@@ -162,11 +162,16 @@ Production infrastructure uses three services: **Taslim Web**, **Taslim API**, a
 ### Taslim Web
 
 - Root directory: `/apps/web`
-- Builder: standard Nixpacks/Railpack or the included Dockerfile
-- Build command: `npm ci && npm run build`
-- Start command: `npm run start`
+- Builder: Dockerfile (recommended and required when using the included multi-stage Docker build)
+- Dockerfile path: `Dockerfile`
+- Custom build command: empty; the Dockerfile runs `npm ci` and `npm run build`
+- Custom start command: empty; the Dockerfile runs `npm run start`
 - Required variable: `NEXT_PUBLIC_API_URL=https://taslim-api-production.up.railway.app`
 - Port: Railway-provided `PORT`
+
+`NEXT_PUBLIC_API_URL` is a public Next.js variable and is embedded during `next build`. The web Dockerfile explicitly declares it as a Docker `ARG` in the builder stage and promotes it to `ENV` before `npm run build`; Railway injects service variables into Docker builds only when they are declared with `ARG`. Do not add the API URL to application source code. For local development, the Docker build argument defaults to `http://localhost:5000`, matching `apps/web/.env.example`.
+
+In Railway, keep `NEXT_PUBLIC_API_URL` configured on the Taslim Web service and use the Dockerfile builder. No custom build command is required; the Dockerfile performs the build.
 
 ### Taslim API
 

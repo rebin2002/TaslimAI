@@ -66,6 +66,8 @@ Provider credentials belong in server-side environment configuration or a manage
 
 The web and API services are independently deployable from the same monorepo. Railway should provide separate services rooted at `apps/web` and `apps/api`, plus managed PostgreSQL. The API remains Dockerfile-based. Production migrations are enabled through `appsettings.Production.json`, use a PostgreSQL advisory lock, and fail startup if they cannot be applied.
 
+The Taslim Web Dockerfile is also build-aware: Railway’s `NEXT_PUBLIC_API_URL` service variable is declared as a Docker `ARG` in the builder stage and made available as an `ENV` before `next build`. This is required because Next.js public environment variables are statically embedded at build time. The Dockerfile keeps `http://localhost:5000` only as a local-development default; the Railway API URL is never hard-coded in source.
+
 ## Extension guidelines
 
 1. Add a stable API contract before wiring a browser feature to backend behavior.
