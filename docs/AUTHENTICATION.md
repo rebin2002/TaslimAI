@@ -1,0 +1,97 @@
+# Taslim.ai Batch 2 authentication and ownership
+
+## Identity architecture
+
+Taslim uses ASP.NET Core Identity with a GUID-backed `ApplicationUser`. Identity owns normalized email, password hashing, security stamps, lockout fields, and other security fields. Taslim-owned profile fields are `DisplayName`, `PreferredLanguage`, `CreatedAt`, `UpdatedAt`, `LastLoginAt`, and `IsActive`.
+
+Registration uses `POST /api/auth/register` and creates the user, a Personal Workspace, and an Owner membership in one EF transaction. The user is signed in only after the workspace and membership are saved. Login uses `POST /api/auth/login`; authentication failures use the generic message `Invalid email or password.`. Current session data is returned by `GET /api/auth/me`, and `POST /api/auth/logout` ends the cookie session.
+
+The server never returns password or Identity security fields. No access token is stored in localStorage, and the frontend never receives a provider or database secret.
+
+## Cookie authentication and CORS
+
+The API issues an HttpOnly Identity cookie named `taslim.auth`. In Production, it is `Secure` and `SameSite=None` so the separately hosted Railway Web and API origins can make credentialed requests. In local development, it is `SameSite=Lax` and follows the request security scheme.
+
+The frontend API client sends `credentials: "include"` for every request. The API only allows origins from `AllowedOrigins`; it uses `AllowCredentials()` and never combines credentials with a wildcard origin.
+
+Current Railway configuration:
+
+```text
+AllowedOrigins__0=https://taslim-web-production.up.railway.app
+```
+
+When custom domains are introduced, set it to the exact web origin:
+
+```text
+AllowedOrigins__0=https://taslim.ai
+```
+
+The API origin changes from the Railway URL to `https://api.taslim.ai` in frontend `NEXT_PUBLIC_API_URL`; the cookie remains host-scoped to the API and still works with credentialed requests.
+
+## CSRF flow
+
+Cookie authentication makes browser state-changing requests vulnerable to cross-site request forgery. Taslim uses ASP.NET Core antiforgery tokens:
+
+1. The frontend calls `GET /api/auth/csrf` with credentials.
+2. The API sets the non-HttpOnly `taslim.csrf` cookie and returns the request token.
+3. The frontend sends that token in the `X-CSRF-TOKEN` header for registration, login, logout, profile updates, project creation, updates, archive, and restore.
+4. ASP.NET Core validates the cookie/header pair through `[ValidateAntiForgeryToken]`.
+
+The CSRF cookie is `Secure` and `SameSite=None` in Production. The token is not an authentication credential; it is only a request-integrity token.
+
+## Workspace ownership model
+
+```text
+ApplicationUser
+  └── WorkspaceMember ── Workspace
+                           └── Project
+```
+
+Projects belong to Workspaces rather than directly to users. `WorkspaceMember` stores the relationship and role (`Owner`, `Admin`, or `Member`) and has a unique `(WorkspaceId, UserId)` constraint. Every newly registered user receives one Personal Workspace and an Owner membership.
+
+The reusable `WorkspaceAccessService` checks membership before list, create, read, update, archive, and restore operations. A browser-supplied workspace ID is never accepted as proof of access. Cross-user project reads and writes return `403` without exposing private project data.
+
+## Project lifecycle
+
+Projects are created through `POST /api/workspaces/{workspaceId}/projects` and are updated through `PATCH /api/projects/{projectId}`. Archive and restore are explicit state transitions. Archived projects remain in the database and are filtered into the Archived view; there is no permanent delete endpoint in Batch 2.
+
+## Database and migrations
+
+The initial migration is `InitialIdentityWorkspacesProjects`. It creates the ASP.NET Core Identity tables plus `Workspaces`, `WorkspaceMembers`, and `Projects`, with foreign keys, unique workspace slugs, membership uniqueness, and workspace/status indexes.
+
+Create or update migrations from the repository root:
+
+```bash
+dotnet tool restore
+dotnet tool run dotnet-ef migrations add <MigrationName> \
+  --project apps/api --startup-project apps/api \
+  --output-dir Persistence/Migrations
+```
+
+Apply migrations locally against an explicitly selected development database:
+
+```bash
+Database__ApplyMigrations=true \
+ConnectionStrings__Postgres='Host=localhost;Port=5432;Database=taslim;Username=taslim;Password=change-me' \
+ASPNETCORE_ENVIRONMENT=Production \
+dotnet run --project apps/api
+```
+
+For Railway, the API Docker deployment uses `ASPNETCORE_ENVIRONMENT=Production` and `Database__ApplyMigrations=true` from `appsettings.Production.json`. The API acquires a PostgreSQL advisory lock before applying pending migrations, logs a critical failure, and stops if migration fails. It never calls `EnsureCreated()` and never resets or drops production data.
+
+Railway PostgreSQL may provide a URI such as `postgresql://user:password@host:port/database`. The API normalizes this server-side to an Npgsql connection string and requires SSL for URI-based production connections. Credentials are never logged or returned.
+
+## API error contract
+
+Controlled errors use this shape:
+
+```json
+{
+  "error": {
+    "code": "PROJECT_NOT_FOUND",
+    "message": "Project not found."
+  }
+}
+```
+
+Production exceptions return a generic `INTERNAL_ERROR` response. Stack traces, SQL, connection details, and secrets are not returned to clients.

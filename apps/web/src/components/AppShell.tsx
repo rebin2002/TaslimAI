@@ -6,10 +6,12 @@ import { Bell, ChevronDown, Plus, Search } from "lucide-react";
 import { navigation } from "@/lib/data";
 import { useLocale, localeNames, locales } from "@/components/LocaleProvider";
 import { BrandMark } from "@/components/BrandMark";
+import { useAuth } from "@/components/AuthProvider";
 
 export function AppShell({ children }: Readonly<{ children: React.ReactNode }>) {
   const pathname = usePathname();
   const { locale, setLocale, t } = useLocale();
+  const { user } = useAuth();
   const activePath = pathname === "/" ? "/" : `/${pathname.split("/")[1]}`;
 
   return (
@@ -44,10 +46,10 @@ export function AppShell({ children }: Readonly<{ children: React.ReactNode }>) 
               </select>
               <ChevronDown size={14} aria-hidden="true" />
             </label>
-            <Link href="/account" className="profile-chip" aria-label={t("navigation.account")}>
-              <span className="profile-avatar">A</span>
-              <span className="profile-name">Alex</span>
-            </Link>
+            {user ? <Link href="/account" className="profile-chip" aria-label={t("navigation.account")}>
+              <span className="profile-avatar">{user.displayName.slice(0, 1).toUpperCase()}</span>
+              <span className="profile-name">{user.displayName}</span>
+            </Link> : <Link href="/login" className="profile-chip auth-link">{t("auth.signIn")}</Link>}
           </div>
         </div>
       </header>
@@ -63,7 +65,7 @@ export function AppShell({ children }: Readonly<{ children: React.ReactNode }>) 
             </Link>
           );
         })}
-        <Link href="/chat" className="mobile-create-link" aria-label={t("navigation.create")}>
+        <Link href="/projects?create=1" className="mobile-create-link" aria-label={t("navigation.create")}>
           <span><Plus size={20} /></span>
           <small>{t("navigation.create")}</small>
         </Link>

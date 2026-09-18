@@ -1,19 +1,20 @@
 # Taslim.ai
 
-Taslim.ai is a multilingual AI platform foundation designed to make professional AI capabilities simple, fast, and approachable. **Batch 1 establishes the production-ready web/API monorepo shell only.** AI providers, chat execution, accounts, billing, credits, and generation engines are intentionally out of scope.
+Taslim.ai is a multilingual AI platform foundation designed to make professional AI capabilities simple, fast, and approachable. **Batch 2 adds identity, users, personal workspaces, and projects.** AI providers and generation engines remain intentionally out of scope.
 
 ## Architecture
 
 ```text
 Taslim Web (Next.js)
         |
+        | credentialed HTTPS + CSRF header
         v
-Taslim API (ASP.NET Core)
+Taslim API (ASP.NET Core Identity + Web API)
         |
         +---- PostgreSQL (EF Core / Npgsql)
 ```
 
-The browser owns presentation and navigation. Future AI functionality will be accessed through Taslim API and its server-side orchestration layers; provider secrets must never be sent to browser clients. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+The browser owns presentation and navigation. The API owns authentication, authorization, persistence, and future AI orchestration. Provider secrets must never be sent to browser clients. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/AUTHENTICATION.md](docs/AUTHENTICATION.md).
 
 ## Repository structure
 
@@ -21,10 +22,12 @@ The browser owns presentation and navigation. Future AI functionality will be ac
 apps/
   web/                  Next.js App Router frontend
   api/                  ASP.NET Core Web API
+  api.Tests/            Identity and ownership integration tests
 packages/
   contracts/            Reserved for shared schemas/contracts
  docs/
   ARCHITECTURE.md       System boundaries and extension path
+  AUTHENTICATION.md     Cookie, CSRF, ownership, and migration details
 ```
 
 ## Requirements
@@ -32,11 +35,9 @@ packages/
 - Node.js 22+
 - npm 10+
 - .NET SDK 8.0+
-- PostgreSQL 15+ for local database work (the Batch 1 health endpoint does not require an active database connection)
+- PostgreSQL 15+ for local database work
 
 ## Local development
-
-Clone the repository and install the frontend dependencies:
 
 ```bash
 git clone https://github.com/rebin2002/TaslimAI.git
@@ -45,93 +46,153 @@ cd apps/web
 npm install
 ```
 
-Copy the examples and adjust values for your environment. Do not commit `.env` files:
+Copy environment examples and adjust values. Never commit `.env` files:
 
 ```bash
-cp .env.example .env.local                 # from apps/web
-cp ../api/.env.example ../api/.env          # optional; ASP.NET reads environment variables
+cp apps/web/.env.example apps/web/.env.local
+cp apps/api/.env.example apps/api/.env
 ```
 
 ### Frontend
 
 ```bash
-cd apps/web
-npm run dev
+npm run dev --workspace @taslim/web
 ```
 
-The web app runs at `http://localhost:3000`. Set `NEXT_PUBLIC_API_URL` to the API base URL when a browser API client is introduced.
+The web app runs at `http://localhost:3000`. Set `NEXT_PUBLIC_API_URL=http://localhost:5000` in `apps/web/.env.local`.
 
-Available frontend checks:
+Checks:
 
 ```bash
-npm run lint
-npm run build
+npm run lint --workspace @taslim/web
+npm run build --workspace @taslim/web
 ```
 
 ### Backend
 
 ```bash
-cd apps/api
-dotnet restore
-dotnet run --urls http://localhost:5000
+export PATH="$HOME/.dotnet:$PATH"
+dotnet run --project apps/api --urls http://localhost:5000
 ```
 
-The API runs at `http://localhost:5000` and exposes:
+The API runs at `http://localhost:5000`. Health check:
 
 ```bash
 curl http://localhost:5000/health
 # {"status":"healthy","service":"Taslim API"}
 ```
 
-Swagger is available in the Development environment at `/swagger`.
+Swagger is available in Development at `/swagger`.
 
 ### PostgreSQL configuration
 
-The API reads the database connection string from `ConnectionStrings__Postgres` (or `DATABASE_URL` as a deployment-friendly fallback). For local development, a typical value is:
+The API reads `ConnectionStrings__Postgres` or `DATABASE_URL`. It accepts either a standard Npgsql connection string or Railway’s URI format, such as `postgresql://user:password@host:port/database`; URI values are normalized server-side and are never logged.
+
+For local work:
 
 ```text
-Host=localhost;Port=5432;Database=taslim;Username=taslim;Password=change-me
+ConnectionStrings__Postgres=Host=localhost;Port=5432;Database=taslim;Username=taslim;Password=change-me
+Database__ApplyMigrations=false
 ```
 
-Batch 1 registers `TaslimDbContext` with Npgsql but intentionally creates no product schema or migrations yet. Future batches should add entities deliberately rather than pre-building the full platform database.
+Batch 2 uses EF Core migrations. It does not call `EnsureCreated()` or reset the database.
 
-## Localization
+## Authentication and security
 
-The web shell includes English (`en`), Arabic (`ar`), and Kurdish Sorani (`ku`) resources. The language selector updates `html[lang]`, `html[dir]`, and persists the selection locally. Arabic and Kurdish Sorani use RTL layout; the interface uses logical layout patterns and explicit RTL-safe rules where needed.
+ASP.NET Core Identity issues an HttpOnly `taslim.auth` cookie. In Production it is Secure and configured for credentialed Web/API requests across the separate Railway origins. The frontend always sends `credentials: "include"` and uses `GET /api/auth/csrf` to obtain a request token for state-changing requests, which is sent through `X-CSRF-TOKEN`.
+
+The API allows only configured origins and uses `AllowCredentials()`; wildcard CORS is not used. Private resources are authorized through Workspace membership. Projects are never directly owned by the browser user, and no authentication token is stored in localStorage.
+
+## Batch 2 product flows
+
+- Register at `/register`
+- Sign in at `/login`
+- View and update profile at `/account`
+- Automatically receive a Personal Workspace
+- Create and edit projects at `/projects`
+- Open a project at `/projects/[projectId]`
+- Archive and restore projects without physical deletion
+- View active and archived project lists
+
+Supported project types are General, Movie, Marketing, Business, Research, Education, and Development. These are extensible server-side values, not a closed database enum.
+
+## Migrations
+
+Restore the pinned EF tool:
+
+```bash
+dotnet tool restore
+```
+
+Create a migration from the repository root:
+
+```bash
+dotnet tool run dotnet-ef migrations add <MigrationName> \
+  --project apps/api --startup-project apps/api \
+  --output-dir Persistence/Migrations
+```
+
+The initial migration is `InitialIdentityWorkspacesProjects` and creates ASP.NET Identity tables plus `Workspaces`, `WorkspaceMembers`, and `Projects`.
+
+To apply migrations locally against an explicitly selected database:
+
+```bash
+ASPNETCORE_ENVIRONMENT=Production \
+Database__ApplyMigrations=true \
+ConnectionStrings__Postgres='Host=localhost;Port=5432;Database=taslim;Username=taslim;Password=change-me' \
+dotnet run --project apps/api
+```
+
+Production startup migrations use a PostgreSQL advisory lock and fail clearly if a migration cannot be applied. Do not run development reset commands against Production.
+
+## Tests
+
+Run the API integration suite:
+
+```bash
+dotnet test apps/api.Tests/Taslim.Api.Tests.csproj
+```
+
+The suite covers registration, duplicate email, login failure, session/logout, personal workspace ownership, project lifecycle, cross-user authorization, and controlled validation errors. Tests use a relational in-memory SQLite database so registration transactions are exercised realistically.
 
 ## Railway deployment
 
-Create three Railway services in the same repository: **Taslim Web**, **Taslim API**, and a managed **PostgreSQL** service.
+Production infrastructure uses three services: **Taslim Web**, **Taslim API**, and managed **PostgreSQL**.
 
-### Taslim Web service
+### Taslim Web
 
 - Root directory: `/apps/web`
+- Builder: standard Nixpacks/Railpack or the included Dockerfile
 - Build command: `npm ci && npm run build`
 - Start command: `npm run start`
-- Required variable: `NEXT_PUBLIC_API_URL=https://<taslim-api-domain>`
-- Port: Railway-provided `PORT` (Next.js reads it automatically)
-
-The included `apps/web/Dockerfile` is an alternative deployment path and runs the standard Next.js production server.
-
-### Taslim API service
-
-- Root directory: `/apps/api`
-- Build command: `dotnet publish -c Release -o ./publish`
-- Start command: `dotnet ./publish/Taslim.Api.dll --urls http://0.0.0.0:$PORT`
-- Required variables:
-  - `ASPNETCORE_ENVIRONMENT=Production`
-  - `ConnectionStrings__Postgres=${{Postgres.DATABASE_URL}}` (use the exact Railway reference exposed by the PostgreSQL service)
-  - `AllowedOrigins__0=https://<taslim-web-domain>`
+- Required variable: `NEXT_PUBLIC_API_URL=https://taslim-api-production.up.railway.app`
 - Port: Railway-provided `PORT`
 
-The included `apps/api/Dockerfile` exposes port 8080 and is suitable for a Docker-based Railway service. Do not hard-code localhost in production. The API `/health` endpoint is the service health check.
+### Taslim API
 
-### PostgreSQL service
+**Preserve Dockerfile deployment. Do not switch the API back to Railpack.**
 
-Use Railway's managed PostgreSQL service and connect it to the API through a private service reference. Never commit the connection string or any database credentials.
+- Root directory: `/apps/api`
+- Builder: Dockerfile
+- Dockerfile path: `Dockerfile`
+- Custom build command: empty
+- Custom start command: empty
+- Required variables:
 
-## Batch 1 scope
+```text
+ASPNETCORE_ENVIRONMENT=Production
+ConnectionStrings__Postgres=${{Postgres.DATABASE_URL}}
+AllowedOrigins__0=https://taslim-web-production.up.railway.app
+```
 
-Included: responsive Taslim application shell, brand placeholder, data-driven department carousels, mobile bottom navigation, placeholder routes, localization/RTL architecture, ASP.NET Core health endpoint, EF Core/Npgsql registration, CORS configuration, environment examples, Dockerfiles, and architecture documentation.
+`appsettings.Production.json` enables `Database__ApplyMigrations=true`. The API Dockerfile uses a multi-stage .NET 8 build and binds to port 8080. Railway should route its provided service port to the container; if the platform requires an explicit variable, set `ASPNETCORE_HTTP_PORTS=8080`.
 
-Not included: authentication, AI providers, AI chat execution, image/movie/voice/music generation, credits, subscriptions, payments, admin, or the complete database schema.
+### PostgreSQL
+
+Use Railway’s managed PostgreSQL service and a private service reference for the API connection string. Do not commit credentials or replace the Railway reference with a hard-coded value. No manual migration command is required after deployment when Production startup migrations are enabled; monitor the first API deployment logs for the migration completion or a clear startup failure.
+
+## Scope boundary
+
+Included in Batch 2: ASP.NET Core Identity, secure cookie sessions, CSRF protection, profile updates, automatic Personal Workspace creation, membership-based authorization, projects, project lifecycle, EF migration, tests, login/register UI, account UI, project UI, localization, RTL preservation, and Railway documentation.
+
+Not included: AI Chat execution, OpenAI, Gemini, Anthropic, AI Core, model routing, generation engines, billing, credits, subscriptions, admin, invitations, teams, business workspace creation, social login, or native mobile apps.
