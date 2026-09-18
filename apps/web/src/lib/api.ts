@@ -16,6 +16,14 @@ export type Workspace = {
 };
 
 export type AuthResponse = { user: User; personalWorkspace: Workspace };
+export type PasswordPolicy = {
+  requiredLength: number;
+  requireUppercase: boolean;
+  requireLowercase: boolean;
+  requireDigit: boolean;
+  requireNonAlphanumeric: boolean;
+  requiredUniqueChars: number;
+};
 
 export type Project = {
   id: string;
@@ -51,22 +59,23 @@ async function request<T>(path: string, init: RequestInit = {}, withCsrf = false
   if (withCsrf) headers.set("X-CSRF-TOKEN", csrfToken ?? await csrf());
   const response = await fetch(`${API_URL}${path}`, { ...init, headers, credentials: "include" });
   if (response.status === 204) return undefined as T;
-  const body = await response.json().catch(() => null) as T & { error?: { message?: string } } | null;
+  const body = await response.json().catch(() => null) as T & { error?: { message?: string; fields?: Record<string, string[]> } } | null;
   if (!response.ok) {
     if (response.status === 400 && withCsrf && !csrfToken) {
       csrfToken = null;
     }
-    throw new ApiError(response.status, body?.error?.message ?? "Something went wrong.");
+    throw new ApiError(response.status, body?.error?.message ?? "Something went wrong.", body?.error?.fields);
   }
   return body as T;
 }
 
 export class ApiError extends Error {
-  constructor(public status: number, message: string) { super(message); }
+  constructor(public status: number, message: string, public fields?: Record<string, string[]>) { super(message); }
 }
 
 export const api = {
   me: () => request<AuthResponse>("/api/auth/me"),
+  passwordPolicy: () => request<PasswordPolicy>("/api/auth/password-policy"),
   register: async (input: RegisterInput) => { await csrf(); return request<AuthResponse>("/api/auth/register", { method: "POST", body: JSON.stringify(input) }, true); },
   login: async (input: LoginInput) => { await csrf(); return request<AuthResponse>("/api/auth/login", { method: "POST", body: JSON.stringify(input) }, true); },
   logout: () => request<{ success: boolean }>("/api/auth/logout", { method: "POST" }, true),

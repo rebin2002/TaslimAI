@@ -145,6 +145,42 @@ public sealed class IdentityProjectsTests : IClassFixture<TaslimApiFactory>
         Assert.Equal("VALIDATION_ERROR", error.GetProperty("error").GetProperty("code").GetString());
     }
 
+    [Fact]
+    public async Task Password_policy_endpoint_matches_configured_identity_requirements()
+    {
+        using var client = factory.CreateClient();
+        var policy = await client.GetFromJsonAsync<JsonElement>("/api/auth/password-policy");
+        Assert.Equal(10, policy.GetProperty("requiredLength").GetInt32());
+        Assert.True(policy.GetProperty("requireUppercase").GetBoolean());
+        Assert.True(policy.GetProperty("requireLowercase").GetBoolean());
+        Assert.True(policy.GetProperty("requireDigit").GetBoolean());
+        Assert.True(policy.GetProperty("requireNonAlphanumeric").GetBoolean());
+    }
+
+    [Fact]
+    public async Task Weak_registration_password_returns_safe_field_level_errors()
+    {
+        using var client = factory.CreateClient();
+        var response = await SendWithCsrf(client, HttpMethod.Post, "/api/auth/register", new
+        {
+            displayName = "Weak Password User",
+            email = $"weak-{Guid.NewGuid():N}@example.com",
+            password = "abcde",
+            preferredLanguage = "en"
+        });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var error = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("VALIDATION_ERROR", error.GetProperty("error").GetProperty("code").GetString());
+        var passwordErrors = error.GetProperty("error").GetProperty("fields").GetProperty("password").EnumerateArray().Select(item => item.GetString()).ToArray();
+        Assert.Contains("PASSWORD_TOO_SHORT", passwordErrors);
+        Assert.Contains("PASSWORD_REQUIRES_UPPERCASE", passwordErrors);
+        Assert.Contains("PASSWORD_REQUIRES_DIGIT", passwordErrors);
+        Assert.Contains("PASSWORD_REQUIRES_NON_ALPHANUMERIC", passwordErrors);
+        Assert.DoesNotContain("PASSWORD_REQUIRES_LOWERCASE", passwordErrors);
+        Assert.DoesNotContain("StackTrace", await response.Content.ReadAsStringAsync());
+    }
+
     private async Task<HttpResponseMessage> Register(HttpClient client, string displayName, string email) =>
         await SendWithCsrf(client, HttpMethod.Post, "/api/auth/register", new { displayName, email, password = "StrongPassword!123", preferredLanguage = "en" });
 

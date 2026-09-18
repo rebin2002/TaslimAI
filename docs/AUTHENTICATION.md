@@ -8,6 +8,21 @@ Registration uses `POST /api/auth/register` and creates the user, a Personal Wor
 
 The server never returns password or Identity security fields. No access token is stored in localStorage, and the frontend never receives a provider or database secret.
 
+## Registration password validation
+
+The registration form reads `GET /api/auth/password-policy`, which is generated from the configured `IdentityOptions.Password` values. The current policy is:
+
+| Requirement | Current value |
+| --- | --- |
+| Minimum length | 10 characters |
+| Uppercase character | Required |
+| Lowercase character | Required |
+| Digit | Required |
+| Non-alphanumeric character | Required |
+| Unique characters | 1 or more, Identity default |
+
+The form displays these requirements in English, Arabic, and Kurdish Sorani and updates each rule as the user types. The server maps safe Identity password-validator codes into `error.fields.password` values such as `PASSWORD_TOO_SHORT` and `PASSWORD_REQUIRES_DIGIT`. Other registration failures remain generic to avoid exposing account-enumeration or infrastructure details.
+
 ## Cookie authentication and CORS
 
 The API issues an HttpOnly Identity cookie named `taslim.auth`. In Production, it is `Secure` and `SameSite=None` so the separately hosted Railway Web and API origins can make credentialed requests. In local development, it is `SameSite=Lax` and follows the request security scheme.

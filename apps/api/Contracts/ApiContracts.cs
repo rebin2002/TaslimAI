@@ -1,10 +1,24 @@
 using System.ComponentModel.DataAnnotations;
+using System.Text.Json.Serialization;
 using Taslim.Api.Domain;
 
 namespace Taslim.Api.Contracts;
 
 public sealed record ErrorEnvelope(ErrorBody Error);
-public sealed record ErrorBody(string Code, string Message);
+
+public sealed record ErrorBody(
+    string Code,
+    string Message,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    IReadOnlyDictionary<string, string[]>? Fields = null);
+
+public sealed record PasswordPolicyDto(
+    int RequiredLength,
+    bool RequireUppercase,
+    bool RequireLowercase,
+    bool RequireDigit,
+    bool RequireNonAlphanumeric,
+    int RequiredUniqueChars);
 
 public sealed record UserDto(
     Guid Id,
@@ -26,7 +40,7 @@ public sealed class RegisterRequest
     [Required, EmailAddress, StringLength(256)]
     public string Email { get; set; } = string.Empty;
 
-    [Required, StringLength(128, MinimumLength = 10)]
+    [Required]
     public string Password { get; set; } = string.Empty;
 
     [StringLength(5)]

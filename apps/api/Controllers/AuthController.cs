@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
 using Taslim.Api.Infrastructure;
@@ -16,7 +17,8 @@ public sealed class AuthController(
     UserManager<ApplicationUser> userManager,
     SignInManager<ApplicationUser> signInManager,
     TaslimDbContext db,
-    IAntiforgery antiforgery) : ControllerBase
+    IAntiforgery antiforgery,
+    IOptions<IdentityOptions> identityOptions) : ControllerBase
 {
     [HttpGet("csrf")]
     [AllowAnonymous]
@@ -24,6 +26,20 @@ public sealed class AuthController(
     {
         var tokens = antiforgery.GetAndStoreTokens(HttpContext);
         return Ok(new { token = tokens.RequestToken });
+    }
+
+    [HttpGet("password-policy")]
+    [AllowAnonymous]
+    public IActionResult PasswordPolicy()
+    {
+        var password = identityOptions.Value.Password;
+        return Ok(new PasswordPolicyDto(
+            password.RequiredLength,
+            password.RequireUppercase,
+            password.RequireLowercase,
+            password.RequireDigit,
+            password.RequireNonAlphanumeric,
+            password.RequiredUniqueChars));
     }
 
     [HttpPost("register")]
@@ -50,7 +66,16 @@ public sealed class AuthController(
         await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
         var identityResult = await userManager.CreateAsync(user, request.Password);
         if (!identityResult.Succeeded)
+        {
+            var passwordErrors = ToPasswordFieldErrors(identityResult.Errors);
+            if (passwordErrors.Length > 0)
+            {
+                var fields = new Dictionary<string, string[]> { ["password"] = passwordErrors };
+                return ApiResults.Validation(this, "Please choose a password that meets the requirements.", fields);
+            }
+
             return ApiResults.Error(this, StatusCodes.Status400BadRequest, "REGISTRATION_FAILED", "We could not create your account. Check your details and try again.");
+        }
 
         var workspace = new Workspace
         {
@@ -153,6 +178,21 @@ public sealed class AuthController(
             .FirstOrDefaultAsync(cancellationToken);
 
     private static bool IsSupportedLanguage(string? language) => string.IsNullOrWhiteSpace(language) || LanguageCodes.Supported.Contains(language);
+    private static string[] ToPasswordFieldErrors(IEnumerable<IdentityError> errors) => errors
+        .Select(error => error.Code)
+        .Where(code => code is "PasswordTooShort" or "PasswordRequiresUpper" or "PasswordRequiresLower" or "PasswordRequiresDigit" or "PasswordRequiresNonAlphanumeric" or "PasswordRequiresUniqueChars")
+        .Select(code => code switch
+        {
+            "PasswordTooShort" => "PASSWORD_TOO_SHORT",
+            "PasswordRequiresUpper" => "PASSWORD_REQUIRES_UPPERCASE",
+            "PasswordRequiresLower" => "PASSWORD_REQUIRES_LOWERCASE",
+            "PasswordRequiresDigit" => "PASSWORD_REQUIRES_DIGIT",
+            "PasswordRequiresNonAlphanumeric" => "PASSWORD_REQUIRES_NON_ALPHANUMERIC",
+            "PasswordRequiresUniqueChars" => "PASSWORD_REQUIRES_UNIQUE_CHARS",
+            _ => "PASSWORD_REQUIREMENTS"
+        })
+        .Distinct(StringComparer.Ordinal)
+        .ToArray();
     private static string Slugify(string name, Guid suffix) => $"{new string(name.Trim().ToLowerInvariant().Where(character => char.IsLetterOrDigit(character) || character == ' ').ToArray()).Replace(' ', '-')}-{suffix.ToString("N")[..8]}";
     private static UserDto ToUserDto(ApplicationUser user, Guid workspaceId) => new(user.Id, user.Email ?? string.Empty, user.DisplayName, user.PreferredLanguage, workspaceId, user.CreatedAt);
     private static WorkspaceSummaryDto ToWorkspaceDto(Workspace workspace, WorkspaceRole role) => new(workspace.Id, workspace.Name, workspace.Slug, workspace.Type.ToString(), role.ToString());
