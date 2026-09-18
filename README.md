@@ -111,7 +111,7 @@ Create three Railway services in the same repository: **Taslim Web**, **Taslim A
 - Required variable: `NEXT_PUBLIC_API_URL=https://<taslim-api-domain>`
 - Port: Railway-provided `PORT` (Next.js reads it automatically)
 
-The included `apps/web/Dockerfile` is an alternative deployment path and uses Next.js standalone output.
+The included `apps/web/Dockerfile` is an alternative deployment path and runs the standard Next.js production server.
 
 ### Taslim API service
 
