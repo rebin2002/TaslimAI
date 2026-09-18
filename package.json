@@ -1,0 +1,6 @@
+{
+  "name": "taslim-ai",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": ["apps/web", "packages/contracts"]
+}

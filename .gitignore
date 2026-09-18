@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Next.js
+.next/
+out/
+
+# .NET
+bin/
+obj/
+
+# Local environment
+.env
+.env.*
+!.env.example
+
+# IDE and OS
+.vscode/
+.idea/
+.DS_Store
+*.user
+*.suo
+
+# Logs
+*.log
+npm-debug.log*
+
+# Test and coverage
+coverage/
+TestResults/
