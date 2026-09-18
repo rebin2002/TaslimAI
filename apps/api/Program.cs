@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Authentication.Cookies;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -16,6 +17,31 @@ builder.Services.AddControllersWithViews(options => options.Filters.Add(new Prod
         options.InvalidModelStateResponseFactory = context =>
             new BadRequestObjectResult(new { error = new { code = "VALIDATION_ERROR", message = "Please check the highlighted fields." } });
     });
+
+builder.Services.Configure<ForwardedHeadersOptions>(options =>
+{
+    // Railway terminates TLS at its edge and forwards the original scheme.
+    // Only consume the scheme, and only one proxy hop, because the API does
+    // not need forwarded client IP or host data for authentication/CSRF.
+    options.ForwardedHeaders = ForwardedHeaders.XForwardedProto;
+    options.ForwardLimit = 1;
+
+    var configuredProxyIps = builder.Configuration.GetSection("ForwardedHeaders:KnownProxies").Get<string[]>() ?? [];
+    foreach (var value in configuredProxyIps)
+    {
+        if (System.Net.IPAddress.TryParse(value, out var address)) options.KnownProxies.Add(address);
+    }
+
+    if (isProduction && configuredProxyIps.Length == 0)
+    {
+        // Railway's public ingress source IPs are not a stable application
+        // setting. The service is reachable through Railway's ingress, so
+        // trust exactly one upstream hop while allowing an operator to add
+        // explicit KnownProxies if the hosting topology becomes stricter.
+        options.KnownNetworks.Clear();
+        options.KnownProxies.Clear();
+    }
+});
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
@@ -76,6 +102,10 @@ builder.Services.AddCors(options => options.AddPolicy("Frontend", policy =>
 builder.Services.AddScoped<WorkspaceAccessService>();
 
 var app = builder.Build();
+
+// Must run before exception handling, CORS, authentication, and antiforgery
+// so Request.IsHttps reflects Railway's external HTTPS request.
+app.UseForwardedHeaders();
 
 if (!app.Environment.IsDevelopment())
 {

@@ -103,6 +103,10 @@ ASP.NET Core Identity issues an HttpOnly `taslim.auth` cookie. In Production it 
 
 The API allows only configured origins and uses `AllowCredentials()`; wildcard CORS is not used. Private resources are authorized through Workspace membership. Projects are never directly owned by the browser user, and no authentication token is stored in localStorage.
 
+### Railway HTTPS forwarding
+
+Railway terminates TLS at its ingress proxy, so the API uses ASP.NET Core Forwarded Headers Middleware to consume one `X-Forwarded-Proto` hop before exception handling, CORS, authentication, authorization, or antiforgery. Production processes only the forwarded scheme, with `ForwardLimit=1`, and preserves `CookieSecurePolicy.Always` for both auth and CSRF cookies. Local development remains direct HTTP with the existing `SameAsRequest` development policy.
+
 ## Batch 2 product flows
 
 - Register at `/register`
@@ -191,6 +195,8 @@ AllowedOrigins__0=https://taslim-web-production.up.railway.app
 ```
 
 `appsettings.Production.json` enables `Database__ApplyMigrations=true`. The API Dockerfile uses a multi-stage .NET 8 build and binds to port 8080. Railway should route its provided service port to the container; if the platform requires an explicit variable, set `ASPNETCORE_HTTP_PORTS=8080`.
+
+No new Railway environment variable is required for forwarded HTTPS. Redeploy the API from the commit containing the middleware change. If a future hosting topology uses a fixed private proxy, explicit proxy IPs may be supplied as `ForwardedHeaders:KnownProxies:0`, `ForwardedHeaders:KnownProxies:1`, and so on; do not add arbitrary client IPs.
 
 ### PostgreSQL
 

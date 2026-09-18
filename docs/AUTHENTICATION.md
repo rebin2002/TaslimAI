@@ -28,6 +28,21 @@ AllowedOrigins__0=https://taslim.ai
 
 The API origin changes from the Railway URL to `https://api.taslim.ai` in frontend `NEXT_PUBLIC_API_URL`; the cookie remains host-scoped to the API and still works with credentialed requests.
 
+## Railway forwarded HTTPS
+
+Railway terminates public TLS at its reverse proxy and forwards the request to the API over the internal service network. The API therefore receives an internal HTTP connection even when the browser used HTTPS. Without forwarded-header processing, `HttpContext.Request.IsHttps` remains false and Production antiforgery correctly refuses to issue its Secure cookie.
+
+Taslim configures `ForwardedHeadersMiddleware` with this exact policy:
+
+```csharp
+options.ForwardedHeaders = ForwardedHeaders.XForwardedProto;
+options.ForwardLimit = 1;
+```
+
+The middleware is registered before exception handling, CORS, authentication, authorization, and controller execution. It consumes only `X-Forwarded-Proto`; Taslim does not consume forwarded client IP or host values for identity or CSRF decisions. In Production, the application allows the single Railway ingress hop because Railway’s public ingress source range is not a stable per-service application setting. If the deployment later gains a fixed private proxy, operators can provide explicit addresses through `ForwardedHeaders:KnownProxies` and the middleware will use those configured addresses.
+
+This preserves `CookieSecurePolicy.Always` for the authentication and antiforgery cookies. It does not disable CSRF, make cookies insecure, or trust multiple forwarded hops. Local development continues to use direct HTTP and `SameAsRequest` cookie policies.
+
 ## CSRF flow
 
 Cookie authentication makes browser state-changing requests vulnerable to cross-site request forgery. Taslim uses ASP.NET Core antiforgery tokens:
