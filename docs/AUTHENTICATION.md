@@ -69,6 +69,12 @@ Cookie authentication makes browser state-changing requests vulnerable to cross-
 
 The CSRF cookie is `Secure` and `SameSite=None` in Production. The token is not an authentication credential; it is only a request-integrity token.
 
+Authentication changes the antiforgery token’s user binding. The web API client therefore invalidates its cached token and fetches a fresh token after registration, login, and logout. If a state-changing request receives the safe `CSRF_VALIDATION_FAILED` response, the client refreshes once and retries the same request; it does not retry repeatedly or bypass validation.
+
+The API also validates state-changing `/api` requests in middleware immediately after authentication and before authorization/MVC execution. This allows the request to be validated against the current authenticated Identity user and produces a stable `CSRF_VALIDATION_FAILED` response instead of the generic MVC ProblemDetails body. The existing controller `[ValidateAntiForgeryToken]` attributes remain in place as defense in depth.
+
+Safe server diagnostics log only method, path, trace ID, authentication state, and exception type. Tokens, cookies, request bodies, passwords, and antiforgery exception messages are not logged or returned to the browser.
+
 ## Workspace ownership model
 
 ```text

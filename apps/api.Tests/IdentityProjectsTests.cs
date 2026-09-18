@@ -181,6 +181,59 @@ public sealed class IdentityProjectsTests : IClassFixture<TaslimApiFactory>
         Assert.DoesNotContain("StackTrace", await response.Content.ReadAsStringAsync());
     }
 
+    [Fact]
+    public async Task Anonymous_csrf_token_is_rejected_after_registration_until_refreshed()
+    {
+        using var client = factory.CreateClient();
+        var anonymousToken = await GetCsrf(client);
+        var registration = await SendWithToken(client, HttpMethod.Post, "/api/auth/register", anonymousToken, new
+        {
+            displayName = "Stale Token Owner",
+            email = $"stale-{Guid.NewGuid():N}@example.com",
+            password = "StrongPassword!123",
+            preferredLanguage = "en"
+        });
+        Assert.Equal(HttpStatusCode.OK, registration.StatusCode);
+        var auth = await registration.Content.ReadFromJsonAsync<AuthResponse>();
+        Assert.NotNull(auth);
+
+        var staleCreate = await SendWithToken(client, HttpMethod.Post, $"/api/workspaces/{auth.PersonalWorkspace.Id}/projects", anonymousToken, new { name = "Stale Project", type = "Business" });
+        Assert.Equal(HttpStatusCode.BadRequest, staleCreate.StatusCode);
+        var staleBody = await staleCreate.Content.ReadAsStringAsync();
+        var error = JsonSerializer.Deserialize<JsonElement>(staleBody);
+        Assert.Equal("CSRF_VALIDATION_FAILED", error.GetProperty("error").GetProperty("code").GetString());
+
+        var refreshedToken = await GetCsrf(client);
+        var project = await SendWithToken<ProjectDto>(client, HttpMethod.Post, $"/api/workspaces/{auth.PersonalWorkspace.Id}/projects", refreshedToken, new { name = "Fresh Project", description = "1", type = "Business" });
+        Assert.Equal("Fresh Project", project.Name);
+    }
+
+    [Fact]
+    public async Task Login_logout_login_and_multiple_project_operations_work_with_refreshed_tokens()
+    {
+        using var client = factory.CreateClient();
+        var email = $"lifecycle-{Guid.NewGuid():N}@example.com";
+        var registration = await Register(client, "Lifecycle Owner", email);
+        var auth = await registration.Content.ReadFromJsonAsync<AuthResponse>();
+        Assert.NotNull(auth);
+        await Logout(client);
+
+        var loginToken = await GetCsrf(client);
+        var login = await SendWithToken(client, HttpMethod.Post, "/api/auth/login", loginToken, new { email, password = "StrongPassword!123" });
+        Assert.Equal(HttpStatusCode.OK, login.StatusCode);
+        var authenticatedToken = await GetCsrf(client);
+
+        var first = await SendWithToken<ProjectDto>(client, HttpMethod.Post, $"/api/workspaces/{auth.PersonalWorkspace.Id}/projects", authenticatedToken, new { name = "Lifecycle One", description = "1", type = "Business" });
+        var second = await SendWithToken<ProjectDto>(client, HttpMethod.Post, $"/api/workspaces/{auth.PersonalWorkspace.Id}/projects", authenticatedToken, new { name = "Lifecycle Two", description = "2", type = "Marketing" });
+        var updated = await SendWithToken<ProjectDto>(client, HttpMethod.Patch, $"/api/projects/{first.Id}", authenticatedToken, new { name = "Lifecycle One Updated", description = "updated", type = "Business" });
+        Assert.Equal("Lifecycle One Updated", updated.Name);
+        await SendWithToken<ProjectDto>(client, HttpMethod.Post, $"/api/projects/{first.Id}/archive", authenticatedToken, null);
+        await SendWithToken<ProjectDto>(client, HttpMethod.Post, $"/api/projects/{first.Id}/restore", authenticatedToken, null);
+        var active = await client.GetFromJsonAsync<List<ProjectDto>>($"/api/workspaces/{auth.PersonalWorkspace.Id}/projects?status=Active");
+        Assert.Contains(active!, project => project.Id == first.Id);
+        Assert.Contains(active!, project => project.Id == second.Id);
+    }
+
     private async Task<HttpResponseMessage> Register(HttpClient client, string displayName, string email) =>
         await SendWithCsrf(client, HttpMethod.Post, "/api/auth/register", new { displayName, email, password = "StrongPassword!123", preferredLanguage = "en" });
 
@@ -205,6 +258,21 @@ public sealed class IdentityProjectsTests : IClassFixture<TaslimApiFactory>
     private static async Task<HttpResponseMessage> SendWithCsrf(HttpClient client, HttpMethod method, string path, object? payload)
     {
         var token = await GetCsrf(client);
+        using var request = new HttpRequestMessage(method, path);
+        request.Headers.Add("X-CSRF-TOKEN", token);
+        if (payload is not null) request.Content = JsonContent.Create(payload);
+        return await client.SendAsync(request);
+    }
+
+    private static async Task<T> SendWithToken<T>(HttpClient client, HttpMethod method, string path, string token, object? payload)
+    {
+        var response = await SendWithToken(client, method, path, token, payload);
+        Assert.True(response.IsSuccessStatusCode, await response.Content.ReadAsStringAsync());
+        return (await response.Content.ReadFromJsonAsync<T>())!;
+    }
+
+    private static async Task<HttpResponseMessage> SendWithToken(HttpClient client, HttpMethod method, string path, string token, object? payload)
+    {
         using var request = new HttpRequestMessage(method, path);
         request.Headers.Add("X-CSRF-TOKEN", token);
         if (payload is not null) request.Content = JsonContent.Create(payload);

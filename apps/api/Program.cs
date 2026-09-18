@@ -11,7 +11,10 @@ using Taslim.Api.Persistence;
 var builder = WebApplication.CreateBuilder(args);
 var isProduction = builder.Environment.IsProduction();
 
-builder.Services.AddControllersWithViews(options => options.Filters.Add(new ProducesAttribute("application/json")))
+builder.Services.AddControllersWithViews(options =>
+    {
+        options.Filters.Add(new ProducesAttribute("application/json"));
+    })
     .ConfigureApiBehaviorOptions(options =>
     {
         options.InvalidModelStateResponseFactory = context =>
@@ -125,6 +128,7 @@ if (app.Environment.IsDevelopment())
 
 app.UseCors("Frontend");
 app.UseAuthentication();
+app.UseMiddleware<AntiforgeryValidationMiddleware>();
 app.UseAuthorization();
 app.MapGet("/health", () => Results.Ok(new { status = "healthy", service = "Taslim API" }))
     .WithName("Health")
