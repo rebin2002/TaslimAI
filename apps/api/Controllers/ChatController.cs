@@ -4,6 +4,7 @@ using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using Taslim.Api.Ai;
 using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
@@ -21,6 +22,7 @@ public sealed class ChatController(
     WorkspaceAccessService access,
     IChatCompletionService completion,
     AiContextBuilder contextBuilder,
+    IOptions<Microsoft.AspNetCore.Mvc.JsonOptions> mvcJsonOptions,
     ILogger<ChatController> logger) : ControllerBase
 {
     [HttpPost("workspaces/{workspaceId:guid}/conversations")]
@@ -379,7 +381,7 @@ public sealed class ChatController(
     private async Task WriteEventAsync(string type, object data, CancellationToken cancellationToken)
     {
         await Response.WriteAsync($"event: {type}\n", cancellationToken);
-        await Response.WriteAsync($"data: {JsonSerializer.Serialize(data)}\n\n", cancellationToken);
+        await Response.WriteAsync($"data: {JsonSerializer.Serialize(data, mvcJsonOptions.Value.JsonSerializerOptions)}\n\n", cancellationToken);
         await Response.Body.FlushAsync(cancellationToken);
     }
 

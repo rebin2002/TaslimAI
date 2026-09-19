@@ -5,7 +5,8 @@ import { Archive, Check, Edit3, MessageCircle, MoreHorizontal, Plus, Search, Sen
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
-import { ApiError, api, type ChatMessage, type ChatStreamEvent, type Conversation } from "@/lib/api";
+import { ApiError, api, type ChatMessage, type Conversation } from "@/lib/api";
+import { createChatStreamState, reduceChatStream } from "@/lib/chatStreamState";
 import { claimSubmission, conversationPath, createSubmission, releaseSubmission, shouldReplaceConversationUrl } from "@/lib/chatLifecycle";
 import { ProtectedPage } from "@/components/ProtectedPage";
 
@@ -124,43 +125,22 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
         setSelected(conversation);
         setConversations(current => [conversation!, ...current]);
       }
-      let assistantId: string | undefined;
-      await api.streamMessage(conversation.id, text, eventData => handleStreamEvent(eventData), id);
-      function handleStreamEvent(streamEvent: ChatStreamEvent) {
-        if (streamEvent.type === "message.started" && streamEvent.data.userMessage && streamEvent.data.assistantMessage) {
-          assistantId = streamEvent.data.assistantMessage.id;
-          const userMessage = streamEvent.data.userMessage;
-          const assistantMessage = streamEvent.data.assistantMessage;
-          setMessages(current => current.some(message => message.id === userMessage.id)
-            ? current.map(message => message.id === assistantMessage.id ? assistantMessage : message)
-            : [...current, userMessage, assistantMessage]);
+      let streamState = createChatStreamState(messages);
+      await api.streamMessage(conversation.id, text, streamEvent => {
+        streamState = reduceChatStream(streamState, streamEvent);
+        setMessages(streamState.messages);
+        setGenerating(streamState.generating);
+        if (streamEvent.type === "message.started" || streamEvent.type === "message.completed") {
           if (streamEvent.data.conversation) {
             setSelected(streamEvent.data.conversation);
             setConversations(current => [streamEvent.data.conversation!, ...current.filter(item => item.id !== streamEvent.data.conversation!.id)]);
           }
-        } else if (streamEvent.type === "message.delta" && streamEvent.data.delta) {
-          const targetId = streamEvent.data.messageId ?? assistantId;
-          if (!targetId) return;
-          setMessages(current => current.map(message => message.id === targetId ? { ...message, status: "Pending", content: message.content + streamEvent.data.delta } : message));
-        } else if (streamEvent.type === "message.completed" && streamEvent.data.assistantMessage && streamEvent.data.userMessage) {
-          const assistantMessage = streamEvent.data.assistantMessage;
-          assistantId = assistantMessage.id;
-          setMessages(current => current.some(message => message.id === assistantMessage.id)
-            ? current.map(message => message.id === assistantMessage.id ? assistantMessage : message)
-            : [...current, streamEvent.data.userMessage!, assistantMessage]);
-          if (streamEvent.data.conversation) {
-            setSelected(streamEvent.data.conversation);
-            setConversations(current => [streamEvent.data.conversation!, ...current.filter(item => item.id !== streamEvent.data.conversation!.id)]);
-          }
-          setContent("");
-          setGenerating(false);
+          if (streamEvent.type === "message.completed") setContent("");
         } else if (streamEvent.type === "message.failed") {
-          if (assistantId) setMessages(current => current.map(message => message.id === assistantId ? { ...message, status: "Failed" } : message));
           setRetryRequest({ conversationId: conversation!.id, content: text, requestId: id });
           setError(streamEvent.data.code === "CONVERSATION_ARCHIVED" ? t("chat.archivedError") : t("chat.generationError"));
-          setGenerating(false);
         }
-      }
+      }, id);
       if (conversation && shouldReplaceConversationUrl(conversationId, conversation.id)) {
         window.history.replaceState(window.history.state, "", conversationPath(conversation.id));
       }

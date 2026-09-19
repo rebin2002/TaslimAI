@@ -158,6 +158,26 @@ public sealed class ChatTests : IClassFixture<TaslimApiFactory>
         Assert.Contains("event: message.completed", body);
         Assert.Contains("connected and ready", body, StringComparison.OrdinalIgnoreCase);
 
+        using var started = ExtractEventData(body, "message.started");
+        using var delta = ExtractEventData(body, "message.delta");
+        using var completed = ExtractEventData(body, "message.completed");
+        Assert.True(started.RootElement.TryGetProperty("conversation", out _));
+        Assert.True(started.RootElement.TryGetProperty("userMessage", out var startedUser));
+        Assert.True(started.RootElement.TryGetProperty("assistantMessage", out var startedAssistant));
+        Assert.True(startedUser.TryGetProperty("id", out _));
+        Assert.True(startedAssistant.TryGetProperty("id", out _));
+        Assert.True(delta.RootElement.TryGetProperty("messageId", out _));
+        Assert.True(delta.RootElement.TryGetProperty("delta", out _));
+        Assert.True(completed.RootElement.TryGetProperty("conversation", out _));
+        Assert.True(completed.RootElement.TryGetProperty("userMessage", out var completedUser));
+        Assert.True(completed.RootElement.TryGetProperty("assistantMessage", out var completedAssistant));
+        Assert.True(completedUser.TryGetProperty("id", out _));
+        Assert.True(completedAssistant.TryGetProperty("id", out _));
+        Assert.DoesNotContain("\"Conversation\"", body);
+        Assert.DoesNotContain("\"UserMessage\"", body);
+        Assert.DoesNotContain("\"AssistantMessage\"", body);
+        Assert.DoesNotContain("\"MessageId\"", body);
+
         var messages = await client.GetFromJsonAsync<List<ChatMessageDto>>($"/api/conversations/{conversation.Id}/messages");
         Assert.NotNull(messages);
         Assert.Equal("Completed", messages[^1].Status);
@@ -259,5 +279,13 @@ public sealed class ChatTests : IClassFixture<TaslimApiFactory>
         request.Headers.Add("X-CSRF-TOKEN", csrf.GetProperty("token").GetString()!);
         if (payload is not null) request.Content = JsonContent.Create(payload);
         return await client.SendAsync(request);
+    }
+
+    private static JsonDocument ExtractEventData(string body, string eventName)
+    {
+        var block = body.Split("\n\n", StringSplitOptions.RemoveEmptyEntries)
+            .First(item => item.StartsWith($"event: {eventName}\n", StringComparison.Ordinal));
+        var dataLine = block.Split('\n').Single(line => line.StartsWith("data: ", StringComparison.Ordinal));
+        return JsonDocument.Parse(dataLine[6..]);
     }
 }
