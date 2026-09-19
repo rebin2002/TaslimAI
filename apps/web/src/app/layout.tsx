@@ -1,7 +1,6 @@
 import type { Metadata } from "next";
 import { AppShell } from "@/components/AppShell";
 import { AuthProvider } from "@/components/AuthProvider";
-import { BuildIdentityLogger } from "@/components/BuildIdentityLogger";
 import { LocaleProvider } from "@/components/LocaleProvider";
 import "./globals.css";
 
@@ -14,7 +13,6 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
   return (
     <html lang="en" dir="ltr">
       <body>
-        <BuildIdentityLogger />
         <LocaleProvider>
           <AuthProvider>
             <AppShell>{children}</AppShell>

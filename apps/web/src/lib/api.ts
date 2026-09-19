@@ -1,5 +1,4 @@
 import { createSseParser, type TaslimSseEvent } from "@/lib/sse";
-import { logChatDiagnostic, safeStreamError } from "@/lib/diagnostics";
 
 export type User = {
   id: string;
@@ -117,43 +116,33 @@ async function request<T>(path: string, init: RequestInit = {}, withCsrf = false
 }
 
 async function streamRequest(path: string, payload: unknown, onEvent: (event: ChatStreamEvent) => void, retryCsrf = true): Promise<void> {
-  logChatDiagnostic("STREAM_REQUEST_STARTED");
-  try {
-    const headers = new Headers({ "Content-Type": "application/json", Accept: "text/event-stream" });
-    headers.set("X-CSRF-TOKEN", csrfToken ?? await csrf());
-    const response = await fetch(`${API_URL}${path}`, { method: "POST", headers, credentials: "include", body: JSON.stringify(payload) });
-    if (!response.ok) {
-      const body = await parseError(response);
-      if (response.status === 400 && retryCsrf && body?.error?.code === "CSRF_VALIDATION_FAILED") {
-        csrfToken = null;
-        await csrf(true);
-        return streamRequest(path, payload, onEvent, false);
-      }
-      throw new ApiError(response.status, body?.error?.message ?? "Something went wrong.", body?.error?.fields, body?.error?.code);
+  const headers = new Headers({ "Content-Type": "application/json", Accept: "text/event-stream" });
+  headers.set("X-CSRF-TOKEN", csrfToken ?? await csrf());
+  const response = await fetch(`${API_URL}${path}`, { method: "POST", headers, credentials: "include", body: JSON.stringify(payload) });
+  if (!response.ok) {
+    const body = await parseError(response);
+    if (response.status === 400 && retryCsrf && body?.error?.code === "CSRF_VALIDATION_FAILED") {
+      csrfToken = null;
+      await csrf(true);
+      return streamRequest(path, payload, onEvent, false);
     }
-    if (!response.body) throw new ApiError(502, "Streaming is unavailable.", undefined, "STREAM_UNAVAILABLE");
+    throw new ApiError(response.status, body?.error?.message ?? "Something went wrong.", body?.error?.fields, body?.error?.code);
+  }
+  if (!response.body) throw new ApiError(502, "Streaming is unavailable.", undefined, "STREAM_UNAVAILABLE");
 
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    const parser = createSseParser<ChatStreamData>(event => {
-      logChatDiagnostic(`SSE_EVENT_RECEIVED ${event.type}`);
-      onEvent(event);
-    });
-    try {
-      while (true) {
-        const result = await reader.read();
-        parser.push(decoder.decode(result.value ?? new Uint8Array(), { stream: !result.done }));
-        if (result.done) break;
-      }
-      parser.push(decoder.decode());
-      parser.end();
-      logChatDiagnostic("STREAM_FINISHED");
-    } finally {
-      reader.releaseLock();
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const parser = createSseParser<ChatStreamData>(onEvent);
+  try {
+    while (true) {
+      const result = await reader.read();
+      parser.push(decoder.decode(result.value ?? new Uint8Array(), { stream: !result.done }));
+      if (result.done) break;
     }
-  } catch (error) {
-    logChatDiagnostic(`STREAM_ERROR ${safeStreamError(error)}`);
-    throw error;
+    parser.push(decoder.decode());
+    parser.end();
+  } finally {
+    reader.releaseLock();
   }
 }
 
