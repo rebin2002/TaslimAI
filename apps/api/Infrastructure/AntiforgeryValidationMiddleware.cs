@@ -21,7 +21,7 @@ public sealed class AntiforgeryValidationMiddleware(
             || HttpMethods.IsPatch(context.Request.Method)
             || HttpMethods.IsDelete(context.Request.Method);
 
-        if (endpointRequiresAntiforgery && isStateChanging)
+        if (endpointRequiresAntiforgery && isStateChanging && context.User.Identity?.IsAuthenticated == true)
         {
             try
             {

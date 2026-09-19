@@ -11,6 +11,8 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
     public DbSet<Workspace> Workspaces => Set<Workspace>();
     public DbSet<WorkspaceMember> WorkspaceMembers => Set<WorkspaceMember>();
     public DbSet<Project> Projects => Set<Project>();
+    public DbSet<Conversation> Conversations => Set<Conversation>();
+    public DbSet<ChatMessage> ChatMessages => Set<ChatMessage>();
 
     protected override void OnModelCreating(ModelBuilder builder)
     {
@@ -62,6 +64,47 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
                 .WithMany(workspace => workspace.Projects)
                 .HasForeignKey(project => project.WorkspaceId)
                 .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        builder.Entity<Conversation>(entity =>
+        {
+            entity.HasKey(conversation => conversation.Id);
+            entity.Property(conversation => conversation.Title).HasMaxLength(160).IsRequired();
+            entity.Property(conversation => conversation.Status).HasConversion<string>().HasMaxLength(30).IsRequired();
+            entity.Property(conversation => conversation.CreatedAt).IsRequired();
+            entity.Property(conversation => conversation.UpdatedAt).IsRequired();
+            entity.Property(conversation => conversation.LastMessageAt);
+            entity.HasIndex(conversation => new { conversation.UserId, conversation.WorkspaceId, conversation.Status, conversation.UpdatedAt });
+            entity.HasIndex(conversation => new { conversation.WorkspaceId, conversation.UpdatedAt });
+            entity.HasOne(conversation => conversation.Workspace)
+                .WithMany(workspace => workspace.Conversations)
+                .HasForeignKey(conversation => conversation.WorkspaceId)
+                .OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(conversation => conversation.User)
+                .WithMany()
+                .HasForeignKey(conversation => conversation.UserId)
+                .OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(conversation => conversation.Project)
+                .WithMany()
+                .HasForeignKey(conversation => conversation.ProjectId)
+                .OnDelete(DeleteBehavior.SetNull);
+        });
+
+        builder.Entity<ChatMessage>(entity =>
+        {
+            entity.HasKey(message => message.Id);
+            entity.Property(message => message.Role).HasConversion<string>().HasMaxLength(30).IsRequired();
+            entity.Property(message => message.Content).HasMaxLength(20000).IsRequired();
+            entity.Property(message => message.Status).HasConversion<string>().HasMaxLength(30).IsRequired();
+            entity.Property(message => message.AttachmentManifestJson).HasMaxLength(10000);
+            entity.Property(message => message.ProviderKey).HasMaxLength(80);
+            entity.Property(message => message.ModelKey).HasMaxLength(160);
+            entity.Property(message => message.FinishReason).HasMaxLength(80);
+            entity.HasIndex(message => new { message.ConversationId, message.CreatedAt, message.Id });
+            entity.HasOne(message => message.Conversation)
+                .WithMany(conversation => conversation.Messages)
+                .HasForeignKey(message => message.ConversationId)
+                .OnDelete(DeleteBehavior.Cascade);
         });
     }
 }

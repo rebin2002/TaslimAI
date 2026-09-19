@@ -73,6 +73,7 @@ public sealed class Workspace
 
     public ICollection<WorkspaceMember> Members { get; set; } = [];
     public ICollection<Project> Projects { get; set; } = [];
+    public ICollection<Conversation> Conversations { get; set; } = [];
 }
 
 public sealed class WorkspaceMember
@@ -101,3 +102,78 @@ public sealed class Project
 
     public Workspace Workspace { get; set; } = null!;
 }
+
+public enum ConversationStatus
+{
+    Active,
+    Archived,
+}
+
+public enum ChatMessageRole
+{
+    User,
+    Assistant,
+    System,
+    Tool,
+}
+
+public enum ChatMessageStatus
+{
+    Pending,
+    Completed,
+    Failed,
+}
+
+public sealed class Conversation
+{
+    public Guid Id { get; set; }
+    public Guid WorkspaceId { get; set; }
+    public Guid? ProjectId { get; set; }
+    public Guid UserId { get; set; }
+    public string Title { get; set; } = string.Empty;
+    public ConversationStatus Status { get; set; } = ConversationStatus.Active;
+    public DateTime CreatedAt { get; set; }
+    public DateTime UpdatedAt { get; set; }
+    public DateTime? LastMessageAt { get; set; }
+
+    public Workspace Workspace { get; set; } = null!;
+    public Project? Project { get; set; }
+    public ApplicationUser User { get; set; } = null!;
+    public ICollection<ChatMessage> Messages { get; set; } = [];
+}
+
+public sealed class ChatMessage
+{
+    public Guid Id { get; set; }
+    public Guid ConversationId { get; set; }
+    public ChatMessageRole Role { get; set; }
+    public string Content { get; set; } = string.Empty;
+    public ChatMessageStatus Status { get; set; } = ChatMessageStatus.Pending;
+    public DateTime CreatedAt { get; set; }
+
+    // Reserved for future attachment manifests stored outside PostgreSQL.
+    public string? AttachmentManifestJson { get; set; }
+    public string? ProviderKey { get; set; }
+    public string? ModelKey { get; set; }
+    public int? InputTokens { get; set; }
+    public int? OutputTokens { get; set; }
+    public decimal? EstimatedCost { get; set; }
+    public decimal? ActualCost { get; set; }
+    public int? LatencyMs { get; set; }
+    public string? FinishReason { get; set; }
+
+    public Conversation Conversation { get; set; } = null!;
+}
+
+public sealed record AiProviderDefinition(string Key, string Name, bool Enabled);
+
+public sealed record AiModelDefinition(
+    string ProviderKey,
+    string ModelKey,
+    string Name,
+    string Capabilities,
+    int ContextWindow,
+    bool SupportsStreaming,
+    bool SupportsVision,
+    bool SupportsTools,
+    string CostTier);

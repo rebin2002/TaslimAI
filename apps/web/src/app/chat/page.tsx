@@ -1,2 +1,5 @@
-import { PlaceholderPage } from "@/app/placeholder-page";
-export default function ChatPage() { return <PlaceholderPage nameKey="navigation.chat" />; }
+import { ChatView } from "@/components/ChatView";
+
+export default function ChatPage() {
+  return <ChatView />;
+}

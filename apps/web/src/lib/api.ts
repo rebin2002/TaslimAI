@@ -41,6 +41,26 @@ export type RegisterInput = { displayName: string; email: string; password: stri
 export type LoginInput = { email: string; password: string };
 export type ProfileInput = { displayName: string; preferredLanguage: string };
 export type ProjectInput = { name: string; description?: string; type?: string };
+export type Conversation = {
+  id: string;
+  workspaceId: string;
+  projectId: string | null;
+  title: string;
+  status: "Active" | "Archived";
+  createdAt: string;
+  updatedAt: string;
+  lastMessageAt: string | null;
+};
+export type ChatMessage = {
+  id: string;
+  conversationId: string;
+  role: "User" | "Assistant";
+  content: string;
+  status: "Pending" | "Completed" | "Failed";
+  createdAt: string;
+  isTestResponse?: boolean;
+};
+export type SendMessageResponse = { conversation: Conversation; userMessage: ChatMessage; assistantMessage: ChatMessage };
 
 const API_URL = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5000").replace(/\/$/, "");
 let csrfToken: string | null = null;
@@ -90,4 +110,11 @@ export const api = {
   updateProject: (projectId: string, input: ProjectInput) => request<Project>(`/api/projects/${projectId}`, { method: "PATCH", body: JSON.stringify(input) }, true),
   archiveProject: (projectId: string) => request<Project>(`/api/projects/${projectId}/archive`, { method: "POST" }, true),
   restoreProject: (projectId: string) => request<Project>(`/api/projects/${projectId}/restore`, { method: "POST" }, true),
+  listConversations: (workspaceId: string, status: "Active" | "Archived" = "Active") => request<Conversation[]>(`/api/workspaces/${workspaceId}/conversations?status=${status}`),
+  createConversation: (workspaceId: string, input: { title?: string; projectId?: string } = {}) => request<Conversation>(`/api/workspaces/${workspaceId}/conversations`, { method: "POST", body: JSON.stringify(input) }, true),
+  getConversation: (conversationId: string) => request<Conversation>(`/api/conversations/${conversationId}`),
+  getMessages: (conversationId: string) => request<ChatMessage[]>(`/api/conversations/${conversationId}/messages`),
+  renameConversation: (conversationId: string, title: string) => request<Conversation>(`/api/conversations/${conversationId}`, { method: "PATCH", body: JSON.stringify({ title }) }, true),
+  archiveConversation: (conversationId: string) => request<Conversation>(`/api/conversations/${conversationId}/archive`, { method: "POST" }, true),
+  sendMessage: (conversationId: string, content: string) => request<SendMessageResponse>(`/api/conversations/${conversationId}/messages`, { method: "POST", body: JSON.stringify({ content }) }, true),
 };

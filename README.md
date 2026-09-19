@@ -1,6 +1,6 @@
 # Taslim.ai
 
-Taslim.ai is a multilingual AI platform foundation designed to make professional AI capabilities simple, fast, and approachable. **Batch 2 adds identity, users, personal workspaces, and projects.** AI providers and generation engines remain intentionally out of scope.
+Taslim.ai is a multilingual AI platform foundation designed to make professional AI capabilities simple, fast, and approachable. **Batch 3.1 adds persistent Taslim Chat and a provider-independent AI Core with a clearly labeled development mock provider.** Paid AI providers remain intentionally out of scope.
 
 ## Architecture
 
@@ -14,7 +14,7 @@ Taslim API (ASP.NET Core Identity + Web API)
         +---- PostgreSQL (EF Core / Npgsql)
 ```
 
-The browser owns presentation and navigation. The API owns authentication, authorization, persistence, and future AI orchestration. Provider secrets must never be sent to browser clients. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/AUTHENTICATION.md](docs/AUTHENTICATION.md).
+The browser owns presentation and navigation. The API owns authentication, authorization, persistence, and AI Core orchestration. Provider secrets must never be sent to browser clients. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/AUTHENTICATION.md](docs/AUTHENTICATION.md), and [docs/CHAT_ARCHITECTURE.md](docs/CHAT_ARCHITECTURE.md).
 
 ## Repository structure
 
@@ -28,6 +28,7 @@ packages/
  docs/
   ARCHITECTURE.md       System boundaries and extension path
   AUTHENTICATION.md     Cookie, CSRF, ownership, and migration details
+  CHAT_ARCHITECTURE.md  Chat persistence, AI Core, provider path, and security
 ```
 
 ## Requirements
@@ -107,7 +108,7 @@ The API allows only configured origins and uses `AllowCredentials()`; wildcard C
 
 Railway terminates TLS at its ingress proxy, so the API uses ASP.NET Core Forwarded Headers Middleware to consume one `X-Forwarded-Proto` hop before exception handling, CORS, authentication, authorization, or antiforgery. Production processes only the forwarded scheme, with `ForwardLimit=1`, and preserves `CookieSecurePolicy.Always` for both auth and CSRF cookies. Local development remains direct HTTP with the existing `SameAsRequest` development policy.
 
-## Batch 2 product flows
+## Batch 3.1 product flows
 
 - Register at `/register`
 - Sign in at `/login`
@@ -117,6 +118,11 @@ Railway terminates TLS at its ingress proxy, so the API uses ASP.NET Core Forwar
 - Open a project at `/projects/[projectId]`
 - Archive and restore projects without physical deletion
 - View active and archived project lists
+- Open a new chat at `/chat`
+- Open an authorized conversation at `/chat/{conversationId}`
+- Search, rename, archive, and revisit conversations
+- Send messages through the provider-independent AI Core mock provider
+- See a clear development-response marker while no paid provider is connected
 
 Supported project types are General, Movie, Marketing, Business, Research, Education, and Development. These are extensible server-side values, not a closed database enum.
 
@@ -136,7 +142,7 @@ dotnet tool run dotnet-ef migrations add <MigrationName> \
   --output-dir Persistence/Migrations
 ```
 
-The initial migration is `InitialIdentityWorkspacesProjects` and creates ASP.NET Identity tables plus `Workspaces`, `WorkspaceMembers`, and `Projects`.
+The initial migration is `InitialIdentityWorkspacesProjects` and creates ASP.NET Identity tables plus `Workspaces`, `WorkspaceMembers`, and `Projects`. Batch 3.1 adds `AddChatConversationsAndMessages` for `Conversations` and `ChatMessages`.
 
 To apply migrations locally against an explicitly selected database:
 
@@ -157,7 +163,7 @@ Run the API integration suite:
 dotnet test apps/api.Tests/Taslim.Api.Tests.csproj
 ```
 
-The suite covers registration, duplicate email, login failure, session/logout, personal workspace ownership, project lifecycle, cross-user authorization, and controlled validation errors. Tests use a relational in-memory SQLite database so registration transactions are exercised realistically.
+The suite covers registration, duplicate email, login failure, session/logout, personal workspace ownership, project lifecycle, chat persistence, mock AI execution, conversation title generation, message history, rename/archive, cross-user and cross-workspace authorization, oversized-message rejection, provider failure persistence, CSRF enforcement, and controlled validation errors. Tests use a relational in-memory SQLite database so transactions and foreign keys are exercised realistically.
 
 ## Railway deployment
 
@@ -204,6 +210,6 @@ Use Railway’s managed PostgreSQL service and a private service reference for t
 
 ## Scope boundary
 
-Included in Batch 2: ASP.NET Core Identity, secure cookie sessions, CSRF protection, profile updates, automatic Personal Workspace creation, membership-based authorization, projects, project lifecycle, EF migration, tests, login/register UI, account UI, project UI, localization, RTL preservation, and Railway documentation.
+Included in Batch 3.1: persistent conversations and messages, secured chat API, provider-independent AI Core, deterministic conversation titles, development mock provider, localized chat UI, conversation history, home-page Ask Taslim integration, EF migration, and integration tests. Batch 2 authentication, CSRF, workspace/project authorization, localization, RTL behavior, and Railway deployment architecture remain unchanged.
 
-Not included: AI Chat execution, OpenAI, Gemini, Anthropic, AI Core, model routing, generation engines, billing, credits, subscriptions, admin, invitations, teams, business workspace creation, social login, or native mobile apps.
+Not included: OpenAI, Gemini, Anthropic, paid model providers, streaming execution, image/video/voice/music generation, web search, file analysis, personal memory, project memory retrieval, vector database, embeddings, RAG, tool calling, agents, billing, credits, subscriptions, payment processing, team chat sharing, admin, invitations, business workspace creation, social login, or native mobile apps.

@@ -1,13 +1,33 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { useState } from "react";
 import { ArrowUpRight, Command, FileText, MessageSquare, Plus, Sparkles } from "lucide-react";
 import { departments } from "@/lib/data";
 import { useLocale } from "@/components/LocaleProvider";
 import { DepartmentSection } from "@/components/DepartmentSection";
+import { useAuth } from "@/components/AuthProvider";
+import { api } from "@/lib/api";
 
 export default function HomePage() {
   const { t } = useLocale();
+  const { user, workspace } = useAuth();
+  const router = useRouter();
+  const [idea, setIdea] = useState("");
+  const [asking, setAsking] = useState(false);
+
+  async function askTaslim() {
+    const prompt = idea.trim();
+    if (!prompt) { router.push("/chat"); return; }
+    if (!user || !workspace) { router.push("/login?next=/chat"); return; }
+    setAsking(true);
+    try {
+      const conversation = await api.createConversation(workspace.id);
+      await api.sendMessage(conversation.id, prompt);
+      router.push(`/chat/${conversation.id}`);
+    } finally { setAsking(false); }
+  }
 
   return (
     <div className="home-page">
@@ -28,15 +48,15 @@ export default function HomePage() {
       <section className="create-panel" aria-label="Create with Taslim">
         <div className="create-panel-top">
           <span className="create-panel-icon"><Sparkles size={18} /></span>
-          <span>{t("home.searchPlaceholder")}</span>
+          <input className="create-prompt-input" value={idea} onChange={(event) => setIdea(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void askTaslim(); }} placeholder={t("home.searchPlaceholder")} aria-label={t("home.searchPlaceholder")} />
           <span className="create-panel-shortcut"><Command size={12} /> K</span>
         </div>
         <div className="create-panel-bottom">
           <div className="create-suggestions">
             <button type="button"><FileText size={14} /> Draft something</button>
-            <button type="button"><MessageSquare size={14} /> Ask Taslim</button>
+            <button type="button" onClick={() => void askTaslim()} disabled={asking}><MessageSquare size={14} /> {asking ? t("home.asking") : t("home.askTaslim")}</button>
           </div>
-          <Link href="/chat" className="create-submit" aria-label={t("home.chatCta")}><ArrowUpRight size={18} /></Link>
+          <button type="button" className="create-submit" onClick={() => void askTaslim()} aria-label={t("home.chatCta")} disabled={asking}><ArrowUpRight size={18} /></button>
         </div>
       </section>
 

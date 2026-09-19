@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Taslim.Api.Ai;
 using Taslim.Api.Authorization;
 using Taslim.Api.Domain;
 using Taslim.Api.Infrastructure;
@@ -103,7 +104,9 @@ builder.Services.AddCors(options => options.AddPolicy("Frontend", policy =>
         .AllowAnyMethod()
         .AllowCredentials()));
 builder.Services.AddScoped<WorkspaceAccessService>();
-
+builder.Services.AddSingleton<IAiModelRouter, AiModelRouter>();
+builder.Services.AddSingleton<IAiProvider, MockAiProvider>();
+builder.Services.AddScoped<IChatCompletionService, ChatCompletionService>();
 var app = builder.Build();
 
 // Must run before exception handling, CORS, authentication, and antiforgery
