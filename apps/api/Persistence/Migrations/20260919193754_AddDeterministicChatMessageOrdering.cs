@@ -30,22 +30,22 @@ namespace Taslim.Api.Persistence.Migrations
             // used only as a deterministic final tie-breaker.
             migrationBuilder.Sql("""
                 WITH ordered AS (
-                    SELECT \"Id\", ROW_NUMBER() OVER (
-                        PARTITION BY \"ConversationId\"
-                        ORDER BY \"CreatedAt\", CASE WHEN \"Role\" = 'User' THEN 0 ELSE 1 END, \"Id\"
-                    ) AS \"Sequence\"
-                    FROM \"ChatMessages\"
+                    SELECT "Id", ROW_NUMBER() OVER (
+                        PARTITION BY "ConversationId"
+                        ORDER BY "CreatedAt", CASE WHEN "Role" = 'User' THEN 0 ELSE 1 END, "Id"
+                    ) AS "Sequence"
+                    FROM "ChatMessages"
                 )
-                UPDATE \"ChatMessages\" AS messages
-                SET \"Sequence\" = ordered.\"Sequence\"
+                UPDATE "ChatMessages" AS messages
+                SET "Sequence" = ordered."Sequence"
                 FROM ordered
-                WHERE messages.\"Id\" = ordered.\"Id\";
+                WHERE messages."Id" = ordered."Id";
 
-                UPDATE \"Conversations\" AS conversations
-                SET \"NextMessageSequence\" = COALESCE((
-                    SELECT MAX(messages.\"Sequence\")
-                    FROM \"ChatMessages\" AS messages
-                    WHERE messages.\"ConversationId\" = conversations.\"Id\"
+                UPDATE "Conversations" AS conversations
+                SET "NextMessageSequence" = COALESCE((
+                    SELECT MAX(messages."Sequence")
+                    FROM "ChatMessages" AS messages
+                    WHERE messages."ConversationId" = conversations."Id"
                 ), 0);
                 """);
 
