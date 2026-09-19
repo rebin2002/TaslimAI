@@ -145,7 +145,7 @@ dotnet tool run dotnet-ef migrations add <MigrationName> \
   --output-dir Persistence/Migrations
 ```
 
-The initial migration is `InitialIdentityWorkspacesProjects` and creates ASP.NET Identity tables plus `Workspaces`, `WorkspaceMembers`, and `Projects`. Batch 3.1 adds `AddChatConversationsAndMessages` for `Conversations` and `ChatMessages`. Batch 3.2 adds `AddChatUsageAndIdempotency` for cached-token usage and duplicate-request protection.
+The initial migration is `InitialIdentityWorkspacesProjects` and creates ASP.NET Identity tables plus `Workspaces`, `WorkspaceMembers`, and `Projects`. Batch 3.1 adds `AddChatConversationsAndMessages` for `Conversations` and `ChatMessages`. Batch 3.2 adds `AddChatUsageAndIdempotency` for cached-token usage and duplicate-request protection, followed by `AddDeterministicChatMessageOrdering` for monotonic per-conversation message sequences and legacy backfill.
 
 To apply migrations locally against an explicitly selected database:
 
@@ -166,7 +166,7 @@ Run the API integration suite:
 dotnet test apps/api.Tests/Taslim.Api.Tests.csproj
 ```
 
-The suite covers registration, duplicate email, login failure, session/logout, personal workspace ownership, project lifecycle, chat persistence, mock AI execution, tier routing, provider failure, context trimming, usage/cost calculation, provider-independent stream events, SSE persistence, idempotency, conversation title generation, message history, rename/archive, cross-user and cross-workspace authorization, oversized-message rejection, CSRF enforcement, and controlled validation errors. Tests use a relational in-memory SQLite database so transactions and foreign keys are exercised realistically.
+The suite covers registration, duplicate email, login failure, session/logout, personal workspace ownership, project lifecycle, chat persistence, mock AI execution, tier routing, provider failure, context trimming, usage/cost calculation, provider-independent stream events, SSE persistence, terminal failure events, deterministic multi-turn ordering, idempotency, conversation title generation, message history, rename/archive, cross-user and cross-workspace authorization, oversized-message rejection, CSRF enforcement, and controlled validation errors. Frontend Vitest coverage includes LF/CRLF/mixed SSE parsing, chunk splits, multiline data, malformed protocol data, EOF without a terminal event, and submission lifecycle locks. Tests use a relational in-memory SQLite database so transactions and foreign keys are exercised realistically.
 
 ## Railway deployment
 

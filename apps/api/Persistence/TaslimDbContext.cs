@@ -74,6 +74,7 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.Property(conversation => conversation.CreatedAt).IsRequired();
             entity.Property(conversation => conversation.UpdatedAt).IsRequired();
             entity.Property(conversation => conversation.LastMessageAt);
+            entity.Property(conversation => conversation.NextMessageSequence).IsRequired();
             entity.HasIndex(conversation => new { conversation.UserId, conversation.WorkspaceId, conversation.Status, conversation.UpdatedAt });
             entity.HasIndex(conversation => new { conversation.WorkspaceId, conversation.UpdatedAt });
             entity.HasOne(conversation => conversation.Workspace)
@@ -96,11 +97,13 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.Property(message => message.Role).HasConversion<string>().HasMaxLength(30).IsRequired();
             entity.Property(message => message.Content).HasMaxLength(20000).IsRequired();
             entity.Property(message => message.Status).HasConversion<string>().HasMaxLength(30).IsRequired();
+            entity.Property(message => message.Sequence).IsRequired();
             entity.Property(message => message.AttachmentManifestJson).HasMaxLength(10000);
             entity.Property(message => message.RequestId).HasMaxLength(80);
             entity.Property(message => message.ProviderKey).HasMaxLength(80);
             entity.Property(message => message.ModelKey).HasMaxLength(160);
             entity.Property(message => message.FinishReason).HasMaxLength(80);
+            entity.HasIndex(message => new { message.ConversationId, message.Sequence }).IsUnique();
             entity.HasIndex(message => new { message.ConversationId, message.CreatedAt, message.Id });
             entity.HasIndex(message => new { message.ConversationId, message.RequestId }).IsUnique().HasFilter("\"RequestId\" IS NOT NULL");
             entity.HasOne(message => message.Conversation)

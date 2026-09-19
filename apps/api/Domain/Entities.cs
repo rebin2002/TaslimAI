@@ -135,6 +135,7 @@ public sealed class Conversation
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
     public DateTime? LastMessageAt { get; set; }
+    public long NextMessageSequence { get; set; }
 
     public Workspace Workspace { get; set; } = null!;
     public Project? Project { get; set; }
@@ -150,6 +151,7 @@ public sealed class ChatMessage
     public string Content { get; set; } = string.Empty;
     public ChatMessageStatus Status { get; set; } = ChatMessageStatus.Pending;
     public DateTime CreatedAt { get; set; }
+    public long Sequence { get; set; }
     public string? RequestId { get; set; }
 
     // Reserved for future attachment manifests stored outside PostgreSQL.

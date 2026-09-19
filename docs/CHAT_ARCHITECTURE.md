@@ -84,7 +84,7 @@ The browser calls:
 POST /api/conversations/{conversationId}/messages/stream
 ```
 
-The response is Taslim-owned Server-Sent Events. The current event contract is:
+The response is Taslim-owned Server-Sent Events. The API sends `Content-Type: text/event-stream; charset=utf-8`, `Cache-Control: no-cache, no-transform`, `Pragma: no-cache`, and `X-Accel-Buffering: no` before flushing each event. The current event contract is:
 
 | Event | Payload purpose |
 | --- | --- |
@@ -94,6 +94,8 @@ The response is Taslim-owned Server-Sent Events. The current event contract is:
 | `message.failed` | Safe error code/message suitable for retry UI |
 
 Raw OpenAI events are never forwarded. The frontend updates the pending assistant message as deltas arrive, keeps the composer disabled while generation is active, auto-scrolls without replacing user-controlled history navigation, and provides a localized retry action after failure.
+
+The frontend parser is line-oriented and tolerant of LF, CRLF, mixed line endings, arbitrary fetch-chunk boundaries, multiple events per chunk, multi-line `data` fields, comments, and a final event at EOF. It rejects malformed Taslim JSON, unsupported event names, events after a terminal event, and streams that close without `message.completed` or `message.failed`. These protocol errors release the generating state and expose the existing recoverable retry path rather than leaving a permanent typing indicator.
 
 The existing synchronous endpoint remains available for compatibility and Home → Ask Taslim. It uses the same AI Core, persistence, routing, context, and failure rules.
 
@@ -110,6 +112,8 @@ A state-changing request follows this order:
 7. On failure or cancellation, preserve the user message and mark the assistant `Failed`.
 
 The frontend generates a request ID for each send. The database stores it on the user message and enforces a unique filtered index per conversation. A repeated completed request returns the existing result without another provider call. A repeated pending request returns a safe conflict. A failed request may be intentionally retried using the same request ID, resetting the failed assistant message instead of creating another user message.
+
+Each persisted chat message also has a monotonically increasing `Sequence` within its conversation. User and assistant rows are allocated consecutive sequence values before provider execution, and all history/context queries order by sequence before timestamp and ID fallbacks. The `AddDeterministicChatMessageOrdering` migration backfills existing rows using `CreatedAt`, places user rows before assistant rows for equal timestamps, and updates each conversation's next sequence value. This is deterministic for all existing data and uses the strongest relationship signals available from the pre-sequence schema without corrupting rows.
 
 ## Usage and cost accounting
 
@@ -135,7 +139,7 @@ Ai__OpenAI__ApiKey=<SECRET>
 Ai__DefaultChatTier=Smart
 ```
 
-The optional base URL is already defaulted to `https://api.openai.com/v1`; set `Ai__OpenAI__BaseUrl` only when a compatible server-side endpoint is intentionally used. Put these variables only on **Taslim API**, never on Taslim Web. The new EF migration is `AddChatUsageAndIdempotency` and is applied through the existing Production startup migration runner.
+The optional base URL is already defaulted to `https://api.openai.com/v1`; set `Ai__OpenAI__BaseUrl` only when a compatible server-side endpoint is intentionally used. Put these variables only on **Taslim API**, never on Taslim Web. The EF migrations `AddChatUsageAndIdempotency` and `AddDeterministicChatMessageOrdering` are applied through the existing Production startup migration runner.
 
 ## Scope boundary
 

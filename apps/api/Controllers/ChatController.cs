@@ -85,7 +85,8 @@ public sealed class ChatController(
         if (conversation is null) return ApiResults.Error(this, StatusCodes.Status404NotFound, "CONVERSATION_NOT_FOUND", "Conversation not found.");
         var messages = (await db.ChatMessages.AsNoTracking()
             .Where(message => message.ConversationId == conversationId && (message.Role == ChatMessageRole.User || message.Role == ChatMessageRole.Assistant))
-            .OrderBy(message => message.CreatedAt)
+            .OrderBy(message => message.Sequence)
+            .ThenBy(message => message.CreatedAt)
             .ThenBy(message => message.Id)
             .ToListAsync(cancellationToken))
             .Select(message => ToMessageDto(message, string.Equals(message.ProviderKey, "mock", StringComparison.OrdinalIgnoreCase)))
@@ -147,8 +148,9 @@ public sealed class ChatController(
     public async Task StreamMessage(Guid conversationId, SendMessageRequest request, CancellationToken cancellationToken)
     {
         Response.StatusCode = StatusCodes.Status200OK;
-        Response.ContentType = "text/event-stream";
-        Response.Headers.CacheControl = "no-cache";
+        Response.ContentType = "text/event-stream; charset=utf-8";
+        Response.Headers.CacheControl = "no-cache, no-transform";
+        Response.Headers.Pragma = "no-cache";
         Response.Headers.Append("X-Accel-Buffering", "no");
 
         if (!ModelState.IsValid)
@@ -158,6 +160,7 @@ public sealed class ChatController(
         }
 
         PreparedChat? prepared = null;
+        var persisted = false;
         try
         {
             prepared = await PrepareMessageAsync(conversationId, request, cancellationToken);
@@ -213,12 +216,13 @@ public sealed class ChatController(
 
             if (usage is null) throw new AiGenerationException("AI response did not complete.");
             await PersistSuccessAsync(prepared, new AiGenerationResult(content.ToString(), usage), CancellationToken.None);
+            persisted = true;
             var finalResponse = new SendMessageResponse(ToDto(prepared.Conversation!), ToMessageDto(prepared.UserMessage!), ToMessageDto(prepared.AssistantMessage!, usage.IsTestResponse));
             await WriteEventAsync("message.completed", finalResponse, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested || HttpContext.RequestAborted.IsCancellationRequested)
         {
-            if (prepared is not null && prepared.ExistingResult is null)
+            if (!persisted && prepared is not null && prepared.ExistingResult is null)
             {
                 await PersistFailureAsync(prepared, new AiGenerationException("The generation request was cancelled."));
                 logger.LogInformation("Chat generation cancelled. ConversationId={ConversationId}; TraceId={TraceId}", prepared.Conversation!.Id, HttpContext.TraceIdentifier);
@@ -226,7 +230,7 @@ public sealed class ChatController(
         }
         catch (Exception exception)
         {
-            if (prepared is not null && prepared.ExistingResult is null)
+            if (!persisted && prepared is not null && prepared.ExistingResult is null)
             {
                 await PersistFailureAsync(prepared, exception);
                 LogGenerationFailure(exception, prepared.Conversation!.Id);
@@ -272,6 +276,9 @@ public sealed class ChatController(
         if (conversation.Title == "New chat") conversation.Title = BuildTitle(content);
         conversation.UpdatedAt = now;
         conversation.LastMessageAt = now;
+        var userSequence = conversation.NextMessageSequence + 1;
+        var assistantSequence = userSequence + 1;
+        conversation.NextMessageSequence = assistantSequence;
         var userMessage = new ChatMessage
         {
             Id = Guid.NewGuid(),
@@ -281,6 +288,7 @@ public sealed class ChatController(
             Content = content,
             Status = ChatMessageStatus.Completed,
             CreatedAt = now,
+            Sequence = userSequence,
         };
         var assistantMessage = new ChatMessage
         {
@@ -290,6 +298,7 @@ public sealed class ChatController(
             Content = string.Empty,
             Status = ChatMessageStatus.Pending,
             CreatedAt = now.AddTicks(1),
+            Sequence = assistantSequence,
         };
         db.ChatMessages.AddRange(userMessage, assistantMessage);
         try
@@ -309,7 +318,8 @@ public sealed class ChatController(
     {
         var history = await db.ChatMessages.AsNoTracking()
             .Where(message => message.ConversationId == conversation.Id && (message.Role == ChatMessageRole.User || message.Role == ChatMessageRole.Assistant) && message.Status == ChatMessageStatus.Completed)
-            .OrderBy(message => message.CreatedAt)
+            .OrderBy(message => message.Sequence)
+            .ThenBy(message => message.CreatedAt)
             .ThenBy(message => message.Id)
             .Select(message => new AiChatMessage(message.Role.ToString().ToLowerInvariant(), message.Content))
             .ToListAsync(cancellationToken);
@@ -375,7 +385,7 @@ public sealed class ChatController(
 
     private static ConversationDto ToDto(Conversation conversation) => new(conversation.Id, conversation.WorkspaceId, conversation.ProjectId, conversation.Title, conversation.Status.ToString(), conversation.CreatedAt, conversation.UpdatedAt, conversation.LastMessageAt);
 
-    private static ChatMessageDto ToMessageDto(ChatMessage message, bool isTestResponse = false) => new(message.Id, message.ConversationId, message.Role.ToString(), message.Content, message.Status.ToString(), message.CreatedAt, isTestResponse);
+    private static ChatMessageDto ToMessageDto(ChatMessage message, bool isTestResponse = false) => new(message.Id, message.ConversationId, message.Role.ToString(), message.Content, message.Status.ToString(), message.CreatedAt, message.Sequence, isTestResponse);
 
     private static string? NormalizeTitle(string? title)
     {

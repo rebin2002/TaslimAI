@@ -19,6 +19,7 @@ public sealed record ChatMessageDto(
     string Content,
     string Status,
     DateTime CreatedAt,
+    long Sequence,
     bool IsTestResponse = false);
 
 public sealed class CreateConversationRequest

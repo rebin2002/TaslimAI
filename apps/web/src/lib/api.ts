@@ -1,3 +1,5 @@
+import { createSseParser, type TaslimSseEvent } from "@/lib/sse";
+
 export type User = {
   id: string;
   email: string;
@@ -58,21 +60,20 @@ export type ChatMessage = {
   content: string;
   status: "Pending" | "Completed" | "Failed";
   createdAt: string;
+  sequence: number;
   isTestResponse?: boolean;
 };
 export type SendMessageResponse = { conversation: Conversation; userMessage: ChatMessage; assistantMessage: ChatMessage };
-export type ChatStreamEvent = {
-  type: "message.started" | "message.delta" | "message.completed" | "message.failed";
-  data: {
-    conversation?: Conversation;
-    userMessage?: ChatMessage;
-    assistantMessage?: ChatMessage;
-    messageId?: string;
-    delta?: string;
-    code?: string;
-    message?: string;
-  };
+export type ChatStreamData = {
+  conversation?: Conversation;
+  userMessage?: ChatMessage;
+  assistantMessage?: ChatMessage;
+  messageId?: string;
+  delta?: string;
+  code?: string;
+  message?: string;
 };
+export type ChatStreamEvent = TaslimSseEvent<ChatStreamData>;
 
 const API_URL = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5000").replace(/\/$/, "");
 let csrfToken: string | null = null;
@@ -131,31 +132,18 @@ async function streamRequest(path: string, payload: unknown, onEvent: (event: Ch
 
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
-  let buffer = "";
+  const parser = createSseParser<ChatStreamData>(onEvent);
   try {
     while (true) {
       const result = await reader.read();
-      buffer += decoder.decode(result.value ?? new Uint8Array(), { stream: !result.done });
-      let boundary = buffer.indexOf("\n\n");
-      while (boundary >= 0) {
-        const block = buffer.slice(0, boundary);
-        buffer = buffer.slice(boundary + 2);
-        parseSseBlock(block, onEvent);
-        boundary = buffer.indexOf("\n\n");
-      }
+      parser.push(decoder.decode(result.value ?? new Uint8Array(), { stream: !result.done }));
       if (result.done) break;
     }
-    if (buffer.trim()) parseSseBlock(buffer, onEvent);
+    parser.push(decoder.decode());
+    parser.end();
   } finally {
     reader.releaseLock();
   }
-}
-
-function parseSseBlock(block: string, onEvent: (event: ChatStreamEvent) => void) {
-  const eventName = block.split("\n").find(line => line.startsWith("event:"))?.slice(6).trim();
-  const data = block.split("\n").filter(line => line.startsWith("data:")).map(line => line.slice(5).trim()).join("\n");
-  if (!eventName || !data) return;
-  try { onEvent({ type: eventName as ChatStreamEvent["type"], data: JSON.parse(data) }); } catch { /* ignore malformed provider-independent event */ }
 }
 
 export class ApiError extends Error {

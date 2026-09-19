@@ -187,6 +187,41 @@ public sealed class ChatTests : IClassFixture<TaslimApiFactory>
         Assert.Equal(2, messages.Count);
     }
 
+    [Fact]
+    public async Task Multiple_turns_keep_user_then_assistant_order_after_database_reload()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Ordering Chat Owner");
+        var conversation = await CreateConversation(client, auth.PersonalWorkspace.Id);
+        await SendMessage(client, conversation.Id, "First turn", Guid.NewGuid().ToString("N"));
+        await SendMessage(client, conversation.Id, "Second turn", Guid.NewGuid().ToString("N"));
+
+        var messages = await client.GetFromJsonAsync<List<ChatMessageDto>>($"/api/conversations/{conversation.Id}/messages");
+        Assert.NotNull(messages);
+        Assert.Equal(["User", "Assistant", "User", "Assistant"], messages.Select(message => message.Role));
+        Assert.Equal([1L, 2L, 3L, 4L], messages.Select(message => message.Sequence));
+        Assert.Equal(["First turn", "Second turn"], messages.Where(message => message.Role == "User").Select(message => message.Content));
+    }
+
+    [Fact]
+    public async Task Streaming_provider_failure_emits_failed_terminal_event_and_persists_failure()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Streaming Failure Owner");
+        var conversation = await CreateConversation(client, auth.PersonalWorkspace.Id);
+        var response = await SendMessage(client, conversation.Id, "[[mock-failure]]", Guid.NewGuid().ToString("N"), stream: true);
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains("event: message.started", body);
+        Assert.Contains("event: message.failed", body);
+        Assert.DoesNotContain("event: message.completed", body);
+
+        var messages = await client.GetFromJsonAsync<List<ChatMessageDto>>($"/api/conversations/{conversation.Id}/messages");
+        Assert.NotNull(messages);
+        Assert.Equal(["User", "Assistant"], messages.Select(message => message.Role));
+        Assert.Equal("Failed", messages[1].Status);
+    }
+
     private async Task<AuthResponse> Register(HttpClient client, string displayName)
     {
         var response = await SendWithCsrf(client, HttpMethod.Post, "/api/auth/register", new
