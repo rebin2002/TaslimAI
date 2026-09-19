@@ -1,3 +1,5 @@
+using System.Runtime.CompilerServices;
+
 namespace Taslim.Api.Ai;
 
 /// <summary>
@@ -8,7 +10,10 @@ public sealed class MockAiProvider(ILogger<MockAiProvider> logger) : IAiProvider
 {
     public string Key => "mock";
 
-    public Task<AiGenerationResult> CompleteAsync(AiChatRequest request, AiProviderSelection selection, CancellationToken cancellationToken = default)
+    public async IAsyncEnumerable<AiStreamEvent> StreamAsync(
+        AiChatRequest request,
+        AiProviderSelection selection,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         var latestUserMessage = request.Messages.LastOrDefault(message => string.Equals(message.Role, "user", StringComparison.OrdinalIgnoreCase))?.Content ?? string.Empty;
         if (latestUserMessage.Contains("[[mock-failure]]", StringComparison.OrdinalIgnoreCase))
@@ -20,19 +25,30 @@ public sealed class MockAiProvider(ILogger<MockAiProvider> logger) : IAiProvider
         var content = latestUserMessage.Contains("hello taslim", StringComparison.OrdinalIgnoreCase)
             ? "Hello! Taslim Chat is connected and ready."
             : "Taslim Chat is connected and ready to help you shape that idea. This is a development response while the first real model provider is being prepared.";
+        foreach (var chunk in Split(content, 18))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            await Task.Yield();
+            yield return new AiMessageDelta(chunk);
+        }
 
-        return Task.FromResult(new AiGenerationResult(
-            content,
-            new AiUsageMetadata(
-                selection.ProviderKey,
-                selection.ModelKey,
-                InputTokens: null,
-                OutputTokens: null,
-                EstimatedCost: 0m,
-                ActualCost: 0m,
-                LatencyMs: 0,
-                FinishReason: "mock-complete",
-                IsTestResponse: true)));
+        yield return new AiMessageCompleted(new AiUsageMetadata(
+            selection.ProviderKey,
+            selection.ModelKey,
+            InputTokens: null,
+            CachedInputTokens: null,
+            OutputTokens: null,
+            EstimatedCost: 0m,
+            ActualCost: 0m,
+            LatencyMs: 0,
+            FinishReason: "mock-complete",
+            IsTestResponse: true));
+    }
+
+    private static IEnumerable<string> Split(string content, int chunkSize)
+    {
+        for (var index = 0; index < content.Length; index += chunkSize)
+            yield return content[index..Math.Min(index + chunkSize, content.Length)];
     }
 }
 

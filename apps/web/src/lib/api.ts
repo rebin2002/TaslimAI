@@ -61,9 +61,25 @@ export type ChatMessage = {
   isTestResponse?: boolean;
 };
 export type SendMessageResponse = { conversation: Conversation; userMessage: ChatMessage; assistantMessage: ChatMessage };
+export type ChatStreamEvent = {
+  type: "message.started" | "message.delta" | "message.completed" | "message.failed";
+  data: {
+    conversation?: Conversation;
+    userMessage?: ChatMessage;
+    assistantMessage?: ChatMessage;
+    messageId?: string;
+    delta?: string;
+    code?: string;
+    message?: string;
+  };
+};
 
 const API_URL = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5000").replace(/\/$/, "");
 let csrfToken: string | null = null;
+
+function requestId() {
+  return globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
 
 async function csrf(forceRefresh = false) {
   if (csrfToken && !forceRefresh) return csrfToken;
@@ -74,26 +90,76 @@ async function csrf(forceRefresh = false) {
   return csrfToken;
 }
 
+type ErrorBody = { error?: { code?: string; message?: string; fields?: Record<string, string[]> } };
+
+async function parseError(response: Response) {
+  return await response.json().catch(() => null) as ErrorBody | null;
+}
+
 async function request<T>(path: string, init: RequestInit = {}, withCsrf = false, retryCsrf = true): Promise<T> {
   const headers = new Headers(init.headers);
   headers.set("Content-Type", "application/json");
   if (withCsrf) headers.set("X-CSRF-TOKEN", csrfToken ?? await csrf());
   const response = await fetch(`${API_URL}${path}`, { ...init, headers, credentials: "include" });
   if (response.status === 204) return undefined as T;
-  const body = await response.json().catch(() => null) as T & { error?: { code?: string; message?: string; fields?: Record<string, string[]> } } | null;
+  const body = await response.json().catch(() => null) as T & ErrorBody | null;
   if (!response.ok) {
     if (response.status === 400 && withCsrf && retryCsrf && body?.error?.code === "CSRF_VALIDATION_FAILED") {
       csrfToken = null;
       await csrf(true);
       return request<T>(path, init, true, false);
     }
-    throw new ApiError(response.status, body?.error?.message ?? "Something went wrong.", body?.error?.fields);
+    throw new ApiError(response.status, body?.error?.message ?? "Something went wrong.", body?.error?.fields, body?.error?.code);
   }
   return body as T;
 }
 
+async function streamRequest(path: string, payload: unknown, onEvent: (event: ChatStreamEvent) => void, retryCsrf = true): Promise<void> {
+  const headers = new Headers({ "Content-Type": "application/json", Accept: "text/event-stream" });
+  headers.set("X-CSRF-TOKEN", csrfToken ?? await csrf());
+  const response = await fetch(`${API_URL}${path}`, { method: "POST", headers, credentials: "include", body: JSON.stringify(payload) });
+  if (!response.ok) {
+    const body = await parseError(response);
+    if (response.status === 400 && retryCsrf && body?.error?.code === "CSRF_VALIDATION_FAILED") {
+      csrfToken = null;
+      await csrf(true);
+      return streamRequest(path, payload, onEvent, false);
+    }
+    throw new ApiError(response.status, body?.error?.message ?? "Something went wrong.", body?.error?.fields, body?.error?.code);
+  }
+  if (!response.body) throw new ApiError(502, "Streaming is unavailable.", undefined, "STREAM_UNAVAILABLE");
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    while (true) {
+      const result = await reader.read();
+      buffer += decoder.decode(result.value ?? new Uint8Array(), { stream: !result.done });
+      let boundary = buffer.indexOf("\n\n");
+      while (boundary >= 0) {
+        const block = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+        parseSseBlock(block, onEvent);
+        boundary = buffer.indexOf("\n\n");
+      }
+      if (result.done) break;
+    }
+    if (buffer.trim()) parseSseBlock(buffer, onEvent);
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+function parseSseBlock(block: string, onEvent: (event: ChatStreamEvent) => void) {
+  const eventName = block.split("\n").find(line => line.startsWith("event:"))?.slice(6).trim();
+  const data = block.split("\n").filter(line => line.startsWith("data:")).map(line => line.slice(5).trim()).join("\n");
+  if (!eventName || !data) return;
+  try { onEvent({ type: eventName as ChatStreamEvent["type"], data: JSON.parse(data) }); } catch { /* ignore malformed provider-independent event */ }
+}
+
 export class ApiError extends Error {
-  constructor(public status: number, message: string, public fields?: Record<string, string[]>) { super(message); }
+  constructor(public status: number, message: string, public fields?: Record<string, string[]>, public code?: string) { super(message); }
 }
 
 export const api = {
@@ -116,5 +182,6 @@ export const api = {
   getMessages: (conversationId: string) => request<ChatMessage[]>(`/api/conversations/${conversationId}/messages`),
   renameConversation: (conversationId: string, title: string) => request<Conversation>(`/api/conversations/${conversationId}`, { method: "PATCH", body: JSON.stringify({ title }) }, true),
   archiveConversation: (conversationId: string) => request<Conversation>(`/api/conversations/${conversationId}/archive`, { method: "POST" }, true),
-  sendMessage: (conversationId: string, content: string) => request<SendMessageResponse>(`/api/conversations/${conversationId}/messages`, { method: "POST", body: JSON.stringify({ content }) }, true),
+  sendMessage: (conversationId: string, content: string, id = requestId()) => request<SendMessageResponse>(`/api/conversations/${conversationId}/messages`, { method: "POST", body: JSON.stringify({ content, requestId: id }) }, true),
+  streamMessage: (conversationId: string, content: string, onEvent: (event: ChatStreamEvent) => void, id = requestId()) => streamRequest(`/api/conversations/${conversationId}/messages/stream`, { content, requestId: id }, onEvent),
 };

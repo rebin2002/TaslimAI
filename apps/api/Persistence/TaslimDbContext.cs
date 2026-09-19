@@ -97,10 +97,12 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.Property(message => message.Content).HasMaxLength(20000).IsRequired();
             entity.Property(message => message.Status).HasConversion<string>().HasMaxLength(30).IsRequired();
             entity.Property(message => message.AttachmentManifestJson).HasMaxLength(10000);
+            entity.Property(message => message.RequestId).HasMaxLength(80);
             entity.Property(message => message.ProviderKey).HasMaxLength(80);
             entity.Property(message => message.ModelKey).HasMaxLength(160);
             entity.Property(message => message.FinishReason).HasMaxLength(80);
             entity.HasIndex(message => new { message.ConversationId, message.CreatedAt, message.Id });
+            entity.HasIndex(message => new { message.ConversationId, message.RequestId }).IsUnique().HasFilter("\"RequestId\" IS NOT NULL");
             entity.HasOne(message => message.Conversation)
                 .WithMany(conversation => conversation.Messages)
                 .HasForeignKey(message => message.ConversationId)

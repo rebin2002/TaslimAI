@@ -143,6 +143,50 @@ public sealed class ChatTests : IClassFixture<TaslimApiFactory>
         Assert.Equal("CSRF_VALIDATION_FAILED", error.GetProperty("error").GetProperty("code").GetString());
     }
 
+    [Fact]
+    public async Task Streaming_endpoint_emits_provider_independent_events_and_persists_final_content()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Streaming Chat Owner");
+        var conversation = await CreateConversation(client, auth.PersonalWorkspace.Id);
+        var response = await SendMessage(client, conversation.Id, "Hello Taslim", Guid.NewGuid().ToString("N"), stream: true);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("text/event-stream", response.Content.Headers.ContentType?.MediaType);
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.Contains("event: message.started", body);
+        Assert.Contains("event: message.delta", body);
+        Assert.Contains("event: message.completed", body);
+        Assert.Contains("connected and ready", body, StringComparison.OrdinalIgnoreCase);
+
+        var messages = await client.GetFromJsonAsync<List<ChatMessageDto>>($"/api/conversations/{conversation.Id}/messages");
+        Assert.NotNull(messages);
+        Assert.Equal("Completed", messages[^1].Status);
+        Assert.Contains("connected and ready", messages[^1].Content, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Repeating_the_same_request_id_returns_the_existing_result_without_duplicate_messages()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Idempotent Chat Owner");
+        var conversation = await CreateConversation(client, auth.PersonalWorkspace.Id);
+        var requestId = Guid.NewGuid().ToString("N");
+        var first = await SendMessage(client, conversation.Id, "Hello Taslim", requestId);
+        var second = await SendMessage(client, conversation.Id, "Hello Taslim", requestId);
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, second.StatusCode);
+        var firstBody = await first.Content.ReadFromJsonAsync<SendMessageResponse>();
+        var secondBody = await second.Content.ReadFromJsonAsync<SendMessageResponse>();
+        Assert.NotNull(firstBody);
+        Assert.NotNull(secondBody);
+        Assert.Equal(firstBody.UserMessage.Id, secondBody.UserMessage.Id);
+        Assert.Equal(firstBody.AssistantMessage.Id, secondBody.AssistantMessage.Id);
+
+        var messages = await client.GetFromJsonAsync<List<ChatMessageDto>>($"/api/conversations/{conversation.Id}/messages");
+        Assert.NotNull(messages);
+        Assert.Equal(2, messages.Count);
+    }
+
     private async Task<AuthResponse> Register(HttpClient client, string displayName)
     {
         var response = await SendWithCsrf(client, HttpMethod.Post, "/api/auth/register", new
@@ -163,8 +207,8 @@ public sealed class ChatTests : IClassFixture<TaslimApiFactory>
         return (await response.Content.ReadFromJsonAsync<ConversationDto>())!;
     }
 
-    private static async Task<HttpResponseMessage> SendMessage(HttpClient client, Guid conversationId, string content) =>
-        await SendWithCsrf(client, HttpMethod.Post, $"/api/conversations/{conversationId}/messages", new { content });
+    private static async Task<HttpResponseMessage> SendMessage(HttpClient client, Guid conversationId, string content, string? requestId = null, bool stream = false) =>
+        await SendWithCsrf(client, HttpMethod.Post, $"/api/conversations/{conversationId}/messages{(stream ? "/stream" : string.Empty)}", new { content, requestId });
 
     private static async Task<T> SendWithCsrf<T>(HttpClient client, HttpMethod method, string path, object? payload)
     {

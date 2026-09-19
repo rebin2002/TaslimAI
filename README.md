@@ -1,6 +1,6 @@
 # Taslim.ai
 
-Taslim.ai is a multilingual AI platform foundation designed to make professional AI capabilities simple, fast, and approachable. **Batch 3.1 adds persistent Taslim Chat and a provider-independent AI Core with a clearly labeled development mock provider.** Paid AI providers remain intentionally out of scope.
+Taslim.ai is a multilingual AI platform foundation designed to make professional AI capabilities simple, fast, and approachable. **Batch 3.2 adds the first production AI provider, provider-independent streaming, deterministic model routing, and safe usage accounting.**
 
 ## Architecture
 
@@ -108,7 +108,7 @@ The API allows only configured origins and uses `AllowCredentials()`; wildcard C
 
 Railway terminates TLS at its ingress proxy, so the API uses ASP.NET Core Forwarded Headers Middleware to consume one `X-Forwarded-Proto` hop before exception handling, CORS, authentication, authorization, or antiforgery. Production processes only the forwarded scheme, with `ForwardLimit=1`, and preserves `CookieSecurePolicy.Always` for both auth and CSRF cookies. Local development remains direct HTTP with the existing `SameAsRequest` development policy.
 
-## Batch 3.1 product flows
+## Batch 3.2 product flows
 
 - Register at `/register`
 - Sign in at `/login`
@@ -121,8 +121,11 @@ Railway terminates TLS at its ingress proxy, so the API uses ASP.NET Core Forwar
 - Open a new chat at `/chat`
 - Open an authorized conversation at `/chat/{conversationId}`
 - Search, rename, archive, and revisit conversations
-- Send messages through the provider-independent AI Core mock provider
-- See a clear development-response marker while no paid provider is connected
+- Send messages through the provider-independent AI Core
+- Stream assistant responses through Taslim-owned SSE events
+- Retry failed generations without duplicating the user message
+- Use OpenAI in Production when explicitly enabled on the API service
+- Keep the mock provider for local development and tests
 
 Supported project types are General, Movie, Marketing, Business, Research, Education, and Development. These are extensible server-side values, not a closed database enum.
 
@@ -142,7 +145,7 @@ dotnet tool run dotnet-ef migrations add <MigrationName> \
   --output-dir Persistence/Migrations
 ```
 
-The initial migration is `InitialIdentityWorkspacesProjects` and creates ASP.NET Identity tables plus `Workspaces`, `WorkspaceMembers`, and `Projects`. Batch 3.1 adds `AddChatConversationsAndMessages` for `Conversations` and `ChatMessages`.
+The initial migration is `InitialIdentityWorkspacesProjects` and creates ASP.NET Identity tables plus `Workspaces`, `WorkspaceMembers`, and `Projects`. Batch 3.1 adds `AddChatConversationsAndMessages` for `Conversations` and `ChatMessages`. Batch 3.2 adds `AddChatUsageAndIdempotency` for cached-token usage and duplicate-request protection.
 
 To apply migrations locally against an explicitly selected database:
 
@@ -163,7 +166,7 @@ Run the API integration suite:
 dotnet test apps/api.Tests/Taslim.Api.Tests.csproj
 ```
 
-The suite covers registration, duplicate email, login failure, session/logout, personal workspace ownership, project lifecycle, chat persistence, mock AI execution, conversation title generation, message history, rename/archive, cross-user and cross-workspace authorization, oversized-message rejection, provider failure persistence, CSRF enforcement, and controlled validation errors. Tests use a relational in-memory SQLite database so transactions and foreign keys are exercised realistically.
+The suite covers registration, duplicate email, login failure, session/logout, personal workspace ownership, project lifecycle, chat persistence, mock AI execution, tier routing, provider failure, context trimming, usage/cost calculation, provider-independent stream events, SSE persistence, idempotency, conversation title generation, message history, rename/archive, cross-user and cross-workspace authorization, oversized-message rejection, CSRF enforcement, and controlled validation errors. Tests use a relational in-memory SQLite database so transactions and foreign keys are exercised realistically.
 
 ## Railway deployment
 
@@ -198,11 +201,14 @@ In Railway, keep `NEXT_PUBLIC_API_URL` configured on the Taslim Web service and 
 ASPNETCORE_ENVIRONMENT=Production
 ConnectionStrings__Postgres=${{Postgres.DATABASE_URL}}
 AllowedOrigins__0=https://taslim-web-production.up.railway.app
+Ai__OpenAI__Enabled=true
+Ai__OpenAI__ApiKey=<SECRET>
+Ai__DefaultChatTier=Smart
 ```
 
 `appsettings.Production.json` enables `Database__ApplyMigrations=true`. The API Dockerfile uses a multi-stage .NET 8 build and binds to port 8080. Railway should route its provided service port to the container; if the platform requires an explicit variable, set `ASPNETCORE_HTTP_PORTS=8080`.
 
-No new Railway environment variable is required for forwarded HTTPS. Redeploy the API from the commit containing the middleware change. If a future hosting topology uses a fixed private proxy, explicit proxy IPs may be supplied as `ForwardedHeaders:KnownProxies:0`, `ForwardedHeaders:KnownProxies:1`, and so on; do not add arbitrary client IPs.
+The OpenAI key belongs only on the Taslim API service. Do not add it to Taslim Web variables, source code, Docker build arguments, or browser bundles. `Ai__OpenAI__BaseUrl` is optional and defaults server-side to `https://api.openai.com/v1`. `Ai__DefaultChatTier=Smart` is the internal default; ordinary users do not select provider models. Production disables mock fallback, so a missing/failed OpenAI configuration returns a safe generation error rather than a simulated answer. No new Railway variable is required for forwarded HTTPS. If a future hosting topology uses a fixed private proxy, explicit proxy IPs may be supplied as `ForwardedHeaders:KnownProxies:0`, `ForwardedHeaders:KnownProxies:1`, and so on; do not add arbitrary client IPs.
 
 ### PostgreSQL
 
@@ -210,6 +216,6 @@ Use Railway’s managed PostgreSQL service and a private service reference for t
 
 ## Scope boundary
 
-Included in Batch 3.1: persistent conversations and messages, secured chat API, provider-independent AI Core, deterministic conversation titles, development mock provider, localized chat UI, conversation history, home-page Ask Taslim integration, EF migration, and integration tests. Batch 2 authentication, CSRF, workspace/project authorization, localization, RTL behavior, and Railway deployment architecture remain unchanged.
+Included in Batch 3.2: the Batch 3.1 conversation foundation, server-only OpenAI Responses adapter, configuration-backed internal model catalog, Fast/Smart/Advanced routing, server-controlled multilingual instruction, Taslim-owned SSE streaming, context budget trimming, usage/cost metadata, request idempotency, retry-safe failure handling, and localized streaming Chat UI. Batch 2 authentication, CSRF, workspace/project authorization, localization, RTL behavior, global CSS, and Railway deployment architecture remain unchanged.
 
-Not included: OpenAI, Gemini, Anthropic, paid model providers, streaming execution, image/video/voice/music generation, web search, file analysis, personal memory, project memory retrieval, vector database, embeddings, RAG, tool calling, agents, billing, credits, subscriptions, payment processing, team chat sharing, admin, invitations, business workspace creation, social login, or native mobile apps.
+Not included: Anthropic, Gemini, automatic cross-provider fallback, image/video/voice/music generation, web search, file analysis, personal memory, project memory retrieval, vector database, embeddings, RAG, tool calling, agents, billing, credits, subscriptions, payment processing, team chat sharing, admin, invitations, business workspace creation, social login, native mobile apps, or Batch 3.3.

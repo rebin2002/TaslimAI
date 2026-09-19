@@ -1,5 +1,4 @@
 using System.ComponentModel.DataAnnotations;
-using Taslim.Api.Domain;
 
 namespace Taslim.Api.Contracts;
 
@@ -38,8 +37,11 @@ public sealed class RenameConversationRequest
 
 public sealed class SendMessageRequest
 {
-    [Required, StringLength(20000, MinimumLength = 1)]
+    [Required, StringLength(20_000, MinimumLength = 1)]
     public string Content { get; set; } = string.Empty;
+
+    [StringLength(80)]
+    public string? RequestId { get; set; }
 }
 
 public sealed record SendMessageResponse(
@@ -47,9 +49,9 @@ public sealed record SendMessageResponse(
     ChatMessageDto UserMessage,
     ChatMessageDto AssistantMessage);
 
-public sealed record AiProviderStatusDto(string Key, string Name, bool Enabled);
+public sealed record ChatStreamEvent(string Type, object? Data = null);
 
 public static class ChatMessageLimits
 {
-    public const int MaximumContentLength = 20000;
+    public const int MaximumContentLength = 20_000;
 }

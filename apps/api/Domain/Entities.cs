@@ -150,12 +150,14 @@ public sealed class ChatMessage
     public string Content { get; set; } = string.Empty;
     public ChatMessageStatus Status { get; set; } = ChatMessageStatus.Pending;
     public DateTime CreatedAt { get; set; }
+    public string? RequestId { get; set; }
 
     // Reserved for future attachment manifests stored outside PostgreSQL.
     public string? AttachmentManifestJson { get; set; }
     public string? ProviderKey { get; set; }
     public string? ModelKey { get; set; }
     public int? InputTokens { get; set; }
+    public int? CachedInputTokens { get; set; }
     public int? OutputTokens { get; set; }
     public decimal? EstimatedCost { get; set; }
     public decimal? ActualCost { get; set; }

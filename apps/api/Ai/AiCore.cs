@@ -1,22 +1,27 @@
+using Microsoft.Extensions.Options;
+
 namespace Taslim.Api.Ai;
 
 public sealed record AiChatMessage(string Role, string Content);
 
 public sealed record AiChatRequest(
     IReadOnlyList<AiChatMessage> Messages,
-    string? RequestedModel = null,
+    string SystemInstruction,
+    string RequestedTier,
     bool EnableStreaming = false);
 
 public sealed record AiProviderSelection(
     string ProviderKey,
     string ModelKey,
     string ModelName,
+    string Tier,
     bool IsTestProvider);
 
 public sealed record AiUsageMetadata(
     string ProviderKey,
     string ModelKey,
     int? InputTokens,
+    int? CachedInputTokens,
     int? OutputTokens,
     decimal? EstimatedCost,
     decimal? ActualCost,
@@ -26,10 +31,17 @@ public sealed record AiUsageMetadata(
 
 public sealed record AiGenerationResult(string Content, AiUsageMetadata Usage);
 
+public abstract record AiStreamEvent;
+public sealed record AiMessageDelta(string Delta) : AiStreamEvent;
+public sealed record AiMessageCompleted(AiUsageMetadata Usage) : AiStreamEvent;
+
 public interface IAiProvider
 {
     string Key { get; }
-    Task<AiGenerationResult> CompleteAsync(AiChatRequest request, AiProviderSelection selection, CancellationToken cancellationToken = default);
+    IAsyncEnumerable<AiStreamEvent> StreamAsync(
+        AiChatRequest request,
+        AiProviderSelection selection,
+        CancellationToken cancellationToken = default);
 }
 
 public interface IAiModelRouter
@@ -39,33 +51,148 @@ public interface IAiModelRouter
 
 public interface IChatCompletionService
 {
-    Task<AiGenerationResult> CompleteAsync(AiChatRequest request, CancellationToken cancellationToken = default);
+    IAsyncEnumerable<AiStreamEvent> StreamAsync(
+        AiChatRequest request,
+        CancellationToken cancellationToken = default);
+
+    Task<AiGenerationResult> CompleteAsync(
+        AiChatRequest request,
+        CancellationToken cancellationToken = default);
 }
 
-public sealed class AiModelRouter : IAiModelRouter
+public sealed class AiModelRouter(
+    IOptions<AiOptions> options,
+    AiModelCatalog catalog) : IAiModelRouter
 {
-    public AiProviderSelection Select(AiChatRequest request) => new(
-        ProviderKey: "mock",
-        ModelKey: request.RequestedModel ?? "taslim-mock-chat",
-        ModelName: "Taslim Mock Chat",
-        IsTestProvider: true);
+    private readonly AiOptions settings = options.Value;
+
+    public AiProviderSelection Select(AiChatRequest request)
+    {
+        var tier = NormalizeTier(request.RequestedTier, settings.DefaultChatTier);
+        var providerKey = settings.OpenAI.Enabled ? "openai" : settings.AllowMockProvider ? "mock" : throw new AiProviderUnavailableException();
+        var model = catalog.GetForTier(tier, providerKey)
+            ?? throw new AiProviderUnavailableException();
+
+        return new AiProviderSelection(providerKey, model.ModelKey, model.DisplayName, tier, providerKey == "mock");
+    }
+
+    private static string NormalizeTier(string? requested, string fallback)
+    {
+        var value = string.IsNullOrWhiteSpace(requested) ? fallback : requested;
+        return value.Trim().ToLowerInvariant() switch
+        {
+            "fast" => "Fast",
+            "advanced" => "Advanced",
+            _ => "Smart",
+        };
+    }
 }
 
 public sealed class ChatCompletionService(
     IAiModelRouter router,
     IEnumerable<IAiProvider> providers,
+    AiModelCatalog catalog,
     ILogger<ChatCompletionService> logger) : IChatCompletionService
 {
-    public async Task<AiGenerationResult> CompleteAsync(AiChatRequest request, CancellationToken cancellationToken = default)
+    public async IAsyncEnumerable<AiStreamEvent> StreamAsync(
+        AiChatRequest request,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         var selection = router.Select(request);
         var provider = providers.FirstOrDefault(item => string.Equals(item.Key, selection.ProviderKey, StringComparison.OrdinalIgnoreCase));
         if (provider is null)
         {
             logger.LogError("AI provider selection failed. ProviderKey={ProviderKey}; ModelKey={ModelKey}", selection.ProviderKey, selection.ModelKey);
-            throw new InvalidOperationException("No AI provider is available for the selected model.");
+            throw new AiProviderUnavailableException();
         }
 
-        return await provider.CompleteAsync(request, selection, cancellationToken);
+        await foreach (var item in provider.StreamAsync(request, selection, cancellationToken))
+        {
+            if (item is AiMessageCompleted completed)
+            {
+                yield return completed with { Usage = EnrichUsage(completed.Usage, selection) };
+            }
+            else
+            {
+                yield return item;
+            }
+        }
+    }
+
+    public async Task<AiGenerationResult> CompleteAsync(AiChatRequest request, CancellationToken cancellationToken = default)
+    {
+        var content = new System.Text.StringBuilder();
+        AiUsageMetadata? usage = null;
+        await foreach (var item in StreamAsync(request, cancellationToken))
+        {
+            switch (item)
+            {
+                case AiMessageDelta delta:
+                    content.Append(delta.Delta);
+                    break;
+                case AiMessageCompleted completed:
+                    usage = completed.Usage;
+                    break;
+            }
+        }
+
+        if (usage is null) throw new AiGenerationException("AI response did not complete.");
+        return new AiGenerationResult(content.ToString(), usage);
+    }
+
+    private AiUsageMetadata EnrichUsage(AiUsageMetadata usage, AiProviderSelection selection)
+    {
+        var model = catalog.Find(selection.ModelKey);
+        var estimated = CalculateCost(usage, model);
+        return usage with
+        {
+            ProviderKey = selection.ProviderKey,
+            ModelKey = selection.ModelKey,
+            EstimatedCost = estimated,
+            ActualCost = estimated,
+        };
+    }
+
+    private static decimal? CalculateCost(AiUsageMetadata usage, AiModelDefinition? model)
+    {
+        if (model is null || (usage.InputTokens is null && usage.OutputTokens is null)) return usage.EstimatedCost;
+        var input = Math.Max(0, usage.InputTokens.GetValueOrDefault());
+        var cached = Math.Min(input, Math.Max(0, usage.CachedInputTokens.GetValueOrDefault()));
+        var output = Math.Max(0, usage.OutputTokens.GetValueOrDefault());
+        var uncachedInput = input - cached;
+        var cost = uncachedInput * model.InputPricePerMillion / 1_000_000m
+            + cached * model.CachedInputPricePerMillion / 1_000_000m
+            + output * model.OutputPricePerMillion / 1_000_000m;
+        return decimal.Round(cost, 8, MidpointRounding.AwayFromZero);
     }
 }
+
+public sealed class AiContextBuilder(IOptions<AiOptions> options)
+{
+    private readonly AiOptions settings = options.Value;
+
+    public AiChatRequest Build(IEnumerable<AiChatMessage> history)
+    {
+        var messages = history.ToList();
+        var budget = Math.Max(256, settings.ContextBudgetTokens);
+        var selected = new List<AiChatMessage>();
+        var used = 0;
+
+        for (var index = messages.Count - 1; index >= 0; index--)
+        {
+            var message = messages[index];
+            var tokens = EstimateTokens(message.Content);
+            if (selected.Count > 0 && used + tokens > budget) break;
+            selected.Add(message);
+            used += tokens;
+        }
+
+        selected.Reverse();
+        return new AiChatRequest(selected, settings.SystemInstruction, settings.DefaultChatTier, EnableStreaming: true);
+    }
+
+    private static int EstimateTokens(string content) => Math.Max(1, (content.Length + 3) / 4);
+}
+
+public sealed class AiProviderUnavailableException() : Exception("No configured AI provider is available.");
+public sealed class AiGenerationException(string message) : Exception(message);

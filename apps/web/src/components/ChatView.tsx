@@ -5,11 +5,12 @@ import { Archive, Check, Edit3, MessageCircle, MoreHorizontal, Plus, Search, Sen
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
-import { ApiError, api, type ChatMessage, type Conversation } from "@/lib/api";
+import { ApiError, api, type ChatMessage, type ChatStreamEvent, type Conversation } from "@/lib/api";
 import { ProtectedPage } from "@/components/ProtectedPage";
 
 type ChatViewProps = { conversationId?: string };
 type ConversationGroup = { label: string; items: Conversation[] };
+type RetryRequest = { conversationId: string; content: string; requestId: string };
 
 function dateGroup(date: string, now = new Date()) {
   const value = new Date(date);
@@ -20,6 +21,10 @@ function dateGroup(date: string, now = new Date()) {
   if (days === 1) return "yesterday";
   if (days <= 7) return "week";
   return "older";
+}
+
+function newRequestId() {
+  return globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
 export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
@@ -36,6 +41,7 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
   const [error, setError] = useState("");
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState("");
+  const [retryRequest, setRetryRequest] = useState<RetryRequest | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const loadConversations = useCallback(async () => {
@@ -85,12 +91,11 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
     return ["today", "yesterday", "week", "older"].map(key => ({ label: labels[key], items: filteredConversations.filter(item => dateGroup(item.updatedAt) === key) })).filter(group => group.items.length > 0);
   }, [filteredConversations, t]);
 
-  async function selectConversation(item: Conversation) {
-    router.push(`/chat/${item.id}`);
-  }
+  function selectConversation(item: Conversation) { router.push(`/chat/${item.id}`); }
 
   function startNewChat() {
     setError("");
+    setRetryRequest(null);
     setSelected(null);
     setMessages([]);
     setContent("");
@@ -98,28 +103,67 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
     router.push("/chat");
   }
 
-  async function send(event?: FormEvent | KeyboardEvent) {
+  async function send(event?: FormEvent | KeyboardEvent, retry?: RetryRequest) {
     event?.preventDefault();
-    const text = content.trim();
+    const text = retry?.content ?? content.trim();
     if (!text || generating || text.length > 20000 || !workspace) return;
+    const id = retry?.requestId ?? newRequestId();
+    let activeConversationId = retry?.conversationId ?? selected?.id;
     setError("");
+    setRetryRequest(null);
     setGenerating(true);
     try {
       let conversation = selected;
       if (!conversation) {
         conversation = await api.createConversation(workspace.id);
+        activeConversationId = conversation.id;
         setSelected(conversation);
         setConversations(current => [conversation!, ...current]);
         router.replace(`/chat/${conversation.id}`);
       }
-      const result = await api.sendMessage(conversation.id, text);
-      setSelected(result.conversation);
-      setConversations(current => [result.conversation, ...current.filter(item => item.id !== result.conversation.id)]);
-      setMessages(current => [...current, result.userMessage, result.assistantMessage]);
-      setContent("");
+      let assistantId: string | undefined;
+      await api.streamMessage(conversation.id, text, eventData => handleStreamEvent(eventData), id);
+      function handleStreamEvent(streamEvent: ChatStreamEvent) {
+        if (streamEvent.type === "message.started" && streamEvent.data.userMessage && streamEvent.data.assistantMessage) {
+          assistantId = streamEvent.data.assistantMessage.id;
+          const userMessage = streamEvent.data.userMessage;
+          const assistantMessage = streamEvent.data.assistantMessage;
+          setMessages(current => current.some(message => message.id === userMessage.id)
+            ? current.map(message => message.id === assistantMessage.id ? assistantMessage : message)
+            : [...current, userMessage, assistantMessage]);
+          if (streamEvent.data.conversation) {
+            setSelected(streamEvent.data.conversation);
+            setConversations(current => [streamEvent.data.conversation!, ...current.filter(item => item.id !== streamEvent.data.conversation!.id)]);
+          }
+        } else if (streamEvent.type === "message.delta" && streamEvent.data.delta) {
+          const targetId = streamEvent.data.messageId ?? assistantId;
+          if (!targetId) return;
+          setMessages(current => current.map(message => message.id === targetId ? { ...message, status: "Pending", content: message.content + streamEvent.data.delta } : message));
+        } else if (streamEvent.type === "message.completed" && streamEvent.data.assistantMessage && streamEvent.data.userMessage) {
+          const assistantMessage = streamEvent.data.assistantMessage;
+          assistantId = assistantMessage.id;
+          setMessages(current => current.some(message => message.id === assistantMessage.id)
+            ? current.map(message => message.id === assistantMessage.id ? assistantMessage : message)
+            : [...current, streamEvent.data.userMessage!, assistantMessage]);
+          if (streamEvent.data.conversation) {
+            setSelected(streamEvent.data.conversation);
+            setConversations(current => [streamEvent.data.conversation!, ...current.filter(item => item.id !== streamEvent.data.conversation!.id)]);
+          }
+          setContent("");
+          setGenerating(false);
+        } else if (streamEvent.type === "message.failed") {
+          if (assistantId) setMessages(current => current.map(message => message.id === assistantId ? { ...message, status: "Failed" } : message));
+          setRetryRequest({ conversationId: conversation!.id, content: text, requestId: id });
+          setError(streamEvent.data.code === "CONVERSATION_ARCHIVED" ? t("chat.archivedError") : t("chat.generationError"));
+          setGenerating(false);
+        }
+      }
+      setGenerating(false);
     } catch (caught) {
-      setError(caught instanceof ApiError ? caught.message : t("chat.sendError"));
-    } finally { setGenerating(false); }
+      setGenerating(false);
+      if (activeConversationId) setRetryRequest({ conversationId: activeConversationId, content: text, requestId: id });
+      setError(caught instanceof ApiError && caught.code === "CONVERSATION_ARCHIVED" ? t("chat.archivedError") : t("chat.generationError"));
+    }
   }
 
   async function saveRename() {
@@ -147,16 +191,16 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
       <button type="button" className="chat-new-button" onClick={startNewChat}><Plus size={15} />{t("chat.newChat")}</button>
       <label className="chat-search"><Search size={15} /><input value={search} onChange={event => setSearch(event.target.value)} placeholder={t("chat.searchPlaceholder")} aria-label={t("chat.searchPlaceholder")} /></label>
       <div className="chat-history" aria-label={t("chat.history")}>
-        {loading ? <div className="chat-sidebar-loading"><span className="loading-spinner" /></div> : groups.length === 0 ? <p className="chat-sidebar-empty">{t("chat.noConversations")}</p> : groups.map(group => <section key={group.label} className="chat-history-group"><span className="chat-history-label">{group.label}</span>{group.items.map(item => <button type="button" key={item.id} className={`chat-history-item ${selected?.id === item.id ? "is-active" : ""}`} onClick={() => void selectConversation(item)}><MessageCircle size={14} /><span>{item.title}</span></button>)}</section>)}
+        {loading ? <div className="chat-sidebar-loading"><span className="loading-spinner" /></div> : groups.length === 0 ? <p className="chat-sidebar-empty">{t("chat.noConversations")}</p> : groups.map(group => <section key={group.label} className="chat-history-group"><span className="chat-history-label">{group.label}</span>{group.items.map(item => <button type="button" key={item.id} className={`chat-history-item ${selected?.id === item.id ? "is-active" : ""}`} onClick={() => selectConversation(item)}><MessageCircle size={14} /><span>{item.title}</span></button>)}</section>)}
       </div>
-      <div className="chat-sidebar-footer"><Sparkles size={15} /><span>{t("chat.mockNotice")}</span></div>
+      <div className="chat-sidebar-footer"><Sparkles size={15} /><span>{t("chat.providerNotice")}</span></div>
     </aside>
     <main className="chat-main">
       <header className="chat-main-header"><div className="chat-title-block"><span className="chat-header-icon"><MessageCircle size={18} /></span><div><p className="section-eyebrow">{t("chat.headerEyebrow")}</p><h2>{selected?.title ?? t("chat.newChat")}</h2></div></div>{selected && <div className="chat-header-actions">{renaming ? <div className="chat-rename"><input value={renameValue} onChange={event => setRenameValue(event.target.value)} onKeyDown={event => { if (event.key === "Enter") void saveRename(); }} autoFocus /><button type="button" onClick={() => void saveRename()} aria-label={t("chat.saveRename")}><Check size={15} /></button><button type="button" onClick={() => setRenaming(false)} aria-label={t("common.cancel")}><X size={15} /></button></div> : <><button type="button" className="chat-header-action" onClick={() => { setRenameValue(selected.title); setRenaming(true); }}><Edit3 size={14} />{t("chat.rename")}</button><button type="button" className="chat-header-action is-danger" onClick={() => void archiveSelected()}><Archive size={14} />{t("chat.archive")}</button></>}</div>}</header>
       <div className="chat-messages" aria-live="polite">
-        {loading ? <div className="chat-empty"><span className="loading-spinner" /></div> : error && !selected ? <div className="chat-empty"><CircleMessage /><h3>{error}</h3><button type="button" className="secondary-button" onClick={() => startNewChat()}>{t("chat.newChat")}</button></div> : messages.length === 0 ? <div className="chat-empty"><span className="chat-empty-icon"><Sparkles size={22} /></span><h3>{t("chat.emptyTitle")}</h3><p>{t("chat.emptyDescription")}</p></div> : <>{messages.map(message => <article className={`chat-message chat-message-${message.role.toLowerCase()}`} key={message.id}><div className="chat-message-avatar">{message.role === "User" ? "T" : <Sparkles size={15} />}</div><div className="chat-message-copy"><span className="chat-message-role">{message.role === "User" ? t("chat.you") : t("chat.taslim")}</span><p>{message.content}</p>{message.isTestResponse && <small className="chat-test-badge">{t("chat.testResponse")}</small>}</div></article>)}{generating && <article className="chat-message chat-message-assistant"><div className="chat-message-avatar"><Sparkles size={15} /></div><div className="chat-message-copy"><span className="chat-message-role">{t("chat.taslim")}</span><div className="chat-typing"><i /><i /><i /></div></div></article>}<div ref={messagesEndRef} /></>}
+        {loading ? <div className="chat-empty"><span className="loading-spinner" /></div> : error && !selected ? <div className="chat-empty"><CircleMessage /><h3>{error}</h3><button type="button" className="secondary-button" onClick={startNewChat}>{t("chat.newChat")}</button></div> : messages.length === 0 ? <div className="chat-empty"><span className="chat-empty-icon"><Sparkles size={22} /></span><h3>{t("chat.emptyTitle")}</h3><p>{t("chat.emptyDescription")}</p></div> : <>{messages.map(message => <article className={`chat-message chat-message-${message.role.toLowerCase()} ${message.status === "Failed" ? "is-failed" : ""}`} key={message.id}><div className="chat-message-avatar">{message.role === "User" ? "T" : <Sparkles size={15} />}</div><div className="chat-message-copy"><span className="chat-message-role">{message.role === "User" ? t("chat.you") : t("chat.taslim")}</span>{message.status === "Pending" && !message.content ? <div className="chat-typing"><i /><i /><i /></div> : <p>{message.content}</p>}{message.status === "Failed" && retryRequest && <button type="button" className="chat-retry-button" onClick={() => void send(undefined, retryRequest)} disabled={generating}><Send size={13} />{t("chat.retry")}</button>}{message.isTestResponse && <small className="chat-test-badge">{t("chat.testResponse")}</small>}</div></article>)}<div ref={messagesEndRef} /></>}
       </div>
-      {error && selected && <div className="chat-inline-error" role="alert">{error}</div>}
+      {error && selected && <div className="chat-inline-error" role="alert">{error}{retryRequest && <button type="button" className="chat-inline-retry" onClick={() => void send(undefined, retryRequest)} disabled={generating}>{t("chat.retry")}</button>}</div>}
       <form className="chat-composer" onSubmit={send}><textarea value={content} onChange={event => setContent(event.target.value)} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey) void send(event); }} placeholder={t("chat.composerPlaceholder")} maxLength={20000} disabled={generating} aria-label={t("chat.composerPlaceholder")} /><div className="chat-composer-footer"><span>{t("chat.composerHint")}</span><button type="submit" className="chat-send-button" disabled={generating || !content.trim()} aria-label={t("chat.send")}><Send size={16} /></button></div></form>
     </main>
   </div></ProtectedPage>;

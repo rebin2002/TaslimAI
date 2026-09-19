@@ -104,8 +104,13 @@ builder.Services.AddCors(options => options.AddPolicy("Frontend", policy =>
         .AllowAnyMethod()
         .AllowCredentials()));
 builder.Services.AddScoped<WorkspaceAccessService>();
+builder.Services.Configure<AiOptions>(builder.Configuration.GetSection("Ai"));
+builder.Services.AddSingleton<AiModelCatalog>();
+builder.Services.AddSingleton<AiContextBuilder>();
+builder.Services.AddHttpClient<OpenAiProvider>();
 builder.Services.AddSingleton<IAiModelRouter, AiModelRouter>();
 builder.Services.AddSingleton<IAiProvider, MockAiProvider>();
+builder.Services.AddSingleton<IAiProvider>(services => services.GetRequiredService<OpenAiProvider>());
 builder.Services.AddScoped<IChatCompletionService, ChatCompletionService>();
 var app = builder.Build();
 

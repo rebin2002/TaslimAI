@@ -1,3 +1,6 @@
+using System.Security.Claims;
+using System.Text;
+using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -17,6 +20,7 @@ public sealed class ChatController(
     TaslimDbContext db,
     WorkspaceAccessService access,
     IChatCompletionService completion,
+    AiContextBuilder contextBuilder,
     ILogger<ChatController> logger) : ControllerBase
 {
     [HttpPost("workspaces/{workspaceId:guid}/conversations")]
@@ -119,14 +123,150 @@ public sealed class ChatController(
     public async Task<IActionResult> SendMessage(Guid conversationId, SendMessageRequest request, CancellationToken cancellationToken)
     {
         if (!ModelState.IsValid) return ApiResults.Validation(this, "Please enter a message.");
+        var prepared = await PrepareMessageAsync(conversationId, request, cancellationToken);
+        if (prepared.Error is not null) return prepared.Error;
+        if (prepared.ExistingResult is not null) return Ok(prepared.ExistingResult);
+
+        try
+        {
+            var context = await BuildContextAsync(prepared.Conversation!, cancellationToken);
+            var result = await completion.CompleteAsync(context, cancellationToken);
+            await PersistSuccessAsync(prepared, result, cancellationToken);
+            return Ok(new SendMessageResponse(ToDto(prepared.Conversation!), ToMessageDto(prepared.UserMessage!), ToMessageDto(prepared.AssistantMessage!, result.Usage.IsTestResponse)));
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            await PersistFailureAsync(prepared, exception);
+            LogGenerationFailure(exception, prepared.Conversation!.Id);
+            return GenerationFailure();
+        }
+    }
+
+    [HttpPost("conversations/{conversationId:guid}/messages/stream")]
+    [ValidateAntiForgeryToken]
+    public async Task StreamMessage(Guid conversationId, SendMessageRequest request, CancellationToken cancellationToken)
+    {
+        Response.StatusCode = StatusCodes.Status200OK;
+        Response.ContentType = "text/event-stream";
+        Response.Headers.CacheControl = "no-cache";
+        Response.Headers.Append("X-Accel-Buffering", "no");
+
+        if (!ModelState.IsValid)
+        {
+            await WriteEventAsync("message.failed", new { code = "VALIDATION_ERROR", message = "Please enter a message." }, cancellationToken);
+            return;
+        }
+
+        PreparedChat? prepared = null;
+        try
+        {
+            prepared = await PrepareMessageAsync(conversationId, request, cancellationToken);
+            if (prepared.Error is not null)
+            {
+                await WriteEventAsync("message.failed", ErrorData(prepared.Error), cancellationToken);
+                return;
+            }
+
+            if (prepared.ExistingResult is not null)
+            {
+                await WriteEventAsync("message.started", new
+                {
+                    conversation = prepared.ExistingResult.Conversation,
+                    userMessage = prepared.ExistingResult.UserMessage,
+                    assistantMessage = prepared.ExistingResult.AssistantMessage,
+                }, cancellationToken);
+                if (prepared.ExistingResult.AssistantMessage.Status == ChatMessageStatus.Completed.ToString())
+                {
+                    await WriteEventAsync("message.delta", new { messageId = prepared.ExistingResult.AssistantMessage.Id, delta = prepared.ExistingResult.AssistantMessage.Content }, cancellationToken);
+                    await WriteEventAsync("message.completed", prepared.ExistingResult, cancellationToken);
+                }
+                else
+                {
+                    await WriteEventAsync("message.failed", new { code = "AI_GENERATION_FAILED", message = "Taslim could not generate a response right now." }, cancellationToken);
+                }
+                return;
+            }
+
+            await WriteEventAsync("message.started", new
+            {
+                conversation = ToDto(prepared.Conversation!),
+                userMessage = ToMessageDto(prepared.UserMessage!),
+                assistantMessage = ToMessageDto(prepared.AssistantMessage!),
+            }, cancellationToken);
+
+            var context = await BuildContextAsync(prepared.Conversation!, cancellationToken);
+            var content = new StringBuilder();
+            AiUsageMetadata? usage = null;
+            await foreach (var item in completion.StreamAsync(context, cancellationToken))
+            {
+                switch (item)
+                {
+                    case AiMessageDelta delta when !string.IsNullOrEmpty(delta.Delta):
+                        content.Append(delta.Delta);
+                        await WriteEventAsync("message.delta", new { messageId = prepared.AssistantMessage!.Id, delta = delta.Delta }, cancellationToken);
+                        break;
+                    case AiMessageCompleted completed:
+                        usage = completed.Usage;
+                        break;
+                }
+            }
+
+            if (usage is null) throw new AiGenerationException("AI response did not complete.");
+            await PersistSuccessAsync(prepared, new AiGenerationResult(content.ToString(), usage), CancellationToken.None);
+            var finalResponse = new SendMessageResponse(ToDto(prepared.Conversation!), ToMessageDto(prepared.UserMessage!), ToMessageDto(prepared.AssistantMessage!, usage.IsTestResponse));
+            await WriteEventAsync("message.completed", finalResponse, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested || HttpContext.RequestAborted.IsCancellationRequested)
+        {
+            if (prepared is not null && prepared.ExistingResult is null)
+            {
+                await PersistFailureAsync(prepared, new AiGenerationException("The generation request was cancelled."));
+                logger.LogInformation("Chat generation cancelled. ConversationId={ConversationId}; TraceId={TraceId}", prepared.Conversation!.Id, HttpContext.TraceIdentifier);
+            }
+        }
+        catch (Exception exception)
+        {
+            if (prepared is not null && prepared.ExistingResult is null)
+            {
+                await PersistFailureAsync(prepared, exception);
+                LogGenerationFailure(exception, prepared.Conversation!.Id);
+            }
+            try { await WriteEventAsync("message.failed", new { code = "AI_GENERATION_FAILED", message = "Taslim could not generate a response right now. Your message was saved." }, CancellationToken.None); } catch { /* client disconnected */ }
+        }
+    }
+
+    private async Task<PreparedChat> PrepareMessageAsync(Guid conversationId, SendMessageRequest request, CancellationToken cancellationToken)
+    {
         var content = request.Content.Trim();
         if (content.Length == 0 || content.Length > ChatMessageLimits.MaximumContentLength)
-            return ApiResults.Validation(this, "Please enter a message under 20,000 characters.");
+            return PreparedChat.Failure(ApiResults.Validation(this, "Please enter a message under 20,000 characters."));
+        if (!string.IsNullOrWhiteSpace(request.RequestId) && request.RequestId.Trim().Length < 8)
+            return PreparedChat.Failure(ApiResults.Validation(this, "The message request identifier is invalid."));
+        var requestId = string.IsNullOrWhiteSpace(request.RequestId) ? Guid.NewGuid().ToString("N") : request.RequestId.Trim();
 
         var conversation = await FindAuthorizedConversation(conversationId, cancellationToken);
-        if (conversation is null) return ApiResults.Error(this, StatusCodes.Status404NotFound, "CONVERSATION_NOT_FOUND", "Conversation not found.");
+        if (conversation is null) return PreparedChat.Failure(ApiResults.Error(this, StatusCodes.Status404NotFound, "CONVERSATION_NOT_FOUND", "Conversation not found."));
         if (conversation.Status == ConversationStatus.Archived)
-            return ApiResults.Error(this, StatusCodes.Status409Conflict, "CONVERSATION_ARCHIVED", "Archived conversations cannot receive new messages.");
+            return PreparedChat.Failure(ApiResults.Error(this, StatusCodes.Status409Conflict, "CONVERSATION_ARCHIVED", "Archived conversations cannot receive new messages."));
+
+        var existingUser = await db.ChatMessages.FirstOrDefaultAsync(message => message.ConversationId == conversationId && message.RequestId == requestId, cancellationToken);
+        if (existingUser is not null)
+        {
+            if (!string.Equals(existingUser.Content, content, StringComparison.Ordinal))
+                return PreparedChat.Failure(ApiResults.Error(this, StatusCodes.Status409Conflict, "REQUEST_ID_REUSED", "That message request cannot be reused with different content."));
+            var existingAssistant = await db.ChatMessages.FirstOrDefaultAsync(message => message.ConversationId == conversationId && message.Role == ChatMessageRole.Assistant && message.CreatedAt > existingUser.CreatedAt, cancellationToken);
+            if (existingAssistant is null) return PreparedChat.Failure(ApiResults.Error(this, StatusCodes.Status409Conflict, "MESSAGE_IN_PROGRESS", "That message is already being generated."));
+            if (existingAssistant.Status == ChatMessageStatus.Failed)
+            {
+                existingAssistant.Status = ChatMessageStatus.Pending;
+                existingAssistant.Content = string.Empty;
+                existingAssistant.ProviderKey = null;
+                existingAssistant.ModelKey = null;
+                await db.SaveChangesAsync(cancellationToken);
+                return PreparedChat.New(conversation, existingUser, existingAssistant);
+            }
+            return PreparedChat.FromExisting(new SendMessageResponse(ToDto(conversation), ToMessageDto(existingUser), ToMessageDto(existingAssistant, string.Equals(existingAssistant.ProviderKey, "mock", StringComparison.OrdinalIgnoreCase))));
+        }
 
         var now = DateTime.UtcNow;
         if (conversation.Title == "New chat") conversation.Title = BuildTitle(content);
@@ -136,6 +276,7 @@ public sealed class ChatController(
         {
             Id = Guid.NewGuid(),
             ConversationId = conversation.Id,
+            RequestId = requestId,
             Role = ChatMessageRole.User,
             Content = content,
             Status = ChatMessageStatus.Completed,
@@ -151,42 +292,69 @@ public sealed class ChatController(
             CreatedAt = now.AddTicks(1),
         };
         db.ChatMessages.AddRange(userMessage, assistantMessage);
-        await db.SaveChangesAsync(cancellationToken);
-
         try
         {
-            var history = await db.ChatMessages.AsNoTracking()
-                .Where(message => message.ConversationId == conversation.Id && (message.Role == ChatMessageRole.User || message.Role == ChatMessageRole.Assistant) && message.Status == ChatMessageStatus.Completed)
-                .OrderBy(message => message.CreatedAt)
-                .ThenBy(message => message.Id)
-                .Select(message => new AiChatMessage(message.Role.ToString().ToLowerInvariant(), message.Content))
-                .ToListAsync(cancellationToken);
-            var result = await completion.CompleteAsync(new AiChatRequest(history), cancellationToken);
-            assistantMessage.Content = result.Content;
-            assistantMessage.Status = ChatMessageStatus.Completed;
-            assistantMessage.ProviderKey = result.Usage.ProviderKey;
-            assistantMessage.ModelKey = result.Usage.ModelKey;
-            assistantMessage.InputTokens = result.Usage.InputTokens;
-            assistantMessage.OutputTokens = result.Usage.OutputTokens;
-            assistantMessage.EstimatedCost = result.Usage.EstimatedCost;
-            assistantMessage.ActualCost = result.Usage.ActualCost;
-            assistantMessage.LatencyMs = result.Usage.LatencyMs;
-            assistantMessage.FinishReason = result.Usage.FinishReason;
-            conversation.UpdatedAt = DateTime.UtcNow;
-            conversation.LastMessageAt = assistantMessage.CreatedAt;
             await db.SaveChangesAsync(cancellationToken);
-            return Ok(new SendMessageResponse(ToDto(conversation), ToMessageDto(userMessage), ToMessageDto(assistantMessage, result.Usage.IsTestResponse)));
         }
-        catch (Exception exception) when (exception is not OperationCanceledException)
+        catch (DbUpdateException)
         {
-            assistantMessage.Status = ChatMessageStatus.Failed;
-            assistantMessage.Content = string.Empty;
-            conversation.UpdatedAt = DateTime.UtcNow;
-            await db.SaveChangesAsync(cancellationToken);
-            logger.LogError(exception, "Chat generation failed. ConversationId={ConversationId}; UserId={UserId}; TraceId={TraceId}", conversation.Id, GetUserId(), HttpContext.TraceIdentifier);
-            return ApiResults.Error(this, StatusCodes.Status503ServiceUnavailable, "AI_GENERATION_FAILED", "Taslim could not generate a response right now. Your message was saved.");
+            var duplicate = await db.ChatMessages.AsNoTracking().FirstOrDefaultAsync(message => message.ConversationId == conversationId && message.RequestId == requestId, cancellationToken);
+            if (duplicate is not null) return PreparedChat.Failure(ApiResults.Error(this, StatusCodes.Status409Conflict, "MESSAGE_IN_PROGRESS", "That message is already being generated."));
+            throw;
+        }
+        return PreparedChat.New(conversation, userMessage, assistantMessage);
+    }
+
+    private async Task<AiChatRequest> BuildContextAsync(Conversation conversation, CancellationToken cancellationToken)
+    {
+        var history = await db.ChatMessages.AsNoTracking()
+            .Where(message => message.ConversationId == conversation.Id && (message.Role == ChatMessageRole.User || message.Role == ChatMessageRole.Assistant) && message.Status == ChatMessageStatus.Completed)
+            .OrderBy(message => message.CreatedAt)
+            .ThenBy(message => message.Id)
+            .Select(message => new AiChatMessage(message.Role.ToString().ToLowerInvariant(), message.Content))
+            .ToListAsync(cancellationToken);
+        return contextBuilder.Build(history);
+    }
+
+    private async Task PersistSuccessAsync(PreparedChat prepared, AiGenerationResult result, CancellationToken cancellationToken)
+    {
+        var assistant = prepared.AssistantMessage!;
+        assistant.Content = result.Content;
+        assistant.Status = ChatMessageStatus.Completed;
+        assistant.ProviderKey = result.Usage.ProviderKey;
+        assistant.ModelKey = result.Usage.ModelKey;
+        assistant.InputTokens = result.Usage.InputTokens;
+        assistant.CachedInputTokens = result.Usage.CachedInputTokens;
+        assistant.OutputTokens = result.Usage.OutputTokens;
+        assistant.EstimatedCost = result.Usage.EstimatedCost;
+        assistant.ActualCost = result.Usage.ActualCost;
+        assistant.LatencyMs = result.Usage.LatencyMs;
+        assistant.FinishReason = result.Usage.FinishReason;
+        prepared.Conversation!.UpdatedAt = DateTime.UtcNow;
+        prepared.Conversation.LastMessageAt = assistant.CreatedAt;
+        await db.SaveChangesAsync(cancellationToken);
+    }
+
+    private async Task PersistFailureAsync(PreparedChat prepared, Exception exception)
+    {
+        try
+        {
+            prepared.AssistantMessage!.Status = ChatMessageStatus.Failed;
+            prepared.AssistantMessage.Content = string.Empty;
+            prepared.Conversation!.UpdatedAt = DateTime.UtcNow;
+            await db.SaveChangesAsync(CancellationToken.None);
+        }
+        catch (Exception persistException)
+        {
+            logger.LogError(persistException, "Failed to persist AI failure state. ConversationId={ConversationId}; TraceId={TraceId}", prepared.Conversation?.Id, HttpContext.TraceIdentifier);
         }
     }
+
+    private void LogGenerationFailure(Exception exception, Guid conversationId) => logger.LogError(exception, "Chat generation failed. Provider architecture handled the failure. ConversationId={ConversationId}; UserId={UserId}; TraceId={TraceId}", conversationId, GetUserId(), HttpContext.TraceIdentifier);
+
+    private static object ErrorData(IActionResult result) => new { code = "CHAT_REQUEST_FAILED", message = "Taslim could not process that chat request." };
+
+    private IActionResult GenerationFailure() => ApiResults.Error(this, StatusCodes.Status503ServiceUnavailable, "AI_GENERATION_FAILED", "Taslim could not generate a response right now. Your message was saved.");
 
     private async Task<Conversation?> FindAuthorizedConversation(Guid conversationId, CancellationToken cancellationToken)
     {
@@ -196,7 +364,14 @@ public sealed class ChatController(
         return await access.IsMemberAsync(userId, conversation.WorkspaceId, cancellationToken) ? conversation : null;
     }
 
-    private Guid GetUserId() => Guid.Parse(User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value ?? throw new InvalidOperationException("Authenticated user identifier is missing."));
+    private Guid GetUserId() => Guid.Parse(User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? throw new InvalidOperationException("Authenticated user identifier is missing."));
+
+    private async Task WriteEventAsync(string type, object data, CancellationToken cancellationToken)
+    {
+        await Response.WriteAsync($"event: {type}\n", cancellationToken);
+        await Response.WriteAsync($"data: {JsonSerializer.Serialize(data)}\n\n", cancellationToken);
+        await Response.Body.FlushAsync(cancellationToken);
+    }
 
     private static ConversationDto ToDto(Conversation conversation) => new(conversation.Id, conversation.WorkspaceId, conversation.ProjectId, conversation.Title, conversation.Status.ToString(), conversation.CreatedAt, conversation.UpdatedAt, conversation.LastMessageAt);
 
@@ -216,5 +391,17 @@ public sealed class ChatController(
         if (boundary is > 0 and <= 80) clean = clean[..boundary];
         var title = NormalizeTitle(clean) ?? "New chat";
         return title.Length <= 60 ? title : title[..57].TrimEnd() + "...";
+    }
+
+    private sealed class PreparedChat
+    {
+        public Conversation? Conversation { get; private init; }
+        public ChatMessage? UserMessage { get; private init; }
+        public ChatMessage? AssistantMessage { get; private init; }
+        public IActionResult? Error { get; private init; }
+        public SendMessageResponse? ExistingResult { get; private init; }
+        public static PreparedChat New(Conversation conversation, ChatMessage user, ChatMessage assistant) => new() { Conversation = conversation, UserMessage = user, AssistantMessage = assistant };
+        public static PreparedChat FromExisting(SendMessageResponse existing) => new() { ExistingResult = existing };
+        public static PreparedChat Failure(IActionResult error) => new() { Error = error };
     }
 }
