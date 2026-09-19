@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
 import { ApiError, api, type ChatMessage, type ChatStreamEvent, type Conversation } from "@/lib/api";
+import { claimSubmission, conversationPath, createSubmission, releaseSubmission, shouldReplaceConversationUrl } from "@/lib/chatLifecycle";
 import { ProtectedPage } from "@/components/ProtectedPage";
 
 type ChatViewProps = { conversationId?: string };
@@ -21,10 +22,6 @@ function dateGroup(date: string, now = new Date()) {
   if (days === 1) return "yesterday";
   if (days <= 7) return "week";
   return "older";
-}
-
-function newRequestId() {
-  return globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
 export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
@@ -43,6 +40,7 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
   const [renameValue, setRenameValue] = useState("");
   const [retryRequest, setRetryRequest] = useState<RetryRequest | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const sendingRef = useRef(false);
 
   const loadConversations = useCallback(async () => {
     if (!workspace) return;
@@ -91,9 +89,13 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
     return ["today", "yesterday", "week", "older"].map(key => ({ label: labels[key], items: filteredConversations.filter(item => dateGroup(item.updatedAt) === key) })).filter(group => group.items.length > 0);
   }, [filteredConversations, t]);
 
-  function selectConversation(item: Conversation) { router.push(`/chat/${item.id}`); }
+  function selectConversation(item: Conversation) {
+    if (generating) return;
+    router.push(conversationPath(item.id));
+  }
 
   function startNewChat() {
+    if (sendingRef.current) return;
     setError("");
     setRetryRequest(null);
     setSelected(null);
@@ -107,8 +109,10 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
     event?.preventDefault();
     const text = retry?.content ?? content.trim();
     if (!text || generating || text.length > 20000 || !workspace) return;
-    const id = retry?.requestId ?? newRequestId();
-    let activeConversationId = retry?.conversationId ?? selected?.id;
+    if (!claimSubmission(sendingRef)) return;
+    const submission = createSubmission(content.trim(), selected?.id, retry);
+    const { requestId: id } = submission;
+    let activeConversationId = submission.conversationId;
     setError("");
     setRetryRequest(null);
     setGenerating(true);
@@ -119,7 +123,6 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
         activeConversationId = conversation.id;
         setSelected(conversation);
         setConversations(current => [conversation!, ...current]);
-        router.replace(`/chat/${conversation.id}`);
       }
       let assistantId: string | undefined;
       await api.streamMessage(conversation.id, text, eventData => handleStreamEvent(eventData), id);
@@ -158,11 +161,16 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
           setGenerating(false);
         }
       }
+      if (conversation && shouldReplaceConversationUrl(conversationId, conversation.id)) {
+        window.history.replaceState(window.history.state, "", conversationPath(conversation.id));
+      }
       setGenerating(false);
     } catch (caught) {
       setGenerating(false);
       if (activeConversationId) setRetryRequest({ conversationId: activeConversationId, content: text, requestId: id });
       setError(caught instanceof ApiError && caught.code === "CONVERSATION_ARCHIVED" ? t("chat.archivedError") : t("chat.generationError"));
+    } finally {
+      releaseSubmission(sendingRef);
     }
   }
 
@@ -188,10 +196,10 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
   return <ProtectedPage><div className="chat-page">
     <aside className="chat-sidebar">
       <div className="chat-sidebar-header"><div><p className="section-eyebrow">{t("chat.eyebrow")}</p><h1>{t("chat.title")}</h1></div><button type="button" className="chat-icon-button" onClick={startNewChat} aria-label={t("chat.newChat")}><Plus size={18} /></button></div>
-      <button type="button" className="chat-new-button" onClick={startNewChat}><Plus size={15} />{t("chat.newChat")}</button>
+      <button type="button" className="chat-new-button" onClick={startNewChat} disabled={generating}><Plus size={15} />{t("chat.newChat")}</button>
       <label className="chat-search"><Search size={15} /><input value={search} onChange={event => setSearch(event.target.value)} placeholder={t("chat.searchPlaceholder")} aria-label={t("chat.searchPlaceholder")} /></label>
       <div className="chat-history" aria-label={t("chat.history")}>
-        {loading ? <div className="chat-sidebar-loading"><span className="loading-spinner" /></div> : groups.length === 0 ? <p className="chat-sidebar-empty">{t("chat.noConversations")}</p> : groups.map(group => <section key={group.label} className="chat-history-group"><span className="chat-history-label">{group.label}</span>{group.items.map(item => <button type="button" key={item.id} className={`chat-history-item ${selected?.id === item.id ? "is-active" : ""}`} onClick={() => selectConversation(item)}><MessageCircle size={14} /><span>{item.title}</span></button>)}</section>)}
+        {loading ? <div className="chat-sidebar-loading"><span className="loading-spinner" /></div> : groups.length === 0 ? <p className="chat-sidebar-empty">{t("chat.noConversations")}</p> : groups.map(group => <section key={group.label} className="chat-history-group"><span className="chat-history-label">{group.label}</span>{group.items.map(item => <button type="button" key={item.id} className={`chat-history-item ${selected?.id === item.id ? "is-active" : ""}`} onClick={() => selectConversation(item)} disabled={generating}><MessageCircle size={14} /><span>{item.title}</span></button>)}</section>)}
       </div>
       <div className="chat-sidebar-footer"><Sparkles size={15} /><span>{t("chat.providerNotice")}</span></div>
     </aside>
