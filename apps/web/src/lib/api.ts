@@ -74,6 +74,32 @@ export type ChatStreamData = {
   message?: string;
 };
 export type ChatStreamEvent = TaslimSseEvent<ChatStreamData>;
+export type UsageSummary = {
+  totalRequests: number;
+  completedRequests: number;
+  failedRequests: number;
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  providerCostUsd: number;
+  customerChargedAmount: number;
+  chargedUnit: string;
+};
+export type UsageTransaction = {
+  id: string;
+  feature: string;
+  status: "Pending" | "Completed" | "Failed" | "Refunded";
+  inputTokens: number | null;
+  cachedInputTokens: number | null;
+  outputTokens: number | null;
+  providerCostUsd: number;
+  chargedAmount: number;
+  chargedUnit: string;
+  createdAt: string;
+  completedAt: string | null;
+  failureCode: string | null;
+};
+export type UsageHistory = { items: UsageTransaction[]; page: number; pageSize: number; totalCount: number; totalPages: number };
 
 const API_URL = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5000").replace(/\/$/, "");
 let csrfToken: string | null = null;
@@ -172,4 +198,6 @@ export const api = {
   archiveConversation: (conversationId: string) => request<Conversation>(`/api/conversations/${conversationId}/archive`, { method: "POST" }, true),
   sendMessage: (conversationId: string, content: string, id = requestId()) => request<SendMessageResponse>(`/api/conversations/${conversationId}/messages`, { method: "POST", body: JSON.stringify({ content, requestId: id }) }, true),
   streamMessage: (conversationId: string, content: string, onEvent: (event: ChatStreamEvent) => void, id = requestId()) => streamRequest(`/api/conversations/${conversationId}/messages/stream`, { content, requestId: id }, onEvent),
+  getUsageSummary: (workspaceId: string) => request<UsageSummary>(`/api/workspaces/${workspaceId}/usage/summary`),
+  getUsageHistory: (workspaceId: string, page = 1, pageSize = 20) => request<UsageHistory>(`/api/workspaces/${workspaceId}/usage?page=${page}&pageSize=${pageSize}`),
 };

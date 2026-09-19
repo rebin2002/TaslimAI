@@ -91,7 +91,7 @@ public sealed class AiModelRouter(
 public sealed class ChatCompletionService(
     IAiModelRouter router,
     IEnumerable<IAiProvider> providers,
-    AiModelCatalog catalog,
+    IAiCostCalculator costCalculator,
     ILogger<ChatCompletionService> logger) : IChatCompletionService
 {
     public async IAsyncEnumerable<AiStreamEvent> StreamAsync(
@@ -142,8 +142,11 @@ public sealed class ChatCompletionService(
 
     private AiUsageMetadata EnrichUsage(AiUsageMetadata usage, AiProviderSelection selection)
     {
-        var model = catalog.Find(selection.ModelKey);
-        var estimated = CalculateCost(usage, model);
+        var estimated = costCalculator.Calculate(usage with
+        {
+            ProviderKey = selection.ProviderKey,
+            ModelKey = selection.ModelKey,
+        });
         return usage with
         {
             ProviderKey = selection.ProviderKey,
@@ -151,19 +154,6 @@ public sealed class ChatCompletionService(
             EstimatedCost = estimated,
             ActualCost = estimated,
         };
-    }
-
-    private static decimal? CalculateCost(AiUsageMetadata usage, AiModelDefinition? model)
-    {
-        if (model is null || (usage.InputTokens is null && usage.OutputTokens is null)) return usage.EstimatedCost;
-        var input = Math.Max(0, usage.InputTokens.GetValueOrDefault());
-        var cached = Math.Min(input, Math.Max(0, usage.CachedInputTokens.GetValueOrDefault()));
-        var output = Math.Max(0, usage.OutputTokens.GetValueOrDefault());
-        var uncachedInput = input - cached;
-        var cost = uncachedInput * model.InputPricePerMillion / 1_000_000m
-            + cached * model.CachedInputPricePerMillion / 1_000_000m
-            + output * model.OutputPricePerMillion / 1_000_000m;
-        return decimal.Round(cost, 8, MidpointRounding.AwayFromZero);
     }
 }
 

@@ -124,6 +124,31 @@ public enum ChatMessageStatus
     Failed,
 }
 
+public enum UsageFeature
+{
+    Chat,
+    Image,
+    Movie,
+    Voice,
+    Music,
+    Document,
+    Research,
+    Presentation,
+}
+
+public enum UsageTransactionStatus
+{
+    Pending,
+    Completed,
+    Failed,
+    Refunded,
+}
+
+public enum UsageChargeUnit
+{
+    Usd,
+}
+
 public sealed class Conversation
 {
     public Guid Id { get; set; }
@@ -167,6 +192,29 @@ public sealed class ChatMessage
     public string? FinishReason { get; set; }
 
     public Conversation Conversation { get; set; } = null!;
+}
+
+public sealed class UsageTransaction
+{
+    public Guid Id { get; set; }
+    public Guid WorkspaceId { get; set; }
+    public Guid UserId { get; set; }
+    public Guid? ProjectId { get; set; }
+    public Guid? ConversationId { get; set; }
+    public string RequestId { get; set; } = string.Empty;
+    public UsageFeature Feature { get; set; }
+    public string Provider { get; set; } = string.Empty;
+    public string Model { get; set; } = string.Empty;
+    public UsageTransactionStatus Status { get; set; } = UsageTransactionStatus.Pending;
+    public int? InputTokens { get; set; }
+    public int? CachedInputTokens { get; set; }
+    public int? OutputTokens { get; set; }
+    public decimal ProviderCostUsd { get; set; }
+    public decimal ChargedAmount { get; set; }
+    public UsageChargeUnit ChargedUnit { get; set; } = UsageChargeUnit.Usd;
+    public DateTime CreatedAt { get; set; }
+    public DateTime? CompletedAt { get; set; }
+    public string? FailureCode { get; set; }
 }
 
 public sealed record AiProviderDefinition(string Key, string Name, bool Enabled);

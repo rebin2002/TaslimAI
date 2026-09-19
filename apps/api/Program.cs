@@ -8,6 +8,7 @@ using Taslim.Api.Authorization;
 using Taslim.Api.Domain;
 using Taslim.Api.Infrastructure;
 using Taslim.Api.Persistence;
+using Taslim.Api.Usage;
 
 var builder = WebApplication.CreateBuilder(args);
 var isProduction = builder.Environment.IsProduction();
@@ -104,8 +105,11 @@ builder.Services.AddCors(options => options.AddPolicy("Frontend", policy =>
         .AllowAnyMethod()
         .AllowCredentials()));
 builder.Services.AddScoped<WorkspaceAccessService>();
+builder.Services.AddScoped<IUsageLedgerService, UsageLedgerService>();
+builder.Services.AddSingleton<IUsageChargingService, SafeUsageChargingService>();
 builder.Services.Configure<AiOptions>(builder.Configuration.GetSection("Ai"));
 builder.Services.AddSingleton<AiModelCatalog>();
+builder.Services.AddSingleton<IAiCostCalculator, AiCostCalculator>();
 builder.Services.AddSingleton<AiContextBuilder>();
 builder.Services.AddHttpClient<OpenAiProvider>();
 builder.Services.AddSingleton<IAiModelRouter, AiModelRouter>();

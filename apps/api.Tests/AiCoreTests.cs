@@ -36,13 +36,22 @@ public sealed class AiCoreTests
         var options = Options.Create(new AiOptions { AllowMockProvider = false, OpenAI = new OpenAiOptions { Enabled = true, ApiKey = "test-only" } });
         var catalog = new AiModelCatalog(new ConfigurationBuilder().Build());
         var router = new AiModelRouter(options, catalog);
-        var completion = new ChatCompletionService(router, [new FakeProvider()], catalog, NullLogger<ChatCompletionService>.Instance);
+        var completion = new ChatCompletionService(router, [new FakeProvider()], new AiCostCalculator(catalog), NullLogger<ChatCompletionService>.Instance);
         var result = await completion.CompleteAsync(new AiChatRequest([new("user", "hello")], "system", "Smart"));
         Assert.Equal("hello world", result.Content);
         Assert.Equal(1000, result.Usage.InputTokens);
         Assert.Equal(200, result.Usage.CachedInputTokens);
         Assert.Equal(1000, result.Usage.OutputTokens);
         Assert.Equal(0.01364m, result.Usage.ActualCost);
+    }
+
+    [Fact]
+    public void Cost_calculator_caps_cached_tokens_at_input_tokens()
+    {
+        var catalog = new AiModelCatalog(new ConfigurationBuilder().Build());
+        var calculator = new AiCostCalculator(catalog);
+        var cost = calculator.Calculate(new AiUsageMetadata("openai", "gpt-5.6-terra", 1000, 1500, 1000, null, null, 0, "completed", false));
+        Assert.Equal(0.0122m, cost);
     }
 
     [Fact]
@@ -61,7 +70,7 @@ public sealed class AiCoreTests
     {
         var options = Options.Create(new AiOptions { AllowMockProvider = false, OpenAI = new OpenAiOptions { Enabled = true, ApiKey = "test-only" } });
         var catalog = new AiModelCatalog(new ConfigurationBuilder().Build());
-        var completion = new ChatCompletionService(new AiModelRouter(options, catalog), [new FakeProvider()], catalog, NullLogger<ChatCompletionService>.Instance);
+        var completion = new ChatCompletionService(new AiModelRouter(options, catalog), [new FakeProvider()], new AiCostCalculator(catalog), NullLogger<ChatCompletionService>.Instance);
         var events = new List<AiStreamEvent>();
         await foreach (var item in completion.StreamAsync(new AiChatRequest([new("user", "hello")], "system", "Smart"))) events.Add(item);
         Assert.Collection(events,

@@ -13,6 +13,7 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
     public DbSet<Project> Projects => Set<Project>();
     public DbSet<Conversation> Conversations => Set<Conversation>();
     public DbSet<ChatMessage> ChatMessages => Set<ChatMessage>();
+    public DbSet<UsageTransaction> UsageTransactions => Set<UsageTransaction>();
 
     protected override void OnModelCreating(ModelBuilder builder)
     {
@@ -110,6 +111,30 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
                 .WithMany(conversation => conversation.Messages)
                 .HasForeignKey(message => message.ConversationId)
                 .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<UsageTransaction>(entity =>
+        {
+            entity.HasKey(transaction => transaction.Id);
+            entity.Property(transaction => transaction.RequestId).HasMaxLength(80).IsRequired();
+            entity.Property(transaction => transaction.Feature).HasConversion<string>().HasMaxLength(30).IsRequired();
+            entity.Property(transaction => transaction.Provider).HasMaxLength(80).IsRequired();
+            entity.Property(transaction => transaction.Model).HasMaxLength(160).IsRequired();
+            entity.Property(transaction => transaction.Status).HasConversion<string>().HasMaxLength(30).IsRequired();
+            entity.Property(transaction => transaction.ChargedUnit).HasConversion<string>().HasMaxLength(20).IsRequired();
+            entity.Property(transaction => transaction.ProviderCostUsd).HasPrecision(18, 8).IsRequired();
+            entity.Property(transaction => transaction.ChargedAmount).HasPrecision(18, 8).IsRequired();
+            entity.Property(transaction => transaction.FailureCode).HasMaxLength(80);
+            entity.Property(transaction => transaction.CreatedAt).IsRequired();
+            entity.HasIndex(transaction => new { transaction.WorkspaceId, transaction.CreatedAt });
+            entity.HasIndex(transaction => new { transaction.UserId, transaction.CreatedAt });
+            entity.HasIndex(transaction => transaction.Feature);
+            entity.HasIndex(transaction => transaction.Status);
+            entity.HasIndex(transaction => new { transaction.WorkspaceId, transaction.RequestId, transaction.Feature }).IsUnique();
+            entity.HasOne<Workspace>().WithMany().HasForeignKey(transaction => transaction.WorkspaceId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<ApplicationUser>().WithMany().HasForeignKey(transaction => transaction.UserId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<Project>().WithMany().HasForeignKey(transaction => transaction.ProjectId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne<Conversation>().WithMany().HasForeignKey(transaction => transaction.ConversationId).OnDelete(DeleteBehavior.SetNull);
         });
     }
 }

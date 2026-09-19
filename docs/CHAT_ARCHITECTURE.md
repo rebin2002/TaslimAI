@@ -143,4 +143,10 @@ The optional base URL is already defaulted to `https://api.openai.com/v1`; set `
 
 ## Scope boundary
 
-Batch 3.2 does not add Anthropic, Gemini, provider fallback, web search, image/video/voice/music generation, file analysis, personal memory, project memory, embeddings, RAG, agents, billing, subscriptions, credit deduction, or native mobile apps. Batch 3.3 was not started.
+Batch 3.2 and 3.3 do not add Anthropic, Gemini, provider fallback, web search, image/video/voice/music generation, file analysis, personal memory, project memory, embeddings, RAG, agents, billing, subscriptions, credit deduction, or native mobile apps. Batch 3.3 adds only the internal usage ledger and zero-charge accounting foundation; Batch 3.4 was not started.
+
+## Batch 3.3 usage ledger boundary
+
+The extensible `UsageTransaction` ledger records workspace and user ownership, optional project and conversation references, request id, feature, provider/model metadata, token usage, provider cost, customer charge, lifecycle status, timestamps, and a safe failure code. It never stores prompts, assistant text, credentials, cookies, authorization headers, or raw provider payloads.
+
+Both normal and streaming chat create one Pending transaction using the unique `WorkspaceId + RequestId + Feature` key. Provider success records usage and calculates decimal provider cost from the existing model catalog before transitioning the transaction to Completed. Provider failure transitions it to Failed, stores only a safe failure code, and sets customer charge to zero. The charging abstraction is currently a safe no-charge implementation; Stripe, subscriptions, credit purchases, and plan limits remain outside this batch.

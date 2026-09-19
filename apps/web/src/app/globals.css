@@ -77,3 +77,46 @@ button { border: 0; cursor: pointer; }
 
 /* Batch 3.2 streaming and provider states — append only; preserve the foundation above. */
 .chat-message.is-failed .chat-message-copy p { color: #b34a4a; }.chat-retry-button, .chat-inline-retry { display: inline-flex; align-items: center; gap: 6px; color: #b34a4a; border: 1px solid #f0d2d0; border-radius: 6px; background: #fff7f6; font-size: 10px; font-weight: 800; }.chat-retry-button { margin-top: 9px; padding: 6px 8px; }.chat-inline-retry { margin-inline-start: 9px; padding: 4px 7px; }.chat-retry-button:hover, .chat-inline-retry:hover { color: #8e3636; border-color: #eab7b2; background: #fff0ee; }.chat-retry-button:disabled, .chat-inline-retry:disabled { opacity: .55; cursor: wait; }.chat-message.is-failed .chat-message-avatar { color: #b34a4a; background: #fff0ee; }
+
+/* Batch 3.3 usage ledger view — additive styles only. */
+.usage-page { padding-bottom: 70px; }
+.usage-header { padding-top: 42px; }
+.usage-header .back-link { margin-bottom: 16px; }
+.usage-notice { display: flex; align-items: flex-start; gap: 9px; margin: 18px 0; padding: 12px 14px; color: #667f96; border: 1px solid #d9e8f1; border-radius: 10px; background: #f4f9fc; font-size: 10px; line-height: 1.5; }
+.usage-notice svg { flex: 0 0 auto; color: var(--blue); }
+.usage-stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 15px; }
+.usage-stat { display: flex; flex-direction: column; gap: 13px; min-height: 104px; }
+.usage-stat span { display: inline-flex; align-items: center; gap: 6px; color: #8998a6; font-size: 10px; font-weight: 700; }
+.usage-stat span svg { color: var(--blue); }
+.usage-stat strong { color: var(--navy-900); font-size: 18px; letter-spacing: -.03em; }
+.usage-grid { margin-bottom: 15px; }
+.usage-definition-list { display: flex; flex-direction: column; gap: 14px; margin: 17px 0 0; }
+.usage-definition-list > div { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding-bottom: 10px; border-bottom: 1px solid #eef2f5; }
+.usage-definition-list > div:last-child { padding-bottom: 0; border-bottom: 0; }
+.usage-definition-list dt { color: #8998a6; font-size: 11px; }
+.usage-definition-list dd { margin: 0; color: var(--navy-900); font-size: 13px; font-weight: 800; }
+.usage-cost { display: block; margin-top: 25px; color: var(--navy-900); font-size: 22px; letter-spacing: -.04em; }
+.usage-history { overflow: hidden; }
+.usage-table-wrap { overflow-x: auto; margin-top: 14px; }
+.usage-table { width: 100%; min-width: 620px; border-collapse: collapse; text-align: start; }
+.usage-table th { padding: 10px 12px; color: #96a3af; border-bottom: 1px solid var(--line); font-size: 10px; font-weight: 800; text-align: start; }
+.usage-table td { padding: 13px 12px; color: #667789; border-bottom: 1px solid #eef2f5; font-size: 11px; }
+.usage-table tr:last-child td { border-bottom: 0; }
+.usage-table td strong { display: block; color: var(--navy-900); font-size: 12px; }
+.usage-status { display: inline-block; margin-top: 4px; color: #8493a0; font-size: 9px; }
+.usage-status.is-completed { color: var(--teal); }
+.usage-status.is-failed { color: #b45656; }
+.usage-status.is-refunded { color: var(--blue); }
+.usage-empty, .usage-loading { color: #8998a6; font-size: 12px; line-height: 1.6; }
+.usage-pagination { display: flex; align-items: center; justify-content: center; gap: 14px; margin-top: 18px; color: #8998a6; font-size: 10px; }
+.usage-pagination .secondary-button { padding: 8px 11px; }
+.usage-pagination button:disabled { cursor: not-allowed; opacity: .45; }
+[dir="rtl"] .usage-notice, [dir="rtl"] .usage-stat span, [dir="rtl"] .usage-pagination { flex-direction: row-reverse; }
+@media (max-width: 900px) { .usage-stat-grid { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 700px) { .usage-stat-grid { grid-template-columns: 1fr 1fr; gap: 8px; }.usage-stat { min-height: 92px; padding: 16px; }.usage-stat strong { font-size: 16px; }.usage-header { padding-top: 35px; }.usage-table { min-width: 560px; } }
+@media (max-width: 430px) { .usage-stat-grid { grid-template-columns: 1fr; } }
+
+.usage-link-card { display: flex; flex-direction: column; gap: 18px; }
+.usage-link-card h2 { margin: 0 0 7px; color: var(--navy-900); font-size: 14px; }
+.usage-link-card p { margin: 0; color: #909eab; font-size: 11px; line-height: 1.5; }
+.usage-link-card .secondary-button { align-self: flex-start; }

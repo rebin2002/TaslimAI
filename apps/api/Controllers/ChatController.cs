@@ -11,6 +11,7 @@ using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
 using Taslim.Api.Infrastructure;
 using Taslim.Api.Persistence;
+using Taslim.Api.Usage;
 
 namespace Taslim.Api.Controllers;
 
@@ -22,6 +23,7 @@ public sealed class ChatController(
     WorkspaceAccessService access,
     IChatCompletionService completion,
     AiContextBuilder contextBuilder,
+    IUsageLedgerService usageLedger,
     IOptions<Microsoft.AspNetCore.Mvc.JsonOptions> mvcJsonOptions,
     ILogger<ChatController> logger) : ControllerBase
 {
@@ -130,18 +132,28 @@ public sealed class ChatController(
         if (prepared.Error is not null) return prepared.Error;
         if (prepared.ExistingResult is not null) return Ok(prepared.ExistingResult);
 
+        UsageTransaction? usage = null;
         try
         {
+            usage = await BeginUsageAsync(prepared, cancellationToken);
             var context = await BuildContextAsync(prepared.Conversation!, cancellationToken);
             var result = await completion.CompleteAsync(context, cancellationToken);
-            await PersistSuccessAsync(prepared, result, cancellationToken);
+            PersistSuccess(prepared, result);
+            await usageLedger.CompleteAsync(usage, result.Usage, cancellationToken);
             return Ok(new SendMessageResponse(ToDto(prepared.Conversation!), ToMessageDto(prepared.UserMessage!), ToMessageDto(prepared.AssistantMessage!, result.Usage.IsTestResponse)));
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
             await PersistFailureAsync(prepared, exception);
+            if (usage is not null) await usageLedger.FailAsync(usage, UsageFailureCodes.FromException(exception), cancellationToken: CancellationToken.None);
             LogGenerationFailure(exception, prepared.Conversation!.Id);
             return GenerationFailure();
+        }
+        catch (OperationCanceledException exception)
+        {
+            await PersistFailureAsync(prepared, exception);
+            if (usage is not null) await usageLedger.FailAsync(usage, UsageFailureCodes.FromException(exception), cancellationToken: CancellationToken.None);
+            throw;
         }
     }
 
@@ -162,6 +174,7 @@ public sealed class ChatController(
         }
 
         PreparedChat? prepared = null;
+        UsageTransaction? usageTransaction = null;
         var persisted = false;
         try
         {
@@ -192,6 +205,7 @@ public sealed class ChatController(
                 return;
             }
 
+            usageTransaction = await BeginUsageAsync(prepared, cancellationToken);
             await WriteEventAsync("message.started", new
             {
                 conversation = ToDto(prepared.Conversation!),
@@ -217,7 +231,8 @@ public sealed class ChatController(
             }
 
             if (usage is null) throw new AiGenerationException("AI response did not complete.");
-            await PersistSuccessAsync(prepared, new AiGenerationResult(content.ToString(), usage), CancellationToken.None);
+            PersistSuccess(prepared, new AiGenerationResult(content.ToString(), usage));
+            await usageLedger.CompleteAsync(usageTransaction, usage, CancellationToken.None);
             persisted = true;
             var finalResponse = new SendMessageResponse(ToDto(prepared.Conversation!), ToMessageDto(prepared.UserMessage!), ToMessageDto(prepared.AssistantMessage!, usage.IsTestResponse));
             await WriteEventAsync("message.completed", finalResponse, cancellationToken);
@@ -227,6 +242,7 @@ public sealed class ChatController(
             if (!persisted && prepared is not null && prepared.ExistingResult is null)
             {
                 await PersistFailureAsync(prepared, new AiGenerationException("The generation request was cancelled."));
+                if (usageTransaction is not null) await usageLedger.FailAsync(usageTransaction, UsageFailureCodes.FromException(new OperationCanceledException()), cancellationToken: CancellationToken.None);
                 logger.LogInformation("Chat generation cancelled. ConversationId={ConversationId}; TraceId={TraceId}", prepared.Conversation!.Id, HttpContext.TraceIdentifier);
             }
         }
@@ -235,6 +251,7 @@ public sealed class ChatController(
             if (!persisted && prepared is not null && prepared.ExistingResult is null)
             {
                 await PersistFailureAsync(prepared, exception);
+                if (usageTransaction is not null) await usageLedger.FailAsync(usageTransaction, UsageFailureCodes.FromException(exception), cancellationToken: CancellationToken.None);
                 LogGenerationFailure(exception, prepared.Conversation!.Id);
             }
             try { await WriteEventAsync("message.failed", new { code = "AI_GENERATION_FAILED", message = "Taslim could not generate a response right now. Your message was saved." }, CancellationToken.None); } catch { /* client disconnected */ }
@@ -328,7 +345,7 @@ public sealed class ChatController(
         return contextBuilder.Build(history);
     }
 
-    private async Task PersistSuccessAsync(PreparedChat prepared, AiGenerationResult result, CancellationToken cancellationToken)
+    private static void PersistSuccess(PreparedChat prepared, AiGenerationResult result)
     {
         var assistant = prepared.AssistantMessage!;
         assistant.Content = result.Content;
@@ -344,8 +361,16 @@ public sealed class ChatController(
         assistant.FinishReason = result.Usage.FinishReason;
         prepared.Conversation!.UpdatedAt = DateTime.UtcNow;
         prepared.Conversation.LastMessageAt = assistant.CreatedAt;
-        await db.SaveChangesAsync(cancellationToken);
     }
+
+    private Task<UsageTransaction> BeginUsageAsync(PreparedChat prepared, CancellationToken cancellationToken) => usageLedger.GetOrCreatePendingAsync(
+        prepared.Conversation!.WorkspaceId,
+        GetUserId(),
+        prepared.Conversation.ProjectId,
+        prepared.Conversation.Id,
+        prepared.UserMessage!.RequestId!,
+        UsageFeature.Chat,
+        cancellationToken);
 
     private async Task PersistFailureAsync(PreparedChat prepared, Exception exception)
     {
