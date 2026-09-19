@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ChatMessage, ChatStreamEvent } from "./api";
-import { createChatStreamState, reduceChatStream } from "./chatStreamState";
+import { applyChatStreamEvent, createChatStreamState, reduceChatStream } from "./chatStreamState";
 
 function message(id: string, role: ChatMessage["role"], content: string, status: ChatMessage["status"]): ChatMessage {
   return { id, conversationId: "conversation-1", role, content, status, createdAt: "2026-01-01T00:00:00Z", sequence: role === "User" ? 1 : 2 };
@@ -46,5 +46,25 @@ describe("Chat stream state", () => {
     expect(state.messages.find(item => item.id === "assistant-1")).toMatchObject({ content: "partial", status: "Failed" });
     expect(state.generating).toBe(false);
     expect(state.terminal).toBe("failed");
+  });
+
+  it("applies the production event callback path to the visible message state", () => {
+    let state = createChatStreamState();
+    const visibleAssistantContent: string[] = [];
+    const apply = (streamEvent: ChatStreamEvent) => {
+      state = applyChatStreamEvent(state, streamEvent, next => {
+        visibleAssistantContent.push(next.messages.find(item => item.id === "assistant-1")?.content ?? "");
+      });
+    };
+
+    apply(event("message.started", { userMessage: user, assistantMessage: assistant }));
+    apply(event("message.delta", { messageId: "assistant-1", delta: "1" }));
+    apply(event("message.delta", { messageId: "assistant-1", delta: "," }));
+    apply(event("message.delta", { messageId: "assistant-1", delta: " 2" }));
+    apply(event("message.completed", { userMessage: user, assistantMessage: message("assistant-1", "Assistant", "1, 2", "Completed") }));
+
+    expect(visibleAssistantContent).toEqual(["", "1", "1,", "1, 2", "1, 2"]);
+    expect(state.generating).toBe(false);
+    expect(state.terminal).toBe("completed");
   });
 });

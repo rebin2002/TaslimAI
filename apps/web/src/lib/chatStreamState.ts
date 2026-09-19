@@ -60,3 +60,9 @@ export function reduceChatStream(state: ChatStreamState, event: ChatStreamEvent)
 
   return state;
 }
+
+export function applyChatStreamEvent(state: ChatStreamState, event: ChatStreamEvent, onApplied: (next: ChatStreamState) => void): ChatStreamState {
+  const next = reduceChatStream(state, event);
+  onApplied(next);
+  return next;
+}

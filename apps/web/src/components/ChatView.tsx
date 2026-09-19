@@ -6,7 +6,8 @@ import { useRouter } from "next/navigation";
 import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
 import { ApiError, api, type ChatMessage, type Conversation } from "@/lib/api";
-import { createChatStreamState, reduceChatStream } from "@/lib/chatStreamState";
+import { applyChatStreamEvent, createChatStreamState } from "@/lib/chatStreamState";
+import { logChatDiagnostic } from "@/lib/diagnostics";
 import { claimSubmission, conversationPath, createSubmission, releaseSubmission, shouldReplaceConversationUrl } from "@/lib/chatLifecycle";
 import { ProtectedPage } from "@/components/ProtectedPage";
 
@@ -127,9 +128,12 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
       }
       let streamState = createChatStreamState(messages);
       await api.streamMessage(conversation.id, text, streamEvent => {
-        streamState = reduceChatStream(streamState, streamEvent);
-        setMessages(streamState.messages);
-        setGenerating(streamState.generating);
+        streamState = applyChatStreamEvent(streamState, streamEvent, next => {
+          logChatDiagnostic(`STREAM_REDUCER_APPLIED ${streamEvent.type}`);
+          setMessages(next.messages);
+          setGenerating(next.generating);
+          logChatDiagnostic(`STREAM_REACT_SET_MESSAGES ${streamEvent.type}`);
+        });
         if (streamEvent.type === "message.started" || streamEvent.type === "message.completed") {
           if (streamEvent.data.conversation) {
             setSelected(streamEvent.data.conversation);
