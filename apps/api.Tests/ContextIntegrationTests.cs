@@ -1,5 +1,8 @@
 using System.Runtime.CompilerServices;
+using System.Net;
+using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -9,6 +12,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Taslim.Api.Ai;
 using Taslim.Api.Contracts;
+using Taslim.Api.Files;
 using Taslim.Api.Persistence;
 using Xunit;
 
@@ -108,6 +112,32 @@ public sealed class ContextIntegrationTests : IClassFixture<ContextRecordingFact
     }
 
     [Fact]
+    public async Task Explicitly_selected_ready_file_is_added_to_context_without_exposing_storage_metadata()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "File Context Owner");
+        var fileResponse = await UploadFile(client, auth.PersonalWorkspace.Id, "brief.txt", "PROJECT_FILE_CONTEXT_MARKER");
+        Assert.Equal(HttpStatusCode.Created, fileResponse.StatusCode);
+        var file = (await fileResponse.Content.ReadFromJsonAsync<StoredFileDto>())!;
+        Assert.Equal("Ready", file.TextExtractionStatus);
+
+        var conversation = await CreateConversation(client, auth.PersonalWorkspace.Id, null);
+        var send = await SendWithCsrf(client, HttpMethod.Post, $"/api/conversations/{conversation.Id}/messages", new
+        {
+            content = "Use the selected brief.",
+            requestId = Guid.NewGuid().ToString("N"),
+            attachmentIds = new[] { file.Id },
+        });
+        Assert.True(send.IsSuccessStatusCode, await send.Content.ReadAsStringAsync());
+
+        var recorder = factory.Services.GetRequiredService<RecordingChatCompletionService>();
+        Assert.Contains("Attached file context", recorder.LastRequest!.SystemInstruction, StringComparison.Ordinal);
+        Assert.Contains("PROJECT_FILE_CONTEXT_MARKER", recorder.LastRequest.SystemInstruction, StringComparison.Ordinal);
+        Assert.DoesNotContain(file.StorageProvider, recorder.LastRequest.SystemInstruction, StringComparison.Ordinal);
+        Assert.DoesNotContain(file.Id.ToString(), recorder.LastRequest.SystemInstruction, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Context_builder_reserves_output_budget_and_bounds_memory_content()
     {
         var builder = new AiContextBuilder(Microsoft.Extensions.Options.Options.Create(new AiOptions
@@ -171,6 +201,18 @@ public sealed class ContextIntegrationTests : IClassFixture<ContextRecordingFact
         using var request = new HttpRequestMessage(method, path);
         request.Headers.Add("X-CSRF-TOKEN", csrf.GetProperty("token").GetString()!);
         if (payload is not null) request.Content = JsonContent.Create(payload);
+        return await client.SendAsync(request);
+    }
+
+    private static async Task<HttpResponseMessage> UploadFile(HttpClient client, Guid workspaceId, string fileName, string content)
+    {
+        var csrf = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
+        using var form = new MultipartFormDataContent();
+        var file = new ByteArrayContent(Encoding.UTF8.GetBytes(content));
+        file.Headers.ContentType = new MediaTypeHeaderValue("text/plain");
+        form.Add(file, "file", fileName);
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"/api/workspaces/{workspaceId}/files") { Content = form };
+        request.Headers.Add("X-CSRF-TOKEN", csrf.GetProperty("token").GetString()!);
         return await client.SendAsync(request);
     }
 }

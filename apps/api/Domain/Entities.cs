@@ -69,6 +69,50 @@ public static class PersonalMemorySources
     public const string Manual = "Manual";
 }
 
+public enum StoredFileStatus
+{
+    Uploading,
+    Ready,
+    Processing,
+    Failed,
+    Deleted,
+}
+
+public enum FileExtractionStatus
+{
+    NotStarted,
+    Processing,
+    Ready,
+    Failed,
+    NotApplicable,
+}
+
+public static class FileStorageProviders
+{
+    public const string Local = "Local";
+    public const string S3Compatible = "S3Compatible";
+}
+
+public static class FileContentTypes
+{
+    public static readonly IReadOnlyDictionary<string, string> AllowedExtensions = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+    {
+        [".pdf"] = "application/pdf",
+        [".docx"] = "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        [".txt"] = "text/plain",
+        [".md"] = "text/markdown",
+        [".csv"] = "text/csv",
+        [".xlsx"] = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        [".jpg"] = "image/jpeg",
+        [".jpeg"] = "image/jpeg",
+        [".png"] = "image/png",
+        [".webp"] = "image/webp",
+    };
+
+    public static bool IsImage(string extension) => extension is ".jpg" or ".jpeg" or ".png" or ".webp";
+    public static bool IsTextExtractable(string extension) => extension is ".pdf" or ".docx" or ".txt" or ".md" or ".csv" or ".xlsx";
+}
+
 public sealed class ApplicationUser : IdentityUser<Guid>
 {
     public string DisplayName { get; set; } = string.Empty;
@@ -94,6 +138,7 @@ public sealed class Workspace
     public ICollection<WorkspaceMember> Members { get; set; } = [];
     public ICollection<Project> Projects { get; set; } = [];
     public ICollection<Conversation> Conversations { get; set; } = [];
+    public ICollection<StoredFile> Files { get; set; } = [];
 }
 
 public sealed class WorkspaceMember
@@ -123,6 +168,7 @@ public sealed class Project
     public DateTime? ArchivedAt { get; set; }
 
     public Workspace Workspace { get; set; } = null!;
+    public ICollection<StoredFile> Files { get; set; } = [];
 }
 
 public sealed class PersonalMemory
@@ -205,6 +251,7 @@ public sealed class Conversation
     public Project? Project { get; set; }
     public ApplicationUser User { get; set; } = null!;
     public ICollection<ChatMessage> Messages { get; set; } = [];
+    public ICollection<StoredFile> Files { get; set; } = [];
 }
 
 public sealed class ChatMessage
@@ -231,6 +278,46 @@ public sealed class ChatMessage
     public string? FinishReason { get; set; }
 
     public Conversation Conversation { get; set; } = null!;
+    public ICollection<ChatMessageAttachment> Attachments { get; set; } = [];
+}
+
+public sealed class StoredFile
+{
+    public Guid Id { get; set; }
+    public Guid WorkspaceId { get; set; }
+    public Guid UserId { get; set; }
+    public Guid? ProjectId { get; set; }
+    public Guid? ConversationId { get; set; }
+    public string OriginalFileName { get; set; } = string.Empty;
+    public string StoredFileName { get; set; } = string.Empty;
+    public string ContentType { get; set; } = "application/octet-stream";
+    public string Extension { get; set; } = string.Empty;
+    public long SizeBytes { get; set; }
+    public string StorageProvider { get; set; } = FileStorageProviders.Local;
+    public string StorageKey { get; set; } = string.Empty;
+    public StoredFileStatus Status { get; set; } = StoredFileStatus.Uploading;
+    public DateTime CreatedAt { get; set; }
+    public DateTime? ProcessedAt { get; set; }
+    public FileExtractionStatus TextExtractionStatus { get; set; } = FileExtractionStatus.NotStarted;
+    public string? ExtractedText { get; set; }
+    public int? ExtractedTextLength { get; set; }
+    public string? MetadataJson { get; set; }
+
+    public Workspace Workspace { get; set; } = null!;
+    public ApplicationUser User { get; set; } = null!;
+    public Project? Project { get; set; }
+    public Conversation? Conversation { get; set; }
+    public ICollection<ChatMessageAttachment> Attachments { get; set; } = [];
+}
+
+public sealed class ChatMessageAttachment
+{
+    public Guid ChatMessageId { get; set; }
+    public Guid StoredFileId { get; set; }
+    public int SortOrder { get; set; }
+
+    public ChatMessage ChatMessage { get; set; } = null!;
+    public StoredFile StoredFile { get; set; } = null!;
 }
 
 public sealed class UsageTransaction

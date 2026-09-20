@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -9,6 +10,8 @@ using Taslim.Api.Domain;
 using Taslim.Api.Infrastructure;
 using Taslim.Api.Persistence;
 using Taslim.Api.Usage;
+using Taslim.Api.Files;
+using FileSettings = Taslim.Api.Files.FileOptions;
 
 var builder = WebApplication.CreateBuilder(args);
 var isProduction = builder.Environment.IsProduction();
@@ -22,6 +25,12 @@ builder.Services.AddControllersWithViews(options =>
         options.InvalidModelStateResponseFactory = context =>
             new BadRequestObjectResult(new { error = new { code = "VALIDATION_ERROR", message = "Please check the highlighted fields." } });
     });
+builder.Services.AddOptions<FileSettings>().Bind(builder.Configuration.GetSection("Files"));
+builder.Services.Configure<FormOptions>(options =>
+{
+    var maxFileSize = builder.Configuration.GetValue<long>("Files:MaxFileSizeBytes", 25 * 1024 * 1024);
+    options.MultipartBodyLengthLimit = maxFileSize + (1024 * 1024);
+});
 
 builder.Services.Configure<ForwardedHeadersOptions>(options =>
 {
@@ -116,6 +125,19 @@ builder.Services.AddSingleton<IAiModelRouter, AiModelRouter>();
 builder.Services.AddSingleton<IAiProvider, MockAiProvider>();
 builder.Services.AddSingleton<IAiProvider>(services => services.GetRequiredService<OpenAiProvider>());
 builder.Services.AddScoped<IChatCompletionService, ChatCompletionService>();
+builder.Services.AddScoped<FileValidationService>();
+builder.Services.AddSingleton<IFileContentExtractor, FileContentExtractor>();
+builder.Services.AddScoped<FileProcessingService>();
+builder.Services.AddSingleton<IFileStorageService>(services =>
+{
+    var settings = services.GetRequiredService<Microsoft.Extensions.Options.IOptions<FileSettings>>().Value;
+    return string.Equals(settings.StorageProvider, FileStorageProviders.Local, StringComparison.OrdinalIgnoreCase)
+        ? new LocalFileStorageService(
+            services.GetRequiredService<Microsoft.Extensions.Options.IOptions<FileSettings>>(),
+            services.GetRequiredService<ILogger<LocalFileStorageService>>())
+        : new UnconfiguredFileStorageService(
+            services.GetRequiredService<Microsoft.Extensions.Options.IOptions<FileSettings>>());
+});
 var app = builder.Build();
 
 // Must run before exception handling, CORS, authentication, and antiforgery

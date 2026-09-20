@@ -15,6 +15,8 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
     public DbSet<ChatMessage> ChatMessages => Set<ChatMessage>();
     public DbSet<UsageTransaction> UsageTransactions => Set<UsageTransaction>();
     public DbSet<PersonalMemory> PersonalMemories => Set<PersonalMemory>();
+    public DbSet<StoredFile> StoredFiles => Set<StoredFile>();
+    public DbSet<ChatMessageAttachment> ChatMessageAttachments => Set<ChatMessageAttachment>();
 
     protected override void OnModelCreating(ModelBuilder builder)
     {
@@ -90,6 +92,47 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasOne(memory => memory.Workspace)
                 .WithMany()
                 .HasForeignKey(memory => memory.WorkspaceId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        builder.Entity<StoredFile>(entity =>
+        {
+            entity.HasKey(file => file.Id);
+            entity.Property(file => file.OriginalFileName).HasMaxLength(255).IsRequired();
+            entity.Property(file => file.StoredFileName).HasMaxLength(255).IsRequired();
+            entity.Property(file => file.ContentType).HasMaxLength(160).IsRequired();
+            entity.Property(file => file.Extension).HasMaxLength(20).IsRequired();
+            entity.Property(file => file.StorageProvider).HasMaxLength(40).IsRequired();
+            entity.Property(file => file.StorageKey).HasMaxLength(600).IsRequired();
+            entity.Property(file => file.Status).HasConversion<string>().HasMaxLength(30).IsRequired();
+            entity.Property(file => file.TextExtractionStatus).HasConversion<string>().HasMaxLength(30).IsRequired();
+            entity.Property(file => file.ExtractedText).HasMaxLength(1_000_000);
+            entity.Property(file => file.MetadataJson).HasMaxLength(20_000);
+            entity.Property(file => file.CreatedAt).IsRequired();
+            entity.HasIndex(file => new { file.WorkspaceId, file.CreatedAt });
+            entity.HasIndex(file => new { file.UserId, file.CreatedAt });
+            entity.HasIndex(file => file.ProjectId);
+            entity.HasIndex(file => file.ConversationId);
+            entity.HasIndex(file => file.Status);
+            entity.HasIndex(file => file.StorageKey).IsUnique();
+            entity.HasOne(file => file.Workspace).WithMany(workspace => workspace.Files).HasForeignKey(file => file.WorkspaceId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(file => file.User).WithMany().HasForeignKey(file => file.UserId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(file => file.Project).WithMany(project => project.Files).HasForeignKey(file => file.ProjectId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne(file => file.Conversation).WithMany(conversation => conversation.Files).HasForeignKey(file => file.ConversationId).OnDelete(DeleteBehavior.SetNull);
+        });
+
+        builder.Entity<ChatMessageAttachment>(entity =>
+        {
+            entity.HasKey(attachment => new { attachment.ChatMessageId, attachment.StoredFileId });
+            entity.Property(attachment => attachment.SortOrder).IsRequired();
+            entity.HasIndex(attachment => new { attachment.StoredFileId, attachment.ChatMessageId });
+            entity.HasOne(attachment => attachment.ChatMessage)
+                .WithMany(message => message.Attachments)
+                .HasForeignKey(attachment => attachment.ChatMessageId)
+                .OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(attachment => attachment.StoredFile)
+                .WithMany(file => file.Attachments)
+                .HasForeignKey(attachment => attachment.StoredFileId)
                 .OnDelete(DeleteBehavior.Restrict);
         });
 

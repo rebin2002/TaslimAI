@@ -28,11 +28,18 @@ public sealed class OpenAiProvider(
         timeout.CancelAfter(TimeSpan.FromSeconds(Math.Clamp(settings.ProviderTimeoutSeconds, 5, 300)));
         using var message = new HttpRequestMessage(HttpMethod.Post, BuildResponsesUrl(settings.OpenAI.BaseUrl));
         message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", settings.OpenAI.ApiKey);
+        var lastMessageIndex = request.Messages.Count - 1;
         message.Content = JsonContent.Create(new
         {
             model = selection.ModelKey,
             instructions = request.SystemInstruction,
-            input = request.Messages.Select(item => new { role = item.Role, content = item.Content }).ToArray(),
+            input = request.Messages.Select((item, index) => new
+            {
+                role = item.Role,
+                content = index == lastMessageIndex && request.Attachments?.Count > 0
+                    ? BuildMultimodalContent(item.Content, request.Attachments)
+                    : (object)item.Content,
+            }).ToArray(),
             stream = true,
         });
 
@@ -126,6 +133,16 @@ public sealed class OpenAiProvider(
     {
         var normalized = string.IsNullOrWhiteSpace(baseUrl) ? "https://api.openai.com/v1" : baseUrl.TrimEnd('/');
         return new Uri($"{normalized}/responses", UriKind.Absolute);
+    }
+
+    private static object[] BuildMultimodalContent(string text, IReadOnlyList<AiFileContext> attachments)
+    {
+        var content = new List<object> { new { type = "input_text", text } };
+        foreach (var attachment in attachments.Where(item => !string.IsNullOrWhiteSpace(item.DataUrl)))
+        {
+            content.Add(new { type = "input_image", image_url = attachment.DataUrl });
+        }
+        return content.ToArray();
     }
 
     private static AiUsageMetadata ReadUsage(JsonElement root, AiProviderSelection selection, long latencyMs)

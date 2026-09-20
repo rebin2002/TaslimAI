@@ -7,6 +7,7 @@ public sealed class AiOptions
     public int ContextOutputReserveTokens { get; set; } = 2_048;
     public int ProjectContextBudgetTokens { get; set; } = 1_200;
     public int PersonalMemoryContextBudgetTokens { get; set; } = 1_200;
+    public int FileContextBudgetTokens { get; set; } = 4_000;
     public int MaxPersonalMemories { get; set; } = 50;
     public int ProviderTimeoutSeconds { get; set; } = 90;
     public bool AllowMockProvider { get; set; } = true;

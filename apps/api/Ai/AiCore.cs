@@ -4,12 +4,14 @@ namespace Taslim.Api.Ai;
 
 public sealed record AiChatMessage(string Role, string Content);
 public sealed record AiMemoryContext(string Category, string Title, string Content);
+public sealed record AiFileContext(string FileName, string ContentType, string? ExtractedText, string? DataUrl);
 
 public sealed record AiChatRequest(
     IReadOnlyList<AiChatMessage> Messages,
     string SystemInstruction,
     string RequestedTier,
-    bool EnableStreaming = false);
+    bool EnableStreaming = false,
+    IReadOnlyList<AiFileContext>? Attachments = null);
 
 public sealed record AiProviderSelection(
     string ProviderKey,
@@ -73,8 +75,13 @@ public sealed class AiModelRouter(
         var providerKey = settings.OpenAI.Enabled ? "openai" : settings.AllowMockProvider ? "mock" : throw new AiProviderUnavailableException();
         var model = catalog.GetForTier(tier, providerKey)
             ?? throw new AiProviderUnavailableException();
+        if (request.Attachments?.Any(attachment => !string.IsNullOrWhiteSpace(attachment.DataUrl)) == true && !model.SupportsVision)
+        {
+            model = catalog.All.FirstOrDefault(candidate => candidate.ProviderKey.Equals(providerKey, StringComparison.OrdinalIgnoreCase) && candidate.Enabled && candidate.SupportsVision)
+                ?? throw new AiProviderUnavailableException();
+        }
 
-        return new AiProviderSelection(providerKey, model.ModelKey, model.DisplayName, tier, providerKey == "mock");
+        return new AiProviderSelection(providerKey, model.ModelKey, model.DisplayName, model.CapabilityTier, providerKey == "mock");
     }
 
     private static string NormalizeTier(string? requested, string fallback)
@@ -169,11 +176,12 @@ public sealed class AiContextBuilder(IOptions<AiOptions> options)
         IEnumerable<AiChatMessage> history,
         string? projectInstructions,
         string? projectContextNotes,
-        IReadOnlyList<AiMemoryContext> personalMemories)
+        IReadOnlyList<AiMemoryContext> personalMemories,
+        IReadOnlyList<AiFileContext>? files = null)
     {
         var messages = history.ToList();
         var budget = Math.Max(256, settings.ContextBudgetTokens);
-        var systemInstruction = BuildSystemInstruction(projectInstructions, projectContextNotes, personalMemories);
+        var systemInstruction = BuildSystemInstruction(projectInstructions, projectContextNotes, personalMemories, files ?? []);
         var historyBudget = Math.Max(256, budget - EstimateTokens(systemInstruction) - Math.Max(0, settings.ContextOutputReserveTokens));
         var selected = new List<AiChatMessage>();
         var used = 0;
@@ -191,7 +199,7 @@ public sealed class AiContextBuilder(IOptions<AiOptions> options)
         return new AiChatRequest(selected, systemInstruction, settings.DefaultChatTier, EnableStreaming: true);
     }
 
-    private string BuildSystemInstruction(string? projectInstructions, string? projectContextNotes, IReadOnlyList<AiMemoryContext> personalMemories)
+    private string BuildSystemInstruction(string? projectInstructions, string? projectContextNotes, IReadOnlyList<AiMemoryContext> personalMemories, IReadOnlyList<AiFileContext> files)
     {
         var instruction = settings.SystemInstruction;
         var projectLines = new List<string>();
@@ -213,6 +221,19 @@ public sealed class AiContextBuilder(IOptions<AiOptions> options)
         }
         var memorySection = string.Join('\n', memoryLines);
         if (!string.IsNullOrWhiteSpace(memorySection)) instruction += $"\n\nPersonal memory (user-approved and reusable in this workspace):\n{memorySection}";
+        var fileLines = new List<string>();
+        var fileTokens = 0;
+        foreach (var file in files.Where(file => !string.IsNullOrWhiteSpace(file.ExtractedText)))
+        {
+            var section = $"File: {file.FileName}\n{file.ExtractedText!.Trim()}";
+            var remaining = Math.Max(1, settings.FileContextBudgetTokens - fileTokens);
+            var bounded = TrimToTokens(section, remaining);
+            if (string.IsNullOrWhiteSpace(bounded)) break;
+            fileLines.Add(bounded);
+            fileTokens += EstimateTokens(bounded);
+            if (fileTokens >= settings.FileContextBudgetTokens) break;
+        }
+        if (fileLines.Count > 0) instruction += $"\n\nAttached file context (keep each file's boundary clear):\n{string.Join("\n\n", fileLines)}";
         return instruction;
     }
 

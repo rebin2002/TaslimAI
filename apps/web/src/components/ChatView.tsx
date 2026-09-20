@@ -1,18 +1,18 @@
 "use client";
 
 import { FormEvent, KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Archive, Check, Edit3, MessageCircle, MoreHorizontal, Plus, Search, Send, Sparkles, X } from "lucide-react";
+import { Archive, Check, Edit3, MessageCircle, MoreHorizontal, Paperclip, Plus, Search, Send, Sparkles, X } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
-import { ApiError, api, type ChatMessage, type Conversation } from "@/lib/api";
+import { ApiError, api, type ChatMessage, type Conversation, type StoredFile } from "@/lib/api";
 import { applyChatStreamEvent, createChatStreamState } from "@/lib/chatStreamState";
 import { claimSubmission, conversationPath, createSubmission, releaseSubmission, shouldReplaceConversationUrl } from "@/lib/chatLifecycle";
 import { ProtectedPage } from "@/components/ProtectedPage";
 
 type ChatViewProps = { conversationId?: string };
 type ConversationGroup = { label: string; items: Conversation[] };
-type RetryRequest = { conversationId: string; content: string; requestId: string };
+type RetryRequest = { conversationId: string; content: string; requestId: string; attachmentIds: string[] };
 
 function dateGroup(date: string, now = new Date()) {
   const value = new Date(date);
@@ -40,8 +40,11 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState("");
   const [retryRequest, setRetryRequest] = useState<RetryRequest | null>(null);
+  const [attachments, setAttachments] = useState<StoredFile[]>([]);
+  const [uploading, setUploading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const sendingRef = useRef(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const loadConversations = useCallback(async () => {
     if (!workspace) return;
@@ -103,15 +106,33 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
     setMessages([]);
     setContent("");
     setRenaming(false);
+    setAttachments([]);
     router.push("/chat");
+  }
+
+  async function uploadSelectedFiles(files: FileList | null) {
+    if (!files || !workspace) return;
+    setUploading(true);
+    setError("");
+    try {
+      for (const file of Array.from(files)) {
+        const stored = await api.uploadFile(workspace.id, file);
+        setAttachments(current => [...current, stored]);
+      }
+    } catch (caught) {
+      setError(caught instanceof ApiError ? caught.message : t("chat.attachmentError"));
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
   }
 
   async function send(event?: FormEvent | KeyboardEvent, retry?: RetryRequest) {
     event?.preventDefault();
     const text = retry?.content ?? content.trim();
-    if (!text || generating || text.length > 20000 || !workspace) return;
+    if (!text || generating || uploading || text.length > 20000 || !workspace) return;
     if (!claimSubmission(sendingRef)) return;
-    const submission = createSubmission(content.trim(), selected?.id, retry);
+    const submission = createSubmission(text, selected?.id, retry);
     const { requestId: id } = submission;
     let activeConversationId = submission.conversationId;
     setError("");
@@ -126,6 +147,7 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
         setConversations(current => [conversation!, ...current]);
       }
       let streamState = createChatStreamState(messages);
+      const attachmentIds = retry?.attachmentIds ?? attachments.map(file => file.id);
       await api.streamMessage(conversation.id, text, streamEvent => {
         streamState = applyChatStreamEvent(streamState, streamEvent, next => {
           setMessages(next.messages);
@@ -136,9 +158,9 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
             setSelected(streamEvent.data.conversation);
             setConversations(current => [streamEvent.data.conversation!, ...current.filter(item => item.id !== streamEvent.data.conversation!.id)]);
           }
-          if (streamEvent.type === "message.completed") setContent("");
+          if (streamEvent.type === "message.completed") { setContent(""); setAttachments([]); }
         } else if (streamEvent.type === "message.failed") {
-          setRetryRequest({ conversationId: conversation!.id, content: text, requestId: id });
+          setRetryRequest({ conversationId: conversation!.id, content: text, requestId: id, attachmentIds });
           setError(streamEvent.data.code === "CONVERSATION_ARCHIVED" ? t("chat.archivedError") : t("chat.generationError"));
         }
       }, id);
@@ -148,7 +170,7 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
       setGenerating(false);
     } catch (caught) {
       setGenerating(false);
-      if (activeConversationId) setRetryRequest({ conversationId: activeConversationId, content: text, requestId: id });
+      if (activeConversationId) setRetryRequest({ conversationId: activeConversationId, content: text, requestId: id, attachmentIds: retry?.attachmentIds ?? attachments.map(file => file.id) });
       setError(caught instanceof ApiError && caught.code === "CONVERSATION_ARCHIVED" ? t("chat.archivedError") : t("chat.generationError"));
     } finally {
       releaseSubmission(sendingRef);
@@ -190,7 +212,13 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
         {loading ? <div className="chat-empty"><span className="loading-spinner" /></div> : error && !selected ? <div className="chat-empty"><CircleMessage /><h3>{error}</h3><button type="button" className="secondary-button" onClick={startNewChat}>{t("chat.newChat")}</button></div> : messages.length === 0 ? <div className="chat-empty"><span className="chat-empty-icon"><Sparkles size={22} /></span><h3>{t("chat.emptyTitle")}</h3><p>{t("chat.emptyDescription")}</p></div> : <>{messages.map(message => <article className={`chat-message chat-message-${message.role.toLowerCase()} ${message.status === "Failed" ? "is-failed" : ""}`} key={message.id}><div className="chat-message-avatar">{message.role === "User" ? "T" : <Sparkles size={15} />}</div><div className="chat-message-copy"><span className="chat-message-role">{message.role === "User" ? t("chat.you") : t("chat.taslim")}</span>{message.status === "Pending" && !message.content ? <div className="chat-typing"><i /><i /><i /></div> : <p>{message.content}</p>}{message.status === "Failed" && retryRequest && <button type="button" className="chat-retry-button" onClick={() => void send(undefined, retryRequest)} disabled={generating}><Send size={13} />{t("chat.retry")}</button>}{message.isTestResponse && <small className="chat-test-badge">{t("chat.testResponse")}</small>}</div></article>)}<div ref={messagesEndRef} /></>}
       </div>
       {error && selected && <div className="chat-inline-error" role="alert">{error}{retryRequest && <button type="button" className="chat-inline-retry" onClick={() => void send(undefined, retryRequest)} disabled={generating}>{t("chat.retry")}</button>}</div>}
-      <form className="chat-composer" onSubmit={send}><textarea value={content} onChange={event => setContent(event.target.value)} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey) void send(event); }} placeholder={t("chat.composerPlaceholder")} maxLength={20000} disabled={generating} aria-label={t("chat.composerPlaceholder")} /><div className="chat-composer-footer"><span>{t("chat.composerHint")}</span><button type="submit" className="chat-send-button" disabled={generating || !content.trim()} aria-label={t("chat.send")}><Send size={16} /></button></div></form>
+      <form className="chat-composer" onSubmit={send}>
+        {attachments.length > 0 && <div className="chat-attachment-list" aria-label={t("chat.attachments")}>
+          {attachments.map(file => <span className="chat-attachment-chip" key={file.id}><Paperclip size={12} /><span>{file.originalFileName}</span><button type="button" onClick={() => setAttachments(current => current.filter(item => item.id !== file.id))} aria-label={`${t("chat.removeAttachment")}: ${file.originalFileName}`} disabled={generating}><X size={12} /></button></span>)}
+        </div>}
+        <textarea value={content} onChange={event => setContent(event.target.value)} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey) void send(event); }} placeholder={t("chat.composerPlaceholder")} maxLength={20000} disabled={generating || uploading} aria-label={t("chat.composerPlaceholder")} />
+        <div className="chat-composer-footer"><span>{uploading ? t("chat.fileUploading") : t("chat.composerHint")}</span><div className="chat-composer-actions"><input ref={fileInputRef} type="file" className="visually-hidden" multiple accept=".pdf,.docx,.txt,.md,.csv,.xlsx,.jpg,.jpeg,.png,.webp" onChange={event => void uploadSelectedFiles(event.target.files)} /><button type="button" className="chat-attach-button" onClick={() => fileInputRef.current?.click()} disabled={generating || uploading} aria-label={t("chat.attachFile")}><Paperclip size={16} /></button><button type="submit" className="chat-send-button" disabled={generating || uploading || !content.trim()} aria-label={t("chat.send")}><Send size={16} /></button></div></div>
+      </form>
     </main>
   </div></ProtectedPage>;
 }

@@ -9,9 +9,11 @@ using Taslim.Api.Ai;
 using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
+using Taslim.Api.Files;
 using Taslim.Api.Infrastructure;
 using Taslim.Api.Persistence;
 using Taslim.Api.Usage;
+using FileSettings = Taslim.Api.Files.FileOptions;
 
 namespace Taslim.Api.Controllers;
 
@@ -25,6 +27,8 @@ public sealed class ChatController(
     AiContextBuilder contextBuilder,
     IUsageLedgerService usageLedger,
     IOptions<Microsoft.AspNetCore.Mvc.JsonOptions> mvcJsonOptions,
+    IFileStorageService fileStorage,
+    IOptions<FileSettings> fileOptions,
     ILogger<ChatController> logger) : ControllerBase
 {
     [HttpPost("workspaces/{workspaceId:guid}/conversations")]
@@ -136,7 +140,7 @@ public sealed class ChatController(
         try
         {
             usage = await BeginUsageAsync(prepared, cancellationToken);
-            var context = await BuildContextAsync(prepared.Conversation!, cancellationToken);
+            var context = await BuildContextAsync(prepared.Conversation!, prepared.UserMessage!.Id, cancellationToken);
             var result = await completion.CompleteAsync(context, cancellationToken);
             PersistSuccess(prepared, result);
             await usageLedger.CompleteAsync(usage, result.Usage, cancellationToken);
@@ -213,7 +217,7 @@ public sealed class ChatController(
                 assistantMessage = ToMessageDto(prepared.AssistantMessage!),
             }, cancellationToken);
 
-            var context = await BuildContextAsync(prepared.Conversation!, cancellationToken);
+            var context = await BuildContextAsync(prepared.Conversation!, prepared.UserMessage!.Id, cancellationToken);
             var content = new StringBuilder();
             AiUsageMetadata? usage = null;
             await foreach (var item in completion.StreamAsync(context, cancellationToken))
@@ -320,6 +324,8 @@ public sealed class ChatController(
             Sequence = assistantSequence,
         };
         db.ChatMessages.AddRange(userMessage, assistantMessage);
+        var attachmentError = await AttachFilesAsync(conversation, userMessage, request.AttachmentIds, cancellationToken);
+        if (attachmentError is not null) return PreparedChat.Failure(attachmentError);
         try
         {
             await db.SaveChangesAsync(cancellationToken);
@@ -333,7 +339,7 @@ public sealed class ChatController(
         return PreparedChat.New(conversation, userMessage, assistantMessage);
     }
 
-    private async Task<AiChatRequest> BuildContextAsync(Conversation conversation, CancellationToken cancellationToken)
+    private async Task<AiChatRequest> BuildContextAsync(Conversation conversation, Guid currentMessageId, CancellationToken cancellationToken)
     {
         var history = await db.ChatMessages.AsNoTracking()
             .Where(message => message.ConversationId == conversation.Id && (message.Role == ChatMessageRole.User || message.Role == ChatMessageRole.Assistant) && message.Status == ChatMessageStatus.Completed)
@@ -355,7 +361,55 @@ public sealed class ChatController(
             .Take(50)
             .Select(memory => new AiMemoryContext(memory.Category, memory.Title, memory.Content))
             .ToListAsync(cancellationToken);
-        return contextBuilder.Build(history, project?.Instructions, project?.ContextNotes, memories);
+        var files = await db.ChatMessageAttachments.AsNoTracking()
+            .Where(attachment => attachment.ChatMessageId == currentMessageId && attachment.StoredFile.Status == StoredFileStatus.Ready)
+            .OrderBy(attachment => attachment.SortOrder)
+            .Select(attachment => new
+            {
+                attachment.StoredFile.OriginalFileName,
+                attachment.StoredFile.ContentType,
+                attachment.StoredFile.Extension,
+                attachment.StoredFile.ExtractedText,
+                attachment.StoredFile.StorageKey,
+            })
+            .ToListAsync(cancellationToken);
+        var fileContexts = new List<AiFileContext>();
+        foreach (var file in files)
+        {
+            string? dataUrl = null;
+            if (FileContentTypes.IsImage(file.Extension))
+            {
+                await using var stream = await fileStorage.OpenReadAsync(file.StorageKey, cancellationToken) ?? throw new FileStorageUnavailableException();
+                using var buffer = new MemoryStream();
+                await stream.CopyToAsync(buffer, cancellationToken);
+                dataUrl = $"data:{file.ContentType};base64,{Convert.ToBase64String(buffer.ToArray())}";
+            }
+            fileContexts.Add(new AiFileContext(file.OriginalFileName, file.ContentType, file.ExtractedText, dataUrl));
+        }
+        return contextBuilder.Build(history, project?.Instructions, project?.ContextNotes, memories, fileContexts);
+    }
+
+    private async Task<IActionResult?> AttachFilesAsync(Conversation conversation, ChatMessage message, IReadOnlyCollection<Guid> requestedIds, CancellationToken cancellationToken)
+    {
+        var ids = requestedIds.Distinct().ToList();
+        var maximumAttachments = Math.Clamp(fileOptions.Value.MaxAttachmentsPerMessage, 1, 20);
+        if (ids.Count > maximumAttachments) return ApiResults.Validation(this, $"You can attach up to {maximumAttachments} files to one message.");
+        if (ids.Count == 0) return null;
+        var userId = GetUserId();
+        var files = await db.StoredFiles
+            .Where(file => ids.Contains(file.Id)
+                && file.WorkspaceId == conversation.WorkspaceId
+                && file.UserId == userId
+                && file.Status == StoredFileStatus.Ready
+                && (file.ProjectId == null || file.ProjectId == conversation.ProjectId)
+                && (file.ConversationId == null || file.ConversationId == conversation.Id))
+            .ToListAsync(cancellationToken);
+        if (files.Count != ids.Count) return ApiResults.Validation(this, "One or more selected files are unavailable or not ready.");
+        for (var index = 0; index < ids.Count; index++)
+        {
+            db.ChatMessageAttachments.Add(new ChatMessageAttachment { ChatMessageId = message.Id, StoredFileId = ids[index], SortOrder = index });
+        }
+        return null;
     }
 
     private static void PersistSuccess(PreparedChat prepared, AiGenerationResult result)

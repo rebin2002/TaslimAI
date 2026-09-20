@@ -43,6 +43,9 @@ public sealed class SendMessageRequest
 
     [StringLength(80)]
     public string? RequestId { get; set; }
+
+    [MaxLength(5)]
+    public List<Guid> AttachmentIds { get; set; } = [];
 }
 
 public sealed record SendMessageResponse(

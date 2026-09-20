@@ -57,6 +57,22 @@ export type PersonalMemory = {
   updatedAt: string;
 };
 export type PersonalMemoryInput = { category: string; title: string; content: string };
+export type StoredFile = {
+  id: string;
+  workspaceId: string;
+  projectId: string | null;
+  conversationId: string | null;
+  originalFileName: string;
+  contentType: string;
+  extension: string;
+  sizeBytes: number;
+  storageProvider: string;
+  status: "Uploading" | "Ready" | "Processing" | "Failed" | "Deleted";
+  textExtractionStatus: "NotStarted" | "Processing" | "Ready" | "Failed" | "NotApplicable";
+  extractedTextLength: number | null;
+  createdAt: string;
+  processedAt: string | null;
+};
 export type Conversation = {
   id: string;
   workspaceId: string;
@@ -155,6 +171,22 @@ async function request<T>(path: string, init: RequestInit = {}, withCsrf = false
   return body as T;
 }
 
+async function requestForm<T>(path: string, form: FormData, withCsrf = false, retryCsrf = true): Promise<T> {
+  const headers = new Headers();
+  if (withCsrf) headers.set("X-CSRF-TOKEN", csrfToken ?? await csrf());
+  const response = await fetch(`${API_URL}${path}`, { method: "POST", headers, credentials: "include", body: form });
+  const body = await response.json().catch(() => null) as T & ErrorBody | null;
+  if (!response.ok) {
+    if (response.status === 400 && withCsrf && retryCsrf && body?.error?.code === "CSRF_VALIDATION_FAILED") {
+      csrfToken = null;
+      await csrf(true);
+      return requestForm<T>(path, form, true, false);
+    }
+    throw new ApiError(response.status, body?.error?.message ?? "Something went wrong.", body?.error?.fields, body?.error?.code);
+  }
+  return body as T;
+}
+
 async function streamRequest(path: string, payload: unknown, onEvent: (event: ChatStreamEvent) => void, retryCsrf = true): Promise<void> {
   const headers = new Headers({ "Content-Type": "application/json", Accept: "text/event-stream" });
   headers.set("X-CSRF-TOKEN", csrfToken ?? await csrf());
@@ -210,12 +242,27 @@ export const api = {
   getMessages: (conversationId: string) => request<ChatMessage[]>(`/api/conversations/${conversationId}/messages`),
   renameConversation: (conversationId: string, title: string) => request<Conversation>(`/api/conversations/${conversationId}`, { method: "PATCH", body: JSON.stringify({ title }) }, true),
   archiveConversation: (conversationId: string) => request<Conversation>(`/api/conversations/${conversationId}/archive`, { method: "POST" }, true),
-  sendMessage: (conversationId: string, content: string, id = requestId()) => request<SendMessageResponse>(`/api/conversations/${conversationId}/messages`, { method: "POST", body: JSON.stringify({ content, requestId: id }) }, true),
-  streamMessage: (conversationId: string, content: string, onEvent: (event: ChatStreamEvent) => void, id = requestId()) => streamRequest(`/api/conversations/${conversationId}/messages/stream`, { content, requestId: id }, onEvent),
+  sendMessage: (conversationId: string, content: string, id = requestId(), attachmentIds: string[] = []) => request<SendMessageResponse>(`/api/conversations/${conversationId}/messages`, { method: "POST", body: JSON.stringify({ content, requestId: id, attachmentIds }) }, true),
+  streamMessage: (conversationId: string, content: string, onEvent: (event: ChatStreamEvent) => void, id = requestId(), attachmentIds: string[] = []) => streamRequest(`/api/conversations/${conversationId}/messages/stream`, { content, requestId: id, attachmentIds }, onEvent),
   getUsageSummary: (workspaceId: string) => request<UsageSummary>(`/api/workspaces/${workspaceId}/usage/summary`),
   getUsageHistory: (workspaceId: string, page = 1, pageSize = 20) => request<UsageHistory>(`/api/workspaces/${workspaceId}/usage?page=${page}&pageSize=${pageSize}`),
   listMemories: (workspaceId: string) => request<PersonalMemory[]>(`/api/workspaces/${workspaceId}/memories`),
   createMemory: (workspaceId: string, input: PersonalMemoryInput) => request<PersonalMemory>(`/api/workspaces/${workspaceId}/memories`, { method: "POST", body: JSON.stringify(input) }, true),
   updateMemory: (memoryId: string, input: PersonalMemoryInput) => request<PersonalMemory>(`/api/memories/${memoryId}`, { method: "PATCH", body: JSON.stringify(input) }, true),
   deleteMemory: (memoryId: string) => request<void>(`/api/memories/${memoryId}`, { method: "DELETE" }, true),
+  listFiles: (workspaceId: string, projectId?: string, conversationId?: string) => {
+    const params = new URLSearchParams();
+    if (projectId) params.set("projectId", projectId);
+    if (conversationId) params.set("conversationId", conversationId);
+    const query = params.toString();
+    return request<StoredFile[]>(`/api/workspaces/${workspaceId}/files${query ? `?${query}` : ""}`);
+  },
+  uploadFile: (workspaceId: string, file: File, scope: { projectId?: string; conversationId?: string } = {}) => {
+    const form = new FormData();
+    form.append("file", file);
+    if (scope.projectId) form.append("projectId", scope.projectId);
+    if (scope.conversationId) form.append("conversationId", scope.conversationId);
+    return requestForm<StoredFile>(`/api/workspaces/${workspaceId}/files`, form, true);
+  },
+  deleteFile: (fileId: string) => request<void>(`/api/files/${fileId}`, { method: "DELETE" }, true),
 };
