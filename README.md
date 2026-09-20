@@ -212,6 +212,11 @@ Ai__DefaultChatTier=Smart
 
 # File context (API only)
 Files__StorageProvider=S3Compatible
+Files__S3Endpoint=https://<ACCOUNT_ID>.r2.cloudflarestorage.com
+Files__S3Region=auto
+Files__S3Bucket=<R2_BUCKET_NAME>
+Files__S3AccessKey=<R2_ACCESS_KEY_ID>
+Files__S3SecretKey=<R2_SECRET_ACCESS_KEY>
 Files__MaxFileSizeBytes=26214400
 Files__MaxAttachmentsPerMessage=5
 Files__FileContextBudgetTokens=4000
@@ -221,7 +226,7 @@ Ai__FileContextBudgetTokens=4000
 
 `appsettings.Production.json` enables `Database__ApplyMigrations=true`. The API Dockerfile uses a multi-stage .NET 8 build and binds to port 8080. Railway should route its provided service port to the container; if the platform requires an explicit variable, set `ASPNETCORE_HTTP_PORTS=8080`.
 
-The OpenAI key belongs only on the Taslim API service. Do not add it to Taslim Web variables, source code, Docker build arguments, or browser bundles. `Ai__OpenAI__BaseUrl` is optional and defaults server-side to `https://api.openai.com/v1`. `Ai__DefaultChatTier=Smart` is the internal default; ordinary users do not select provider models. Production disables mock fallback, so a missing/failed OpenAI configuration returns a safe generation error rather than a simulated answer. No new Railway variable is required for forwarded HTTPS. If a future hosting topology uses a fixed private proxy, explicit proxy IPs may be supplied as `ForwardedHeaders:KnownProxies:0`, `ForwardedHeaders:KnownProxies:1`, and so on; do not add arbitrary client IPs.
+The OpenAI key belongs only on the Taslim API service. Do not add it to Taslim Web variables, source code, Docker build arguments, or browser bundles. `Ai__OpenAI__BaseUrl` is optional and defaults server-side to `https://api.openai.com/v1`. `Ai__DefaultChatTier=Smart` is the internal default; ordinary users do not select provider models. Production disables mock fallback, so a missing/failed OpenAI configuration returns a safe generation error rather than a simulated answer. For R2, the API uses the AWS SDK S3 adapter with the private account endpoint, region `auto`, bucket, access key, and secret shown above; none of these variables belong on Taslim Web. If R2 settings are incomplete or the provider name is unknown, the API returns a safe storage-unavailable error and never falls back to ephemeral Railway filesystem storage. No new Railway variable is required for forwarded HTTPS. If a future hosting topology uses a fixed private proxy, explicit proxy IPs may be supplied as `ForwardedHeaders:KnownProxies:0`, `ForwardedHeaders:KnownProxies:1`, and so on; do not add arbitrary client IPs.
 
 ### PostgreSQL
 
@@ -247,6 +252,6 @@ Projects now support bounded `Instructions` and `ContextNotes` fields. They are 
 
 ## Batch 3.5 files and attachments
 
-Batch 3.5 adds `StoredFile` metadata and `ChatMessageAttachment` joins. Local development and tests use the safe filesystem provider under `Files:LocalRootPath`; Production selects the explicit `S3Compatible` boundary so the API does not silently write user files to ephemeral Railway disk. Uploads validate filename, extension, declared MIME type, signature, and size before bounded TXT, Markdown, PDF, DOCX, CSV, or XLSX extraction. Images remain binary attachments for a provider-capable vision path.
+Batch 3.5 adds `StoredFile` metadata and `ChatMessageAttachment` joins. Local development and tests use the safe filesystem provider under `Files:LocalRootPath`; Production selects the AWS SDK-backed `S3CompatibleFileStorageService` for Cloudflare R2 so the API does not silently write user files to ephemeral Railway disk. Uploads validate filename, extension, declared MIME type, signature, and size before bounded TXT, Markdown, PDF, DOCX, CSV, or XLSX extraction. Images remain binary attachments for a provider-capable vision path.
 
 The browser receives safe file metadata and sends opaque attachment IDs. The API enforces workspace, project, conversation, uploader, readiness, and attachment-count checks before resolving selected files server-side. Storage keys, extracted text, binary data, provider credentials, and provider file IDs never enter browser DTOs. See [docs/FILES_ARCHITECTURE.md](docs/FILES_ARCHITECTURE.md) for the storage adapter boundary and production configuration.

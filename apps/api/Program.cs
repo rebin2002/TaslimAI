@@ -131,12 +131,23 @@ builder.Services.AddScoped<FileProcessingService>();
 builder.Services.AddSingleton<IFileStorageService>(services =>
 {
     var settings = services.GetRequiredService<Microsoft.Extensions.Options.IOptions<FileSettings>>().Value;
-    return string.Equals(settings.StorageProvider, FileStorageProviders.Local, StringComparison.OrdinalIgnoreCase)
-        ? new LocalFileStorageService(
-            services.GetRequiredService<Microsoft.Extensions.Options.IOptions<FileSettings>>(),
-            services.GetRequiredService<ILogger<LocalFileStorageService>>())
-        : new UnconfiguredFileStorageService(
-            services.GetRequiredService<Microsoft.Extensions.Options.IOptions<FileSettings>>());
+    var options = services.GetRequiredService<Microsoft.Extensions.Options.IOptions<FileSettings>>();
+    if (string.Equals(settings.StorageProvider, FileStorageProviders.Local, StringComparison.OrdinalIgnoreCase))
+    {
+        return new LocalFileStorageService(
+            options,
+            services.GetRequiredService<ILogger<LocalFileStorageService>>());
+    }
+
+    if (string.Equals(settings.StorageProvider, FileStorageProviders.S3Compatible, StringComparison.OrdinalIgnoreCase)
+        && settings.IsS3Configured)
+    {
+        return new S3CompatibleFileStorageService(
+            options,
+            services.GetRequiredService<ILogger<S3CompatibleFileStorageService>>());
+    }
+
+    return new UnconfiguredFileStorageService(options);
 });
 var app = builder.Build();
 

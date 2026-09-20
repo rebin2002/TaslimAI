@@ -1,6 +1,6 @@
 # Taslim file context architecture
 
-Batch 3.5 adds a provider-neutral file foundation for project resources and chat attachments. Files are stored as metadata in PostgreSQL and bytes through an `IFileStorageService` boundary. Local development uses the filesystem under `Files:LocalRootPath`; Production selects the explicit `S3Compatible` boundary and requires a persistent object-storage adapter and credentials before uploads are enabled.
+Batch 3.5 adds a provider-neutral file foundation for project resources and chat attachments. Files are stored as metadata in PostgreSQL and bytes through an `IFileStorageService` boundary. Local development uses the filesystem under `Files:LocalRootPath`; Production selects the AWS SDK-backed `S3CompatibleFileStorageService`, which supports Cloudflare R2 through its S3-compatible API.
 
 ## Storage and ownership
 
@@ -20,11 +20,12 @@ The frontend uploads a file and receives safe metadata only. It sends selected o
 
 ## Production configuration
 
-The repository includes a local storage implementation for development and tests and an explicit unavailable-provider implementation for the `S3Compatible` production boundary. This keeps the API deployable without silently writing user files to ephemeral Railway container storage. Connect a persistent S3-compatible provider by implementing `IFileStorageService` or wiring an approved adapter, then set the server-only variables below on Taslim API. They must never be placed on Taslim Web or passed as Docker build arguments.
+The repository includes a local filesystem implementation for development and tests and an AWS SDK-backed `S3CompatibleFileStorageService` for Cloudflare R2 and compatible object stores. The API selects the real adapter only when `StorageProvider=S3Compatible` and all required HTTPS endpoint, region, bucket, access-key, and secret-key settings are present. Unknown or incomplete providers resolve to the unavailable fail-closed implementation; the API never falls back to ephemeral Railway disk in Production. These variables are server-only and must never be placed on Taslim Web or passed as Docker build arguments.
 
 ```text
 Files__StorageProvider=S3Compatible
 Files__S3Endpoint=https://object-storage.example
+Files__S3Region=auto
 Files__S3Bucket=taslim-files
 Files__S3AccessKey=<server-only>
 Files__S3SecretKey=<server-only>
@@ -33,5 +34,7 @@ Files__MaxAttachmentsPerMessage=5
 Files__MaxExtractedTextCharacters=80000
 Ai__FileContextBudgetTokens=4000
 ```
+
+For Cloudflare R2, use the account S3 endpoint `https://<ACCOUNT_ID>.r2.cloudflarestorage.com`, region `auto`, an R2 API-token access key and secret, and a private bucket. The adapter uses HTTPS and path-style addressing and performs all object operations server-to-server; it does not create public URLs or presigned browser uploads.
 
 The additive migration is `AddStoredFilesAndChatAttachments`. It creates `StoredFiles` and `ChatMessageAttachments` with restricted ownership relationships, deterministic indexes, and a unique storage-key constraint. Existing authentication, CSRF, workspace authorization, AI routing, usage accounting, and conversation persistence remain the source of truth for their respective concerns.

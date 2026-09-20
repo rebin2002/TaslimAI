@@ -12,9 +12,18 @@ public sealed class FileOptions
     public string StorageProvider { get; set; } = FileStorageProviders.Local;
     public string LocalRootPath { get; set; } = "App_Data/files";
     public string S3Endpoint { get; set; } = string.Empty;
+    public string S3Region { get; set; } = "auto";
     public string S3Bucket { get; set; } = string.Empty;
     public string S3AccessKey { get; set; } = string.Empty;
     public string S3SecretKey { get; set; } = string.Empty;
+
+    public bool IsS3Configured =>
+        Uri.TryCreate(S3Endpoint, UriKind.Absolute, out var endpoint)
+        && string.Equals(endpoint.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
+        && !string.IsNullOrWhiteSpace(S3Bucket)
+        && !string.IsNullOrWhiteSpace(S3AccessKey)
+        && !string.IsNullOrWhiteSpace(S3SecretKey)
+        && !string.IsNullOrWhiteSpace(S3Region);
 }
 
 public sealed record StoredFileDto(
