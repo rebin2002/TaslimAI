@@ -12,13 +12,15 @@ export function ProjectForm({ project, onClose, onSubmit }: Readonly<{ project?:
   const { t } = useLocale();
   const [name, setName] = useState(project?.name ?? "");
   const [description, setDescription] = useState(project?.description ?? "");
+  const [instructions, setInstructions] = useState(project?.instructions ?? "");
+  const [contextNotes, setContextNotes] = useState(project?.contextNotes ?? "");
   const [type, setType] = useState(project?.type ?? "General");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
   async function submit(event: FormEvent) {
     event.preventDefault(); setSaving(true); setError("");
-    try { await onSubmit({ name, description: description || undefined, type }); onClose(); }
+    try { await onSubmit({ name, description: description || undefined, instructions: instructions || undefined, contextNotes: contextNotes || undefined, type }); onClose(); }
     catch (caught) { setError(caught instanceof Error ? caught.message : t("projects.saveError")); }
     finally { setSaving(false); }
   }
@@ -29,6 +31,8 @@ export function ProjectForm({ project, onClose, onSubmit }: Readonly<{ project?:
       <label><span>{t("projects.name")}</span><input required minLength={1} maxLength={160} value={name} onChange={(event) => setName(event.target.value)} autoFocus /></label>
       <label><span>{t("projects.type")}</span><div className="select-shell"><select value={type} onChange={(event) => setType(event.target.value)}>{projectTypes.map((item) => <option key={item} value={item}>{t(typeKey(item))}</option>)}</select><ChevronDown size={15} /></div></label>
       <label><span>{t("projects.description")}</span><textarea maxLength={2000} rows={4} value={description} onChange={(event) => setDescription(event.target.value)} placeholder={t("projects.descriptionPlaceholder")} /></label>
+      <label><span>{t("projects.instructions")}</span><textarea maxLength={4000} rows={4} value={instructions} onChange={(event) => setInstructions(event.target.value)} placeholder={t("projects.instructionsPlaceholder")} /></label>
+      <label><span>{t("projects.contextNotes")}</span><textarea maxLength={8000} rows={5} value={contextNotes} onChange={(event) => setContextNotes(event.target.value)} placeholder={t("projects.contextNotesPlaceholder")} /></label>
       {error && <div className="form-error" role="alert">{error}</div>}
       <div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>{t("common.cancel")}</button><button className="primary-button" disabled={saving}>{saving ? t("common.saving") : <><Check size={15} /> {project ? t("common.save") : t("projects.create")}</>}</button></div>
     </form>

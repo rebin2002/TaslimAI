@@ -32,6 +32,8 @@ export type Project = {
   workspaceId: string;
   name: string;
   description: string | null;
+  instructions: string | null;
+  contextNotes: string | null;
   type: string;
   status: "Active" | "Archived";
   createdAt: string;
@@ -42,7 +44,19 @@ export type Project = {
 export type RegisterInput = { displayName: string; email: string; password: string; preferredLanguage?: string };
 export type LoginInput = { email: string; password: string };
 export type ProfileInput = { displayName: string; preferredLanguage: string };
-export type ProjectInput = { name: string; description?: string; type?: string };
+export type ProjectInput = { name: string; description?: string; instructions?: string; contextNotes?: string; type?: string };
+export type PersonalMemory = {
+  id: string;
+  workspaceId: string;
+  category: string;
+  title: string;
+  content: string;
+  source: string;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+export type PersonalMemoryInput = { category: string; title: string; content: string };
 export type Conversation = {
   id: string;
   workspaceId: string;
@@ -200,4 +214,8 @@ export const api = {
   streamMessage: (conversationId: string, content: string, onEvent: (event: ChatStreamEvent) => void, id = requestId()) => streamRequest(`/api/conversations/${conversationId}/messages/stream`, { content, requestId: id }, onEvent),
   getUsageSummary: (workspaceId: string) => request<UsageSummary>(`/api/workspaces/${workspaceId}/usage/summary`),
   getUsageHistory: (workspaceId: string, page = 1, pageSize = 20) => request<UsageHistory>(`/api/workspaces/${workspaceId}/usage?page=${page}&pageSize=${pageSize}`),
+  listMemories: (workspaceId: string) => request<PersonalMemory[]>(`/api/workspaces/${workspaceId}/memories`),
+  createMemory: (workspaceId: string, input: PersonalMemoryInput) => request<PersonalMemory>(`/api/workspaces/${workspaceId}/memories`, { method: "POST", body: JSON.stringify(input) }, true),
+  updateMemory: (memoryId: string, input: PersonalMemoryInput) => request<PersonalMemory>(`/api/memories/${memoryId}`, { method: "PATCH", body: JSON.stringify(input) }, true),
+  deleteMemory: (memoryId: string) => request<void>(`/api/memories/${memoryId}`, { method: "DELETE" }, true),
 };

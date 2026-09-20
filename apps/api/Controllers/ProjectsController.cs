@@ -42,6 +42,7 @@ public sealed class ProjectsController(TaslimDbContext db, WorkspaceAccessServic
         {
             Id = Guid.NewGuid(), WorkspaceId = workspaceId, Name = request.Name.Trim(),
             Description = CleanDescription(request.Description), Type = type,
+            Instructions = CleanText(request.Instructions), ContextNotes = CleanText(request.ContextNotes),
             Status = ProjectStatuses.Active, CreatedAt = now, UpdatedAt = now,
         };
         db.Projects.Add(project);
@@ -70,6 +71,8 @@ public sealed class ProjectsController(TaslimDbContext db, WorkspaceAccessServic
         if (type is null) return ApiResults.Validation(this, "Choose a valid project type.");
         project.Name = request.Name.Trim();
         project.Description = CleanDescription(request.Description);
+        project.Instructions = CleanText(request.Instructions);
+        project.ContextNotes = CleanText(request.ContextNotes);
         project.Type = type;
         project.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(cancellationToken);
@@ -110,6 +113,7 @@ public sealed class ProjectsController(TaslimDbContext db, WorkspaceAccessServic
 
     private Guid GetUserId() => Guid.Parse(User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value ?? throw new InvalidOperationException("Authenticated user identifier is missing."));
     private static string? ResolveType(string? type) => string.IsNullOrWhiteSpace(type) ? ProjectTypes.General : ProjectTypes.Initial.FirstOrDefault(item => string.Equals(item, type.Trim(), StringComparison.OrdinalIgnoreCase));
-    private static string? CleanDescription(string? description) => string.IsNullOrWhiteSpace(description) ? null : description.Trim();
-    private static ProjectDto ToDto(Project project) => new(project.Id, project.WorkspaceId, project.Name, project.Description, project.Type, project.Status, project.CreatedAt, project.UpdatedAt, project.ArchivedAt);
+    private static string? CleanDescription(string? description) => CleanText(description);
+    private static string? CleanText(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+    private static ProjectDto ToDto(Project project) => new(project.Id, project.WorkspaceId, project.Name, project.Description, project.Instructions, project.ContextNotes, project.Type, project.Status, project.CreatedAt, project.UpdatedAt, project.ArchivedAt);
 }

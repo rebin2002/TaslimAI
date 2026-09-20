@@ -4,6 +4,10 @@ public sealed class AiOptions
 {
     public string DefaultChatTier { get; set; } = "Smart";
     public int ContextBudgetTokens { get; set; } = 12_000;
+    public int ContextOutputReserveTokens { get; set; } = 2_048;
+    public int ProjectContextBudgetTokens { get; set; } = 1_200;
+    public int PersonalMemoryContextBudgetTokens { get; set; } = 1_200;
+    public int MaxPersonalMemories { get; set; } = 50;
     public int ProviderTimeoutSeconds { get; set; } = 90;
     public bool AllowMockProvider { get; set; } = true;
     public string SystemInstruction { get; set; } = "You are Taslim, a helpful multilingual AI assistant. Provide clear, accurate and useful answers. Respond naturally in the user's language unless they request another language.";

@@ -70,6 +70,8 @@ public sealed record ProjectDto(
     Guid WorkspaceId,
     string Name,
     string? Description,
+    string? Instructions,
+    string? ContextNotes,
     string Type,
     string Status,
     DateTime CreatedAt,
@@ -84,6 +86,12 @@ public sealed class CreateProjectRequest
     [StringLength(2000)]
     public string? Description { get; set; }
 
+    [StringLength(4000)]
+    public string? Instructions { get; set; }
+
+    [StringLength(8000)]
+    public string? ContextNotes { get; set; }
+
     [StringLength(50)]
     public string? Type { get; set; }
 }
@@ -95,6 +103,12 @@ public sealed class UpdateProjectRequest
 
     [StringLength(2000)]
     public string? Description { get; set; }
+
+    [StringLength(4000)]
+    public string? Instructions { get; set; }
+
+    [StringLength(8000)]
+    public string? ContextNotes { get; set; }
 
     [StringLength(50)]
     public string? Type { get; set; }

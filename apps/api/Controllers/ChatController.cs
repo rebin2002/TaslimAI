@@ -342,7 +342,20 @@ public sealed class ChatController(
             .ThenBy(message => message.Id)
             .Select(message => new AiChatMessage(message.Role.ToString().ToLowerInvariant(), message.Content))
             .ToListAsync(cancellationToken);
-        return contextBuilder.Build(history);
+        var project = conversation.ProjectId is null
+            ? null
+            : await db.Projects.AsNoTracking()
+                .Where(item => item.Id == conversation.ProjectId && item.WorkspaceId == conversation.WorkspaceId)
+                .Select(item => new { item.Instructions, item.ContextNotes })
+                .FirstOrDefaultAsync(cancellationToken);
+        var memories = await db.PersonalMemories.AsNoTracking()
+            .Where(memory => memory.UserId == GetUserId() && memory.WorkspaceId == conversation.WorkspaceId && memory.IsActive)
+            .OrderByDescending(memory => memory.UpdatedAt)
+            .ThenByDescending(memory => memory.CreatedAt)
+            .Take(50)
+            .Select(memory => new AiMemoryContext(memory.Category, memory.Title, memory.Content))
+            .ToListAsync(cancellationToken);
+        return contextBuilder.Build(history, project?.Instructions, project?.ContextNotes, memories);
     }
 
     private static void PersistSuccess(PreparedChat prepared, AiGenerationResult result)

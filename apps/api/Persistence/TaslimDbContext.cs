@@ -14,6 +14,7 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
     public DbSet<Conversation> Conversations => Set<Conversation>();
     public DbSet<ChatMessage> ChatMessages => Set<ChatMessage>();
     public DbSet<UsageTransaction> UsageTransactions => Set<UsageTransaction>();
+    public DbSet<PersonalMemory> PersonalMemories => Set<PersonalMemory>();
 
     protected override void OnModelCreating(ModelBuilder builder)
     {
@@ -57,6 +58,8 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasKey(project => project.Id);
             entity.Property(project => project.Name).HasMaxLength(160).IsRequired();
             entity.Property(project => project.Description).HasMaxLength(2000);
+            entity.Property(project => project.Instructions).HasMaxLength(4000);
+            entity.Property(project => project.ContextNotes).HasMaxLength(8000);
             entity.Property(project => project.Type).HasMaxLength(50).IsRequired();
             entity.Property(project => project.Status).HasMaxLength(30).IsRequired();
             entity.HasIndex(project => project.WorkspaceId);
@@ -64,6 +67,29 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasOne(project => project.Workspace)
                 .WithMany(workspace => workspace.Projects)
                 .HasForeignKey(project => project.WorkspaceId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        builder.Entity<PersonalMemory>(entity =>
+        {
+            entity.HasKey(memory => memory.Id);
+            entity.Property(memory => memory.Category).HasMaxLength(30).IsRequired();
+            entity.Property(memory => memory.Title).HasMaxLength(160).IsRequired();
+            entity.Property(memory => memory.Content).HasMaxLength(4000).IsRequired();
+            entity.Property(memory => memory.Source).HasMaxLength(30).IsRequired();
+            entity.Property(memory => memory.IsActive).IsRequired();
+            entity.Property(memory => memory.CreatedAt).IsRequired();
+            entity.Property(memory => memory.UpdatedAt).IsRequired();
+            entity.HasIndex(memory => new { memory.WorkspaceId, memory.UserId });
+            entity.HasIndex(memory => new { memory.UserId, memory.IsActive });
+            entity.HasIndex(memory => new { memory.WorkspaceId, memory.UpdatedAt });
+            entity.HasOne(memory => memory.User)
+                .WithMany()
+                .HasForeignKey(memory => memory.UserId)
+                .OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(memory => memory.Workspace)
+                .WithMany()
+                .HasForeignKey(memory => memory.WorkspaceId)
                 .OnDelete(DeleteBehavior.Restrict);
         });
 

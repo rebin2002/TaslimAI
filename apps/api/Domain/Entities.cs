@@ -49,6 +49,26 @@ public static class ProjectStatuses
     public const string Archived = "Archived";
 }
 
+public static class PersonalMemoryCategories
+{
+    public const string Preference = "Preference";
+    public const string Personal = "Personal";
+    public const string Business = "Business";
+    public const string Writing = "Writing";
+    public const string Language = "Language";
+    public const string Other = "Other";
+
+    public static readonly IReadOnlySet<string> Initial = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        Preference, Personal, Business, Writing, Language, Other,
+    };
+}
+
+public static class PersonalMemorySources
+{
+    public const string Manual = "Manual";
+}
+
 public sealed class ApplicationUser : IdentityUser<Guid>
 {
     public string DisplayName { get; set; } = string.Empty;
@@ -94,12 +114,31 @@ public sealed class Project
     public Guid WorkspaceId { get; set; }
     public string Name { get; set; } = string.Empty;
     public string? Description { get; set; }
+    public string? Instructions { get; set; }
+    public string? ContextNotes { get; set; }
     public string Type { get; set; } = ProjectTypes.General;
     public string Status { get; set; } = ProjectStatuses.Active;
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
     public DateTime? ArchivedAt { get; set; }
 
+    public Workspace Workspace { get; set; } = null!;
+}
+
+public sealed class PersonalMemory
+{
+    public Guid Id { get; set; }
+    public Guid UserId { get; set; }
+    public Guid WorkspaceId { get; set; }
+    public string Category { get; set; } = PersonalMemoryCategories.Other;
+    public string Title { get; set; } = string.Empty;
+    public string Content { get; set; } = string.Empty;
+    public string Source { get; set; } = PersonalMemorySources.Manual;
+    public bool IsActive { get; set; } = true;
+    public DateTime CreatedAt { get; set; }
+    public DateTime UpdatedAt { get; set; }
+
+    public ApplicationUser User { get; set; } = null!;
     public Workspace Workspace { get; set; } = null!;
 }
 

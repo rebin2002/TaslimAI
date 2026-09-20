@@ -3,6 +3,7 @@ using Microsoft.Extensions.Options;
 namespace Taslim.Api.Ai;
 
 public sealed record AiChatMessage(string Role, string Content);
+public sealed record AiMemoryContext(string Category, string Title, string Content);
 
 public sealed record AiChatRequest(
     IReadOnlyList<AiChatMessage> Messages,
@@ -162,9 +163,18 @@ public sealed class AiContextBuilder(IOptions<AiOptions> options)
     private readonly AiOptions settings = options.Value;
 
     public AiChatRequest Build(IEnumerable<AiChatMessage> history)
+        => Build(history, null, null, []);
+
+    public AiChatRequest Build(
+        IEnumerable<AiChatMessage> history,
+        string? projectInstructions,
+        string? projectContextNotes,
+        IReadOnlyList<AiMemoryContext> personalMemories)
     {
         var messages = history.ToList();
         var budget = Math.Max(256, settings.ContextBudgetTokens);
+        var systemInstruction = BuildSystemInstruction(projectInstructions, projectContextNotes, personalMemories);
+        var historyBudget = Math.Max(256, budget - EstimateTokens(systemInstruction) - Math.Max(0, settings.ContextOutputReserveTokens));
         var selected = new List<AiChatMessage>();
         var used = 0;
 
@@ -172,13 +182,45 @@ public sealed class AiContextBuilder(IOptions<AiOptions> options)
         {
             var message = messages[index];
             var tokens = EstimateTokens(message.Content);
-            if (selected.Count > 0 && used + tokens > budget) break;
+            if (selected.Count > 0 && used + tokens > historyBudget) break;
             selected.Add(message);
             used += tokens;
         }
 
         selected.Reverse();
-        return new AiChatRequest(selected, settings.SystemInstruction, settings.DefaultChatTier, EnableStreaming: true);
+        return new AiChatRequest(selected, systemInstruction, settings.DefaultChatTier, EnableStreaming: true);
+    }
+
+    private string BuildSystemInstruction(string? projectInstructions, string? projectContextNotes, IReadOnlyList<AiMemoryContext> personalMemories)
+    {
+        var instruction = settings.SystemInstruction;
+        var projectLines = new List<string>();
+        if (!string.IsNullOrWhiteSpace(projectInstructions)) projectLines.Add($"Instructions: {projectInstructions.Trim()}");
+        if (!string.IsNullOrWhiteSpace(projectContextNotes)) projectLines.Add($"Notes: {projectContextNotes.Trim()}");
+        var projectSection = TrimToTokens(string.Join('\n', projectLines), Math.Max(0, settings.ProjectContextBudgetTokens));
+        if (!string.IsNullOrWhiteSpace(projectSection)) instruction += $"\n\nProject-specific context (use only for this project):\n{projectSection}";
+
+        var memoryLines = new List<string>();
+        var memoryTokens = 0;
+        foreach (var memory in personalMemories.Take(Math.Max(0, settings.MaxPersonalMemories)))
+        {
+            if (string.IsNullOrWhiteSpace(memory.Content)) continue;
+            var line = $"- [{memory.Category}] {memory.Title}: {memory.Content.Trim()}";
+            var lineTokens = EstimateTokens(line);
+            if (memoryLines.Count > 0 && memoryTokens + lineTokens > settings.PersonalMemoryContextBudgetTokens) break;
+            memoryLines.Add(TrimToTokens(line, Math.Max(1, settings.PersonalMemoryContextBudgetTokens - memoryTokens)));
+            memoryTokens += EstimateTokens(memoryLines[^1]);
+        }
+        var memorySection = string.Join('\n', memoryLines);
+        if (!string.IsNullOrWhiteSpace(memorySection)) instruction += $"\n\nPersonal memory (user-approved and reusable in this workspace):\n{memorySection}";
+        return instruction;
+    }
+
+    private static string TrimToTokens(string value, int tokenBudget)
+    {
+        if (string.IsNullOrWhiteSpace(value) || tokenBudget <= 0) return string.Empty;
+        var maxCharacters = Math.Max(4, tokenBudget * 4);
+        return value.Length <= maxCharacters ? value : value[..(maxCharacters - 3)].TrimEnd() + "...";
     }
 
     private static int EstimateTokens(string content) => Math.Max(1, (content.Length + 3) / 4);

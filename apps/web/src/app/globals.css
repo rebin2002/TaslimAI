@@ -120,3 +120,24 @@ button { border: 0; cursor: pointer; }
 .usage-link-card h2 { margin: 0 0 7px; color: var(--navy-900); font-size: 14px; }
 .usage-link-card p { margin: 0; color: #909eab; font-size: 11px; line-height: 1.5; }
 .usage-link-card .secondary-button { align-self: flex-start; }
+
+/* Batch 3.4 memory and project-context surfaces — additive styles only. */
+.memory-page { padding-bottom: 70px; }
+.memory-notice { margin: 18px 0; padding: 13px 15px; color: #667f96; border: 1px solid #d9e8f1; border-radius: 10px; background: #f4f9fc; font-size: 11px; line-height: 1.6; }
+.memory-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px; }
+.memory-card { min-height: 150px; }
+.memory-card-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 14px; }
+.memory-card h2 { margin: 8px 0 0; color: var(--navy-900); font-size: 16px; letter-spacing: -.03em; }
+.memory-card p { margin: 17px 0 0; color: #68798a; font-size: 12px; line-height: 1.7; white-space: pre-wrap; }
+.memory-category { display: inline-flex; padding: 5px 8px; color: var(--teal); background: #e7f7f4; border-radius: 6px; font-size: 9px; font-weight: 800; }
+.memory-actions { display: flex; gap: 3px; }
+.memory-actions .icon-button { width: 30px; height: 30px; }
+.memory-actions .danger-icon:hover { color: #b45656; background: #fff1ef; }
+.memory-empty { text-align: start; }
+.memory-empty h2 { margin: 0 0 8px; color: var(--navy-900); font-size: 18px; }
+.memory-empty p { margin: 0 0 18px; color: #768596; font-size: 12px; line-height: 1.6; }
+.memory-form textarea, .project-context-card textarea { resize: vertical; }
+.project-context-card { margin: 24px 0; }
+.project-context-card .primary-button { margin-top: 4px; }
+.project-context-card .card-title p { max-width: 520px; }
+@media (max-width: 700px) { .memory-list { grid-template-columns: 1fr; }.memory-page .account-header { align-items: flex-start; gap: 18px; }.memory-page .account-header .primary-button { flex: 0 0 auto; } }

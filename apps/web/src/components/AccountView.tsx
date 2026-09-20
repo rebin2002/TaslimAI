@@ -45,6 +45,7 @@ export function AccountView() {
       </form>
       <div className="account-side">
         <div className="account-card workspace-card-detail"><div className="card-title"><span className="card-title-icon teal"><UserRound size={17} /></span><div><h2>{t("account.workspace")}</h2><p>{t("account.workspaceSubtitle")}</p></div></div><strong>{workspace?.name}</strong><span>{t("account.owner")}</span></div>
+        <div className="account-card usage-link-card"><div><h2>{t("account.memoryTitle")}</h2><p>{t("account.memorySubtitle")}</p></div><Link className="secondary-button" href="/account/memory">{t("account.viewMemory")}</Link></div>
         <div className="account-card usage-link-card"><div><h2>{t("account.usageTitle")}</h2><p>{t("account.usageSubtitle")}</p></div><Link className="secondary-button" href="/account/usage">{t("account.viewUsage")}</Link></div>
         <div className="account-card danger-card"><div><h2>{t("account.session")}</h2><p>{t("account.sessionSubtitle")}</p></div><button className="secondary-button" onClick={() => void signOut()}><LogOut size={15} />{t("auth.logout")}</button></div>
       </div>

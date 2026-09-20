@@ -1,6 +1,6 @@
 # Taslim.ai
 
-Taslim.ai is a multilingual AI platform foundation designed to make professional AI capabilities simple, fast, and approachable. **Batch 3.2 adds the first production AI provider and provider-independent streaming. Batch 3.3 adds the internal usage ledger and zero-charge accounting foundation.**
+Taslim.ai is a multilingual AI platform foundation designed to make professional AI capabilities simple, fast, and approachable. **Batch 3.2 adds the first production AI provider and provider-independent streaming. Batch 3.3 adds the internal usage ledger and zero-charge accounting foundation. Batch 3.4 adds user-approved memory and project-scoped context.**
 
 ## Architecture
 
@@ -116,6 +116,7 @@ Railway terminates TLS at its ingress proxy, so the API uses ASP.NET Core Forwar
 - Automatically receive a Personal Workspace
 - Create and edit projects at `/projects`
 - Open a project at `/projects/[projectId]`
+- Edit project instructions and context notes at `/projects/[projectId]`
 - Archive and restore projects without physical deletion
 - View active and archived project lists
 - Open a new chat at `/chat`
@@ -126,6 +127,7 @@ Railway terminates TLS at its ingress proxy, so the API uses ASP.NET Core Forwar
 - Retry failed generations without duplicating the user message
 - Use OpenAI in Production when explicitly enabled on the API service
 - Keep the mock provider for local development and tests
+- Manage user-approved reusable memory at `/account/memory`
 
 Supported project types are General, Movie, Marketing, Business, Research, Education, and Development. These are extensible server-side values, not a closed database enum.
 
@@ -145,7 +147,7 @@ dotnet tool run dotnet-ef migrations add <MigrationName> \
   --output-dir Persistence/Migrations
 ```
 
-The initial migration is `InitialIdentityWorkspacesProjects` and creates ASP.NET Identity tables plus `Workspaces`, `WorkspaceMembers`, and `Projects`. Batch 3.1 adds `AddChatConversationsAndMessages` for `Conversations` and `ChatMessages`. Batch 3.2 adds `AddChatUsageAndIdempotency` for cached-token usage and duplicate-request protection, followed by `AddDeterministicChatMessageOrdering` for monotonic per-conversation message sequences and legacy backfill. Batch 3.3 adds `AddUsageLedger` for immutable usage transactions, cost metadata, and request/feature idempotency.
+The initial migration is `InitialIdentityWorkspacesProjects` and creates ASP.NET Identity tables plus `Workspaces`, `WorkspaceMembers`, and `Projects`. Batch 3.1 adds `AddChatConversationsAndMessages` for `Conversations` and `ChatMessages`. Batch 3.2 adds `AddChatUsageAndIdempotency` for cached-token usage and duplicate-request protection, followed by `AddDeterministicChatMessageOrdering` for monotonic per-conversation message sequences and legacy backfill. Batch 3.3 adds `AddUsageLedger` for immutable usage transactions, cost metadata, and request/feature idempotency. Batch 3.4 adds `AddPersonalMemoryAndProjectContext` for `PersonalMemories` and nullable project context fields.
 
 To apply migrations locally against an explicitly selected database:
 
@@ -216,12 +218,18 @@ Use Railway’s managed PostgreSQL service and a private service reference for t
 
 ## Scope boundary
 
-Included in Batch 3.2: the Batch 3.1 conversation foundation, server-only OpenAI Responses adapter, configuration-backed internal model catalog, Fast/Smart/Advanced routing, server-controlled multilingual instruction, Taslim-owned SSE streaming, context budget trimming, usage/cost metadata, request idempotency, retry-safe failure handling, and localized streaming Chat UI. Batch 2 authentication, CSRF, workspace/project authorization, localization, RTL behavior, global CSS, and Railway deployment architecture remain unchanged.
+Included through Batch 3.4: the Batch 3.1 conversation foundation, server-only OpenAI Responses adapter, configuration-backed internal model catalog, Fast/Smart/Advanced routing, server-controlled multilingual instruction, Taslim-owned SSE streaming, context budget trimming, usage/cost metadata, request idempotency, retry-safe failure handling, localized streaming Chat UI, the zero-charge usage ledger, user-approved personal memory, and project-scoped context. Batch 2 authentication, CSRF, workspace/project authorization, localization, RTL behavior, global CSS, and Railway deployment architecture remain unchanged.
 
-Not included: Anthropic, Gemini, automatic cross-provider fallback, image/video/voice/music generation, web search, file analysis, personal memory, project memory retrieval, vector database, embeddings, RAG, tool calling, agents, billing, credits, subscriptions, payment processing, team chat sharing, admin, invitations, business workspace creation, social login, native mobile apps, or Batch 3.4.
+Not included: Anthropic, Gemini, automatic cross-provider fallback, image/video/voice/music generation, web search, file analysis, vector database, embeddings, RAG, tool calling, agents, billing, credits, subscriptions, payment processing, team chat sharing, admin, invitations, business workspace creation, social login, native mobile apps, or Batch 3.5.
 
 ## Batch 3.3 usage ledger
 
 Batch 3.3 adds the extensible `UsageTransaction` ledger and the `AddUsageLedger` migration. Chat creates one workspace-scoped pending transaction per `RequestId` and `Chat` feature, then marks it Completed only after provider success and usage metadata are known. Failed generations remain Failed with zero customer charge. Provider cost is calculated with the existing AI model catalog; no prices are duplicated in the ledger layer, and no real customer billing or payment gateway is active.
 
 Authenticated workspace usage endpoints are available at `GET /api/workspaces/{workspaceId}/usage/summary` and `GET /api/workspaces/{workspaceId}/usage?page=1&pageSize=20`. The Account page links to `/account/usage`, which shows localized English, Arabic, and Kurdish Sorani totals and paginated history. Usage records contain accounting metadata only; prompts, responses, secrets, cookies, authorization headers, provider payloads, provider names, and model names are not returned to normal clients.
+
+## Batch 3.4 memory and project context
+
+Batch 3.4 adds explicit user-approved context without automatic memory extraction. Authenticated users can manage active manual memories through `GET/POST /api/workspaces/{workspaceId}/memories`, `PATCH /api/memories/{memoryId}`, and `DELETE /api/memories/{memoryId}`. Memory records are scoped to the creating user and workspace, use bounded title/content fields and an extensible category/source model, and are physically removed on delete. The Account page links to `/account/memory`.
+
+Projects now support bounded `Instructions` and `ContextNotes` fields. They are editable on the existing project form and on the project detail page. When a conversation has a matching project, the API includes only that project’s context. It also includes only active memories owned by the current user in the conversation workspace. Project context and memory are inserted into the server-built system instruction; they are never loaded into another user’s conversation. The context builder preserves the existing history trimming and reserves separate budgets for project context, memory, and output (`ContextBudgetTokens=12000`, `ProjectContextBudgetTokens=1200`, `PersonalMemoryContextBudgetTokens=1200`, `ContextOutputReserveTokens=2048`, `MaxPersonalMemories=50`).

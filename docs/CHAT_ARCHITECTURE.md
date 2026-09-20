@@ -68,13 +68,13 @@ The API supplies this instruction from configuration:
 
 > You are Taslim, a helpful multilingual AI assistant. Provide clear, accurate and useful answers. Respond naturally in the user's language unless they request another language.
 
-The browser cannot replace or append an authoritative system instruction. The configuration location leaves room for future safety, product behavior, memory, project context, and tool instructions without introducing those systems in this batch.
+The browser cannot replace or append an authoritative system instruction. Batch 3.4 appends bounded, server-selected project context and user-approved memory to this instruction; callers cannot inject context for another project, workspace, or user.
 
 ## Context construction and budget
 
-For each request, the API loads only completed user and assistant messages from the authorized conversation. Failed assistant messages, provider metadata, billing metadata, and database implementation details are excluded. The current user message is saved before context construction, so it is included in the request.
+For each request, the API loads only completed user and assistant messages from the authorized conversation. Failed assistant messages, provider metadata, billing metadata, and database implementation details are excluded. The current user message is saved before context construction, so it is included in the request. If the conversation has a project, the API loads only that project’s `Instructions` and `ContextNotes`; it also loads only active memories whose `UserId` and `WorkspaceId` both match the authenticated user and conversation workspace. Project context is never loaded for a conversation without that matching project.
 
-`AiContextBuilder` estimates tokens conservatively from Unicode content and retains the newest messages within `Ai__ContextBudgetTokens`, while preserving the latest user message. The initial default is 12,000 estimated tokens. Older turns are trimmed rather than summarized with another paid model. Personal memory, project memory, embeddings, RAG, and retrieval are not implemented.
+`AiContextBuilder` estimates tokens conservatively from Unicode content and retains the newest messages within `Ai__ContextBudgetTokens`, while preserving the latest user message. The initial defaults are 12,000 total estimated tokens, 1,200 for project context, 1,200 for personal memory, 2,048 reserved for output, and at most 50 memories. Older turns and excess context are bounded rather than summarized with another paid model. Context records are never logged or returned in usage DTOs.
 
 ## Streaming contract
 
@@ -143,10 +143,17 @@ The optional base URL is already defaulted to `https://api.openai.com/v1`; set `
 
 ## Scope boundary
 
-Batch 3.2 and 3.3 do not add Anthropic, Gemini, provider fallback, web search, image/video/voice/music generation, file analysis, personal memory, project memory, embeddings, RAG, agents, billing, subscriptions, credit deduction, or native mobile apps. Batch 3.3 adds only the internal usage ledger and zero-charge accounting foundation; Batch 3.4 was not started.
+Batch 3.2 and 3.3 do not add Anthropic, Gemini, provider fallback, web search, image/video/voice/music generation, file analysis, embeddings, RAG, agents, billing, subscriptions, credit deduction, or native mobile apps. Batch 3.3 adds the internal usage ledger and zero-charge accounting foundation. Batch 3.4 adds only explicit user-managed memory and project-scoped context; automatic memory extraction, embeddings, vector retrieval, and cross-project memory remain excluded.
 
 ## Batch 3.3 usage ledger boundary
 
 The extensible `UsageTransaction` ledger records workspace and user ownership, optional project and conversation references, request id, feature, provider/model metadata, token usage, provider cost, customer charge, lifecycle status, timestamps, and a safe failure code. It never stores prompts, assistant text, credentials, cookies, authorization headers, or raw provider payloads.
 
 Both normal and streaming chat create one Pending transaction using the unique `WorkspaceId + RequestId + Feature` key. Provider success records usage and calculates decimal provider cost from the existing model catalog before transitioning the transaction to Completed. Provider failure transitions it to Failed, stores only a safe failure code, and sets customer charge to zero. The charging abstraction is currently a safe no-charge implementation; Stripe, subscriptions, credit purchases, and plan limits remain outside this batch.
+
+
+## Batch 3.4 context boundary
+
+Personal memories are created, edited, listed, and deleted only through authenticated, CSRF-protected endpoints. Their source is currently `Manual`; the source field is extensible for later controlled integrations, but no automatic provider or model may create a memory in this batch. Memory categories are constrained to the initial Preference, Personal, Business, Writing, Language, and Other set while remaining string-backed for future extension.
+
+Projects store optional bounded instructions and context notes alongside their existing metadata. They are ordinary project fields protected by the existing workspace membership checks. The context builder combines the matched project fields and current-user workspace memories with the configured system instruction before applying the existing history budget. No prompt, response, memory content, project context, credentials, or raw provider payload is written to the usage ledger or exposed through normal usage endpoints.
