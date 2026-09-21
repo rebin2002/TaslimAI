@@ -43,6 +43,11 @@ public sealed class FilesController(
             logger.LogWarning("File upload rejected because persistent storage is not configured. WorkspaceId={WorkspaceId}", workspaceId);
             return ApiResults.Error(this, StatusCodes.Status503ServiceUnavailable, "FILE_STORAGE_UNAVAILABLE", "File storage is not configured yet.");
         }
+        catch (FileStorageOperationException)
+        {
+            logger.LogWarning("File upload failed because the configured storage provider rejected the operation. WorkspaceId={WorkspaceId}", workspaceId);
+            return ApiResults.Error(this, StatusCodes.Status503ServiceUnavailable, "FILE_STORAGE_OPERATION_FAILED", "We couldn't store this file. Please try again.");
+        }
     }
 
     [HttpGet("workspaces/{workspaceId:guid}/files")]
@@ -84,6 +89,11 @@ public sealed class FilesController(
         {
             logger.LogWarning("File deletion rejected because persistent storage is unavailable. FileId={FileId}; WorkspaceId={WorkspaceId}", file.Id, file.WorkspaceId);
             return ApiResults.Error(this, StatusCodes.Status503ServiceUnavailable, "FILE_STORAGE_UNAVAILABLE", "The file could not be deleted because storage is unavailable.");
+        }
+        catch (FileStorageOperationException)
+        {
+            logger.LogWarning("File deletion failed because the configured storage provider rejected the operation. FileId={FileId}; WorkspaceId={WorkspaceId}", file.Id, file.WorkspaceId);
+            return ApiResults.Error(this, StatusCodes.Status503ServiceUnavailable, "FILE_STORAGE_OPERATION_FAILED", "We couldn't delete this file. Please try again.");
         }
     }
 

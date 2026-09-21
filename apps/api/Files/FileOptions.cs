@@ -59,6 +59,8 @@ public interface IFileStorageService
 
 public sealed class FileStorageUnavailableException() : Exception("Persistent file storage is not configured.");
 
+public sealed class FileStorageOperationException() : Exception("Persistent file storage operation failed.");
+
 public sealed class LocalFileStorageService(IOptions<FileOptions> options, ILogger<LocalFileStorageService> logger) : IFileStorageService
 {
     private readonly string rootPath = Path.GetFullPath(options.Value.LocalRootPath, AppContext.BaseDirectory);

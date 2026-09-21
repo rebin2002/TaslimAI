@@ -54,7 +54,7 @@ public sealed class S3CompatibleFileStorageService : IFileStorageService, IDispo
         catch (Exception exception)
         {
             LogFailure("put", exception);
-            throw new FileStorageUnavailableException();
+            throw new FileStorageOperationException();
         }
     }
 
@@ -71,7 +71,7 @@ public sealed class S3CompatibleFileStorageService : IFileStorageService, IDispo
         catch (Exception exception)
         {
             LogFailure("get", exception);
-            throw new FileStorageUnavailableException();
+            throw new FileStorageOperationException();
         }
     }
 
@@ -88,7 +88,7 @@ public sealed class S3CompatibleFileStorageService : IFileStorageService, IDispo
         catch (Exception exception)
         {
             LogFailure("delete", exception);
-            throw new FileStorageUnavailableException();
+            throw new FileStorageOperationException();
         }
     }
 
@@ -105,7 +105,7 @@ public sealed class S3CompatibleFileStorageService : IFileStorageService, IDispo
         catch (Exception exception)
         {
             LogFailure("head", exception);
-            throw new FileStorageUnavailableException();
+            throw new FileStorageOperationException();
         }
     }
 
@@ -113,6 +113,18 @@ public sealed class S3CompatibleFileStorageService : IFileStorageService, IDispo
 
     private void LogFailure(string operation, Exception exception)
     {
+        if (exception is AmazonS3Exception s3Exception)
+        {
+            logger.LogError(
+                "S3-compatible storage operation failed. Operation={Operation}; StatusCode={StatusCode}; ErrorCode={ErrorCode}; ErrorType={ErrorType}; RequestId={RequestId}",
+                operation,
+                (int)s3Exception.StatusCode,
+                s3Exception.ErrorCode,
+                exception.GetType().Name,
+                s3Exception.RequestId);
+            return;
+        }
+
         logger.LogError(
             "S3-compatible storage operation failed. Operation={Operation}; ErrorType={ErrorType}",
             operation,

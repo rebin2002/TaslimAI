@@ -90,6 +90,14 @@ public sealed class FileProcessingService(
             await db.SaveChangesAsync(CancellationToken.None);
             throw;
         }
+        catch (FileStorageOperationException)
+        {
+            file.Status = StoredFileStatus.Failed;
+            file.TextExtractionStatus = FileExtractionStatus.Failed;
+            file.ProcessedAt = DateTime.UtcNow;
+            await db.SaveChangesAsync(CancellationToken.None);
+            throw;
+        }
         catch (Exception exception)
         {
             file.Status = StoredFileStatus.Failed;
