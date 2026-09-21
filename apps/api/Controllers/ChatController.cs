@@ -146,6 +146,12 @@ public sealed class ChatController(
             await usageLedger.CompleteAsync(usage, result.Usage, cancellationToken);
             return Ok(new SendMessageResponse(ToDto(prepared.Conversation!), ToMessageDto(prepared.UserMessage!), ToMessageDto(prepared.AssistantMessage!, result.Usage.IsTestResponse)));
         }
+        catch (FileContentUnavailableException)
+        {
+            await PersistFailureAsync(prepared, new FileContentUnavailableException());
+            if (usage is not null) await usageLedger.FailAsync(usage, "ATTACHMENT_CONTENT_UNAVAILABLE", cancellationToken: CancellationToken.None);
+            return AttachmentContentFailure();
+        }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
             await PersistFailureAsync(prepared, exception);
@@ -249,6 +255,15 @@ public sealed class ChatController(
                 if (usageTransaction is not null) await usageLedger.FailAsync(usageTransaction, UsageFailureCodes.FromException(new OperationCanceledException()), cancellationToken: CancellationToken.None);
                 logger.LogInformation("Chat generation cancelled. ConversationId={ConversationId}; TraceId={TraceId}", prepared.Conversation!.Id, HttpContext.TraceIdentifier);
             }
+        }
+        catch (FileContentUnavailableException)
+        {
+            if (!persisted && prepared is not null && prepared.ExistingResult is null)
+            {
+                await PersistFailureAsync(prepared, new FileContentUnavailableException());
+                if (usageTransaction is not null) await usageLedger.FailAsync(usageTransaction, "ATTACHMENT_CONTENT_UNAVAILABLE", cancellationToken: CancellationToken.None);
+            }
+            try { await WriteEventAsync("message.failed", new { code = "ATTACHMENT_CONTENT_UNAVAILABLE", message = AttachmentContentFailureMessage }, CancellationToken.None); } catch { /* client disconnected */ }
         }
         catch (Exception exception)
         {
@@ -361,31 +376,53 @@ public sealed class ChatController(
             .Take(50)
             .Select(memory => new AiMemoryContext(memory.Category, memory.Title, memory.Content))
             .ToListAsync(cancellationToken);
+        var attachmentCount = await db.ChatMessageAttachments.CountAsync(attachment => attachment.ChatMessageId == currentMessageId, cancellationToken);
         var files = await db.ChatMessageAttachments.AsNoTracking()
-            .Where(attachment => attachment.ChatMessageId == currentMessageId && attachment.StoredFile.Status == StoredFileStatus.Ready)
+            .Where(attachment => attachment.ChatMessageId == currentMessageId)
             .OrderBy(attachment => attachment.SortOrder)
             .Select(attachment => new
             {
+                attachment.StoredFileId,
                 attachment.StoredFile.OriginalFileName,
                 attachment.StoredFile.ContentType,
                 attachment.StoredFile.Extension,
                 attachment.StoredFile.ExtractedText,
+                attachment.StoredFile.Status,
+                attachment.StoredFile.TextExtractionStatus,
+                attachment.StoredFile.ExtractedTextLength,
                 attachment.StoredFile.StorageKey,
             })
             .ToListAsync(cancellationToken);
+        if (files.Count != attachmentCount) throw new FileContentUnavailableException();
         var fileContexts = new List<AiFileContext>();
         foreach (var file in files)
         {
+            logger.LogInformation("Chat attachment inspected. ConversationId={ConversationId}; MessageId={MessageId}; FileId={FileId}; Status={Status}; TextExtractionStatus={TextExtractionStatus}; ExtractedCharacterCount={ExtractedCharacterCount}", conversation.Id, currentMessageId, file.StoredFileId, file.Status, file.TextExtractionStatus, file.ExtractedTextLength ?? 0);
+            if (file.Status != StoredFileStatus.Ready || (!FileContentTypes.IsImage(file.Extension) && (file.TextExtractionStatus != FileExtractionStatus.Ready || string.IsNullOrWhiteSpace(file.ExtractedText))))
+                throw new FileContentUnavailableException();
             string? dataUrl = null;
             if (FileContentTypes.IsImage(file.Extension))
             {
-                await using var stream = await fileStorage.OpenReadAsync(file.StorageKey, cancellationToken) ?? throw new FileStorageUnavailableException();
-                using var buffer = new MemoryStream();
-                await stream.CopyToAsync(buffer, cancellationToken);
-                dataUrl = $"data:{file.ContentType};base64,{Convert.ToBase64String(buffer.ToArray())}";
+                try
+                {
+                    await using var stream = await fileStorage.OpenReadAsync(file.StorageKey, cancellationToken) ?? throw new FileContentUnavailableException();
+                    using var buffer = new MemoryStream();
+                    await stream.CopyToAsync(buffer, cancellationToken);
+                    dataUrl = $"data:{file.ContentType};base64,{Convert.ToBase64String(buffer.ToArray())}";
+                }
+                catch (FileStorageUnavailableException)
+                {
+                    throw new FileContentUnavailableException();
+                }
+                catch (FileStorageOperationException)
+                {
+                    throw new FileContentUnavailableException();
+                }
             }
             fileContexts.Add(new AiFileContext(file.OriginalFileName, file.ContentType, file.ExtractedText, dataUrl));
         }
+        var attachmentCharacters = fileContexts.Sum(file => file.ExtractedText?.Length ?? 0);
+        logger.LogInformation("Chat attachment context prepared. ConversationId={ConversationId}; MessageId={MessageId}; AttachmentCount={AttachmentCount}; ContextIncluded={ContextIncluded}; AttachmentContextCharacterCount={AttachmentContextCharacterCount}; AttachmentContextTokenEstimate={AttachmentContextTokenEstimate}", conversation.Id, currentMessageId, files.Count, fileContexts.Count > 0, attachmentCharacters, (attachmentCharacters + 3) / 4);
         return contextBuilder.Build(history, project?.Instructions, project?.ContextNotes, memories, fileContexts);
     }
 
@@ -400,11 +437,12 @@ public sealed class ChatController(
             .Where(file => ids.Contains(file.Id)
                 && file.WorkspaceId == conversation.WorkspaceId
                 && file.UserId == userId
-                && file.Status == StoredFileStatus.Ready
                 && (file.ProjectId == null || file.ProjectId == conversation.ProjectId)
                 && (file.ConversationId == null || file.ConversationId == conversation.Id))
             .ToListAsync(cancellationToken);
-        if (files.Count != ids.Count) return ApiResults.Validation(this, "One or more selected files are unavailable or not ready.");
+        if (files.Count != ids.Count) return ApiResults.Error(this, StatusCodes.Status400BadRequest, "ATTACHMENT_NOT_AVAILABLE", "One or more selected files are unavailable.");
+        if (files.Any(file => file.Status != StoredFileStatus.Ready || (!FileContentTypes.IsImage(file.Extension) && (file.TextExtractionStatus != FileExtractionStatus.Ready || string.IsNullOrWhiteSpace(file.ExtractedText)))))
+            return ApiResults.Error(this, StatusCodes.Status422UnprocessableEntity, "ATTACHMENT_CONTENT_UNAVAILABLE", AttachmentContentFailureMessage);
         for (var index = 0; index < ids.Count; index++)
         {
             db.ChatMessageAttachments.Add(new ChatMessageAttachment { ChatMessageId = message.Id, StoredFileId = ids[index], SortOrder = index });
@@ -456,7 +494,13 @@ public sealed class ChatController(
 
     private void LogGenerationFailure(Exception exception, Guid conversationId) => logger.LogError(exception, "Chat generation failed. Provider architecture handled the failure. ConversationId={ConversationId}; UserId={UserId}; TraceId={TraceId}", conversationId, GetUserId(), HttpContext.TraceIdentifier);
 
-    private static object ErrorData(IActionResult result) => new { code = "CHAT_REQUEST_FAILED", message = "Taslim could not process that chat request." };
+    private const string AttachmentContentFailureMessage = "We received your file, but couldn't read its contents. Please try the file again.";
+
+    private IActionResult AttachmentContentFailure() => ApiResults.Error(this, StatusCodes.Status422UnprocessableEntity, "ATTACHMENT_CONTENT_UNAVAILABLE", AttachmentContentFailureMessage);
+
+    private static object ErrorData(IActionResult result) => result is ObjectResult { Value: ErrorEnvelope envelope }
+        ? new { code = envelope.Error.Code, message = envelope.Error.Message }
+        : new { code = "CHAT_REQUEST_FAILED", message = "Taslim could not process that chat request." };
 
     private IActionResult GenerationFailure() => ApiResults.Error(this, StatusCodes.Status503ServiceUnavailable, "AI_GENERATION_FAILED", "Taslim could not generate a response right now. Your message was saved.");
 

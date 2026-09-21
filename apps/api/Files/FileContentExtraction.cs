@@ -42,6 +42,10 @@ public sealed class FileContentExtractor(IOptions<FileOptions> options) : IFileC
             if (normalized == ".xlsx") return Ready(ExtractXlsx(content), "xlsx");
             return new FileExtractionResult(FileExtractionStatus.NotApplicable, null, null, null);
         }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
         catch (Exception exception) when (exception is IOException or InvalidDataException or FormatException or XmlException)
         {
             return new FileExtractionResult(FileExtractionStatus.Failed, null, null, null, "EXTRACTION_FAILED");
@@ -51,6 +55,9 @@ public sealed class FileContentExtractor(IOptions<FileOptions> options) : IFileC
     private FileExtractionResult Ready(string text, string kind)
     {
         var normalized = NormalizeAndBound(text);
+        if (string.IsNullOrWhiteSpace(normalized))
+            return new FileExtractionResult(FileExtractionStatus.Failed, null, null, $"{{\"kind\":\"{kind}\"}}", "EXTRACTION_EMPTY");
+
         return new FileExtractionResult(
             FileExtractionStatus.Ready,
             normalized,

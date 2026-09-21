@@ -22,6 +22,7 @@ describe("chat submission lifecycle", () => {
       content: first.content,
       conversationId: "conversation-1",
       requestId: first.requestId,
+      attachmentIds: first.attachmentIds,
     });
     expect(retry.requestId).toBe(first.requestId);
     expect(retry.content).toBe(first.content);
@@ -37,5 +38,21 @@ describe("chat submission lifecycle", () => {
   it("does not plan navigation for an existing conversation send", () => {
     const submission = createSubmission("follow up", "conversation-1");
     expect(shouldReplaceConversationUrl("conversation-1", submission.conversationId!)).toBe(false);
+  });
+
+  it("preserves attachments for the first message in a new conversation", () => {
+    const submission = createSubmission("Summarize this PDF", undefined, undefined, ["file-pdf-1"]);
+
+    expect(submission.conversationId).toBeUndefined();
+    expect(submission.attachmentIds).toEqual(["file-pdf-1"]);
+
+    const retry = createSubmission("ignored retry text", undefined, {
+      content: submission.content,
+      conversationId: "conversation-created-after-upload",
+      requestId: submission.requestId,
+      attachmentIds: submission.attachmentIds,
+    });
+    expect(retry.attachmentIds).toEqual(["file-pdf-1"]);
+    expect(retry.requestId).toBe(submission.requestId);
   });
 });

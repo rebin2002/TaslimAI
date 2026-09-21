@@ -132,8 +132,9 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
     const text = retry?.content ?? content.trim();
     if (!text || generating || uploading || text.length > 20000 || !workspace) return;
     if (!claimSubmission(sendingRef)) return;
-    const submission = createSubmission(text, selected?.id, retry);
+    const submission = createSubmission(text, selected?.id, retry, attachments.map(file => file.id));
     const { requestId: id } = submission;
+    const attachmentIds = submission.attachmentIds;
     let activeConversationId = submission.conversationId;
     setError("");
     setRetryRequest(null);
@@ -147,7 +148,6 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
         setConversations(current => [conversation!, ...current]);
       }
       let streamState = createChatStreamState(messages);
-      const attachmentIds = retry?.attachmentIds ?? attachments.map(file => file.id);
       await api.streamMessage(conversation.id, text, streamEvent => {
         streamState = applyChatStreamEvent(streamState, streamEvent, next => {
           setMessages(next.messages);
@@ -163,14 +163,14 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
           setRetryRequest({ conversationId: conversation!.id, content: text, requestId: id, attachmentIds });
           setError(streamEvent.data.code === "CONVERSATION_ARCHIVED" ? t("chat.archivedError") : t("chat.generationError"));
         }
-      }, id);
+      }, id, attachmentIds);
       if (conversation && shouldReplaceConversationUrl(conversationId, conversation.id)) {
         window.history.replaceState(window.history.state, "", conversationPath(conversation.id));
       }
       setGenerating(false);
     } catch (caught) {
       setGenerating(false);
-      if (activeConversationId) setRetryRequest({ conversationId: activeConversationId, content: text, requestId: id, attachmentIds: retry?.attachmentIds ?? attachments.map(file => file.id) });
+      if (activeConversationId) setRetryRequest({ conversationId: activeConversationId, content: text, requestId: id, attachmentIds });
       setError(caught instanceof ApiError && caught.code === "CONVERSATION_ARCHIVED" ? t("chat.archivedError") : t("chat.generationError"));
     } finally {
       releaseSubmission(sendingRef);

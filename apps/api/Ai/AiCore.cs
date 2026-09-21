@@ -196,7 +196,7 @@ public sealed class AiContextBuilder(IOptions<AiOptions> options)
         }
 
         selected.Reverse();
-        return new AiChatRequest(selected, systemInstruction, settings.DefaultChatTier, EnableStreaming: true);
+        return new AiChatRequest(selected, systemInstruction, settings.DefaultChatTier, EnableStreaming: true, Attachments: files);
     }
 
     private string BuildSystemInstruction(string? projectInstructions, string? projectContextNotes, IReadOnlyList<AiMemoryContext> personalMemories, IReadOnlyList<AiFileContext> files)
@@ -225,9 +225,13 @@ public sealed class AiContextBuilder(IOptions<AiOptions> options)
         var fileTokens = 0;
         foreach (var file in files.Where(file => !string.IsNullOrWhiteSpace(file.ExtractedText)))
         {
-            var section = $"File: {file.FileName}\n{file.ExtractedText!.Trim()}";
             var remaining = Math.Max(1, settings.FileContextBudgetTokens - fileTokens);
-            var bounded = TrimToTokens(section, remaining);
+            var header = $"[Attached file: {file.FileName}]";
+            var footer = "[End attached file]";
+            var boundaryTokens = EstimateTokens(header) + EstimateTokens(footer) + 1;
+            if (remaining <= boundaryTokens) break;
+            var body = TrimToTokens(file.ExtractedText!.Trim(), remaining - boundaryTokens);
+            var bounded = $"{header}\n{body}\n{footer}";
             if (string.IsNullOrWhiteSpace(bounded)) break;
             fileLines.Add(bounded);
             fileTokens += EstimateTokens(bounded);

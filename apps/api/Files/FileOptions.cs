@@ -61,6 +61,8 @@ public sealed class FileStorageUnavailableException() : Exception("Persistent fi
 
 public sealed class FileStorageOperationException() : Exception("Persistent file storage operation failed.");
 
+public sealed class FileContentUnavailableException() : Exception("Attached file content is unavailable.");
+
 public sealed class LocalFileStorageService(IOptions<FileOptions> options, ILogger<LocalFileStorageService> logger) : IFileStorageService
 {
     private readonly string rootPath = Path.GetFullPath(options.Value.LocalRootPath, AppContext.BaseDirectory);

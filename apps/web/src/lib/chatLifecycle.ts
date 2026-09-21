@@ -14,13 +14,14 @@ export function createChatRequestId() {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
-export type RetrySubmission = { content: string; conversationId: string; requestId: string };
+export type RetrySubmission = { content: string; conversationId: string; requestId: string; attachmentIds: string[] };
 
-export function createSubmission(content: string, conversationId: string | undefined, retry?: RetrySubmission) {
+export function createSubmission(content: string, conversationId: string | undefined, retry?: RetrySubmission, attachmentIds: string[] = []) {
   return {
     content: retry?.content ?? content,
     conversationId: retry?.conversationId ?? conversationId,
     requestId: retry?.requestId ?? createChatRequestId(),
+    attachmentIds: retry?.attachmentIds ?? attachmentIds,
   };
 }
 
