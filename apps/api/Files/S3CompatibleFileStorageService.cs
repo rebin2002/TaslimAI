@@ -152,15 +152,19 @@ internal sealed class AwsS3CompatibleObjectClient(IAmazonS3 client) : IS3Compati
 {
     public async Task PutAsync(string bucket, string key, Stream content, CancellationToken cancellationToken = default)
     {
-        await client.PutObjectAsync(new PutObjectRequest
-        {
-            BucketName = bucket,
-            Key = key,
-            InputStream = content,
-            AutoCloseStream = false,
-            AutoResetStreamPosition = false,
-        }, cancellationToken);
+        await client.PutObjectAsync(CreatePutObjectRequest(bucket, key, content), cancellationToken);
     }
+
+    internal static PutObjectRequest CreatePutObjectRequest(string bucket, string key, Stream content) => new()
+    {
+        BucketName = bucket,
+        Key = key,
+        InputStream = content,
+        AutoCloseStream = false,
+        AutoResetStreamPosition = false,
+        DisablePayloadSigning = true,
+        DisableDefaultChecksumValidation = true,
+    };
 
     public async Task<Stream?> GetAsync(string bucket, string key, CancellationToken cancellationToken = default)
     {

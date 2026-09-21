@@ -27,6 +27,21 @@ namespace Taslim.Api.Tests;
 public sealed class S3CompatibleStorageTests
 {
     [Fact]
+    public void PutObject_request_disables_r2_incompatible_signing_and_checksum_validation()
+    {
+        using var content = new MemoryStream([1, 2, 3]);
+        var request = AwsS3CompatibleObjectClient.CreatePutObjectRequest("taslim-private", "workspace/file.txt", content);
+
+        Assert.Equal("taslim-private", request.BucketName);
+        Assert.Equal("workspace/file.txt", request.Key);
+        Assert.Same(content, request.InputStream);
+        Assert.False(request.AutoCloseStream);
+        Assert.False(request.AutoResetStreamPosition);
+        Assert.True(request.DisablePayloadSigning);
+        Assert.True(request.DisableDefaultChecksumValidation);
+    }
+
+    [Fact]
     public async Task Store_open_exists_and_delete_use_configured_bucket_and_guid_key()
     {
         var client = new FakeObjectClient();
