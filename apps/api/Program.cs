@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Authentication.Cookies;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Identity;
@@ -61,6 +62,9 @@ builder.Services.AddSwaggerGen();
 
 var connectionString = DatabaseConnectionString.Resolve(builder.Configuration);
 builder.Services.AddDbContext<TaslimDbContext>(options => options.UseNpgsql(connectionString));
+builder.Services.AddDataProtection()
+    .SetApplicationName("Taslim.Api")
+    .PersistKeysToDbContext<TaslimDbContext>();
 
 builder.Services.AddIdentity<ApplicationUser, IdentityRole<Guid>>(options =>
     {
