@@ -148,11 +148,25 @@ public sealed class S3CompatibleFileStorageService : IFileStorageService, IDispo
     }
 }
 
-internal sealed class AwsS3CompatibleObjectClient(IAmazonS3 client) : IS3CompatibleObjectClient
+internal sealed class AwsS3CompatibleObjectClient : IS3CompatibleObjectClient
 {
+    private readonly IAmazonS3? client;
+    private readonly Func<GetObjectRequest, CancellationToken, Task<GetObjectResponse>> getObject;
+
+    internal AwsS3CompatibleObjectClient(IAmazonS3 client)
+    {
+        this.client = client;
+        getObject = (request, cancellationToken) => client.GetObjectAsync(request, cancellationToken);
+    }
+
+    internal AwsS3CompatibleObjectClient(Func<GetObjectRequest, CancellationToken, Task<GetObjectResponse>> getObject)
+    {
+        this.getObject = getObject;
+    }
+
     public async Task PutAsync(string bucket, string key, Stream content, CancellationToken cancellationToken = default)
     {
-        await client.PutObjectAsync(CreatePutObjectRequest(bucket, key, content), cancellationToken);
+        await client!.PutObjectAsync(CreatePutObjectRequest(bucket, key, content), cancellationToken);
     }
 
     internal static PutObjectRequest CreatePutObjectRequest(string bucket, string key, Stream content) => new()
@@ -170,12 +184,26 @@ internal sealed class AwsS3CompatibleObjectClient(IAmazonS3 client) : IS3Compati
     {
         try
         {
-            var response = await client.GetObjectAsync(new GetObjectRequest
+            using var response = await getObject(new GetObjectRequest
             {
                 BucketName = bucket,
                 Key = key,
             }, cancellationToken);
-            return new ResponseStream(response);
+
+            if (response.ResponseStream is null) return null;
+
+            var buffered = new MemoryStream();
+            try
+            {
+                await response.ResponseStream.CopyToAsync(buffered, cancellationToken);
+                buffered.Position = 0;
+                return buffered;
+            }
+            catch
+            {
+                await buffered.DisposeAsync();
+                throw;
+            }
         }
         catch (AmazonS3Exception exception) when (IsNotFound(exception))
         {
@@ -185,7 +213,7 @@ internal sealed class AwsS3CompatibleObjectClient(IAmazonS3 client) : IS3Compati
 
     public async Task DeleteAsync(string bucket, string key, CancellationToken cancellationToken = default)
     {
-        await client.DeleteObjectAsync(new DeleteObjectRequest
+        await client!.DeleteObjectAsync(new DeleteObjectRequest
         {
             BucketName = bucket,
             Key = key,
@@ -196,7 +224,7 @@ internal sealed class AwsS3CompatibleObjectClient(IAmazonS3 client) : IS3Compati
     {
         try
         {
-            await client.GetObjectMetadataAsync(new GetObjectMetadataRequest
+            await client!.GetObjectMetadataAsync(new GetObjectMetadataRequest
             {
                 BucketName = bucket,
                 Key = key,
@@ -209,39 +237,10 @@ internal sealed class AwsS3CompatibleObjectClient(IAmazonS3 client) : IS3Compati
         }
     }
 
-    public void Dispose() => client.Dispose();
+    public void Dispose() => client?.Dispose();
 
     private static bool IsNotFound(AmazonS3Exception exception) =>
         exception.StatusCode == System.Net.HttpStatusCode.NotFound
         || string.Equals(exception.ErrorCode, "NoSuchKey", StringComparison.OrdinalIgnoreCase)
         || string.Equals(exception.ErrorCode, "NotFound", StringComparison.OrdinalIgnoreCase);
-
-    private sealed class ResponseStream(GetObjectResponse response) : Stream
-    {
-        private readonly Stream inner = response.ResponseStream;
-        private bool disposed;
-
-        public override bool CanRead => inner.CanRead;
-        public override bool CanSeek => inner.CanSeek;
-        public override bool CanWrite => false;
-        public override long Length => inner.Length;
-        public override long Position { get => inner.Position; set => inner.Position = value; }
-        public override void Flush() => inner.Flush();
-        public override int Read(byte[] buffer, int offset, int count) => inner.Read(buffer, offset, count);
-        public override long Seek(long offset, SeekOrigin origin) => inner.Seek(offset, origin);
-        public override void SetLength(long value) => throw new NotSupportedException();
-        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
-
-        protected override void Dispose(bool disposing)
-        {
-            if (disposed) return;
-            disposed = true;
-            if (disposing)
-            {
-                inner.Dispose();
-                response.Dispose();
-            }
-            base.Dispose(disposing);
-        }
-    }
 }
