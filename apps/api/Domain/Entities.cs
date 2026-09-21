@@ -49,6 +49,41 @@ public static class ProjectStatuses
     public const string Archived = "Archived";
 }
 
+public static class GenerationJobTypes
+{
+    public const string SystemTest = "system.test";
+
+    public static readonly IReadOnlySet<string> Supported = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        SystemTest,
+    };
+}
+
+public enum GenerationJobStatus
+{
+    Pending,
+    Queued,
+    Running,
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+public static class GenerationJobOutputTypes
+{
+    public const string StoredFile = "stored_file";
+    public const string Json = "json";
+}
+
+public static class GenerationJobErrorCodes
+{
+    public const string TypeNotSupported = "JOB_TYPE_NOT_SUPPORTED";
+    public const string Cancelled = "JOB_CANCELLED";
+    public const string ExecutionFailed = "JOB_EXECUTION_FAILED";
+    public const string NotCancellable = "JOB_NOT_CANCELLABLE";
+    public const string NotFound = "JOB_NOT_FOUND";
+}
+
 public static class PersonalMemoryCategories
 {
     public const string Preference = "Preference";
@@ -212,6 +247,7 @@ public enum ChatMessageStatus
 public enum UsageFeature
 {
     Chat,
+    Generation,
     Image,
     Movie,
     Voice,
@@ -308,6 +344,52 @@ public sealed class StoredFile
     public Project? Project { get; set; }
     public Conversation? Conversation { get; set; }
     public ICollection<ChatMessageAttachment> Attachments { get; set; } = [];
+    public ICollection<GenerationJobOutput> GenerationJobOutputs { get; set; } = [];
+}
+
+public sealed class GenerationJob
+{
+    public Guid Id { get; set; }
+    public Guid WorkspaceId { get; set; }
+    public Guid? ProjectId { get; set; }
+    public Guid CreatedByUserId { get; set; }
+    public string JobType { get; set; } = string.Empty;
+    public GenerationJobStatus Status { get; set; } = GenerationJobStatus.Pending;
+    public string? Title { get; set; }
+    public string? Provider { get; set; }
+    public string? ProviderModel { get; set; }
+    public string InputJson { get; set; } = "{}";
+    public string? ResultJson { get; set; }
+    public string? ErrorCode { get; set; }
+    public string? ErrorMessage { get; set; }
+    public int ProgressPercent { get; set; }
+    public bool CancellationRequested { get; set; }
+    public Guid ConcurrencyToken { get; set; } = Guid.NewGuid();
+    public DateTime CreatedAt { get; set; }
+    public DateTime? QueuedAt { get; set; }
+    public DateTime? StartedAt { get; set; }
+    public DateTime? CompletedAt { get; set; }
+    public DateTime? FailedAt { get; set; }
+    public DateTime? CancelledAt { get; set; }
+    public DateTime? ClaimExpiresAt { get; set; }
+
+    public Workspace Workspace { get; set; } = null!;
+    public Project? Project { get; set; }
+    public ApplicationUser CreatedByUser { get; set; } = null!;
+    public ICollection<GenerationJobOutput> Outputs { get; set; } = [];
+}
+
+public sealed class GenerationJobOutput
+{
+    public Guid Id { get; set; }
+    public Guid GenerationJobId { get; set; }
+    public Guid? StoredFileId { get; set; }
+    public string OutputType { get; set; } = string.Empty;
+    public string? MetadataJson { get; set; }
+    public DateTime CreatedAt { get; set; }
+
+    public GenerationJob GenerationJob { get; set; } = null!;
+    public StoredFile? StoredFile { get; set; }
 }
 
 public sealed class ChatMessageAttachment

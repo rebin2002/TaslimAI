@@ -1,6 +1,6 @@
 # Taslim.ai
 
-Taslim.ai is a multilingual AI platform foundation designed to make professional AI capabilities simple, fast, and approachable. **Batch 3.2 adds the first production AI provider and provider-independent streaming. Batch 3.3 adds the internal usage ledger and zero-charge accounting foundation. Batch 3.4 adds user-approved memory and project-scoped context. Batch 3.5 adds secure file storage, bounded document extraction, and explicit chat attachments.**
+Taslim.ai is a multilingual AI platform foundation designed to make professional AI capabilities simple, fast, and approachable. **Batch 3.2 adds the first production AI provider and provider-independent streaming. Batch 3.3 adds the internal usage ledger and zero-charge accounting foundation. Batch 3.4 adds user-approved memory and project-scoped context. Batch 3.5 adds secure file storage, bounded document extraction, and explicit chat attachments. Batch 3.6 adds the persistent provider-independent Generation Job foundation.**
 
 ## Architecture
 
@@ -14,7 +14,7 @@ Taslim API (ASP.NET Core Identity + Web API)
         +---- PostgreSQL (EF Core / Npgsql)
 ```
 
-The browser owns presentation and navigation. The API owns authentication, authorization, persistence, and AI Core orchestration. Provider secrets must never be sent to browser clients. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/AUTHENTICATION.md](docs/AUTHENTICATION.md), [docs/CHAT_ARCHITECTURE.md](docs/CHAT_ARCHITECTURE.md), and [docs/FILES_ARCHITECTURE.md](docs/FILES_ARCHITECTURE.md).
+The browser owns presentation and navigation. The API owns authentication, authorization, persistence, and AI Core orchestration. Provider secrets must never be sent to browser clients. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/AUTHENTICATION.md](docs/AUTHENTICATION.md), [docs/CHAT_ARCHITECTURE.md](docs/CHAT_ARCHITECTURE.md), [docs/FILES_ARCHITECTURE.md](docs/FILES_ARCHITECTURE.md), and [docs/GENERATION_JOBS_ARCHITECTURE.md](docs/GENERATION_JOBS_ARCHITECTURE.md).
 
 ## Repository structure
 
@@ -30,6 +30,7 @@ docs/
   AUTHENTICATION.md     Cookie, CSRF, ownership, and migration details
   CHAT_ARCHITECTURE.md  Chat persistence, AI Core, provider path, and security
   FILES_ARCHITECTURE.md File storage, extraction, attachments, and security
+  GENERATION_JOBS_ARCHITECTURE.md Persistent job lifecycle, queue, worker, and handlers
 ```
 
 ## Requirements
@@ -131,6 +132,7 @@ Railway terminates TLS at its ingress proxy, so the API uses ASP.NET Core Forwar
 - Manage user-approved reusable memory at `/account/memory`
 - Upload and manage project files at `/projects/[projectId]`
 - Attach explicitly selected ready files to chat messages
+- Validate the persistent system test job foundation at `/account/generation-jobs`
 
 Supported project types are General, Movie, Marketing, Business, Research, Education, and Development. These are extensible server-side values, not a closed database enum.
 
@@ -150,7 +152,7 @@ dotnet tool run dotnet-ef migrations add <MigrationName> \
   --output-dir Persistence/Migrations
 ```
 
-The initial migration is `InitialIdentityWorkspacesProjects` and creates ASP.NET Identity tables plus `Workspaces`, `WorkspaceMembers`, and `Projects`. Batch 3.1 adds `AddChatConversationsAndMessages` for `Conversations` and `ChatMessages`. Batch 3.2 adds `AddChatUsageAndIdempotency` for cached-token usage and duplicate-request protection, followed by `AddDeterministicChatMessageOrdering` for monotonic per-conversation message sequences and legacy backfill. Batch 3.3 adds `AddUsageLedger` for immutable usage transactions, cost metadata, and request/feature idempotency. Batch 3.4 adds `AddPersonalMemoryAndProjectContext` for `PersonalMemories` and nullable project context fields. Batch 3.5 adds `AddStoredFilesAndChatAttachments` for `StoredFiles` and normalized `ChatMessageAttachments`.
+The initial migration is `InitialIdentityWorkspacesProjects` and creates ASP.NET Identity tables plus `Workspaces`, `WorkspaceMembers`, and `Projects`. Batch 3.1 adds `AddChatConversationsAndMessages` for `Conversations` and `ChatMessages`. Batch 3.2 adds `AddChatUsageAndIdempotency` for cached-token usage and duplicate-request protection, followed by `AddDeterministicChatMessageOrdering` for monotonic per-conversation message sequences and legacy backfill. Batch 3.3 adds `AddUsageLedger` for immutable usage transactions, cost metadata, and request/feature idempotency. Batch 3.4 adds `AddPersonalMemoryAndProjectContext` for `PersonalMemories` and nullable project context fields. Batch 3.5 adds `AddStoredFilesAndChatAttachments` for `StoredFiles` and normalized `ChatMessageAttachments`. Batch 3.6 adds `AddGenerationJobs` for durable `GenerationJobs` and `GenerationJobOutputs`; it leaves the existing `DataProtectionKeys` table and mapping intact.
 
 To apply migrations locally against an explicitly selected database:
 
@@ -236,7 +238,7 @@ Use Railway’s managed PostgreSQL service and a private service reference for t
 
 Included through Batch 3.5: the Batch 3.1 conversation foundation, server-only OpenAI Responses adapter, configuration-backed internal model catalog, Fast/Smart/Advanced routing, server-controlled multilingual instruction, Taslim-owned SSE streaming, context budget trimming, usage/cost metadata, request idempotency, retry-safe failure handling, localized streaming Chat UI, the zero-charge usage ledger, user-approved personal memory, project-scoped context, secure file storage boundaries, bounded extraction, and explicit chat attachments. Batch 2 authentication, CSRF, workspace/project authorization, localization, RTL behavior, global CSS, and Railway deployment architecture remain unchanged.
 
-Not included: Anthropic, Gemini, automatic cross-provider fallback, image/video/voice/music generation, web search, vector database, embeddings, RAG, tool calling, agents, billing, credits, subscriptions, payment processing, team chat sharing, admin, invitations, business workspace creation, social login, native mobile apps, or Batch 3.6.
+Not included: Anthropic, Gemini, automatic cross-provider fallback, image/video/voice/music generation, web search, vector database, embeddings, RAG, tool calling, agents, billing, credits, subscriptions, payment processing, team chat sharing, admin, invitations, business workspace creation, social login, native mobile apps, or Batch 3.7. Batch 3.6 deliberately does not implement Image, Movie, Document, Presentation, Voice, Music, Research, or Social studios/providers.
 
 ## Batch 3.3 usage ledger
 

@@ -18,6 +18,8 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
     public DbSet<PersonalMemory> PersonalMemories => Set<PersonalMemory>();
     public DbSet<StoredFile> StoredFiles => Set<StoredFile>();
     public DbSet<ChatMessageAttachment> ChatMessageAttachments => Set<ChatMessageAttachment>();
+    public DbSet<GenerationJob> GenerationJobs => Set<GenerationJob>();
+    public DbSet<GenerationJobOutput> GenerationJobOutputs => Set<GenerationJobOutput>();
     public DbSet<DataProtectionKey> DataProtectionKeys => Set<DataProtectionKey>();
 
     protected override void OnModelCreating(ModelBuilder builder)
@@ -121,6 +123,44 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasOne(file => file.User).WithMany().HasForeignKey(file => file.UserId).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne(file => file.Project).WithMany(project => project.Files).HasForeignKey(file => file.ProjectId).OnDelete(DeleteBehavior.SetNull);
             entity.HasOne(file => file.Conversation).WithMany(conversation => conversation.Files).HasForeignKey(file => file.ConversationId).OnDelete(DeleteBehavior.SetNull);
+        });
+
+        builder.Entity<GenerationJob>(entity =>
+        {
+            entity.HasKey(job => job.Id);
+            entity.Property(job => job.JobType).HasMaxLength(100).IsRequired();
+            entity.Property(job => job.Status).HasConversion<string>().HasMaxLength(30).IsRequired();
+            entity.Property(job => job.Title).HasMaxLength(160);
+            entity.Property(job => job.Provider).HasMaxLength(80);
+            entity.Property(job => job.ProviderModel).HasMaxLength(160);
+            entity.Property(job => job.InputJson).HasMaxLength(100_000).IsRequired();
+            entity.Property(job => job.ResultJson).HasMaxLength(100_000);
+            entity.Property(job => job.ErrorCode).HasMaxLength(100);
+            entity.Property(job => job.ErrorMessage).HasMaxLength(1_000);
+            entity.Property(job => job.ProgressPercent).IsRequired();
+            entity.Property(job => job.CancellationRequested).IsRequired();
+            entity.Property(job => job.ConcurrencyToken).IsConcurrencyToken().IsRequired();
+            entity.Property(job => job.CreatedAt).IsRequired();
+            entity.ToTable("GenerationJobs", table => table.HasCheckConstraint("CK_GenerationJobs_ProgressPercent", "\"ProgressPercent\" BETWEEN 0 AND 100"));
+            entity.HasIndex(job => new { job.Status, job.QueuedAt, job.CreatedAt });
+            entity.HasIndex(job => new { job.WorkspaceId, job.CreatedAt });
+            entity.HasIndex(job => new { job.WorkspaceId, job.Status, job.CreatedAt });
+            entity.HasIndex(job => job.ProjectId);
+            entity.HasOne(job => job.Workspace).WithMany().HasForeignKey(job => job.WorkspaceId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(job => job.Project).WithMany().HasForeignKey(job => job.ProjectId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne(job => job.CreatedByUser).WithMany().HasForeignKey(job => job.CreatedByUserId).OnDelete(DeleteBehavior.Restrict);
+        });
+
+        builder.Entity<GenerationJobOutput>(entity =>
+        {
+            entity.HasKey(output => output.Id);
+            entity.Property(output => output.OutputType).HasMaxLength(80).IsRequired();
+            entity.Property(output => output.MetadataJson).HasMaxLength(20_000);
+            entity.Property(output => output.CreatedAt).IsRequired();
+            entity.HasIndex(output => output.GenerationJobId);
+            entity.HasIndex(output => output.StoredFileId);
+            entity.HasOne(output => output.GenerationJob).WithMany(job => job.Outputs).HasForeignKey(output => output.GenerationJobId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(output => output.StoredFile).WithMany(file => file.GenerationJobOutputs).HasForeignKey(output => output.StoredFileId).OnDelete(DeleteBehavior.Restrict);
         });
 
         builder.Entity<ChatMessageAttachment>(entity =>

@@ -130,6 +130,29 @@ export type UsageTransaction = {
   failureCode: string | null;
 };
 export type UsageHistory = { items: UsageTransaction[]; page: number; pageSize: number; totalCount: number; totalPages: number };
+export type GenerationJobStatus = "Pending" | "Queued" | "Running" | "Succeeded" | "Failed" | "Cancelled";
+export type GenerationJobOutput = { id: string; outputType: string; storedFileId: string | null; metadataJson: string | null; createdAt: string };
+export type GenerationJob = {
+  id: string;
+  workspaceId: string;
+  projectId: string | null;
+  jobType: string;
+  status: GenerationJobStatus;
+  title: string | null;
+  progressPercent: number;
+  resultJson: string | null;
+  errorCode: string | null;
+  errorMessage: string | null;
+  cancellationRequested: boolean;
+  createdAt: string;
+  queuedAt: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  failedAt: string | null;
+  cancelledAt: string | null;
+  outputs: GenerationJobOutput[];
+};
+export type GenerationJobList = { items: GenerationJob[]; page: number; pageSize: number; totalCount: number; totalPages: number };
 
 const API_URL = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5000").replace(/\/$/, "");
 let csrfToken: string | null = null;
@@ -246,6 +269,10 @@ export const api = {
   streamMessage: (conversationId: string, content: string, onEvent: (event: ChatStreamEvent) => void, id = requestId(), attachmentIds: string[] = []) => streamRequest(`/api/conversations/${conversationId}/messages/stream`, { content, requestId: id, attachmentIds }, onEvent),
   getUsageSummary: (workspaceId: string) => request<UsageSummary>(`/api/workspaces/${workspaceId}/usage/summary`),
   getUsageHistory: (workspaceId: string, page = 1, pageSize = 20) => request<UsageHistory>(`/api/workspaces/${workspaceId}/usage?page=${page}&pageSize=${pageSize}`),
+  createGenerationJob: (workspaceId: string, inputJson = "{}", title?: string) => request<GenerationJob>("/api/generation/jobs", { method: "POST", body: JSON.stringify({ workspaceId, jobType: "system.test", inputJson, title }) }, true),
+  getGenerationJob: (jobId: string) => request<GenerationJob>(`/api/generation/jobs/${jobId}`),
+  listGenerationJobs: (workspaceId: string, page = 1, pageSize = 20) => request<GenerationJobList>(`/api/generation/jobs?workspaceId=${encodeURIComponent(workspaceId)}&page=${page}&pageSize=${pageSize}&jobType=system.test`),
+  cancelGenerationJob: (jobId: string) => request<{ status: GenerationJobStatus; cancellationRequested?: boolean }>(`/api/generation/jobs/${jobId}/cancel`, { method: "POST" }, true),
   listMemories: (workspaceId: string) => request<PersonalMemory[]>(`/api/workspaces/${workspaceId}/memories`),
   createMemory: (workspaceId: string, input: PersonalMemoryInput) => request<PersonalMemory>(`/api/workspaces/${workspaceId}/memories`, { method: "POST", body: JSON.stringify(input) }, true),
   updateMemory: (memoryId: string, input: PersonalMemoryInput) => request<PersonalMemory>(`/api/memories/${memoryId}`, { method: "PATCH", body: JSON.stringify(input) }, true),

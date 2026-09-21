@@ -12,6 +12,7 @@ using Taslim.Api.Infrastructure;
 using Taslim.Api.Persistence;
 using Taslim.Api.Usage;
 using Taslim.Api.Files;
+using Taslim.Api.Generation;
 using FileSettings = Taslim.Api.Files.FileOptions;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -120,6 +121,15 @@ builder.Services.AddCors(options => options.AddPolicy("Frontend", policy =>
 builder.Services.AddScoped<WorkspaceAccessService>();
 builder.Services.AddScoped<IUsageLedgerService, UsageLedgerService>();
 builder.Services.AddSingleton<IUsageChargingService, SafeUsageChargingService>();
+builder.Services.Configure<GenerationJobOptions>(builder.Configuration.GetSection("GenerationJobs"));
+builder.Services.AddScoped<IGenerationJobQueue, DatabaseGenerationJobQueue>();
+builder.Services.AddScoped<IGenerationJobUsageService, GenerationJobUsageService>();
+builder.Services.AddScoped<IGenerationJobService, GenerationJobService>();
+builder.Services.AddSingleton<IGenerationJobHandler, SystemTestGenerationJobHandler>();
+if (builder.Configuration.GetValue("GenerationJobs:WorkerEnabled", !builder.Environment.IsEnvironment("Testing")))
+{
+    builder.Services.AddHostedService<GenerationJobWorker>();
+}
 builder.Services.Configure<AiOptions>(builder.Configuration.GetSection("Ai"));
 builder.Services.AddSingleton<AiModelCatalog>();
 builder.Services.AddSingleton<IAiCostCalculator, AiCostCalculator>();

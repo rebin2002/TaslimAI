@@ -202,3 +202,37 @@ select.memory-control { appearance: auto; cursor: pointer; }
 .chat-markdown a { color: var(--blue); text-decoration: underline; text-decoration-color: #a9c5ed; text-underline-offset: 2px; }.chat-markdown a:hover { color: #245fb9; }
 .chat-markdown-table { max-width: 100%; margin: .85em 0; overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; -webkit-overflow-scrolling: touch; }.chat-markdown table { width: 100%; min-width: 420px; border-collapse: collapse; font-size: .92em; }.chat-markdown th, .chat-markdown td { padding: 7px 9px; border-bottom: 1px solid var(--line); text-align: start; vertical-align: top; }.chat-markdown th { color: var(--navy-900); background: #f5f8fb; font-weight: 800; }.chat-markdown tr:last-child td { border-bottom: 0; }
 [dir="rtl"] .chat-markdown blockquote { border-inline-start: 0; border-inline-end: 3px solid #a9c5ed; }
+
+
+/* Batch 3.6 generation foundation validation surface */
+.generation-jobs-page { padding-bottom: 70px; }
+.generation-jobs-grid { display: grid; grid-template-columns: 1.15fr .85fr; gap: 15px; }
+.generation-job-card, .generation-recent-card { min-width: 0; }
+.generation-create-button { margin-top: 7px; }
+.generation-job-detail { margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--line); }
+.generation-job-detail-header, .generation-progress-label { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.generation-job-detail-header code { display: block; margin-top: 5px; color: #758496; font-size: 10px; overflow-wrap: anywhere; }
+.generation-status { display: inline-flex; align-items: center; width: max-content; padding: 5px 8px; border-radius: 5px; font-size: 9px; font-weight: 800; }
+.generation-status-pending, .generation-status-queued { color: #9a6d27; background: #fff5df; }
+.generation-status-running { color: #3269ae; background: #eaf2ff; }
+.generation-status-succeeded { color: #2d8c64; background: #eaf8f1; }
+.generation-status-failed, .generation-status-cancelled { color: #b34a4a; background: #fff1f1; }
+.generation-progress-label { margin-top: 18px; color: #8190a0; font-size: 11px; }
+.generation-progress-label strong { color: var(--navy-900); }
+.generation-progress-track { height: 8px; margin-top: 8px; overflow: hidden; border-radius: 99px; background: #edf2f6; }
+.generation-progress-track span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--blue), var(--teal)); transition: width .2s var(--ease-out); }
+.generation-result { margin-top: 18px; }
+.generation-result pre { max-height: 180px; margin: 7px 0 0; padding: 11px; overflow: auto; color: #536579; border: 1px solid #e6edf3; border-radius: 8px; background: #f8fafc; font-size: 10px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.generation-cancel-button { margin-top: 15px; color: #b45656; background: #fff3f3; }
+.generation-running { display: flex; align-items: center; gap: 6px; margin-top: 14px; color: #718093; font-size: 10px; }
+.generation-running svg { animation: taslim-spin .8s linear infinite; }
+.generation-empty { padding: 35px 10px; color: #9aa7b4; font-size: 11px; text-align: center; }
+.generation-job-list { display: flex; flex-direction: column; gap: 7px; }
+.generation-job-list-item { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; padding: 11px 10px; color: var(--ink); border: 1px solid #edf1f4; border-radius: 8px; background: #fbfcfd; text-align: start; }
+.generation-job-list-item:hover, .generation-job-list-item.is-active { border-color: #cfe0fa; background: #f3f7fd; }
+.generation-job-list-item > span:first-child { display: flex; flex-direction: column; min-width: 0; gap: 5px; }
+.generation-job-list-item strong { overflow: hidden; color: var(--navy-900); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.generation-job-list-item small { color: #9aa7b4; font-size: 9px; }
+.generation-job-list-item .generation-status { flex: 0 0 auto; }
+[dir="rtl"] .generation-job-detail-header, [dir="rtl"] .generation-progress-label, [dir="rtl"] .generation-job-list-item { flex-direction: row-reverse; }
+@media (max-width: 700px) { .generation-jobs-grid { grid-template-columns: 1fr; } }

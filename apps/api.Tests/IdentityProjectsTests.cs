@@ -15,7 +15,7 @@ using Xunit;
 
 namespace Taslim.Api.Tests;
 
-public sealed class TaslimApiFactory : WebApplicationFactory<Program>
+public class TaslimApiFactory : WebApplicationFactory<Program>
 {
     private readonly SqliteConnection connection = new("DataSource=:memory:");
 
