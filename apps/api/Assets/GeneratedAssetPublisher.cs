@@ -6,7 +6,7 @@ using Taslim.Api.Persistence;
 
 namespace Taslim.Api.Assets;
 
-public sealed record GeneratedFileArtifact(string FileName, string ContentType, ReadOnlyMemory<byte> Content, string? MetadataJson = null);
+public sealed record GeneratedFileArtifact(string FileName, string ContentType, ReadOnlyMemory<byte> Content, string? MetadataJson = null, string? RepresentationType = null);
 public sealed record GeneratedAssetDescriptor(string Name, string? Description, string AssetType, string? MetadataJson = null);
 public sealed record PreparedGenerationOutput(GenerationJobOutput Output, Asset? Asset, StoredFile? CreatedFile);
 
@@ -86,6 +86,9 @@ public sealed class GeneratedAssetPublisher(TaslimDbContext db, FileProcessingSe
     {
         db.Entry(publication.Output).State = EntityState.Detached;
         if (publication.Asset is not null) db.Entry(publication.Asset).State = EntityState.Detached;
+        if (publication.Asset is not null)
+            foreach (var representation in publication.Asset.Representations)
+                db.Entry(representation).State = EntityState.Detached;
         if (publication.CreatedFile is not null && publication.CreatedFile.Status != StoredFileStatus.Deleted)
         {
             try { await files.DeleteAsync(publication.CreatedFile, cancellationToken); }

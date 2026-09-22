@@ -7,3 +7,6 @@ export const API_URL = process.env.NODE_ENV === "production" ? "" : configuredAp
 
 export const assetFileUrl = (assetId: string, inline = false) =>
   `${API_URL}/api/assets/${assetId}/download${inline ? "?inline=true" : ""}`;
+
+export const assetRepresentationUrl = (assetId: string, representationId: string) =>
+  `${API_URL}/api/assets/${assetId}/representations/${representationId}/download`;

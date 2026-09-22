@@ -12,7 +12,9 @@ public sealed record AiChatRequest(
     string SystemInstruction,
     string RequestedTier,
     bool EnableStreaming = false,
-    IReadOnlyList<AiFileContext>? Attachments = null);
+    IReadOnlyList<AiFileContext>? Attachments = null,
+    int? MaxOutputTokens = null,
+    bool JsonMode = false);
 
 public sealed record AiProviderSelection(
     string ProviderKey,

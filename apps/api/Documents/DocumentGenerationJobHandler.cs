@@ -1,0 +1,98 @@
+using System.Text.Json;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
+using Taslim.Api.Ai;
+using Taslim.Api.Assets;
+using Taslim.Api.Contracts;
+using Taslim.Api.Domain;
+using Taslim.Api.Generation;
+using Taslim.Api.Persistence;
+
+namespace Taslim.Api.Documents;
+
+public sealed class DocumentGenerationJobHandler(
+    TaslimDbContext db,
+    IDocumentPromptBuilder promptBuilder,
+    IDocumentGenerationProvider provider,
+    IDocumentRenderer renderer,
+    IOptions<DocumentGenerationOptions> options) : IGenerationJobHandler
+{
+    private readonly DocumentGenerationOptions settings = options.Value;
+
+    public bool CanHandle(string jobType) => string.Equals(jobType, GenerationJobTypes.DocumentGenerate, StringComparison.OrdinalIgnoreCase);
+
+    public async Task<GenerationHandlerResult> ExecuteAsync(GenerationJob job, IProgress<int> progress, CancellationToken cancellationToken)
+    {
+        if (!DocumentGenerationContractMapper.TryDeserializeInput(job.InputJson, out var input) || input is null)
+            throw new DocumentRequestValidationException(GenerationJobErrorCodes.DocumentRequestInvalid, "The document request is invalid.");
+        DocumentGenerationRequestValidator.Validate(input, settings);
+        progress.Report(5);
+        progress.Report(10);
+
+        var files = await db.StoredFiles.AsNoTracking()
+            .Where(file => file.WorkspaceId == job.WorkspaceId && input.AttachmentIds.Contains(file.Id))
+            .ToListAsync(cancellationToken);
+        if (files.Count != input.AttachmentIds.Count)
+            throw new DocumentRequestValidationException(GenerationJobErrorCodes.DocumentAttachmentUnavailable, "One or more source documents are unavailable.");
+        if (files.Any(file => !DocumentGenerationDefaults.AttachmentExtensions.Contains(file.Extension)))
+            throw new DocumentRequestValidationException(GenerationJobErrorCodes.DocumentAttachmentUnavailable, "Only supported document files can be used as sources.");
+        if (files.Any(file => file.Status != StoredFileStatus.Ready))
+            throw new DocumentRequestValidationException(GenerationJobErrorCodes.DocumentAttachmentUnavailable, "One or more source documents are not ready yet.");
+        if (files.Any(file => file.TextExtractionStatus != FileExtractionStatus.Ready || string.IsNullOrWhiteSpace(file.ExtractedText)))
+            throw new DocumentRequestValidationException(GenerationJobErrorCodes.DocumentAttachmentExtractionFailed, "One or more source documents could not be prepared for context.");
+        progress.Report(20);
+
+        DocumentProjectContext? project = null;
+        if (input.ProjectId.HasValue)
+        {
+            var projectEntity = await db.Projects.AsNoTracking().FirstOrDefaultAsync(item => item.Id == input.ProjectId && item.WorkspaceId == job.WorkspaceId, cancellationToken)
+                ?? throw new DocumentRequestValidationException("PROJECT_NOT_IN_WORKSPACE", "The selected project is not in this workspace.");
+            project = new DocumentProjectContext(projectEntity.Name, projectEntity.Instructions, projectEntity.ContextNotes);
+        }
+        var attachmentOrder = input.AttachmentIds.Select((id, index) => (id, index)).ToDictionary(item => item.id, item => item.index);
+        var sources = files.OrderBy(file => attachmentOrder[file.Id])
+            .Select(file => new DocumentSourceContext(file.OriginalFileName, file.Extension, file.ExtractedText!))
+            .ToArray();
+        var prompt = promptBuilder.Build(input, project, sources, settings);
+        progress.Report(30);
+
+        var generated = await provider.GenerateAsync(prompt, settings, cancellationToken);
+        DocumentDraftValidator.Validate(generated.Draft, settings);
+        progress.Report(65);
+
+        var outputs = new List<GenerationHandlerOutput>();
+        var rendered = new List<RenderedDocument>();
+        if (input.OutputFormat is "docx" or "both") rendered.Add(renderer.RenderDocx(generated.Draft, input, settings));
+        if (input.OutputFormat is "pdf" or "both") rendered.Add(renderer.RenderPdf(generated.Draft, input, settings));
+        if (rendered.Count == 0) throw new DocumentOutputValidationException();
+
+        var metadata = JsonSerializer.Serialize(new
+        {
+            sourceCount = files.Count,
+            language = input.Language,
+            outputFormat = input.OutputFormat,
+            generatedAt = DateTime.UtcNow,
+        });
+        for (var index = 0; index < rendered.Count; index++)
+        {
+            var item = rendered[index];
+            outputs.Add(new GenerationHandlerOutput(
+                GenerationJobOutputTypes.StoredFile,
+                null,
+                metadata,
+                new GeneratedFileArtifact(item.FileName, item.ContentType, item.Content, metadata, item.RepresentationType),
+                index == 0 ? new GeneratedAssetDescriptor(input.Title, generated.Draft.Summary, AssetTypes.Document, metadata) : null));
+        }
+        progress.Report(90);
+        var result = JsonSerializer.Serialize(new
+        {
+            documentType = AssetTypes.Document,
+            title = generated.Draft.Title,
+            language = input.Language,
+            summary = generated.Draft.Summary,
+            sections = generated.Draft.Sections,
+        });
+        progress.Report(100);
+        return new GenerationHandlerResult(result, outputs, generated.Usage);
+    }
+}

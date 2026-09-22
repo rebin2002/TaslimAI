@@ -6,6 +6,7 @@ using Taslim.Api.Assets;
 using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
+using Taslim.Api.Documents;
 using Taslim.Api.Files;
 using Taslim.Api.Images;
 using Taslim.Api.Persistence;
@@ -106,7 +107,9 @@ public sealed class GenerationJobUsageService(IUsageLedgerService ledger) : IGen
             job.ProjectId,
             null,
             $"generation:{job.Id:N}",
-            string.Equals(job.JobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase) ? UsageFeature.Image : UsageFeature.Generation,
+            string.Equals(job.JobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase)
+                ? UsageFeature.Image
+                : string.Equals(job.JobType, GenerationJobTypes.DocumentGenerate, StringComparison.OrdinalIgnoreCase) ? UsageFeature.Document : UsageFeature.Generation,
             cancellationToken,
             job.Id,
             estimatedProviderCostUsd);
@@ -245,7 +248,9 @@ public sealed class GenerationJobService(
     private static string CancellationCode(GenerationJob job) =>
         string.Equals(job.JobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase)
             ? GenerationJobErrorCodes.ImageCancelled
-            : GenerationJobErrorCodes.Cancelled;
+            : string.Equals(job.JobType, GenerationJobTypes.DocumentGenerate, StringComparison.OrdinalIgnoreCase)
+                ? GenerationJobErrorCodes.DocumentCancelled
+                : GenerationJobErrorCodes.Cancelled;
 }
 
 public sealed class GenerationJobValidationException(string code, string message) : Exception(message)
@@ -355,20 +360,19 @@ public sealed class GenerationJobWorker(
         var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
         var usage = scope.ServiceProvider.GetRequiredService<IGenerationJobUsageService>();
         var publisher = scope.ServiceProvider.GetRequiredService<IGeneratedAssetPublisher>();
-        var handlers = scope.ServiceProvider.GetServices<IGenerationJobHandler>();
-        var handler = handlers.FirstOrDefault(item => item.CanHandle(claimedJob.JobType));
-        if (handler is null)
-        {
-            await FailAsync(db, usage, claimedJob, GenerationJobErrorCodes.TypeNotSupported, "This job type is not available.", stoppingToken);
-            return;
-        }
-
         using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
         var monitor = MonitorCancellationAsync(db, claimedJob.Id, cancellation, stoppingToken);
         var publications = new List<PreparedGenerationOutput>();
         var publicationCommitted = false;
         try
         {
+            var handlers = scope.ServiceProvider.GetServices<IGenerationJobHandler>();
+            var handler = handlers.FirstOrDefault(item => item.CanHandle(claimedJob.JobType));
+            if (handler is null)
+            {
+                await FailAsync(db, usage, claimedJob, GenerationJobErrorCodes.TypeNotSupported, "This job type is not available.", stoppingToken);
+                return;
+            }
             var progress = new Progress<int>(value => _ = UpdateProgressAsync(claimedJob.Id, value, stoppingToken));
             var result = await handler.ExecuteAsync(claimedJob, progress, cancellation.Token);
             var current = await db.GenerationJobs.FirstOrDefaultAsync(item => item.Id == claimedJob.Id, stoppingToken);
@@ -381,6 +385,7 @@ public sealed class GenerationJobWorker(
             {
                 publications.Add(await publisher.PrepareAsync(current, output, stoppingToken));
             }
+            AttachAssetRepresentations(publications);
             var resultJson = AddPublishedAssetReference(result.ResultJson, publications);
             if (result.Usage is not null)
             {
@@ -476,11 +481,42 @@ public sealed class GenerationJobWorker(
             var values = new Dictionary<string, object?>();
             foreach (var property in document.RootElement.EnumerateObject()) values[property.Name] = property.Value.Clone();
             values["assetId"] = asset.Id;
+            values["representations"] = asset.Representations.OrderBy(item => item.RepresentationType).Select(item => new
+            {
+                id = item.Id,
+                type = item.RepresentationType,
+                fileName = item.FileName,
+                contentType = item.ContentType,
+            }).ToArray();
             return JsonSerializer.Serialize(values);
         }
         catch (JsonException)
         {
             return JsonSerializer.Serialize(new { assetId = asset.Id });
+        }
+    }
+
+    private static void AttachAssetRepresentations(IReadOnlyList<PreparedGenerationOutput> publications)
+    {
+        var asset = publications.Select(item => item.Asset).FirstOrDefault(item => item is not null);
+        if (asset is null) return;
+        foreach (var publication in publications)
+        {
+            var file = publication.CreatedFile;
+            if (file is null) continue;
+            var representationType = file.Extension.TrimStart('.').ToLowerInvariant();
+            if (representationType is not (AssetRepresentationTypes.Docx or AssetRepresentationTypes.Pdf)) continue;
+            asset.Representations.Add(new AssetRepresentation
+            {
+                Id = Guid.NewGuid(),
+                AssetId = asset.Id,
+                StoredFileId = file.Id,
+                RepresentationType = representationType,
+                FileName = file.OriginalFileName,
+                ContentType = file.ContentType,
+                SizeBytes = file.SizeBytes,
+                CreatedAt = DateTime.UtcNow,
+            });
         }
     }
 
@@ -515,10 +551,27 @@ public sealed class GenerationJobWorker(
     private static string CancellationCode(GenerationJob job) =>
         string.Equals(job.JobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase)
             ? GenerationJobErrorCodes.ImageCancelled
-            : GenerationJobErrorCodes.Cancelled;
+            : string.Equals(job.JobType, GenerationJobTypes.DocumentGenerate, StringComparison.OrdinalIgnoreCase)
+                ? GenerationJobErrorCodes.DocumentCancelled
+                : GenerationJobErrorCodes.Cancelled;
 
     private static string MapFailureCode(Exception exception, string jobType)
     {
+        if (string.Equals(jobType, GenerationJobTypes.DocumentGenerate, StringComparison.OrdinalIgnoreCase))
+        {
+            return exception switch
+            {
+                DocumentRequestValidationException validation => validation.Code,
+                DocumentContextLimitException => GenerationJobErrorCodes.DocumentContextTooLarge,
+                DocumentOutputValidationException => GenerationJobErrorCodes.DocumentOutputInvalid,
+                FileStorageUnavailableException => GenerationJobErrorCodes.DocumentStorageFailed,
+                FileStorageOperationException => GenerationJobErrorCodes.DocumentStorageFailed,
+                FileUploadValidationException => GenerationJobErrorCodes.DocumentStorageFailed,
+                AiProviderUnavailableException => GenerationJobErrorCodes.DocumentProviderUnavailable,
+                AiProviderTimeoutException => GenerationJobErrorCodes.DocumentProviderUnavailable,
+                _ => GenerationJobErrorCodes.DocumentGenerationFailed,
+            };
+        }
         if (!string.Equals(jobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase)) return GenerationJobErrorCodes.ExecutionFailed;
         return exception switch
         {
@@ -543,7 +596,14 @@ public sealed class GenerationJobWorker(
         GenerationJobErrorCodes.ImageOutputStorageFailed => "The image was generated but could not be saved. Please try again.",
         GenerationJobErrorCodes.ImageRequestInvalid => "Please check the image request and try again.",
         GenerationJobErrorCodes.ImageCancelled => "The image generation was cancelled.",
+        GenerationJobErrorCodes.DocumentProviderUnavailable => "Document generation is temporarily unavailable. Please try again later.",
+        GenerationJobErrorCodes.DocumentContextTooLarge => "The selected source material is too large. Choose fewer or shorter documents.",
+        GenerationJobErrorCodes.DocumentOutputInvalid => "The generated document was invalid. Please try again.",
+        GenerationJobErrorCodes.DocumentStorageFailed => "The document was generated but could not be saved. Please try again.",
+        GenerationJobErrorCodes.DocumentRenderFailed => "The document could not be rendered. Please try again.",
+        GenerationJobErrorCodes.DocumentCancelled => "The document generation was cancelled.",
         _ when code.StartsWith("IMAGE_", StringComparison.Ordinal) => "The image could not be generated. Please try again.",
+        _ when code.StartsWith("DOCUMENT_", StringComparison.Ordinal) => "The document could not be generated. Please try again.",
         _ => "The job could not be completed.",
     };
 }

@@ -29,19 +29,22 @@ public sealed class OpenAiProvider(
         using var message = new HttpRequestMessage(HttpMethod.Post, BuildResponsesUrl(settings.OpenAI.BaseUrl));
         message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", settings.OpenAI.ApiKey);
         var lastMessageIndex = request.Messages.Count - 1;
-        message.Content = JsonContent.Create(new
+        var requestPayload = new Dictionary<string, object?>
         {
-            model = selection.ModelKey,
-            instructions = request.SystemInstruction,
-            input = request.Messages.Select((item, index) => new
+            ["model"] = selection.ModelKey,
+            ["instructions"] = request.SystemInstruction,
+            ["input"] = request.Messages.Select((item, index) => new
             {
                 role = item.Role,
                 content = index == lastMessageIndex && request.Attachments?.Count > 0
                     ? BuildMultimodalContent(item.Content, request.Attachments)
                     : (object)item.Content,
             }).ToArray(),
-            stream = true,
-        });
+            ["stream"] = true,
+        };
+        if (request.MaxOutputTokens is { } maxOutputTokens) requestPayload["max_output_tokens"] = maxOutputTokens;
+        if (request.JsonMode) requestPayload["text"] = new { format = new { type = "json_object" } };
+        message.Content = JsonContent.Create(requestPayload);
 
         var stopwatch = Stopwatch.StartNew();
         HttpResponseMessage response;

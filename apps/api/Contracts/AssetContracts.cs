@@ -28,7 +28,16 @@ public sealed record AssetDto(
     bool CanPreview,
     DateTime CreatedAt,
     DateTime UpdatedAt,
-    DateTime? ArchivedAt);
+    DateTime? ArchivedAt,
+    IReadOnlyList<AssetRepresentationDto> Representations);
+
+public sealed record AssetRepresentationDto(
+    Guid Id,
+    string RepresentationType,
+    string FileName,
+    string ContentType,
+    long SizeBytes,
+    DateTime CreatedAt);
 
 public sealed record AssetListDto(
     IReadOnlyList<AssetDto> Items,
@@ -62,5 +71,8 @@ public static class AssetContractMapper
         asset.StoredFileId.HasValue && asset.MimeType?.StartsWith("image/", StringComparison.OrdinalIgnoreCase) == true,
         asset.CreatedAt,
         asset.UpdatedAt,
-        asset.ArchivedAt);
+        asset.ArchivedAt,
+        asset.Representations.OrderBy(item => item.RepresentationType)
+            .Select(item => new AssetRepresentationDto(item.Id, item.RepresentationType, item.FileName, item.ContentType, item.SizeBytes, item.CreatedAt))
+            .ToArray());
 }

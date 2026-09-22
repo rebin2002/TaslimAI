@@ -21,6 +21,7 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
     public DbSet<GenerationJob> GenerationJobs => Set<GenerationJob>();
     public DbSet<GenerationJobOutput> GenerationJobOutputs => Set<GenerationJobOutput>();
     public DbSet<Asset> Assets => Set<Asset>();
+    public DbSet<AssetRepresentation> AssetRepresentations => Set<AssetRepresentation>();
     public DbSet<DataProtectionKey> DataProtectionKeys => Set<DataProtectionKey>();
 
     protected override void OnModelCreating(ModelBuilder builder)
@@ -186,6 +187,20 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasOne(asset => asset.CreatedByUser).WithMany().HasForeignKey(asset => asset.CreatedByUserId).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne(asset => asset.StoredFile).WithMany(file => file.Assets).HasForeignKey(asset => asset.StoredFileId).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne(asset => asset.SourceGenerationJob).WithMany(job => job.Assets).HasForeignKey(asset => asset.SourceGenerationJobId).OnDelete(DeleteBehavior.Restrict);
+        });
+
+        builder.Entity<AssetRepresentation>(entity =>
+        {
+            entity.HasKey(representation => representation.Id);
+            entity.Property(representation => representation.RepresentationType).HasMaxLength(30).IsRequired();
+            entity.Property(representation => representation.FileName).HasMaxLength(255).IsRequired();
+            entity.Property(representation => representation.ContentType).HasMaxLength(160).IsRequired();
+            entity.Property(representation => representation.SizeBytes).IsRequired();
+            entity.Property(representation => representation.CreatedAt).IsRequired();
+            entity.HasIndex(representation => new { representation.AssetId, representation.RepresentationType }).IsUnique();
+            entity.HasIndex(representation => representation.StoredFileId).IsUnique();
+            entity.HasOne(representation => representation.Asset).WithMany(asset => asset.Representations).HasForeignKey(representation => representation.AssetId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(representation => representation.StoredFile).WithMany(file => file.AssetRepresentations).HasForeignKey(representation => representation.StoredFileId).OnDelete(DeleteBehavior.Restrict);
         });
 
         builder.Entity<ChatMessageAttachment>(entity =>

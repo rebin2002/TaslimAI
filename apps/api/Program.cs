@@ -10,6 +10,7 @@ using Taslim.Api.Ai;
 using Taslim.Api.Assets;
 using Taslim.Api.Authorization;
 using Taslim.Api.Domain;
+using Taslim.Api.Documents;
 using Taslim.Api.Infrastructure;
 using Taslim.Api.Images;
 using Taslim.Api.Persistence;
@@ -146,6 +147,7 @@ if (builder.Configuration.GetValue("GenerationJobs:WorkerEnabled", !builder.Envi
 }
 builder.Services.Configure<AiOptions>(builder.Configuration.GetSection("Ai"));
 builder.Services.Configure<ImageGenerationOptions>(builder.Configuration.GetSection("ImageGeneration"));
+builder.Services.Configure<DocumentGenerationOptions>(builder.Configuration.GetSection("DocumentGeneration"));
 builder.Services.AddSingleton<AiModelCatalog>();
 builder.Services.AddSingleton<IAiCostCalculator, AiCostCalculator>();
 builder.Services.AddSingleton<AiContextBuilder>();
@@ -158,6 +160,10 @@ builder.Services.AddScoped<IChatCompletionService, ChatCompletionService>();
 builder.Services.AddSingleton<IImagePromptBuilder, TaslimImagePromptBuilder>();
 builder.Services.AddSingleton<IImageGenerationProvider>(services => services.GetRequiredService<OpenAiImageGenerationProvider>());
 builder.Services.AddSingleton<IGenerationJobHandler, ImageGenerationJobHandler>();
+builder.Services.AddSingleton<IDocumentPromptBuilder, DocumentPromptBuilder>();
+builder.Services.AddScoped<IDocumentGenerationProvider, AiDocumentGenerationProvider>();
+builder.Services.AddSingleton<IDocumentRenderer, DocumentRenderer>();
+builder.Services.AddScoped<IGenerationJobHandler, DocumentGenerationJobHandler>();
 builder.Services.AddScoped<FileValidationService>();
 builder.Services.AddSingleton<IFileContentExtractor, FileContentExtractor>();
 builder.Services.AddScoped<FileProcessingService>();

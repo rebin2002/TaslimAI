@@ -8,7 +8,7 @@ const asset: Asset = {
   id: "3ca880c9-a8e3-4534-8e78-a39d2e3aed74", workspaceId: "workspace-1", projectId: "project-1", projectName: "Launch",
   name: "Campaign result", description: "Reusable output", assetType: "file", mimeType: "application/json",
   status: "Active", hasFile: true, canPreview: false, createdAt: "2026-09-22T00:00:00Z",
-  updatedAt: "2026-09-22T00:00:00Z", archivedAt: null,
+  updatedAt: "2026-09-22T00:00:00Z", archivedAt: null, representations: [],
 };
 
 describe("AssetCard", () => {

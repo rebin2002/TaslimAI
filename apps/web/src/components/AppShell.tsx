@@ -20,7 +20,7 @@ export function AppShell({ children }: Readonly<{ children: React.ReactNode }>) 
         <div className="topbar-inner">
           <BrandMark />
           <nav className="desktop-nav" aria-label="Primary navigation">
-            {navigation.slice(0, 4).map((item) => {
+            {navigation.slice(0, 5).map((item) => {
               const Icon = item.icon;
               const active = activePath === item.href;
               return (
@@ -55,7 +55,7 @@ export function AppShell({ children }: Readonly<{ children: React.ReactNode }>) 
       </header>
       <main className="page-content">{children}</main>
       <nav className="mobile-bottom-nav" aria-label="Mobile navigation">
-        {navigation.filter((item) => ["/", "/projects", "/assets", "/account"].includes(item.href)).map((item) => {
+        {navigation.filter((item) => ["/", "/projects", "/assets", "/create/document", "/account"].includes(item.href)).map((item) => {
           const Icon = item.icon;
           const active = activePath === item.href;
           return (

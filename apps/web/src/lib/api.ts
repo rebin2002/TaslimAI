@@ -1,5 +1,5 @@
 import { createSseParser, type TaslimSseEvent } from "./sse";
-import { API_URL, assetFileUrl } from "./apiBase";
+import { API_URL, assetFileUrl, assetRepresentationUrl } from "./apiBase";
 
 export type User = {
   id: string;
@@ -192,6 +192,22 @@ export type ImageGenerationInput = {
   textInImage?: string | null;
 };
 export type ImageJobResult = { assetId?: string; assetType?: "image"; format?: string; width?: number | null; height?: number | null; aspectRatio?: string; quality?: string };
+export type DocumentGenerationInput = {
+  workspaceId: string;
+  projectId?: string | null;
+  title?: string | null;
+  description: string;
+  documentType?: "auto" | "report" | "proposal" | "business_letter" | "company_profile" | "meeting_minutes" | "article" | "general";
+  length?: "short" | "standard" | "detailed";
+  audience?: string | null;
+  additionalInstructions?: string | null;
+  attachmentIds: string[];
+  language?: "auto" | "en" | "ar" | "ku";
+  outputFormat?: "docx" | "pdf" | "both";
+  tone?: "professional" | "formal" | "friendly" | "persuasive" | "neutral" | "concise" | "academic";
+  includeTableOfContents?: boolean;
+};
+export type DocumentJobResult = { assetId?: string; documentType?: "document"; title?: string; language?: string; summary?: string; sections?: { heading: string; blocks: { type: string; text?: string | null; items?: string[] | null; rows?: { cells: string[] }[] | null }[] }[]; representations?: { id: string; type: string; fileName: string; contentType: string }[] };
 export type AssetStatus = "Active" | "Archived";
 export type AssetType = "image" | "document" | "presentation" | "video" | "audio" | "music" | "research" | "social" | "file" | "other";
 export type Asset = {
@@ -209,7 +225,9 @@ export type Asset = {
   createdAt: string;
   updatedAt: string;
   archivedAt: string | null;
+  representations: AssetRepresentation[];
 };
+export type AssetRepresentation = { id: string; representationType: string; fileName: string; contentType: string; sizeBytes: number; createdAt: string };
 export type AssetList = { items: Asset[]; page: number; pageSize: number; totalCount: number; totalPages: number };
 export type AssetFilters = { projectId?: string; assetType?: AssetType; status?: AssetStatus; search?: string; page?: number; pageSize?: number };
 export type AssetInput = { name: string; description?: string | null; projectId?: string | null };
@@ -335,6 +353,7 @@ export const api = {
   getAdminUsageTransaction: (id: string) => request<AdminUsageTransaction>(`/api/admin/usage/transactions/${id}`),
   createGenerationJob: (workspaceId: string, inputJson = "{}", title?: string) => request<GenerationJob>("/api/generation/jobs", { method: "POST", body: JSON.stringify({ workspaceId, jobType: "system.test", inputJson, title }) }, true),
   createImageGenerationJob: (input: ImageGenerationInput) => request<{ job: GenerationJob }>("/api/image-generation/jobs", { method: "POST", body: JSON.stringify(input) }, true).then((response) => response.job),
+  createDocumentGenerationJob: (input: DocumentGenerationInput) => request<{ job: GenerationJob }>("/api/document-generation/jobs", { method: "POST", body: JSON.stringify(input) }, true).then((response) => response.job),
   getGenerationJob: (jobId: string) => request<GenerationJob>(`/api/generation/jobs/${jobId}`),
   listGenerationJobs: (workspaceId: string, page = 1, pageSize = 20) => request<GenerationJobList>(`/api/generation/jobs?workspaceId=${encodeURIComponent(workspaceId)}&page=${page}&pageSize=${pageSize}&jobType=system.test`),
   cancelGenerationJob: (jobId: string) => request<{ status: GenerationJobStatus; cancellationRequested?: boolean }>(`/api/generation/jobs/${jobId}/cancel`, { method: "POST" }, true),
@@ -350,6 +369,7 @@ export const api = {
   archiveAsset: (assetId: string) => request<Asset>(`/api/assets/${assetId}/archive`, { method: "POST" }, true),
   restoreAsset: (assetId: string) => request<Asset>(`/api/assets/${assetId}/restore`, { method: "POST" }, true),
   assetFileUrl,
+  assetRepresentationUrl,
   listMemories: (workspaceId: string) => request<PersonalMemory[]>(`/api/workspaces/${workspaceId}/memories`),
   createMemory: (workspaceId: string, input: PersonalMemoryInput) => request<PersonalMemory>(`/api/workspaces/${workspaceId}/memories`, { method: "POST", body: JSON.stringify(input) }, true),
   updateMemory: (memoryId: string, input: PersonalMemoryInput) => request<PersonalMemory>(`/api/memories/${memoryId}`, { method: "PATCH", body: JSON.stringify(input) }, true),

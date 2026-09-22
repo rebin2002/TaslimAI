@@ -13,10 +13,10 @@ public interface IAssetService
     Task<Asset?> UpdateAsync(Guid userId, Guid assetId, UpdateAssetRequest request, CancellationToken cancellationToken = default);
     Task<Asset?> ArchiveAsync(Guid userId, Guid assetId, CancellationToken cancellationToken = default);
     Task<Asset?> RestoreAsync(Guid userId, Guid assetId, CancellationToken cancellationToken = default);
-    Task<AssetDownload?> GetDownloadAsync(Guid userId, Guid assetId, CancellationToken cancellationToken = default);
+    Task<AssetDownload?> GetDownloadAsync(Guid userId, Guid assetId, Guid? representationId = null, CancellationToken cancellationToken = default);
 }
 
-public sealed record AssetDownload(Asset Asset, StoredFile StoredFile);
+public sealed record AssetDownload(Asset Asset, StoredFile StoredFile, string FileName, string ContentType);
 
 public sealed class AssetValidationException(string code, string message) : Exception(message)
 {
@@ -86,13 +86,22 @@ public sealed class AssetService(TaslimDbContext db, WorkspaceAccessService acce
     public Task<Asset?> RestoreAsync(Guid userId, Guid assetId, CancellationToken cancellationToken = default) =>
         SetStatusAsync(userId, assetId, AssetStatus.Active, cancellationToken);
 
-    public async Task<AssetDownload?> GetDownloadAsync(Guid userId, Guid assetId, CancellationToken cancellationToken = default)
+    public async Task<AssetDownload?> GetDownloadAsync(Guid userId, Guid assetId, Guid? representationId = null, CancellationToken cancellationToken = default)
     {
         var asset = await Query().Include(item => item.StoredFile).FirstOrDefaultAsync(item => item.Id == assetId, cancellationToken);
         if (asset is null || !await access.IsMemberAsync(userId, asset.WorkspaceId, cancellationToken)) return null;
+        if (representationId.HasValue)
+        {
+            var representation = asset.Representations.FirstOrDefault(item => item.Id == representationId.Value);
+            if (representation is null) return null;
+            var representationFile = await db.StoredFiles.AsNoTracking().FirstOrDefaultAsync(file => file.Id == representation.StoredFileId, cancellationToken);
+            if (representationFile is null || representationFile.Status != StoredFileStatus.Ready)
+                throw new AssetValidationException("ASSET_FILE_UNAVAILABLE", "This document format is not available.");
+            return new AssetDownload(asset, representationFile, representation.FileName, representation.ContentType);
+        }
         if (asset.StoredFile is null || asset.StoredFile.Status != StoredFileStatus.Ready)
             throw new AssetValidationException("ASSET_FILE_UNAVAILABLE", "This asset does not have an available file.");
-        return new AssetDownload(asset, asset.StoredFile);
+        return new AssetDownload(asset, asset.StoredFile, asset.StoredFile.OriginalFileName, asset.StoredFile.ContentType);
     }
 
     private async Task<Asset?> SetStatusAsync(Guid userId, Guid assetId, AssetStatus status, CancellationToken cancellationToken)
@@ -109,7 +118,7 @@ public sealed class AssetService(TaslimDbContext db, WorkspaceAccessService acce
 
     private IQueryable<Asset> Query(bool tracking = false)
     {
-        var query = db.Assets.Include(asset => asset.Project).AsQueryable();
+        var query = db.Assets.Include(asset => asset.Project).Include(asset => asset.Representations).AsQueryable();
         return tracking ? query : query.AsNoTracking();
     }
 }

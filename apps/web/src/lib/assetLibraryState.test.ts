@@ -6,7 +6,7 @@ const asset: Asset = {
   id: "asset-1", workspaceId: "workspace-1", projectId: "project-1", projectName: "Launch",
   name: "Campaign result", description: "Reusable output", assetType: "file", mimeType: "application/json",
   status: "Active", hasFile: true, canPreview: false, createdAt: "2026-09-22T00:00:00Z",
-  updatedAt: "2026-09-22T00:00:00Z", archivedAt: null,
+  updatedAt: "2026-09-22T00:00:00Z", archivedAt: null, representations: [],
 };
 const result: AssetList = { items: [asset], page: 1, pageSize: 12, totalCount: 1, totalPages: 1 };
 const initial: AssetLibraryState = { loading: false, error: "", result: null };

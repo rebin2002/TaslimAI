@@ -53,11 +53,13 @@ public static class GenerationJobTypes
 {
     public const string SystemTest = "system.test";
     public const string ImageGenerate = "image.generate";
+    public const string DocumentGenerate = "document.generate";
 
     public static readonly IReadOnlySet<string> Supported = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
         SystemTest,
         ImageGenerate,
+        DocumentGenerate,
     };
 }
 
@@ -92,6 +94,16 @@ public static class GenerationJobErrorCodes
     public const string ImageCancelled = "IMAGE_CANCELLED";
     public const string ImageSafetyRefusal = "IMAGE_SAFETY_REFUSAL";
     public const string ImageReferenceNotSupported = "IMAGE_REFERENCE_NOT_SUPPORTED";
+    public const string DocumentRequestInvalid = "DOCUMENT_REQUEST_INVALID";
+    public const string DocumentAttachmentUnavailable = "DOCUMENT_ATTACHMENT_UNAVAILABLE";
+    public const string DocumentAttachmentExtractionFailed = "DOCUMENT_ATTACHMENT_EXTRACTION_FAILED";
+    public const string DocumentContextTooLarge = "DOCUMENT_CONTEXT_TOO_LARGE";
+    public const string DocumentProviderUnavailable = "DOCUMENT_PROVIDER_UNAVAILABLE";
+    public const string DocumentGenerationFailed = "DOCUMENT_GENERATION_FAILED";
+    public const string DocumentOutputInvalid = "DOCUMENT_OUTPUT_INVALID";
+    public const string DocumentRenderFailed = "DOCUMENT_RENDER_FAILED";
+    public const string DocumentStorageFailed = "DOCUMENT_STORAGE_FAILED";
+    public const string DocumentCancelled = "DOCUMENT_CANCELLED";
 }
 
 public static class AssetTypes
@@ -111,6 +123,12 @@ public static class AssetTypes
     {
         Image, Document, Presentation, Video, Audio, Music, Research, Social, File, Other,
     };
+}
+
+public static class AssetRepresentationTypes
+{
+    public const string Docx = "docx";
+    public const string Pdf = "pdf";
 }
 
 public enum AssetStatus
@@ -390,6 +408,7 @@ public sealed class StoredFile
     public ICollection<ChatMessageAttachment> Attachments { get; set; } = [];
     public ICollection<GenerationJobOutput> GenerationJobOutputs { get; set; } = [];
     public ICollection<Asset> Assets { get; set; } = [];
+    public ICollection<AssetRepresentation> AssetRepresentations { get; set; } = [];
 }
 
 public sealed class GenerationJob
@@ -448,6 +467,22 @@ public sealed class Asset
     public ApplicationUser CreatedByUser { get; set; } = null!;
     public StoredFile? StoredFile { get; set; }
     public GenerationJob? SourceGenerationJob { get; set; }
+    public ICollection<AssetRepresentation> Representations { get; set; } = [];
+}
+
+public sealed class AssetRepresentation
+{
+    public Guid Id { get; set; }
+    public Guid AssetId { get; set; }
+    public Guid StoredFileId { get; set; }
+    public string RepresentationType { get; set; } = string.Empty;
+    public string FileName { get; set; } = string.Empty;
+    public string ContentType { get; set; } = "application/octet-stream";
+    public long SizeBytes { get; set; }
+    public DateTime CreatedAt { get; set; }
+
+    public Asset Asset { get; set; } = null!;
+    public StoredFile StoredFile { get; set; } = null!;
 }
 
 public sealed class GenerationJobOutput

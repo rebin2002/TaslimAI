@@ -79,7 +79,7 @@ public sealed class AssetsController(
         AssetDownload? download;
         try
         {
-            download = await assets.GetDownloadAsync(GetUserId(), id, cancellationToken);
+            download = await assets.GetDownloadAsync(GetUserId(), id, cancellationToken: cancellationToken);
         }
         catch (AssetValidationException exception)
         {
@@ -87,13 +87,34 @@ public sealed class AssetsController(
         }
         if (download is null) return ApiResults.Error(this, StatusCodes.Status404NotFound, "ASSET_NOT_FOUND", "Asset not found.");
 
+        return await StreamDownloadAsync(download, inline, cancellationToken);
+    }
+
+    [HttpGet("{id:guid}/representations/{representationId:guid}/download")]
+    public async Task<IActionResult> DownloadRepresentation(Guid id, Guid representationId, CancellationToken cancellationToken)
+    {
+        AssetDownload? download;
+        try
+        {
+            download = await assets.GetDownloadAsync(GetUserId(), id, representationId, cancellationToken);
+        }
+        catch (AssetValidationException exception)
+        {
+            return ApiResults.Error(this, StatusCodes.Status409Conflict, exception.Code, exception.Message);
+        }
+        if (download is null) return ApiResults.Error(this, StatusCodes.Status404NotFound, "ASSET_NOT_FOUND", "Asset not found.");
+        return await StreamDownloadAsync(download, false, cancellationToken);
+    }
+
+    private async Task<IActionResult> StreamDownloadAsync(AssetDownload download, bool inline, CancellationToken cancellationToken)
+    {
         try
         {
             var stream = await storage.OpenReadAsync(download.StoredFile.StorageKey, cancellationToken);
             if (stream is null) return ApiResults.Error(this, StatusCodes.Status404NotFound, "ASSET_FILE_NOT_FOUND", "The asset file could not be found.");
-            if (inline && download.StoredFile.ContentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
-                return File(stream, download.StoredFile.ContentType, enableRangeProcessing: true);
-            return File(stream, download.StoredFile.ContentType, download.StoredFile.OriginalFileName, enableRangeProcessing: true);
+            if (inline && download.ContentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
+                return File(stream, download.ContentType, enableRangeProcessing: true);
+            return File(stream, download.ContentType, download.FileName, enableRangeProcessing: true);
         }
         catch (FileStorageUnavailableException)
         {
