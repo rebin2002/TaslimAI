@@ -1,0 +1,72 @@
+using Taslim.Api.Contracts;
+using Taslim.Api.Images;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
+using Taslim.Api.Domain;
+using Taslim.Api.Generation;
+using Xunit;
+
+namespace Taslim.Api.Tests;
+
+public sealed class ImageGenerationUnitTests
+{
+    [Fact]
+    public void Prompt_builder_preserves_exact_text_and_does_not_add_personal_context()
+    {
+        var builder = new TaslimImagePromptBuilder();
+        var result = builder.Build(new ImageGenerationInput(
+            "A clean product hero for a ceramic cup.",
+            "product",
+            "landscape",
+            "high",
+            "Cup hero",
+            "calm",
+            "soft stone background",
+            "Taslim",
+            null,
+            null));
+
+        Assert.Contains("A clean product hero for a ceramic cup.", result.Prompt);
+        Assert.Contains("Render exactly this requested text inside the image: \"Taslim\".", result.Prompt);
+        Assert.Contains("landscape", result.Prompt, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("memory", result.Prompt, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("provider", result.Prompt, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Image_binary_inspector_accepts_png_and_rejects_non_image_payloads()
+    {
+        var png = Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=");
+        var info = ImageBinaryInspector.Read(png);
+        Assert.NotNull(info);
+        Assert.Equal("image/png", info.ContentType);
+        Assert.Equal(1, info.Width);
+        Assert.Equal(1, info.Height);
+        Assert.Null(ImageBinaryInspector.Read("<html>error</html>"u8));
+    }
+
+    [Fact]
+    public async Task Handler_rejects_invalid_provider_output_before_returning_success()
+    {
+        var handler = new ImageGenerationJobHandler(
+            [new InvalidImageProvider()],
+            new TaslimImagePromptBuilder(),
+            Options.Create(new ImageGenerationOptions { Enabled = true }),
+            NullLogger<ImageGenerationJobHandler>.Instance);
+        var job = new GenerationJob
+        {
+            Id = Guid.NewGuid(),
+            JobType = GenerationJobTypes.ImageGenerate,
+            InputJson = System.Text.Json.JsonSerializer.Serialize(new ImageGenerationInput("A test image", "auto", "square", "standard", null, null, null, null, null, null)),
+        };
+
+        await Assert.ThrowsAsync<ImageOutputInvalidException>(() => handler.ExecuteAsync(job, new Progress<int>(), CancellationToken.None));
+    }
+
+    private sealed class InvalidImageProvider : IImageGenerationProvider
+    {
+        public string Key => "openai";
+        public Task<ImageProviderResult> GenerateAsync(ImageGenerationInput request, ImagePromptBuildResult prompt, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new ImageProviderResult("not-an-image"u8.ToArray(), "text/plain", "txt", null, null, new ImageProviderUsage(null, null, null, null, 0m)));
+    }
+}

@@ -1,6 +1,6 @@
 # Generation Job Foundation
 
-Batch 3.6 establishes a provider-independent execution foundation for Taslim’s future long-running workflows. It does **not** implement Image Studio, Movie Studio, Document Studio, Presentation Studio, Voice, Music, Research, or Social providers. The only registered job type is the deterministic internal `system.test` handler.
+Batch 3.6 establishes a provider-independent execution foundation for Taslim’s future long-running workflows. Batch 3.8 registers one real `image.generate` handler on top of that foundation; Movie Studio, Document Studio, Presentation Studio, Voice, Music, Research, and Social providers remain out of scope.
 
 ## Domain and lifecycle
 
@@ -26,7 +26,7 @@ Progress updates use independent scoped database contexts. Cancellation monitori
 
 ## Handlers
 
-Handlers implement `IGenerationJobHandler` and are independently registered. The worker discovers a handler through `CanHandle(jobType)` rather than a future-studio switch statement. `SystemTestGenerationJobHandler` performs five short asynchronous stages, reports visible progress, produces deterministic JSON, and creates a JSON output association without storing a binary file. Future handlers can use the same contract to link `GenerationJobOutput.StoredFileId` to an existing `StoredFile`; the job system does not duplicate R2 or local storage behavior.
+Handlers implement `IGenerationJobHandler` and are independently registered. The worker discovers a handler through `CanHandle(jobType)` rather than a future-studio switch statement. `SystemTestGenerationJobHandler` performs five short asynchronous stages, remains deterministic and zero-cost, and publishes its deterministic JSON artifact through the shared output path. Batch 3.8 adds `ImageGenerationJobHandler`, which validates a structured image request, builds a provider prompt, calls the registered image adapter, and returns a generic private file/Asset publication descriptor. Future handlers can use the same contract to link `GenerationJobOutput.StoredFileId` to an existing `StoredFile`; the job system does not duplicate R2 or local storage behavior.
 
 ## API and authorization
 
@@ -47,7 +47,7 @@ A job may have zero, one, or many `GenerationJobOutput` rows. Each output has a 
 
 ## Usage extension points
 
-Job creation records a `UsageTransaction` with the existing ledger using the new `Generation` feature and an idempotent `generation:{jobId}` request key. The `system.test` handler finalizes with provider cost and customer charge equal to zero. Failures and cancellations finalize the transaction as failed with zero charge. `IGenerationJobUsageService` is intentionally small: future handlers can add allowance reservation, provider-cost recording, customer-usage finalization, refund, or reversal behavior without changing the job controller or domain model. No image, movie, or other studio pricing is introduced.
+Job creation records a `UsageTransaction` with the existing ledger using `Generation` for `system.test` and `Image` for `image.generate`, always with an idempotent `generation:{jobId}` request key. The system test finalizes with zero provider cost and zero customer charge. Image jobs record provider usage/cost when available while the existing safe charging service keeps customer charge at zero. Failures and cancellations finalize as failed with zero customer charge. `IGenerationJobUsageService` is intentionally small: future handlers can add allowance reservation, provider-cost recording, customer-usage finalization, refund, or reversal behavior without changing the job controller or domain model.
 
 ## Protected validation UI
 

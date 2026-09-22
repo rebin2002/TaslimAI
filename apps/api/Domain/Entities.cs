@@ -52,10 +52,12 @@ public static class ProjectStatuses
 public static class GenerationJobTypes
 {
     public const string SystemTest = "system.test";
+    public const string ImageGenerate = "image.generate";
 
     public static readonly IReadOnlySet<string> Supported = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
         SystemTest,
+        ImageGenerate,
     };
 }
 
@@ -82,6 +84,14 @@ public static class GenerationJobErrorCodes
     public const string ExecutionFailed = "JOB_EXECUTION_FAILED";
     public const string NotCancellable = "JOB_NOT_CANCELLABLE";
     public const string NotFound = "JOB_NOT_FOUND";
+    public const string ImageRequestInvalid = "IMAGE_REQUEST_INVALID";
+    public const string ImageProviderUnavailable = "IMAGE_PROVIDER_UNAVAILABLE";
+    public const string ImageGenerationFailed = "IMAGE_GENERATION_FAILED";
+    public const string ImageOutputInvalid = "IMAGE_OUTPUT_INVALID";
+    public const string ImageOutputStorageFailed = "IMAGE_OUTPUT_STORAGE_FAILED";
+    public const string ImageCancelled = "IMAGE_CANCELLED";
+    public const string ImageSafetyRefusal = "IMAGE_SAFETY_REFUSAL";
+    public const string ImageReferenceNotSupported = "IMAGE_REFERENCE_NOT_SUPPORTED";
 }
 
 public static class AssetTypes

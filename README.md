@@ -1,6 +1,6 @@
 # Taslim.ai
 
-Taslim.ai is a multilingual AI platform foundation designed to make professional AI capabilities simple, fast, and approachable. **Batch 3.2 adds the first production AI provider and provider-independent streaming. Batch 3.3 adds the internal usage ledger and zero-charge accounting foundation. Batch 3.4 adds user-approved memory and project-scoped context. Batch 3.5 adds secure file storage, bounded document extraction, and explicit chat attachments. Batch 3.6 adds the persistent provider-independent Generation Job foundation. Batch 3.7 adds the unified reusable Asset architecture and product library.**
+Taslim.ai is a multilingual AI platform foundation designed to make professional AI capabilities simple, fast, and approachable. **Batch 3.2 adds the first production AI provider and provider-independent streaming. Batch 3.3 adds the internal usage ledger and zero-charge accounting foundation. Batch 3.4 adds user-approved memory and project-scoped context. Batch 3.5 adds secure file storage, bounded document extraction, and explicit chat attachments. Batch 3.6 adds the persistent provider-independent Generation Job foundation. Batch 3.7 adds the unified reusable Asset architecture and product library. Batch 3.8 adds the first real Image Studio on top of those foundations.**
 
 ## Architecture
 
@@ -14,7 +14,7 @@ Taslim API (ASP.NET Core Identity + Web API)
         +---- PostgreSQL (EF Core / Npgsql)
 ```
 
-The browser owns presentation and navigation. The API owns authentication, authorization, persistence, and AI Core orchestration. Provider secrets must never be sent to browser clients. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/AUTHENTICATION.md](docs/AUTHENTICATION.md), [docs/CHAT_ARCHITECTURE.md](docs/CHAT_ARCHITECTURE.md), [docs/FILES_ARCHITECTURE.md](docs/FILES_ARCHITECTURE.md), [docs/GENERATION_JOBS_ARCHITECTURE.md](docs/GENERATION_JOBS_ARCHITECTURE.md), and [docs/ASSET_ARCHITECTURE.md](docs/ASSET_ARCHITECTURE.md).
+The browser owns presentation and navigation. The API owns authentication, authorization, persistence, and AI Core orchestration. Provider secrets must never be sent to browser clients. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/AUTHENTICATION.md](docs/AUTHENTICATION.md), [docs/CHAT_ARCHITECTURE.md](docs/CHAT_ARCHITECTURE.md), [docs/FILES_ARCHITECTURE.md](docs/FILES_ARCHITECTURE.md), [docs/GENERATION_JOBS_ARCHITECTURE.md](docs/GENERATION_JOBS_ARCHITECTURE.md), [docs/ASSET_ARCHITECTURE.md](docs/ASSET_ARCHITECTURE.md), and [docs/IMAGE_STUDIO_ARCHITECTURE.md](docs/IMAGE_STUDIO_ARCHITECTURE.md).
 
 ## Repository structure
 
@@ -32,6 +32,7 @@ docs/
   FILES_ARCHITECTURE.md File storage, extraction, attachments, and security
   GENERATION_JOBS_ARCHITECTURE.md Persistent job lifecycle, queue, worker, and handlers
   ASSET_ARCHITECTURE.md Unified Asset model, publication, private downloads, lifecycle, and UI
+  IMAGE_STUDIO_ARCHITECTURE.md Image request, provider, output, usage, safety, and UI boundaries
 ```
 
 ## Requirements
@@ -134,6 +135,7 @@ Railway terminates TLS at its ingress proxy, so the API uses ASP.NET Core Forwar
 - Upload and manage project files at `/projects/[projectId]`
 - Attach explicitly selected ready files to chat messages
 - Validate the persistent system test job foundation at `/account/generation-jobs`
+- Create an image asynchronously at `/create/image`, poll progress, cancel eligible jobs, and preview/download the private result
 - Find, filter, rename, reassign, archive, restore, and download reusable outputs at `/assets`
 - View project-assigned Assets from `/projects/[projectId]`
 
@@ -166,7 +168,7 @@ ConnectionStrings__Postgres='Host=localhost;Port=5432;Database=taslim;Username=t
 dotnet run --project apps/api
 ```
 
-Production startup migrations use a PostgreSQL advisory lock and fail clearly if a migration cannot be applied. Do not run development reset commands against Production.
+Production startup migrations use a PostgreSQL advisory lock and fail clearly if a migration cannot be applied. Batch 3.8 adds no schema migration: it reuses `GenerationJobs`, `GenerationJobOutputs`, `StoredFiles`, `Assets`, and `UsageTransactions`. Do not run development reset commands against Production.
 
 ## Tests
 
@@ -176,7 +178,7 @@ Run the API integration suite:
 dotnet test apps/api.Tests/Taslim.Api.Tests.csproj
 ```
 
-The suite covers registration, duplicate email, login failure, session/logout, personal workspace ownership, project lifecycle, chat persistence, mock AI execution, tier routing, provider failure, context trimming, usage/cost calculation, provider-independent stream events, SSE persistence, terminal failure events, deterministic multi-turn ordering, idempotency, usage ledger behavior, message history, cross-workspace authorization, CSRF enforcement, upload validation, bounded extraction, file ownership, normalized chat attachments, durable Generation Job claiming/cancellation/recovery, generated-file publication, Asset provenance, project inheritance, search/filter/pagination, archive/restore, authorized download, and failed/cancelled no-Asset behavior. Frontend Vitest coverage includes streaming lifecycle and Asset Library loading, empty, update, archive, restore, safe-display, and card rendering states. Tests use relational SQLite so transactions and foreign keys are exercised realistically.
+The suite covers registration, duplicate email, login failure, session/logout, personal workspace ownership, project lifecycle, chat persistence, mock AI execution, tier routing, provider failure, context trimming, usage/cost calculation, provider-independent stream events, SSE persistence, terminal failure events, deterministic multi-turn ordering, idempotency, usage ledger behavior, message history, cross-workspace authorization, CSRF enforcement, upload validation, bounded extraction, file ownership, normalized chat attachments, durable Generation Job claiming/cancellation/recovery, generated-file publication, Asset provenance, project inheritance, search/filter/pagination, archive/restore, authorized download, failed/cancelled no-Asset behavior, Image Studio validation, provider-independent deterministic image execution, private PNG publication, image usage cost, and safe provider refusal. Frontend Vitest coverage includes streaming lifecycle, Asset Library loading, empty, update, archive, restore, safe-display, and card rendering states, plus Image Studio progress/result/cancellation and provider-detail redaction states. Tests use relational SQLite so transactions and foreign keys are exercised realistically.
 
 ## Railway deployment
 
@@ -231,7 +233,7 @@ Ai__FileContextBudgetTokens=4000
 
 `appsettings.Production.json` enables `Database__ApplyMigrations=true`. The API Dockerfile uses a multi-stage .NET 8 build and binds to port 8080. Railway should route its provided service port to the container; if the platform requires an explicit variable, set `ASPNETCORE_HTTP_PORTS=8080`.
 
-The OpenAI key belongs only on the Taslim API service. Do not add it to Taslim Web variables, source code, Docker build arguments, or browser bundles. `Ai__OpenAI__BaseUrl` is optional and defaults server-side to `https://api.openai.com/v1`. `Ai__DefaultChatTier=Smart` is the internal default; ordinary users do not select provider models. Production disables mock fallback, so a missing/failed OpenAI configuration returns a safe generation error rather than a simulated answer. For R2, the API uses the AWS SDK S3 adapter with the private account endpoint, region `auto`, bucket, access key, and secret shown above; none of these variables belong on Taslim Web. If R2 settings are incomplete or the provider name is unknown, the API returns a safe storage-unavailable error and never falls back to ephemeral Railway filesystem storage. No new Railway variable is required for forwarded HTTPS. If a future hosting topology uses a fixed private proxy, explicit proxy IPs may be supplied as `ForwardedHeaders:KnownProxies:0`, `ForwardedHeaders:KnownProxies:1`, and so on; do not add arbitrary client IPs.
+The OpenAI key belongs only on the Taslim API service. Do not add it to Taslim Web variables, source code, Docker build arguments, or browser bundles. `Ai__OpenAI__BaseUrl` is optional and defaults server-side to `https://api.openai.com/v1`. `Ai__DefaultChatTier=Smart` is the internal default; ordinary users do not select provider models. Production disables mock fallback, so a missing/failed OpenAI configuration returns a safe generation error rather than a simulated answer. Image Studio reuses the same existing API key through the server-only Images API adapter; its enabled flag, model, limits, moderation, and configurable token rates are committed API settings under `ImageGeneration` and can be overridden server-side if needed, but no new Railway variable is required. The existing `Ai__OpenAI__Enabled=true` and `Ai__OpenAI__ApiKey` settings must remain configured for both chat and image generation. For R2, the API uses the AWS SDK S3 adapter with the private account endpoint, region `auto`, bucket, access key, and secret shown above; none of these variables belong on Taslim Web. If R2 settings are incomplete or the provider name is unknown, the API returns a safe storage-unavailable error and never falls back to ephemeral Railway filesystem storage. No new Railway variable is required for forwarded HTTPS. If a future hosting topology uses a fixed private proxy, explicit proxy IPs may be supplied as `ForwardedHeaders:KnownProxies:0`, `ForwardedHeaders:KnownProxies:1`, and so on; do not add arbitrary client IPs.
 
 ### PostgreSQL
 
@@ -239,9 +241,9 @@ Use Railway’s managed PostgreSQL service and a private service reference for t
 
 ## Scope boundary
 
-Included through Batch 3.7: the conversation and streaming foundation, server-only OpenAI chat adapter, internal model routing, zero-charge usage ledger, user-approved memory, project context, secure private file storage, bounded extraction, explicit chat attachments, durable provider-independent Generation Jobs, generated-output publication, and the unified reusable Asset Library. Authentication, CSRF, workspace/project authorization, localization, RTL behavior, persistent Data Protection, and Railway deployment architecture remain intact.
+Included through Batch 3.8: the conversation and streaming foundation, server-only OpenAI chat adapter, internal model routing, zero-charge usage ledger, user-approved memory, project context, secure private file storage, bounded extraction, explicit chat attachments, durable provider-independent Generation Jobs, generated-output publication, the unified reusable Asset Library, and the focused Image Studio MVP. Authentication, CSRF, workspace/project authorization, localization, RTL behavior, persistent Data Protection, and Railway deployment architecture remain intact.
 
-Not included: Anthropic, Gemini, automatic cross-provider fallback, Image, Movie, Document, Presentation, Voice, Music, Research, or Social studios/providers, real media generation, web search, vector databases, embeddings, RAG, tool calling, agents, billing, credits, subscriptions, payment processing, team chat sharing, admin, invitations, business workspace creation, social login, or native mobile apps. Batch 3.7 adds the shared Asset destination and extension contract only.
+Not included: Anthropic, Gemini, automatic cross-provider fallback, Movie, Document, Presentation, Voice, Music, Research, or Social studios/providers, image editing/reference-image workflows, web search, vector databases, embeddings, RAG, tool calling, agents, billing, credits, subscriptions, payment processing, team chat sharing, admin, invitations, business workspace creation, social login, or native mobile apps. Batch 3.8 adds one server-only OpenAI image generation path; it does not add those other studios or expose provider choice to users.
 
 ## Batch 3.3 usage ledger
 
@@ -270,3 +272,9 @@ Batch 3.6 adds the database-backed `GenerationJob` queue, atomic PostgreSQL clai
 Batch 3.7 adds `Asset` as the reusable product layer above private `StoredFile` metadata and immutable `GenerationJobOutput` provenance. Successful `system.test` execution writes a deterministic JSON artifact through the configured storage adapter, links the output, and publishes one Asset in the same workspace and optional project. Failed or cancelled jobs publish no Asset, and system-test usage remains zero.
 
 Authenticated `/api/assets` routes support paginated listing, text/type/project/status filters, get, metadata updates, project assignment/removal, archive, restore, and authorized private-file streaming. `/assets` provides the localized English, Arabic, and Kurdish Sorani product library, while project details show project-assigned Assets. See [docs/ASSET_ARCHITECTURE.md](docs/ASSET_ARCHITECTURE.md) for extension rules future handlers must follow.
+
+## Batch 3.8 Image Studio
+
+Batch 3.8 registers `image.generate` on the durable Generation Job worker and adds `POST /api/image-generation/jobs`. The protected `/create/image` page collects a bounded description plus structured style, aspect ratio, quality, project, mood, background, title, and exact-text controls. It polls the existing job snapshot API, displays progress and safe failures, supports cooperative cancellation, and shows a private Asset preview after success. Successful image jobs create one `StoredFile`, one `GenerationJobOutput`, and one reusable `image` Asset; failed or cancelled jobs publish none.
+
+The API uses the server-only OpenAI Images adapter configured for `gpt-image-2.5-sunburst`. Provider/model selection, prompts after enrichment, credentials, storage keys, raw provider payloads, and moderation details never enter browser responses. The existing zero-customer-charge usage service records `UsageFeature.Image` and configured provider cost metadata for internal accounting. Reference-image editing remains explicitly deferred. See [docs/IMAGE_STUDIO_ARCHITECTURE.md](docs/IMAGE_STUDIO_ARCHITECTURE.md).

@@ -152,7 +152,12 @@ public sealed class GenerationJobsTests : IClassFixture<GenerationJobsApiFactory
         using var client = factory.CreateClient();
         var auth = await Register(client, $"jobs-cancel-running-{Guid.NewGuid():N}@example.com");
         var created = await SendWithCsrf<GenerationJobDto>(client, HttpMethod.Post, "/api/generation/jobs", new { workspaceId = auth.PersonalWorkspace.Id, jobType = "system.test", inputJson = "{}" });
-        await Task.Delay(120);
+        for (var attempt = 0; attempt < 40; attempt++)
+        {
+            var current = await client.GetFromJsonAsync<GenerationJobDto>($"/api/generation/jobs/{created.Id}");
+            if (current?.Status == "Running") break;
+            await Task.Delay(10);
+        }
         var cancel = await SendWithCsrf(client, HttpMethod.Post, $"/api/generation/jobs/{created.Id}/cancel", null);
         Assert.True(cancel.StatusCode is HttpStatusCode.OK or HttpStatusCode.Accepted, await cancel.Content.ReadAsStringAsync());
         var terminal = await WaitForTerminal(client, created.Id);
@@ -197,7 +202,7 @@ public sealed class GenerationJobsTests : IClassFixture<GenerationJobsApiFactory
     {
         using var client = factory.CreateClient();
         var auth = await Register(client, $"jobs-type-{Guid.NewGuid():N}@example.com");
-        var response = await SendWithCsrf(client, HttpMethod.Post, "/api/generation/jobs", new { workspaceId = auth.PersonalWorkspace.Id, jobType = "image.generate", inputJson = "{}" });
+        var response = await SendWithCsrf(client, HttpMethod.Post, "/api/generation/jobs", new { workspaceId = auth.PersonalWorkspace.Id, jobType = "unsupported.generate", inputJson = "{}" });
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
         var body = await response.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal("JOB_TYPE_NOT_SUPPORTED", body.GetProperty("error").GetProperty("code").GetString());

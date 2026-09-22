@@ -154,6 +154,19 @@ export type GenerationJob = {
   outputs: GenerationJobOutput[];
 };
 export type GenerationJobList = { items: GenerationJob[]; page: number; pageSize: number; totalCount: number; totalPages: number };
+export type ImageGenerationInput = {
+  workspaceId: string;
+  projectId?: string | null;
+  description: string;
+  style: string;
+  aspectRatio: string;
+  quality: string;
+  title?: string | null;
+  mood?: string | null;
+  background?: string | null;
+  textInImage?: string | null;
+};
+export type ImageJobResult = { assetId?: string; assetType?: "image"; format?: string; width?: number | null; height?: number | null; aspectRatio?: string; quality?: string };
 export type AssetStatus = "Active" | "Archived";
 export type AssetType = "image" | "document" | "presentation" | "video" | "audio" | "music" | "research" | "social" | "file" | "other";
 export type Asset = {
@@ -291,6 +304,7 @@ export const api = {
   getUsageSummary: (workspaceId: string) => request<UsageSummary>(`/api/workspaces/${workspaceId}/usage/summary`),
   getUsageHistory: (workspaceId: string, page = 1, pageSize = 20) => request<UsageHistory>(`/api/workspaces/${workspaceId}/usage?page=${page}&pageSize=${pageSize}`),
   createGenerationJob: (workspaceId: string, inputJson = "{}", title?: string) => request<GenerationJob>("/api/generation/jobs", { method: "POST", body: JSON.stringify({ workspaceId, jobType: "system.test", inputJson, title }) }, true),
+  createImageGenerationJob: (input: ImageGenerationInput) => request<{ job: GenerationJob }>("/api/image-generation/jobs", { method: "POST", body: JSON.stringify(input) }, true).then((response) => response.job),
   getGenerationJob: (jobId: string) => request<GenerationJob>(`/api/generation/jobs/${jobId}`),
   listGenerationJobs: (workspaceId: string, page = 1, pageSize = 20) => request<GenerationJobList>(`/api/generation/jobs?workspaceId=${encodeURIComponent(workspaceId)}&page=${page}&pageSize=${pageSize}&jobType=system.test`),
   cancelGenerationJob: (jobId: string) => request<{ status: GenerationJobStatus; cancellationRequested?: boolean }>(`/api/generation/jobs/${jobId}/cancel`, { method: "POST" }, true),

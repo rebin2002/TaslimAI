@@ -6,7 +6,7 @@ using Taslim.Api.Persistence;
 
 namespace Taslim.Api.Assets;
 
-public sealed record GeneratedFileArtifact(string FileName, string ContentType, ReadOnlyMemory<byte> Content);
+public sealed record GeneratedFileArtifact(string FileName, string ContentType, ReadOnlyMemory<byte> Content, string? MetadataJson = null);
 public sealed record GeneratedAssetDescriptor(string Name, string? Description, string AssetType, string? MetadataJson = null);
 public sealed record PreparedGenerationOutput(GenerationJobOutput Output, Asset? Asset, StoredFile? CreatedFile);
 
@@ -33,6 +33,7 @@ public sealed class GeneratedAssetPublisher(TaslimDbContext db, FileProcessingSe
                 output.FileArtifact.FileName,
                 output.FileArtifact.ContentType,
                 output.FileArtifact.Content,
+                output.FileArtifact.MetadataJson,
                 cancellationToken);
             storedFileId = createdFile.Id;
         }

@@ -6,6 +6,8 @@ using Taslim.Api.Assets;
 using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
+using Taslim.Api.Files;
+using Taslim.Api.Images;
 using Taslim.Api.Persistence;
 using Taslim.Api.Usage;
 
@@ -54,7 +56,7 @@ public sealed record GenerationHandlerOutput(
     string? MetadataJson,
     GeneratedFileArtifact? FileArtifact = null,
     GeneratedAssetDescriptor? Asset = null);
-public sealed record GenerationHandlerResult(string ResultJson, IReadOnlyList<GenerationHandlerOutput> Outputs);
+public sealed record GenerationHandlerResult(string ResultJson, IReadOnlyList<GenerationHandlerOutput> Outputs, AiUsageMetadata? Usage = null);
 
 public interface IGenerationJobHandler
 {
@@ -83,14 +85,14 @@ public sealed class SystemTestGenerationJobHandler : IGenerationJobHandler
         var metadata = JsonSerializer.Serialize(new { deterministic = true, stageCount = 5 });
         var artifact = new GeneratedFileArtifact("generation-result.json", "application/json", System.Text.Encoding.UTF8.GetBytes(result));
         var asset = new GeneratedAssetDescriptor(job.Title ?? "Generation result", "Deterministic system test output.", AssetTypes.File, metadata);
-        return new GenerationHandlerResult(result, [new GenerationHandlerOutput(GenerationJobOutputTypes.StoredFile, null, metadata, artifact, asset)]);
+        return new GenerationHandlerResult(result, [new GenerationHandlerOutput(GenerationJobOutputTypes.StoredFile, null, metadata, artifact, asset)], new AiUsageMetadata("system", "system.test", null, null, null, 0m, 0m, 0, "completed", true));
     }
 }
 
 public interface IGenerationJobUsageService
 {
     Task<UsageTransaction> BeginAsync(GenerationJob job, CancellationToken cancellationToken = default);
-    Task CompleteAsync(UsageTransaction transaction, CancellationToken cancellationToken = default);
+    Task CompleteAsync(UsageTransaction transaction, AiUsageMetadata usage, CancellationToken cancellationToken = default);
     Task FailAsync(UsageTransaction transaction, string failureCode, CancellationToken cancellationToken = default);
 }
 
@@ -103,21 +105,11 @@ public sealed class GenerationJobUsageService(IUsageLedgerService ledger) : IGen
             job.ProjectId,
             null,
             $"generation:{job.Id:N}",
-            UsageFeature.Generation,
+            string.Equals(job.JobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase) ? UsageFeature.Image : UsageFeature.Generation,
             cancellationToken);
 
-    public Task CompleteAsync(UsageTransaction transaction, CancellationToken cancellationToken = default) =>
-        ledger.CompleteAsync(transaction, new AiUsageMetadata(
-            "system",
-            "system.test",
-            null,
-            null,
-            null,
-            0m,
-            0m,
-            0,
-            "completed",
-            true), cancellationToken);
+    public Task CompleteAsync(UsageTransaction transaction, AiUsageMetadata usage, CancellationToken cancellationToken = default) =>
+        ledger.CompleteAsync(transaction, usage, cancellationToken);
 
     public Task FailAsync(UsageTransaction transaction, string failureCode, CancellationToken cancellationToken = default) =>
         ledger.FailAsync(transaction, failureCode, cancellationToken: cancellationToken);
@@ -222,13 +214,13 @@ public sealed class GenerationJobService(
             .Where(item => item.Id == jobId && (item.Status == GenerationJobStatus.Pending || item.Status == GenerationJobStatus.Queued))
             .ExecuteUpdateAsync(setters => setters
                 .SetProperty(item => item.Status, GenerationJobStatus.Cancelled)
-                .SetProperty(item => item.ErrorCode, GenerationJobErrorCodes.Cancelled)
+                .SetProperty(item => item.ErrorCode, CancellationCode(job))
                 .SetProperty(item => item.ErrorMessage, "The job was cancelled.")
                 .SetProperty(item => item.ProgressPercent, 0)
                 .SetProperty(item => item.CancelledAt, now), cancellationToken);
         if (immediate > 0)
         {
-            await FailUsageAsync(job, GenerationJobErrorCodes.Cancelled, cancellationToken);
+            await FailUsageAsync(job, CancellationCode(job), cancellationToken);
             return GenerationJobCancelResult.Cancelled;
         }
 
@@ -243,6 +235,11 @@ public sealed class GenerationJobService(
         var transaction = await usage.BeginAsync(job, cancellationToken);
         await usage.FailAsync(transaction, code, cancellationToken);
     }
+
+    private static string CancellationCode(GenerationJob job) =>
+        string.Equals(job.JobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase)
+            ? GenerationJobErrorCodes.ImageCancelled
+            : GenerationJobErrorCodes.Cancelled;
 }
 
 public sealed class GenerationJobValidationException(string code, string message) : Exception(message)
@@ -378,6 +375,12 @@ public sealed class GenerationJobWorker(
             {
                 publications.Add(await publisher.PrepareAsync(current, output, stoppingToken));
             }
+            var resultJson = AddPublishedAssetReference(result.ResultJson, publications);
+            if (result.Usage is not null)
+            {
+                current.Provider = result.Usage.ProviderKey;
+                current.ProviderModel = result.Usage.ModelKey;
+            }
 
             int completed;
             await using (var completionTransaction = await db.Database.BeginTransactionAsync(stoppingToken))
@@ -394,7 +397,9 @@ public sealed class GenerationJobWorker(
                     .ExecuteUpdateAsync(setters => setters
                         .SetProperty(item => item.Status, GenerationJobStatus.Succeeded)
                         .SetProperty(item => item.ProgressPercent, 100)
-                        .SetProperty(item => item.ResultJson, result.ResultJson)
+                        .SetProperty(item => item.ResultJson, resultJson)
+                        .SetProperty(item => item.Provider, result.Usage == null ? null : result.Usage.ProviderKey)
+                        .SetProperty(item => item.ProviderModel, result.Usage == null ? null : result.Usage.ModelKey)
                         .SetProperty(item => item.CompletedAt, completedAt)
                         .SetProperty(item => item.ClaimExpiresAt, (DateTime?)null), stoppingToken);
                 if (completed > 0) await completionTransaction.CommitAsync(stoppingToken);
@@ -408,7 +413,7 @@ public sealed class GenerationJobWorker(
             }
             publicationCommitted = true;
             var transaction = await usage.BeginAsync(current, stoppingToken);
-            await usage.CompleteAsync(transaction, stoppingToken);
+            await usage.CompleteAsync(transaction, result.Usage ?? new AiUsageMetadata("system", "unknown", null, null, null, 0m, 0m, 0, "completed", true), stoppingToken);
         }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
         {
@@ -420,8 +425,9 @@ public sealed class GenerationJobWorker(
         {
             if (!publicationCommitted)
                 foreach (var publication in publications) await publisher.DiscardAsync(publication, CancellationToken.None);
-            logger.LogError(exception, "Generation job execution failed. JobId={JobId}; JobType={JobType}", claimedJob.Id, claimedJob.JobType);
-            await FailAsync(db, usage, claimedJob, GenerationJobErrorCodes.ExecutionFailed, "The job could not be completed.", stoppingToken);
+            var failureCode = MapFailureCode(exception, claimedJob.JobType);
+            logger.LogError(exception, "Generation job execution failed. JobId={JobId}; JobType={JobType}; FailureCode={FailureCode}", claimedJob.Id, claimedJob.JobType, failureCode);
+            await FailAsync(db, usage, claimedJob, failureCode, FailureMessage(failureCode), stoppingToken);
         }
         finally
         {
@@ -453,18 +459,37 @@ public sealed class GenerationJobWorker(
             .ExecuteUpdateAsync(setters => setters.SetProperty(job => job.ProgressPercent, Math.Clamp(progress, 0, 100)), cancellationToken);
     }
 
+    private static string AddPublishedAssetReference(string resultJson, IReadOnlyList<PreparedGenerationOutput> publications)
+    {
+        var asset = publications.Select(item => item.Asset).FirstOrDefault(item => item is not null);
+        if (asset is null) return resultJson;
+        try
+        {
+            using var document = JsonDocument.Parse(resultJson);
+            if (document.RootElement.ValueKind != JsonValueKind.Object) return resultJson;
+            var values = new Dictionary<string, object?>();
+            foreach (var property in document.RootElement.EnumerateObject()) values[property.Name] = property.Value.Clone();
+            values["assetId"] = asset.Id;
+            return JsonSerializer.Serialize(values);
+        }
+        catch (JsonException)
+        {
+            return JsonSerializer.Serialize(new { assetId = asset.Id });
+        }
+    }
+
     private static async Task CancelRunningAsync(TaslimDbContext db, IGenerationJobUsageService usage, GenerationJob job, CancellationToken cancellationToken)
     {
         var now = DateTime.UtcNow;
         await db.GenerationJobs.Where(item => item.Id == job.Id && item.Status == GenerationJobStatus.Running)
             .ExecuteUpdateAsync(setters => setters
                 .SetProperty(item => item.Status, GenerationJobStatus.Cancelled)
-                .SetProperty(item => item.ErrorCode, GenerationJobErrorCodes.Cancelled)
+                .SetProperty(item => item.ErrorCode, CancellationCode(job))
                 .SetProperty(item => item.ErrorMessage, "The job was cancelled.")
                 .SetProperty(item => item.CancelledAt, now)
                 .SetProperty(item => item.ClaimExpiresAt, (DateTime?)null), cancellationToken);
         var transaction = await usage.BeginAsync(job, cancellationToken);
-        await usage.FailAsync(transaction, GenerationJobErrorCodes.Cancelled, cancellationToken);
+        await usage.FailAsync(transaction, CancellationCode(job), cancellationToken);
     }
 
     private static async Task FailAsync(TaslimDbContext db, IGenerationJobUsageService usage, GenerationJob job, string code, string message, CancellationToken cancellationToken)
@@ -480,4 +505,39 @@ public sealed class GenerationJobWorker(
         var transaction = await usage.BeginAsync(job, cancellationToken);
         await usage.FailAsync(transaction, code, cancellationToken);
     }
+
+    private static string CancellationCode(GenerationJob job) =>
+        string.Equals(job.JobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase)
+            ? GenerationJobErrorCodes.ImageCancelled
+            : GenerationJobErrorCodes.Cancelled;
+
+    private static string MapFailureCode(Exception exception, string jobType)
+    {
+        if (!string.Equals(jobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase)) return GenerationJobErrorCodes.ExecutionFailed;
+        return exception switch
+        {
+            ImageRequestValidationException validation => validation.Code,
+            ImageProviderUnavailableException => GenerationJobErrorCodes.ImageProviderUnavailable,
+            ImageProviderTimeoutException => GenerationJobErrorCodes.ImageProviderUnavailable,
+            ImageProviderSafetyException => GenerationJobErrorCodes.ImageSafetyRefusal,
+            ImageOutputInvalidException => GenerationJobErrorCodes.ImageOutputInvalid,
+            ImageProviderFailureException failure => failure.SafeCode,
+            FileStorageUnavailableException => GenerationJobErrorCodes.ImageOutputStorageFailed,
+            FileStorageOperationException => GenerationJobErrorCodes.ImageOutputStorageFailed,
+            FileUploadValidationException => GenerationJobErrorCodes.ImageOutputStorageFailed,
+            _ => GenerationJobErrorCodes.ImageGenerationFailed,
+        };
+    }
+
+    private static string FailureMessage(string code) => code switch
+    {
+        GenerationJobErrorCodes.ImageProviderUnavailable => "Image generation is temporarily unavailable. Please try again later.",
+        GenerationJobErrorCodes.ImageSafetyRefusal => "This request could not be completed by the image safety system. Try a different description.",
+        GenerationJobErrorCodes.ImageOutputInvalid => "The image result was invalid. Please try again.",
+        GenerationJobErrorCodes.ImageOutputStorageFailed => "The image was generated but could not be saved. Please try again.",
+        GenerationJobErrorCodes.ImageRequestInvalid => "Please check the image request and try again.",
+        GenerationJobErrorCodes.ImageCancelled => "The image generation was cancelled.",
+        _ when code.StartsWith("IMAGE_", StringComparison.Ordinal) => "The image could not be generated. Please try again.",
+        _ => "The job could not be completed.",
+    };
 }

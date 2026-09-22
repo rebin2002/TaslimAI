@@ -157,4 +157,6 @@ export const routeLabels: Record<string, string> = {
 };
 
 export const featureRoute = (departmentId: string, featureId: string) =>
-  `/${departmentId === "media" ? "media" : departmentId}/${featureId}`;
+  departmentId === "media" && featureId === "images"
+    ? "/create/image"
+    : `/${departmentId === "media" ? "media" : departmentId}/${featureId}`;
