@@ -1,3 +1,5 @@
+using Taslim.Api.Domain;
+
 namespace Taslim.Api.Images;
 
 public sealed class ImageGenerationOptions
@@ -10,6 +12,10 @@ public sealed class ImageGenerationOptions
     public int MaxTitleCharacters { get; set; } = 160;
     public int MaxImagesPerJob { get; set; } = 1;
     public int MaxOutputBytes { get; set; } = 10 * 1_048_576;
+    public string PricingVersion { get; set; } = "gpt-image-2.5-sunburst-2026-09-08";
+    public DateTime PricingEffectiveDateUtc { get; set; } = new(2026, 9, 8, 0, 0, 0, DateTimeKind.Utc);
+    public string PricingSource { get; set; } = "https://developers.openai.com/api/docs/models/gpt-image-2.5-sunburst";
+    public string Currency { get; set; } = "USD";
     public ImagePricingOptions Pricing { get; set; } = new();
 }
 
@@ -21,6 +27,24 @@ public sealed class ImagePricingOptions
     public decimal ImageInputUsdPerMillion { get; set; } = 8m;
     public decimal CachedImageInputUsdPerMillion { get; set; } = 2m;
     public decimal ImageOutputUsdPerMillion { get; set; } = 30m;
+
+    public UsagePricingSnapshot ToSnapshot(ImageGenerationOptions options) => new(
+        options.ProviderKey,
+        options.Model,
+        options.PricingVersion,
+        options.PricingEffectiveDateUtc.Kind == DateTimeKind.Unspecified
+            ? DateTime.SpecifyKind(options.PricingEffectiveDateUtc, DateTimeKind.Utc)
+            : options.PricingEffectiveDateUtc.ToUniversalTime(),
+        "USD per 1M tokens",
+        options.PricingSource,
+        new Dictionary<string, decimal>
+        {
+            ["textInput"] = TextInputUsdPerMillion,
+            ["cachedTextInput"] = CachedTextInputUsdPerMillion,
+            ["imageInput"] = ImageInputUsdPerMillion,
+            ["cachedImageInput"] = CachedImageInputUsdPerMillion,
+            ["imageOutput"] = ImageOutputUsdPerMillion,
+        });
 }
 
 public sealed class ImageProviderUnavailableException() : Exception("The configured image provider is unavailable.");

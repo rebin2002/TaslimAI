@@ -18,6 +18,8 @@ public sealed class CreateGenerationJobRequest
 
     [Required, StringLength(100_000)]
     public string InputJson { get; set; } = "{}";
+
+    public decimal? EstimatedProviderCostUsd { get; set; }
 }
 
 public sealed record GenerationJobOutputDto(

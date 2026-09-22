@@ -299,6 +299,7 @@ public enum UsageTransactionStatus
     Pending,
     Completed,
     Failed,
+    Cancelled,
     Refunded,
 }
 
@@ -473,6 +474,7 @@ public sealed class UsageTransaction
     public Guid UserId { get; set; }
     public Guid? ProjectId { get; set; }
     public Guid? ConversationId { get; set; }
+    public Guid? GenerationJobId { get; set; }
     public string RequestId { get; set; } = string.Empty;
     public UsageFeature Feature { get; set; }
     public string Provider { get; set; } = string.Empty;
@@ -481,12 +483,26 @@ public sealed class UsageTransaction
     public int? InputTokens { get; set; }
     public int? CachedInputTokens { get; set; }
     public int? OutputTokens { get; set; }
+    public int? ImageInputTokens { get; set; }
+    public int? ImageOutputTokens { get; set; }
+    public int? LatencyMs { get; set; }
+    public decimal? EstimatedProviderCostUsd { get; set; }
     public decimal ProviderCostUsd { get; set; }
     public decimal ChargedAmount { get; set; }
     public UsageChargeUnit ChargedUnit { get; set; } = UsageChargeUnit.Usd;
+    public string Currency { get; set; } = "USD";
+    public string? PricingVersion { get; set; }
+    public string? PricingSnapshotJson { get; set; }
+    public string? SafeMetadataJson { get; set; }
+    public bool IsAnomalous { get; set; }
+    public string? AnomalyCode { get; set; }
+    public DateTime? AnomalyDetectedAt { get; set; }
     public DateTime CreatedAt { get; set; }
     public DateTime? CompletedAt { get; set; }
+    public DateTime? RefundedAt { get; set; }
     public string? FailureCode { get; set; }
+
+    public GenerationJob? GenerationJob { get; set; }
 }
 
 public sealed record AiProviderDefinition(string Key, string Name, bool Enabled);

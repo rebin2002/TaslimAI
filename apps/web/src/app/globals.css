@@ -336,3 +336,33 @@ select.memory-control { appearance: auto; cursor: pointer; }
 [dir="rtl"] .asset-card-meta, [dir="rtl"] .asset-card-actions, [dir="rtl"] .project-assets-list > a { flex-direction: row-reverse; }
 @media (max-width: 900px) { .assets-toolbar { grid-template-columns: 1fr 1fr; }.asset-search { grid-column: 1 / -1; }.asset-grid { grid-template-columns: repeat(2, minmax(0,1fr)); } }
 @media (max-width: 700px) { .assets-page { padding-bottom: 90px; }.assets-hero { padding: 18px; }.assets-toolbar { grid-template-columns: 1fr; }.asset-search { grid-column: auto; }.asset-status-tabs { width: 100%; }.asset-status-tabs button { flex: 1; }.asset-grid { grid-template-columns: 1fr; }.asset-preview { height: 160px; }.project-assets-section .card-title { align-items: flex-start; }.project-assets-link { width: 100%; margin: 8px 0 0; justify-content: center; }.project-assets-list { grid-template-columns: 1fr; } }
+
+
+/* Batch 3.9 internal usage dashboard — additive only */
+.admin-usage-page { max-width: 1240px; }
+.admin-usage-notice { border-color: rgba(111, 88, 255, .25); }
+.admin-range-controls { display: flex; justify-content: space-between; gap: 16px; align-items: end; margin: 20px 0; flex-wrap: wrap; }
+.admin-range-presets, .admin-custom-range { display: flex; gap: 8px; align-items: end; flex-wrap: wrap; }
+.admin-custom-range label { display: grid; gap: 6px; color: var(--muted); font-size: .78rem; }
+.admin-custom-range input { min-height: 38px; border: 1px solid var(--line); border-radius: 10px; padding: 0 10px; background: var(--white); color: var(--ink); }
+.secondary-button.is-active { border-color: var(--blue); color: var(--blue); background: #eef5ff; }
+.admin-kpi-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.admin-usage-grid { align-items: stretch; }
+.admin-trend-card { min-width: 0; }
+.admin-trend-bars { height: 180px; display: flex; align-items: end; gap: 5px; overflow-x: auto; padding: 20px 4px 0; }
+.admin-trend-day { min-width: 18px; height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: end; gap: 7px; color: var(--muted); font-size: .68rem; }
+.admin-trend-bar { width: 100%; min-height: 4px; border-radius: 5px 5px 2px 2px; background: linear-gradient(180deg, var(--blue), var(--teal)); }
+.admin-breakdown-list { display: grid; gap: 11px; margin-top: 14px; }
+.admin-breakdown-list > div { display: flex; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--line); padding-bottom: 9px; font-size: .88rem; }
+.admin-breakdown-list > div:last-child { border-bottom: 0; padding-bottom: 0; }
+.admin-breakdown-list strong { white-space: nowrap; }
+.admin-usage-table td, .admin-usage-table th { white-space: nowrap; }
+.admin-inspector { margin-top: 18px; }
+.admin-inspector-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin: 18px 0 0; }
+.admin-inspector-grid div { min-width: 0; }
+.admin-inspector-grid dt { color: var(--muted); font-size: .74rem; margin-bottom: 4px; }
+.admin-inspector-grid dd { margin: 0; overflow-wrap: anywhere; font-size: .87rem; }
+.admin-json-inspector { margin: 18px 0 0; max-height: 220px; overflow: auto; padding: 14px; border: 1px solid var(--line); border-radius: 10px; background: #fbfcfd; color: var(--muted); font-size: .74rem; direction: ltr; text-align: left; }
+@media (max-width: 900px) { .admin-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .admin-inspector-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 620px) { .admin-range-controls, .admin-range-presets, .admin-custom-range { align-items: stretch; width: 100%; } .admin-custom-range label { flex: 1; } .admin-custom-range .primary-button { width: 100%; } .admin-kpi-grid { grid-template-columns: 1fr; } .admin-inspector-grid { grid-template-columns: 1fr; } }
+[dir="rtl"] .admin-json-inspector { direction: ltr; text-align: left; }

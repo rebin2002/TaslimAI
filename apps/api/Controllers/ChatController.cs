@@ -162,7 +162,7 @@ public sealed class ChatController(
         catch (OperationCanceledException exception)
         {
             await PersistFailureAsync(prepared, exception);
-            if (usage is not null) await usageLedger.FailAsync(usage, UsageFailureCodes.FromException(exception), cancellationToken: CancellationToken.None);
+            if (usage is not null) await usageLedger.CancelAsync(usage, UsageFailureCodes.FromException(exception), CancellationToken.None);
             throw;
         }
     }
@@ -252,7 +252,7 @@ public sealed class ChatController(
             if (!persisted && prepared is not null && prepared.ExistingResult is null)
             {
                 await PersistFailureAsync(prepared, new AiGenerationException("The generation request was cancelled."));
-                if (usageTransaction is not null) await usageLedger.FailAsync(usageTransaction, UsageFailureCodes.FromException(new OperationCanceledException()), cancellationToken: CancellationToken.None);
+                if (usageTransaction is not null) await usageLedger.CancelAsync(usageTransaction, UsageFailureCodes.FromException(new OperationCanceledException()), CancellationToken.None);
                 logger.LogInformation("Chat generation cancelled. ConversationId={ConversationId}; TraceId={TraceId}", prepared.Conversation!.Id, HttpContext.TraceIdentifier);
             }
         }

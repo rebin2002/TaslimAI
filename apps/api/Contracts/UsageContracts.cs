@@ -1,15 +1,14 @@
-using Taslim.Api.Domain;
-
 namespace Taslim.Api.Contracts;
 
 public sealed record UsageSummaryDto(
     int TotalRequests,
     int CompletedRequests,
     int FailedRequests,
+    int CancelledRequests,
+    int RefundedRequests,
     long InputTokens,
     long CachedInputTokens,
     long OutputTokens,
-    decimal ProviderCostUsd,
     decimal CustomerChargedAmount,
     string ChargedUnit);
 
@@ -20,7 +19,6 @@ public sealed record UsageTransactionDto(
     int? InputTokens,
     int? CachedInputTokens,
     int? OutputTokens,
-    decimal ProviderCostUsd,
     decimal ChargedAmount,
     string ChargedUnit,
     DateTime CreatedAt,

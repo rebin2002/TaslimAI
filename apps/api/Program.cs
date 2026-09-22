@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Authentication.Cookies;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.Http.Features;
@@ -83,6 +84,12 @@ builder.Services.AddIdentity<ApplicationUser, IdentityRole<Guid>>(options =>
     })
     .AddEntityFrameworkStores<TaslimDbContext>()
     .AddDefaultTokenProviders();
+builder.Services.AddAuthorization(options =>
+{
+    options.AddPolicy(AdminPolicies.Usage, policy =>
+        policy.RequireAuthenticatedUser().AddRequirements(new AdminUsageRequirement()));
+});
+builder.Services.AddScoped<IAuthorizationHandler, AdminUsageAuthorizationHandler>();
 
 builder.Services.ConfigureApplicationCookie(options =>
 {
@@ -125,6 +132,9 @@ builder.Services.AddScoped<IAssetService, AssetService>();
 builder.Services.AddScoped<IGeneratedAssetPublisher, GeneratedAssetPublisher>();
 builder.Services.AddScoped<IUsageLedgerService, UsageLedgerService>();
 builder.Services.AddSingleton<IUsageChargingService, SafeUsageChargingService>();
+builder.Services.Configure<UsageControlOptions>(builder.Configuration.GetSection("UsageControls"));
+builder.Services.AddScoped<IUsageCostControl, UsageCostControl>();
+builder.Services.AddScoped<IAdminUsageService, AdminUsageService>();
 builder.Services.Configure<GenerationJobOptions>(builder.Configuration.GetSection("GenerationJobs"));
 builder.Services.AddScoped<IGenerationJobQueue, DatabaseGenerationJobQueue>();
 builder.Services.AddScoped<IGenerationJobUsageService, GenerationJobUsageService>();
@@ -209,6 +219,9 @@ if (builder.Configuration.GetValue("Database:ApplyMigrations", isProduction))
     var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
     var logger = scope.ServiceProvider.GetRequiredService<ILoggerFactory>().CreateLogger("Taslim.DatabaseMigration");
     await DatabaseMigrator.ApplyAsync(db, logger);
+    await using var roleScope = app.Services.CreateAsyncScope();
+    var roleLogger = roleScope.ServiceProvider.GetRequiredService<ILoggerFactory>().CreateLogger("Taslim.AdminBootstrap");
+    await AdminRoleBootstrapper.EnsureConfiguredAdministratorsAsync(roleScope.ServiceProvider, builder.Configuration, roleLogger);
 }
 
 app.Run();

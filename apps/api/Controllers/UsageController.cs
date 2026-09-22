@@ -27,19 +27,19 @@ public sealed class UsageController(
                 transaction.InputTokens,
                 transaction.CachedInputTokens,
                 transaction.OutputTokens,
-                transaction.ProviderCostUsd,
                 transaction.ChargedAmount,
             })
             .ToListAsync(cancellationToken);
-        var summary = new UsageSummaryDto(
-            transactions.Count,
-            transactions.Count(transaction => transaction.Status == Domain.UsageTransactionStatus.Completed),
-            transactions.Count(transaction => transaction.Status == Domain.UsageTransactionStatus.Failed),
-            transactions.Sum(transaction => (long?)transaction.InputTokens ?? 0L),
-            transactions.Sum(transaction => (long?)transaction.CachedInputTokens ?? 0L),
-            transactions.Sum(transaction => (long?)transaction.OutputTokens ?? 0L),
-            transactions.Sum(transaction => transaction.ProviderCostUsd),
-            transactions.Sum(transaction => transaction.ChargedAmount),
+            var summary = new UsageSummaryDto(
+                transactions.Count,
+                transactions.Count(transaction => transaction.Status == Domain.UsageTransactionStatus.Completed),
+                transactions.Count(transaction => transaction.Status == Domain.UsageTransactionStatus.Failed),
+                transactions.Count(transaction => transaction.Status == Domain.UsageTransactionStatus.Cancelled),
+                transactions.Count(transaction => transaction.Status == Domain.UsageTransactionStatus.Refunded),
+                transactions.Sum(transaction => (long?)transaction.InputTokens ?? 0L),
+                transactions.Sum(transaction => (long?)transaction.CachedInputTokens ?? 0L),
+                transactions.Sum(transaction => (long?)transaction.OutputTokens ?? 0L),
+                transactions.Sum(transaction => transaction.ChargedAmount),
             Domain.UsageChargeUnit.Usd.ToString());
         return Ok(summary);
     }
@@ -63,7 +63,6 @@ public sealed class UsageController(
             transaction.InputTokens,
             transaction.CachedInputTokens,
             transaction.OutputTokens,
-            transaction.ProviderCostUsd,
             transaction.ChargedAmount,
             transaction.ChargedUnit.ToString(),
             transaction.CreatedAt,

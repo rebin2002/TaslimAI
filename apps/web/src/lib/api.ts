@@ -109,21 +109,21 @@ export type UsageSummary = {
   totalRequests: number;
   completedRequests: number;
   failedRequests: number;
+  cancelledRequests: number;
+  refundedRequests: number;
   inputTokens: number;
   cachedInputTokens: number;
   outputTokens: number;
-  providerCostUsd: number;
   customerChargedAmount: number;
   chargedUnit: string;
 };
 export type UsageTransaction = {
   id: string;
   feature: string;
-  status: "Pending" | "Completed" | "Failed" | "Refunded";
+  status: "Pending" | "Completed" | "Failed" | "Cancelled" | "Refunded";
   inputTokens: number | null;
   cachedInputTokens: number | null;
   outputTokens: number | null;
-  providerCostUsd: number;
   chargedAmount: number;
   chargedUnit: string;
   createdAt: string;
@@ -131,6 +131,31 @@ export type UsageTransaction = {
   failureCode: string | null;
 };
 export type UsageHistory = { items: UsageTransaction[]; page: number; pageSize: number; totalCount: number; totalPages: number };
+export type AdminUsageSummary = {
+  fromUtc: string;
+  toUtc: string;
+  transactionCount: number;
+  successfulCount: number;
+  failedCount: number;
+  cancelledCount: number;
+  refundedCount: number;
+  totalProviderCostUsd: number;
+  totalCustomerChargesUsd: number;
+  pendingEstimatedProviderCostUsd: number;
+  anomalousCount: number;
+  currency: string;
+};
+export type AdminUsageFeatureBreakdown = { feature: string; transactionCount: number; successfulCount: number; failedCount: number; cancelledCount: number; providerCostUsd: number; customerChargesUsd: number };
+export type AdminUsageDailyBreakdown = { dayUtc: string; transactionCount: number; providerCostUsd: number; customerChargesUsd: number };
+export type AdminUsageWorkspaceBreakdown = { workspaceId: string; workspaceName: string; transactionCount: number; providerCostUsd: number; customerChargesUsd: number };
+export type AdminUsageUserBreakdown = { userId: string; email: string | null; displayName: string; transactionCount: number; providerCostUsd: number; customerChargesUsd: number };
+export type AdminUsageStatusBreakdown = { status: string; transactionCount: number; successfulCount: number; failedCount: number; cancelledCount: number; providerCostUsd: number; customerChargesUsd: number };
+export type AdminUsageBreakdowns = { byFeature: AdminUsageFeatureBreakdown[]; byDay: AdminUsageDailyBreakdown[]; byWorkspace: AdminUsageWorkspaceBreakdown[]; byUser: AdminUsageUserBreakdown[]; byStatus: AdminUsageStatusBreakdown[] };
+export type AdminUsageTransaction = {
+  id: string; createdAt: string; completedAt: string | null; workspaceId: string; workspaceName: string; userId: string; userEmail: string | null; userDisplayName: string; projectId: string | null; conversationId: string | null; generationJobId: string | null; feature: string; status: string; provider: string; model: string; inputTokens: number | null; cachedInputTokens: number | null; outputTokens: number | null; imageInputTokens: number | null; imageOutputTokens: number | null; latencyMs: number | null; estimatedProviderCostUsd: number | null; providerCostUsd: number; chargedAmount: number; currency: string; pricingVersion: string | null; pricingSnapshotJson: string | null; safeMetadataJson: string | null; failureCode: string | null; isAnomalous: boolean; anomalyCode: string | null; refundedAt: string | null;
+};
+export type AdminUsageTransactionList = { items: AdminUsageTransaction[]; page: number; pageSize: number; totalCount: number; totalPages: number };
+export type AdminUsageReport = { summary: AdminUsageSummary; breakdowns: AdminUsageBreakdowns; transactions: AdminUsageTransactionList };
 export type GenerationJobStatus = "Pending" | "Queued" | "Running" | "Succeeded" | "Failed" | "Cancelled";
 export type GenerationJobOutput = { id: string; outputType: string; storedFileId: string | null; metadataJson: string | null; createdAt: string };
 export type GenerationJob = {
@@ -303,6 +328,11 @@ export const api = {
   streamMessage: (conversationId: string, content: string, onEvent: (event: ChatStreamEvent) => void, id = requestId(), attachmentIds: string[] = []) => streamRequest(`/api/conversations/${conversationId}/messages/stream`, { content, requestId: id, attachmentIds }, onEvent),
   getUsageSummary: (workspaceId: string) => request<UsageSummary>(`/api/workspaces/${workspaceId}/usage/summary`),
   getUsageHistory: (workspaceId: string, page = 1, pageSize = 20) => request<UsageHistory>(`/api/workspaces/${workspaceId}/usage?page=${page}&pageSize=${pageSize}`),
+  getAdminUsageReport: (params: Record<string, string | number | undefined> = {}) => {
+    const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value !== undefined).map(([key, value]) => [key, String(value)]));
+    return request<AdminUsageReport>(`/api/admin/usage/report${query.toString() ? `?${query.toString()}` : ""}`);
+  },
+  getAdminUsageTransaction: (id: string) => request<AdminUsageTransaction>(`/api/admin/usage/transactions/${id}`),
   createGenerationJob: (workspaceId: string, inputJson = "{}", title?: string) => request<GenerationJob>("/api/generation/jobs", { method: "POST", body: JSON.stringify({ workspaceId, jobType: "system.test", inputJson, title }) }, true),
   createImageGenerationJob: (input: ImageGenerationInput) => request<{ job: GenerationJob }>("/api/image-generation/jobs", { method: "POST", body: JSON.stringify(input) }, true).then((response) => response.job),
   getGenerationJob: (jobId: string) => request<GenerationJob>(`/api/generation/jobs/${jobId}`),

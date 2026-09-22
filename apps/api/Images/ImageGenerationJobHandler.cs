@@ -86,7 +86,11 @@ public sealed class ImageGenerationJobHandler(
             generated.Usage.ActualCostUsd,
             generated.Usage.LatencyMs,
             generated.Usage.FinishReason,
-            false);
+            false,
+            generated.Usage.ImageInputTokens,
+            generated.Usage.ImageOutputTokens,
+            settings.PricingVersion,
+            settings.Pricing.ToSnapshot(settings).ToJson());
         return new GenerationHandlerResult(resultJson, [new GenerationHandlerOutput(GenerationJobOutputTypes.StoredFile, null, metadata, artifact, asset)], usage);
     }
 

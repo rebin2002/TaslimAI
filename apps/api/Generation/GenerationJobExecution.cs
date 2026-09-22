@@ -91,14 +91,15 @@ public sealed class SystemTestGenerationJobHandler : IGenerationJobHandler
 
 public interface IGenerationJobUsageService
 {
-    Task<UsageTransaction> BeginAsync(GenerationJob job, CancellationToken cancellationToken = default);
+    Task<UsageTransaction> BeginAsync(GenerationJob job, decimal? estimatedProviderCostUsd = null, CancellationToken cancellationToken = default);
     Task CompleteAsync(UsageTransaction transaction, AiUsageMetadata usage, CancellationToken cancellationToken = default);
     Task FailAsync(UsageTransaction transaction, string failureCode, CancellationToken cancellationToken = default);
+    Task CancelAsync(UsageTransaction transaction, string cancellationCode, CancellationToken cancellationToken = default);
 }
 
 public sealed class GenerationJobUsageService(IUsageLedgerService ledger) : IGenerationJobUsageService
 {
-    public Task<UsageTransaction> BeginAsync(GenerationJob job, CancellationToken cancellationToken = default) =>
+    public Task<UsageTransaction> BeginAsync(GenerationJob job, decimal? estimatedProviderCostUsd = null, CancellationToken cancellationToken = default) =>
         ledger.GetOrCreatePendingAsync(
             job.WorkspaceId,
             job.CreatedByUserId,
@@ -106,13 +107,18 @@ public sealed class GenerationJobUsageService(IUsageLedgerService ledger) : IGen
             null,
             $"generation:{job.Id:N}",
             string.Equals(job.JobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase) ? UsageFeature.Image : UsageFeature.Generation,
-            cancellationToken);
+            cancellationToken,
+            job.Id,
+            estimatedProviderCostUsd);
 
     public Task CompleteAsync(UsageTransaction transaction, AiUsageMetadata usage, CancellationToken cancellationToken = default) =>
         ledger.CompleteAsync(transaction, usage, cancellationToken);
 
     public Task FailAsync(UsageTransaction transaction, string failureCode, CancellationToken cancellationToken = default) =>
         ledger.FailAsync(transaction, failureCode, cancellationToken: cancellationToken);
+
+    public Task CancelAsync(UsageTransaction transaction, string cancellationCode, CancellationToken cancellationToken = default) =>
+        ledger.CancelAsync(transaction, cancellationCode, cancellationToken);
 }
 
 public interface IGenerationJobService
@@ -172,7 +178,7 @@ public sealed class GenerationJobService(
         };
         db.GenerationJobs.Add(job);
         await db.SaveChangesAsync(cancellationToken);
-        await usage.BeginAsync(job, cancellationToken);
+        await usage.BeginAsync(job, request.EstimatedProviderCostUsd, cancellationToken);
         await queue.EnqueueAsync(job.Id, cancellationToken);
         job.Status = GenerationJobStatus.Queued;
         job.QueuedAt = DateTime.UtcNow;
@@ -220,7 +226,7 @@ public sealed class GenerationJobService(
                 .SetProperty(item => item.CancelledAt, now), cancellationToken);
         if (immediate > 0)
         {
-            await FailUsageAsync(job, CancellationCode(job), cancellationToken);
+            await CancelUsageAsync(job, CancellationCode(job), cancellationToken);
             return GenerationJobCancelResult.Cancelled;
         }
 
@@ -230,10 +236,10 @@ public sealed class GenerationJobService(
         return running > 0 ? GenerationJobCancelResult.CancellationRequested : GenerationJobCancelResult.Conflict;
     }
 
-    private async Task FailUsageAsync(GenerationJob job, string code, CancellationToken cancellationToken)
+    private async Task CancelUsageAsync(GenerationJob job, string code, CancellationToken cancellationToken)
     {
-        var transaction = await usage.BeginAsync(job, cancellationToken);
-        await usage.FailAsync(transaction, code, cancellationToken);
+        var transaction = await usage.BeginAsync(job, cancellationToken: cancellationToken);
+        await usage.CancelAsync(transaction, code, cancellationToken);
     }
 
     private static string CancellationCode(GenerationJob job) =>
@@ -412,7 +418,7 @@ public sealed class GenerationJobWorker(
                 return;
             }
             publicationCommitted = true;
-            var transaction = await usage.BeginAsync(current, stoppingToken);
+            var transaction = await usage.BeginAsync(current, cancellationToken: stoppingToken);
             await usage.CompleteAsync(transaction, result.Usage ?? new AiUsageMetadata("system", "unknown", null, null, null, 0m, 0m, 0, "completed", true), stoppingToken);
         }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
@@ -488,8 +494,8 @@ public sealed class GenerationJobWorker(
                 .SetProperty(item => item.ErrorMessage, "The job was cancelled.")
                 .SetProperty(item => item.CancelledAt, now)
                 .SetProperty(item => item.ClaimExpiresAt, (DateTime?)null), cancellationToken);
-        var transaction = await usage.BeginAsync(job, cancellationToken);
-        await usage.FailAsync(transaction, CancellationCode(job), cancellationToken);
+        var transaction = await usage.BeginAsync(job, cancellationToken: cancellationToken);
+        await usage.CancelAsync(transaction, CancellationCode(job), cancellationToken);
     }
 
     private static async Task FailAsync(TaslimDbContext db, IGenerationJobUsageService usage, GenerationJob job, string code, string message, CancellationToken cancellationToken)
@@ -502,7 +508,7 @@ public sealed class GenerationJobWorker(
                 .SetProperty(item => item.ErrorMessage, message)
                 .SetProperty(item => item.FailedAt, now)
                 .SetProperty(item => item.ClaimExpiresAt, (DateTime?)null), cancellationToken);
-        var transaction = await usage.BeginAsync(job, cancellationToken);
+        var transaction = await usage.BeginAsync(job, cancellationToken: cancellationToken);
         await usage.FailAsync(transaction, code, cancellationToken);
     }
 

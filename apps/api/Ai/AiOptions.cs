@@ -35,6 +35,9 @@ public sealed class AiModelDefinitionOptions
     public decimal InputPricePerMillion { get; set; }
     public decimal CachedInputPricePerMillion { get; set; }
     public decimal OutputPricePerMillion { get; set; }
+    public string PricingVersion { get; set; } = "chat-default-2026-09-22";
+    public DateTime PricingEffectiveDateUtc { get; set; } = new(2026, 9, 22, 0, 0, 0, DateTimeKind.Utc);
+    public string PricingSource { get; set; } = "https://openai.com/api/pricing/";
     public string CostTier { get; set; } = "standard";
     public string CapabilityTier { get; set; } = "Smart";
 }
@@ -51,6 +54,9 @@ public sealed record AiModelDefinition(
     decimal InputPricePerMillion,
     decimal CachedInputPricePerMillion,
     decimal OutputPricePerMillion,
+    string PricingVersion,
+    DateTime PricingEffectiveDateUtc,
+    string PricingSource,
     string CostTier,
     string CapabilityTier);
 
@@ -58,10 +64,10 @@ public sealed class AiModelCatalog(IConfiguration configuration)
 {
     private static readonly IReadOnlyDictionary<string, AiModelDefinition> Defaults = new Dictionary<string, AiModelDefinition>(StringComparer.OrdinalIgnoreCase)
     {
-        ["gpt-5.6-luna"] = new("openai", "gpt-5.6-luna", "Taslim Fast", true, true, false, false, 128_000, 0.20m, 0.02m, 1.20m, "low", "Fast"),
-        ["gpt-5.6-terra"] = new("openai", "gpt-5.6-terra", "Taslim Smart", true, true, false, false, 128_000, 2.00m, 0.20m, 12.00m, "standard", "Smart"),
-        ["gpt-5.6-sol"] = new("openai", "gpt-5.6-sol", "Taslim Advanced", true, true, true, true, 128_000, 4.00m, 0.40m, 20.00m, "high", "Advanced"),
-        ["mock"] = new("mock", "taslim-mock-chat", "Taslim Development", true, true, false, false, 64_000, 0m, 0m, 0m, "test", "Smart"),
+        ["gpt-5.6-luna"] = new("openai", "gpt-5.6-luna", "Taslim Fast", true, true, false, false, 128_000, 0.20m, 0.02m, 1.20m, "chat-openai-2026-09-22", new DateTime(2026, 9, 22, 0, 0, 0, DateTimeKind.Utc), "https://openai.com/api/pricing/", "low", "Fast"),
+        ["gpt-5.6-terra"] = new("openai", "gpt-5.6-terra", "Taslim Smart", true, true, false, false, 128_000, 2.00m, 0.20m, 12.00m, "chat-openai-2026-09-22", new DateTime(2026, 9, 22, 0, 0, 0, DateTimeKind.Utc), "https://openai.com/api/pricing/", "standard", "Smart"),
+        ["gpt-5.6-sol"] = new("openai", "gpt-5.6-sol", "Taslim Advanced", true, true, true, true, 128_000, 4.00m, 0.40m, 20.00m, "chat-openai-2026-09-22", new DateTime(2026, 9, 22, 0, 0, 0, DateTimeKind.Utc), "https://openai.com/api/pricing/", "high", "Advanced"),
+        ["mock"] = new("mock", "taslim-mock-chat", "Taslim Development", true, true, false, false, 64_000, 0m, 0m, 0m, "chat-mock-2026-09-22", new DateTime(2026, 9, 22, 0, 0, 0, DateTimeKind.Utc), "internal-test-provider", "test", "Smart"),
     };
 
     private readonly IReadOnlyList<AiModelDefinition> models = Load(configuration);
@@ -92,6 +98,9 @@ public sealed class AiModelCatalog(IConfiguration configuration)
                 options.InputPricePerMillion,
                 options.CachedInputPricePerMillion,
                 options.OutputPricePerMillion,
+                string.IsNullOrWhiteSpace(options.PricingVersion) ? "chat-configured" : options.PricingVersion,
+                options.PricingEffectiveDateUtc.Kind == DateTimeKind.Unspecified ? DateTime.SpecifyKind(options.PricingEffectiveDateUtc, DateTimeKind.Utc) : options.PricingEffectiveDateUtc.ToUniversalTime(),
+                string.IsNullOrWhiteSpace(options.PricingSource) ? "configured" : options.PricingSource,
                 options.CostTier,
                 options.CapabilityTier);
         }

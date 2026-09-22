@@ -16,7 +16,8 @@ public sealed record ImageProviderUsage(
     int? OutputTokens,
     decimal? ActualCostUsd,
     string FinishReason = "completed",
-    int LatencyMs = 0);
+    int LatencyMs = 0,
+    int? ImageOutputTokens = null);
 
 public sealed record ImageProviderResult(
     ReadOnlyMemory<byte> Content,
@@ -33,6 +34,25 @@ public interface IImageGenerationProvider
         ImageGenerationInput request,
         ImagePromptBuildResult prompt,
         CancellationToken cancellationToken = default);
+}
+
+public static class ImageGenerationCostEstimator
+{
+    public static decimal Estimate(ImagePromptBuildResult prompt, ImagePricingOptions pricing)
+    {
+        var textTokens = Math.Max(1, (prompt.Prompt.Length + 3) / 4);
+        var outputTokens = prompt.NormalizedAspectRatio switch
+        {
+            ImageGenerationValues.Portrait => prompt.NormalizedQuality == ImageGenerationValues.High ? 6240 : 1584,
+            ImageGenerationValues.Landscape => prompt.NormalizedQuality == ImageGenerationValues.High ? 6208 : 1568,
+            _ => prompt.NormalizedQuality == ImageGenerationValues.High ? 4160 : 1056,
+        };
+        return decimal.Round(
+            textTokens * pricing.TextInputUsdPerMillion / 1_000_000m
+            + outputTokens * pricing.ImageOutputUsdPerMillion / 1_000_000m,
+            8,
+            MidpointRounding.AwayFromZero);
+    }
 }
 
 public sealed class OpenAiImageGenerationProvider(
@@ -137,7 +157,7 @@ public sealed class OpenAiImageGenerationProvider(
         var imageInput = ReadInt(details, "image_tokens");
         var imageOutput = ReadInt(outputDetails, "image_tokens") ?? output;
         var actualCost = CalculateCost(input, textInput, imageInput, imageOutput, prompt);
-        return new ImageProviderUsage(input, textInput, imageInput, output, actualCost, "completed", (int)Math.Min(int.MaxValue, latencyMs));
+        return new ImageProviderUsage(input, textInput, imageInput, output, actualCost, "completed", (int)Math.Min(int.MaxValue, latencyMs), imageOutput);
     }
 
     private decimal CalculateCost(int? input, int? textInput, int? imageInput, int? imageOutput, ImagePromptBuildResult prompt)

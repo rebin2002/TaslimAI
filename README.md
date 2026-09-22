@@ -1,6 +1,6 @@
 # Taslim.ai
 
-Taslim.ai is a multilingual AI platform foundation designed to make professional AI capabilities simple, fast, and approachable. **Batch 3.2 adds the first production AI provider and provider-independent streaming. Batch 3.3 adds the internal usage ledger and zero-charge accounting foundation. Batch 3.4 adds user-approved memory and project-scoped context. Batch 3.5 adds secure file storage, bounded document extraction, and explicit chat attachments. Batch 3.6 adds the persistent provider-independent Generation Job foundation. Batch 3.7 adds the unified reusable Asset architecture and product library. Batch 3.8 adds the first real Image Studio on top of those foundations.**
+Taslim.ai is a multilingual AI platform foundation designed to make professional AI capabilities simple, fast, and approachable. **Batch 3.2 adds the first production AI provider and provider-independent streaming. Batch 3.3 adds the internal usage ledger and zero-charge accounting foundation. Batch 3.4 adds user-approved memory and project-scoped context. Batch 3.5 adds secure file storage, bounded document extraction, and explicit chat attachments. Batch 3.6 adds the persistent provider-independent Generation Job foundation. Batch 3.7 adds the unified reusable Asset architecture and product library. Batch 3.8 adds the first real Image Studio on top of those foundations. Batch 3.9 adds versioned provider-cost accounting, opt-in safety controls, anomaly flags, and a server-authorized admin usage dashboard without activating customer billing.**
 
 ## Architecture
 
@@ -14,7 +14,7 @@ Taslim API (ASP.NET Core Identity + Web API)
         +---- PostgreSQL (EF Core / Npgsql)
 ```
 
-The browser owns presentation and navigation. The API owns authentication, authorization, persistence, and AI Core orchestration. Provider secrets must never be sent to browser clients. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/AUTHENTICATION.md](docs/AUTHENTICATION.md), [docs/CHAT_ARCHITECTURE.md](docs/CHAT_ARCHITECTURE.md), [docs/FILES_ARCHITECTURE.md](docs/FILES_ARCHITECTURE.md), [docs/GENERATION_JOBS_ARCHITECTURE.md](docs/GENERATION_JOBS_ARCHITECTURE.md), [docs/ASSET_ARCHITECTURE.md](docs/ASSET_ARCHITECTURE.md), and [docs/IMAGE_STUDIO_ARCHITECTURE.md](docs/IMAGE_STUDIO_ARCHITECTURE.md).
+The browser owns presentation and navigation. The API owns authentication, authorization, persistence, and AI Core orchestration. Provider secrets must never be sent to browser clients. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/AUTHENTICATION.md](docs/AUTHENTICATION.md), [docs/CHAT_ARCHITECTURE.md](docs/CHAT_ARCHITECTURE.md), [docs/FILES_ARCHITECTURE.md](docs/FILES_ARCHITECTURE.md), [docs/GENERATION_JOBS_ARCHITECTURE.md](docs/GENERATION_JOBS_ARCHITECTURE.md), [docs/ASSET_ARCHITECTURE.md](docs/ASSET_ARCHITECTURE.md), [docs/IMAGE_STUDIO_ARCHITECTURE.md](docs/IMAGE_STUDIO_ARCHITECTURE.md), and [docs/USAGE_ACCOUNTING_ARCHITECTURE.md](docs/USAGE_ACCOUNTING_ARCHITECTURE.md).
 
 ## Repository structure
 
@@ -33,6 +33,7 @@ docs/
   GENERATION_JOBS_ARCHITECTURE.md Persistent job lifecycle, queue, worker, and handlers
   ASSET_ARCHITECTURE.md Unified Asset model, publication, private downloads, lifecycle, and UI
   IMAGE_STUDIO_ARCHITECTURE.md Image request, provider, output, usage, safety, and UI boundaries
+  USAGE_ACCOUNTING_ARCHITECTURE.md Versioned cost ledger, guardrails, anomalies, admin reports, and privacy
 ```
 
 ## Requirements
@@ -138,6 +139,7 @@ Railway terminates TLS at its ingress proxy, so the API uses ASP.NET Core Forwar
 - Create an image asynchronously at `/create/image`, poll progress, cancel eligible jobs, and preview/download the private result
 - Find, filter, rename, reassign, archive, restore, and download reusable outputs at `/assets`
 - View project-assigned Assets from `/projects/[projectId]`
+- Review internal provider-cost summaries and transaction details at `/account/admin/usage` when the authenticated account has the `TaslimAdministrator` role
 
 Supported project types are General, Movie, Marketing, Business, Research, Education, and Development. These are extensible server-side values, not a closed database enum.
 
@@ -157,7 +159,7 @@ dotnet tool run dotnet-ef migrations add <MigrationName> \
   --output-dir Persistence/Migrations
 ```
 
-The initial migration is `InitialIdentityWorkspacesProjects` and creates ASP.NET Identity tables plus `Workspaces`, `WorkspaceMembers`, and `Projects`. Batch 3.1 adds `AddChatConversationsAndMessages` for `Conversations` and `ChatMessages`. Batch 3.2 adds `AddChatUsageAndIdempotency` for cached-token usage and duplicate-request protection, followed by `AddDeterministicChatMessageOrdering` for monotonic per-conversation message sequences and legacy backfill. Batch 3.3 adds `AddUsageLedger` for immutable usage transactions, cost metadata, and request/feature idempotency. Batch 3.4 adds `AddPersonalMemoryAndProjectContext` for `PersonalMemories` and nullable project context fields. Batch 3.5 adds `AddStoredFilesAndChatAttachments` for `StoredFiles` and normalized `ChatMessageAttachments`. Batch 3.6 adds `AddGenerationJobs` for durable `GenerationJobs` and `GenerationJobOutputs`. Batch 3.7 adds `AddAssets` for the reusable user-facing Asset library and its storage/provenance relationships. Both additive migrations leave the existing `DataProtectionKeys` table and mapping intact.
+The initial migration is `InitialIdentityWorkspacesProjects` and creates ASP.NET Identity tables plus `Workspaces`, `WorkspaceMembers`, and `Projects`. Batch 3.1 adds `AddChatConversationsAndMessages` for `Conversations` and `ChatMessages`. Batch 3.2 adds `AddChatUsageAndIdempotency` for cached-token usage and duplicate-request protection, followed by `AddDeterministicChatMessageOrdering` for monotonic per-conversation message sequences and legacy backfill. Batch 3.3 adds `AddUsageLedger` for usage transactions, cost metadata, and request/feature idempotency. Batch 3.4 adds `AddPersonalMemoryAndProjectContext` for `PersonalMemories` and nullable project context fields. Batch 3.5 adds `AddStoredFilesAndChatAttachments` for `StoredFiles` and normalized `ChatMessageAttachments`. Batch 3.6 adds `AddGenerationJobs` for durable `GenerationJobs` and `GenerationJobOutputs`. Batch 3.7 adds `AddAssets` for the reusable user-facing Asset library and its storage/provenance relationships. Batch 3.9 adds `AddUsageAccountingFoundation` for versioned price snapshots, image quantities, cancellation/refund/anomaly fields, report indexes, and optional Generation Job provenance. All additive migrations leave the existing `DataProtectionKeys` table and mapping intact.
 
 To apply migrations locally against an explicitly selected database:
 
@@ -168,7 +170,7 @@ ConnectionStrings__Postgres='Host=localhost;Port=5432;Database=taslim;Username=t
 dotnet run --project apps/api
 ```
 
-Production startup migrations use a PostgreSQL advisory lock and fail clearly if a migration cannot be applied. Batch 3.8 adds no schema migration: it reuses `GenerationJobs`, `GenerationJobOutputs`, `StoredFiles`, `Assets`, and `UsageTransactions`. Do not run development reset commands against Production.
+Production startup migrations use a PostgreSQL advisory lock and fail clearly if a migration cannot be applied. Batch 3.8 adds no schema migration and Batch 3.9 uses the additive accounting migration above; both reuse the existing job, asset, storage, Identity, and Data Protection architecture. Do not run development reset commands against Production.
 
 ## Tests
 
@@ -178,7 +180,7 @@ Run the API integration suite:
 dotnet test apps/api.Tests/Taslim.Api.Tests.csproj
 ```
 
-The suite covers registration, duplicate email, login failure, session/logout, personal workspace ownership, project lifecycle, chat persistence, mock AI execution, tier routing, provider failure, context trimming, usage/cost calculation, provider-independent stream events, SSE persistence, terminal failure events, deterministic multi-turn ordering, idempotency, usage ledger behavior, message history, cross-workspace authorization, CSRF enforcement, upload validation, bounded extraction, file ownership, normalized chat attachments, durable Generation Job claiming/cancellation/recovery, generated-file publication, Asset provenance, project inheritance, search/filter/pagination, archive/restore, authorized download, failed/cancelled no-Asset behavior, Image Studio validation, provider-independent deterministic image execution, private PNG publication, image usage cost, and safe provider refusal. Frontend Vitest coverage includes streaming lifecycle, Asset Library loading, empty, update, archive, restore, safe-display, and card rendering states, plus Image Studio progress/result/cancellation and provider-detail redaction states. Tests use relational SQLite so transactions and foreign keys are exercised realistically.
+The suite covers registration, duplicate email, login failure, session/logout, personal workspace ownership, project lifecycle, chat persistence, mock AI execution, tier routing, provider failure, context trimming, usage/cost calculation, provider-independent stream events, SSE persistence, terminal failure events, deterministic multi-turn ordering, idempotency, usage ledger behavior, explicit cancellation/refund state, versioned pricing snapshots, disabled and enabled cost guardrails, admin role authorization, admin summaries/breakdowns/transactions/inspection, normal-user provider-cost redaction, message history, cross-workspace authorization, CSRF enforcement, upload validation, bounded extraction, file ownership, normalized chat attachments, durable Generation Job claiming/cancellation/recovery, generated-file publication, Asset provenance, project inheritance, search/filter/pagination, archive/restore, authorized download, failed/cancelled no-Asset behavior, Image Studio validation, provider-independent deterministic image execution, private PNG publication, image usage cost, and safe provider refusal. Frontend Vitest coverage includes streaming lifecycle, Asset Library loading, empty, update, archive, restore, safe-display, and card rendering states, Image Studio progress/result/cancellation and provider-detail redaction states, and admin usage date/chart state. Tests use relational SQLite so transactions and foreign keys are exercised realistically.
 
 ## Railway deployment
 
@@ -217,6 +219,9 @@ Ai__OpenAI__Enabled=true
 Ai__OpenAI__ApiKey=<SECRET>
 Ai__DefaultChatTier=Smart
 
+# Optional: already-registered administrator email (role bootstrap only)
+Admin__BootstrapEmails__0=<ADMIN_EMAIL>
+
 # File context (API only)
 Files__StorageProvider=S3Compatible
 Files__S3Endpoint=https://<ACCOUNT_ID>.r2.cloudflarestorage.com
@@ -241,15 +246,15 @@ Use Railway’s managed PostgreSQL service and a private service reference for t
 
 ## Scope boundary
 
-Included through Batch 3.8: the conversation and streaming foundation, server-only OpenAI chat adapter, internal model routing, zero-charge usage ledger, user-approved memory, project context, secure private file storage, bounded extraction, explicit chat attachments, durable provider-independent Generation Jobs, generated-output publication, the unified reusable Asset Library, and the focused Image Studio MVP. Authentication, CSRF, workspace/project authorization, localization, RTL behavior, persistent Data Protection, and Railway deployment architecture remain intact.
+Included through Batch 3.9: the conversation and streaming foundation, server-only OpenAI chat adapter, internal model routing, zero-charge usage ledger with versioned provider-cost accounting, opt-in usage safety controls, server-authorized admin reporting, user-approved memory, project context, secure private file storage, bounded extraction, explicit chat attachments, durable provider-independent Generation Jobs, generated-output publication, the unified reusable Asset Library, and the focused Image Studio MVP. Authentication, CSRF, workspace/project authorization, localization, RTL behavior, persistent Data Protection, and Railway deployment architecture remain intact.
 
-Not included: Anthropic, Gemini, automatic cross-provider fallback, Movie, Document, Presentation, Voice, Music, Research, or Social studios/providers, image editing/reference-image workflows, web search, vector databases, embeddings, RAG, tool calling, agents, billing, credits, subscriptions, payment processing, team chat sharing, admin, invitations, business workspace creation, social login, or native mobile apps. Batch 3.8 adds one server-only OpenAI image generation path; it does not add those other studios or expose provider choice to users.
+Not included: Anthropic, Gemini, automatic cross-provider fallback, Movie, Document, Presentation, Voice, Music, Research, or Social studios/providers, image editing/reference-image workflows, web search, vector databases, embeddings, RAG, tool calling, agents, customer billing, credits, subscriptions, payment processing, team chat sharing, invitations, business workspace creation, social login, or native mobile apps. Batch 3.8 adds one server-only OpenAI image generation path and Batch 3.9 adds operational accounting administration only; neither exposes provider choice to users or activates customer billing.
 
 ## Batch 3.3 usage ledger
 
 Batch 3.3 adds the extensible `UsageTransaction` ledger and the `AddUsageLedger` migration. Chat creates one workspace-scoped pending transaction per `RequestId` and `Chat` feature, then marks it Completed only after provider success and usage metadata are known. Failed generations remain Failed with zero customer charge. Provider cost is calculated with the existing AI model catalog; no prices are duplicated in the ledger layer, and no real customer billing or payment gateway is active.
 
-Authenticated workspace usage endpoints are available at `GET /api/workspaces/{workspaceId}/usage/summary` and `GET /api/workspaces/{workspaceId}/usage?page=1&pageSize=20`. The Account page links to `/account/usage`, which shows localized English, Arabic, and Kurdish Sorani totals and paginated history. Usage records contain accounting metadata only; prompts, responses, secrets, cookies, authorization headers, provider payloads, provider names, and model names are not returned to normal clients.
+Authenticated workspace usage endpoints are available at `GET /api/workspaces/{workspaceId}/usage/summary` and `GET /api/workspaces/{workspaceId}/usage?page=1&pageSize=20`. The Account page links to `/account/usage`, which shows localized English, Arabic, and Kurdish Sorani totals and paginated history. Normal usage responses intentionally omit provider costs, provider names, model names, pricing snapshots, and anomaly metadata. Admin-only `/api/admin/usage/*` endpoints and `/account/admin/usage` expose those internal fields only after server-side `TaslimAdministrator` role authorization. Configure optional role bootstrap emails under `Admin:BootstrapEmails` during a migration-enabled startup; no default administrator is created.
 
 ## Batch 3.4 memory and project context
 

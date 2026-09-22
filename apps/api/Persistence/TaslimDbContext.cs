@@ -258,19 +258,29 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.Property(transaction => transaction.Model).HasMaxLength(160).IsRequired();
             entity.Property(transaction => transaction.Status).HasConversion<string>().HasMaxLength(30).IsRequired();
             entity.Property(transaction => transaction.ChargedUnit).HasConversion<string>().HasMaxLength(20).IsRequired();
+            entity.Property(transaction => transaction.Currency).HasMaxLength(3).IsRequired();
             entity.Property(transaction => transaction.ProviderCostUsd).HasPrecision(18, 8).IsRequired();
             entity.Property(transaction => transaction.ChargedAmount).HasPrecision(18, 8).IsRequired();
+            entity.Property(transaction => transaction.EstimatedProviderCostUsd).HasPrecision(18, 8);
+            entity.Property(transaction => transaction.PricingVersion).HasMaxLength(100);
+            entity.Property(transaction => transaction.PricingSnapshotJson).HasMaxLength(8_000);
+            entity.Property(transaction => transaction.SafeMetadataJson).HasMaxLength(8_000);
             entity.Property(transaction => transaction.FailureCode).HasMaxLength(80);
+            entity.Property(transaction => transaction.AnomalyCode).HasMaxLength(100);
             entity.Property(transaction => transaction.CreatedAt).IsRequired();
             entity.HasIndex(transaction => new { transaction.WorkspaceId, transaction.CreatedAt });
             entity.HasIndex(transaction => new { transaction.UserId, transaction.CreatedAt });
+            entity.HasIndex(transaction => new { transaction.GenerationJobId, transaction.CreatedAt });
             entity.HasIndex(transaction => transaction.Feature);
             entity.HasIndex(transaction => transaction.Status);
+            entity.HasIndex(transaction => transaction.Provider);
+            entity.HasIndex(transaction => transaction.IsAnomalous);
             entity.HasIndex(transaction => new { transaction.WorkspaceId, transaction.RequestId, transaction.Feature }).IsUnique();
             entity.HasOne<Workspace>().WithMany().HasForeignKey(transaction => transaction.WorkspaceId).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne<ApplicationUser>().WithMany().HasForeignKey(transaction => transaction.UserId).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne<Project>().WithMany().HasForeignKey(transaction => transaction.ProjectId).OnDelete(DeleteBehavior.SetNull);
             entity.HasOne<Conversation>().WithMany().HasForeignKey(transaction => transaction.ConversationId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne(transaction => transaction.GenerationJob).WithMany().HasForeignKey(transaction => transaction.GenerationJobId).OnDelete(DeleteBehavior.SetNull);
         });
     }
 }

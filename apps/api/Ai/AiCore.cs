@@ -30,7 +30,11 @@ public sealed record AiUsageMetadata(
     decimal? ActualCost,
     int LatencyMs,
     string FinishReason,
-    bool IsTestResponse);
+    bool IsTestResponse,
+    int? ImageInputTokens = null,
+    int? ImageOutputTokens = null,
+    string? PricingVersion = null,
+    string? PricingSnapshotJson = null);
 
 public sealed record AiGenerationResult(string Content, AiUsageMetadata Usage);
 
@@ -150,17 +154,19 @@ public sealed class ChatCompletionService(
 
     private AiUsageMetadata EnrichUsage(AiUsageMetadata usage, AiProviderSelection selection)
     {
-        var estimated = costCalculator.Calculate(usage with
+        var normalized = usage with
         {
             ProviderKey = selection.ProviderKey,
             ModelKey = selection.ModelKey,
-        });
-        return usage with
+        };
+        var estimated = costCalculator.Calculate(normalized);
+        var snapshot = costCalculator.GetPricingSnapshot(normalized);
+        return normalized with
         {
-            ProviderKey = selection.ProviderKey,
-            ModelKey = selection.ModelKey,
             EstimatedCost = estimated,
             ActualCost = estimated,
+            PricingVersion = snapshot?.Version,
+            PricingSnapshotJson = snapshot?.ToJson(),
         };
     }
 }
