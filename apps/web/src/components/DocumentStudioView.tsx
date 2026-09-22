@@ -11,6 +11,7 @@ import {
   displayDocumentProgress,
   documentPresentationState,
   isDocumentSourceReady,
+  nextDocumentPollDelay,
   parseDocumentJobResult,
   shouldPollDocumentJob,
 } from "@/lib/documentStudioState";
@@ -81,7 +82,7 @@ export function DocumentStudioView() {
         // Keep polling after a transient request failure; the current job remains the source of truth.
         setPollRetry((attempt) => attempt + 1);
       }
-    }, 700);
+    }, nextDocumentPollDelay(current, pollRetry) ?? 700);
     return () => { active = false; window.clearTimeout(timer); };
   }, [current, pollRetry, t]);
 

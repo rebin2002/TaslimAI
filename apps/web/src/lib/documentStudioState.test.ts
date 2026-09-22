@@ -4,6 +4,7 @@ import {
   displayDocumentProgress,
   documentPresentationState,
   isDocumentSourceReady,
+  nextDocumentPollDelay,
   parseDocumentJobResult,
   shouldPollDocumentJob,
 } from "./documentStudioState";
@@ -27,6 +28,10 @@ describe("Document Studio state", () => {
     expect(shouldPollDocumentJob(job("Succeeded"))).toBe(false);
     expect(shouldPollDocumentJob(job("Failed"))).toBe(false);
     expect(shouldPollDocumentJob(job("Cancelled"))).toBe(false);
+    expect(nextDocumentPollDelay(job("Running"), 0)).toBe(700);
+    expect(nextDocumentPollDelay(job("Running"), 1)).toBe(1400);
+    expect(nextDocumentPollDelay(job("Running"), 10)).toBe(2800);
+    expect(nextDocumentPollDelay(job("Succeeded"), 0)).toBeNull();
   });
 
   it("uses status, not 100% progress, to determine completion", () => {
@@ -69,6 +74,16 @@ describe("Document Studio state", () => {
     const completed = job("Succeeded");
     expect(documentPresentationState(completed, null)).toBe("completed-unavailable");
     expect(canCancelDocumentJob(completed)).toBe(false);
+  });
+
+  it("keeps failed and cancelled jobs in safe terminal states", () => {
+    const failed = job("Failed");
+    failed.errorMessage = "DOCUMENT_RENDER_FAILED";
+    const cancelled = job("Cancelled");
+    expect(documentPresentationState(failed, null)).toBe("failed");
+    expect(documentPresentationState(cancelled, null)).toBe("cancelled");
+    expect(canCancelDocumentJob(failed)).toBe(false);
+    expect(canCancelDocumentJob(cancelled)).toBe(false);
   });
 
   it("accepts only ready supported extracted sources", () => {

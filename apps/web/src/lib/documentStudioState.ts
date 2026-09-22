@@ -20,6 +20,11 @@ export function shouldPollDocumentJob(job: GenerationJob | null) {
   return !!job && !isDocumentTerminal(job);
 }
 
+export function nextDocumentPollDelay(job: GenerationJob | null, retryAttempt = 0) {
+  if (!shouldPollDocumentJob(job)) return null;
+  return Math.min(700 * Math.max(1, retryAttempt + 1), 2_800);
+}
+
 export function canCancelDocumentJob(job: GenerationJob | null) {
   return !!job && (job.status === "Pending" || job.status === "Queued" || job.status === "Running") && !job.cancellationRequested;
 }
