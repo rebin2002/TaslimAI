@@ -35,7 +35,7 @@ public sealed class ImagePricingOptions
         options.PricingEffectiveDateUtc.Kind == DateTimeKind.Unspecified
             ? DateTime.SpecifyKind(options.PricingEffectiveDateUtc, DateTimeKind.Utc)
             : options.PricingEffectiveDateUtc.ToUniversalTime(),
-        "USD per 1M tokens",
+        $"{options.Currency} per 1M tokens",
         options.PricingSource,
         new Dictionary<string, decimal>
         {

@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Options;
+using Taslim.Api.Domain;
 
 namespace Taslim.Api.Ai;
 
@@ -34,7 +35,9 @@ public sealed record AiUsageMetadata(
     int? ImageInputTokens = null,
     int? ImageOutputTokens = null,
     string? PricingVersion = null,
-    string? PricingSnapshotJson = null);
+    string? PricingSnapshotJson = null,
+    string? Currency = null,
+    string? CostBasis = null);
 
 public sealed record AiGenerationResult(string Content, AiUsageMetadata Usage);
 
@@ -167,6 +170,8 @@ public sealed class ChatCompletionService(
             ActualCost = estimated,
             PricingVersion = snapshot?.Version,
             PricingSnapshotJson = snapshot?.ToJson(),
+            Currency = UsageCurrencies.Usd,
+            CostBasis = UsageCostBasis.Estimated,
         };
     }
 }

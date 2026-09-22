@@ -163,6 +163,9 @@ public sealed class UsageLedgerService(
                 existing.CompletedAt = null;
                 existing.RefundedAt = null;
                 existing.FailureCode = null;
+                existing.CostBasis = null;
+                existing.PricingVersion = null;
+                existing.PricingSnapshotJson = null;
                 existing.IsAnomalous = false;
                 existing.AnomalyCode = null;
                 existing.AnomalyDetectedAt = null;
@@ -214,7 +217,7 @@ public sealed class UsageLedgerService(
     {
         if (transaction.Status is UsageTransactionStatus.Completed or UsageTransactionStatus.Refunded) return;
         var providerCost = costCalculator.Calculate(usage);
-        var snapshot = usage.PricingSnapshotJson ?? costCalculator.GetPricingSnapshot(usage)?.ToJson();
+        var snapshot = string.IsNullOrWhiteSpace(usage.PricingSnapshotJson) ? costCalculator.GetPricingSnapshot(usage)?.ToJson() : usage.PricingSnapshotJson;
         transaction.Provider = usage.ProviderKey;
         transaction.Model = usage.ModelKey;
         transaction.Status = UsageTransactionStatus.Completed;
@@ -226,7 +229,11 @@ public sealed class UsageLedgerService(
         transaction.LatencyMs = usage.LatencyMs;
         transaction.ProviderCostUsd = providerCost;
         transaction.ChargedAmount = chargingService.CalculateCustomerCharge(transaction);
-        transaction.PricingVersion = usage.PricingVersion ?? costCalculator.GetPricingSnapshot(usage)?.Version;
+        transaction.Currency = string.IsNullOrWhiteSpace(usage.Currency) ? transaction.Currency : usage.Currency.Trim().ToUpperInvariant();
+        transaction.CostBasis = string.IsNullOrWhiteSpace(usage.CostBasis)
+            ? usage.ActualCost.HasValue ? UsageCostBasis.Actual : UsageCostBasis.Estimated
+            : usage.CostBasis;
+        transaction.PricingVersion = string.IsNullOrWhiteSpace(usage.PricingVersion) ? costCalculator.GetPricingSnapshot(usage)?.Version : usage.PricingVersion;
         transaction.PricingSnapshotJson = snapshot;
         transaction.CompletedAt = DateTime.UtcNow;
         transaction.FailureCode = null;
@@ -249,8 +256,12 @@ public sealed class UsageLedgerService(
         transaction.LatencyMs = usage?.LatencyMs;
         transaction.Provider = usage?.ProviderKey ?? transaction.Provider;
         transaction.Model = usage?.ModelKey ?? transaction.Model;
-        transaction.PricingVersion = usage?.PricingVersion ?? transaction.PricingVersion;
-        transaction.PricingSnapshotJson = usage?.PricingSnapshotJson ?? transaction.PricingSnapshotJson;
+        transaction.Currency = string.IsNullOrWhiteSpace(usage?.Currency) ? transaction.Currency : usage.Currency.Trim().ToUpperInvariant();
+        transaction.CostBasis = string.IsNullOrWhiteSpace(usage?.CostBasis)
+            ? usage?.ActualCost.HasValue == true ? UsageCostBasis.Actual : transaction.CostBasis
+            : usage.CostBasis;
+        transaction.PricingVersion = string.IsNullOrWhiteSpace(usage?.PricingVersion) ? transaction.PricingVersion : usage.PricingVersion;
+        transaction.PricingSnapshotJson = string.IsNullOrWhiteSpace(usage?.PricingSnapshotJson) ? transaction.PricingSnapshotJson : usage.PricingSnapshotJson;
         transaction.FailureCode = failureCode;
         transaction.CompletedAt = null;
         await costControl.MarkAnomalyAsync(transaction, cancellationToken);

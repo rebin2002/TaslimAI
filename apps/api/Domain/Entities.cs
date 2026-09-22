@@ -303,6 +303,12 @@ public enum UsageTransactionStatus
     Refunded,
 }
 
+public static class UsageCostBasis
+{
+    public const string Actual = "Actual";
+    public const string Estimated = "Estimated";
+}
+
 public enum UsageChargeUnit
 {
     Usd,
@@ -491,6 +497,7 @@ public sealed class UsageTransaction
     public decimal ChargedAmount { get; set; }
     public UsageChargeUnit ChargedUnit { get; set; } = UsageChargeUnit.Usd;
     public string Currency { get; set; } = "USD";
+    public string? CostBasis { get; set; }
     public string? PricingVersion { get; set; }
     public string? PricingSnapshotJson { get; set; }
     public string? SafeMetadataJson { get; set; }

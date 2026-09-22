@@ -6,6 +6,7 @@ using System.Text.Json;
 using Microsoft.Extensions.Options;
 using Taslim.Api.Ai;
 using Taslim.Api.Contracts;
+using Taslim.Api.Domain;
 
 namespace Taslim.Api.Images;
 
@@ -17,7 +18,8 @@ public sealed record ImageProviderUsage(
     decimal? ActualCostUsd,
     string FinishReason = "completed",
     int LatencyMs = 0,
-    int? ImageOutputTokens = null);
+    int? ImageOutputTokens = null,
+    string CostBasis = UsageCostBasis.Estimated);
 
 public sealed record ImageProviderResult(
     ReadOnlyMemory<byte> Content,
@@ -155,16 +157,19 @@ public sealed class OpenAiImageGenerationProvider(
         var outputDetails = usageElement.ValueKind == JsonValueKind.Object && usageElement.TryGetProperty("output_tokens_details", out var outputTokenDetails) ? outputTokenDetails : default;
         var textInput = ReadInt(details, "text_tokens");
         var imageInput = ReadInt(details, "image_tokens");
-        var imageOutput = ReadInt(outputDetails, "image_tokens") ?? output;
-        var actualCost = CalculateCost(input, textInput, imageInput, imageOutput, prompt);
-        return new ImageProviderUsage(input, textInput, imageInput, output, actualCost, "completed", (int)Math.Min(int.MaxValue, latencyMs), imageOutput);
+        var imageOutput = ReadInt(outputDetails, "image_tokens");
+        var actualCost = CalculateCost(input, textInput, imageInput, output, imageOutput, prompt);
+        var costBasis = input.HasValue && output.HasValue ? UsageCostBasis.Actual : UsageCostBasis.Estimated;
+        return new ImageProviderUsage(input, textInput, imageInput, output, actualCost, "completed", Math.Max(1, (int)Math.Min(int.MaxValue, latencyMs)), imageOutput, costBasis);
     }
 
-    private decimal CalculateCost(int? input, int? textInput, int? imageInput, int? imageOutput, ImagePromptBuildResult prompt)
+    private decimal CalculateCost(int? input, int? textInput, int? imageInput, int? output, int? imageOutput, ImagePromptBuildResult prompt)
     {
         var textTokens = Math.Max(0, textInput ?? input ?? EstimateTextTokens(prompt.Prompt));
         var imageTokens = Math.Max(0, imageInput ?? 0);
-        var outputTokens = Math.Max(0, imageOutput ?? EstimateOutputTokens(prompt.NormalizedAspectRatio, prompt.NormalizedQuality));
+        // The Images API currently reports billable image output through normal output_tokens.
+        // Keep ImageOutputTokens null unless output_tokens_details.image_tokens is present.
+        var outputTokens = Math.Max(0, imageOutput ?? output ?? EstimateOutputTokens(prompt.NormalizedAspectRatio, prompt.NormalizedQuality));
         return decimal.Round(
             textTokens * settings.Pricing.TextInputUsdPerMillion / 1_000_000m
             + imageTokens * settings.Pricing.ImageInputUsdPerMillion / 1_000_000m

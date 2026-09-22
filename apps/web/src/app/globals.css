@@ -366,3 +366,10 @@ select.memory-control { appearance: auto; cursor: pointer; }
 @media (max-width: 900px) { .admin-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .admin-inspector-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 620px) { .admin-range-controls, .admin-range-presets, .admin-custom-range { align-items: stretch; width: 100%; } .admin-custom-range label { flex: 1; } .admin-custom-range .primary-button { width: 100%; } .admin-kpi-grid { grid-template-columns: 1fr; } .admin-inspector-grid { grid-template-columns: 1fr; } }
 [dir="rtl"] .admin-json-inspector { direction: ltr; text-align: left; }
+
+/* Batch 3.9.1 accounting inspector refinement — additive only */
+.admin-json-title {
+  margin: 1.1rem 0 0.55rem;
+  font-size: 0.86rem;
+  color: var(--muted);
+}

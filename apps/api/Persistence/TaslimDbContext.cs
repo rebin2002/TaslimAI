@@ -259,6 +259,7 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.Property(transaction => transaction.Status).HasConversion<string>().HasMaxLength(30).IsRequired();
             entity.Property(transaction => transaction.ChargedUnit).HasConversion<string>().HasMaxLength(20).IsRequired();
             entity.Property(transaction => transaction.Currency).HasMaxLength(3).IsRequired();
+            entity.Property(transaction => transaction.CostBasis).HasMaxLength(20);
             entity.Property(transaction => transaction.ProviderCostUsd).HasPrecision(18, 8).IsRequired();
             entity.Property(transaction => transaction.ChargedAmount).HasPrecision(18, 8).IsRequired();
             entity.Property(transaction => transaction.EstimatedProviderCostUsd).HasPrecision(18, 8);

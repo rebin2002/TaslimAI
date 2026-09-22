@@ -174,6 +174,7 @@ public sealed class AdminUsageService(TaslimDbContext db) : IAdminUsageService
         transaction.ProviderCostUsd,
         transaction.ChargedAmount,
         transaction.Currency,
+        transaction.CostBasis,
         transaction.PricingVersion,
         transaction.PricingSnapshotJson,
         transaction.SafeMetadataJson,

@@ -6,15 +6,17 @@ Batch 3.9 extends Taslim's existing `UsageTransaction` ledger into a provider-co
 
 ## Ledger model
 
-Each transaction is linked to a workspace and user and may be linked to a project, conversation, or `GenerationJob`. The ledger records the Taslim feature, provider and model identifiers, measured token quantities, image input/output quantities, latency, provider cost, customer charge, currency, failure code, refund time, and a historical pricing snapshot. Provider and model fields are internal operational data; they are not included in normal workspace usage responses.
+Each transaction is linked to a workspace and user and may be linked to a project, conversation, or `GenerationJob`. The ledger records the Taslim feature, provider and model identifiers, measured token quantities, image input/output quantities, provider latency, provider cost, customer charge, currency, cost basis, failure code, refund time, and a historical pricing snapshot. Provider and model fields are internal operational data; they are not included in normal workspace usage responses.
 
 The transaction state machine is `Pending → Completed`, `Pending → Failed`, `Pending → Cancelled`, and `Completed → Refunded`. Idempotent requests reuse the existing workspace/request/feature uniqueness key. Completed and refunded transactions are terminal for normal completion/failure updates. A cancellation always records zero customer charge, and a refund records the refund timestamp.
 
 ## Pricing snapshots and cost formulas
 
-Chat costs are calculated from the selected model's input, cached-input, and output token quantities. Image costs prefer measured provider usage from the image response and retain the configured estimate only for preflight controls or when a provider does not return a usable cost. Image accounting distinguishes text input tokens, image input tokens, and image output tokens.
+Chat costs are calculated from the selected model's input, cached-input, and output token quantities and are marked `Estimated` because the chat catalog calculation is Taslim's accounting calculation. Image costs prefer measured provider usage from the image response and retain the configured estimate only when the provider does not return usable billable quantities. Each completed transaction records `Actual` or `Estimated` in `CostBasis`, so an estimated fallback is never presented as exact provider-reported cost.
 
-Every completed transaction records the pricing version, effective date, source, unit, and rates that were used or configured for the calculation. This prevents a future rate change from changing the interpretation of historical transactions. The Batch 3.9 image snapshot is `gpt-image-2.5-sunburst-2026-09-08`, effective 2026-09-08, with the official rates of $5.00 per million text input tokens, $1.25 per million cached text input tokens, $8.00 per million image input tokens, $2.00 per million cached image input tokens, and $30.00 per million image output tokens. The source is the official [GPT Image 2.5 Sunburst model page][1]. The audit notes are in [`docs/openai-usage-pricing-audit-2026-09-22.md`](openai-usage-pricing-audit-2026-09-22.md).
+Every completed paid-provider transaction records the pricing version, effective date, source, unit, currency, and rates that were used or configured for the calculation. This prevents a future rate change from changing the interpretation of historical transactions. The Batch 3.9 image snapshot is `gpt-image-2.5-sunburst-2026-09-08`, effective 2026-09-08, with the official rates of $5.00 per million text input tokens, $1.25 per million cached text input tokens, $8.00 per million image input tokens, $2.00 per million cached image input tokens, and $30.00 per million image output tokens. The source is the official [GPT Image 2.5 Sunburst model page][1]. The audit notes are in [`docs/openai-usage-pricing-audit-2026-09-22.md`](openai-usage-pricing-audit-2026-09-22.md).
+
+The Images API response exposes ordinary `usage.input_tokens` and `usage.output_tokens`, plus optional `input_tokens_details.image_tokens` and `output_tokens_details.image_tokens`; it does not guarantee image-specific output details. Taslim therefore persists standard input/output quantities whenever returned and leaves `ImageInputTokens` or `ImageOutputTokens` null when the corresponding detail is absent. For the selected Sunburst response, the billable output quantity is the standard `output_tokens` field, not an invented image-output value. This follows the official [Create image API reference][2].
 
 ## Guardrails and anomaly detection
 
@@ -44,10 +46,11 @@ All report queries accept bounded UTC date ranges and optional feature, status, 
 
 ## Migration and operations
 
-`AddUsageAccountingFoundation` is additive. It preserves the existing `DataProtectionKeys`, Generation Jobs, Assets, Stored Files, Identity, and usage tables and adds nullable provenance/metadata columns, bounded internal JSON fields, indexes for report filters, and the optional Generation Job foreign key. The migration must be applied through the existing production advisory-lock migration runner. No Redis, queue broker, or new billing provider is required.
+`AddUsageAccountingFoundation` and `AddUsageCostBasis` are additive. They preserve the existing `DataProtectionKeys`, Generation Jobs, Assets, Stored Files, Identity, and usage tables and add nullable provenance/metadata columns, bounded internal JSON fields, indexes for report filters, the optional Generation Job foreign key, and the nullable cost-basis field. The migrations must be applied through the existing production advisory-lock migration runner. No Redis, queue broker, or new billing provider is required.
 
 ## Future extensions
 
 Future customer billing can implement a different `IUsageChargingService` and a currency-aware settlement policy without changing provider handlers. Future pricing catalogs can publish new versioned snapshots while retaining old snapshots on existing transactions. Guardrails can be enabled with explicit operator-selected limits, and a support workflow can review anomalies without exposing internal fields to ordinary users.
 
 [1]: https://developers.openai.com/api/docs/models/gpt-image-2.5-sunburst "Official GPT Image 2.5 Sunburst model page"
+[2]: https://developers.openai.com/api/reference/resources/images/methods/generate/ "Official Create image API reference"

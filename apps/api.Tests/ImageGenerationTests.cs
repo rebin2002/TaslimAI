@@ -77,6 +77,21 @@ public sealed class ImageGenerationTests : IClassFixture<ImageGenerationApiFacto
         Assert.Equal(UsageTransactionStatus.Completed, usage.Status);
         Assert.Equal(0.03168m, usage.ProviderCostUsd);
         Assert.Equal(0m, usage.ChargedAmount);
+        Assert.Equal("openai", usage.Provider);
+        Assert.Equal("gpt-image-2.5-sunburst", usage.Model);
+        Assert.Equal("USD", usage.Currency);
+        Assert.Equal(UsageCostBasis.Actual, usage.CostBasis);
+        Assert.Equal(100, usage.InputTokens);
+        Assert.Equal(1056, usage.OutputTokens);
+        Assert.Null(usage.ImageInputTokens);
+        Assert.Null(usage.ImageOutputTokens);
+        Assert.Equal(12, usage.LatencyMs);
+        Assert.Equal("gpt-image-2.5-sunburst-2026-09-08", usage.PricingVersion);
+        Assert.Contains("imageOutput", usage.PricingSnapshotJson, StringComparison.Ordinal);
+
+        var changedPricing = new ImageGenerationOptions { PricingVersion = "future-pricing-schedule" }.Pricing.ToSnapshot(new ImageGenerationOptions { PricingVersion = "future-pricing-schedule" }).ToJson();
+        Assert.DoesNotContain("future-pricing-schedule", usage.PricingSnapshotJson, StringComparison.Ordinal);
+        Assert.NotEqual(changedPricing, usage.PricingSnapshotJson);
 
         var asset = await db.Assets.AsNoTracking().Include(item => item.StoredFile).SingleAsync(item => item.SourceGenerationJobId == envelope.Job.Id);
         Assert.Equal(AssetTypes.Image, asset.AssetType);
@@ -212,6 +227,6 @@ internal sealed class DeterministicImageProvider : IImageGenerationProvider
     public async Task<ImageProviderResult> GenerateAsync(ImageGenerationInput request, ImagePromptBuildResult prompt, CancellationToken cancellationToken = default)
     {
         await Task.Delay(30, cancellationToken);
-        return new ImageProviderResult(Png, "image/png", "png", 1, 1, new ImageProviderUsage(100, 80, 0, 1056, 0.03168m, "completed", 12));
+        return new ImageProviderResult(Png, "image/png", "png", 1, 1, new ImageProviderUsage(100, 80, null, 1056, 0.03168m, "completed", 12, null, UsageCostBasis.Actual));
     }
 }

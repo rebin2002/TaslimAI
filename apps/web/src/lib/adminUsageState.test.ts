@@ -3,7 +3,7 @@ import { dailyCostMaximum, inspectableTransaction, presetRange, reportHasProvide
 import type { AdminUsageReport, AdminUsageTransaction } from "./api";
 
 const transaction: AdminUsageTransaction = {
-  id: "tx-1", createdAt: "2026-09-22T00:00:00Z", completedAt: "2026-09-22T00:00:01Z", workspaceId: "ws-1", workspaceName: "Workspace", userId: "u-1", userEmail: "admin@example.com", userDisplayName: "Admin", projectId: null, conversationId: null, generationJobId: null, feature: "Image", status: "Completed", provider: "openai", model: "gpt-image-2.5-sunburst", inputTokens: 10, cachedInputTokens: 0, outputTokens: 0, imageInputTokens: null, imageOutputTokens: 100, latencyMs: 500, estimatedProviderCostUsd: 0.001, providerCostUsd: 0.002, chargedAmount: 0, currency: "USD", pricingVersion: "pricing-v1", pricingSnapshotJson: "{\"version\":\"pricing-v1\"}", safeMetadataJson: null, failureCode: null, isAnomalous: false, anomalyCode: null, refundedAt: null,
+  id: "tx-1", createdAt: "2026-09-22T00:00:00Z", completedAt: "2026-09-22T00:00:01Z", workspaceId: "ws-1", workspaceName: "Workspace", userId: "u-1", userEmail: "admin@example.com", userDisplayName: "Admin", projectId: null, conversationId: null, generationJobId: null, feature: "Image", status: "Completed", provider: "openai", model: "gpt-image-2.5-sunburst", inputTokens: 10, cachedInputTokens: 0, outputTokens: 0, imageInputTokens: null, imageOutputTokens: 100, latencyMs: 500, estimatedProviderCostUsd: 0.001, providerCostUsd: 0.002, chargedAmount: 0, currency: "USD", costBasis: "Actual", pricingVersion: "pricing-v1", pricingSnapshotJson: "{\"version\":\"pricing-v1\"}", safeMetadataJson: null, failureCode: null, isAnomalous: false, anomalyCode: null, refundedAt: null,
 };
 
 const report: AdminUsageReport = {

@@ -88,6 +88,7 @@ public sealed record AdminUsageTransactionDto(
     decimal ProviderCostUsd,
     decimal ChargedAmount,
     string Currency,
+    string? CostBasis,
     string? PricingVersion,
     string? PricingSnapshotJson,
     string? SafeMetadataJson,

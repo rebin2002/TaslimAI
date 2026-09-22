@@ -43,7 +43,15 @@ public sealed class AdminUsageTests : IClassFixture<TaslimApiFactory>
         Assert.Contains(report.Breakdowns.ByFeature, item => item.Feature == "Chat");
         Assert.NotEmpty(report.Transactions.Items);
         Assert.Equal("mock", report.Transactions.Items[0].Provider);
+        Assert.Equal(UsageCostBasis.Estimated, report.Transactions.Items[0].CostBasis);
+        Assert.NotNull(report.Transactions.Items[0].PricingVersion);
+        Assert.NotNull(report.Transactions.Items[0].PricingSnapshotJson);
         Assert.Equal("USD", report.Summary.Currency);
+
+        var inspected = await client.GetFromJsonAsync<AdminUsageTransactionDto>($"/api/admin/usage/transactions/{report.Transactions.Items[0].Id}");
+        Assert.NotNull(inspected);
+        Assert.Equal(report.Transactions.Items[0].PricingVersion, inspected!.PricingVersion);
+        Assert.Equal(report.Transactions.Items[0].CostBasis, inspected.CostBasis);
     }
 
     [Fact]
@@ -54,10 +62,15 @@ public sealed class AdminUsageTests : IClassFixture<TaslimApiFactory>
         var summaryResponse = await client.GetAsync($"/api/workspaces/{auth.PersonalWorkspace.Id}/usage/summary");
         var summaryJson = JsonDocument.Parse(await summaryResponse.Content.ReadAsStringAsync());
         Assert.DoesNotContain(summaryJson.RootElement.EnumerateObject(), property => property.NameEquals("providerCostUsd"));
+        Assert.DoesNotContain(summaryJson.RootElement.EnumerateObject(), property => property.NameEquals("provider"));
+        Assert.DoesNotContain(summaryJson.RootElement.EnumerateObject(), property => property.NameEquals("model"));
+        Assert.DoesNotContain(summaryJson.RootElement.EnumerateObject(), property => property.NameEquals("pricingVersion"));
 
         var historyResponse = await client.GetAsync($"/api/workspaces/{auth.PersonalWorkspace.Id}/usage?page=1&pageSize=10");
         var historyJson = JsonDocument.Parse(await historyResponse.Content.ReadAsStringAsync());
         Assert.DoesNotContain(historyJson.RootElement.GetProperty("items").EnumerateArray(), item => item.TryGetProperty("providerCostUsd", out _));
+        Assert.DoesNotContain(historyJson.RootElement.GetProperty("items").EnumerateArray(), item => item.TryGetProperty("provider", out _));
+        Assert.DoesNotContain(historyJson.RootElement.GetProperty("items").EnumerateArray(), item => item.TryGetProperty("pricingSnapshotJson", out _));
     }
 
     [Fact]
