@@ -23,9 +23,18 @@ public sealed class DocumentGenerationJobHandler(
 
     public async Task<GenerationHandlerResult> ExecuteAsync(GenerationJob job, IProgress<int> progress, CancellationToken cancellationToken)
     {
-        if (!DocumentGenerationContractMapper.TryDeserializeInput(job.InputJson, out var input) || input is null)
-            throw new DocumentRequestValidationException(GenerationJobErrorCodes.DocumentRequestInvalid, "The document request is invalid.");
-        DocumentGenerationRequestValidator.Validate(input, settings);
+        DocumentGenerationInput input;
+        try
+        {
+            if (!DocumentGenerationContractMapper.TryDeserializeInput(job.InputJson, out var deserialized) || deserialized is null)
+                throw new DocumentRequestValidationException(GenerationJobErrorCodes.DocumentRequestInvalid, "The document request is invalid.");
+            DocumentGenerationRequestValidator.Validate(deserialized, settings);
+            input = deserialized;
+        }
+        catch (DocumentRequestValidationException exception)
+        {
+            throw new DocumentGenerationStageException(DocumentGenerationStages.Validation, exception.Code, exception.Message, null, exception);
+        }
         progress.Report(5);
         progress.Report(10);
 
@@ -53,17 +62,61 @@ public sealed class DocumentGenerationJobHandler(
         var sources = files.OrderBy(file => attachmentOrder[file.Id])
             .Select(file => new DocumentSourceContext(file.OriginalFileName, file.Extension, file.ExtractedText!))
             .ToArray();
-        var prompt = promptBuilder.Build(input, project, sources, settings);
+        DocumentGenerationPrompt prompt;
+        try
+        {
+            prompt = promptBuilder.Build(input, project, sources, settings);
+        }
+        catch (DocumentContextLimitException exception)
+        {
+            throw new DocumentGenerationStageException(DocumentGenerationStages.Context, GenerationJobErrorCodes.DocumentContextTooLarge, "The selected document context is too large.", null, exception);
+        }
         progress.Report(30);
 
-        var generated = await provider.GenerateAsync(prompt, settings, cancellationToken);
-        DocumentDraftValidator.Validate(generated.Draft, settings);
+        DocumentProviderResult generated;
+        try
+        {
+            generated = await provider.GenerateAsync(prompt, settings, cancellationToken);
+        }
+        catch (DocumentGenerationStageException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            var code = exception is AiProviderUnavailableException or AiProviderTimeoutException or AiProviderException or AiGenerationException
+                ? GenerationJobErrorCodes.DocumentProviderUnavailable
+                : GenerationJobErrorCodes.DocumentGenerationFailed;
+            throw new DocumentGenerationStageException(DocumentGenerationStages.Provider, code, "The document provider could not complete the request.", null, exception);
+        }
+        try
+        {
+            DocumentDraftValidator.Validate(generated.Draft, settings);
+        }
+        catch (DocumentOutputValidationException exception)
+        {
+            throw new DocumentGenerationStageException(DocumentGenerationStages.DraftValidation, GenerationJobErrorCodes.DocumentOutputInvalid, "The document draft did not satisfy the required structure.", generated.Usage, exception);
+        }
         progress.Report(65);
 
         var outputs = new List<GenerationHandlerOutput>();
         var rendered = new List<RenderedDocument>();
-        if (input.OutputFormat is "docx" or "both") rendered.Add(renderer.RenderDocx(generated.Draft, input, settings));
-        if (input.OutputFormat is "pdf" or "both") rendered.Add(renderer.RenderPdf(generated.Draft, input, settings));
+        if (input.OutputFormat is "docx" or "both")
+        {
+            try { rendered.Add(renderer.RenderDocx(generated.Draft, input, settings)); }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                throw new DocumentGenerationStageException(DocumentGenerationStages.DocxRender, GenerationJobErrorCodes.DocumentRenderFailed, "The DOCX document could not be rendered.", generated.Usage, exception);
+            }
+        }
+        if (input.OutputFormat is "pdf" or "both")
+        {
+            try { rendered.Add(renderer.RenderPdf(generated.Draft, input, settings)); }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                throw new DocumentGenerationStageException(DocumentGenerationStages.PdfRender, GenerationJobErrorCodes.DocumentRenderFailed, "The PDF document could not be rendered.", generated.Usage, exception);
+            }
+        }
         if (rendered.Count == 0) throw new DocumentOutputValidationException();
 
         var metadata = JsonSerializer.Serialize(new

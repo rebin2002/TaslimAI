@@ -18,7 +18,7 @@ using Xunit;
 
 namespace Taslim.Api.Tests;
 
-public sealed class DocumentGenerationApiFactory : GenerationJobsApiFactory
+public class DocumentGenerationApiFactory : GenerationJobsApiFactory
 {
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
@@ -29,6 +29,19 @@ public sealed class DocumentGenerationApiFactory : GenerationJobsApiFactory
         {
             services.RemoveAll<IDocumentGenerationProvider>();
             services.AddSingleton<IDocumentGenerationProvider, DeterministicDocumentProvider>();
+        });
+    }
+}
+
+public sealed class DocumentRenderFailureApiFactory : DocumentGenerationApiFactory
+{
+    protected override void ConfigureWebHost(IWebHostBuilder builder)
+    {
+        base.ConfigureWebHost(builder);
+        builder.ConfigureServices(services =>
+        {
+            services.RemoveAll<IDocumentRenderer>();
+            services.AddSingleton<IDocumentRenderer, FailingPdfDocumentRenderer>();
         });
     }
 }
@@ -90,6 +103,35 @@ public sealed class DocumentGenerationTests : IClassFixture<DocumentGenerationAp
         Assert.Equal(0m, usage.ChargedAmount);
         Assert.Equal("document-test", usage.Provider);
         Assert.Equal(UsageCostBasis.Actual, usage.CostBasis);
+    }
+
+    [Fact]
+    public async Task Document_job_without_attachments_renders_both_formats_and_publishes_one_asset()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client);
+        var response = await SendWithCsrf(client, HttpMethod.Post, "/api/document-generation/jobs", new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            description = "Create a concise professional report about a clear product launch plan.",
+            documentType = "report",
+            length = "standard",
+            tone = "professional",
+            language = "en",
+            attachmentIds = Array.Empty<Guid>(),
+            outputFormat = "both",
+        });
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        var created = (await response.Content.ReadFromJsonAsync<CreateDocumentGenerationResponse>())!;
+        var job = await WaitForTerminal(client, created.Job.Id);
+        Assert.Equal(GenerationJobStatus.Succeeded.ToString(), job.Status);
+        Assert.Equal(2, job.Outputs.Count);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var asset = await db.Assets.Include(item => item.Representations).SingleAsync(item => item.SourceGenerationJobId == created.Job.Id);
+        Assert.Equal(AssetTypes.Document, asset.AssetType);
+        Assert.Equal(2, asset.Representations.Count);
     }
 
     [Fact]
@@ -175,6 +217,57 @@ public sealed class DocumentGenerationTests : IClassFixture<DocumentGenerationAp
     }
 }
 
+public sealed class DocumentGenerationFailureTests : IClassFixture<DocumentRenderFailureApiFactory>
+{
+    private readonly DocumentRenderFailureApiFactory factory;
+
+    public DocumentGenerationFailureTests(DocumentRenderFailureApiFactory factory)
+    {
+        this.factory = factory;
+        using var scope = factory.Services.CreateScope();
+        scope.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+    }
+
+    [Fact]
+    public async Task Provider_usage_is_retained_when_pdf_rendering_fails()
+    {
+        using var client = factory.CreateClient();
+        var csrf = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
+        using var register = new HttpRequestMessage(HttpMethod.Post, "/api/auth/register");
+        register.Headers.Add("X-CSRF-TOKEN", csrf.GetProperty("token").GetString());
+        register.Content = JsonContent.Create(new { displayName = "Render Failure Tester", email = $"document-render-{Guid.NewGuid():N}@example.com", password = "StrongPassword!123", preferredLanguage = "en" });
+        var authResponse = await client.SendAsync(register);
+        Assert.Equal(HttpStatusCode.OK, authResponse.StatusCode);
+        var auth = (await authResponse.Content.ReadFromJsonAsync<AuthResponse>())!;
+
+        csrf = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
+        using var create = new HttpRequestMessage(HttpMethod.Post, "/api/document-generation/jobs");
+        create.Headers.Add("X-CSRF-TOKEN", csrf.GetProperty("token").GetString());
+        create.Content = JsonContent.Create(new { workspaceId = auth.PersonalWorkspace.Id, description = "Create a concise report.", documentType = "report", length = "standard", tone = "professional", language = "en", outputFormat = "both", attachmentIds = Array.Empty<Guid>() });
+        var createdResponse = await client.SendAsync(create);
+        Assert.Equal(HttpStatusCode.Accepted, createdResponse.StatusCode);
+        var created = (await createdResponse.Content.ReadFromJsonAsync<CreateDocumentGenerationResponse>())!;
+
+        GenerationJobDto? terminal = null;
+        for (var attempt = 0; attempt < 120; attempt++)
+        {
+            terminal = await client.GetFromJsonAsync<GenerationJobDto>($"/api/generation/jobs/{created.Job.Id}");
+            if (terminal?.Status is "Succeeded" or "Failed" or "Cancelled") break;
+            await Task.Delay(50);
+        }
+
+        Assert.Equal("Failed", terminal?.Status);
+        Assert.Equal(GenerationJobErrorCodes.DocumentRenderFailed, terminal?.ErrorCode);
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var usage = await db.UsageTransactions.AsNoTracking().SingleAsync(item => item.GenerationJobId == created.Job.Id);
+        Assert.Equal(UsageTransactionStatus.Failed, usage.Status);
+        Assert.True(usage.ProviderCostUsd > 0m);
+        Assert.Equal(UsageCostBasis.Actual, usage.CostBasis);
+        Assert.False(await db.Assets.AsNoTracking().AnyAsync(item => item.SourceGenerationJobId == created.Job.Id));
+    }
+}
+
 internal sealed class DeterministicDocumentProvider : IDocumentGenerationProvider
 {
     public Task<DocumentProviderResult> GenerateAsync(DocumentGenerationPrompt prompt, DocumentGenerationOptions options, CancellationToken cancellationToken = default)
@@ -188,4 +281,13 @@ internal sealed class DeterministicDocumentProvider : IDocumentGenerationProvide
         var usage = new AiUsageMetadata("document-test", "document-test", 80, null, 120, 0.0012m, 0.0012m, 8, "completed", false, PricingVersion: "document-test-v1", Currency: "USD", CostBasis: UsageCostBasis.Actual);
         return Task.FromResult(new DocumentProviderResult(draft, usage));
     }
+}
+
+internal sealed class FailingPdfDocumentRenderer : IDocumentRenderer
+{
+    public RenderedDocument RenderDocx(DocumentDraft draft, DocumentGenerationInput input, DocumentGenerationOptions options) =>
+        new(AssetRepresentationTypes.Docx, "draft.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", [1, 2, 3]);
+
+    public RenderedDocument RenderPdf(DocumentDraft draft, DocumentGenerationInput input, DocumentGenerationOptions options) =>
+        throw new InvalidOperationException("intentional renderer test failure");
 }

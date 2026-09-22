@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
@@ -94,7 +95,7 @@ public interface IGenerationJobUsageService
 {
     Task<UsageTransaction> BeginAsync(GenerationJob job, decimal? estimatedProviderCostUsd = null, CancellationToken cancellationToken = default);
     Task CompleteAsync(UsageTransaction transaction, AiUsageMetadata usage, CancellationToken cancellationToken = default);
-    Task FailAsync(UsageTransaction transaction, string failureCode, CancellationToken cancellationToken = default);
+    Task FailAsync(UsageTransaction transaction, string failureCode, AiUsageMetadata? usage = null, CancellationToken cancellationToken = default);
     Task CancelAsync(UsageTransaction transaction, string cancellationCode, CancellationToken cancellationToken = default);
 }
 
@@ -117,8 +118,8 @@ public sealed class GenerationJobUsageService(IUsageLedgerService ledger) : IGen
     public Task CompleteAsync(UsageTransaction transaction, AiUsageMetadata usage, CancellationToken cancellationToken = default) =>
         ledger.CompleteAsync(transaction, usage, cancellationToken);
 
-    public Task FailAsync(UsageTransaction transaction, string failureCode, CancellationToken cancellationToken = default) =>
-        ledger.FailAsync(transaction, failureCode, cancellationToken: cancellationToken);
+    public Task FailAsync(UsageTransaction transaction, string failureCode, AiUsageMetadata? usage = null, CancellationToken cancellationToken = default) =>
+        ledger.FailAsync(transaction, failureCode, usage, cancellationToken);
 
     public Task CancelAsync(UsageTransaction transaction, string cancellationCode, CancellationToken cancellationToken = default) =>
         ledger.CancelAsync(transaction, cancellationCode, cancellationToken);
@@ -364,17 +365,21 @@ public sealed class GenerationJobWorker(
         var monitor = MonitorCancellationAsync(db, claimedJob.Id, cancellation, stoppingToken);
         var publications = new List<PreparedGenerationOutput>();
         var publicationCommitted = false;
+        AiUsageMetadata? providerUsage = null;
+        var executionStarted = Stopwatch.GetTimestamp();
         try
         {
             var handlers = scope.ServiceProvider.GetServices<IGenerationJobHandler>();
             var handler = handlers.FirstOrDefault(item => item.CanHandle(claimedJob.JobType));
             if (handler is null)
             {
-                await FailAsync(db, usage, claimedJob, GenerationJobErrorCodes.TypeNotSupported, "This job type is not available.", stoppingToken);
+                await FailAsync(db, usage, claimedJob, GenerationJobErrorCodes.TypeNotSupported, "This job type is not available.", null, stoppingToken);
                 return;
             }
-            var progress = new Progress<int>(value => _ = UpdateProgressAsync(claimedJob.Id, value, stoppingToken));
+            var progress = new SerializedProgress(value => UpdateProgressSafelyAsync(claimedJob.Id, value, stoppingToken));
             var result = await handler.ExecuteAsync(claimedJob, progress, cancellation.Token);
+            await progress.DrainAsync();
+            providerUsage = result.Usage;
             var current = await db.GenerationJobs.FirstOrDefaultAsync(item => item.Id == claimedJob.Id, stoppingToken);
             if (current is null || current.Status != GenerationJobStatus.Running || current.CancellationRequested || cancellation.IsCancellationRequested)
             {
@@ -383,7 +388,17 @@ public sealed class GenerationJobWorker(
             }
             foreach (var output in result.Outputs)
             {
-                publications.Add(await publisher.PrepareAsync(current, output, stoppingToken));
+                try
+                {
+                    publications.Add(await publisher.PrepareAsync(current, output, stoppingToken));
+                }
+                catch (Exception exception) when (exception is not OperationCanceledException && string.Equals(claimedJob.JobType, GenerationJobTypes.DocumentGenerate, StringComparison.OrdinalIgnoreCase))
+                {
+                    var stage = output.FileArtifact?.RepresentationType?.Equals(AssetRepresentationTypes.Pdf, StringComparison.OrdinalIgnoreCase) == true
+                        ? DocumentGenerationStages.StoragePdf
+                        : DocumentGenerationStages.StorageDocx;
+                    throw new DocumentGenerationStageException(stage, DocumentGenerationFailureCodes.ForStage(stage), "The generated document could not be stored.", providerUsage, exception);
+                }
             }
             AttachAssetRepresentations(publications);
             var resultJson = AddPublishedAssetReference(result.ResultJson, publications);
@@ -394,27 +409,41 @@ public sealed class GenerationJobWorker(
             }
 
             int completed;
-            await using (var completionTransaction = await db.Database.BeginTransactionAsync(stoppingToken))
+            try
             {
-                foreach (var publication in publications)
+                await using (var completionTransaction = await db.Database.BeginTransactionAsync(stoppingToken))
                 {
-                    db.GenerationJobOutputs.Add(publication.Output);
-                    if (publication.Asset is not null) db.Assets.Add(publication.Asset);
-                }
-                await db.SaveChangesAsync(stoppingToken);
-                var completedAt = DateTime.UtcNow;
-                completed = await db.GenerationJobs
-                    .Where(item => item.Id == current.Id && item.Status == GenerationJobStatus.Running && !item.CancellationRequested)
-                    .ExecuteUpdateAsync(setters => setters
-                        .SetProperty(item => item.Status, GenerationJobStatus.Succeeded)
-                        .SetProperty(item => item.ProgressPercent, 100)
-                        .SetProperty(item => item.ResultJson, resultJson)
-                        .SetProperty(item => item.Provider, result.Usage == null ? null : result.Usage.ProviderKey)
-                        .SetProperty(item => item.ProviderModel, result.Usage == null ? null : result.Usage.ModelKey)
+                    var completedAt = DateTime.UtcNow;
+                    completed = await db.GenerationJobs
+                        .Where(item => item.Id == current.Id && item.Status == GenerationJobStatus.Running && !item.CancellationRequested)
+                        .ExecuteUpdateAsync(setters => setters
+                            .SetProperty(item => item.Status, GenerationJobStatus.Succeeded)
+                            .SetProperty(item => item.ProgressPercent, 100)
+                            .SetProperty(item => item.ResultJson, resultJson)
+                            .SetProperty(item => item.Provider, result.Usage == null ? null : result.Usage.ProviderKey)
+                            .SetProperty(item => item.ProviderModel, result.Usage == null ? null : result.Usage.ModelKey)
                         .SetProperty(item => item.CompletedAt, completedAt)
                         .SetProperty(item => item.ClaimExpiresAt, (DateTime?)null), stoppingToken);
-                if (completed > 0) await completionTransaction.CommitAsync(stoppingToken);
-                else await completionTransaction.RollbackAsync(stoppingToken);
+                    if (completed == 0)
+                    {
+                        await completionTransaction.RollbackAsync(stoppingToken);
+                    }
+                    else
+                    {
+                        db.Entry(current).State = EntityState.Detached;
+                        foreach (var publication in publications)
+                        {
+                            db.GenerationJobOutputs.Add(publication.Output);
+                            if (publication.Asset is not null) db.Assets.Add(publication.Asset);
+                        }
+                        await usage.CompleteAsync(await usage.BeginAsync(current, cancellationToken: stoppingToken), result.Usage ?? new AiUsageMetadata("system", "unknown", null, null, null, 0m, 0m, 0, "completed", true), stoppingToken);
+                        await completionTransaction.CommitAsync(stoppingToken);
+                    }
+                }
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException && string.Equals(claimedJob.JobType, GenerationJobTypes.DocumentGenerate, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new DocumentGenerationStageException(DocumentGenerationStages.AssetPublish, GenerationJobErrorCodes.DocumentStorageFailed, "The generated document could not be published.", providerUsage, exception);
             }
             if (completed == 0)
             {
@@ -423,8 +452,6 @@ public sealed class GenerationJobWorker(
                 return;
             }
             publicationCommitted = true;
-            var transaction = await usage.BeginAsync(current, cancellationToken: stoppingToken);
-            await usage.CompleteAsync(transaction, result.Usage ?? new AiUsageMetadata("system", "unknown", null, null, null, 0m, 0m, 0, "completed", true), stoppingToken);
         }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
         {
@@ -437,8 +464,17 @@ public sealed class GenerationJobWorker(
             if (!publicationCommitted)
                 foreach (var publication in publications) await publisher.DiscardAsync(publication, CancellationToken.None);
             var failureCode = MapFailureCode(exception, claimedJob.JobType);
-            logger.LogError(exception, "Generation job execution failed. JobId={JobId}; JobType={JobType}; FailureCode={FailureCode}", claimedJob.Id, claimedJob.JobType, failureCode);
-            await FailAsync(db, usage, claimedJob, failureCode, FailureMessage(failureCode), stoppingToken);
+            var failureUsage = providerUsage ?? (exception as DocumentGenerationStageException)?.Usage;
+            if (string.Equals(claimedJob.JobType, GenerationJobTypes.DocumentGenerate, StringComparison.OrdinalIgnoreCase))
+            {
+                var stage = (exception as DocumentGenerationStageException)?.Stage ?? DocumentGenerationStages.Execution;
+                logger.LogError("Document generation failed. JobId={JobId}; Stage={Stage}; ErrorCode={ErrorCode}; ExceptionType={ExceptionType}; ElapsedMs={ElapsedMs}", claimedJob.Id, stage, failureCode, exception.GetType().Name, (long)Stopwatch.GetElapsedTime(executionStarted).TotalMilliseconds);
+            }
+            else
+            {
+                logger.LogError(exception, "Generation job execution failed. JobId={JobId}; JobType={JobType}; FailureCode={FailureCode}", claimedJob.Id, claimedJob.JobType, failureCode);
+            }
+            await FailAsync(db, usage, claimedJob, failureCode, FailureMessage(failureCode), failureUsage, stoppingToken);
         }
         finally
         {
@@ -468,6 +504,38 @@ public sealed class GenerationJobWorker(
         var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
         return await db.GenerationJobs.Where(job => job.Id == jobId && job.Status == GenerationJobStatus.Running)
             .ExecuteUpdateAsync(setters => setters.SetProperty(job => job.ProgressPercent, Math.Clamp(progress, 0, 100)), cancellationToken);
+    }
+
+    private async Task UpdateProgressSafelyAsync(Guid jobId, int progress, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await UpdateProgressAsync(jobId, progress, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+        catch (Exception exception)
+        {
+            logger.LogWarning("Generation job progress update was skipped. JobId={JobId}; ExceptionType={ExceptionType}", jobId, exception.GetType().Name);
+        }
+    }
+
+    private sealed class SerializedProgress(Func<int, Task> writer) : IProgress<int>
+    {
+        private readonly object gate = new();
+        private Task pending = Task.CompletedTask;
+
+        public void Report(int value)
+        {
+            lock (gate)
+            {
+                pending = pending.ContinueWith(_ => writer(value), CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default).Unwrap();
+            }
+        }
+
+        public Task DrainAsync()
+        {
+            lock (gate) return pending;
+        }
     }
 
     private static string AddPublishedAssetReference(string resultJson, IReadOnlyList<PreparedGenerationOutput> publications)
@@ -534,7 +602,7 @@ public sealed class GenerationJobWorker(
         await usage.CancelAsync(transaction, CancellationCode(job), cancellationToken);
     }
 
-    private static async Task FailAsync(TaslimDbContext db, IGenerationJobUsageService usage, GenerationJob job, string code, string message, CancellationToken cancellationToken)
+    private static async Task FailAsync(TaslimDbContext db, IGenerationJobUsageService usage, GenerationJob job, string code, string message, AiUsageMetadata? providerUsage, CancellationToken cancellationToken)
     {
         var now = DateTime.UtcNow;
         await db.GenerationJobs.Where(item => item.Id == job.Id && item.Status == GenerationJobStatus.Running)
@@ -545,7 +613,7 @@ public sealed class GenerationJobWorker(
                 .SetProperty(item => item.FailedAt, now)
                 .SetProperty(item => item.ClaimExpiresAt, (DateTime?)null), cancellationToken);
         var transaction = await usage.BeginAsync(job, cancellationToken: cancellationToken);
-        await usage.FailAsync(transaction, code, cancellationToken);
+        await usage.FailAsync(transaction, code, providerUsage, cancellationToken);
     }
 
     private static string CancellationCode(GenerationJob job) =>
@@ -561,6 +629,7 @@ public sealed class GenerationJobWorker(
         {
             return exception switch
             {
+                DocumentGenerationStageException staged => staged.Code,
                 DocumentRequestValidationException validation => validation.Code,
                 DocumentContextLimitException => GenerationJobErrorCodes.DocumentContextTooLarge,
                 DocumentOutputValidationException => GenerationJobErrorCodes.DocumentOutputInvalid,

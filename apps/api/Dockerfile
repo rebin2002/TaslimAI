@@ -9,5 +9,8 @@ FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS final
 WORKDIR /app
 ENV ASPNETCORE_HTTP_PORTS=8080
 EXPOSE 8080
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libfontconfig1 libfreetype6 libharfbuzz0b \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=build /app/publish .
 ENTRYPOINT ["dotnet", "Taslim.Api.dll"]

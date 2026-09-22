@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Taslim.Api.Ai;
 using Taslim.Api.Contracts;
+using Taslim.Api.Domain;
 
 namespace Taslim.Api.Documents;
 
@@ -34,16 +35,39 @@ public sealed class AiDocumentGenerationProvider(IChatCompletionService completi
         {
             throw new AiProviderTimeoutException();
         }
+        if (string.IsNullOrWhiteSpace(result.Content))
+            throw new DocumentGenerationStageException(DocumentGenerationStages.DraftParse, GenerationJobErrorCodes.DocumentOutputInvalid, "The document response was empty.", result.Usage);
+
+        DocumentDraft draft;
         try
         {
-            var draft = JsonSerializer.Deserialize<DocumentDraft>(result.Content, new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
-                ?? throw new DocumentOutputValidationException();
-            DocumentDraftValidator.Validate(draft, options);
-            return new DocumentProviderResult(draft, result.Usage);
+            draft = JsonSerializer.Deserialize<DocumentDraft>(NormalizeStructuredJson(result.Content), new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+                ?? throw new JsonException("The document response was empty.");
         }
-        catch (JsonException)
+        catch (JsonException exception)
         {
-            throw new DocumentOutputValidationException();
+            throw new DocumentGenerationStageException(DocumentGenerationStages.DraftParse, GenerationJobErrorCodes.DocumentOutputInvalid, "The document response could not be parsed.", result.Usage, exception);
         }
+
+        try
+        {
+            DocumentDraftValidator.Validate(draft, options);
+        }
+        catch (DocumentOutputValidationException exception)
+        {
+            throw new DocumentGenerationStageException(DocumentGenerationStages.DraftValidation, GenerationJobErrorCodes.DocumentOutputInvalid, "The document response did not satisfy the required structure.", result.Usage, exception);
+        }
+
+        return new DocumentProviderResult(draft, result.Usage);
+    }
+
+    private static string NormalizeStructuredJson(string content)
+    {
+        var value = content.Trim();
+        if (!value.StartsWith("```", StringComparison.Ordinal) || !value.EndsWith("```", StringComparison.Ordinal)) return value;
+        var firstLineEnd = value.IndexOf('\n');
+        if (firstLineEnd < 0 || !value[..firstLineEnd].Trim().Equals("```json", StringComparison.OrdinalIgnoreCase))
+            throw new JsonException("The document response contained an unsupported wrapper.");
+        return value[(firstLineEnd + 1)..^3].Trim();
     }
 }

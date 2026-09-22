@@ -20,7 +20,7 @@ Provider selection remains behind `IDocumentGenerationProvider`. The current ada
 
 A single validated `DocumentDraft` is rendered twice: once to editable DOCX through `DocumentFormat.OpenXml` and once to PDF through QuestPDF. The two files therefore share the same generated content and do not require separate AI calls. DOCX output includes title, headings, paragraphs, lists, simple tables, spacing, margins, Unicode text, and RTL paragraph direction. PDF output uses A4 pages, margins, headings, spacing, tables, footer page numbers, and right-to-left content flow for Arabic and Kurdish Sorani.
 
-QuestPDF is packaged as a NuGet dependency and carries its Linux native renderer assets through the existing .NET publish pipeline; no new Railway service or browser runtime is required. `NotoSansArabic-Regular.ttf` is included in API output/publish assets and registered when available for deterministic RTL PDF font support. The API Dockerfile remains the existing .NET 8 multi-stage deployment.
+QuestPDF is packaged as a NuGet dependency and carries its Linux native renderer assets through the existing .NET publish pipeline. The API runtime image installs the required `fontconfig`, FreeType, and HarfBuzz libraries; no new Railway service or browser runtime is required. `NotoSansArabic-Regular.ttf` is included in API output/publish assets and registered when available for deterministic RTL PDF font support.
 
 ## Asset and storage relationship
 
@@ -34,11 +34,11 @@ Successful results expose only the Asset ID, safe title/language/summary, bounde
 
 The existing lifecycle is Pending → Queued → Running → Succeeded, with Failed and Cancelled terminal paths. Document progress reports validation, source preparation, drafting, rendering, storage, and completion stages. A pending or queued request can be cancelled immediately; a running request receives cooperative cancellation through the existing worker token. Failed and cancelled jobs publish no Asset or representation.
 
-Document-specific safe codes include `DOCUMENT_REQUEST_INVALID`, `DOCUMENT_ATTACHMENT_UNAVAILABLE`, `DOCUMENT_ATTACHMENT_EXTRACTION_FAILED`, `DOCUMENT_CONTEXT_TOO_LARGE`, `DOCUMENT_PROVIDER_UNAVAILABLE`, `DOCUMENT_OUTPUT_INVALID`, `DOCUMENT_RENDER_FAILED`, `DOCUMENT_STORAGE_FAILED`, `DOCUMENT_GENERATION_FAILED`, and `DOCUMENT_CANCELLED`. Browser responses do not contain prompts, raw provider responses, API keys, storage keys, stack traces, or internal provider/model details.
+Document-specific safe codes include `DOCUMENT_REQUEST_INVALID`, `DOCUMENT_ATTACHMENT_UNAVAILABLE`, `DOCUMENT_ATTACHMENT_EXTRACTION_FAILED`, `DOCUMENT_CONTEXT_TOO_LARGE`, `DOCUMENT_PROVIDER_UNAVAILABLE`, `DOCUMENT_OUTPUT_INVALID`, `DOCUMENT_RENDER_FAILED`, `DOCUMENT_STORAGE_FAILED`, `DOCUMENT_GENERATION_FAILED`, and `DOCUMENT_CANCELLED`. Internal logs distinguish validation, context, provider, draft parsing/validation, DOCX/PDF rendering, representation storage, Asset publication, and usage-finalization stages with job ID, safe code, exception type, and elapsed time. Browser responses do not contain prompts, raw provider responses, API keys, storage keys, stack traces, or internal provider/model details.
 
 ## Usage accounting
 
-Document execution uses `UsageFeature.Document` through the production Usage Ledger. The ledger records Generation Job provenance, provider/model, input and output quantities when available, provider latency, currency, pricing version, immutable pricing snapshot, and actual-versus-estimated cost basis. The customer charge remains zero. Document transactions are visible to server-authorized administrators at `/account/admin/usage`; normal users receive the existing redacted usage contract.
+Document execution uses `UsageFeature.Document` through the production Usage Ledger. The ledger records Generation Job provenance, provider/model, input and output quantities when available, provider latency, currency, pricing version, immutable pricing snapshot, and actual-versus-estimated cost basis. If a provider succeeds but rendering or storage fails, the usage metadata is retained on the failed transaction; if the provider is never called, provider cost remains zero. The customer charge remains zero. Document transactions are visible to server-authorized administrators at `/account/admin/usage`; normal users receive the existing redacted usage contract.
 
 ## Localization and future path
 
