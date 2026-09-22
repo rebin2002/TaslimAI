@@ -33,6 +33,15 @@ public sealed class DocumentGenerationStageException(
 
 public static class DocumentGenerationFailureCodes
 {
+    public static string ForProvider(AiProviderException exception) => exception.FailureCategory switch
+    {
+        AiProviderFailureCategories.Configuration => GenerationJobErrorCodes.DocumentProviderConfiguration,
+        AiProviderFailureCategories.UnsupportedRequest => GenerationJobErrorCodes.DocumentProviderUnsupportedRequest,
+        AiProviderFailureCategories.RateLimited => GenerationJobErrorCodes.DocumentProviderRateLimited,
+        AiProviderFailureCategories.Transient => GenerationJobErrorCodes.DocumentProviderTransientFailure,
+        _ => GenerationJobErrorCodes.DocumentProviderUnavailable,
+    };
+
     public static string ForStage(string stage) => stage switch
     {
         DocumentGenerationStages.DocxRender or DocumentGenerationStages.PdfRender => GenerationJobErrorCodes.DocumentRenderFailed,

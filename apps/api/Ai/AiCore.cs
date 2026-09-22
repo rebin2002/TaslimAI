@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Options;
+using System.Text.Json;
 using Taslim.Api.Domain;
 
 namespace Taslim.Api.Ai;
@@ -6,6 +7,7 @@ namespace Taslim.Api.Ai;
 public sealed record AiChatMessage(string Role, string Content);
 public sealed record AiMemoryContext(string Category, string Title, string Content);
 public sealed record AiFileContext(string FileName, string ContentType, string? ExtractedText, string? DataUrl);
+public sealed record AiStructuredOutputSpec(string Name, JsonElement Schema, string? Description = null, bool Strict = true);
 
 public sealed record AiChatRequest(
     IReadOnlyList<AiChatMessage> Messages,
@@ -14,7 +16,8 @@ public sealed record AiChatRequest(
     bool EnableStreaming = false,
     IReadOnlyList<AiFileContext>? Attachments = null,
     int? MaxOutputTokens = null,
-    bool JsonMode = false);
+    bool JsonMode = false,
+    AiStructuredOutputSpec? StructuredOutput = null);
 
 public sealed record AiProviderSelection(
     string ProviderKey,
@@ -82,11 +85,12 @@ public sealed class AiModelRouter(
     {
         var tier = NormalizeTier(request.RequestedTier, settings.DefaultChatTier);
         var providerKey = settings.OpenAI.Enabled ? "openai" : settings.AllowMockProvider ? "mock" : throw new AiProviderUnavailableException();
-        var model = catalog.GetForTier(tier, providerKey)
+        var requiresStructuredOutput = request.StructuredOutput is not null || request.JsonMode;
+        var model = catalog.GetForTier(tier, providerKey, requiresStructuredOutput)
             ?? throw new AiProviderUnavailableException();
         if (request.Attachments?.Any(attachment => !string.IsNullOrWhiteSpace(attachment.DataUrl)) == true && !model.SupportsVision)
         {
-            model = catalog.All.FirstOrDefault(candidate => candidate.ProviderKey.Equals(providerKey, StringComparison.OrdinalIgnoreCase) && candidate.Enabled && candidate.SupportsVision)
+            model = catalog.All.FirstOrDefault(candidate => candidate.ProviderKey.Equals(providerKey, StringComparison.OrdinalIgnoreCase) && candidate.Enabled && candidate.SupportsVision && (!requiresStructuredOutput || candidate.SupportsStructuredOutput))
                 ?? throw new AiProviderUnavailableException();
         }
 

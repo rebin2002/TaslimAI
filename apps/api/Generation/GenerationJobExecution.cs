@@ -468,7 +468,19 @@ public sealed class GenerationJobWorker(
             if (string.Equals(claimedJob.JobType, GenerationJobTypes.DocumentGenerate, StringComparison.OrdinalIgnoreCase))
             {
                 var stage = (exception as DocumentGenerationStageException)?.Stage ?? DocumentGenerationStages.Execution;
-                logger.LogError("Document generation failed. JobId={JobId}; Stage={Stage}; ErrorCode={ErrorCode}; ExceptionType={ExceptionType}; ElapsedMs={ElapsedMs}", claimedJob.Id, stage, failureCode, exception.GetType().Name, (long)Stopwatch.GetElapsedTime(executionStarted).TotalMilliseconds);
+                var providerException = exception as AiProviderException ?? exception.InnerException as AiProviderException;
+                logger.LogError("Document generation failed. JobId={JobId}; Stage={Stage}; ErrorCode={ErrorCode}; ExceptionType={ExceptionType}; ProviderFailureCategory={ProviderFailureCategory}; ProviderHttpStatus={ProviderHttpStatus}; ProviderErrorCode={ProviderErrorCode}; ModelKey={ModelKey}; StructuredOutput={StructuredOutput}; Streaming={Streaming}; ElapsedMs={ElapsedMs}",
+                    claimedJob.Id,
+                    stage,
+                    failureCode,
+                    exception.GetType().Name,
+                    providerException?.FailureCategory,
+                    providerException?.HttpStatusCode,
+                    providerException?.ProviderErrorCode,
+                    providerException?.ModelKey,
+                    providerException?.StructuredOutputRequested,
+                    providerException?.StreamingRequested,
+                    (long)Stopwatch.GetElapsedTime(executionStarted).TotalMilliseconds);
             }
             else
             {
@@ -633,6 +645,7 @@ public sealed class GenerationJobWorker(
                 DocumentRequestValidationException validation => validation.Code,
                 DocumentContextLimitException => GenerationJobErrorCodes.DocumentContextTooLarge,
                 DocumentOutputValidationException => GenerationJobErrorCodes.DocumentOutputInvalid,
+                AiProviderException providerException => DocumentGenerationFailureCodes.ForProvider(providerException),
                 FileStorageUnavailableException => GenerationJobErrorCodes.DocumentStorageFailed,
                 FileStorageOperationException => GenerationJobErrorCodes.DocumentStorageFailed,
                 FileUploadValidationException => GenerationJobErrorCodes.DocumentStorageFailed,
@@ -666,6 +679,10 @@ public sealed class GenerationJobWorker(
         GenerationJobErrorCodes.ImageRequestInvalid => "Please check the image request and try again.",
         GenerationJobErrorCodes.ImageCancelled => "The image generation was cancelled.",
         GenerationJobErrorCodes.DocumentProviderUnavailable => "Document generation is temporarily unavailable. Please try again later.",
+        GenerationJobErrorCodes.DocumentProviderConfiguration => "Document generation is temporarily unavailable. Please try again later.",
+        GenerationJobErrorCodes.DocumentProviderUnsupportedRequest => "Document generation is temporarily unavailable. Please try again later.",
+        GenerationJobErrorCodes.DocumentProviderRateLimited => "Document generation is temporarily unavailable. Please try again later.",
+        GenerationJobErrorCodes.DocumentProviderTransientFailure => "Document generation is temporarily unavailable. Please try again later.",
         GenerationJobErrorCodes.DocumentContextTooLarge => "The selected source material is too large. Choose fewer or shorter documents.",
         GenerationJobErrorCodes.DocumentOutputInvalid => "The generated document was invalid. Please try again.",
         GenerationJobErrorCodes.DocumentStorageFailed => "The document was generated but could not be saved. Please try again.",

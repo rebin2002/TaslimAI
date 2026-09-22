@@ -44,4 +44,15 @@ public sealed class DocumentGenerationUnitTests
         Assert.StartsWith("%PDF-", System.Text.Encoding.ASCII.GetString(pdf.Content, 0, 5));
         Assert.True(pdf.Content.Length > 500);
     }
+
+    [Fact]
+    public void Structured_document_schema_is_strict_and_matches_canonical_blocks()
+    {
+        var schema = DocumentDraftStructuredOutput.Spec.Schema;
+        Assert.Equal("object", schema.GetProperty("type").GetString());
+        Assert.False(schema.GetProperty("additionalProperties").GetBoolean());
+        Assert.Equal(new[] { "title", "summary", "sections" }, schema.GetProperty("required").EnumerateArray().Select(item => item.GetString()).ToArray());
+        var block = schema.GetProperty("properties").GetProperty("sections").GetProperty("items").GetProperty("properties").GetProperty("blocks").GetProperty("items");
+        Assert.Equal(new[] { "type", "text", "items", "rows" }, block.GetProperty("required").EnumerateArray().Select(item => item.GetString()).ToArray());
+    }
 }

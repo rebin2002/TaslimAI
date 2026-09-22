@@ -84,9 +84,12 @@ public sealed class DocumentGenerationJobHandler(
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
-            var code = exception is AiProviderUnavailableException or AiProviderTimeoutException or AiProviderException or AiGenerationException
-                ? GenerationJobErrorCodes.DocumentProviderUnavailable
-                : GenerationJobErrorCodes.DocumentGenerationFailed;
+            var code = exception switch
+            {
+                AiProviderException providerException => DocumentGenerationFailureCodes.ForProvider(providerException),
+                AiProviderUnavailableException or AiProviderTimeoutException or AiGenerationException => GenerationJobErrorCodes.DocumentProviderUnavailable,
+                _ => GenerationJobErrorCodes.DocumentGenerationFailed,
+            };
             throw new DocumentGenerationStageException(DocumentGenerationStages.Provider, code, "The document provider could not complete the request.", null, exception);
         }
         try

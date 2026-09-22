@@ -31,6 +31,22 @@ public sealed class AiCoreTests
     }
 
     [Fact]
+    public void Router_rejects_structured_request_when_selected_tier_lacks_capability()
+    {
+        var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Ai:Models:gpt-5.6-terra:ProviderKey"] = "openai",
+            ["Ai:Models:gpt-5.6-terra:CapabilityTier"] = "Smart",
+            ["Ai:Models:gpt-5.6-terra:SupportsStructuredOutput"] = "false",
+        }).Build();
+        var options = Options.Create(new AiOptions { DefaultChatTier = "Smart", AllowMockProvider = false, OpenAI = new OpenAiOptions { Enabled = true, ApiKey = "test-only" } });
+        var router = new AiModelRouter(options, new AiModelCatalog(configuration));
+        var schema = System.Text.Json.JsonDocument.Parse("{\"type\":\"object\"}").RootElement.Clone();
+
+        Assert.Throws<AiProviderUnavailableException>(() => router.Select(new AiChatRequest([], "system", "Smart", StructuredOutput: new AiStructuredOutputSpec("test", schema))));
+    }
+
+    [Fact]
     public async Task Completion_service_calculates_catalog_cost_and_preserves_usage()
     {
         var options = Options.Create(new AiOptions { AllowMockProvider = false, OpenAI = new OpenAiOptions { Enabled = true, ApiKey = "test-only" } });

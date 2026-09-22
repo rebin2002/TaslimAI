@@ -28,7 +28,7 @@ public sealed class AiDocumentGenerationProvider(IChatCompletionService completi
                     options.RequestedTier,
                     EnableStreaming: false,
                     MaxOutputTokens: options.MaxOutputTokens,
-                    JsonMode: true),
+                    StructuredOutput: DocumentDraftStructuredOutput.Spec),
                 timeout.Token);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
@@ -70,4 +70,57 @@ public sealed class AiDocumentGenerationProvider(IChatCompletionService completi
             throw new JsonException("The document response contained an unsupported wrapper.");
         return value[(firstLineEnd + 1)..^3].Trim();
     }
+}
+
+public static class DocumentDraftStructuredOutput
+{
+    public static AiStructuredOutputSpec Spec { get; } = new(
+        "taslim_document_draft",
+        JsonDocument.Parse("""
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "title": { "type": "string" },
+            "summary": { "type": "string" },
+            "sections": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "heading": { "type": "string" },
+                  "blocks": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "type": { "type": "string", "enum": ["paragraph", "heading", "bullet_list", "numbered_list", "table"] },
+                        "text": { "type": ["string", "null"] },
+                        "items": { "type": ["array", "null"], "items": { "type": "string" } },
+                        "rows": {
+                          "type": ["array", "null"],
+                          "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                              "cells": { "type": "array", "items": { "type": "string" } }
+                            },
+                            "required": ["cells"]
+                          }
+                        }
+                      },
+                      "required": ["type", "text", "items", "rows"]
+                    }
+                  }
+                },
+                "required": ["heading", "blocks"]
+              }
+            }
+          },
+          "required": ["title", "summary", "sections"]
+        }
+        """).RootElement.Clone(),
+        "A bounded canonical document draft for Taslim Document Studio.");
 }

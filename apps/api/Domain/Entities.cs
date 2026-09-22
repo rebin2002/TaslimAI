@@ -99,6 +99,10 @@ public static class GenerationJobErrorCodes
     public const string DocumentAttachmentExtractionFailed = "DOCUMENT_ATTACHMENT_EXTRACTION_FAILED";
     public const string DocumentContextTooLarge = "DOCUMENT_CONTEXT_TOO_LARGE";
     public const string DocumentProviderUnavailable = "DOCUMENT_PROVIDER_UNAVAILABLE";
+    public const string DocumentProviderConfiguration = "DOCUMENT_PROVIDER_CONFIGURATION";
+    public const string DocumentProviderUnsupportedRequest = "DOCUMENT_PROVIDER_UNSUPPORTED_REQUEST";
+    public const string DocumentProviderRateLimited = "DOCUMENT_PROVIDER_RATE_LIMITED";
+    public const string DocumentProviderTransientFailure = "DOCUMENT_PROVIDER_TRANSIENT_FAILURE";
     public const string DocumentGenerationFailed = "DOCUMENT_GENERATION_FAILED";
     public const string DocumentOutputInvalid = "DOCUMENT_OUTPUT_INVALID";
     public const string DocumentRenderFailed = "DOCUMENT_RENDER_FAILED";
