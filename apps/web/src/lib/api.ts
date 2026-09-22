@@ -234,6 +234,54 @@ export type PresentationJobResult = {
   previewSlides?: { order: number; type: string; title: string; subtitle?: string | null; blocks?: { type: string; text?: string | null; items?: string[]; columns?: { heading: string; items: string[] }[]; rows?: { cells: string[] }[]; metrics?: { label: string; value: string; detail?: string | null }[]; label?: string | null; value?: string | null }[] }[];
   representations?: { id: string; type: string; fileName: string; contentType: string }[];
 };
+export type ResearchGenerationInput = {
+  workspaceId: string;
+  projectId?: string | null;
+  question: string;
+  title?: string | null;
+  depth?: "quick" | "standard" | "deep";
+  reportType?: "research_report" | "market_research" | "competitor_research" | "company_research" | "product_research" | "industry_research" | "general_research";
+  language?: "auto" | "en" | "ar" | "ku";
+  audience?: string | null;
+  geographicFocus?: string | null;
+  timePeriod?: string | null;
+  additionalInstructions?: string | null;
+  preferredDomains?: string | null;
+  excludedDomains?: string | null;
+  useWebSources: boolean;
+  attachmentIds: string[];
+};
+export type ResearchReportBlock = { type: string; text?: string | null; items?: string[] | null; rows?: { cells: string[] }[] | null; citationIds?: string[] };
+export type ResearchJobResult = {
+  assetId?: string;
+  researchType?: "research";
+  title?: string;
+  subtitle?: string | null;
+  language?: string;
+  executiveSummary?: string;
+  keyFindings?: ResearchReportBlock[];
+  sections?: { heading: string; blocks: ResearchReportBlock[] }[];
+  conclusion?: string;
+  sourceCount?: number;
+  sources?: ResearchSource[];
+  representations?: { id: string; type: string; fileName: string; contentType: string }[];
+};
+export type ResearchSource = {
+  citationId: string;
+  url: string | null;
+  title: string;
+  domain: string;
+  publisher: string | null;
+  publishedAt: string | null;
+  retrievedAt: string;
+  sourceType: string;
+  snippet: string | null;
+  searchQuery: string | null;
+  rank: number;
+  isSelected: boolean;
+  evidence?: ResearchEvidence[];
+};
+export type ResearchEvidence = { topic: string; excerpt: string; context: string | null; publishedAt: string | null };
 export type AssetStatus = "Active" | "Archived";
 export type AssetType = "image" | "document" | "presentation" | "video" | "audio" | "music" | "research" | "social" | "file" | "other";
 export type Asset = {
@@ -381,7 +429,9 @@ export const api = {
   createImageGenerationJob: (input: ImageGenerationInput) => request<{ job: GenerationJob }>("/api/image-generation/jobs", { method: "POST", body: JSON.stringify(input) }, true).then((response) => response.job),
   createDocumentGenerationJob: (input: DocumentGenerationInput) => request<{ job: GenerationJob }>("/api/document-generation/jobs", { method: "POST", body: JSON.stringify(input) }, true).then((response) => response.job),
   createPresentationGenerationJob: (input: PresentationGenerationInput) => request<{ job: GenerationJob }>("/api/presentation-generation/jobs", { method: "POST", body: JSON.stringify(input) }, true).then((response) => response.job),
+  createResearchGenerationJob: (input: ResearchGenerationInput) => request<{ job: GenerationJob }>("/api/research-generation/jobs", { method: "POST", body: JSON.stringify(input) }, true).then((response) => response.job),
   getGenerationJob: (jobId: string) => request<GenerationJob>(`/api/generation/jobs/${jobId}`),
+  getResearchSources: (jobId: string) => request<{ jobId: string; sources: ResearchSource[] }>(`/api/research-generation/jobs/${jobId}/sources`),
   listGenerationJobs: (workspaceId: string, page = 1, pageSize = 20) => request<GenerationJobList>(`/api/generation/jobs?workspaceId=${encodeURIComponent(workspaceId)}&page=${page}&pageSize=${pageSize}&jobType=system.test`),
   cancelGenerationJob: (jobId: string) => request<{ status: GenerationJobStatus; cancellationRequested?: boolean }>(`/api/generation/jobs/${jobId}/cancel`, { method: "POST" }, true),
   listAssets: (workspaceId: string, filters: AssetFilters = {}) => {

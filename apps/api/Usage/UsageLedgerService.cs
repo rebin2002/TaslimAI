@@ -235,6 +235,7 @@ public sealed class UsageLedgerService(
             : usage.CostBasis;
         transaction.PricingVersion = string.IsNullOrWhiteSpace(usage.PricingVersion) ? costCalculator.GetPricingSnapshot(usage)?.Version : usage.PricingVersion;
         transaction.PricingSnapshotJson = snapshot;
+        transaction.SafeMetadataJson = usage.SafeMetadataJson;
         transaction.CompletedAt = DateTime.UtcNow;
         transaction.FailureCode = null;
         await costControl.MarkAnomalyAsync(transaction, cancellationToken);
@@ -262,6 +263,7 @@ public sealed class UsageLedgerService(
             : usage.CostBasis;
         transaction.PricingVersion = string.IsNullOrWhiteSpace(usage?.PricingVersion) ? transaction.PricingVersion : usage.PricingVersion;
         transaction.PricingSnapshotJson = string.IsNullOrWhiteSpace(usage?.PricingSnapshotJson) ? transaction.PricingSnapshotJson : usage.PricingSnapshotJson;
+        transaction.SafeMetadataJson = usage?.SafeMetadataJson ?? transaction.SafeMetadataJson;
         transaction.FailureCode = failureCode;
         transaction.CompletedAt = null;
         await costControl.MarkAnomalyAsync(transaction, cancellationToken);

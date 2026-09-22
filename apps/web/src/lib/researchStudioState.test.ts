@@ -1,0 +1,12 @@
+import { describe, expect, it } from "vitest";
+import type { GenerationJob } from "./api";
+import { displayResearchProgress, isResearchSourceReady, isSafeExternalUrl, parseResearchJobResult, researchStudioState } from "./researchStudioState";
+
+const job = (status: GenerationJob["status"], resultJson: string | null = null, progressPercent = 70): GenerationJob => ({ id: "job-1", workspaceId: "workspace-1", projectId: null, jobType: "research.generate", status, title: "Research", progressPercent, resultJson, errorCode: null, errorMessage: null, cancellationRequested: false, createdAt: "2026-01-01", queuedAt: null, startedAt: null, completedAt: null, failedAt: null, cancelledAt: null, outputs: [] });
+
+describe("researchStudioState", () => {
+  it("caps nonterminal progress and honors terminal completion", () => { expect(displayResearchProgress(job("Running", null, 100))).toBe(99); expect(displayResearchProgress(job("Succeeded", '{"assetId":"asset-1"}', 100))).toBe(100); });
+  it("parses cited report blocks and rejects malformed result safely", () => { const result = parseResearchJobResult(job("Succeeded", '{"researchType":"research","assetId":"asset-1","title":"Report","sources":[{"citationId":"S1","title":"Official source","domain":"example.gov","url":"https://example.gov","sourceType":"web","isSelected":true}],"keyFindings":[{"type":"key_finding","text":"A finding [S1]","citationIds":["S1"]}],"representations":[{"id":"docx-1","type":"docx","fileName":"report.docx","contentType":"application/vnd.openxmlformats-officedocument.wordprocessingml.document"}]}')); expect(result?.sources?.[0].citationId).toBe("S1"); expect(result?.keyFindings?.[0].citationIds).toEqual(["S1"]); expect(result?.representations).toHaveLength(1); expect(parseResearchJobResult(job("Succeeded", "not-json"))).toBeNull(); });
+  it("uses completed-unavailable when a successful job lacks an asset result", () => { expect(researchStudioState(job("Succeeded", '{"title":"Report"}'), parseResearchJobResult(job("Succeeded", '{"title":"Report"}')))).toBe("completed-unavailable"); });
+  it("accepts only ready extracted source files and safe HTTP links", () => { expect(isResearchSourceReady({ extension: ".xlsx", status: "Ready", textExtractionStatus: "Ready" })).toBe(true); expect(isResearchSourceReady({ extension: ".png", status: "Ready", textExtractionStatus: "Ready" })).toBe(false); expect(isSafeExternalUrl("https://example.gov/source")).toBe(true); expect(isSafeExternalUrl("javascript:alert(1)")).toBe(false); });
+});

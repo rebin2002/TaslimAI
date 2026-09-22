@@ -22,6 +22,8 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
     public DbSet<GenerationJobOutput> GenerationJobOutputs => Set<GenerationJobOutput>();
     public DbSet<Asset> Assets => Set<Asset>();
     public DbSet<AssetRepresentation> AssetRepresentations => Set<AssetRepresentation>();
+    public DbSet<ResearchSource> ResearchSources => Set<ResearchSource>();
+    public DbSet<ResearchEvidence> ResearchEvidence => Set<ResearchEvidence>();
     public DbSet<DataProtectionKey> DataProtectionKeys => Set<DataProtectionKey>();
 
     protected override void OnModelCreating(ModelBuilder builder)
@@ -201,6 +203,41 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasIndex(representation => representation.StoredFileId).IsUnique();
             entity.HasOne(representation => representation.Asset).WithMany(asset => asset.Representations).HasForeignKey(representation => representation.AssetId).OnDelete(DeleteBehavior.Cascade);
             entity.HasOne(representation => representation.StoredFile).WithMany(file => file.AssetRepresentations).HasForeignKey(representation => representation.StoredFileId).OnDelete(DeleteBehavior.Restrict);
+        });
+
+        builder.Entity<ResearchSource>(entity =>
+        {
+            entity.HasKey(source => source.Id);
+            entity.Property(source => source.CitationId).HasMaxLength(16).IsRequired();
+            entity.Property(source => source.Url).HasMaxLength(2_000);
+            entity.Property(source => source.CanonicalUrl).HasMaxLength(2_000);
+            entity.Property(source => source.Title).HasMaxLength(300).IsRequired();
+            entity.Property(source => source.Domain).HasMaxLength(160).IsRequired();
+            entity.Property(source => source.Publisher).HasMaxLength(300);
+            entity.Property(source => source.SourceType).HasMaxLength(40).IsRequired();
+            entity.Property(source => source.Snippet).HasMaxLength(2_000);
+            entity.Property(source => source.ExtractedText).HasMaxLength(20_000);
+            entity.Property(source => source.SearchQuery).HasMaxLength(800);
+            entity.Property(source => source.MetadataJson).HasMaxLength(8_000);
+            entity.HasIndex(source => new { source.GenerationJobId, source.CitationId }).IsUnique();
+            entity.HasIndex(source => new { source.WorkspaceId, source.RetrievedAt });
+            entity.HasOne(source => source.Workspace).WithMany().HasForeignKey(source => source.WorkspaceId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(source => source.GenerationJob).WithMany(job => job.ResearchSources).HasForeignKey(source => source.GenerationJobId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(source => source.StoredFile).WithMany().HasForeignKey(source => source.StoredFileId).OnDelete(DeleteBehavior.SetNull);
+        });
+
+        builder.Entity<ResearchEvidence>(entity =>
+        {
+            entity.HasKey(evidence => evidence.Id);
+            entity.Property(evidence => evidence.Topic).HasMaxLength(240).IsRequired();
+            entity.Property(evidence => evidence.Excerpt).HasMaxLength(4_000).IsRequired();
+            entity.Property(evidence => evidence.Context).HasMaxLength(4_000);
+            entity.Property(evidence => evidence.CreatedAt).IsRequired();
+            entity.HasIndex(evidence => new { evidence.GenerationJobId, evidence.ResearchSourceId });
+            entity.HasIndex(evidence => evidence.WorkspaceId);
+            entity.HasOne(evidence => evidence.Workspace).WithMany().HasForeignKey(evidence => evidence.WorkspaceId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(evidence => evidence.GenerationJob).WithMany().HasForeignKey(evidence => evidence.GenerationJobId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(evidence => evidence.ResearchSource).WithMany(source => source.Evidence).HasForeignKey(evidence => evidence.ResearchSourceId).OnDelete(DeleteBehavior.Cascade);
         });
 
         builder.Entity<ChatMessageAttachment>(entity =>

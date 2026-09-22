@@ -42,7 +42,8 @@ public sealed record AiUsageMetadata(
     string? PricingVersion = null,
     string? PricingSnapshotJson = null,
     string? Currency = null,
-    string? CostBasis = null);
+    string? CostBasis = null,
+    string? SafeMetadataJson = null);
 
 public sealed record AiGenerationResult(string Content, AiUsageMetadata Usage);
 

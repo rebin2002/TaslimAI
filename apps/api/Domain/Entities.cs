@@ -55,6 +55,7 @@ public static class GenerationJobTypes
     public const string ImageGenerate = "image.generate";
     public const string DocumentGenerate = "document.generate";
     public const string PresentationGenerate = "presentation.generate";
+    public const string ResearchGenerate = "research.generate";
 
     public static readonly IReadOnlySet<string> Supported = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
@@ -62,6 +63,7 @@ public static class GenerationJobTypes
         ImageGenerate,
         DocumentGenerate,
         PresentationGenerate,
+        ResearchGenerate,
     };
 }
 
@@ -124,6 +126,20 @@ public static class GenerationJobErrorCodes
     public const string PresentationRenderFailed = "PRESENTATION_RENDER_FAILED";
     public const string PresentationStorageFailed = "PRESENTATION_STORAGE_FAILED";
     public const string PresentationCancelled = "PRESENTATION_CANCELLED";
+    public const string ResearchRequestInvalid = "RESEARCH_REQUEST_INVALID";
+    public const string ResearchSourceUnavailable = "RESEARCH_SOURCE_UNAVAILABLE";
+    public const string ResearchSourceFetchFailed = "RESEARCH_SOURCE_FETCH_FAILED";
+    public const string ResearchSourceExtractionFailed = "RESEARCH_SOURCE_EXTRACTION_FAILED";
+    public const string ResearchSearchUnavailable = "RESEARCH_SEARCH_UNAVAILABLE";
+    public const string ResearchSearchFailed = "RESEARCH_SEARCH_FAILED";
+    public const string ResearchContextTooLarge = "RESEARCH_CONTEXT_TOO_LARGE";
+    public const string ResearchProviderUnavailable = "RESEARCH_PROVIDER_UNAVAILABLE";
+    public const string ResearchGenerationFailed = "RESEARCH_GENERATION_FAILED";
+    public const string ResearchOutputInvalid = "RESEARCH_OUTPUT_INVALID";
+    public const string ResearchCitationValidationFailed = "RESEARCH_CITATION_VALIDATION_FAILED";
+    public const string ResearchRenderFailed = "RESEARCH_RENDER_FAILED";
+    public const string ResearchStorageFailed = "RESEARCH_STORAGE_FAILED";
+    public const string ResearchCancelled = "RESEARCH_CANCELLED";
 }
 
 public static class AssetTypes
@@ -464,6 +480,52 @@ public sealed class GenerationJob
     public ApplicationUser CreatedByUser { get; set; } = null!;
     public ICollection<GenerationJobOutput> Outputs { get; set; } = [];
     public ICollection<Asset> Assets { get; set; } = [];
+    public ICollection<ResearchSource> ResearchSources { get; set; } = [];
+}
+
+public sealed class ResearchSource
+{
+    public Guid Id { get; set; }
+    public Guid WorkspaceId { get; set; }
+    public Guid GenerationJobId { get; set; }
+    public Guid? StoredFileId { get; set; }
+    public string CitationId { get; set; } = string.Empty;
+    public string? Url { get; set; }
+    public string? CanonicalUrl { get; set; }
+    public string Title { get; set; } = string.Empty;
+    public string Domain { get; set; } = string.Empty;
+    public string? Publisher { get; set; }
+    public DateTime? PublishedAt { get; set; }
+    public DateTime RetrievedAt { get; set; }
+    public string SourceType { get; set; } = "web";
+    public string? Snippet { get; set; }
+    public string? ExtractedText { get; set; }
+    public string? SearchQuery { get; set; }
+    public int Rank { get; set; }
+    public bool IsSelected { get; set; }
+    public string? MetadataJson { get; set; }
+
+    public Workspace Workspace { get; set; } = null!;
+    public GenerationJob GenerationJob { get; set; } = null!;
+    public StoredFile? StoredFile { get; set; }
+    public ICollection<ResearchEvidence> Evidence { get; set; } = [];
+}
+
+public sealed class ResearchEvidence
+{
+    public Guid Id { get; set; }
+    public Guid WorkspaceId { get; set; }
+    public Guid GenerationJobId { get; set; }
+    public Guid ResearchSourceId { get; set; }
+    public string Topic { get; set; } = string.Empty;
+    public string Excerpt { get; set; } = string.Empty;
+    public string? Context { get; set; }
+    public DateTime? PublishedAt { get; set; }
+    public DateTime CreatedAt { get; set; }
+
+    public Workspace Workspace { get; set; } = null!;
+    public GenerationJob GenerationJob { get; set; } = null!;
+    public ResearchSource ResearchSource { get; set; } = null!;
 }
 
 public sealed class Asset

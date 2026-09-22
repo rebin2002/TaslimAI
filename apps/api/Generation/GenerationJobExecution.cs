@@ -12,6 +12,7 @@ using Taslim.Api.Files;
 using Taslim.Api.Images;
 using Taslim.Api.Persistence;
 using Taslim.Api.Presentations;
+using Taslim.Api.Research;
 using Taslim.Api.Usage;
 
 namespace Taslim.Api.Generation;
@@ -113,7 +114,9 @@ public sealed class GenerationJobUsageService(IUsageLedgerService ledger) : IGen
                 ? UsageFeature.Image
                 : string.Equals(job.JobType, GenerationJobTypes.DocumentGenerate, StringComparison.OrdinalIgnoreCase)
                     ? UsageFeature.Document
-                    : string.Equals(job.JobType, GenerationJobTypes.PresentationGenerate, StringComparison.OrdinalIgnoreCase) ? UsageFeature.Presentation : UsageFeature.Generation,
+                    : string.Equals(job.JobType, GenerationJobTypes.PresentationGenerate, StringComparison.OrdinalIgnoreCase)
+                        ? UsageFeature.Presentation
+                        : string.Equals(job.JobType, GenerationJobTypes.ResearchGenerate, StringComparison.OrdinalIgnoreCase) ? UsageFeature.Research : UsageFeature.Generation,
             cancellationToken,
             job.Id,
             estimatedProviderCostUsd);
@@ -256,6 +259,8 @@ public sealed class GenerationJobService(
                 ? GenerationJobErrorCodes.DocumentCancelled
                 : string.Equals(job.JobType, GenerationJobTypes.PresentationGenerate, StringComparison.OrdinalIgnoreCase)
                     ? GenerationJobErrorCodes.PresentationCancelled
+                    : string.Equals(job.JobType, GenerationJobTypes.ResearchGenerate, StringComparison.OrdinalIgnoreCase)
+                        ? GenerationJobErrorCodes.ResearchCancelled
                 : GenerationJobErrorCodes.Cancelled;
 }
 
@@ -408,6 +413,10 @@ public sealed class GenerationJobWorker(
                 {
                     throw new PresentationGenerationStageException(PresentationGenerationStages.StoragePptx, GenerationJobErrorCodes.PresentationStorageFailed, "The generated presentation could not be stored.", providerUsage, exception);
                 }
+                catch (Exception exception) when (exception is not OperationCanceledException && string.Equals(claimedJob.JobType, GenerationJobTypes.ResearchGenerate, StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new ResearchGenerationStageException(ResearchGenerationStages.StorageDocx, GenerationJobErrorCodes.ResearchStorageFailed, "The generated research report could not be stored.", providerUsage, exception);
+                }
             }
             AttachAssetRepresentations(publications);
             var resultJson = AddPublishedAssetReference(result.ResultJson, publications);
@@ -458,6 +467,10 @@ public sealed class GenerationJobWorker(
             {
                 throw new PresentationGenerationStageException(PresentationGenerationStages.AssetPublish, GenerationJobErrorCodes.PresentationStorageFailed, "The generated presentation could not be published.", providerUsage, exception);
             }
+            catch (Exception exception) when (exception is not OperationCanceledException && string.Equals(claimedJob.JobType, GenerationJobTypes.ResearchGenerate, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new ResearchGenerationStageException(ResearchGenerationStages.AssetPublish, GenerationJobErrorCodes.ResearchStorageFailed, "The generated research report could not be published.", providerUsage, exception);
+            }
             if (completed == 0)
             {
                 foreach (var publication in publications) await publisher.DiscardAsync(publication, stoppingToken);
@@ -479,6 +492,7 @@ public sealed class GenerationJobWorker(
             var failureCode = MapFailureCode(exception, claimedJob.JobType);
             var failureUsage = providerUsage ?? (exception as DocumentGenerationStageException)?.Usage;
             failureUsage ??= (exception as PresentationGenerationStageException)?.Usage;
+            failureUsage ??= (exception as ResearchGenerationStageException)?.Usage;
             if (string.Equals(claimedJob.JobType, GenerationJobTypes.DocumentGenerate, StringComparison.OrdinalIgnoreCase))
             {
                 var stage = (exception as DocumentGenerationStageException)?.Stage ?? DocumentGenerationStages.Execution;
@@ -511,6 +525,21 @@ public sealed class GenerationJobWorker(
                     providerException?.ModelKey,
                     providerException?.StructuredOutputRequested,
                     providerException?.StreamingRequested,
+                    (long)Stopwatch.GetElapsedTime(executionStarted).TotalMilliseconds);
+            }
+            else if (string.Equals(claimedJob.JobType, GenerationJobTypes.ResearchGenerate, StringComparison.OrdinalIgnoreCase))
+            {
+                var stage = (exception as ResearchGenerationStageException)?.Stage ?? ResearchGenerationStages.Report;
+                var providerException = exception as AiProviderException ?? exception.InnerException as AiProviderException;
+                logger.LogError("Research generation failed. JobId={JobId}; Stage={Stage}; ErrorCode={ErrorCode}; ExceptionType={ExceptionType}; ProviderFailureCategory={ProviderFailureCategory}; ProviderHttpStatus={ProviderHttpStatus}; ProviderErrorCode={ProviderErrorCode}; ModelKey={ModelKey}; ElapsedMs={ElapsedMs}",
+                    claimedJob.Id,
+                    stage,
+                    failureCode,
+                    exception.GetType().Name,
+                    providerException?.FailureCategory,
+                    providerException?.HttpStatusCode,
+                    providerException?.ProviderErrorCode,
+                    providerException?.ModelKey,
                     (long)Stopwatch.GetElapsedTime(executionStarted).TotalMilliseconds);
             }
             else
@@ -666,6 +695,8 @@ public sealed class GenerationJobWorker(
                 ? GenerationJobErrorCodes.DocumentCancelled
                 : string.Equals(job.JobType, GenerationJobTypes.PresentationGenerate, StringComparison.OrdinalIgnoreCase)
                     ? GenerationJobErrorCodes.PresentationCancelled
+                    : string.Equals(job.JobType, GenerationJobTypes.ResearchGenerate, StringComparison.OrdinalIgnoreCase)
+                        ? GenerationJobErrorCodes.ResearchCancelled
                 : GenerationJobErrorCodes.Cancelled;
 
     private static string MapFailureCode(Exception exception, string jobType)
@@ -699,6 +730,22 @@ public sealed class GenerationJobWorker(
                 FileStorageUnavailableException or FileStorageOperationException or FileUploadValidationException => GenerationJobErrorCodes.PresentationStorageFailed,
                 AiProviderUnavailableException or AiProviderTimeoutException => GenerationJobErrorCodes.PresentationProviderUnavailable,
                 _ => GenerationJobErrorCodes.PresentationGenerationFailed,
+            };
+        }
+        if (string.Equals(jobType, GenerationJobTypes.ResearchGenerate, StringComparison.OrdinalIgnoreCase))
+        {
+            return exception switch
+            {
+                ResearchGenerationStageException staged => staged.Code,
+                ResearchRequestValidationException validation => validation.Code,
+                ResearchContextLimitException => GenerationJobErrorCodes.ResearchContextTooLarge,
+                ResearchCitationValidationException => GenerationJobErrorCodes.ResearchCitationValidationFailed,
+                ResearchOutputValidationException or ResearchOutputInvalidException => GenerationJobErrorCodes.ResearchOutputInvalid,
+                ResearchSearchUnavailableException or ResearchSearchTimeoutException => GenerationJobErrorCodes.ResearchSearchUnavailable,
+                ResearchSearchFailedException => GenerationJobErrorCodes.ResearchSearchFailed,
+                AiProviderException or AiProviderUnavailableException or AiProviderTimeoutException => GenerationJobErrorCodes.ResearchProviderUnavailable,
+                FileStorageUnavailableException or FileStorageOperationException or FileUploadValidationException => GenerationJobErrorCodes.ResearchStorageFailed,
+                _ => GenerationJobErrorCodes.ResearchGenerationFailed,
             };
         }
         if (!string.Equals(jobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase)) return GenerationJobErrorCodes.ExecutionFailed;
@@ -745,6 +792,15 @@ public sealed class GenerationJobWorker(
         GenerationJobErrorCodes.PresentationStorageFailed => "The presentation was generated but could not be saved. Please try again.",
         GenerationJobErrorCodes.PresentationRenderFailed => "The presentation could not be rendered. Please try again.",
         GenerationJobErrorCodes.PresentationCancelled => "The presentation generation was cancelled.",
+        GenerationJobErrorCodes.ResearchSearchUnavailable => "Web research is temporarily unavailable. Please try again later.",
+        GenerationJobErrorCodes.ResearchSearchFailed => "Web research could not be completed. Please try again.",
+        GenerationJobErrorCodes.ResearchProviderUnavailable => "Research generation is temporarily unavailable. Please try again later.",
+        GenerationJobErrorCodes.ResearchContextTooLarge => "The selected research context is too large. Choose fewer or shorter sources.",
+        GenerationJobErrorCodes.ResearchOutputInvalid => "The research report was invalid. Please try again.",
+        GenerationJobErrorCodes.ResearchCitationValidationFailed => "The research citations were invalid. Please try again.",
+        GenerationJobErrorCodes.ResearchStorageFailed => "The research report was generated but could not be saved. Please try again.",
+        GenerationJobErrorCodes.ResearchRenderFailed => "The research report could not be rendered. Please try again.",
+        GenerationJobErrorCodes.ResearchCancelled => "The research generation was cancelled.",
         _ when code.StartsWith("IMAGE_", StringComparison.Ordinal) => "The image could not be generated. Please try again.",
         _ when code.StartsWith("DOCUMENT_", StringComparison.Ordinal) => "The document could not be generated. Please try again.",
         _ when code.StartsWith("PRESENTATION_", StringComparison.Ordinal) => "The presentation could not be generated. Please try again.",
