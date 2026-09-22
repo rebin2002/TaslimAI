@@ -6,6 +6,7 @@ import { ArrowLeft, ArrowRight, Check, CircleAlert, Eye, EyeOff, Languages, Lock
 import { useLocale, localeNames, locales } from "@/components/LocaleProvider";
 import { useAuth } from "@/components/AuthProvider";
 import { api, ApiError, type PasswordPolicy } from "@/lib/api";
+import { getAuthErrorTranslationKey } from "@/lib/authErrors";
 import { BrandMark } from "@/components/BrandMark";
 
 type PasswordRequirement = { code: string; label: string; satisfied: boolean };
@@ -68,7 +69,7 @@ export function AuthForm({ mode }: Readonly<{ mode: "login" | "register" }>) {
       else await signIn({ email, password });
     } catch (caught) {
       if (caught instanceof ApiError && caught.fields?.password) setPasswordErrors(caught.fields.password);
-      else setError(caught instanceof Error ? caught.message : t("auth.genericError"));
+      else setError(t(getAuthErrorTranslationKey(caught)));
     } finally { setSubmitting(false); }
   }
 

@@ -25,6 +25,8 @@ public sealed class AuthController(
     public IActionResult Csrf()
     {
         var tokens = antiforgery.GetAndStoreTokens(HttpContext);
+        Response.Headers.CacheControl = "no-store, no-cache";
+        Response.Headers.Pragma = "no-cache";
         return Ok(new { token = tokens.RequestToken });
     }
 

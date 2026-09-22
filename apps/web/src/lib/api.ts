@@ -1,5 +1,5 @@
-import { createSseParser, type TaslimSseEvent } from "@/lib/sse";
-import { API_URL, assetFileUrl } from "@/lib/apiBase";
+import { createSseParser, type TaslimSseEvent } from "./sse";
+import { API_URL, assetFileUrl } from "./apiBase";
 
 export type User = {
   id: string;
@@ -222,7 +222,7 @@ function requestId() {
 
 async function csrf(forceRefresh = false) {
   if (csrfToken && !forceRefresh) return csrfToken;
-  const response = await fetch(`${API_URL}/api/auth/csrf`, { credentials: "include" });
+  const response = await fetch(`${API_URL}/api/auth/csrf`, { credentials: "include", cache: "no-store" });
   if (!response.ok) throw new Error("CSRF token unavailable");
   const body = await response.json() as { token: string };
   csrfToken = body.token;

@@ -85,6 +85,24 @@ public sealed class AdminUsageTests : IClassFixture<TaslimApiFactory>
     }
 
     [Fact]
+    public async Task Existing_user_can_login_after_administrator_role_assignment()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Accounting Administrator Login");
+        await AddAdminRole(auth.User.Email!);
+        await Logout(client);
+
+        var login = await SendWithCsrf(client, HttpMethod.Post, "/api/auth/login", new
+        {
+            email = auth.User.Email,
+            password = "StrongPassword!123",
+        });
+
+        Assert.Equal(HttpStatusCode.OK, login.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/api/auth/me")).StatusCode);
+    }
+
+    [Fact]
     public async Task Cancelled_usage_has_explicit_cancelled_state_and_zero_charge()
     {
         using var client = factory.CreateClient();
@@ -126,6 +144,14 @@ public sealed class AdminUsageTests : IClassFixture<TaslimApiFactory>
         var user = await userManager.FindByEmailAsync(email);
         Assert.NotNull(user);
         Assert.True((await userManager.AddToRoleAsync(user!, AdminPolicies.Role)).Succeeded);
+    }
+
+    private static async Task Logout(HttpClient client)
+    {
+        var csrf = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/auth/logout");
+        request.Headers.Add("X-CSRF-TOKEN", csrf.GetProperty("token").GetString());
+        Assert.Equal(HttpStatusCode.OK, (await client.SendAsync(request)).StatusCode);
     }
 
     private static async Task<ConversationDto> CreateConversation(HttpClient client, Guid workspaceId)

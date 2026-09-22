@@ -158,6 +158,75 @@ public sealed class IdentityProjectsTests : IClassFixture<TaslimApiFactory>
     }
 
     [Fact]
+    public async Task Csrf_endpoint_returns_a_usable_non_cacheable_token()
+    {
+        using var client = factory.CreateClient();
+        using var request = new HttpRequestMessage(HttpMethod.Get, "/api/auth/csrf");
+        request.Headers.Add("Origin", "http://localhost:3000");
+        var response = await client.SendAsync(request);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.False(string.IsNullOrWhiteSpace(body.GetProperty("token").GetString()));
+        Assert.Contains("no-store", response.Headers.CacheControl?.ToString() ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("http://localhost:3000", response.Headers.GetValues("Access-Control-Allow-Origin").Single());
+        Assert.Equal("true", response.Headers.GetValues("Access-Control-Allow-Credentials").Single());
+    }
+
+    [Fact]
+    public async Task Login_without_or_with_invalid_csrf_returns_safe_csrf_error_before_identity()
+    {
+        using var client = factory.CreateClient();
+        var email = $"csrf-login-{Guid.NewGuid():N}@example.com";
+        await Register(client, "CSRF Login User", email);
+        await Logout(client);
+
+        using var missing = new HttpRequestMessage(HttpMethod.Post, "/api/auth/login")
+        {
+            Content = JsonContent.Create(new { email, password = "StrongPassword!123" }),
+        };
+        var missingResponse = await client.SendAsync(missing);
+        Assert.Equal(HttpStatusCode.BadRequest, missingResponse.StatusCode);
+        Assert.Equal("CSRF_VALIDATION_FAILED", (await missingResponse.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error").GetProperty("code").GetString());
+
+        using var invalid = new HttpRequestMessage(HttpMethod.Post, "/api/auth/login")
+        {
+            Content = JsonContent.Create(new { email, password = "StrongPassword!123" }),
+        };
+        invalid.Headers.Add("X-CSRF-TOKEN", "invalid-token");
+        var invalidResponse = await client.SendAsync(invalid);
+        Assert.Equal(HttpStatusCode.BadRequest, invalidResponse.StatusCode);
+        Assert.Equal("CSRF_VALIDATION_FAILED", (await invalidResponse.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error").GetProperty("code").GetString());
+    }
+
+    [Fact]
+    public async Task Stale_anonymous_login_csrf_is_rejected_then_fresh_token_allows_login()
+    {
+        using var client = factory.CreateClient();
+        using var separateAnonymousClient = factory.CreateClient();
+        var email = $"stale-login-{Guid.NewGuid():N}@example.com";
+        var foreignToken = await GetCsrf(separateAnonymousClient);
+        var anonymousToken = await GetCsrf(client);
+        var registration = await SendWithToken(client, HttpMethod.Post, "/api/auth/register", anonymousToken, new
+        {
+            displayName = "Stale Login User",
+            email,
+            password = "StrongPassword!123",
+            preferredLanguage = "en",
+        });
+        Assert.Equal(HttpStatusCode.OK, registration.StatusCode);
+        await Logout(client);
+
+        var staleLogin = await SendWithToken(client, HttpMethod.Post, "/api/auth/login", foreignToken, new { email, password = "StrongPassword!123" });
+        Assert.Equal(HttpStatusCode.BadRequest, staleLogin.StatusCode);
+        Assert.Equal("CSRF_VALIDATION_FAILED", (await staleLogin.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error").GetProperty("code").GetString());
+
+        var freshLogin = await SendWithCsrf(client, HttpMethod.Post, "/api/auth/login", new { email, password = "StrongPassword!123" });
+        Assert.Equal(HttpStatusCode.OK, freshLogin.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/api/auth/me")).StatusCode);
+    }
+
+    [Fact]
     public async Task Weak_registration_password_returns_safe_field_level_errors()
     {
         using var client = factory.CreateClient();

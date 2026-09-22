@@ -20,13 +20,15 @@ public sealed class AntiforgeryValidationMiddleware(
             || HttpMethods.IsPut(context.Request.Method)
             || HttpMethods.IsPatch(context.Request.Method)
             || HttpMethods.IsDelete(context.Request.Method);
+        var isAnonymousAuthenticationEndpoint = context.Request.Path.Value is "/api/auth/login" or "/api/auth/register";
 
-        if (endpointRequiresAntiforgery && isStateChanging && context.User.Identity?.IsAuthenticated == true)
+        if (endpointRequiresAntiforgery && isStateChanging && (context.User.Identity?.IsAuthenticated == true || isAnonymousAuthenticationEndpoint))
         {
             try
             {
-                // Authentication has already populated HttpContext.User, so
-                // Identity-bound tokens are validated against the right user.
+                // Validate before MVC so anonymous login/registration failures receive
+                // the same safe error envelope as authenticated API mutations. The
+                // MVC [ValidateAntiForgeryToken] attributes remain defense in depth.
                 await antiforgery.ValidateRequestAsync(context);
             }
             catch (AntiforgeryValidationException exception)
