@@ -370,6 +370,11 @@ export const api = {
   restoreAsset: (assetId: string) => request<Asset>(`/api/assets/${assetId}/restore`, { method: "POST" }, true),
   assetFileUrl,
   assetRepresentationUrl,
+  downloadAssetRepresentation: async (assetId: string, representationId: string) => {
+    const response = await fetch(assetRepresentationUrl(assetId, representationId), { credentials: "include" });
+    if (!response.ok) throw new ApiError(response.status, "Asset representation unavailable.", undefined, "ASSET_REPRESENTATION_UNAVAILABLE");
+    return response.blob();
+  },
   listMemories: (workspaceId: string) => request<PersonalMemory[]>(`/api/workspaces/${workspaceId}/memories`),
   createMemory: (workspaceId: string, input: PersonalMemoryInput) => request<PersonalMemory>(`/api/workspaces/${workspaceId}/memories`, { method: "POST", body: JSON.stringify(input) }, true),
   updateMemory: (memoryId: string, input: PersonalMemoryInput) => request<PersonalMemory>(`/api/memories/${memoryId}`, { method: "PATCH", body: JSON.stringify(input) }, true),

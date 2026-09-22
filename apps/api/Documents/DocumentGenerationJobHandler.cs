@@ -121,6 +121,12 @@ public sealed class DocumentGenerationJobHandler(
             }
         }
         if (rendered.Count == 0) throw new DocumentOutputValidationException();
+        if (input.OutputFormat == "both")
+        {
+            var formats = rendered.Select(item => item.RepresentationType).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            if (!formats.Contains(AssetRepresentationTypes.Docx) || !formats.Contains(AssetRepresentationTypes.Pdf))
+                throw new DocumentGenerationStageException(DocumentGenerationStages.Execution, GenerationJobErrorCodes.DocumentRenderFailed, "Both document formats could not be rendered.", generated.Usage);
+        }
 
         var metadata = JsonSerializer.Serialize(new
         {

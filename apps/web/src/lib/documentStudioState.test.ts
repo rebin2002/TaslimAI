@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { canCancelDocumentJob, isDocumentSourceReady, parseDocumentJobResult } from "./documentStudioState";
+import {
+  canCancelDocumentJob,
+  displayDocumentProgress,
+  documentPresentationState,
+  isDocumentSourceReady,
+  parseDocumentJobResult,
+  shouldPollDocumentJob,
+} from "./documentStudioState";
 import type { GenerationJob } from "./api";
 
 const job = (status: GenerationJob["status"], cancellationRequested = false): GenerationJob => ({
@@ -16,14 +23,52 @@ describe("Document Studio state", () => {
     expect(canCancelDocumentJob(job("Running", true))).toBe(false);
     expect(canCancelDocumentJob(job("Succeeded"))).toBe(false);
     expect(canCancelDocumentJob(null)).toBe(false);
+    expect(shouldPollDocumentJob(job("Running"))).toBe(true);
+    expect(shouldPollDocumentJob(job("Succeeded"))).toBe(false);
+    expect(shouldPollDocumentJob(job("Failed"))).toBe(false);
+    expect(shouldPollDocumentJob(job("Cancelled"))).toBe(false);
+  });
+
+  it("uses status, not 100% progress, to determine completion", () => {
+    const running = job("Running");
+    running.progressPercent = 100;
+    expect(documentPresentationState(running, null)).toBe("running");
+    expect(displayDocumentProgress(running)).toBe(99);
+
+    const succeeded = job("Succeeded");
+    succeeded.progressPercent = 100;
+    succeeded.resultJson = JSON.stringify({ assetId: "asset-1" });
+    expect(documentPresentationState(succeeded, parseDocumentJobResult(succeeded))).toBe("succeeded");
+    expect(displayDocumentProgress(succeeded)).toBe(100);
   });
 
   it("parses a safe structured result and rejects malformed polling data", () => {
     const completed = job("Succeeded");
-    completed.resultJson = JSON.stringify({ assetId: "asset-1", title: "Report", summary: "Summary", sections: [{ heading: "Overview", blocks: [{ type: "paragraph", text: "Text" }] }] });
-    expect(parseDocumentJobResult(completed)?.sections?.[0].heading).toBe("Overview");
+    completed.resultJson = JSON.stringify({
+      assetId: "asset-1",
+      title: "Report",
+      summary: "Summary",
+      sections: [{ heading: "Overview", blocks: [{ type: "paragraph", text: "Text" }, { type: "table", rows: [{ cells: ["A", "B"] }] }] }],
+      representations: [{ id: "docx-1", type: "docx", fileName: "report.docx", contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" }],
+    });
+    const parsed = parseDocumentJobResult(completed);
+    expect(parsed?.sections?.[0].heading).toBe("Overview");
+    expect(parsed?.representations).toHaveLength(1);
+
+    completed.resultJson = JSON.stringify({ assetId: "asset-1", sections: [{ heading: null, blocks: null }], representations: [{ id: "bad" }] });
+    const partial = parseDocumentJobResult(completed);
+    expect(partial?.assetId).toBe("asset-1");
+    expect(partial?.sections).toEqual([]);
+    expect(partial?.representations).toEqual([]);
+
     completed.resultJson = "not-json";
     expect(parseDocumentJobResult(completed)).toBeNull();
+  });
+
+  it("represents a succeeded job without an optional result as recoverable", () => {
+    const completed = job("Succeeded");
+    expect(documentPresentationState(completed, null)).toBe("completed-unavailable");
+    expect(canCancelDocumentJob(completed)).toBe(false);
   });
 
   it("accepts only ready supported extracted sources", () => {

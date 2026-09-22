@@ -1,12 +1,19 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { BookOpen, CheckCircle2, Download, FileText, LoaderCircle, RefreshCw, Sparkles, XCircle } from "lucide-react";
 import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
 import { api, type GenerationJob, type Project, type StoredFile } from "@/lib/api";
-import { canCancelDocumentJob, isDocumentSourceReady, parseDocumentJobResult } from "@/lib/documentStudioState";
+import {
+  canCancelDocumentJob,
+  displayDocumentProgress,
+  documentPresentationState,
+  isDocumentSourceReady,
+  parseDocumentJobResult,
+  shouldPollDocumentJob,
+} from "@/lib/documentStudioState";
 
 const extensions = [".pdf", ".docx", ".txt", ".md", ".csv", ".xlsx"];
 
@@ -29,7 +36,10 @@ export function DocumentStudioView() {
   const [current, setCurrent] = useState<GenerationJob | null>(null);
   const [loadingSources, setLoadingSources] = useState(true);
   const [working, setWorking] = useState(false);
+  const [retryingCompleted, setRetryingCompleted] = useState(false);
+  const [pollRetry, setPollRetry] = useState(0);
   const [error, setError] = useState("");
+  const [downloadError, setDownloadError] = useState("");
 
   const loadSources = useCallback(async () => {
     if (!workspace) return;
@@ -55,18 +65,25 @@ export function DocumentStudioView() {
   useEffect(() => { void loadSources(); }, [loadSources]);
 
   useEffect(() => {
-    if (!current || ["Succeeded", "Failed", "Cancelled"].includes(current.status)) return;
+    if (!current || !shouldPollDocumentJob(current)) return;
+    const jobId = current.id;
     let active = true;
     const timer = window.setTimeout(async () => {
       try {
-        const next = await api.getGenerationJob(current.id);
-        if (active) setCurrent(next);
-      } catch (caught) {
-        if (active) setError(caught instanceof Error ? caught.message : t("document.pollError"));
+        const next = await api.getGenerationJob(jobId);
+        if (!active) return;
+        setCurrent(next);
+        setError("");
+        setPollRetry(0);
+      } catch {
+        if (!active) return;
+        setError(t("document.pollError"));
+        // Keep polling after a transient request failure; the current job remains the source of truth.
+        setPollRetry((attempt) => attempt + 1);
       }
     }, 700);
     return () => { active = false; window.clearTimeout(timer); };
-  }, [current, t]);
+  }, [current, pollRetry, t]);
 
   function toggleFile(file: StoredFile) {
     if (!isDocumentSourceReady(file)) return;
@@ -83,24 +100,58 @@ export function DocumentStudioView() {
     }
     setWorking(true);
     setError("");
+    setDownloadError("");
     try {
       setCurrent(await api.createDocumentGenerationJob({ workspaceId: workspace.id, projectId: projectId || null, title: title.trim() || null, description: prompt.trim(), documentType, length, audience: audience.trim() || null, additionalInstructions: additionalInstructions.trim() || null, attachmentIds: selected, language, tone, includeTableOfContents }));
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : t("document.createError"));
+      setPollRetry(0);
+    } catch {
+      setError(t("document.createError"));
     } finally {
       setWorking(false);
     }
   }
 
   async function cancel() {
-    if (!current) return;
+    if (!current || !canCancelDocumentJob(current)) return;
     setWorking(true);
     setError("");
     try {
       await api.cancelGenerationJob(current.id);
       setCurrent(await api.getGenerationJob(current.id));
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : t("document.cancelError"));
+    } catch {
+      setError(t("document.cancelError"));
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  async function retryCompleted() {
+    if (!current) return;
+    setRetryingCompleted(true);
+    setError("");
+    try {
+      setCurrent(await api.getGenerationJob(current.id));
+    } catch {
+      setError(t("document.completedLoadError"));
+    } finally {
+      setRetryingCompleted(false);
+    }
+  }
+
+  async function downloadRepresentation(representationId: string, fileName: string) {
+    if (!result?.assetId) return;
+    setWorking(true);
+    setDownloadError("");
+    try {
+      const blob = await api.downloadAssetRepresentation(result.assetId, representationId);
+      const url = URL.createObjectURL(blob);
+      const anchor = window.document.createElement("a");
+      anchor.href = url;
+      anchor.download = fileName;
+      anchor.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 0);
+    } catch {
+      setDownloadError(t("document.downloadError"));
     } finally {
       setWorking(false);
     }
@@ -109,19 +160,22 @@ export function DocumentStudioView() {
   function createAnother() {
     setCurrent(null);
     setError("");
+    setDownloadError("");
+    setPollRetry(0);
   }
 
-  const result = useMemo(() => parseDocumentJobResult(current), [current]);
-  const succeeded = current?.status === "Succeeded" && !!result?.assetId;
-  const terminalFailure = current?.status === "Failed" || current?.status === "Cancelled";
+  const result = parseDocumentJobResult(current);
+  const presentation = documentPresentationState(current, result);
   const readyFiles = files.filter((file) => isDocumentSourceReady(file));
+  const displayProgress = displayDocumentProgress(current);
+  const statusKey = current?.status ?? "Queued";
 
   return <div className="document-studio-page">
     <div className="document-studio-header">
       <div><p className="section-eyebrow">{t("document.eyebrow")}</p><h1>{t("document.title")}</h1><p>{t("document.subtitle")}</p></div>
       <span className="document-studio-header-icon"><BookOpen size={25} /></span>
     </div>
-    {!current || terminalFailure ? <form className="document-studio-layout" onSubmit={(event) => void create(event)}>
+    {!current ? <form className="document-studio-layout" onSubmit={(event) => void create(event)}>
       <section className="account-card document-studio-form-card">
         <div className="card-title"><span className="card-title-icon teal"><Sparkles size={17} /></span><div><h2>{t("document.createTitle")}</h2><p>{t("document.createSubtitle")}</p></div></div>
         <label className="image-primary-field"><span>{t("document.descriptionLabel")}</span><textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} maxLength={8000} placeholder={t("document.descriptionPlaceholder")} required /><small>{prompt.length}/8000</small></label>
@@ -132,11 +186,10 @@ export function DocumentStudioView() {
         <div className="document-source-heading"><div><h3>{t("document.sources")}</h3><p>{t("document.sourcesHint")}</p></div><strong>{selected.length}/5</strong></div>
         <div className="document-source-list">{loadingSources ? <p className="usage-empty">{t("document.loadingSources")}</p> : readyFiles.length === 0 ? <p className="usage-empty">{t("document.noSources")}</p> : readyFiles.map((file) => <label className={`document-source-option ${selected.includes(file.id) ? "is-selected" : ""}`} key={file.id}><input type="checkbox" checked={selected.includes(file.id)} onChange={() => toggleFile(file)} /><FileText size={16} /><span><strong>{file.originalFileName}</strong><small>{file.extension.toUpperCase()} · {Math.ceil(file.sizeBytes / 1024)} KB</small></span></label>)}</div>
         {error && <div className="form-error"><XCircle size={15} /> {error}</div>}
-        {current?.errorMessage && <div className="form-error"><XCircle size={15} /> {current.errorMessage}</div>}
         <button className="primary-button" type="submit" disabled={working || prompt.trim().length < 3}><Sparkles size={16} /> {working ? t("document.working") : t("document.generate")}</button>
       </section>
       <aside className="account-card document-studio-guidance"><BookOpen size={26} /><h2>{t("document.guidanceTitle")}</h2><p>{t("document.guidanceText")}</p><ul><li>{t("document.guidanceOne")}</li><li>{t("document.guidanceTwo")}</li><li>{t("document.guidanceThree")}</li></ul><Link className="secondary-button" href="/assets">{t("document.openAssets")}</Link></aside>
-    </form> : <section className="account-card document-generation-state" aria-live="polite">{succeeded && result ? <><div className="document-result-heading"><div><p className="section-eyebrow">{t("document.resultEyebrow")}</p><h2>{result.title || t("document.resultTitle")}</h2></div><span className="form-success"><CheckCircle2 size={16} /> {t("document.savedToAssets")}</span></div><p className="document-result-summary">{result.summary}</p>{result.sections?.length ? <div className="document-preview"><p className="section-eyebrow">{t("document.preview")}</p>{result.sections.map((section) => <section className="document-preview-section" key={section.heading}><h3>{section.heading}</h3>{section.blocks.map((block, index) => <div className="document-preview-block" key={`${section.heading}-${index}`}>{block.text && <p>{block.text}</p>}{block.items?.length ? <ul>{block.items.map((item) => <li key={item}>{item}</li>)}</ul> : null}{block.rows?.length ? <div className="document-preview-table">{block.rows.map((row, rowIndex) => <div className="document-preview-row" key={rowIndex}>{row.cells.map((cell) => <span key={cell}>{cell}</span>)}</div>)}</div> : null}</div>)}</section>)}</div> : null}<div className="document-result-actions">{result.representations?.map((representation) => <a className="secondary-button" key={representation.id} href={api.assetRepresentationUrl(result.assetId!, representation.id)}><Download size={15} /> {representation.type.toUpperCase()}</a>)}<Link className="secondary-button" href={`/assets?search=${encodeURIComponent(result.title || "Generated document")}`}>{t("document.openAssets")}</Link><button className="primary-button" onClick={createAnother}><RefreshCw size={15} /> {t("document.createAnother")}</button></div></> : <><div className="image-progress-icon"><LoaderCircle size={26} /></div><p className="section-eyebrow">{t("document.progressEyebrow")}</p><h2>{t(`jobs.status${current?.status ?? "Queued"}`)}</h2><p className="image-progress-copy">{t("document.progressText")}</p><div className="generation-progress-label"><span>{t("jobs.progress")}</span><strong>{current?.progressPercent ?? 0}%</strong></div><div className="generation-progress-track"><span style={{ width: `${current?.progressPercent ?? 0}%` }} /></div>{canCancelDocumentJob(current) && <button className="secondary-button generation-cancel-button" onClick={() => void cancel()} disabled={working}><XCircle size={15} /> {t("document.cancel")}</button>}</>}</section>}
+    </form> : presentation === "failed" || presentation === "cancelled" ? <section className="account-card document-generation-state document-terminal-state" aria-live="polite"><XCircle size={28} /><p className="section-eyebrow">{t(`jobs.status${statusKey}`)}</p><h2>{current.errorMessage || t("document.failedSafe")}</h2><div className="document-result-actions"><button className="primary-button" onClick={createAnother}><RefreshCw size={15} /> {t("document.createAnother")}</button><Link className="secondary-button" href="/assets">{t("document.openAssets")}</Link></div></section> : presentation === "succeeded" && result?.assetId ? <section className="account-card document-generation-state" aria-live="polite"><div className="document-result-heading"><div><p className="section-eyebrow">{t("document.resultEyebrow")}</p><h2>{result.title || t("document.resultTitle")}</h2></div><span className="form-success"><CheckCircle2 size={16} /> {t("document.savedToAssets")}</span></div><p className="document-result-summary">{result.summary || t("document.resultSummaryUnavailable")}</p>{result.sections?.length ? <div className="document-preview"><p className="section-eyebrow">{t("document.preview")}</p>{result.sections.map((section) => <section className="document-preview-section" key={section.heading}><h3>{section.heading}</h3>{section.blocks.map((block, index) => <div className="document-preview-block" key={`${section.heading}-${index}`}>{block.text && <p>{block.text}</p>}{block.items?.length ? <ul>{block.items.map((item) => <li key={item}>{item}</li>)}</ul> : null}{block.rows?.length ? <div className="document-preview-table">{block.rows.map((row, rowIndex) => <div className="document-preview-row" key={rowIndex}>{row.cells.map((cell, cellIndex) => <span key={`${rowIndex}-${cellIndex}`}>{cell}</span>)}</div>)}</div> : null}</div>)}</section>)}</div> : null}{downloadError && <div className="form-error"><XCircle size={15} /> {downloadError}</div>}<div className="document-result-actions">{result.representations?.map((representation) => <button className="secondary-button" key={representation.id} type="button" onClick={() => void downloadRepresentation(representation.id, representation.fileName)} disabled={working}><Download size={15} /> {representation.type.toUpperCase()}</button>)}{!result.representations?.length && <span className="document-no-downloads">{t("document.noDownloads")}</span>}<Link className="secondary-button" href={`/assets?search=${encodeURIComponent(result.title || "Generated document")}`}>{t("document.openAssets")}</Link><button className="primary-button" onClick={createAnother}><RefreshCw size={15} /> {t("document.createAnother")}</button></div></section> : presentation === "completed-unavailable" ? <section className="account-card document-generation-state document-terminal-state" aria-live="polite"><RefreshCw size={28} /><p className="section-eyebrow">{t("jobs.statusSucceeded")}</p><h2>{t("document.completedLoadError")}</h2><p>{t("document.completedLoadHint")}</p><div className="document-result-actions"><button className="primary-button" onClick={() => void retryCompleted()} disabled={retryingCompleted}>{retryingCompleted ? t("document.working") : t("document.retry")} </button><Link className="secondary-button" href="/assets">{t("document.openAssets")}</Link></div></section> : <section className="account-card document-generation-state" aria-live="polite"><div className="image-progress-icon"><LoaderCircle size={26} /></div><p className="section-eyebrow">{t("document.progressEyebrow")}</p><h2>{t(`jobs.status${statusKey}`)}</h2><p className="image-progress-copy">{t("document.progressText")}</p><div className="generation-progress-label"><span>{t("jobs.progress")}</span><strong>{displayProgress}%</strong></div><div className="generation-progress-track"><span style={{ width: `${displayProgress}%` }} /></div>{error && <div className="form-error"><XCircle size={15} /> {error}</div>}{canCancelDocumentJob(current) && <button className="secondary-button generation-cancel-button" onClick={() => void cancel()} disabled={working}><XCircle size={15} /> {t("document.cancel")}</button>}</section>}
     <p className="document-studio-footnote">{t("document.safetyNote")}</p>
   </div>;
 }

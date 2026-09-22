@@ -42,6 +42,8 @@ Document-specific safe codes include `DOCUMENT_REQUEST_INVALID`, `DOCUMENT_ATTAC
 
 Document execution uses `UsageFeature.Document` through the production Usage Ledger. The ledger records Generation Job provenance, provider/model, input and output quantities when available, provider latency, currency, pricing version, immutable pricing snapshot, and actual-versus-estimated cost basis. If a provider succeeds but rendering or storage fails, the usage metadata is retained on the failed transaction; if the provider is never called, provider cost remains zero. The customer charge remains zero. Document transactions are visible to server-authorized administrators at `/account/admin/usage`; normal users receive the existing redacted usage contract.
 
+The completion UI does not add an automatic retry for transient provider failures in this stabilization batch. A retry must be coupled to an idempotency key and a ledger policy that records every provider call exactly once before it can safely create another draft, render, and Asset publication attempt. Operators or the user can retry a failed job through a new explicit generation request; automatic bounded retry remains a future reliability change.
+
 ## Localization and future path
 
 The route and all visible controls are localized in English, Arabic, and Kurdish Sorani with RTL-compatible layout. UI language and generated document language are independent. The representation relationship leaves a future path for document versions, regenerated formats, editing, templates, branding, and additional renderers without replacing the provider or canonical draft layers. Those capabilities are intentionally outside Batch 3.10.
