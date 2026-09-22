@@ -13,8 +13,20 @@ namespace Taslim.Api.Generation;
 public sealed class GenerationJobOptions
 {
     public int WorkerConcurrency { get; set; } = 1;
-    public int PollIntervalMilliseconds { get; set; } = 250;
+    public int PollIntervalMilliseconds { get; set; } = 1000;
     public int CancellationPollMilliseconds { get; set; } = 100;
+    public int ClaimRecoveryIntervalMilliseconds { get; set; } = 30000;
+}
+
+public sealed class GenerationJobPollingSchedule(GenerationJobOptions options)
+{
+    public DateTime NextRecoveryAt { get; private set; } = DateTime.MinValue;
+    public TimeSpan IdleDelay => TimeSpan.FromMilliseconds(Math.Max(1, options.PollIntervalMilliseconds));
+
+    public bool RecoveryDue(DateTime now) => now >= NextRecoveryAt;
+
+    public void ScheduleNextRecovery(DateTime now) =>
+        NextRecoveryAt = now.AddMilliseconds(Math.Max(1000, options.ClaimRecoveryIntervalMilliseconds));
 }
 
 public interface IGenerationJobQueue
@@ -247,17 +259,23 @@ public sealed class GenerationJobWorker(
 
     private async Task RunWorkerAsync(CancellationToken stoppingToken)
     {
+        var schedule = new GenerationJobPollingSchedule(settings);
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
                 using var scope = scopeFactory.CreateScope();
                 var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
-                await RecoverExpiredClaimsAsync(db, stoppingToken);
+                var now = DateTime.UtcNow;
+                if (schedule.RecoveryDue(now))
+                {
+                    await RecoverExpiredClaimsAsync(db, stoppingToken);
+                    schedule.ScheduleNextRecovery(now);
+                }
                 var job = await ClaimAsync(db, stoppingToken);
                 if (job is null)
                 {
-                    await Task.Delay(settings.PollIntervalMilliseconds, stoppingToken);
+                    await Task.Delay(schedule.IdleDelay, stoppingToken);
                     continue;
                 }
                 await ExecuteJobAsync(job, stoppingToken);
@@ -266,7 +284,7 @@ public sealed class GenerationJobWorker(
             catch (Exception exception)
             {
                 logger.LogError(exception, "Generation job worker iteration failed safely.");
-                await Task.Delay(settings.PollIntervalMilliseconds, stoppingToken);
+                await Task.Delay(schedule.IdleDelay, stoppingToken);
             }
         }
     }

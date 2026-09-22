@@ -1,7 +1,7 @@
+using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
-using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -16,9 +16,7 @@ namespace Taslim.Api.Tests;
 
 public class GenerationJobsApiFactory : WebApplicationFactory<Program>
 {
-    private readonly SqliteConnection connection = new($"Data Source={Path.Combine(Path.GetTempPath(), $"taslim-generation-{Guid.NewGuid():N}.db")}");
-
-    public GenerationJobsApiFactory() => connection.Open();
+    private readonly string databasePath = Path.Combine(Path.GetTempPath(), $"taslim-generation-{Guid.NewGuid():N}.db");
 
     protected virtual bool WorkerEnabled => true;
 
@@ -28,18 +26,18 @@ public class GenerationJobsApiFactory : WebApplicationFactory<Program>
         builder.UseSetting("GenerationJobs:WorkerEnabled", WorkerEnabled.ToString());
         builder.UseSetting("GenerationJobs:PollIntervalMilliseconds", "50");
         builder.UseSetting("GenerationJobs:CancellationPollMilliseconds", "5");
+        builder.UseSetting("GenerationJobs:ClaimRecoveryIntervalMilliseconds", "1000");
         builder.ConfigureServices(services =>
         {
             services.RemoveAll<DbContextOptions<TaslimDbContext>>();
-            services.AddSingleton(connection);
-            services.AddDbContext<TaslimDbContext>(options => options.UseSqlite(connection));
+            services.AddDbContext<TaslimDbContext>(options => options.UseSqlite($"Data Source={databasePath}"));
         });
     }
 
     protected override void Dispose(bool disposing)
     {
         base.Dispose(disposing);
-        if (disposing) connection.Dispose();
+        if (disposing && File.Exists(databasePath)) File.Delete(databasePath);
     }
 }
 
@@ -55,6 +53,7 @@ public sealed class GenerationJobsTests : IClassFixture<GenerationJobsApiFactory
     public GenerationJobsTests(GenerationJobsApiFactory factory)
     {
         this.factory = factory;
+        Task.Delay(150).GetAwaiter().GetResult();
         using var scope = factory.Services.CreateScope();
         scope.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
         Task.Delay(150).GetAwaiter().GetResult();
@@ -133,7 +132,9 @@ public sealed class GenerationJobsTests : IClassFixture<GenerationJobsApiFactory
             var cancel = await SendWithCsrf(client, HttpMethod.Post, $"/api/generation/jobs/{first.Id}/cancel", null);
             Assert.Equal(HttpStatusCode.Conflict, cancel.StatusCode);
         }
+        var nextJobTimer = Stopwatch.StartNew();
         await WaitForTerminal(client, second.Id);
+        Assert.True(nextJobTimer.Elapsed < TimeSpan.FromSeconds(1), $"The next queued job was delayed for {nextJobTimer.Elapsed}.");
     }
 
     [Fact]
@@ -147,6 +148,37 @@ public sealed class GenerationJobsTests : IClassFixture<GenerationJobsApiFactory
         Assert.True(cancel.StatusCode is HttpStatusCode.OK or HttpStatusCode.Accepted, await cancel.Content.ReadAsStringAsync());
         var terminal = await WaitForTerminal(client, created.Id);
         Assert.Equal("Cancelled", terminal.Status);
+    }
+
+    [Fact]
+    public async Task Expired_running_claim_is_requeued_and_processed()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, $"jobs-recovery-{Guid.NewGuid():N}@example.com");
+        var id = Guid.NewGuid();
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.GenerationJobs.Add(new GenerationJob
+            {
+                Id = id,
+                WorkspaceId = auth.PersonalWorkspace.Id,
+                CreatedByUserId = auth.User.Id,
+                JobType = GenerationJobTypes.SystemTest,
+                Status = GenerationJobStatus.Running,
+                InputJson = "{}",
+                ProgressPercent = 40,
+                CreatedAt = DateTime.UtcNow.AddMinutes(-1),
+                StartedAt = DateTime.UtcNow.AddMinutes(-1),
+                ClaimExpiresAt = DateTime.UtcNow.AddSeconds(-1),
+                ConcurrencyToken = Guid.NewGuid(),
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var terminal = await WaitForTerminal(client, id);
+        Assert.Equal("Succeeded", terminal.Status);
+        Assert.Equal(100, terminal.ProgressPercent);
     }
 
     [Fact]
