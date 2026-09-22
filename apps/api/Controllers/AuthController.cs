@@ -18,7 +18,8 @@ public sealed class AuthController(
     SignInManager<ApplicationUser> signInManager,
     TaslimDbContext db,
     IAntiforgery antiforgery,
-    IOptions<IdentityOptions> identityOptions) : ControllerBase
+    IOptions<IdentityOptions> identityOptions,
+    ILogger<AuthController> logger) : ControllerBase
 {
     [HttpGet("csrf")]
     [AllowAnonymous]
@@ -27,6 +28,7 @@ public sealed class AuthController(
         var tokens = antiforgery.GetAndStoreTokens(HttpContext);
         Response.Headers.CacheControl = "no-store, no-cache";
         Response.Headers.Pragma = "no-cache";
+        logger.LogInformation("CSRF token issued. TraceId={TraceId}; CookieIssued={CookieIssued}; Authenticated={Authenticated}", HttpContext.TraceIdentifier, !string.IsNullOrWhiteSpace(tokens.CookieToken), User.Identity?.IsAuthenticated == true);
         return Ok(new { token = tokens.RequestToken });
     }
 
@@ -110,15 +112,24 @@ public sealed class AuthController(
     public async Task<IActionResult> Login(LoginRequest request, CancellationToken cancellationToken)
     {
         if (!ModelState.IsValid)
+        {
+            logger.LogInformation("Login validation rejected request. TraceId={TraceId}; Reason=ModelValidation", HttpContext.TraceIdentifier);
             return ApiResults.Validation(this, "Please enter your email and password.");
+        }
 
         var user = await userManager.FindByEmailAsync(request.Email.Trim());
         if (user is null || !user.IsActive)
+        {
+            logger.LogInformation("Login validation rejected credentials. TraceId={TraceId}; Reason=InvalidCredentials", HttpContext.TraceIdentifier);
             return ApiResults.Error(this, StatusCodes.Status401Unauthorized, "INVALID_CREDENTIALS", "Invalid email or password.");
+        }
 
         var result = await signInManager.CheckPasswordSignInAsync(user, request.Password, lockoutOnFailure: true);
         if (!result.Succeeded)
+        {
+            logger.LogInformation("Login validation rejected credentials. TraceId={TraceId}; Reason=InvalidCredentials", HttpContext.TraceIdentifier);
             return ApiResults.Error(this, StatusCodes.Status401Unauthorized, "INVALID_CREDENTIALS", "Invalid email or password.");
+        }
 
         user.LastLoginAt = DateTime.UtcNow;
         user.UpdatedAt = DateTime.UtcNow;
@@ -128,6 +139,7 @@ public sealed class AuthController(
         if (workspace is null)
             return ApiResults.Error(this, StatusCodes.Status500InternalServerError, "ACCOUNT_SETUP_INCOMPLETE", "Your account setup is incomplete. Please contact support.");
 
+        logger.LogInformation("Login validation succeeded. TraceId={TraceId}", HttpContext.TraceIdentifier);
         return Ok(new AuthResponse(ToUserDto(user, workspace.Id), ToWorkspaceDto(workspace, WorkspaceRole.Owner)));
     }
 

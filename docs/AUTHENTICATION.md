@@ -25,7 +25,7 @@ The form displays these requirements in English, Arabic, and Kurdish Sorani and 
 
 ## Cookie authentication and CORS
 
-The API issues an HttpOnly Identity cookie named `taslim.auth`. In Production, it is `Secure` and `SameSite=None` so the separately hosted Railway Web and API origins can make credentialed requests. In local development, it is `SameSite=Lax` and follows the request security scheme.
+The API issues an HttpOnly Identity cookie named `taslim.auth`. In Production, it is `Secure` and `SameSite=None`. Browser API calls in the production Web build use the same-origin Next.js `/api/*` proxy, so the browser stores both the authentication and antiforgery cookies on the Web origin and mobile browsers do not need to accept a cookie from a separate API origin. The proxy forwards the original cookie, CSRF header, request body, response status, and `Set-Cookie` values to the API. In local development, `API_URL` remains the direct `http://localhost:5000` API so the existing two-process workflow is preserved.
 
 The frontend API client sends `credentials: "include"` for every request. The API only allows origins from `AllowedOrigins`; it uses `AllowCredentials()` and never combines credentials with a wildcard origin.
 
@@ -41,7 +41,7 @@ When custom domains are introduced, set it to the exact web origin:
 AllowedOrigins__0=https://taslim.ai
 ```
 
-The API origin changes from the Railway URL to `https://api.taslim.ai` in frontend `NEXT_PUBLIC_API_URL`; the cookie remains host-scoped to the API and still works with credentialed requests.
+The API origin remains configured in `NEXT_PUBLIC_API_URL` because the Next.js server proxy needs it at build/runtime. No custom domain or shared cookie Domain is required for the proxy architecture. If a future deployment uses `api.taslim.ai`, update this variable and the API's exact `AllowedOrigins` entry as usual; do not set a broad cookie Domain.
 
 ## Railway forwarded HTTPS
 
@@ -62,7 +62,7 @@ This preserves `CookieSecurePolicy.Always` for the authentication and antiforger
 
 Cookie authentication makes browser state-changing requests vulnerable to cross-site request forgery. Taslim uses ASP.NET Core antiforgery tokens:
 
-1. The frontend calls `GET /api/auth/csrf` with credentials.
+1. The frontend calls `GET /api/auth/csrf` with credentials. In Production this is same-origin `/api/auth/csrf`; the Next.js proxy calls the API and forwards the response cookie.
 2. The API sets the non-HttpOnly `taslim.csrf` cookie and returns the request token.
 3. The frontend sends that token in the `X-CSRF-TOKEN` header for registration, login, logout, profile updates, project creation, updates, archive, and restore.
 4. ASP.NET Core validates the cookie/header pair through `[ValidateAntiForgeryToken]`.
@@ -71,7 +71,7 @@ The CSRF cookie is `Secure` and `SameSite=None` in Production. The token is not 
 
 Authentication changes the antiforgery token’s user binding. The web API client therefore invalidates its cached token and fetches a fresh token after registration, login, and logout. If a state-changing request receives the safe `CSRF_VALIDATION_FAILED` response, the client refreshes once and retries the same request; it does not retry repeatedly or bypass validation.
 
-The API also validates state-changing `/api` requests in middleware immediately after authentication and before authorization/MVC execution. This allows the request to be validated against the current authenticated Identity user and produces a stable `CSRF_VALIDATION_FAILED` response instead of the generic MVC ProblemDetails body. The existing controller `[ValidateAntiForgeryToken]` attributes remain in place as defense in depth.
+The API also validates state-changing authenticated `/api` requests, plus anonymous `/api/auth/login` and `/api/auth/register`, in middleware immediately after authentication and before authorization/MVC execution. This allows stale anonymous login tokens to receive a stable `CSRF_VALIDATION_FAILED` response instead of the generic MVC 400 body. The existing controller `[ValidateAntiForgeryToken]` attributes remain in place as defense in depth.
 
 Safe server diagnostics log only method, path, trace ID, authentication state, and exception type. Tokens, cookies, request bodies, passwords, and antiforgery exception messages are not logged or returned to the browser.
 

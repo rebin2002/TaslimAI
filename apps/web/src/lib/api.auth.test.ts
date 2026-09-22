@@ -46,6 +46,8 @@ describe("api.login", () => {
     await expect(api.login({ email: "owner@example.com", password: "StrongPassword!123" })).resolves.toEqual(authResponse);
     expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(fetchMock.mock.calls.map((call) => (call[1] as RequestInit | undefined)?.method ?? "GET")).toEqual(["GET", "POST", "GET"]);
+    expect(fetchMock.mock.calls[0][1].credentials).toBe("include");
+    expect(fetchMock.mock.calls[1][1].credentials).toBe("include");
   });
 
   it("surfaces invalid credentials as a typed safe API error", async () => {
@@ -74,6 +76,9 @@ describe("api.login", () => {
     await expect(api.login({ email: "owner@example.com", password: "StrongPassword!123" })).resolves.toEqual(authResponse);
     expect(fetchMock).toHaveBeenCalledTimes(5);
     expect(fetchMock.mock.calls.map((call) => (call[1] as RequestInit | undefined)?.method ?? "GET")).toEqual(["GET", "POST", "GET", "POST", "GET"]);
+    expect(fetchMock.mock.calls[0][1].credentials).toBe("include");
+    expect(fetchMock.mock.calls[1][1].credentials).toBe("include");
+    expect(fetchMock.mock.calls[3][1].credentials).toBe("include");
     expect(new Headers(fetchMock.mock.calls[1][1].headers).get("X-CSRF-TOKEN")).toBe("stale");
     expect(new Headers(fetchMock.mock.calls[3][1].headers).get("X-CSRF-TOKEN")).toBe("fresh");
   });
