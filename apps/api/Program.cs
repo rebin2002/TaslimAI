@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Taslim.Api.Ai;
+using Taslim.Api.Assets;
 using Taslim.Api.Authorization;
 using Taslim.Api.Domain;
 using Taslim.Api.Infrastructure;
@@ -119,6 +120,8 @@ builder.Services.AddCors(options => options.AddPolicy("Frontend", policy =>
         .AllowAnyMethod()
         .AllowCredentials()));
 builder.Services.AddScoped<WorkspaceAccessService>();
+builder.Services.AddScoped<IAssetService, AssetService>();
+builder.Services.AddScoped<IGeneratedAssetPublisher, GeneratedAssetPublisher>();
 builder.Services.AddScoped<IUsageLedgerService, UsageLedgerService>();
 builder.Services.AddSingleton<IUsageChargingService, SafeUsageChargingService>();
 builder.Services.Configure<GenerationJobOptions>(builder.Configuration.GetSection("GenerationJobs"));

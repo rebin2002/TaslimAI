@@ -1,4 +1,5 @@
 import { createSseParser, type TaslimSseEvent } from "@/lib/sse";
+import { API_URL, assetFileUrl } from "@/lib/apiBase";
 
 export type User = {
   id: string;
@@ -153,8 +154,28 @@ export type GenerationJob = {
   outputs: GenerationJobOutput[];
 };
 export type GenerationJobList = { items: GenerationJob[]; page: number; pageSize: number; totalCount: number; totalPages: number };
+export type AssetStatus = "Active" | "Archived";
+export type AssetType = "image" | "document" | "presentation" | "video" | "audio" | "music" | "research" | "social" | "file" | "other";
+export type Asset = {
+  id: string;
+  workspaceId: string;
+  projectId: string | null;
+  projectName: string | null;
+  name: string;
+  description: string | null;
+  assetType: AssetType;
+  mimeType: string | null;
+  status: AssetStatus;
+  hasFile: boolean;
+  canPreview: boolean;
+  createdAt: string;
+  updatedAt: string;
+  archivedAt: string | null;
+};
+export type AssetList = { items: Asset[]; page: number; pageSize: number; totalCount: number; totalPages: number };
+export type AssetFilters = { projectId?: string; assetType?: AssetType; status?: AssetStatus; search?: string; page?: number; pageSize?: number };
+export type AssetInput = { name: string; description?: string | null; projectId?: string | null };
 
-const API_URL = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5000").replace(/\/$/, "");
 let csrfToken: string | null = null;
 
 function requestId() {
@@ -273,6 +294,18 @@ export const api = {
   getGenerationJob: (jobId: string) => request<GenerationJob>(`/api/generation/jobs/${jobId}`),
   listGenerationJobs: (workspaceId: string, page = 1, pageSize = 20) => request<GenerationJobList>(`/api/generation/jobs?workspaceId=${encodeURIComponent(workspaceId)}&page=${page}&pageSize=${pageSize}&jobType=system.test`),
   cancelGenerationJob: (jobId: string) => request<{ status: GenerationJobStatus; cancellationRequested?: boolean }>(`/api/generation/jobs/${jobId}/cancel`, { method: "POST" }, true),
+  listAssets: (workspaceId: string, filters: AssetFilters = {}) => {
+    const params = new URLSearchParams({ workspaceId, status: filters.status ?? "Active", page: String(filters.page ?? 1), pageSize: String(filters.pageSize ?? 24) });
+    if (filters.projectId) params.set("projectId", filters.projectId);
+    if (filters.assetType) params.set("assetType", filters.assetType);
+    if (filters.search?.trim()) params.set("search", filters.search.trim());
+    return request<AssetList>(`/api/assets?${params.toString()}`);
+  },
+  getAsset: (assetId: string) => request<Asset>(`/api/assets/${assetId}`),
+  updateAsset: (assetId: string, input: AssetInput) => request<Asset>(`/api/assets/${assetId}`, { method: "PATCH", body: JSON.stringify(input) }, true),
+  archiveAsset: (assetId: string) => request<Asset>(`/api/assets/${assetId}/archive`, { method: "POST" }, true),
+  restoreAsset: (assetId: string) => request<Asset>(`/api/assets/${assetId}/restore`, { method: "POST" }, true),
+  assetFileUrl,
   listMemories: (workspaceId: string) => request<PersonalMemory[]>(`/api/workspaces/${workspaceId}/memories`),
   createMemory: (workspaceId: string, input: PersonalMemoryInput) => request<PersonalMemory>(`/api/workspaces/${workspaceId}/memories`, { method: "POST", body: JSON.stringify(input) }, true),
   updateMemory: (memoryId: string, input: PersonalMemoryInput) => request<PersonalMemory>(`/api/memories/${memoryId}`, { method: "PATCH", body: JSON.stringify(input) }, true),

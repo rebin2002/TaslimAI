@@ -20,6 +20,7 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
     public DbSet<ChatMessageAttachment> ChatMessageAttachments => Set<ChatMessageAttachment>();
     public DbSet<GenerationJob> GenerationJobs => Set<GenerationJob>();
     public DbSet<GenerationJobOutput> GenerationJobOutputs => Set<GenerationJobOutput>();
+    public DbSet<Asset> Assets => Set<Asset>();
     public DbSet<DataProtectionKey> DataProtectionKeys => Set<DataProtectionKey>();
 
     protected override void OnModelCreating(ModelBuilder builder)
@@ -161,6 +162,30 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasIndex(output => output.StoredFileId);
             entity.HasOne(output => output.GenerationJob).WithMany(job => job.Outputs).HasForeignKey(output => output.GenerationJobId).OnDelete(DeleteBehavior.Cascade);
             entity.HasOne(output => output.StoredFile).WithMany(file => file.GenerationJobOutputs).HasForeignKey(output => output.StoredFileId).OnDelete(DeleteBehavior.Restrict);
+        });
+
+        builder.Entity<Asset>(entity =>
+        {
+            entity.HasKey(asset => asset.Id);
+            entity.Property(asset => asset.Name).HasMaxLength(255).IsRequired();
+            entity.Property(asset => asset.Description).HasMaxLength(2_000);
+            entity.Property(asset => asset.AssetType).HasMaxLength(40).IsRequired();
+            entity.Property(asset => asset.MimeType).HasMaxLength(160);
+            entity.Property(asset => asset.Status).HasConversion<string>().HasMaxLength(30).IsRequired();
+            entity.Property(asset => asset.MetadataJson).HasMaxLength(20_000);
+            entity.Property(asset => asset.CreatedAt).IsRequired();
+            entity.Property(asset => asset.UpdatedAt).IsRequired();
+            entity.HasIndex(asset => new { asset.WorkspaceId, asset.Status, asset.CreatedAt });
+            entity.HasIndex(asset => new { asset.WorkspaceId, asset.AssetType, asset.Status, asset.CreatedAt });
+            entity.HasIndex(asset => new { asset.ProjectId, asset.Status, asset.CreatedAt });
+            entity.HasIndex(asset => new { asset.WorkspaceId, asset.Name });
+            entity.HasIndex(asset => asset.StoredFileId);
+            entity.HasIndex(asset => asset.SourceGenerationJobId);
+            entity.HasOne(asset => asset.Workspace).WithMany(workspace => workspace.Assets).HasForeignKey(asset => asset.WorkspaceId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(asset => asset.Project).WithMany(project => project.Assets).HasForeignKey(asset => asset.ProjectId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne(asset => asset.CreatedByUser).WithMany().HasForeignKey(asset => asset.CreatedByUserId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(asset => asset.StoredFile).WithMany(file => file.Assets).HasForeignKey(asset => asset.StoredFileId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(asset => asset.SourceGenerationJob).WithMany(job => job.Assets).HasForeignKey(asset => asset.SourceGenerationJobId).OnDelete(DeleteBehavior.Restrict);
         });
 
         builder.Entity<ChatMessageAttachment>(entity =>

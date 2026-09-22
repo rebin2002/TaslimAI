@@ -77,13 +77,22 @@ public sealed class GenerationJobsTests : IClassFixture<GenerationJobsApiFactory
         Assert.Equal(100, completed.ProgressPercent);
         Assert.Contains("system.test", completed.ResultJson);
         Assert.Single(completed.Outputs);
+        Assert.NotNull(completed.Outputs[0].StoredFileId);
 
         using var scope = factory.Services.CreateScope();
-        var usage = await scope.ServiceProvider.GetRequiredService<TaslimDbContext>().UsageTransactions.AsNoTracking().SingleAsync(item => item.RequestId == $"generation:{created.Id:N}");
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var usage = await db.UsageTransactions.AsNoTracking().SingleAsync(item => item.RequestId == $"generation:{created.Id:N}");
         Assert.Equal(UsageFeature.Generation, usage.Feature);
         Assert.Equal(0m, usage.ProviderCostUsd);
         Assert.Equal(0m, usage.ChargedAmount);
         Assert.Equal(UsageTransactionStatus.Completed, usage.Status);
+        var asset = await db.Assets.AsNoTracking().Include(item => item.StoredFile).SingleAsync(item => item.SourceGenerationJobId == created.Id);
+        Assert.Equal(auth.PersonalWorkspace.Id, asset.WorkspaceId);
+        Assert.Null(asset.ProjectId);
+        Assert.Equal(AssetTypes.File, asset.AssetType);
+        Assert.Equal(completed.Outputs[0].StoredFileId, asset.StoredFileId);
+        Assert.Equal("application/json", asset.StoredFile!.ContentType);
+        Assert.Equal(StoredFileStatus.Ready, asset.StoredFile.Status);
     }
 
     [Fact]
@@ -148,6 +157,8 @@ public sealed class GenerationJobsTests : IClassFixture<GenerationJobsApiFactory
         Assert.True(cancel.StatusCode is HttpStatusCode.OK or HttpStatusCode.Accepted, await cancel.Content.ReadAsStringAsync());
         var terminal = await WaitForTerminal(client, created.Id);
         Assert.Equal("Cancelled", terminal.Status);
+        using var scope = factory.Services.CreateScope();
+        Assert.False(await scope.ServiceProvider.GetRequiredService<TaslimDbContext>().Assets.AsNoTracking().AnyAsync(item => item.SourceGenerationJobId == created.Id));
     }
 
     [Fact]
@@ -251,6 +262,8 @@ public sealed class GenerationJobQueuedCancellationTests : IClassFixture<Generat
         Assert.Equal(HttpStatusCode.OK, cancelled.StatusCode);
         var job = await client.GetFromJsonAsync<GenerationJobDto>($"/api/generation/jobs/{created.Id}");
         Assert.Equal("Cancelled", job!.Status);
+        using var scope = factory.Services.CreateScope();
+        Assert.False(await scope.ServiceProvider.GetRequiredService<TaslimDbContext>().Assets.AsNoTracking().AnyAsync(item => item.SourceGenerationJobId == created.Id));
     }
 
     private static async Task<HttpResponseMessage> Register(HttpClient client)

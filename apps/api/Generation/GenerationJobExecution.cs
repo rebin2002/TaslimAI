@@ -2,6 +2,7 @@ using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Taslim.Api.Ai;
+using Taslim.Api.Assets;
 using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
@@ -47,7 +48,12 @@ public sealed class DatabaseGenerationJobQueue(TaslimDbContext db) : IGeneration
     }
 }
 
-public sealed record GenerationHandlerOutput(string OutputType, Guid? StoredFileId, string? MetadataJson);
+public sealed record GenerationHandlerOutput(
+    string OutputType,
+    Guid? StoredFileId,
+    string? MetadataJson,
+    GeneratedFileArtifact? FileArtifact = null,
+    GeneratedAssetDescriptor? Asset = null);
 public sealed record GenerationHandlerResult(string ResultJson, IReadOnlyList<GenerationHandlerOutput> Outputs);
 
 public interface IGenerationJobHandler
@@ -75,7 +81,9 @@ public sealed class SystemTestGenerationJobHandler : IGenerationJobHandler
             version = 1,
         });
         var metadata = JsonSerializer.Serialize(new { deterministic = true, stageCount = 5 });
-        return new GenerationHandlerResult(result, [new GenerationHandlerOutput(GenerationJobOutputTypes.Json, null, metadata)]);
+        var artifact = new GeneratedFileArtifact("generation-result.json", "application/json", System.Text.Encoding.UTF8.GetBytes(result));
+        var asset = new GeneratedAssetDescriptor(job.Title ?? "Generation result", "Deterministic system test output.", AssetTypes.File, metadata);
+        return new GenerationHandlerResult(result, [new GenerationHandlerOutput(GenerationJobOutputTypes.StoredFile, null, metadata, artifact, asset)]);
     }
 }
 
@@ -343,6 +351,7 @@ public sealed class GenerationJobWorker(
         using var scope = scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
         var usage = scope.ServiceProvider.GetRequiredService<IGenerationJobUsageService>();
+        var publisher = scope.ServiceProvider.GetRequiredService<IGeneratedAssetPublisher>();
         var handlers = scope.ServiceProvider.GetServices<IGenerationJobHandler>();
         var handler = handlers.FirstOrDefault(item => item.CanHandle(claimedJob.JobType));
         if (handler is null)
@@ -353,6 +362,8 @@ public sealed class GenerationJobWorker(
 
         using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
         var monitor = MonitorCancellationAsync(db, claimedJob.Id, cancellation, stoppingToken);
+        var publications = new List<PreparedGenerationOutput>();
+        var publicationCommitted = false;
         try
         {
             var progress = new Progress<int>(value => _ = UpdateProgressAsync(claimedJob.Id, value, stoppingToken));
@@ -363,45 +374,52 @@ public sealed class GenerationJobWorker(
                 await CancelRunningAsync(db, usage, claimedJob, stoppingToken);
                 return;
             }
-            await using var completionTransaction = await db.Database.BeginTransactionAsync(stoppingToken);
-            var completedAt = DateTime.UtcNow;
             foreach (var output in result.Outputs)
             {
-                db.GenerationJobOutputs.Add(new GenerationJobOutput
-                {
-                    Id = Guid.NewGuid(),
-                    GenerationJobId = current.Id,
-                    StoredFileId = output.StoredFileId,
-                    OutputType = output.OutputType,
-                    MetadataJson = output.MetadataJson,
-                    CreatedAt = DateTime.UtcNow,
-                });
+                publications.Add(await publisher.PrepareAsync(current, output, stoppingToken));
             }
-            await db.SaveChangesAsync(stoppingToken);
-            var completed = await db.GenerationJobs
-                .Where(item => item.Id == current.Id && item.Status == GenerationJobStatus.Running && !item.CancellationRequested)
-                .ExecuteUpdateAsync(setters => setters
-                    .SetProperty(item => item.Status, GenerationJobStatus.Succeeded)
-                    .SetProperty(item => item.ProgressPercent, 100)
-                    .SetProperty(item => item.ResultJson, result.ResultJson)
-                    .SetProperty(item => item.CompletedAt, completedAt)
-                    .SetProperty(item => item.ClaimExpiresAt, (DateTime?)null), stoppingToken);
+
+            int completed;
+            await using (var completionTransaction = await db.Database.BeginTransactionAsync(stoppingToken))
+            {
+                foreach (var publication in publications)
+                {
+                    db.GenerationJobOutputs.Add(publication.Output);
+                    if (publication.Asset is not null) db.Assets.Add(publication.Asset);
+                }
+                await db.SaveChangesAsync(stoppingToken);
+                var completedAt = DateTime.UtcNow;
+                completed = await db.GenerationJobs
+                    .Where(item => item.Id == current.Id && item.Status == GenerationJobStatus.Running && !item.CancellationRequested)
+                    .ExecuteUpdateAsync(setters => setters
+                        .SetProperty(item => item.Status, GenerationJobStatus.Succeeded)
+                        .SetProperty(item => item.ProgressPercent, 100)
+                        .SetProperty(item => item.ResultJson, result.ResultJson)
+                        .SetProperty(item => item.CompletedAt, completedAt)
+                        .SetProperty(item => item.ClaimExpiresAt, (DateTime?)null), stoppingToken);
+                if (completed > 0) await completionTransaction.CommitAsync(stoppingToken);
+                else await completionTransaction.RollbackAsync(stoppingToken);
+            }
             if (completed == 0)
             {
-                await completionTransaction.RollbackAsync(stoppingToken);
+                foreach (var publication in publications) await publisher.DiscardAsync(publication, stoppingToken);
                 await CancelRunningAsync(db, usage, claimedJob, stoppingToken);
                 return;
             }
-            await completionTransaction.CommitAsync(stoppingToken);
+            publicationCommitted = true;
             var transaction = await usage.BeginAsync(current, stoppingToken);
             await usage.CompleteAsync(transaction, stoppingToken);
         }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
         {
+            if (!publicationCommitted)
+                foreach (var publication in publications) await publisher.DiscardAsync(publication, CancellationToken.None);
             await CancelRunningAsync(db, usage, claimedJob, stoppingToken);
         }
         catch (Exception exception)
         {
+            if (!publicationCommitted)
+                foreach (var publication in publications) await publisher.DiscardAsync(publication, CancellationToken.None);
             logger.LogError(exception, "Generation job execution failed. JobId={JobId}; JobType={JobType}", claimedJob.Id, claimedJob.JobType);
             await FailAsync(db, usage, claimedJob, GenerationJobErrorCodes.ExecutionFailed, "The job could not be completed.", stoppingToken);
         }

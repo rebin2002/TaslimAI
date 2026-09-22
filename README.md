@@ -1,6 +1,6 @@
 # Taslim.ai
 
-Taslim.ai is a multilingual AI platform foundation designed to make professional AI capabilities simple, fast, and approachable. **Batch 3.2 adds the first production AI provider and provider-independent streaming. Batch 3.3 adds the internal usage ledger and zero-charge accounting foundation. Batch 3.4 adds user-approved memory and project-scoped context. Batch 3.5 adds secure file storage, bounded document extraction, and explicit chat attachments. Batch 3.6 adds the persistent provider-independent Generation Job foundation.**
+Taslim.ai is a multilingual AI platform foundation designed to make professional AI capabilities simple, fast, and approachable. **Batch 3.2 adds the first production AI provider and provider-independent streaming. Batch 3.3 adds the internal usage ledger and zero-charge accounting foundation. Batch 3.4 adds user-approved memory and project-scoped context. Batch 3.5 adds secure file storage, bounded document extraction, and explicit chat attachments. Batch 3.6 adds the persistent provider-independent Generation Job foundation. Batch 3.7 adds the unified reusable Asset architecture and product library.**
 
 ## Architecture
 
@@ -14,7 +14,7 @@ Taslim API (ASP.NET Core Identity + Web API)
         +---- PostgreSQL (EF Core / Npgsql)
 ```
 
-The browser owns presentation and navigation. The API owns authentication, authorization, persistence, and AI Core orchestration. Provider secrets must never be sent to browser clients. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/AUTHENTICATION.md](docs/AUTHENTICATION.md), [docs/CHAT_ARCHITECTURE.md](docs/CHAT_ARCHITECTURE.md), [docs/FILES_ARCHITECTURE.md](docs/FILES_ARCHITECTURE.md), and [docs/GENERATION_JOBS_ARCHITECTURE.md](docs/GENERATION_JOBS_ARCHITECTURE.md).
+The browser owns presentation and navigation. The API owns authentication, authorization, persistence, and AI Core orchestration. Provider secrets must never be sent to browser clients. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/AUTHENTICATION.md](docs/AUTHENTICATION.md), [docs/CHAT_ARCHITECTURE.md](docs/CHAT_ARCHITECTURE.md), [docs/FILES_ARCHITECTURE.md](docs/FILES_ARCHITECTURE.md), [docs/GENERATION_JOBS_ARCHITECTURE.md](docs/GENERATION_JOBS_ARCHITECTURE.md), and [docs/ASSET_ARCHITECTURE.md](docs/ASSET_ARCHITECTURE.md).
 
 ## Repository structure
 
@@ -31,6 +31,7 @@ docs/
   CHAT_ARCHITECTURE.md  Chat persistence, AI Core, provider path, and security
   FILES_ARCHITECTURE.md File storage, extraction, attachments, and security
   GENERATION_JOBS_ARCHITECTURE.md Persistent job lifecycle, queue, worker, and handlers
+  ASSET_ARCHITECTURE.md Unified Asset model, publication, private downloads, lifecycle, and UI
 ```
 
 ## Requirements
@@ -110,7 +111,7 @@ The API allows only configured origins and uses `AllowCredentials()`; wildcard C
 
 Railway terminates TLS at its ingress proxy, so the API uses ASP.NET Core Forwarded Headers Middleware to consume one `X-Forwarded-Proto` hop before exception handling, CORS, authentication, authorization, or antiforgery. Production processes only the forwarded scheme, with `ForwardLimit=1`, and preserves `CookieSecurePolicy.Always` for both auth and CSRF cookies. Local development remains direct HTTP with the existing `SameAsRequest` development policy.
 
-## Batch 3.5 product flows
+## Product flows through Batch 3.7
 
 - Register at `/register`
 - Sign in at `/login`
@@ -133,6 +134,8 @@ Railway terminates TLS at its ingress proxy, so the API uses ASP.NET Core Forwar
 - Upload and manage project files at `/projects/[projectId]`
 - Attach explicitly selected ready files to chat messages
 - Validate the persistent system test job foundation at `/account/generation-jobs`
+- Find, filter, rename, reassign, archive, restore, and download reusable outputs at `/assets`
+- View project-assigned Assets from `/projects/[projectId]`
 
 Supported project types are General, Movie, Marketing, Business, Research, Education, and Development. These are extensible server-side values, not a closed database enum.
 
@@ -152,7 +155,7 @@ dotnet tool run dotnet-ef migrations add <MigrationName> \
   --output-dir Persistence/Migrations
 ```
 
-The initial migration is `InitialIdentityWorkspacesProjects` and creates ASP.NET Identity tables plus `Workspaces`, `WorkspaceMembers`, and `Projects`. Batch 3.1 adds `AddChatConversationsAndMessages` for `Conversations` and `ChatMessages`. Batch 3.2 adds `AddChatUsageAndIdempotency` for cached-token usage and duplicate-request protection, followed by `AddDeterministicChatMessageOrdering` for monotonic per-conversation message sequences and legacy backfill. Batch 3.3 adds `AddUsageLedger` for immutable usage transactions, cost metadata, and request/feature idempotency. Batch 3.4 adds `AddPersonalMemoryAndProjectContext` for `PersonalMemories` and nullable project context fields. Batch 3.5 adds `AddStoredFilesAndChatAttachments` for `StoredFiles` and normalized `ChatMessageAttachments`. Batch 3.6 adds `AddGenerationJobs` for durable `GenerationJobs` and `GenerationJobOutputs`; it leaves the existing `DataProtectionKeys` table and mapping intact.
+The initial migration is `InitialIdentityWorkspacesProjects` and creates ASP.NET Identity tables plus `Workspaces`, `WorkspaceMembers`, and `Projects`. Batch 3.1 adds `AddChatConversationsAndMessages` for `Conversations` and `ChatMessages`. Batch 3.2 adds `AddChatUsageAndIdempotency` for cached-token usage and duplicate-request protection, followed by `AddDeterministicChatMessageOrdering` for monotonic per-conversation message sequences and legacy backfill. Batch 3.3 adds `AddUsageLedger` for immutable usage transactions, cost metadata, and request/feature idempotency. Batch 3.4 adds `AddPersonalMemoryAndProjectContext` for `PersonalMemories` and nullable project context fields. Batch 3.5 adds `AddStoredFilesAndChatAttachments` for `StoredFiles` and normalized `ChatMessageAttachments`. Batch 3.6 adds `AddGenerationJobs` for durable `GenerationJobs` and `GenerationJobOutputs`. Batch 3.7 adds `AddAssets` for the reusable user-facing Asset library and its storage/provenance relationships. Both additive migrations leave the existing `DataProtectionKeys` table and mapping intact.
 
 To apply migrations locally against an explicitly selected database:
 
@@ -173,7 +176,7 @@ Run the API integration suite:
 dotnet test apps/api.Tests/Taslim.Api.Tests.csproj
 ```
 
-The suite covers registration, duplicate email, login failure, session/logout, personal workspace ownership, project lifecycle, chat persistence, mock AI execution, tier routing, provider failure, context trimming, usage/cost calculation, provider-independent stream events, SSE persistence, terminal failure events, deterministic multi-turn ordering, idempotency, usage ledger completion/failure/summary/history behavior, conversation title generation, message history, rename/archive, cross-user and cross-workspace authorization, oversized-message rejection, CSRF enforcement, controlled validation errors, upload validation, bounded extraction, file ownership, deletion, and normalized chat attachments. Frontend Vitest coverage includes LF/CRLF/mixed SSE parsing, chunk splits, multiline data, malformed protocol data, EOF without a terminal event, and submission lifecycle locks. Tests use a relational in-memory SQLite database so transactions and foreign keys are exercised realistically.
+The suite covers registration, duplicate email, login failure, session/logout, personal workspace ownership, project lifecycle, chat persistence, mock AI execution, tier routing, provider failure, context trimming, usage/cost calculation, provider-independent stream events, SSE persistence, terminal failure events, deterministic multi-turn ordering, idempotency, usage ledger behavior, message history, cross-workspace authorization, CSRF enforcement, upload validation, bounded extraction, file ownership, normalized chat attachments, durable Generation Job claiming/cancellation/recovery, generated-file publication, Asset provenance, project inheritance, search/filter/pagination, archive/restore, authorized download, and failed/cancelled no-Asset behavior. Frontend Vitest coverage includes streaming lifecycle and Asset Library loading, empty, update, archive, restore, safe-display, and card rendering states. Tests use relational SQLite so transactions and foreign keys are exercised realistically.
 
 ## Railway deployment
 
@@ -236,9 +239,9 @@ Use Railway’s managed PostgreSQL service and a private service reference for t
 
 ## Scope boundary
 
-Included through Batch 3.5: the Batch 3.1 conversation foundation, server-only OpenAI Responses adapter, configuration-backed internal model catalog, Fast/Smart/Advanced routing, server-controlled multilingual instruction, Taslim-owned SSE streaming, context budget trimming, usage/cost metadata, request idempotency, retry-safe failure handling, localized streaming Chat UI, the zero-charge usage ledger, user-approved personal memory, project-scoped context, secure file storage boundaries, bounded extraction, and explicit chat attachments. Batch 2 authentication, CSRF, workspace/project authorization, localization, RTL behavior, global CSS, and Railway deployment architecture remain unchanged.
+Included through Batch 3.7: the conversation and streaming foundation, server-only OpenAI chat adapter, internal model routing, zero-charge usage ledger, user-approved memory, project context, secure private file storage, bounded extraction, explicit chat attachments, durable provider-independent Generation Jobs, generated-output publication, and the unified reusable Asset Library. Authentication, CSRF, workspace/project authorization, localization, RTL behavior, persistent Data Protection, and Railway deployment architecture remain intact.
 
-Not included: Anthropic, Gemini, automatic cross-provider fallback, image/video/voice/music generation, web search, vector database, embeddings, RAG, tool calling, agents, billing, credits, subscriptions, payment processing, team chat sharing, admin, invitations, business workspace creation, social login, native mobile apps, or Batch 3.7. Batch 3.6 deliberately does not implement Image, Movie, Document, Presentation, Voice, Music, Research, or Social studios/providers.
+Not included: Anthropic, Gemini, automatic cross-provider fallback, Image, Movie, Document, Presentation, Voice, Music, Research, or Social studios/providers, real media generation, web search, vector databases, embeddings, RAG, tool calling, agents, billing, credits, subscriptions, payment processing, team chat sharing, admin, invitations, business workspace creation, social login, or native mobile apps. Batch 3.7 adds the shared Asset destination and extension contract only.
 
 ## Batch 3.3 usage ledger
 
@@ -257,3 +260,13 @@ Projects now support bounded `Instructions` and `ContextNotes` fields. They are 
 Batch 3.5 adds `StoredFile` metadata and `ChatMessageAttachment` joins. Local development and tests use the safe filesystem provider under `Files:LocalRootPath`; Production selects the AWS SDK-backed `S3CompatibleFileStorageService` for Cloudflare R2 so the API does not silently write user files to ephemeral Railway disk. Uploads validate filename, extension, declared MIME type, signature, and size before bounded TXT, Markdown, PDF, DOCX, CSV, or XLSX extraction. Images remain binary attachments for a provider-capable vision path.
 
 The browser receives safe file metadata and sends opaque attachment IDs. The API enforces workspace, project, conversation, uploader, readiness, and attachment-count checks before resolving selected files server-side. Storage keys, extracted text, binary data, provider credentials, and provider file IDs never enter browser DTOs. See [docs/FILES_ARCHITECTURE.md](docs/FILES_ARCHITECTURE.md) for the storage adapter boundary and production configuration.
+
+## Batch 3.6 Generation Jobs
+
+Batch 3.6 adds the database-backed `GenerationJob` queue, atomic PostgreSQL claim path, configurable single-concurrency worker, independently registered handlers, cooperative cancellation, output provenance, recovery of expired claims, and zero-cost `system.test` handler. The protected `/account/generation-jobs` route remains an internal validation surface rather than a studio. See [docs/GENERATION_JOBS_ARCHITECTURE.md](docs/GENERATION_JOBS_ARCHITECTURE.md).
+
+## Batch 3.7 unified Assets
+
+Batch 3.7 adds `Asset` as the reusable product layer above private `StoredFile` metadata and immutable `GenerationJobOutput` provenance. Successful `system.test` execution writes a deterministic JSON artifact through the configured storage adapter, links the output, and publishes one Asset in the same workspace and optional project. Failed or cancelled jobs publish no Asset, and system-test usage remains zero.
+
+Authenticated `/api/assets` routes support paginated listing, text/type/project/status filters, get, metadata updates, project assignment/removal, archive, restore, and authorized private-file streaming. `/assets` provides the localized English, Arabic, and Kurdish Sorani product library, while project details show project-assigned Assets. See [docs/ASSET_ARCHITECTURE.md](docs/ASSET_ARCHITECTURE.md) for extension rules future handlers must follow.

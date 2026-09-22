@@ -84,6 +84,31 @@ public static class GenerationJobErrorCodes
     public const string NotFound = "JOB_NOT_FOUND";
 }
 
+public static class AssetTypes
+{
+    public const string Image = "image";
+    public const string Document = "document";
+    public const string Presentation = "presentation";
+    public const string Video = "video";
+    public const string Audio = "audio";
+    public const string Music = "music";
+    public const string Research = "research";
+    public const string Social = "social";
+    public const string File = "file";
+    public const string Other = "other";
+
+    public static readonly IReadOnlySet<string> Supported = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        Image, Document, Presentation, Video, Audio, Music, Research, Social, File, Other,
+    };
+}
+
+public enum AssetStatus
+{
+    Active,
+    Archived,
+}
+
 public static class PersonalMemoryCategories
 {
     public const string Preference = "Preference";
@@ -174,6 +199,7 @@ public sealed class Workspace
     public ICollection<Project> Projects { get; set; } = [];
     public ICollection<Conversation> Conversations { get; set; } = [];
     public ICollection<StoredFile> Files { get; set; } = [];
+    public ICollection<Asset> Assets { get; set; } = [];
 }
 
 public sealed class WorkspaceMember
@@ -204,6 +230,7 @@ public sealed class Project
 
     public Workspace Workspace { get; set; } = null!;
     public ICollection<StoredFile> Files { get; set; } = [];
+    public ICollection<Asset> Assets { get; set; } = [];
 }
 
 public sealed class PersonalMemory
@@ -345,6 +372,7 @@ public sealed class StoredFile
     public Conversation? Conversation { get; set; }
     public ICollection<ChatMessageAttachment> Attachments { get; set; } = [];
     public ICollection<GenerationJobOutput> GenerationJobOutputs { get; set; } = [];
+    public ICollection<Asset> Assets { get; set; } = [];
 }
 
 public sealed class GenerationJob
@@ -377,6 +405,32 @@ public sealed class GenerationJob
     public Project? Project { get; set; }
     public ApplicationUser CreatedByUser { get; set; } = null!;
     public ICollection<GenerationJobOutput> Outputs { get; set; } = [];
+    public ICollection<Asset> Assets { get; set; } = [];
+}
+
+public sealed class Asset
+{
+    public Guid Id { get; set; }
+    public Guid WorkspaceId { get; set; }
+    public Guid? ProjectId { get; set; }
+    public Guid CreatedByUserId { get; set; }
+    public Guid? StoredFileId { get; set; }
+    public Guid? SourceGenerationJobId { get; set; }
+    public string Name { get; set; } = string.Empty;
+    public string? Description { get; set; }
+    public string AssetType { get; set; } = AssetTypes.File;
+    public string? MimeType { get; set; }
+    public AssetStatus Status { get; set; } = AssetStatus.Active;
+    public string? MetadataJson { get; set; }
+    public DateTime CreatedAt { get; set; }
+    public DateTime UpdatedAt { get; set; }
+    public DateTime? ArchivedAt { get; set; }
+
+    public Workspace Workspace { get; set; } = null!;
+    public Project? Project { get; set; }
+    public ApplicationUser CreatedByUser { get; set; } = null!;
+    public StoredFile? StoredFile { get; set; }
+    public GenerationJob? SourceGenerationJob { get; set; }
 }
 
 public sealed class GenerationJobOutput
