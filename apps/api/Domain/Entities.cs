@@ -54,12 +54,14 @@ public static class GenerationJobTypes
     public const string SystemTest = "system.test";
     public const string ImageGenerate = "image.generate";
     public const string DocumentGenerate = "document.generate";
+    public const string PresentationGenerate = "presentation.generate";
 
     public static readonly IReadOnlySet<string> Supported = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
         SystemTest,
         ImageGenerate,
         DocumentGenerate,
+        PresentationGenerate,
     };
 }
 
@@ -108,6 +110,20 @@ public static class GenerationJobErrorCodes
     public const string DocumentRenderFailed = "DOCUMENT_RENDER_FAILED";
     public const string DocumentStorageFailed = "DOCUMENT_STORAGE_FAILED";
     public const string DocumentCancelled = "DOCUMENT_CANCELLED";
+    public const string PresentationRequestInvalid = "PRESENTATION_REQUEST_INVALID";
+    public const string PresentationAttachmentUnavailable = "PRESENTATION_ATTACHMENT_UNAVAILABLE";
+    public const string PresentationAttachmentExtractionFailed = "PRESENTATION_ATTACHMENT_EXTRACTION_FAILED";
+    public const string PresentationContextTooLarge = "PRESENTATION_CONTEXT_TOO_LARGE";
+    public const string PresentationProviderUnavailable = "PRESENTATION_PROVIDER_UNAVAILABLE";
+    public const string PresentationProviderConfiguration = "PRESENTATION_PROVIDER_CONFIGURATION";
+    public const string PresentationProviderUnsupportedRequest = "PRESENTATION_PROVIDER_UNSUPPORTED_REQUEST";
+    public const string PresentationProviderRateLimited = "PRESENTATION_PROVIDER_RATE_LIMITED";
+    public const string PresentationProviderTransientFailure = "PRESENTATION_PROVIDER_TRANSIENT_FAILURE";
+    public const string PresentationGenerationFailed = "PRESENTATION_GENERATION_FAILED";
+    public const string PresentationOutputInvalid = "PRESENTATION_OUTPUT_INVALID";
+    public const string PresentationRenderFailed = "PRESENTATION_RENDER_FAILED";
+    public const string PresentationStorageFailed = "PRESENTATION_STORAGE_FAILED";
+    public const string PresentationCancelled = "PRESENTATION_CANCELLED";
 }
 
 public static class AssetTypes
@@ -133,6 +149,7 @@ public static class AssetRepresentationTypes
 {
     public const string Docx = "docx";
     public const string Pdf = "pdf";
+    public const string Pptx = "pptx";
 }
 
 public enum AssetStatus
@@ -191,6 +208,7 @@ public static class FileContentTypes
     {
         [".pdf"] = "application/pdf",
         [".docx"] = "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        [".pptx"] = "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         [".txt"] = "text/plain",
         [".md"] = "text/markdown",
         [".csv"] = "text/csv",

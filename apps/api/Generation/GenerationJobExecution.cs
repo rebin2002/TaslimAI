@@ -11,6 +11,7 @@ using Taslim.Api.Documents;
 using Taslim.Api.Files;
 using Taslim.Api.Images;
 using Taslim.Api.Persistence;
+using Taslim.Api.Presentations;
 using Taslim.Api.Usage;
 
 namespace Taslim.Api.Generation;
@@ -110,7 +111,9 @@ public sealed class GenerationJobUsageService(IUsageLedgerService ledger) : IGen
             $"generation:{job.Id:N}",
             string.Equals(job.JobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase)
                 ? UsageFeature.Image
-                : string.Equals(job.JobType, GenerationJobTypes.DocumentGenerate, StringComparison.OrdinalIgnoreCase) ? UsageFeature.Document : UsageFeature.Generation,
+                : string.Equals(job.JobType, GenerationJobTypes.DocumentGenerate, StringComparison.OrdinalIgnoreCase)
+                    ? UsageFeature.Document
+                    : string.Equals(job.JobType, GenerationJobTypes.PresentationGenerate, StringComparison.OrdinalIgnoreCase) ? UsageFeature.Presentation : UsageFeature.Generation,
             cancellationToken,
             job.Id,
             estimatedProviderCostUsd);
@@ -251,6 +254,8 @@ public sealed class GenerationJobService(
             ? GenerationJobErrorCodes.ImageCancelled
             : string.Equals(job.JobType, GenerationJobTypes.DocumentGenerate, StringComparison.OrdinalIgnoreCase)
                 ? GenerationJobErrorCodes.DocumentCancelled
+                : string.Equals(job.JobType, GenerationJobTypes.PresentationGenerate, StringComparison.OrdinalIgnoreCase)
+                    ? GenerationJobErrorCodes.PresentationCancelled
                 : GenerationJobErrorCodes.Cancelled;
 }
 
@@ -399,6 +404,10 @@ public sealed class GenerationJobWorker(
                         : DocumentGenerationStages.StorageDocx;
                     throw new DocumentGenerationStageException(stage, DocumentGenerationFailureCodes.ForStage(stage), "The generated document could not be stored.", providerUsage, exception);
                 }
+                catch (Exception exception) when (exception is not OperationCanceledException && string.Equals(claimedJob.JobType, GenerationJobTypes.PresentationGenerate, StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new PresentationGenerationStageException(PresentationGenerationStages.StoragePptx, GenerationJobErrorCodes.PresentationStorageFailed, "The generated presentation could not be stored.", providerUsage, exception);
+                }
             }
             AttachAssetRepresentations(publications);
             var resultJson = AddPublishedAssetReference(result.ResultJson, publications);
@@ -445,6 +454,10 @@ public sealed class GenerationJobWorker(
             {
                 throw new DocumentGenerationStageException(DocumentGenerationStages.AssetPublish, GenerationJobErrorCodes.DocumentStorageFailed, "The generated document could not be published.", providerUsage, exception);
             }
+            catch (Exception exception) when (exception is not OperationCanceledException && string.Equals(claimedJob.JobType, GenerationJobTypes.PresentationGenerate, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new PresentationGenerationStageException(PresentationGenerationStages.AssetPublish, GenerationJobErrorCodes.PresentationStorageFailed, "The generated presentation could not be published.", providerUsage, exception);
+            }
             if (completed == 0)
             {
                 foreach (var publication in publications) await publisher.DiscardAsync(publication, stoppingToken);
@@ -465,11 +478,29 @@ public sealed class GenerationJobWorker(
                 foreach (var publication in publications) await publisher.DiscardAsync(publication, CancellationToken.None);
             var failureCode = MapFailureCode(exception, claimedJob.JobType);
             var failureUsage = providerUsage ?? (exception as DocumentGenerationStageException)?.Usage;
+            failureUsage ??= (exception as PresentationGenerationStageException)?.Usage;
             if (string.Equals(claimedJob.JobType, GenerationJobTypes.DocumentGenerate, StringComparison.OrdinalIgnoreCase))
             {
                 var stage = (exception as DocumentGenerationStageException)?.Stage ?? DocumentGenerationStages.Execution;
                 var providerException = exception as AiProviderException ?? exception.InnerException as AiProviderException;
                 logger.LogError("Document generation failed. JobId={JobId}; Stage={Stage}; ErrorCode={ErrorCode}; ExceptionType={ExceptionType}; ProviderFailureCategory={ProviderFailureCategory}; ProviderHttpStatus={ProviderHttpStatus}; ProviderErrorCode={ProviderErrorCode}; ModelKey={ModelKey}; StructuredOutput={StructuredOutput}; Streaming={Streaming}; ElapsedMs={ElapsedMs}",
+                    claimedJob.Id,
+                    stage,
+                    failureCode,
+                    exception.GetType().Name,
+                    providerException?.FailureCategory,
+                    providerException?.HttpStatusCode,
+                    providerException?.ProviderErrorCode,
+                    providerException?.ModelKey,
+                    providerException?.StructuredOutputRequested,
+                    providerException?.StreamingRequested,
+                    (long)Stopwatch.GetElapsedTime(executionStarted).TotalMilliseconds);
+            }
+            else if (string.Equals(claimedJob.JobType, GenerationJobTypes.PresentationGenerate, StringComparison.OrdinalIgnoreCase))
+            {
+                var stage = (exception as PresentationGenerationStageException)?.Stage ?? PresentationGenerationStages.Execution;
+                var providerException = exception as AiProviderException ?? exception.InnerException as AiProviderException;
+                logger.LogError("Presentation generation failed. JobId={JobId}; Stage={Stage}; ErrorCode={ErrorCode}; ExceptionType={ExceptionType}; ProviderFailureCategory={ProviderFailureCategory}; ProviderHttpStatus={ProviderHttpStatus}; ProviderErrorCode={ProviderErrorCode}; ModelKey={ModelKey}; StructuredOutput={StructuredOutput}; Streaming={Streaming}; ElapsedMs={ElapsedMs}",
                     claimedJob.Id,
                     stage,
                     failureCode,
@@ -585,7 +616,7 @@ public sealed class GenerationJobWorker(
             var file = publication.CreatedFile;
             if (file is null) continue;
             var representationType = file.Extension.TrimStart('.').ToLowerInvariant();
-            if (representationType is not (AssetRepresentationTypes.Docx or AssetRepresentationTypes.Pdf)) continue;
+            if (representationType is not (AssetRepresentationTypes.Docx or AssetRepresentationTypes.Pdf or AssetRepresentationTypes.Pptx)) continue;
             asset.Representations.Add(new AssetRepresentation
             {
                 Id = Guid.NewGuid(),
@@ -633,6 +664,8 @@ public sealed class GenerationJobWorker(
             ? GenerationJobErrorCodes.ImageCancelled
             : string.Equals(job.JobType, GenerationJobTypes.DocumentGenerate, StringComparison.OrdinalIgnoreCase)
                 ? GenerationJobErrorCodes.DocumentCancelled
+                : string.Equals(job.JobType, GenerationJobTypes.PresentationGenerate, StringComparison.OrdinalIgnoreCase)
+                    ? GenerationJobErrorCodes.PresentationCancelled
                 : GenerationJobErrorCodes.Cancelled;
 
     private static string MapFailureCode(Exception exception, string jobType)
@@ -652,6 +685,20 @@ public sealed class GenerationJobWorker(
                 AiProviderUnavailableException => GenerationJobErrorCodes.DocumentProviderUnavailable,
                 AiProviderTimeoutException => GenerationJobErrorCodes.DocumentProviderUnavailable,
                 _ => GenerationJobErrorCodes.DocumentGenerationFailed,
+            };
+        }
+        if (string.Equals(jobType, GenerationJobTypes.PresentationGenerate, StringComparison.OrdinalIgnoreCase))
+        {
+            return exception switch
+            {
+                PresentationGenerationStageException staged => staged.Code,
+                PresentationRequestValidationException validation => validation.Code,
+                PresentationContextLimitException => GenerationJobErrorCodes.PresentationContextTooLarge,
+                PresentationOutputValidationException => GenerationJobErrorCodes.PresentationOutputInvalid,
+                AiProviderException providerException => PresentationGenerationFailureCodes.ForProvider(providerException),
+                FileStorageUnavailableException or FileStorageOperationException or FileUploadValidationException => GenerationJobErrorCodes.PresentationStorageFailed,
+                AiProviderUnavailableException or AiProviderTimeoutException => GenerationJobErrorCodes.PresentationProviderUnavailable,
+                _ => GenerationJobErrorCodes.PresentationGenerationFailed,
             };
         }
         if (!string.Equals(jobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase)) return GenerationJobErrorCodes.ExecutionFailed;
@@ -688,8 +735,19 @@ public sealed class GenerationJobWorker(
         GenerationJobErrorCodes.DocumentStorageFailed => "The document was generated but could not be saved. Please try again.",
         GenerationJobErrorCodes.DocumentRenderFailed => "The document could not be rendered. Please try again.",
         GenerationJobErrorCodes.DocumentCancelled => "The document generation was cancelled.",
+        GenerationJobErrorCodes.PresentationProviderUnavailable => "Presentation generation is temporarily unavailable. Please try again later.",
+        GenerationJobErrorCodes.PresentationProviderConfiguration => "Presentation generation is temporarily unavailable. Please try again later.",
+        GenerationJobErrorCodes.PresentationProviderUnsupportedRequest => "Presentation generation is temporarily unavailable. Please try again later.",
+        GenerationJobErrorCodes.PresentationProviderRateLimited => "Presentation generation is temporarily unavailable. Please try again later.",
+        GenerationJobErrorCodes.PresentationProviderTransientFailure => "Presentation generation is temporarily unavailable. Please try again later.",
+        GenerationJobErrorCodes.PresentationContextTooLarge => "The selected source material is too large. Choose fewer or shorter documents.",
+        GenerationJobErrorCodes.PresentationOutputInvalid => "The generated presentation was invalid. Please try again.",
+        GenerationJobErrorCodes.PresentationStorageFailed => "The presentation was generated but could not be saved. Please try again.",
+        GenerationJobErrorCodes.PresentationRenderFailed => "The presentation could not be rendered. Please try again.",
+        GenerationJobErrorCodes.PresentationCancelled => "The presentation generation was cancelled.",
         _ when code.StartsWith("IMAGE_", StringComparison.Ordinal) => "The image could not be generated. Please try again.",
         _ when code.StartsWith("DOCUMENT_", StringComparison.Ordinal) => "The document could not be generated. Please try again.",
+        _ when code.StartsWith("PRESENTATION_", StringComparison.Ordinal) => "The presentation could not be generated. Please try again.",
         _ => "The job could not be completed.",
     };
 }

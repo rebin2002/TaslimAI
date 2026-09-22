@@ -12,7 +12,7 @@ export function AppShell({ children }: Readonly<{ children: React.ReactNode }>) 
   const pathname = usePathname();
   const { locale, setLocale, t } = useLocale();
   const { user } = useAuth();
-  const activePath = pathname === "/" ? "/" : `/${pathname.split("/")[1]}`;
+  const activePath = pathname === "/" ? "/" : navigation.find((item) => pathname === item.href || pathname.startsWith(`${item.href}/`))?.href ?? `/${pathname.split("/")[1]}`;
 
   return (
     <div className="app-shell">
@@ -20,7 +20,7 @@ export function AppShell({ children }: Readonly<{ children: React.ReactNode }>) 
         <div className="topbar-inner">
           <BrandMark />
           <nav className="desktop-nav" aria-label="Primary navigation">
-            {navigation.slice(0, 5).map((item) => {
+            {navigation.slice(0, 6).map((item) => {
               const Icon = item.icon;
               const active = activePath === item.href;
               return (
@@ -55,7 +55,7 @@ export function AppShell({ children }: Readonly<{ children: React.ReactNode }>) 
       </header>
       <main className="page-content">{children}</main>
       <nav className="mobile-bottom-nav" aria-label="Mobile navigation">
-        {navigation.filter((item) => ["/", "/projects", "/assets", "/create/document", "/account"].includes(item.href)).map((item) => {
+        {navigation.filter((item) => ["/", "/projects", "/assets", "/create/document", "/create/presentation", "/account"].includes(item.href)).map((item) => {
           const Icon = item.icon;
           const active = activePath === item.href;
           return (

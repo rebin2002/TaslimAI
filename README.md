@@ -1,6 +1,6 @@
 # Taslim.ai
 
-Taslim.ai is a multilingual AI platform foundation designed to make professional AI capabilities simple, fast, and approachable. **Batch 3.2 adds the first production AI provider and provider-independent streaming. Batch 3.3 adds the internal usage ledger and zero-charge accounting foundation. Batch 3.4 adds user-approved memory and project-scoped context. Batch 3.5 adds secure file storage, bounded document extraction, and explicit chat attachments. Batch 3.6 adds the persistent provider-independent Generation Job foundation. Batch 3.7 adds the unified reusable Asset architecture and product library. Batch 3.8 adds the first real Image Studio on top of those foundations. Batch 3.9 adds versioned provider-cost accounting, opt-in safety controls, anomaly flags, and a server-authorized admin usage dashboard without activating customer billing. Batch 3.10 adds the first real Document Studio workflow with canonical drafting and DOCX/PDF output.**
+Taslim.ai is a multilingual AI platform foundation designed to make professional AI capabilities simple, fast, and approachable. **Batch 3.2 adds the first production AI provider and provider-independent streaming. Batch 3.3 adds the internal usage ledger and zero-charge accounting foundation. Batch 3.4 adds user-approved memory and project-scoped context. Batch 3.5 adds secure file storage, bounded document extraction, and explicit chat attachments. Batch 3.6 adds the persistent provider-independent Generation Job foundation. Batch 3.7 adds the unified reusable Asset architecture and product library. Batch 3.8 adds the first real Image Studio on top of those foundations. Batch 3.9 adds versioned provider-cost accounting, opt-in safety controls, anomaly flags, and a server-authorized admin usage dashboard without activating customer billing. Batch 3.10 adds the first real Document Studio workflow with canonical drafting and DOCX/PDF output. Batch 3.11 adds provider-independent Presentation Studio with strict canonical drafting, managed editable PPTX output, and RTL support.**
 
 ## Architecture
 
@@ -34,6 +34,7 @@ docs/
   ASSET_ARCHITECTURE.md Unified Asset model, publication, private downloads, lifecycle, and UI
   IMAGE_STUDIO_ARCHITECTURE.md Image request, provider, output, usage, safety, and UI boundaries
   DOCUMENT_STUDIO_ARCHITECTURE.md Canonical document drafting, rendering, Asset publication, and security
+  PRESENTATION_STUDIO_ARCHITECTURE.md Canonical presentation drafting, managed PPTX rendering, RTL, and security
   USAGE_ACCOUNTING_ARCHITECTURE.md Versioned cost ledger, guardrails, anomalies, admin reports, and privacy
 ```
 
@@ -139,6 +140,7 @@ Railway terminates TLS at its ingress proxy, so the API uses ASP.NET Core Forwar
 - Validate the persistent system test job foundation at `/account/generation-jobs`
 - Create an image asynchronously at `/create/image`, poll progress, cancel eligible jobs, and preview/download the private result
 - Create a document asynchronously at `/create/document`, select source files and guided settings, poll progress, preview the canonical draft, and download private DOCX/PDF representations
+- Create an editable presentation asynchronously at `/create/presentation`, select guided settings and explicit source files, poll progress, preview slides, and download the private PPTX representation
 - Find, filter, rename, reassign, archive, restore, and download reusable outputs at `/assets`
 - View project-assigned Assets from `/projects/[projectId]`
 - Review internal provider-cost summaries and transaction details at `/account/admin/usage` when the authenticated account has the `TaslimAdministrator` role
@@ -172,7 +174,7 @@ ConnectionStrings__Postgres='Host=localhost;Port=5432;Database=taslim;Username=t
 dotnet run --project apps/api
 ```
 
-Production startup migrations use a PostgreSQL advisory lock and fail clearly if a migration cannot be applied. Batch 3.8 adds no schema migration, Batch 3.9 uses the additive accounting migration above, and Batch 3.10 uses the additive AssetRepresentation migration; all reuse the existing job, asset, storage, Identity, and Data Protection architecture. Do not run development reset commands against Production.
+Production startup migrations use a PostgreSQL advisory lock and fail clearly if a migration cannot be applied. Batch 3.8 adds no schema migration, Batch 3.9 uses the additive accounting migration above, Batch 3.10 uses the additive AssetRepresentation migration, and Batch 3.11 adds no migration because PPTX is an accepted generated-file/representation path using the existing schema. All reuse the existing job, asset, storage, Identity, and Data Protection architecture. Do not run development reset commands against Production.
 
 ## Tests
 

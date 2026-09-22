@@ -208,6 +208,32 @@ export type DocumentGenerationInput = {
   includeTableOfContents?: boolean;
 };
 export type DocumentJobResult = { assetId?: string; documentType?: "document"; title?: string; language?: string; summary?: string; sections?: { heading: string; blocks: { type: string; text?: string | null; items?: string[] | null; rows?: { cells: string[] }[] | null }[] }[]; representations?: { id: string; type: string; fileName: string; contentType: string }[] };
+export type PresentationGenerationInput = {
+  workspaceId: string;
+  projectId?: string | null;
+  title?: string | null;
+  description: string;
+  presentationType?: "auto" | "business" | "company_profile" | "sales" | "investor" | "proposal" | "training" | "project_update" | "report" | "educational" | "general";
+  length?: "short" | "standard" | "detailed";
+  tone?: "professional" | "formal" | "friendly" | "persuasive" | "neutral" | "concise" | "academic";
+  language?: "auto" | "en" | "ar" | "ku";
+  audience?: string | null;
+  additionalInstructions?: string | null;
+  brandCompany?: string | null;
+  includeAgenda?: boolean;
+  includeClosingNextSteps?: boolean;
+  attachmentIds: string[];
+};
+export type PresentationJobResult = {
+  assetId?: string;
+  presentationType?: string;
+  title?: string;
+  subtitle?: string | null;
+  language?: string;
+  slideCount?: number;
+  previewSlides?: { order: number; type: string; title: string; subtitle?: string | null; blocks?: { type: string; text?: string | null; items?: string[]; columns?: { heading: string; items: string[] }[]; rows?: { cells: string[] }[]; metrics?: { label: string; value: string; detail?: string | null }[]; label?: string | null; value?: string | null }[] }[];
+  representations?: { id: string; type: string; fileName: string; contentType: string }[];
+};
 export type AssetStatus = "Active" | "Archived";
 export type AssetType = "image" | "document" | "presentation" | "video" | "audio" | "music" | "research" | "social" | "file" | "other";
 export type Asset = {
@@ -354,6 +380,7 @@ export const api = {
   createGenerationJob: (workspaceId: string, inputJson = "{}", title?: string) => request<GenerationJob>("/api/generation/jobs", { method: "POST", body: JSON.stringify({ workspaceId, jobType: "system.test", inputJson, title }) }, true),
   createImageGenerationJob: (input: ImageGenerationInput) => request<{ job: GenerationJob }>("/api/image-generation/jobs", { method: "POST", body: JSON.stringify(input) }, true).then((response) => response.job),
   createDocumentGenerationJob: (input: DocumentGenerationInput) => request<{ job: GenerationJob }>("/api/document-generation/jobs", { method: "POST", body: JSON.stringify(input) }, true).then((response) => response.job),
+  createPresentationGenerationJob: (input: PresentationGenerationInput) => request<{ job: GenerationJob }>("/api/presentation-generation/jobs", { method: "POST", body: JSON.stringify(input) }, true).then((response) => response.job),
   getGenerationJob: (jobId: string) => request<GenerationJob>(`/api/generation/jobs/${jobId}`),
   listGenerationJobs: (workspaceId: string, page = 1, pageSize = 20) => request<GenerationJobList>(`/api/generation/jobs?workspaceId=${encodeURIComponent(workspaceId)}&page=${page}&pageSize=${pageSize}&jobType=system.test`),
   cancelGenerationJob: (jobId: string) => request<{ status: GenerationJobStatus; cancellationRequested?: boolean }>(`/api/generation/jobs/${jobId}/cancel`, { method: "POST" }, true),
