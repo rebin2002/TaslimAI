@@ -56,6 +56,7 @@ public static class GenerationJobTypes
     public const string DocumentGenerate = "document.generate";
     public const string PresentationGenerate = "presentation.generate";
     public const string ResearchGenerate = "research.generate";
+    public const string MusicGenerate = "music.generate";
 
     public static readonly IReadOnlySet<string> Supported = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
@@ -64,6 +65,7 @@ public static class GenerationJobTypes
         DocumentGenerate,
         PresentationGenerate,
         ResearchGenerate,
+        MusicGenerate,
     };
 }
 
@@ -140,6 +142,18 @@ public static class GenerationJobErrorCodes
     public const string ResearchRenderFailed = "RESEARCH_RENDER_FAILED";
     public const string ResearchStorageFailed = "RESEARCH_STORAGE_FAILED";
     public const string ResearchCancelled = "RESEARCH_CANCELLED";
+    public const string MusicRequestInvalid = "MUSIC_REQUEST_INVALID";
+    public const string MusicGenreUnsupported = "MUSIC_GENRE_UNSUPPORTED";
+    public const string MusicMoodUnsupported = "MUSIC_MOOD_UNSUPPORTED";
+    public const string MusicDurationUnsupported = "MUSIC_DURATION_UNSUPPORTED";
+    public const string MusicVocalPreferenceUnsupported = "MUSIC_VOCAL_PREFERENCE_UNSUPPORTED";
+    public const string MusicLanguageUnsupported = "MUSIC_LANGUAGE_UNSUPPORTED";
+    public const string MusicProviderUnavailable = "MUSIC_PROVIDER_UNAVAILABLE";
+    public const string MusicProviderTimeout = "MUSIC_PROVIDER_TIMEOUT";
+    public const string MusicGenerationFailed = "MUSIC_GENERATION_FAILED";
+    public const string MusicOutputInvalid = "MUSIC_OUTPUT_INVALID";
+    public const string MusicOutputStorageFailed = "MUSIC_OUTPUT_STORAGE_FAILED";
+    public const string MusicCancelled = "MUSIC_CANCELLED";
 }
 
 public static class AssetTypes

@@ -15,6 +15,7 @@ using Taslim.Api.Presentations;
 using Taslim.Api.Research;
 using Taslim.Api.Infrastructure;
 using Taslim.Api.Images;
+using Taslim.Api.Music;
 using Taslim.Api.Persistence;
 using Taslim.Api.Usage;
 using Taslim.Api.Files;
@@ -152,6 +153,7 @@ builder.Services.Configure<ImageGenerationOptions>(builder.Configuration.GetSect
 builder.Services.Configure<DocumentGenerationOptions>(builder.Configuration.GetSection("DocumentGeneration"));
 builder.Services.Configure<PresentationGenerationOptions>(builder.Configuration.GetSection("PresentationGeneration"));
 builder.Services.Configure<ResearchGenerationOptions>(builder.Configuration.GetSection("ResearchGeneration"));
+builder.Services.Configure<MusicGenerationOptions>(builder.Configuration.GetSection("MusicGeneration"));
 builder.Services.AddSingleton<AiModelCatalog>();
 builder.Services.AddSingleton<IAiCostCalculator, AiCostCalculator>();
 builder.Services.AddSingleton<AiContextBuilder>();
@@ -180,6 +182,8 @@ builder.Services.AddSingleton<IResearchPromptBuilder, ResearchPromptBuilder>();
 builder.Services.AddScoped<IResearchSearchProvider>(services => services.GetRequiredService<OpenAiResearchSearchProvider>());
 builder.Services.AddScoped<IResearchReportProvider, AiResearchReportProvider>();
 builder.Services.AddScoped<IGenerationJobHandler, ResearchGenerationJobHandler>();
+// Music providers are intentionally not registered until a production provider is selected and validated.
+builder.Services.AddScoped<IGenerationJobHandler, MusicGenerationJobHandler>();
 builder.Services.AddScoped<FileValidationService>();
 builder.Services.AddSingleton<IFileContentExtractor, FileContentExtractor>();
 builder.Services.AddScoped<FileProcessingService>();

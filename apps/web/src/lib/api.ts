@@ -251,6 +251,20 @@ export type ResearchGenerationInput = {
   useWebSources: boolean;
   attachmentIds: string[];
 };
+export type MusicGenerationInput = {
+  workspaceId: string;
+  projectId?: string | null;
+  description: string;
+  purpose: string;
+  genre: string;
+  mood: string;
+  durationSeconds: number;
+  vocalPreference: string;
+  language: string;
+  title?: string | null;
+  additionalInstructions?: string | null;
+};
+export type MusicJobResult = { assetId?: string; assetType?: "music"; title?: string; format?: string; durationSeconds?: number | null; vocalPreference?: string; language?: string };
 export type ResearchReportBlock = { type: string; text?: string | null; items?: string[] | null; rows?: { cells: string[] }[] | null; citationIds?: string[] };
 export type ResearchJobResult = {
   assetId?: string;
@@ -430,6 +444,7 @@ export const api = {
   createDocumentGenerationJob: (input: DocumentGenerationInput) => request<{ job: GenerationJob }>("/api/document-generation/jobs", { method: "POST", body: JSON.stringify(input) }, true).then((response) => response.job),
   createPresentationGenerationJob: (input: PresentationGenerationInput) => request<{ job: GenerationJob }>("/api/presentation-generation/jobs", { method: "POST", body: JSON.stringify(input) }, true).then((response) => response.job),
   createResearchGenerationJob: (input: ResearchGenerationInput) => request<{ job: GenerationJob }>("/api/research-generation/jobs", { method: "POST", body: JSON.stringify(input) }, true).then((response) => response.job),
+  createMusicGenerationJob: (input: MusicGenerationInput) => request<{ job: GenerationJob }>("/api/music-generation/jobs", { method: "POST", body: JSON.stringify(input) }, true).then((response) => response.job),
   getGenerationJob: (jobId: string) => request<GenerationJob>(`/api/generation/jobs/${jobId}`),
   getResearchSources: (jobId: string) => request<{ jobId: string; sources: ResearchSource[] }>(`/api/research-generation/jobs/${jobId}/sources`),
   listGenerationJobs: (workspaceId: string, page = 1, pageSize = 20) => request<GenerationJobList>(`/api/generation/jobs?workspaceId=${encodeURIComponent(workspaceId)}&page=${page}&pageSize=${pageSize}&jobType=system.test`),

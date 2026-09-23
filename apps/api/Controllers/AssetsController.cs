@@ -112,7 +112,9 @@ public sealed class AssetsController(
         {
             var stream = await storage.OpenReadAsync(download.StoredFile.StorageKey, cancellationToken);
             if (stream is null) return ApiResults.Error(this, StatusCodes.Status404NotFound, "ASSET_FILE_NOT_FOUND", "The asset file could not be found.");
-            if (inline && download.ContentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
+            if (inline && (download.ContentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase)
+                || download.ContentType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase)
+                || download.ContentType.StartsWith("video/", StringComparison.OrdinalIgnoreCase)))
                 return File(stream, download.ContentType, enableRangeProcessing: true);
             return File(stream, download.ContentType, download.FileName, enableRangeProcessing: true);
         }
