@@ -611,6 +611,17 @@ public sealed class GenerationJobOutput
     public StoredFile? StoredFile { get; set; }
 }
 
+public sealed class ActivityReadState
+{
+    public Guid Id { get; set; }
+    public Guid UserId { get; set; }
+    public Guid GenerationJobId { get; set; }
+    public DateTime ReadAt { get; set; }
+
+    public ApplicationUser User { get; set; } = null!;
+    public GenerationJob GenerationJob { get; set; } = null!;
+}
+
 public sealed class ChatMessageAttachment
 {
     public Guid ChatMessageId { get; set; }

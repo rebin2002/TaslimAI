@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Taslim.Api.Ai;
+using Taslim.Api.Activity;
 using Taslim.Api.Assets;
 using Taslim.Api.Authorization;
 using Taslim.Api.Billing;
@@ -151,6 +152,7 @@ builder.Services.AddScoped<IGenerationJobUsageService, GenerationJobUsageService
 builder.Services.AddScoped<IGenerationJobService, GenerationJobService>();
 builder.Services.AddScoped<IMovieStudioService, MovieStudioService>();
 builder.Services.AddSingleton<IMovieVideoProvider, UnavailableMovieVideoProvider>();
+builder.Services.AddScoped<IActivityCenterService, ActivityCenterService>();
 builder.Services.AddSingleton<IGenerationJobHandler, SystemTestGenerationJobHandler>();
 if (builder.Configuration.GetValue("GenerationJobs:WorkerEnabled", !builder.Environment.IsEnvironment("Testing")))
 {

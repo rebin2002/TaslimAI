@@ -196,6 +196,21 @@ export type MovieProject = { id: string; workspaceId: string; projectId: string 
 export type MovieProviderReadiness = { ready: boolean; providerKey: string | null; supportedOperations: string[] };
 export type MovieStudioResponse = { project: MovieProject; job: GenerationJob | null };
 export type MovieStudioCreateInput = { workspaceId: string; projectId?: string | null; mode: "Quick" | "Full"; title: string; description: string; durationSeconds: number; aspectRatio: string; style: string; language: string; additionalInstructions?: string | null; visualLanguage?: string | null; cameraLanguage?: string | null; colorAndLighting?: string | null; soundAndNarration?: string | null; continuityRules?: string | null };
+export type ActivityItem = {
+  jobId: string;
+  workspaceId: string;
+  projectId: string | null;
+  jobType: "image" | "document" | "presentation" | "research" | "social" | "voice" | "music" | "movie" | "other";
+  title: string;
+  status: "Queued" | "Running" | "Completed" | "Failed" | "Cancelled";
+  progressPercent: number;
+  createdAt: string;
+  completedAt: string | null;
+  isRead: boolean;
+  safeFailureMessage: string | null;
+  assetId: string | null;
+};
+export type ActivityList = { items: ActivityItem[]; page: number; pageSize: number; totalCount: number; totalPages: number; unreadCount: number };
 export type ImageGenerationInput = {
   workspaceId: string;
   projectId?: string | null;
@@ -479,6 +494,14 @@ export const api = {
   getResearchSources: (jobId: string) => request<{ jobId: string; sources: ResearchSource[] }>(`/api/research-generation/jobs/${jobId}/sources`),
   listGenerationJobs: (workspaceId: string, page = 1, pageSize = 20) => request<GenerationJobList>(`/api/generation/jobs?workspaceId=${encodeURIComponent(workspaceId)}&page=${page}&pageSize=${pageSize}&jobType=system.test`),
   cancelGenerationJob: (jobId: string) => request<{ status: GenerationJobStatus; cancellationRequested?: boolean }>(`/api/generation/jobs/${jobId}/cancel`, { method: "POST" }, true),
+  listActivity: (workspaceId: string, page = 1, pageSize = 50, status?: string) => {
+    const params = new URLSearchParams({ workspaceId, page: String(page), pageSize: String(pageSize) });
+    if (status && status !== "All") params.set("status", status);
+    return request<ActivityList>(`/api/activity?${params.toString()}`);
+  },
+  getActivityUnreadCount: (workspaceId: string) => request<{ unreadCount: number }>(`/api/activity/unread-count?workspaceId=${encodeURIComponent(workspaceId)}`),
+  markActivityRead: (workspaceId: string, jobId: string) => request<{ read: boolean }>(`/api/activity/${jobId}/read`, { method: "POST", body: JSON.stringify({ workspaceId }) }, true),
+  markAllActivityRead: (workspaceId: string) => request<{ read: boolean }>("/api/activity/read-all", { method: "POST", body: JSON.stringify({ workspaceId }) }, true),
   listAssets: (workspaceId: string, filters: AssetFilters = {}) => {
     const params = new URLSearchParams({ workspaceId, status: filters.status ?? "Active", page: String(filters.page ?? 1), pageSize: String(filters.pageSize ?? 24) });
     if (filters.projectId) params.set("projectId", filters.projectId);

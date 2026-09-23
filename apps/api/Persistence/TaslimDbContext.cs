@@ -21,6 +21,7 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
     public DbSet<ChatMessageAttachment> ChatMessageAttachments => Set<ChatMessageAttachment>();
     public DbSet<GenerationJob> GenerationJobs => Set<GenerationJob>();
     public DbSet<GenerationJobOutput> GenerationJobOutputs => Set<GenerationJobOutput>();
+    public DbSet<ActivityReadState> ActivityReadStates => Set<ActivityReadState>();
     public DbSet<Asset> Assets => Set<Asset>();
     public DbSet<AssetRepresentation> AssetRepresentations => Set<AssetRepresentation>();
     public DbSet<ResearchSource> ResearchSources => Set<ResearchSource>();
@@ -280,6 +281,16 @@ public DbSet<MovieProject> MovieProjects => Set<MovieProject>();
             entity.HasIndex(output => output.StoredFileId);
             entity.HasOne(output => output.GenerationJob).WithMany(job => job.Outputs).HasForeignKey(output => output.GenerationJobId).OnDelete(DeleteBehavior.Cascade);
             entity.HasOne(output => output.StoredFile).WithMany(file => file.GenerationJobOutputs).HasForeignKey(output => output.StoredFileId).OnDelete(DeleteBehavior.Restrict);
+        });
+
+        builder.Entity<ActivityReadState>(entity =>
+        {
+            entity.HasKey(read => read.Id);
+            entity.Property(read => read.ReadAt).IsRequired();
+            entity.HasIndex(read => new { read.UserId, read.GenerationJobId }).IsUnique();
+            entity.HasIndex(read => read.GenerationJobId);
+            entity.HasOne(read => read.User).WithMany().HasForeignKey(read => read.UserId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(read => read.GenerationJob).WithMany().HasForeignKey(read => read.GenerationJobId).OnDelete(DeleteBehavior.Cascade);
         });
 
         builder.Entity<Asset>(entity =>
