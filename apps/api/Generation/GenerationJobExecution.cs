@@ -14,6 +14,7 @@ using Taslim.Api.Persistence;
 using Taslim.Api.Presentations;
 using Taslim.Api.Research;
 using Taslim.Api.Usage;
+using Taslim.Api.Voice;
 
 namespace Taslim.Api.Generation;
 
@@ -116,7 +117,11 @@ public sealed class GenerationJobUsageService(IUsageLedgerService ledger) : IGen
                     ? UsageFeature.Document
                     : string.Equals(job.JobType, GenerationJobTypes.PresentationGenerate, StringComparison.OrdinalIgnoreCase)
                         ? UsageFeature.Presentation
-                        : string.Equals(job.JobType, GenerationJobTypes.ResearchGenerate, StringComparison.OrdinalIgnoreCase) ? UsageFeature.Research : UsageFeature.Generation,
+                        : string.Equals(job.JobType, GenerationJobTypes.ResearchGenerate, StringComparison.OrdinalIgnoreCase)
+                            ? UsageFeature.Research
+                            : string.Equals(job.JobType, GenerationJobTypes.VoiceGenerate, StringComparison.OrdinalIgnoreCase)
+                                ? UsageFeature.Voice
+                                : UsageFeature.Generation,
             cancellationToken,
             job.Id,
             estimatedProviderCostUsd);
@@ -261,7 +266,9 @@ public sealed class GenerationJobService(
                     ? GenerationJobErrorCodes.PresentationCancelled
                     : string.Equals(job.JobType, GenerationJobTypes.ResearchGenerate, StringComparison.OrdinalIgnoreCase)
                         ? GenerationJobErrorCodes.ResearchCancelled
-                : GenerationJobErrorCodes.Cancelled;
+                        : string.Equals(job.JobType, GenerationJobTypes.VoiceGenerate, StringComparison.OrdinalIgnoreCase)
+                            ? GenerationJobErrorCodes.VoiceCancelled
+                            : GenerationJobErrorCodes.Cancelled;
 }
 
 public sealed class GenerationJobValidationException(string code, string message) : Exception(message)
@@ -707,7 +714,9 @@ public sealed class GenerationJobWorker(
                     ? GenerationJobErrorCodes.PresentationCancelled
                     : string.Equals(job.JobType, GenerationJobTypes.ResearchGenerate, StringComparison.OrdinalIgnoreCase)
                         ? GenerationJobErrorCodes.ResearchCancelled
-                : GenerationJobErrorCodes.Cancelled;
+                        : string.Equals(job.JobType, GenerationJobTypes.VoiceGenerate, StringComparison.OrdinalIgnoreCase)
+                            ? GenerationJobErrorCodes.VoiceCancelled
+                            : GenerationJobErrorCodes.Cancelled;
 
     private static string MapFailureCode(Exception exception, string jobType)
     {
@@ -756,6 +765,18 @@ public sealed class GenerationJobWorker(
                 AiProviderException or AiProviderUnavailableException or AiProviderTimeoutException => GenerationJobErrorCodes.ResearchProviderUnavailable,
                 FileStorageUnavailableException or FileStorageOperationException or FileUploadValidationException => GenerationJobErrorCodes.ResearchStorageFailed,
                 _ => GenerationJobErrorCodes.ResearchGenerationFailed,
+            };
+        }
+        if (string.Equals(jobType, GenerationJobTypes.VoiceGenerate, StringComparison.OrdinalIgnoreCase))
+        {
+            return exception switch
+            {
+                VoiceRequestValidationException validation => validation.Code,
+                VoiceProviderUnavailableException or VoiceProviderTimeoutException => GenerationJobErrorCodes.VoiceProviderUnavailable,
+                VoiceProviderFailureException => GenerationJobErrorCodes.VoiceProviderFailed,
+                VoiceOutputInvalidException => GenerationJobErrorCodes.VoiceOutputInvalid,
+                FileStorageUnavailableException or FileStorageOperationException or FileUploadValidationException => GenerationJobErrorCodes.VoiceOutputStorageFailed,
+                _ => GenerationJobErrorCodes.VoiceProviderFailed,
             };
         }
         if (!string.Equals(jobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase)) return GenerationJobErrorCodes.ExecutionFailed;
@@ -811,9 +832,16 @@ public sealed class GenerationJobWorker(
         GenerationJobErrorCodes.ResearchStorageFailed => "The research report was generated but could not be saved. Please try again.",
         GenerationJobErrorCodes.ResearchRenderFailed => "The research report could not be rendered. Please try again.",
         GenerationJobErrorCodes.ResearchCancelled => "The research generation was cancelled.",
+        GenerationJobErrorCodes.VoiceProviderUnavailable => "Voice generation is temporarily unavailable. Please try again later.",
+        GenerationJobErrorCodes.VoiceProviderFailed => "Voice generation could not be completed. Please try again.",
+        GenerationJobErrorCodes.VoiceOutputInvalid => "The generated audio was invalid. Please try again.",
+        GenerationJobErrorCodes.VoiceOutputStorageFailed => "The audio was generated but could not be saved. Please try again.",
+        GenerationJobErrorCodes.VoiceRequestInvalid => "Please check the voice request and try again.",
+        GenerationJobErrorCodes.VoiceCancelled => "The voice generation was cancelled.",
         _ when code.StartsWith("IMAGE_", StringComparison.Ordinal) => "The image could not be generated. Please try again.",
         _ when code.StartsWith("DOCUMENT_", StringComparison.Ordinal) => "The document could not be generated. Please try again.",
         _ when code.StartsWith("PRESENTATION_", StringComparison.Ordinal) => "The presentation could not be generated. Please try again.",
+        _ when code.StartsWith("VOICE_", StringComparison.Ordinal) => "The voice could not be generated. Please try again.",
         _ => "The job could not be completed.",
     };
 }

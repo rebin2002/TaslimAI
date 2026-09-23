@@ -192,6 +192,28 @@ export type ImageGenerationInput = {
   textInImage?: string | null;
 };
 export type ImageJobResult = { assetId?: string; assetType?: "image"; format?: string; width?: number | null; height?: number | null; aspectRatio?: string; quality?: string };
+export type VoiceGenerationInput = {
+  workspaceId: string;
+  projectId?: string | null;
+  text: string;
+  language: "en" | "ar" | "ku";
+  voiceStyle: string;
+  speakingStyle: string;
+  instructions?: string | null;
+  title?: string | null;
+};
+export type VoiceJobResult = {
+  assetId?: string;
+  assetType?: "audio";
+  contentType?: string;
+  format?: string;
+  language?: string;
+  voiceStyle?: string;
+  speakingStyle?: string;
+  sizeBytes?: number;
+  durationMilliseconds?: number | null;
+  sampleRateHz?: number | null;
+};
 export type DocumentGenerationInput = {
   workspaceId: string;
   projectId?: string | null;
@@ -427,6 +449,7 @@ export const api = {
   getAdminUsageTransaction: (id: string) => request<AdminUsageTransaction>(`/api/admin/usage/transactions/${id}`),
   createGenerationJob: (workspaceId: string, inputJson = "{}", title?: string) => request<GenerationJob>("/api/generation/jobs", { method: "POST", body: JSON.stringify({ workspaceId, jobType: "system.test", inputJson, title }) }, true),
   createImageGenerationJob: (input: ImageGenerationInput) => request<{ job: GenerationJob }>("/api/image-generation/jobs", { method: "POST", body: JSON.stringify(input) }, true).then((response) => response.job),
+  createVoiceGenerationJob: (input: VoiceGenerationInput) => request<{ job: GenerationJob }>("/api/voice-generation/jobs", { method: "POST", body: JSON.stringify(input) }, true).then((response) => response.job),
   createDocumentGenerationJob: (input: DocumentGenerationInput) => request<{ job: GenerationJob }>("/api/document-generation/jobs", { method: "POST", body: JSON.stringify(input) }, true).then((response) => response.job),
   createPresentationGenerationJob: (input: PresentationGenerationInput) => request<{ job: GenerationJob }>("/api/presentation-generation/jobs", { method: "POST", body: JSON.stringify(input) }, true).then((response) => response.job),
   createResearchGenerationJob: (input: ResearchGenerationInput) => request<{ job: GenerationJob }>("/api/research-generation/jobs", { method: "POST", body: JSON.stringify(input) }, true).then((response) => response.job),

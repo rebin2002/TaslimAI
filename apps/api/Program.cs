@@ -19,6 +19,7 @@ using Taslim.Api.Persistence;
 using Taslim.Api.Usage;
 using Taslim.Api.Files;
 using Taslim.Api.Generation;
+using Taslim.Api.Voice;
 using FileSettings = Taslim.Api.Files.FileOptions;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -152,6 +153,7 @@ builder.Services.Configure<ImageGenerationOptions>(builder.Configuration.GetSect
 builder.Services.Configure<DocumentGenerationOptions>(builder.Configuration.GetSection("DocumentGeneration"));
 builder.Services.Configure<PresentationGenerationOptions>(builder.Configuration.GetSection("PresentationGeneration"));
 builder.Services.Configure<ResearchGenerationOptions>(builder.Configuration.GetSection("ResearchGeneration"));
+builder.Services.Configure<VoiceGenerationOptions>(builder.Configuration.GetSection("VoiceGeneration"));
 builder.Services.AddSingleton<AiModelCatalog>();
 builder.Services.AddSingleton<IAiCostCalculator, AiCostCalculator>();
 builder.Services.AddSingleton<AiContextBuilder>();
@@ -180,6 +182,8 @@ builder.Services.AddSingleton<IResearchPromptBuilder, ResearchPromptBuilder>();
 builder.Services.AddScoped<IResearchSearchProvider>(services => services.GetRequiredService<OpenAiResearchSearchProvider>());
 builder.Services.AddScoped<IResearchReportProvider, AiResearchReportProvider>();
 builder.Services.AddScoped<IGenerationJobHandler, ResearchGenerationJobHandler>();
+builder.Services.AddSingleton<IVoiceGenerationProvider, UnconfiguredVoiceGenerationProvider>();
+builder.Services.AddScoped<IGenerationJobHandler, VoiceGenerationJobHandler>();
 builder.Services.AddScoped<FileValidationService>();
 builder.Services.AddSingleton<IFileContentExtractor, FileContentExtractor>();
 builder.Services.AddScoped<FileProcessingService>();

@@ -56,6 +56,7 @@ public static class GenerationJobTypes
     public const string DocumentGenerate = "document.generate";
     public const string PresentationGenerate = "presentation.generate";
     public const string ResearchGenerate = "research.generate";
+    public const string VoiceGenerate = "voice.generate";
 
     public static readonly IReadOnlySet<string> Supported = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
@@ -64,6 +65,7 @@ public static class GenerationJobTypes
         DocumentGenerate,
         PresentationGenerate,
         ResearchGenerate,
+        VoiceGenerate,
     };
 }
 
@@ -140,6 +142,12 @@ public static class GenerationJobErrorCodes
     public const string ResearchRenderFailed = "RESEARCH_RENDER_FAILED";
     public const string ResearchStorageFailed = "RESEARCH_STORAGE_FAILED";
     public const string ResearchCancelled = "RESEARCH_CANCELLED";
+    public const string VoiceRequestInvalid = "VOICE_REQUEST_INVALID";
+    public const string VoiceProviderUnavailable = "VOICE_PROVIDER_UNAVAILABLE";
+    public const string VoiceProviderFailed = "VOICE_PROVIDER_FAILED";
+    public const string VoiceOutputInvalid = "VOICE_OUTPUT_INVALID";
+    public const string VoiceOutputStorageFailed = "VOICE_OUTPUT_STORAGE_FAILED";
+    public const string VoiceCancelled = "VOICE_CANCELLED";
 }
 
 public static class AssetTypes
