@@ -57,6 +57,14 @@ public static class GenerationJobTypes
     public const string PresentationGenerate = "presentation.generate";
     public const string ResearchGenerate = "research.generate";
     public const string SocialGenerate = "social.generate";
+public const string MovieQuickGenerate = "movie.quick.generate";
+    public const string MovieClipGenerate = "movie.clip.generate";
+    public const string MovieAssembly = "movie.assembly";
+
+    public static readonly IReadOnlySet<string> MovieTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        MovieQuickGenerate, MovieClipGenerate, MovieAssembly,
+    };
 
     public static readonly IReadOnlySet<string> Supported = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
@@ -66,6 +74,9 @@ public static class GenerationJobTypes
         PresentationGenerate,
         ResearchGenerate,
         SocialGenerate,
+MovieQuickGenerate,
+        MovieClipGenerate,
+        MovieAssembly,
     };
 }
 
@@ -154,6 +165,9 @@ public static class GenerationJobErrorCodes
     public const string SocialOutputInvalid = "SOCIAL_OUTPUT_INVALID";
     public const string SocialStorageFailed = "SOCIAL_STORAGE_FAILED";
     public const string SocialCancelled = "SOCIAL_CANCELLED";
+public const string MovieProviderUnavailable = "MOVIE_PROVIDER_UNAVAILABLE";
+    public const string MovieCancelled = "MOVIE_CANCELLED";
+    public const string MovieGenerationFailed = "MOVIE_GENERATION_FAILED";
 }
 
 public static class AssetTypes

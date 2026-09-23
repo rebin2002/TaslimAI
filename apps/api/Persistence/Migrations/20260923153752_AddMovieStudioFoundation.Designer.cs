@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using Taslim.Api.Persistence;
@@ -11,9 +12,11 @@ using Taslim.Api.Persistence;
 namespace Taslim.Api.Persistence.Migrations
 {
     [DbContext(typeof(TaslimDbContext))]
-    partial class TaslimDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260923153752_AddMovieStudioFoundation")]
+    partial class AddMovieStudioFoundation
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -378,45 +381,6 @@ namespace Taslim.Api.Persistence.Migrations
                     b.ToTable("AssetRepresentations");
                 });
 
-            modelBuilder.Entity("Taslim.Api.Domain.BillingPeriod", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<DateTime?>("ClosedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<DateTime>("EndsAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<long>("IncludedCredits")
-                        .HasColumnType("bigint");
-
-                    b.Property<DateTime>("StartsAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("Status")
-                        .IsRequired()
-                        .HasMaxLength(30)
-                        .HasColumnType("character varying(30)");
-
-                    b.Property<Guid>("SubscriptionId")
-                        .HasColumnType("uuid");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("Status", "EndsAt");
-
-                    b.HasIndex("SubscriptionId", "StartsAt")
-                        .IsUnique();
-
-                    b.ToTable("BillingPeriods");
-                });
-
             modelBuilder.Entity("Taslim.Api.Domain.ChatMessage", b =>
                 {
                     b.Property<Guid>("Id")
@@ -563,117 +527,6 @@ namespace Taslim.Api.Persistence.Migrations
                     b.HasIndex("UserId", "WorkspaceId", "Status", "UpdatedAt");
 
                     b.ToTable("Conversations");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Domain.CreditEntitlement", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<Guid?>("BillingPeriodId")
-                        .HasColumnType("uuid");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<DateTime?>("ExpiresAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<DateTime>("GrantedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<long>("GrantedCredits")
-                        .HasColumnType("bigint");
-
-                    b.Property<string>("IdempotencyKey")
-                        .IsRequired()
-                        .HasMaxLength(180)
-                        .HasColumnType("character varying(180)");
-
-                    b.Property<string>("SourceReference")
-                        .HasMaxLength(200)
-                        .HasColumnType("character varying(200)");
-
-                    b.Property<string>("Type")
-                        .IsRequired()
-                        .HasMaxLength(40)
-                        .HasColumnType("character varying(40)");
-
-                    b.Property<Guid>("WorkspaceId")
-                        .HasColumnType("uuid");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("BillingPeriodId");
-
-                    b.HasIndex("WorkspaceId", "ExpiresAt");
-
-                    b.HasIndex("WorkspaceId", "IdempotencyKey")
-                        .IsUnique();
-
-                    b.ToTable("CreditEntitlements");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Domain.CreditLedgerEntry", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<Guid?>("ActorUserId")
-                        .HasColumnType("uuid");
-
-                    b.Property<long>("Amount")
-                        .HasColumnType("bigint");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<Guid?>("CreditEntitlementId")
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("IdempotencyKey")
-                        .IsRequired()
-                        .HasMaxLength(180)
-                        .HasColumnType("character varying(180)");
-
-                    b.Property<string>("Reason")
-                        .IsRequired()
-                        .HasMaxLength(500)
-                        .HasColumnType("character varying(500)");
-
-                    b.Property<Guid?>("ReversesEntryId")
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("Type")
-                        .IsRequired()
-                        .HasMaxLength(40)
-                        .HasColumnType("character varying(40)");
-
-                    b.Property<Guid?>("UsageTransactionId")
-                        .HasColumnType("uuid");
-
-                    b.Property<Guid>("WorkspaceId")
-                        .HasColumnType("uuid");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("CreditEntitlementId");
-
-                    b.HasIndex("ReversesEntryId");
-
-                    b.HasIndex("UsageTransactionId");
-
-                    b.HasIndex("WorkspaceId", "CreatedAt");
-
-                    b.HasIndex("WorkspaceId", "IdempotencyKey")
-                        .IsUnique();
-
-                    b.ToTable("CreditLedgerEntries", null, t =>
-                        {
-                            t.HasCheckConstraint("CK_CreditLedgerEntries_NonZeroAmount", "\"Amount\" <> 0");
-                        });
                 });
 
             modelBuilder.Entity("Taslim.Api.Domain.GenerationJob", b =>
@@ -862,130 +715,6 @@ namespace Taslim.Api.Persistence.Migrations
                     b.HasIndex("WorkspaceId", "UserId");
 
                     b.ToTable("PersonalMemories");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Domain.Plan", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("Code")
-                        .IsRequired()
-                        .HasMaxLength(40)
-                        .HasColumnType("character varying(40)");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("Currency")
-                        .IsRequired()
-                        .HasMaxLength(3)
-                        .HasColumnType("character varying(3)");
-
-                    b.Property<string>("Description")
-                        .HasMaxLength(500)
-                        .HasColumnType("character varying(500)");
-
-                    b.Property<bool>("IsActive")
-                        .HasColumnType("boolean");
-
-                    b.Property<long>("MonthlyCreditAllowance")
-                        .HasColumnType("bigint");
-
-                    b.Property<decimal>("MonthlyPriceUsd")
-                        .HasPrecision(18, 2)
-                        .HasColumnType("numeric(18,2)");
-
-                    b.Property<string>("Name")
-                        .IsRequired()
-                        .HasMaxLength(80)
-                        .HasColumnType("character varying(80)");
-
-                    b.Property<int>("SortOrder")
-                        .HasColumnType("integer");
-
-                    b.Property<DateTime>("UpdatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("Code")
-                        .IsUnique();
-
-                    b.ToTable("Plans");
-
-                    b.HasData(
-                        new
-                        {
-                            Id = new Guid("0f0e0d0c-0b0a-0908-0706-050403020100"),
-                            Code = "free",
-                            CreatedAt = new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Utc),
-                            Currency = "USD",
-                            Description = "A no-cost Taslim foundation plan.",
-                            IsActive = true,
-                            MonthlyCreditAllowance = 1000L,
-                            MonthlyPriceUsd = 0m,
-                            Name = "Free",
-                            SortOrder = 1,
-                            UpdatedAt = new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Utc)
-                        },
-                        new
-                        {
-                            Id = new Guid("1f1e1d1c-1b1a-1918-1716-151413121110"),
-                            Code = "pro",
-                            CreatedAt = new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Utc),
-                            Currency = "USD",
-                            Description = "For regular individual work.",
-                            IsActive = true,
-                            MonthlyCreditAllowance = 10000L,
-                            MonthlyPriceUsd = 9m,
-                            Name = "Pro",
-                            SortOrder = 2,
-                            UpdatedAt = new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Utc)
-                        },
-                        new
-                        {
-                            Id = new Guid("2f2e2d2c-2b2a-2928-2726-252423222120"),
-                            Code = "ultra",
-                            CreatedAt = new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Utc),
-                            Currency = "USD",
-                            Description = "For heavier individual usage.",
-                            IsActive = true,
-                            MonthlyCreditAllowance = 30000L,
-                            MonthlyPriceUsd = 19m,
-                            Name = "Ultra",
-                            SortOrder = 3,
-                            UpdatedAt = new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Utc)
-                        },
-                        new
-                        {
-                            Id = new Guid("3f3e3d3c-3b3a-3938-3736-353433323130"),
-                            Code = "mega",
-                            CreatedAt = new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Utc),
-                            Currency = "USD",
-                            Description = "For high-volume creative work.",
-                            IsActive = true,
-                            MonthlyCreditAllowance = 60000L,
-                            MonthlyPriceUsd = 29m,
-                            Name = "Mega",
-                            SortOrder = 4,
-                            UpdatedAt = new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Utc)
-                        },
-                        new
-                        {
-                            Id = new Guid("4f4e4d4c-4b4a-4948-4746-454443424140"),
-                            Code = "business",
-                            CreatedAt = new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Utc),
-                            Currency = "USD",
-                            Description = "For teams and business workspaces.",
-                            IsActive = true,
-                            MonthlyCreditAllowance = 150000L,
-                            MonthlyPriceUsd = 59m,
-                            Name = "Business",
-                            SortOrder = 5,
-                            UpdatedAt = new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Utc)
-                        });
                 });
 
             modelBuilder.Entity("Taslim.Api.Domain.Project", b =>
@@ -1269,60 +998,6 @@ namespace Taslim.Api.Persistence.Migrations
                     b.HasIndex("WorkspaceId", "CreatedAt");
 
                     b.ToTable("StoredFiles");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Domain.Subscription", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("BillingProvider")
-                        .HasMaxLength(60)
-                        .HasColumnType("character varying(60)");
-
-                    b.Property<bool>("CancelAtPeriodEnd")
-                        .HasColumnType("boolean");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<DateTime>("CurrentPeriodEnd")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<DateTime>("CurrentPeriodStart")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<DateTime>("NextRenewalAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<Guid>("PlanId")
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("ProviderSubscriptionReference")
-                        .HasMaxLength(200)
-                        .HasColumnType("character varying(200)");
-
-                    b.Property<string>("Status")
-                        .IsRequired()
-                        .HasMaxLength(30)
-                        .HasColumnType("character varying(30)");
-
-                    b.Property<DateTime>("UpdatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<Guid>("WorkspaceId")
-                        .HasColumnType("uuid");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("PlanId");
-
-                    b.HasIndex("WorkspaceId");
-
-                    b.HasIndex("Status", "NextRenewalAt");
-
-                    b.ToTable("Subscriptions");
                 });
 
             modelBuilder.Entity("Taslim.Api.Domain.UsageTransaction", b =>
@@ -2080,17 +1755,6 @@ namespace Taslim.Api.Persistence.Migrations
                     b.Navigation("StoredFile");
                 });
 
-            modelBuilder.Entity("Taslim.Api.Domain.BillingPeriod", b =>
-                {
-                    b.HasOne("Taslim.Api.Domain.Subscription", "Subscription")
-                        .WithMany("BillingPeriods")
-                        .HasForeignKey("SubscriptionId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("Subscription");
-                });
-
             modelBuilder.Entity("Taslim.Api.Domain.ChatMessage", b =>
                 {
                     b.HasOne("Taslim.Api.Domain.Conversation", "Conversation")
@@ -2143,49 +1807,6 @@ namespace Taslim.Api.Persistence.Migrations
                     b.Navigation("Project");
 
                     b.Navigation("User");
-
-                    b.Navigation("Workspace");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Domain.CreditEntitlement", b =>
-                {
-                    b.HasOne("Taslim.Api.Domain.BillingPeriod", "BillingPeriod")
-                        .WithMany("CreditEntitlements")
-                        .HasForeignKey("BillingPeriodId")
-                        .OnDelete(DeleteBehavior.SetNull);
-
-                    b.HasOne("Taslim.Api.Domain.Workspace", "Workspace")
-                        .WithMany()
-                        .HasForeignKey("WorkspaceId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.Navigation("BillingPeriod");
-
-                    b.Navigation("Workspace");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Domain.CreditLedgerEntry", b =>
-                {
-                    b.HasOne("Taslim.Api.Domain.CreditEntitlement", "CreditEntitlement")
-                        .WithMany("LedgerEntries")
-                        .HasForeignKey("CreditEntitlementId")
-                        .OnDelete(DeleteBehavior.Restrict);
-
-                    b.HasOne("Taslim.Api.Domain.UsageTransaction", "UsageTransaction")
-                        .WithMany()
-                        .HasForeignKey("UsageTransactionId")
-                        .OnDelete(DeleteBehavior.SetNull);
-
-                    b.HasOne("Taslim.Api.Domain.Workspace", "Workspace")
-                        .WithMany()
-                        .HasForeignKey("WorkspaceId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.Navigation("CreditEntitlement");
-
-                    b.Navigation("UsageTransaction");
 
                     b.Navigation("Workspace");
                 });
@@ -2346,25 +1967,6 @@ namespace Taslim.Api.Persistence.Migrations
                     b.Navigation("Project");
 
                     b.Navigation("User");
-
-                    b.Navigation("Workspace");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Domain.Subscription", b =>
-                {
-                    b.HasOne("Taslim.Api.Domain.Plan", "Plan")
-                        .WithMany("Subscriptions")
-                        .HasForeignKey("PlanId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.HasOne("Taslim.Api.Domain.Workspace", "Workspace")
-                        .WithMany()
-                        .HasForeignKey("WorkspaceId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.Navigation("Plan");
 
                     b.Navigation("Workspace");
                 });
@@ -2589,11 +2191,6 @@ namespace Taslim.Api.Persistence.Migrations
                     b.Navigation("Representations");
                 });
 
-            modelBuilder.Entity("Taslim.Api.Domain.BillingPeriod", b =>
-                {
-                    b.Navigation("CreditEntitlements");
-                });
-
             modelBuilder.Entity("Taslim.Api.Domain.ChatMessage", b =>
                 {
                     b.Navigation("Attachments");
@@ -2606,11 +2203,6 @@ namespace Taslim.Api.Persistence.Migrations
                     b.Navigation("Messages");
                 });
 
-            modelBuilder.Entity("Taslim.Api.Domain.CreditEntitlement", b =>
-                {
-                    b.Navigation("LedgerEntries");
-                });
-
             modelBuilder.Entity("Taslim.Api.Domain.GenerationJob", b =>
                 {
                     b.Navigation("Assets");
@@ -2618,11 +2210,6 @@ namespace Taslim.Api.Persistence.Migrations
                     b.Navigation("Outputs");
 
                     b.Navigation("ResearchSources");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Domain.Plan", b =>
-                {
-                    b.Navigation("Subscriptions");
                 });
 
             modelBuilder.Entity("Taslim.Api.Domain.Project", b =>
@@ -2646,11 +2233,6 @@ namespace Taslim.Api.Persistence.Migrations
                     b.Navigation("Attachments");
 
                     b.Navigation("GenerationJobOutputs");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Domain.Subscription", b =>
-                {
-                    b.Navigation("BillingPeriods");
                 });
 
             modelBuilder.Entity("Taslim.Api.Domain.Workspace", b =>

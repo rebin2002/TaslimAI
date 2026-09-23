@@ -15,6 +15,7 @@ using Taslim.Api.Presentations;
 using Taslim.Api.Research;
 using Taslim.Api.Social;
 using Taslim.Api.Usage;
+using Taslim.Api.Movies;
 
 namespace Taslim.Api.Generation;
 
@@ -119,7 +120,11 @@ public sealed class GenerationJobUsageService(IUsageLedgerService ledger) : IGen
                         ? UsageFeature.Presentation
                         : string.Equals(job.JobType, GenerationJobTypes.ResearchGenerate, StringComparison.OrdinalIgnoreCase)
                             ? UsageFeature.Research
-                            : string.Equals(job.JobType, GenerationJobTypes.SocialGenerate, StringComparison.OrdinalIgnoreCase) ? UsageFeature.Social : UsageFeature.Generation,
+                            : string.Equals(job.JobType, GenerationJobTypes.SocialGenerate, StringComparison.OrdinalIgnoreCase)
+                                ? UsageFeature.Social
+                                : GenerationJobTypes.MovieTypes.Contains(job.JobType)
+                                    ? UsageFeature.Movie
+                                    : UsageFeature.Generation,
             cancellationToken,
             job.Id,
             estimatedProviderCostUsd);
@@ -256,7 +261,9 @@ public sealed class GenerationJobService(
     }
 
     private static string CancellationCode(GenerationJob job) =>
-        string.Equals(job.JobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase)
+        GenerationJobTypes.MovieTypes.Contains(job.JobType)
+            ? GenerationJobErrorCodes.MovieCancelled
+            : string.Equals(job.JobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase)
             ? GenerationJobErrorCodes.ImageCancelled
             : string.Equals(job.JobType, GenerationJobTypes.DocumentGenerate, StringComparison.OrdinalIgnoreCase)
                 ? GenerationJobErrorCodes.DocumentCancelled
@@ -729,7 +736,9 @@ public sealed class GenerationJobWorker(
     }
 
     private static string CancellationCode(GenerationJob job) =>
-        string.Equals(job.JobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase)
+        GenerationJobTypes.MovieTypes.Contains(job.JobType)
+            ? GenerationJobErrorCodes.MovieCancelled
+            : string.Equals(job.JobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase)
             ? GenerationJobErrorCodes.ImageCancelled
             : string.Equals(job.JobType, GenerationJobTypes.DocumentGenerate, StringComparison.OrdinalIgnoreCase)
                 ? GenerationJobErrorCodes.DocumentCancelled
@@ -804,6 +813,16 @@ public sealed class GenerationJobWorker(
                 _ => GenerationJobErrorCodes.SocialGenerationFailed,
             };
         }
+        if (GenerationJobTypes.MovieTypes.Contains(jobType))
+        {
+            return exception switch
+            {
+                MovieProviderUnavailableException => GenerationJobErrorCodes.MovieProviderUnavailable,
+                _ => GenerationJobErrorCodes.MovieGenerationFailed,
+            };
+        }
+            };
+        }
         if (!string.Equals(jobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase)) return GenerationJobErrorCodes.ExecutionFailed;
         return exception switch
         {
@@ -866,10 +885,14 @@ public sealed class GenerationJobWorker(
         GenerationJobErrorCodes.SocialOutputInvalid => "The generated social content was invalid. Please try again.",
         GenerationJobErrorCodes.SocialStorageFailed => "The social content was generated but could not be saved. Please try again.",
         GenerationJobErrorCodes.SocialCancelled => "The social content generation was cancelled.",
+        GenerationJobErrorCodes.MovieProviderUnavailable => "Movie generation is not available yet because no video provider is configured. Your movie plan was saved.",
+        GenerationJobErrorCodes.MovieCancelled => "The movie generation was cancelled.",
+        GenerationJobErrorCodes.MovieGenerationFailed => "The movie could not be generated. Your movie plan was saved.",
         _ when code.StartsWith("IMAGE_", StringComparison.Ordinal) => "The image could not be generated. Please try again.",
         _ when code.StartsWith("DOCUMENT_", StringComparison.Ordinal) => "The document could not be generated. Please try again.",
         _ when code.StartsWith("PRESENTATION_", StringComparison.Ordinal) => "The presentation could not be generated. Please try again.",
         _ when code.StartsWith("SOCIAL_", StringComparison.Ordinal) => "The social content could not be generated. Please try again.",
+        _ when code.StartsWith("MOVIE_", StringComparison.Ordinal) => "The movie could not be generated. Your movie plan was saved.",
         _ => "The job could not be completed.",
     };
 }

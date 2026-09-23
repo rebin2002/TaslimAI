@@ -55,7 +55,10 @@ export function AppShell({ children }: Readonly<{ children: React.ReactNode }>) 
       </header>
       <main className="page-content">{children}</main>
       <nav className="mobile-bottom-nav" aria-label="Mobile navigation">
-        {navigation.filter((item) => ["/", "/projects", "/assets", "/create/document", "/create/presentation", "/create/research", "/create/social", "/account"].includes(item.href)).map((item) => {
+        {navigation.filter((item) => [
+          "/", "/projects", "/assets", "/create/document", "/create/presentation", "/create/research",
+          "/create/social", "/create/movie", "/account",
+        ].includes(item.href)).map((item) => {
           const Icon = item.icon;
           const active = activePath === item.href;
           return (
