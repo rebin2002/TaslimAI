@@ -266,6 +266,25 @@ export type ResearchJobResult = {
   sources?: ResearchSource[];
   representations?: { id: string; type: string; fileName: string; contentType: string }[];
 };
+export type SocialGenerationInput = {
+  workspaceId: string;
+  projectId?: string | null;
+  prompt: string;
+  socialType?: "auto" | "announcement" | "product_launch" | "promotion" | "educational" | "thought_leadership" | "company_update" | "event" | "community" | "general";
+  platform?: "instagram" | "facebook" | "linkedin" | "x" | "tiktok" | "multi";
+  tone?: "professional" | "friendly" | "persuasive" | "educational" | "playful" | "concise" | "thoughtful";
+  language?: "auto" | "en" | "ar" | "ku";
+  audience?: string | null;
+  brandVoice?: string | null;
+  callToAction?: string | null;
+  includeHashtags?: boolean;
+  includeEmojis?: boolean;
+  generateVariants?: boolean;
+  assetIds: string[];
+  attachmentIds: string[];
+};
+export type SocialPost = { order: number; hook: string; body: string; callToAction?: string | null; hashtags?: string[]; altText?: string | null; visualDirection?: string | null; assetRefs?: string[] };
+export type SocialJobResult = { assetId?: string; socialType?: string; platform?: string; title?: string; language?: string; postCount?: number; posts?: SocialPost[] };
 export type ResearchSource = {
   citationId: string;
   url: string | null;
@@ -430,6 +449,7 @@ export const api = {
   createDocumentGenerationJob: (input: DocumentGenerationInput) => request<{ job: GenerationJob }>("/api/document-generation/jobs", { method: "POST", body: JSON.stringify(input) }, true).then((response) => response.job),
   createPresentationGenerationJob: (input: PresentationGenerationInput) => request<{ job: GenerationJob }>("/api/presentation-generation/jobs", { method: "POST", body: JSON.stringify(input) }, true).then((response) => response.job),
   createResearchGenerationJob: (input: ResearchGenerationInput) => request<{ job: GenerationJob }>("/api/research-generation/jobs", { method: "POST", body: JSON.stringify(input) }, true).then((response) => response.job),
+  createSocialGenerationJob: (input: SocialGenerationInput) => request<{ job: GenerationJob }>("/api/social-generation/jobs", { method: "POST", body: JSON.stringify(input) }, true).then((response) => response.job),
   getGenerationJob: (jobId: string) => request<GenerationJob>(`/api/generation/jobs/${jobId}`),
   getResearchSources: (jobId: string) => request<{ jobId: string; sources: ResearchSource[] }>(`/api/research-generation/jobs/${jobId}/sources`),
   listGenerationJobs: (workspaceId: string, page = 1, pageSize = 20) => request<GenerationJobList>(`/api/generation/jobs?workspaceId=${encodeURIComponent(workspaceId)}&page=${page}&pageSize=${pageSize}&jobType=system.test`),

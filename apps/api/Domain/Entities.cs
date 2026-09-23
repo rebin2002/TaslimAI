@@ -56,6 +56,7 @@ public static class GenerationJobTypes
     public const string DocumentGenerate = "document.generate";
     public const string PresentationGenerate = "presentation.generate";
     public const string ResearchGenerate = "research.generate";
+    public const string SocialGenerate = "social.generate";
 
     public static readonly IReadOnlySet<string> Supported = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
@@ -64,6 +65,7 @@ public static class GenerationJobTypes
         DocumentGenerate,
         PresentationGenerate,
         ResearchGenerate,
+        SocialGenerate,
     };
 }
 
@@ -140,6 +142,18 @@ public static class GenerationJobErrorCodes
     public const string ResearchRenderFailed = "RESEARCH_RENDER_FAILED";
     public const string ResearchStorageFailed = "RESEARCH_STORAGE_FAILED";
     public const string ResearchCancelled = "RESEARCH_CANCELLED";
+    public const string SocialRequestInvalid = "SOCIAL_REQUEST_INVALID";
+    public const string SocialContextUnavailable = "SOCIAL_CONTEXT_UNAVAILABLE";
+    public const string SocialContextTooLarge = "SOCIAL_CONTEXT_TOO_LARGE";
+    public const string SocialProviderUnavailable = "SOCIAL_PROVIDER_UNAVAILABLE";
+    public const string SocialProviderConfiguration = "SOCIAL_PROVIDER_CONFIGURATION";
+    public const string SocialProviderUnsupportedRequest = "SOCIAL_PROVIDER_UNSUPPORTED_REQUEST";
+    public const string SocialProviderRateLimited = "SOCIAL_PROVIDER_RATE_LIMITED";
+    public const string SocialProviderTransientFailure = "SOCIAL_PROVIDER_TRANSIENT_FAILURE";
+    public const string SocialGenerationFailed = "SOCIAL_GENERATION_FAILED";
+    public const string SocialOutputInvalid = "SOCIAL_OUTPUT_INVALID";
+    public const string SocialStorageFailed = "SOCIAL_STORAGE_FAILED";
+    public const string SocialCancelled = "SOCIAL_CANCELLED";
 }
 
 public static class AssetTypes
@@ -348,6 +362,7 @@ public enum UsageFeature
     Document,
     Research,
     Presentation,
+    Social,
 }
 
 public enum UsageTransactionStatus

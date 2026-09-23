@@ -13,6 +13,7 @@ using Taslim.Api.Images;
 using Taslim.Api.Persistence;
 using Taslim.Api.Presentations;
 using Taslim.Api.Research;
+using Taslim.Api.Social;
 using Taslim.Api.Usage;
 
 namespace Taslim.Api.Generation;
@@ -116,7 +117,9 @@ public sealed class GenerationJobUsageService(IUsageLedgerService ledger) : IGen
                     ? UsageFeature.Document
                     : string.Equals(job.JobType, GenerationJobTypes.PresentationGenerate, StringComparison.OrdinalIgnoreCase)
                         ? UsageFeature.Presentation
-                        : string.Equals(job.JobType, GenerationJobTypes.ResearchGenerate, StringComparison.OrdinalIgnoreCase) ? UsageFeature.Research : UsageFeature.Generation,
+                        : string.Equals(job.JobType, GenerationJobTypes.ResearchGenerate, StringComparison.OrdinalIgnoreCase)
+                            ? UsageFeature.Research
+                            : string.Equals(job.JobType, GenerationJobTypes.SocialGenerate, StringComparison.OrdinalIgnoreCase) ? UsageFeature.Social : UsageFeature.Generation,
             cancellationToken,
             job.Id,
             estimatedProviderCostUsd);
@@ -261,6 +264,8 @@ public sealed class GenerationJobService(
                     ? GenerationJobErrorCodes.PresentationCancelled
                     : string.Equals(job.JobType, GenerationJobTypes.ResearchGenerate, StringComparison.OrdinalIgnoreCase)
                         ? GenerationJobErrorCodes.ResearchCancelled
+                        : string.Equals(job.JobType, GenerationJobTypes.SocialGenerate, StringComparison.OrdinalIgnoreCase)
+                            ? GenerationJobErrorCodes.SocialCancelled
                 : GenerationJobErrorCodes.Cancelled;
 }
 
@@ -417,6 +422,10 @@ public sealed class GenerationJobWorker(
                 {
                     throw new ResearchGenerationStageException(ResearchGenerationStages.StorageDocx, GenerationJobErrorCodes.ResearchStorageFailed, "The generated research report could not be stored.", providerUsage, exception);
                 }
+                catch (Exception exception) when (exception is not OperationCanceledException && string.Equals(claimedJob.JobType, GenerationJobTypes.SocialGenerate, StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new SocialGenerationStageException(SocialGenerationStages.Storage, GenerationJobErrorCodes.SocialStorageFailed, "The generated social content could not be stored.", providerUsage, exception);
+                }
             }
             AttachAssetRepresentations(publications);
             var resultJson = AddPublishedAssetReference(result.ResultJson, publications);
@@ -471,6 +480,10 @@ public sealed class GenerationJobWorker(
             {
                 throw new ResearchGenerationStageException(ResearchGenerationStages.AssetPublish, GenerationJobErrorCodes.ResearchStorageFailed, "The generated research report could not be published.", providerUsage, exception);
             }
+            catch (Exception exception) when (exception is not OperationCanceledException && string.Equals(claimedJob.JobType, GenerationJobTypes.SocialGenerate, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new SocialGenerationStageException(SocialGenerationStages.AssetPublish, GenerationJobErrorCodes.SocialStorageFailed, "The generated social content could not be published.", providerUsage, exception);
+            }
             if (completed == 0)
             {
                 foreach (var publication in publications) await publisher.DiscardAsync(publication, stoppingToken);
@@ -493,6 +506,7 @@ public sealed class GenerationJobWorker(
             var failureUsage = providerUsage ?? (exception as DocumentGenerationStageException)?.Usage;
             failureUsage ??= (exception as PresentationGenerationStageException)?.Usage;
             failureUsage ??= (exception as ResearchGenerationStageException)?.Usage;
+            failureUsage ??= (exception as SocialGenerationStageException)?.Usage;
             if (string.Equals(claimedJob.JobType, GenerationJobTypes.DocumentGenerate, StringComparison.OrdinalIgnoreCase))
             {
                 var stage = (exception as DocumentGenerationStageException)?.Stage ?? DocumentGenerationStages.Execution;
@@ -550,6 +564,22 @@ public sealed class GenerationJobWorker(
                     searchDetails?.ErrorCode,
                     searchDetails?.ErrorParam,
                     providerException?.ModelKey,
+                    (long)Stopwatch.GetElapsedTime(executionStarted).TotalMilliseconds);
+            }
+            else if (string.Equals(claimedJob.JobType, GenerationJobTypes.SocialGenerate, StringComparison.OrdinalIgnoreCase))
+            {
+                var stage = (exception as SocialGenerationStageException)?.Stage ?? SocialGenerationStages.Execution;
+                var providerException = exception as AiProviderException ?? exception.InnerException as AiProviderException;
+                logger.LogError("Social generation failed. JobId={JobId}; Stage={Stage}; ErrorCode={ErrorCode}; ExceptionType={ExceptionType}; ProviderFailureCategory={ProviderFailureCategory}; ProviderHttpStatus={ProviderHttpStatus}; ProviderErrorCode={ProviderErrorCode}; ModelKey={ModelKey}; StructuredOutput={StructuredOutput}; ElapsedMs={ElapsedMs}",
+                    claimedJob.Id,
+                    stage,
+                    failureCode,
+                    exception.GetType().Name,
+                    providerException?.FailureCategory,
+                    providerException?.HttpStatusCode,
+                    providerException?.ProviderErrorCode,
+                    providerException?.ModelKey,
+                    providerException?.StructuredOutputRequested,
                     (long)Stopwatch.GetElapsedTime(executionStarted).TotalMilliseconds);
             }
             else
@@ -703,11 +733,13 @@ public sealed class GenerationJobWorker(
             ? GenerationJobErrorCodes.ImageCancelled
             : string.Equals(job.JobType, GenerationJobTypes.DocumentGenerate, StringComparison.OrdinalIgnoreCase)
                 ? GenerationJobErrorCodes.DocumentCancelled
-                : string.Equals(job.JobType, GenerationJobTypes.PresentationGenerate, StringComparison.OrdinalIgnoreCase)
-                    ? GenerationJobErrorCodes.PresentationCancelled
-                    : string.Equals(job.JobType, GenerationJobTypes.ResearchGenerate, StringComparison.OrdinalIgnoreCase)
-                        ? GenerationJobErrorCodes.ResearchCancelled
-                : GenerationJobErrorCodes.Cancelled;
+            : string.Equals(job.JobType, GenerationJobTypes.PresentationGenerate, StringComparison.OrdinalIgnoreCase)
+                ? GenerationJobErrorCodes.PresentationCancelled
+            : string.Equals(job.JobType, GenerationJobTypes.ResearchGenerate, StringComparison.OrdinalIgnoreCase)
+                ? GenerationJobErrorCodes.ResearchCancelled
+            : string.Equals(job.JobType, GenerationJobTypes.SocialGenerate, StringComparison.OrdinalIgnoreCase)
+                ? GenerationJobErrorCodes.SocialCancelled
+            : GenerationJobErrorCodes.Cancelled;
 
     private static string MapFailureCode(Exception exception, string jobType)
     {
@@ -756,6 +788,20 @@ public sealed class GenerationJobWorker(
                 AiProviderException or AiProviderUnavailableException or AiProviderTimeoutException => GenerationJobErrorCodes.ResearchProviderUnavailable,
                 FileStorageUnavailableException or FileStorageOperationException or FileUploadValidationException => GenerationJobErrorCodes.ResearchStorageFailed,
                 _ => GenerationJobErrorCodes.ResearchGenerationFailed,
+            };
+        }
+        if (string.Equals(jobType, GenerationJobTypes.SocialGenerate, StringComparison.OrdinalIgnoreCase))
+        {
+            return exception switch
+            {
+                SocialGenerationStageException staged => staged.Code,
+                SocialRequestValidationException validation => validation.Code,
+                SocialContextLimitException => GenerationJobErrorCodes.SocialContextTooLarge,
+                SocialOutputValidationException => GenerationJobErrorCodes.SocialOutputInvalid,
+                AiProviderException providerException => SocialGenerationFailureCodes.ForProvider(providerException),
+                FileStorageUnavailableException or FileStorageOperationException or FileUploadValidationException => GenerationJobErrorCodes.SocialStorageFailed,
+                AiProviderUnavailableException or AiProviderTimeoutException => GenerationJobErrorCodes.SocialProviderUnavailable,
+                _ => GenerationJobErrorCodes.SocialGenerationFailed,
             };
         }
         if (!string.Equals(jobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase)) return GenerationJobErrorCodes.ExecutionFailed;
@@ -811,9 +857,19 @@ public sealed class GenerationJobWorker(
         GenerationJobErrorCodes.ResearchStorageFailed => "The research report was generated but could not be saved. Please try again.",
         GenerationJobErrorCodes.ResearchRenderFailed => "The research report could not be rendered. Please try again.",
         GenerationJobErrorCodes.ResearchCancelled => "The research generation was cancelled.",
+        GenerationJobErrorCodes.SocialProviderUnavailable => "Social content generation is temporarily unavailable. Please try again later.",
+        GenerationJobErrorCodes.SocialProviderConfiguration => "Social content generation is temporarily unavailable. Please try again later.",
+        GenerationJobErrorCodes.SocialProviderUnsupportedRequest => "Social content generation is temporarily unavailable. Please try again later.",
+        GenerationJobErrorCodes.SocialProviderRateLimited => "Social content generation is temporarily unavailable. Please try again later.",
+        GenerationJobErrorCodes.SocialProviderTransientFailure => "Social content generation is temporarily unavailable. Please try again later.",
+        GenerationJobErrorCodes.SocialContextTooLarge => "The selected social context is too large. Choose fewer or shorter sources.",
+        GenerationJobErrorCodes.SocialOutputInvalid => "The generated social content was invalid. Please try again.",
+        GenerationJobErrorCodes.SocialStorageFailed => "The social content was generated but could not be saved. Please try again.",
+        GenerationJobErrorCodes.SocialCancelled => "The social content generation was cancelled.",
         _ when code.StartsWith("IMAGE_", StringComparison.Ordinal) => "The image could not be generated. Please try again.",
         _ when code.StartsWith("DOCUMENT_", StringComparison.Ordinal) => "The document could not be generated. Please try again.",
         _ when code.StartsWith("PRESENTATION_", StringComparison.Ordinal) => "The presentation could not be generated. Please try again.",
+        _ when code.StartsWith("SOCIAL_", StringComparison.Ordinal) => "The social content could not be generated. Please try again.",
         _ => "The job could not be completed.",
     };
 }

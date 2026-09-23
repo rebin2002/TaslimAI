@@ -58,6 +58,7 @@ export const navigation = [
   { href: "/create/document", labelKey: "navigation.documentStudio", icon: FileText },
   { href: "/create/presentation", labelKey: "navigation.presentationStudio", icon: Presentation },
   { href: "/create/research", labelKey: "navigation.researchStudio", icon: Search },
+  { href: "/create/social", labelKey: "navigation.socialStudio", icon: MessageSquare },
   { href: "/notifications", labelKey: "navigation.notifications", icon: Activity },
   { href: "/account", labelKey: "navigation.account", icon: UserRound },
 ] as const;
@@ -158,6 +159,7 @@ export const routeLabels: Record<string, string> = {
   "/create/document": "navigation.documentStudio",
   "/create/presentation": "navigation.presentationStudio",
   "/create/research": "navigation.researchStudio",
+  "/create/social": "navigation.socialStudio",
   "/notifications": "navigation.notifications",
   "/account": "navigation.account",
 };
@@ -171,4 +173,6 @@ export const featureRoute = (departmentId: string, featureId: string) =>
       ? "/create/presentation"
     : featureId === "research"
       ? "/create/research"
+    : departmentId === "marketing" && featureId === "social-media"
+      ? "/create/social"
     : `/${departmentId === "media" ? "media" : departmentId}/${featureId}`;
