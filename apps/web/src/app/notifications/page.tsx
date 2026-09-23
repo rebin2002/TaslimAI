@@ -1,2 +1,6 @@
-import { PlaceholderPage } from "@/app/placeholder-page";
-export default function NotificationsPage() { return <PlaceholderPage nameKey="navigation.notifications" />; }
+import { ActivityCenterView } from "@/components/ActivityCenterView";
+import { ProtectedPage } from "@/components/ProtectedPage";
+
+export default function NotificationsPage() {
+  return <ProtectedPage><ActivityCenterView /></ProtectedPage>;
+}

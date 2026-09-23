@@ -510,3 +510,44 @@ select.memory-control { appearance: auto; cursor: pointer; }
 [dir="rtl"] .research-studio-header, [dir="rtl"] .research-result-heading, [dir="rtl"] .research-source-heading, [dir="rtl"] .research-sources-heading { flex-direction: row-reverse; }.research-studio-page .primary-button { align-self: flex-start; }
 @media (max-width: 760px) { .research-studio-page { padding: 35px 0 60px; }.research-studio-header { gap: 14px; }.research-studio-header-icon { width: 43px; height: 43px; }.research-studio-layout { grid-template-columns: 1fr; } }
 @media (max-width: 520px) { .research-control-grid, .research-advanced-grid, .research-source-list { grid-template-columns: 1fr; }.research-result-heading { flex-direction: column; }.research-studio-header h1 { font-size: 39px; }.research-studio-page .primary-button { align-self: stretch; justify-content: center; } }
+/* Activity Center — additive notification and generation activity UI. */
+.notification-button { position: relative; }
+.notification-badge { position: absolute; top: -5px; right: -6px; min-width: 16px; height: 16px; display: grid; place-items: center; padding: 0 4px; color: #fff; border: 2px solid #fff; border-radius: 999px; background: var(--coral); font-size: 8px; font-weight: 800; line-height: 1; }
+.activity-page { max-width: 1040px; margin: 0 auto; padding: 38px 0 76px; }
+.activity-hero { margin-bottom: 18px; padding: 22px 24px; border: 1px solid #dfe9f0; border-radius: 16px; background: linear-gradient(135deg, #f9fcff 0%, #f2fbf8 100%); }
+.activity-hero .section-heading { margin: 0; }
+.activity-hero .section-heading > div > p:not(.section-eyebrow) { max-width: 650px; margin: 7px 0 0; color: #718296; font-size: 12px; line-height: 1.65; }
+.activity-hero-icon { display: inline-flex; align-items: center; justify-content: center; width: 48px; height: 48px; color: var(--teal); border: 1px solid #cae9e3; border-radius: 13px; background: #eefaf7; }
+.activity-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+.activity-tabs { display: flex; min-width: 0; gap: 3px; padding: 3px; overflow-x: auto; border-radius: 9px; background: #f0f4f7; }
+.activity-tabs button { flex: 0 0 auto; padding: 8px 11px; color: #788898; border: 0; border-radius: 6px; background: transparent; font-size: 10px; font-weight: 800; cursor: pointer; }
+.activity-tabs button.is-active { color: var(--navy-900); background: #fff; box-shadow: 0 1px 3px rgba(25,46,68,.09); }
+.activity-read-all { flex: 0 0 auto; min-height: 35px; padding: 0 11px; }
+.activity-count { display: inline-grid; place-items: center; min-width: 17px; height: 17px; padding: 0 4px; color: var(--blue); border-radius: 99px; background: #eaf2ff; font-size: 9px; }
+.activity-list { display: flex; flex-direction: column; gap: 10px; }
+.activity-card { position: relative; display: flex; gap: 13px; min-width: 0; padding: 17px 18px; overflow: hidden; border: 1px solid #dfe8ef; border-radius: 13px; background: #fff; box-shadow: 0 5px 18px rgba(30,55,77,.04); }
+.generation-status-completed { color: #2d8c64; background: #eaf8f1; }
+.activity-card.is-unread { border-color: #cbdff9; box-shadow: 0 7px 22px rgba(51,124,246,.08); }
+.activity-card-mark { flex: 0 0 auto; width: 4px; margin: -17px 0 -17px -18px; background: transparent; }
+.activity-card.is-unread .activity-card-mark { background: var(--blue); }
+.activity-card-icon { display: grid; flex: 0 0 auto; place-items: center; width: 34px; height: 34px; color: var(--teal); border-radius: 9px; background: #eaf8f5; }
+.activity-card-main { flex: 1; min-width: 0; }
+.activity-card-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.activity-card-heading h2 { margin: 3px 0 0; overflow: hidden; color: var(--navy-900); font-size: 14px; letter-spacing: -.025em; text-overflow: ellipsis; white-space: nowrap; }
+.activity-type { margin: 0; color: #8d9aa8; font-size: 9px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+.activity-card-meta { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 9px; color: #8b99a7; font-size: 10px; }
+.activity-card .generation-progress-label { margin-top: 14px; }
+.activity-card .generation-progress-track { height: 6px; }
+.activity-failure { display: flex; align-items: flex-start; gap: 7px; margin-top: 13px; padding: 9px 10px; color: #a85353; border-radius: 8px; background: #fff4f4; font-size: 10px; line-height: 1.45; }
+.activity-card-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 13px; }
+.activity-card-actions .secondary-button { min-height: 31px; padding: 0 10px; font-size: 10px; }
+.activity-read-button { padding: 5px 0; color: var(--blue); border: 0; background: transparent; font-size: 10px; font-weight: 800; cursor: pointer; }
+.activity-read-button:disabled { opacity: .55; cursor: wait; }
+.activity-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 260px; padding: 30px; color: #9aa7b4; text-align: center; border: 1px dashed #d7e1ea; border-radius: 14px; background: rgba(255,255,255,.5); }
+.activity-empty h2 { margin: 12px 0 6px; color: var(--navy-900); font-size: 18px; }
+.activity-empty p { max-width: 340px; margin: 0; font-size: 11px; line-height: 1.6; }
+.activity-spin { animation: taslim-spin .8s linear infinite; }
+[dir="rtl"] .activity-card-mark { margin-right: -18px; margin-left: 0; }
+[dir="rtl"] .activity-card-heading, [dir="rtl"] .activity-card-meta, [dir="rtl"] .activity-card-actions { flex-direction: row-reverse; }
+[dir="rtl"] .notification-badge { right: auto; left: -6px; }
+@media (max-width: 700px) { .activity-page { padding: 24px 14px 76px; }.activity-hero { padding: 18px; }.activity-hero-icon { width: 40px; height: 40px; }.activity-toolbar { align-items: stretch; flex-direction: column; }.activity-tabs { width: 100%; }.activity-read-all { align-self: flex-end; }.activity-card { padding: 14px; gap: 10px; }.activity-card-mark { margin: -14px 0 -14px -14px; }.activity-card-heading { align-items: flex-start; flex-direction: column; gap: 7px; }.activity-card-heading .generation-status { align-self: flex-start; }.activity-card-meta { flex-direction: column; gap: 4px; }.activity-card-actions { align-items: stretch; flex-direction: column; }.activity-card-actions .secondary-button { justify-content: center; width: 100%; }.activity-read-button { align-self: flex-start; } [dir="rtl"] .activity-card-mark { margin-right: -14px; margin-left: 0; } }

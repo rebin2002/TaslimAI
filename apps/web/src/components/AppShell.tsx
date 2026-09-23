@@ -2,11 +2,12 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Bell, ChevronDown, Plus, Search } from "lucide-react";
+import { ChevronDown, Plus, Search } from "lucide-react";
 import { navigation } from "@/lib/data";
 import { useLocale, localeNames, locales } from "@/components/LocaleProvider";
 import { BrandMark } from "@/components/BrandMark";
 import { useAuth } from "@/components/AuthProvider";
+import { ActivityBell } from "@/components/ActivityBell";
 
 export function AppShell({ children }: Readonly<{ children: React.ReactNode }>) {
   const pathname = usePathname();
@@ -35,10 +36,7 @@ export function AppShell({ children }: Readonly<{ children: React.ReactNode }>) 
             <button type="button" className="icon-button search-button" aria-label="Search">
               <Search size={18} />
             </button>
-            <Link href="/notifications" className="icon-button notification-button" aria-label={t("navigation.notifications")}>
-              <Bell size={18} />
-              <span className="notification-dot" />
-            </Link>
+            <ActivityBell />
             <label className="language-select">
               <span className="sr-only">Language</span>
               <select value={locale} onChange={(event) => setLocale(event.target.value as typeof locale)}>
