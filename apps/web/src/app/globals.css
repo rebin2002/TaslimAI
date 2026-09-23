@@ -681,3 +681,49 @@ select.memory-control { appearance: auto; cursor: pointer; }
 [dir="rtl"] .music-studio-header, [dir="rtl"] .music-result-heading { flex-direction: row-reverse; }
 @media (max-width: 760px) { .music-studio-page { padding: 35px 0 60px; }.music-studio-header { gap: 14px; }.music-studio-header-icon { width: 43px; height: 43px; }.music-studio-layout { grid-template-columns: 1fr; }.music-player { flex-wrap: wrap; }.music-player audio { flex-basis: 100%; } }
 @media (max-width: 520px) { .music-control-grid, .music-optional-grid { grid-template-columns: 1fr; }.music-field-wide { grid-column: auto; }.music-result-heading { flex-direction: column; }.music-studio-header h1 { font-size: 39px; }.music-studio-page .primary-button { align-self: stretch; justify-content: center; } }
+/* Parallel Voice Studio */
+.voice-studio-page { max-width: 1040px; margin: 0 auto; padding: 60px 0 70px; }
+.voice-studio-header { display: flex; justify-content: space-between; align-items: flex-end; gap: 25px; margin-bottom: 31px; }
+.voice-studio-header h1 { margin: 7px 0 10px; color: var(--navy-950); font-size: clamp(38px, 5vw, 59px); line-height: 1; letter-spacing: -.075em; }
+.voice-studio-header p:not(.section-eyebrow) { max-width: 590px; margin: 0; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.voice-studio-header-icon { width: 51px; height: 51px; display: grid; place-items: center; color: var(--teal); background: #e7f7f4; border-radius: 14px; }
+.voice-studio-layout { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(250px, .65fr); gap: 15px; max-width: 1040px; margin: 0 auto; }
+.voice-studio-form-card { display: flex; flex-direction: column; gap: 17px; }
+.voice-primary-field { display: flex; flex-direction: column; gap: 7px; color: #69798a; font-size: 11px; font-weight: 800; }
+.voice-primary-field textarea { min-height: 190px; padding: 14px; border: 1px solid #dfe8ef; border-radius: 10px; color: var(--navy-900); background: #fbfcfd; font: inherit; font-size: 13px; font-weight: 500; line-height: 1.65; outline: none; resize: vertical; }
+.voice-primary-field textarea:focus, .voice-optional-controls textarea:focus { border-color: #9cc6c5; box-shadow: 0 0 0 3px rgba(79, 176, 170, .12); }
+.voice-primary-field small { align-self: flex-end; color: #9aa6b3; font-size: 10px; font-weight: 600; }
+.voice-control-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.voice-optional-controls { border-top: 1px solid #edf1f4; padding-top: 15px; }
+.voice-optional-controls summary { color: #69798a; cursor: pointer; font-size: 11px; font-weight: 800; }
+.voice-optional-controls .field { margin-top: 14px; }
+.voice-optional-controls textarea { min-height: 90px; resize: vertical; }
+.voice-studio-page .field input, .voice-studio-page .field select, .voice-studio-page .field textarea { direction: inherit; }
+.voice-studio-page .field textarea { line-height: 1.55; }
+.voice-generate-button { align-self: flex-start; }
+.voice-studio-guidance { display: flex; flex-direction: column; align-items: flex-start; gap: 13px; color: #8392a0; }
+.voice-studio-guidance > svg { color: var(--teal); }
+.voice-studio-guidance h2 { margin: 0; color: var(--navy-900); font-size: 20px; letter-spacing: -.04em; }
+.voice-studio-guidance p, .voice-studio-guidance li { color: var(--muted); font-size: 12px; line-height: 1.65; }
+.voice-studio-guidance p { margin: 0; }.voice-studio-guidance ul { margin: 0; padding-inline-start: 18px; }.voice-studio-guidance .secondary-button { margin-top: auto; }
+.voice-generation-state { max-width: 1040px; margin: 0 auto; }
+.voice-result-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.voice-result-heading h2 { margin: 7px 0 0; color: var(--navy-900); font-size: 26px; letter-spacing: -.05em; }
+.voice-player { margin-top: 24px; padding: 21px; border: 1px solid #dfe8ef; border-radius: 12px; background: linear-gradient(145deg, #fff, #f4faf9); }
+.voice-player audio { display: block; width: 100%; }
+.voice-result-meta { margin-top: 12px; color: #82909e; font-size: 11px; }
+.voice-result-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 22px; }
+.voice-progress-icon { display: grid; place-items: center; width: 52px; height: 52px; margin: 8px auto 16px; color: var(--teal); border-radius: 50%; background: #e7f7f4; }
+.voice-generation-state > .voice-progress-icon, .voice-generation-state > .section-eyebrow, .voice-generation-state > h2, .voice-generation-state > .voice-progress-copy { text-align: center; }
+.voice-generation-state > h2 { margin: 7px 0 8px; color: var(--navy-900); font-size: 25px; letter-spacing: -.05em; }
+.voice-progress-copy { max-width: 510px; margin: 0 auto 22px; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.voice-generation-state .generation-progress-label { max-width: 620px; margin-inline: auto; }
+.voice-generation-state .generation-progress-track { max-width: 620px; margin-inline: auto; }
+.voice-generation-state .generation-cancel-button { display: flex; margin: 22px auto 0; }
+.voice-unavailable { background: #fff8ec; border-color: #f2d7a8; color: #8d641d; }
+.voice-studio-footnote { max-width: 1040px; margin: 18px auto 0; color: #98a4af; font-size: 10px; text-align: center; }
+[dir="rtl"] .voice-studio-header, [dir="rtl"] .voice-result-heading { flex-direction: row-reverse; }
+[dir="rtl"] .voice-primary-field small { align-self: flex-start; }
+[dir="rtl"] .voice-studio-page .field input, [dir="rtl"] .voice-studio-page .field select, [dir="rtl"] .voice-studio-page .field textarea { text-align: start; }
+@media (max-width: 760px) { .voice-studio-page { padding: 35px 0 60px; }.voice-studio-header { gap: 14px; }.voice-studio-header-icon { width: 43px; height: 43px; }.voice-studio-layout { grid-template-columns: 1fr; } }
+@media (max-width: 520px) { .voice-control-grid { grid-template-columns: 1fr; }.voice-result-heading { flex-direction: column; }.voice-studio-header h1 { font-size: 39px; }.voice-generate-button { align-self: stretch; justify-content: center; }.voice-result-actions > * { flex: 1 1 100%; justify-content: center; } }

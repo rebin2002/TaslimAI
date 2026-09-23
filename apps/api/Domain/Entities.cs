@@ -66,6 +66,7 @@ public const string MovieQuickGenerate = "movie.quick.generate";
         MovieQuickGenerate, MovieClipGenerate, MovieAssembly,
     };
 public const string MusicGenerate = "music.generate";
+public const string VoiceGenerate = "voice.generate";
 
     public static readonly IReadOnlySet<string> Supported = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
@@ -79,6 +80,7 @@ MovieQuickGenerate,
         MovieClipGenerate,
         MovieAssembly,
 MusicGenerate,
+VoiceGenerate,
     };
 }
 
@@ -182,6 +184,12 @@ public const string MusicRequestInvalid = "MUSIC_REQUEST_INVALID";
     public const string MusicOutputInvalid = "MUSIC_OUTPUT_INVALID";
     public const string MusicOutputStorageFailed = "MUSIC_OUTPUT_STORAGE_FAILED";
     public const string MusicCancelled = "MUSIC_CANCELLED";
+public const string VoiceRequestInvalid = "VOICE_REQUEST_INVALID";
+    public const string VoiceProviderUnavailable = "VOICE_PROVIDER_UNAVAILABLE";
+    public const string VoiceProviderFailed = "VOICE_PROVIDER_FAILED";
+    public const string VoiceOutputInvalid = "VOICE_OUTPUT_INVALID";
+    public const string VoiceOutputStorageFailed = "VOICE_OUTPUT_STORAGE_FAILED";
+    public const string VoiceCancelled = "VOICE_CANCELLED";
 }
 
 public static class AssetTypes

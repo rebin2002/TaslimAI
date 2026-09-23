@@ -24,6 +24,7 @@ using Taslim.Api.Usage;
 using Taslim.Api.Files;
 using Taslim.Api.Generation;
 using Taslim.Api.Movies;
+using Taslim.Api.Voice;
 using FileSettings = Taslim.Api.Files.FileOptions;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -166,6 +167,7 @@ builder.Services.Configure<PresentationGenerationOptions>(builder.Configuration.
 builder.Services.Configure<ResearchGenerationOptions>(builder.Configuration.GetSection("ResearchGeneration"));
 builder.Services.Configure<SocialGenerationOptions>(builder.Configuration.GetSection("SocialGeneration"));
 builder.Services.Configure<MusicGenerationOptions>(builder.Configuration.GetSection("MusicGeneration"));
+builder.Services.Configure<VoiceGenerationOptions>(builder.Configuration.GetSection("VoiceGeneration"));
 builder.Services.AddSingleton<AiModelCatalog>();
 builder.Services.AddSingleton<IAiCostCalculator, AiCostCalculator>();
 builder.Services.AddSingleton<AiContextBuilder>();
@@ -200,6 +202,8 @@ builder.Services.AddScoped<ISocialGenerationProvider, AiSocialGenerationProvider
 builder.Services.AddScoped<IGenerationJobHandler, SocialGenerationJobHandler>();
 // Music providers are intentionally not registered until a production provider is selected and validated.
 builder.Services.AddScoped<IGenerationJobHandler, MusicGenerationJobHandler>();
+builder.Services.AddSingleton<IVoiceGenerationProvider, UnconfiguredVoiceGenerationProvider>();
+builder.Services.AddScoped<IGenerationJobHandler, VoiceGenerationJobHandler>();
 builder.Services.AddScoped<FileValidationService>();
 builder.Services.AddSingleton<IFileContentExtractor, FileContentExtractor>();
 builder.Services.AddScoped<FileProcessingService>();
