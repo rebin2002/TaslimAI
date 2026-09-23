@@ -11,6 +11,7 @@ using Taslim.Api.Documents;
 using Taslim.Api.Files;
 using Taslim.Api.Images;
 using Taslim.Api.Music;
+using Taslim.Api.Movies;
 using Taslim.Api.Persistence;
 using Taslim.Api.Presentations;
 using Taslim.Api.Research;
@@ -855,8 +856,6 @@ public sealed class GenerationJobWorker(
                 VoiceOutputInvalidException => GenerationJobErrorCodes.VoiceOutputInvalid,
                 FileStorageUnavailableException or FileStorageOperationException or FileUploadValidationException => GenerationJobErrorCodes.VoiceOutputStorageFailed,
                 _ => GenerationJobErrorCodes.VoiceProviderFailed,
-            };
-        }
             };
         }
         if (!string.Equals(jobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase)) return GenerationJobErrorCodes.ExecutionFailed;
