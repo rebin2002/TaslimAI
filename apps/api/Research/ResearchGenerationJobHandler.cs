@@ -71,6 +71,10 @@ public sealed class ResearchGenerationJobHandler(
             {
                 throw new ResearchGenerationStageException(ResearchGenerationStages.Search, GenerationJobErrorCodes.ResearchSearchUnavailable, "Web research is temporarily unavailable.", usage, exception);
             }
+            catch (ResearchSearchFailedException exception) when (exception.Details?.FailureCategory is "configuration" or "rate_limited" or "transient")
+            {
+                throw new ResearchGenerationStageException(ResearchGenerationStages.Search, GenerationJobErrorCodes.ResearchSearchUnavailable, "Web research is temporarily unavailable.", usage, exception);
+            }
             catch (ResearchSearchTimeoutException exception)
             {
                 throw new ResearchGenerationStageException(ResearchGenerationStages.Search, GenerationJobErrorCodes.ResearchSearchFailed, "Web research took too long to complete.", usage, exception);

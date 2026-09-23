@@ -13,6 +13,7 @@ public sealed record ResearchSearchRequest(ResearchGenerationInput Input, Resear
 public sealed record ResearchSearchResult(IReadOnlyList<ResearchSourceCandidate> Sources, IReadOnlyList<ResearchEvidenceCandidate> Evidence, AiUsageMetadata Usage);
 public sealed record ResearchReportPrompt(ResearchGenerationInput Input, ResearchPlan Plan, IReadOnlyList<ResearchSourceCandidate> Sources, IReadOnlyList<ResearchEvidenceCandidate> Evidence, ResearchProjectContext? Project);
 public sealed record ResearchReportProviderResult(ResearchDraft Draft, AiUsageMetadata Usage);
+public sealed record ResearchProviderErrorDetails(int HttpStatusCode, string? ErrorType, string? ErrorCode, string? ErrorParam, string FailureCategory);
 
 public interface IResearchPlanner
 {
@@ -117,13 +118,7 @@ public sealed class OpenAiResearchSearchProvider(
         var payload = new Dictionary<string, object?>
         {
             ["model"] = string.IsNullOrWhiteSpace(options.SearchModel) ? settings.SearchModel : options.SearchModel,
-            ["tools"] = new object[] { new Dictionary<string, object?>
-            {
-                ["type"] = "web_search",
-                ["search_context_size"] = request.Input.Depth.Equals("deep", StringComparison.OrdinalIgnoreCase) ? "high" : request.Input.Depth.Equals("quick", StringComparison.OrdinalIgnoreCase) ? "low" : "medium",
-                ["external_web_access"] = true,
-                ["filters"] = BuildFilters(request.Preferences),
-            } },
+            ["tools"] = new object[] { BuildWebSearchTool(request) },
             ["tool_choice"] = "required",
             ["include"] = new[] { "web_search_call.action.sources" },
             ["input"] = BuildInput(request),
@@ -138,23 +133,98 @@ public sealed class OpenAiResearchSearchProvider(
         catch (HttpRequestException exception) { logger.LogWarning(exception, "Research search provider request failed safely. FailureCategory={FailureCategory}", "transient"); throw new ResearchSearchFailedException(); }
         using (response.Content)
         {
+            var httpStatus = (int)response.StatusCode;
             if (!response.IsSuccessStatusCode)
             {
-                var status = (int)response.StatusCode;
-                logger.LogWarning("Research search provider rejected request. HttpStatus={HttpStatus}; FailureCategory={FailureCategory}", status, status >= 500 ? "transient" : "provider");
-                throw status is 401 or 403 ? new ResearchSearchUnavailableException() : new ResearchSearchFailedException();
+                var details = await ReadProviderErrorAsync(response.Content, httpStatus, timeout.Token);
+                logger.LogWarning(
+                    "Research search provider rejected request. HttpStatus={HttpStatus}; ErrorType={ErrorType}; ErrorCode={ErrorCode}; ErrorParam={ErrorParam}; FailureCategory={FailureCategory}",
+                    details.HttpStatusCode,
+                    details.ErrorType ?? "none",
+                    details.ErrorCode ?? "none",
+                    details.ErrorParam ?? "none",
+                    details.FailureCategory);
+                throw httpStatus is 401 or 403
+                    ? new ResearchSearchUnavailableException(details)
+                    : new ResearchSearchFailedException(details);
             }
-            using var document = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(timeout.Token), cancellationToken: timeout.Token);
-            return Parse(document.RootElement, stopwatch.ElapsedMilliseconds, options);
+            try
+            {
+                using var document = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(timeout.Token), cancellationToken: timeout.Token);
+                return Parse(document.RootElement, stopwatch.ElapsedMilliseconds, options);
+            }
+            catch (ResearchSearchFailedException)
+            {
+                throw;
+            }
+            catch (JsonException)
+            {
+                logger.LogWarning("Research search provider returned malformed output. HttpStatus={HttpStatus}; FailureCategory={FailureCategory}", httpStatus, "malformed_response");
+                throw new ResearchSearchFailedException(new ResearchProviderErrorDetails(httpStatus, null, null, null, "malformed_response"));
+            }
+            catch (InvalidOperationException)
+            {
+                logger.LogWarning("Research search provider returned malformed output. HttpStatus={HttpStatus}; FailureCategory={FailureCategory}", httpStatus, "malformed_response");
+                throw new ResearchSearchFailedException(new ResearchProviderErrorDetails(httpStatus, null, null, null, "malformed_response"));
+            }
         }
     }
 
-    private static object BuildFilters(ResearchSourcePreference preferences)
+    private static Dictionary<string, object?> BuildWebSearchTool(ResearchSearchRequest request)
+    {
+        var tool = new Dictionary<string, object?>
+        {
+            ["type"] = "web_search",
+            ["search_context_size"] = request.Input.Depth.Equals("deep", StringComparison.OrdinalIgnoreCase) ? "high" : request.Input.Depth.Equals("quick", StringComparison.OrdinalIgnoreCase) ? "low" : "medium",
+            ["external_web_access"] = true,
+        };
+        var filters = BuildFilters(request.Preferences);
+        if (filters is not null) tool["filters"] = filters;
+        return tool;
+    }
+
+    private static Dictionary<string, object?>? BuildFilters(ResearchSourcePreference preferences)
     {
         var filters = new Dictionary<string, object?>();
         if (preferences.PreferredDomains.Count > 0) filters["allowed_domains"] = preferences.PreferredDomains;
         if (preferences.ExcludedDomains.Count > 0) filters["blocked_domains"] = preferences.ExcludedDomains;
-        return filters;
+        return filters.Count == 0 ? null : filters;
+    }
+
+    private static async Task<ResearchProviderErrorDetails> ReadProviderErrorAsync(HttpContent content, int status, CancellationToken cancellationToken)
+    {
+        string? errorType = null;
+        string? errorCode = null;
+        string? errorParam = null;
+        try
+        {
+            using var document = await JsonDocument.ParseAsync(await content.ReadAsStreamAsync(cancellationToken), cancellationToken: cancellationToken);
+            if (document.RootElement.TryGetProperty("error", out var error) && error.ValueKind == JsonValueKind.Object)
+            {
+                errorType = ReadSafeProviderField(error, "type");
+                errorCode = ReadSafeProviderField(error, "code");
+                errorParam = ReadSafeProviderField(error, "param");
+            }
+        }
+        catch (JsonException) { }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { }
+
+        var category = status switch
+        {
+            401 or 403 => "configuration",
+            429 => "rate_limited",
+            >= 500 => "transient",
+            >= 400 => "provider",
+            _ => "unknown",
+        };
+        return new ResearchProviderErrorDetails(status, errorType, errorCode, errorParam, category);
+    }
+
+    private static string? ReadSafeProviderField(JsonElement error, string property)
+    {
+        if (!error.TryGetProperty(property, out var value) || value.ValueKind != JsonValueKind.String) return null;
+        var text = value.GetString()?.Trim();
+        return string.IsNullOrWhiteSpace(text) ? null : text.Length <= 160 ? text : text[..160];
     }
 
     private static string BuildInput(ResearchSearchRequest request) =>
@@ -185,8 +255,9 @@ public sealed class OpenAiResearchSearchProvider(
                     if (!part.TryGetProperty("annotations", out var annotationList) || annotationList.ValueKind != JsonValueKind.Array) continue;
                     foreach (var annotation in annotationList.EnumerateArray())
                     {
-                        if (!annotation.TryGetProperty("url", out var url) || url.ValueKind != JsonValueKind.String) continue;
-                        annotations.Add((url.GetString()!, annotation.TryGetProperty("title", out var title) && title.ValueKind == JsonValueKind.String ? title.GetString() : null, annotation.TryGetProperty("start_index", out var start) && start.TryGetInt32(out var startValue) ? startValue : 0, annotation.TryGetProperty("end_index", out var end) && end.TryGetInt32(out var endValue) ? endValue : text.Length));
+                        var citation = annotation.TryGetProperty("url_citation", out var nested) && nested.ValueKind == JsonValueKind.Object ? nested : annotation;
+                        if (!citation.TryGetProperty("url", out var url) || url.ValueKind != JsonValueKind.String) continue;
+                        annotations.Add((url.GetString()!, citation.TryGetProperty("title", out var title) && title.ValueKind == JsonValueKind.String ? title.GetString() : null, citation.TryGetProperty("start_index", out var start) && start.TryGetInt32(out var startValue) ? startValue : 0, citation.TryGetProperty("end_index", out var end) && end.TryGetInt32(out var endValue) ? endValue : text.Length));
                     }
                 }
             }
@@ -203,7 +274,8 @@ public sealed class OpenAiResearchSearchProvider(
             var title = string.IsNullOrWhiteSpace(annotation.Title) ? new Uri(url).Host : annotation.Title!;
             var citationId = $"S{index + 1}";
             var canonical = Canonicalize(url);
-            sourceByUrl[url] = new ResearchSourceCandidate(citationId, url, canonical, Trim(title, options.MaxSourceTitleCharacters), new Uri(url).Host, null, null, DateTime.UtcNow, "web", Trim(answer, options.MaxSourceSnippetCharacters), Trim(answer, options.MaxSourceTextCharacters), null, index + 1, true, null);
+            var citationMetadata = annotation.Url is null ? null : JsonSerializer.Serialize(new { citationStartIndex = annotation.Start, citationEndIndex = annotation.End });
+            sourceByUrl[url] = new ResearchSourceCandidate(citationId, url, canonical, Trim(title, options.MaxSourceTitleCharacters), new Uri(url).Host, null, null, DateTime.UtcNow, "web", Trim(answer, options.MaxSourceSnippetCharacters), Trim(answer, options.MaxSourceTextCharacters), null, index + 1, true, citationMetadata);
             if (annotations.Any(item => item.Url.Equals(url, StringComparison.OrdinalIgnoreCase))) evidence.Add(new ResearchEvidenceCandidate(citationId, "web evidence", Trim(answer, options.MaxEvidenceCharacters), null, null));
         }
         var model = root.TryGetProperty("model", out var modelElement) && modelElement.ValueKind == JsonValueKind.String ? modelElement.GetString()! : options.SearchModel;
@@ -263,7 +335,15 @@ public static class ResearchStructuredOutput
     """).RootElement.Clone());
 }
 
-public sealed class ResearchSearchUnavailableException : Exception;
-public sealed class ResearchSearchFailedException : Exception;
+public sealed class ResearchSearchUnavailableException(ResearchProviderErrorDetails? details = null) : Exception("The research search provider is unavailable.")
+{
+    public ResearchProviderErrorDetails? Details { get; } = details;
+}
+
+public sealed class ResearchSearchFailedException(ResearchProviderErrorDetails? details = null) : Exception("The research search provider failed.")
+{
+    public ResearchProviderErrorDetails? Details { get; } = details;
+}
+
 public sealed class ResearchSearchTimeoutException : Exception;
 public sealed class ResearchOutputInvalidException(Exception inner) : Exception("The research report output was invalid.", inner);

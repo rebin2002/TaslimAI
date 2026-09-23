@@ -531,7 +531,13 @@ public sealed class GenerationJobWorker(
             {
                 var stage = (exception as ResearchGenerationStageException)?.Stage ?? ResearchGenerationStages.Report;
                 var providerException = exception as AiProviderException ?? exception.InnerException as AiProviderException;
-                logger.LogError("Research generation failed. JobId={JobId}; Stage={Stage}; ErrorCode={ErrorCode}; ExceptionType={ExceptionType}; ProviderFailureCategory={ProviderFailureCategory}; ProviderHttpStatus={ProviderHttpStatus}; ProviderErrorCode={ProviderErrorCode}; ModelKey={ModelKey}; ElapsedMs={ElapsedMs}",
+                var searchDetails = exception.InnerException switch
+                {
+                    ResearchSearchFailedException failed => failed.Details,
+                    ResearchSearchUnavailableException unavailable => unavailable.Details,
+                    _ => null,
+                };
+                logger.LogError("Research generation failed. JobId={JobId}; Stage={Stage}; ErrorCode={ErrorCode}; ExceptionType={ExceptionType}; ProviderFailureCategory={ProviderFailureCategory}; ProviderHttpStatus={ProviderHttpStatus}; ProviderErrorCode={ProviderErrorCode}; SearchHttpStatus={SearchHttpStatus}; SearchErrorType={SearchErrorType}; SearchErrorCode={SearchErrorCode}; SearchErrorParam={SearchErrorParam}; ModelKey={ModelKey}; ElapsedMs={ElapsedMs}",
                     claimedJob.Id,
                     stage,
                     failureCode,
@@ -539,6 +545,10 @@ public sealed class GenerationJobWorker(
                     providerException?.FailureCategory,
                     providerException?.HttpStatusCode,
                     providerException?.ProviderErrorCode,
+                    searchDetails?.HttpStatusCode,
+                    searchDetails?.ErrorType,
+                    searchDetails?.ErrorCode,
+                    searchDetails?.ErrorParam,
                     providerException?.ModelKey,
                     (long)Stopwatch.GetElapsedTime(executionStarted).TotalMilliseconds);
             }
