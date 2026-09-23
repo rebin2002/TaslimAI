@@ -19,6 +19,7 @@ using Taslim.Api.Persistence;
 using Taslim.Api.Usage;
 using Taslim.Api.Files;
 using Taslim.Api.Generation;
+using Taslim.Api.Movies;
 using FileSettings = Taslim.Api.Files.FileOptions;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -142,6 +143,8 @@ builder.Services.Configure<GenerationJobOptions>(builder.Configuration.GetSectio
 builder.Services.AddScoped<IGenerationJobQueue, DatabaseGenerationJobQueue>();
 builder.Services.AddScoped<IGenerationJobUsageService, GenerationJobUsageService>();
 builder.Services.AddScoped<IGenerationJobService, GenerationJobService>();
+builder.Services.AddScoped<IMovieStudioService, MovieStudioService>();
+builder.Services.AddSingleton<IMovieVideoProvider, UnavailableMovieVideoProvider>();
 builder.Services.AddSingleton<IGenerationJobHandler, SystemTestGenerationJobHandler>();
 if (builder.Configuration.GetValue("GenerationJobs:WorkerEnabled", !builder.Environment.IsEnvironment("Testing")))
 {
@@ -165,6 +168,7 @@ builder.Services.AddScoped<IChatCompletionService, ChatCompletionService>();
 builder.Services.AddSingleton<IImagePromptBuilder, TaslimImagePromptBuilder>();
 builder.Services.AddSingleton<IImageGenerationProvider>(services => services.GetRequiredService<OpenAiImageGenerationProvider>());
 builder.Services.AddSingleton<IGenerationJobHandler, ImageGenerationJobHandler>();
+builder.Services.AddScoped<IGenerationJobHandler, MovieVideoGenerationJobHandler>();
 builder.Services.AddSingleton<IDocumentPromptBuilder, DocumentPromptBuilder>();
 builder.Services.AddScoped<IDocumentGenerationProvider, AiDocumentGenerationProvider>();
 builder.Services.AddSingleton<IDocumentRenderer, DocumentRenderer>();
