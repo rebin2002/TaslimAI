@@ -163,6 +163,26 @@ button { border: 0; cursor: pointer; }
 .usage-link-card p { margin: 0; color: #909eab; font-size: 11px; line-height: 1.5; }
 .usage-link-card .secondary-button { align-self: flex-start; }
 
+/* Billing foundation — customer-facing entitlement view only. */
+.billing-page { padding-bottom: 70px; }
+.billing-notice { display: flex; align-items: flex-start; gap: 9px; margin: 18px 0; padding: 12px 14px; color: #667f96; border: 1px solid #d9e8f1; border-radius: 10px; background: #f4f9fc; font-size: 10px; line-height: 1.5; }
+.billing-summary-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-bottom: 14px; }
+.billing-plan-card, .billing-credit-card, .billing-period-card { display: flex; min-height: 168px; flex-direction: column; gap: 9px; }
+.billing-plan-card > strong, .billing-credit-card > strong, .billing-period-card > strong { margin-top: auto; color: var(--navy-900); font-size: 23px; letter-spacing: -.03em; }
+.billing-plan-card > span, .billing-credit-card > span, .billing-period-card > span { color: #8493a2; font-size: 10px; line-height: 1.45; }
+.billing-grid { margin-bottom: 14px; }
+.billing-definition-list { display: grid; gap: 10px; margin: 17px 0 0; }
+.billing-definition-list > div { display: flex; justify-content: space-between; gap: 12px; padding-bottom: 9px; border-bottom: 1px solid #eef2f5; font-size: 11px; }
+.billing-definition-list > div:last-child { padding-bottom: 0; border-bottom: 0; }
+.billing-definition-list dt { color: #8493a2; }
+.billing-definition-list dd { margin: 0; color: var(--navy-900); font-weight: 750; }
+.billing-history { margin-top: 0; }
+.billing-table td:nth-child(2) { min-width: 220px; white-space: normal; }
+.billing-positive { color: #19866e; font-weight: 750; }
+.billing-negative { color: #aa4e4e; font-weight: 750; }
+[dir="rtl"] .billing-notice { flex-direction: row-reverse; }
+@media (max-width: 900px) { .billing-summary-grid { grid-template-columns: 1fr; } }
+
 /* Batch 3.4 memory and project-context surfaces — additive styles only. */
 .memory-page { padding-bottom: 70px; }
 .memory-notice { margin: 18px 0; padding: 13px 15px; color: #667f96; border: 1px solid #d9e8f1; border-radius: 10px; background: #f4f9fc; font-size: 11px; line-height: 1.6; }
