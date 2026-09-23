@@ -9,6 +9,7 @@ using Microsoft.EntityFrameworkCore;
 using Taslim.Api.Ai;
 using Taslim.Api.Assets;
 using Taslim.Api.Authorization;
+using Taslim.Api.Billing;
 using Taslim.Api.Domain;
 using Taslim.Api.Documents;
 using Taslim.Api.Presentations;
@@ -132,6 +133,10 @@ builder.Services.AddCors(options => options.AddPolicy("Frontend", policy =>
         .AllowAnyMethod()
         .AllowCredentials()));
 builder.Services.AddScoped<WorkspaceAccessService>();
+builder.Services.Configure<BillingOptions>(builder.Configuration.GetSection("Billing"));
+builder.Services.AddScoped<IBillingProvisioningService, BillingProvisioningService>();
+builder.Services.AddScoped<IBillingAccountService, BillingAccountService>();
+builder.Services.AddScoped<ICreditLedgerService, CreditLedgerService>();
 builder.Services.AddScoped<IAssetService, AssetService>();
 builder.Services.AddScoped<IGeneratedAssetPublisher, GeneratedAssetPublisher>();
 builder.Services.AddScoped<IUsageLedgerService, UsageLedgerService>();

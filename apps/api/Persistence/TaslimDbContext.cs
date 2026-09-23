@@ -24,6 +24,11 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
     public DbSet<AssetRepresentation> AssetRepresentations => Set<AssetRepresentation>();
     public DbSet<ResearchSource> ResearchSources => Set<ResearchSource>();
     public DbSet<ResearchEvidence> ResearchEvidence => Set<ResearchEvidence>();
+    public DbSet<Plan> Plans => Set<Plan>();
+    public DbSet<Subscription> Subscriptions => Set<Subscription>();
+    public DbSet<BillingPeriod> BillingPeriods => Set<BillingPeriod>();
+    public DbSet<CreditEntitlement> CreditEntitlements => Set<CreditEntitlement>();
+    public DbSet<CreditLedgerEntry> CreditLedgerEntries => Set<CreditLedgerEntry>();
     public DbSet<DataProtectionKey> DataProtectionKeys => Set<DataProtectionKey>();
 
     protected override void OnModelCreating(ModelBuilder builder)
@@ -334,6 +339,79 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasOne<Project>().WithMany().HasForeignKey(transaction => transaction.ProjectId).OnDelete(DeleteBehavior.SetNull);
             entity.HasOne<Conversation>().WithMany().HasForeignKey(transaction => transaction.ConversationId).OnDelete(DeleteBehavior.SetNull);
             entity.HasOne(transaction => transaction.GenerationJob).WithMany().HasForeignKey(transaction => transaction.GenerationJobId).OnDelete(DeleteBehavior.SetNull);
+        });
+        builder.Entity<Plan>(entity =>
+        {
+            entity.HasKey(plan => plan.Id);
+            entity.Property(plan => plan.Code).HasMaxLength(40).IsRequired();
+            entity.Property(plan => plan.Name).HasMaxLength(80).IsRequired();
+            entity.Property(plan => plan.Description).HasMaxLength(500);
+            entity.Property(plan => plan.MonthlyPriceUsd).HasPrecision(18, 2).IsRequired();
+            entity.Property(plan => plan.Currency).HasMaxLength(3).IsRequired();
+            entity.Property(plan => plan.MonthlyCreditAllowance).IsRequired();
+            entity.Property(plan => plan.CreatedAt).IsRequired();
+            entity.Property(plan => plan.UpdatedAt).IsRequired();
+            entity.HasIndex(plan => plan.Code).IsUnique();
+            entity.HasData(DefaultPlanCatalog.All.Select(plan => new
+            {
+                plan.Id, plan.Code, plan.Name, plan.Description, plan.MonthlyPriceUsd,
+                plan.MonthlyCreditAllowance, plan.Currency, plan.IsActive, plan.SortOrder,
+                CreatedAt = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc),
+                UpdatedAt = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc),
+            }));
+        });
+        builder.Entity<Subscription>(entity =>
+        {
+            entity.HasKey(subscription => subscription.Id);
+            entity.Property(subscription => subscription.Status).HasConversion<string>().HasMaxLength(30).IsRequired();
+            entity.Property(subscription => subscription.BillingProvider).HasMaxLength(60);
+            entity.Property(subscription => subscription.ProviderSubscriptionReference).HasMaxLength(200);
+            entity.Property(subscription => subscription.CreatedAt).IsRequired();
+            entity.Property(subscription => subscription.UpdatedAt).IsRequired();
+            entity.HasIndex(subscription => subscription.WorkspaceId);
+            entity.HasIndex(subscription => new { subscription.Status, subscription.NextRenewalAt });
+            entity.HasOne(subscription => subscription.Workspace).WithMany().HasForeignKey(subscription => subscription.WorkspaceId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(subscription => subscription.Plan).WithMany(plan => plan.Subscriptions).HasForeignKey(subscription => subscription.PlanId).OnDelete(DeleteBehavior.Restrict);
+        });
+        builder.Entity<BillingPeriod>(entity =>
+        {
+            entity.HasKey(period => period.Id);
+            entity.Property(period => period.Status).HasConversion<string>().HasMaxLength(30).IsRequired();
+            entity.Property(period => period.IncludedCredits).IsRequired();
+            entity.Property(period => period.CreatedAt).IsRequired();
+            entity.HasIndex(period => new { period.SubscriptionId, period.StartsAt }).IsUnique();
+            entity.HasIndex(period => new { period.Status, period.EndsAt });
+            entity.HasOne(period => period.Subscription).WithMany(subscription => subscription.BillingPeriods).HasForeignKey(period => period.SubscriptionId).OnDelete(DeleteBehavior.Cascade);
+        });
+        builder.Entity<CreditEntitlement>(entity =>
+        {
+            entity.HasKey(entitlement => entitlement.Id);
+            entity.Property(entitlement => entitlement.Type).HasConversion<string>().HasMaxLength(40).IsRequired();
+            entity.Property(entitlement => entitlement.GrantedCredits).IsRequired();
+            entity.Property(entitlement => entitlement.IdempotencyKey).HasMaxLength(180).IsRequired();
+            entity.Property(entitlement => entitlement.SourceReference).HasMaxLength(200);
+            entity.Property(entitlement => entitlement.CreatedAt).IsRequired();
+            entity.HasIndex(entitlement => new { entitlement.WorkspaceId, entitlement.IdempotencyKey }).IsUnique();
+            entity.HasIndex(entitlement => new { entitlement.WorkspaceId, entitlement.ExpiresAt });
+            entity.HasOne(entitlement => entitlement.Workspace).WithMany().HasForeignKey(entitlement => entitlement.WorkspaceId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(entitlement => entitlement.BillingPeriod).WithMany(period => period.CreditEntitlements).HasForeignKey(entitlement => entitlement.BillingPeriodId).OnDelete(DeleteBehavior.SetNull);
+        });
+        builder.Entity<CreditLedgerEntry>(entity =>
+        {
+            entity.HasKey(entry => entry.Id);
+            entity.Property(entry => entry.Type).HasConversion<string>().HasMaxLength(40).IsRequired();
+            entity.Property(entry => entry.Amount).IsRequired();
+            entity.Property(entry => entry.IdempotencyKey).HasMaxLength(180).IsRequired();
+            entity.Property(entry => entry.Reason).HasMaxLength(500).IsRequired();
+            entity.Property(entry => entry.CreatedAt).IsRequired();
+            entity.HasIndex(entry => new { entry.WorkspaceId, entry.IdempotencyKey }).IsUnique();
+            entity.HasIndex(entry => new { entry.WorkspaceId, entry.CreatedAt });
+            entity.HasIndex(entry => entry.UsageTransactionId);
+            entity.HasIndex(entry => entry.ReversesEntryId);
+            entity.HasOne(entry => entry.Workspace).WithMany().HasForeignKey(entry => entry.WorkspaceId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(entry => entry.CreditEntitlement).WithMany(entitlement => entitlement.LedgerEntries).HasForeignKey(entry => entry.CreditEntitlementId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(entry => entry.UsageTransaction).WithMany().HasForeignKey(entry => entry.UsageTransactionId).OnDelete(DeleteBehavior.SetNull);
+            entity.ToTable("CreditLedgerEntries", table => table.HasCheckConstraint("CK_CreditLedgerEntries_NonZeroAmount", "\"Amount\" <> 0"));
         });
     }
 }

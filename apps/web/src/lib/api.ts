@@ -131,6 +131,12 @@ export type UsageTransaction = {
   failureCode: string | null;
 };
 export type UsageHistory = { items: UsageTransaction[]; page: number; pageSize: number; totalCount: number; totalPages: number };
+export type BillingPlan = { code: string; name: string; monthlyPriceUsd: number; monthlyCreditAllowance: number; currency: string };
+export type BillingSubscription = { status: string; currentPeriodStart: string; currentPeriodEnd: string; nextRenewalAt: string; cancelAtPeriodEnd: boolean };
+export type BillingPeriod = { id: string; status: string; startsAt: string; endsAt: string; includedCredits: number };
+export type BillingCredits = { includedGranted: number; includedRemaining: number; purchasedRemaining: number; adjustmentBalance: number; totalRemaining: number };
+export type CreditLedgerEntry = { id: string; type: string; amount: number; reason: string; createdAt: string };
+export type BillingAccount = { currentPlan: BillingPlan; subscription: BillingSubscription; billingPeriod: BillingPeriod; credits: BillingCredits; transactions: CreditLedgerEntry[]; upgradeAvailable: boolean };
 export type AdminUsageSummary = {
   fromUtc: string;
   toUtc: string;
@@ -439,6 +445,7 @@ export const api = {
   streamMessage: (conversationId: string, content: string, onEvent: (event: ChatStreamEvent) => void, id = requestId(), attachmentIds: string[] = []) => streamRequest(`/api/conversations/${conversationId}/messages/stream`, { content, requestId: id, attachmentIds }, onEvent),
   getUsageSummary: (workspaceId: string) => request<UsageSummary>(`/api/workspaces/${workspaceId}/usage/summary`),
   getUsageHistory: (workspaceId: string, page = 1, pageSize = 20) => request<UsageHistory>(`/api/workspaces/${workspaceId}/usage?page=${page}&pageSize=${pageSize}`),
+  getBillingAccount: (workspaceId: string) => request<BillingAccount>(`/api/workspaces/${workspaceId}/billing`),
   getAdminUsageReport: (params: Record<string, string | number | undefined> = {}) => {
     const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value !== undefined).map(([key, value]) => [key, String(value)]));
     return request<AdminUsageReport>(`/api/admin/usage/report${query.toString() ? `?${query.toString()}` : ""}`);
