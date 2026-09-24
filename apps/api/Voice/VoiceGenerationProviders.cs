@@ -120,10 +120,10 @@ public sealed class OpenAiVoiceGenerationProvider(
                 throw new VoiceProviderFailureException();
             }
 
-            byte[] content;
+            ReadOnlyMemory<byte> content;
             try
             {
-                content = await response.Content.ReadAsByteArrayAsync(timeout.Token);
+                content = await ReadBoundedAsync(response.Content, settings.MaxOutputBytes, timeout.Token);
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
@@ -140,6 +140,22 @@ public sealed class OpenAiVoiceGenerationProvider(
                 Key, settings.Model, request.Language, format, content.Length, stopwatch.ElapsedMilliseconds, ReadRequestId(response));
             return new VoiceProviderResult(content, string.IsNullOrWhiteSpace(contentType) ? ContentTypeFor(format) : contentType, format, null, null, usage);
         }
+    }
+
+    private static async Task<ReadOnlyMemory<byte>> ReadBoundedAsync(HttpContent content, int configuredMaximum, CancellationToken cancellationToken)
+    {
+        var maximum = Math.Min(10 * 1_048_576, Math.Max(1, configuredMaximum));
+        await using var input = await content.ReadAsStreamAsync(cancellationToken);
+        await using var output = new MemoryStream();
+        var buffer = new byte[64 * 1024];
+        while (true)
+        {
+            var read = await input.ReadAsync(buffer.AsMemory(), cancellationToken);
+            if (read == 0) break;
+            if (output.Length + read > maximum) throw new VoiceOutputInvalidException();
+            await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+        }
+        return output.ToArray();
     }
 
     private VoiceProviderUsage BuildUsage(VoiceGenerationInput request, int outputBytes, long latencyMs, string format)
