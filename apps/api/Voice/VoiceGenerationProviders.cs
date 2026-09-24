@@ -66,6 +66,8 @@ public sealed class OpenAiVoiceGenerationProvider(
 
         if (!settings.SupportedLanguages.Contains(request.Language, StringComparer.OrdinalIgnoreCase))
             throw new VoiceLanguageUnsupportedException();
+        if (request.Text.Length > Math.Max(1, settings.MaxProviderTextCharacters))
+            throw new VoiceProviderUnsupportedRequestException();
 
         var format = NormalizeFormat(settings.ResponseFormat);
         if (!VoiceGenerationValues.Formats.Contains(format))
@@ -239,5 +241,6 @@ public sealed class VoiceProviderUnavailableException() : Exception("No configur
 public sealed class VoiceProviderTimeoutException() : Exception("The voice provider timed out.");
 public sealed class VoiceProviderFailureException() : Exception("The voice provider failed safely.");
 public sealed class VoiceProviderConfigurationException() : Exception("The voice provider configuration is incomplete.");
+public sealed class VoiceProviderUnsupportedRequestException() : Exception("The voice provider does not support this request.");
 public sealed class VoiceLanguageUnsupportedException() : Exception("The configured voice provider does not support this language.");
 public sealed class VoiceOutputInvalidException() : Exception("The voice provider returned invalid audio.");

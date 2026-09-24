@@ -68,6 +68,23 @@ public sealed class OpenAiVoiceGenerationProviderTests
         Assert.Null(handler.Request);
     }
 
+    [Fact]
+    public async Task Adapter_rejects_text_over_provider_limit_without_calling_provider()
+    {
+        var handler = new StubHandler(_ => throw new InvalidOperationException("provider should not be called"));
+        using var client = new HttpClient(handler);
+        var provider = CreateProvider(client, new VoiceGenerationOptions
+        {
+            Enabled = true,
+            ProviderKey = "openai",
+            Model = "gpt-4o-mini-tts",
+            MaxProviderTextCharacters = 4,
+        });
+
+        await Assert.ThrowsAsync<VoiceProviderUnsupportedRequestException>(() => provider.GenerateAsync(Input()));
+        Assert.Null(handler.Request);
+    }
+
     [Theory]
     [InlineData(HttpStatusCode.Unauthorized)]
     [InlineData(HttpStatusCode.TooManyRequests)]
