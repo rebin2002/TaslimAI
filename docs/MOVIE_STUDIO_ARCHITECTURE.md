@@ -2,13 +2,13 @@
 
 ## Purpose and scope
 
-Movie Studio establishes the production foundation for two workflows at `/create/movie`: **Quick Movie** and **Full Movie Project**. The feature saves a durable creative plan before it depends on a video-generation vendor. It therefore supports product discovery, continuity planning, job accounting, and future provider integration without emitting fake video output.
+Movie Studio establishes the production foundation for two workflows at `/create/movie`: **Quick Movie** and **Full Movie Project**. The feature saves a durable creative plan and connects it to a provider-neutral, restart-safe video execution layer. It supports continuity planning, per-shot/per-scene clip attachment, job accounting, and private video publication without emitting fake output when no vetted provider is configured.
 
 The implementation intentionally does not reference or modify Batch 3.13 Social Media Studio code. It is isolated on `parallel/movie-studio` and is designed to be reconciled with concurrent work later.
 
 ## Workflow model
 
-Quick Movie captures a title, description, duration, aspect ratio, style, language, optional existing Project, and additional instructions. The API persists a `MovieProject`, creates or reuses the optional Project link, and queues a durable `GenerationJob` with type `movie.quick.generate`. The existing generation worker then delegates to the provider-neutral `IMovieVideoProvider` boundary. When no provider is configured, the default implementation fails safely with `MOVIE_PROVIDER_UNAVAILABLE`; the plan and job history remain available for continuation.
+Quick Movie captures a title, description, duration, aspect ratio, style, language, optional existing Project, and additional instructions. The API persists a `MovieProject`, creates a `MovieClip`, and queues a durable `GenerationJob` with type `movie.quick.generate`. The worker submits through `IMovieVideoProvider`, persists the provider job identifier, polls with bounded retry/backoff, supports cancellation, retrieves the output as a stream, and publishes it through the existing private `StoredFile` → `Asset` path. When no provider is configured, the default implementation fails safely with `MOVIE_PROVIDER_UNAVAILABLE`; the plan, clip, usage transaction, and job history remain available for continuation.
 
 Full Movie Project creates a durable planning workspace. If the user does not select an existing Project, the API creates a Taslim Project with type `Movie`. The Movie Project owns a Movie Guide / Continuity Guide and collections for scenes, characters, locations, shots, clips, and assemblies. The first UI exposes the guide and starter planning columns for scenes, characters, and locations. Shot, clip, and assembly persistence is present for future studio stages.
 
@@ -24,38 +24,39 @@ Movie-specific tables are additive and live beside the existing Projects, Assets
 | `MovieCharacter` | Durable character identity and continuity notes | Movie Project, optional Asset reference |
 | `MovieLocation` | Durable location identity and visual continuity | Movie Project, optional Asset reference |
 | `MovieShot` | Shot description, framing, motion, narration, dialogue | Scene |
-| `MovieClip` | Future provider output record | Project, Shot, Generation Job, Asset, Stored File |
+| `MovieClip` | Provider output and continuity attachment | Project, Scene, Shot, Generation Job, Asset, Stored File |
 | `MovieAssembly` | Future final-assembly record | Project, Generation Job, Asset |
 
-The EF-generated migration `20260923153752_AddMovieStudioFoundation` creates these tables and their indexes. It is additive and uses restrictive workspace ownership relationships, cascading deletion only from the Movie Project root to its plan records, and nullable links for provider outputs. Existing private storage remains the boundary for actual media files: `StoredFile` carries the storage key and provider, while `Asset` is the user-facing library record.
+The EF-generated migration `20260923153752_AddMovieStudioFoundation` creates the planning tables. The additive migration `20260924012646_AddMovieVideoProviderExecution` adds continuity snapshots, scene clip links, and the durable provider execution table. Existing private storage remains the boundary for actual media files: `StoredFile` carries the storage key and provider, while `Asset` is the user-facing library record.
 
 The schema does not store public provider URLs as final assets. Provider identifiers and metadata are retained as nullable fields so a configured provider can be reconciled with Taslim-owned private storage later.
 
 ## Generation jobs and usage accounting
 
-Movie operations use the existing durable `GenerationJob` queue. The supported job types are `movie.quick.generate`, `movie.clip.generate`, and `movie.assembly`. Only Quick Movie creates a job in this task; clip-generation and assembly operations are reserved for later stages.
+Movie operations use the existing durable `GenerationJob` queue. The supported job types are `movie.quick.generate`, `movie.clip.generate`, and `movie.assembly`. Quick Movie creates a project-level clip; authenticated scene-level and shot-level generation routes create `movie.clip.generate` jobs that retain their scene/shot links and continuity snapshot. Assembly remains a reserved future stage.
 
 `GenerationJobUsageService` maps every movie job type to `UsageFeature.Movie`. This preserves the repository's existing feature naming convention and allows pending, failed, cancelled, and completed transactions to appear in existing usage reporting without a new accounting subsystem.
 
-The current provider registration is `UnavailableMovieVideoProvider`. It is explicit rather than a mock: it reports `IsAvailable = false` and throws `MovieProviderUnavailableException`. This prevents a successful-looking fake clip from entering Assets or private storage.
+The current provider registration is `UnavailableMovieVideoProvider`. It is explicit rather than a mock: it reports `IsAvailable = false` and throws `MovieProviderUnavailableException`. This prevents a successful-looking fake clip from entering Assets or private storage. A real adapter is intentionally not included because this baseline has no verified video API endpoint and no provider credentials/configuration.
 
 ## Provider-neutral boundary
 
-The future integration point is:
+The production integration point is:
 
 ```csharp
 public interface IMovieVideoProvider
 {
     string Key { get; }
     bool IsAvailable { get; }
-    Task<MovieVideoGenerationResult> GenerateAsync(
-        MovieVideoGenerationRequest request,
-        IProgress<int> progress,
-        CancellationToken cancellationToken);
+    IReadOnlyCollection<string> SupportedOperations { get; }
+    Task<MovieVideoSubmission> SubmitAsync(MovieVideoGenerationRequest request, CancellationToken cancellationToken);
+    Task<MovieVideoProviderStatus> GetStatusAsync(string providerJobId, CancellationToken cancellationToken);
+    Task<MovieVideoProviderOutput> RetrieveAsync(string providerJobId, MovieVideoProviderStatus status, CancellationToken cancellationToken);
+    Task CancelAsync(string providerJobId, CancellationToken cancellationToken);
 }
 ```
 
-The request carries the operation, creative brief, duration, aspect ratio, style, language, additional instructions, continuity-guide JSON, and optional scene JSON. The result carries a provider key, provider clip identifier, content type, optional provider URL for transient transfer, and metadata. A production provider implementation can be registered through dependency injection without changing the Movie Studio API contract.
+The request carries a stable generation-job identity, operation, creative brief, duration, aspect ratio, style, language, additional instructions, continuity-guide JSON, and optional scene/shot JSON. Provider job identifiers, attempt counts, poll counts, status, and next-poll state are stored in the server-only `MovieVideoProviderExecutions` table. A production provider implementation can be registered through dependency injection without changing the Movie Studio API contract. Provider/model/cost internals are not returned in user-facing Movie DTOs or result JSON.
 
 ## API surface
 
@@ -71,6 +72,8 @@ All endpoints require authentication and workspace membership. Mutating endpoint
 | `POST /api/movie-studio/projects/{id}/characters` | Add a character record |
 | `POST /api/movie-studio/projects/{id}/locations` | Add a location record |
 | `POST /api/movie-studio/scenes/{sceneId}/shots` | Add an ordered shot with narration/dialogue and continuity fields |
+| `POST /api/movie-studio/projects/{id}/scenes/{sceneId}/generate` | Queue a provider-neutral scene clip job |
+| `POST /api/movie-studio/shots/{shotId}/generate` | Queue a provider-neutral shot clip job |
 
 ## UI foundation
 
@@ -98,13 +101,13 @@ No unfinished 3.13 code is imported, called, or modified.
 
 ## Migration and operations
 
-The migration is named `AddMovieStudioFoundation` and should be applied through the repository's existing production advisory-lock migration runner. The EF migration designer and `TaslimDbContextModelSnapshot.cs` are included. The API build completed with zero warnings and errors, `dotnet ef migrations list` discovers the Movie Studio migration, and an offline migration script contains the new Movie tables. The local PostgreSQL database was not running, so applied-versus-pending status could not be queried.
+The migrations are `AddMovieStudioFoundation` and `AddMovieVideoProviderExecution`; they should be applied through the repository's existing production advisory-lock migration runner. The second migration is required because provider job identifiers, polling state, retries, and continuity snapshots must survive an API restart. The EF migration designers and `TaslimDbContextModelSnapshot.cs` are included. The API build completed with zero warnings and errors, `dotnet ef migrations list` discovers the new migration, and an offline migration script contains `MovieVideoProviderExecutions`, `ContinuitySnapshotJson`, and the scene clip foreign key. The local PostgreSQL database was not running, so applied-versus-pending status could not be queried.
 
-The web package has a focused `npm run lint` and `npm run build` validation path. The UI does not require a provider to render, create a durable plan, or expose the provider readiness state.
+The web package has a focused `npm run lint`, test, and `npm run build` validation path. The UI does not require a provider to render, create a durable plan, or expose the provider readiness state. Production video output requires the existing private R2 configuration (`Files:StorageProvider=S3Compatible`, HTTPS `Files:S3Endpoint`, `Files:S3Region=auto`, bucket, access key, and secret) and a separately reviewed `IMovieVideoProvider` registration. No movie vendor endpoint or credential is present in this branch, so the default behavior is safely unavailable rather than simulated.
 
 ## Integration conflicts and boundaries
 
-There are no expected conflicts with Batch 3.13 because no Social Media Studio file is referenced. If another branch changes the EF model snapshot concurrently, reconcile that generated file with the included Movie Studio snapshot changes. A future provider branch should replace `UnavailableMovieVideoProvider` with a real `IMovieVideoProvider` implementation and add private-storage publication for returned media; it should not bypass the existing Generation Job, Asset, Stored File, or Usage Transaction boundaries.
+There are no expected conflicts with Batch 3.13 because no Social Media Studio file is referenced. If another branch changes the EF model snapshot concurrently, reconcile that generated file with the included Movie Studio snapshot changes. A future provider branch should replace `UnavailableMovieVideoProvider` with a real, verified `IMovieVideoProvider` implementation and configure only API-side credentials; it should not bypass the existing Generation Job, Asset, Stored File, Activity Center, or Usage Transaction boundaries. Customer charge remains zero; authoritative provider cost, when returned by the adapter, is retained only in the existing internal usage ledger.
 
 ## References
 

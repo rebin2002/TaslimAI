@@ -17,6 +17,8 @@ public interface IMovieStudioService
     Task<MovieCharacterDto?> AddCharacterAsync(Guid userId, Guid id, MovieStudioCharacterRequest request, CancellationToken cancellationToken);
     Task<MovieLocationDto?> AddLocationAsync(Guid userId, Guid id, MovieStudioLocationRequest request, CancellationToken cancellationToken);
     Task<MovieShotDto?> AddShotAsync(Guid userId, Guid sceneId, MovieStudioShotRequest request, CancellationToken cancellationToken);
+    Task<MovieStudioGenerationResponse?> GenerateSceneAsync(Guid userId, Guid movieProjectId, Guid sceneId, MovieStudioGenerationRequest request, CancellationToken cancellationToken);
+    Task<MovieStudioGenerationResponse?> GenerateShotAsync(Guid userId, Guid shotId, MovieStudioGenerationRequest request, CancellationToken cancellationToken);
     Task<MovieProviderReadinessDto> ProviderReadinessAsync();
 }
 
@@ -65,13 +67,26 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         GenerationJobDto? job = null;
         if (request.Mode == MovieProjectModes.Quick)
         {
+            var clip = new MovieClip
+            {
+                Id = Guid.NewGuid(),
+                MovieProjectId = movie.Id,
+                Status = MovieClipStatuses.Queued,
+                ContinuitySnapshotJson = ContinuitySnapshot(movie.Guide),
+                CreatedAt = now,
+                UpdatedAt = now,
+            };
+            db.MovieClips.Add(clip);
+            await db.SaveChangesAsync(cancellationToken);
             var createdJob = await jobs.CreateAsync(userId, new CreateGenerationJobRequest
             {
                 WorkspaceId = request.WorkspaceId, ProjectId = projectId, JobType = GenerationJobTypes.MovieQuickGenerate,
                 Title = request.Title.Trim(), InputJson = JsonSerializer.Serialize(new MovieGenerationInput(
-                    MovieStudioOperations.QuickMovie, movie.Description, movie.DurationSeconds, movie.AspectRatio,
-                    movie.Style, movie.Language, movie.AdditionalInstructions, null, null)),
+                    MovieStudioOperations.QuickMovie, movie.Id, clip.Id, null, null, movie.Description, movie.DurationSeconds, movie.AspectRatio,
+                    movie.Style, movie.Language, movie.AdditionalInstructions, ContinuitySnapshot(movie.Guide), null, null)),
             }, cancellationToken);
+            clip.GenerationJobId = createdJob.Id;
+            await db.SaveChangesAsync(cancellationToken);
             job = GenerationJobContractMapper.ToDto(createdJob);
         }
 
@@ -108,7 +123,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         var scene = new MovieScene { Id = Guid.NewGuid(), MovieProjectId = id, Sequence = await db.MovieScenes.CountAsync(item => item.MovieProjectId == id, cancellationToken) + 1, Title = request.Title.Trim(), Summary = request.Summary.Trim(), DurationSeconds = request.DurationSeconds, ContinuityNotes = MovieStudioHelpers.Clean(request.ContinuityNotes), Narration = MovieStudioHelpers.Clean(request.Narration), Dialogue = MovieStudioHelpers.Clean(request.Dialogue), CreatedAt = now, UpdatedAt = now };
         db.MovieScenes.Add(scene);
         await db.SaveChangesAsync(cancellationToken);
-        return ToDto(scene, []);
+        return ToDto(scene, [], []);
     }
 
     public async Task<MovieCharacterDto?> AddCharacterAsync(Guid userId, Guid id, MovieStudioCharacterRequest request, CancellationToken cancellationToken)
@@ -147,16 +162,79 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         return ToDto(shot, []);
     }
 
-    public Task<MovieProviderReadinessDto> ProviderReadinessAsync() => Task.FromResult(new MovieProviderReadinessDto(provider.IsAvailable, provider.IsAvailable ? provider.Key : null, [MovieStudioOperations.QuickMovie, MovieStudioOperations.SceneClip, MovieStudioOperations.Assembly]));
+    public async Task<MovieStudioGenerationResponse?> GenerateSceneAsync(Guid userId, Guid movieProjectId, Guid sceneId, MovieStudioGenerationRequest request, CancellationToken cancellationToken)
+    {
+        var scene = await db.MovieScenes.Include(item => item.MovieProject).ThenInclude(item => item.Guide).FirstOrDefaultAsync(item => item.Id == sceneId && item.MovieProjectId == movieProjectId, cancellationToken);
+        if (scene is null || !await access.IsMemberAsync(userId, scene.MovieProject.WorkspaceId, cancellationToken)) return null;
+        return await QueueClipAsync(userId, scene.MovieProject, scene, null, request, cancellationToken);
+    }
 
-    private IQueryable<MovieProject> Query() => db.MovieProjects.AsNoTracking().Include(item => item.Guide).Include(item => item.Scenes).ThenInclude(scene => scene.Shots).ThenInclude(shot => shot.Clips).Include(item => item.Characters).Include(item => item.Locations).Include(item => item.Assemblies);
+    public async Task<MovieStudioGenerationResponse?> GenerateShotAsync(Guid userId, Guid shotId, MovieStudioGenerationRequest request, CancellationToken cancellationToken)
+    {
+        var shot = await db.MovieShots.Include(item => item.Scene).ThenInclude(item => item.MovieProject).ThenInclude(item => item.Guide).FirstOrDefaultAsync(item => item.Id == shotId, cancellationToken);
+        if (shot is null || !await access.IsMemberAsync(userId, shot.Scene.MovieProject.WorkspaceId, cancellationToken)) return null;
+        return await QueueClipAsync(userId, shot.Scene.MovieProject, shot.Scene, shot, request, cancellationToken);
+    }
 
-    private static MovieStudioProjectDto ToDto(MovieProject movie) => new(movie.Id, movie.WorkspaceId, movie.ProjectId, movie.Mode, movie.Status, movie.Title, movie.Description, movie.DurationSeconds, movie.AspectRatio, movie.Style, movie.Language, movie.AdditionalInstructions, movie.CreatedAt, movie.UpdatedAt, new MovieGuideDto(movie.Guide.Id, movie.Guide.VisualLanguage, movie.Guide.CameraLanguage, movie.Guide.ColorAndLighting, movie.Guide.SoundAndNarration, movie.Guide.ContinuityRules, movie.Guide.UpdatedAt), movie.Scenes.OrderBy(scene => scene.Sequence).Select(scene => ToDto(scene, scene.Shots.OrderBy(shot => shot.Sequence).Select(shot => ToDto(shot, shot.Clips.Select(ToDto).ToArray())).ToArray())).ToArray(), movie.Characters.OrderBy(character => character.CreatedAt).Select(ToDto).ToArray(), movie.Locations.OrderBy(location => location.CreatedAt).Select(ToDto).ToArray(), movie.Assemblies.OrderByDescending(assembly => assembly.CreatedAt).Select(ToDto).ToArray());
-    private static MovieSceneDto ToDto(MovieScene scene, IReadOnlyList<MovieShotDto> shots) => new(scene.Id, scene.Sequence, scene.Title, scene.Summary, scene.DurationSeconds, scene.ContinuityNotes, scene.Narration, scene.Dialogue, shots);
+    public Task<MovieProviderReadinessDto> ProviderReadinessAsync() => Task.FromResult(new MovieProviderReadinessDto(provider.IsAvailable, provider.SupportedOperations.ToArray()));
+
+    private async Task<MovieStudioGenerationResponse> QueueClipAsync(Guid userId, MovieProject movie, MovieScene scene, MovieShot? shot, MovieStudioGenerationRequest request, CancellationToken cancellationToken)
+    {
+        var description = shot?.Description ?? scene.Summary;
+        var durationSeconds = Math.Clamp(shot?.DurationSeconds ?? scene.DurationSeconds ?? Math.Min(movie.DurationSeconds, 60), 1, 3600);
+        var now = DateTime.UtcNow;
+        var clip = new MovieClip
+        {
+            Id = Guid.NewGuid(),
+            MovieProjectId = movie.Id,
+            MovieSceneId = scene.Id,
+            MovieShotId = shot?.Id,
+            Status = MovieClipStatuses.Queued,
+            DurationSeconds = durationSeconds,
+            ContinuitySnapshotJson = ContinuitySnapshot(movie.Guide),
+            CreatedAt = now,
+            UpdatedAt = now,
+        };
+        db.MovieClips.Add(clip);
+        await db.SaveChangesAsync(cancellationToken);
+        var job = await jobs.CreateAsync(userId, new CreateGenerationJobRequest
+        {
+            WorkspaceId = movie.WorkspaceId,
+            ProjectId = movie.ProjectId,
+            JobType = shot is null ? GenerationJobTypes.MovieClipGenerate : GenerationJobTypes.MovieClipGenerate,
+            Title = string.IsNullOrWhiteSpace(request.Title) ? movie.Title : request.Title.Trim(),
+            InputJson = JsonSerializer.Serialize(new MovieGenerationInput(
+                MovieStudioOperations.SceneClip,
+                movie.Id,
+                clip.Id,
+                scene.Id,
+                shot?.Id,
+                description,
+                durationSeconds,
+                movie.AspectRatio,
+                movie.Style,
+                movie.Language,
+                movie.AdditionalInstructions,
+                ContinuitySnapshot(movie.Guide),
+                SceneSnapshot(scene),
+                shot is null ? null : ShotSnapshot(shot))),
+        }, cancellationToken);
+        clip.GenerationJobId = job.Id;
+        await db.SaveChangesAsync(cancellationToken);
+        return new MovieStudioGenerationResponse(await GetAsync(userId, movie.Id, cancellationToken) ?? throw new InvalidOperationException("Movie project disappeared."), GenerationJobContractMapper.ToDto(job), clip.Id);
+    }
+
+    private IQueryable<MovieProject> Query() => db.MovieProjects.AsNoTracking().Include(item => item.Guide).Include(item => item.Scenes).ThenInclude(scene => scene.Shots).ThenInclude(shot => shot.Clips).Include(item => item.Scenes).ThenInclude(scene => scene.Clips).Include(item => item.Clips).Include(item => item.Characters).Include(item => item.Locations).Include(item => item.Assemblies);
+
+    private static MovieStudioProjectDto ToDto(MovieProject movie) => new(movie.Id, movie.WorkspaceId, movie.ProjectId, movie.Mode, movie.Status, movie.Title, movie.Description, movie.DurationSeconds, movie.AspectRatio, movie.Style, movie.Language, movie.AdditionalInstructions, movie.CreatedAt, movie.UpdatedAt, new MovieGuideDto(movie.Guide.Id, movie.Guide.VisualLanguage, movie.Guide.CameraLanguage, movie.Guide.ColorAndLighting, movie.Guide.SoundAndNarration, movie.Guide.ContinuityRules, movie.Guide.UpdatedAt), movie.Scenes.OrderBy(scene => scene.Sequence).Select(scene => ToDto(scene, scene.Shots.OrderBy(shot => shot.Sequence).Select(shot => ToDto(shot, shot.Clips.Select(ToDto).ToArray())).ToArray(), scene.Clips.Where(clip => clip.MovieShotId is null).Select(ToDto).ToArray())).ToArray(), movie.Characters.OrderBy(character => character.CreatedAt).Select(ToDto).ToArray(), movie.Locations.OrderBy(location => location.CreatedAt).Select(ToDto).ToArray(), movie.Clips.Where(clip => clip.MovieSceneId is null).Select(ToDto).ToArray(), movie.Assemblies.OrderByDescending(assembly => assembly.CreatedAt).Select(ToDto).ToArray());
+    private static string ContinuitySnapshot(MovieContinuityGuide guide) => JsonSerializer.Serialize(new { guide.VisualLanguage, guide.CameraLanguage, guide.ColorAndLighting, guide.SoundAndNarration, guide.ContinuityRules, guide.ReferenceAssetIdsJson, guide.UpdatedAt });
+    private static string SceneSnapshot(MovieScene scene) => JsonSerializer.Serialize(new { scene.Id, scene.Sequence, scene.Title, scene.Summary, scene.DurationSeconds, scene.ContinuityNotes, scene.Narration, scene.Dialogue });
+    private static string ShotSnapshot(MovieShot shot) => JsonSerializer.Serialize(new { shot.Id, shot.Sequence, shot.Description, shot.CameraAndFraming, shot.CameraMotion, shot.DurationSeconds, shot.Narration, shot.Dialogue, shot.VisualContinuityNotes });
+    private static MovieSceneDto ToDto(MovieScene scene, IReadOnlyList<MovieShotDto> shots, IReadOnlyList<MovieClipDto> clips) => new(scene.Id, scene.Sequence, scene.Title, scene.Summary, scene.DurationSeconds, scene.ContinuityNotes, scene.Narration, scene.Dialogue, shots, clips);
     private static MovieShotDto ToDto(MovieShot shot, IReadOnlyList<MovieClipDto> clips) => new(shot.Id, shot.Sequence, shot.Description, shot.CameraAndFraming, shot.CameraMotion, shot.DurationSeconds, shot.Narration, shot.Dialogue, shot.VisualContinuityNotes, clips);
     private static MovieCharacterDto ToDto(MovieCharacter character) => new(character.Id, character.Name, character.Description, character.Appearance, character.VoiceAndPerformance, character.ContinuityNotes, character.ReferenceAssetId);
     private static MovieLocationDto ToDto(MovieLocation location) => new(location.Id, location.Name, location.Description, location.VisualContinuityNotes, location.ReferenceAssetId);
-    private static MovieClipDto ToDto(MovieClip clip) => new(clip.Id, clip.MovieShotId, clip.GenerationJobId, clip.AssetId, clip.Status, clip.ProviderKey, clip.DurationSeconds, clip.MetadataJson);
+    private static MovieClipDto ToDto(MovieClip clip) => new(clip.Id, clip.MovieSceneId, clip.MovieShotId, clip.GenerationJobId, clip.AssetId, clip.Status, clip.DurationSeconds, clip.MetadataJson, clip.ContinuitySnapshotJson);
     private static MovieAssemblyDto ToDto(MovieAssembly assembly) => new(assembly.Id, assembly.GenerationJobId, assembly.AssetId, assembly.Status, assembly.OutputFormat, assembly.MetadataJson, assembly.CreatedAt, assembly.CompletedAt);
 }
 

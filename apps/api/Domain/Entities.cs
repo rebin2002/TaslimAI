@@ -183,6 +183,8 @@ public static class GenerationJobErrorCodes
 public const string MovieProviderUnavailable = "MOVIE_PROVIDER_UNAVAILABLE";
     public const string MovieCancelled = "MOVIE_CANCELLED";
     public const string MovieGenerationFailed = "MOVIE_GENERATION_FAILED";
+    public const string MovieOutputInvalid = "MOVIE_OUTPUT_INVALID";
+    public const string MovieOutputStorageFailed = "MOVIE_OUTPUT_STORAGE_FAILED";
 public const string MusicRequestInvalid = "MUSIC_REQUEST_INVALID";
     public const string MusicGenreUnsupported = "MUSIC_GENRE_UNSUPPORTED";
     public const string MusicMoodUnsupported = "MUSIC_MOOD_UNSUPPORTED";

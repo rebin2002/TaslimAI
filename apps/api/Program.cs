@@ -159,6 +159,8 @@ builder.Services.AddScoped<IGenerationJobQueue, DatabaseGenerationJobQueue>();
 builder.Services.AddScoped<IGenerationJobUsageService, GenerationJobUsageService>();
 builder.Services.AddScoped<IGenerationJobService, GenerationJobService>();
 builder.Services.AddScoped<IMovieStudioService, MovieStudioService>();
+builder.Services.Configure<MovieVideoOptions>(builder.Configuration.GetSection("MovieVideo"));
+builder.Services.AddScoped<MovieVideoExecutionStore>();
 builder.Services.AddSingleton<IMovieVideoProvider, UnavailableMovieVideoProvider>();
 builder.Services.AddScoped<IActivityCenterService, ActivityCenterService>();
 builder.Services.AddSingleton<IGenerationJobHandler, SystemTestGenerationJobHandler>();

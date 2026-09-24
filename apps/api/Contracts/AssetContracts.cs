@@ -69,7 +69,8 @@ public static class AssetContractMapper
         asset.Status.ToString(),
         asset.StoredFileId.HasValue,
         asset.StoredFileId.HasValue && (asset.MimeType?.StartsWith("image/", StringComparison.OrdinalIgnoreCase) == true
-            || asset.MimeType?.StartsWith("audio/", StringComparison.OrdinalIgnoreCase) == true),
+            || asset.MimeType?.StartsWith("audio/", StringComparison.OrdinalIgnoreCase) == true
+            || asset.MimeType?.StartsWith("video/", StringComparison.OrdinalIgnoreCase) == true),
         asset.CreatedAt,
         asset.UpdatedAt,
         asset.ArchivedAt,
