@@ -40,6 +40,7 @@ docs/
 MUSIC_STUDIO_ARCHITECTURE.md        Provider-independent music jobs, private playback, and Asset publication
   USAGE_ACCOUNTING_ARCHITECTURE.md Versioned cost ledger, guardrails, anomalies, admin reports, and privacy
   GLOBAL_SEARCH_ARCHITECTURE.md     Protected grouped search across workspace content
+  E2E_TESTING.md                    Playwright browser journeys, fixtures, and CI execution
 ```
 
 ## Requirements
@@ -192,6 +193,12 @@ dotnet test apps/api.Tests/Taslim.Api.Tests.csproj
 ```
 
 The suite covers registration, duplicate email, login failure, session/logout, personal workspace ownership, project lifecycle, chat persistence, mock AI execution, tier routing, provider failure, context trimming, usage/cost calculation, provider-independent stream events, SSE persistence, terminal failure events, deterministic multi-turn ordering, idempotency, usage ledger behavior, explicit cancellation/refund state, versioned pricing snapshots, actual-versus-estimated image accounting, provider latency and standard image usage parsing, disabled and enabled cost guardrails, admin role authorization, admin summaries/breakdowns/transactions/inspection, normal-user provider/model/pricing redaction, message history, cross-workspace authorization, CSRF enforcement, anonymous login CSRF recovery, credentialed CORS, no-cache token issuance, upload validation, bounded extraction, file ownership, normalized chat attachments, durable Generation Job claiming/cancellation/recovery, generated-file publication, Asset provenance, project inheritance, search/filter/pagination, archive/restore, authorized download, failed/cancelled no-Asset behavior, Image Studio validation, provider-independent deterministic image execution, private PNG publication, image usage cost, and safe provider refusal. Social Studio coverage includes strict canonical schema/HTML rejection, selected-context bounds, authorization, durable completion, JSON Asset publication, safe result preview, and zero customer charge. Frontend Vitest coverage includes streaming lifecycle, authentication error classification, one-shot CSRF refresh/retry, same-origin proxy forwarding, Asset Library loading, empty, update, archive, restore, safe-display, and card rendering states, Image Studio progress/result/cancellation and provider-detail redaction states, Social Studio progress/result/malformed-output/copy/source-readiness states, and admin usage date/chart state. Tests use relational SQLite so transactions and foreign keys are exercised realistically.
+
+Browser-level end-to-end coverage is documented in [docs/E2E_TESTING.md](docs/E2E_TESTING.md). After starting a disposable API/database, run:
+
+```bash
+npm run test:e2e --workspace @taslim/web
+```
 
 ## Railway deployment
 
