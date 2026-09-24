@@ -2,7 +2,7 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { api, type AuthResponse, type LoginInput, type ProfileInput, type RegisterInput, type User } from "@/lib/api";
+import { api, type AuthResponse, type LoginInput, type OnboardingInput, type ProfileInput, type RegisterInput, type User } from "@/lib/api";
 import { useLocale } from "@/components/LocaleProvider";
 
 type AuthContextValue = {
@@ -13,6 +13,7 @@ type AuthContextValue = {
   register: (input: RegisterInput) => Promise<void>;
   signOut: () => Promise<void>;
   updateProfile: (input: ProfileInput) => Promise<void>;
+  completeOnboarding: (input: OnboardingInput) => Promise<void>;
   refresh: () => Promise<void>;
 };
 
@@ -63,7 +64,12 @@ export function AuthProvider({ children }: Readonly<{ children: React.ReactNode 
     setSession(next);
   }, []);
 
-  const value = useMemo(() => ({ user: session?.user ?? null, workspace: session?.personalWorkspace ?? null, loading, signIn, register, signOut, updateProfile, refresh }), [loading, refresh, register, session, signIn, signOut, updateProfile]);
+  const completeOnboarding = useCallback(async (input: OnboardingInput) => {
+    const next = await api.completeOnboarding(input);
+    setSession(next);
+  }, []);
+
+  const value = useMemo(() => ({ user: session?.user ?? null, workspace: session?.personalWorkspace ?? null, loading, signIn, register, signOut, updateProfile, completeOnboarding, refresh }), [completeOnboarding, loading, refresh, register, session, signIn, signOut, updateProfile]);
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 

@@ -26,6 +26,9 @@ public sealed record AssetDto(
     string Status,
     bool HasFile,
     bool CanPreview,
+    long? FileSizeBytes,
+    string? SourceStudio,
+    string? SourceJobTitle,
     DateTime CreatedAt,
     DateTime UpdatedAt,
     DateTime? ArchivedAt,
@@ -52,6 +55,7 @@ public sealed record AssetFilter(
     string? AssetType,
     AssetStatus? Status,
     string? Search,
+    string? Sort,
     int Page = 1,
     int PageSize = 24);
 
@@ -71,10 +75,27 @@ public static class AssetContractMapper
         asset.StoredFileId.HasValue && (asset.MimeType?.StartsWith("image/", StringComparison.OrdinalIgnoreCase) == true
             || asset.MimeType?.StartsWith("audio/", StringComparison.OrdinalIgnoreCase) == true
             || asset.MimeType?.StartsWith("video/", StringComparison.OrdinalIgnoreCase) == true),
+        asset.StoredFile?.SizeBytes,
+        SourceStudioKey(asset.SourceGenerationJob?.JobType),
+        asset.SourceGenerationJob?.Title,
         asset.CreatedAt,
         asset.UpdatedAt,
         asset.ArchivedAt,
         asset.Representations.OrderBy(item => item.RepresentationType)
             .Select(item => new AssetRepresentationDto(item.Id, item.RepresentationType, item.FileName, item.ContentType, item.SizeBytes, item.CreatedAt))
             .ToArray());
+
+    private static string? SourceStudioKey(string? jobType) => jobType?.ToLowerInvariant() switch
+    {
+        "image.generate" => "image",
+        "document.generate" => "document",
+        "presentation.generate" => "presentation",
+        "research.generate" => "research",
+        "social.generate" => "social",
+        "voice.generate" => "voice",
+        "music.generate" => "music",
+        "movie.quick.generate" or "movie.clip.generate" or "movie.assembly" => "movie",
+        "system.test" => "system",
+        _ => null,
+    };
 }

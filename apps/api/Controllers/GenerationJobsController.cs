@@ -18,7 +18,7 @@ public sealed class GenerationJobsController(IGenerationJobService jobs) : Contr
         if (!ModelState.IsValid) return ApiResults.Validation(this);
         try
         {
-            var job = await jobs.CreateAsync(GetUserId(), request, cancellationToken);
+            var job = await jobs.CreateAsync(GetUserId(), request, cancellationToken, Request.Headers["Idempotency-Key"].FirstOrDefault());
             return CreatedAtAction(nameof(Get), new { id = job.Id }, GenerationJobContractMapper.ToDto(job));
         }
         catch (GenerationJobForbiddenException) { return Forbid(); }

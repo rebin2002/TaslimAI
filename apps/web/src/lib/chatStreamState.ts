@@ -66,3 +66,15 @@ export function applyChatStreamEvent(state: ChatStreamState, event: ChatStreamEv
   onApplied(next);
   return next;
 }
+
+export function stopChatStream(state: ChatStreamState): ChatStreamState {
+  const pendingAssistant = [...state.messages].reverse().find(message => message.role === "Assistant" && message.status === "Pending");
+  return {
+    ...state,
+    messages: pendingAssistant
+      ? state.messages.map(message => message.id === pendingAssistant.id ? { ...message, status: "Failed" } : message)
+      : state.messages,
+    generating: false,
+    terminal: "failed",
+  };
+}

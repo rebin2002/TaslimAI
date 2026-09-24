@@ -28,7 +28,7 @@ namespace Taslim.Api.Tests;
 public sealed class S3CompatibleStorageTests
 {
     [Fact]
-    public async Task GetObject_non_seekable_response_is_buffered_for_seekable_consumers()
+    public async Task GetObject_non_seekable_response_is_streamed_without_full_buffering()
     {
         var expected = Encoding.UTF8.GetBytes("r2-non-seekable-content");
         var client = new AwsS3CompatibleObjectClient((_, _) => Task.FromResult(new GetObjectResponse
@@ -40,11 +40,7 @@ public sealed class S3CompatibleStorageTests
         await using var result = await service.OpenReadAsync("workspace/file.txt");
 
         Assert.NotNull(result);
-        Assert.True(result!.CanSeek);
-        Assert.Equal(0, result.Position);
-        Assert.Equal(expected.Length, result.Length);
-        Assert.Equal(4, result.Seek(4, SeekOrigin.Begin));
-        result.Position = 0;
+        Assert.False(result!.CanSeek);
         using var reader = new StreamReader(result, Encoding.UTF8, leaveOpen: true);
         Assert.Equal("r2-non-seekable-content", await reader.ReadToEndAsync());
     }
@@ -62,7 +58,7 @@ public sealed class S3CompatibleStorageTests
 
         var result = await extractor.ExtractAsync(".pdf", seekable!);
 
-        Assert.True(seekable!.CanSeek);
+        Assert.False(seekable!.CanSeek);
         Assert.Equal(FileExtractionStatus.Ready, result.Status);
         Assert.True(result.ExtractedTextLength > 0);
         Assert.Contains("R2_PDF_EXTRACTION_MARKER", result.ExtractedText, StringComparison.Ordinal);

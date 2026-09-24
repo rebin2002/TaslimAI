@@ -41,7 +41,7 @@ public sealed class ImageGenerationController(
                 Title = request.Title,
                 InputJson = System.Text.Json.JsonSerializer.Serialize(input),
                 EstimatedProviderCostUsd = preflight.EstimatedProviderCostUsd,
-            }, cancellationToken);
+            }, cancellationToken, Request.Headers["Idempotency-Key"].FirstOrDefault());
             return Accepted(new CreateImageGenerationResponse(GenerationJobContractMapper.ToDto(job)));
         }
         catch (ImageRequestValidationException exception)

@@ -25,6 +25,21 @@ public static class OutputPreferences
     };
 }
 
+public static class OnboardingIntents
+{
+    public const string Project = "project";
+    public const string Chat = "chat";
+    public const string Image = "image";
+    public const string Document = "document";
+    public const string Presentation = "presentation";
+    public const string Research = "research";
+
+    public static readonly IReadOnlySet<string> Supported = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        Project, Chat, Image, Document, Presentation, Research,
+    };
+}
+
 public enum WorkspaceType
 {
     Personal,
@@ -312,6 +327,8 @@ public sealed class ApplicationUser : IdentityUser<Guid>
     public string TimeZone { get; set; } = "UTC";
     public string OutputPreference { get; set; } = OutputPreferences.Balanced;
     public bool IncludeSourceLinks { get; set; } = true;
+    public DateTime? OnboardingCompletedAt { get; set; }
+    public string? OnboardingIntent { get; set; }
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
     public DateTime? LastLoginAt { get; set; }
@@ -531,6 +548,8 @@ public sealed class GenerationJob
     public string? Provider { get; set; }
     public string? ProviderModel { get; set; }
     public string InputJson { get; set; } = "{}";
+    public string? IdempotencyKey { get; set; }
+    public string? RequestFingerprint { get; set; }
     public string? ResultJson { get; set; }
     public string? ErrorCode { get; set; }
     public string? ErrorMessage { get; set; }

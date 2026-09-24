@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.DataProtection.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
 using Taslim.Api.Domain;
 using Taslim.Api.Movies;
+using Taslim.Api.Notifications;
 
 namespace Taslim.Api.Persistence;
 
@@ -22,6 +23,7 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
     public DbSet<GenerationJob> GenerationJobs => Set<GenerationJob>();
     public DbSet<GenerationJobOutput> GenerationJobOutputs => Set<GenerationJobOutput>();
     public DbSet<ActivityReadState> ActivityReadStates => Set<ActivityReadState>();
+    public DbSet<Notification> Notifications => Set<Notification>();
     public DbSet<Asset> Assets => Set<Asset>();
     public DbSet<AssetRepresentation> AssetRepresentations => Set<AssetRepresentation>();
     public DbSet<ResearchSource> ResearchSources => Set<ResearchSource>();
@@ -61,6 +63,7 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.Property(user => user.TimeZone).HasMaxLength(100).IsRequired();
             entity.Property(user => user.OutputPreference).HasMaxLength(32).IsRequired();
             entity.Property(user => user.IncludeSourceLinks).HasDefaultValue(true).IsRequired();
+            entity.Property(user => user.OnboardingIntent).HasMaxLength(50);
             entity.Property(user => user.CreatedAt).IsRequired();
             entity.Property(user => user.UpdatedAt).IsRequired();
         });
@@ -281,6 +284,8 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.Property(job => job.Provider).HasMaxLength(80);
             entity.Property(job => job.ProviderModel).HasMaxLength(160);
             entity.Property(job => job.InputJson).HasMaxLength(100_000).IsRequired();
+            entity.Property(job => job.IdempotencyKey).HasMaxLength(80);
+            entity.Property(job => job.RequestFingerprint).HasMaxLength(64);
             entity.Property(job => job.ResultJson).HasMaxLength(100_000);
             entity.Property(job => job.ErrorCode).HasMaxLength(100);
             entity.Property(job => job.ErrorMessage).HasMaxLength(1_000);
@@ -293,6 +298,7 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasIndex(job => new { job.WorkspaceId, job.CreatedAt });
             entity.HasIndex(job => new { job.WorkspaceId, job.Status, job.CreatedAt });
             entity.HasIndex(job => job.ProjectId);
+            entity.HasIndex(job => new { job.CreatedByUserId, job.IdempotencyKey }).IsUnique().HasFilter("\"IdempotencyKey\" IS NOT NULL");
             entity.HasOne(job => job.Workspace).WithMany().HasForeignKey(job => job.WorkspaceId).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne(job => job.Project).WithMany().HasForeignKey(job => job.ProjectId).OnDelete(DeleteBehavior.SetNull);
             entity.HasOne(job => job.CreatedByUser).WithMany().HasForeignKey(job => job.CreatedByUserId).OnDelete(DeleteBehavior.Restrict);
@@ -318,6 +324,23 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasIndex(read => read.GenerationJobId);
             entity.HasOne(read => read.User).WithMany().HasForeignKey(read => read.UserId).OnDelete(DeleteBehavior.Cascade);
             entity.HasOne(read => read.GenerationJob).WithMany().HasForeignKey(read => read.GenerationJobId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<Notification>(entity =>
+        {
+            entity.HasKey(notification => notification.Id);
+            entity.Property(notification => notification.Type).HasMaxLength(60).IsRequired();
+            entity.Property(notification => notification.DeduplicationKey).HasMaxLength(180).IsRequired();
+            entity.Property(notification => notification.ResourceTitle).HasMaxLength(160);
+            entity.Property(notification => notification.CreatedAt).IsRequired();
+            entity.HasIndex(notification => new { notification.UserId, notification.WorkspaceId, notification.ReadAt, notification.CreatedAt });
+            entity.HasIndex(notification => new { notification.UserId, notification.DeduplicationKey }).IsUnique();
+            entity.HasIndex(notification => notification.GenerationJobId);
+            entity.HasOne<ApplicationUser>().WithMany().HasForeignKey(notification => notification.UserId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<Workspace>().WithMany().HasForeignKey(notification => notification.WorkspaceId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<Project>().WithMany().HasForeignKey(notification => notification.ProjectId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne<GenerationJob>().WithMany().HasForeignKey(notification => notification.GenerationJobId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne<Asset>().WithMany().HasForeignKey(notification => notification.AssetId).OnDelete(DeleteBehavior.SetNull);
         });
 
         builder.Entity<Asset>(entity =>

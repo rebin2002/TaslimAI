@@ -41,7 +41,7 @@ public sealed class PresentationGenerationController(
                 Title = input.Title,
                 InputJson = PresentationGenerationContractMapper.SerializeInput(input),
                 EstimatedProviderCostUsd = preflight.EstimatedProviderCostUsd,
-            }, cancellationToken);
+            }, cancellationToken, Request.Headers["Idempotency-Key"].FirstOrDefault());
             return Accepted(new CreatePresentationGenerationResponse(GenerationJobContractMapper.ToDto(job)));
         }
         catch (PresentationRequestValidationException exception)

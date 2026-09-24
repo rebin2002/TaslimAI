@@ -48,6 +48,12 @@ public sealed class SendMessageRequest
     public List<Guid> AttachmentIds { get; set; } = [];
 }
 
+public sealed class RegenerateMessageRequest
+{
+    [Required, StringLength(80, MinimumLength = 8)]
+    public string RequestId { get; set; } = string.Empty;
+}
+
 public sealed record SendMessageResponse(
     ConversationDto Conversation,
     ChatMessageDto UserMessage,

@@ -4,7 +4,7 @@
 
 Taslim’s Activity Center is a **safe projection over the existing `GenerationJob` architecture**. It does not create a second job table, duplicate queue, or notification record for every generation. The existing generation job remains the source of truth for lifecycle, progress, timestamps, cancellation, outputs, and workspace authorization. The Activity Center adds only one small persistence concern: per-user read state.
 
-The protected `/notifications` route is the user-facing activity surface. It lists queued, running, completed, failed, and cancelled work across the current personal workspace. Users can leave Image, Document, Presentation, or Research Studio and return later to see the current status or open the resulting Asset. The projection also leaves room for future Social, Voice, Music, and Movie job types without changing the activity storage model.
+The protected `/activity` route is the user-facing activity surface. It lists queued, running, completed, failed, and cancelled work across the current personal workspace. Users can leave Image, Document, Presentation, or Research Studio and return later to see the current status or open the resulting Asset. The projection also leaves room for future Social, Voice, Music, and Movie job types without changing the activity storage model. The separate `/notifications` route contains only durable attention records; it links back here for job history.
 
 ## Domain model
 
@@ -59,7 +59,7 @@ The status filter accepts `All`, `Queued`, `Running`, `Completed`, `Failed`, and
 
 A job is unread when no `ActivityReadState` exists for the current user and job. New jobs therefore appear in the header badge immediately, including work that is still queued or running. Opening a completed Asset marks the activity read. The explicit “Mark read” action supports queued, running, failed, and cancelled work. “Mark all read” is idempotent and only inserts missing state rows.
 
-The header bell requests only the unread count for the authenticated personal workspace. It refreshes while the shell is open and renders a compact badge instead of the previous unconditional notification dot. The Activity Center refreshes active work on a short client-side interval while the page is open; it does not create a new server-side polling worker or scheduled process.
+The Activity Center no longer owns the header bell. The bell requests the durable notification unread count for the authenticated personal workspace and opens the compact Notifications panel. The Activity Center refreshes active work on a short client-side interval while the page is open; it does not create a new server-side polling worker or scheduled process.
 
 ## User experience and accessibility
 
@@ -87,11 +87,11 @@ The branch intentionally touches the following shared files because they are int
 | `apps/api/Persistence/TaslimDbContext.cs` | DbSet or `OnModelCreating` additions | Keep the read-state DbSet, unique index, and cascade relationships. |
 | `apps/api/Program.cs` | Service registrations and `using` directives | Keep `IActivityCenterService` registration; preserve all other wave registrations. |
 | `apps/web/src/lib/api.ts` | Shared frontend type and API method additions | Keep `ActivityItem`, `ActivityList`, and the four activity methods. |
-| `apps/web/src/components/AppShell.tsx` | Header notification/bell markup | Keep `ActivityBell` in the existing notification slot. |
+| `apps/web/src/components/AppShell.tsx` | Header notification/bell markup | Keep `NotificationBell` in the existing notification slot; do not move Activity polling into it. |
 | `apps/web/src/lib/i18n.ts` | Large three-locale translation object | Preserve all `activity.*` keys in each locale. |
 | `apps/web/src/app/globals.css` | Shared stylesheet tail or topbar styles | Keep the additive activity block and merge duplicate notification badge rules if necessary. |
 
-No conflict is expected with `apps/web/src/components/SocialMediaStudioView.tsx` because this branch does not modify that implementation. The main API and frontend additions are isolated in `ActivityController`, `ActivityCenterService`, `ActivityContracts`, `ActivityCenterView`, `ActivityBell`, and activity state tests.
+No conflict is expected with `apps/web/src/components/SocialMediaStudioView.tsx` because this branch does not modify that implementation. The main API and frontend activity additions remain isolated in `ActivityController`, `ActivityCenterService`, `ActivityContracts`, `ActivityCenterView`, and activity state tests; notification records and UI live in the separate Notifications service, controller, center, and bell implementation.
 
 ## References
 

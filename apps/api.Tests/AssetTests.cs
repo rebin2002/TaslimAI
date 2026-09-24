@@ -40,6 +40,9 @@ public sealed class AssetTests : IClassFixture<GenerationJobsApiFactory>
         Assert.Equal("file", asset.AssetType);
         Assert.Equal("application/json", asset.MimeType);
         Assert.True(asset.HasFile);
+        Assert.Equal("system", asset.SourceStudio);
+        Assert.Equal("Project artifact", asset.SourceJobTitle);
+        Assert.NotNull(asset.FileSizeBytes);
 
         var download = await client.GetAsync($"/api/assets/{asset.Id}/download");
         Assert.Equal(HttpStatusCode.OK, download.StatusCode);
@@ -75,6 +78,13 @@ public sealed class AssetTests : IClassFixture<GenerationJobsApiFactory>
         Assert.Single(page!.Items);
         Assert.True(page.TotalCount >= 2);
         Assert.True(page.TotalPages >= 2);
+
+        var named = await client.GetFromJsonAsync<AssetListDto>($"/api/assets?workspaceId={auth.PersonalWorkspace.Id}&status=Active&sort=name&page=1&pageSize=10");
+        Assert.Equal(named!.Items.OrderBy(item => item.Name).Select(item => item.Id), named.Items.Select(item => item.Id));
+        var invalidSort = await client.GetAsync($"/api/assets?workspaceId={auth.PersonalWorkspace.Id}&status=Active&sort=provider");
+        Assert.Equal(HttpStatusCode.BadRequest, invalidSort.StatusCode);
+        var invalidSortBody = await invalidSort.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("ASSET_SORT_NOT_SUPPORTED", invalidSortBody.GetProperty("error").GetProperty("code").GetString());
 
         var search = await client.GetFromJsonAsync<AssetListDto>($"/api/assets?workspaceId={auth.PersonalWorkspace.Id}&status=Active&assetType=file&search=Quarterly");
         var asset = Assert.Single(search!.Items);

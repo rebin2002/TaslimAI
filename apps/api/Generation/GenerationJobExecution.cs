@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
@@ -12,6 +14,7 @@ using Taslim.Api.Files;
 using Taslim.Api.Images;
 using Taslim.Api.Music;
 using Taslim.Api.Movies;
+using Taslim.Api.Notifications;
 using Taslim.Api.Persistence;
 using Taslim.Api.Presentations;
 using Taslim.Api.Research;
@@ -27,6 +30,8 @@ public sealed class GenerationJobOptions
     public int PollIntervalMilliseconds { get; set; } = 1000;
     public int CancellationPollMilliseconds { get; set; } = 100;
     public int ClaimRecoveryIntervalMilliseconds { get; set; } = 30000;
+    public int ClaimLeaseMinutes { get; set; } = 30;
+    public int LeaseRenewalIntervalMilliseconds { get; set; } = 60000;
 }
 
 public sealed class GenerationJobPollingSchedule(GenerationJobOptions options)
@@ -148,7 +153,7 @@ public sealed class GenerationJobUsageService(IUsageLedgerService ledger) : IGen
 
 public interface IGenerationJobService
 {
-    Task<GenerationJob> CreateAsync(Guid userId, CreateGenerationJobRequest request, CancellationToken cancellationToken = default);
+    Task<GenerationJob> CreateAsync(Guid userId, CreateGenerationJobRequest request, CancellationToken cancellationToken = default, string? idempotencyKey = null);
     Task<GenerationJob?> GetAsync(Guid userId, Guid jobId, CancellationToken cancellationToken = default);
     Task<GenerationJobListDto?> ListAsync(Guid userId, GenerationJobFilter filter, CancellationToken cancellationToken = default);
     Task<GenerationJobCancelResult> CancelAsync(Guid userId, Guid jobId, CancellationToken cancellationToken = default);
@@ -169,7 +174,7 @@ public sealed class GenerationJobService(
     IGenerationJobQueue queue,
     IGenerationJobUsageService usage) : IGenerationJobService
 {
-    public async Task<GenerationJob> CreateAsync(Guid userId, CreateGenerationJobRequest request, CancellationToken cancellationToken = default)
+    public async Task<GenerationJob> CreateAsync(Guid userId, CreateGenerationJobRequest request, CancellationToken cancellationToken = default, string? idempotencyKey = null)
     {
         if (!GenerationJobTypes.Supported.Contains(request.JobType.Trim()))
             throw new GenerationJobValidationException(GenerationJobErrorCodes.TypeNotSupported, "This job type is not available.");
@@ -187,6 +192,21 @@ public sealed class GenerationJobService(
             throw new GenerationJobValidationException("INVALID_INPUT_JSON", "The job input is not valid JSON.");
         }
 
+        var normalizedKey = NormalizeIdempotencyKey(idempotencyKey);
+        var normalizedJobType = GenerationJobTypes.Supported.First(type => string.Equals(type, request.JobType.Trim(), StringComparison.OrdinalIgnoreCase));
+        var normalizedTitle = string.IsNullOrWhiteSpace(request.Title) ? null : request.Title.Trim();
+        var requestFingerprint = ComputeRequestFingerprint(request.WorkspaceId, request.ProjectId, normalizedJobType, normalizedTitle, request.InputJson, request.EstimatedProviderCostUsd);
+        if (normalizedKey is not null)
+        {
+            var existing = await db.GenerationJobs.AsNoTracking().FirstOrDefaultAsync(item => item.CreatedByUserId == userId && item.IdempotencyKey == normalizedKey, cancellationToken);
+            if (existing is not null)
+            {
+                if (!string.Equals(existing.RequestFingerprint, requestFingerprint, StringComparison.Ordinal))
+                    throw new GenerationJobValidationException("IDEMPOTENCY_KEY_REUSED", "This idempotency key was already used for a different generation request.");
+                return existing;
+            }
+        }
+
         var now = DateTime.UtcNow;
         var job = new GenerationJob
         {
@@ -194,21 +214,62 @@ public sealed class GenerationJobService(
             WorkspaceId = request.WorkspaceId,
             ProjectId = request.ProjectId,
             CreatedByUserId = userId,
-            JobType = GenerationJobTypes.Supported.First(type => string.Equals(type, request.JobType.Trim(), StringComparison.OrdinalIgnoreCase)),
+            JobType = normalizedJobType,
             Status = GenerationJobStatus.Pending,
-            Title = string.IsNullOrWhiteSpace(request.Title) ? null : request.Title.Trim(),
+            Title = normalizedTitle,
             InputJson = request.InputJson,
+            IdempotencyKey = normalizedKey,
+            RequestFingerprint = requestFingerprint,
             ProgressPercent = 0,
             CreatedAt = now,
         };
         db.GenerationJobs.Add(job);
-        await db.SaveChangesAsync(cancellationToken);
-        await usage.BeginAsync(job, request.EstimatedProviderCostUsd, cancellationToken);
-        await queue.EnqueueAsync(job.Id, cancellationToken);
-        job.Status = GenerationJobStatus.Queued;
-        job.QueuedAt = DateTime.UtcNow;
-        return job;
+        var transaction = normalizedKey is null ? null : await db.Database.BeginTransactionAsync(cancellationToken);
+        try
+        {
+            await db.SaveChangesAsync(cancellationToken);
+            await usage.BeginAsync(job, request.EstimatedProviderCostUsd, cancellationToken);
+            await queue.EnqueueAsync(job.Id, cancellationToken);
+            job.Status = GenerationJobStatus.Queued;
+            job.QueuedAt = DateTime.UtcNow;
+            if (transaction is not null) await transaction.CommitAsync(cancellationToken);
+            return job;
+        }
+        catch (DbUpdateException) when (normalizedKey is not null)
+        {
+            if (transaction is not null) await transaction.RollbackAsync(CancellationToken.None);
+            db.Entry(job).State = EntityState.Detached;
+            var existing = await db.GenerationJobs.AsNoTracking().FirstOrDefaultAsync(item => item.CreatedByUserId == userId && item.IdempotencyKey == normalizedKey, cancellationToken);
+            if (existing is null) throw;
+            if (!string.Equals(existing.RequestFingerprint, requestFingerprint, StringComparison.Ordinal))
+                throw new GenerationJobValidationException("IDEMPOTENCY_KEY_REUSED", "This idempotency key was already used for a different generation request.");
+            return existing;
+        }
+        finally
+        {
+            if (transaction is not null) await transaction.DisposeAsync();
+        }
     }
+
+    private static string? NormalizeIdempotencyKey(string? idempotencyKey)
+    {
+        var normalized = idempotencyKey?.Trim();
+        if (string.IsNullOrEmpty(normalized)) return null;
+        if (normalized.Length > 80)
+            throw new GenerationJobValidationException("IDEMPOTENCY_KEY_INVALID", "The idempotency key is too long.");
+        return normalized;
+    }
+
+    private static string ComputeRequestFingerprint(Guid workspaceId, Guid? projectId, string jobType, string? title, string inputJson, decimal? estimatedProviderCostUsd) =>
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new
+        {
+            workspaceId,
+            projectId,
+            jobType,
+            title,
+            inputJson,
+            estimatedProviderCostUsd,
+        }))));
 
     public async Task<GenerationJob?> GetAsync(Guid userId, Guid jobId, CancellationToken cancellationToken = default)
     {
@@ -319,10 +380,11 @@ public sealed class GenerationJobWorker(
             {
                 using var scope = scopeFactory.CreateScope();
                 var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+                var notifications = scope.ServiceProvider.GetRequiredService<INotificationEventWriter>();
                 var now = DateTime.UtcNow;
                 if (schedule.RecoveryDue(now))
                 {
-                    await RecoverExpiredClaimsAsync(db, stoppingToken);
+                    await RecoverExpiredClaimsAsync(db, notifications, stoppingToken);
                     schedule.ScheduleNextRecovery(now);
                 }
                 var job = await ClaimAsync(db, stoppingToken);
@@ -342,20 +404,29 @@ public sealed class GenerationJobWorker(
         }
     }
 
-    private static Task<int> RecoverExpiredClaimsAsync(TaslimDbContext db, CancellationToken cancellationToken)
+    private async Task RecoverExpiredClaimsAsync(TaslimDbContext db, INotificationEventWriter notifications, CancellationToken cancellationToken)
     {
         var now = DateTime.UtcNow;
-        return db.GenerationJobs
+        var recoveryToken = Guid.NewGuid();
+        var recoveredJobIds = await db.GenerationJobs.AsNoTracking()
+            .Where(job => job.Status == GenerationJobStatus.Running && job.ClaimExpiresAt.HasValue && job.ClaimExpiresAt < now)
+            .Select(job => job.Id)
+            .ToListAsync(cancellationToken);
+        if (recoveredJobIds.Count == 0) return;
+        await db.GenerationJobs
             .Where(job => job.Status == GenerationJobStatus.Running && job.ClaimExpiresAt.HasValue && job.ClaimExpiresAt < now)
             .ExecuteUpdateAsync(setters => setters
                 .SetProperty(job => job.Status, GenerationJobStatus.Queued)
                 .SetProperty(job => job.QueuedAt, now)
                 .SetProperty(job => job.StartedAt, (DateTime?)null)
                 .SetProperty(job => job.ClaimExpiresAt, (DateTime?)null)
-                .SetProperty(job => job.CancellationRequested, false), cancellationToken);
+                .SetProperty(job => job.CancellationRequested, false)
+                .SetProperty(job => job.ConcurrencyToken, recoveryToken), cancellationToken);
+        foreach (var jobId in recoveredJobIds)
+            await TryNotifyAsync(() => notifications.CreateGenerationAttentionAsync(jobId, cancellationToken), jobId);
     }
 
-    private static async Task<GenerationJob?> ClaimAsync(TaslimDbContext db, CancellationToken cancellationToken)
+    private async Task<GenerationJob?> ClaimAsync(TaslimDbContext db, CancellationToken cancellationToken)
     {
         var isSqlite = db.Database.ProviderName?.Contains("Sqlite", StringComparison.OrdinalIgnoreCase) == true;
         if (isSqlite)
@@ -363,7 +434,7 @@ public sealed class GenerationJobWorker(
             var candidate = await db.GenerationJobs.AsNoTracking().FirstOrDefaultAsync(item => item.Status == GenerationJobStatus.Queued, cancellationToken);
             if (candidate is null) return null;
             var startedAt = DateTime.UtcNow;
-            var claimExpiresAt = startedAt.AddMinutes(15);
+            var claimExpiresAt = startedAt.AddMinutes(Math.Max(2, settings.ClaimLeaseMinutes));
             var concurrencyToken = Guid.NewGuid();
             var claimed = await db.GenerationJobs
                 .Where(item => item.Id == candidate.Id && item.Status == GenerationJobStatus.Queued)
@@ -384,7 +455,7 @@ public sealed class GenerationJobWorker(
         }
         job.Status = GenerationJobStatus.Running;
         job.StartedAt = DateTime.UtcNow;
-        job.ClaimExpiresAt = DateTime.UtcNow.AddMinutes(15);
+        job.ClaimExpiresAt = DateTime.UtcNow.AddMinutes(Math.Max(2, settings.ClaimLeaseMinutes));
         job.ConcurrencyToken = Guid.NewGuid();
         await db.SaveChangesAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
@@ -395,11 +466,12 @@ public sealed class GenerationJobWorker(
     {
         using var scope = scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var notifications = scope.ServiceProvider.GetRequiredService<INotificationEventWriter>();
         var usage = scope.ServiceProvider.GetRequiredService<IGenerationJobUsageService>();
         var publisher = scope.ServiceProvider.GetRequiredService<IGeneratedAssetPublisher>();
         var movieExecutions = scope.ServiceProvider.GetRequiredService<MovieVideoExecutionStore>();
         using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
-        var monitor = MonitorCancellationAsync(db, claimedJob.Id, cancellation, stoppingToken);
+        var monitor = MonitorCancellationAndLeaseAsync(claimedJob.Id, claimedJob.ConcurrencyToken, cancellation, stoppingToken);
         var publications = new List<PreparedGenerationOutput>();
         var publicationCommitted = false;
         AiUsageMetadata? providerUsage = null;
@@ -410,17 +482,18 @@ public sealed class GenerationJobWorker(
             var handler = handlers.FirstOrDefault(item => item.CanHandle(claimedJob.JobType));
             if (handler is null)
             {
-                await FailAsync(db, usage, claimedJob, GenerationJobErrorCodes.TypeNotSupported, "This job type is not available.", null, stoppingToken);
+                await FailAsync(db, usage, claimedJob, GenerationJobErrorCodes.TypeNotSupported, "This job type is not available.", null, claimedJob.ConcurrencyToken, stoppingToken);
+                await TryNotifyAsync(() => notifications.CreateGenerationFailedAsync(claimedJob.Id, stoppingToken), claimedJob.Id);
                 return;
             }
-            var progress = new SerializedProgress(value => UpdateProgressSafelyAsync(claimedJob.Id, value, stoppingToken));
+            var progress = new SerializedProgress(value => UpdateProgressSafelyAsync(claimedJob.Id, claimedJob.ConcurrencyToken, value, stoppingToken));
             var result = await handler.ExecuteAsync(claimedJob, progress, cancellation.Token);
             await progress.DrainAsync();
             providerUsage = result.Usage;
             var current = await db.GenerationJobs.FirstOrDefaultAsync(item => item.Id == claimedJob.Id, stoppingToken);
-            if (current is null || current.Status != GenerationJobStatus.Running || current.CancellationRequested || cancellation.IsCancellationRequested)
+            if (current is null || current.Status != GenerationJobStatus.Running || current.ConcurrencyToken != claimedJob.ConcurrencyToken || current.CancellationRequested || cancellation.IsCancellationRequested)
             {
-                await CancelRunningAsync(db, usage, claimedJob, stoppingToken);
+                await CancelRunningAsync(db, usage, claimedJob, claimedJob.ConcurrencyToken, stoppingToken);
                 return;
             }
             foreach (var output in result.Outputs)
@@ -464,7 +537,7 @@ public sealed class GenerationJobWorker(
                 {
                     var completedAt = DateTime.UtcNow;
                     completed = await db.GenerationJobs
-                        .Where(item => item.Id == current.Id && item.Status == GenerationJobStatus.Running && !item.CancellationRequested)
+                        .Where(item => item.Id == current.Id && item.Status == GenerationJobStatus.Running && item.ConcurrencyToken == claimedJob.ConcurrencyToken && !item.CancellationRequested)
                         .ExecuteUpdateAsync(setters => setters
                             .SetProperty(item => item.Status, GenerationJobStatus.Succeeded)
                             .SetProperty(item => item.ProgressPercent, 100)
@@ -509,10 +582,11 @@ public sealed class GenerationJobWorker(
             if (completed == 0)
             {
                 foreach (var publication in publications) await publisher.DiscardAsync(publication, stoppingToken);
-                await CancelRunningAsync(db, usage, claimedJob, stoppingToken);
+                await CancelRunningAsync(db, usage, claimedJob, claimedJob.ConcurrencyToken, stoppingToken);
                 return;
             }
             publicationCommitted = true;
+            await TryNotifyAsync(() => notifications.CreateGenerationCompletedAsync(claimedJob.Id, stoppingToken), claimedJob.Id);
             if (GenerationJobTypes.MovieTypes.Contains(claimedJob.JobType))
             {
                 var publication = publications.FirstOrDefault(item => item.Asset is not null);
@@ -525,7 +599,7 @@ public sealed class GenerationJobWorker(
                 foreach (var publication in publications) await publisher.DiscardAsync(publication, CancellationToken.None);
             if (GenerationJobTypes.MovieTypes.Contains(claimedJob.JobType))
                 await movieExecutions.MarkCancelledAsync(claimedJob.Id, CancellationToken.None);
-            await CancelRunningAsync(db, usage, claimedJob, stoppingToken);
+            await CancelRunningAsync(db, usage, claimedJob, claimedJob.ConcurrencyToken, stoppingToken);
         }
         catch (Exception exception)
         {
@@ -617,7 +691,8 @@ public sealed class GenerationJobWorker(
             {
                 logger.LogError(exception, "Generation job execution failed. JobId={JobId}; JobType={JobType}; FailureCode={FailureCode}", claimedJob.Id, claimedJob.JobType, failureCode);
             }
-            await FailAsync(db, usage, claimedJob, failureCode, FailureMessage(failureCode), failureUsage, stoppingToken);
+            await FailAsync(db, usage, claimedJob, failureCode, FailureMessage(failureCode), failureUsage, claimedJob.ConcurrencyToken, stoppingToken);
+            await TryNotifyAsync(() => notifications.CreateGenerationFailedAsync(claimedJob.Id, stoppingToken), claimedJob.Id);
         }
         finally
         {
@@ -626,39 +701,67 @@ public sealed class GenerationJobWorker(
         }
     }
 
-    private async Task MonitorCancellationAsync(TaslimDbContext _, Guid jobId, CancellationTokenSource cancellation, CancellationToken stoppingToken)
+    private async Task MonitorCancellationAndLeaseAsync(Guid jobId, Guid concurrencyToken, CancellationTokenSource cancellation, CancellationToken stoppingToken)
     {
+        var nextRenewalAt = DateTime.UtcNow;
         while (!stoppingToken.IsCancellationRequested && !cancellation.IsCancellationRequested)
         {
             using var scope = scopeFactory.CreateScope();
             var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
-            if (await db.GenerationJobs.AsNoTracking().AnyAsync(job => job.Id == jobId && job.CancellationRequested, stoppingToken))
+            var now = DateTime.UtcNow;
+            var current = await db.GenerationJobs.AsNoTracking().Where(job => job.Id == jobId).Select(job => new { job.Status, job.ConcurrencyToken, job.CancellationRequested }).FirstOrDefaultAsync(stoppingToken);
+            if (current is null || current.Status != GenerationJobStatus.Running || current.ConcurrencyToken != concurrencyToken || current.CancellationRequested)
             {
                 cancellation.Cancel();
                 return;
+            }
+
+            if (now >= nextRenewalAt)
+            {
+                var renewed = await db.GenerationJobs
+                    .Where(job => job.Id == jobId && job.Status == GenerationJobStatus.Running && job.ConcurrencyToken == concurrencyToken)
+                    .ExecuteUpdateAsync(setters => setters.SetProperty(job => job.ClaimExpiresAt, now.AddMinutes(Math.Max(2, settings.ClaimLeaseMinutes))), stoppingToken);
+                if (renewed == 0)
+                {
+                    cancellation.Cancel();
+                    return;
+                }
+                nextRenewalAt = now.AddMilliseconds(Math.Max(1000, settings.LeaseRenewalIntervalMilliseconds));
             }
             await Task.Delay(settings.CancellationPollMilliseconds, stoppingToken);
         }
     }
 
-    private async Task<int> UpdateProgressAsync(Guid jobId, int progress, CancellationToken cancellationToken)
+    private async Task<int> UpdateProgressAsync(Guid jobId, Guid concurrencyToken, int progress, CancellationToken cancellationToken)
     {
         using var scope = scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
-        return await db.GenerationJobs.Where(job => job.Id == jobId && job.Status == GenerationJobStatus.Running)
+        return await db.GenerationJobs.Where(job => job.Id == jobId && job.Status == GenerationJobStatus.Running && job.ConcurrencyToken == concurrencyToken)
             .ExecuteUpdateAsync(setters => setters.SetProperty(job => job.ProgressPercent, Math.Clamp(progress, 0, 100)), cancellationToken);
     }
 
-    private async Task UpdateProgressSafelyAsync(Guid jobId, int progress, CancellationToken cancellationToken)
+    private async Task UpdateProgressSafelyAsync(Guid jobId, Guid concurrencyToken, int progress, CancellationToken cancellationToken)
     {
         try
         {
-            await UpdateProgressAsync(jobId, progress, cancellationToken);
+            await UpdateProgressAsync(jobId, concurrencyToken, progress, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
         catch (Exception exception)
         {
             logger.LogWarning("Generation job progress update was skipped. JobId={JobId}; ExceptionType={ExceptionType}", jobId, exception.GetType().Name);
+        }
+    }
+
+    private async Task TryNotifyAsync(Func<Task> action, Guid jobId)
+    {
+        try
+        {
+            await action();
+        }
+        catch (Exception exception)
+        {
+            logger.LogWarning(exception, "Generation notification was skipped safely. JobId={JobId}", jobId);
         }
     }
 
@@ -731,32 +834,46 @@ public sealed class GenerationJobWorker(
         }
     }
 
-    private static async Task CancelRunningAsync(TaslimDbContext db, IGenerationJobUsageService usage, GenerationJob job, CancellationToken cancellationToken)
+    private static async Task CancelRunningAsync(TaslimDbContext db, IGenerationJobUsageService usage, GenerationJob job, Guid concurrencyToken, CancellationToken cancellationToken)
     {
         var now = DateTime.UtcNow;
-        await db.GenerationJobs.Where(item => item.Id == job.Id && item.Status == GenerationJobStatus.Running)
+        await using var finalization = await db.Database.BeginTransactionAsync(cancellationToken);
+        var cancelled = await db.GenerationJobs.Where(item => item.Id == job.Id && item.Status == GenerationJobStatus.Running && item.ConcurrencyToken == concurrencyToken)
             .ExecuteUpdateAsync(setters => setters
                 .SetProperty(item => item.Status, GenerationJobStatus.Cancelled)
                 .SetProperty(item => item.ErrorCode, CancellationCode(job))
                 .SetProperty(item => item.ErrorMessage, "The job was cancelled.")
                 .SetProperty(item => item.CancelledAt, now)
                 .SetProperty(item => item.ClaimExpiresAt, (DateTime?)null), cancellationToken);
+        if (cancelled == 0)
+        {
+            await finalization.RollbackAsync(cancellationToken);
+            return;
+        }
         var transaction = await usage.BeginAsync(job, cancellationToken: cancellationToken);
         await usage.CancelAsync(transaction, CancellationCode(job), cancellationToken);
+        await finalization.CommitAsync(cancellationToken);
     }
 
-    private static async Task FailAsync(TaslimDbContext db, IGenerationJobUsageService usage, GenerationJob job, string code, string message, AiUsageMetadata? providerUsage, CancellationToken cancellationToken)
+    private static async Task FailAsync(TaslimDbContext db, IGenerationJobUsageService usage, GenerationJob job, string code, string message, AiUsageMetadata? providerUsage, Guid concurrencyToken, CancellationToken cancellationToken)
     {
         var now = DateTime.UtcNow;
-        await db.GenerationJobs.Where(item => item.Id == job.Id && item.Status == GenerationJobStatus.Running)
+        await using var finalization = await db.Database.BeginTransactionAsync(cancellationToken);
+        var failed = await db.GenerationJobs.Where(item => item.Id == job.Id && item.Status == GenerationJobStatus.Running && item.ConcurrencyToken == concurrencyToken)
             .ExecuteUpdateAsync(setters => setters
                 .SetProperty(item => item.Status, GenerationJobStatus.Failed)
                 .SetProperty(item => item.ErrorCode, code)
                 .SetProperty(item => item.ErrorMessage, message)
                 .SetProperty(item => item.FailedAt, now)
                 .SetProperty(item => item.ClaimExpiresAt, (DateTime?)null), cancellationToken);
+        if (failed == 0)
+        {
+            await finalization.RollbackAsync(cancellationToken);
+            return;
+        }
         var transaction = await usage.BeginAsync(job, cancellationToken: cancellationToken);
         await usage.FailAsync(transaction, code, providerUsage, cancellationToken);
+        await finalization.CommitAsync(cancellationToken);
     }
 
     private static string CancellationCode(GenerationJob job) =>

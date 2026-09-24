@@ -18,6 +18,15 @@ public interface IAssetService
 
 public sealed record AssetDownload(Asset Asset, StoredFile StoredFile, string FileName, string ContentType);
 
+public static class AssetSorts
+{
+    public const string Recent = "recent";
+    public const string Oldest = "oldest";
+    public const string Name = "name";
+    public const string Size = "size";
+    public static readonly IReadOnlySet<string> Supported = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { Recent, Oldest, Name, Size };
+}
+
 public sealed class AssetValidationException(string code, string message) : Exception(message)
 {
     public string Code { get; } = code;
@@ -53,9 +62,18 @@ public sealed class AssetService(TaslimDbContext db, WorkspaceAccessService acce
                 : query.Where(asset => asset.Name.ToLower().Contains(search.ToLower()) || (asset.Description != null && asset.Description.ToLower().Contains(search.ToLower())));
         }
 
+        var sort = string.IsNullOrWhiteSpace(filter.Sort) ? AssetSorts.Recent : filter.Sort.Trim().ToLowerInvariant();
+        if (!AssetSorts.Supported.Contains(sort)) throw new AssetValidationException("ASSET_SORT_NOT_SUPPORTED", "This asset sort is not available.");
+
         var totalCount = await query.CountAsync(cancellationToken);
-        var items = await query.OrderByDescending(asset => asset.CreatedAt)
-            .ThenBy(asset => asset.Id)
+        var ordered = sort switch
+        {
+            AssetSorts.Oldest => query.OrderBy(asset => asset.CreatedAt).ThenBy(asset => asset.Id),
+            AssetSorts.Name => query.OrderBy(asset => asset.Name).ThenByDescending(asset => asset.CreatedAt),
+            AssetSorts.Size => query.OrderByDescending(asset => asset.StoredFile == null ? 0 : asset.StoredFile.SizeBytes).ThenByDescending(asset => asset.CreatedAt),
+            _ => query.OrderByDescending(asset => asset.CreatedAt).ThenBy(asset => asset.Id),
+        };
+        var items = await ordered
             .Skip((page - 1) * pageSize)
             .Take(pageSize)
             .ToListAsync(cancellationToken);
@@ -118,7 +136,12 @@ public sealed class AssetService(TaslimDbContext db, WorkspaceAccessService acce
 
     private IQueryable<Asset> Query(bool tracking = false)
     {
-        var query = db.Assets.Include(asset => asset.Project).Include(asset => asset.Representations).AsQueryable();
+        var query = db.Assets
+            .Include(asset => asset.Project)
+            .Include(asset => asset.StoredFile)
+            .Include(asset => asset.SourceGenerationJob)
+            .Include(asset => asset.Representations)
+            .AsQueryable();
         return tracking ? query : query.AsNoTracking();
     }
 }

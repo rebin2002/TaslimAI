@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { AppShell } from "@/components/AppShell";
 import { AuthProvider } from "@/components/AuthProvider";
 import { LocaleProvider } from "@/components/LocaleProvider";
+import { OnboardingGate } from "@/components/OnboardingGate";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -16,6 +17,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
         <LocaleProvider>
           <AuthProvider>
             <AppShell>{children}</AppShell>
+            <OnboardingGate />
           </AuthProvider>
         </LocaleProvider>
       </body>

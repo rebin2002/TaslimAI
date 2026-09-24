@@ -38,7 +38,7 @@ public sealed class MusicGenerationController(
                 Title = request.Title,
                 InputJson = System.Text.Json.JsonSerializer.Serialize(input),
                 EstimatedProviderCostUsd = preflight.EstimatedProviderCostUsd,
-            }, cancellationToken);
+            }, cancellationToken, Request.Headers["Idempotency-Key"].FirstOrDefault());
             return Accepted(new CreateMusicGenerationResponse(GenerationJobContractMapper.ToDto(job)));
         }
         catch (MusicRequestValidationException exception)

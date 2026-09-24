@@ -1,6 +1,6 @@
 import type { LucideIcon } from "lucide-react";
 import {
-  Activity,
+  Bell,
   FileText,
   Image,
   LayoutDashboard,
@@ -34,7 +34,7 @@ export const primaryNavigation: NavigationItem[] = [
   { href: "/", labelKey: "navigation.home", icon: LayoutDashboard },
   { href: "/projects", labelKey: "navigation.projects", icon: FileText },
   { href: "/create", labelKey: "navigation.create", icon: Sparkles },
-  { href: "/notifications", labelKey: "navigation.activity", icon: Activity },
+  { href: "/notifications", labelKey: "navigation.notifications", icon: Bell },
   { href: "/account", labelKey: "navigation.account", icon: UserRound },
 ];
 

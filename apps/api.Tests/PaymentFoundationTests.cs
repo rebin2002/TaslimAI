@@ -4,6 +4,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Taslim.Api.Billing;
 using Taslim.Api.Domain;
+using Taslim.Api.Notifications;
 using Taslim.Api.Payments;
 using Taslim.Api.Persistence;
 using Xunit;
@@ -105,7 +106,7 @@ public sealed class PaymentFoundationTests
         return db;
     }
 
-    private static PaymentLifecycleService NewLifecycle(TaslimDbContext db) => new(db, new CreditLedgerService(db, Options.Create(new BillingOptions { CustomerChargingEnabled = true })));
+    private static PaymentLifecycleService NewLifecycle(TaslimDbContext db) => new(db, new CreditLedgerService(db, Options.Create(new BillingOptions { CustomerChargingEnabled = true })), new NullNotificationEventWriter());
 
     private static Workspace NewWorkspace() => new()
     {
@@ -136,5 +137,13 @@ public sealed class PaymentFoundationTests
     private sealed class AcceptingSignatureVerifier : IWebhookSignatureVerifier
     {
         public bool Verify(string rawPayload, string signature) => signature == "valid";
+    }
+
+    private sealed class NullNotificationEventWriter : INotificationEventWriter
+    {
+        public Task CreateGenerationCompletedAsync(Guid jobId, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task CreateGenerationFailedAsync(Guid jobId, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task CreateGenerationAttentionAsync(Guid jobId, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task CreateBillingPaymentFailedAsync(Guid workspaceId, Guid paymentAttemptId, CancellationToken cancellationToken = default) => Task.CompletedTask;
     }
 }

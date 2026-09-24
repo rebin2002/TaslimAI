@@ -29,7 +29,6 @@ export function ProjectDetailView() {
   const [overview, setOverview] = useState<ProjectOverview | null>(null);
   const [loading, setLoading] = useState(true);
   const [formOpen, setFormOpen] = useState(false);
-  const [working, setWorking] = useState(false);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -62,15 +61,7 @@ export function ProjectDetailView() {
 
   async function startConversation() {
     if (!overview) return;
-    setWorking(true);
-    setError("");
-    try {
-      const conversation = await api.createConversation(overview.workspace.id, { projectId: overview.project.id });
-      router.push(`/chat/${conversation.id}`);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : t("projects.conversationError"));
-      setWorking(false);
-    }
+    router.push(`/chat?projectId=${encodeURIComponent(overview.project.id)}`);
   }
 
   if (loading) return <div className="loading-state"><span className="loading-spinner" /></div>;
@@ -127,7 +118,7 @@ export function ProjectDetailView() {
         {recentActivity.length === 0 ? <p className="usage-empty">{t("projects.noActivity")}</p> : <div className="project-activity-list">{recentActivity.map((item) => <article className="project-activity-row" key={item.jobId}><span className={`activity-status-dot activity-status-${item.status.toLowerCase()}`} /><div><strong>{item.title}</strong><small>{t(`activity.type.${item.jobType}`)} · {formatDate(item.createdAt, locale)}</small></div>{item.assetId ? <Link className="text-link" href={`/assets?projectId=${project.id}`}>{t("projects.openResult")}</Link> : <span className="project-activity-status">{t(`activity.status.${item.status.toLowerCase()}`)}</span>}</article>)}</div>}
       </section>
       <section className="account-card project-conversations-card">
-        <div className="card-title"><span className="card-title-icon"><MessageSquare size={17} /></span><div><h2>{t("projects.conversationsTitle")}</h2><p>{t("projects.conversationsDescription")}</p></div><button className="secondary-button project-new-chat" onClick={() => void startConversation()} disabled={working}><Plus size={14} /> {t("projects.newConversation")}</button></div>
+        <div className="card-title"><span className="card-title-icon"><MessageSquare size={17} /></span><div><h2>{t("projects.conversationsTitle")}</h2><p>{t("projects.conversationsDescription")}</p></div><button className="secondary-button project-new-chat" onClick={() => void startConversation()}><Plus size={14} /> {t("projects.newConversation")}</button></div>
         {conversations.length === 0 ? <p className="usage-empty">{t("projects.noConversations")}</p> : <div className="project-conversations-list">{conversations.map((conversation) => <Link href={`/chat/${conversation.id}`} key={conversation.id}><MessageSquare size={15} /><span><strong>{conversation.title}</strong><small>{formatDate(conversation.updatedAt, locale)}</small></span></Link>)}</div>}
       </section>
     </div>

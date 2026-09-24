@@ -61,11 +61,55 @@ describe("same-origin API proxy", () => {
     vi.unstubAllGlobals();
   });
 
+  it("forwards the incoming abort signal for safe streaming cancellation", async () => {
+    const upstream = new Response("event: message.started\n\ndata: {}\n\n", { status: 200, headers: { "content-type": "text/event-stream" } });
+    const fetchMock = vi.fn().mockResolvedValue(upstream);
+    vi.stubGlobal("fetch", fetchMock);
+    const controller = new AbortController();
+    const request = new Request("http://localhost:3000/api/conversations/conversation-1/messages/stream", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+      signal: controller.signal,
+    });
+
+    await POST(request, context(["conversations", "conversation-1", "messages", "stream"]));
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(init.signal).toBeDefined();
+    controller.abort();
+    expect(init.signal?.aborted).toBe(true);
+    vi.unstubAllGlobals();
+  });
+
   it("returns a safe unavailable response when the API cannot be reached", async () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("private upstream detail")));
     const response = await GET(new Request("http://localhost:3000/api/auth/csrf"), context(["auth", "csrf"]));
     expect(response.status).toBe(503);
     await expect(response.json()).resolves.toEqual({ error: { code: "API_UNAVAILABLE", message: "The service is temporarily unavailable. Please try again." } });
+    vi.unstubAllGlobals();
+  });
+
+  it("rejects oversized request bodies before contacting the API", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const response = await POST(new Request("http://localhost:3000/api/files", {
+      method: "POST",
+      headers: { "content-length": String(25 * 1024 * 1024 + 1) },
+      body: "small-body",
+    }), context(["files"]));
+
+    expect(response.status).toBe(413);
+    await expect(response.json()).resolves.toEqual({ error: { code: "REQUEST_TOO_LARGE", message: "The request body is too large." } });
+    expect(fetchMock).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it("returns a safe timeout response for an aborted upstream request", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new DOMException("private upstream detail", "AbortError")));
+    const response = await GET(new Request("http://localhost:3000/api/auth/me"), context(["auth", "me"]));
+
+    expect(response.status).toBe(504);
+    await expect(response.json()).resolves.toEqual({ error: { code: "API_TIMEOUT", message: "The service took too long to respond. Please try again." } });
     vi.unstubAllGlobals();
   });
 });

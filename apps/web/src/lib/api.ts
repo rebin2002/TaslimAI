@@ -12,6 +12,9 @@ export type User = {
   timeZone: string;
   outputPreference: "concise" | "balanced" | "detailed";
   includeSourceLinks: boolean;
+  onboardingCompletedAt: string | null;
+  onboardingIntent: OnboardingIntent | null;
+  isAdmin: boolean;
 };
 
 export type Workspace = {
@@ -56,6 +59,13 @@ export type ProjectOverview = {
 
 export type RegisterInput = { displayName: string; email: string; password: string; preferredLanguage?: string };
 export type LoginInput = { email: string; password: string };
+export type OnboardingIntent = "project" | "chat" | "image" | "document" | "presentation" | "research";
+export type OnboardingInput = {
+  displayName?: string;
+  preferredLanguage: "en" | "ar" | "ku";
+  defaultGenerationLanguage: "en" | "ar" | "ku";
+  intent?: OnboardingIntent;
+};
 export type ProfileInput = {
   displayName: string;
   preferredLanguage: string;
@@ -185,6 +195,39 @@ export type AdminUsageTransaction = {
 };
 export type AdminUsageTransactionList = { items: AdminUsageTransaction[]; page: number; pageSize: number; totalCount: number; totalPages: number };
 export type AdminUsageReport = { summary: AdminUsageSummary; breakdowns: AdminUsageBreakdowns; transactions: AdminUsageTransactionList };
+export type AdminCountBreakdown = { key: string; count: number };
+export type AdminGenerationOverview = {
+  totalJobsInRange: number;
+  byStatus: AdminCountBreakdown[];
+  byStudio: AdminCountBreakdown[];
+  recentFailures: { jobId: string; jobType: string; errorCode: string | null; failedAt: string }[];
+  runningJobs: { jobId: string; jobType: string; progressPercent: number; queuedAt: string | null; startedAt: string | null; createdAt: string }[];
+  queuedOrPendingCount: number;
+};
+export type AdminUsageOperations = {
+  requestCount: number;
+  completedRequestCount: number;
+  failedRequestCount: number;
+  pendingRequestCount: number;
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  imageInputTokens: number;
+  imageOutputTokens: number;
+  providerCostUsd: number;
+  customerChargesUsd: number;
+  pendingEstimatedProviderCostUsd: number;
+  byFeature: { feature: string; requestCount: number; completedRequestCount: number; failedRequestCount: number; pendingRequestCount: number; inputTokens: number; cachedInputTokens: number; outputTokens: number; imageInputTokens: number; imageOutputTokens: number; providerCostUsd: number; customerChargesUsd: number }[];
+};
+export type AdminOperationsDashboard = {
+  range: { fromUtc: string; toUtc: string };
+  generation: AdminGenerationOverview;
+  usage: AdminUsageOperations;
+  usersAndWorkspaces: { totalUsers: number; activeUsers: number; disabledUsers: number; totalWorkspaces: number; personalWorkspaces: number; businessWorkspaces: number; archivedWorkspaces: number };
+  assetsAndStorage: { totalAssets: number; assetsByType: AdminCountBreakdown[]; totalStoredFiles: number; storedBytes: number; filesByStatus: AdminCountBreakdown[]; filesByStorageProvider: AdminCountBreakdown[]; configuredStorageProvider: string; persistentStorageConfigured: boolean };
+  billing: { customerChargingEnabled: boolean; configuredProvider: string; paymentProviderConfigured: boolean; subscriptions: { planCode: string; status: string; count: number }[]; paymentAttemptsByStatus: AdminCountBreakdown[]; pendingReconciliationCount: number };
+  signals: { runningJobCount: number; queuedOrPendingJobCount: number; recentFailureCount: number; anomalousUsageCountInRange: number; lastCompletedGenerationAt: string | null };
+};
 export type GenerationJobStatus = "Pending" | "Queued" | "Running" | "Succeeded" | "Failed" | "Cancelled";
 export type GenerationJobOutput = { id: string; outputType: string; storedFileId: string | null; metadataJson: string | null; createdAt: string };
 export type GenerationJob = {
@@ -234,6 +277,37 @@ export type ActivityItem = {
   assetId: string | null;
 };
 export type ActivityList = { items: ActivityItem[]; page: number; pageSize: number; totalCount: number; totalPages: number; unreadCount: number };
+export type GlobalSearchResultType = "projects" | "conversations" | "assets" | "files" | "generation";
+export type GlobalSearchResult = {
+  type: GlobalSearchResultType;
+  id: string;
+  title: string;
+  description: string | null;
+  projectId: string | null;
+  conversationId: string | null;
+  assetId: string | null;
+  projectName: string | null;
+  status: string | null;
+  metadata: string | null;
+  createdAt: string;
+  updatedAt: string | null;
+};
+export type GlobalSearchGroup = { type: GlobalSearchResultType; count: number; items: GlobalSearchResult[] };
+export type GlobalSearchResponse = { query: string; totalCount: number; groups: GlobalSearchGroup[] };
+export type NotificationItem = {
+  id: string;
+  workspaceId: string;
+  projectId: string | null;
+  generationJobId: string | null;
+  assetId: string | null;
+  type: "generation.completed" | "generation.failed" | "generation.attention" | "billing.payment_failed";
+  resourceTitle: string | null;
+  createdAt: string;
+  readAt: string | null;
+  isRead: boolean;
+  destination: string;
+};
+export type NotificationList = { items: NotificationItem[]; page: number; pageSize: number; totalCount: number; totalPages: number; unreadCount: number };
 export type ImageGenerationInput = {
   workspaceId: string;
   projectId?: string | null;
@@ -406,6 +480,9 @@ export type Asset = {
   status: AssetStatus;
   hasFile: boolean;
   canPreview: boolean;
+  fileSizeBytes: number | null;
+  sourceStudio: string | null;
+  sourceJobTitle: string | null;
   createdAt: string;
   updatedAt: string;
   archivedAt: string | null;
@@ -413,13 +490,20 @@ export type Asset = {
 };
 export type AssetRepresentation = { id: string; representationType: string; fileName: string; contentType: string; sizeBytes: number; createdAt: string };
 export type AssetList = { items: Asset[]; page: number; pageSize: number; totalCount: number; totalPages: number };
-export type AssetFilters = { projectId?: string; assetType?: AssetType; status?: AssetStatus; search?: string; page?: number; pageSize?: number };
+export type AssetSort = "recent" | "oldest" | "name" | "size";
+export type AssetFilters = { projectId?: string; assetType?: AssetType; status?: AssetStatus; search?: string; sort?: AssetSort; page?: number; pageSize?: number };
 export type AssetInput = { name: string; description?: string | null; projectId?: string | null };
 
 let csrfToken: string | null = null;
 
 function requestId() {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+function generationInit(init: RequestInit, idempotencyKey: string): RequestInit {
+  const headers = new Headers(init.headers);
+  headers.set("Idempotency-Key", idempotencyKey);
+  return { ...init, headers };
 }
 
 async function csrf(forceRefresh = false) {
@@ -471,16 +555,16 @@ async function requestForm<T>(path: string, form: FormData, withCsrf = false, re
   return body as T;
 }
 
-async function streamRequest(path: string, payload: unknown, onEvent: (event: ChatStreamEvent) => void, retryCsrf = true): Promise<void> {
+async function streamRequest(path: string, payload: unknown, onEvent: (event: ChatStreamEvent) => void, signal?: AbortSignal, retryCsrf = true): Promise<void> {
   const headers = new Headers({ "Content-Type": "application/json", Accept: "text/event-stream" });
   headers.set("X-CSRF-TOKEN", csrfToken ?? await csrf());
-  const response = await fetch(`${API_URL}${path}`, { method: "POST", headers, credentials: "include", body: JSON.stringify(payload) });
+  const response = await fetch(`${API_URL}${path}`, { method: "POST", headers, credentials: "include", body: JSON.stringify(payload), signal });
   if (!response.ok) {
     const body = await parseError(response);
     if (response.status === 400 && retryCsrf && body?.error?.code === "CSRF_VALIDATION_FAILED") {
       csrfToken = null;
       await csrf(true);
-      return streamRequest(path, payload, onEvent, false);
+      return streamRequest(path, payload, onEvent, signal, false);
     }
     throw new ApiError(response.status, body?.error?.message ?? "Something went wrong.", body?.error?.fields, body?.error?.code);
   }
@@ -513,6 +597,7 @@ export const api = {
   login: async (input: LoginInput) => { const result = await request<AuthResponse>("/api/auth/login", { method: "POST", body: JSON.stringify(input) }, true); csrfToken = null; await csrf(true); return result; },
   logout: async () => { const result = await request<{ success: boolean }>("/api/auth/logout", { method: "POST" }, true); csrfToken = null; await csrf(true); return result; },
   updateProfile: (input: ProfileInput) => request<AuthResponse>("/api/auth/profile", { method: "PATCH", body: JSON.stringify(input) }, true),
+  completeOnboarding: (input: OnboardingInput) => request<AuthResponse>("/api/auth/onboarding/complete", { method: "POST", body: JSON.stringify(input) }, true),
   changePassword: (input: ChangePasswordInput) => request<{ success: boolean }>("/api/auth/password", { method: "POST", body: JSON.stringify(input) }, true),
   listProjects: (workspaceId: string, status: "Active" | "Archived") => request<Project[]>(`/api/workspaces/${workspaceId}/projects?status=${status}`),
   listWorkspaces: () => request<Workspace[]>('/api/workspaces'),
@@ -529,8 +614,10 @@ export const api = {
   getMessages: (conversationId: string) => request<ChatMessage[]>(`/api/conversations/${conversationId}/messages`),
   renameConversation: (conversationId: string, title: string) => request<Conversation>(`/api/conversations/${conversationId}`, { method: "PATCH", body: JSON.stringify({ title }) }, true),
   archiveConversation: (conversationId: string) => request<Conversation>(`/api/conversations/${conversationId}/archive`, { method: "POST" }, true),
+  deleteConversation: (conversationId: string) => request<void>(`/api/conversations/${conversationId}`, { method: "DELETE" }, true),
   sendMessage: (conversationId: string, content: string, id = requestId(), attachmentIds: string[] = []) => request<SendMessageResponse>(`/api/conversations/${conversationId}/messages`, { method: "POST", body: JSON.stringify({ content, requestId: id, attachmentIds }) }, true),
-  streamMessage: (conversationId: string, content: string, onEvent: (event: ChatStreamEvent) => void, id = requestId(), attachmentIds: string[] = []) => streamRequest(`/api/conversations/${conversationId}/messages/stream`, { content, requestId: id, attachmentIds }, onEvent),
+  streamMessage: (conversationId: string, content: string, onEvent: (event: ChatStreamEvent) => void, id = requestId(), attachmentIds: string[] = [], signal?: AbortSignal) => streamRequest(`/api/conversations/${conversationId}/messages/stream`, { content, requestId: id, attachmentIds }, onEvent, signal),
+  regenerateMessage: (conversationId: string, messageId: string, onEvent: (event: ChatStreamEvent) => void, id = requestId(), signal?: AbortSignal) => streamRequest(`/api/conversations/${conversationId}/messages/${messageId}/regenerate`, { requestId: id }, onEvent, signal),
   getUsageSummary: (workspaceId: string) => request<UsageSummary>(`/api/workspaces/${workspaceId}/usage/summary`),
   getUsageHistory: (workspaceId: string, page = 1, pageSize = 20) => request<UsageHistory>(`/api/workspaces/${workspaceId}/usage?page=${page}&pageSize=${pageSize}`),
   getBillingAccount: (workspaceId: string) => request<BillingAccount>(`/api/workspaces/${workspaceId}/billing`),
@@ -539,13 +626,17 @@ export const api = {
     return request<AdminUsageReport>(`/api/admin/usage/report${query.toString() ? `?${query.toString()}` : ""}`);
   },
   getAdminUsageTransaction: (id: string) => request<AdminUsageTransaction>(`/api/admin/usage/transactions/${id}`),
-  createGenerationJob: (workspaceId: string, inputJson = "{}", title?: string) => request<GenerationJob>("/api/generation/jobs", { method: "POST", body: JSON.stringify({ workspaceId, jobType: "system.test", inputJson, title }) }, true),
-  createImageGenerationJob: (input: ImageGenerationInput) => request<{ job: GenerationJob }>("/api/image-generation/jobs", { method: "POST", body: JSON.stringify(input) }, true).then((response) => response.job),
-  createVoiceGenerationJob: (input: VoiceGenerationInput) => request<{ job: GenerationJob }>("/api/voice-generation/jobs", { method: "POST", body: JSON.stringify(input) }, true).then((response) => response.job),
-  createDocumentGenerationJob: (input: DocumentGenerationInput) => request<{ job: GenerationJob }>("/api/document-generation/jobs", { method: "POST", body: JSON.stringify(input) }, true).then((response) => response.job),
-  createPresentationGenerationJob: (input: PresentationGenerationInput) => request<{ job: GenerationJob }>("/api/presentation-generation/jobs", { method: "POST", body: JSON.stringify(input) }, true).then((response) => response.job),
-  createResearchGenerationJob: (input: ResearchGenerationInput) => request<{ job: GenerationJob }>("/api/research-generation/jobs", { method: "POST", body: JSON.stringify(input) }, true).then((response) => response.job),
-  createSocialGenerationJob: (input: SocialGenerationInput) => request<{ job: GenerationJob }>("/api/social-generation/jobs", { method: "POST", body: JSON.stringify(input) }, true).then((response) => response.job),
+  getAdminOperationsDashboard: (params: Record<string, string | number | undefined> = {}) => {
+    const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value !== undefined).map(([key, value]) => [key, String(value)]));
+    return request<AdminOperationsDashboard>(`/api/admin/operations/dashboard${query.toString() ? `?${query.toString()}` : ""}`);
+  },
+  createGenerationJob: (workspaceId: string, inputJson = "{}", title?: string, idempotencyKey = requestId()) => request<GenerationJob>("/api/generation/jobs", generationInit({ method: "POST", body: JSON.stringify({ workspaceId, jobType: "system.test", inputJson, title }) }, idempotencyKey), true),
+  createImageGenerationJob: (input: ImageGenerationInput, idempotencyKey = requestId()) => request<{ job: GenerationJob }>("/api/image-generation/jobs", generationInit({ method: "POST", body: JSON.stringify(input) }, idempotencyKey), true).then((response) => response.job),
+  createVoiceGenerationJob: (input: VoiceGenerationInput, idempotencyKey = requestId()) => request<{ job: GenerationJob }>("/api/voice-generation/jobs", generationInit({ method: "POST", body: JSON.stringify(input) }, idempotencyKey), true).then((response) => response.job),
+  createDocumentGenerationJob: (input: DocumentGenerationInput, idempotencyKey = requestId()) => request<{ job: GenerationJob }>("/api/document-generation/jobs", generationInit({ method: "POST", body: JSON.stringify(input) }, idempotencyKey), true).then((response) => response.job),
+  createPresentationGenerationJob: (input: PresentationGenerationInput, idempotencyKey = requestId()) => request<{ job: GenerationJob }>("/api/presentation-generation/jobs", generationInit({ method: "POST", body: JSON.stringify(input) }, idempotencyKey), true).then((response) => response.job),
+  createResearchGenerationJob: (input: ResearchGenerationInput, idempotencyKey = requestId()) => request<{ job: GenerationJob }>("/api/research-generation/jobs", generationInit({ method: "POST", body: JSON.stringify(input) }, idempotencyKey), true).then((response) => response.job),
+  createSocialGenerationJob: (input: SocialGenerationInput, idempotencyKey = requestId()) => request<{ job: GenerationJob }>("/api/social-generation/jobs", generationInit({ method: "POST", body: JSON.stringify(input) }, idempotencyKey), true).then((response) => response.job),
   getMovieProvider: () => request<{ provider: MovieProviderReadiness }>("/api/movie-studio/provider"),
   createMovieProject: (input: MovieStudioCreateInput) => request<MovieStudioResponse>("/api/movie-studio/projects", { method: "POST", body: JSON.stringify(input) }, true),
   getMovieProject: (id: string) => request<MovieProject>(`/api/movie-studio/projects/${id}`),
@@ -553,9 +644,9 @@ export const api = {
   addMovieScene: (id: string, input: { title: string; summary: string; durationSeconds?: number | null; continuityNotes?: string | null; narration?: string | null; dialogue?: string | null }) => request<MovieScene>(`/api/movie-studio/projects/${id}/scenes`, { method: "POST", body: JSON.stringify(input) }, true),
   addMovieCharacter: (id: string, input: { name: string; description: string; appearance?: string | null; voiceAndPerformance?: string | null; continuityNotes?: string | null; referenceAssetId?: string | null }) => request<MovieCharacter>(`/api/movie-studio/projects/${id}/characters`, { method: "POST", body: JSON.stringify(input) }, true),
   addMovieLocation: (id: string, input: { name: string; description: string; visualContinuityNotes?: string | null; referenceAssetId?: string | null }) => request<MovieLocation>(`/api/movie-studio/projects/${id}/locations`, { method: "POST", body: JSON.stringify(input) }, true),
-  generateMovieScene: (projectId: string, sceneId: string, input: { title?: string | null } = {}) => request<{ project: MovieProject; job: GenerationJob; clipId: string }>(`/api/movie-studio/projects/${projectId}/scenes/${sceneId}/generate`, { method: "POST", body: JSON.stringify(input) }, true),
-  generateMovieShot: (shotId: string, input: { title?: string | null } = {}) => request<{ project: MovieProject; job: GenerationJob; clipId: string }>(`/api/movie-studio/shots/${shotId}/generate`, { method: "POST", body: JSON.stringify(input) }, true),
-  createMusicGenerationJob: (input: MusicGenerationInput) => request<{ job: GenerationJob }>("/api/music-generation/jobs", { method: "POST", body: JSON.stringify(input) }, true).then((response) => response.job),
+  generateMovieScene: (projectId: string, sceneId: string, input: { title?: string | null } = {}, idempotencyKey = requestId()) => request<{ project: MovieProject; job: GenerationJob; clipId: string }>(`/api/movie-studio/projects/${projectId}/scenes/${sceneId}/generate`, generationInit({ method: "POST", body: JSON.stringify(input) }, idempotencyKey), true),
+  generateMovieShot: (shotId: string, input: { title?: string | null } = {}, idempotencyKey = requestId()) => request<{ project: MovieProject; job: GenerationJob; clipId: string }>(`/api/movie-studio/shots/${shotId}/generate`, generationInit({ method: "POST", body: JSON.stringify(input) }, idempotencyKey), true),
+  createMusicGenerationJob: (input: MusicGenerationInput, idempotencyKey = requestId()) => request<{ job: GenerationJob }>("/api/music-generation/jobs", generationInit({ method: "POST", body: JSON.stringify(input) }, idempotencyKey), true).then((response) => response.job),
   getGenerationJob: (jobId: string) => request<GenerationJob>(`/api/generation/jobs/${jobId}`),
   getResearchSources: (jobId: string) => request<{ jobId: string; sources: ResearchSource[] }>(`/api/research-generation/jobs/${jobId}/sources`),
   listGenerationJobs: (workspaceId: string, page = 1, pageSize = 20) => request<GenerationJobList>(`/api/generation/jobs?workspaceId=${encodeURIComponent(workspaceId)}&page=${page}&pageSize=${pageSize}&jobType=system.test`),
@@ -565,14 +656,23 @@ export const api = {
     if (status && status !== "All") params.set("status", status);
     return request<ActivityList>(`/api/activity?${params.toString()}`);
   },
+  search: (query: string, limit = 8) => request<GlobalSearchResponse>(`/api/search?q=${encodeURIComponent(query)}&limit=${limit}`),
   getActivityUnreadCount: (workspaceId: string) => request<{ unreadCount: number }>(`/api/activity/unread-count?workspaceId=${encodeURIComponent(workspaceId)}`),
   markActivityRead: (workspaceId: string, jobId: string) => request<{ read: boolean }>(`/api/activity/${jobId}/read`, { method: "POST", body: JSON.stringify({ workspaceId }) }, true),
   markAllActivityRead: (workspaceId: string) => request<{ read: boolean }>("/api/activity/read-all", { method: "POST", body: JSON.stringify({ workspaceId }) }, true),
+  listNotifications: (workspaceId: string, page = 1, pageSize = 20, unreadOnly = false) => {
+    const params = new URLSearchParams({ workspaceId, page: String(page), pageSize: String(pageSize), unreadOnly: String(unreadOnly) });
+    return request<NotificationList>(`/api/notifications?${params.toString()}`);
+  },
+  getNotificationUnreadCount: (workspaceId: string) => request<{ unreadCount: number }>(`/api/notifications/unread-count?workspaceId=${encodeURIComponent(workspaceId)}`),
+  markNotificationRead: (workspaceId: string, notificationId: string) => request<{ read: boolean }>(`/api/notifications/${notificationId}/read`, { method: "POST", body: JSON.stringify({ workspaceId }) }, true),
+  markAllNotificationsRead: (workspaceId: string) => request<{ read: boolean }>("/api/notifications/read-all", { method: "POST", body: JSON.stringify({ workspaceId }) }, true),
   listAssets: (workspaceId: string, filters: AssetFilters = {}) => {
     const params = new URLSearchParams({ workspaceId, status: filters.status ?? "Active", page: String(filters.page ?? 1), pageSize: String(filters.pageSize ?? 24) });
     if (filters.projectId) params.set("projectId", filters.projectId);
     if (filters.assetType) params.set("assetType", filters.assetType);
     if (filters.search?.trim()) params.set("search", filters.search.trim());
+    if (filters.sort) params.set("sort", filters.sort);
     return request<AssetList>(`/api/assets?${params.toString()}`);
   },
   getAsset: (assetId: string) => request<Asset>(`/api/assets/${assetId}`),
