@@ -12,6 +12,8 @@ export type User = {
   timeZone: string;
   outputPreference: "concise" | "balanced" | "detailed";
   includeSourceLinks: boolean;
+  onboardingCompletedAt: string | null;
+  onboardingIntent: OnboardingIntent | null;
 };
 
 export type Workspace = {
@@ -56,6 +58,13 @@ export type ProjectOverview = {
 
 export type RegisterInput = { displayName: string; email: string; password: string; preferredLanguage?: string };
 export type LoginInput = { email: string; password: string };
+export type OnboardingIntent = "project" | "chat" | "image" | "document" | "presentation" | "research";
+export type OnboardingInput = {
+  displayName?: string;
+  preferredLanguage: "en" | "ar" | "ku";
+  defaultGenerationLanguage: "en" | "ar" | "ku";
+  intent?: OnboardingIntent;
+};
 export type ProfileInput = {
   displayName: string;
   preferredLanguage: string;
@@ -548,6 +557,7 @@ export const api = {
   login: async (input: LoginInput) => { const result = await request<AuthResponse>("/api/auth/login", { method: "POST", body: JSON.stringify(input) }, true); csrfToken = null; await csrf(true); return result; },
   logout: async () => { const result = await request<{ success: boolean }>("/api/auth/logout", { method: "POST" }, true); csrfToken = null; await csrf(true); return result; },
   updateProfile: (input: ProfileInput) => request<AuthResponse>("/api/auth/profile", { method: "PATCH", body: JSON.stringify(input) }, true),
+  completeOnboarding: (input: OnboardingInput) => request<AuthResponse>("/api/auth/onboarding/complete", { method: "POST", body: JSON.stringify(input) }, true),
   changePassword: (input: ChangePasswordInput) => request<{ success: boolean }>("/api/auth/password", { method: "POST", body: JSON.stringify(input) }, true),
   listProjects: (workspaceId: string, status: "Active" | "Archived") => request<Project[]>(`/api/workspaces/${workspaceId}/projects?status=${status}`),
   listWorkspaces: () => request<Workspace[]>('/api/workspaces'),

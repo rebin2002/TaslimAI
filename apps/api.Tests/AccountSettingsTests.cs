@@ -55,6 +55,66 @@ public sealed class AccountSettingsTests : IClassFixture<TaslimApiFactory>
     }
 
     [Fact]
+    public async Task New_user_can_complete_onboarding_with_preferences_and_a_real_workflow_intent()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Onboarding Owner", $"onboarding-{Guid.NewGuid():N}@example.com");
+
+        Assert.Null(auth.User.OnboardingCompletedAt);
+        Assert.Null(auth.User.OnboardingIntent);
+
+        var completed = await SendWithCsrf<AuthResponse>(client, HttpMethod.Post, "/api/auth/onboarding/complete", new
+        {
+            displayName = "Onboarding Owner Updated",
+            preferredLanguage = "ar",
+            defaultGenerationLanguage = "ku",
+            intent = "research",
+        });
+
+        Assert.Equal("Onboarding Owner Updated", completed.User.DisplayName);
+        Assert.Equal("ar", completed.User.PreferredLanguage);
+        Assert.Equal("ku", completed.User.DefaultGenerationLanguage);
+        Assert.Equal("research", completed.User.OnboardingIntent);
+        Assert.NotNull(completed.User.OnboardingCompletedAt);
+
+        var current = await client.GetFromJsonAsync<AuthResponse>("/api/auth/me");
+        Assert.NotNull(current);
+        Assert.Equal("research", current!.User.OnboardingIntent);
+        Assert.NotNull(current.User.OnboardingCompletedAt);
+    }
+
+    [Fact]
+    public async Task New_user_can_skip_onboarding_and_the_skip_persists()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Skip Owner", $"onboarding-skip-{Guid.NewGuid():N}@example.com");
+
+        var completed = await SendWithCsrf<AuthResponse>(client, HttpMethod.Post, "/api/auth/onboarding/complete", new
+        {
+            preferredLanguage = "en",
+            defaultGenerationLanguage = "en",
+        });
+
+        Assert.Equal(auth.User.DisplayName, completed.User.DisplayName);
+        Assert.Null(completed.User.OnboardingIntent);
+        Assert.NotNull(completed.User.OnboardingCompletedAt);
+    }
+
+    [Fact]
+    public async Task Onboarding_completion_requires_an_authenticated_session()
+    {
+        using var anonymous = factory.CreateClient();
+        var response = await SendWithCsrf(anonymous, HttpMethod.Post, "/api/auth/onboarding/complete", new
+        {
+            preferredLanguage = "en",
+            defaultGenerationLanguage = "en",
+            intent = "project",
+        });
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
     public async Task Password_change_requires_current_password_and_replaces_login_secret()
     {
         using var client = factory.CreateClient();
