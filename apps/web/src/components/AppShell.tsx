@@ -34,9 +34,9 @@ export function AppShell({ children }: Readonly<{ children: React.ReactNode }>) 
             })}
           </nav>
           <div className="topbar-actions">
-            <button type="button" className="icon-button search-button" aria-label={t("navigation.search")}>
+            <Link href="/search" className="icon-button search-button" aria-label={t("navigation.search")}>
               <Search size={18} />
-            </button>
+            </Link>
             <ActivityBell unreadCount={unreadCount} />
             <label className="language-select">
               <span className="sr-only">{t("navigation.language")}</span>

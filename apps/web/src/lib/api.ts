@@ -234,6 +234,23 @@ export type ActivityItem = {
   assetId: string | null;
 };
 export type ActivityList = { items: ActivityItem[]; page: number; pageSize: number; totalCount: number; totalPages: number; unreadCount: number };
+export type GlobalSearchResultType = "projects" | "conversations" | "assets" | "files" | "generation";
+export type GlobalSearchResult = {
+  type: GlobalSearchResultType;
+  id: string;
+  title: string;
+  description: string | null;
+  projectId: string | null;
+  conversationId: string | null;
+  assetId: string | null;
+  projectName: string | null;
+  status: string | null;
+  metadata: string | null;
+  createdAt: string;
+  updatedAt: string | null;
+};
+export type GlobalSearchGroup = { type: GlobalSearchResultType; count: number; items: GlobalSearchResult[] };
+export type GlobalSearchResponse = { query: string; totalCount: number; groups: GlobalSearchGroup[] };
 export type ImageGenerationInput = {
   workspaceId: string;
   projectId?: string | null;
@@ -567,6 +584,7 @@ export const api = {
     if (status && status !== "All") params.set("status", status);
     return request<ActivityList>(`/api/activity?${params.toString()}`);
   },
+  search: (query: string, limit = 8) => request<GlobalSearchResponse>(`/api/search?q=${encodeURIComponent(query)}&limit=${limit}`),
   getActivityUnreadCount: (workspaceId: string) => request<{ unreadCount: number }>(`/api/activity/unread-count?workspaceId=${encodeURIComponent(workspaceId)}`),
   markActivityRead: (workspaceId: string, jobId: string) => request<{ read: boolean }>(`/api/activity/${jobId}/read`, { method: "POST", body: JSON.stringify({ workspaceId }) }, true),
   markAllActivityRead: (workspaceId: string) => request<{ read: boolean }>("/api/activity/read-all", { method: "POST", body: JSON.stringify({ workspaceId }) }, true),

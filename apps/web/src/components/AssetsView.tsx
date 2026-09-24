@@ -9,17 +9,17 @@ import { api, type Asset, type AssetList, type AssetStatus, type AssetType, type
 
 const assetTypes: AssetType[] = ["image", "document", "presentation", "video", "audio", "music", "research", "social", "file", "other"];
 
-export function AssetsView({ initialProjectId }: { initialProjectId?: string }) {
+export function AssetsView({ initialProjectId, initialSearch, initialStatus }: { initialProjectId?: string; initialSearch?: string; initialStatus?: AssetStatus }) {
   const { workspace } = useAuth();
   const { t, locale } = useLocale();
   const [result, setResult] = useState<AssetList | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [search, setSearch] = useState("");
+  const [search, setSearch] = useState(initialSearch ?? "");
   const [assetType, setAssetType] = useState<AssetType | "">("");
   const [projectId, setProjectId] = useState(initialProjectId ?? "");
-  const [status, setStatus] = useState<AssetStatus>("Active");
+  const [status, setStatus] = useState<AssetStatus>(initialStatus ?? "Active");
   const [page, setPage] = useState(1);
   const [editing, setEditing] = useState<Asset | null>(null);
   const [editName, setEditName] = useState("");
