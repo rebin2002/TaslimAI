@@ -25,6 +25,7 @@ using Taslim.Api.Files;
 using Taslim.Api.Generation;
 using Taslim.Api.Movies;
 using Taslim.Api.Payments;
+using Taslim.Api.Notifications;
 using Taslim.Api.Voice;
 using FileSettings = Taslim.Api.Files.FileOptions;
 
@@ -158,6 +159,9 @@ builder.Services.Configure<GenerationJobOptions>(builder.Configuration.GetSectio
 builder.Services.AddScoped<IGenerationJobQueue, DatabaseGenerationJobQueue>();
 builder.Services.AddScoped<IGenerationJobUsageService, GenerationJobUsageService>();
 builder.Services.AddScoped<IGenerationJobService, GenerationJobService>();
+builder.Services.AddScoped<NotificationService>();
+builder.Services.AddScoped<INotificationService>(services => services.GetRequiredService<NotificationService>());
+builder.Services.AddScoped<INotificationEventWriter>(services => services.GetRequiredService<NotificationService>());
 builder.Services.AddScoped<IMovieStudioService, MovieStudioService>();
 builder.Services.Configure<MovieVideoOptions>(builder.Configuration.GetSection("MovieVideo"));
 builder.Services.AddScoped<MovieVideoExecutionStore>();

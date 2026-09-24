@@ -12,6 +12,7 @@ using Taslim.Api.Files;
 using Taslim.Api.Images;
 using Taslim.Api.Music;
 using Taslim.Api.Movies;
+using Taslim.Api.Notifications;
 using Taslim.Api.Persistence;
 using Taslim.Api.Presentations;
 using Taslim.Api.Research;
@@ -319,10 +320,11 @@ public sealed class GenerationJobWorker(
             {
                 using var scope = scopeFactory.CreateScope();
                 var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+                var notifications = scope.ServiceProvider.GetRequiredService<INotificationEventWriter>();
                 var now = DateTime.UtcNow;
                 if (schedule.RecoveryDue(now))
                 {
-                    await RecoverExpiredClaimsAsync(db, stoppingToken);
+                    await RecoverExpiredClaimsAsync(db, notifications, stoppingToken);
                     schedule.ScheduleNextRecovery(now);
                 }
                 var job = await ClaimAsync(db, stoppingToken);
@@ -342,10 +344,15 @@ public sealed class GenerationJobWorker(
         }
     }
 
-    private static Task<int> RecoverExpiredClaimsAsync(TaslimDbContext db, CancellationToken cancellationToken)
+    private async Task RecoverExpiredClaimsAsync(TaslimDbContext db, INotificationEventWriter notifications, CancellationToken cancellationToken)
     {
         var now = DateTime.UtcNow;
-        return db.GenerationJobs
+        var recoveredJobIds = await db.GenerationJobs.AsNoTracking()
+            .Where(job => job.Status == GenerationJobStatus.Running && job.ClaimExpiresAt.HasValue && job.ClaimExpiresAt < now)
+            .Select(job => job.Id)
+            .ToListAsync(cancellationToken);
+        if (recoveredJobIds.Count == 0) return;
+        await db.GenerationJobs
             .Where(job => job.Status == GenerationJobStatus.Running && job.ClaimExpiresAt.HasValue && job.ClaimExpiresAt < now)
             .ExecuteUpdateAsync(setters => setters
                 .SetProperty(job => job.Status, GenerationJobStatus.Queued)
@@ -353,6 +360,8 @@ public sealed class GenerationJobWorker(
                 .SetProperty(job => job.StartedAt, (DateTime?)null)
                 .SetProperty(job => job.ClaimExpiresAt, (DateTime?)null)
                 .SetProperty(job => job.CancellationRequested, false), cancellationToken);
+        foreach (var jobId in recoveredJobIds)
+            await TryNotifyAsync(() => notifications.CreateGenerationAttentionAsync(jobId, cancellationToken), jobId);
     }
 
     private static async Task<GenerationJob?> ClaimAsync(TaslimDbContext db, CancellationToken cancellationToken)
@@ -395,6 +404,7 @@ public sealed class GenerationJobWorker(
     {
         using var scope = scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var notifications = scope.ServiceProvider.GetRequiredService<INotificationEventWriter>();
         var usage = scope.ServiceProvider.GetRequiredService<IGenerationJobUsageService>();
         var publisher = scope.ServiceProvider.GetRequiredService<IGeneratedAssetPublisher>();
         var movieExecutions = scope.ServiceProvider.GetRequiredService<MovieVideoExecutionStore>();
@@ -411,6 +421,7 @@ public sealed class GenerationJobWorker(
             if (handler is null)
             {
                 await FailAsync(db, usage, claimedJob, GenerationJobErrorCodes.TypeNotSupported, "This job type is not available.", null, stoppingToken);
+                await TryNotifyAsync(() => notifications.CreateGenerationFailedAsync(claimedJob.Id, stoppingToken), claimedJob.Id);
                 return;
             }
             var progress = new SerializedProgress(value => UpdateProgressSafelyAsync(claimedJob.Id, value, stoppingToken));
@@ -513,6 +524,7 @@ public sealed class GenerationJobWorker(
                 return;
             }
             publicationCommitted = true;
+            await TryNotifyAsync(() => notifications.CreateGenerationCompletedAsync(claimedJob.Id, stoppingToken), claimedJob.Id);
             if (GenerationJobTypes.MovieTypes.Contains(claimedJob.JobType))
             {
                 var publication = publications.FirstOrDefault(item => item.Asset is not null);
@@ -618,6 +630,7 @@ public sealed class GenerationJobWorker(
                 logger.LogError(exception, "Generation job execution failed. JobId={JobId}; JobType={JobType}; FailureCode={FailureCode}", claimedJob.Id, claimedJob.JobType, failureCode);
             }
             await FailAsync(db, usage, claimedJob, failureCode, FailureMessage(failureCode), failureUsage, stoppingToken);
+            await TryNotifyAsync(() => notifications.CreateGenerationFailedAsync(claimedJob.Id, stoppingToken), claimedJob.Id);
         }
         finally
         {
@@ -659,6 +672,18 @@ public sealed class GenerationJobWorker(
         catch (Exception exception)
         {
             logger.LogWarning("Generation job progress update was skipped. JobId={JobId}; ExceptionType={ExceptionType}", jobId, exception.GetType().Name);
+        }
+    }
+
+    private async Task TryNotifyAsync(Func<Task> action, Guid jobId)
+    {
+        try
+        {
+            await action();
+        }
+        catch (Exception exception)
+        {
+            logger.LogWarning(exception, "Generation notification was skipped safely. JobId={JobId}", jobId);
         }
     }
 
