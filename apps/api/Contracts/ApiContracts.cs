@@ -78,6 +78,19 @@ public sealed record ProjectDto(
     DateTime UpdatedAt,
     DateTime? ArchivedAt);
 
+public sealed record ProjectOverviewCountsDto(
+    int Files,
+    int Assets,
+    int Conversations,
+    int Activity);
+
+public sealed record ProjectOverviewDto(
+    ProjectDto Project,
+    WorkspaceSummaryDto Workspace,
+    ProjectOverviewCountsDto Counts,
+    IReadOnlyList<ConversationDto> Conversations,
+    IReadOnlyList<ActivityItemDto> RecentActivity);
+
 public sealed class CreateProjectRequest
 {
     [Required, StringLength(160, MinimumLength = 1)]

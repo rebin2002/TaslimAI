@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import { CheckCircle2, Download, FileText, LoaderCircle, Presentation as PresentationIcon, RefreshCw, Sparkles, XCircle } from "lucide-react";
 import { useAuth } from "@/components/AuthProvider";
@@ -17,9 +18,10 @@ type Language = "auto" | "en" | "ar" | "ku";
 export function PresentationStudioView() {
   const { workspace } = useAuth();
   const { t } = useLocale();
+  const searchParams = useSearchParams();
   const [projects, setProjects] = useState<Project[]>([]);
   const [files, setFiles] = useState<StoredFile[]>([]);
-  const [projectId, setProjectId] = useState("");
+  const [projectId, setProjectId] = useState(() => searchParams.get("projectId") ?? "");
   const [selected, setSelected] = useState<string[]>([]);
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");

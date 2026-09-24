@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import { BookOpen, CheckCircle2, Download, FileText, LoaderCircle, RefreshCw, Sparkles, XCircle } from "lucide-react";
 import { useAuth } from "@/components/AuthProvider";
@@ -21,9 +22,10 @@ const extensions = [".pdf", ".docx", ".txt", ".md", ".csv", ".xlsx"];
 export function DocumentStudioView() {
   const { workspace } = useAuth();
   const { t } = useLocale();
+  const searchParams = useSearchParams();
   const [projects, setProjects] = useState<Project[]>([]);
   const [files, setFiles] = useState<StoredFile[]>([]);
-  const [projectId, setProjectId] = useState("");
+  const [projectId, setProjectId] = useState(() => searchParams.get("projectId") ?? "");
   const [selected, setSelected] = useState<string[]>([]);
   const [title, setTitle] = useState("");
   const [prompt, setPrompt] = useState("");

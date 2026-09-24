@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { CheckCircle2, Download, Headphones, LoaderCircle, Mic2, RefreshCw, Volume2, XCircle } from "lucide-react";
 import { useAuth } from "@/components/AuthProvider";
@@ -15,13 +16,14 @@ const speakingStyles = ["conversational", "clear", "expressive", "calm"] as cons
 export function VoiceStudioView() {
   const { workspace } = useAuth();
   const { t } = useLocale();
+  const searchParams = useSearchParams();
   const [projects, setProjects] = useState<Project[]>([]);
   const [text, setText] = useState("");
   const [language, setLanguage] = useState<VoiceGenerationInput["language"]>("en");
   const [voiceStyle, setVoiceStyle] = useState<string>("neutral");
   const [speakingStyle, setSpeakingStyle] = useState<string>("clear");
   const [instructions, setInstructions] = useState("");
-  const [projectId, setProjectId] = useState("");
+  const [projectId, setProjectId] = useState(() => searchParams.get("projectId") ?? "");
   const [current, setCurrent] = useState<GenerationJob | null>(null);
   const [working, setWorking] = useState(false);
   const [loadingProjects, setLoadingProjects] = useState(true);

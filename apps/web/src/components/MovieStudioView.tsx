@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { Clapperboard, Film, Layers3, MapPin, Plus, Sparkles, Users, WandSparkles } from "lucide-react";
 import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
@@ -13,13 +14,14 @@ const styles = ["cinematic", "documentary", "animation", "commercial", "experime
 export function MovieStudioView() {
   const { t } = useLocale();
   const { workspace } = useAuth();
+  const searchParams = useSearchParams();
   const [mode, setMode] = useState<"Quick" | "Full">("Quick");
   const [projects, setProjects] = useState<Project[]>([]);
   const [provider, setProvider] = useState<MovieProviderReadiness | null>(null);
   const [saved, setSaved] = useState<MovieProject | null>(null);
   const [error, setError] = useState("");
   const [working, setWorking] = useState(false);
-  const [form, setForm] = useState({ title: "", description: "", durationSeconds: 30, aspectRatio: "16:9", style: "cinematic", language: "en", projectId: "", additionalInstructions: "", visualLanguage: "", cameraLanguage: "", colorAndLighting: "", soundAndNarration: "", continuityRules: "" });
+  const [form, setForm] = useState({ title: "", description: "", durationSeconds: 30, aspectRatio: "16:9", style: "cinematic", language: "en", projectId: searchParams.get("projectId") ?? "", additionalInstructions: "", visualLanguage: "", cameraLanguage: "", colorAndLighting: "", soundAndNarration: "", continuityRules: "" });
   const [newScene, setNewScene] = useState({ title: "", summary: "" });
   const [newCharacter, setNewCharacter] = useState({ name: "", description: "" });
   const [newLocation, setNewLocation] = useState({ name: "", description: "" });

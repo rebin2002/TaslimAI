@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import { Check, CheckCircle2, Copy, FileText, Image as ImageIcon, LoaderCircle, RefreshCw, Share2, Sparkles, XCircle } from "lucide-react";
 import { useAuth } from "@/components/AuthProvider";
@@ -17,10 +18,11 @@ type Tone = "professional" | "friendly" | "persuasive" | "educational" | "playfu
 export function SocialStudioView() {
   const { workspace } = useAuth();
   const { t } = useLocale();
+  const searchParams = useSearchParams();
   const [projects, setProjects] = useState<Project[]>([]);
   const [files, setFiles] = useState<StoredFile[]>([]);
   const [assets, setAssets] = useState<Asset[]>([]);
-  const [projectId, setProjectId] = useState("");
+  const [projectId, setProjectId] = useState(() => searchParams.get("projectId") ?? "");
   const [selectedFiles, setSelectedFiles] = useState<string[]>([]);
   const [selectedAssets, setSelectedAssets] = useState<string[]>([]);
   const [prompt, setPrompt] = useState("");

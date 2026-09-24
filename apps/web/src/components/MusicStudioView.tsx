@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { CheckCircle2, Download, Headphones, LoaderCircle, Music2, RefreshCw, Sparkles, XCircle } from "lucide-react";
 import { useAuth } from "@/components/AuthProvider";
@@ -17,6 +18,7 @@ const languages = ["auto", "en", "ar", "ku"] as const;
 export function MusicStudioView() {
   const { workspace } = useAuth();
   const { t } = useLocale();
+  const searchParams = useSearchParams();
   const [projects, setProjects] = useState<Project[]>([]);
   const [description, setDescription] = useState("");
   const [purpose, setPurpose] = useState("");
@@ -27,7 +29,7 @@ export function MusicStudioView() {
   const [language, setLanguage] = useState("auto");
   const [title, setTitle] = useState("");
   const [additionalInstructions, setAdditionalInstructions] = useState("");
-  const [projectId, setProjectId] = useState("");
+  const [projectId, setProjectId] = useState(() => searchParams.get("projectId") ?? "");
   const [current, setCurrent] = useState<GenerationJob | null>(null);
   const [working, setWorking] = useState(false);
   const [loadingProjects, setLoadingProjects] = useState(true);
