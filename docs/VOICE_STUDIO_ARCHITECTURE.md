@@ -4,7 +4,7 @@ Voice Studio is an authenticated speech-generation workflow at `/create/voice`. 
 
 ## Current provider status
 
-The production speech adapter is implemented for OpenAI's Audio Speech endpoint and is **disabled by default**. When enabled with the existing `Ai:OpenAI` credentials, `OpenAiVoiceGenerationProvider` owns provider-specific authentication, request mapping, response parsing, timeout handling, bounded MP3 validation, and safe usage metadata. Provider and model details remain internal to the API; no controller, frontend component, asset publisher, or database entity depends on a provider SDK or provider-specific request shape. The registered `UnconfiguredVoiceGenerationProvider` remains the disabled fallback and fails safely without fabricating audio.
+The production speech adapter is implemented for OpenAI's Audio Speech endpoint and is **disabled by default**. When enabled with the existing `Ai:OpenAI` credentials, `OpenAiVoiceGenerationProvider` owns provider-specific authentication, request mapping, response parsing, timeout handling, bounded audio validation, and safe usage metadata. Provider and model details remain internal to the API; no controller, frontend component, asset publisher, or database entity depends on a provider SDK or provider-specific request shape. The registered `UnconfiguredVoiceGenerationProvider` remains the disabled fallback and fails safely without fabricating audio.
 
 OpenAI's published TTS language list includes English and Arabic but does not include Kurdish Sorani. Sorani remains available in the Voice Studio request contract and UI, but the OpenAI adapter rejects it before making a provider call with `VOICE_LANGUAGE_UNSUPPORTED`; it never claims native Sorani support or silently changes the requested language.
 
@@ -23,7 +23,7 @@ The Voice controller checks workspace membership, optional project ownership, an
 1. Deserialize and validate the stored request.
 2. Refuse safely when Voice Studio is disabled or the configured adapter is unavailable.
 3. Select an adapter by the internal configured provider key.
-4. Validate the returned bytes as bounded MP3 `audio/*` content with a supported output format.
+4. Validate the returned bytes as bounded `audio/*` content with a supported output format.
 5. Build `VoiceOutputMetadata` and a private `GeneratedFileArtifact`.
 6. Publish the file and an `audio` Asset through `GeneratedAssetPublisher`.
 7. Complete or fail the shared usage transaction.
@@ -38,7 +38,7 @@ The existing `GET /api/assets/{id}/download` endpoint remains the authorization 
 
 ## Usage accounting
 
-Voice jobs use `UsageFeature.Voice`. OpenAI's speech response is binary and does not currently return authoritative token or cost usage in this adapter, so the ledger records the provider/model internally, stores character/byte counts in safe metadata, and does not invent a provider cost. `SafeUsageChargingService` keeps customer charge at zero. If an authoritative provider usage/cost payload becomes available, it can be passed through `VoiceProviderUsage` without changing the user-facing job contract.
+Voice jobs use `UsageFeature.Voice`. OpenAI's speech response is binary and does not currently return authoritative token or cost usage in this adapter, so the ledger records the provider/model internally and stores character/byte counts in safe metadata. An operator may explicitly configure a per-million-character pricing policy; that value is recorded as **estimated** provider cost, never as provider-reported actual usage. `SafeUsageChargingService` keeps customer charge at zero. If an authoritative provider usage/cost payload becomes available, it can be passed through `VoiceProviderUsage` without changing the user-facing job contract.
 
 ## Localization and RTL
 
