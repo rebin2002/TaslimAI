@@ -61,6 +61,24 @@ describe("same-origin API proxy", () => {
     vi.unstubAllGlobals();
   });
 
+  it("forwards the incoming abort signal for safe streaming cancellation", async () => {
+    const upstream = new Response("event: message.started\n\ndata: {}\n\n", { status: 200, headers: { "content-type": "text/event-stream" } });
+    const fetchMock = vi.fn().mockResolvedValue(upstream);
+    vi.stubGlobal("fetch", fetchMock);
+    const controller = new AbortController();
+    const request = new Request("http://localhost:3000/api/conversations/conversation-1/messages/stream", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+      signal: controller.signal,
+    });
+
+    await POST(request, context(["conversations", "conversation-1", "messages", "stream"]));
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(init.signal).toBe(request.signal);
+    vi.unstubAllGlobals();
+  });
+
   it("returns a safe unavailable response when the API cannot be reached", async () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("private upstream detail")));
     const response = await GET(new Request("http://localhost:3000/api/auth/csrf"), context(["auth", "csrf"]));

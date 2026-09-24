@@ -73,6 +73,25 @@ public sealed class ChatTests : IClassFixture<TaslimApiFactory>
     }
 
     [Fact]
+    public async Task Conversation_delete_removes_history_only_for_the_authorized_owner()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Delete Chat Owner");
+        var conversation = await CreateConversation(client, auth.PersonalWorkspace.Id);
+        await SendMessage(client, conversation.Id, "A private conversation");
+
+        var deleted = await SendWithCsrf(client, HttpMethod.Delete, $"/api/conversations/{conversation.Id}", null);
+        Assert.Equal(HttpStatusCode.NoContent, deleted.StatusCode);
+
+        var get = await client.GetAsync($"/api/conversations/{conversation.Id}");
+        var messages = await client.GetAsync($"/api/conversations/{conversation.Id}/messages");
+        var listed = await client.GetFromJsonAsync<List<ConversationDto>>($"/api/workspaces/{auth.PersonalWorkspace.Id}/conversations");
+        Assert.Equal(HttpStatusCode.NotFound, get.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, messages.StatusCode);
+        Assert.DoesNotContain(listed!, item => item.Id == conversation.Id);
+    }
+
+    [Fact]
     public async Task Cross_user_conversation_access_is_denied_without_content_leak()
     {
         using var owner = factory.CreateClient();
@@ -205,6 +224,39 @@ public sealed class ChatTests : IClassFixture<TaslimApiFactory>
         var messages = await client.GetFromJsonAsync<List<ChatMessageDto>>($"/api/conversations/{conversation.Id}/messages");
         Assert.NotNull(messages);
         Assert.Equal(2, messages.Count);
+    }
+
+    [Fact]
+    public async Task Latest_assistant_response_can_be_regenerated_idempotently_without_a_duplicate_user_message()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Regeneration Chat Owner");
+        var conversation = await CreateConversation(client, auth.PersonalWorkspace.Id);
+        var initial = await SendMessage(client, conversation.Id, "Give me a concise plan.");
+        var initialResult = await initial.Content.ReadFromJsonAsync<SendMessageResponse>();
+        Assert.NotNull(initialResult);
+        var requestId = Guid.NewGuid().ToString("N");
+
+        var firstRegeneration = await SendWithCsrf(client, HttpMethod.Post, $"/api/conversations/{conversation.Id}/messages/{initialResult!.AssistantMessage.Id}/regenerate", new { requestId });
+        Assert.Equal(HttpStatusCode.OK, firstRegeneration.StatusCode);
+        var firstBody = await firstRegeneration.Content.ReadAsStringAsync();
+        Assert.Contains("event: message.started", firstBody);
+        Assert.Contains("event: message.delta", firstBody);
+        Assert.Contains("event: message.completed", firstBody);
+        using var firstCompleted = ExtractEventData(firstBody, "message.completed");
+        var firstAssistantId = firstCompleted.RootElement.GetProperty("assistantMessage").GetProperty("id").GetString();
+
+        var repeatedRegeneration = await SendWithCsrf(client, HttpMethod.Post, $"/api/conversations/{conversation.Id}/messages/{initialResult.AssistantMessage.Id}/regenerate", new { requestId });
+        Assert.Equal(HttpStatusCode.OK, repeatedRegeneration.StatusCode);
+        var repeatedBody = await repeatedRegeneration.Content.ReadAsStringAsync();
+        using var repeatedCompleted = ExtractEventData(repeatedBody, "message.completed");
+        Assert.Equal(firstAssistantId, repeatedCompleted.RootElement.GetProperty("assistantMessage").GetProperty("id").GetString());
+
+        var messages = await client.GetFromJsonAsync<List<ChatMessageDto>>($"/api/conversations/{conversation.Id}/messages");
+        Assert.NotNull(messages);
+        Assert.Equal(["User", "Assistant", "Assistant"], messages.Select(message => message.Role));
+        Assert.Equal([1L, 2L, 3L], messages.Select(message => message.Sequence));
+        Assert.All(messages.Where(message => message.Role == "Assistant"), message => Assert.Equal("Completed", message.Status));
     }
 
     [Fact]

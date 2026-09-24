@@ -296,6 +296,34 @@ public sealed class ContextIntegrationTests : IClassFixture<ContextRecordingFact
         Assert.Equal("recent", request.Messages[^1].Content);
     }
 
+    [Fact]
+    public async Task Regeneration_reuses_the_source_user_context_without_including_the_response_being_replaced()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Regeneration Context Owner");
+        var conversation = await CreateConversation(client, auth.PersonalWorkspace.Id, null);
+        var initial = await SendWithCsrf<SendMessageResponse>(client, HttpMethod.Post, $"/api/conversations/{conversation.Id}/messages", new
+        {
+            content = "SOURCE_USER_MARKER",
+            requestId = Guid.NewGuid().ToString("N"),
+        });
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var originalAssistant = await db.ChatMessages.SingleAsync(message => message.Id == initial.AssistantMessage.Id);
+        originalAssistant.Content = "SUPERSEDED_ASSISTANT_MARKER";
+        await db.SaveChangesAsync();
+
+        var regeneration = await SendWithCsrf(client, HttpMethod.Post, $"/api/conversations/{conversation.Id}/messages/{initial.AssistantMessage.Id}/regenerate", new
+        {
+            requestId = Guid.NewGuid().ToString("N"),
+        });
+        Assert.Equal(HttpStatusCode.OK, regeneration.StatusCode);
+        var recorder = factory.Services.GetRequiredService<RecordingChatCompletionService>();
+        Assert.Contains(recorder.LastRequest!.Messages, message => message.Content == "SOURCE_USER_MARKER");
+        Assert.DoesNotContain(recorder.LastRequest.Messages, message => message.Content == "SUPERSEDED_ASSISTANT_MARKER");
+    }
+
     private async Task<AuthResponse> Register(HttpClient client, string displayName)
     {
         var response = await SendWithCsrf(client, HttpMethod.Post, "/api/auth/register", new
