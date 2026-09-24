@@ -34,7 +34,7 @@ export const primaryNavigation: NavigationItem[] = [
   { href: "/", labelKey: "navigation.home", icon: LayoutDashboard },
   { href: "/projects", labelKey: "navigation.projects", icon: FileText },
   { href: "/create", labelKey: "navigation.create", icon: Sparkles },
-  { href: "/notifications", labelKey: "navigation.notifications", icon: Bell },
+  { href: "/notifications", labelKey: "navigation.activity", icon: Bell },
   { href: "/account", labelKey: "navigation.account", icon: UserRound },
 ];
 
@@ -44,7 +44,7 @@ export const desktopNavigation: NavigationItem[] = [
   primaryNavigation[1],
   { href: "/assets", labelKey: "navigation.assets", icon: FileText },
   primaryNavigation[2],
-  primaryNavigation[3],
+  { href: "/notifications", labelKey: "navigation.notifications", icon: Bell },
 ];
 
 export const studioCategories: StudioCategory[] = [
