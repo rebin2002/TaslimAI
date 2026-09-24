@@ -49,6 +49,10 @@ public DbSet<MovieProject> MovieProjects => Set<MovieProject>();
         {
             entity.Property(user => user.DisplayName).HasMaxLength(120).IsRequired();
             entity.Property(user => user.PreferredLanguage).HasMaxLength(5).IsRequired();
+            entity.Property(user => user.DefaultGenerationLanguage).HasMaxLength(5).IsRequired();
+            entity.Property(user => user.TimeZone).HasMaxLength(100).IsRequired();
+            entity.Property(user => user.OutputPreference).HasMaxLength(32).IsRequired();
+            entity.Property(user => user.IncludeSourceLinks).HasDefaultValue(true).IsRequired();
             entity.Property(user => user.CreatedAt).IsRequired();
             entity.Property(user => user.UpdatedAt).IsRequired();
         });

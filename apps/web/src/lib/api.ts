@@ -8,6 +8,10 @@ export type User = {
   preferredLanguage: "en" | "ar" | "ku";
   personalWorkspaceId: string;
   createdAt: string;
+  defaultGenerationLanguage: "en" | "ar" | "ku";
+  timeZone: string;
+  outputPreference: "concise" | "balanced" | "detailed";
+  includeSourceLinks: boolean;
 };
 
 export type Workspace = {
@@ -44,7 +48,15 @@ export type Project = {
 
 export type RegisterInput = { displayName: string; email: string; password: string; preferredLanguage?: string };
 export type LoginInput = { email: string; password: string };
-export type ProfileInput = { displayName: string; preferredLanguage: string };
+export type ProfileInput = {
+  displayName: string;
+  preferredLanguage: string;
+  defaultGenerationLanguage?: string;
+  timeZone?: string;
+  outputPreference?: "concise" | "balanced" | "detailed";
+  includeSourceLinks?: boolean;
+};
+export type ChangePasswordInput = { currentPassword: string; newPassword: string };
 export type ProjectInput = { name: string; description?: string; instructions?: string; contextNotes?: string; type?: string };
 export type PersonalMemory = {
   id: string;
@@ -490,6 +502,7 @@ export const api = {
   login: async (input: LoginInput) => { const result = await request<AuthResponse>("/api/auth/login", { method: "POST", body: JSON.stringify(input) }, true); csrfToken = null; await csrf(true); return result; },
   logout: async () => { const result = await request<{ success: boolean }>("/api/auth/logout", { method: "POST" }, true); csrfToken = null; await csrf(true); return result; },
   updateProfile: (input: ProfileInput) => request<AuthResponse>("/api/auth/profile", { method: "PATCH", body: JSON.stringify(input) }, true),
+  changePassword: (input: ChangePasswordInput) => request<{ success: boolean }>("/api/auth/password", { method: "POST", body: JSON.stringify(input) }, true),
   listProjects: (workspaceId: string, status: "Active" | "Archived") => request<Project[]>(`/api/workspaces/${workspaceId}/projects?status=${status}`),
   getWorkspace: (workspaceId: string) => request<Workspace>(`/api/workspaces/${workspaceId}`),
   createProject: (workspaceId: string, input: ProjectInput) => request<Project>(`/api/workspaces/${workspaceId}/projects`, { method: "POST", body: JSON.stringify(input) }, true),
