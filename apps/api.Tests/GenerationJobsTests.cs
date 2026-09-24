@@ -128,6 +128,27 @@ public sealed class GenerationJobsTests : IClassFixture<GenerationJobsApiFactory
     }
 
     [Fact]
+    public async Task Repeated_generation_request_with_same_idempotency_key_returns_one_job()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, $"jobs-idempotency-{Guid.NewGuid():N}@example.com");
+        const string key = "generation-retry-001";
+        var payload = new { workspaceId = auth.PersonalWorkspace.Id, jobType = "system.test", inputJson = "{\"purpose\":\"retry\"}" };
+
+        var first = await SendWithCsrf<GenerationJobDto>(client, HttpMethod.Post, "/api/generation/jobs", payload, key);
+        var second = await SendWithCsrf<GenerationJobDto>(client, HttpMethod.Post, "/api/generation/jobs", payload, key);
+
+        Assert.Equal(first.Id, second.Id);
+        using var scope = factory.Services.CreateScope();
+        Assert.Equal(1, await scope.ServiceProvider.GetRequiredService<TaslimDbContext>().GenerationJobs.CountAsync(item => item.IdempotencyKey == key));
+
+        var conflicting = await SendWithCsrf(client, HttpMethod.Post, "/api/generation/jobs", new { workspaceId = auth.PersonalWorkspace.Id, jobType = "system.test", inputJson = "{\"purpose\":\"different\"}" }, key);
+        Assert.Equal(HttpStatusCode.BadRequest, conflicting.StatusCode);
+        var error = await conflicting.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("IDEMPOTENCY_KEY_REUSED", error.GetProperty("error").GetProperty("code").GetString());
+    }
+
+    [Fact]
     public async Task Jobs_support_list_filter_pagination_and_terminal_conflict_cancellation()
     {
         using var client = factory.CreateClient();
@@ -232,18 +253,19 @@ public sealed class GenerationJobsTests : IClassFixture<GenerationJobsApiFactory
         throw new TimeoutException($"Job {id} did not reach a terminal state.");
     }
 
-    private static async Task<T> SendWithCsrf<T>(HttpClient client, HttpMethod method, string path, object? payload)
+    private static async Task<T> SendWithCsrf<T>(HttpClient client, HttpMethod method, string path, object? payload, string? idempotencyKey = null)
     {
-        var response = await SendWithCsrf(client, method, path, payload);
+        var response = await SendWithCsrf(client, method, path, payload, idempotencyKey);
         Assert.True(response.IsSuccessStatusCode, await response.Content.ReadAsStringAsync());
         return (await response.Content.ReadFromJsonAsync<T>())!;
     }
 
-    private static async Task<HttpResponseMessage> SendWithCsrf(HttpClient client, HttpMethod method, string path, object? payload)
+    private static async Task<HttpResponseMessage> SendWithCsrf(HttpClient client, HttpMethod method, string path, object? payload, string? idempotencyKey = null)
     {
         var csrf = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
         using var request = new HttpRequestMessage(method, path);
         request.Headers.Add("X-CSRF-TOKEN", csrf.GetProperty("token").GetString());
+        if (idempotencyKey is not null) request.Headers.Add("Idempotency-Key", idempotencyKey);
         if (payload is not null) request.Content = JsonContent.Create(payload);
         return await client.SendAsync(request);
     }

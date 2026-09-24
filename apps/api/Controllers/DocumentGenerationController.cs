@@ -41,7 +41,7 @@ public sealed class DocumentGenerationController(
                 Title = input.Title,
                 InputJson = DocumentGenerationContractMapper.SerializeInput(input),
                 EstimatedProviderCostUsd = preflight.EstimatedProviderCostUsd,
-            }, cancellationToken);
+            }, cancellationToken, Request.Headers["Idempotency-Key"].FirstOrDefault());
             return Accepted(new CreateDocumentGenerationResponse(GenerationJobContractMapper.ToDto(job)));
         }
         catch (DocumentRequestValidationException exception)

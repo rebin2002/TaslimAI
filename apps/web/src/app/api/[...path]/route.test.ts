@@ -86,4 +86,28 @@ describe("same-origin API proxy", () => {
     await expect(response.json()).resolves.toEqual({ error: { code: "API_UNAVAILABLE", message: "The service is temporarily unavailable. Please try again." } });
     vi.unstubAllGlobals();
   });
+
+  it("rejects oversized request bodies before contacting the API", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const response = await POST(new Request("http://localhost:3000/api/files", {
+      method: "POST",
+      headers: { "content-length": String(25 * 1024 * 1024 + 1) },
+      body: "small-body",
+    }), context(["files"]));
+
+    expect(response.status).toBe(413);
+    await expect(response.json()).resolves.toEqual({ error: { code: "REQUEST_TOO_LARGE", message: "The request body is too large." } });
+    expect(fetchMock).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it("returns a safe timeout response for an aborted upstream request", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new DOMException("private upstream detail", "AbortError")));
+    const response = await GET(new Request("http://localhost:3000/api/auth/me"), context(["auth", "me"]));
+
+    expect(response.status).toBe(504);
+    await expect(response.json()).resolves.toEqual({ error: { code: "API_TIMEOUT", message: "The service took too long to respond. Please try again." } });
+    vi.unstubAllGlobals();
+  });
 });

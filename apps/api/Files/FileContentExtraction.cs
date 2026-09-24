@@ -24,13 +24,32 @@ public interface IFileContentExtractor
 public sealed class FileContentExtractor(IOptions<FileOptions> options) : IFileContentExtractor
 {
     private readonly int maxCharacters = Math.Clamp(options.Value.MaxExtractedTextCharacters, 1_000, 1_000_000);
+    private readonly long maxStagingBytes = Math.Min(options.Value.MaxFileSizeBytes, 25 * 1_048_576);
 
     public bool CanHandle(string extension) => FileContentTypes.IsTextExtractable(extension);
 
     public async Task<FileExtractionResult> ExtractAsync(string extension, Stream content, CancellationToken cancellationToken = default)
     {
+        MemoryStream? staged = null;
         try
         {
+            if (!content.CanSeek)
+            {
+                staged = new MemoryStream();
+                var buffer = new byte[64 * 1024];
+                long total = 0;
+                while (true)
+                {
+                    var read = await content.ReadAsync(buffer.AsMemory(), cancellationToken);
+                    if (read == 0) break;
+                    total += read;
+                    if (total > maxStagingBytes) throw new InvalidDataException("File extraction input exceeds the configured limit.");
+                    await staged.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+                }
+                staged.Position = 0;
+                content = staged;
+            }
+
             var normalized = extension.ToLowerInvariant();
             if (normalized is ".txt" or ".md" or ".csv")
             {
@@ -49,6 +68,10 @@ public sealed class FileContentExtractor(IOptions<FileOptions> options) : IFileC
         catch (Exception exception) when (exception is IOException or InvalidDataException or FormatException or XmlException)
         {
             return new FileExtractionResult(FileExtractionStatus.Failed, null, null, null, "EXTRACTION_FAILED");
+        }
+        finally
+        {
+            if (staged is not null) await staged.DisposeAsync();
         }
     }
 

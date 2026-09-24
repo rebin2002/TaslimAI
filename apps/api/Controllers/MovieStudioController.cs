@@ -22,7 +22,7 @@ public sealed class MovieStudioController(IMovieStudioService movies) : Controll
         if (!ModelState.IsValid) return ApiResults.Validation(this);
         try
         {
-            var result = await movies.CreateAsync(GetUserId(), request, cancellationToken);
+            var result = await movies.CreateAsync(GetUserId(), request, cancellationToken, Request.Headers["Idempotency-Key"].FirstOrDefault());
             return result is null ? Forbid() : Accepted(result);
         }
         catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_REQUEST_INVALID", exception.Message); }
@@ -81,7 +81,7 @@ public sealed class MovieStudioController(IMovieStudioService movies) : Controll
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> GenerateScene(Guid id, Guid sceneId, MovieStudioGenerationRequest request, CancellationToken cancellationToken)
     {
-        var result = await movies.GenerateSceneAsync(GetUserId(), id, sceneId, request, cancellationToken);
+        var result = await movies.GenerateSceneAsync(GetUserId(), id, sceneId, request, cancellationToken, Request.Headers["Idempotency-Key"].FirstOrDefault());
         return result is null ? ApiResults.Error(this, 404, "MOVIE_SCENE_NOT_FOUND", "Movie scene not found.") : Accepted(result);
     }
 
@@ -89,7 +89,7 @@ public sealed class MovieStudioController(IMovieStudioService movies) : Controll
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> GenerateShot(Guid shotId, MovieStudioGenerationRequest request, CancellationToken cancellationToken)
     {
-        var result = await movies.GenerateShotAsync(GetUserId(), shotId, request, cancellationToken);
+        var result = await movies.GenerateShotAsync(GetUserId(), shotId, request, cancellationToken, Request.Headers["Idempotency-Key"].FirstOrDefault());
         return result is null ? ApiResults.Error(this, 404, "MOVIE_SHOT_NOT_FOUND", "Movie shot not found.") : Accepted(result);
     }
 
