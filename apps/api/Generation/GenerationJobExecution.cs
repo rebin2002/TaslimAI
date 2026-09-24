@@ -153,7 +153,7 @@ public sealed class GenerationJobUsageService(IUsageLedgerService ledger) : IGen
 
 public interface IGenerationJobService
 {
-    Task<GenerationJob> CreateAsync(Guid userId, CreateGenerationJobRequest request, CancellationToken cancellationToken = default, string? idempotencyKey = null);
+    Task<GenerationJob> CreateAsync(Guid userId, CreateGenerationJobRequest request, CancellationToken cancellationToken = default, string? idempotencyKey = null, string? requestId = null);
     Task<GenerationJob?> GetAsync(Guid userId, Guid jobId, CancellationToken cancellationToken = default);
     Task<GenerationJobListDto?> ListAsync(Guid userId, GenerationJobFilter filter, CancellationToken cancellationToken = default);
     Task<GenerationJobCancelResult> CancelAsync(Guid userId, Guid jobId, CancellationToken cancellationToken = default);
@@ -172,9 +172,10 @@ public sealed class GenerationJobService(
     TaslimDbContext db,
     WorkspaceAccessService access,
     IGenerationJobQueue queue,
-    IGenerationJobUsageService usage) : IGenerationJobService
+    IGenerationJobUsageService usage,
+    IHttpContextAccessor httpContextAccessor) : IGenerationJobService
 {
-    public async Task<GenerationJob> CreateAsync(Guid userId, CreateGenerationJobRequest request, CancellationToken cancellationToken = default, string? idempotencyKey = null)
+    public async Task<GenerationJob> CreateAsync(Guid userId, CreateGenerationJobRequest request, CancellationToken cancellationToken = default, string? idempotencyKey = null, string? requestId = null)
     {
         if (!GenerationJobTypes.Supported.Contains(request.JobType.Trim()))
             throw new GenerationJobValidationException(GenerationJobErrorCodes.TypeNotSupported, "This job type is not available.");
@@ -208,6 +209,7 @@ public sealed class GenerationJobService(
         }
 
         var now = DateTime.UtcNow;
+        requestId ??= httpContextAccessor.HttpContext?.TraceIdentifier;
         var job = new GenerationJob
         {
             Id = Guid.NewGuid(),
@@ -220,6 +222,7 @@ public sealed class GenerationJobService(
             InputJson = request.InputJson,
             IdempotencyKey = normalizedKey,
             RequestFingerprint = requestFingerprint,
+            RequestId = requestId,
             ProgressPercent = 0,
             CreatedAt = now,
         };
@@ -393,6 +396,9 @@ public sealed class GenerationJobWorker(
                     await Task.Delay(schedule.IdleDelay, stoppingToken);
                     continue;
                 }
+                logger.LogInformation(
+                    "Generation job claimed. JobId={JobId}; WorkspaceId={WorkspaceId}; JobType={JobType}; RequestId={RequestId}; RetryCount={RetryCount}; ClaimExpiresAt={ClaimExpiresAt}",
+                    job.Id, job.WorkspaceId, job.JobType, job.RequestId, job.RetryCount, job.ClaimExpiresAt);
                 await ExecuteJobAsync(job, stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
@@ -421,9 +427,13 @@ public sealed class GenerationJobWorker(
                 .SetProperty(job => job.StartedAt, (DateTime?)null)
                 .SetProperty(job => job.ClaimExpiresAt, (DateTime?)null)
                 .SetProperty(job => job.CancellationRequested, false)
+                .SetProperty(job => job.RetryCount, job => job.RetryCount + 1)
                 .SetProperty(job => job.ConcurrencyToken, recoveryToken), cancellationToken);
         foreach (var jobId in recoveredJobIds)
+        {
+            logger.LogWarning("Expired generation lease recovered. JobId={JobId}; RetryReason={RetryReason}", jobId, "lease_expired");
             await TryNotifyAsync(() => notifications.CreateGenerationAttentionAsync(jobId, cancellationToken), jobId);
+        }
     }
 
     private async Task<GenerationJob?> ClaimAsync(TaslimDbContext db, CancellationToken cancellationToken)
@@ -476,6 +486,9 @@ public sealed class GenerationJobWorker(
         var publicationCommitted = false;
         AiUsageMetadata? providerUsage = null;
         var executionStarted = Stopwatch.GetTimestamp();
+        logger.LogInformation(
+            "Generation job execution started. JobId={JobId}; WorkspaceId={WorkspaceId}; JobType={JobType}; RequestId={RequestId}; RetryCount={RetryCount}",
+            claimedJob.Id, claimedJob.WorkspaceId, claimedJob.JobType, claimedJob.RequestId, claimedJob.RetryCount);
         try
         {
             var handlers = scope.ServiceProvider.GetServices<IGenerationJobHandler>();
@@ -586,6 +599,10 @@ public sealed class GenerationJobWorker(
                 return;
             }
             publicationCommitted = true;
+            logger.LogInformation(
+                "Generation job execution completed. JobId={JobId}; JobType={JobType}; RequestId={RequestId}; ProviderKey={ProviderKey}; ProviderModel={ProviderModel}; ElapsedMs={ElapsedMs}; UsageFinalized={UsageFinalized}",
+                claimedJob.Id, claimedJob.JobType, claimedJob.RequestId, result.Usage?.ProviderKey, result.Usage?.ModelKey,
+                (long)Stopwatch.GetElapsedTime(executionStarted).TotalMilliseconds, true);
             await TryNotifyAsync(() => notifications.CreateGenerationCompletedAsync(claimedJob.Id, stoppingToken), claimedJob.Id);
             if (GenerationJobTypes.MovieTypes.Contains(claimedJob.JobType))
             {
@@ -600,6 +617,9 @@ public sealed class GenerationJobWorker(
             if (GenerationJobTypes.MovieTypes.Contains(claimedJob.JobType))
                 await movieExecutions.MarkCancelledAsync(claimedJob.Id, CancellationToken.None);
             await CancelRunningAsync(db, usage, claimedJob, claimedJob.ConcurrencyToken, stoppingToken);
+            logger.LogInformation(
+                "Generation job execution cancelled. JobId={JobId}; JobType={JobType}; RequestId={RequestId}; ElapsedMs={ElapsedMs}; UsageFinalized={UsageFinalized}",
+                claimedJob.Id, claimedJob.JobType, claimedJob.RequestId, (long)Stopwatch.GetElapsedTime(executionStarted).TotalMilliseconds, true);
         }
         catch (Exception exception)
         {
@@ -616,8 +636,9 @@ public sealed class GenerationJobWorker(
             {
                 var stage = (exception as DocumentGenerationStageException)?.Stage ?? DocumentGenerationStages.Execution;
                 var providerException = exception as AiProviderException ?? exception.InnerException as AiProviderException;
-                logger.LogError("Document generation failed. JobId={JobId}; Stage={Stage}; ErrorCode={ErrorCode}; ExceptionType={ExceptionType}; ProviderFailureCategory={ProviderFailureCategory}; ProviderHttpStatus={ProviderHttpStatus}; ProviderErrorCode={ProviderErrorCode}; ModelKey={ModelKey}; StructuredOutput={StructuredOutput}; Streaming={Streaming}; ElapsedMs={ElapsedMs}",
+                logger.LogError("Document generation failed. JobId={JobId}; RequestId={RequestId}; Stage={Stage}; ErrorCode={ErrorCode}; ExceptionType={ExceptionType}; ProviderFailureCategory={ProviderFailureCategory}; ProviderHttpStatus={ProviderHttpStatus}; ProviderErrorCode={ProviderErrorCode}; ModelKey={ModelKey}; StructuredOutput={StructuredOutput}; Streaming={Streaming}; ElapsedMs={ElapsedMs}",
                     claimedJob.Id,
+                    claimedJob.RequestId,
                     stage,
                     failureCode,
                     exception.GetType().Name,
@@ -633,8 +654,9 @@ public sealed class GenerationJobWorker(
             {
                 var stage = (exception as PresentationGenerationStageException)?.Stage ?? PresentationGenerationStages.Execution;
                 var providerException = exception as AiProviderException ?? exception.InnerException as AiProviderException;
-                logger.LogError("Presentation generation failed. JobId={JobId}; Stage={Stage}; ErrorCode={ErrorCode}; ExceptionType={ExceptionType}; ProviderFailureCategory={ProviderFailureCategory}; ProviderHttpStatus={ProviderHttpStatus}; ProviderErrorCode={ProviderErrorCode}; ModelKey={ModelKey}; StructuredOutput={StructuredOutput}; Streaming={Streaming}; ElapsedMs={ElapsedMs}",
+                logger.LogError("Presentation generation failed. JobId={JobId}; RequestId={RequestId}; Stage={Stage}; ErrorCode={ErrorCode}; ExceptionType={ExceptionType}; ProviderFailureCategory={ProviderFailureCategory}; ProviderHttpStatus={ProviderHttpStatus}; ProviderErrorCode={ProviderErrorCode}; ModelKey={ModelKey}; StructuredOutput={StructuredOutput}; Streaming={Streaming}; ElapsedMs={ElapsedMs}",
                     claimedJob.Id,
+                    claimedJob.RequestId,
                     stage,
                     failureCode,
                     exception.GetType().Name,
@@ -656,8 +678,9 @@ public sealed class GenerationJobWorker(
                     ResearchSearchUnavailableException unavailable => unavailable.Details,
                     _ => null,
                 };
-                logger.LogError("Research generation failed. JobId={JobId}; Stage={Stage}; ErrorCode={ErrorCode}; ExceptionType={ExceptionType}; ProviderFailureCategory={ProviderFailureCategory}; ProviderHttpStatus={ProviderHttpStatus}; ProviderErrorCode={ProviderErrorCode}; SearchHttpStatus={SearchHttpStatus}; SearchErrorType={SearchErrorType}; SearchErrorCode={SearchErrorCode}; SearchErrorParam={SearchErrorParam}; ModelKey={ModelKey}; ElapsedMs={ElapsedMs}",
+                logger.LogError("Research generation failed. JobId={JobId}; RequestId={RequestId}; Stage={Stage}; ErrorCode={ErrorCode}; ExceptionType={ExceptionType}; ProviderFailureCategory={ProviderFailureCategory}; ProviderHttpStatus={ProviderHttpStatus}; ProviderErrorCode={ProviderErrorCode}; SearchHttpStatus={SearchHttpStatus}; SearchErrorType={SearchErrorType}; SearchErrorCode={SearchErrorCode}; SearchErrorParam={SearchErrorParam}; ModelKey={ModelKey}; ElapsedMs={ElapsedMs}",
                     claimedJob.Id,
+                    claimedJob.RequestId,
                     stage,
                     failureCode,
                     exception.GetType().Name,
@@ -675,8 +698,9 @@ public sealed class GenerationJobWorker(
             {
                 var stage = (exception as SocialGenerationStageException)?.Stage ?? SocialGenerationStages.Execution;
                 var providerException = exception as AiProviderException ?? exception.InnerException as AiProviderException;
-                logger.LogError("Social generation failed. JobId={JobId}; Stage={Stage}; ErrorCode={ErrorCode}; ExceptionType={ExceptionType}; ProviderFailureCategory={ProviderFailureCategory}; ProviderHttpStatus={ProviderHttpStatus}; ProviderErrorCode={ProviderErrorCode}; ModelKey={ModelKey}; StructuredOutput={StructuredOutput}; ElapsedMs={ElapsedMs}",
+                logger.LogError("Social generation failed. JobId={JobId}; RequestId={RequestId}; Stage={Stage}; ErrorCode={ErrorCode}; ExceptionType={ExceptionType}; ProviderFailureCategory={ProviderFailureCategory}; ProviderHttpStatus={ProviderHttpStatus}; ProviderErrorCode={ProviderErrorCode}; ModelKey={ModelKey}; StructuredOutput={StructuredOutput}; ElapsedMs={ElapsedMs}",
                     claimedJob.Id,
+                    claimedJob.RequestId,
                     stage,
                     failureCode,
                     exception.GetType().Name,
@@ -689,9 +713,14 @@ public sealed class GenerationJobWorker(
             }
             else
             {
-                logger.LogError(exception, "Generation job execution failed. JobId={JobId}; JobType={JobType}; FailureCode={FailureCode}", claimedJob.Id, claimedJob.JobType, failureCode);
+                logger.LogError(exception, "Generation job execution failed. JobId={JobId}; WorkspaceId={WorkspaceId}; JobType={JobType}; RequestId={RequestId}; FailureCode={FailureCode}; ExceptionType={ExceptionType}; ElapsedMs={ElapsedMs}; UsageFinalized={UsageFinalized}",
+                    claimedJob.Id, claimedJob.WorkspaceId, claimedJob.JobType, claimedJob.RequestId, failureCode, exception.GetType().Name,
+                    (long)Stopwatch.GetElapsedTime(executionStarted).TotalMilliseconds, true);
             }
             await FailAsync(db, usage, claimedJob, failureCode, FailureMessage(failureCode), failureUsage, claimedJob.ConcurrencyToken, stoppingToken);
+            logger.LogInformation(
+                "Generation job failure finalized. JobId={JobId}; JobType={JobType}; RequestId={RequestId}; FailureCode={FailureCode}; UsageFinalized={UsageFinalized}",
+                claimedJob.Id, claimedJob.JobType, claimedJob.RequestId, failureCode, true);
             await TryNotifyAsync(() => notifications.CreateGenerationFailedAsync(claimedJob.Id, stoppingToken), claimedJob.Id);
         }
         finally
@@ -709,9 +738,10 @@ public sealed class GenerationJobWorker(
             using var scope = scopeFactory.CreateScope();
             var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
             var now = DateTime.UtcNow;
-            var current = await db.GenerationJobs.AsNoTracking().Where(job => job.Id == jobId).Select(job => new { job.Status, job.ConcurrencyToken, job.CancellationRequested }).FirstOrDefaultAsync(stoppingToken);
+            var current = await db.GenerationJobs.AsNoTracking().Where(job => job.Id == jobId).Select(job => new { job.Status, job.ConcurrencyToken, job.CancellationRequested, job.RequestId }).FirstOrDefaultAsync(stoppingToken);
             if (current is null || current.Status != GenerationJobStatus.Running || current.ConcurrencyToken != concurrencyToken || current.CancellationRequested)
             {
+                logger.LogWarning("Generation job lease or cancellation state changed during execution. JobId={JobId}; RequestId={RequestId}; Status={Status}; CancellationRequested={CancellationRequested}", jobId, current?.RequestId, current?.Status, current?.CancellationRequested);
                 cancellation.Cancel();
                 return;
             }
@@ -723,6 +753,7 @@ public sealed class GenerationJobWorker(
                     .ExecuteUpdateAsync(setters => setters.SetProperty(job => job.ClaimExpiresAt, now.AddMinutes(Math.Max(2, settings.ClaimLeaseMinutes))), stoppingToken);
                 if (renewed == 0)
                 {
+                    logger.LogWarning("Generation job lease renewal lost. JobId={JobId}; RequestId={RequestId}", jobId, current.RequestId);
                     cancellation.Cancel();
                     return;
                 }

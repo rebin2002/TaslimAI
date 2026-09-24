@@ -286,11 +286,13 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.Property(job => job.InputJson).HasMaxLength(100_000).IsRequired();
             entity.Property(job => job.IdempotencyKey).HasMaxLength(80);
             entity.Property(job => job.RequestFingerprint).HasMaxLength(64);
+            entity.Property(job => job.RequestId).HasMaxLength(128);
             entity.Property(job => job.ResultJson).HasMaxLength(100_000);
             entity.Property(job => job.ErrorCode).HasMaxLength(100);
             entity.Property(job => job.ErrorMessage).HasMaxLength(1_000);
             entity.Property(job => job.ProgressPercent).IsRequired();
             entity.Property(job => job.CancellationRequested).IsRequired();
+            entity.Property(job => job.RetryCount).IsRequired();
             entity.Property(job => job.ConcurrencyToken).IsConcurrencyToken().IsRequired();
             entity.Property(job => job.CreatedAt).IsRequired();
             entity.ToTable("GenerationJobs", table => table.HasCheckConstraint("CK_GenerationJobs_ProgressPercent", "\"ProgressPercent\" BETWEEN 0 AND 100"));

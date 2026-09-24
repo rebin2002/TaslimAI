@@ -16,9 +16,11 @@ public interface IAdminOperationsService
 public sealed class AdminOperationsService(
     TaslimDbContext db,
     IOptions<BillingOptions> billingOptions,
-    IOptions<FileSettings> fileOptions) : IAdminOperationsService
+    IOptions<FileSettings> fileOptions,
+    ProviderHealthService providerHealth) : IAdminOperationsService
 {
     private const int RecentItemLimit = 20;
+    private static readonly TimeSpan LongRunningThreshold = TimeSpan.FromMinutes(15);
 
     public async Task<AdminOperationsDashboardDto> GetDashboardAsync(AdminOperationsFilter filter, CancellationToken cancellationToken = default)
     {
@@ -27,8 +29,9 @@ public sealed class AdminOperationsService(
         var usage = await BuildUsageAsync(range, cancellationToken);
         var usersAndWorkspaces = await BuildUsersAndWorkspacesAsync(cancellationToken);
         var assetsAndStorage = await BuildAssetsAndStorageAsync(range, cancellationToken);
-        var billing = await BuildBillingAsync(cancellationToken);
+        var billing = await BuildBillingAsync(range, cancellationToken);
         var signals = await BuildSignalsAsync(range, generation, cancellationToken);
+        var providers = await providerHealth.GetAsync(cancellationToken);
 
         return new AdminOperationsDashboardDto(
             new AdminOperationsRangeDto(range.FromUtc, range.ToUtc),
@@ -37,7 +40,8 @@ public sealed class AdminOperationsService(
             usersAndWorkspaces,
             assetsAndStorage,
             billing,
-            signals);
+            signals,
+            providers);
     }
 
     private async Task<AdminGenerationOverviewDto> BuildGenerationAsync((DateTime FromUtc, DateTime ToUtc) range, CancellationToken cancellationToken)
@@ -59,14 +63,38 @@ public sealed class AdminOperationsService(
             .Take(RecentItemLimit)
             .Select(item => new AdminRecentFailureDto(item.Id, item.JobType, item.ErrorCode, item.FailedAt ?? item.CreatedAt))
             .ToArrayAsync(cancellationToken);
-        var runningJobs = await jobs
+        var now = DateTime.UtcNow;
+        var longRunningSince = now.Subtract(LongRunningThreshold);
+        var runningRows = await jobs
             .Where(item => item.Status == GenerationJobStatus.Running)
             .OrderBy(item => item.StartedAt ?? item.QueuedAt ?? item.CreatedAt)
             .ThenBy(item => item.Id)
             .Take(RecentItemLimit)
-            .Select(item => new AdminRunningJobDto(item.Id, item.JobType, item.ProgressPercent, item.QueuedAt, item.StartedAt, item.CreatedAt))
+            .Select(item => new
+            {
+                item.Id,
+                item.JobType,
+                item.ProgressPercent,
+                item.QueuedAt,
+                item.StartedAt,
+                item.CreatedAt,
+                item.RetryCount,
+                item.ClaimExpiresAt,
+            })
             .ToArrayAsync(cancellationToken);
+        var runningJobs = runningRows.Select(item => new AdminRunningJobDto(
+            item.Id,
+            item.JobType,
+            item.ProgressPercent,
+            item.QueuedAt,
+            item.StartedAt,
+            item.CreatedAt,
+            item.RetryCount,
+            item.ClaimExpiresAt,
+            (item.StartedAt ?? item.QueuedAt ?? item.CreatedAt) <= longRunningSince)).ToArray();
         var queuedOrPendingCount = await jobs.CountAsync(item => item.Status == GenerationJobStatus.Queued || item.Status == GenerationJobStatus.Pending, cancellationToken);
+        var longRunningCount = await jobs.CountAsync(item => item.Status == GenerationJobStatus.Running && (item.StartedAt ?? item.QueuedAt ?? item.CreatedAt) <= longRunningSince, cancellationToken);
+        var totalRetryCount = await inRange.SumAsync(item => item.RetryCount, cancellationToken);
         var totalJobsInRange = await inRange.CountAsync(cancellationToken);
 
         return new AdminGenerationOverviewDto(
@@ -75,7 +103,9 @@ public sealed class AdminOperationsService(
             byStudio.OrderByDescending(item => item.Count).ThenBy(item => item.Key).ToArray(),
             recentFailures,
             runningJobs,
-            queuedOrPendingCount);
+            queuedOrPendingCount,
+            longRunningCount,
+            totalRetryCount);
     }
 
     private async Task<AdminUsageOperationsDto> BuildUsageAsync((DateTime FromUtc, DateTime ToUtc) range, CancellationToken cancellationToken)
@@ -173,6 +203,9 @@ public sealed class AdminOperationsService(
         var filesByProvider = await files.GroupBy(item => item.StorageProvider)
             .Select(group => new AdminCountBreakdownDto(group.Key, group.Count()))
             .ToArrayAsync(cancellationToken);
+        var filesByExtraction = await files.GroupBy(item => item.TextExtractionStatus)
+            .Select(group => new AdminCountBreakdownDto(group.Key.ToString(), group.Count()))
+            .ToArrayAsync(cancellationToken);
         var options = fileOptions.Value;
 
         return new AdminAssetsAndStorageDto(
@@ -182,11 +215,14 @@ public sealed class AdminOperationsService(
             await files.SumAsync(item => (long?)item.SizeBytes, cancellationToken) ?? 0,
             filesByStatus.OrderBy(item => item.Key).ToArray(),
             filesByProvider.OrderBy(item => item.Key).ToArray(),
+            filesByExtraction.OrderBy(item => item.Key).ToArray(),
+            await files.CountAsync(item => item.Status == StoredFileStatus.Failed && item.CreatedAt >= range.FromUtc && item.CreatedAt < range.ToUtc, cancellationToken),
+            await files.CountAsync(item => item.TextExtractionStatus == FileExtractionStatus.Failed && item.CreatedAt >= range.FromUtc && item.CreatedAt < range.ToUtc, cancellationToken),
             options.StorageProvider,
             string.Equals(options.StorageProvider, FileStorageProviders.Local, StringComparison.OrdinalIgnoreCase) || options.IsS3Configured);
     }
 
-    private async Task<AdminBillingOperationsDto> BuildBillingAsync(CancellationToken cancellationToken)
+    private async Task<AdminBillingOperationsDto> BuildBillingAsync((DateTime FromUtc, DateTime ToUtc) range, CancellationToken cancellationToken)
     {
         var subscriptions = await (from subscription in db.Subscriptions.AsNoTracking()
                                    join plan in db.Plans.AsNoTracking() on subscription.PlanId equals plan.Id
@@ -194,6 +230,11 @@ public sealed class AdminOperationsService(
                                    select new AdminSubscriptionBreakdownDto(grouped.Key.Code, grouped.Key.Status.ToString(), grouped.Count()))
             .ToArrayAsync(cancellationToken);
         var attempts = await db.PaymentAttempts.AsNoTracking()
+            .GroupBy(item => item.Status)
+            .Select(group => new AdminCountBreakdownDto(group.Key.ToString(), group.Count()))
+            .ToArrayAsync(cancellationToken);
+        var events = await db.PaymentEvents.AsNoTracking()
+            .Where(item => item.ReceivedAt >= range.FromUtc && item.ReceivedAt < range.ToUtc)
             .GroupBy(item => item.Status)
             .Select(group => new AdminCountBreakdownDto(group.Key.ToString(), group.Count()))
             .ToArrayAsync(cancellationToken);
@@ -206,7 +247,9 @@ public sealed class AdminOperationsService(
             providerConfigured,
             subscriptions.OrderBy(item => item.PlanCode).ThenBy(item => item.Status).ToArray(),
             attempts.OrderBy(item => item.Key).ToArray(),
-            await db.PaymentReconciliationRecords.AsNoTracking().CountAsync(item => item.Status == ReconciliationStatus.Pending || item.Status == ReconciliationStatus.Mismatch, cancellationToken));
+            events.OrderBy(item => item.Key).ToArray(),
+            await db.PaymentReconciliationRecords.AsNoTracking().CountAsync(item => item.Status == ReconciliationStatus.Pending || item.Status == ReconciliationStatus.Mismatch, cancellationToken),
+            await db.PaymentEvents.AsNoTracking().CountAsync(item => item.Status == PaymentEventStatus.Rejected && item.ReceivedAt >= range.FromUtc && item.ReceivedAt < range.ToUtc, cancellationToken));
     }
 
     private async Task<AdminOperationalSignalsDto> BuildSignalsAsync(

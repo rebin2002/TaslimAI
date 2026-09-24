@@ -81,6 +81,7 @@ public sealed class AuthController(
                 return ApiResults.Validation(this, "Please choose a password that meets the requirements.", fields);
             }
 
+            logger.LogInformation("Registration rejected by identity policy. TraceId={TraceId}; ErrorCount={ErrorCount}", HttpContext.TraceIdentifier, identityResult.Errors.Count());
             return ApiResults.Error(this, StatusCodes.Status400BadRequest, "REGISTRATION_FAILED", "We could not create your account. Check your details and try again.");
         }
 
@@ -131,7 +132,7 @@ public sealed class AuthController(
         var result = await signInManager.CheckPasswordSignInAsync(user, request.Password, lockoutOnFailure: true);
         if (!result.Succeeded)
         {
-            logger.LogInformation("Login validation rejected credentials. TraceId={TraceId}; Reason=InvalidCredentials", HttpContext.TraceIdentifier);
+            logger.LogInformation("Login validation rejected credentials. TraceId={TraceId}; Reason={Reason}", HttpContext.TraceIdentifier, result.IsLockedOut ? "LockedOut" : result.IsNotAllowed ? "NotAllowed" : "InvalidCredentials");
             return ApiResults.Error(this, StatusCodes.Status401Unauthorized, "INVALID_CREDENTIALS", "Invalid email or password.");
         }
 

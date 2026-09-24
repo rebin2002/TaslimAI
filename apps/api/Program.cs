@@ -42,6 +42,9 @@ builder.Services.AddControllersWithViews(options =>
         options.InvalidModelStateResponseFactory = context =>
             new BadRequestObjectResult(new { error = new { code = "VALIDATION_ERROR", message = "Please check the highlighted fields." } });
     });
+builder.Services.AddHttpContextAccessor();
+builder.Services.Configure<HealthOptions>(builder.Configuration.GetSection("Health"));
+builder.Services.AddScoped<OperationalHealthService>();
 builder.Services.AddOptions<FileSettings>().Bind(builder.Configuration.GetSection("Files"));
 builder.Services.Configure<FormOptions>(options =>
 {
@@ -157,6 +160,7 @@ builder.Services.Configure<UsageControlOptions>(builder.Configuration.GetSection
 builder.Services.AddScoped<IUsageCostControl, UsageCostControl>();
 builder.Services.AddScoped<IAdminUsageService, AdminUsageService>();
 builder.Services.AddScoped<IAdminOperationsService, AdminOperationsService>();
+builder.Services.AddScoped<ProviderHealthService>();
 builder.Services.Configure<GenerationJobOptions>(builder.Configuration.GetSection("GenerationJobs"));
 builder.Services.AddScoped<IGenerationJobQueue, DatabaseGenerationJobQueue>();
 builder.Services.AddScoped<IGenerationJobUsageService, GenerationJobUsageService>();
@@ -252,11 +256,16 @@ var app = builder.Build();
 // Must run before exception handling, CORS, authentication, and antiforgery
 // so Request.IsHttps reflects Railway's external HTTPS request.
 app.UseForwardedHeaders();
+app.UseMiddleware<RequestCorrelationMiddleware>();
 
 if (!app.Environment.IsDevelopment())
 {
     app.UseExceptionHandler(errorApp => errorApp.Run(async context =>
     {
+        var logger = context.RequestServices.GetRequiredService<ILoggerFactory>().CreateLogger("Taslim.UnexpectedApiException");
+        var exception = context.Features.Get<Microsoft.AspNetCore.Diagnostics.IExceptionHandlerFeature>()?.Error;
+        logger.LogError(exception, "Unexpected API exception. RequestId={RequestId}; Method={Method}; Path={Path}; ExceptionType={ExceptionType}",
+            context.TraceIdentifier, context.Request.Method, context.Request.Path, exception?.GetType().Name);
         context.Response.StatusCode = StatusCodes.Status500InternalServerError;
         context.Response.ContentType = "application/json";
         await context.Response.WriteAsJsonAsync(new { error = new { code = "INTERNAL_ERROR", message = "An unexpected error occurred." } });
@@ -273,8 +282,18 @@ app.UseCors("Frontend");
 app.UseAuthentication();
 app.UseMiddleware<AntiforgeryValidationMiddleware>();
 app.UseAuthorization();
-app.MapGet("/health", () => Results.Ok(new { status = "healthy", service = "Taslim API" }))
+app.MapGet("/health", (OperationalHealthService health, HttpContext context) => Results.Ok(health.Live(context.TraceIdentifier)))
     .WithName("Health")
+    .WithTags("System");
+app.MapGet("/health/live", (OperationalHealthService health, HttpContext context) => Results.Ok(health.Live(context.TraceIdentifier)))
+    .WithName("HealthLive")
+    .WithTags("System");
+app.MapGet("/health/ready", async (OperationalHealthService health, HttpContext context, CancellationToken cancellationToken) =>
+{
+    var result = await health.ReadinessAsync(context.TraceIdentifier, cancellationToken);
+    return Results.Json(result.Response, statusCode: result.IsReady ? StatusCodes.Status200OK : StatusCodes.Status503ServiceUnavailable);
+})
+    .WithName("HealthReady")
     .WithTags("System");
 app.MapControllers();
 

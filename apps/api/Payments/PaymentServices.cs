@@ -13,7 +13,8 @@ namespace Taslim.Api.Payments;
 public sealed class CheckoutSessionService(
     TaslimDbContext db,
     IOptions<BillingOptions> options,
-    IEnumerable<IPaymentProvider> providers) : ICheckoutSessionService
+    IEnumerable<IPaymentProvider> providers,
+    ILogger<CheckoutSessionService> logger) : ICheckoutSessionService
 {
     private readonly BillingOptions settings = options.Value;
 
@@ -27,6 +28,7 @@ public sealed class CheckoutSessionService(
     {
         if (!settings.CustomerChargingEnabled)
         {
+            logger.LogInformation("Checkout request rejected because customer charging is disabled. WorkspaceId={WorkspaceId}; PlanCode={PlanCode}; ChargingEnabled={ChargingEnabled}", workspaceId, planCode, false);
             return new(false, null, null, "CHECKOUT_DISABLED", "Customer charging is intentionally disabled.");
         }
 
@@ -44,6 +46,7 @@ public sealed class CheckoutSessionService(
         var provider = providers.SingleOrDefault(item => item.Key.Equals(settings.Provider, StringComparison.OrdinalIgnoreCase));
         if (provider is null)
         {
+            logger.LogWarning("Checkout request could not find a configured payment provider. WorkspaceId={WorkspaceId}; ProviderKey={ProviderKey}", workspaceId, settings.Provider);
             return new(false, null, null, "PAYMENT_PROVIDER_UNCONFIGURED", "A reviewed payment provider has not been configured.");
         }
 
@@ -72,6 +75,7 @@ public sealed class CheckoutSessionService(
             session.Status = CheckoutSessionStatus.Open;
             session.ExpiresAt = result.ExpiresAt ?? session.ExpiresAt;
             await db.SaveChangesAsync(cancellationToken);
+            logger.LogInformation("Checkout session created. CheckoutSessionId={CheckoutSessionId}; WorkspaceId={WorkspaceId}; ProviderKey={ProviderKey}; Status={Status}", session.Id, workspaceId, provider.Key, session.Status);
             return new(true, session.Id, result.CheckoutUrl, "CHECKOUT_CREATED", null);
         }
         catch (Exception exception)
@@ -79,12 +83,13 @@ public sealed class CheckoutSessionService(
             session.Status = CheckoutSessionStatus.Failed;
             session.FailureReason = "Checkout provider request failed; no customer charge was confirmed.";
             await db.SaveChangesAsync(cancellationToken);
+            logger.LogError(exception, "Checkout provider request failed. CheckoutSessionId={CheckoutSessionId}; WorkspaceId={WorkspaceId}; ProviderKey={ProviderKey}; ChargingEnabled={ChargingEnabled}", session.Id, workspaceId, provider.Key, settings.CustomerChargingEnabled);
             throw new InvalidOperationException(session.FailureReason, exception);
         }
     }
 }
 
-public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerService creditLedger, INotificationEventWriter notifications) : IPaymentLifecycleService
+public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerService creditLedger, INotificationEventWriter notifications, ILogger<PaymentLifecycleService> logger) : IPaymentLifecycleService
 {
     public async Task<PaymentAttempt> RecordPaymentAttemptAsync(
         Guid workspaceId, string provider, string idempotencyKey, decimal amount, string currency,
@@ -124,6 +129,7 @@ public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerSer
         };
         db.PaymentAttempts.Add(attempt);
         await db.SaveChangesAsync(cancellationToken);
+        logger.LogInformation("Payment attempt recorded. PaymentAttemptId={PaymentAttemptId}; WorkspaceId={WorkspaceId}; ProviderKey={Provider}; Status={Status}; Amount={Amount}; Currency={Currency}", attempt.Id, workspaceId, attempt.Provider, attempt.Status, attempt.Amount, attempt.Currency);
         return attempt;
     }
 
@@ -139,6 +145,7 @@ public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerSer
         attempt.FailureReason = reason.Trim();
         attempt.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(cancellationToken);
+        logger.LogWarning("Payment attempt failed. PaymentAttemptId={PaymentAttemptId}; WorkspaceId={WorkspaceId}; FailureCode={FailureCode}", paymentAttemptId, workspaceId, failureCode);
         if (attempt.SubscriptionId.HasValue)
         {
             var subscription = await db.Subscriptions.SingleOrDefaultAsync(item => item.Id == attempt.SubscriptionId && item.WorkspaceId == workspaceId, cancellationToken);
@@ -174,6 +181,7 @@ public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerSer
         attempt.SucceededAt = DateTime.UtcNow;
         attempt.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(cancellationToken);
+        logger.LogInformation("Payment attempt succeeded. PaymentAttemptId={PaymentAttemptId}; WorkspaceId={WorkspaceId}; Provider={Provider}", paymentAttemptId, workspaceId, attempt.Provider);
         return attempt;
     }
 
@@ -262,6 +270,7 @@ public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerSer
         {
             await creditLedger.RefundAsync(workspaceId, attempt.CreditLedgerEntryId.Value, $"refund:{refund.Id}", $"Payment refund {refund.Id}: {reason}", cancellationToken: cancellationToken);
         }
+        logger.LogInformation("Payment refund recorded. PaymentRefundId={PaymentRefundId}; PaymentAttemptId={PaymentAttemptId}; WorkspaceId={WorkspaceId}; Status={Status}", refund.Id, paymentAttemptId, workspaceId, refund.Status);
         return refund;
     }
 
@@ -341,9 +350,16 @@ public sealed class PaymentWebhookService(
     public async Task<WebhookProcessingResult> ProcessAsync(string providerKey, string rawPayload, string signature, CancellationToken cancellationToken = default)
     {
         var provider = providers.SingleOrDefault(item => item.Key.Equals(providerKey, StringComparison.OrdinalIgnoreCase));
-        if (provider is null) return new(false, false, "PAYMENT_PROVIDER_UNCONFIGURED", null, "The payment provider is not configured.");
+        if (provider is null)
+        {
+            logger.LogWarning("Payment webhook rejected because provider is unconfigured. ProviderKey={ProviderKey}", providerKey);
+            return new(false, false, "PAYMENT_PROVIDER_UNCONFIGURED", null, "The payment provider is not configured.");
+        }
         if (string.IsNullOrWhiteSpace(rawPayload) || !provider.WebhookSignatureVerifier.Verify(rawPayload, signature))
+        {
+            logger.LogWarning("Payment webhook signature verification failed. ProviderKey={ProviderKey}; PayloadPresent={PayloadPresent}", provider.Key, !string.IsNullOrWhiteSpace(rawPayload));
             return new(false, false, "WEBHOOK_SIGNATURE_INVALID", null, "The webhook signature could not be verified.");
+        }
 
         ProviderPaymentEvent parsed;
         try
@@ -358,7 +374,10 @@ public sealed class PaymentWebhookService(
 
         var duplicate = await db.PaymentEvents.SingleOrDefaultAsync(item => item.Provider == provider.Key && item.ProviderEventReference == parsed.ProviderEventReference, cancellationToken);
         if (duplicate is not null)
+        {
+            logger.LogInformation("Duplicate payment webhook ignored. ProviderKey={ProviderKey}; PaymentEventId={PaymentEventId}; Status={Status}", provider.Key, duplicate.Id, duplicate.Status);
             return new(true, true, "WEBHOOK_DUPLICATE", duplicate.Id, "The already-recorded payment event was not applied twice.");
+        }
 
         var paymentEvent = new PaymentEvent
         {
@@ -371,6 +390,7 @@ public sealed class PaymentWebhookService(
         };
         db.PaymentEvents.Add(paymentEvent);
         await db.SaveChangesAsync(cancellationToken);
+        logger.LogInformation("Payment webhook recorded. ProviderKey={ProviderKey}; PaymentEventId={PaymentEventId}; EventType={EventType}; SignatureVerified={SignatureVerified}", provider.Key, paymentEvent.Id, paymentEvent.Type, paymentEvent.SignatureVerified);
 
         try
         {
@@ -405,6 +425,7 @@ public sealed class PaymentWebhookService(
             paymentEvent.Status = PaymentEventStatus.Processed;
             paymentEvent.ProcessedAt = DateTime.UtcNow;
             await db.SaveChangesAsync(cancellationToken);
+            logger.LogInformation("Payment webhook processed. ProviderKey={ProviderKey}; PaymentEventId={PaymentEventId}; EventType={EventType}; Status={Status}", provider.Key, paymentEvent.Id, paymentEvent.Type, paymentEvent.Status);
             return new(true, false, "WEBHOOK_PROCESSED", paymentEvent.Id, null);
         }
         catch (Exception exception)
@@ -418,7 +439,7 @@ public sealed class PaymentWebhookService(
     }
 }
 
-public sealed class PaymentReconciliationService(TaslimDbContext db) : IPaymentReconciliationService
+public sealed class PaymentReconciliationService(TaslimDbContext db, ILogger<PaymentReconciliationService> logger) : IPaymentReconciliationService
 {
     public async Task<PaymentReconciliationRecord> RecordAsync(
         string provider, string providerObjectType, string providerObjectReference, ReconciliationStatus status,
@@ -443,6 +464,7 @@ public sealed class PaymentReconciliationService(TaslimDbContext db) : IPaymentR
         };
         db.PaymentReconciliationRecords.Add(record);
         await db.SaveChangesAsync(cancellationToken);
+        logger.LogInformation("Payment reconciliation record created. ReconciliationId={ReconciliationId}; Provider={Provider}; Status={Status}; WorkspaceId={WorkspaceId}", record.Id, record.Provider, record.Status, record.WorkspaceId);
         return record;
     }
 
@@ -456,6 +478,7 @@ public sealed class PaymentReconciliationService(TaslimDbContext db) : IPaymentR
         record.ResolvedAt = DateTime.UtcNow;
         record.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(cancellationToken);
+        logger.LogInformation("Payment reconciliation record resolved. ReconciliationId={ReconciliationId}; Status={Status}", reconciliationId, record.Status);
     }
 
     private static void Validate(string value, string name)
