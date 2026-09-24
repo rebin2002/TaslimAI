@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
+using Taslim.Api.Authorization;
 using Taslim.Api.Billing;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
@@ -106,7 +107,7 @@ public sealed class AuthController(
         await transaction.CommitAsync(cancellationToken);
 
         await signInManager.SignInAsync(user, isPersistent: true);
-        return Ok(new AuthResponse(ToUserDto(user, workspace.Id), ToWorkspaceDto(workspace, WorkspaceRole.Owner)));
+        return Ok(new AuthResponse(await ToUserDtoAsync(user, workspace.Id), ToWorkspaceDto(workspace, WorkspaceRole.Owner)));
     }
 
     [HttpPost("login")]
@@ -143,7 +144,7 @@ public sealed class AuthController(
             return ApiResults.Error(this, StatusCodes.Status500InternalServerError, "ACCOUNT_SETUP_INCOMPLETE", "Your account setup is incomplete. Please contact support.");
 
         logger.LogInformation("Login validation succeeded. TraceId={TraceId}", HttpContext.TraceIdentifier);
-        return Ok(new AuthResponse(ToUserDto(user, workspace.Id), ToWorkspaceDto(workspace, WorkspaceRole.Owner)));
+        return Ok(new AuthResponse(await ToUserDtoAsync(user, workspace.Id), ToWorkspaceDto(workspace, WorkspaceRole.Owner)));
     }
 
     [HttpGet("me")]
@@ -156,7 +157,7 @@ public sealed class AuthController(
         var workspace = await FindPersonalWorkspace(user.Id, cancellationToken);
         if (workspace is null)
             return ApiResults.Error(this, StatusCodes.Status500InternalServerError, "ACCOUNT_SETUP_INCOMPLETE", "Your account setup is incomplete. Please contact support.");
-        return Ok(new AuthResponse(ToUserDto(user, workspace.Id), ToWorkspaceDto(workspace, WorkspaceRole.Owner)));
+        return Ok(new AuthResponse(await ToUserDtoAsync(user, workspace.Id), ToWorkspaceDto(workspace, WorkspaceRole.Owner)));
     }
 
     [HttpPost("logout")]
@@ -192,7 +193,7 @@ public sealed class AuthController(
             return ApiResults.Error(this, StatusCodes.Status400BadRequest, "PROFILE_UPDATE_FAILED", "We could not update your profile.");
         var workspace = await FindPersonalWorkspace(user.Id, HttpContext.RequestAborted);
         if (workspace is null) return ApiResults.Error(this, 500, "ACCOUNT_SETUP_INCOMPLETE", "Your account setup is incomplete. Please contact support.");
-        return Ok(new AuthResponse(ToUserDto(user, workspace.Id), ToWorkspaceDto(workspace, WorkspaceRole.Owner)));
+        return Ok(new AuthResponse(await ToUserDtoAsync(user, workspace.Id), ToWorkspaceDto(workspace, WorkspaceRole.Owner)));
     }
 
     [HttpPost("password")]
@@ -245,6 +246,17 @@ public sealed class AuthController(
         .Distinct(StringComparer.Ordinal)
         .ToArray();
     private static string Slugify(string name, Guid suffix) => $"{new string(name.Trim().ToLowerInvariant().Where(character => char.IsLetterOrDigit(character) || character == ' ').ToArray()).Replace(' ', '-')}-{suffix.ToString("N")[..8]}";
-    private static UserDto ToUserDto(ApplicationUser user, Guid workspaceId) => new(user.Id, user.Email ?? string.Empty, user.DisplayName, user.PreferredLanguage, workspaceId, user.CreatedAt, user.DefaultGenerationLanguage, user.TimeZone, user.OutputPreference, user.IncludeSourceLinks);
+    private async Task<UserDto> ToUserDtoAsync(ApplicationUser user, Guid workspaceId) => new(
+        user.Id,
+        user.Email ?? string.Empty,
+        user.DisplayName,
+        user.PreferredLanguage,
+        workspaceId,
+        user.CreatedAt,
+        user.DefaultGenerationLanguage,
+        user.TimeZone,
+        user.OutputPreference,
+        user.IncludeSourceLinks,
+        user.IsActive && await userManager.IsInRoleAsync(user, AdminPolicies.Role));
     private static WorkspaceSummaryDto ToWorkspaceDto(Workspace workspace, WorkspaceRole role) => new(workspace.Id, workspace.Name, workspace.Slug, workspace.Type.ToString(), role.ToString());
 }

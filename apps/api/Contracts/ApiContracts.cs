@@ -30,7 +30,8 @@ public sealed record UserDto(
     string DefaultGenerationLanguage = LanguageCodes.English,
     string TimeZone = "UTC",
     string OutputPreference = OutputPreferences.Balanced,
-    bool IncludeSourceLinks = true);
+    bool IncludeSourceLinks = true,
+    bool IsAdmin = false);
 
 public sealed record WorkspaceSummaryDto(Guid Id, string Name, string Slug, string Type, string Role);
 

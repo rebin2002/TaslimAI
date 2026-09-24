@@ -1,6 +1,6 @@
 import { AdminUsageView } from "@/components/AdminUsageView";
-import { ProtectedPage } from "@/components/ProtectedPage";
+import { AdminPage } from "@/components/AdminPage";
 
 export default function AdminUsagePage() {
-  return <ProtectedPage><AdminUsageView /></ProtectedPage>;
+  return <AdminPage><AdminUsageView /></AdminPage>;
 }

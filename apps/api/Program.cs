@@ -16,6 +16,7 @@ using Taslim.Api.Documents;
 using Taslim.Api.Presentations;
 using Taslim.Api.Research;
 using Taslim.Api.Social;
+using Taslim.Api.Operations;
 using Taslim.Api.Infrastructure;
 using Taslim.Api.Images;
 using Taslim.Api.Music;
@@ -154,6 +155,7 @@ builder.Services.AddSingleton<IUsageChargingService, SafeUsageChargingService>()
 builder.Services.Configure<UsageControlOptions>(builder.Configuration.GetSection("UsageControls"));
 builder.Services.AddScoped<IUsageCostControl, UsageCostControl>();
 builder.Services.AddScoped<IAdminUsageService, AdminUsageService>();
+builder.Services.AddScoped<IAdminOperationsService, AdminOperationsService>();
 builder.Services.Configure<GenerationJobOptions>(builder.Configuration.GetSection("GenerationJobs"));
 builder.Services.AddScoped<IGenerationJobQueue, DatabaseGenerationJobQueue>();
 builder.Services.AddScoped<IGenerationJobUsageService, GenerationJobUsageService>();

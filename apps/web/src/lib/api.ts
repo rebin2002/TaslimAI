@@ -12,6 +12,7 @@ export type User = {
   timeZone: string;
   outputPreference: "concise" | "balanced" | "detailed";
   includeSourceLinks: boolean;
+  isAdmin: boolean;
 };
 
 export type Workspace = {
@@ -185,6 +186,39 @@ export type AdminUsageTransaction = {
 };
 export type AdminUsageTransactionList = { items: AdminUsageTransaction[]; page: number; pageSize: number; totalCount: number; totalPages: number };
 export type AdminUsageReport = { summary: AdminUsageSummary; breakdowns: AdminUsageBreakdowns; transactions: AdminUsageTransactionList };
+export type AdminCountBreakdown = { key: string; count: number };
+export type AdminGenerationOverview = {
+  totalJobsInRange: number;
+  byStatus: AdminCountBreakdown[];
+  byStudio: AdminCountBreakdown[];
+  recentFailures: { jobId: string; jobType: string; errorCode: string | null; failedAt: string }[];
+  runningJobs: { jobId: string; jobType: string; progressPercent: number; queuedAt: string | null; startedAt: string | null; createdAt: string }[];
+  queuedOrPendingCount: number;
+};
+export type AdminUsageOperations = {
+  requestCount: number;
+  completedRequestCount: number;
+  failedRequestCount: number;
+  pendingRequestCount: number;
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  imageInputTokens: number;
+  imageOutputTokens: number;
+  providerCostUsd: number;
+  customerChargesUsd: number;
+  pendingEstimatedProviderCostUsd: number;
+  byFeature: { feature: string; requestCount: number; completedRequestCount: number; failedRequestCount: number; pendingRequestCount: number; inputTokens: number; cachedInputTokens: number; outputTokens: number; imageInputTokens: number; imageOutputTokens: number; providerCostUsd: number; customerChargesUsd: number }[];
+};
+export type AdminOperationsDashboard = {
+  range: { fromUtc: string; toUtc: string };
+  generation: AdminGenerationOverview;
+  usage: AdminUsageOperations;
+  usersAndWorkspaces: { totalUsers: number; activeUsers: number; disabledUsers: number; totalWorkspaces: number; personalWorkspaces: number; businessWorkspaces: number; archivedWorkspaces: number };
+  assetsAndStorage: { totalAssets: number; assetsByType: AdminCountBreakdown[]; totalStoredFiles: number; storedBytes: number; filesByStatus: AdminCountBreakdown[]; filesByStorageProvider: AdminCountBreakdown[]; configuredStorageProvider: string; persistentStorageConfigured: boolean };
+  billing: { customerChargingEnabled: boolean; configuredProvider: string; paymentProviderConfigured: boolean; subscriptions: { planCode: string; status: string; count: number }[]; paymentAttemptsByStatus: AdminCountBreakdown[]; pendingReconciliationCount: number };
+  signals: { runningJobCount: number; queuedOrPendingJobCount: number; recentFailureCount: number; anomalousUsageCountInRange: number; lastCompletedGenerationAt: string | null };
+};
 export type GenerationJobStatus = "Pending" | "Queued" | "Running" | "Succeeded" | "Failed" | "Cancelled";
 export type GenerationJobOutput = { id: string; outputType: string; storedFileId: string | null; metadataJson: string | null; createdAt: string };
 export type GenerationJob = {
@@ -539,6 +573,10 @@ export const api = {
     return request<AdminUsageReport>(`/api/admin/usage/report${query.toString() ? `?${query.toString()}` : ""}`);
   },
   getAdminUsageTransaction: (id: string) => request<AdminUsageTransaction>(`/api/admin/usage/transactions/${id}`),
+  getAdminOperationsDashboard: (params: Record<string, string | number | undefined> = {}) => {
+    const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value !== undefined).map(([key, value]) => [key, String(value)]));
+    return request<AdminOperationsDashboard>(`/api/admin/operations/dashboard${query.toString() ? `?${query.toString()}` : ""}`);
+  },
   createGenerationJob: (workspaceId: string, inputJson = "{}", title?: string) => request<GenerationJob>("/api/generation/jobs", { method: "POST", body: JSON.stringify({ workspaceId, jobType: "system.test", inputJson, title }) }, true),
   createImageGenerationJob: (input: ImageGenerationInput) => request<{ job: GenerationJob }>("/api/image-generation/jobs", { method: "POST", body: JSON.stringify(input) }, true).then((response) => response.job),
   createVoiceGenerationJob: (input: VoiceGenerationInput) => request<{ job: GenerationJob }>("/api/voice-generation/jobs", { method: "POST", body: JSON.stringify(input) }, true).then((response) => response.job),
