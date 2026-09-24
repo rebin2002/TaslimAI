@@ -7,8 +7,10 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Taslim.Api.Ai;
+using Taslim.Api.Activity;
 using Taslim.Api.Assets;
 using Taslim.Api.Authorization;
+using Taslim.Api.Billing;
 using Taslim.Api.Domain;
 using Taslim.Api.Documents;
 using Taslim.Api.Presentations;
@@ -16,10 +18,13 @@ using Taslim.Api.Research;
 using Taslim.Api.Social;
 using Taslim.Api.Infrastructure;
 using Taslim.Api.Images;
+using Taslim.Api.Music;
 using Taslim.Api.Persistence;
 using Taslim.Api.Usage;
 using Taslim.Api.Files;
 using Taslim.Api.Generation;
+using Taslim.Api.Movies;
+using Taslim.Api.Voice;
 using FileSettings = Taslim.Api.Files.FileOptions;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -132,6 +137,10 @@ builder.Services.AddCors(options => options.AddPolicy("Frontend", policy =>
         .AllowAnyMethod()
         .AllowCredentials()));
 builder.Services.AddScoped<WorkspaceAccessService>();
+builder.Services.Configure<BillingOptions>(builder.Configuration.GetSection("Billing"));
+builder.Services.AddScoped<IBillingProvisioningService, BillingProvisioningService>();
+builder.Services.AddScoped<IBillingAccountService, BillingAccountService>();
+builder.Services.AddScoped<ICreditLedgerService, CreditLedgerService>();
 builder.Services.AddScoped<IAssetService, AssetService>();
 builder.Services.AddScoped<IGeneratedAssetPublisher, GeneratedAssetPublisher>();
 builder.Services.AddScoped<IUsageLedgerService, UsageLedgerService>();
@@ -143,6 +152,9 @@ builder.Services.Configure<GenerationJobOptions>(builder.Configuration.GetSectio
 builder.Services.AddScoped<IGenerationJobQueue, DatabaseGenerationJobQueue>();
 builder.Services.AddScoped<IGenerationJobUsageService, GenerationJobUsageService>();
 builder.Services.AddScoped<IGenerationJobService, GenerationJobService>();
+builder.Services.AddScoped<IMovieStudioService, MovieStudioService>();
+builder.Services.AddSingleton<IMovieVideoProvider, UnavailableMovieVideoProvider>();
+builder.Services.AddScoped<IActivityCenterService, ActivityCenterService>();
 builder.Services.AddSingleton<IGenerationJobHandler, SystemTestGenerationJobHandler>();
 if (builder.Configuration.GetValue("GenerationJobs:WorkerEnabled", !builder.Environment.IsEnvironment("Testing")))
 {
@@ -154,6 +166,8 @@ builder.Services.Configure<DocumentGenerationOptions>(builder.Configuration.GetS
 builder.Services.Configure<PresentationGenerationOptions>(builder.Configuration.GetSection("PresentationGeneration"));
 builder.Services.Configure<ResearchGenerationOptions>(builder.Configuration.GetSection("ResearchGeneration"));
 builder.Services.Configure<SocialGenerationOptions>(builder.Configuration.GetSection("SocialGeneration"));
+builder.Services.Configure<MusicGenerationOptions>(builder.Configuration.GetSection("MusicGeneration"));
+builder.Services.Configure<VoiceGenerationOptions>(builder.Configuration.GetSection("VoiceGeneration"));
 builder.Services.AddSingleton<AiModelCatalog>();
 builder.Services.AddSingleton<IAiCostCalculator, AiCostCalculator>();
 builder.Services.AddSingleton<AiContextBuilder>();
@@ -167,6 +181,7 @@ builder.Services.AddScoped<IChatCompletionService, ChatCompletionService>();
 builder.Services.AddSingleton<IImagePromptBuilder, TaslimImagePromptBuilder>();
 builder.Services.AddSingleton<IImageGenerationProvider>(services => services.GetRequiredService<OpenAiImageGenerationProvider>());
 builder.Services.AddSingleton<IGenerationJobHandler, ImageGenerationJobHandler>();
+builder.Services.AddScoped<IGenerationJobHandler, MovieVideoGenerationJobHandler>();
 builder.Services.AddSingleton<IDocumentPromptBuilder, DocumentPromptBuilder>();
 builder.Services.AddScoped<IDocumentGenerationProvider, AiDocumentGenerationProvider>();
 builder.Services.AddSingleton<IDocumentRenderer, DocumentRenderer>();
@@ -185,6 +200,10 @@ builder.Services.AddScoped<IGenerationJobHandler, ResearchGenerationJobHandler>(
 builder.Services.AddSingleton<ISocialPromptBuilder, SocialPromptBuilder>();
 builder.Services.AddScoped<ISocialGenerationProvider, AiSocialGenerationProvider>();
 builder.Services.AddScoped<IGenerationJobHandler, SocialGenerationJobHandler>();
+// Music providers are intentionally not registered until a production provider is selected and validated.
+builder.Services.AddScoped<IGenerationJobHandler, MusicGenerationJobHandler>();
+builder.Services.AddSingleton<IVoiceGenerationProvider, UnconfiguredVoiceGenerationProvider>();
+builder.Services.AddScoped<IGenerationJobHandler, VoiceGenerationJobHandler>();
 builder.Services.AddScoped<FileValidationService>();
 builder.Services.AddSingleton<IFileContentExtractor, FileContentExtractor>();
 builder.Services.AddScoped<FileProcessingService>();

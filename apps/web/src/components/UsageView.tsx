@@ -40,7 +40,7 @@ export function UsageView() {
   const loading = !error && (!workspace?.id || loadedWorkspaceId !== workspace.id || !history || history.page !== page);
   const formatNumber = (value: number) => numberFormat.format(value);
   const formatUsd = (value: number) => `${value.toFixed(8)} ${t("usage.usd")}`;
-  const featureLabel = (feature: string) => feature === "Chat" ? t("usage.featureChat") : feature === "Image" ? t("usage.featureImage") : t("usage.featureOther");
+  const featureLabel = (feature: string) => feature === "Chat" ? t("usage.featureChat") : feature === "Image" ? t("usage.featureImage") : feature === "Music" ? t("feature.music") : t("usage.featureOther");
 
   return <div className="account-page usage-page">
     <div className="detail-header usage-header"><div><Link className="back-link" href="/account"><ArrowLeft size={14} /> {t("navigation.account")}</Link><p className="section-eyebrow">{t("usage.eyebrow")}</p><h1>{t("usage.title")}</h1><p>{t("usage.subtitle")}</p></div><div className="detail-icon"><BarChart3 size={21} /></div></div>

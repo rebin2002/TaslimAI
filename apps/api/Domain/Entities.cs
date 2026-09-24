@@ -57,6 +57,16 @@ public static class GenerationJobTypes
     public const string PresentationGenerate = "presentation.generate";
     public const string ResearchGenerate = "research.generate";
     public const string SocialGenerate = "social.generate";
+public const string MovieQuickGenerate = "movie.quick.generate";
+    public const string MovieClipGenerate = "movie.clip.generate";
+    public const string MovieAssembly = "movie.assembly";
+
+    public static readonly IReadOnlySet<string> MovieTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        MovieQuickGenerate, MovieClipGenerate, MovieAssembly,
+    };
+public const string MusicGenerate = "music.generate";
+public const string VoiceGenerate = "voice.generate";
 
     public static readonly IReadOnlySet<string> Supported = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
@@ -66,6 +76,11 @@ public static class GenerationJobTypes
         PresentationGenerate,
         ResearchGenerate,
         SocialGenerate,
+MovieQuickGenerate,
+        MovieClipGenerate,
+        MovieAssembly,
+MusicGenerate,
+VoiceGenerate,
     };
 }
 
@@ -154,6 +169,27 @@ public static class GenerationJobErrorCodes
     public const string SocialOutputInvalid = "SOCIAL_OUTPUT_INVALID";
     public const string SocialStorageFailed = "SOCIAL_STORAGE_FAILED";
     public const string SocialCancelled = "SOCIAL_CANCELLED";
+public const string MovieProviderUnavailable = "MOVIE_PROVIDER_UNAVAILABLE";
+    public const string MovieCancelled = "MOVIE_CANCELLED";
+    public const string MovieGenerationFailed = "MOVIE_GENERATION_FAILED";
+public const string MusicRequestInvalid = "MUSIC_REQUEST_INVALID";
+    public const string MusicGenreUnsupported = "MUSIC_GENRE_UNSUPPORTED";
+    public const string MusicMoodUnsupported = "MUSIC_MOOD_UNSUPPORTED";
+    public const string MusicDurationUnsupported = "MUSIC_DURATION_UNSUPPORTED";
+    public const string MusicVocalPreferenceUnsupported = "MUSIC_VOCAL_PREFERENCE_UNSUPPORTED";
+    public const string MusicLanguageUnsupported = "MUSIC_LANGUAGE_UNSUPPORTED";
+    public const string MusicProviderUnavailable = "MUSIC_PROVIDER_UNAVAILABLE";
+    public const string MusicProviderTimeout = "MUSIC_PROVIDER_TIMEOUT";
+    public const string MusicGenerationFailed = "MUSIC_GENERATION_FAILED";
+    public const string MusicOutputInvalid = "MUSIC_OUTPUT_INVALID";
+    public const string MusicOutputStorageFailed = "MUSIC_OUTPUT_STORAGE_FAILED";
+    public const string MusicCancelled = "MUSIC_CANCELLED";
+public const string VoiceRequestInvalid = "VOICE_REQUEST_INVALID";
+    public const string VoiceProviderUnavailable = "VOICE_PROVIDER_UNAVAILABLE";
+    public const string VoiceProviderFailed = "VOICE_PROVIDER_FAILED";
+    public const string VoiceOutputInvalid = "VOICE_OUTPUT_INVALID";
+    public const string VoiceOutputStorageFailed = "VOICE_OUTPUT_STORAGE_FAILED";
+    public const string VoiceCancelled = "VOICE_CANCELLED";
 }
 
 public static class AssetTypes
@@ -595,6 +631,17 @@ public sealed class GenerationJobOutput
 
     public GenerationJob GenerationJob { get; set; } = null!;
     public StoredFile? StoredFile { get; set; }
+}
+
+public sealed class ActivityReadState
+{
+    public Guid Id { get; set; }
+    public Guid UserId { get; set; }
+    public Guid GenerationJobId { get; set; }
+    public DateTime ReadAt { get; set; }
+
+    public ApplicationUser User { get; set; } = null!;
+    public GenerationJob GenerationJob { get; set; } = null!;
 }
 
 public sealed class ChatMessageAttachment

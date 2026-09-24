@@ -10,11 +10,14 @@ using Taslim.Api.Domain;
 using Taslim.Api.Documents;
 using Taslim.Api.Files;
 using Taslim.Api.Images;
+using Taslim.Api.Music;
+using Taslim.Api.Movies;
 using Taslim.Api.Persistence;
 using Taslim.Api.Presentations;
 using Taslim.Api.Research;
 using Taslim.Api.Social;
 using Taslim.Api.Usage;
+using Taslim.Api.Voice;
 
 namespace Taslim.Api.Generation;
 
@@ -119,7 +122,15 @@ public sealed class GenerationJobUsageService(IUsageLedgerService ledger) : IGen
                         ? UsageFeature.Presentation
                         : string.Equals(job.JobType, GenerationJobTypes.ResearchGenerate, StringComparison.OrdinalIgnoreCase)
                             ? UsageFeature.Research
-                            : string.Equals(job.JobType, GenerationJobTypes.SocialGenerate, StringComparison.OrdinalIgnoreCase) ? UsageFeature.Social : UsageFeature.Generation,
+                            : string.Equals(job.JobType, GenerationJobTypes.VoiceGenerate, StringComparison.OrdinalIgnoreCase)
+                                ? UsageFeature.Voice
+                                : string.Equals(job.JobType, GenerationJobTypes.MusicGenerate, StringComparison.OrdinalIgnoreCase)
+                                    ? UsageFeature.Music
+                                    : string.Equals(job.JobType, GenerationJobTypes.SocialGenerate, StringComparison.OrdinalIgnoreCase)
+                                        ? UsageFeature.Social
+                                        : GenerationJobTypes.MovieTypes.Contains(job.JobType)
+                                            ? UsageFeature.Movie
+                                            : UsageFeature.Generation,
             cancellationToken,
             job.Id,
             estimatedProviderCostUsd);
@@ -256,7 +267,9 @@ public sealed class GenerationJobService(
     }
 
     private static string CancellationCode(GenerationJob job) =>
-        string.Equals(job.JobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase)
+        GenerationJobTypes.MovieTypes.Contains(job.JobType)
+            ? GenerationJobErrorCodes.MovieCancelled
+            : string.Equals(job.JobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase)
             ? GenerationJobErrorCodes.ImageCancelled
             : string.Equals(job.JobType, GenerationJobTypes.DocumentGenerate, StringComparison.OrdinalIgnoreCase)
                 ? GenerationJobErrorCodes.DocumentCancelled
@@ -266,7 +279,11 @@ public sealed class GenerationJobService(
                         ? GenerationJobErrorCodes.ResearchCancelled
                         : string.Equals(job.JobType, GenerationJobTypes.SocialGenerate, StringComparison.OrdinalIgnoreCase)
                             ? GenerationJobErrorCodes.SocialCancelled
-                : GenerationJobErrorCodes.Cancelled;
+                            : string.Equals(job.JobType, GenerationJobTypes.MusicGenerate, StringComparison.OrdinalIgnoreCase)
+                                ? GenerationJobErrorCodes.MusicCancelled
+                                : string.Equals(job.JobType, GenerationJobTypes.VoiceGenerate, StringComparison.OrdinalIgnoreCase)
+                                    ? GenerationJobErrorCodes.VoiceCancelled
+                                    : GenerationJobErrorCodes.Cancelled;
 }
 
 public sealed class GenerationJobValidationException(string code, string message) : Exception(message)
@@ -729,7 +746,9 @@ public sealed class GenerationJobWorker(
     }
 
     private static string CancellationCode(GenerationJob job) =>
-        string.Equals(job.JobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase)
+        GenerationJobTypes.MovieTypes.Contains(job.JobType)
+            ? GenerationJobErrorCodes.MovieCancelled
+            : string.Equals(job.JobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase)
             ? GenerationJobErrorCodes.ImageCancelled
             : string.Equals(job.JobType, GenerationJobTypes.DocumentGenerate, StringComparison.OrdinalIgnoreCase)
                 ? GenerationJobErrorCodes.DocumentCancelled
@@ -739,6 +758,10 @@ public sealed class GenerationJobWorker(
                 ? GenerationJobErrorCodes.ResearchCancelled
             : string.Equals(job.JobType, GenerationJobTypes.SocialGenerate, StringComparison.OrdinalIgnoreCase)
                 ? GenerationJobErrorCodes.SocialCancelled
+            : string.Equals(job.JobType, GenerationJobTypes.MusicGenerate, StringComparison.OrdinalIgnoreCase)
+                ? GenerationJobErrorCodes.MusicCancelled
+            : string.Equals(job.JobType, GenerationJobTypes.VoiceGenerate, StringComparison.OrdinalIgnoreCase)
+                ? GenerationJobErrorCodes.VoiceCancelled
             : GenerationJobErrorCodes.Cancelled;
 
     private static string MapFailureCode(Exception exception, string jobType)
@@ -804,6 +827,37 @@ public sealed class GenerationJobWorker(
                 _ => GenerationJobErrorCodes.SocialGenerationFailed,
             };
         }
+        if (GenerationJobTypes.MovieTypes.Contains(jobType))
+        {
+            return exception switch
+            {
+                MovieProviderUnavailableException => GenerationJobErrorCodes.MovieProviderUnavailable,
+                _ => GenerationJobErrorCodes.MovieGenerationFailed,
+            };
+        }
+        if (string.Equals(jobType, GenerationJobTypes.MusicGenerate, StringComparison.OrdinalIgnoreCase))
+        {
+            return exception switch
+            {
+                MusicRequestValidationException validation => validation.Code,
+                MusicProviderUnavailableException or MusicProviderTimeoutException => GenerationJobErrorCodes.MusicProviderUnavailable,
+                MusicOutputInvalidException => GenerationJobErrorCodes.MusicOutputInvalid,
+                FileStorageUnavailableException or FileStorageOperationException or FileUploadValidationException => GenerationJobErrorCodes.MusicOutputStorageFailed,
+                _ => GenerationJobErrorCodes.MusicGenerationFailed,
+            };
+        }
+        if (string.Equals(jobType, GenerationJobTypes.VoiceGenerate, StringComparison.OrdinalIgnoreCase))
+        {
+            return exception switch
+            {
+                VoiceRequestValidationException validation => validation.Code,
+                VoiceProviderUnavailableException or VoiceProviderTimeoutException => GenerationJobErrorCodes.VoiceProviderUnavailable,
+                VoiceProviderFailureException => GenerationJobErrorCodes.VoiceProviderFailed,
+                VoiceOutputInvalidException => GenerationJobErrorCodes.VoiceOutputInvalid,
+                FileStorageUnavailableException or FileStorageOperationException or FileUploadValidationException => GenerationJobErrorCodes.VoiceOutputStorageFailed,
+                _ => GenerationJobErrorCodes.VoiceProviderFailed,
+            };
+        }
         if (!string.Equals(jobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase)) return GenerationJobErrorCodes.ExecutionFailed;
         return exception switch
         {
@@ -866,10 +920,26 @@ public sealed class GenerationJobWorker(
         GenerationJobErrorCodes.SocialOutputInvalid => "The generated social content was invalid. Please try again.",
         GenerationJobErrorCodes.SocialStorageFailed => "The social content was generated but could not be saved. Please try again.",
         GenerationJobErrorCodes.SocialCancelled => "The social content generation was cancelled.",
+        GenerationJobErrorCodes.MovieProviderUnavailable => "Movie generation is not available yet because no video provider is configured. Your movie plan was saved.",
+        GenerationJobErrorCodes.MovieCancelled => "The movie generation was cancelled.",
+        GenerationJobErrorCodes.MovieGenerationFailed => "The movie could not be generated. Your movie plan was saved.",
+        GenerationJobErrorCodes.MusicProviderUnavailable or GenerationJobErrorCodes.MusicProviderTimeout => "Music generation is temporarily unavailable. Please try again later.",
+        GenerationJobErrorCodes.MusicOutputInvalid => "The generated music was invalid. Please try again.",
+        GenerationJobErrorCodes.MusicOutputStorageFailed => "The music was generated but could not be saved. Please try again.",
+        GenerationJobErrorCodes.MusicCancelled => "The music generation was cancelled.",
+        GenerationJobErrorCodes.VoiceProviderUnavailable => "Voice generation is temporarily unavailable. Please try again later.",
+        GenerationJobErrorCodes.VoiceProviderFailed => "Voice generation could not be completed. Please try again.",
+        GenerationJobErrorCodes.VoiceOutputInvalid => "The generated audio was invalid. Please try again.",
+        GenerationJobErrorCodes.VoiceOutputStorageFailed => "The audio was generated but could not be saved. Please try again.",
+        GenerationJobErrorCodes.VoiceRequestInvalid => "Please check the voice request and try again.",
+        GenerationJobErrorCodes.VoiceCancelled => "The voice generation was cancelled.",
         _ when code.StartsWith("IMAGE_", StringComparison.Ordinal) => "The image could not be generated. Please try again.",
         _ when code.StartsWith("DOCUMENT_", StringComparison.Ordinal) => "The document could not be generated. Please try again.",
         _ when code.StartsWith("PRESENTATION_", StringComparison.Ordinal) => "The presentation could not be generated. Please try again.",
         _ when code.StartsWith("SOCIAL_", StringComparison.Ordinal) => "The social content could not be generated. Please try again.",
+        _ when code.StartsWith("MOVIE_", StringComparison.Ordinal) => "The movie could not be generated. Your movie plan was saved.",
+        _ when code.StartsWith("MUSIC_", StringComparison.Ordinal) => "The music could not be generated. Please try again.",
+        _ when code.StartsWith("VOICE_", StringComparison.Ordinal) => "The voice could not be generated. Please try again.",
         _ => "The job could not be completed.",
     };
 }

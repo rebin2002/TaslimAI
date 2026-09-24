@@ -131,6 +131,12 @@ export type UsageTransaction = {
   failureCode: string | null;
 };
 export type UsageHistory = { items: UsageTransaction[]; page: number; pageSize: number; totalCount: number; totalPages: number };
+export type BillingPlan = { code: string; name: string; monthlyPriceUsd: number; monthlyCreditAllowance: number; currency: string };
+export type BillingSubscription = { status: string; currentPeriodStart: string; currentPeriodEnd: string; nextRenewalAt: string; cancelAtPeriodEnd: boolean };
+export type BillingPeriod = { id: string; status: string; startsAt: string; endsAt: string; includedCredits: number };
+export type BillingCredits = { includedGranted: number; includedRemaining: number; purchasedRemaining: number; adjustmentBalance: number; totalRemaining: number };
+export type CreditLedgerEntry = { id: string; type: string; amount: number; reason: string; createdAt: string };
+export type BillingAccount = { currentPlan: BillingPlan; subscription: BillingSubscription; billingPeriod: BillingPeriod; credits: BillingCredits; transactions: CreditLedgerEntry[]; upgradeAvailable: boolean };
 export type AdminUsageSummary = {
   fromUtc: string;
   toUtc: string;
@@ -179,6 +185,32 @@ export type GenerationJob = {
   outputs: GenerationJobOutput[];
 };
 export type GenerationJobList = { items: GenerationJob[]; page: number; pageSize: number; totalCount: number; totalPages: number };
+export type MovieGuide = { id: string; visualLanguage: string; cameraLanguage: string; colorAndLighting: string; soundAndNarration: string; continuityRules: string; updatedAt: string };
+export type MovieScene = { id: string; sequence: number; title: string; summary: string; durationSeconds: number | null; continuityNotes: string | null; narration: string | null; dialogue: string | null; shots: MovieShot[] };
+export type MovieShot = { id: string; sequence: number; description: string; cameraAndFraming: string | null; cameraMotion: string | null; durationSeconds: number | null; narration: string | null; dialogue: string | null; visualContinuityNotes: string | null; clips: MovieClip[] };
+export type MovieCharacter = { id: string; name: string; description: string; appearance: string | null; voiceAndPerformance: string | null; continuityNotes: string | null; referenceAssetId: string | null };
+export type MovieLocation = { id: string; name: string; description: string; visualContinuityNotes: string | null; referenceAssetId: string | null };
+export type MovieClip = { id: string; movieShotId: string | null; generationJobId: string | null; assetId: string | null; status: string; providerKey: string | null; durationSeconds: number | null; metadataJson: string | null };
+export type MovieAssembly = { id: string; generationJobId: string | null; assetId: string | null; status: string; outputFormat: string; metadataJson: string | null; createdAt: string; completedAt: string | null };
+export type MovieProject = { id: string; workspaceId: string; projectId: string | null; mode: "Quick" | "Full"; status: string; title: string; description: string; durationSeconds: number; aspectRatio: string; style: string; language: string; additionalInstructions: string | null; createdAt: string; updatedAt: string; guide: MovieGuide; scenes: MovieScene[]; characters: MovieCharacter[]; locations: MovieLocation[]; assemblies: MovieAssembly[] };
+export type MovieProviderReadiness = { ready: boolean; providerKey: string | null; supportedOperations: string[] };
+export type MovieStudioResponse = { project: MovieProject; job: GenerationJob | null };
+export type MovieStudioCreateInput = { workspaceId: string; projectId?: string | null; mode: "Quick" | "Full"; title: string; description: string; durationSeconds: number; aspectRatio: string; style: string; language: string; additionalInstructions?: string | null; visualLanguage?: string | null; cameraLanguage?: string | null; colorAndLighting?: string | null; soundAndNarration?: string | null; continuityRules?: string | null };
+export type ActivityItem = {
+  jobId: string;
+  workspaceId: string;
+  projectId: string | null;
+  jobType: "image" | "document" | "presentation" | "research" | "social" | "voice" | "music" | "movie" | "other";
+  title: string;
+  status: "Queued" | "Running" | "Completed" | "Failed" | "Cancelled";
+  progressPercent: number;
+  createdAt: string;
+  completedAt: string | null;
+  isRead: boolean;
+  safeFailureMessage: string | null;
+  assetId: string | null;
+};
+export type ActivityList = { items: ActivityItem[]; page: number; pageSize: number; totalCount: number; totalPages: number; unreadCount: number };
 export type ImageGenerationInput = {
   workspaceId: string;
   projectId?: string | null;
@@ -192,6 +224,28 @@ export type ImageGenerationInput = {
   textInImage?: string | null;
 };
 export type ImageJobResult = { assetId?: string; assetType?: "image"; format?: string; width?: number | null; height?: number | null; aspectRatio?: string; quality?: string };
+export type VoiceGenerationInput = {
+  workspaceId: string;
+  projectId?: string | null;
+  text: string;
+  language: "en" | "ar" | "ku";
+  voiceStyle: string;
+  speakingStyle: string;
+  instructions?: string | null;
+  title?: string | null;
+};
+export type VoiceJobResult = {
+  assetId?: string;
+  assetType?: "audio";
+  contentType?: string;
+  format?: string;
+  language?: string;
+  voiceStyle?: string;
+  speakingStyle?: string;
+  sizeBytes?: number;
+  durationMilliseconds?: number | null;
+  sampleRateHz?: number | null;
+};
 export type DocumentGenerationInput = {
   workspaceId: string;
   projectId?: string | null;
@@ -251,6 +305,20 @@ export type ResearchGenerationInput = {
   useWebSources: boolean;
   attachmentIds: string[];
 };
+export type MusicGenerationInput = {
+  workspaceId: string;
+  projectId?: string | null;
+  description: string;
+  purpose: string;
+  genre: string;
+  mood: string;
+  durationSeconds: number;
+  vocalPreference: string;
+  language: string;
+  title?: string | null;
+  additionalInstructions?: string | null;
+};
+export type MusicJobResult = { assetId?: string; assetType?: "music"; title?: string; format?: string; durationSeconds?: number | null; vocalPreference?: string; language?: string };
 export type ResearchReportBlock = { type: string; text?: string | null; items?: string[] | null; rows?: { cells: string[] }[] | null; citationIds?: string[] };
 export type ResearchJobResult = {
   assetId?: string;
@@ -439,6 +507,7 @@ export const api = {
   streamMessage: (conversationId: string, content: string, onEvent: (event: ChatStreamEvent) => void, id = requestId(), attachmentIds: string[] = []) => streamRequest(`/api/conversations/${conversationId}/messages/stream`, { content, requestId: id, attachmentIds }, onEvent),
   getUsageSummary: (workspaceId: string) => request<UsageSummary>(`/api/workspaces/${workspaceId}/usage/summary`),
   getUsageHistory: (workspaceId: string, page = 1, pageSize = 20) => request<UsageHistory>(`/api/workspaces/${workspaceId}/usage?page=${page}&pageSize=${pageSize}`),
+  getBillingAccount: (workspaceId: string) => request<BillingAccount>(`/api/workspaces/${workspaceId}/billing`),
   getAdminUsageReport: (params: Record<string, string | number | undefined> = {}) => {
     const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value !== undefined).map(([key, value]) => [key, String(value)]));
     return request<AdminUsageReport>(`/api/admin/usage/report${query.toString() ? `?${query.toString()}` : ""}`);
@@ -446,14 +515,31 @@ export const api = {
   getAdminUsageTransaction: (id: string) => request<AdminUsageTransaction>(`/api/admin/usage/transactions/${id}`),
   createGenerationJob: (workspaceId: string, inputJson = "{}", title?: string) => request<GenerationJob>("/api/generation/jobs", { method: "POST", body: JSON.stringify({ workspaceId, jobType: "system.test", inputJson, title }) }, true),
   createImageGenerationJob: (input: ImageGenerationInput) => request<{ job: GenerationJob }>("/api/image-generation/jobs", { method: "POST", body: JSON.stringify(input) }, true).then((response) => response.job),
+  createVoiceGenerationJob: (input: VoiceGenerationInput) => request<{ job: GenerationJob }>("/api/voice-generation/jobs", { method: "POST", body: JSON.stringify(input) }, true).then((response) => response.job),
   createDocumentGenerationJob: (input: DocumentGenerationInput) => request<{ job: GenerationJob }>("/api/document-generation/jobs", { method: "POST", body: JSON.stringify(input) }, true).then((response) => response.job),
   createPresentationGenerationJob: (input: PresentationGenerationInput) => request<{ job: GenerationJob }>("/api/presentation-generation/jobs", { method: "POST", body: JSON.stringify(input) }, true).then((response) => response.job),
   createResearchGenerationJob: (input: ResearchGenerationInput) => request<{ job: GenerationJob }>("/api/research-generation/jobs", { method: "POST", body: JSON.stringify(input) }, true).then((response) => response.job),
   createSocialGenerationJob: (input: SocialGenerationInput) => request<{ job: GenerationJob }>("/api/social-generation/jobs", { method: "POST", body: JSON.stringify(input) }, true).then((response) => response.job),
+  getMovieProvider: () => request<{ provider: MovieProviderReadiness }>("/api/movie-studio/provider"),
+  createMovieProject: (input: MovieStudioCreateInput) => request<MovieStudioResponse>("/api/movie-studio/projects", { method: "POST", body: JSON.stringify(input) }, true),
+  getMovieProject: (id: string) => request<MovieProject>(`/api/movie-studio/projects/${id}`),
+  updateMovieGuide: (id: string, input: Partial<MovieGuide>) => request<MovieProject>(`/api/movie-studio/projects/${id}/guide`, { method: "PATCH", body: JSON.stringify(input) }, true),
+  addMovieScene: (id: string, input: { title: string; summary: string; durationSeconds?: number | null; continuityNotes?: string | null; narration?: string | null; dialogue?: string | null }) => request<MovieScene>(`/api/movie-studio/projects/${id}/scenes`, { method: "POST", body: JSON.stringify(input) }, true),
+  addMovieCharacter: (id: string, input: { name: string; description: string; appearance?: string | null; voiceAndPerformance?: string | null; continuityNotes?: string | null; referenceAssetId?: string | null }) => request<MovieCharacter>(`/api/movie-studio/projects/${id}/characters`, { method: "POST", body: JSON.stringify(input) }, true),
+  addMovieLocation: (id: string, input: { name: string; description: string; visualContinuityNotes?: string | null; referenceAssetId?: string | null }) => request<MovieLocation>(`/api/movie-studio/projects/${id}/locations`, { method: "POST", body: JSON.stringify(input) }, true),
+  createMusicGenerationJob: (input: MusicGenerationInput) => request<{ job: GenerationJob }>("/api/music-generation/jobs", { method: "POST", body: JSON.stringify(input) }, true).then((response) => response.job),
   getGenerationJob: (jobId: string) => request<GenerationJob>(`/api/generation/jobs/${jobId}`),
   getResearchSources: (jobId: string) => request<{ jobId: string; sources: ResearchSource[] }>(`/api/research-generation/jobs/${jobId}/sources`),
   listGenerationJobs: (workspaceId: string, page = 1, pageSize = 20) => request<GenerationJobList>(`/api/generation/jobs?workspaceId=${encodeURIComponent(workspaceId)}&page=${page}&pageSize=${pageSize}&jobType=system.test`),
   cancelGenerationJob: (jobId: string) => request<{ status: GenerationJobStatus; cancellationRequested?: boolean }>(`/api/generation/jobs/${jobId}/cancel`, { method: "POST" }, true),
+  listActivity: (workspaceId: string, page = 1, pageSize = 50, status?: string) => {
+    const params = new URLSearchParams({ workspaceId, page: String(page), pageSize: String(pageSize) });
+    if (status && status !== "All") params.set("status", status);
+    return request<ActivityList>(`/api/activity?${params.toString()}`);
+  },
+  getActivityUnreadCount: (workspaceId: string) => request<{ unreadCount: number }>(`/api/activity/unread-count?workspaceId=${encodeURIComponent(workspaceId)}`),
+  markActivityRead: (workspaceId: string, jobId: string) => request<{ read: boolean }>(`/api/activity/${jobId}/read`, { method: "POST", body: JSON.stringify({ workspaceId }) }, true),
+  markAllActivityRead: (workspaceId: string) => request<{ read: boolean }>("/api/activity/read-all", { method: "POST", body: JSON.stringify({ workspaceId }) }, true),
   listAssets: (workspaceId: string, filters: AssetFilters = {}) => {
     const params = new URLSearchParams({ workspaceId, status: filters.status ?? "Active", page: String(filters.page ?? 1), pageSize: String(filters.pageSize ?? 24) });
     if (filters.projectId) params.set("projectId", filters.projectId);

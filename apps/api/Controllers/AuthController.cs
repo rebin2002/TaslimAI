@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
+using Taslim.Api.Billing;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
 using Taslim.Api.Infrastructure;
@@ -19,6 +20,7 @@ public sealed class AuthController(
     TaslimDbContext db,
     IAntiforgery antiforgery,
     IOptions<IdentityOptions> identityOptions,
+    IBillingProvisioningService billingProvisioning,
     ILogger<AuthController> logger) : ControllerBase
 {
     [HttpGet("csrf")]
@@ -100,6 +102,7 @@ public sealed class AuthController(
             JoinedAt = now,
         });
         await db.SaveChangesAsync(cancellationToken);
+        await billingProvisioning.EnsureProvisionedAsync(workspace.Id, cancellationToken);
         await transaction.CommitAsync(cancellationToken);
 
         await signInManager.SignInAsync(user, isPersistent: true);

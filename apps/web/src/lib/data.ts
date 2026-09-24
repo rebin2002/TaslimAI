@@ -55,10 +55,13 @@ export const navigation = [
   { href: "/chat", labelKey: "navigation.chat", icon: MessageSquare },
   { href: "/projects", labelKey: "navigation.projects", icon: BriefcaseBusiness },
   { href: "/assets", labelKey: "navigation.assets", icon: LibraryBig },
+  { href: "/create/voice", labelKey: "navigation.voiceStudio", icon: Volume2 },
   { href: "/create/document", labelKey: "navigation.documentStudio", icon: FileText },
   { href: "/create/presentation", labelKey: "navigation.presentationStudio", icon: Presentation },
   { href: "/create/research", labelKey: "navigation.researchStudio", icon: Search },
   { href: "/create/social", labelKey: "navigation.socialStudio", icon: MessageSquare },
+  { href: "/create/movie", labelKey: "navigation.movieStudio", icon: Video },
+  { href: "/create/music", labelKey: "navigation.musicStudio", icon: Music2 },
   { href: "/notifications", labelKey: "navigation.notifications", icon: Activity },
   { href: "/account", labelKey: "navigation.account", icon: UserRound },
 ] as const;
@@ -153,6 +156,7 @@ export const departments: Department[] = [
 ];
 
 export const routeLabels: Record<string, string> = {
+  "/create/voice": "navigation.voiceStudio",
   "/chat": "navigation.chat",
   "/projects": "navigation.projects",
   "/assets": "navigation.assets",
@@ -160,6 +164,8 @@ export const routeLabels: Record<string, string> = {
   "/create/presentation": "navigation.presentationStudio",
   "/create/research": "navigation.researchStudio",
   "/create/social": "navigation.socialStudio",
+  "/create/movie": "navigation.movieStudio",
+  "/create/music": "navigation.musicStudio",
   "/notifications": "navigation.notifications",
   "/account": "navigation.account",
 };
@@ -167,6 +173,12 @@ export const routeLabels: Record<string, string> = {
 export const featureRoute = (departmentId: string, featureId: string) =>
   departmentId === "media" && featureId === "images"
     ? "/create/image"
+    : departmentId === "media" && featureId === "movies"
+      ? "/create/movie"
+    : departmentId === "media" && featureId === "music"
+      ? "/create/music"
+    : departmentId === "media" && featureId === "voice"
+      ? "/create/voice"
     : departmentId === "personal" && featureId === "documents"
       ? "/create/document"
     : departmentId === "education" && featureId === "teaching"
