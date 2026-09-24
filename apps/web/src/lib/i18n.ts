@@ -385,8 +385,10 @@ export const translations: Record<Locale, Record<string, string>> = {
     "voice.progressText": "Your request is moving through a durable generation job. You can cancel while it is in progress.",
     "voice.cancel": "Cancel generation",
     "voice.unavailable": "Voice generation is not available yet. The speech service is not configured, so no audio was created.",
+    "voice.languageUnsupported": "This voice service cannot reliably generate that language yet. Please choose another language.",
+    "voice.unsupportedRequest": "This voice request is not supported. Please use shorter text or different settings.",
     "voice.failedSafe": "The audio could not be completed. Please try again.",
-    "voice.safetyNote": "Review generated speech before sharing it. Audio is delivered through your authenticated private Asset Library.",
+    "voice.safetyNote": "Review this AI-generated speech before sharing it. Audio is delivered through your authenticated private Asset Library.",
   },
 
   ar: {
@@ -600,8 +602,10 @@ export const translations: Record<Locale, Record<string, string>> = {
     "voice.progressText": "ينتقل طلبك عبر عملية إنشاء دائمة. يمكنك الإلغاء أثناء التنفيذ.",
     "voice.cancel": "إلغاء الإنشاء",
     "voice.unavailable": "إنشاء الصوت غير متاح بعد. لم تتم تهيئة خدمة الكلام، لذلك لم يتم إنشاء أي صوت.",
+    "voice.languageUnsupported": "لا تدعم خدمة الصوت هذه اللغة بشكل موثوق حتى الآن. اختر لغة أخرى.",
+    "voice.unsupportedRequest": "طلب الصوت هذا غير مدعوم. استخدم نصاً أقصر أو إعدادات مختلفة.",
     "voice.failedSafe": "تعذر إكمال الصوت. حاول مرة أخرى.",
-    "voice.safetyNote": "راجع الكلام الناتج قبل مشاركته. يُسلّم الصوت عبر مكتبة أصولك الخاصة والمحمية.",
+    "voice.safetyNote": "راجع هذا الكلام المُنشأ بالذكاء الاصطناعي قبل مشاركته. يُسلّم الصوت عبر مكتبة أصولك الخاصة والمحمية.",
   },
 
   ku: {
@@ -810,8 +814,10 @@ export const translations: Record<Locale, Record<string, string>> = {
     "voice.progressText": "داواکارییەکەت بە ڕێگەی کارێکی دروستکردنی بەردەوامەوە دەڕوات. دەتوانیت لە کاتی کارکردندا هەڵیبوەشێنیتەوە.",
     "voice.cancel": "هەڵوەشاندنەوەی دروستکردن",
     "voice.unavailable": "دروستکردنی دەنگ هێشتا بەردەست نییە. خزمەتگوزاریی قسەکردن ڕێک نەخراوە، بۆیە هیچ دەنگێک دروست نەکرا.",
+    "voice.languageUnsupported": "ئەم خزمەتگوزارییەی دەنگ هێشتا ناتوانێت بە دڵنیایی ئەم زمانە دروست بکات. تکایە زمانێکی تر هەڵبژێرە.",
+    "voice.unsupportedRequest": "ئەم داواکارییەی دەنگ پشتگیری ناکرێت. تکایە دەقێکی کورتتر یان ڕێکخستنێکی تر بەکاربهێنە.",
     "voice.failedSafe": "نەتوانرا دەنگەکە تەواو بکرێت. تکایە دووبارە هەوڵ بدە.",
-    "voice.safetyNote": "پێش بڵاوکردنەوە، دەنگی دروستکراو پێداچوونەوەی بۆ بکە. دەنگەکە بە کتێبخانەی ئاسێتە تایبەت و پارێزراوەکەتەوە دەدرێت.",
+    "voice.safetyNote": "پێش بڵاوکردنەوە، ئەم دەنگە دروستکراوە بە زیرەکی دەستکرد پێداچوونەوەی بۆ بکە. دەنگەکە بە کتێبخانەی ئاسێتە تایبەت و پارێزراوەکەتەوە دەدرێت.",
   },
 };
 

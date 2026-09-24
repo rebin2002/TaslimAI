@@ -174,6 +174,7 @@ builder.Services.AddSingleton<AiContextBuilder>();
 builder.Services.AddHttpClient<OpenAiProvider>();
 builder.Services.AddHttpClient<OpenAiImageGenerationProvider>();
 builder.Services.AddHttpClient<OpenAiResearchSearchProvider>();
+builder.Services.AddHttpClient<OpenAiVoiceGenerationProvider>();
 builder.Services.AddSingleton<IAiModelRouter, AiModelRouter>();
 builder.Services.AddSingleton<IAiProvider, MockAiProvider>();
 builder.Services.AddSingleton<IAiProvider>(services => services.GetRequiredService<OpenAiProvider>());
@@ -203,6 +204,7 @@ builder.Services.AddScoped<IGenerationJobHandler, SocialGenerationJobHandler>();
 // Music providers are intentionally not registered until a production provider is selected and validated.
 builder.Services.AddScoped<IGenerationJobHandler, MusicGenerationJobHandler>();
 builder.Services.AddSingleton<IVoiceGenerationProvider, UnconfiguredVoiceGenerationProvider>();
+builder.Services.AddSingleton<IVoiceGenerationProvider>(services => services.GetRequiredService<OpenAiVoiceGenerationProvider>());
 builder.Services.AddScoped<IGenerationJobHandler, VoiceGenerationJobHandler>();
 builder.Services.AddScoped<FileValidationService>();
 builder.Services.AddSingleton<IFileContentExtractor, FileContentExtractor>();

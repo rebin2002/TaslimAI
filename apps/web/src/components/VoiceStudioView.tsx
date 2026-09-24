@@ -107,6 +107,13 @@ export function VoiceStudioView() {
   const isSuccess = current?.status === "Succeeded" && !!result?.assetId;
   const isFailure = current?.status === "Failed" || current?.status === "Cancelled";
   const unavailable = current?.errorCode === "VOICE_PROVIDER_UNAVAILABLE";
+  const safeFailureMessage = current?.errorCode === "VOICE_LANGUAGE_UNSUPPORTED"
+    ? t("voice.languageUnsupported")
+    : current?.errorCode === "VOICE_PROVIDER_UNSUPPORTED_REQUEST"
+      ? t("voice.unsupportedRequest")
+      : unavailable
+        ? t("voice.unavailable")
+        : current?.errorMessage ?? t("voice.failedSafe");
 
   return <div className="voice-studio-page">
     <div className="voice-studio-header">
@@ -126,7 +133,7 @@ export function VoiceStudioView() {
         </div>
         <details className="voice-optional-controls"><summary>{t("voice.moreOptions")}</summary><label className="field"><span>{t("voice.instructions")}</span><textarea value={instructions} onChange={(event) => setInstructions(event.target.value)} maxLength={3000} placeholder={t("voice.instructionsPlaceholder")} /></label></details>
         {error && <div className="form-error"><XCircle size={15} /> {error}</div>}
-        {isFailure && <div className={`form-error ${unavailable ? "voice-unavailable" : ""}`}><XCircle size={15} /> {unavailable ? t("voice.unavailable") : current?.errorMessage ?? t("voice.failedSafe")}</div>}
+        {isFailure && <div className={`form-error ${unavailable ? "voice-unavailable" : ""}`}><XCircle size={15} /> {safeFailureMessage}</div>}
         <button className="primary-button voice-generate-button" type="submit" disabled={working || text.trim().length < 1}><Volume2 size={16} /> {working ? t("voice.working") : t("voice.generate")}</button>
       </section>
       <aside className="account-card voice-studio-guidance"><Headphones size={26} /><h2>{t("voice.guidanceTitle")}</h2><p>{t("voice.guidanceText")}</p><ul><li>{t("voice.guidanceOne")}</li><li>{t("voice.guidanceTwo")}</li><li>{t("voice.guidanceThree")}</li></ul></aside>

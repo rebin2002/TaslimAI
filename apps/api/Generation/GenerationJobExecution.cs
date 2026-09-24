@@ -851,6 +851,8 @@ public sealed class GenerationJobWorker(
             return exception switch
             {
                 VoiceRequestValidationException validation => validation.Code,
+                VoiceLanguageUnsupportedException => GenerationJobErrorCodes.VoiceLanguageUnsupported,
+                VoiceProviderUnsupportedRequestException => GenerationJobErrorCodes.VoiceProviderUnsupportedRequest,
                 VoiceProviderUnavailableException or VoiceProviderTimeoutException => GenerationJobErrorCodes.VoiceProviderUnavailable,
                 VoiceProviderFailureException => GenerationJobErrorCodes.VoiceProviderFailed,
                 VoiceOutputInvalidException => GenerationJobErrorCodes.VoiceOutputInvalid,
@@ -928,6 +930,8 @@ public sealed class GenerationJobWorker(
         GenerationJobErrorCodes.MusicOutputStorageFailed => "The music was generated but could not be saved. Please try again.",
         GenerationJobErrorCodes.MusicCancelled => "The music generation was cancelled.",
         GenerationJobErrorCodes.VoiceProviderUnavailable => "Voice generation is temporarily unavailable. Please try again later.",
+        GenerationJobErrorCodes.VoiceProviderUnsupportedRequest => "This voice request is not supported. Please use shorter text or different settings.",
+        GenerationJobErrorCodes.VoiceLanguageUnsupported => "Voice generation does not reliably support this language yet. Please choose another language.",
         GenerationJobErrorCodes.VoiceProviderFailed => "Voice generation could not be completed. Please try again.",
         GenerationJobErrorCodes.VoiceOutputInvalid => "The generated audio was invalid. Please try again.",
         GenerationJobErrorCodes.VoiceOutputStorageFailed => "The audio was generated but could not be saved. Please try again.",

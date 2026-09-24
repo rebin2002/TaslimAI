@@ -63,9 +63,9 @@ public sealed class VoiceGenerationJobHandler(
         var usage = new AiUsageMetadata(
             provider.Key,
             generated.Usage.ModelKey,
-            generated.Usage.InputCharacters,
             null,
-            generated.Usage.OutputBytes,
+            null,
+            null,
             generated.Usage.ActualCostUsd,
             generated.Usage.ActualCostUsd,
             Math.Max(1, generated.Usage.LatencyMs > 0 ? generated.Usage.LatencyMs : (int)Math.Min(int.MaxValue, stopwatch.ElapsedMilliseconds)),
