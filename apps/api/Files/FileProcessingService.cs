@@ -96,6 +96,81 @@ public sealed class FileProcessingService(
         catch (Exception exception) { logger.LogWarning(exception, "Generated file cleanup failed. FileId={FileId}; WorkspaceId={WorkspaceId}", fileId, workspaceId); }
     }
 
+    public async Task<StoredFile> StoreGeneratedStreamAsync(
+        Guid workspaceId,
+        Guid userId,
+        Guid? projectId,
+        string fileName,
+        string contentType,
+        long sizeBytes,
+        Func<CancellationToken, Task<Stream>> openReadAsync,
+        string? metadataJson,
+        CancellationToken cancellationToken)
+    {
+        if (sizeBytes <= 0 || sizeBytes > Math.Max(1, settings.MaxGeneratedVideoBytes))
+            throw new FileUploadValidationException("Generated video output is outside the configured size limit.");
+        if (string.IsNullOrWhiteSpace(contentType) || !contentType.StartsWith("video/", StringComparison.OrdinalIgnoreCase) || contentType.Length > 160)
+            throw new FileUploadValidationException("Generated video content type is invalid.");
+        if (metadataJson?.Length > 16_000)
+            throw new FileUploadValidationException("Generated file metadata is too large.");
+
+        var safeName = FileValidationService.SanitizeFileName(fileName);
+        var extension = Path.GetExtension(safeName).ToLowerInvariant();
+        if (string.IsNullOrWhiteSpace(extension) || extension.Length > 20)
+            throw new FileUploadValidationException("Generated video file extension is invalid.");
+
+        var id = Guid.NewGuid();
+        var storedName = $"{id:N}{extension}";
+        var storageKey = $"{workspaceId:N}/{id:N}/{storedName}";
+        var now = DateTime.UtcNow;
+        var file = new StoredFile
+        {
+            Id = id,
+            WorkspaceId = workspaceId,
+            UserId = userId,
+            ProjectId = projectId,
+            OriginalFileName = safeName,
+            StoredFileName = storedName,
+            ContentType = contentType,
+            Extension = extension,
+            SizeBytes = sizeBytes,
+            StorageProvider = storage.ProviderKey,
+            StorageKey = storageKey,
+            Status = StoredFileStatus.Uploading,
+            CreatedAt = now,
+            TextExtractionStatus = FileExtractionStatus.NotApplicable,
+            MetadataJson = metadataJson,
+        };
+        db.StoredFiles.Add(file);
+        await db.SaveChangesAsync(cancellationToken);
+
+        try
+        {
+            await using var input = await openReadAsync(cancellationToken);
+            await storage.StoreAsync(storageKey, input, cancellationToken);
+            file.Status = StoredFileStatus.Ready;
+            file.ProcessedAt = DateTime.UtcNow;
+            await db.SaveChangesAsync(cancellationToken);
+            return file;
+        }
+        catch (OperationCanceledException)
+        {
+            file.Status = StoredFileStatus.Failed;
+            file.ProcessedAt = DateTime.UtcNow;
+            await db.SaveChangesAsync(CancellationToken.None);
+            await TryDeleteGeneratedObjectAsync(storageKey, file.Id, workspaceId);
+            throw;
+        }
+        catch
+        {
+            file.Status = StoredFileStatus.Failed;
+            file.ProcessedAt = DateTime.UtcNow;
+            await db.SaveChangesAsync(CancellationToken.None);
+            await TryDeleteGeneratedObjectAsync(storageKey, file.Id, workspaceId);
+            throw;
+        }
+    }
+
     public async Task<StoredFile> UploadAsync(Guid workspaceId, Guid userId, Guid? projectId, Guid? conversationId, IFormFile upload, CancellationToken cancellationToken)
     {
         var validated = await validation.ValidateAsync(upload, cancellationToken);

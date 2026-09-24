@@ -35,7 +35,7 @@ export function AssetCard({ asset, labels, locale, onEdit, onArchive, onRestore 
   const fileUrl = assetFileUrl(asset.id);
   return <article className="asset-card">
     <a className={`asset-preview is-${asset.assetType}`} href={asset.hasFile ? fileUrl : undefined} aria-label={asset.name}>
-      {asset.canPreview ? <span className="asset-image-preview" style={{ backgroundImage: `url(${assetFileUrl(asset.id, true)})` }} role="img" aria-label={asset.name} /> : <span className="asset-type-icon"><AssetTypeIcon type={asset.assetType} size={28} /></span>}
+      {asset.canPreview && asset.assetType === "video" ? <video className="asset-video-preview" src={assetFileUrl(asset.id, true)} controls preload="metadata" aria-label={asset.name} /> : asset.canPreview ? <span className="asset-image-preview" style={{ backgroundImage: `url(${assetFileUrl(asset.id, true)})` }} role="img" aria-label={asset.name} /> : <span className="asset-type-icon"><AssetTypeIcon type={asset.assetType} size={28} /></span>}
       <span className="asset-type-badge">{labels.type}</span>
     </a>
     <div className="asset-card-body">

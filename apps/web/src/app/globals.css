@@ -324,7 +324,7 @@ select.memory-control { appearance: auto; cursor: pointer; }
 .asset-preview.is-document, .asset-preview.is-file, .asset-preview.is-research { color: #3675bd; background: linear-gradient(145deg, #eef5ff, #f8fbff); }
 .asset-preview.is-audio, .asset-preview.is-music { color: #8a62b4; background: linear-gradient(145deg, #f4effb, #fcfaff); }
 .asset-preview.is-video, .asset-preview.is-presentation { color: #c56b50; background: linear-gradient(145deg, #fff2ec, #fffaf8); }
-.asset-image-preview { position: absolute; inset: 0; background-position: center; background-repeat: no-repeat; background-size: cover; }
+.asset-image-preview { position: absolute; inset: 0; background-position: center; background-repeat: no-repeat; background-size: cover; }.asset-video-preview { width: 100%; height: 100%; object-fit: cover; background: #151b22; }
 .asset-type-icon { display: inline-flex; align-items: center; justify-content: center; width: 48px; height: 48px; border: 1px solid rgba(97,130,155,.15); border-radius: 13px; background: rgba(255,255,255,.72); box-shadow: 0 5px 12px rgba(40,62,80,.06); }
 .asset-type-badge { position: absolute; inset-block-start: 10px; inset-inline-start: 10px; padding: 4px 7px; color: #557086; border: 1px solid rgba(213,227,236,.9); border-radius: 5px; background: rgba(255,255,255,.9); backdrop-filter: blur(6px); font-size: 8px; font-weight: 800; text-transform: uppercase; letter-spacing: .04em; }
 .asset-card-body { display: flex; flex-direction: column; gap: 11px; padding: 14px; }

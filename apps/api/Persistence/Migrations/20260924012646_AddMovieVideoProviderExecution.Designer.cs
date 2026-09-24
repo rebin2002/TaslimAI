@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using Taslim.Api.Persistence;
@@ -11,9 +12,11 @@ using Taslim.Api.Persistence;
 namespace Taslim.Api.Persistence.Migrations
 {
     [DbContext(typeof(TaslimDbContext))]
-    partial class TaslimDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260924012646_AddMovieVideoProviderExecution")]
+    partial class AddMovieVideoProviderExecution
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -2592,7 +2595,7 @@ namespace Taslim.Api.Persistence.Migrations
                         .OnDelete(DeleteBehavior.SetNull);
 
                     b.HasOne("Taslim.Api.Movies.MovieProject", "MovieProject")
-                        .WithMany("Clips")
+                        .WithMany()
                         .HasForeignKey("MovieProjectId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
@@ -2813,8 +2816,6 @@ namespace Taslim.Api.Persistence.Migrations
                     b.Navigation("Assemblies");
 
                     b.Navigation("Characters");
-
-                    b.Navigation("Clips");
 
                     b.Navigation("Guide")
                         .IsRequired();

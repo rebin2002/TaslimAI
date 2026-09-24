@@ -39,6 +39,7 @@ public DbSet<MovieProject> MovieProjects => Set<MovieProject>();
     public DbSet<MovieShot> MovieShots => Set<MovieShot>();
     public DbSet<MovieClip> MovieClips => Set<MovieClip>();
     public DbSet<MovieAssembly> MovieAssemblies => Set<MovieAssembly>();
+    public DbSet<MovieVideoProviderExecution> MovieVideoProviderExecutions => Set<MovieVideoProviderExecution>();
     public DbSet<DataProtectionKey> DataProtectionKeys => Set<DataProtectionKey>();
 
     protected override void OnModelCreating(ModelBuilder builder)
@@ -199,13 +200,28 @@ public DbSet<MovieProject> MovieProjects => Set<MovieProject>();
             entity.Property(item => item.ProviderKey).HasMaxLength(80);
             entity.Property(item => item.ProviderClipId).HasMaxLength(240);
             entity.Property(item => item.MetadataJson).HasMaxLength(20_000);
+            entity.Property(item => item.ContinuitySnapshotJson).HasMaxLength(20_000);
             entity.HasIndex(item => new { item.MovieProjectId, item.Status });
             entity.HasIndex(item => item.GenerationJobId);
-            entity.HasOne(item => item.MovieProject).WithMany().HasForeignKey(item => item.MovieProjectId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.MovieProject).WithMany(item => item.Clips).HasForeignKey(item => item.MovieProjectId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.MovieScene).WithMany(item => item.Clips).HasForeignKey(item => item.MovieSceneId).OnDelete(DeleteBehavior.SetNull);
             entity.HasOne(item => item.MovieShot).WithMany(item => item.Clips).HasForeignKey(item => item.MovieShotId).OnDelete(DeleteBehavior.SetNull);
             entity.HasOne(item => item.GenerationJob).WithMany().HasForeignKey(item => item.GenerationJobId).OnDelete(DeleteBehavior.SetNull);
             entity.HasOne(item => item.Asset).WithMany().HasForeignKey(item => item.AssetId).OnDelete(DeleteBehavior.SetNull);
             entity.HasOne(item => item.StoredFile).WithMany().HasForeignKey(item => item.StoredFileId).OnDelete(DeleteBehavior.SetNull);
+        });
+        builder.Entity<MovieVideoProviderExecution>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.ProviderKey).HasMaxLength(80).IsRequired();
+            entity.Property(item => item.ProviderJobId).HasMaxLength(240);
+            entity.Property(item => item.Status).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.LastErrorCode).HasMaxLength(100);
+            entity.HasIndex(item => item.GenerationJobId).IsUnique();
+            entity.HasIndex(item => new { item.Status, item.NextPollAt });
+            entity.HasIndex(item => item.MovieClipId);
+            entity.HasOne(item => item.GenerationJob).WithMany().HasForeignKey(item => item.GenerationJobId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.MovieClip).WithMany().HasForeignKey(item => item.MovieClipId).OnDelete(DeleteBehavior.Cascade);
         });
         builder.Entity<MovieAssembly>(entity =>
         {

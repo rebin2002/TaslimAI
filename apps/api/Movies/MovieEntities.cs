@@ -25,6 +25,7 @@ public static class MovieClipStatuses
     public const string Generating = "Generating";
     public const string Ready = "Ready";
     public const string Failed = "Failed";
+    public const string Cancelled = "Cancelled";
 }
 
 public static class MovieAssemblyStatuses
@@ -61,6 +62,7 @@ public sealed class MovieProject
     public ICollection<MovieScene> Scenes { get; set; } = [];
     public ICollection<MovieCharacter> Characters { get; set; } = [];
     public ICollection<MovieLocation> Locations { get; set; } = [];
+    public ICollection<MovieClip> Clips { get; set; } = [];
     public ICollection<MovieAssembly> Assemblies { get; set; } = [];
 }
 
@@ -93,6 +95,7 @@ public sealed class MovieScene
     public DateTime UpdatedAt { get; set; }
     public MovieProject MovieProject { get; set; } = null!;
     public ICollection<MovieShot> Shots { get; set; } = [];
+    public ICollection<MovieClip> Clips { get; set; } = [];
 }
 
 public sealed class MovieCharacter
@@ -147,6 +150,7 @@ public sealed class MovieClip
 {
     public Guid Id { get; set; }
     public Guid MovieProjectId { get; set; }
+    public Guid? MovieSceneId { get; set; }
     public Guid? MovieShotId { get; set; }
     public Guid? GenerationJobId { get; set; }
     public Guid? AssetId { get; set; }
@@ -156,9 +160,11 @@ public sealed class MovieClip
     public string? ProviderClipId { get; set; }
     public int? DurationSeconds { get; set; }
     public string? MetadataJson { get; set; }
+    public string? ContinuitySnapshotJson { get; set; }
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
     public MovieProject MovieProject { get; set; } = null!;
+    public MovieScene? MovieScene { get; set; }
     public MovieShot? MovieShot { get; set; }
     public GenerationJob? GenerationJob { get; set; }
     public Asset? Asset { get; set; }
@@ -181,14 +187,69 @@ public sealed class MovieAssembly
     public Asset? Asset { get; set; }
 }
 
-public sealed record MovieVideoGenerationRequest(string Operation, string Description, int DurationSeconds, string AspectRatio, string Style, string Language, string? AdditionalInstructions, string? ContinuityGuideJson, string? SceneJson);
-public sealed record MovieVideoGenerationResult(string ProviderKey, string ProviderClipId, string ContentType, string? DownloadUrl, string? MetadataJson);
+public enum MovieVideoProviderJobStatus
+{
+    Submitted,
+    Queued,
+    Running,
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+public sealed record MovieVideoGenerationRequest(
+    string Operation,
+    Guid GenerationJobId,
+    Guid MovieProjectId,
+    Guid MovieClipId,
+    Guid? MovieSceneId,
+    Guid? MovieShotId,
+    string Description,
+    int DurationSeconds,
+    string AspectRatio,
+    string Style,
+    string Language,
+    string? AdditionalInstructions,
+    string? ContinuityGuideJson,
+    string? SceneJson,
+    string? ShotJson);
+
+public sealed record MovieVideoSubmission(string ProviderJobId);
+public sealed record MovieVideoProviderStatus(
+    MovieVideoProviderJobStatus Status,
+    int ProgressPercent,
+    string? ContentType = null,
+    string? FileName = null,
+    long? SizeBytes = null,
+    int? DurationSeconds = null,
+    string? MetadataJson = null,
+    decimal? ActualCostUsd = null,
+    string? Currency = null,
+    string? CostBasis = null,
+    string? SafeMetadataJson = null);
+
+public sealed record MovieVideoProviderOutput(
+    string ContentType,
+    string FileName,
+    long SizeBytes,
+    Func<CancellationToken, Task<Stream>> OpenReadAsync,
+    int? DurationSeconds,
+    string? MetadataJson,
+    decimal? EstimatedCostUsd,
+    decimal? ActualCostUsd,
+    string? Currency,
+    string? CostBasis,
+    string? SafeMetadataJson);
 
 public interface IMovieVideoProvider
 {
     string Key { get; }
     bool IsAvailable { get; }
-    Task<MovieVideoGenerationResult> GenerateAsync(MovieVideoGenerationRequest request, IProgress<int> progress, CancellationToken cancellationToken);
+    IReadOnlyCollection<string> SupportedOperations { get; }
+    Task<MovieVideoSubmission> SubmitAsync(MovieVideoGenerationRequest request, CancellationToken cancellationToken);
+    Task<MovieVideoProviderStatus> GetStatusAsync(string providerJobId, CancellationToken cancellationToken);
+    Task<MovieVideoProviderOutput> RetrieveAsync(string providerJobId, MovieVideoProviderStatus status, CancellationToken cancellationToken);
+    Task CancelAsync(string providerJobId, CancellationToken cancellationToken);
 }
 
 public sealed class MovieProviderUnavailableException : Exception
@@ -200,37 +261,53 @@ public sealed class UnavailableMovieVideoProvider : IMovieVideoProvider
 {
     public string Key => "unconfigured";
     public bool IsAvailable => false;
-    public Task<MovieVideoGenerationResult> GenerateAsync(MovieVideoGenerationRequest request, IProgress<int> progress, CancellationToken cancellationToken) => Task.FromException<MovieVideoGenerationResult>(new MovieProviderUnavailableException());
+    public IReadOnlyCollection<string> SupportedOperations => [];
+    public Task<MovieVideoSubmission> SubmitAsync(MovieVideoGenerationRequest request, CancellationToken cancellationToken) => Task.FromException<MovieVideoSubmission>(new MovieProviderUnavailableException());
+    public Task<MovieVideoProviderStatus> GetStatusAsync(string providerJobId, CancellationToken cancellationToken) => Task.FromException<MovieVideoProviderStatus>(new MovieProviderUnavailableException());
+    public Task<MovieVideoProviderOutput> RetrieveAsync(string providerJobId, MovieVideoProviderStatus status, CancellationToken cancellationToken) => Task.FromException<MovieVideoProviderOutput>(new MovieProviderUnavailableException());
+    public Task CancelAsync(string providerJobId, CancellationToken cancellationToken) => Task.CompletedTask;
 }
 
-public sealed class MovieVideoGenerationJobHandler(IMovieVideoProvider provider) : IGenerationJobHandler
+public sealed class MovieVideoProviderException(string code, bool transient, string message = "Movie provider request failed.") : Exception(message)
 {
-    public bool CanHandle(string jobType) => GenerationJobTypes.MovieTypes.Contains(jobType);
-
-    public async Task<GenerationHandlerResult> ExecuteAsync(GenerationJob job, IProgress<int> progress, CancellationToken cancellationToken)
-    {
-        var input = System.Text.Json.JsonSerializer.Deserialize<MovieGenerationInput>(job.InputJson) ?? throw new MovieProviderUnavailableException();
-        progress.Report(10);
-        var result = await provider.GenerateAsync(new MovieVideoGenerationRequest(input.Operation, input.Description, input.DurationSeconds, input.AspectRatio, input.Style, input.Language, input.AdditionalInstructions, input.ContinuityGuideJson, input.SceneJson), progress, cancellationToken);
-        progress.Report(100);
-        return new GenerationHandlerResult(System.Text.Json.JsonSerializer.Serialize(new { assetType = AssetTypes.Video, provider = result.ProviderKey, providerClipId = result.ProviderClipId, contentType = result.ContentType, result.DownloadUrl, result.MetadataJson }), [], new AiUsageMetadata(result.ProviderKey, "video", null, null, null, 0m, 0m, 0, "completed", false));
-    }
+    public string Code { get; } = code;
+    public bool IsTransient { get; } = transient;
 }
 
-public sealed record MovieGenerationInput(string Operation, string Description, int DurationSeconds, string AspectRatio, string Style, string Language, string? AdditionalInstructions, string? ContinuityGuideJson, string? SceneJson);
+public sealed class MovieVideoProviderOutputException : Exception
+{
+    public MovieVideoProviderOutputException() : base("The movie provider returned an invalid output.") { }
+}
 
-public sealed record MovieProviderReadinessDto(bool Ready, string? ProviderKey, IReadOnlyList<string> SupportedOperations);
+public sealed record MovieGenerationInput(
+    string Operation,
+    Guid MovieProjectId,
+    Guid MovieClipId,
+    Guid? MovieSceneId,
+    Guid? MovieShotId,
+    string Description,
+    int DurationSeconds,
+    string AspectRatio,
+    string Style,
+    string Language,
+    string? AdditionalInstructions,
+    string? ContinuityGuideJson,
+    string? SceneJson,
+    string? ShotJson);
+
+public sealed record MovieProviderReadinessDto(bool Ready, IReadOnlyList<string> SupportedOperations);
 
 public sealed record MovieGuideDto(Guid Id, string VisualLanguage, string CameraLanguage, string ColorAndLighting, string SoundAndNarration, string ContinuityRules, DateTime UpdatedAt);
-public sealed record MovieSceneDto(Guid Id, int Sequence, string Title, string Summary, int? DurationSeconds, string? ContinuityNotes, string? Narration, string? Dialogue, IReadOnlyList<MovieShotDto> Shots);
+public sealed record MovieSceneDto(Guid Id, int Sequence, string Title, string Summary, int? DurationSeconds, string? ContinuityNotes, string? Narration, string? Dialogue, IReadOnlyList<MovieShotDto> Shots, IReadOnlyList<MovieClipDto> Clips);
 public sealed record MovieShotDto(Guid Id, int Sequence, string Description, string? CameraAndFraming, string? CameraMotion, int? DurationSeconds, string? Narration, string? Dialogue, string? VisualContinuityNotes, IReadOnlyList<MovieClipDto> Clips);
 public sealed record MovieCharacterDto(Guid Id, string Name, string Description, string? Appearance, string? VoiceAndPerformance, string? ContinuityNotes, Guid? ReferenceAssetId);
 public sealed record MovieLocationDto(Guid Id, string Name, string Description, string? VisualContinuityNotes, Guid? ReferenceAssetId);
-public sealed record MovieClipDto(Guid Id, Guid? MovieShotId, Guid? GenerationJobId, Guid? AssetId, string Status, string? ProviderKey, int? DurationSeconds, string? MetadataJson);
+public sealed record MovieClipDto(Guid Id, Guid? MovieSceneId, Guid? MovieShotId, Guid? GenerationJobId, Guid? AssetId, string Status, int? DurationSeconds, string? MetadataJson, string? ContinuitySnapshotJson);
 public sealed record MovieAssemblyDto(Guid Id, Guid? GenerationJobId, Guid? AssetId, string Status, string OutputFormat, string? MetadataJson, DateTime CreatedAt, DateTime? CompletedAt);
-public sealed record MovieStudioProjectDto(Guid Id, Guid WorkspaceId, Guid? ProjectId, string Mode, string Status, string Title, string Description, int DurationSeconds, string AspectRatio, string Style, string Language, string? AdditionalInstructions, DateTime CreatedAt, DateTime UpdatedAt, MovieGuideDto Guide, IReadOnlyList<MovieSceneDto> Scenes, IReadOnlyList<MovieCharacterDto> Characters, IReadOnlyList<MovieLocationDto> Locations, IReadOnlyList<MovieAssemblyDto> Assemblies);
+public sealed record MovieStudioProjectDto(Guid Id, Guid WorkspaceId, Guid? ProjectId, string Mode, string Status, string Title, string Description, int DurationSeconds, string AspectRatio, string Style, string Language, string? AdditionalInstructions, DateTime CreatedAt, DateTime UpdatedAt, MovieGuideDto Guide, IReadOnlyList<MovieSceneDto> Scenes, IReadOnlyList<MovieCharacterDto> Characters, IReadOnlyList<MovieLocationDto> Locations, IReadOnlyList<MovieClipDto> Clips, IReadOnlyList<MovieAssemblyDto> Assemblies);
 public sealed record MovieStudioProjectResponse(MovieStudioProjectDto Project, GenerationJobDto? Job);
 public sealed record MovieStudioProviderResponse(MovieProviderReadinessDto Provider);
+public sealed record MovieStudioGenerationResponse(MovieStudioProjectDto Project, GenerationJobDto Job, Guid ClipId);
 
 public sealed class MovieStudioCreateRequest
 {
@@ -256,6 +333,7 @@ public sealed record MovieStudioCharacterRequest(string Name, string Description
 public sealed record MovieStudioLocationRequest(string Name, string Description, string? VisualContinuityNotes, Guid? ReferenceAssetId);
 public sealed record MovieStudioShotRequest(string Description, string? CameraAndFraming, string? CameraMotion, int? DurationSeconds, string? Narration, string? Dialogue, string? VisualContinuityNotes);
 public sealed record MovieStudioGuideRequest(string? VisualLanguage, string? CameraLanguage, string? ColorAndLighting, string? SoundAndNarration, string? ContinuityRules);
+public sealed record MovieStudioGenerationRequest(string? Title = null);
 
 public static class MovieStudioValidation
 {
