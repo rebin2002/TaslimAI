@@ -132,11 +132,14 @@ export type UsageTransaction = {
 };
 export type UsageHistory = { items: UsageTransaction[]; page: number; pageSize: number; totalCount: number; totalPages: number };
 export type BillingPlan = { code: string; name: string; monthlyPriceUsd: number; monthlyCreditAllowance: number; currency: string };
+export type BillingPlanOption = BillingPlan & { isCurrent: boolean };
 export type BillingSubscription = { status: string; currentPeriodStart: string; currentPeriodEnd: string; nextRenewalAt: string; cancelAtPeriodEnd: boolean };
 export type BillingPeriod = { id: string; status: string; startsAt: string; endsAt: string; includedCredits: number };
 export type BillingCredits = { includedGranted: number; includedRemaining: number; purchasedRemaining: number; adjustmentBalance: number; totalRemaining: number };
 export type CreditLedgerEntry = { id: string; type: string; amount: number; reason: string; createdAt: string };
-export type BillingAccount = { currentPlan: BillingPlan; subscription: BillingSubscription; billingPeriod: BillingPeriod; credits: BillingCredits; transactions: CreditLedgerEntry[]; upgradeAvailable: boolean };
+export type BillingPaymentStatus = { status: string; provider: string | null; lastFailureReason: string | null; lastPaymentAt: string | null };
+export type BillingActions = { checkoutAvailable: boolean; upgradeAvailable: boolean; downgradeAvailable: boolean; cancelAvailable: boolean; disabledReason: string };
+export type BillingAccount = { currentPlan: BillingPlan; subscription: BillingSubscription; billingPeriod: BillingPeriod; credits: BillingCredits; transactions: CreditLedgerEntry[]; availablePlans: BillingPlanOption[]; paymentStatus: BillingPaymentStatus; actions: BillingActions };
 export type AdminUsageSummary = {
   fromUtc: string;
   toUtc: string;

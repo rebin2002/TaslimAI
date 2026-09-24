@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
 using Taslim.Api.Persistence;
@@ -10,8 +11,10 @@ public interface IBillingAccountService
     Task<BillingAccountDto> GetAccountAsync(Guid workspaceId, CancellationToken cancellationToken = default);
 }
 
-public sealed class BillingAccountService(TaslimDbContext db, IBillingProvisioningService provisioning) : IBillingAccountService
+public sealed class BillingAccountService(TaslimDbContext db, IBillingProvisioningService provisioning, IOptions<BillingOptions> options) : IBillingAccountService
 {
+    private readonly BillingOptions settings = options.Value;
+
     public async Task<BillingAccountDto> GetAccountAsync(Guid workspaceId, CancellationToken cancellationToken = default)
     {
         await provisioning.EnsureProvisionedAsync(workspaceId, cancellationToken);
@@ -41,12 +44,40 @@ public sealed class BillingAccountService(TaslimDbContext db, IBillingProvisioni
         var purchasedRemaining = entries.Where(item => item.CreditEntitlementId.HasValue && purchasedIds.Contains(item.CreditEntitlementId.Value)).Sum(item => item.Amount);
         var adjustmentBalance = entries.Where(item => item.CreditEntitlementId.HasValue && adjustmentIds.Contains(item.CreditEntitlementId.Value)).Sum(item => item.Amount);
         var unallocatedMovements = entries.Where(item => !item.CreditEntitlementId.HasValue).Sum(item => item.Amount);
+        var plans = await db.Plans.AsNoTracking()
+            .Where(item => item.IsActive)
+            .OrderBy(item => item.SortOrder)
+            .Select(item => new BillingPlanOptionDto(item.Code, item.Name, item.MonthlyPriceUsd, item.MonthlyCreditAllowance, item.Currency, item.Id == subscription.PlanId))
+            .ToArrayAsync(cancellationToken);
+        var lastAttempt = await db.PaymentAttempts.AsNoTracking()
+            .Where(item => item.WorkspaceId == workspaceId)
+            .OrderByDescending(item => item.UpdatedAt)
+            .FirstOrDefaultAsync(cancellationToken);
+        var paymentStatus = GetPaymentStatus(subscription, lastAttempt, settings);
+        var actions = new BillingActionsDto(
+            settings.CustomerChargingEnabled && !string.Equals(settings.Provider, "unconfigured", StringComparison.OrdinalIgnoreCase),
+            false,
+            false,
+            false,
+            "Customer charging is intentionally disabled until a reviewed provider and launch decision are configured.");
         return new BillingAccountDto(
             new(subscription.Plan.Code, subscription.Plan.Name, subscription.Plan.MonthlyPriceUsd, subscription.Plan.MonthlyCreditAllowance, subscription.Plan.Currency),
             new(subscription.Status.ToString(), subscription.CurrentPeriodStart, subscription.CurrentPeriodEnd, subscription.NextRenewalAt, subscription.CancelAtPeriodEnd),
             new(period.Id, period.Status.ToString(), period.StartsAt, period.EndsAt, period.IncludedCredits),
             new(period.IncludedCredits, Math.Max(0, includedRemaining), Math.Max(0, purchasedRemaining), adjustmentBalance, Math.Max(0, includedRemaining + purchasedRemaining + adjustmentBalance + unallocatedMovements)),
             entries.Select(item => new CreditLedgerEntryDto(item.Id, item.Type.ToString(), item.Amount, item.Reason, item.CreatedAt)).ToArray(),
-            true);
+            plans,
+            paymentStatus,
+            actions);
+    }
+
+    private static BillingPaymentStatusDto GetPaymentStatus(Subscription subscription, PaymentAttempt? lastAttempt, BillingOptions settings)
+    {
+        if (!settings.CustomerChargingEnabled) return new("disabled", null, null, lastAttempt?.SucceededAt);
+        if (subscription.Status == SubscriptionStatus.PastDue || lastAttempt?.Status == PaymentAttemptStatus.Failed)
+            return new("failed", lastAttempt?.Provider, lastAttempt?.FailureReason, lastAttempt?.SucceededAt);
+        if (lastAttempt?.Status == PaymentAttemptStatus.Succeeded)
+            return new("paid", lastAttempt.Provider, null, lastAttempt.SucceededAt);
+        return new("not_started", lastAttempt?.Provider, null, null);
     }
 }
