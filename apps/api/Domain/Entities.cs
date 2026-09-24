@@ -550,11 +550,13 @@ public sealed class GenerationJob
     public string InputJson { get; set; } = "{}";
     public string? IdempotencyKey { get; set; }
     public string? RequestFingerprint { get; set; }
+    public string? RequestId { get; set; }
     public string? ResultJson { get; set; }
     public string? ErrorCode { get; set; }
     public string? ErrorMessage { get; set; }
     public int ProgressPercent { get; set; }
     public bool CancellationRequested { get; set; }
+    public int RetryCount { get; set; }
     public Guid ConcurrencyToken { get; set; } = Guid.NewGuid();
     public DateTime CreatedAt { get; set; }
     public DateTime? QueuedAt { get; set; }
