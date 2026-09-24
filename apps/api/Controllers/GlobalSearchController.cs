@@ -1,9 +1,11 @@
 using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
+using Taslim.Api.Infrastructure;
 using Taslim.Api.Persistence;
 
 namespace Taslim.Api.Controllers;
@@ -18,6 +20,7 @@ public sealed class GlobalSearchController(TaslimDbContext db) : ControllerBase
     private const int MaxQueryLength = 100;
 
     [HttpGet]
+    [EnableRateLimiting(RateLimiting.Search)]
     public async Task<ActionResult<GlobalSearchResponseDto>> Search(
         [FromQuery(Name = "q")] string? query,
         [FromQuery] int limit = DefaultLimitPerType,

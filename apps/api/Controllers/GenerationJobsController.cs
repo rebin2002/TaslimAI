@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
 using Taslim.Api.Generation;
@@ -13,6 +14,7 @@ public sealed class GenerationJobsController(IGenerationJobService jobs) : Contr
 {
     [HttpPost("api/generation/jobs")]
     [ValidateAntiForgeryToken]
+    [EnableRateLimiting(RateLimiting.Generation)]
     public async Task<IActionResult> Create(CreateGenerationJobRequest request, CancellationToken cancellationToken)
     {
         if (!ModelState.IsValid) return ApiResults.Validation(this);

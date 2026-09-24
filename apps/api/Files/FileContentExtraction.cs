@@ -25,6 +25,11 @@ public sealed class FileContentExtractor(IOptions<FileOptions> options) : IFileC
 {
     private readonly int maxCharacters = Math.Clamp(options.Value.MaxExtractedTextCharacters, 1_000, 1_000_000);
     private readonly long maxStagingBytes = Math.Min(options.Value.MaxFileSizeBytes, 25 * 1_048_576);
+    private readonly int maxArchiveEntries = Math.Clamp(options.Value.MaxArchiveEntries, 1, 10_000);
+    private readonly long maxArchiveUncompressedBytes = Math.Clamp(options.Value.MaxArchiveUncompressedBytes, 1_048_576, 1_073_741_824);
+    private readonly long maxArchiveEntryBytes = Math.Clamp(options.Value.MaxArchiveEntryBytes, 64 * 1024, Math.Clamp(options.Value.MaxArchiveUncompressedBytes, 1_048_576, 1_073_741_824));
+    private readonly double maxArchiveCompressionRatio = Math.Clamp(options.Value.MaxArchiveCompressionRatio, 1, 10_000);
+    private readonly long maxArchiveXmlCharacters = Math.Clamp(options.Value.MaxArchiveXmlCharacters, 1_024, 100_000_000);
 
     public bool CanHandle(string extension) => FileContentTypes.IsTextExtractable(extension);
 
@@ -142,12 +147,12 @@ public sealed class FileContentExtractor(IOptions<FileOptions> options) : IFileC
         return builder.ToString();
     }
 
-    private static string ExtractDocx(Stream content)
+    private string ExtractDocx(Stream content)
     {
-        using var archive = new ZipArchive(content, ZipArchiveMode.Read, leaveOpen: true);
+        using var archive = OpenSafeArchive(content);
         var entry = archive.GetEntry("word/document.xml") ?? throw new InvalidDataException();
         using var stream = entry.Open();
-        var document = XDocument.Load(stream);
+        var document = LoadBoundedXml(stream);
         XNamespace word = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
         var builder = new StringBuilder();
         foreach (var paragraph in document.Descendants(word + "p"))
@@ -158,9 +163,9 @@ public sealed class FileContentExtractor(IOptions<FileOptions> options) : IFileC
         return builder.ToString();
     }
 
-    private static string ExtractXlsx(Stream content)
+    private string ExtractXlsx(Stream content)
     {
-        using var archive = new ZipArchive(content, ZipArchiveMode.Read, leaveOpen: true);
+        using var archive = OpenSafeArchive(content);
         var shared = ReadSharedStrings(archive);
         var builder = new StringBuilder();
         var sheets = archive.Entries.Where(entry => entry.FullName.StartsWith("xl/worksheets/sheet", StringComparison.OrdinalIgnoreCase) && entry.FullName.EndsWith(".xml", StringComparison.OrdinalIgnoreCase)).OrderBy(entry => entry.FullName);
@@ -168,7 +173,7 @@ public sealed class FileContentExtractor(IOptions<FileOptions> options) : IFileC
         {
             builder.AppendLine($"[Sheet {Path.GetFileNameWithoutExtension(sheet.Name)}]");
             using var stream = sheet.Open();
-            var document = XDocument.Load(stream);
+            var document = LoadBoundedXml(stream);
             XNamespace spreadsheet = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
             foreach (var row in document.Descendants(spreadsheet + "row"))
             {
@@ -179,12 +184,12 @@ public sealed class FileContentExtractor(IOptions<FileOptions> options) : IFileC
         return builder.ToString();
     }
 
-    private static IReadOnlyList<string> ReadSharedStrings(ZipArchive archive)
+    private IReadOnlyList<string> ReadSharedStrings(ZipArchive archive)
     {
         var entry = archive.GetEntry("xl/sharedStrings.xml");
         if (entry is null) return [];
         using var stream = entry.Open();
-        var document = XDocument.Load(stream);
+        var document = LoadBoundedXml(stream);
         XNamespace spreadsheet = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
         return document.Descendants(spreadsheet + "si").Select(item => string.Concat(item.Descendants(spreadsheet + "t").Select(text => text.Value))).ToList();
     }
@@ -193,5 +198,60 @@ public sealed class FileContentExtractor(IOptions<FileOptions> options) : IFileC
     {
         var value = cell.Element(spreadsheet + "v")?.Value ?? cell.Element(spreadsheet + "is")?.Value ?? string.Empty;
         return cell.Attribute("t")?.Value == "s" && int.TryParse(value, out var index) && index >= 0 && index < shared.Count ? shared[index] : value;
+    }
+
+    private ZipArchive OpenSafeArchive(Stream content)
+    {
+        var archive = new ZipArchive(content, ZipArchiveMode.Read, leaveOpen: true);
+        try
+        {
+            if (archive.Entries.Count > maxArchiveEntries) throw new InvalidDataException("Archive contains too many entries.");
+
+            long uncompressedBytes = 0;
+            foreach (var entry in archive.Entries)
+            {
+                ValidateArchivePath(entry.FullName);
+                if (entry.Length < 0 || entry.CompressedLength < 0 || entry.Length > maxArchiveEntryBytes)
+                    throw new InvalidDataException("Archive entry exceeds the configured limit.");
+                if (entry.Length > 0 && (entry.CompressedLength == 0 || (double)entry.Length / entry.CompressedLength > maxArchiveCompressionRatio))
+                    throw new InvalidDataException("Archive entry compression ratio exceeds the configured limit.");
+                uncompressedBytes = checked(uncompressedBytes + entry.Length);
+                if (uncompressedBytes > maxArchiveUncompressedBytes)
+                    throw new InvalidDataException("Archive exceeds the configured uncompressed size limit.");
+            }
+
+            return archive;
+        }
+        catch
+        {
+            archive.Dispose();
+            throw;
+        }
+    }
+
+    private static void ValidateArchivePath(string path)
+    {
+        var normalized = path.Replace('\\', '/');
+        if (string.IsNullOrWhiteSpace(normalized)
+            || normalized.StartsWith("/", StringComparison.Ordinal)
+            || Path.IsPathRooted(normalized)
+            || normalized.Split('/', StringSplitOptions.RemoveEmptyEntries).Any(segment => segment is "." or "..")
+            || normalized.Contains('\0'))
+            throw new InvalidDataException("Archive contains an unsafe path.");
+    }
+
+    private XDocument LoadBoundedXml(Stream stream)
+    {
+        var settings = new XmlReaderSettings
+        {
+            DtdProcessing = DtdProcessing.Prohibit,
+            XmlResolver = null,
+            MaxCharactersInDocument = maxArchiveXmlCharacters,
+            MaxCharactersFromEntities = 0,
+            IgnoreComments = true,
+            IgnoreWhitespace = false,
+        };
+        using var reader = XmlReader.Create(stream, settings);
+        return XDocument.Load(reader, LoadOptions.None);
     }
 }

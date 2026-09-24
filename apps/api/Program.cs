@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.DataProtection;
@@ -5,7 +6,9 @@ using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
+using System.Security.Claims;
 using Taslim.Api.Ai;
 using Taslim.Api.Activity;
 using Taslim.Api.Assets;
@@ -102,6 +105,7 @@ builder.Services.AddAuthorization(options =>
         policy.RequireAuthenticatedUser().AddRequirements(new AdminUsageRequirement()));
 });
 builder.Services.AddScoped<IAuthorizationHandler, AdminUsageAuthorizationHandler>();
+builder.Services.AddRateLimiter(RateLimiting.Configure);
 
 builder.Services.ConfigureApplicationCookie(options =>
 {
@@ -120,6 +124,23 @@ builder.Services.ConfigureApplicationCookie(options =>
     {
         context.Response.StatusCode = StatusCodes.Status403Forbidden;
         return Task.CompletedTask;
+    };
+    options.Events.OnValidatePrincipal = async context =>
+    {
+        var userId = context.Principal?.FindFirstValue(ClaimTypes.NameIdentifier);
+        if (!Guid.TryParse(userId, out var parsedUserId))
+        {
+            context.RejectPrincipal();
+            return;
+        }
+
+        var userManager = context.HttpContext.RequestServices.GetRequiredService<UserManager<ApplicationUser>>();
+        var user = await userManager.FindByIdAsync(parsedUserId.ToString());
+        if (user is null || !user.IsActive)
+        {
+            context.RejectPrincipal();
+            await context.HttpContext.SignOutAsync(IdentityConstants.ApplicationScheme);
+        }
     };
 });
 
@@ -248,6 +269,7 @@ builder.Services.AddSingleton<IFileStorageService>(services =>
     return new UnconfiguredFileStorageService(options);
 });
 var app = builder.Build();
+ProductionConfigurationValidator.Validate(app.Configuration, app.Environment);
 
 // Must run before exception handling, CORS, authentication, and antiforgery
 // so Request.IsHttps reflects Railway's external HTTPS request.
@@ -263,6 +285,9 @@ if (!app.Environment.IsDevelopment())
     }));
 }
 
+app.UseMiddleware<SecurityHeadersMiddleware>();
+if (isProduction) app.UseHsts();
+
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
@@ -270,11 +295,30 @@ if (app.Environment.IsDevelopment())
 }
 
 app.UseCors("Frontend");
+app.UseRouting();
 app.UseAuthentication();
+app.UseRateLimiter();
 app.UseMiddleware<AntiforgeryValidationMiddleware>();
 app.UseAuthorization();
 app.MapGet("/health", () => Results.Ok(new { status = "healthy", service = "Taslim API" }))
     .WithName("Health")
+    .WithTags("System");
+app.MapGet("/readiness", async (TaslimDbContext db, ILoggerFactory loggerFactory, CancellationToken cancellationToken) =>
+    {
+        try
+        {
+            return await db.Database.CanConnectAsync(cancellationToken)
+                ? Results.Ok(new { status = "ready" })
+                : Results.Json(new { status = "not_ready" }, statusCode: StatusCodes.Status503ServiceUnavailable);
+        }
+        catch (Exception exception)
+        {
+            loggerFactory.CreateLogger("Taslim.Readiness").LogWarning(exception, "Readiness dependency check failed.");
+            return Results.Json(new { status = "not_ready" }, statusCode: StatusCodes.Status503ServiceUnavailable);
+        }
+    })
+    .AllowAnonymous()
+    .WithName("Readiness")
     .WithTags("System");
 app.MapControllers();
 

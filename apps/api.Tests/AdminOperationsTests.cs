@@ -132,7 +132,7 @@ public sealed class AdminOperationsTests : IClassFixture<TaslimApiFactory>
             user!.IsActive = false;
             Assert.True((await userManager.UpdateAsync(user)).Succeeded);
         }
-        Assert.Equal(HttpStatusCode.Forbidden, (await disabledAdmin.GetAsync("/api/admin/operations/dashboard")).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await disabledAdmin.GetAsync("/api/admin/operations/dashboard")).StatusCode);
     }
 
     [Fact]

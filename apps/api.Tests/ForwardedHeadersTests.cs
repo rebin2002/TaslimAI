@@ -24,7 +24,14 @@ public sealed class ProductionApiFactory : WebApplicationFactory<Program>
         builder.UseEnvironment("Production");
         builder.ConfigureAppConfiguration((_, configuration) => configuration.AddInMemoryCollection(new Dictionary<string, string?>
         {
-            ["Database:ApplyMigrations"] = "false"
+            ["Database:ApplyMigrations"] = "false",
+            ["ConnectionStrings:Postgres"] = "Host=test;Port=5432;Database=test;Username=test;Password=test",
+            ["AllowedOrigins:0"] = "https://web.example.test",
+            ["Files:S3Endpoint"] = "https://storage.example.test",
+            ["Files:S3Region"] = "auto",
+            ["Files:S3Bucket"] = "test-bucket",
+            ["Files:S3AccessKey"] = "test-access-key",
+            ["Files:S3SecretKey"] = "test-secret-key",
         }));
         builder.ConfigureServices(services =>
         {

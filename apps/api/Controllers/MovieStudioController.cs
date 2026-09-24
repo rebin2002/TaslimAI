@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Taslim.Api.Infrastructure;
 using Taslim.Api.Movies;
 using Taslim.Api.Generation;
@@ -79,6 +80,7 @@ public sealed class MovieStudioController(IMovieStudioService movies) : Controll
 
     [HttpPost("projects/{id:guid}/scenes/{sceneId:guid}/generate")]
     [ValidateAntiForgeryToken]
+    [EnableRateLimiting(RateLimiting.ExpensiveAi)]
     public async Task<IActionResult> GenerateScene(Guid id, Guid sceneId, MovieStudioGenerationRequest request, CancellationToken cancellationToken)
     {
         var result = await movies.GenerateSceneAsync(GetUserId(), id, sceneId, request, cancellationToken, Request.Headers["Idempotency-Key"].FirstOrDefault());
@@ -87,6 +89,7 @@ public sealed class MovieStudioController(IMovieStudioService movies) : Controll
 
     [HttpPost("shots/{shotId:guid}/generate")]
     [ValidateAntiForgeryToken]
+    [EnableRateLimiting(RateLimiting.ExpensiveAi)]
     public async Task<IActionResult> GenerateShot(Guid shotId, MovieStudioGenerationRequest request, CancellationToken cancellationToken)
     {
         var result = await movies.GenerateShotAsync(GetUserId(), shotId, request, cancellationToken, Request.Headers["Idempotency-Key"].FirstOrDefault());
