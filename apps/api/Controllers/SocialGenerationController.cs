@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.Options;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
@@ -21,6 +22,7 @@ public sealed class SocialGenerationController(
 {
     [HttpPost("jobs")]
     [ValidateAntiForgeryToken]
+    [EnableRateLimiting(RateLimiting.ExpensiveAi)]
     public async Task<IActionResult> Create([FromBody] SocialGenerationRequest request, CancellationToken cancellationToken)
     {
         try

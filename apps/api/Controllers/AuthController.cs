@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Taslim.Api.Authorization;
@@ -52,6 +53,7 @@ public sealed class AuthController(
     [HttpPost("register")]
     [AllowAnonymous]
     [ValidateAntiForgeryToken]
+    [EnableRateLimiting(RateLimiting.Authentication)]
     public async Task<IActionResult> Register(RegisterRequest request, CancellationToken cancellationToken)
     {
         if (!ModelState.IsValid || !IsSupportedLanguage(request.PreferredLanguage))
@@ -113,6 +115,7 @@ public sealed class AuthController(
     [HttpPost("login")]
     [AllowAnonymous]
     [ValidateAntiForgeryToken]
+    [EnableRateLimiting(RateLimiting.Authentication)]
     public async Task<IActionResult> Login(LoginRequest request, CancellationToken cancellationToken)
     {
         if (!ModelState.IsValid)

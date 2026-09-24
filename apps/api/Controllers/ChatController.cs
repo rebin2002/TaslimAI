@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Taslim.Api.Ai;
@@ -143,6 +144,7 @@ public sealed class ChatController(
 
     [HttpPost("conversations/{conversationId:guid}/messages/{messageId:guid}/regenerate")]
     [ValidateAntiForgeryToken]
+    [EnableRateLimiting(RateLimiting.Chat)]
     public async Task RegenerateMessage(Guid conversationId, Guid messageId, RegenerateMessageRequest request, CancellationToken cancellationToken)
     {
         Response.StatusCode = StatusCodes.Status200OK;
@@ -305,6 +307,7 @@ public sealed class ChatController(
 
     [HttpPost("conversations/{conversationId:guid}/messages")]
     [ValidateAntiForgeryToken]
+    [EnableRateLimiting(RateLimiting.Chat)]
     public async Task<IActionResult> SendMessage(Guid conversationId, SendMessageRequest request, CancellationToken cancellationToken)
     {
         if (!ModelState.IsValid) return ApiResults.Validation(this, "Please enter a message.");
@@ -345,6 +348,7 @@ public sealed class ChatController(
 
     [HttpPost("conversations/{conversationId:guid}/messages/stream")]
     [ValidateAntiForgeryToken]
+    [EnableRateLimiting(RateLimiting.Chat)]
     public async Task StreamMessage(Guid conversationId, SendMessageRequest request, CancellationToken cancellationToken)
     {
         Response.StatusCode = StatusCodes.Status200OK;

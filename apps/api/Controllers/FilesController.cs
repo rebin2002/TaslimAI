@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
@@ -22,6 +23,7 @@ public sealed class FilesController(
 {
     [HttpPost("workspaces/{workspaceId:guid}/files")]
     [ValidateAntiForgeryToken]
+    [EnableRateLimiting(RateLimiting.Upload)]
     public async Task<IActionResult> Upload(Guid workspaceId, [FromForm] IFormFile? file, [FromForm] Guid? projectId, [FromForm] Guid? conversationId, CancellationToken cancellationToken)
     {
         if (file is null) return ApiResults.Validation(this, "Choose a file to upload.");
