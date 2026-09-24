@@ -66,7 +66,7 @@ public sealed class VoiceGenerationJobHandler(
             generated.Usage.InputCharacters,
             null,
             generated.Usage.OutputBytes,
-            generated.Usage.ActualCostUsd,
+            generated.Usage.EstimatedCostUsd,
             generated.Usage.ActualCostUsd,
             Math.Max(1, generated.Usage.LatencyMs > 0 ? generated.Usage.LatencyMs : (int)Math.Min(int.MaxValue, stopwatch.ElapsedMilliseconds)),
             generated.Usage.FinishReason,

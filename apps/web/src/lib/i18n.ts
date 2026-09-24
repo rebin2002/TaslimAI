@@ -385,7 +385,9 @@ export const translations: Record<Locale, Record<string, string>> = {
     "voice.progressText": "Your request is moving through a durable generation job. You can cancel while it is in progress.",
     "voice.cancel": "Cancel generation",
     "voice.unavailable": "Voice generation is not available yet. The speech service is not configured, so no audio was created.",
+    "voice.unsupportedLanguage": "This language is not currently supported by the configured speech service.",
     "voice.failedSafe": "The audio could not be completed. Please try again.",
+    "voice.cancelled": "The voice generation was cancelled.",
     "voice.safetyNote": "Review generated speech before sharing it. Audio is delivered through your authenticated private Asset Library.",
   },
 
@@ -600,7 +602,9 @@ export const translations: Record<Locale, Record<string, string>> = {
     "voice.progressText": "ينتقل طلبك عبر عملية إنشاء دائمة. يمكنك الإلغاء أثناء التنفيذ.",
     "voice.cancel": "إلغاء الإنشاء",
     "voice.unavailable": "إنشاء الصوت غير متاح بعد. لم تتم تهيئة خدمة الكلام، لذلك لم يتم إنشاء أي صوت.",
+    "voice.unsupportedLanguage": "هذه اللغة غير مدعومة حاليًا من خدمة الكلام المُهيأة.",
     "voice.failedSafe": "تعذر إكمال الصوت. حاول مرة أخرى.",
+    "voice.cancelled": "تم إلغاء إنشاء الصوت.",
     "voice.safetyNote": "راجع الكلام الناتج قبل مشاركته. يُسلّم الصوت عبر مكتبة أصولك الخاصة والمحمية.",
   },
 
@@ -810,7 +814,9 @@ export const translations: Record<Locale, Record<string, string>> = {
     "voice.progressText": "داواکارییەکەت بە ڕێگەی کارێکی دروستکردنی بەردەوامەوە دەڕوات. دەتوانیت لە کاتی کارکردندا هەڵیبوەشێنیتەوە.",
     "voice.cancel": "هەڵوەشاندنەوەی دروستکردن",
     "voice.unavailable": "دروستکردنی دەنگ هێشتا بەردەست نییە. خزمەتگوزاریی قسەکردن ڕێک نەخراوە، بۆیە هیچ دەنگێک دروست نەکرا.",
+    "voice.unsupportedLanguage": "ئەم زمانە لە خزمەتگوزاریی قسەکردنی ڕێکخراودا لە ئێستادا پشتگیری ناکرێت.",
     "voice.failedSafe": "نەتوانرا دەنگەکە تەواو بکرێت. تکایە دووبارە هەوڵ بدە.",
+    "voice.cancelled": "دروستکردنی دەنگ هەڵوەشێندرایەوە.",
     "voice.safetyNote": "پێش بڵاوکردنەوە، دەنگی دروستکراو پێداچوونەوەی بۆ بکە. دەنگەکە بە کتێبخانەی ئاسێتە تایبەت و پارێزراوەکەتەوە دەدرێت.",
   },
 };

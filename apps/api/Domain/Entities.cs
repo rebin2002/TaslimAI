@@ -187,6 +187,7 @@ public const string MusicRequestInvalid = "MUSIC_REQUEST_INVALID";
 public const string VoiceRequestInvalid = "VOICE_REQUEST_INVALID";
     public const string VoiceProviderUnavailable = "VOICE_PROVIDER_UNAVAILABLE";
     public const string VoiceProviderFailed = "VOICE_PROVIDER_FAILED";
+    public const string VoiceLanguageUnsupported = "VOICE_LANGUAGE_UNSUPPORTED";
     public const string VoiceOutputInvalid = "VOICE_OUTPUT_INVALID";
     public const string VoiceOutputStorageFailed = "VOICE_OUTPUT_STORAGE_FAILED";
     public const string VoiceCancelled = "VOICE_CANCELLED";
