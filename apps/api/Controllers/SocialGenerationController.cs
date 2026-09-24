@@ -38,7 +38,7 @@ public sealed class SocialGenerationController(
                 Title = input.Prompt.Length > 160 ? input.Prompt[..160] : input.Prompt,
                 InputJson = SocialGenerationContractMapper.SerializeInput(input),
                 EstimatedProviderCostUsd = preflight.EstimatedProviderCostUsd,
-            }, cancellationToken);
+            }, cancellationToken, Request.Headers["Idempotency-Key"].FirstOrDefault());
             return Accepted(new CreateSocialGenerationResponse(GenerationJobContractMapper.ToDto(job)));
         }
         catch (SocialRequestValidationException exception) { return ApiResults.Error(this, StatusCodes.Status400BadRequest, exception.Code, exception.Message); }

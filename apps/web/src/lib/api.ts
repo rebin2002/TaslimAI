@@ -422,6 +422,12 @@ function requestId() {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
+function generationInit(init: RequestInit, idempotencyKey: string): RequestInit {
+  const headers = new Headers(init.headers);
+  headers.set("Idempotency-Key", idempotencyKey);
+  return { ...init, headers };
+}
+
 async function csrf(forceRefresh = false) {
   if (csrfToken && !forceRefresh) return csrfToken;
   const response = await fetch(`${API_URL}/api/auth/csrf`, { credentials: "include", cache: "no-store" });
@@ -539,13 +545,13 @@ export const api = {
     return request<AdminUsageReport>(`/api/admin/usage/report${query.toString() ? `?${query.toString()}` : ""}`);
   },
   getAdminUsageTransaction: (id: string) => request<AdminUsageTransaction>(`/api/admin/usage/transactions/${id}`),
-  createGenerationJob: (workspaceId: string, inputJson = "{}", title?: string) => request<GenerationJob>("/api/generation/jobs", { method: "POST", body: JSON.stringify({ workspaceId, jobType: "system.test", inputJson, title }) }, true),
-  createImageGenerationJob: (input: ImageGenerationInput) => request<{ job: GenerationJob }>("/api/image-generation/jobs", { method: "POST", body: JSON.stringify(input) }, true).then((response) => response.job),
-  createVoiceGenerationJob: (input: VoiceGenerationInput) => request<{ job: GenerationJob }>("/api/voice-generation/jobs", { method: "POST", body: JSON.stringify(input) }, true).then((response) => response.job),
-  createDocumentGenerationJob: (input: DocumentGenerationInput) => request<{ job: GenerationJob }>("/api/document-generation/jobs", { method: "POST", body: JSON.stringify(input) }, true).then((response) => response.job),
-  createPresentationGenerationJob: (input: PresentationGenerationInput) => request<{ job: GenerationJob }>("/api/presentation-generation/jobs", { method: "POST", body: JSON.stringify(input) }, true).then((response) => response.job),
-  createResearchGenerationJob: (input: ResearchGenerationInput) => request<{ job: GenerationJob }>("/api/research-generation/jobs", { method: "POST", body: JSON.stringify(input) }, true).then((response) => response.job),
-  createSocialGenerationJob: (input: SocialGenerationInput) => request<{ job: GenerationJob }>("/api/social-generation/jobs", { method: "POST", body: JSON.stringify(input) }, true).then((response) => response.job),
+  createGenerationJob: (workspaceId: string, inputJson = "{}", title?: string, idempotencyKey = requestId()) => request<GenerationJob>("/api/generation/jobs", generationInit({ method: "POST", body: JSON.stringify({ workspaceId, jobType: "system.test", inputJson, title }) }, idempotencyKey), true),
+  createImageGenerationJob: (input: ImageGenerationInput, idempotencyKey = requestId()) => request<{ job: GenerationJob }>("/api/image-generation/jobs", generationInit({ method: "POST", body: JSON.stringify(input) }, idempotencyKey), true).then((response) => response.job),
+  createVoiceGenerationJob: (input: VoiceGenerationInput, idempotencyKey = requestId()) => request<{ job: GenerationJob }>("/api/voice-generation/jobs", generationInit({ method: "POST", body: JSON.stringify(input) }, idempotencyKey), true).then((response) => response.job),
+  createDocumentGenerationJob: (input: DocumentGenerationInput, idempotencyKey = requestId()) => request<{ job: GenerationJob }>("/api/document-generation/jobs", generationInit({ method: "POST", body: JSON.stringify(input) }, idempotencyKey), true).then((response) => response.job),
+  createPresentationGenerationJob: (input: PresentationGenerationInput, idempotencyKey = requestId()) => request<{ job: GenerationJob }>("/api/presentation-generation/jobs", generationInit({ method: "POST", body: JSON.stringify(input) }, idempotencyKey), true).then((response) => response.job),
+  createResearchGenerationJob: (input: ResearchGenerationInput, idempotencyKey = requestId()) => request<{ job: GenerationJob }>("/api/research-generation/jobs", generationInit({ method: "POST", body: JSON.stringify(input) }, idempotencyKey), true).then((response) => response.job),
+  createSocialGenerationJob: (input: SocialGenerationInput, idempotencyKey = requestId()) => request<{ job: GenerationJob }>("/api/social-generation/jobs", generationInit({ method: "POST", body: JSON.stringify(input) }, idempotencyKey), true).then((response) => response.job),
   getMovieProvider: () => request<{ provider: MovieProviderReadiness }>("/api/movie-studio/provider"),
   createMovieProject: (input: MovieStudioCreateInput) => request<MovieStudioResponse>("/api/movie-studio/projects", { method: "POST", body: JSON.stringify(input) }, true),
   getMovieProject: (id: string) => request<MovieProject>(`/api/movie-studio/projects/${id}`),
@@ -553,9 +559,9 @@ export const api = {
   addMovieScene: (id: string, input: { title: string; summary: string; durationSeconds?: number | null; continuityNotes?: string | null; narration?: string | null; dialogue?: string | null }) => request<MovieScene>(`/api/movie-studio/projects/${id}/scenes`, { method: "POST", body: JSON.stringify(input) }, true),
   addMovieCharacter: (id: string, input: { name: string; description: string; appearance?: string | null; voiceAndPerformance?: string | null; continuityNotes?: string | null; referenceAssetId?: string | null }) => request<MovieCharacter>(`/api/movie-studio/projects/${id}/characters`, { method: "POST", body: JSON.stringify(input) }, true),
   addMovieLocation: (id: string, input: { name: string; description: string; visualContinuityNotes?: string | null; referenceAssetId?: string | null }) => request<MovieLocation>(`/api/movie-studio/projects/${id}/locations`, { method: "POST", body: JSON.stringify(input) }, true),
-  generateMovieScene: (projectId: string, sceneId: string, input: { title?: string | null } = {}) => request<{ project: MovieProject; job: GenerationJob; clipId: string }>(`/api/movie-studio/projects/${projectId}/scenes/${sceneId}/generate`, { method: "POST", body: JSON.stringify(input) }, true),
-  generateMovieShot: (shotId: string, input: { title?: string | null } = {}) => request<{ project: MovieProject; job: GenerationJob; clipId: string }>(`/api/movie-studio/shots/${shotId}/generate`, { method: "POST", body: JSON.stringify(input) }, true),
-  createMusicGenerationJob: (input: MusicGenerationInput) => request<{ job: GenerationJob }>("/api/music-generation/jobs", { method: "POST", body: JSON.stringify(input) }, true).then((response) => response.job),
+  generateMovieScene: (projectId: string, sceneId: string, input: { title?: string | null } = {}, idempotencyKey = requestId()) => request<{ project: MovieProject; job: GenerationJob; clipId: string }>(`/api/movie-studio/projects/${projectId}/scenes/${sceneId}/generate`, generationInit({ method: "POST", body: JSON.stringify(input) }, idempotencyKey), true),
+  generateMovieShot: (shotId: string, input: { title?: string | null } = {}, idempotencyKey = requestId()) => request<{ project: MovieProject; job: GenerationJob; clipId: string }>(`/api/movie-studio/shots/${shotId}/generate`, generationInit({ method: "POST", body: JSON.stringify(input) }, idempotencyKey), true),
+  createMusicGenerationJob: (input: MusicGenerationInput, idempotencyKey = requestId()) => request<{ job: GenerationJob }>("/api/music-generation/jobs", generationInit({ method: "POST", body: JSON.stringify(input) }, idempotencyKey), true).then((response) => response.job),
   getGenerationJob: (jobId: string) => request<GenerationJob>(`/api/generation/jobs/${jobId}`),
   getResearchSources: (jobId: string) => request<{ jobId: string; sources: ResearchSource[] }>(`/api/research-generation/jobs/${jobId}/sources`),
   listGenerationJobs: (workspaceId: string, page = 1, pageSize = 20) => request<GenerationJobList>(`/api/generation/jobs?workspaceId=${encodeURIComponent(workspaceId)}&page=${page}&pageSize=${pageSize}&jobType=system.test`),

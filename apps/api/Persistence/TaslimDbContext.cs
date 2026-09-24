@@ -281,6 +281,8 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.Property(job => job.Provider).HasMaxLength(80);
             entity.Property(job => job.ProviderModel).HasMaxLength(160);
             entity.Property(job => job.InputJson).HasMaxLength(100_000).IsRequired();
+            entity.Property(job => job.IdempotencyKey).HasMaxLength(80);
+            entity.Property(job => job.RequestFingerprint).HasMaxLength(64);
             entity.Property(job => job.ResultJson).HasMaxLength(100_000);
             entity.Property(job => job.ErrorCode).HasMaxLength(100);
             entity.Property(job => job.ErrorMessage).HasMaxLength(1_000);
@@ -293,6 +295,7 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasIndex(job => new { job.WorkspaceId, job.CreatedAt });
             entity.HasIndex(job => new { job.WorkspaceId, job.Status, job.CreatedAt });
             entity.HasIndex(job => job.ProjectId);
+            entity.HasIndex(job => new { job.CreatedByUserId, job.IdempotencyKey }).IsUnique().HasFilter("\"IdempotencyKey\" IS NOT NULL");
             entity.HasOne(job => job.Workspace).WithMany().HasForeignKey(job => job.WorkspaceId).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne(job => job.Project).WithMany().HasForeignKey(job => job.ProjectId).OnDelete(DeleteBehavior.SetNull);
             entity.HasOne(job => job.CreatedByUser).WithMany().HasForeignKey(job => job.CreatedByUserId).OnDelete(DeleteBehavior.Restrict);

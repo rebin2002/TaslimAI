@@ -147,7 +147,10 @@ public sealed class FileProcessingService(
         try
         {
             await using var input = await openReadAsync(cancellationToken);
-            await storage.StoreAsync(storageKey, input, cancellationToken);
+            await using var bounded = new CountingReadStream(input, Math.Max(1, settings.MaxGeneratedVideoBytes));
+            await storage.StoreAsync(storageKey, bounded, cancellationToken);
+            if (bounded.BytesRead != sizeBytes)
+                throw new FileUploadValidationException("Generated video output size did not match its declared size.");
             file.Status = StoredFileStatus.Ready;
             file.ProcessedAt = DateTime.UtcNow;
             await db.SaveChangesAsync(cancellationToken);
@@ -274,4 +277,56 @@ public sealed class FileProcessingService(
         await db.SaveChangesAsync(cancellationToken);
         return true;
     }
+}
+
+internal sealed class CountingReadStream(Stream inner, long maxBytes) : Stream
+{
+    public long BytesRead { get; private set; }
+    public override bool CanRead => inner.CanRead;
+    public override bool CanSeek => false;
+    public override bool CanWrite => false;
+    public override long Length => throw new NotSupportedException();
+    public override long Position { get => BytesRead; set => throw new NotSupportedException(); }
+
+    public override int Read(byte[] buffer, int offset, int count)
+    {
+        var read = inner.Read(buffer, offset, Math.Min(count, RemainingBufferSize(count)));
+        Record(read);
+        return read;
+    }
+
+    public override int Read(Span<byte> buffer)
+    {
+        var read = inner.Read(buffer[..Math.Min(buffer.Length, RemainingBufferSize(buffer.Length))]);
+        Record(read);
+        return read;
+    }
+
+    public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+    {
+        if (BytesRead >= maxBytes)
+        {
+            var probe = new byte[1];
+            var extra = await inner.ReadAsync(probe.AsMemory(), cancellationToken);
+            if (extra > 0) throw new InvalidDataException("Generated stream exceeded the configured size limit.");
+            return 0;
+        }
+        var read = await inner.ReadAsync(buffer[..Math.Min(buffer.Length, RemainingBufferSize(buffer.Length))], cancellationToken);
+        Record(read);
+        return read;
+    }
+
+    public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) =>
+        ReadAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
+
+    private int RemainingBufferSize(int requested) => (int)Math.Min(requested, maxBytes - BytesRead);
+    private void Record(int read) => BytesRead += read;
+    public override void Flush() => inner.Flush();
+    public override Task FlushAsync(CancellationToken cancellationToken) => inner.FlushAsync(cancellationToken);
+    public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+    public override void SetLength(long value) => throw new NotSupportedException();
+    public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    public override void Write(ReadOnlySpan<byte> buffer) => throw new NotSupportedException();
+    public override Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) => throw new NotSupportedException();
+    public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default) => throw new NotSupportedException();
 }

@@ -182,32 +182,27 @@ internal sealed class AwsS3CompatibleObjectClient : IS3CompatibleObjectClient
 
     public async Task<Stream?> GetAsync(string bucket, string key, CancellationToken cancellationToken = default)
     {
+        GetObjectResponse? response = null;
         try
         {
-            using var response = await getObject(new GetObjectRequest
+            response = await getObject(new GetObjectRequest
             {
                 BucketName = bucket,
                 Key = key,
             }, cancellationToken);
 
             if (response.ResponseStream is null) return null;
-
-            var buffered = new MemoryStream();
-            try
-            {
-                await response.ResponseStream.CopyToAsync(buffered, cancellationToken);
-                buffered.Position = 0;
-                return buffered;
-            }
-            catch
-            {
-                await buffered.DisposeAsync();
-                throw;
-            }
+            var stream = new ResponseOwnedStream(response.ResponseStream, response);
+            response = null;
+            return stream;
         }
         catch (AmazonS3Exception exception) when (IsNotFound(exception))
         {
             return null;
+        }
+        finally
+        {
+            response?.Dispose();
         }
     }
 
@@ -243,4 +238,42 @@ internal sealed class AwsS3CompatibleObjectClient : IS3CompatibleObjectClient
         exception.StatusCode == System.Net.HttpStatusCode.NotFound
         || string.Equals(exception.ErrorCode, "NoSuchKey", StringComparison.OrdinalIgnoreCase)
         || string.Equals(exception.ErrorCode, "NotFound", StringComparison.OrdinalIgnoreCase);
+
+    private sealed class ResponseOwnedStream(Stream inner, IDisposable response) : Stream
+    {
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                inner.Dispose();
+                response.Dispose();
+            }
+            base.Dispose(disposing);
+        }
+
+        public override async ValueTask DisposeAsync()
+        {
+            await inner.DisposeAsync();
+            response.Dispose();
+            GC.SuppressFinalize(this);
+        }
+
+        public override bool CanRead => inner.CanRead;
+        public override bool CanSeek => inner.CanSeek;
+        public override bool CanWrite => false;
+        public override long Length => inner.Length;
+        public override long Position { get => inner.Position; set => inner.Position = value; }
+        public override void Flush() => inner.Flush();
+        public override Task FlushAsync(CancellationToken cancellationToken) => inner.FlushAsync(cancellationToken);
+        public override int Read(byte[] buffer, int offset, int count) => inner.Read(buffer, offset, count);
+        public override int Read(Span<byte> buffer) => inner.Read(buffer);
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) => inner.ReadAsync(buffer, offset, count, cancellationToken);
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) => inner.ReadAsync(buffer, cancellationToken);
+        public override long Seek(long offset, SeekOrigin origin) => inner.Seek(offset, origin);
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override void Write(ReadOnlySpan<byte> buffer) => throw new NotSupportedException();
+        public override Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    }
 }

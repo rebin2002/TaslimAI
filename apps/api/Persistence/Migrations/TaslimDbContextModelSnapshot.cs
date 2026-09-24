@@ -839,6 +839,10 @@ namespace Taslim.Api.Persistence.Migrations
                         .HasMaxLength(100000)
                         .HasColumnType("character varying(100000)");
 
+                    b.Property<string>("IdempotencyKey")
+                        .HasMaxLength(80)
+                        .HasColumnType("character varying(80)");
+
                     b.Property<string>("JobType")
                         .IsRequired()
                         .HasMaxLength(100)
@@ -857,6 +861,10 @@ namespace Taslim.Api.Persistence.Migrations
                     b.Property<string>("ProviderModel")
                         .HasMaxLength(160)
                         .HasColumnType("character varying(160)");
+
+                    b.Property<string>("RequestFingerprint")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
 
                     b.Property<DateTime?>("QueuedAt")
                         .HasColumnType("timestamp with time zone");
@@ -891,6 +899,10 @@ namespace Taslim.Api.Persistence.Migrations
                     b.HasIndex("Status", "QueuedAt", "CreatedAt");
 
                     b.HasIndex("WorkspaceId", "Status", "CreatedAt");
+
+                    b.HasIndex("CreatedByUserId", "IdempotencyKey")
+                        .IsUnique()
+                        .HasFilter("\"IdempotencyKey\" IS NOT NULL");
 
                     b.ToTable("GenerationJobs", null, t =>
                         {

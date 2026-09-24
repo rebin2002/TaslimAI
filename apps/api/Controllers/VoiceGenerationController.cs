@@ -39,7 +39,7 @@ public sealed class VoiceGenerationController(
                 Title = request.Title,
                 InputJson = VoiceGenerationContractMapper.SerializeInput(input),
                 EstimatedProviderCostUsd = preflight.EstimatedProviderCostUsd,
-            }, cancellationToken);
+            }, cancellationToken, Request.Headers["Idempotency-Key"].FirstOrDefault());
             return Accepted(new CreateVoiceGenerationResponse(GenerationJobContractMapper.ToDto(job)));
         }
         catch (VoiceRequestValidationException exception)

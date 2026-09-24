@@ -44,7 +44,7 @@ public sealed class ResearchGenerationController(
                 Title = input.Title,
                 InputJson = ResearchGenerationContractMapper.SerializeInput(input),
                 EstimatedProviderCostUsd = preflight.EstimatedProviderCostUsd,
-            }, cancellationToken);
+            }, cancellationToken, Request.Headers["Idempotency-Key"].FirstOrDefault());
             return Accepted(new CreateResearchGenerationResponse(GenerationJobContractMapper.ToDto(job)));
         }
         catch (ResearchRequestValidationException exception)

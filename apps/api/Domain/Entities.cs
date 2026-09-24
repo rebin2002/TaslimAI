@@ -531,6 +531,8 @@ public sealed class GenerationJob
     public string? Provider { get; set; }
     public string? ProviderModel { get; set; }
     public string InputJson { get; set; } = "{}";
+    public string? IdempotencyKey { get; set; }
+    public string? RequestFingerprint { get; set; }
     public string? ResultJson { get; set; }
     public string? ErrorCode { get; set; }
     public string? ErrorMessage { get; set; }
