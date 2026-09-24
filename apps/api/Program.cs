@@ -208,7 +208,8 @@ builder.Services.AddScoped<IGenerationJobHandler, ResearchGenerationJobHandler>(
 builder.Services.AddSingleton<ISocialPromptBuilder, SocialPromptBuilder>();
 builder.Services.AddScoped<ISocialGenerationProvider, AiSocialGenerationProvider>();
 builder.Services.AddScoped<IGenerationJobHandler, SocialGenerationJobHandler>();
-// Music providers are intentionally not registered until a production provider is selected and validated.
+builder.Services.AddHttpClient<MubertMusicGenerationProvider>();
+builder.Services.AddSingleton<IMusicGenerationProvider>(services => services.GetRequiredService<MubertMusicGenerationProvider>());
 builder.Services.AddScoped<IGenerationJobHandler, MusicGenerationJobHandler>();
 builder.Services.AddSingleton<IVoiceGenerationProvider, UnconfiguredVoiceGenerationProvider>();
 builder.Services.AddScoped<IGenerationJobHandler, VoiceGenerationJobHandler>();

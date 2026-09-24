@@ -26,8 +26,8 @@ public sealed class FileProcessingService(
         string? metadataJson,
         CancellationToken cancellationToken)
         {
-        if (content.Length <= 0 || content.Length > Math.Min(settings.MaxFileSizeBytes, 10 * 1_048_576))
-            throw new FileUploadValidationException("Generated files must be between 1 byte and 10 MB.");
+        if (content.Length <= 0 || content.Length > Math.Min(settings.MaxFileSizeBytes, 25 * 1_048_576))
+            throw new FileUploadValidationException("Generated files must be between 1 byte and 25 MB.");
         if (string.IsNullOrWhiteSpace(contentType) || contentType.Length > 160)
             throw new FileUploadValidationException("Generated file content type is invalid.");
         if (metadataJson?.Length > 16_000)
