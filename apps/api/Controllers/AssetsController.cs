@@ -24,13 +24,14 @@ public sealed class AssetsController(
         [FromQuery] string? assetType,
         [FromQuery] AssetStatus? status,
         [FromQuery] string? search,
+        [FromQuery] string? sort,
         [FromQuery] int page = 1,
         [FromQuery] int pageSize = 24,
         CancellationToken cancellationToken = default)
     {
         try
         {
-            var result = await assets.ListAsync(GetUserId(), new AssetFilter(workspaceId, projectId, assetType, status, search, page, pageSize), cancellationToken);
+            var result = await assets.ListAsync(GetUserId(), new AssetFilter(workspaceId, projectId, assetType, status, search, sort, page, pageSize), cancellationToken);
             return result is null ? Forbid() : Ok(result);
         }
         catch (AssetValidationException exception)
