@@ -1,0 +1,121 @@
+name: Taslim CI
+
+on:
+  push:
+    branches: [main, "parallel/**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "22"
+  DOTNET_VERSION: "8.0.x"
+
+jobs:
+  frontend:
+    name: Frontend checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - run: npm test --workspace @taslim/web
+      - run: npm run lint --workspace @taslim/web
+      - run: npx tsc --noEmit -p apps/web/tsconfig.json
+      - run: npm run build --workspace @taslim/web
+
+  api:
+    name: API integration tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: taslim
+          POSTGRES_PASSWORD: change-me
+          POSTGRES_DB: taslim_tests
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U taslim -d taslim_tests"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+      - run: dotnet test apps/api.Tests/Taslim.Api.Tests.csproj
+        env:
+          ConnectionStrings__Postgres: Host=localhost;Port=5432;Database=taslim_tests;Username=taslim;Password=change-me
+          Database__ApplyMigrations: "false"
+
+  e2e:
+    name: Browser E2E
+    runs-on: ubuntu-latest
+    needs: [frontend]
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: taslim
+          POSTGRES_PASSWORD: change-me
+          POSTGRES_DB: taslim_e2e
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U taslim -d taslim_e2e"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+        working-directory: apps/web
+      - name: Start API
+        env:
+          ASPNETCORE_ENVIRONMENT: Development
+          ConnectionStrings__Postgres: Host=localhost;Port=5432;Database=taslim_e2e;Username=taslim;Password=change-me
+          Database__ApplyMigrations: "true"
+          AllowedOrigins__0: http://127.0.0.1:3000
+          Ai__OpenAI__Enabled: "false"
+          Files__StorageProvider: Local
+          Files__LocalRootPath: ${{ github.workspace }}/.e2e-files
+        run: |
+          mkdir -p .e2e-files
+          nohup dotnet run --project apps/api --urls http://127.0.0.1:5000 > /tmp/taslim-api.log 2>&1 &
+          for attempt in {1..60}; do
+            if curl --fail --silent http://127.0.0.1:5000/health >/dev/null; then exit 0; fi
+            sleep 2
+          done
+          cat /tmp/taslim-api.log
+          exit 1
+      - name: Run browser tests
+        env:
+          E2E_API_URL: http://127.0.0.1:5000
+          NEXT_PUBLIC_API_URL: http://127.0.0.1:5000
+          E2E_TEST_PASSWORD: E2eStrongPassword!123
+          CI: "true"
+        run: npm run test:e2e --workspace @taslim/web
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            apps/web/playwright-report
+            apps/web/test-results
+            /tmp/taslim-api.log
+          if-no-files-found: ignore
