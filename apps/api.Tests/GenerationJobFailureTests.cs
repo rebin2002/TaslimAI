@@ -69,6 +69,10 @@ public sealed class GenerationJobFailureTests : IClassFixture<GenerationJobFailu
         Assert.False(await db.Assets.AsNoTracking().AnyAsync(item => item.SourceGenerationJobId == job.Id));
         Assert.False(await db.GenerationJobOutputs.AsNoTracking().AnyAsync(item => item.GenerationJobId == job.Id));
         Assert.False(await db.StoredFiles.AsNoTracking().AnyAsync(item => item.WorkspaceId == auth.PersonalWorkspace.Id));
+        var notifications = await client.GetFromJsonAsync<JsonElement>($"/api/notifications?workspaceId={auth.PersonalWorkspace.Id}");
+        var notification = Assert.Single(notifications.GetProperty("items").EnumerateArray());
+        Assert.Equal("generation.failed", notification.GetProperty("type").GetString());
+        Assert.Contains("/activity", notification.GetProperty("destination").GetString());
     }
 
     private static async Task<AuthResponse> Register(HttpClient client)

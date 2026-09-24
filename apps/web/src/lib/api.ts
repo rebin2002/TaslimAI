@@ -251,6 +251,20 @@ export type GlobalSearchResult = {
 };
 export type GlobalSearchGroup = { type: GlobalSearchResultType; count: number; items: GlobalSearchResult[] };
 export type GlobalSearchResponse = { query: string; totalCount: number; groups: GlobalSearchGroup[] };
+export type NotificationItem = {
+  id: string;
+  workspaceId: string;
+  projectId: string | null;
+  generationJobId: string | null;
+  assetId: string | null;
+  type: "generation.completed" | "generation.failed" | "generation.attention" | "billing.payment_failed";
+  resourceTitle: string | null;
+  createdAt: string;
+  readAt: string | null;
+  isRead: boolean;
+  destination: string;
+};
+export type NotificationList = { items: NotificationItem[]; page: number; pageSize: number; totalCount: number; totalPages: number; unreadCount: number };
 export type ImageGenerationInput = {
   workspaceId: string;
   projectId?: string | null;
@@ -588,6 +602,13 @@ export const api = {
   getActivityUnreadCount: (workspaceId: string) => request<{ unreadCount: number }>(`/api/activity/unread-count?workspaceId=${encodeURIComponent(workspaceId)}`),
   markActivityRead: (workspaceId: string, jobId: string) => request<{ read: boolean }>(`/api/activity/${jobId}/read`, { method: "POST", body: JSON.stringify({ workspaceId }) }, true),
   markAllActivityRead: (workspaceId: string) => request<{ read: boolean }>("/api/activity/read-all", { method: "POST", body: JSON.stringify({ workspaceId }) }, true),
+  listNotifications: (workspaceId: string, page = 1, pageSize = 20, unreadOnly = false) => {
+    const params = new URLSearchParams({ workspaceId, page: String(page), pageSize: String(pageSize), unreadOnly: String(unreadOnly) });
+    return request<NotificationList>(`/api/notifications?${params.toString()}`);
+  },
+  getNotificationUnreadCount: (workspaceId: string) => request<{ unreadCount: number }>(`/api/notifications/unread-count?workspaceId=${encodeURIComponent(workspaceId)}`),
+  markNotificationRead: (workspaceId: string, notificationId: string) => request<{ read: boolean }>(`/api/notifications/${notificationId}/read`, { method: "POST", body: JSON.stringify({ workspaceId }) }, true),
+  markAllNotificationsRead: (workspaceId: string) => request<{ read: boolean }>("/api/notifications/read-all", { method: "POST", body: JSON.stringify({ workspaceId }) }, true),
   listAssets: (workspaceId: string, filters: AssetFilters = {}) => {
     const params = new URLSearchParams({ workspaceId, status: filters.status ?? "Active", page: String(filters.page ?? 1), pageSize: String(filters.pageSize ?? 24) });
     if (filters.projectId) params.set("projectId", filters.projectId);

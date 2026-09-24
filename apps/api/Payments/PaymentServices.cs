@@ -5,6 +5,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Taslim.Api.Billing;
 using Taslim.Api.Domain;
+using Taslim.Api.Notifications;
 using Taslim.Api.Persistence;
 
 namespace Taslim.Api.Payments;
@@ -83,7 +84,7 @@ public sealed class CheckoutSessionService(
     }
 }
 
-public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerService creditLedger) : IPaymentLifecycleService
+public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerService creditLedger, INotificationEventWriter notifications) : IPaymentLifecycleService
 {
     public async Task<PaymentAttempt> RecordPaymentAttemptAsync(
         Guid workspaceId, string provider, string idempotencyKey, decimal amount, string currency,
@@ -148,6 +149,14 @@ public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerSer
                 AddLifecycleEvent(subscription, SubscriptionLifecycleEventType.PaymentFailed, "payment", reason);
                 await db.SaveChangesAsync(cancellationToken);
             }
+        }
+        try
+        {
+            await notifications.CreateBillingPaymentFailedAsync(workspaceId, paymentAttemptId, cancellationToken);
+        }
+        catch (Exception)
+        {
+            // Billing state remains authoritative even if an in-app attention record cannot be written.
         }
         return attempt;
     }

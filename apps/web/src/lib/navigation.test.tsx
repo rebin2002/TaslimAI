@@ -6,7 +6,7 @@ describe("navigation structure", () => {
   it("keeps mobile primary navigation to five focused destinations", () => {
     expect(primaryNavigation.map((item) => item.href)).toEqual(["/", "/projects", "/create", "/notifications", "/account"]);
     expect(primaryNavigation).toHaveLength(5);
-    expect(primaryNavigation.map((item) => item.labelKey)).toContain("navigation.activity");
+    expect(primaryNavigation.map((item) => item.labelKey)).toContain("navigation.notifications");
     expect(primaryNavigation.map((item) => item.labelKey)).not.toContain("navigation.movieStudio");
   });
 

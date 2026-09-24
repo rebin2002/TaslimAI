@@ -93,6 +93,10 @@ public sealed class GenerationJobsTests : IClassFixture<GenerationJobsApiFactory
         Assert.Equal(completed.Outputs[0].StoredFileId, asset.StoredFileId);
         Assert.Equal("application/json", asset.StoredFile!.ContentType);
         Assert.Equal(StoredFileStatus.Ready, asset.StoredFile.Status);
+        var notifications = await client.GetFromJsonAsync<JsonElement>($"/api/notifications?workspaceId={auth.PersonalWorkspace.Id}");
+        var notification = Assert.Single(notifications.GetProperty("items").EnumerateArray());
+        Assert.Equal("generation.completed", notification.GetProperty("type").GetString());
+        Assert.Contains("/assets", notification.GetProperty("destination").GetString());
     }
 
     [Fact]

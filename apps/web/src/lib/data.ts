@@ -1,6 +1,6 @@
 import type { LucideIcon } from "lucide-react";
 import {
-  Activity,
+  Bell,
   BarChart3,
   BriefcaseBusiness,
   Bug,
@@ -62,7 +62,7 @@ export const navigation = [
   { href: "/create/social", labelKey: "navigation.socialStudio", icon: MessageSquare },
   { href: "/create/movie", labelKey: "navigation.movieStudio", icon: Video },
   { href: "/create/music", labelKey: "navigation.musicStudio", icon: Music2 },
-  { href: "/notifications", labelKey: "navigation.notifications", icon: Activity },
+  { href: "/notifications", labelKey: "navigation.notifications", icon: Bell },
   { href: "/account", labelKey: "navigation.account", icon: UserRound },
 ] as const;
 

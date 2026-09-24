@@ -1,6 +1,6 @@
-import { ActivityCenterView } from "@/components/ActivityCenterView";
+import { NotificationCenterView } from "@/components/NotificationCenterView";
 import { ProtectedPage } from "@/components/ProtectedPage";
 
 export default function NotificationsPage() {
-  return <ProtectedPage><ActivityCenterView /></ProtectedPage>;
+  return <ProtectedPage><NotificationCenterView /></ProtectedPage>;
 }
