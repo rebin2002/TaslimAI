@@ -3,8 +3,10 @@ import {
   claimSubmission,
   conversationPath,
   createSubmission,
+  isAbortError,
   releaseSubmission,
   shouldReplaceConversationUrl,
+  studioTransitionPath,
 } from "./chatLifecycle";
 
 describe("chat submission lifecycle", () => {
@@ -54,5 +56,15 @@ describe("chat submission lifecycle", () => {
     });
     expect(retry.attachmentIds).toEqual(["file-pdf-1"]);
     expect(retry.requestId).toBe(submission.requestId);
+  });
+
+  it("creates safe project-aware transitions to existing Studios without claiming generation", () => {
+    expect(studioTransitionPath("document", "project 1")).toBe("/create/document?projectId=project%201");
+    expect(studioTransitionPath("research")).toBe("/create/research");
+  });
+
+  it("recognizes browser stream cancellation without treating ordinary errors as cancellation", () => {
+    expect(isAbortError(new DOMException("Stopped", "AbortError"))).toBe(true);
+    expect(isAbortError(new Error("network failed"))).toBe(false);
   });
 });

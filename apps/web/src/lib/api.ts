@@ -471,16 +471,16 @@ async function requestForm<T>(path: string, form: FormData, withCsrf = false, re
   return body as T;
 }
 
-async function streamRequest(path: string, payload: unknown, onEvent: (event: ChatStreamEvent) => void, retryCsrf = true): Promise<void> {
+async function streamRequest(path: string, payload: unknown, onEvent: (event: ChatStreamEvent) => void, signal?: AbortSignal, retryCsrf = true): Promise<void> {
   const headers = new Headers({ "Content-Type": "application/json", Accept: "text/event-stream" });
   headers.set("X-CSRF-TOKEN", csrfToken ?? await csrf());
-  const response = await fetch(`${API_URL}${path}`, { method: "POST", headers, credentials: "include", body: JSON.stringify(payload) });
+  const response = await fetch(`${API_URL}${path}`, { method: "POST", headers, credentials: "include", body: JSON.stringify(payload), signal });
   if (!response.ok) {
     const body = await parseError(response);
     if (response.status === 400 && retryCsrf && body?.error?.code === "CSRF_VALIDATION_FAILED") {
       csrfToken = null;
       await csrf(true);
-      return streamRequest(path, payload, onEvent, false);
+      return streamRequest(path, payload, onEvent, signal, false);
     }
     throw new ApiError(response.status, body?.error?.message ?? "Something went wrong.", body?.error?.fields, body?.error?.code);
   }
@@ -529,8 +529,10 @@ export const api = {
   getMessages: (conversationId: string) => request<ChatMessage[]>(`/api/conversations/${conversationId}/messages`),
   renameConversation: (conversationId: string, title: string) => request<Conversation>(`/api/conversations/${conversationId}`, { method: "PATCH", body: JSON.stringify({ title }) }, true),
   archiveConversation: (conversationId: string) => request<Conversation>(`/api/conversations/${conversationId}/archive`, { method: "POST" }, true),
+  deleteConversation: (conversationId: string) => request<void>(`/api/conversations/${conversationId}`, { method: "DELETE" }, true),
   sendMessage: (conversationId: string, content: string, id = requestId(), attachmentIds: string[] = []) => request<SendMessageResponse>(`/api/conversations/${conversationId}/messages`, { method: "POST", body: JSON.stringify({ content, requestId: id, attachmentIds }) }, true),
-  streamMessage: (conversationId: string, content: string, onEvent: (event: ChatStreamEvent) => void, id = requestId(), attachmentIds: string[] = []) => streamRequest(`/api/conversations/${conversationId}/messages/stream`, { content, requestId: id, attachmentIds }, onEvent),
+  streamMessage: (conversationId: string, content: string, onEvent: (event: ChatStreamEvent) => void, id = requestId(), attachmentIds: string[] = [], signal?: AbortSignal) => streamRequest(`/api/conversations/${conversationId}/messages/stream`, { content, requestId: id, attachmentIds }, onEvent, signal),
+  regenerateMessage: (conversationId: string, messageId: string, onEvent: (event: ChatStreamEvent) => void, id = requestId(), signal?: AbortSignal) => streamRequest(`/api/conversations/${conversationId}/messages/${messageId}/regenerate`, { requestId: id }, onEvent, signal),
   getUsageSummary: (workspaceId: string) => request<UsageSummary>(`/api/workspaces/${workspaceId}/usage/summary`),
   getUsageHistory: (workspaceId: string, page = 1, pageSize = 20) => request<UsageHistory>(`/api/workspaces/${workspaceId}/usage?page=${page}&pageSize=${pageSize}`),
   getBillingAccount: (workspaceId: string) => request<BillingAccount>(`/api/workspaces/${workspaceId}/billing`),

@@ -18,6 +18,7 @@ async function forward(request: Request, context: RouteContext): Promise<Respons
     headers,
     redirect: "manual",
     cache: "no-store",
+    signal: request.signal,
   };
   if (bodyMethods.has(request.method)) {
     init.body = await request.arrayBuffer();

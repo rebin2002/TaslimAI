@@ -127,6 +127,182 @@ public sealed class ChatController(
         return Ok(ToDto(conversation));
     }
 
+    [HttpDelete("conversations/{conversationId:guid}")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> DeleteConversation(Guid conversationId, CancellationToken cancellationToken)
+    {
+        var conversation = await FindAuthorizedConversation(conversationId, cancellationToken);
+        if (conversation is null) return ApiResults.Error(this, StatusCodes.Status404NotFound, "CONVERSATION_NOT_FOUND", "Conversation not found.");
+
+        // Preserve file bytes and usage records. Chat-message relationships cascade and usage
+        // references are set to null by the existing relational configuration.
+        db.Conversations.Remove(conversation);
+        await db.SaveChangesAsync(cancellationToken);
+        return NoContent();
+    }
+
+    [HttpPost("conversations/{conversationId:guid}/messages/{messageId:guid}/regenerate")]
+    [ValidateAntiForgeryToken]
+    public async Task RegenerateMessage(Guid conversationId, Guid messageId, RegenerateMessageRequest request, CancellationToken cancellationToken)
+    {
+        Response.StatusCode = StatusCodes.Status200OK;
+        Response.ContentType = "text/event-stream; charset=utf-8";
+        Response.Headers.CacheControl = "no-cache, no-transform";
+        Response.Headers.Pragma = "no-cache";
+        Response.Headers.Append("X-Accel-Buffering", "no");
+
+        if (!ModelState.IsValid)
+        {
+            await WriteEventAsync("message.failed", new { code = "VALIDATION_ERROR", message = "The regeneration request is invalid." }, cancellationToken);
+            return;
+        }
+
+        var conversation = await FindAuthorizedConversation(conversationId, cancellationToken);
+        if (conversation is null)
+        {
+            await WriteEventAsync("message.failed", new { code = "CONVERSATION_NOT_FOUND", message = "Conversation not found." }, cancellationToken);
+            return;
+        }
+        if (conversation.Status == ConversationStatus.Archived)
+        {
+            await WriteEventAsync("message.failed", new { code = "CONVERSATION_ARCHIVED", message = "Archived conversations cannot receive new messages." }, cancellationToken);
+            return;
+        }
+
+        var assistant = await db.ChatMessages.FirstOrDefaultAsync(message =>
+            message.Id == messageId &&
+            message.ConversationId == conversationId &&
+            message.Role == ChatMessageRole.Assistant &&
+            message.Status == ChatMessageStatus.Completed,
+            cancellationToken);
+        if (assistant is null)
+        {
+            await WriteEventAsync("message.failed", new { code = "MESSAGE_NOT_REGENERABLE", message = "Only a completed assistant response can be regenerated." }, cancellationToken);
+            return;
+        }
+
+        var laterUserMessageExists = await db.ChatMessages.AnyAsync(message =>
+            message.ConversationId == conversationId &&
+            message.Role == ChatMessageRole.User &&
+            message.Sequence > assistant.Sequence,
+            cancellationToken);
+        if (laterUserMessageExists)
+        {
+            await WriteEventAsync("message.failed", new { code = "MESSAGE_NOT_REGENERABLE", message = "Regenerate the latest response before continuing the conversation." }, cancellationToken);
+            return;
+        }
+
+        var sourceUser = await db.ChatMessages.AsNoTracking()
+            .Where(message => message.ConversationId == conversationId && message.Role == ChatMessageRole.User && message.Sequence < assistant.Sequence)
+            .OrderByDescending(message => message.Sequence)
+            .FirstOrDefaultAsync(cancellationToken);
+        if (sourceUser is null)
+        {
+            await WriteEventAsync("message.failed", new { code = "MESSAGE_NOT_REGENERABLE", message = "The source message for this response is unavailable." }, cancellationToken);
+            return;
+        }
+
+        await StreamRegenerationAsync(conversation, sourceUser, assistant.Id, request.RequestId.Trim(), cancellationToken);
+    }
+
+    private async Task StreamRegenerationAsync(Conversation conversation, ChatMessage sourceUser, Guid supersededAssistantId, string requestId, CancellationToken cancellationToken)
+    {
+        ChatMessage? assistant = null;
+        UsageTransaction? usageTransaction = null;
+        var persisted = false;
+        try
+        {
+            var existing = await db.ChatMessages.FirstOrDefaultAsync(message => message.ConversationId == conversation.Id && message.RequestId == requestId, cancellationToken);
+            if (existing is not null)
+            {
+                if (existing.Role != ChatMessageRole.Assistant)
+                {
+                    await WriteEventAsync("message.failed", new { code = "REQUEST_ID_REUSED", message = "That regeneration request cannot be reused." }, cancellationToken);
+                    return;
+                }
+                if (existing.Status == ChatMessageStatus.Completed)
+                {
+                    var completed = new SendMessageResponse(ToDto(conversation), ToMessageDto(sourceUser), ToMessageDto(existing, string.Equals(existing.ProviderKey, "mock", StringComparison.OrdinalIgnoreCase)));
+                    await WriteEventAsync("message.started", new { conversation = completed.Conversation, userMessage = completed.UserMessage, assistantMessage = completed.AssistantMessage }, cancellationToken);
+                    await WriteEventAsync("message.delta", new { messageId = completed.AssistantMessage.Id, delta = completed.AssistantMessage.Content }, cancellationToken);
+                    await WriteEventAsync("message.completed", completed, cancellationToken);
+                    return;
+                }
+                if (existing.Status == ChatMessageStatus.Pending)
+                {
+                    await WriteEventAsync("message.failed", new { code = "MESSAGE_IN_PROGRESS", message = "That regeneration is already in progress." }, cancellationToken);
+                    return;
+                }
+
+                assistant = existing;
+                ResetAssistantForRetry(assistant);
+            }
+            else
+            {
+                assistant = new ChatMessage
+                {
+                    Id = Guid.NewGuid(),
+                    ConversationId = conversation.Id,
+                    RequestId = requestId,
+                    Role = ChatMessageRole.Assistant,
+                    Content = string.Empty,
+                    Status = ChatMessageStatus.Pending,
+                    CreatedAt = DateTime.UtcNow,
+                    Sequence = ++conversation.NextMessageSequence,
+                };
+                db.ChatMessages.Add(assistant);
+            }
+
+            conversation.UpdatedAt = DateTime.UtcNow;
+            await db.SaveChangesAsync(cancellationToken);
+            usageTransaction = await usageLedger.GetOrCreatePendingAsync(conversation.WorkspaceId, GetUserId(), conversation.ProjectId, conversation.Id, requestId, UsageFeature.Chat, cancellationToken);
+            await WriteEventAsync("message.started", new { conversation = ToDto(conversation), userMessage = ToMessageDto(sourceUser), assistantMessage = ToMessageDto(assistant) }, cancellationToken);
+
+            var context = await BuildContextAsync(conversation, sourceUser.Id, cancellationToken, supersededAssistantId);
+            var content = new StringBuilder();
+            AiUsageMetadata? usage = null;
+            await foreach (var item in completion.StreamAsync(context, cancellationToken))
+            {
+                switch (item)
+                {
+                    case AiMessageDelta delta when !string.IsNullOrEmpty(delta.Delta):
+                        content.Append(delta.Delta);
+                        await WriteEventAsync("message.delta", new { messageId = assistant.Id, delta = delta.Delta }, cancellationToken);
+                        break;
+                    case AiMessageCompleted completed:
+                        usage = completed.Usage;
+                        break;
+                }
+            }
+
+            if (usage is null) throw new AiGenerationException("AI response did not complete.");
+            PersistRegenerationSuccess(conversation, assistant, new AiGenerationResult(content.ToString(), usage));
+            await db.SaveChangesAsync(CancellationToken.None);
+            await usageLedger.CompleteAsync(usageTransaction, usage, CancellationToken.None);
+            persisted = true;
+            await WriteEventAsync("message.completed", new SendMessageResponse(ToDto(conversation), ToMessageDto(sourceUser), ToMessageDto(assistant, usage.IsTestResponse)), cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested || HttpContext.RequestAborted.IsCancellationRequested)
+        {
+            if (!persisted && assistant is not null)
+            {
+                await PersistRegenerationFailureAsync(conversation, assistant);
+                if (usageTransaction is not null) await usageLedger.CancelAsync(usageTransaction, UsageFailureCodes.FromException(new OperationCanceledException()), CancellationToken.None);
+                logger.LogInformation("Chat regeneration cancelled. ConversationId={ConversationId}; TraceId={TraceId}", conversation.Id, HttpContext.TraceIdentifier);
+            }
+        }
+        catch (Exception exception)
+        {
+            if (!persisted && assistant is not null)
+            {
+                await PersistRegenerationFailureAsync(conversation, assistant);
+                if (usageTransaction is not null) await usageLedger.FailAsync(usageTransaction, UsageFailureCodes.FromException(exception), cancellationToken: CancellationToken.None);
+                LogGenerationFailure(exception, conversation.Id);
+            }
+            try { await WriteEventAsync("message.failed", new { code = "AI_GENERATION_FAILED", message = "Taslim could not regenerate a response right now." }, CancellationToken.None); } catch { /* client disconnected */ }
+        }
+    }
+
     [HttpPost("conversations/{conversationId:guid}/messages")]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> SendMessage(Guid conversationId, SendMessageRequest request, CancellationToken cancellationToken)
@@ -354,10 +530,10 @@ public sealed class ChatController(
         return PreparedChat.New(conversation, userMessage, assistantMessage);
     }
 
-    private async Task<AiChatRequest> BuildContextAsync(Conversation conversation, Guid currentMessageId, CancellationToken cancellationToken)
+    private async Task<AiChatRequest> BuildContextAsync(Conversation conversation, Guid currentMessageId, CancellationToken cancellationToken, Guid? excludedMessageId = null)
     {
         var history = await db.ChatMessages.AsNoTracking()
-            .Where(message => message.ConversationId == conversation.Id && (message.Role == ChatMessageRole.User || message.Role == ChatMessageRole.Assistant) && message.Status == ChatMessageStatus.Completed)
+            .Where(message => message.ConversationId == conversation.Id && (message.Role == ChatMessageRole.User || message.Role == ChatMessageRole.Assistant) && message.Status == ChatMessageStatus.Completed && (excludedMessageId == null || message.Id != excludedMessageId.Value))
             .OrderBy(message => message.Sequence)
             .ThenBy(message => message.CreatedAt)
             .ThenBy(message => message.Id)
@@ -468,6 +644,38 @@ public sealed class ChatController(
         prepared.Conversation.LastMessageAt = assistant.CreatedAt;
     }
 
+    private static void PersistRegenerationSuccess(Conversation conversation, ChatMessage assistant, AiGenerationResult result)
+    {
+        assistant.Content = result.Content;
+        assistant.Status = ChatMessageStatus.Completed;
+        assistant.ProviderKey = result.Usage.ProviderKey;
+        assistant.ModelKey = result.Usage.ModelKey;
+        assistant.InputTokens = result.Usage.InputTokens;
+        assistant.CachedInputTokens = result.Usage.CachedInputTokens;
+        assistant.OutputTokens = result.Usage.OutputTokens;
+        assistant.EstimatedCost = result.Usage.EstimatedCost;
+        assistant.ActualCost = result.Usage.ActualCost;
+        assistant.LatencyMs = result.Usage.LatencyMs;
+        assistant.FinishReason = result.Usage.FinishReason;
+        conversation.UpdatedAt = DateTime.UtcNow;
+        conversation.LastMessageAt = assistant.CreatedAt;
+    }
+
+    private static void ResetAssistantForRetry(ChatMessage assistant)
+    {
+        assistant.Status = ChatMessageStatus.Pending;
+        assistant.Content = string.Empty;
+        assistant.ProviderKey = null;
+        assistant.ModelKey = null;
+        assistant.InputTokens = null;
+        assistant.CachedInputTokens = null;
+        assistant.OutputTokens = null;
+        assistant.EstimatedCost = null;
+        assistant.ActualCost = null;
+        assistant.LatencyMs = null;
+        assistant.FinishReason = null;
+    }
+
     private Task<UsageTransaction> BeginUsageAsync(PreparedChat prepared, CancellationToken cancellationToken) => usageLedger.GetOrCreatePendingAsync(
         prepared.Conversation!.WorkspaceId,
         GetUserId(),
@@ -489,6 +697,21 @@ public sealed class ChatController(
         catch (Exception persistException)
         {
             logger.LogError(persistException, "Failed to persist AI failure state. ConversationId={ConversationId}; TraceId={TraceId}", prepared.Conversation?.Id, HttpContext.TraceIdentifier);
+        }
+    }
+
+    private async Task PersistRegenerationFailureAsync(Conversation conversation, ChatMessage assistant)
+    {
+        try
+        {
+            assistant.Status = ChatMessageStatus.Failed;
+            assistant.Content = string.Empty;
+            conversation.UpdatedAt = DateTime.UtcNow;
+            await db.SaveChangesAsync(CancellationToken.None);
+        }
+        catch (Exception persistException)
+        {
+            logger.LogError(persistException, "Failed to persist chat regeneration failure. ConversationId={ConversationId}; TraceId={TraceId}", conversation.Id, HttpContext.TraceIdentifier);
         }
     }
 

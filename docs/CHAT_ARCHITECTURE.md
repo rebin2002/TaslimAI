@@ -99,6 +99,8 @@ The frontend parser is line-oriented and tolerant of LF, CRLF, mixed line ending
 
 The existing synchronous endpoint remains available for compatibility and Home → Ask Taslim. It uses the same AI Core, persistence, routing, context, and failure rules.
 
+The Chat UX stop control aborts the browser stream. The same-origin proxy forwards that abort signal to the API request, allowing the existing request-abort cancellation path to stop provider streaming, mark the pending assistant message as failed, and cancel the related usage transaction. A stopped response can be retried using the original idempotency key after the server has persisted that terminal state.
+
 ## Persistence safety and idempotency
 
 A state-changing request follows this order:
@@ -114,6 +116,8 @@ A state-changing request follows this order:
 The frontend generates a request ID for each send. The database stores it on the user message and enforces a unique filtered index per conversation. A repeated completed request returns the existing result without another provider call. A repeated pending request returns a safe conflict. A failed request may be intentionally retried using the same request ID, resetting the failed assistant message instead of creating another user message.
 
 Each persisted chat message also has a monotonically increasing `Sequence` within its conversation. User and assistant rows are allocated consecutive sequence values before provider execution, and all history/context queries order by sequence before timestamp and ID fallbacks. The `AddDeterministicChatMessageOrdering` migration backfills existing rows using `CreatedAt`, places user rows before assistant rows for equal timestamps, and updates each conversation's next sequence value. This is deterministic for all existing data and uses the strongest relationship signals available from the pre-sequence schema without corrupting rows.
+
+Regeneration is limited to the latest completed assistant response, so it cannot rewrite history after a later user turn. It creates a new assistant row with a fresh client request ID while reusing the original user turn and its explicitly attached files. The superseded assistant response is deliberately excluded from the regenerated model context. Repeating the same regeneration request ID returns the already-persisted regenerated response rather than calling the provider again. Deleting a conversation removes its message history and chat attachment joins; stored source files and usage records are retained, with relational references safely detached.
 
 ## Usage and cost accounting
 
