@@ -30,7 +30,9 @@ public sealed record UserDto(
     string DefaultGenerationLanguage = LanguageCodes.English,
     string TimeZone = "UTC",
     string OutputPreference = OutputPreferences.Balanced,
-    bool IncludeSourceLinks = true);
+    bool IncludeSourceLinks = true,
+    DateTime? OnboardingCompletedAt = null,
+    string? OnboardingIntent = null);
 
 public sealed record WorkspaceSummaryDto(Guid Id, string Name, string Slug, string Type, string Role);
 
@@ -78,6 +80,21 @@ public sealed class UpdateProfileRequest
     public string? OutputPreference { get; set; }
 
     public bool? IncludeSourceLinks { get; set; }
+}
+
+public sealed class CompleteOnboardingRequest
+{
+    [StringLength(120)]
+    public string? DisplayName { get; set; }
+
+    [Required, StringLength(5)]
+    public string PreferredLanguage { get; set; } = LanguageCodes.English;
+
+    [Required, StringLength(5)]
+    public string DefaultGenerationLanguage { get; set; } = LanguageCodes.English;
+
+    [StringLength(50)]
+    public string? Intent { get; set; }
 }
 
 public sealed class ChangePasswordRequest

@@ -195,6 +195,39 @@ public sealed class AuthController(
         return Ok(new AuthResponse(ToUserDto(user, workspace.Id), ToWorkspaceDto(workspace, WorkspaceRole.Owner)));
     }
 
+    [HttpPost("onboarding/complete")]
+    [Authorize]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> CompleteOnboarding(CompleteOnboardingRequest request, CancellationToken cancellationToken)
+    {
+        var displayName = request.DisplayName?.Trim();
+        var intent = string.IsNullOrWhiteSpace(request.Intent) ? null : request.Intent.Trim().ToLowerInvariant();
+        if (!ModelState.IsValid
+            || !IsSupportedLanguage(request.PreferredLanguage)
+            || !IsSupportedLanguage(request.DefaultGenerationLanguage)
+            || (displayName is not null && displayName.Length > 0 && displayName.Length < 2)
+            || (intent is not null && !OnboardingIntents.Supported.Contains(intent)))
+            return ApiResults.Validation(this, "Please provide valid onboarding preferences.");
+
+        var user = await userManager.GetUserAsync(User);
+        if (user is null || !user.IsActive) return Unauthorized();
+
+        if (!string.IsNullOrWhiteSpace(displayName)) user.DisplayName = displayName;
+        user.PreferredLanguage = request.PreferredLanguage.Trim().ToLowerInvariant();
+        user.DefaultGenerationLanguage = request.DefaultGenerationLanguage.Trim().ToLowerInvariant();
+        user.OnboardingIntent = intent;
+        user.OnboardingCompletedAt = DateTime.UtcNow;
+        user.UpdatedAt = DateTime.UtcNow;
+
+        var result = await userManager.UpdateAsync(user);
+        if (!result.Succeeded)
+            return ApiResults.Error(this, StatusCodes.Status400BadRequest, "ONBOARDING_UPDATE_FAILED", "We could not save your onboarding choices.");
+
+        var workspace = await FindPersonalWorkspace(user.Id, cancellationToken);
+        if (workspace is null) return ApiResults.Error(this, 500, "ACCOUNT_SETUP_INCOMPLETE", "Your account setup is incomplete. Please contact support.");
+        return Ok(new AuthResponse(ToUserDto(user, workspace.Id), ToWorkspaceDto(workspace, WorkspaceRole.Owner)));
+    }
+
     [HttpPost("password")]
     [Authorize]
     [ValidateAntiForgeryToken]
@@ -245,6 +278,6 @@ public sealed class AuthController(
         .Distinct(StringComparer.Ordinal)
         .ToArray();
     private static string Slugify(string name, Guid suffix) => $"{new string(name.Trim().ToLowerInvariant().Where(character => char.IsLetterOrDigit(character) || character == ' ').ToArray()).Replace(' ', '-')}-{suffix.ToString("N")[..8]}";
-    private static UserDto ToUserDto(ApplicationUser user, Guid workspaceId) => new(user.Id, user.Email ?? string.Empty, user.DisplayName, user.PreferredLanguage, workspaceId, user.CreatedAt, user.DefaultGenerationLanguage, user.TimeZone, user.OutputPreference, user.IncludeSourceLinks);
+    private static UserDto ToUserDto(ApplicationUser user, Guid workspaceId) => new(user.Id, user.Email ?? string.Empty, user.DisplayName, user.PreferredLanguage, workspaceId, user.CreatedAt, user.DefaultGenerationLanguage, user.TimeZone, user.OutputPreference, user.IncludeSourceLinks, user.OnboardingCompletedAt, user.OnboardingIntent);
     private static WorkspaceSummaryDto ToWorkspaceDto(Workspace workspace, WorkspaceRole role) => new(workspace.Id, workspace.Name, workspace.Slug, workspace.Type.ToString(), role.ToString());
 }
