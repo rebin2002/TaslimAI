@@ -32,7 +32,8 @@ public sealed record UserDto(
     string OutputPreference = OutputPreferences.Balanced,
     bool IncludeSourceLinks = true,
     DateTime? OnboardingCompletedAt = null,
-    string? OnboardingIntent = null);
+    string? OnboardingIntent = null,
+    bool IsAdmin = false);
 
 public sealed record WorkspaceSummaryDto(Guid Id, string Name, string Slug, string Type, string Role);
 
