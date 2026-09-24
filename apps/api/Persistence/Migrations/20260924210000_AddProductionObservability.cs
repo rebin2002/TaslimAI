@@ -1,9 +1,13 @@
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
+using Taslim.Api.Persistence;
 
 #nullable disable
 
 namespace Taslim.Api.Persistence.Migrations;
 
+[DbContext(typeof(TaslimDbContext))]
+[Migration("20260924210000_AddProductionObservability")]
 public partial class AddProductionObservability : Migration
 {
     protected override void Up(MigrationBuilder migrationBuilder)

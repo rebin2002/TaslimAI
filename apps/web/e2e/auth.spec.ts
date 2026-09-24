@@ -5,10 +5,10 @@ test.describe("authentication and onboarding", () => {
     await registerInUi(page, testUser, false);
     const onboarding = page.getByRole("dialog");
     await expect(onboarding).toBeVisible();
-    await expect(onboarding.getByRole("heading")).toBeVisible();
+    await expect(onboarding.locator("#onboarding-title")).toBeVisible();
     await onboarding.getByRole("button", { name: /continue/i }).click();
-    await expect(onboarding.getByRole("heading")).toBeVisible();
-    await onboarding.getByRole("button", { name: /choose an action/i }).click();
+    await expect(onboarding.locator("#onboarding-title")).toBeVisible();
+    await onboarding.getByRole("button", { name: /choose .*action/i }).click();
     await onboarding.getByRole("button").filter({ hasText: /project/i }).click();
     await expect(onboarding).toBeHidden();
     await expect(page).toHaveURL(/\/projects/);
@@ -23,7 +23,7 @@ test.describe("authentication and onboarding", () => {
     await expect(page.getByRole("dialog")).toHaveCount(0);
     await page.goto("/");
     await expect(page).toHaveURL(/\/$/);
-    await expect(page.getByRole("heading", { name: new RegExp(`welcome.*${testUser.displayName}`, "i") })).toBeVisible();
+    await expect(page.getByText(new RegExp(`good evening,?\\s*${testUser.displayName}`, "i"))).toBeVisible();
 
     await logoutInUi(page);
     await page.goto("/projects");
@@ -32,7 +32,7 @@ test.describe("authentication and onboarding", () => {
 
   test("authenticated home exposes the primary workspace entry points", async ({ authenticatedPage: page }) => {
     await page.goto("/");
-    await expect(page.getByRole("heading", { name: /what would you like to create/i })).toBeVisible();
+    await expect(page.getByRole("heading", { name: /what would you like to make today/i })).toBeVisible();
     await expect(page.getByRole("link", { name: /projects/i }).first()).toBeVisible();
     await expect(page.getByRole("link", { name: /assets/i }).first()).toBeVisible();
     await expect(page.getByRole("link", { name: /chat/i }).first()).toBeVisible();

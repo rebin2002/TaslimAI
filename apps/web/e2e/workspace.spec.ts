@@ -46,15 +46,15 @@ test.describe("workspace and project journeys", () => {
     };
     await registerInUi(otherPage, otherUser);
     await otherPage.goto(`/projects/${project.id}`);
-    await expect(otherPage.getByText(/could not load your projects|project not found/i)).toBeVisible();
+    await expect(otherPage.getByText(/something went wrong/i)).toBeVisible();
     await otherContext.close();
   });
 
   test("opens account settings and the charging-disabled billing view", async ({ authenticatedPage: page }) => {
     await page.goto("/account");
     await expect(page.getByRole("heading", { name: /^account$/i })).toBeVisible();
-    await expect(page.getByRole("link", { name: /view billing/i })).toBeVisible();
-    await page.getByRole("link", { name: /view billing/i }).click();
+    await expect(page.getByRole("link", { name: /view plan & credits/i })).toBeVisible();
+    await page.getByRole("link", { name: /view plan & credits/i }).click();
     await expect(page).toHaveURL(/\/account\/billing$/);
     await expect(page.getByRole("heading", { name: /billing/i })).toBeVisible();
     await expect(page.getByText(/billing is not collecting payment yet/i)).toBeVisible();

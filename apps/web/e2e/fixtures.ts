@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { test as base, expect, type APIRequestContext, type Page } from "@playwright/test";
 
 export const E2E_API_URL = (process.env.E2E_API_URL ?? process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:5000").replace(/\/$/, "");
@@ -17,7 +18,8 @@ type TaslimFixtures = {
 };
 
 function makeTestUser(testId: string): TestUser {
-  const suffix = `${Date.now().toString(36)}-${testId.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}`.slice(-42);
+  const testSlug = testId.replace(/[^a-z0-9]+/gi, "-").toLowerCase().slice(0, 24);
+  const suffix = `${testSlug}-${randomUUID().slice(0, 12)}`;
   return {
     displayName: "E2E Test User",
     email: `e2e+${suffix}@example.test`,
@@ -33,9 +35,9 @@ async function waitForApp(page: Page, path: string) {
 export async function completeOnboarding(page: Page, intent: "project" | "chat" = "project") {
   const onboarding = page.getByRole("dialog");
   await expect(onboarding).toBeVisible();
-  await expect(onboarding.getByRole("heading")).toBeVisible();
+  await expect(onboarding.locator("#onboarding-title")).toBeVisible();
   await onboarding.getByRole("button", { name: /continue/i }).click();
-  await onboarding.getByRole("button", { name: /choose an action/i }).click();
+  await onboarding.getByRole("button", { name: /choose .*action/i }).click();
   const workflowButtons = onboarding.getByRole("button");
   if (intent === "chat") {
     await workflowButtons.filter({ hasText: /chat/i }).click();
@@ -49,7 +51,7 @@ export async function registerInUi(page: Page, user: TestUser, complete = true) 
   await waitForApp(page, "/register");
   await page.getByLabel(/display name/i).fill(user.displayName);
   await page.getByLabel(/email/i).fill(user.email);
-  await page.getByLabel(/^password$/i).fill(user.password);
+  await page.getByRole("textbox", { name: /^password/i }).fill(user.password);
   await page.getByLabel(/confirm password/i).fill(user.password);
   await page.getByRole("button", { name: /create account/i }).click();
   await expect(page).toHaveURL(/\/projects/);
@@ -59,7 +61,7 @@ export async function registerInUi(page: Page, user: TestUser, complete = true) 
 export async function loginInUi(page: Page, user: TestUser) {
   await waitForApp(page, "/login");
   await page.getByLabel(/email/i).fill(user.email);
-  await page.getByLabel(/^password$/i).fill(user.password);
+  await page.getByRole("textbox", { name: /^password/i }).fill(user.password);
   await page.getByRole("button", { name: /sign in/i }).click();
   await expect(page).toHaveURL(/\/projects/);
 }
@@ -67,8 +69,8 @@ export async function loginInUi(page: Page, user: TestUser) {
 export async function logoutInUi(page: Page) {
   await page.goto("/account");
   await expect(page.getByRole("heading", { name: /^account$/i })).toBeVisible();
-  await page.getByRole("button", { name: /sign out/i }).click();
-  await expect(page).toHaveURL(/\/$/);
+  await page.getByRole("button", { name: /log out/i }).click();
+  await expect(page).toHaveURL(/(?:\/|\/login\?next=%2Faccount)$/);
 }
 
 async function getCsrf(request: APIRequestContext) {
@@ -125,7 +127,7 @@ export const test = base.extend<TaslimFixtures>({
     await useFixture(page as AuthenticatedPage);
     try {
       const session = await page.request.get(`${E2E_API_URL}/api/auth/me`);
-      if (session.ok()) await logoutInUi(page);
+      if (session.ok()) await apiJson(page.request, "POST", "/api/auth/logout");
     } catch {
       // The browser context may already be closed or intentionally logged out.
     }

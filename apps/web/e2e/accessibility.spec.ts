@@ -14,7 +14,7 @@ test.describe("basic accessibility smoke", () => {
   test("authentication forms expose labels and keyboard focus", async ({ page }) => {
     await page.goto("/login");
     await expect(page.getByLabel(/email/i)).toBeVisible();
-    await expect(page.getByLabel(/^password$/i)).toBeVisible();
+    await expect(page.getByRole("textbox", { name: /^password/i })).toBeVisible();
     await page.keyboard.press("Tab");
     await expect(page.locator(":focus")).toBeVisible();
     await page.keyboard.press("Tab");

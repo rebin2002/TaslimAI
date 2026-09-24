@@ -53,7 +53,7 @@ test.describe("chat journeys", () => {
       buffer: Buffer.from("Deterministic E2E attachment content."),
     });
     await expect(page.getByText("e2e-notes.txt")).toBeVisible();
-    await page.getByRole("button", { name: /clear attachments/i }).click();
+    await page.getByRole("button", { name: /clear all/i }).click();
     await expect(page.getByText("e2e-notes.txt")).toHaveCount(0);
   });
 

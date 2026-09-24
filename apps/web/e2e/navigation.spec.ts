@@ -4,18 +4,18 @@ test.describe("workspace navigation and protected views", () => {
   test("searches workspace content and opens Activity and Notifications", async ({ authenticatedPage: page }) => {
     await page.goto("/search");
     await expect(page.getByRole("heading", { name: /search/i }).first()).toBeVisible();
-    await page.getByRole("searchbox", { name: /search/i }).fill("E2E no-match");
-    await page.getByRole("button", { name: /search/i }).click();
+    await page.getByRole("textbox", { name: "Search" }).fill("E2E no-match");
+    await page.getByRole("button", { name: "Search", exact: true }).click();
     await expect(page).toHaveURL(/\/search\?q=E2E%20no-match/);
     await expect(page.getByText(/no matches found/i)).toBeVisible();
 
     await page.goto("/notifications");
-    await expect(page.getByRole("heading", { name: /notifications/i })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Notifications", exact: true })).toBeVisible();
     const markAllRead = page.getByRole("button", { name: /mark all as read|mark all read/i });
     await expect(markAllRead).toBeVisible();
     await expect(markAllRead).toBeDisabled();
     await page.goto("/activity");
-    await expect(page.getByRole("heading", { name: /activity/i })).toBeVisible();
+    await expect(page.getByRole("heading", { name: /^activity center$/i })).toBeVisible();
   });
 
   test("supports notification unread-to-read behavior with deterministic browser data", async ({ authenticatedPage: page }) => {
@@ -36,7 +36,7 @@ test.describe("workspace navigation and protected views", () => {
     await page.route("**/api/notifications?*", async (route) => {
       await route.fulfill({
         contentType: "application/json",
-        body: JSON.stringify({ items: [{ ...notification, isRead: unread, readAt: unread ? null : new Date().toISOString() }], page: 1, pageSize: 50, totalCount: 1, totalPages: 1, unreadCount: unread ? 1 : 0 }),
+        body: JSON.stringify({ items: [{ ...notification, isRead: !unread, readAt: unread ? null : new Date().toISOString() }], page: 1, pageSize: 50, totalCount: 1, totalPages: 1, unreadCount: unread ? 1 : 0 }),
       });
     });
     await page.route("**/api/notifications/*/read", async (route) => {
