@@ -37,6 +37,9 @@ export function safeAssetDisplay(asset: Asset) {
     mimeType: asset.mimeType,
     hasFile: asset.hasFile,
     canPreview: asset.canPreview,
+    fileSizeBytes: asset.fileSizeBytes,
+    sourceStudio: asset.sourceStudio,
+    sourceJobTitle: asset.sourceJobTitle,
     createdAt: asset.createdAt,
   };
 }

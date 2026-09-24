@@ -406,6 +406,9 @@ export type Asset = {
   status: AssetStatus;
   hasFile: boolean;
   canPreview: boolean;
+  fileSizeBytes: number | null;
+  sourceStudio: string | null;
+  sourceJobTitle: string | null;
   createdAt: string;
   updatedAt: string;
   archivedAt: string | null;
@@ -413,7 +416,8 @@ export type Asset = {
 };
 export type AssetRepresentation = { id: string; representationType: string; fileName: string; contentType: string; sizeBytes: number; createdAt: string };
 export type AssetList = { items: Asset[]; page: number; pageSize: number; totalCount: number; totalPages: number };
-export type AssetFilters = { projectId?: string; assetType?: AssetType; status?: AssetStatus; search?: string; page?: number; pageSize?: number };
+export type AssetSort = "recent" | "oldest" | "name" | "size";
+export type AssetFilters = { projectId?: string; assetType?: AssetType; status?: AssetStatus; search?: string; sort?: AssetSort; page?: number; pageSize?: number };
 export type AssetInput = { name: string; description?: string | null; projectId?: string | null };
 
 let csrfToken: string | null = null;
@@ -573,6 +577,7 @@ export const api = {
     if (filters.projectId) params.set("projectId", filters.projectId);
     if (filters.assetType) params.set("assetType", filters.assetType);
     if (filters.search?.trim()) params.set("search", filters.search.trim());
+    if (filters.sort) params.set("sort", filters.sort);
     return request<AssetList>(`/api/assets?${params.toString()}`);
   },
   getAsset: (assetId: string) => request<Asset>(`/api/assets/${assetId}`),
