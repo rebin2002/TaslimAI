@@ -46,6 +46,14 @@ export type Project = {
   archivedAt: string | null;
 };
 
+export type ProjectOverview = {
+  project: Project;
+  workspace: Workspace;
+  counts: { files: number; assets: number; conversations: number; activity: number };
+  conversations: Conversation[];
+  recentActivity: ActivityItem[];
+};
+
 export type RegisterInput = { displayName: string; email: string; password: string; preferredLanguage?: string };
 export type LoginInput = { email: string; password: string };
 export type ProfileInput = {
@@ -507,9 +515,11 @@ export const api = {
   updateProfile: (input: ProfileInput) => request<AuthResponse>("/api/auth/profile", { method: "PATCH", body: JSON.stringify(input) }, true),
   changePassword: (input: ChangePasswordInput) => request<{ success: boolean }>("/api/auth/password", { method: "POST", body: JSON.stringify(input) }, true),
   listProjects: (workspaceId: string, status: "Active" | "Archived") => request<Project[]>(`/api/workspaces/${workspaceId}/projects?status=${status}`),
+  listWorkspaces: () => request<Workspace[]>('/api/workspaces'),
   getWorkspace: (workspaceId: string) => request<Workspace>(`/api/workspaces/${workspaceId}`),
   createProject: (workspaceId: string, input: ProjectInput) => request<Project>(`/api/workspaces/${workspaceId}/projects`, { method: "POST", body: JSON.stringify(input) }, true),
   getProject: (projectId: string) => request<Project>(`/api/projects/${projectId}`),
+  getProjectOverview: (projectId: string) => request<ProjectOverview>(`/api/projects/${projectId}/overview`),
   updateProject: (projectId: string, input: ProjectInput) => request<Project>(`/api/projects/${projectId}`, { method: "PATCH", body: JSON.stringify(input) }, true),
   archiveProject: (projectId: string) => request<Project>(`/api/projects/${projectId}/archive`, { method: "POST" }, true),
   restoreProject: (projectId: string) => request<Project>(`/api/projects/${projectId}/restore`, { method: "POST" }, true),
