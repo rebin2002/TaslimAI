@@ -26,12 +26,19 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
     public DbSet<AssetRepresentation> AssetRepresentations => Set<AssetRepresentation>();
     public DbSet<ResearchSource> ResearchSources => Set<ResearchSource>();
     public DbSet<ResearchEvidence> ResearchEvidence => Set<ResearchEvidence>();
-    public DbSet<Plan> Plans => Set<Plan>();
-    public DbSet<Subscription> Subscriptions => Set<Subscription>();
-    public DbSet<BillingPeriod> BillingPeriods => Set<BillingPeriod>();
-    public DbSet<CreditEntitlement> CreditEntitlements => Set<CreditEntitlement>();
-    public DbSet<CreditLedgerEntry> CreditLedgerEntries => Set<CreditLedgerEntry>();
-public DbSet<MovieProject> MovieProjects => Set<MovieProject>();
+        public DbSet<Plan> Plans => Set<Plan>();
+        public DbSet<Subscription> Subscriptions => Set<Subscription>();
+        public DbSet<BillingPeriod> BillingPeriods => Set<BillingPeriod>();
+        public DbSet<CreditEntitlement> CreditEntitlements => Set<CreditEntitlement>();
+        public DbSet<CreditLedgerEntry> CreditLedgerEntries => Set<CreditLedgerEntry>();
+        public DbSet<ProviderCustomerReference> ProviderCustomerReferences => Set<ProviderCustomerReference>();
+        public DbSet<CheckoutSession> CheckoutSessions => Set<CheckoutSession>();
+        public DbSet<PaymentAttempt> PaymentAttempts => Set<PaymentAttempt>();
+        public DbSet<PaymentEvent> PaymentEvents => Set<PaymentEvent>();
+        public DbSet<PaymentRefund> PaymentRefunds => Set<PaymentRefund>();
+        public DbSet<SubscriptionLifecycleEvent> SubscriptionLifecycleEvents => Set<SubscriptionLifecycleEvent>();
+        public DbSet<PaymentReconciliationRecord> PaymentReconciliationRecords => Set<PaymentReconciliationRecord>();
+        public DbSet<MovieProject> MovieProjects => Set<MovieProject>();
     public DbSet<MovieContinuityGuide> MovieContinuityGuides => Set<MovieContinuityGuide>();
     public DbSet<MovieScene> MovieScenes => Set<MovieScene>();
     public DbSet<MovieCharacter> MovieCharacters => Set<MovieCharacter>();
@@ -497,6 +504,126 @@ public DbSet<MovieProject> MovieProjects => Set<MovieProject>();
             entity.HasIndex(subscription => new { subscription.Status, subscription.NextRenewalAt });
             entity.HasOne(subscription => subscription.Workspace).WithMany().HasForeignKey(subscription => subscription.WorkspaceId).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne(subscription => subscription.Plan).WithMany(plan => plan.Subscriptions).HasForeignKey(subscription => subscription.PlanId).OnDelete(DeleteBehavior.Restrict);
+        });
+        builder.Entity<ProviderCustomerReference>(entity =>
+        {
+            entity.HasKey(reference => reference.Id);
+            entity.Property(reference => reference.Provider).HasMaxLength(60).IsRequired();
+            entity.Property(reference => reference.ProviderCustomerReferenceValue).HasMaxLength(240).IsRequired();
+            entity.Property(reference => reference.CreatedAt).IsRequired();
+            entity.Property(reference => reference.UpdatedAt).IsRequired();
+            entity.HasIndex(reference => new { reference.WorkspaceId, reference.Provider, reference.ProviderCustomerReferenceValue }).IsUnique();
+            entity.HasIndex(reference => new { reference.WorkspaceId, reference.Provider, reference.IsDefault });
+            entity.HasOne(reference => reference.Workspace).WithMany().HasForeignKey(reference => reference.WorkspaceId).OnDelete(DeleteBehavior.Restrict);
+        });
+        builder.Entity<CheckoutSession>(entity =>
+        {
+            entity.HasKey(session => session.Id);
+            entity.Property(session => session.Provider).HasMaxLength(60).IsRequired();
+            entity.Property(session => session.ProviderSessionReference).HasMaxLength(240);
+            entity.Property(session => session.Status).HasConversion<string>().HasMaxLength(30).IsRequired();
+            entity.Property(session => session.IdempotencyKey).HasMaxLength(180).IsRequired();
+            entity.Property(session => session.Currency).HasMaxLength(3).IsRequired();
+            entity.Property(session => session.Amount).HasPrecision(18, 2).IsRequired();
+            entity.Property(session => session.FailureReason).HasMaxLength(500);
+            entity.Property(session => session.CreatedAt).IsRequired();
+            entity.HasIndex(session => new { session.WorkspaceId, session.IdempotencyKey }).IsUnique();
+            entity.HasIndex(session => new { session.Provider, session.ProviderSessionReference }).IsUnique().HasFilter("\"ProviderSessionReference\" IS NOT NULL");
+            entity.HasIndex(session => new { session.Status, session.ExpiresAt });
+            entity.HasOne(session => session.Workspace).WithMany().HasForeignKey(session => session.WorkspaceId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(session => session.Plan).WithMany().HasForeignKey(session => session.PlanId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(session => session.Subscription).WithMany().HasForeignKey(session => session.SubscriptionId).OnDelete(DeleteBehavior.SetNull);
+        });
+        builder.Entity<PaymentAttempt>(entity =>
+        {
+            entity.HasKey(attempt => attempt.Id);
+            entity.Property(attempt => attempt.Provider).HasMaxLength(60).IsRequired();
+            entity.Property(attempt => attempt.ProviderPaymentReference).HasMaxLength(240);
+            entity.Property(attempt => attempt.Status).HasConversion<string>().HasMaxLength(30).IsRequired();
+            entity.Property(attempt => attempt.Amount).HasPrecision(18, 2).IsRequired();
+            entity.Property(attempt => attempt.Currency).HasMaxLength(3).IsRequired();
+            entity.Property(attempt => attempt.IdempotencyKey).HasMaxLength(180).IsRequired();
+            entity.Property(attempt => attempt.FailureCode).HasMaxLength(100);
+            entity.Property(attempt => attempt.FailureReason).HasMaxLength(500);
+            entity.Property(attempt => attempt.CreatedAt).IsRequired();
+            entity.Property(attempt => attempt.UpdatedAt).IsRequired();
+            entity.HasIndex(attempt => new { attempt.WorkspaceId, attempt.IdempotencyKey }).IsUnique();
+            entity.HasIndex(attempt => new { attempt.Provider, attempt.ProviderPaymentReference }).IsUnique().HasFilter("\"ProviderPaymentReference\" IS NOT NULL");
+            entity.HasIndex(attempt => new { attempt.WorkspaceId, attempt.CreatedAt });
+            entity.HasIndex(attempt => attempt.Status);
+            entity.HasOne(attempt => attempt.Workspace).WithMany().HasForeignKey(attempt => attempt.WorkspaceId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(attempt => attempt.Subscription).WithMany().HasForeignKey(attempt => attempt.SubscriptionId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne(attempt => attempt.CheckoutSession).WithMany(session => session.PaymentAttempts).HasForeignKey(attempt => attempt.CheckoutSessionId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne(attempt => attempt.CreditLedgerEntry).WithMany().HasForeignKey(attempt => attempt.CreditLedgerEntryId).OnDelete(DeleteBehavior.SetNull);
+        });
+        builder.Entity<PaymentEvent>(entity =>
+        {
+            entity.HasKey(paymentEvent => paymentEvent.Id);
+            entity.Property(paymentEvent => paymentEvent.Provider).HasMaxLength(60).IsRequired();
+            entity.Property(paymentEvent => paymentEvent.ProviderEventReference).HasMaxLength(240).IsRequired();
+            entity.Property(paymentEvent => paymentEvent.Type).HasConversion<string>().HasMaxLength(40).IsRequired();
+            entity.Property(paymentEvent => paymentEvent.Status).HasConversion<string>().HasMaxLength(30).IsRequired();
+            entity.Property(paymentEvent => paymentEvent.PayloadHash).HasMaxLength(64).IsRequired();
+            entity.Property(paymentEvent => paymentEvent.PayloadJson).HasMaxLength(100_000).IsRequired();
+            entity.Property(paymentEvent => paymentEvent.Reason).HasMaxLength(500);
+            entity.Property(paymentEvent => paymentEvent.FailureReason).HasMaxLength(500);
+            entity.Property(paymentEvent => paymentEvent.OccurredAt).IsRequired();
+            entity.Property(paymentEvent => paymentEvent.ReceivedAt).IsRequired();
+            entity.HasIndex(paymentEvent => new { paymentEvent.Provider, paymentEvent.ProviderEventReference }).IsUnique();
+            entity.HasIndex(paymentEvent => new { paymentEvent.Status, paymentEvent.ReceivedAt });
+            entity.HasIndex(paymentEvent => paymentEvent.WorkspaceId);
+            entity.HasOne(paymentEvent => paymentEvent.Workspace).WithMany().HasForeignKey(paymentEvent => paymentEvent.WorkspaceId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne(paymentEvent => paymentEvent.Subscription).WithMany().HasForeignKey(paymentEvent => paymentEvent.SubscriptionId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne(paymentEvent => paymentEvent.CheckoutSession).WithMany().HasForeignKey(paymentEvent => paymentEvent.CheckoutSessionId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne(paymentEvent => paymentEvent.PaymentAttempt).WithMany().HasForeignKey(paymentEvent => paymentEvent.PaymentAttemptId).OnDelete(DeleteBehavior.SetNull);
+        });
+        builder.Entity<PaymentRefund>(entity =>
+        {
+            entity.HasKey(refund => refund.Id);
+            entity.Property(refund => refund.Provider).HasMaxLength(60).IsRequired();
+            entity.Property(refund => refund.ProviderRefundReference).HasMaxLength(240);
+            entity.Property(refund => refund.Status).HasConversion<string>().HasMaxLength(30).IsRequired();
+            entity.Property(refund => refund.Amount).HasPrecision(18, 2).IsRequired();
+            entity.Property(refund => refund.Currency).HasMaxLength(3).IsRequired();
+            entity.Property(refund => refund.IdempotencyKey).HasMaxLength(180).IsRequired();
+            entity.Property(refund => refund.Reason).HasMaxLength(500).IsRequired();
+            entity.Property(refund => refund.FailureReason).HasMaxLength(500);
+            entity.Property(refund => refund.CreatedAt).IsRequired();
+            entity.Property(refund => refund.UpdatedAt).IsRequired();
+            entity.HasIndex(refund => new { refund.WorkspaceId, refund.IdempotencyKey }).IsUnique();
+            entity.HasIndex(refund => new { refund.Provider, refund.ProviderRefundReference }).IsUnique().HasFilter("\"ProviderRefundReference\" IS NOT NULL");
+            entity.HasIndex(refund => new { refund.PaymentAttemptId, refund.CreatedAt });
+            entity.HasOne(refund => refund.Workspace).WithMany().HasForeignKey(refund => refund.WorkspaceId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(refund => refund.PaymentAttempt).WithMany(attempt => attempt.Refunds).HasForeignKey(refund => refund.PaymentAttemptId).OnDelete(DeleteBehavior.Restrict);
+        });
+        builder.Entity<SubscriptionLifecycleEvent>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.Type).HasConversion<string>().HasMaxLength(30).IsRequired();
+            entity.Property(item => item.Source).HasMaxLength(60).IsRequired();
+            entity.Property(item => item.Reason).HasMaxLength(500).IsRequired();
+            entity.Property(item => item.ProviderEventReference).HasMaxLength(240);
+            entity.Property(item => item.CreatedAt).IsRequired();
+            entity.HasIndex(item => new { item.SubscriptionId, item.CreatedAt });
+            entity.HasIndex(item => item.ProviderEventReference);
+            entity.HasOne(item => item.Workspace).WithMany().HasForeignKey(item => item.WorkspaceId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(item => item.Subscription).WithMany().HasForeignKey(item => item.SubscriptionId).OnDelete(DeleteBehavior.Restrict);
+        });
+        builder.Entity<PaymentReconciliationRecord>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.Provider).HasMaxLength(60).IsRequired();
+            entity.Property(item => item.ProviderObjectType).HasMaxLength(60).IsRequired();
+            entity.Property(item => item.ProviderObjectReference).HasMaxLength(240).IsRequired();
+            entity.Property(item => item.LocalEntityType).HasMaxLength(60);
+            entity.Property(item => item.Status).HasConversion<string>().HasMaxLength(30).IsRequired();
+            entity.Property(item => item.Reason).HasMaxLength(500).IsRequired();
+            entity.Property(item => item.CreatedAt).IsRequired();
+            entity.Property(item => item.UpdatedAt).IsRequired();
+            entity.HasIndex(item => new { item.Provider, item.ProviderObjectType, item.ProviderObjectReference }).IsUnique();
+            entity.HasIndex(item => new { item.Status, item.UpdatedAt });
+            entity.HasIndex(item => item.WorkspaceId);
+            entity.HasOne(item => item.Workspace).WithMany().HasForeignKey(item => item.WorkspaceId).OnDelete(DeleteBehavior.SetNull);
         });
         builder.Entity<BillingPeriod>(entity =>
         {

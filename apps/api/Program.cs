@@ -24,6 +24,7 @@ using Taslim.Api.Usage;
 using Taslim.Api.Files;
 using Taslim.Api.Generation;
 using Taslim.Api.Movies;
+using Taslim.Api.Payments;
 using Taslim.Api.Voice;
 using FileSettings = Taslim.Api.Files.FileOptions;
 
@@ -141,6 +142,11 @@ builder.Services.Configure<BillingOptions>(builder.Configuration.GetSection("Bil
 builder.Services.AddScoped<IBillingProvisioningService, BillingProvisioningService>();
 builder.Services.AddScoped<IBillingAccountService, BillingAccountService>();
 builder.Services.AddScoped<ICreditLedgerService, CreditLedgerService>();
+builder.Services.AddScoped<ICheckoutSessionService, CheckoutSessionService>();
+builder.Services.AddScoped<IPaymentLifecycleService, PaymentLifecycleService>();
+builder.Services.AddScoped<IPaymentWebhookService, PaymentWebhookService>();
+builder.Services.AddScoped<IPaymentReconciliationService, PaymentReconciliationService>();
+builder.Services.AddSingleton<IPaymentProvider, UnconfiguredPaymentProvider>();
 builder.Services.AddScoped<IAssetService, AssetService>();
 builder.Services.AddScoped<IGeneratedAssetPublisher, GeneratedAssetPublisher>();
 builder.Services.AddScoped<IUsageLedgerService, UsageLedgerService>();
