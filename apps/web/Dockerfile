@@ -5,7 +5,7 @@ RUN npm ci
 
 FROM node:22-alpine AS builder
 WORKDIR /app
-ARG NEXT_PUBLIC_API_URL
+ARG NEXT_PUBLIC_API_URL=https://taslim-api-production.up.railway.app
 RUN test -n "$NEXT_PUBLIC_API_URL" && case "$NEXT_PUBLIC_API_URL" in https://*) ;; *) echo "NEXT_PUBLIC_API_URL must be an HTTPS URL for production builds" >&2; exit 1 ;; esac
 ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
 COPY --from=deps /app/node_modules ./node_modules
