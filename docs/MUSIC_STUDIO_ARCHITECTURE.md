@@ -17,7 +17,7 @@ The backend is organized into five small boundaries.
 | Boundary | Responsibility |
 | --- | --- |
 | `MusicGenerationRequestValidator` | Enforces bounded descriptions, purpose, title, instructions, supported genres, moods, durations, vocal preferences, and languages before queueing and again before execution. |
-| `IMusicGenerationProvider` | Defines the provider adapter contract. Providers receive normalized user intent and return validated audio bytes plus internal usage metadata. No production provider is registered in this foundation branch. |
+| `IMusicGenerationProvider` | Defines the provider adapter contract. Providers receive normalized user intent and return validated audio bytes plus internal usage metadata. The registered Mubert adapter is disabled until server-only credentials are configured. |
 | `MusicGenerationJobHandler` | Deserializes and validates job input, resolves the configured provider, validates output content type and size, creates safe metadata, and returns a `GeneratedFileArtifact` plus `GeneratedAssetDescriptor`. |
 | `GenerationJobWorker` and `GeneratedAssetPublisher` | Claim and execute jobs, monitor cancellation, persist outputs, store private files, publish Assets, complete or fail usage accounting, and clean up uncommitted files. |
 | `MusicGenerationController` | Authenticates the request, applies CSRF protection, validates workspace and project ownership through the shared job service, runs zero-cost preflight accounting, and creates the `music.generate` job. |
@@ -32,18 +32,13 @@ The job input JSON stores only normalized user intent. It does not store credent
 
 ## Provider status and extension path
 
-The branch deliberately does not fabricate a production music provider. The default configuration sets `MusicGeneration:Enabled` to `false`, uses `unconfigured` provider and model keys, and registers no `IMusicGenerationProvider`. A future provider integration must be explicitly implemented and registered in the API service container. It must also define its own server-only configuration, timeout handling, response parsing, output limits, safe failure mapping, and usage metadata policy.
+The production adapter targets the documented **Mubert AI Music API v3** public track contract. It submits `POST /api/v3/public/tracks` with a bounded text prompt, duration, format, bitrate, intensity, and mode; it polls the documented `GET /api/v3/public/tracks/{track}` resource until a generation URL is available; and it downloads that temporary URL immediately. Mubert generation is asynchronous and its API documentation also describes webhook notifications, so the adapter keeps provider operation status separate from the Taslim Generation Job status and can later replace polling with a verified callback coordinator without changing the browser contract.
 
-A provider implementation should follow this sequence:
+The adapter checks `MusicGeneration:Enabled`, the `mubert` provider key, and the server-only `MubertCustomerId` and `MubertAccessToken` values before making any request. It applies the linked job cancellation token, a bounded overall timeout, bounded transient retries, a bounded polling count, a 255-character provider prompt limit, and a bounded streamed output download. Mubert does not document a track-cancellation endpoint in the public v3 contract; cancellation therefore stops Taslim polling cooperatively and never fabricates a remote cancellation request.
 
-1. Check its server-side enablement and required credentials.
-2. Apply a linked timeout and preserve cancellation from the Generation Job worker.
-3. Submit only the normalized request or an internally built provider prompt.
-4. Parse the provider response into bounded audio bytes and a supported MIME/format pair.
-5. Return usage and latency metadata without returning raw provider payloads.
-6. Let the Music handler validate the final output and let the shared publisher persist it.
+The default development and production configuration registers the real adapter but leaves `MusicGeneration:Enabled` false and credentials empty. When enabled, the adapter returns only bounded audio bytes, a supported MIME/format pair, latency, and safe administrator-only metadata. It does not write to the database, select a workspace, publish Assets, or expose raw provider payloads. Mubert’s public documentation does not return authoritative per-generation pricing, so the adapter records no invented provider cost; customer charging remains zero.
 
-The foundation supports `audio/mpeg`, `audio/wav`, `audio/ogg`, `audio/mp4`, `audio/aac`, and `audio/flac`. A provider that returns another format must be rejected until the format is intentionally added to the server allowlist and the browser playback path is tested.
+The foundation supports `audio/mpeg`, `audio/wav`, `audio/ogg`, `audio/mp4`, `audio/aac`, and `audio/flac`. A provider that returns another format must be rejected until the format is intentionally added to the server allowlist and the browser playback path is tested. The Mubert adapter requests and accepts only `mp3` or `wav` and currently defaults to `mp3`.
 
 ## Assets and private storage
 
@@ -67,13 +62,13 @@ The `/create/music` experience has English, Arabic, and Kurdish Sorani translati
 
 ## Testing and migrations
 
-Focused API tests cover successful deterministic provider injection, private Asset publication, `UsageFeature.Music`, zero customer charge, bounded validation, and the safe unavailable-provider path. Frontend state tests cover job recognition, cancellability, safe result parsing, redaction of provider/model-shaped fields, and malformed result handling. These tests do not require a production provider.
+Focused API tests cover successful deterministic provider injection, private Asset publication and inline playback, workspace authorization, `UsageFeature.Music`, zero customer charge, bounded validation, and the safe unavailable-provider path. Mubert adapter tests cover documented request construction, polling, transient retry bounds, provider failure, timeout, and cooperative cancellation. Frontend state tests cover job recognition, cancellability, safe result parsing, redaction of provider/model-shaped fields, and malformed result handling.
 
 No database migration is required for this branch. The current domain model already contains `GenerationJobTypes.MusicGenerate`, `AssetTypes.Music`, and `UsageFeature.Music`, and the existing Generation Jobs, Assets, Stored Files, Asset representations, and Usage Transactions tables are sufficient for a single music output. Future provider-specific metadata must remain additive and server-only; it must not add provider secrets or raw payloads to the user-facing schema.
 
 ## Deferred work
 
-A production provider integration, provider-specific lyric moderation, waveform generation, loudness normalization, transcoding, stems, multi-track projects, editing, waveform visualization, playlisting, and customer billing remain outside this foundation. Each future feature should preserve the single logical Asset boundary and add a focused representation or related entity only when the product contract requires it.
+Provider-specific lyric moderation, waveform generation, loudness normalization, transcoding, stems, multi-track projects, editing, waveform visualization, playlisting, webhook callback coordination, and customer billing remain outside this branch. The Mubert adapter is production-ready at the server boundary but remains disabled until its account credentials and private storage configuration are supplied. Each future feature should preserve the single logical Asset boundary and add a focused representation or related entity only when the product contract requires it.
 
 ## References
 
