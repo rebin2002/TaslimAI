@@ -54,7 +54,8 @@ export function AdminOperationsView() {
   }, []);
 
   useEffect(() => {
-    void load(presetRange("thirtyDays"));
+    const timer = window.setTimeout(() => { void load(presetRange("thirtyDays")); }, 0);
+    return () => window.clearTimeout(timer);
   }, [load]);
 
   const applyPreset = (next: "today" | "sevenDays" | "thirtyDays") => {

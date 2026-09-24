@@ -51,7 +51,6 @@ async function forward(request: Request, context: RouteContext): Promise<Respons
     headers,
     redirect: "manual",
     cache: "no-store",
-    signal: request.signal,
   };
   if (bodyMethods.has(request.method)) {
     const body = await readBoundedBody(request);
@@ -62,8 +61,9 @@ async function forward(request: Request, context: RouteContext): Promise<Respons
   let upstream: Response;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
+  const upstreamSignal = AbortSignal.any([request.signal, controller.signal]);
   try {
-    upstream = await fetch(target, { ...init, signal: controller.signal });
+    upstream = await fetch(target, { ...init, signal: upstreamSignal });
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError")
       return Response.json({ error: { code: "API_TIMEOUT", message: "The service took too long to respond. Please try again." } }, { status: 504 });

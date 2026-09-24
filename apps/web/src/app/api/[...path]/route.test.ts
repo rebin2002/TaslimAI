@@ -75,7 +75,9 @@ describe("same-origin API proxy", () => {
 
     await POST(request, context(["conversations", "conversation-1", "messages", "stream"]));
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(init.signal).toBe(request.signal);
+    expect(init.signal).toBeDefined();
+    controller.abort();
+    expect(init.signal?.aborted).toBe(true);
     vi.unstubAllGlobals();
   });
 

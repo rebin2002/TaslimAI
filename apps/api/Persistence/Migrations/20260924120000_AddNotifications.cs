@@ -1,10 +1,14 @@
 using System;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
+using Taslim.Api.Persistence;
 
 #nullable disable
 
 namespace Taslim.Api.Persistence.Migrations
 {
+    [DbContext(typeof(TaslimDbContext))]
+    [Migration("20260924120000_AddNotifications")]
     /// <inheritdoc />
     public partial class AddNotifications : Migration
     {

@@ -14,7 +14,7 @@ const baseActivity = {
 };
 
 const baseAsset = {
-  id: "asset-1", workspaceId: "workspace-1", projectId: null, projectName: null, name: "Company overview", description: null, assetType: "document" as const, mimeType: "application/pdf", status: "Active" as const, hasFile: true, canPreview: true, createdAt: "2026-09-19T12:00:00.000Z", updatedAt: "2026-09-22T18:00:00.000Z", archivedAt: null, representations: [],
+  id: "asset-1", workspaceId: "workspace-1", projectId: null, projectName: null, name: "Company overview", description: null, assetType: "document" as const, mimeType: "application/pdf", status: "Active" as const, hasFile: true, canPreview: true, fileSizeBytes: null, sourceStudio: null, sourceJobTitle: null, createdAt: "2026-09-19T12:00:00.000Z", updatedAt: "2026-09-22T18:00:00.000Z", archivedAt: null, representations: [],
 };
 
 describe("homeDashboardState", () => {
