@@ -26,18 +26,18 @@ export function HomeComposer({ value, onChange, onSubmit, busy, projects, projec
   const { t } = useLocale();
   const fileInputRef = useRef<HTMLInputElement>(null);
   return (
-    <section className="home-composer" aria-labelledby="home-composer-title">
+    <div className="home-composer">
       <div className="home-composer-heading">
         <span className="home-composer-mark" aria-hidden="true">✦</span>
-        <h2 id="home-composer-title">{t("home.title")}</h2>
+        <div><p className="home-composer-kicker">{t("home.creationKicker")}</p><h2 id="home-composer-title">{t("home.creationTitle")}</h2></div>
       </div>
       <textarea
         className="home-composer-input"
         value={value}
         onChange={(event) => onChange(event.target.value)}
         onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); onSubmit(); } }}
-        placeholder={t("home.searchPlaceholder")}
-        aria-label={t("home.searchPlaceholder")}
+        placeholder={t("home.creationPlaceholder")}
+        aria-label={t("home.creationPlaceholder")}
         maxLength={20000}
         disabled={busy}
         rows={4}
@@ -49,7 +49,7 @@ export function HomeComposer({ value, onChange, onSubmit, busy, projects, projec
         <div className="home-composer-context">
           <label className="home-composer-control">
             <input ref={fileInputRef} className="home-composer-file-input visually-hidden" type="file" multiple accept=".pdf,.docx,.txt,.md,.csv,.xlsx,.jpg,.jpeg,.png,.webp" onChange={(event) => { onFilesChange(Array.from(event.target.files ?? [])); event.currentTarget.value = ""; }} disabled={busy} />
-            <Paperclip size={15} /> <span>{t("chat.attachFile")}</span>
+            <Paperclip size={15} /> <span>{t("home.attachAction")}</span>
           </label>
           <label className="home-composer-project">
             <span className="sr-only">{t("chat.projectSelector")}</span>
@@ -60,10 +60,10 @@ export function HomeComposer({ value, onChange, onSubmit, busy, projects, projec
             <ChevronDown size={14} aria-hidden="true" />
           </label>
         </div>
-        <button type="button" className="home-composer-submit" onClick={onSubmit} disabled={busy || !value.trim()} aria-label={t("chat.send")}>
-          <span>{t("chat.send")}</span><Send size={16} />
+        <button type="button" className="home-composer-submit" onClick={onSubmit} disabled={busy || !value.trim()} aria-label={t("home.createAction")}>
+          <span>{t("home.createAction")}</span><Send size={16} />
         </button>
       </div>
-    </section>
+    </div>
   );
 }

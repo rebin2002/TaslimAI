@@ -21,11 +21,12 @@ const project: Project = {
 describe("HomeComposer", () => {
   it("renders one multiline creation input with safe project and attachment controls", () => {
     const html = renderToStaticMarkup(<LocaleProvider><HomeComposer value="Plan a launch" onChange={vi.fn()} onSubmit={vi.fn()} busy={false} projects={[project]} projectId="" onProjectChange={vi.fn()} files={[]} onFilesChange={vi.fn()} onRemoveFile={vi.fn()} /></LocaleProvider>);
-    expect(html).toContain("What can Taslim help you create?");
-    expect(html).toContain("Describe what you want to create...");
+    expect(html).toContain("What would you like Taslim to create?");
+    expect(html).toContain("Describe a document, image, presentation, movie, research task, or anything else...");
     expect(html).toContain("textarea");
     expect(html).toContain("Launch plan");
-    expect(html).toContain("Attach file");
+    expect(html).toContain("+ Attach");
+    expect(html).toContain("Create");
     expect(html).not.toContain("Open Taslim Chat");
   });
 

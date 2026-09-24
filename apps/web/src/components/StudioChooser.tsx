@@ -15,12 +15,10 @@ function CompactStudioLauncher() {
   return (
     <section className="studio-chooser studio-chooser-compact" aria-labelledby="studio-chooser-title">
       <div className="studio-chooser-heading">
-        <div><h2 id="studio-chooser-title">{t("home.createPanelLabel")}</h2><p>{t("home.createSubtitle")}</p></div>
+        <div><p className="studio-section-kicker">{t("home.studiosKicker")}</p><h2 id="studio-chooser-title">{t("home.studiosTitle")}</h2></div>
         <Link href="/create" className="studio-view-all">{t("home.viewAll")} <ArrowUpRight size={14} /></Link>
       </div>
-      <div className="studio-launcher-grid">
-        {studios.map((studio) => <StudioTile key={studio.href} studio={studio} />)}
-      </div>
+      <div className="studio-launcher-grid">{studios.map((studio) => <StudioTile key={studio.href} studio={studio} />)}</div>
     </section>
   );
 }
@@ -44,5 +42,5 @@ function StudioCategorySection({ category }: Readonly<{ category: StudioCategory
 function StudioTile({ studio }: Readonly<{ studio: StudioItem }>) {
   const { t } = useLocale();
   const Icon = studio.icon;
-  return <Link href={studio.href} className="studio-card"><span className="studio-card-icon"><Icon size={18} strokeWidth={1.9} /></span><span className="studio-card-copy"><strong>{t(studio.labelKey)}</strong><small>{t(studio.descriptionKey)}</small></span></Link>;
+  return <Link href={studio.href} className="studio-card"><span className="studio-card-icon"><Icon size={18} strokeWidth={1.9} /></span><span className="studio-card-copy"><strong>{t(studio.labelKey)}</strong><small>{t(studio.descriptionKey)}</small></span><ArrowUpRight className="studio-card-arrow" size={13} /></Link>;
 }

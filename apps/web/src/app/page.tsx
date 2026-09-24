@@ -13,16 +13,17 @@ import { buildHomeRecentItems, hasInFlightActivity, type HomeRecentItem } from "
 
 const localeMap = { en: "en-US", ar: "ar", ku: "ku-Arab" } as const;
 const promptChips = [
-  { labelKey: "home.promptImage" },
+  { labelKey: "home.promptCampaign" },
   { labelKey: "home.promptResearch" },
   { labelKey: "home.promptPresentation" },
-  { labelKey: "home.promptDocument" },
+  { labelKey: "home.promptImage" },
 ] as const;
 type DashboardData = { projects: Project[]; conversations: Conversation[]; activity: ActivityItem[]; assets: Asset[] };
 
 function formatDate(value: string, locale: keyof typeof localeMap) {
   return new Intl.DateTimeFormat(localeMap[locale], { month: "short", day: "numeric" }).format(new Date(value));
 }
+
 export default function HomePage() {
   return <ProtectedPage><HomeDashboard /></ProtectedPage>;
 }
@@ -91,22 +92,26 @@ function HomeDashboard() {
   return (
     <div className="home-dashboard">
       <section className="home-greeting" aria-labelledby="home-title">
-        <h1 id="home-title">{t("home.welcome", { name: user?.displayName ?? "" })}</h1>
-        <p>{t("home.dashboardSubtitle")}</p>
+        <p className="home-greeting-line">{t("home.greeting", { name: user?.displayName ?? "" })}</p>
+        <h1 id="home-title">{t("home.mainQuestion")}</h1>
       </section>
 
-      <HomeComposer value={idea} onChange={(value) => { setIdea(value); if (askError) setAskError(""); }} onSubmit={() => void askTaslim()} busy={asking} projects={projects} projectId={projectId} onProjectChange={setProjectId} files={files} onFilesChange={(next) => setFiles((current) => [...current, ...next].slice(0, 5))} onRemoveFile={(index) => setFiles((current) => current.filter((_, itemIndex) => itemIndex !== index))} />
+      <section className="home-creation-surface" aria-labelledby="home-composer-title">
+        <div className="home-creation-orbit home-creation-orbit-one" aria-hidden="true" />
+        <div className="home-creation-orbit home-creation-orbit-two" aria-hidden="true" />
+        <HomeComposer value={idea} onChange={(value) => { setIdea(value); if (askError) setAskError(""); }} onSubmit={() => void askTaslim()} busy={asking} projects={projects} projectId={projectId} onProjectChange={setProjectId} files={files} onFilesChange={(next) => setFiles((current) => [...current, ...next].slice(0, 5))} onRemoveFile={(index) => setFiles((current) => current.filter((_, itemIndex) => itemIndex !== index))} />
+      </section>
       {askError && <p className="home-composer-error" role="alert">{askError}</p>}
 
-      <div className="home-prompt-chips" aria-label={t("home.quickActions")}>
-        {promptChips.map((chip) => <button type="button" key={chip.labelKey} onClick={() => setIdea(t(chip.labelKey))} disabled={asking}><Sparkles size={13} />{t(chip.labelKey)}</button>)}
+      <div className="home-prompt-chips" aria-label={t("home.inspirationLabel")}>
+        {promptChips.map((chip) => <button type="button" key={chip.labelKey} onClick={() => setIdea(t(chip.labelKey))} disabled={asking}><Sparkles size={12} />{t(chip.labelKey)}</button>)}
       </div>
 
-      <section className="home-studios" aria-label={t("home.createPanelLabel")}><StudioChooser compact /></section>
+      <section className="home-studios" aria-label={t("home.studiosTitle")}><StudioChooser compact /></section>
 
       <section className="home-continue" aria-labelledby="continue-work-title">
         <div className="home-section-heading home-continue-heading">
-          <div><h2 id="continue-work-title">{t("home.continueTitle")}</h2><p>{hasWorkingGeneration ? t("home.workInProgress") : t("home.continueDescription")}</p></div>
+          <div><p className="home-section-kicker">{t("home.continueKicker")}</p><h2 id="continue-work-title">{t("home.continueSectionTitle")}</h2><p>{hasWorkingGeneration ? t("home.workInProgress") : t("home.continueSubtitle")}</p></div>
           <Link href="/activity" className="home-view-all">{t("home.viewAll")} <ArrowUpRight size={14} /></Link>
         </div>
         {loadError && <div className="inline-error home-dashboard-error" role="alert">{loadError}</div>}
@@ -122,9 +127,10 @@ function RecentWorkCard({ item, locale, t }: { item: HomeRecentItem; locale: "en
   const kindLabel = item.kind === "project" ? t("navigation.projects") : item.kind === "conversation" ? t("chat.title") : item.kind === "activity" ? t(`activity.type.${item.jobType ?? "other"}`) : t(`assets.type.${item.assetType ?? "other"}`);
   const statusLabel = item.status ? t(`activity.status.${item.status.toLowerCase()}`) : null;
   const statusClass = item.status ? `home-status-${item.status.toLowerCase()}` : "";
-  return <Link href={item.href} className="home-recent-card">
+  const active = item.status === "Queued" || item.status === "Running";
+  return <Link href={item.href} className={`home-recent-card home-recent-card-${item.kind}`}>
     <span className={`home-recent-icon home-recent-icon-${item.kind}`}><Icon size={17} /></span>
-    <span className="home-recent-content"><span className="home-recent-meta"><span>{kindLabel}</span>{statusLabel && <span className={`home-work-status ${statusClass}`}>{statusLabel}</span>}</span><strong>{item.title}</strong><small>{formatDate(item.timestamp, locale)}{item.status && (item.status === "Queued" || item.status === "Running") && ` · ${item.progressPercent ?? 0}%`}</small>{item.status && (item.status === "Queued" || item.status === "Running") && <span className="home-progress"><span style={{ width: `${Math.max(0, Math.min(100, item.progressPercent ?? 0))}%` }} /></span>}</span>
+    <span className="home-recent-content"><span className="home-recent-meta"><span>{kindLabel}</span>{statusLabel && <span className={`home-work-status ${statusClass}`}>{statusLabel}</span>}</span><strong>{item.title}</strong><small>{formatDate(item.timestamp, locale)}{item.status && active && ` · ${item.progressPercent ?? 0}%`}</small>{active && <span className="home-progress"><span style={{ width: `${Math.max(0, Math.min(100, item.progressPercent ?? 0))}%` }} /></span>}</span>
     <ArrowUpRight className="home-recent-arrow" size={15} />
   </Link>;
 }
