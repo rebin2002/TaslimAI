@@ -869,7 +869,9 @@ public sealed class GenerationJobWorker(
             return exception switch
             {
                 VoiceRequestValidationException validation => validation.Code,
-                VoiceProviderUnavailableException or VoiceProviderTimeoutException => GenerationJobErrorCodes.VoiceProviderUnavailable,
+                VoiceProviderUnsupportedRequestException => GenerationJobErrorCodes.VoiceProviderUnsupportedRequest,
+                VoiceProviderUnavailableException or VoiceProviderTimeoutException or VoiceProviderConfigurationException => GenerationJobErrorCodes.VoiceProviderUnavailable,
+                VoiceLanguageUnsupportedException => GenerationJobErrorCodes.VoiceLanguageUnsupported,
                 VoiceProviderFailureException => GenerationJobErrorCodes.VoiceProviderFailed,
                 VoiceOutputInvalidException => GenerationJobErrorCodes.VoiceOutputInvalid,
                 FileStorageUnavailableException or FileStorageOperationException or FileUploadValidationException => GenerationJobErrorCodes.VoiceOutputStorageFailed,
@@ -948,7 +950,9 @@ public sealed class GenerationJobWorker(
         GenerationJobErrorCodes.MusicOutputStorageFailed => "The music was generated but could not be saved. Please try again.",
         GenerationJobErrorCodes.MusicCancelled => "The music generation was cancelled.",
         GenerationJobErrorCodes.VoiceProviderUnavailable => "Voice generation is temporarily unavailable. Please try again later.",
+        GenerationJobErrorCodes.VoiceProviderUnsupportedRequest => "This voice request is not supported. Please use shorter text or different settings.",
         GenerationJobErrorCodes.VoiceProviderFailed => "Voice generation could not be completed. Please try again.",
+        GenerationJobErrorCodes.VoiceLanguageUnsupported => "This language is not currently supported for voice generation.",
         GenerationJobErrorCodes.VoiceOutputInvalid => "The generated audio was invalid. Please try again.",
         GenerationJobErrorCodes.VoiceOutputStorageFailed => "The audio was generated but could not be saved. Please try again.",
         GenerationJobErrorCodes.VoiceRequestInvalid => "Please check the voice request and try again.",

@@ -4,9 +4,9 @@ Voice Studio is an authenticated speech-generation workflow at `/create/voice`. 
 
 ## Current provider status
 
-The production speech provider is intentionally **not configured** in this branch. `VoiceGenerationOptions.Enabled` defaults to `false`, and the registered `UnconfiguredVoiceGenerationProvider` fails safely without fabricating audio. A user can still submit a validated request and receive a durable job status. The worker marks the job as failed with `VOICE_PROVIDER_UNAVAILABLE`, records zero customer charge, and exposes only the safe unavailable message in the normal Voice Studio UI.
+The production speech adapter is implemented for OpenAI's Audio Speech endpoint and is **disabled by default**. When enabled with the existing `Ai:OpenAI` credentials, `OpenAiVoiceGenerationProvider` owns provider-specific authentication, request mapping, response parsing, timeout handling, bounded audio validation, and safe usage metadata. Provider and model details remain internal to the API; no controller, frontend component, asset publisher, or database entity depends on a provider SDK or provider-specific request shape. The registered `UnconfiguredVoiceGenerationProvider` remains the disabled fallback and fails safely without fabricating audio.
 
-A future provider adapter must implement `IVoiceGenerationProvider`. It owns provider-specific authentication, request mapping, response parsing, timeout handling, and provider usage metadata. No controller, frontend component, asset publisher, or database entity depends on a provider SDK or provider-specific request shape.
+OpenAI's published TTS language list includes English and Arabic but does not include Kurdish Sorani. Sorani remains available in the Voice Studio request contract and UI, but the OpenAI adapter rejects it before making a provider call with `VOICE_LANGUAGE_UNSUPPORTED`; it never claims native Sorani support or silently changes the requested language.
 
 ## Request and validation boundary
 
@@ -38,7 +38,7 @@ The existing `GET /api/assets/{id}/download` endpoint remains the authorization 
 
 ## Usage accounting
 
-Voice jobs use `UsageFeature.Voice`. Preflight estimated provider cost is zero until a production adapter and pricing policy are explicitly configured. `SafeUsageChargingService` keeps customer charge at zero. If a future provider reports internal cost metadata, it is retained for operational accounting and is not included in the normal user-facing job contract.
+Voice jobs use `UsageFeature.Voice`. OpenAI's speech response is binary and does not currently return authoritative token or cost usage in this adapter, so the ledger records the provider/model internally and stores character/byte counts in safe metadata. An operator may explicitly configure a per-million-character pricing policy; that value is recorded as **estimated** provider cost, never as provider-reported actual usage. `SafeUsageChargingService` keeps customer charge at zero. If an authoritative provider usage/cost payload becomes available, it can be passed through `VoiceProviderUsage` without changing the user-facing job contract.
 
 ## Localization and RTL
 
@@ -46,15 +46,13 @@ The route is localized in English, Arabic, and Kurdish Sorani. The existing `Loc
 
 ## Provider enablement checklist
 
-A future production adapter should be added without changing the route contract:
+The OpenAI adapter is enabled operationally only after configuration is verified:
 
-- Implement `IVoiceGenerationProvider` in a provider-specific adapter file.
-- Register the adapter alongside `UnconfiguredVoiceGenerationProvider`.
-- Add secret-backed provider configuration outside source control.
-- Set `VoiceGeneration:Enabled` and `VoiceGeneration:ProviderKey` only after configuration is verified.
-- Return validated audio bytes, a supported format, and non-sensitive `VoiceProviderUsage` values.
-- Add adapter contract tests for timeout, authentication failure, malformed output, and provider response parsing.
-- Add a pricing snapshot only when the provider's accounting policy is approved.
+- Set `Ai:OpenAI:Enabled=true` and provide `Ai:OpenAI:ApiKey` through secret-backed environment configuration, never source control.
+- Set `VoiceGeneration:Enabled=true`, `VoiceGeneration:ProviderKey=openai`, and keep the approved model such as `gpt-4o-mini-tts` in deployment configuration.
+- Preserve the `UnconfiguredVoiceGenerationProvider` fallback for disabled or incomplete environments.
+- Keep the provider contract tests for timeout, authentication/unavailable responses, malformed output, request mapping, and unsupported Kurdish Sorani.
+- Add a pricing snapshot only when the provider exposes authoritative usage/cost data or an explicitly approved pricing policy exists.
 
 ## Migration status
 
