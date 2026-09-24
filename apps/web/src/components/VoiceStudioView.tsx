@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { CheckCircle2, Download, Headphones, LoaderCircle, Mic2, RefreshCw, Volume2, XCircle } from "lucide-react";
 import { useAuth } from "@/components/AuthProvider";
@@ -15,13 +16,14 @@ const speakingStyles = ["conversational", "clear", "expressive", "calm"] as cons
 export function VoiceStudioView() {
   const { workspace } = useAuth();
   const { t } = useLocale();
+  const searchParams = useSearchParams();
   const [projects, setProjects] = useState<Project[]>([]);
   const [text, setText] = useState("");
   const [language, setLanguage] = useState<VoiceGenerationInput["language"]>("en");
   const [voiceStyle, setVoiceStyle] = useState<string>("neutral");
   const [speakingStyle, setSpeakingStyle] = useState<string>("clear");
   const [instructions, setInstructions] = useState("");
-  const [projectId, setProjectId] = useState("");
+  const [projectId, setProjectId] = useState(() => searchParams.get("projectId") ?? "");
   const [current, setCurrent] = useState<GenerationJob | null>(null);
   const [working, setWorking] = useState(false);
   const [loadingProjects, setLoadingProjects] = useState(true);
@@ -107,6 +109,8 @@ export function VoiceStudioView() {
   const isSuccess = current?.status === "Succeeded" && !!result?.assetId;
   const isFailure = current?.status === "Failed" || current?.status === "Cancelled";
   const unavailable = current?.errorCode === "VOICE_PROVIDER_UNAVAILABLE";
+  const unsupportedLanguage = current?.errorCode === "VOICE_LANGUAGE_UNSUPPORTED";
+  const cancelled = current?.errorCode === "VOICE_CANCELLED";
 
   return <div className="voice-studio-page">
     <div className="voice-studio-header">
@@ -126,7 +130,7 @@ export function VoiceStudioView() {
         </div>
         <details className="voice-optional-controls"><summary>{t("voice.moreOptions")}</summary><label className="field"><span>{t("voice.instructions")}</span><textarea value={instructions} onChange={(event) => setInstructions(event.target.value)} maxLength={3000} placeholder={t("voice.instructionsPlaceholder")} /></label></details>
         {error && <div className="form-error"><XCircle size={15} /> {error}</div>}
-        {isFailure && <div className={`form-error ${unavailable ? "voice-unavailable" : ""}`}><XCircle size={15} /> {unavailable ? t("voice.unavailable") : current?.errorMessage ?? t("voice.failedSafe")}</div>}
+        {isFailure && <div className={`form-error ${unavailable ? "voice-unavailable" : ""}`}><XCircle size={15} /> {unavailable ? t("voice.unavailable") : unsupportedLanguage ? t("voice.unsupportedLanguage") : cancelled ? t("voice.cancelled") : t("voice.failedSafe")}</div>}
         <button className="primary-button voice-generate-button" type="submit" disabled={working || text.trim().length < 1}><Volume2 size={16} /> {working ? t("voice.working") : t("voice.generate")}</button>
       </section>
       <aside className="account-card voice-studio-guidance"><Headphones size={26} /><h2>{t("voice.guidanceTitle")}</h2><p>{t("voice.guidanceText")}</p><ul><li>{t("voice.guidanceOne")}</li><li>{t("voice.guidanceTwo")}</li><li>{t("voice.guidanceThree")}</li></ul></aside>

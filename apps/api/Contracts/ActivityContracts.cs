@@ -58,7 +58,7 @@ public static class ActivityContractMapper
         "social.generate" => "social",
         "voice.generate" => "voice",
         "music.generate" => "music",
-        "movie.generate" => "movie",
+        "movie.generate" or "movie.quick.generate" or "movie.clip.generate" or "movie.assembly" => "movie",
         _ => "other",
     };
 

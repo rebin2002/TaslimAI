@@ -7,6 +7,7 @@ import { ArrowUpRight, Command, FileText, MessageSquare, Plus, Sparkles } from "
 import { departments } from "@/lib/data";
 import { useLocale } from "@/components/LocaleProvider";
 import { DepartmentSection } from "@/components/DepartmentSection";
+import { StudioChooser } from "@/components/StudioChooser";
 import { useAuth } from "@/components/AuthProvider";
 import { api } from "@/lib/api";
 
@@ -45,7 +46,7 @@ export default function HomePage() {
         </div>
       </section>
 
-      <section className="create-panel" aria-label="Create with Taslim">
+      <section className="create-panel" aria-label={t("home.createPanelLabel")}>
         <div className="create-panel-top">
           <span className="create-panel-icon"><Sparkles size={18} /></span>
           <input className="create-prompt-input" value={idea} onChange={(event) => setIdea(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void askTaslim(); }} placeholder={t("home.searchPlaceholder")} aria-label={t("home.searchPlaceholder")} />
@@ -53,7 +54,7 @@ export default function HomePage() {
         </div>
         <div className="create-panel-bottom">
           <div className="create-suggestions">
-            <button type="button"><FileText size={14} /> Draft something</button>
+            <Link href="/create" className="create-suggestion-link"><FileText size={14} /> {t("home.browseStudios")}</Link>
             <button type="button" onClick={() => void askTaslim()} disabled={asking}><MessageSquare size={14} /> {asking ? t("home.asking") : t("home.askTaslim")}</button>
           </div>
           <button type="button" className="create-submit" onClick={() => void askTaslim()} aria-label={t("home.chatCta")} disabled={asking}><ArrowUpRight size={18} /></button>
@@ -75,6 +76,8 @@ export default function HomePage() {
           <ArrowUpRight size={18} />
         </Link>
       </div>
+
+      <StudioChooser compact />
 
       <div id="departments" className="departments-heading"><div><p className="section-eyebrow">{t("home.explore")}</p><h2>{t("home.explore")}</h2></div><span className="department-count">06</span></div>
       <div className="departments-list">

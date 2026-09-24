@@ -156,6 +156,8 @@ export const departments: Department[] = [
 ];
 
 export const routeLabels: Record<string, string> = {
+  "/create": "navigation.create",
+  "/create/image": "navigation.imageStudio",
   "/create/voice": "navigation.voiceStudio",
   "/chat": "navigation.chat",
   "/projects": "navigation.projects",

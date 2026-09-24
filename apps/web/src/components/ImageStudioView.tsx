@@ -8,6 +8,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { CheckCircle2, Download, Image as ImageIcon, LoaderCircle, Palette, RefreshCw, Sparkles, XCircle } from "lucide-react";
 import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
+import { useSearchParams } from "next/navigation";
 import { api, type GenerationJob, type ImageGenerationInput, type Project } from "@/lib/api";
 import { canCancelImageJob, parseImageJobResult } from "@/lib/imageStudioState";
 
@@ -18,6 +19,7 @@ const qualities = ["standard", "high"] as const;
 export function ImageStudioView() {
   const { workspace } = useAuth();
   const { t } = useLocale();
+  const searchParams = useSearchParams();
   const [projects, setProjects] = useState<Project[]>([]);
   const [description, setDescription] = useState("");
   const [style, setStyle] = useState<string>("auto");
@@ -27,7 +29,7 @@ export function ImageStudioView() {
   const [mood, setMood] = useState("");
   const [background, setBackground] = useState("");
   const [textInImage, setTextInImage] = useState("");
-  const [projectId, setProjectId] = useState("");
+  const [projectId, setProjectId] = useState(() => searchParams.get("projectId") ?? "");
   const [current, setCurrent] = useState<GenerationJob | null>(null);
   const [working, setWorking] = useState(false);
   const [loadingProjects, setLoadingProjects] = useState(true);

@@ -84,7 +84,7 @@ public sealed record MusicProviderUsage(
     decimal? ActualCostUsd,
     int LatencyMs,
     string FinishReason = "completed",
-    string CostBasis = UsageCostBasis.Estimated,
+    string? CostBasis = UsageCostBasis.Estimated,
     string? SafeMetadataJson = null);
 
 public sealed record MusicProviderResult(

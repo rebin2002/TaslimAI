@@ -100,6 +100,42 @@ public sealed class MusicGenerationTests : IClassFixture<MusicGenerationApiFacto
     }
 
     [Fact]
+    public async Task Music_asset_supports_authenticated_inline_playback_and_is_workspace_isolated()
+    {
+        using var owner = factory.CreateClient();
+        var ownerAuth = await Register(owner, $"music-playback-{Guid.NewGuid():N}@example.com");
+        var response = await SendWithCsrf(owner, HttpMethod.Post, "/api/music-generation/jobs", new
+        {
+            workspaceId = ownerAuth.PersonalWorkspace.Id,
+            description = "A short instrumental cue",
+            purpose = "Inline playback authorization test",
+            genre = "ambient",
+            mood = "focused",
+            durationSeconds = 30,
+            vocalPreference = "instrumental",
+            language = "auto",
+        });
+        var created = (await response.Content.ReadFromJsonAsync<CreateMusicGenerationResponse>())!;
+        var completed = await WaitForTerminal(owner, created.Job.Id);
+        Assert.Equal("Succeeded", completed.Status);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var asset = await db.Assets.AsNoTracking().SingleAsync(item => item.SourceGenerationJobId == created.Job.Id);
+
+        var playback = await owner.GetAsync($"/api/assets/{asset.Id}/download?inline=true");
+        Assert.Equal(HttpStatusCode.OK, playback.StatusCode);
+        Assert.Equal("audio/mpeg", playback.Content.Headers.ContentType?.MediaType);
+        Assert.Equal("deterministic music", await playback.Content.ReadAsStringAsync());
+        var usage = await db.UsageTransactions.AsNoTracking().SingleAsync(item => item.GenerationJobId == created.Job.Id);
+        Assert.Equal(0m, usage.ChargedAmount);
+
+        using var other = factory.CreateClient();
+        await Register(other, $"music-other-{Guid.NewGuid():N}@example.com");
+        Assert.Equal(HttpStatusCode.NotFound, (await other.GetAsync($"/api/assets/{asset.Id}/download?inline=true")).StatusCode);
+    }
+
+    [Fact]
     public async Task Music_validation_rejects_unsupported_controls_before_queueing()
     {
         using var client = factory.CreateClient();

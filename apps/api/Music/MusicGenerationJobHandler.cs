@@ -116,7 +116,7 @@ public static class MusicOutputInspector
 
     public static MusicOutputInfo Validate(MusicProviderResult result, int maxOutputBytes)
     {
-        if (result.Content.Length <= 0 || result.Content.Length > Math.Min(10 * 1_048_576, Math.Max(1, maxOutputBytes)))
+        if (result.Content.Length <= 0 || result.Content.Length > Math.Min(25 * 1_048_576, Math.Max(1, maxOutputBytes)))
             throw new MusicOutputInvalidException();
         if (string.IsNullOrWhiteSpace(result.ContentType) || !Supported.TryGetValue(result.ContentType.Trim(), out var expectedFormat))
             throw new MusicOutputInvalidException();

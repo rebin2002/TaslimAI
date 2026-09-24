@@ -59,6 +59,60 @@ public sealed class ProjectsController(TaslimDbContext db, WorkspaceAccessServic
         return Ok(ToDto(project));
     }
 
+    [HttpGet("api/projects/{projectId:guid}/overview")]
+    public async Task<IActionResult> Overview(Guid projectId, CancellationToken cancellationToken)
+    {
+        var userId = GetUserId();
+        var project = await db.Projects.AsNoTracking().FirstOrDefaultAsync(item => item.Id == projectId, cancellationToken);
+        if (project is null) return ApiResults.Error(this, 404, "PROJECT_NOT_FOUND", "Project not found.");
+
+        var membership = await access.GetMembershipAsync(userId, project.WorkspaceId, cancellationToken);
+        if (membership is null) return Forbid();
+
+        var workspace = await db.Workspaces.AsNoTracking().FirstOrDefaultAsync(item => item.Id == project.WorkspaceId, cancellationToken);
+        if (workspace is null) return ApiResults.Error(this, 404, "WORKSPACE_NOT_FOUND", "Workspace not found.");
+
+        var files = db.StoredFiles.AsNoTracking()
+            .Where(file => file.ProjectId == projectId && file.WorkspaceId == project.WorkspaceId && file.Status != StoredFileStatus.Deleted);
+        var assets = db.Assets.AsNoTracking()
+            .Where(asset => asset.ProjectId == projectId && asset.WorkspaceId == project.WorkspaceId && asset.Status == AssetStatus.Active);
+        var conversations = db.Conversations.AsNoTracking()
+            .Where(conversation => conversation.ProjectId == projectId && conversation.WorkspaceId == project.WorkspaceId && conversation.UserId == userId);
+        var activity = db.GenerationJobs.AsNoTracking()
+            .Where(job => job.ProjectId == projectId && job.WorkspaceId == project.WorkspaceId);
+
+        var counts = new ProjectOverviewCountsDto(
+            await files.CountAsync(cancellationToken),
+            await assets.CountAsync(cancellationToken),
+            await conversations.CountAsync(cancellationToken),
+            await activity.CountAsync(cancellationToken));
+
+        var recentConversations = await conversations
+            .OrderByDescending(item => item.UpdatedAt)
+            .Take(8)
+            .Select(item => new ConversationDto(item.Id, item.WorkspaceId, item.ProjectId, item.Title, item.Status.ToString(), item.CreatedAt, item.UpdatedAt, item.LastMessageAt))
+            .ToListAsync(cancellationToken);
+
+        var recentActivity = await activity
+            .OrderByDescending(item => item.CreatedAt)
+            .Take(8)
+            .Select(item => new
+            {
+                Job = item,
+                IsRead = db.ActivityReadStates.Any(read => read.UserId == userId && read.GenerationJobId == item.Id),
+                AssetId = db.Assets.Where(asset => asset.SourceGenerationJobId == item.Id).Select(asset => (Guid?)asset.Id).FirstOrDefault(),
+            })
+            .ToListAsync(cancellationToken);
+
+        var workspaceDto = new WorkspaceSummaryDto(workspace.Id, workspace.Name, workspace.Slug, workspace.Type.ToString(), membership.Role.ToString());
+        return Ok(new ProjectOverviewDto(
+            ToDto(project),
+            workspaceDto,
+            counts,
+            recentConversations,
+            recentActivity.Select(item => ActivityContractMapper.ToDto(item.Job, item.IsRead, item.AssetId)).ToArray()));
+    }
+
     [HttpPatch("api/projects/{projectId:guid}")]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Update(Guid projectId, UpdateProjectRequest request, CancellationToken cancellationToken)

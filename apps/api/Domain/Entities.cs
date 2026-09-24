@@ -14,6 +14,17 @@ public static class LanguageCodes
     };
 }
 
+public static class OutputPreferences
+{
+    public const string Concise = "concise";
+    public const string Balanced = "balanced";
+    public const string Detailed = "detailed";
+    public static readonly IReadOnlySet<string> Supported = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        Concise, Balanced, Detailed,
+    };
+}
+
 public enum WorkspaceType
 {
     Personal,
@@ -172,6 +183,8 @@ public static class GenerationJobErrorCodes
 public const string MovieProviderUnavailable = "MOVIE_PROVIDER_UNAVAILABLE";
     public const string MovieCancelled = "MOVIE_CANCELLED";
     public const string MovieGenerationFailed = "MOVIE_GENERATION_FAILED";
+    public const string MovieOutputInvalid = "MOVIE_OUTPUT_INVALID";
+    public const string MovieOutputStorageFailed = "MOVIE_OUTPUT_STORAGE_FAILED";
 public const string MusicRequestInvalid = "MUSIC_REQUEST_INVALID";
     public const string MusicGenreUnsupported = "MUSIC_GENRE_UNSUPPORTED";
     public const string MusicMoodUnsupported = "MUSIC_MOOD_UNSUPPORTED";
@@ -187,6 +200,8 @@ public const string MusicRequestInvalid = "MUSIC_REQUEST_INVALID";
 public const string VoiceRequestInvalid = "VOICE_REQUEST_INVALID";
     public const string VoiceProviderUnavailable = "VOICE_PROVIDER_UNAVAILABLE";
     public const string VoiceProviderFailed = "VOICE_PROVIDER_FAILED";
+    public const string VoiceProviderUnsupportedRequest = "VOICE_PROVIDER_UNSUPPORTED_REQUEST";
+    public const string VoiceLanguageUnsupported = "VOICE_LANGUAGE_UNSUPPORTED";
     public const string VoiceOutputInvalid = "VOICE_OUTPUT_INVALID";
     public const string VoiceOutputStorageFailed = "VOICE_OUTPUT_STORAGE_FAILED";
     public const string VoiceCancelled = "VOICE_CANCELLED";
@@ -293,6 +308,10 @@ public sealed class ApplicationUser : IdentityUser<Guid>
 {
     public string DisplayName { get; set; } = string.Empty;
     public string PreferredLanguage { get; set; } = LanguageCodes.English;
+    public string DefaultGenerationLanguage { get; set; } = LanguageCodes.English;
+    public string TimeZone { get; set; } = "UTC";
+    public string OutputPreference { get; set; } = OutputPreferences.Balanced;
+    public bool IncludeSourceLinks { get; set; } = true;
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
     public DateTime? LastLoginAt { get; set; }

@@ -7,6 +7,7 @@ using Taslim.Api.Persistence;
 namespace Taslim.Api.Assets;
 
 public sealed record GeneratedFileArtifact(string FileName, string ContentType, ReadOnlyMemory<byte> Content, string? MetadataJson = null, string? RepresentationType = null);
+public sealed record GeneratedStreamFileArtifact(string FileName, string ContentType, long SizeBytes, Func<CancellationToken, Task<Stream>> OpenReadAsync, string? MetadataJson = null);
 public sealed record GeneratedAssetDescriptor(string Name, string? Description, string AssetType, string? MetadataJson = null);
 public sealed record PreparedGenerationOutput(GenerationJobOutput Output, Asset? Asset, StoredFile? CreatedFile);
 
@@ -34,6 +35,20 @@ public sealed class GeneratedAssetPublisher(TaslimDbContext db, FileProcessingSe
                 output.FileArtifact.ContentType,
                 output.FileArtifact.Content,
                 output.FileArtifact.MetadataJson,
+                cancellationToken);
+            storedFileId = createdFile.Id;
+        }
+        else if (output.StreamArtifact is not null)
+        {
+            createdFile = await files.StoreGeneratedStreamAsync(
+                job.WorkspaceId,
+                job.CreatedByUserId,
+                job.ProjectId,
+                output.StreamArtifact.FileName,
+                output.StreamArtifact.ContentType,
+                output.StreamArtifact.SizeBytes,
+                output.StreamArtifact.OpenReadAsync,
+                output.StreamArtifact.MetadataJson,
                 cancellationToken);
             storedFileId = createdFile.Id;
         }

@@ -77,5 +77,21 @@ public sealed class MovieStudioController(IMovieStudioService movies) : Controll
         catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_SHOT_INVALID", exception.Message); }
     }
 
+    [HttpPost("projects/{id:guid}/scenes/{sceneId:guid}/generate")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> GenerateScene(Guid id, Guid sceneId, MovieStudioGenerationRequest request, CancellationToken cancellationToken)
+    {
+        var result = await movies.GenerateSceneAsync(GetUserId(), id, sceneId, request, cancellationToken);
+        return result is null ? ApiResults.Error(this, 404, "MOVIE_SCENE_NOT_FOUND", "Movie scene not found.") : Accepted(result);
+    }
+
+    [HttpPost("shots/{shotId:guid}/generate")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> GenerateShot(Guid shotId, MovieStudioGenerationRequest request, CancellationToken cancellationToken)
+    {
+        var result = await movies.GenerateShotAsync(GetUserId(), shotId, request, cancellationToken);
+        return result is null ? ApiResults.Error(this, 404, "MOVIE_SHOT_NOT_FOUND", "Movie shot not found.") : Accepted(result);
+    }
+
     private Guid GetUserId() => Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier) ?? throw new InvalidOperationException("Authenticated user identifier is missing."));
 }

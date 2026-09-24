@@ -8,6 +8,10 @@ export type User = {
   preferredLanguage: "en" | "ar" | "ku";
   personalWorkspaceId: string;
   createdAt: string;
+  defaultGenerationLanguage: "en" | "ar" | "ku";
+  timeZone: string;
+  outputPreference: "concise" | "balanced" | "detailed";
+  includeSourceLinks: boolean;
 };
 
 export type Workspace = {
@@ -42,9 +46,25 @@ export type Project = {
   archivedAt: string | null;
 };
 
+export type ProjectOverview = {
+  project: Project;
+  workspace: Workspace;
+  counts: { files: number; assets: number; conversations: number; activity: number };
+  conversations: Conversation[];
+  recentActivity: ActivityItem[];
+};
+
 export type RegisterInput = { displayName: string; email: string; password: string; preferredLanguage?: string };
 export type LoginInput = { email: string; password: string };
-export type ProfileInput = { displayName: string; preferredLanguage: string };
+export type ProfileInput = {
+  displayName: string;
+  preferredLanguage: string;
+  defaultGenerationLanguage?: string;
+  timeZone?: string;
+  outputPreference?: "concise" | "balanced" | "detailed";
+  includeSourceLinks?: boolean;
+};
+export type ChangePasswordInput = { currentPassword: string; newPassword: string };
 export type ProjectInput = { name: string; description?: string; instructions?: string; contextNotes?: string; type?: string };
 export type PersonalMemory = {
   id: string;
@@ -132,11 +152,14 @@ export type UsageTransaction = {
 };
 export type UsageHistory = { items: UsageTransaction[]; page: number; pageSize: number; totalCount: number; totalPages: number };
 export type BillingPlan = { code: string; name: string; monthlyPriceUsd: number; monthlyCreditAllowance: number; currency: string };
+export type BillingPlanOption = BillingPlan & { isCurrent: boolean };
 export type BillingSubscription = { status: string; currentPeriodStart: string; currentPeriodEnd: string; nextRenewalAt: string; cancelAtPeriodEnd: boolean };
 export type BillingPeriod = { id: string; status: string; startsAt: string; endsAt: string; includedCredits: number };
 export type BillingCredits = { includedGranted: number; includedRemaining: number; purchasedRemaining: number; adjustmentBalance: number; totalRemaining: number };
 export type CreditLedgerEntry = { id: string; type: string; amount: number; reason: string; createdAt: string };
-export type BillingAccount = { currentPlan: BillingPlan; subscription: BillingSubscription; billingPeriod: BillingPeriod; credits: BillingCredits; transactions: CreditLedgerEntry[]; upgradeAvailable: boolean };
+export type BillingPaymentStatus = { status: string; provider: string | null; lastFailureReason: string | null; lastPaymentAt: string | null };
+export type BillingActions = { checkoutAvailable: boolean; upgradeAvailable: boolean; downgradeAvailable: boolean; cancelAvailable: boolean; disabledReason: string };
+export type BillingAccount = { currentPlan: BillingPlan; subscription: BillingSubscription; billingPeriod: BillingPeriod; credits: BillingCredits; transactions: CreditLedgerEntry[]; availablePlans: BillingPlanOption[]; paymentStatus: BillingPaymentStatus; actions: BillingActions };
 export type AdminUsageSummary = {
   fromUtc: string;
   toUtc: string;
@@ -186,14 +209,14 @@ export type GenerationJob = {
 };
 export type GenerationJobList = { items: GenerationJob[]; page: number; pageSize: number; totalCount: number; totalPages: number };
 export type MovieGuide = { id: string; visualLanguage: string; cameraLanguage: string; colorAndLighting: string; soundAndNarration: string; continuityRules: string; updatedAt: string };
-export type MovieScene = { id: string; sequence: number; title: string; summary: string; durationSeconds: number | null; continuityNotes: string | null; narration: string | null; dialogue: string | null; shots: MovieShot[] };
+export type MovieScene = { id: string; sequence: number; title: string; summary: string; durationSeconds: number | null; continuityNotes: string | null; narration: string | null; dialogue: string | null; shots: MovieShot[]; clips: MovieClip[] };
 export type MovieShot = { id: string; sequence: number; description: string; cameraAndFraming: string | null; cameraMotion: string | null; durationSeconds: number | null; narration: string | null; dialogue: string | null; visualContinuityNotes: string | null; clips: MovieClip[] };
 export type MovieCharacter = { id: string; name: string; description: string; appearance: string | null; voiceAndPerformance: string | null; continuityNotes: string | null; referenceAssetId: string | null };
 export type MovieLocation = { id: string; name: string; description: string; visualContinuityNotes: string | null; referenceAssetId: string | null };
-export type MovieClip = { id: string; movieShotId: string | null; generationJobId: string | null; assetId: string | null; status: string; providerKey: string | null; durationSeconds: number | null; metadataJson: string | null };
+export type MovieClip = { id: string; movieSceneId: string | null; movieShotId: string | null; generationJobId: string | null; assetId: string | null; status: string; durationSeconds: number | null; metadataJson: string | null; continuitySnapshotJson: string | null };
 export type MovieAssembly = { id: string; generationJobId: string | null; assetId: string | null; status: string; outputFormat: string; metadataJson: string | null; createdAt: string; completedAt: string | null };
-export type MovieProject = { id: string; workspaceId: string; projectId: string | null; mode: "Quick" | "Full"; status: string; title: string; description: string; durationSeconds: number; aspectRatio: string; style: string; language: string; additionalInstructions: string | null; createdAt: string; updatedAt: string; guide: MovieGuide; scenes: MovieScene[]; characters: MovieCharacter[]; locations: MovieLocation[]; assemblies: MovieAssembly[] };
-export type MovieProviderReadiness = { ready: boolean; providerKey: string | null; supportedOperations: string[] };
+export type MovieProject = { id: string; workspaceId: string; projectId: string | null; mode: "Quick" | "Full"; status: string; title: string; description: string; durationSeconds: number; aspectRatio: string; style: string; language: string; additionalInstructions: string | null; createdAt: string; updatedAt: string; guide: MovieGuide; scenes: MovieScene[]; characters: MovieCharacter[]; locations: MovieLocation[]; clips: MovieClip[]; assemblies: MovieAssembly[] };
+export type MovieProviderReadiness = { ready: boolean; supportedOperations: string[] };
 export type MovieStudioResponse = { project: MovieProject; job: GenerationJob | null };
 export type MovieStudioCreateInput = { workspaceId: string; projectId?: string | null; mode: "Quick" | "Full"; title: string; description: string; durationSeconds: number; aspectRatio: string; style: string; language: string; additionalInstructions?: string | null; visualLanguage?: string | null; cameraLanguage?: string | null; colorAndLighting?: string | null; soundAndNarration?: string | null; continuityRules?: string | null };
 export type ActivityItem = {
@@ -490,10 +513,13 @@ export const api = {
   login: async (input: LoginInput) => { const result = await request<AuthResponse>("/api/auth/login", { method: "POST", body: JSON.stringify(input) }, true); csrfToken = null; await csrf(true); return result; },
   logout: async () => { const result = await request<{ success: boolean }>("/api/auth/logout", { method: "POST" }, true); csrfToken = null; await csrf(true); return result; },
   updateProfile: (input: ProfileInput) => request<AuthResponse>("/api/auth/profile", { method: "PATCH", body: JSON.stringify(input) }, true),
+  changePassword: (input: ChangePasswordInput) => request<{ success: boolean }>("/api/auth/password", { method: "POST", body: JSON.stringify(input) }, true),
   listProjects: (workspaceId: string, status: "Active" | "Archived") => request<Project[]>(`/api/workspaces/${workspaceId}/projects?status=${status}`),
+  listWorkspaces: () => request<Workspace[]>('/api/workspaces'),
   getWorkspace: (workspaceId: string) => request<Workspace>(`/api/workspaces/${workspaceId}`),
   createProject: (workspaceId: string, input: ProjectInput) => request<Project>(`/api/workspaces/${workspaceId}/projects`, { method: "POST", body: JSON.stringify(input) }, true),
   getProject: (projectId: string) => request<Project>(`/api/projects/${projectId}`),
+  getProjectOverview: (projectId: string) => request<ProjectOverview>(`/api/projects/${projectId}/overview`),
   updateProject: (projectId: string, input: ProjectInput) => request<Project>(`/api/projects/${projectId}`, { method: "PATCH", body: JSON.stringify(input) }, true),
   archiveProject: (projectId: string) => request<Project>(`/api/projects/${projectId}/archive`, { method: "POST" }, true),
   restoreProject: (projectId: string) => request<Project>(`/api/projects/${projectId}/restore`, { method: "POST" }, true),
@@ -527,6 +553,8 @@ export const api = {
   addMovieScene: (id: string, input: { title: string; summary: string; durationSeconds?: number | null; continuityNotes?: string | null; narration?: string | null; dialogue?: string | null }) => request<MovieScene>(`/api/movie-studio/projects/${id}/scenes`, { method: "POST", body: JSON.stringify(input) }, true),
   addMovieCharacter: (id: string, input: { name: string; description: string; appearance?: string | null; voiceAndPerformance?: string | null; continuityNotes?: string | null; referenceAssetId?: string | null }) => request<MovieCharacter>(`/api/movie-studio/projects/${id}/characters`, { method: "POST", body: JSON.stringify(input) }, true),
   addMovieLocation: (id: string, input: { name: string; description: string; visualContinuityNotes?: string | null; referenceAssetId?: string | null }) => request<MovieLocation>(`/api/movie-studio/projects/${id}/locations`, { method: "POST", body: JSON.stringify(input) }, true),
+  generateMovieScene: (projectId: string, sceneId: string, input: { title?: string | null } = {}) => request<{ project: MovieProject; job: GenerationJob; clipId: string }>(`/api/movie-studio/projects/${projectId}/scenes/${sceneId}/generate`, { method: "POST", body: JSON.stringify(input) }, true),
+  generateMovieShot: (shotId: string, input: { title?: string | null } = {}) => request<{ project: MovieProject; job: GenerationJob; clipId: string }>(`/api/movie-studio/shots/${shotId}/generate`, { method: "POST", body: JSON.stringify(input) }, true),
   createMusicGenerationJob: (input: MusicGenerationInput) => request<{ job: GenerationJob }>("/api/music-generation/jobs", { method: "POST", body: JSON.stringify(input) }, true).then((response) => response.job),
   getGenerationJob: (jobId: string) => request<GenerationJob>(`/api/generation/jobs/${jobId}`),
   getResearchSources: (jobId: string) => request<{ jobId: string; sources: ResearchSource[] }>(`/api/research-generation/jobs/${jobId}/sources`),

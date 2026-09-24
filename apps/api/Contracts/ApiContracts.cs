@@ -26,7 +26,11 @@ public sealed record UserDto(
     string DisplayName,
     string PreferredLanguage,
     Guid PersonalWorkspaceId,
-    DateTime CreatedAt);
+    DateTime CreatedAt,
+    string DefaultGenerationLanguage = LanguageCodes.English,
+    string TimeZone = "UTC",
+    string OutputPreference = OutputPreferences.Balanced,
+    bool IncludeSourceLinks = true);
 
 public sealed record WorkspaceSummaryDto(Guid Id, string Name, string Slug, string Type, string Role);
 
@@ -63,6 +67,26 @@ public sealed class UpdateProfileRequest
 
     [Required, StringLength(5)]
     public string PreferredLanguage { get; set; } = LanguageCodes.English;
+
+    [StringLength(5)]
+    public string? DefaultGenerationLanguage { get; set; }
+
+    [StringLength(100)]
+    public string? TimeZone { get; set; }
+
+    [StringLength(32)]
+    public string? OutputPreference { get; set; }
+
+    public bool? IncludeSourceLinks { get; set; }
+}
+
+public sealed class ChangePasswordRequest
+{
+    [Required]
+    public string CurrentPassword { get; set; } = string.Empty;
+
+    [Required]
+    public string NewPassword { get; set; } = string.Empty;
 }
 
 public sealed record ProjectDto(
@@ -77,6 +101,19 @@ public sealed record ProjectDto(
     DateTime CreatedAt,
     DateTime UpdatedAt,
     DateTime? ArchivedAt);
+
+public sealed record ProjectOverviewCountsDto(
+    int Files,
+    int Assets,
+    int Conversations,
+    int Activity);
+
+public sealed record ProjectOverviewDto(
+    ProjectDto Project,
+    WorkspaceSummaryDto Workspace,
+    ProjectOverviewCountsDto Counts,
+    IReadOnlyList<ConversationDto> Conversations,
+    IReadOnlyList<ActivityItemDto> RecentActivity);
 
 public sealed class CreateProjectRequest
 {

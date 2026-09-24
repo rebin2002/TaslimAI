@@ -118,6 +118,50 @@ public sealed class IdentityProjectsTests : IClassFixture<TaslimApiFactory>
     }
 
     [Fact]
+    public async Task Project_overview_returns_project_resources_activity_and_user_conversations()
+    {
+        using var owner = factory.CreateClient();
+        var authResponse = await Register(owner, "Overview Owner", $"overview-{Guid.NewGuid():N}@example.com");
+        var auth = await authResponse.Content.ReadFromJsonAsync<AuthResponse>();
+        Assert.NotNull(auth);
+        var project = await SendWithCsrf<ProjectDto>(owner, HttpMethod.Post, $"/api/workspaces/{auth.PersonalWorkspace.Id}/projects", new { name = "Overview Project", type = "Business" });
+        var conversation = await SendWithCsrf<ConversationDto>(owner, HttpMethod.Post, $"/api/workspaces/{auth.PersonalWorkspace.Id}/conversations", new { projectId = project.Id, title = "Project planning" });
+        var job = await SendWithCsrf<GenerationJobDto>(owner, HttpMethod.Post, "/api/generation/jobs", new { workspaceId = auth.PersonalWorkspace.Id, projectId = project.Id, jobType = "system.test", inputJson = "{}", title = "Project output" });
+
+        var overview = await owner.GetFromJsonAsync<ProjectOverviewDto>($"/api/projects/{project.Id}/overview");
+        Assert.NotNull(overview);
+        Assert.Equal(project.Id, overview!.Project.Id);
+        Assert.Equal(auth.PersonalWorkspace.Id, overview.Workspace.Id);
+        Assert.Equal("Owner", overview.Workspace.Role);
+        Assert.Equal(1, overview.Counts.Conversations);
+        Assert.Equal(1, overview.Counts.Activity);
+        Assert.Contains(overview.Conversations, item => item.Id == conversation.Id);
+        Assert.Contains(overview.RecentActivity, item => item.JobId == job.Id && item.ProjectId == project.Id);
+
+        var workspaces = await owner.GetFromJsonAsync<List<WorkspaceSummaryDto>>("/api/workspaces");
+        Assert.Contains(workspaces!, item => item.Id == auth.PersonalWorkspace.Id && item.Role == "Owner" && item.Type == "Personal");
+    }
+
+    [Fact]
+    public async Task Project_overview_does_not_cross_workspace_boundaries()
+    {
+        using var first = factory.CreateClient();
+        var firstAuthResponse = await Register(first, "Overview First", $"overview-first-{Guid.NewGuid():N}@example.com");
+        var firstAuth = await firstAuthResponse.Content.ReadFromJsonAsync<AuthResponse>();
+        Assert.NotNull(firstAuth);
+        var project = await SendWithCsrf<ProjectDto>(first, HttpMethod.Post, $"/api/workspaces/{firstAuth.PersonalWorkspace.Id}/projects", new { name = "Private Overview" });
+
+        using var second = factory.CreateClient();
+        var secondAuthResponse = await Register(second, "Overview Second", $"overview-second-{Guid.NewGuid():N}@example.com");
+        var secondAuth = await secondAuthResponse.Content.ReadFromJsonAsync<AuthResponse>();
+        Assert.NotNull(secondAuth);
+        Assert.Equal(HttpStatusCode.Forbidden, (await second.GetAsync($"/api/projects/{project.Id}/overview")).StatusCode);
+        var workspaces = await second.GetFromJsonAsync<List<WorkspaceSummaryDto>>("/api/workspaces");
+        Assert.DoesNotContain(workspaces!, item => item.Id == firstAuth.PersonalWorkspace.Id);
+        Assert.Contains(workspaces!, item => item.Id == secondAuth!.PersonalWorkspace.Id);
+    }
+
+    [Fact]
     public async Task Another_user_cannot_read_or_create_in_a_private_workspace()
     {
         using var first = factory.CreateClient();

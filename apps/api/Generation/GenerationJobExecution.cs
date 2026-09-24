@@ -63,7 +63,8 @@ public sealed record GenerationHandlerOutput(
     Guid? StoredFileId,
     string? MetadataJson,
     GeneratedFileArtifact? FileArtifact = null,
-    GeneratedAssetDescriptor? Asset = null);
+    GeneratedAssetDescriptor? Asset = null,
+    GeneratedStreamFileArtifact? StreamArtifact = null);
 public sealed record GenerationHandlerResult(string ResultJson, IReadOnlyList<GenerationHandlerOutput> Outputs, AiUsageMetadata? Usage = null);
 
 public interface IGenerationJobHandler
@@ -250,6 +251,9 @@ public sealed class GenerationJobService(
                 .SetProperty(item => item.CancelledAt, now), cancellationToken);
         if (immediate > 0)
         {
+            if (GenerationJobTypes.MovieTypes.Contains(job.JobType))
+                await db.MovieClips.Where(clip => clip.GenerationJobId == job.Id)
+                    .ExecuteUpdateAsync(setters => setters.SetProperty(clip => clip.Status, MovieClipStatuses.Cancelled).SetProperty(clip => clip.UpdatedAt, now), cancellationToken);
             await CancelUsageAsync(job, CancellationCode(job), cancellationToken);
             return GenerationJobCancelResult.Cancelled;
         }
@@ -393,6 +397,7 @@ public sealed class GenerationJobWorker(
         var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
         var usage = scope.ServiceProvider.GetRequiredService<IGenerationJobUsageService>();
         var publisher = scope.ServiceProvider.GetRequiredService<IGeneratedAssetPublisher>();
+        var movieExecutions = scope.ServiceProvider.GetRequiredService<MovieVideoExecutionStore>();
         using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
         var monitor = MonitorCancellationAsync(db, claimedJob.Id, cancellation, stoppingToken);
         var publications = new List<PreparedGenerationOutput>();
@@ -508,11 +513,18 @@ public sealed class GenerationJobWorker(
                 return;
             }
             publicationCommitted = true;
+            if (GenerationJobTypes.MovieTypes.Contains(claimedJob.JobType))
+            {
+                var publication = publications.FirstOrDefault(item => item.Asset is not null);
+                await movieExecutions.MarkReadyAsync(current.Id, publication?.Asset?.Id, publication?.CreatedFile?.Id, null, publication?.Output.MetadataJson, stoppingToken);
+            }
         }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
         {
             if (!publicationCommitted)
                 foreach (var publication in publications) await publisher.DiscardAsync(publication, CancellationToken.None);
+            if (GenerationJobTypes.MovieTypes.Contains(claimedJob.JobType))
+                await movieExecutions.MarkCancelledAsync(claimedJob.Id, CancellationToken.None);
             await CancelRunningAsync(db, usage, claimedJob, stoppingToken);
         }
         catch (Exception exception)
@@ -520,6 +532,8 @@ public sealed class GenerationJobWorker(
             if (!publicationCommitted)
                 foreach (var publication in publications) await publisher.DiscardAsync(publication, CancellationToken.None);
             var failureCode = MapFailureCode(exception, claimedJob.JobType);
+            if (GenerationJobTypes.MovieTypes.Contains(claimedJob.JobType))
+                await movieExecutions.MarkFailedAsync(claimedJob.Id, failureCode, CancellationToken.None);
             var failureUsage = providerUsage ?? (exception as DocumentGenerationStageException)?.Usage;
             failureUsage ??= (exception as PresentationGenerationStageException)?.Usage;
             failureUsage ??= (exception as ResearchGenerationStageException)?.Usage;
@@ -832,6 +846,10 @@ public sealed class GenerationJobWorker(
             return exception switch
             {
                 MovieProviderUnavailableException => GenerationJobErrorCodes.MovieProviderUnavailable,
+                MovieVideoProviderException providerException when providerException.Code == GenerationJobErrorCodes.MovieProviderUnavailable => GenerationJobErrorCodes.MovieProviderUnavailable,
+                MovieVideoProviderException => GenerationJobErrorCodes.MovieGenerationFailed,
+                MovieVideoProviderOutputException => GenerationJobErrorCodes.MovieOutputInvalid,
+                FileStorageUnavailableException or FileStorageOperationException or FileUploadValidationException => GenerationJobErrorCodes.MovieOutputStorageFailed,
                 _ => GenerationJobErrorCodes.MovieGenerationFailed,
             };
         }
@@ -851,7 +869,9 @@ public sealed class GenerationJobWorker(
             return exception switch
             {
                 VoiceRequestValidationException validation => validation.Code,
-                VoiceProviderUnavailableException or VoiceProviderTimeoutException => GenerationJobErrorCodes.VoiceProviderUnavailable,
+                VoiceProviderUnsupportedRequestException => GenerationJobErrorCodes.VoiceProviderUnsupportedRequest,
+                VoiceProviderUnavailableException or VoiceProviderTimeoutException or VoiceProviderConfigurationException => GenerationJobErrorCodes.VoiceProviderUnavailable,
+                VoiceLanguageUnsupportedException => GenerationJobErrorCodes.VoiceLanguageUnsupported,
                 VoiceProviderFailureException => GenerationJobErrorCodes.VoiceProviderFailed,
                 VoiceOutputInvalidException => GenerationJobErrorCodes.VoiceOutputInvalid,
                 FileStorageUnavailableException or FileStorageOperationException or FileUploadValidationException => GenerationJobErrorCodes.VoiceOutputStorageFailed,
@@ -921,6 +941,8 @@ public sealed class GenerationJobWorker(
         GenerationJobErrorCodes.SocialStorageFailed => "The social content was generated but could not be saved. Please try again.",
         GenerationJobErrorCodes.SocialCancelled => "The social content generation was cancelled.",
         GenerationJobErrorCodes.MovieProviderUnavailable => "Movie generation is not available yet because no video provider is configured. Your movie plan was saved.",
+        GenerationJobErrorCodes.MovieOutputInvalid => "The generated movie clip was invalid. Your movie plan was saved.",
+        GenerationJobErrorCodes.MovieOutputStorageFailed => "The movie clip was generated but could not be saved. Your movie plan was saved.",
         GenerationJobErrorCodes.MovieCancelled => "The movie generation was cancelled.",
         GenerationJobErrorCodes.MovieGenerationFailed => "The movie could not be generated. Your movie plan was saved.",
         GenerationJobErrorCodes.MusicProviderUnavailable or GenerationJobErrorCodes.MusicProviderTimeout => "Music generation is temporarily unavailable. Please try again later.",
@@ -928,7 +950,9 @@ public sealed class GenerationJobWorker(
         GenerationJobErrorCodes.MusicOutputStorageFailed => "The music was generated but could not be saved. Please try again.",
         GenerationJobErrorCodes.MusicCancelled => "The music generation was cancelled.",
         GenerationJobErrorCodes.VoiceProviderUnavailable => "Voice generation is temporarily unavailable. Please try again later.",
+        GenerationJobErrorCodes.VoiceProviderUnsupportedRequest => "This voice request is not supported. Please use shorter text or different settings.",
         GenerationJobErrorCodes.VoiceProviderFailed => "Voice generation could not be completed. Please try again.",
+        GenerationJobErrorCodes.VoiceLanguageUnsupported => "This language is not currently supported for voice generation.",
         GenerationJobErrorCodes.VoiceOutputInvalid => "The generated audio was invalid. Please try again.",
         GenerationJobErrorCodes.VoiceOutputStorageFailed => "The audio was generated but could not be saved. Please try again.",
         GenerationJobErrorCodes.VoiceRequestInvalid => "Please check the voice request and try again.",

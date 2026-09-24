@@ -1,5 +1,6 @@
 using System.ComponentModel.DataAnnotations;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Taslim.Api.Domain;
 using Taslim.Api.Voice;
 
@@ -38,7 +39,7 @@ public static class VoiceGenerationValues
 
     public static readonly IReadOnlySet<string> Formats = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
-        "aac", "flac", "m4a", "mp3", "ogg", "wav", "webm",
+        "aac", "flac", "m4a", "mp3", "ogg", "opus", "wav", "webm",
     };
 }
 
@@ -81,14 +82,23 @@ public sealed record VoiceGenerationInput(
 public sealed record CreateVoiceGenerationResponse(GenerationJobDto Job);
 
 public sealed record VoiceOutputMetadata(
+    [property: JsonPropertyName("assetType")]
     string AssetType,
+    [property: JsonPropertyName("contentType")]
     string ContentType,
+    [property: JsonPropertyName("format")]
     string Format,
+    [property: JsonPropertyName("language")]
     string Language,
+    [property: JsonPropertyName("voiceStyle")]
     string VoiceStyle,
+    [property: JsonPropertyName("speakingStyle")]
     string SpeakingStyle,
+    [property: JsonPropertyName("sizeBytes")]
     long SizeBytes,
+    [property: JsonPropertyName("durationMilliseconds")]
     long? DurationMilliseconds,
+    [property: JsonPropertyName("sampleRateHz")]
     int? SampleRateHz);
 
 public static class VoiceGenerationContractMapper

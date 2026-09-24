@@ -6,6 +6,7 @@ namespace Taslim.Api.Files;
 public sealed class FileOptions
 {
     public long MaxFileSizeBytes { get; set; } = 25 * 1024 * 1024;
+    public long MaxGeneratedVideoBytes { get; set; } = 250 * 1024 * 1024;
     public int MaxAttachmentsPerMessage { get; set; } = 5;
     public int FileContextBudgetTokens { get; set; } = 4_000;
     public int MaxExtractedTextCharacters { get; set; } = 80_000;

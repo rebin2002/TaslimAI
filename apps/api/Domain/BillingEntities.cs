@@ -139,4 +139,6 @@ public sealed class BillingOptions
 {
     // Keep false until a reviewed payment/charging launch explicitly enables it.
     public bool CustomerChargingEnabled { get; set; }
+    // Deliberately unconfigured until credentials and a launch decision exist.
+    public string Provider { get; set; } = "unconfigured";
 }
