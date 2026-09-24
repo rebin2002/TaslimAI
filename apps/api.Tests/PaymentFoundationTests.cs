@@ -19,7 +19,7 @@ public sealed class PaymentFoundationTests
         await using var connection = new SqliteConnection("Data Source=:memory:");
         await connection.OpenAsync();
         await using var db = CreateDb(connection);
-        var service = new CheckoutSessionService(db, Options.Create(new BillingOptions { CustomerChargingEnabled = false, Provider = "unconfigured" }), []);
+        var service = new CheckoutSessionService(db, Options.Create(new BillingOptions { CustomerChargingEnabled = false, Provider = "unconfigured" }), [], NullLogger<CheckoutSessionService>.Instance);
 
         var result = await service.CreateAsync(Guid.NewGuid(), "pro", "checkout:disabled", "https://example.test/success", "https://example.test/cancel");
 
@@ -106,7 +106,7 @@ public sealed class PaymentFoundationTests
         return db;
     }
 
-    private static PaymentLifecycleService NewLifecycle(TaslimDbContext db) => new(db, new CreditLedgerService(db, Options.Create(new BillingOptions { CustomerChargingEnabled = true })), new NullNotificationEventWriter());
+    private static PaymentLifecycleService NewLifecycle(TaslimDbContext db) => new(db, new CreditLedgerService(db, Options.Create(new BillingOptions { CustomerChargingEnabled = true })), new NullNotificationEventWriter(), NullLogger<PaymentLifecycleService>.Instance);
 
     private static Workspace NewWorkspace() => new()
     {

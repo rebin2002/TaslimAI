@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.DataProtection;
@@ -5,7 +6,9 @@ using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
+using System.Security.Claims;
 using Taslim.Api.Ai;
 using Taslim.Api.Activity;
 using Taslim.Api.Assets;
@@ -42,6 +45,9 @@ builder.Services.AddControllersWithViews(options =>
         options.InvalidModelStateResponseFactory = context =>
             new BadRequestObjectResult(new { error = new { code = "VALIDATION_ERROR", message = "Please check the highlighted fields." } });
     });
+builder.Services.AddHttpContextAccessor();
+builder.Services.Configure<HealthOptions>(builder.Configuration.GetSection("Health"));
+builder.Services.AddScoped<OperationalHealthService>();
 builder.Services.AddOptions<FileSettings>().Bind(builder.Configuration.GetSection("Files"));
 builder.Services.Configure<FormOptions>(options =>
 {
@@ -102,6 +108,7 @@ builder.Services.AddAuthorization(options =>
         policy.RequireAuthenticatedUser().AddRequirements(new AdminUsageRequirement()));
 });
 builder.Services.AddScoped<IAuthorizationHandler, AdminUsageAuthorizationHandler>();
+builder.Services.AddRateLimiter(RateLimiting.Configure);
 
 builder.Services.ConfigureApplicationCookie(options =>
 {
@@ -120,6 +127,23 @@ builder.Services.ConfigureApplicationCookie(options =>
     {
         context.Response.StatusCode = StatusCodes.Status403Forbidden;
         return Task.CompletedTask;
+    };
+    options.Events.OnValidatePrincipal = async context =>
+    {
+        var userId = context.Principal?.FindFirstValue(ClaimTypes.NameIdentifier);
+        if (!Guid.TryParse(userId, out var parsedUserId))
+        {
+            context.RejectPrincipal();
+            return;
+        }
+
+        var userManager = context.HttpContext.RequestServices.GetRequiredService<UserManager<ApplicationUser>>();
+        var user = await userManager.FindByIdAsync(parsedUserId.ToString());
+        if (user is null || !user.IsActive)
+        {
+            context.RejectPrincipal();
+            await context.HttpContext.SignOutAsync(IdentityConstants.ApplicationScheme);
+        }
     };
 });
 
@@ -157,6 +181,7 @@ builder.Services.Configure<UsageControlOptions>(builder.Configuration.GetSection
 builder.Services.AddScoped<IUsageCostControl, UsageCostControl>();
 builder.Services.AddScoped<IAdminUsageService, AdminUsageService>();
 builder.Services.AddScoped<IAdminOperationsService, AdminOperationsService>();
+builder.Services.AddScoped<ProviderHealthService>();
 builder.Services.Configure<GenerationJobOptions>(builder.Configuration.GetSection("GenerationJobs"));
 builder.Services.AddScoped<IGenerationJobQueue, DatabaseGenerationJobQueue>();
 builder.Services.AddScoped<IGenerationJobUsageService, GenerationJobUsageService>();
@@ -248,20 +273,29 @@ builder.Services.AddSingleton<IFileStorageService>(services =>
     return new UnconfiguredFileStorageService(options);
 });
 var app = builder.Build();
+ProductionConfigurationValidator.Validate(app.Configuration, app.Environment);
 
 // Must run before exception handling, CORS, authentication, and antiforgery
 // so Request.IsHttps reflects Railway's external HTTPS request.
 app.UseForwardedHeaders();
+app.UseMiddleware<RequestCorrelationMiddleware>();
 
 if (!app.Environment.IsDevelopment())
 {
     app.UseExceptionHandler(errorApp => errorApp.Run(async context =>
     {
+        var logger = context.RequestServices.GetRequiredService<ILoggerFactory>().CreateLogger("Taslim.UnexpectedApiException");
+        var exception = context.Features.Get<Microsoft.AspNetCore.Diagnostics.IExceptionHandlerFeature>()?.Error;
+        logger.LogError(exception, "Unexpected API exception. RequestId={RequestId}; Method={Method}; Path={Path}; ExceptionType={ExceptionType}",
+            context.TraceIdentifier, context.Request.Method, context.Request.Path, exception?.GetType().Name);
         context.Response.StatusCode = StatusCodes.Status500InternalServerError;
         context.Response.ContentType = "application/json";
         await context.Response.WriteAsJsonAsync(new { error = new { code = "INTERNAL_ERROR", message = "An unexpected error occurred." } });
     }));
 }
+
+app.UseMiddleware<SecurityHeadersMiddleware>();
+if (isProduction) app.UseHsts();
 
 if (app.Environment.IsDevelopment())
 {
@@ -270,11 +304,27 @@ if (app.Environment.IsDevelopment())
 }
 
 app.UseCors("Frontend");
+app.UseRouting();
 app.UseAuthentication();
+app.UseRateLimiter();
 app.UseMiddleware<AntiforgeryValidationMiddleware>();
 app.UseAuthorization();
-app.MapGet("/health", () => Results.Ok(new { status = "healthy", service = "Taslim API" }))
+app.MapGet("/health", (OperationalHealthService health, HttpContext context) => Results.Ok(health.Live(context.TraceIdentifier)))
     .WithName("Health")
+    .WithTags("System");
+app.MapGet("/health/live", (OperationalHealthService health, HttpContext context) => Results.Ok(health.Live(context.TraceIdentifier)))
+    .WithName("HealthLive")
+    .WithTags("System");
+static async Task<IResult> ReadinessEndpoint(OperationalHealthService health, HttpContext context, CancellationToken cancellationToken)
+{
+    var result = await health.ReadinessAsync(context.TraceIdentifier, cancellationToken);
+    return Results.Json(result.Response, statusCode: result.IsReady ? StatusCodes.Status200OK : StatusCodes.Status503ServiceUnavailable);
+}
+app.MapGet("/health/ready", ReadinessEndpoint)
+    .WithName("HealthReady")
+    .WithTags("System");
+app.MapGet("/readiness", ReadinessEndpoint)
+    .WithName("Readiness")
     .WithTags("System");
 app.MapControllers();
 

@@ -65,6 +65,7 @@ public sealed class FileProcessingService(
 
         try
         {
+            logger.LogInformation("Generated file storage started. FileId={FileId}; WorkspaceId={WorkspaceId}; StorageProvider={StorageProvider}; SizeBytes={SizeBytes}", file.Id, workspaceId, storage.ProviderKey, content.Length);
             await using var input = new MemoryStream(content.ToArray(), writable: false);
             await storage.StoreAsync(storageKey, input, cancellationToken);
             file.Status = StoredFileStatus.Ready;
@@ -74,14 +75,16 @@ public sealed class FileProcessingService(
         }
         catch (OperationCanceledException)
         {
+            logger.LogWarning("Generated file storage cancelled. FileId={FileId}; WorkspaceId={WorkspaceId}; StorageProvider={StorageProvider}", file.Id, workspaceId, storage.ProviderKey);
             file.Status = StoredFileStatus.Failed;
             file.ProcessedAt = DateTime.UtcNow;
             await db.SaveChangesAsync(CancellationToken.None);
             await TryDeleteGeneratedObjectAsync(storageKey, file.Id, workspaceId);
             throw;
         }
-        catch
+        catch (Exception exception)
         {
+            logger.LogError(exception, "Generated file storage failed. FileId={FileId}; WorkspaceId={WorkspaceId}; StorageProvider={StorageProvider}; FailureCategory={FailureCategory}", file.Id, workspaceId, storage.ProviderKey, exception is FileStorageUnavailableException ? "unavailable" : "operation_failed");
             file.Status = StoredFileStatus.Failed;
             file.ProcessedAt = DateTime.UtcNow;
             await db.SaveChangesAsync(CancellationToken.None);
@@ -146,6 +149,7 @@ public sealed class FileProcessingService(
 
         try
         {
+            logger.LogInformation("Generated stream storage started. FileId={FileId}; WorkspaceId={WorkspaceId}; StorageProvider={StorageProvider}; SizeBytes={SizeBytes}", file.Id, workspaceId, storage.ProviderKey, sizeBytes);
             await using var input = await openReadAsync(cancellationToken);
             await using var bounded = new CountingReadStream(input, Math.Max(1, settings.MaxGeneratedVideoBytes));
             await storage.StoreAsync(storageKey, bounded, cancellationToken);
@@ -158,14 +162,16 @@ public sealed class FileProcessingService(
         }
         catch (OperationCanceledException)
         {
+            logger.LogWarning("Generated stream storage cancelled. FileId={FileId}; WorkspaceId={WorkspaceId}; StorageProvider={StorageProvider}", file.Id, workspaceId, storage.ProviderKey);
             file.Status = StoredFileStatus.Failed;
             file.ProcessedAt = DateTime.UtcNow;
             await db.SaveChangesAsync(CancellationToken.None);
             await TryDeleteGeneratedObjectAsync(storageKey, file.Id, workspaceId);
             throw;
         }
-        catch
+        catch (Exception exception)
         {
+            logger.LogError(exception, "Generated stream storage failed. FileId={FileId}; WorkspaceId={WorkspaceId}; StorageProvider={StorageProvider}; FailureCategory={FailureCategory}", file.Id, workspaceId, storage.ProviderKey, exception is FileStorageUnavailableException ? "unavailable" : "operation_failed");
             file.Status = StoredFileStatus.Failed;
             file.ProcessedAt = DateTime.UtcNow;
             await db.SaveChangesAsync(CancellationToken.None);
@@ -206,6 +212,7 @@ public sealed class FileProcessingService(
 
         try
         {
+            logger.LogInformation("File upload started. FileId={FileId}; WorkspaceId={WorkspaceId}; StorageProvider={StorageProvider}; Extension={Extension}; SizeBytes={SizeBytes}", file.Id, workspaceId, storage.ProviderKey, file.Extension, file.SizeBytes);
             await using (var input = upload.OpenReadStream())
             {
                 await storage.StoreAsync(storageKey, input, cancellationToken);
@@ -227,6 +234,8 @@ public sealed class FileProcessingService(
                 file.MetadataJson = result.MetadataJson;
                 file.ProcessedAt = DateTime.UtcNow;
                 file.Status = result.Status == FileExtractionStatus.Failed ? StoredFileStatus.Failed : StoredFileStatus.Ready;
+                if (result.Status == FileExtractionStatus.Failed)
+                    logger.LogWarning("File extraction failed. FileId={FileId}; WorkspaceId={WorkspaceId}; Extension={Extension}; FailureCode={FailureCode}", file.Id, workspaceId, file.Extension, result.FailureCode);
             }
             else
             {
@@ -242,14 +251,16 @@ public sealed class FileProcessingService(
         }
         catch (FileStorageUnavailableException)
         {
+            logger.LogWarning("File storage is unavailable. FileId={FileId}; WorkspaceId={WorkspaceId}; StorageProvider={StorageProvider}", file.Id, workspaceId, storage.ProviderKey);
             file.Status = StoredFileStatus.Failed;
             file.TextExtractionStatus = FileExtractionStatus.Failed;
             file.ProcessedAt = DateTime.UtcNow;
             await db.SaveChangesAsync(CancellationToken.None);
             throw;
         }
-        catch (FileStorageOperationException)
+        catch (FileStorageOperationException exception)
         {
+            logger.LogWarning(exception, "File storage operation failed. FileId={FileId}; WorkspaceId={WorkspaceId}; StorageProvider={StorageProvider}", file.Id, workspaceId, storage.ProviderKey);
             file.Status = StoredFileStatus.Failed;
             file.TextExtractionStatus = FileExtractionStatus.Failed;
             file.ProcessedAt = DateTime.UtcNow;

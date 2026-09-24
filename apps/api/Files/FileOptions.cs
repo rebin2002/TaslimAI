@@ -10,6 +10,11 @@ public sealed class FileOptions
     public int MaxAttachmentsPerMessage { get; set; } = 5;
     public int FileContextBudgetTokens { get; set; } = 4_000;
     public int MaxExtractedTextCharacters { get; set; } = 80_000;
+    public int MaxArchiveEntries { get; set; } = 256;
+    public long MaxArchiveUncompressedBytes { get; set; } = 64 * 1024 * 1024;
+    public long MaxArchiveEntryBytes { get; set; } = 16 * 1024 * 1024;
+    public double MaxArchiveCompressionRatio { get; set; } = 100;
+    public long MaxArchiveXmlCharacters { get; set; } = 8 * 1024 * 1024;
     public string StorageProvider { get; set; } = FileStorageProviders.Local;
     public string LocalRootPath { get; set; } = "App_Data/files";
     public string S3Endpoint { get; set; } = string.Empty;

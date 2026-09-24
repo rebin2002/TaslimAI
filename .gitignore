@@ -29,3 +29,6 @@ npm-debug.log*
 # Test and coverage
 coverage/
 TestResults/
+apps/web/playwright-report/
+apps/web/test-results/
+*.tsbuildinfo

@@ -1,4 +1,7 @@
-const apiOrigin = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5000").replace(/\/$/, "");
+const configuredApiUrl = process.env.NEXT_PUBLIC_API_URL;
+if (process.env.NODE_ENV === "production" && (!configuredApiUrl || !configuredApiUrl.startsWith("https://")))
+  throw new Error("NEXT_PUBLIC_API_URL must be an HTTPS URL in production.");
+const apiOrigin = (configuredApiUrl ?? "http://localhost:5000").replace(/\/$/, "");
 const MAX_PROXY_BODY_BYTES = 25 * 1024 * 1024;
 const UPSTREAM_TIMEOUT_MS = 30_000;
 

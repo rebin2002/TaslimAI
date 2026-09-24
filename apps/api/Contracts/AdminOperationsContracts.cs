@@ -1,3 +1,5 @@
+using Taslim.Api.Operations;
+
 namespace Taslim.Api.Contracts;
 
 public sealed record AdminOperationsDashboardDto(
@@ -7,7 +9,8 @@ public sealed record AdminOperationsDashboardDto(
     AdminUsersAndWorkspacesDto UsersAndWorkspaces,
     AdminAssetsAndStorageDto AssetsAndStorage,
     AdminBillingOperationsDto Billing,
-    AdminOperationalSignalsDto Signals);
+    AdminOperationalSignalsDto Signals,
+    IReadOnlyList<AdminProviderHealthDto> Providers);
 
 public sealed record AdminOperationsRangeDto(DateTime FromUtc, DateTime ToUtc);
 
@@ -17,7 +20,9 @@ public sealed record AdminGenerationOverviewDto(
     IReadOnlyList<AdminCountBreakdownDto> ByStudio,
     IReadOnlyList<AdminRecentFailureDto> RecentFailures,
     IReadOnlyList<AdminRunningJobDto> RunningJobs,
-    int QueuedOrPendingCount);
+    int QueuedOrPendingCount,
+    int LongRunningJobCount,
+    int TotalRetryCount);
 
 public sealed record AdminCountBreakdownDto(string Key, int Count);
 
@@ -33,7 +38,10 @@ public sealed record AdminRunningJobDto(
     int ProgressPercent,
     DateTime? QueuedAt,
     DateTime? StartedAt,
-    DateTime CreatedAt);
+    DateTime CreatedAt,
+    int RetryCount,
+    DateTime? ClaimExpiresAt,
+    bool IsLongRunning);
 
 public sealed record AdminUsageOperationsDto(
     int RequestCount,
@@ -80,6 +88,9 @@ public sealed record AdminAssetsAndStorageDto(
     long StoredBytes,
     IReadOnlyList<AdminCountBreakdownDto> FilesByStatus,
     IReadOnlyList<AdminCountBreakdownDto> FilesByStorageProvider,
+    IReadOnlyList<AdminCountBreakdownDto> FilesByExtractionStatus,
+    int FailedFileCountInRange,
+    int FailedExtractionCountInRange,
     string ConfiguredStorageProvider,
     bool PersistentStorageConfigured);
 
@@ -89,7 +100,9 @@ public sealed record AdminBillingOperationsDto(
     bool PaymentProviderConfigured,
     IReadOnlyList<AdminSubscriptionBreakdownDto> Subscriptions,
     IReadOnlyList<AdminCountBreakdownDto> PaymentAttemptsByStatus,
-    int PendingReconciliationCount);
+    IReadOnlyList<AdminCountBreakdownDto> PaymentEventsByStatus,
+    int PendingReconciliationCount,
+    int WebhookFailureCount);
 
 public sealed record AdminSubscriptionBreakdownDto(string PlanCode, string Status, int Count);
 
@@ -99,6 +112,13 @@ public sealed record AdminOperationalSignalsDto(
     int RecentFailureCount,
     int AnomalousUsageCountInRange,
     DateTime? LastCompletedGenerationAt);
+
+public sealed record AdminProviderHealthDto(
+    string Key,
+    string Category,
+    string Status,
+    DateTime? LastFailureAt,
+    string? LastFailureCode);
 
 public sealed record AdminOperationsFilter(
     DateTime? FromUtc = null,

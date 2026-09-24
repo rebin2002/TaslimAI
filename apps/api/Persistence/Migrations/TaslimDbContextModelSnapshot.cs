@@ -858,6 +858,9 @@ namespace Taslim.Api.Persistence.Migrations
                     b.Property<int>("ProgressPercent")
                         .HasColumnType("integer");
 
+                    b.Property<int>("RetryCount")
+                        .HasColumnType("integer");
+
                     b.Property<Guid?>("ProjectId")
                         .HasColumnType("uuid");
 
@@ -875,6 +878,10 @@ namespace Taslim.Api.Persistence.Migrations
                     b.Property<string>("RequestFingerprint")
                         .HasMaxLength(64)
                         .HasColumnType("character varying(64)");
+
+                    b.Property<string>("RequestId")
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
 
                     b.Property<string>("ResultJson")
                         .HasMaxLength(100000)
