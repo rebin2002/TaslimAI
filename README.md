@@ -39,6 +39,7 @@ docs/
   SOCIAL_STUDIO_ARCHITECTURE.md       Social drafts, selected context, Asset publication, and security
 MUSIC_STUDIO_ARCHITECTURE.md        Provider-independent music jobs, private playback, and Asset publication
   USAGE_ACCOUNTING_ARCHITECTURE.md Versioned cost ledger, guardrails, anomalies, admin reports, and privacy
+  GLOBAL_SEARCH_ARCHITECTURE.md     Protected grouped search across workspace content
 ```
 
 ## Requirements
