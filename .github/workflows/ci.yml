@@ -26,7 +26,10 @@ jobs:
       - run: npm test --workspace @taslim/web
       - run: npm run lint --workspace @taslim/web
       - run: npx tsc --noEmit -p apps/web/tsconfig.json
-      - run: npm run build --workspace @taslim/web
+      - name: Build frontend
+        env:
+          NEXT_PUBLIC_API_URL: https://api.example.test
+        run: npm run build --workspace @taslim/web
 
   api:
     name: API integration tests
