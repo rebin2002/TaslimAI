@@ -2,28 +2,29 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { ChevronDown, Plus, Search } from "lucide-react";
-import { navigation } from "@/lib/data";
+import { ChevronDown, Search } from "lucide-react";
 import { useLocale, localeNames, locales } from "@/components/LocaleProvider";
 import { BrandMark } from "@/components/BrandMark";
 import { useAuth } from "@/components/AuthProvider";
-import { ActivityBell } from "@/components/ActivityBell";
+import { ActivityBell, useActivityUnreadCount } from "@/components/ActivityBell";
+import { desktopNavigation, matchesNavigationPath, primaryNavigation } from "@/lib/navigation";
 
 export function AppShell({ children }: Readonly<{ children: React.ReactNode }>) {
   const pathname = usePathname();
   const { locale, setLocale, t } = useLocale();
   const { user } = useAuth();
-  const activePath = pathname === "/" ? "/" : navigation.find((item) => pathname === item.href || pathname.startsWith(`${item.href}/`))?.href ?? `/${pathname.split("/")[1]}`;
+  const unreadCount = useActivityUnreadCount();
+  const activePath = primaryNavigation.find((item) => matchesNavigationPath(pathname, item.href))?.href ?? null;
 
   return (
     <div className="app-shell">
       <header className="topbar">
         <div className="topbar-inner">
           <BrandMark />
-          <nav className="desktop-nav" aria-label="Primary navigation">
-            {navigation.slice(0, 6).map((item) => {
+          <nav className="desktop-nav" aria-label={t("navigation.primary")}>
+            {desktopNavigation.map((item) => {
               const Icon = item.icon;
-              const active = activePath === item.href;
+              const active = item.href === "/create" ? pathname.startsWith("/create") : matchesNavigationPath(pathname, item.href);
               return (
                 <Link key={item.href} href={item.href} className={`top-link ${active ? "is-active" : ""}`}>
                   <Icon size={16} strokeWidth={1.8} />
@@ -33,12 +34,12 @@ export function AppShell({ children }: Readonly<{ children: React.ReactNode }>) 
             })}
           </nav>
           <div className="topbar-actions">
-            <button type="button" className="icon-button search-button" aria-label="Search">
+            <button type="button" className="icon-button search-button" aria-label={t("navigation.search")}>
               <Search size={18} />
             </button>
-            <ActivityBell />
+            <ActivityBell unreadCount={unreadCount} />
             <label className="language-select">
-              <span className="sr-only">Language</span>
+              <span className="sr-only">{t("navigation.language")}</span>
               <select value={locale} onChange={(event) => setLocale(event.target.value as typeof locale)}>
                 {locales.map((item) => <option key={item} value={item}>{localeNames[item]}</option>)}
               </select>
@@ -52,24 +53,18 @@ export function AppShell({ children }: Readonly<{ children: React.ReactNode }>) 
         </div>
       </header>
       <main className="page-content">{children}</main>
-      <nav className="mobile-bottom-nav" aria-label="Mobile navigation">
-        {navigation.filter((item) => [
-          "/", "/projects", "/assets", "/create/document", "/create/presentation", "/create/research",
-          "/create/voice", "/create/social", "/create/movie", "/create/music", "/account",
-        ].includes(item.href)).map((item) => {
+      <nav className="mobile-bottom-nav" aria-label={t("navigation.mobilePrimary")}>
+        {primaryNavigation.map((item) => {
           const Icon = item.icon;
-          const active = activePath === item.href;
+          const active = activePath === item.href || (item.href === "/create" && pathname.startsWith("/create"));
+          const isActivity = item.href === "/notifications";
           return (
-            <Link key={item.href} href={item.href} className={`mobile-nav-link ${active ? "is-active" : ""}`}>
-              <Icon size={19} strokeWidth={active ? 2.2 : 1.8} />
+            <Link key={item.href} href={item.href} className={`mobile-nav-link ${active ? "is-active" : ""}`} aria-current={active ? "page" : undefined}>
+              <span className="mobile-nav-icon"><Icon size={19} strokeWidth={active ? 2.2 : 1.8} />{isActivity && unreadCount > 0 && <span className="mobile-activity-badge" aria-label={t("activity.unread", { count: String(unreadCount) })}>{unreadCount > 99 ? "99+" : unreadCount}</span>}</span>
               <span>{t(item.labelKey)}</span>
             </Link>
           );
         })}
-        <Link href="/projects?create=1" className="mobile-create-link" aria-label={t("navigation.create")}>
-          <span><Plus size={20} /></span>
-          <small>{t("navigation.create")}</small>
-        </Link>
       </nav>
     </div>
   );
