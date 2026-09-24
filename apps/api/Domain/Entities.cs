@@ -14,6 +14,17 @@ public static class LanguageCodes
     };
 }
 
+public static class OutputPreferences
+{
+    public const string Concise = "concise";
+    public const string Balanced = "balanced";
+    public const string Detailed = "detailed";
+    public static readonly IReadOnlySet<string> Supported = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        Concise, Balanced, Detailed,
+    };
+}
+
 public enum WorkspaceType
 {
     Personal,
@@ -293,6 +304,10 @@ public sealed class ApplicationUser : IdentityUser<Guid>
 {
     public string DisplayName { get; set; } = string.Empty;
     public string PreferredLanguage { get; set; } = LanguageCodes.English;
+    public string DefaultGenerationLanguage { get; set; } = LanguageCodes.English;
+    public string TimeZone { get; set; } = "UTC";
+    public string OutputPreference { get; set; } = OutputPreferences.Balanced;
+    public bool IncludeSourceLinks { get; set; } = true;
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
     public DateTime? LastLoginAt { get; set; }

@@ -727,3 +727,61 @@ select.memory-control { appearance: auto; cursor: pointer; }
 [dir="rtl"] .voice-studio-page .field input, [dir="rtl"] .voice-studio-page .field select, [dir="rtl"] .voice-studio-page .field textarea { text-align: start; }
 @media (max-width: 760px) { .voice-studio-page { padding: 35px 0 60px; }.voice-studio-header { gap: 14px; }.voice-studio-header-icon { width: 43px; height: 43px; }.voice-studio-layout { grid-template-columns: 1fr; } }
 @media (max-width: 520px) { .voice-control-grid { grid-template-columns: 1fr; }.voice-result-heading { flex-direction: column; }.voice-studio-header h1 { font-size: 39px; }.voice-generate-button { align-self: stretch; justify-content: center; }.voice-result-actions > * { flex: 1 1 100%; justify-content: center; } }
+/* Wave 2 account and settings foundation. */
+.account-settings-page { padding-bottom: 78px; }
+.account-settings-hero { align-items: center; }
+.account-identity-mark { display: flex; align-items: center; gap: 12px; }
+.account-identity-mark > div { display: flex; flex-direction: column; gap: 4px; }
+.account-identity-mark strong { color: var(--navy-900); font-size: 13px; }
+.account-identity-mark span:not(.account-avatar) { color: #8e9aa7; font-size: 10px; }
+.account-settings-grid { display: grid; grid-template-columns: 1.35fr .65fr; gap: 15px; align-items: start; }
+.account-profile-card { min-height: 100%; }
+.account-form-divider { height: 1px; margin: 1px 0 0; background: #edf1f4; }
+.card-subheading { display: flex; align-items: center; gap: 7px; color: var(--navy-900); font-size: 11px; font-weight: 800; }
+.card-subheading svg { color: var(--teal); }
+.account-control-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 15px; }
+.account-control-grid label { min-width: 0; }
+.account-check-row { display: flex; align-items: flex-start; gap: 9px; padding: 11px 12px; border: 1px solid #e5edf1; border-radius: 8px; background: #fbfdfd; cursor: pointer; }
+.account-check-row input { margin-top: 2px; accent-color: var(--teal); }
+.account-check-row span { display: flex; flex-direction: column; gap: 4px; }
+.account-check-row strong { color: #526b7c; font-size: 11px; }
+.account-check-row small { color: #91a0ac; font-size: 10px; line-height: 1.45; }
+.account-info-card { padding-bottom: 18px; }
+.account-definition-list { display: flex; flex-direction: column; gap: 0; margin: 17px 0 0; }
+.account-definition-list div { display: flex; justify-content: space-between; gap: 18px; padding: 10px 0; border-top: 1px solid #edf1f4; }
+.account-definition-list dt { color: #93a0ac; font-size: 10px; }
+.account-definition-list dd { margin: 0; color: #526b7c; font-size: 10px; font-weight: 800; text-align: end; }
+.workspace-role-badge { display: inline-flex; align-self: flex-start; padding: 5px 8px; border-radius: 5px; background: #e7f7f4; color: var(--teal) !important; font-size: 10px; font-weight: 800; }
+.workspace-future-row { display: flex; justify-content: space-between; gap: 12px; margin-top: 17px; padding-top: 12px; border-top: 1px solid #edf1f4; color: #8b9aa6; font-size: 10px; }
+.workspace-future-row span:last-child { color: #566f80; font-weight: 800; }
+.workspace-future-note { display: flex; align-items: flex-start; gap: 7px; margin-top: 13px; padding: 10px; color: #708493; border-radius: 7px; background: #f6fafb; font-size: 10px; line-height: 1.5; }
+.workspace-future-note svg { flex: 0 0 auto; color: var(--teal); margin-top: 1px; }
+.account-section-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 15px; margin: 38px 0 14px; }
+.account-section-heading h2 { margin: 4px 0 0; color: var(--navy-900); font-size: 20px; letter-spacing: -.04em; }
+.account-section-heading > svg { color: #b2c2ce; }
+.security-grid { grid-template-columns: 1.35fr .65fr; }
+.security-summary-card { display: flex; flex-direction: column; gap: 13px; }
+.security-point { display: flex; align-items: flex-start; gap: 8px; color: #65798a; font-size: 11px; line-height: 1.45; }
+.security-point svg { flex: 0 0 auto; color: var(--teal); margin-top: 1px; }
+.security-logout { align-self: flex-start; margin-top: 7px; }
+.account-context-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 15px; }
+.context-card { display: flex; flex-direction: column; min-height: 236px; }
+.context-card > p { flex: 1; margin: 8px 0 20px; color: #738494; font-size: 11px; line-height: 1.65; }
+.context-card .secondary-button { align-self: flex-start; }
+.account-resource-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 15px; }
+.privacy-card { min-height: 100%; }
+.privacy-card > p { margin: 16px 0 0; color: #738494; font-size: 11px; line-height: 1.65; }
+.memory-boundary-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-bottom: 15px; }
+.memory-boundary-card { padding: 16px; border: 1px solid #e6edf1; border-radius: 10px; background: #fbfcfd; }
+.memory-boundary-card.is-active { border-color: #bfe6df; background: #f3fbf9; }
+.memory-boundary-card > span { color: #8d9da9; font-size: 9px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+.memory-boundary-card.is-active > span { color: var(--teal); }
+.memory-boundary-card h2 { margin: 7px 0 5px; color: var(--navy-900); font-size: 13px; }
+.memory-boundary-card p { margin: 0; color: #788b9a; font-size: 10px; line-height: 1.55; }
+.memory-card-labels { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.memory-source { padding: 3px 6px; color: #8a9aa6; border: 1px solid #e4ebef; border-radius: 4px; background: #fbfcfd; font-size: 9px; font-weight: 800; }
+[dir="rtl"] .account-identity-mark, [dir="rtl"] .account-section-heading { flex-direction: row-reverse; }
+[dir="rtl"] .account-definition-list dd { text-align: start; }
+[dir="rtl"] .workspace-future-note, [dir="rtl"] .security-point, [dir="rtl"] .account-check-row { flex-direction: row-reverse; }
+@media (max-width: 900px) { .account-context-grid, .account-resource-grid { grid-template-columns: 1fr; }.context-card { min-height: auto; }.account-resource-grid .usage-link-card { min-height: 0; } }
+@media (max-width: 700px) { .account-settings-hero { align-items: flex-start; }.account-identity-mark { align-self: stretch; }.account-settings-grid, .security-grid, .account-control-grid, .memory-boundary-grid { grid-template-columns: 1fr; }.account-section-heading { margin-top: 31px; }.account-section-heading h2 { font-size: 18px; }.account-identity-mark { flex-direction: row; } }

@@ -173,12 +173,19 @@ public sealed class AuthController(
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> UpdateProfile(UpdateProfileRequest request)
     {
-        if (!ModelState.IsValid || !IsSupportedLanguage(request.PreferredLanguage))
-            return ApiResults.Validation(this, "Please provide a valid display name and language.");
+        if (!ModelState.IsValid || !IsSupportedLanguage(request.PreferredLanguage)
+            || (request.DefaultGenerationLanguage is not null && !IsSupportedLanguage(request.DefaultGenerationLanguage))
+            || (request.TimeZone is not null && !TimeZoneInfo.GetSystemTimeZones().Any(zone => string.Equals(zone.Id, request.TimeZone.Trim(), StringComparison.Ordinal)))
+            || (request.OutputPreference is not null && !OutputPreferences.Supported.Contains(request.OutputPreference.Trim())))
+            return ApiResults.Validation(this, "Please provide valid profile and preference values.");
         var user = await userManager.GetUserAsync(User);
         if (user is null || !user.IsActive) return Unauthorized();
         user.DisplayName = request.DisplayName.Trim();
         user.PreferredLanguage = request.PreferredLanguage.ToLowerInvariant();
+        if (request.DefaultGenerationLanguage is not null) user.DefaultGenerationLanguage = request.DefaultGenerationLanguage.Trim().ToLowerInvariant();
+        if (request.TimeZone is not null) user.TimeZone = request.TimeZone.Trim();
+        if (request.OutputPreference is not null) user.OutputPreference = request.OutputPreference.Trim().ToLowerInvariant();
+        if (request.IncludeSourceLinks.HasValue) user.IncludeSourceLinks = request.IncludeSourceLinks.Value;
         user.UpdatedAt = DateTime.UtcNow;
         var result = await userManager.UpdateAsync(user);
         if (!result.Succeeded)
@@ -186,6 +193,33 @@ public sealed class AuthController(
         var workspace = await FindPersonalWorkspace(user.Id, HttpContext.RequestAborted);
         if (workspace is null) return ApiResults.Error(this, 500, "ACCOUNT_SETUP_INCOMPLETE", "Your account setup is incomplete. Please contact support.");
         return Ok(new AuthResponse(ToUserDto(user, workspace.Id), ToWorkspaceDto(workspace, WorkspaceRole.Owner)));
+    }
+
+    [HttpPost("password")]
+    [Authorize]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> ChangePassword(ChangePasswordRequest request)
+    {
+        if (!ModelState.IsValid)
+            return ApiResults.Validation(this, "Please provide your current password and a new password.");
+
+        var user = await userManager.GetUserAsync(User);
+        if (user is null || !user.IsActive) return Unauthorized();
+
+        var result = await userManager.ChangePasswordAsync(user, request.CurrentPassword, request.NewPassword);
+        if (!result.Succeeded)
+        {
+            if (result.Errors.Any(error => error.Code == "PasswordMismatch"))
+                return ApiResults.Error(this, StatusCodes.Status400BadRequest, "CURRENT_PASSWORD_INVALID", "Your current password is not correct.");
+
+            var errors = ToPasswordFieldErrors(result.Errors);
+            return ApiResults.Validation(this, "Please choose a password that meets the requirements.", errors.Length > 0
+                ? new Dictionary<string, string[]> { ["newPassword"] = errors }
+                : null);
+        }
+
+        await signInManager.RefreshSignInAsync(user);
+        return Ok(new { success = true });
     }
 
     private async Task<Workspace?> FindPersonalWorkspace(Guid userId, CancellationToken cancellationToken) =>
@@ -211,6 +245,6 @@ public sealed class AuthController(
         .Distinct(StringComparer.Ordinal)
         .ToArray();
     private static string Slugify(string name, Guid suffix) => $"{new string(name.Trim().ToLowerInvariant().Where(character => char.IsLetterOrDigit(character) || character == ' ').ToArray()).Replace(' ', '-')}-{suffix.ToString("N")[..8]}";
-    private static UserDto ToUserDto(ApplicationUser user, Guid workspaceId) => new(user.Id, user.Email ?? string.Empty, user.DisplayName, user.PreferredLanguage, workspaceId, user.CreatedAt);
+    private static UserDto ToUserDto(ApplicationUser user, Guid workspaceId) => new(user.Id, user.Email ?? string.Empty, user.DisplayName, user.PreferredLanguage, workspaceId, user.CreatedAt, user.DefaultGenerationLanguage, user.TimeZone, user.OutputPreference, user.IncludeSourceLinks);
     private static WorkspaceSummaryDto ToWorkspaceDto(Workspace workspace, WorkspaceRole role) => new(workspace.Id, workspace.Name, workspace.Slug, workspace.Type.ToString(), role.ToString());
 }

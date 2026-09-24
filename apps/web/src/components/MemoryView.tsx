@@ -94,6 +94,11 @@ export function MemoryView() {
         </button>
       </div>
       <div className="memory-notice">{t("memory.notice")}</div>
+      <div className="memory-boundary-grid">
+        <article className="memory-boundary-card is-active"><span>{t("memory.boundaryMemoryLabel")}</span><h2>{t("memory.boundaryMemoryTitle")}</h2><p>{t("memory.boundaryMemoryText")}</p></article>
+        <article className="memory-boundary-card"><span>{t("memory.boundaryHistoryLabel")}</span><h2>{t("memory.boundaryHistoryTitle")}</h2><p>{t("memory.boundaryHistoryText")}</p></article>
+        <article className="memory-boundary-card"><span>{t("memory.boundaryProjectLabel")}</span><h2>{t("memory.boundaryProjectTitle")}</h2><p>{t("memory.boundaryProjectText")}</p></article>
+      </div>
       {error && <div className="form-error" role="alert">{error}</div>}
       {loading && <div className="account-card usage-loading">{t("memory.loading")}</div>}
       {!loading && !memories.length && (
@@ -109,7 +114,7 @@ export function MemoryView() {
             <article className="account-card memory-card" key={memory.id}>
               <div className="memory-card-header">
                 <div>
-                  <span className="memory-category">{t(`memory.category.${memory.category.toLowerCase()}`)}</span>
+                  <div className="memory-card-labels"><span className="memory-category">{t(`memory.category.${memory.category.toLowerCase()}`)}</span><span className="memory-source">{memory.source === "Manual" ? t("memory.manualSource") : memory.source}</span></div>
                   <h2>{memory.title}</h2>
                 </div>
                 <div className="memory-actions">
