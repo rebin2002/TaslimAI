@@ -8,7 +8,7 @@ import { studioCategories, type StudioCategory } from "@/lib/navigation";
 export function StudioChooser({ compact = false }: Readonly<{ compact?: boolean }>) {
   const { t } = useLocale();
   const eyebrowKey = compact ? "home.createEyebrow" : "create.eyebrow";
-  const titleKey = compact ? "home.createTitle" : "create.title";
+  const titleKey = compact ? "home.createPanelLabel" : "create.title";
   const subtitleKey = compact ? "home.createSubtitle" : "create.subtitle";
 
   return (
