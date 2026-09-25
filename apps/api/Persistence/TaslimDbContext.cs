@@ -22,7 +22,9 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
     public DbSet<ChatMessageAttachment> ChatMessageAttachments => Set<ChatMessageAttachment>();
     public DbSet<GenerationJob> GenerationJobs => Set<GenerationJob>();
     public DbSet<GenerationJobOutput> GenerationJobOutputs => Set<GenerationJobOutput>();
-    public DbSet<GenerationProviderAttempt> GenerationProviderAttempts => Set<GenerationProviderAttempt>();
+public DbSet<GenerationProviderAttempt> GenerationProviderAttempts => Set<GenerationProviderAttempt>();
+    public DbSet<ProviderCircuit> ProviderCircuits => Set<ProviderCircuit>();
+    public DbSet<ProviderExecutionFinalization> ProviderExecutionFinalizations => Set<ProviderExecutionFinalization>();
     public DbSet<ActivityReadState> ActivityReadStates => Set<ActivityReadState>();
     public DbSet<Notification> Notifications => Set<Notification>();
     public DbSet<Asset> Assets => Set<Asset>();
@@ -339,6 +341,44 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasIndex(output => output.StoredFileId);
             entity.HasOne(output => output.GenerationJob).WithMany(job => job.Outputs).HasForeignKey(output => output.GenerationJobId).OnDelete(DeleteBehavior.Cascade);
             entity.HasOne(output => output.StoredFile).WithMany(file => file.GenerationJobOutputs).HasForeignKey(output => output.StoredFileId).OnDelete(DeleteBehavior.Restrict);
+        });
+
+        builder.Entity<ProviderAttempt>(entity =>
+        {
+            entity.HasKey(attempt => attempt.Id);
+            entity.Property(attempt => attempt.IdempotencyKey).HasMaxLength(180).IsRequired();
+            entity.Property(attempt => attempt.Capability).HasMaxLength(120).IsRequired();
+            entity.Property(attempt => attempt.ProviderKey).HasMaxLength(80).IsRequired();
+            entity.Property(attempt => attempt.ResultCategory).HasMaxLength(40).IsRequired();
+            entity.Property(attempt => attempt.ErrorCode).HasMaxLength(100);
+            entity.Property(attempt => attempt.EstimatedCostUsd).HasPrecision(18, 6);
+            entity.Property(attempt => attempt.StartedAt).IsRequired();
+            entity.HasIndex(attempt => new { attempt.GenerationJobId, attempt.IdempotencyKey });
+            entity.HasIndex(attempt => new { attempt.ProviderKey, attempt.Capability, attempt.StartedAt });
+            entity.HasOne(attempt => attempt.GenerationJob).WithMany().HasForeignKey(attempt => attempt.GenerationJobId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<ProviderCircuit>(entity =>
+        {
+            entity.HasKey(circuit => circuit.Id);
+            entity.Property(circuit => circuit.ProviderKey).HasMaxLength(80).IsRequired();
+            entity.Property(circuit => circuit.Capability).HasMaxLength(120).IsRequired();
+            entity.Property(circuit => circuit.State).HasMaxLength(20).IsRequired();
+            entity.Property(circuit => circuit.RowVersion).IsConcurrencyToken().IsRequired();
+            entity.Property(circuit => circuit.UpdatedAt).IsRequired();
+            entity.HasIndex(circuit => new { circuit.ProviderKey, circuit.Capability }).IsUnique();
+            entity.HasIndex(circuit => new { circuit.State, circuit.OpenUntil });
+        });
+
+        builder.Entity<ProviderExecutionFinalization>(entity =>
+        {
+            entity.HasKey(finalization => finalization.Id);
+            entity.Property(finalization => finalization.IdempotencyKey).HasMaxLength(180).IsRequired();
+            entity.Property(finalization => finalization.State).HasMaxLength(20).IsRequired();
+            entity.Property(finalization => finalization.ClaimedAt).IsRequired();
+            entity.HasIndex(finalization => new { finalization.GenerationJobId, finalization.IdempotencyKey }).IsUnique();
+            entity.HasIndex(finalization => new { finalization.State, finalization.ClaimExpiresAt });
+            entity.HasOne(finalization => finalization.GenerationJob).WithMany().HasForeignKey(finalization => finalization.GenerationJobId).OnDelete(DeleteBehavior.Cascade);
         });
 
         builder.Entity<ActivityReadState>(entity =>
