@@ -63,6 +63,20 @@ public sealed class AdminOperationsTests : IClassFixture<TaslimApiFactory>
                 JobType = GenerationJobTypes.DocumentGenerate, Status = GenerationJobStatus.Succeeded, Title = "Completed document",
                 InputJson = "{}", ProgressPercent = 100, CreatedAt = now.AddMinutes(-8), CompletedAt = now.AddMinutes(-1), ConcurrencyToken = Guid.NewGuid(),
             };
+            var rateLimitedJob = new GenerationJob
+            {
+                Id = Guid.NewGuid(), WorkspaceId = auth.PersonalWorkspace.Id, CreatedByUserId = auth.User.Id,
+                JobType = GenerationJobTypes.DocumentGenerate, Status = GenerationJobStatus.Failed, InputJson = "{\"prompt\":\"private prompt\"}",
+                ErrorCode = GenerationJobErrorCodes.DocumentProviderRateLimited, ErrorMessage = "raw provider payload must not be returned",
+                RetryCount = 1, CreatedAt = now.AddMinutes(-7), FailedAt = now.AddMinutes(-6), ConcurrencyToken = Guid.NewGuid(),
+            };
+            var qcFailedJob = new GenerationJob
+            {
+                Id = Guid.NewGuid(), WorkspaceId = auth.PersonalWorkspace.Id, CreatedByUserId = auth.User.Id,
+                JobType = GenerationJobTypes.ImageGenerate, Status = GenerationJobStatus.Failed, InputJson = "{\"prompt\":\"another private prompt\"}",
+                ErrorCode = GenerationJobErrorCodes.ImageOutputInvalid, ErrorMessage = "another raw provider payload must not be returned",
+                CreatedAt = now.AddMinutes(-9), FailedAt = now.AddMinutes(-8), ConcurrencyToken = Guid.NewGuid(),
+            };
             db.StoredFiles.Add(file);
             db.Assets.Add(new Asset
             {
@@ -70,14 +84,21 @@ public sealed class AdminOperationsTests : IClassFixture<TaslimApiFactory>
                 SourceGenerationJobId = completedJob.Id, Name = "Operations report", AssetType = AssetTypes.Document,
                 MimeType = "application/json", Status = AssetStatus.Active, CreatedAt = now, UpdatedAt = now,
             });
-            db.GenerationJobs.AddRange(failedJob, runningJob, completedJob);
+            db.GenerationJobs.AddRange(failedJob, runningJob, completedJob, rateLimitedJob, qcFailedJob);
             db.UsageTransactions.Add(new UsageTransaction
             {
                 Id = Guid.NewGuid(), WorkspaceId = auth.PersonalWorkspace.Id, UserId = auth.User.Id, GenerationJobId = completedJob.Id,
                 RequestId = $"admin-operations-{Guid.NewGuid():N}", Feature = UsageFeature.Document, Provider = "test-provider", Model = "test-model",
                 Status = UsageTransactionStatus.Completed, InputTokens = 300, CachedInputTokens = 20, OutputTokens = 500,
                 ImageInputTokens = 7, ImageOutputTokens = 11, ProviderCostUsd = 1.25m, ChargedAmount = 4.50m,
-                Currency = "USD", CostBasis = UsageCostBasis.Actual, CreatedAt = now, CompletedAt = now,
+                LatencyMs = 840, EstimatedProviderCostUsd = 1.50m, Currency = "USD", CostBasis = UsageCostBasis.Actual, CreatedAt = now, CompletedAt = now,
+            });
+            db.UsageTransactions.Add(new UsageTransaction
+            {
+                Id = Guid.NewGuid(), WorkspaceId = auth.PersonalWorkspace.Id, UserId = auth.User.Id,
+                RequestId = $"admin-operations-chat-{Guid.NewGuid():N}", Feature = UsageFeature.Chat, Provider = "mock", Model = "test-chat",
+                Status = UsageTransactionStatus.Completed, LatencyMs = 120, ProviderCostUsd = 0m, ChargedAmount = 0m,
+                Currency = "USD", CostBasis = UsageCostBasis.Estimated, CreatedAt = now, CompletedAt = now,
             });
             await db.SaveChangesAsync();
         }
@@ -105,7 +126,34 @@ public sealed class AdminOperationsTests : IClassFixture<TaslimApiFactory>
         Assert.True(dashboard.Signals.RunningJobCount >= 1);
         Assert.NotNull(dashboard.Signals.LastCompletedGenerationAt);
 
+        var imageProvider = Assert.Single(dashboard.Providers, item => item.Key == "openai-image");
+        Assert.False(imageProvider.Enabled);
+        Assert.False(imageProvider.Configured);
+        Assert.Equal("disabled", imageProvider.Status);
+        Assert.True(imageProvider.RecentFailureCount >= 2);
+        Assert.True(imageProvider.QualityControlFailureCount >= 1);
+        Assert.True(imageProvider.RetryCount >= 0);
+        Assert.Contains(imageProvider.RecentFailures, item => item.ErrorCode == GenerationJobErrorCodes.ImageGenerationFailed);
+        var documentProvider = Assert.Single(dashboard.Providers, item => item.Key == "openai-document");
+        Assert.True(documentProvider.RecentSuccessCount >= 1);
+        Assert.True(documentProvider.RateLimitEventCount >= 1);
+        Assert.Equal(840, documentProvider.AverageLatencyMs);
+        Assert.True(documentProvider.EstimatedProviderCostUsd >= 1.50m);
+        Assert.True(documentProvider.ActualProviderCostUsd >= 1.25m);
+        Assert.False(documentProvider.FallbackTelemetryRecorded);
+        Assert.Equal("disabled", Assert.Single(dashboard.Providers, item => item.Key == "mubert").Status);
+        var chatProvider = Assert.Single(dashboard.Providers, item => item.Key == "chat");
+        Assert.True(chatProvider.Enabled);
+        Assert.True(chatProvider.Configured);
+        Assert.Equal("operational", chatProvider.Status);
+        Assert.Equal(120, chatProvider.AverageLatencyMs);
+
         Assert.DoesNotContain("Internal provider detail", json);
+        Assert.DoesNotContain("raw provider payload", json);
+        Assert.DoesNotContain("private prompt", json);
+        Assert.DoesNotContain("InputJson", json);
+        Assert.DoesNotContain("ErrorMessage", json);
+        Assert.DoesNotContain("ApiKey", json, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("storageKey", json, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("email", json, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("providerPaymentReference", json, StringComparison.OrdinalIgnoreCase);
