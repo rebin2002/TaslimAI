@@ -1,4 +1,3 @@
-using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
 using Taslim.Api.Ai;
@@ -32,24 +31,25 @@ public sealed class ImageGenerationJobHandler(
             throw new ImageRequestValidationException(GenerationJobErrorCodes.ImageRequestInvalid, "The image request is invalid.");
         }
 
-        ImageGenerationRequestValidator.Validate(request, settings);
-        cancellationToken.ThrowIfCancellationRequested();
-        progress.Report(10);
-        var prompt = promptBuilder.Build(request);
-        progress.Report(25);
         var provider = providers.FirstOrDefault(item => string.Equals(item.Key, settings.ProviderKey, StringComparison.OrdinalIgnoreCase));
         if (provider is null) throw new ImageProviderUnavailableException();
+        var capabilities = (provider as IImageGenerationProviderCapabilities)?.Capabilities;
+        ImageGenerationRequestValidator.Validate(request, settings, capabilities);
+        if (capabilities is not null && settings.MaxImagesPerJob > capabilities.MaxImagesPerRequest)
+            throw new ImageRequestValidationException(GenerationJobErrorCodes.ImageRequestInvalid, "The selected image configuration is unavailable.");
+
+        cancellationToken.ThrowIfCancellationRequested();
+        progress.Report(10);
+        var requestWithJob = request with { GenerationJobId = job.Id };
+        var prompt = promptBuilder.Build(requestWithJob);
+        progress.Report(25);
 
         logger.LogInformation("Image generation started. JobId={JobId}; ProviderKey={ProviderKey}", job.Id, provider.Key);
         progress.Report(35);
-        var generated = await provider.GenerateAsync(request, prompt, cancellationToken);
+        var generated = await provider.GenerateAsync(requestWithJob, prompt, cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
         progress.Report(82);
-        if (generated.Content.Length == 0 || generated.Content.Length > Math.Min(10 * 1_048_576, Math.Max(1, settings.MaxOutputBytes)))
-            throw new ImageOutputInvalidException();
-        var imageInfo = ImageBinaryInspector.Read(generated.Content.Span);
-        if (imageInfo is null || !imageInfo.ContentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
-            throw new ImageOutputInvalidException();
+        var imageInfo = ValidateOutput(generated, capabilities);
 
         var format = imageInfo.Format;
         var contentType = imageInfo.ContentType;
@@ -90,10 +90,38 @@ public sealed class ImageGenerationJobHandler(
             generated.Usage.ImageInputTokens,
             generated.Usage.ImageOutputTokens,
             settings.PricingVersion,
-            settings.Pricing.ToSnapshot(settings).ToJson(),
+            settings.Pricing.ToSnapshot(settings)?.ToJson(),
             settings.Currency,
             generated.Usage.CostBasis);
         return new GenerationHandlerResult(resultJson, [new GenerationHandlerOutput(GenerationJobOutputTypes.StoredFile, null, metadata, artifact, asset)], usage);
     }
 
+    private ImageBinaryInfo ValidateOutput(ImageProviderResult generated, ImageGenerationCapabilities? capabilities)
+    {
+        var maxBytes = Math.Min(25 * 1_048_576, Math.Max(1, settings.MaxOutputBytes));
+        if (generated.Content.Length == 0 || generated.Content.Length > maxBytes)
+            throw new ImageOutputInvalidException();
+        var imageInfo = ImageBinaryInspector.Read(generated.Content.Span);
+        var supportedTypes = capabilities?.OutputContentTypes ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "image/png", "image/jpeg", "image/webp",
+        };
+        if (imageInfo is null || !supportedTypes.Contains(imageInfo.ContentType)
+            || string.IsNullOrWhiteSpace(generated.ContentType)
+            || !string.Equals(generated.ContentType, imageInfo.ContentType, StringComparison.OrdinalIgnoreCase)
+            || string.IsNullOrWhiteSpace(generated.Format)
+            || !string.Equals(generated.Format, imageInfo.Format, StringComparison.OrdinalIgnoreCase))
+            throw new ImageOutputInvalidException();
+        if (generated.Width.HasValue && generated.Width != imageInfo.Width || generated.Height.HasValue && generated.Height != imageInfo.Height)
+            throw new ImageOutputInvalidException();
+        if (!imageInfo.Width.HasValue || !imageInfo.Height.HasValue || imageInfo.Width.Value <= 0 || imageInfo.Height.Value <= 0)
+            throw new ImageOutputInvalidException();
+        var width = imageInfo.Width.Value;
+        var height = imageInfo.Height.Value;
+        var maxDimension = Math.Max(1, settings.MaxImageDimension);
+        var maxPixels = Math.Max(1, settings.MaxImagePixels);
+        if (width > maxDimension || height > maxDimension || (long)width * height > maxPixels)
+            throw new ImageOutputInvalidException();
+        return imageInfo;
+    }
 }

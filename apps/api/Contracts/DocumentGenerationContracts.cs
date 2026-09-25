@@ -190,8 +190,9 @@ public sealed class DocumentRequestValidationException(string code, string messa
 
 public static class DocumentGenerationCostEstimator
 {
-    public static decimal Estimate(DocumentGenerationOptions options) =>
-        Math.Round(Math.Max(0m, options.MaxOutputTokens / 1_000m * options.EstimatedOutputUsdPer1KTokens), 8);
+    public static decimal? Estimate(DocumentGenerationOptions options) => options.EstimatedOutputUsdPer1KTokens.HasValue
+        ? Math.Round(Math.Max(0m, options.MaxOutputTokens / 1_000m * options.EstimatedOutputUsdPer1KTokens.Value), 8)
+        : null;
 }
 
 public static class DocumentDraftValidator

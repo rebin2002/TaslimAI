@@ -824,6 +824,10 @@ namespace Taslim.Api.Persistence.Migrations
                         .IsConcurrencyToken()
                         .HasColumnType("uuid");
 
+                    b.Property<string>("CostEstimateJson")
+                        .HasMaxLength(8000)
+                        .HasColumnType("character varying(8000)");
+
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -837,6 +841,13 @@ namespace Taslim.Api.Persistence.Migrations
                     b.Property<string>("ErrorMessage")
                         .HasMaxLength(1000)
                         .HasColumnType("character varying(1000)");
+
+                    b.Property<bool?>("EstimatedProviderCostKnown")
+                        .HasColumnType("boolean");
+
+                    b.Property<decimal?>("EstimatedProviderCostUsd")
+                        .HasPrecision(18, 8)
+                        .HasColumnType("numeric(18,8)");
 
                     b.Property<DateTime?>("FailedAt")
                         .HasColumnType("timestamp with time zone");
@@ -856,9 +867,6 @@ namespace Taslim.Api.Persistence.Migrations
                         .HasColumnType("character varying(100)");
 
                     b.Property<int>("ProgressPercent")
-                        .HasColumnType("integer");
-
-                    b.Property<int>("RetryCount")
                         .HasColumnType("integer");
 
                     b.Property<Guid?>("ProjectId")
@@ -886,6 +894,9 @@ namespace Taslim.Api.Persistence.Migrations
                     b.Property<string>("ResultJson")
                         .HasMaxLength(100000)
                         .HasColumnType("character varying(100000)");
+
+                    b.Property<int>("RetryCount")
+                        .HasColumnType("integer");
 
                     b.Property<DateTime?>("StartedAt")
                         .HasColumnType("timestamp with time zone");
@@ -953,6 +964,142 @@ namespace Taslim.Api.Persistence.Migrations
                     b.HasIndex("StoredFileId");
 
                     b.ToTable("GenerationJobOutputs");
+                });
+
+            modelBuilder.Entity("Taslim.Api.Domain.GenerationProviderAttempt", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<bool>("ActualProviderCostKnown")
+                        .HasColumnType("boolean");
+
+                    b.Property<decimal?>("ActualProviderCostUsd")
+                        .HasPrecision(18, 8)
+                        .HasColumnType("numeric(18,8)");
+
+                    b.Property<int>("AttemptNumber")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Capability")
+                        .HasMaxLength(120)
+                        .HasColumnType("character varying(120)");
+
+                    b.Property<bool>("CircuitOpen")
+                        .HasColumnType("boolean");
+
+                    b.Property<DateTime?>("CompletedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("CostEstimateJson")
+                        .HasMaxLength(8000)
+                        .HasColumnType("character varying(8000)");
+
+                    b.Property<string>("Currency")
+                        .IsRequired()
+                        .HasMaxLength(3)
+                        .HasColumnType("character varying(3)");
+
+                    b.Property<bool>("EstimatedProviderCostKnown")
+                        .HasColumnType("boolean");
+
+                    b.Property<decimal?>("EstimatedProviderCostUsd")
+                        .HasPrecision(18, 8)
+                        .HasColumnType("numeric(18,8)");
+
+                    b.Property<string>("FailureCode")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<string>("FinalizationKey")
+                        .IsRequired()
+                        .HasMaxLength(160)
+                        .HasColumnType("character varying(160)");
+
+                    b.Property<Guid>("GenerationJobId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("IdempotencyKey")
+                        .IsRequired()
+                        .HasMaxLength(180)
+                        .HasColumnType("character varying(180)");
+
+                    b.Property<bool>("IsFallback")
+                        .HasColumnType("boolean");
+
+                    b.Property<bool>("IsRetry")
+                        .HasColumnType("boolean");
+
+                    b.Property<Guid>("JobConcurrencyToken")
+                        .HasColumnType("uuid");
+
+                    b.Property<long?>("LatencyMs")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("Model")
+                        .HasMaxLength(160)
+                        .HasColumnType("character varying(160)");
+
+                    b.Property<string>("PricingSnapshotJson")
+                        .HasMaxLength(8000)
+                        .HasColumnType("character varying(8000)");
+
+                    b.Property<string>("PricingVersion")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<string>("Provider")
+                        .IsRequired()
+                        .HasMaxLength(80)
+                        .HasColumnType("character varying(80)");
+
+                    b.Property<string>("ProviderExecutionId")
+                        .HasMaxLength(240)
+                        .HasColumnType("character varying(240)");
+
+                    b.Property<bool>("QualityControlRejected")
+                        .HasColumnType("boolean");
+
+                    b.Property<bool>("RateLimited")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("ResultClassification")
+                        .IsRequired()
+                        .HasMaxLength(40)
+                        .HasColumnType("character varying(40)");
+
+                    b.Property<int>("RetryNumber")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("SafeMetadataJson")
+                        .HasMaxLength(8000)
+                        .HasColumnType("character varying(8000)");
+
+                    b.Property<DateTime>("StartedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(30)
+                        .HasColumnType("character varying(30)");
+
+                    b.Property<bool>("TimedOut")
+                        .HasColumnType("boolean");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("FinalizationKey")
+                        .IsUnique();
+
+                    b.HasIndex("GenerationJobId", "AttemptNumber")
+                        .IsUnique();
+
+                    b.HasIndex("GenerationJobId", "IdempotencyKey");
+
+                    b.HasIndex("Provider", "Capability", "StartedAt");
+
+                    b.ToTable("GenerationProviderAttempts");
                 });
 
             modelBuilder.Entity("Taslim.Api.Domain.PaymentAttempt", b =>
@@ -1490,6 +1637,62 @@ namespace Taslim.Api.Persistence.Migrations
                     b.ToTable("Projects");
                 });
 
+            modelBuilder.Entity("Taslim.Api.Domain.ProviderCircuit", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Capability")
+                        .IsRequired()
+                        .HasMaxLength(120)
+                        .HasColumnType("character varying(120)");
+
+                    b.Property<int>("ConsecutiveFailures")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime?>("LastFailureAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime?>("LastSuccessAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime?>("OpenUntil")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime?>("OpenedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime?>("ProbeExpiresAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("ProviderKey")
+                        .IsRequired()
+                        .HasMaxLength(80)
+                        .HasColumnType("character varying(80)");
+
+                    b.Property<Guid>("RowVersion")
+                        .IsConcurrencyToken()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ProviderKey", "Capability")
+                        .IsUnique();
+
+                    b.HasIndex("State", "OpenUntil");
+
+                    b.ToTable("ProviderCircuits");
+                });
+
             modelBuilder.Entity("Taslim.Api.Domain.ProviderCustomerReference", b =>
                 {
                     b.Property<Guid>("Id")
@@ -1526,6 +1729,47 @@ namespace Taslim.Api.Persistence.Migrations
                         .IsUnique();
 
                     b.ToTable("ProviderCustomerReferences");
+                });
+
+            modelBuilder.Entity("Taslim.Api.Domain.ProviderExecutionFinalization", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime?>("ClaimExpiresAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime>("ClaimedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime?>("CompletedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("GenerationJobId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("IdempotencyKey")
+                        .IsRequired()
+                        .HasMaxLength(180)
+                        .HasColumnType("character varying(180)");
+
+                    b.Property<Guid>("JobConcurrencyToken")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("GenerationJobId", "IdempotencyKey")
+                        .IsUnique();
+
+                    b.HasIndex("State", "ClaimExpiresAt");
+
+                    b.ToTable("ProviderExecutionFinalizations");
                 });
 
             modelBuilder.Entity("Taslim.Api.Domain.ResearchEvidence", b =>
@@ -1891,6 +2135,10 @@ namespace Taslim.Api.Persistence.Migrations
                         .HasMaxLength(20)
                         .HasColumnType("character varying(20)");
 
+                    b.Property<string>("CostEstimateJson")
+                        .HasMaxLength(8000)
+                        .HasColumnType("character varying(8000)");
+
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -1953,6 +2201,9 @@ namespace Taslim.Api.Persistence.Migrations
                         .IsRequired()
                         .HasMaxLength(80)
                         .HasColumnType("character varying(80)");
+
+                    b.Property<bool>("ProviderCostKnown")
+                        .HasColumnType("boolean");
 
                     b.Property<decimal>("ProviderCostUsd")
                         .HasPrecision(18, 8)
@@ -2941,6 +3192,17 @@ namespace Taslim.Api.Persistence.Migrations
                     b.Navigation("StoredFile");
                 });
 
+            modelBuilder.Entity("Taslim.Api.Domain.GenerationProviderAttempt", b =>
+                {
+                    b.HasOne("Taslim.Api.Domain.GenerationJob", "GenerationJob")
+                        .WithMany("ProviderAttempts")
+                        .HasForeignKey("GenerationJobId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("GenerationJob");
+                });
+
             modelBuilder.Entity("Taslim.Api.Domain.PaymentAttempt", b =>
                 {
                     b.HasOne("Taslim.Api.Domain.CheckoutSession", "CheckoutSession")
@@ -3072,6 +3334,17 @@ namespace Taslim.Api.Persistence.Migrations
                         .IsRequired();
 
                     b.Navigation("Workspace");
+                });
+
+            modelBuilder.Entity("Taslim.Api.Domain.ProviderExecutionFinalization", b =>
+                {
+                    b.HasOne("Taslim.Api.Domain.GenerationJob", "GenerationJob")
+                        .WithMany()
+                        .HasForeignKey("GenerationJobId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("GenerationJob");
                 });
 
             modelBuilder.Entity("Taslim.Api.Domain.ResearchEvidence", b =>
@@ -3506,6 +3779,8 @@ namespace Taslim.Api.Persistence.Migrations
                     b.Navigation("Assets");
 
                     b.Navigation("Outputs");
+
+                    b.Navigation("ProviderAttempts");
 
                     b.Navigation("ResearchSources");
                 });

@@ -393,6 +393,23 @@ select.memory-control { appearance: auto; cursor: pointer; }
 @media (max-width: 620px) { .admin-range-controls, .admin-range-presets, .admin-custom-range { align-items: stretch; width: 100%; } .admin-custom-range label { flex: 1; } .admin-custom-range .primary-button { width: 100%; } .admin-kpi-grid { grid-template-columns: 1fr; } .admin-inspector-grid { grid-template-columns: 1fr; } }
 [dir="rtl"] .admin-json-inspector { direction: ltr; text-align: left; }
 
+/* Wave 5 provider operations — read-only health cards */
+.provider-health-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.provider-health-card { min-width: 0; }
+.provider-health-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 18px; }
+.provider-health-heading h3 { margin: 5px 0 0; color: var(--navy-900); font-size: 1rem; letter-spacing: -.025em; }
+.provider-health-category { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: .72rem; font-weight: 750; text-transform: uppercase; letter-spacing: .06em; }
+.provider-status { display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto; padding: 5px 8px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); background: #fbfcfd; font-size: .69rem; font-weight: 750; white-space: nowrap; }
+.provider-status-operational { color: #18735d; border-color: #c4e8dc; background: #effaf6; }
+.provider-status-disabled, .provider-status-unconfigured { color: #768391; background: #f5f7f9; }
+.provider-status-recent_operational_failure { color: #a86032; border-color: #f1d6bd; background: #fff8f1; }
+.provider-state-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.provider-health-failures { margin-top: 17px; padding-top: 15px; border-top: 1px solid var(--line); }
+.provider-health-failures h4 { display: inline-flex; align-items: center; gap: 5px; margin: 0 0 9px; color: var(--navy-900); font-size: .78rem; }
+.provider-health-footnote { margin: 10px 2px 0; color: var(--muted); font-size: .72rem; line-height: 1.55; }
+@media (max-width: 900px) { .provider-health-grid { grid-template-columns: 1fr; } }
+@media (max-width: 620px) { .provider-health-heading { flex-direction: column; } .provider-state-grid { grid-template-columns: 1fr; } }
+
 /* Batch 3.9.1 accounting inspector refinement — additive only */
 .admin-json-title {
   margin: 1.1rem 0 0.55rem;

@@ -29,7 +29,7 @@ public sealed class MusicGenerationController(
         {
             var input = MusicGenerationContractMapper.ToInput(request);
             MusicGenerationRequestValidator.Validate(input, options.Value);
-            var preflight = await costControl.CheckPreflightAsync(request.WorkspaceId, UsageFeature.Music, 0m, cancellationToken);
+            var preflight = await costControl.CheckPreflightAsync(request.WorkspaceId, UsageFeature.Music, null, cancellationToken);
             if (!preflight.Allowed)
                 return ApiResults.Error(this, StatusCodes.Status429TooManyRequests, preflight.RejectionCode ?? "COST_GUARDRAIL_REJECTED", preflight.RejectionMessage ?? "This operation exceeds a configured safety limit.");
             var job = await jobs.CreateAsync(GetUserId(), new CreateGenerationJobRequest

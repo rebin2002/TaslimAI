@@ -89,7 +89,7 @@ public sealed class ImageGenerationTests : IClassFixture<ImageGenerationApiFacto
         Assert.Equal("gpt-image-2.5-sunburst-2026-09-08", usage.PricingVersion);
         Assert.Contains("imageOutput", usage.PricingSnapshotJson, StringComparison.Ordinal);
 
-        var changedPricing = new ImageGenerationOptions { PricingVersion = "future-pricing-schedule" }.Pricing.ToSnapshot(new ImageGenerationOptions { PricingVersion = "future-pricing-schedule" }).ToJson();
+        var changedPricing = new ImageGenerationOptions { PricingVersion = "future-pricing-schedule" }.Pricing.ToSnapshot(new ImageGenerationOptions { PricingVersion = "future-pricing-schedule" })?.ToJson();
         Assert.DoesNotContain("future-pricing-schedule", usage.PricingSnapshotJson, StringComparison.Ordinal);
         Assert.NotEqual(changedPricing, usage.PricingSnapshotJson);
 
@@ -170,6 +170,40 @@ public sealed class ImageGenerationTests : IClassFixture<ImageGenerationApiFacto
     }
 
     [Fact]
+    public async Task Repeated_image_request_with_same_idempotency_key_finalizes_once()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, $"image-idempotency-{Guid.NewGuid():N}@example.com");
+        const string key = "image-generation-retry-001";
+        var payload = new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            description = "A product image that must be generated once.",
+            style = "product",
+            aspectRatio = "square",
+            quality = "standard",
+        };
+
+        var first = await SendWithCsrf(client, HttpMethod.Post, "/api/image-generation/jobs", payload, key);
+        var second = await SendWithCsrf(client, HttpMethod.Post, "/api/image-generation/jobs", payload, key);
+        Assert.Equal(HttpStatusCode.Accepted, first.StatusCode);
+        Assert.Equal(HttpStatusCode.Accepted, second.StatusCode);
+        var firstJob = (await first.Content.ReadFromJsonAsync<CreateImageGenerationResponse>())!.Job;
+        var secondJob = (await second.Content.ReadFromJsonAsync<CreateImageGenerationResponse>())!.Job;
+        Assert.Equal(firstJob.Id, secondJob.Id);
+
+        var completed = await WaitForTerminal(client, firstJob.Id);
+        Assert.Equal(GenerationJobStatus.Succeeded.ToString(), completed.Status);
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.Equal(1, await db.GenerationJobs.CountAsync(item => item.IdempotencyKey == key));
+        Assert.Equal(1, await db.GenerationJobOutputs.CountAsync(item => item.GenerationJobId == firstJob.Id));
+        Assert.Equal(1, await db.Assets.CountAsync(item => item.SourceGenerationJobId == firstJob.Id));
+        Assert.Equal(1, await db.UsageTransactions.CountAsync(item => item.RequestId == $"generation:{firstJob.Id:N}"));
+        Assert.Equal(UsageTransactionStatus.Completed, await db.UsageTransactions.Where(item => item.RequestId == $"generation:{firstJob.Id:N}").Select(item => item.Status).SingleAsync());
+    }
+
+    [Fact]
     public async Task Image_job_requires_workspace_membership_and_project_belongs_to_workspace()
     {
         using var first = factory.CreateClient();
@@ -206,11 +240,12 @@ public sealed class ImageGenerationTests : IClassFixture<ImageGenerationApiFacto
         throw new TimeoutException($"Image job {id} did not reach a terminal state.");
     }
 
-    private static async Task<HttpResponseMessage> SendWithCsrf(HttpClient client, HttpMethod method, string path, object? payload)
+    private static async Task<HttpResponseMessage> SendWithCsrf(HttpClient client, HttpMethod method, string path, object? payload, string? idempotencyKey = null)
     {
         var csrf = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
         using var request = new HttpRequestMessage(method, path);
         request.Headers.Add("X-CSRF-TOKEN", csrf.GetProperty("token").GetString());
+        if (idempotencyKey is not null) request.Headers.Add("Idempotency-Key", idempotencyKey);
         if (payload is not null) request.Content = JsonContent.Create(payload);
         return await client.SendAsync(request);
     }

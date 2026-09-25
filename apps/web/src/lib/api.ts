@@ -201,8 +201,33 @@ export type AdminGenerationOverview = {
   byStatus: AdminCountBreakdown[];
   byStudio: AdminCountBreakdown[];
   recentFailures: { jobId: string; jobType: string; errorCode: string | null; failedAt: string }[];
-  runningJobs: { jobId: string; jobType: string; progressPercent: number; queuedAt: string | null; startedAt: string | null; createdAt: string }[];
+  runningJobs: { jobId: string; jobType: string; progressPercent: number; queuedAt: string | null; startedAt: string | null; createdAt: string; retryCount: number; claimExpiresAt: string | null; isLongRunning: boolean }[];
   queuedOrPendingCount: number;
+  longRunningJobCount: number;
+  totalRetryCount: number;
+};
+export type AdminSanitizedGenerationFailure = { jobType: string; errorCode: string; occurredAt: string };
+export type AdminProviderHealth = {
+  key: string;
+  category: string;
+  status: "disabled" | "unconfigured" | "recent_operational_failure" | "operational" | "available_unknown" | string;
+  enabled: boolean;
+  configured: boolean;
+  recentSuccessCount: number;
+  recentFailureCount: number;
+  averageLatencyMs: number | null;
+  rateLimitEventCount: number;
+  timeoutEventCount: number;
+  qualityControlFailureCount: number;
+  retryCount: number;
+  fallbackCount: number;
+  fallbackTelemetryRecorded: boolean;
+  estimatedProviderCostUsd: number;
+  actualProviderCostUsd: number;
+  lastSuccessAt: string | null;
+  lastFailureAt: string | null;
+  lastFailureCode: string | null;
+  recentFailures: AdminSanitizedGenerationFailure[];
 };
 export type AdminUsageOperations = {
   requestCount: number;
@@ -227,6 +252,7 @@ export type AdminOperationsDashboard = {
   assetsAndStorage: { totalAssets: number; assetsByType: AdminCountBreakdown[]; totalStoredFiles: number; storedBytes: number; filesByStatus: AdminCountBreakdown[]; filesByStorageProvider: AdminCountBreakdown[]; configuredStorageProvider: string; persistentStorageConfigured: boolean };
   billing: { customerChargingEnabled: boolean; configuredProvider: string; paymentProviderConfigured: boolean; subscriptions: { planCode: string; status: string; count: number }[]; paymentAttemptsByStatus: AdminCountBreakdown[]; pendingReconciliationCount: number };
   signals: { runningJobCount: number; queuedOrPendingJobCount: number; recentFailureCount: number; anomalousUsageCountInRange: number; lastCompletedGenerationAt: string | null };
+  providers: AdminProviderHealth[];
 };
 export type GenerationJobStatus = "Pending" | "Queued" | "Running" | "Succeeded" | "Failed" | "Cancelled";
 export type GenerationJobOutput = { id: string; outputType: string; storedFileId: string | null; metadataJson: string | null; createdAt: string };

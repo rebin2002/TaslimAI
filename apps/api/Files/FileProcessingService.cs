@@ -28,18 +28,12 @@ public sealed class FileProcessingService(
         {
         if (content.Length <= 0 || content.Length > Math.Min(settings.MaxFileSizeBytes, 25 * 1_048_576))
             throw new FileUploadValidationException("Generated files must be between 1 byte and 25 MB.");
-        if (string.IsNullOrWhiteSpace(contentType) || contentType.Length > 160)
-            throw new FileUploadValidationException("Generated file content type is invalid.");
-        if (metadataJson?.Length > 16_000)
-            throw new FileUploadValidationException("Generated file metadata is too large.");
-
-        var safeName = FileValidationService.SanitizeFileName(fileName);
-        var extension = Path.GetExtension(safeName).ToLowerInvariant();
-        if (string.IsNullOrWhiteSpace(extension) || extension.Length > 20)
-            throw new FileUploadValidationException("Generated file extension is invalid.");
+        var descriptor = GeneratedMediaSecurity.ValidateDescriptor(fileName, contentType);
+        GeneratedMediaSecurity.ValidateContent(descriptor, content.Span, settings);
+        var metadata = GeneratedMediaSecurity.NormalizeMetadataJson(metadataJson);
 
         var id = Guid.NewGuid();
-        var storedName = $"{id:N}{extension}";
+        var storedName = $"{id:N}{descriptor.Extension}";
         var storageKey = $"{workspaceId:N}/{id:N}/{storedName}";
         var now = DateTime.UtcNow;
         var file = new StoredFile
@@ -48,17 +42,17 @@ public sealed class FileProcessingService(
             WorkspaceId = workspaceId,
             UserId = userId,
             ProjectId = projectId,
-            OriginalFileName = safeName,
+            OriginalFileName = descriptor.SafeFileName,
             StoredFileName = storedName,
-            ContentType = contentType,
-            Extension = extension,
+            ContentType = descriptor.ContentType,
+            Extension = descriptor.Extension,
             SizeBytes = content.Length,
             StorageProvider = storage.ProviderKey,
             StorageKey = storageKey,
             Status = StoredFileStatus.Uploading,
             CreatedAt = now,
             TextExtractionStatus = FileExtractionStatus.NotApplicable,
-            MetadataJson = metadataJson,
+            MetadataJson = metadata,
         };
         db.StoredFiles.Add(file);
         await db.SaveChangesAsync(cancellationToken);
@@ -112,18 +106,13 @@ public sealed class FileProcessingService(
     {
         if (sizeBytes <= 0 || sizeBytes > Math.Max(1, settings.MaxGeneratedVideoBytes))
             throw new FileUploadValidationException("Generated video output is outside the configured size limit.");
-        if (string.IsNullOrWhiteSpace(contentType) || !contentType.StartsWith("video/", StringComparison.OrdinalIgnoreCase) || contentType.Length > 160)
-            throw new FileUploadValidationException("Generated video content type is invalid.");
-        if (metadataJson?.Length > 16_000)
-            throw new FileUploadValidationException("Generated file metadata is too large.");
-
-        var safeName = FileValidationService.SanitizeFileName(fileName);
-        var extension = Path.GetExtension(safeName).ToLowerInvariant();
-        if (string.IsNullOrWhiteSpace(extension) || extension.Length > 20)
-            throw new FileUploadValidationException("Generated video file extension is invalid.");
+        var descriptor = GeneratedMediaSecurity.ValidateDescriptor(fileName, contentType);
+        if (!descriptor.ContentType.StartsWith("video/", StringComparison.OrdinalIgnoreCase))
+            throw new FileUploadValidationException("Generated stream content type is invalid.");
+        var metadata = GeneratedMediaSecurity.NormalizeMetadataJson(metadataJson);
 
         var id = Guid.NewGuid();
-        var storedName = $"{id:N}{extension}";
+        var storedName = $"{id:N}{descriptor.Extension}";
         var storageKey = $"{workspaceId:N}/{id:N}/{storedName}";
         var now = DateTime.UtcNow;
         var file = new StoredFile
@@ -132,17 +121,17 @@ public sealed class FileProcessingService(
             WorkspaceId = workspaceId,
             UserId = userId,
             ProjectId = projectId,
-            OriginalFileName = safeName,
+            OriginalFileName = descriptor.SafeFileName,
             StoredFileName = storedName,
-            ContentType = contentType,
-            Extension = extension,
+            ContentType = descriptor.ContentType,
+            Extension = descriptor.Extension,
             SizeBytes = sizeBytes,
             StorageProvider = storage.ProviderKey,
             StorageKey = storageKey,
             Status = StoredFileStatus.Uploading,
             CreatedAt = now,
             TextExtractionStatus = FileExtractionStatus.NotApplicable,
-            MetadataJson = metadataJson,
+            MetadataJson = metadata,
         };
         db.StoredFiles.Add(file);
         await db.SaveChangesAsync(cancellationToken);
@@ -155,6 +144,7 @@ public sealed class FileProcessingService(
             await storage.StoreAsync(storageKey, bounded, cancellationToken);
             if (bounded.BytesRead != sizeBytes)
                 throw new FileUploadValidationException("Generated video output size did not match its declared size.");
+            GeneratedMediaSecurity.ValidateHeader(descriptor, bounded.Prefix.Span);
             file.Status = StoredFileStatus.Ready;
             file.ProcessedAt = DateTime.UtcNow;
             await db.SaveChangesAsync(cancellationToken);
@@ -292,7 +282,9 @@ public sealed class FileProcessingService(
 
 internal sealed class CountingReadStream(Stream inner, long maxBytes) : Stream
 {
+    private readonly byte[] prefix = new byte[64];
     public long BytesRead { get; private set; }
+    public ReadOnlyMemory<byte> Prefix => prefix[..(int)Math.Min(BytesRead, prefix.Length)];
     public override bool CanRead => inner.CanRead;
     public override bool CanSeek => false;
     public override bool CanWrite => false;
@@ -302,14 +294,14 @@ internal sealed class CountingReadStream(Stream inner, long maxBytes) : Stream
     public override int Read(byte[] buffer, int offset, int count)
     {
         var read = inner.Read(buffer, offset, Math.Min(count, RemainingBufferSize(count)));
-        Record(read);
+        Record(read, buffer.AsSpan(offset, read));
         return read;
     }
 
     public override int Read(Span<byte> buffer)
     {
         var read = inner.Read(buffer[..Math.Min(buffer.Length, RemainingBufferSize(buffer.Length))]);
-        Record(read);
+        Record(read, buffer);
         return read;
     }
 
@@ -323,7 +315,7 @@ internal sealed class CountingReadStream(Stream inner, long maxBytes) : Stream
             return 0;
         }
         var read = await inner.ReadAsync(buffer[..Math.Min(buffer.Length, RemainingBufferSize(buffer.Length))], cancellationToken);
-        Record(read);
+        Record(read, buffer.Span);
         return read;
     }
 
@@ -331,7 +323,12 @@ internal sealed class CountingReadStream(Stream inner, long maxBytes) : Stream
         ReadAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
 
     private int RemainingBufferSize(int requested) => (int)Math.Min(requested, maxBytes - BytesRead);
-    private void Record(int read) => BytesRead += read;
+    private void Record(int read, ReadOnlySpan<byte> buffer)
+    {
+        if (read > 0 && BytesRead < prefix.Length)
+            buffer[..Math.Min(read, prefix.Length - (int)BytesRead)].CopyTo(prefix.AsSpan((int)BytesRead));
+        BytesRead += read;
+    }
     public override void Flush() => inner.Flush();
     public override Task FlushAsync(CancellationToken cancellationToken) => inner.FlushAsync(cancellationToken);
     public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();

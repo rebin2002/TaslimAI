@@ -212,7 +212,9 @@ public sealed record MovieVideoGenerationRequest(
     string? AdditionalInstructions,
     string? ContinuityGuideJson,
     string? SceneJson,
-    string? ShotJson);
+    string? ShotJson,
+    string? SourceImageUri = null,
+    string? ContinuationProviderJobId = null);
 
 public sealed record MovieVideoSubmission(string ProviderJobId);
 public sealed record MovieVideoProviderStatus(
@@ -226,7 +228,8 @@ public sealed record MovieVideoProviderStatus(
     decimal? ActualCostUsd = null,
     string? Currency = null,
     string? CostBasis = null,
-    string? SafeMetadataJson = null);
+    string? SafeMetadataJson = null,
+    decimal? EstimatedCostUsd = null);
 
 public sealed record MovieVideoProviderOutput(
     string ContentType,
@@ -239,7 +242,8 @@ public sealed record MovieVideoProviderOutput(
     decimal? ActualCostUsd,
     string? Currency,
     string? CostBasis,
-    string? SafeMetadataJson);
+    string? SafeMetadataJson,
+    string? ProviderModelKey = null);
 
 public interface IMovieVideoProvider
 {
@@ -256,6 +260,10 @@ public sealed class MovieProviderUnavailableException : Exception
 {
     public MovieProviderUnavailableException() : base("No movie video provider is configured.") { }
 }
+
+public sealed class MovieVideoProviderTimeoutException() : Exception("The movie provider did not finish within the configured polling limit.");
+public sealed class MovieVideoProviderCancelledException() : OperationCanceledException("The movie provider task was cancelled.");
+public sealed class MovieVideoStaleWorkerException() : OperationCanceledException("The movie execution ownership changed.");
 
 public sealed class UnavailableMovieVideoProvider : IMovieVideoProvider
 {
@@ -293,7 +301,9 @@ public sealed record MovieGenerationInput(
     string? AdditionalInstructions,
     string? ContinuityGuideJson,
     string? SceneJson,
-    string? ShotJson);
+    string? ShotJson,
+    string? SourceImageUri = null,
+    string? ContinuationProviderJobId = null);
 
 public sealed record MovieProviderReadinessDto(bool Ready, IReadOnlyList<string> SupportedOperations);
 

@@ -139,7 +139,8 @@ public sealed class GenerationJobUsageService(IUsageLedgerService ledger) : IGen
                                             : UsageFeature.Generation,
             cancellationToken,
             job.Id,
-            estimatedProviderCostUsd);
+            estimatedProviderCostUsd,
+            job.CostEstimateJson);
 
     public Task CompleteAsync(UsageTransaction transaction, AiUsageMetadata usage, CancellationToken cancellationToken = default) =>
         ledger.CompleteAsync(transaction, usage, cancellationToken);
@@ -223,6 +224,9 @@ public sealed class GenerationJobService(
             IdempotencyKey = normalizedKey,
             RequestFingerprint = requestFingerprint,
             RequestId = requestId,
+            EstimatedProviderCostUsd = request.EstimatedProviderCostUsd,
+            EstimatedProviderCostKnown = request.EstimatedProviderCostUsd.HasValue,
+            CostEstimateJson = request.InternalCostEstimate?.ToJson(),
             ProgressPercent = 0,
             CreatedAt = now,
         };
@@ -478,6 +482,7 @@ public sealed class GenerationJobWorker(
         var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
         var notifications = scope.ServiceProvider.GetRequiredService<INotificationEventWriter>();
         var usage = scope.ServiceProvider.GetRequiredService<IGenerationJobUsageService>();
+        var budget = scope.ServiceProvider.GetRequiredService<IGenerationBudgetService>();
         var publisher = scope.ServiceProvider.GetRequiredService<IGeneratedAssetPublisher>();
         var movieExecutions = scope.ServiceProvider.GetRequiredService<MovieVideoExecutionStore>();
         using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
@@ -485,6 +490,7 @@ public sealed class GenerationJobWorker(
         var publications = new List<PreparedGenerationOutput>();
         var publicationCommitted = false;
         AiUsageMetadata? providerUsage = null;
+        GenerationProviderAttempt? providerAttempt = null;
         var executionStarted = Stopwatch.GetTimestamp();
         logger.LogInformation(
             "Generation job execution started. JobId={JobId}; WorkspaceId={WorkspaceId}; JobType={JobType}; RequestId={RequestId}; RetryCount={RetryCount}",
@@ -499,6 +505,10 @@ public sealed class GenerationJobWorker(
                 await TryNotifyAsync(() => notifications.CreateGenerationFailedAsync(claimedJob.Id, stoppingToken), claimedJob.Id);
                 return;
             }
+            var estimate = claimedJob.EstimatedProviderCostKnown == true && claimedJob.EstimatedProviderCostUsd.HasValue
+                ? new GenerationCostEstimate(true, claimedJob.EstimatedProviderCostUsd, UsageCurrencies.Usd, null, null, null, [])
+                : GenerationCostEstimate.Unknown("job_estimate_missing");
+            providerAttempt = await budget.BeginAttemptAsync(claimedJob, claimedJob.Provider ?? "selected", claimedJob.ProviderModel, estimate, stoppingToken);
             var progress = new SerializedProgress(value => UpdateProgressSafelyAsync(claimedJob.Id, claimedJob.ConcurrencyToken, value, stoppingToken));
             var result = await handler.ExecuteAsync(claimedJob, progress, cancellation.Token);
             await progress.DrainAsync();
@@ -514,6 +524,10 @@ public sealed class GenerationJobWorker(
                 try
                 {
                     publications.Add(await publisher.PrepareAsync(current, output, stoppingToken));
+                }
+                catch (Exception exception) when (exception is not OperationCanceledException && string.Equals(claimedJob.JobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new ImageOutputStorageException(exception);
                 }
                 catch (Exception exception) when (exception is not OperationCanceledException && string.Equals(claimedJob.JobType, GenerationJobTypes.DocumentGenerate, StringComparison.OrdinalIgnoreCase))
                 {
@@ -599,6 +613,8 @@ public sealed class GenerationJobWorker(
                 return;
             }
             publicationCommitted = true;
+            if (providerAttempt is not null)
+                await budget.CompleteAttemptAsync(providerAttempt, result.Usage?.ActualCost, result.Usage?.ActualCost.HasValue == true, GenerationProviderAttemptStatus.Succeeded, cancellationToken: stoppingToken);
             logger.LogInformation(
                 "Generation job execution completed. JobId={JobId}; JobType={JobType}; RequestId={RequestId}; ProviderKey={ProviderKey}; ProviderModel={ProviderModel}; ElapsedMs={ElapsedMs}; UsageFinalized={UsageFinalized}",
                 claimedJob.Id, claimedJob.JobType, claimedJob.RequestId, result.Usage?.ProviderKey, result.Usage?.ModelKey,
@@ -607,15 +623,31 @@ public sealed class GenerationJobWorker(
             if (GenerationJobTypes.MovieTypes.Contains(claimedJob.JobType))
             {
                 var publication = publications.FirstOrDefault(item => item.Asset is not null);
-                await movieExecutions.MarkReadyAsync(current.Id, publication?.Asset?.Id, publication?.CreatedFile?.Id, null, publication?.Output.MetadataJson, stoppingToken);
+                await movieExecutions.MarkReadyAsync(current.Id, claimedJob.ConcurrencyToken, publication?.Asset?.Id, publication?.CreatedFile?.Id, null, publication?.Output.MetadataJson, stoppingToken);
             }
+        }
+        catch (MovieVideoStaleWorkerException)
+        {
+            if (!publicationCommitted)
+                foreach (var publication in publications) await publisher.DiscardAsync(publication, CancellationToken.None);
+            logger.LogWarning("Stale movie worker stopped without mutating the recovered execution. JobId={JobId}; RequestId={RequestId}", claimedJob.Id, claimedJob.RequestId);
+        }
+        catch (MovieVideoProviderCancelledException)
+        {
+            if (!publicationCommitted)
+                foreach (var publication in publications) await publisher.DiscardAsync(publication, CancellationToken.None);
+            if (GenerationJobTypes.MovieTypes.Contains(claimedJob.JobType))
+                await movieExecutions.MarkCancelledAsync(claimedJob.Id, claimedJob.ConcurrencyToken, CancellationToken.None);
+            await CancelRunningAsync(db, usage, claimedJob, claimedJob.ConcurrencyToken, stoppingToken);
         }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
         {
             if (!publicationCommitted)
                 foreach (var publication in publications) await publisher.DiscardAsync(publication, CancellationToken.None);
             if (GenerationJobTypes.MovieTypes.Contains(claimedJob.JobType))
-                await movieExecutions.MarkCancelledAsync(claimedJob.Id, CancellationToken.None);
+await movieExecutions.MarkCancelledAsync(claimedJob.Id, claimedJob.ConcurrencyToken, CancellationToken.None);
+            if (providerAttempt is not null)
+                await budget.CompleteAttemptAsync(providerAttempt, null, false, GenerationProviderAttemptStatus.Cancelled, GenerationJobErrorCodes.Cancelled, CancellationToken.None);
             await CancelRunningAsync(db, usage, claimedJob, claimedJob.ConcurrencyToken, stoppingToken);
             logger.LogInformation(
                 "Generation job execution cancelled. JobId={JobId}; JobType={JobType}; RequestId={RequestId}; ElapsedMs={ElapsedMs}; UsageFinalized={UsageFinalized}",
@@ -627,11 +659,30 @@ public sealed class GenerationJobWorker(
                 foreach (var publication in publications) await publisher.DiscardAsync(publication, CancellationToken.None);
             var failureCode = MapFailureCode(exception, claimedJob.JobType);
             if (GenerationJobTypes.MovieTypes.Contains(claimedJob.JobType))
-                await movieExecutions.MarkFailedAsync(claimedJob.Id, failureCode, CancellationToken.None);
+                await movieExecutions.MarkFailedAsync(claimedJob.Id, claimedJob.ConcurrencyToken, failureCode, CancellationToken.None);
             var failureUsage = providerUsage ?? (exception as DocumentGenerationStageException)?.Usage;
             failureUsage ??= (exception as PresentationGenerationStageException)?.Usage;
             failureUsage ??= (exception as ResearchGenerationStageException)?.Usage;
             failureUsage ??= (exception as SocialGenerationStageException)?.Usage;
+var qualityFailure = exception as GenerationQualityControlException ?? exception.InnerException as GenerationQualityControlException;
+            if (qualityFailure is not null)
+            {
+                var qualityMetadata = JsonSerializer.Serialize(new
+                {
+                    qualityControl = new
+                    {
+                        outcome = qualityFailure.Classification.ToString(),
+                        reasonCode = qualityFailure.ReasonCode,
+                        category = qualityFailure.Result.Findings.FirstOrDefault()?.Category,
+                    },
+                });
+                failureUsage = (failureUsage ?? new AiUsageMetadata("system", "unknown", null, null, null, 0m, 0m, 0, "quality_failed", true)) with
+                {
+                    SafeMetadataJson = qualityMetadata,
+                };
+            }
+            if (providerAttempt is not null)
+                await budget.CompleteAttemptAsync(providerAttempt, failureUsage?.ActualCost, failureUsage?.ActualCost.HasValue == true, GenerationProviderAttemptStatus.Failed, failureCode, CancellationToken.None);
             if (string.Equals(claimedJob.JobType, GenerationJobTypes.DocumentGenerate, StringComparison.OrdinalIgnoreCase))
             {
                 var stage = (exception as DocumentGenerationStageException)?.Stage ?? DocumentGenerationStages.Execution;
@@ -928,6 +979,19 @@ public sealed class GenerationJobWorker(
 
     private static string MapFailureCode(Exception exception, string jobType)
     {
+if (exception is GenerationBudgetRejectedException budgetRejected) return budgetRejected.Code;
+        var qualityFailure = exception as GenerationQualityControlException ?? exception.InnerException as GenerationQualityControlException;
+        if (qualityFailure is not null)
+        {
+            if (string.Equals(jobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase)) return GenerationJobErrorCodes.ImageOutputInvalid;
+            if (string.Equals(jobType, GenerationJobTypes.DocumentGenerate, StringComparison.OrdinalIgnoreCase)) return GenerationJobErrorCodes.DocumentOutputInvalid;
+            if (string.Equals(jobType, GenerationJobTypes.PresentationGenerate, StringComparison.OrdinalIgnoreCase)) return GenerationJobErrorCodes.PresentationOutputInvalid;
+            if (string.Equals(jobType, GenerationJobTypes.ResearchGenerate, StringComparison.OrdinalIgnoreCase)) return GenerationJobErrorCodes.ResearchOutputInvalid;
+            if (string.Equals(jobType, GenerationJobTypes.SocialGenerate, StringComparison.OrdinalIgnoreCase)) return GenerationJobErrorCodes.SocialOutputInvalid;
+            if (GenerationJobTypes.MovieTypes.Contains(jobType)) return GenerationJobErrorCodes.MovieOutputInvalid;
+            if (string.Equals(jobType, GenerationJobTypes.MusicGenerate, StringComparison.OrdinalIgnoreCase)) return GenerationJobErrorCodes.MusicOutputInvalid;
+            if (string.Equals(jobType, GenerationJobTypes.VoiceGenerate, StringComparison.OrdinalIgnoreCase)) return GenerationJobErrorCodes.VoiceOutputInvalid;
+        }
         if (string.Equals(jobType, GenerationJobTypes.DocumentGenerate, StringComparison.OrdinalIgnoreCase))
         {
             return exception switch
@@ -994,7 +1058,11 @@ public sealed class GenerationJobWorker(
             return exception switch
             {
                 MovieProviderUnavailableException => GenerationJobErrorCodes.MovieProviderUnavailable,
+                MovieVideoProviderTimeoutException => GenerationJobErrorCodes.MovieProviderTimeout,
+                MovieVideoStaleWorkerException => GenerationJobErrorCodes.MovieCancelled,
+                MovieVideoProviderCancelledException => GenerationJobErrorCodes.MovieCancelled,
                 MovieVideoProviderException providerException when providerException.Code == GenerationJobErrorCodes.MovieProviderUnavailable => GenerationJobErrorCodes.MovieProviderUnavailable,
+                MovieVideoProviderException providerException when providerException.Code == GenerationJobErrorCodes.MovieProviderUnsupportedRequest => GenerationJobErrorCodes.MovieProviderUnsupportedRequest,
                 MovieVideoProviderException => GenerationJobErrorCodes.MovieGenerationFailed,
                 MovieVideoProviderOutputException => GenerationJobErrorCodes.MovieOutputInvalid,
                 FileStorageUnavailableException or FileStorageOperationException or FileUploadValidationException => GenerationJobErrorCodes.MovieOutputStorageFailed,
@@ -1006,7 +1074,11 @@ public sealed class GenerationJobWorker(
             return exception switch
             {
                 MusicRequestValidationException validation => validation.Code,
-                MusicProviderUnavailableException or MusicProviderTimeoutException => GenerationJobErrorCodes.MusicProviderUnavailable,
+                MusicProviderUnavailableException => GenerationJobErrorCodes.MusicProviderUnavailable,
+                MusicProviderTimeoutException => GenerationJobErrorCodes.MusicProviderTimeout,
+                MusicProviderRateLimitException => GenerationJobErrorCodes.MusicProviderRateLimited,
+                MusicProviderRejectedException => GenerationJobErrorCodes.MusicPromptRejected,
+                MusicProviderInvalidRequestException => GenerationJobErrorCodes.MusicProviderInvalidRequest,
                 MusicOutputInvalidException => GenerationJobErrorCodes.MusicOutputInvalid,
                 FileStorageUnavailableException or FileStorageOperationException or FileUploadValidationException => GenerationJobErrorCodes.MusicOutputStorageFailed,
                 _ => GenerationJobErrorCodes.MusicGenerationFailed,
@@ -1018,7 +1090,11 @@ public sealed class GenerationJobWorker(
             {
                 VoiceRequestValidationException validation => validation.Code,
                 VoiceProviderUnsupportedRequestException => GenerationJobErrorCodes.VoiceProviderUnsupportedRequest,
-                VoiceProviderUnavailableException or VoiceProviderTimeoutException or VoiceProviderConfigurationException => GenerationJobErrorCodes.VoiceProviderUnavailable,
+                VoiceProviderAuthenticationException => GenerationJobErrorCodes.VoiceProviderAuthentication,
+                VoiceProviderRateLimitException => GenerationJobErrorCodes.VoiceProviderRateLimited,
+                VoiceProviderTimeoutException => GenerationJobErrorCodes.VoiceProviderTimeout,
+                VoiceProviderInvalidInputException => GenerationJobErrorCodes.VoiceProviderInvalidInput,
+                VoiceProviderUnavailableException or VoiceProviderConfigurationException => GenerationJobErrorCodes.VoiceProviderUnavailable,
                 VoiceLanguageUnsupportedException => GenerationJobErrorCodes.VoiceLanguageUnsupported,
                 VoiceProviderFailureException => GenerationJobErrorCodes.VoiceProviderFailed,
                 VoiceOutputInvalidException => GenerationJobErrorCodes.VoiceOutputInvalid,
@@ -1032,9 +1108,12 @@ public sealed class GenerationJobWorker(
             ImageRequestValidationException validation => validation.Code,
             ImageProviderUnavailableException => GenerationJobErrorCodes.ImageProviderUnavailable,
             ImageProviderTimeoutException => GenerationJobErrorCodes.ImageProviderUnavailable,
+            ImageProviderRateLimitException => GenerationJobErrorCodes.ImageProviderUnavailable,
+            ImageProviderUnsupportedRequestException => GenerationJobErrorCodes.ImageRequestInvalid,
             ImageProviderSafetyException => GenerationJobErrorCodes.ImageSafetyRefusal,
             ImageOutputInvalidException => GenerationJobErrorCodes.ImageOutputInvalid,
             ImageProviderFailureException failure => failure.SafeCode,
+            ImageOutputStorageException => GenerationJobErrorCodes.ImageOutputStorageFailed,
             FileStorageUnavailableException => GenerationJobErrorCodes.ImageOutputStorageFailed,
             FileStorageOperationException => GenerationJobErrorCodes.ImageOutputStorageFailed,
             FileUploadValidationException => GenerationJobErrorCodes.ImageOutputStorageFailed,
@@ -1045,10 +1124,10 @@ public sealed class GenerationJobWorker(
     private static string FailureMessage(string code) => code switch
     {
         GenerationJobErrorCodes.ImageProviderUnavailable => "Image generation is temporarily unavailable. Please try again later.",
+        GenerationJobErrorCodes.ImageRequestInvalid => "Please check the image request and try again.",
         GenerationJobErrorCodes.ImageSafetyRefusal => "This request could not be completed by the image safety system. Try a different description.",
         GenerationJobErrorCodes.ImageOutputInvalid => "The image result was invalid. Please try again.",
         GenerationJobErrorCodes.ImageOutputStorageFailed => "The image was generated but could not be saved. Please try again.",
-        GenerationJobErrorCodes.ImageRequestInvalid => "Please check the image request and try again.",
         GenerationJobErrorCodes.ImageCancelled => "The image generation was cancelled.",
         GenerationJobErrorCodes.DocumentProviderUnavailable => "Document generation is temporarily unavailable. Please try again later.",
         GenerationJobErrorCodes.DocumentProviderConfiguration => "Document generation is temporarily unavailable. Please try again later.",
@@ -1089,15 +1168,24 @@ public sealed class GenerationJobWorker(
         GenerationJobErrorCodes.SocialStorageFailed => "The social content was generated but could not be saved. Please try again.",
         GenerationJobErrorCodes.SocialCancelled => "The social content generation was cancelled.",
         GenerationJobErrorCodes.MovieProviderUnavailable => "Movie generation is not available yet because no video provider is configured. Your movie plan was saved.",
+        GenerationJobErrorCodes.MovieProviderTimeout => "Movie generation took too long to finish. Your movie plan was saved.",
+        GenerationJobErrorCodes.MovieProviderUnsupportedRequest => "This movie request is not supported by the configured video provider. Your movie plan was saved.",
         GenerationJobErrorCodes.MovieOutputInvalid => "The generated movie clip was invalid. Your movie plan was saved.",
         GenerationJobErrorCodes.MovieOutputStorageFailed => "The movie clip was generated but could not be saved. Your movie plan was saved.",
         GenerationJobErrorCodes.MovieCancelled => "The movie generation was cancelled.",
         GenerationJobErrorCodes.MovieGenerationFailed => "The movie could not be generated. Your movie plan was saved.",
         GenerationJobErrorCodes.MusicProviderUnavailable or GenerationJobErrorCodes.MusicProviderTimeout => "Music generation is temporarily unavailable. Please try again later.",
+        GenerationJobErrorCodes.MusicProviderRateLimited => "Music generation is temporarily busy. Please try again later.",
+        GenerationJobErrorCodes.MusicPromptRejected => "This music request could not be completed. Try a different description.",
+        GenerationJobErrorCodes.MusicProviderInvalidRequest => "Please check the music request and try again.",
         GenerationJobErrorCodes.MusicOutputInvalid => "The generated music was invalid. Please try again.",
         GenerationJobErrorCodes.MusicOutputStorageFailed => "The music was generated but could not be saved. Please try again.",
         GenerationJobErrorCodes.MusicCancelled => "The music generation was cancelled.",
         GenerationJobErrorCodes.VoiceProviderUnavailable => "Voice generation is temporarily unavailable. Please try again later.",
+        GenerationJobErrorCodes.VoiceProviderAuthentication => "Voice generation is temporarily unavailable. Please try again later.",
+        GenerationJobErrorCodes.VoiceProviderRateLimited => "Voice generation is busy right now. Please try again later.",
+        GenerationJobErrorCodes.VoiceProviderTimeout => "Voice generation took too long to complete. Please try again.",
+        GenerationJobErrorCodes.VoiceProviderInvalidInput => "Please check the voice request and try again.",
         GenerationJobErrorCodes.VoiceProviderUnsupportedRequest => "This voice request is not supported. Please use shorter text or different settings.",
         GenerationJobErrorCodes.VoiceProviderFailed => "Voice generation could not be completed. Please try again.",
         GenerationJobErrorCodes.VoiceLanguageUnsupported => "This language is not currently supported for voice generation.",

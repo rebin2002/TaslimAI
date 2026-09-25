@@ -139,7 +139,9 @@ public sealed class SocialRequestValidationException(string code, string message
 
 public static class SocialGenerationCostEstimator
 {
-    public static decimal Estimate(SocialGenerationOptions options) => Math.Round(Math.Max(0m, options.MaxOutputTokens / 1_000m * options.EstimatedOutputUsdPer1KTokens), 8);
+    public static decimal? Estimate(SocialGenerationOptions options) => options.EstimatedOutputUsdPer1KTokens.HasValue
+        ? Math.Round(Math.Max(0m, options.MaxOutputTokens / 1_000m * options.EstimatedOutputUsdPer1KTokens.Value), 8)
+        : null;
 }
 
 public static class SocialDraftValidator

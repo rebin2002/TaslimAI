@@ -5,6 +5,7 @@ using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Taslim.Api.Contracts;
@@ -20,6 +21,22 @@ public class GenerationJobsApiFactory : WebApplicationFactory<Program>
 
     protected virtual bool WorkerEnabled => true;
 
+    public GenerationJobsApiFactory()
+    {
+        using var connection = new SqliteConnection($"Data Source={databasePath}");
+        connection.Open();
+        using (var pragma = connection.CreateCommand())
+        {
+            pragma.CommandText = "PRAGMA journal_mode=WAL;";
+            pragma.ExecuteNonQuery();
+        }
+        var options = new DbContextOptionsBuilder<TaslimDbContext>()
+            .UseSqlite(connection)
+            .Options;
+        using var db = new TaslimDbContext(options);
+        db.Database.EnsureCreated();
+    }
+
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseEnvironment("Testing");
@@ -30,14 +47,17 @@ public class GenerationJobsApiFactory : WebApplicationFactory<Program>
         builder.ConfigureServices(services =>
         {
             services.RemoveAll<DbContextOptions<TaslimDbContext>>();
-            services.AddDbContext<TaslimDbContext>(options => options.UseSqlite($"Data Source={databasePath}"));
+            services.AddDbContext<TaslimDbContext>(options => options.UseSqlite($"Data Source={databasePath};Cache=Shared;Default Timeout=30"));
         });
     }
 
     protected override void Dispose(bool disposing)
     {
         base.Dispose(disposing);
-        if (disposing && File.Exists(databasePath)) File.Delete(databasePath);
+        // Hosted workers can finish their final database observation after the
+        // WebApplicationFactory begins disposal. Keep the unique ephemeral file
+        // until the test process exits rather than allowing a late connection to
+        // recreate an empty SQLite database.
     }
 }
 

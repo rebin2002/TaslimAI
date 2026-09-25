@@ -22,6 +22,9 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
     public DbSet<ChatMessageAttachment> ChatMessageAttachments => Set<ChatMessageAttachment>();
     public DbSet<GenerationJob> GenerationJobs => Set<GenerationJob>();
     public DbSet<GenerationJobOutput> GenerationJobOutputs => Set<GenerationJobOutput>();
+    public DbSet<GenerationProviderAttempt> GenerationProviderAttempts => Set<GenerationProviderAttempt>();
+    public DbSet<ProviderCircuit> ProviderCircuits => Set<ProviderCircuit>();
+    public DbSet<ProviderExecutionFinalization> ProviderExecutionFinalizations => Set<ProviderExecutionFinalization>();
     public DbSet<ActivityReadState> ActivityReadStates => Set<ActivityReadState>();
     public DbSet<Notification> Notifications => Set<Notification>();
     public DbSet<Asset> Assets => Set<Asset>();
@@ -283,6 +286,8 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.Property(job => job.Title).HasMaxLength(160);
             entity.Property(job => job.Provider).HasMaxLength(80);
             entity.Property(job => job.ProviderModel).HasMaxLength(160);
+            entity.Property(job => job.EstimatedProviderCostUsd).HasPrecision(18, 8);
+            entity.Property(job => job.CostEstimateJson).HasMaxLength(8_000);
             entity.Property(job => job.InputJson).HasMaxLength(100_000).IsRequired();
             entity.Property(job => job.IdempotencyKey).HasMaxLength(80);
             entity.Property(job => job.RequestFingerprint).HasMaxLength(64);
@@ -306,6 +311,37 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasOne(job => job.CreatedByUser).WithMany().HasForeignKey(job => job.CreatedByUserId).OnDelete(DeleteBehavior.Restrict);
         });
 
+        builder.Entity<GenerationProviderAttempt>(entity =>
+        {
+            entity.HasKey(attempt => attempt.Id);
+            entity.Property(attempt => attempt.JobConcurrencyToken).IsRequired();
+            entity.Property(attempt => attempt.IdempotencyKey).HasMaxLength(180).IsRequired();
+            entity.Property(attempt => attempt.Capability).HasMaxLength(120);
+            entity.Property(attempt => attempt.Provider).HasMaxLength(80).IsRequired();
+            entity.Property(attempt => attempt.Model).HasMaxLength(160);
+            entity.Property(attempt => attempt.ProviderExecutionId).HasMaxLength(240);
+            entity.Property(attempt => attempt.ResultClassification).HasMaxLength(40).IsRequired();
+            entity.Property(attempt => attempt.Status).HasConversion<string>().HasMaxLength(30).IsRequired();
+            entity.Property(attempt => attempt.EstimatedProviderCostUsd).HasPrecision(18, 8);
+            entity.Property(attempt => attempt.ActualProviderCostUsd).HasPrecision(18, 8);
+            entity.Property(attempt => attempt.CostEstimateJson).HasMaxLength(8_000);
+            entity.Property(attempt => attempt.FailureCode).HasMaxLength(100);
+            entity.Property(attempt => attempt.PricingVersion).HasMaxLength(100);
+            entity.Property(attempt => attempt.PricingSnapshotJson).HasMaxLength(8_000);
+            entity.Property(attempt => attempt.Currency).HasMaxLength(3).IsRequired();
+            entity.Property(attempt => attempt.SafeMetadataJson).HasMaxLength(8_000);
+            entity.Property(attempt => attempt.FinalizationKey).HasMaxLength(160).IsRequired();
+            entity.Property(attempt => attempt.StartedAt).IsRequired();
+            entity.HasIndex(attempt => new { attempt.GenerationJobId, attempt.AttemptNumber }).IsUnique();
+            entity.HasIndex(attempt => new { attempt.GenerationJobId, attempt.IdempotencyKey });
+            entity.HasIndex(attempt => new { attempt.Provider, attempt.Capability, attempt.StartedAt });
+            entity.HasIndex(attempt => attempt.FinalizationKey).IsUnique();
+            entity.HasOne(attempt => attempt.GenerationJob)
+                .WithMany(job => job.ProviderAttempts)
+                .HasForeignKey(attempt => attempt.GenerationJobId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
         builder.Entity<GenerationJobOutput>(entity =>
         {
             entity.HasKey(output => output.Id);
@@ -316,6 +352,30 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasIndex(output => output.StoredFileId);
             entity.HasOne(output => output.GenerationJob).WithMany(job => job.Outputs).HasForeignKey(output => output.GenerationJobId).OnDelete(DeleteBehavior.Cascade);
             entity.HasOne(output => output.StoredFile).WithMany(file => file.GenerationJobOutputs).HasForeignKey(output => output.StoredFileId).OnDelete(DeleteBehavior.Restrict);
+        });
+
+
+        builder.Entity<ProviderCircuit>(entity =>
+        {
+            entity.HasKey(circuit => circuit.Id);
+            entity.Property(circuit => circuit.ProviderKey).HasMaxLength(80).IsRequired();
+            entity.Property(circuit => circuit.Capability).HasMaxLength(120).IsRequired();
+            entity.Property(circuit => circuit.State).HasMaxLength(20).IsRequired();
+            entity.Property(circuit => circuit.RowVersion).IsConcurrencyToken().IsRequired();
+            entity.Property(circuit => circuit.UpdatedAt).IsRequired();
+            entity.HasIndex(circuit => new { circuit.ProviderKey, circuit.Capability }).IsUnique();
+            entity.HasIndex(circuit => new { circuit.State, circuit.OpenUntil });
+        });
+
+        builder.Entity<ProviderExecutionFinalization>(entity =>
+        {
+            entity.HasKey(finalization => finalization.Id);
+            entity.Property(finalization => finalization.IdempotencyKey).HasMaxLength(180).IsRequired();
+            entity.Property(finalization => finalization.State).HasMaxLength(20).IsRequired();
+            entity.Property(finalization => finalization.ClaimedAt).IsRequired();
+            entity.HasIndex(finalization => new { finalization.GenerationJobId, finalization.IdempotencyKey }).IsUnique();
+            entity.HasIndex(finalization => new { finalization.State, finalization.ClaimExpiresAt });
+            entity.HasOne(finalization => finalization.GenerationJob).WithMany().HasForeignKey(finalization => finalization.GenerationJobId).OnDelete(DeleteBehavior.Cascade);
         });
 
         builder.Entity<ActivityReadState>(entity =>
@@ -493,8 +553,10 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.Property(transaction => transaction.ProviderCostUsd).HasPrecision(18, 8).IsRequired();
             entity.Property(transaction => transaction.ChargedAmount).HasPrecision(18, 8).IsRequired();
             entity.Property(transaction => transaction.EstimatedProviderCostUsd).HasPrecision(18, 8);
+            entity.Property(transaction => transaction.ProviderCostKnown).IsRequired();
             entity.Property(transaction => transaction.PricingVersion).HasMaxLength(100);
             entity.Property(transaction => transaction.PricingSnapshotJson).HasMaxLength(8_000);
+            entity.Property(transaction => transaction.CostEstimateJson).HasMaxLength(8_000);
             entity.Property(transaction => transaction.SafeMetadataJson).HasMaxLength(8_000);
             entity.Property(transaction => transaction.FailureCode).HasMaxLength(80);
             entity.Property(transaction => transaction.AnomalyCode).HasMaxLength(100);

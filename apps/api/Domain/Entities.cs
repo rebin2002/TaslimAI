@@ -196,6 +196,8 @@ public static class GenerationJobErrorCodes
     public const string SocialStorageFailed = "SOCIAL_STORAGE_FAILED";
     public const string SocialCancelled = "SOCIAL_CANCELLED";
 public const string MovieProviderUnavailable = "MOVIE_PROVIDER_UNAVAILABLE";
+    public const string MovieProviderTimeout = "MOVIE_PROVIDER_TIMEOUT";
+    public const string MovieProviderUnsupportedRequest = "MOVIE_PROVIDER_UNSUPPORTED_REQUEST";
     public const string MovieCancelled = "MOVIE_CANCELLED";
     public const string MovieGenerationFailed = "MOVIE_GENERATION_FAILED";
     public const string MovieOutputInvalid = "MOVIE_OUTPUT_INVALID";
@@ -208,13 +210,20 @@ public const string MusicRequestInvalid = "MUSIC_REQUEST_INVALID";
     public const string MusicLanguageUnsupported = "MUSIC_LANGUAGE_UNSUPPORTED";
     public const string MusicProviderUnavailable = "MUSIC_PROVIDER_UNAVAILABLE";
     public const string MusicProviderTimeout = "MUSIC_PROVIDER_TIMEOUT";
+    public const string MusicProviderRateLimited = "MUSIC_PROVIDER_RATE_LIMITED";
+    public const string MusicPromptRejected = "MUSIC_PROMPT_REJECTED";
+    public const string MusicProviderInvalidRequest = "MUSIC_PROVIDER_INVALID_REQUEST";
     public const string MusicGenerationFailed = "MUSIC_GENERATION_FAILED";
     public const string MusicOutputInvalid = "MUSIC_OUTPUT_INVALID";
     public const string MusicOutputStorageFailed = "MUSIC_OUTPUT_STORAGE_FAILED";
     public const string MusicCancelled = "MUSIC_CANCELLED";
-public const string VoiceRequestInvalid = "VOICE_REQUEST_INVALID";
-    public const string VoiceProviderUnavailable = "VOICE_PROVIDER_UNAVAILABLE";
-    public const string VoiceProviderFailed = "VOICE_PROVIDER_FAILED";
+	public const string VoiceRequestInvalid = "VOICE_REQUEST_INVALID";
+	    public const string VoiceProviderUnavailable = "VOICE_PROVIDER_UNAVAILABLE";
+	    public const string VoiceProviderAuthentication = "VOICE_PROVIDER_AUTHENTICATION_FAILED";
+	    public const string VoiceProviderRateLimited = "VOICE_PROVIDER_RATE_LIMITED";
+	    public const string VoiceProviderTimeout = "VOICE_PROVIDER_TIMEOUT";
+	    public const string VoiceProviderInvalidInput = "VOICE_PROVIDER_INVALID_INPUT";
+	    public const string VoiceProviderFailed = "VOICE_PROVIDER_FAILED";
     public const string VoiceProviderUnsupportedRequest = "VOICE_PROVIDER_UNSUPPORTED_REQUEST";
     public const string VoiceLanguageUnsupported = "VOICE_LANGUAGE_UNSUPPORTED";
     public const string VoiceOutputInvalid = "VOICE_OUTPUT_INVALID";
@@ -450,6 +459,7 @@ public static class UsageCostBasis
 {
     public const string Actual = "Actual";
     public const string Estimated = "Estimated";
+    public const string Unknown = "Unknown";
 }
 
 public enum UsageChargeUnit
@@ -547,6 +557,9 @@ public sealed class GenerationJob
     public string? Title { get; set; }
     public string? Provider { get; set; }
     public string? ProviderModel { get; set; }
+    public decimal? EstimatedProviderCostUsd { get; set; }
+    public bool? EstimatedProviderCostKnown { get; set; }
+    public string? CostEstimateJson { get; set; }
     public string InputJson { get; set; } = "{}";
     public string? IdempotencyKey { get; set; }
     public string? RequestFingerprint { get; set; }
@@ -572,6 +585,54 @@ public sealed class GenerationJob
     public ICollection<GenerationJobOutput> Outputs { get; set; } = [];
     public ICollection<Asset> Assets { get; set; } = [];
     public ICollection<ResearchSource> ResearchSources { get; set; } = [];
+    public ICollection<GenerationProviderAttempt> ProviderAttempts { get; set; } = [];
+}
+
+public enum GenerationProviderAttemptStatus
+{
+    Started,
+    Succeeded,
+    Failed,
+    Cancelled,
+    Rejected,
+}
+
+public sealed class GenerationProviderAttempt
+{
+    public Guid Id { get; set; }
+    public Guid GenerationJobId { get; set; }
+    public Guid JobConcurrencyToken { get; set; }
+    public string IdempotencyKey { get; set; } = string.Empty;
+    public string? Capability { get; set; }
+    public int AttemptNumber { get; set; }
+    public int RetryNumber { get; set; }
+    public bool IsRetry { get; set; }
+    public bool IsFallback { get; set; }
+    public string Provider { get; set; } = string.Empty;
+    public string? Model { get; set; }
+    public string? ProviderExecutionId { get; set; }
+    public GenerationProviderAttemptStatus Status { get; set; } = GenerationProviderAttemptStatus.Started;
+    public string ResultClassification { get; set; } = "Started";
+    public bool RateLimited { get; set; }
+    public bool TimedOut { get; set; }
+    public bool CircuitOpen { get; set; }
+    public bool QualityControlRejected { get; set; }
+    public decimal? EstimatedProviderCostUsd { get; set; }
+    public bool EstimatedProviderCostKnown { get; set; }
+    public decimal? ActualProviderCostUsd { get; set; }
+    public bool ActualProviderCostKnown { get; set; }
+    public string? CostEstimateJson { get; set; }
+    public string? FailureCode { get; set; }
+    public string? PricingVersion { get; set; }
+    public string? PricingSnapshotJson { get; set; }
+    public string Currency { get; set; } = UsageCurrencies.Usd;
+    public string? SafeMetadataJson { get; set; }
+    public long? LatencyMs { get; set; }
+    public string FinalizationKey { get; set; } = string.Empty;
+    public DateTime StartedAt { get; set; }
+    public DateTime? CompletedAt { get; set; }
+
+    public GenerationJob GenerationJob { get; set; } = null!;
 }
 
 public sealed class ResearchSource
@@ -715,12 +776,14 @@ public sealed class UsageTransaction
     public int? LatencyMs { get; set; }
     public decimal? EstimatedProviderCostUsd { get; set; }
     public decimal ProviderCostUsd { get; set; }
+    public bool ProviderCostKnown { get; set; }
     public decimal ChargedAmount { get; set; }
     public UsageChargeUnit ChargedUnit { get; set; } = UsageChargeUnit.Usd;
     public string Currency { get; set; } = "USD";
     public string? CostBasis { get; set; }
     public string? PricingVersion { get; set; }
     public string? PricingSnapshotJson { get; set; }
+    public string? CostEstimateJson { get; set; }
     public string? SafeMetadataJson { get; set; }
     public bool IsAnomalous { get; set; }
     public string? AnomalyCode { get; set; }

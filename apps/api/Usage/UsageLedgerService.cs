@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Taslim.Api.Ai;
 using Taslim.Api.Domain;
@@ -20,7 +21,7 @@ public interface IUsageCostControl
     Task<UsagePreflightResult> CheckPreflightAsync(
         Guid workspaceId,
         UsageFeature feature,
-        decimal estimatedProviderCostUsd,
+        decimal? estimatedProviderCostUsd,
         CancellationToken cancellationToken = default);
 
     Task MarkAnomalyAsync(UsageTransaction transaction, CancellationToken cancellationToken = default);
@@ -36,11 +37,15 @@ public sealed class UsageCostControl(
     public async Task<UsagePreflightResult> CheckPreflightAsync(
         Guid workspaceId,
         UsageFeature feature,
-        decimal estimatedProviderCostUsd,
+        decimal? estimatedProviderCostUsd,
         CancellationToken cancellationToken = default)
     {
-        var estimate = decimal.Round(Math.Max(0m, estimatedProviderCostUsd), 8, MidpointRounding.AwayFromZero);
+        var estimate = estimatedProviderCostUsd.HasValue
+            ? decimal.Round(Math.Max(0m, estimatedProviderCostUsd.Value), 8, MidpointRounding.AwayFromZero)
+            : (decimal?)null;
         if (!settings.GuardrailsEnabled) return new UsagePreflightResult(true, estimate);
+        if (!estimate.HasValue && settings.RejectUnknownEstimates)
+            return new UsagePreflightResult(false, null, "COST_ESTIMATE_UNKNOWN", "The provider cost could not be estimated safely.");
 
         if (settings.MaxEstimatedProviderCostPerGenerationUsd is { } single && estimate > single)
             return new UsagePreflightResult(false, estimate, "COST_ESTIMATE_EXCEEDS_LIMIT", "This operation exceeds the configured safety limit.");
@@ -49,16 +54,20 @@ public sealed class UsageCostControl(
         if (settings.DailyWorkspaceProviderCostCeilingUsd is { } daily)
         {
             var start = now.Date;
-            var spent = await ProviderCostForWindowAsync(workspaceId, start, now, cancellationToken);
-            if (spent + estimate > daily)
+            var (spent, hasUnknown) = await ProviderCostForWindowAsync(workspaceId, start, now, cancellationToken);
+            if (hasUnknown)
+                return new UsagePreflightResult(false, estimate, "WORKSPACE_COST_UNKNOWN", "This workspace has provider exposure that cannot be estimated safely.");
+            if (spent + estimate.GetValueOrDefault() > daily)
                 return new UsagePreflightResult(false, estimate, "DAILY_COST_CEILING_EXCEEDED", "This workspace has reached its configured daily safety limit.");
         }
 
         if (settings.MonthlyWorkspaceProviderCostCeilingUsd is { } monthly)
         {
             var start = new DateTime(now.Year, now.Month, 1, 0, 0, 0, DateTimeKind.Utc);
-            var spent = await ProviderCostForWindowAsync(workspaceId, start, now, cancellationToken);
-            if (spent + estimate > monthly)
+            var (spent, hasUnknown) = await ProviderCostForWindowAsync(workspaceId, start, now, cancellationToken);
+            if (hasUnknown)
+                return new UsagePreflightResult(false, estimate, "WORKSPACE_COST_UNKNOWN", "This workspace has provider exposure that cannot be estimated safely.");
+            if (spent + estimate.GetValueOrDefault() > monthly)
                 return new UsagePreflightResult(false, estimate, "MONTHLY_COST_CEILING_EXCEEDED", "This workspace has reached its configured monthly safety limit.");
         }
 
@@ -77,14 +86,21 @@ public sealed class UsageCostControl(
             transaction.Id, transaction.WorkspaceId, transaction.Feature, code, transaction.ProviderCostUsd);
     }
 
-    private async Task<decimal> ProviderCostForWindowAsync(Guid workspaceId, DateTime start, DateTime end, CancellationToken cancellationToken) =>
-        await db.UsageTransactions
+    private async Task<(decimal Cost, bool HasUnknown)> ProviderCostForWindowAsync(Guid workspaceId, DateTime start, DateTime end, CancellationToken cancellationToken)
+    {
+        var rows = await db.UsageTransactions
             .Where(item => item.WorkspaceId == workspaceId && item.CreatedAt >= start && item.CreatedAt < end)
-            .SumAsync(item => item.Status == UsageTransactionStatus.Completed
-                ? item.ProviderCostUsd
-                : item.Status == UsageTransactionStatus.Pending
-                    ? (item.EstimatedProviderCostUsd ?? 0m)
-                    : 0m, cancellationToken);
+            .Select(item => new { item.Status, item.ProviderCostUsd, item.ProviderCostKnown, item.EstimatedProviderCostUsd })
+            .ToListAsync(cancellationToken);
+        var hasUnknown = rows.Any(item => item.Status != UsageTransactionStatus.Cancelled
+            && (item.Status == UsageTransactionStatus.Pending ? !item.EstimatedProviderCostUsd.HasValue : !item.ProviderCostKnown));
+        var cost = rows.Sum(item => item.Status == UsageTransactionStatus.Completed || item.Status == UsageTransactionStatus.Failed
+            ? item.ProviderCostKnown ? item.ProviderCostUsd : 0m
+            : item.Status == UsageTransactionStatus.Pending
+                ? item.EstimatedProviderCostUsd ?? 0m
+                : 0m);
+        return (cost, hasUnknown);
+    }
 
     private async Task<string?> FindAnomalyCodeAsync(UsageTransaction transaction, CancellationToken cancellationToken)
     {
@@ -94,7 +110,8 @@ public sealed class UsageCostControl(
         if (settings.DailyWorkspaceAnomalyThresholdUsd is { } daily)
         {
             var start = transaction.CreatedAt.Date;
-            var spent = await ProviderCostForWindowAsync(transaction.WorkspaceId, start, DateTime.UtcNow, cancellationToken);
+            var (spent, hasUnknown) = await ProviderCostForWindowAsync(transaction.WorkspaceId, start, DateTime.UtcNow, cancellationToken);
+            if (hasUnknown) return "PROVIDER_COST_UNKNOWN";
             if (spent > daily) return "DAILY_WORKSPACE_COST_THRESHOLD";
         }
 
@@ -123,7 +140,8 @@ public interface IUsageLedgerService
         UsageFeature feature,
         CancellationToken cancellationToken = default,
         Guid? generationJobId = null,
-        decimal? estimatedProviderCostUsd = null);
+        decimal? estimatedProviderCostUsd = null,
+        string? costEstimateJson = null);
 
     Task CompleteAsync(UsageTransaction transaction, AiUsageMetadata usage, CancellationToken cancellationToken = default);
     Task FailAsync(UsageTransaction transaction, string failureCode, AiUsageMetadata? usage = null, CancellationToken cancellationToken = default);
@@ -147,19 +165,31 @@ public sealed class UsageLedgerService(
         UsageFeature feature,
         CancellationToken cancellationToken = default,
         Guid? generationJobId = null,
-        decimal? estimatedProviderCostUsd = null)
+        decimal? estimatedProviderCostUsd = null,
+        string? costEstimateJson = null)
     {
         var existing = await db.UsageTransactions.SingleOrDefaultAsync(transaction =>
             transaction.WorkspaceId == workspaceId && transaction.RequestId == requestId && transaction.Feature == feature,
             cancellationToken);
         if (existing is not null)
         {
+            if (existing.GenerationJobId.HasValue && (existing.Status is UsageTransactionStatus.Failed or UsageTransactionStatus.Cancelled))
+            {
+                var jobStatus = await db.GenerationJobs.AsNoTracking()
+                    .Where(job => job.Id == existing.GenerationJobId.Value)
+                    .Select(job => job.Status)
+                    .SingleOrDefaultAsync(cancellationToken);
+                if (jobStatus is GenerationJobStatus.Failed or GenerationJobStatus.Cancelled or GenerationJobStatus.Succeeded)
+                    return existing;
+            }
             if (existing.Status is UsageTransactionStatus.Failed or UsageTransactionStatus.Cancelled)
             {
                 existing.Status = UsageTransactionStatus.Pending;
                 existing.ProviderCostUsd = 0m;
+                existing.ProviderCostKnown = false;
                 existing.ChargedAmount = 0m;
                 existing.EstimatedProviderCostUsd = estimatedProviderCostUsd;
+                existing.CostEstimateJson = costEstimateJson;
                 existing.CompletedAt = null;
                 existing.RefundedAt = null;
                 existing.FailureCode = null;
@@ -190,7 +220,9 @@ public sealed class UsageLedgerService(
             Model = "pending",
             Status = UsageTransactionStatus.Pending,
             EstimatedProviderCostUsd = estimatedProviderCostUsd,
+            CostEstimateJson = costEstimateJson,
             ProviderCostUsd = 0m,
+            ProviderCostKnown = false,
             ChargedAmount = 0m,
             ChargedUnit = UsageChargeUnit.Usd,
             Currency = UsageCurrencies.Usd,
@@ -215,7 +247,7 @@ public sealed class UsageLedgerService(
 
     public async Task CompleteAsync(UsageTransaction transaction, AiUsageMetadata usage, CancellationToken cancellationToken = default)
     {
-        if (transaction.Status is UsageTransactionStatus.Completed or UsageTransactionStatus.Refunded) return;
+        if (transaction.Status is UsageTransactionStatus.Completed or UsageTransactionStatus.Refunded or UsageTransactionStatus.Failed or UsageTransactionStatus.Cancelled) return;
         var providerCost = costCalculator.Calculate(usage);
         var snapshot = string.IsNullOrWhiteSpace(usage.PricingSnapshotJson) ? costCalculator.GetPricingSnapshot(usage)?.ToJson() : usage.PricingSnapshotJson;
         transaction.Provider = usage.ProviderKey;
@@ -227,14 +259,18 @@ public sealed class UsageLedgerService(
         transaction.ImageInputTokens = usage.ImageInputTokens;
         transaction.ImageOutputTokens = usage.ImageOutputTokens;
         transaction.LatencyMs = usage.LatencyMs;
-        transaction.ProviderCostUsd = providerCost;
+        transaction.ProviderCostUsd = providerCost ?? 0m;
+        transaction.ProviderCostKnown = providerCost.HasValue;
         transaction.ChargedAmount = chargingService.CalculateCustomerCharge(transaction);
         transaction.Currency = string.IsNullOrWhiteSpace(usage.Currency) ? transaction.Currency : usage.Currency.Trim().ToUpperInvariant();
         transaction.CostBasis = string.IsNullOrWhiteSpace(usage.CostBasis)
-            ? usage.ActualCost.HasValue ? UsageCostBasis.Actual : UsageCostBasis.Estimated
+            ? usage.ActualCost.HasValue ? UsageCostBasis.Actual : providerCost.HasValue ? UsageCostBasis.Estimated : UsageCostBasis.Unknown
             : usage.CostBasis;
         transaction.PricingVersion = string.IsNullOrWhiteSpace(usage.PricingVersion) ? costCalculator.GetPricingSnapshot(usage)?.Version : usage.PricingVersion;
         transaction.PricingSnapshotJson = snapshot;
+        transaction.CostEstimateJson = usage.EstimatedCost.HasValue && string.IsNullOrWhiteSpace(transaction.CostEstimateJson)
+            ? JsonSerializer.Serialize(new { amountUsd = usage.EstimatedCost, pricingVersion = usage.PricingVersion })
+            : transaction.CostEstimateJson;
         transaction.SafeMetadataJson = usage.SafeMetadataJson;
         transaction.CompletedAt = DateTime.UtcNow;
         transaction.FailureCode = null;
@@ -245,9 +281,11 @@ public sealed class UsageLedgerService(
 
     public async Task FailAsync(UsageTransaction transaction, string failureCode, AiUsageMetadata? usage = null, CancellationToken cancellationToken = default)
     {
-        if (transaction.Status is UsageTransactionStatus.Completed or UsageTransactionStatus.Refunded) return;
+        if (transaction.Status is UsageTransactionStatus.Completed or UsageTransactionStatus.Refunded or UsageTransactionStatus.Failed or UsageTransactionStatus.Cancelled) return;
         transaction.Status = UsageTransactionStatus.Failed;
-        transaction.ProviderCostUsd = usage is null ? 0m : costCalculator.Calculate(usage);
+        var providerCost = usage is null ? null : costCalculator.Calculate(usage);
+        transaction.ProviderCostUsd = providerCost ?? 0m;
+        transaction.ProviderCostKnown = providerCost.HasValue;
         transaction.ChargedAmount = 0m;
         transaction.InputTokens = usage?.InputTokens;
         transaction.CachedInputTokens = usage?.CachedInputTokens;
@@ -259,7 +297,7 @@ public sealed class UsageLedgerService(
         transaction.Model = usage?.ModelKey ?? transaction.Model;
         transaction.Currency = string.IsNullOrWhiteSpace(usage?.Currency) ? transaction.Currency : usage.Currency.Trim().ToUpperInvariant();
         transaction.CostBasis = string.IsNullOrWhiteSpace(usage?.CostBasis)
-            ? usage?.ActualCost.HasValue == true ? UsageCostBasis.Actual : transaction.CostBasis
+            ? usage?.ActualCost.HasValue == true ? UsageCostBasis.Actual : providerCost.HasValue ? UsageCostBasis.Estimated : UsageCostBasis.Unknown
             : usage.CostBasis;
         transaction.PricingVersion = string.IsNullOrWhiteSpace(usage?.PricingVersion) ? transaction.PricingVersion : usage.PricingVersion;
         transaction.PricingSnapshotJson = string.IsNullOrWhiteSpace(usage?.PricingSnapshotJson) ? transaction.PricingSnapshotJson : usage.PricingSnapshotJson;
@@ -273,9 +311,10 @@ public sealed class UsageLedgerService(
 
     public async Task CancelAsync(UsageTransaction transaction, string cancellationCode, CancellationToken cancellationToken = default)
     {
-        if (transaction.Status is UsageTransactionStatus.Completed or UsageTransactionStatus.Refunded) return;
+        if (transaction.Status is UsageTransactionStatus.Completed or UsageTransactionStatus.Refunded or UsageTransactionStatus.Failed or UsageTransactionStatus.Cancelled) return;
         transaction.Status = UsageTransactionStatus.Cancelled;
         transaction.ProviderCostUsd = 0m;
+        transaction.ProviderCostKnown = false;
         transaction.ChargedAmount = 0m;
         transaction.FailureCode = cancellationCode;
         transaction.CompletedAt = null;

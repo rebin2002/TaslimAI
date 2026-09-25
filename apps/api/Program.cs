@@ -30,6 +30,7 @@ using Taslim.Api.Generation;
 using Taslim.Api.Movies;
 using Taslim.Api.Payments;
 using Taslim.Api.Notifications;
+using Taslim.Api.Resilience;
 using Taslim.Api.Voice;
 using FileSettings = Taslim.Api.Files.FileOptions;
 
@@ -175,24 +176,42 @@ builder.Services.AddScoped<IPaymentReconciliationService, PaymentReconciliationS
 builder.Services.AddSingleton<IPaymentProvider, UnconfiguredPaymentProvider>();
 builder.Services.AddScoped<IAssetService, AssetService>();
 builder.Services.AddScoped<IGeneratedAssetPublisher, GeneratedAssetPublisher>();
+builder.Services.Configure<GenerationQualityControlOptions>(builder.Configuration.GetSection("GenerationQualityControl"));
+builder.Services.AddScoped<IGenerationQualityControl, GenerationQualityControlService>();
 builder.Services.AddScoped<IUsageLedgerService, UsageLedgerService>();
 builder.Services.AddSingleton<IUsageChargingService, SafeUsageChargingService>();
 builder.Services.Configure<UsageControlOptions>(builder.Configuration.GetSection("UsageControls"));
 builder.Services.AddScoped<IUsageCostControl, UsageCostControl>();
+builder.Services.Configure<GenerationCostPricingOptions>(builder.Configuration.GetSection("GenerationCostPricing"));
+builder.Services.AddSingleton<IGenerationCostEstimator, GenerationCostEstimator>();
+builder.Services.Configure<GenerationBudgetOptions>(builder.Configuration.GetSection("GenerationBudget"));
+builder.Services.AddScoped<IGenerationBudgetService, GenerationBudgetService>();
 builder.Services.AddScoped<IAdminUsageService, AdminUsageService>();
 builder.Services.AddScoped<IAdminOperationsService, AdminOperationsService>();
 builder.Services.AddScoped<ProviderHealthService>();
 builder.Services.Configure<GenerationJobOptions>(builder.Configuration.GetSection("GenerationJobs"));
+builder.Services.Configure<ProviderResilienceOptions>(builder.Configuration.GetSection("ProviderResilience"));
 builder.Services.AddScoped<IGenerationJobQueue, DatabaseGenerationJobQueue>();
 builder.Services.AddScoped<IGenerationJobUsageService, GenerationJobUsageService>();
 builder.Services.AddScoped<IGenerationJobService, GenerationJobService>();
+builder.Services.AddScoped<IProviderResilienceStore, EfProviderResilienceStore>();
+builder.Services.AddScoped<IProviderResilienceOrchestrator, ProviderResilienceOrchestrator>();
+builder.Services.AddSingleton<IProviderCostGuard, AllowAllProviderCostGuard>();
+builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddScoped<NotificationService>();
 builder.Services.AddScoped<INotificationService>(services => services.GetRequiredService<NotificationService>());
 builder.Services.AddScoped<INotificationEventWriter>(services => services.GetRequiredService<NotificationService>());
 builder.Services.AddScoped<IMovieStudioService, MovieStudioService>();
 builder.Services.Configure<MovieVideoOptions>(builder.Configuration.GetSection("MovieVideo"));
 builder.Services.AddScoped<MovieVideoExecutionStore>();
-builder.Services.AddSingleton<IMovieVideoProvider, UnavailableMovieVideoProvider>();
+builder.Services.AddHttpClient<RunwayMovieVideoProvider>();
+builder.Services.AddSingleton<IMovieVideoProvider>(services =>
+{
+    var options = services.GetRequiredService<Microsoft.Extensions.Options.IOptions<MovieVideoOptions>>().Value;
+    return options.Enabled && string.Equals(options.ProviderKey, "runway", StringComparison.OrdinalIgnoreCase)
+        ? services.GetRequiredService<RunwayMovieVideoProvider>()
+        : new UnavailableMovieVideoProvider();
+});
 builder.Services.AddScoped<IActivityCenterService, ActivityCenterService>();
 builder.Services.AddSingleton<IGenerationJobHandler, SystemTestGenerationJobHandler>();
 if (builder.Configuration.GetValue("GenerationJobs:WorkerEnabled", !builder.Environment.IsEnvironment("Testing")))
@@ -215,6 +234,7 @@ builder.Services.AddHttpClient<OpenAiImageGenerationProvider>();
 builder.Services.AddHttpClient<OpenAiVoiceGenerationProvider>();
 builder.Services.AddHttpClient<OpenAiResearchSearchProvider>();
 builder.Services.AddHttpClient<OpenAiVoiceGenerationProvider>();
+builder.Services.AddHttpClient<AzureSpeechVoiceGenerationProvider>();
 builder.Services.AddSingleton<IAiModelRouter, AiModelRouter>();
 builder.Services.AddSingleton<IAiProvider, MockAiProvider>();
 builder.Services.AddSingleton<IAiProvider>(services => services.GetRequiredService<OpenAiProvider>());
@@ -241,12 +261,17 @@ builder.Services.AddScoped<IGenerationJobHandler, ResearchGenerationJobHandler>(
 builder.Services.AddSingleton<ISocialPromptBuilder, SocialPromptBuilder>();
 builder.Services.AddScoped<ISocialGenerationProvider, AiSocialGenerationProvider>();
 builder.Services.AddScoped<IGenerationJobHandler, SocialGenerationJobHandler>();
-builder.Services.AddHttpClient<MubertMusicGenerationProvider>();
+builder.Services.AddSingleton<IProviderUrlPolicy, ProviderUrlPolicy>();
+builder.Services.AddHttpClient<MubertMusicGenerationProvider>()
+    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
 builder.Services.AddSingleton<IMusicGenerationProvider>(services => services.GetRequiredService<MubertMusicGenerationProvider>());
+builder.Services.AddHttpClient<StableAudioMusicGenerationProvider>();
+builder.Services.AddSingleton<IMusicGenerationProvider>(services => services.GetRequiredService<StableAudioMusicGenerationProvider>());
 builder.Services.AddScoped<IGenerationJobHandler, MusicGenerationJobHandler>();
 builder.Services.AddSingleton<IVoiceGenerationProvider>(services => services.GetRequiredService<OpenAiVoiceGenerationProvider>());
 builder.Services.AddSingleton<IVoiceGenerationProvider, UnconfiguredVoiceGenerationProvider>();
 builder.Services.AddSingleton<IVoiceGenerationProvider>(services => services.GetRequiredService<OpenAiVoiceGenerationProvider>());
+builder.Services.AddSingleton<IVoiceGenerationProvider>(services => services.GetRequiredService<AzureSpeechVoiceGenerationProvider>());
 builder.Services.AddScoped<IGenerationJobHandler, VoiceGenerationJobHandler>();
 builder.Services.AddScoped<FileValidationService>();
 builder.Services.AddSingleton<IFileContentExtractor, FileContentExtractor>();

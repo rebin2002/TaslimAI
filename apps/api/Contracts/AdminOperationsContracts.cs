@@ -117,8 +117,28 @@ public sealed record AdminProviderHealthDto(
     string Key,
     string Category,
     string Status,
+    bool Enabled,
+    bool Configured,
+    int RecentSuccessCount,
+    int RecentFailureCount,
+    int? AverageLatencyMs,
+    int RateLimitEventCount,
+    int TimeoutEventCount,
+    int QualityControlFailureCount,
+    int RetryCount,
+    int FallbackCount,
+    bool FallbackTelemetryRecorded,
+    decimal EstimatedProviderCostUsd,
+    decimal ActualProviderCostUsd,
+    DateTime? LastSuccessAt,
     DateTime? LastFailureAt,
-    string? LastFailureCode);
+    string? LastFailureCode,
+    IReadOnlyList<AdminSanitizedGenerationFailureDto> RecentFailures);
+
+public sealed record AdminSanitizedGenerationFailureDto(
+    string JobType,
+    string ErrorCode,
+    DateTime OccurredAt);
 
 public sealed record AdminOperationsFilter(
     DateTime? FromUtc = null,

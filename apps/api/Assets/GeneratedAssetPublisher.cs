@@ -17,12 +17,18 @@ public interface IGeneratedAssetPublisher
     Task DiscardAsync(PreparedGenerationOutput publication, CancellationToken cancellationToken = default);
 }
 
-public sealed class GeneratedAssetPublisher(TaslimDbContext db, FileProcessingService files, ILogger<GeneratedAssetPublisher> logger) : IGeneratedAssetPublisher
+public sealed class GeneratedAssetPublisher(
+    TaslimDbContext db,
+    FileProcessingService files,
+    IGenerationQualityControl qualityControl,
+    ILogger<GeneratedAssetPublisher> logger) : IGeneratedAssetPublisher
 {
     public async Task<PreparedGenerationOutput> PrepareAsync(GenerationJob job, GenerationHandlerOutput output, CancellationToken cancellationToken = default)
     {
         var assetType = output.Asset?.AssetType.Trim().ToLowerInvariant();
         if (assetType is not null && !AssetTypes.Supported.Contains(assetType)) throw new InvalidOperationException("Generated asset type is not supported.");
+        var outputMetadata = GeneratedMediaSecurity.NormalizeMetadataJson(output.MetadataJson);
+        var assetMetadata = GeneratedMediaSecurity.NormalizeMetadataJson(output.Asset?.MetadataJson);
         StoredFile? createdFile = null;
         var storedFileId = output.StoredFileId;
         if (output.FileArtifact is not null)
@@ -60,6 +66,23 @@ public sealed class GeneratedAssetPublisher(TaslimDbContext db, FileProcessingSe
                 file => file.Id == storedFileId && file.WorkspaceId == job.WorkspaceId && file.Status == StoredFileStatus.Ready,
                 cancellationToken) ?? throw new InvalidOperationException("Generated output file is not available in the job workspace.");
         }
+        if (output.Asset is not null && (storedFile is null || storedFile.Status != StoredFileStatus.Ready))
+            throw new InvalidOperationException("Generated assets require a completed private stored file.");
+
+        try
+        {
+            var quality = await qualityControl.ValidateAsync(job, output, cancellationToken);
+            if (quality.IsFailure) throw new GenerationQualityControlException(quality);
+        }
+        catch
+        {
+            if (createdFile is not null)
+            {
+                try { await files.DeleteAsync(createdFile, CancellationToken.None); }
+                catch (Exception exception) { logger.LogWarning(exception, "Generated file cleanup failed after QC rejection. FileId={FileId}; JobId={JobId}", createdFile.Id, job.Id); }
+            }
+            throw;
+        }
 
         var jobOutput = new GenerationJobOutput
         {
@@ -67,7 +90,7 @@ public sealed class GeneratedAssetPublisher(TaslimDbContext db, FileProcessingSe
             GenerationJobId = job.Id,
             StoredFileId = storedFileId,
             OutputType = output.OutputType,
-            MetadataJson = output.MetadataJson,
+            MetadataJson = outputMetadata,
             CreatedAt = DateTime.UtcNow,
         };
 
@@ -87,8 +110,7 @@ public sealed class GeneratedAssetPublisher(TaslimDbContext db, FileProcessingSe
                 Description = NormalizeDescription(output.Asset.Description),
                 AssetType = assetType!,
                 MimeType = storedFile?.ContentType,
-                Status = AssetStatus.Active,
-                MetadataJson = output.Asset.MetadataJson,
+                MetadataJson = assetMetadata,
                 CreatedAt = now,
                 UpdatedAt = now,
             };

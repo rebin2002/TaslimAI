@@ -1,5 +1,7 @@
 using System.ComponentModel.DataAnnotations;
+using System.Text.Json.Serialization;
 using Taslim.Api.Domain;
+using Taslim.Api.Usage;
 
 namespace Taslim.Api.Contracts;
 
@@ -19,7 +21,11 @@ public sealed class CreateGenerationJobRequest
     [Required, StringLength(100_000)]
     public string InputJson { get; set; } = "{}";
 
+    [JsonIgnore]
     public decimal? EstimatedProviderCostUsd { get; set; }
+
+    [JsonIgnore]
+    public GenerationCostEstimate? InternalCostEstimate { get; set; }
 }
 
 public sealed record GenerationJobOutputDto(
