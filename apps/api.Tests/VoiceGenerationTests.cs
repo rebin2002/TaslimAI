@@ -87,7 +87,7 @@ public sealed class VoiceGenerationTests : IClassFixture<VoiceGenerationApiFacto
         var inline = await owner.GetAsync($"/api/assets/{asset.Id}/download?inline=true");
         Assert.Equal(HttpStatusCode.OK, inline.StatusCode);
         Assert.Equal("audio/mpeg", inline.Content.Headers.ContentType?.MediaType);
-        Assert.Equal("voice-bytes", await inline.Content.ReadAsStringAsync());
+        Assert.Equal("ID3voice-bytes", await inline.Content.ReadAsStringAsync());
         var download = await owner.GetAsync($"/api/assets/{asset.Id}/download");
         Assert.Equal(HttpStatusCode.OK, download.StatusCode);
         Assert.Contains("attachment", download.Content.Headers.ContentDisposition?.ToString() ?? string.Empty, StringComparison.OrdinalIgnoreCase);
@@ -268,7 +268,7 @@ internal sealed class DeterministicVoiceProvider : IVoiceGenerationProvider
 
     public Task<VoiceProviderResult> GenerateAsync(VoiceGenerationInput request, CancellationToken cancellationToken = default) =>
         Task.FromResult(new VoiceProviderResult(
-            "voice-bytes"u8.ToArray(),
+            "ID3voice-bytes"u8.ToArray(),
             "audio/mpeg",
             "mp3",
             1000,

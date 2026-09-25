@@ -126,7 +126,7 @@ public sealed class MusicGenerationTests : IClassFixture<MusicGenerationApiFacto
         var playback = await owner.GetAsync($"/api/assets/{asset.Id}/download?inline=true");
         Assert.Equal(HttpStatusCode.OK, playback.StatusCode);
         Assert.Equal("audio/mpeg", playback.Content.Headers.ContentType?.MediaType);
-        Assert.Equal("deterministic music", await playback.Content.ReadAsStringAsync());
+        Assert.Equal("ID3 deterministic music", await playback.Content.ReadAsStringAsync());
         var usage = await db.UsageTransactions.AsNoTracking().SingleAsync(item => item.GenerationJobId == created.Job.Id);
         Assert.Equal(0m, usage.ChargedAmount);
 
@@ -196,7 +196,7 @@ internal sealed class DeterministicMusicProvider : IMusicGenerationProvider
     {
         await Task.Delay(30, cancellationToken);
         return new MusicProviderResult(
-            "deterministic music"u8.ToArray(),
+            "ID3 deterministic music"u8.ToArray(),
             "audio/mpeg",
             "mp3",
             request.DurationSeconds,
