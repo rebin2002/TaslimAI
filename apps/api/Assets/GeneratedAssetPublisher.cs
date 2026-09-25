@@ -60,6 +60,8 @@ public sealed class GeneratedAssetPublisher(TaslimDbContext db, FileProcessingSe
                 file => file.Id == storedFileId && file.WorkspaceId == job.WorkspaceId && file.Status == StoredFileStatus.Ready,
                 cancellationToken) ?? throw new InvalidOperationException("Generated output file is not available in the job workspace.");
         }
+        if (output.Asset is not null && (storedFile is null || storedFile.Status != StoredFileStatus.Ready))
+            throw new InvalidOperationException("Generated assets require a completed private stored file.");
 
         var jobOutput = new GenerationJobOutput
         {

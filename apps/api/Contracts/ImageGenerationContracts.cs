@@ -90,7 +90,8 @@ public sealed record ImageGenerationInput(
     string? Background,
     string? TextInImage,
     Guid? ProjectId,
-    Guid? ReferenceFileId);
+    Guid? ReferenceFileId,
+    Guid? GenerationJobId = null);
 
 public static class ImageGenerationContractMapper
 {
