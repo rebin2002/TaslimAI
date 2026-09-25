@@ -192,7 +192,14 @@ builder.Services.AddScoped<INotificationEventWriter>(services => services.GetReq
 builder.Services.AddScoped<IMovieStudioService, MovieStudioService>();
 builder.Services.Configure<MovieVideoOptions>(builder.Configuration.GetSection("MovieVideo"));
 builder.Services.AddScoped<MovieVideoExecutionStore>();
-builder.Services.AddSingleton<IMovieVideoProvider, UnavailableMovieVideoProvider>();
+builder.Services.AddHttpClient<RunwayMovieVideoProvider>();
+builder.Services.AddSingleton<IMovieVideoProvider>(services =>
+{
+    var options = services.GetRequiredService<Microsoft.Extensions.Options.IOptions<MovieVideoOptions>>().Value;
+    return options.Enabled && string.Equals(options.ProviderKey, "runway", StringComparison.OrdinalIgnoreCase)
+        ? services.GetRequiredService<RunwayMovieVideoProvider>()
+        : new UnavailableMovieVideoProvider();
+});
 builder.Services.AddScoped<IActivityCenterService, ActivityCenterService>();
 builder.Services.AddSingleton<IGenerationJobHandler, SystemTestGenerationJobHandler>();
 if (builder.Configuration.GetValue("GenerationJobs:WorkerEnabled", !builder.Environment.IsEnvironment("Testing")))

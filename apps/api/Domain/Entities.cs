@@ -196,6 +196,8 @@ public static class GenerationJobErrorCodes
     public const string SocialStorageFailed = "SOCIAL_STORAGE_FAILED";
     public const string SocialCancelled = "SOCIAL_CANCELLED";
 public const string MovieProviderUnavailable = "MOVIE_PROVIDER_UNAVAILABLE";
+    public const string MovieProviderTimeout = "MOVIE_PROVIDER_TIMEOUT";
+    public const string MovieProviderUnsupportedRequest = "MOVIE_PROVIDER_UNSUPPORTED_REQUEST";
     public const string MovieCancelled = "MOVIE_CANCELLED";
     public const string MovieGenerationFailed = "MOVIE_GENERATION_FAILED";
     public const string MovieOutputInvalid = "MOVIE_OUTPUT_INVALID";
