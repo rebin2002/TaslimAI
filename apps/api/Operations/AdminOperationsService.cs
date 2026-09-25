@@ -31,7 +31,7 @@ public sealed class AdminOperationsService(
         var assetsAndStorage = await BuildAssetsAndStorageAsync(range, cancellationToken);
         var billing = await BuildBillingAsync(range, cancellationToken);
         var signals = await BuildSignalsAsync(range, generation, cancellationToken);
-        var providers = await providerHealth.GetAsync(cancellationToken);
+        var providers = await providerHealth.GetAsync(range, cancellationToken);
 
         return new AdminOperationsDashboardDto(
             new AdminOperationsRangeDto(range.FromUtc, range.ToUtc),

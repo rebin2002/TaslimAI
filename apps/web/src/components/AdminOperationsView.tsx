@@ -2,8 +2,8 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
-import { Activity, ArrowLeft, Boxes, CircleDollarSign, Database, FileStack, Gauge, RefreshCw, ShieldCheck, UsersRound, Workflow } from "lucide-react";
-import { api, type AdminCountBreakdown, type AdminOperationsDashboard } from "@/lib/api";
+import { Activity, AlertTriangle, ArrowLeft, Boxes, CheckCircle2, CircleDollarSign, Clock3, Database, FileStack, Gauge, RefreshCw, ServerCog, ShieldCheck, UsersRound, Workflow, XCircle } from "lucide-react";
+import { api, type AdminCountBreakdown, type AdminOperationsDashboard, type AdminProviderHealth } from "@/lib/api";
 import { presetRange } from "@/lib/adminUsageState";
 
 function money(value: number) {
@@ -15,7 +15,25 @@ function dateInputValue(value: Date) {
 }
 
 function dateTime(value: string | null) {
-  return value ? new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(value)) : "No completed generation recorded";
+	return value ? new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(value)) : "No completed generation recorded";
+}
+
+function providerStatusLabel(provider: AdminProviderHealth) {
+	if (provider.status === "disabled") return "Disabled";
+	if (provider.status === "unconfigured") return "Unconfigured";
+	if (provider.status === "recent_operational_failure") return "Recent failure";
+	if (provider.status === "operational") return "Operational";
+	return "Available; no recent success recorded";
+}
+
+function providerStatusIcon(provider: AdminProviderHealth) {
+	if (provider.status === "operational") return <CheckCircle2 size={16} aria-hidden="true" />;
+	if (provider.status === "disabled" || provider.status === "unconfigured") return <XCircle size={16} aria-hidden="true" />;
+	return <AlertTriangle size={16} aria-hidden="true" />;
+}
+
+function providerCost(provider: AdminProviderHealth) {
+	return `${money(provider.actualProviderCostUsd)} actual · ${money(provider.estimatedProviderCostUsd)} estimated`;
 }
 
 function bytes(value: number) {
@@ -83,7 +101,7 @@ export function AdminOperationsView() {
       <div className="detail-icon"><ShieldCheck size={21} /></div>
     </div>
 
-    <div className="usage-notice admin-usage-notice"><Activity size={16} /><span>Indicators below are derived from recorded jobs, usage, billing, and storage data. This view does not infer uptime or provider health.</span></div>
+    <div className="usage-notice admin-usage-notice"><Activity size={16} /><span>Indicators below are derived from recorded jobs, usage, billing, storage, and provider execution data. Secrets, prompts, and raw provider payloads are never returned.</span></div>
 
     <div className="admin-range-controls">
       <div className="admin-range-presets">
@@ -107,6 +125,34 @@ export function AdminOperationsView() {
         <div className="account-card usage-stat"><span><CircleDollarSign size={15} /> Provider cost</span><strong>{money(dashboard.usage.providerCostUsd)}</strong></div>
         <div className="account-card usage-stat"><span><CircleDollarSign size={15} /> Customer charges</span><strong>{money(dashboard.usage.customerChargesUsd)}</strong></div>
       </div>
+
+      <section className="operations-section" aria-labelledby="operations-providers">
+        <div className="operations-section-heading"><div><p className="section-eyebrow">Provider control plane</p><h2 id="operations-providers">Generation provider health</h2></div><span>Read-only server configuration state</span></div>
+        <div className="provider-health-grid">
+          {dashboard.providers.map((provider) => <article className="account-card provider-health-card" key={provider.key}>
+            <div className="provider-health-heading">
+              <div><span className="provider-health-category"><ServerCog size={15} /> {provider.category}</span><h3>{provider.key}</h3></div>
+              <span className={`provider-status provider-status-${provider.status}`} title={providerStatusLabel(provider)}>{providerStatusIcon(provider)}<span>{providerStatusLabel(provider)}</span></span>
+            </div>
+            <dl className="operations-metric-grid provider-state-grid">
+              <div><dt>Enabled</dt><dd>{provider.enabled ? "Yes" : "No"}</dd></div>
+              <div><dt>Configured</dt><dd>{provider.configured ? "Yes" : "No"}</dd></div>
+              <div><dt>Recent success / failure</dt><dd>{provider.recentSuccessCount} / {provider.recentFailureCount}</dd></div>
+              <div><dt>Average latency</dt><dd>{provider.averageLatencyMs === null ? "Not recorded" : `${provider.averageLatencyMs.toLocaleString()} ms`}</dd></div>
+              <div><dt>Rate-limit events</dt><dd>{provider.rateLimitEventCount.toLocaleString()}</dd></div>
+              <div><dt>Timeout events</dt><dd>{provider.timeoutEventCount.toLocaleString()}</dd></div>
+              <div><dt>QC failures</dt><dd>{provider.qualityControlFailureCount.toLocaleString()}</dd></div>
+              <div><dt>Retries</dt><dd>{provider.retryCount.toLocaleString()}</dd></div>
+              <div><dt>Fallbacks</dt><dd>{provider.fallbackTelemetryRecorded ? provider.fallbackCount.toLocaleString() : "Not recorded"}</dd></div>
+              <div><dt>Provider cost</dt><dd>{providerCost(provider)}</dd></div>
+              <div><dt>Last success</dt><dd>{provider.lastSuccessAt ? dateTime(provider.lastSuccessAt) : "Not recorded"}</dd></div>
+              <div><dt>Last failure</dt><dd>{provider.lastFailureAt ? `${provider.lastFailureCode ?? "Sanitized failure"} · ${dateTime(provider.lastFailureAt)}` : "Not recorded"}</dd></div>
+            </dl>
+            <div className="provider-health-failures"><h4><Clock3 size={14} /> Recent sanitized failures</h4>{provider.recentFailures.length ? <div className="operations-detail-list">{provider.recentFailures.map((failure, index) => <div key={`${failure.occurredAt}-${failure.errorCode}-${index}`}><span><strong>{failure.errorCode}</strong><small>{failure.jobType} · {dateTime(failure.occurredAt)}</small></span></div>)}</div> : <p className="operations-empty">No sanitized provider failures recorded.</p>}</div>
+          </article>)}
+        </div>
+        <p className="provider-health-footnote">Provider activation remains controlled by secure server configuration. Fallback telemetry is not persisted by the current architecture, so it is shown as not recorded rather than inferred.</p>
+      </section>
 
       <section className="operations-section" aria-labelledby="operations-signals">
         <div className="operations-section-heading"><div><p className="section-eyebrow">Recorded signals</p><h2 id="operations-signals">Operational signals</h2></div><span>Live database state</span></div>
