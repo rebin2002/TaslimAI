@@ -37,7 +37,7 @@ test.describe("workspace and project journeys", () => {
 
     const browser = page.context().browser();
     expect(browser).not.toBeNull();
-    const otherContext = await browser!.newContext({ baseURL: process.env.E2E_WEB_URL ?? "http://127.0.0.1:3000" });
+    const otherContext = await browser!.newContext({ baseURL: process.env.E2E_WEB_URL ?? "http://localhost:3000" });
     const otherPage = await otherContext.newPage();
     const otherUser = {
       displayName: "E2E Other User",

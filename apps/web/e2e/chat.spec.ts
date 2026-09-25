@@ -68,7 +68,8 @@ test.describe("chat journeys", () => {
     await page.goto("/chat");
     await page.getByLabel("Message Taslim...").fill("E2E provider safety check");
     await page.getByRole("button", { name: /send message/i }).click();
-    await expect(page.getByRole("alert")).toBeVisible({ timeout: 15_000 });
-    await expect(page.getByRole("alert")).not.toContainText(/stack|exception|api key|secret/i);
+    const errorAlert = page.locator(".chat-inline-error");
+    await expect(errorAlert).toBeVisible({ timeout: 15_000 });
+    await expect(errorAlert).not.toContainText(/stack|exception|api key|secret/i);
   });
 });
