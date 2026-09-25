@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { Activity, Archive, ArrowLeft, BarChart3, CalendarDays, FileText, FolderOpen, LibraryBig, MessageSquare, Pencil, Plus, RotateCcw, Sparkles } from "lucide-react";
+import { Activity, Archive, ArrowLeft, ArrowUpRight, BarChart3, CalendarDays, FileText, FolderOpen, LibraryBig, MessageSquare, Pencil, Plus, RotateCcw, Sparkles } from "lucide-react";
 import { useParams, useRouter } from "next/navigation";
 import { api, type Project, type ProjectInput, type ProjectOverview } from "@/lib/api";
 import { useLocale } from "@/components/LocaleProvider";
@@ -11,15 +11,11 @@ import { ProjectContextEditor } from "@/components/ProjectContextEditor";
 import { ProjectFilesSection } from "@/components/ProjectFilesSection";
 import { ProjectAssetsSection } from "@/components/ProjectAssetsSection";
 
-const studioLinks = [
-  ["/create/image", "projects.studio.image"],
-  ["/create/document", "projects.studio.document"],
-  ["/create/presentation", "projects.studio.presentation"],
-  ["/create/research", "projects.studio.research"],
-  ["/create/social", "projects.studio.social"],
-  ["/create/voice", "projects.studio.voice"],
-  ["/create/music", "projects.studio.music"],
-  ["/create/movie", "projects.studio.movie"],
+const projectActions = [
+  ["/chat", "projects.newConversation", MessageSquare, "project-action-chat"],
+  ["/create/image", "projects.studio.image", Sparkles, "project-action-image"],
+  ["/create/document", "projects.studio.document", FileText, "project-action-document"],
+  ["/create/research", "projects.studio.research", LibraryBig, "project-action-research"],
 ] as const;
 
 export function ProjectDetailView() {
@@ -59,7 +55,7 @@ export function ProjectDetailView() {
     catch (caught) { setError(caught instanceof Error ? caught.message : t("projects.saveError")); }
   }
 
-  async function startConversation() {
+  function startConversation() {
     if (!overview) return;
     router.push(`/chat?projectId=${encodeURIComponent(overview.project.id)}`);
   }
@@ -75,51 +71,55 @@ export function ProjectDetailView() {
 
   return <div className="project-detail-page">
     <Link href="/projects" className="back-link"><ArrowLeft size={15} /> {t("projects.backToProjects")}</Link>
-    <div className="detail-header">
-      <div>
-        <span className="detail-icon"><FolderOpen size={22} /></span>
-        <p className="section-eyebrow">{type}</p>
+
+    <header className="detail-header project-detail-hero">
+      <div className="project-hero-copy">
+        <div className="project-hero-label"><span className="detail-icon"><FolderOpen size={22} /></span><span className="project-type-pill">{type}</span></div>
+        <p className="section-eyebrow">{t("projects.overviewEyebrow")}</p>
         <h1>{project.name}</h1>
         <p>{project.description || t("projects.noDescription")}</p>
       </div>
       <div className="detail-actions">
         <button className="secondary-button" onClick={() => setFormOpen(true)}><Pencil size={15} /> {t("projects.edit")}</button>
-        {project.status === "Active"
-          ? <button className="secondary-button" onClick={() => void archive()}><Archive size={15} /> {t("projects.archive")}</button>
-          : <button className="primary-button" onClick={() => void restore()}><RotateCcw size={15} /> {t("projects.restore")}</button>}
+        {project.status === "Active" ? <button className="secondary-button" onClick={() => void archive()}><Archive size={15} /> {t("projects.archive")}</button> : <button className="primary-button" onClick={() => void restore()}><RotateCcw size={15} /> {t("projects.restore")}</button>}
       </div>
-    </div>
-    <div className="detail-meta">
+    </header>
+
+    <div className="detail-meta project-detail-meta">
       <span><CalendarDays size={15} /> {t("projects.updated")} {formatDate(project.updatedAt, locale)}</span>
       <span><Sparkles size={15} /> {t(`projects.status.${project.status.toLowerCase()}`)}</span>
       <span><FolderOpen size={15} /> {t("projects.metadataId", { id: project.id.slice(0, 8) })}</span>
     </div>
     {error && <div className="inline-error" role="alert">{error}</div>}
 
-    <section className="project-overview-hero">
+    <section className="project-overview-hero project-overview-intro">
       <div><p className="section-eyebrow">{t("projects.overviewEyebrow")}</p><h2>{t("projects.overviewTitle")}</h2><p>{t("projects.overviewDescription")}</p></div>
       <div className="project-workspace-summary"><span className="workspace-banner-icon"><BarChart3 size={17} /></span><div><small>{t(workspaceTypeKey)}</small><strong>{workspace.name}</strong></div><span className="workspace-role">{t(roleKey)}</span></div>
     </section>
-    <div className="project-stat-grid" aria-label={t("projects.overviewTitle")}>
+
+    <div className="project-stat-grid project-stat-grid-premium" aria-label={t("projects.overviewTitle")}>
       <OverviewStat icon={<FileText size={18} />} label={t("projects.stats.files")} value={counts.files} />
       <OverviewStat icon={<LibraryBig size={18} />} label={t("projects.stats.assets")} value={counts.assets} />
       <OverviewStat icon={<MessageSquare size={18} />} label={t("projects.stats.conversations")} value={counts.conversations} />
       <OverviewStat icon={<Activity size={18} />} label={t("projects.stats.activity")} value={counts.activity} />
     </div>
 
-    <section className="project-quick-create account-card">
+    <section className="project-quick-create project-action-surface account-card">
       <div className="card-title"><span className="card-title-icon"><Plus size={17} /></span><div><h2>{t("projects.quickCreateTitle")}</h2><p>{t("projects.quickCreateDescription")}</p></div></div>
-      <div className="studio-link-grid">{studioLinks.map(([href, label]) => <Link key={href} href={`${href}?projectId=${project.id}`} className="studio-link"><Sparkles size={14} /> {t(label)}</Link>)}</div>
+      <div className="project-action-grid">
+        <button type="button" className="project-action project-action-continue" onClick={startConversation}><span className="project-action-icon"><MessageSquare size={16} /></span><span><strong>{t("projects.newConversation")}</strong><small>{t("projects.conversationsDescription")}</small></span><ArrowUpRight size={15} /></button>
+        {projectActions.slice(1).map(([href, label, Icon, className]) => <Link key={href} href={`${href}?projectId=${project.id}`} className={`project-action ${className}`}><span className="project-action-icon"><Icon size={16} /></span><span><strong>{t(label)}</strong><small>{t("projects.quickCreateDescription")}</small></span><ArrowUpRight size={15} /></Link>)}
+      </div>
     </section>
 
-    <div className="project-overview-grid">
+    <div className="project-overview-grid project-overview-grid-premium">
       <section className="account-card project-activity-card">
         <div className="card-title"><span className="card-title-icon teal"><Activity size={17} /></span><div><h2>{t("projects.activityTitle")}</h2><p>{t("projects.activityDescription")}</p></div></div>
         {recentActivity.length === 0 ? <p className="usage-empty">{t("projects.noActivity")}</p> : <div className="project-activity-list">{recentActivity.map((item) => <article className="project-activity-row" key={item.jobId}><span className={`activity-status-dot activity-status-${item.status.toLowerCase()}`} /><div><strong>{item.title}</strong><small>{t(`activity.type.${item.jobType}`)} · {formatDate(item.createdAt, locale)}</small></div>{item.assetId ? <Link className="text-link" href={`/assets?projectId=${project.id}`}>{t("projects.openResult")}</Link> : <span className="project-activity-status">{t(`activity.status.${item.status.toLowerCase()}`)}</span>}</article>)}</div>}
       </section>
       <section className="account-card project-conversations-card">
-        <div className="card-title"><span className="card-title-icon"><MessageSquare size={17} /></span><div><h2>{t("projects.conversationsTitle")}</h2><p>{t("projects.conversationsDescription")}</p></div><button className="secondary-button project-new-chat" onClick={() => void startConversation()}><Plus size={14} /> {t("projects.newConversation")}</button></div>
-        {conversations.length === 0 ? <p className="usage-empty">{t("projects.noConversations")}</p> : <div className="project-conversations-list">{conversations.map((conversation) => <Link href={`/chat/${conversation.id}`} key={conversation.id}><MessageSquare size={15} /><span><strong>{conversation.title}</strong><small>{formatDate(conversation.updatedAt, locale)}</small></span></Link>)}</div>}
+        <div className="card-title"><span className="card-title-icon"><MessageSquare size={17} /></span><div><h2>{t("projects.conversationsTitle")}</h2><p>{t("projects.conversationsDescription")}</p></div><button className="secondary-button project-new-chat" onClick={startConversation}><Plus size={14} /> {t("projects.newConversation")}</button></div>
+        {conversations.length === 0 ? <p className="usage-empty">{t("projects.noConversations")}</p> : <div className="project-conversations-list">{conversations.map((conversation) => <Link href={`/chat/${conversation.id}`} key={conversation.id}><MessageSquare size={15} /><span><strong>{conversation.title}</strong><small>{formatDate(conversation.updatedAt, locale)}</small></span><ArrowUpRight size={14} /></Link>)}</div>}
       </section>
     </div>
 
