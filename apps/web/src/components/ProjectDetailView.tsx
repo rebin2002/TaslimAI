@@ -107,8 +107,8 @@ export function ProjectDetailView() {
     <section className="project-quick-create project-action-surface account-card">
       <div className="card-title"><span className="card-title-icon"><Plus size={17} /></span><div><h2>{t("projects.quickCreateTitle")}</h2><p>{t("projects.quickCreateDescription")}</p></div></div>
       <div className="project-action-grid">
-        <button type="button" className="project-action project-action-continue" onClick={startConversation}><span className="project-action-icon"><MessageSquare size={16} /></span><span><strong>{t("projects.newConversation")}</strong><small>{t("projects.conversationsDescription")}</small></span><ArrowUpRight size={15} /></button>
-        {projectActions.slice(1).map(([href, label, Icon, className]) => <Link key={href} href={`${href}?projectId=${project.id}`} className={`project-action ${className}`}><span className="project-action-icon"><Icon size={16} /></span><span><strong>{t(label)}</strong><small>{t("projects.quickCreateDescription")}</small></span><ArrowUpRight size={15} /></Link>)}
+        <button type="button" className="project-action project-action-continue" aria-label={t("projects.conversationsTitle")} onClick={startConversation}><span className="project-action-icon"><MessageSquare size={16} /></span><span><strong>{t("projects.newConversation")}</strong><small>{t("projects.conversationsDescription")}</small></span><ArrowUpRight size={15} /></button>
+        {projectActions.slice(1).map(([href, label, Icon, className]) => <Link key={href} href={`${href}?projectId=${project.id}`} aria-label={t(label)} className={`project-action ${className}`}><span className="project-action-icon"><Icon size={16} /></span><span><strong>{t(label)}</strong><small>{t("projects.quickCreateDescription")}</small></span><ArrowUpRight size={15} /></Link>)}
       </div>
     </section>
 

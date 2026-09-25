@@ -173,6 +173,8 @@ export function ImageStudioView() {
     close: t("common.close"),
     structuredTitle: t("assets.structuredTitle"),
     structuredDescription: t("assets.structuredDescription"),
+    previewLabel: t("assets.structuredTitle"),
+    summaryLabel: t("assets.description"),
     download: t("assets.download"),
     open: t("assets.open"),
     edit: t("assets.rename"),
@@ -205,7 +207,7 @@ export function ImageStudioView() {
       <div className="image-studio-header-copy">
         <div className="image-studio-breadcrumb"><span className="image-studio-mark"><Palette size={15} /></span><span>{t("image.workspaceLabel")}</span><span className="image-studio-slash">/</span><strong>{t("image.title")}</strong></div>
         <p className="section-eyebrow">{t("image.eyebrow")}</p>
-        <h1>{t("image.workspaceTitle")}</h1>
+        <h1 aria-label={t("image.title")}>{t("image.workspaceTitle")}</h1>
         <p>{t("image.workspaceSubtitle")}</p>
       </div>
       <Link className="image-studio-library-link" href="/assets?assetType=image"><ImageIcon size={15} /> {t("image.openAssets")} <ArrowUpRight size={14} /></Link>

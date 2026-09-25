@@ -1135,7 +1135,8 @@ select.memory-control { appearance: auto; cursor: pointer; }
   .app-header .language-select { display: none; }
   .app-header .profile-chip { margin-inline-start: 0; padding-inline-start: 0; border-inline-start: 0; }
   .app-header .profile-avatar { width: 30px; height: 30px; }
-  .page-content { padding-bottom: calc(98px + env(safe-area-inset-bottom)); }
+  /* Keep final page content clear of the fixed nav and device safe area. */
+  .page-content { padding-bottom: calc(104px + env(safe-area-inset-bottom)); }
   .home-dashboard { padding: 30px 0 26px; }
   .home-welcome { gap: 18px; margin-bottom: 22px; }
   .home-welcome h1 { font-size: clamp(34px, 10vw, 48px); }
