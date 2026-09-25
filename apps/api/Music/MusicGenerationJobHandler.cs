@@ -122,6 +122,19 @@ public static class MusicOutputInspector
             throw new MusicOutputInvalidException();
         if (string.IsNullOrWhiteSpace(result.Format) || !string.Equals(result.Format.Trim().TrimStart('.'), expectedFormat, StringComparison.OrdinalIgnoreCase))
             throw new MusicOutputInvalidException();
+        if (!HasValidAudioSignature(result.Content.Span, expectedFormat))
+            throw new MusicOutputInvalidException();
         return new MusicOutputInfo(result.ContentType.Trim().ToLowerInvariant(), expectedFormat);
     }
+
+    public static bool HasValidAudioSignature(ReadOnlySpan<byte> content, string format) => format.ToLowerInvariant() switch
+    {
+        "mp3" => content.Length >= 4 && ((content[..3].SequenceEqual("ID3"u8) && content.Length >= 10) || (content[0] == 0xFF && (content[1] & 0xE0) == 0xE0)),
+        "wav" => content.Length >= 12 && content[..4].SequenceEqual("RIFF"u8) && content.Slice(8, 4).SequenceEqual("WAVE"u8),
+        "ogg" => content.Length >= 4 && content[..4].SequenceEqual("OggS"u8),
+        "m4a" => content.Length >= 12 && content.Slice(4, 4).SequenceEqual("ftyp"u8),
+        "aac" => content.Length >= 2 && content[0] == 0xFF && (content[1] & 0xF6) == 0xF0,
+        "flac" => content.Length >= 4 && content[..4].SequenceEqual("fLaC"u8),
+        _ => false,
+    };
 }

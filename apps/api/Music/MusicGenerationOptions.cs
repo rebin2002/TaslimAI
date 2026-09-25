@@ -29,10 +29,29 @@ public sealed class MusicGenerationOptions
     public string MubertFormat { get; set; } = "mp3";
     public string MubertIntensity { get; set; } = "high";
     public string MubertMode { get; set; } = "track";
+
+    // Stable Audio API v2beta text-to-audio contract. These remain disabled and
+    // empty until a server-only Stability API key is configured through the
+    // deployment environment or secret configuration store.
+    public string StableAudioApiBaseUrl { get; set; } = "https://api.stability.ai/";
+    public string StableAudioApiKey { get; set; } = string.Empty;
+    public string StableAudioModel { get; set; } = "stable-audio-3";
+    public string StableAudioOutputFormat { get; set; } = "mp3";
+    public int StableAudioPollIntervalMilliseconds { get; set; } = 10_000;
+    public int StableAudioMaxPollAttempts { get; set; } = 36;
+    public int StableAudioMaxRetryAttempts { get; set; } = 2;
+    public int StableAudioRetryBaseDelayMilliseconds { get; set; } = 500;
+    public int StableAudioCreditsPerGeneration { get; set; } = 26;
+    public decimal StableAudioUsdPerCredit { get; set; } = 0.01m;
 }
 
-public sealed class MusicProviderUnavailableException() : Exception("The configured music provider is unavailable.");
+public class MusicProviderUnavailableException() : Exception("The configured music provider is unavailable.");
+public sealed class MusicProviderAuthenticationException() : MusicProviderUnavailableException;
+public sealed class MusicProviderQuotaException() : MusicProviderUnavailableException;
 public sealed class MusicProviderTimeoutException() : Exception("The music provider timed out.");
+public sealed class MusicProviderRateLimitException() : Exception("The music provider request was rate limited.");
+public sealed class MusicProviderRejectedException() : Exception("The music provider rejected the music request.");
+public sealed class MusicProviderInvalidRequestException() : Exception("The music provider rejected the music request as invalid.");
 public sealed class MusicProviderFailureException() : Exception("The music provider failed.");
 public sealed class MusicOutputInvalidException() : Exception("The music provider returned an invalid music file.");
 public sealed class MusicRequestValidationException(string code, string message) : Exception(message)
