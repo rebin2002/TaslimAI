@@ -93,7 +93,7 @@ jobs:
           ASPNETCORE_ENVIRONMENT: Development
           ConnectionStrings__Postgres: Host=localhost;Port=5432;Database=taslim_e2e;Username=taslim;Password=change-me
           Database__ApplyMigrations: "true"
-          AllowedOrigins__0: http://127.0.0.1:3000
+          AllowedOrigins__0: http://localhost:3000
           Ai__OpenAI__Enabled: "false"
           Files__StorageProvider: Local
           Files__LocalRootPath: ${{ github.workspace }}/.e2e-files
@@ -108,8 +108,8 @@ jobs:
           exit 1
       - name: Run browser tests
         env:
-          E2E_API_URL: http://127.0.0.1:5000
-          NEXT_PUBLIC_API_URL: http://127.0.0.1:5000
+          E2E_API_URL: http://localhost:5000
+          NEXT_PUBLIC_API_URL: http://localhost:5000
           E2E_TEST_PASSWORD: E2eStrongPassword!123
           CI: "true"
         run: npm run test:e2e --workspace @taslim/web

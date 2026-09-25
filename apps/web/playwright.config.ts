@@ -1,6 +1,6 @@
 import { defineConfig, devices } from "@playwright/test";
 
-const webUrl = process.env.E2E_WEB_URL ?? "http://127.0.0.1:3000";
+const webUrl = process.env.E2E_WEB_URL ?? "http://localhost:3000";
 
 export default defineConfig({
   testDir: "./e2e",
@@ -53,7 +53,7 @@ export default defineConfig({
         timeout: 120_000,
         env: {
           ...process.env,
-          NEXT_PUBLIC_API_URL: process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:5000",
+          NEXT_PUBLIC_API_URL: process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5000",
         },
       },
 });
