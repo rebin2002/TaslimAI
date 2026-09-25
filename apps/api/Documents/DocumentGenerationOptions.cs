@@ -12,7 +12,7 @@ public sealed class DocumentGenerationOptions
     public int MaxHeadingCharacters { get; set; } = 240;
     public int MaxBlockCharacters { get; set; } = 8_000;
     public int MaxSummaryCharacters { get; set; } = 2_000;
-    public decimal EstimatedOutputUsdPer1KTokens { get; set; } = 0.01m;
+    public decimal? EstimatedOutputUsdPer1KTokens { get; set; }
     public string RequestedTier { get; set; } = "Smart";
     public int ProviderTimeoutSeconds { get; set; } = 180;
     public string DefaultFontFamily { get; set; } = "Lato";

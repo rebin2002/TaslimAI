@@ -811,6 +811,10 @@ namespace Taslim.Api.Persistence.Migrations
                     b.Property<bool>("CancellationRequested")
                         .HasColumnType("boolean");
 
+                    b.Property<string>("CostEstimateJson")
+                        .HasMaxLength(8000)
+                        .HasColumnType("character varying(8000)");
+
                     b.Property<DateTime?>("CancelledAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -829,6 +833,13 @@ namespace Taslim.Api.Persistence.Migrations
 
                     b.Property<Guid>("CreatedByUserId")
                         .HasColumnType("uuid");
+
+                    b.Property<bool?>("EstimatedProviderCostKnown")
+                        .HasColumnType("boolean");
+
+                    b.Property<decimal?>("EstimatedProviderCostUsd")
+                        .HasPrecision(18, 8)
+                        .HasColumnType("numeric(18,8)");
 
                     b.Property<string>("ErrorCode")
                         .HasMaxLength(100)
@@ -953,6 +964,76 @@ namespace Taslim.Api.Persistence.Migrations
                     b.HasIndex("StoredFileId");
 
                     b.ToTable("GenerationJobOutputs");
+                });
+
+            modelBuilder.Entity("Taslim.Api.Domain.GenerationProviderAttempt", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("AttemptNumber")
+                        .HasColumnType("integer");
+
+                    b.Property<decimal?>("ActualProviderCostUsd")
+                        .HasPrecision(18, 8)
+                        .HasColumnType("numeric(18,8)");
+
+                    b.Property<bool>("ActualProviderCostKnown")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("CostEstimateJson")
+                        .HasMaxLength(8000)
+                        .HasColumnType("character varying(8000)");
+
+                    b.Property<DateTime?>("CompletedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("FailureCode")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<string>("FinalizationKey")
+                        .IsRequired()
+                        .HasMaxLength(160)
+                        .HasColumnType("character varying(160)");
+
+                    b.Property<Guid>("GenerationJobId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Model")
+                        .HasMaxLength(160)
+                        .HasColumnType("character varying(160)");
+
+                    b.Property<string>("Provider")
+                        .IsRequired()
+                        .HasMaxLength(80)
+                        .HasColumnType("character varying(80)");
+
+                    b.Property<decimal?>("EstimatedProviderCostUsd")
+                        .HasPrecision(18, 8)
+                        .HasColumnType("numeric(18,8)");
+
+                    b.Property<bool>("EstimatedProviderCostKnown")
+                        .HasColumnType("boolean");
+
+                    b.Property<DateTime>("StartedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(30)
+                        .HasColumnType("character varying(30)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("FinalizationKey")
+                        .IsUnique();
+
+                    b.HasIndex("GenerationJobId", "AttemptNumber")
+                        .IsUnique();
+
+                    b.ToTable("GenerationProviderAttempts");
                 });
 
             modelBuilder.Entity("Taslim.Api.Domain.PaymentAttempt", b =>
@@ -1891,6 +1972,10 @@ namespace Taslim.Api.Persistence.Migrations
                         .HasMaxLength(20)
                         .HasColumnType("character varying(20)");
 
+                    b.Property<string>("CostEstimateJson")
+                        .HasMaxLength(8000)
+                        .HasColumnType("character varying(8000)");
+
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -1957,6 +2042,9 @@ namespace Taslim.Api.Persistence.Migrations
                     b.Property<decimal>("ProviderCostUsd")
                         .HasPrecision(18, 8)
                         .HasColumnType("numeric(18,8)");
+
+                    b.Property<bool>("ProviderCostKnown")
+                        .HasColumnType("boolean");
 
                     b.Property<DateTime?>("RefundedAt")
                         .HasColumnType("timestamp with time zone");
@@ -2941,6 +3029,17 @@ namespace Taslim.Api.Persistence.Migrations
                     b.Navigation("StoredFile");
                 });
 
+            modelBuilder.Entity("Taslim.Api.Domain.GenerationProviderAttempt", b =>
+                {
+                    b.HasOne("Taslim.Api.Domain.GenerationJob", "GenerationJob")
+                        .WithMany("ProviderAttempts")
+                        .HasForeignKey("GenerationJobId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("GenerationJob");
+                });
+
             modelBuilder.Entity("Taslim.Api.Domain.PaymentAttempt", b =>
                 {
                     b.HasOne("Taslim.Api.Domain.CheckoutSession", "CheckoutSession")
@@ -3506,6 +3605,8 @@ namespace Taslim.Api.Persistence.Migrations
                     b.Navigation("Assets");
 
                     b.Navigation("Outputs");
+
+                    b.Navigation("ProviderAttempts");
 
                     b.Navigation("ResearchSources");
                 });

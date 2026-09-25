@@ -174,11 +174,11 @@ public sealed class ChatCompletionService(
         return normalized with
         {
             EstimatedCost = estimated,
-            ActualCost = estimated,
+            ActualCost = normalized.ActualCost,
             PricingVersion = snapshot?.Version,
             PricingSnapshotJson = snapshot?.ToJson(),
             Currency = UsageCurrencies.Usd,
-            CostBasis = UsageCostBasis.Estimated,
+            CostBasis = estimated.HasValue ? UsageCostBasis.Estimated : UsageCostBasis.Unknown,
         };
     }
 }

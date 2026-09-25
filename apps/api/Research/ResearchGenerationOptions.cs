@@ -25,9 +25,9 @@ public sealed class ResearchGenerationOptions
     public int MaxReportBlockCharacters { get; set; } = 8_000;
     public int MaxHeadingCharacters { get; set; } = 240;
     public int ProviderTimeoutSeconds { get; set; } = 240;
-    public decimal EstimatedOutputUsdPer1KTokens { get; set; } = 0.01m;
+    public decimal? EstimatedOutputUsdPer1KTokens { get; set; }
     public string DefaultFontFamily { get; set; } = "Lato";
     public string RtlFontFamily { get; set; } = "Noto Sans Arabic";
-    public string PricingVersion { get; set; } = "research-openai-2026-09-23";
-    public string PricingSource { get; set; } = "https://developers.openai.com/api/docs/guides/tools-web-search";
+    public string? PricingVersion { get; set; }
+    public string? PricingSource { get; set; }
 }
