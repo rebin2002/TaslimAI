@@ -632,6 +632,23 @@ public sealed class GenerationJobWorker(
             failureUsage ??= (exception as PresentationGenerationStageException)?.Usage;
             failureUsage ??= (exception as ResearchGenerationStageException)?.Usage;
             failureUsage ??= (exception as SocialGenerationStageException)?.Usage;
+            var qualityFailure = exception as GenerationQualityControlException ?? exception.InnerException as GenerationQualityControlException;
+            if (qualityFailure is not null)
+            {
+                var qualityMetadata = JsonSerializer.Serialize(new
+                {
+                    qualityControl = new
+                    {
+                        outcome = qualityFailure.Classification.ToString(),
+                        reasonCode = qualityFailure.ReasonCode,
+                        category = qualityFailure.Result.Findings.FirstOrDefault()?.Category,
+                    },
+                });
+                failureUsage = (failureUsage ?? new AiUsageMetadata("system", "unknown", null, null, null, 0m, 0m, 0, "quality_failed", true)) with
+                {
+                    SafeMetadataJson = qualityMetadata,
+                };
+            }
             if (string.Equals(claimedJob.JobType, GenerationJobTypes.DocumentGenerate, StringComparison.OrdinalIgnoreCase))
             {
                 var stage = (exception as DocumentGenerationStageException)?.Stage ?? DocumentGenerationStages.Execution;
@@ -928,6 +945,18 @@ public sealed class GenerationJobWorker(
 
     private static string MapFailureCode(Exception exception, string jobType)
     {
+        var qualityFailure = exception as GenerationQualityControlException ?? exception.InnerException as GenerationQualityControlException;
+        if (qualityFailure is not null)
+        {
+            if (string.Equals(jobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase)) return GenerationJobErrorCodes.ImageOutputInvalid;
+            if (string.Equals(jobType, GenerationJobTypes.DocumentGenerate, StringComparison.OrdinalIgnoreCase)) return GenerationJobErrorCodes.DocumentOutputInvalid;
+            if (string.Equals(jobType, GenerationJobTypes.PresentationGenerate, StringComparison.OrdinalIgnoreCase)) return GenerationJobErrorCodes.PresentationOutputInvalid;
+            if (string.Equals(jobType, GenerationJobTypes.ResearchGenerate, StringComparison.OrdinalIgnoreCase)) return GenerationJobErrorCodes.ResearchOutputInvalid;
+            if (string.Equals(jobType, GenerationJobTypes.SocialGenerate, StringComparison.OrdinalIgnoreCase)) return GenerationJobErrorCodes.SocialOutputInvalid;
+            if (GenerationJobTypes.MovieTypes.Contains(jobType)) return GenerationJobErrorCodes.MovieOutputInvalid;
+            if (string.Equals(jobType, GenerationJobTypes.MusicGenerate, StringComparison.OrdinalIgnoreCase)) return GenerationJobErrorCodes.MusicOutputInvalid;
+            if (string.Equals(jobType, GenerationJobTypes.VoiceGenerate, StringComparison.OrdinalIgnoreCase)) return GenerationJobErrorCodes.VoiceOutputInvalid;
+        }
         if (string.Equals(jobType, GenerationJobTypes.DocumentGenerate, StringComparison.OrdinalIgnoreCase))
         {
             return exception switch
