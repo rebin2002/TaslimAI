@@ -607,15 +607,29 @@ public sealed class GenerationJobWorker(
             if (GenerationJobTypes.MovieTypes.Contains(claimedJob.JobType))
             {
                 var publication = publications.FirstOrDefault(item => item.Asset is not null);
-                await movieExecutions.MarkReadyAsync(current.Id, publication?.Asset?.Id, publication?.CreatedFile?.Id, null, publication?.Output.MetadataJson, stoppingToken);
+                await movieExecutions.MarkReadyAsync(current.Id, claimedJob.ConcurrencyToken, publication?.Asset?.Id, publication?.CreatedFile?.Id, null, publication?.Output.MetadataJson, stoppingToken);
             }
+        }
+        catch (MovieVideoStaleWorkerException)
+        {
+            if (!publicationCommitted)
+                foreach (var publication in publications) await publisher.DiscardAsync(publication, CancellationToken.None);
+            logger.LogWarning("Stale movie worker stopped without mutating the recovered execution. JobId={JobId}; RequestId={RequestId}", claimedJob.Id, claimedJob.RequestId);
+        }
+        catch (MovieVideoProviderCancelledException)
+        {
+            if (!publicationCommitted)
+                foreach (var publication in publications) await publisher.DiscardAsync(publication, CancellationToken.None);
+            if (GenerationJobTypes.MovieTypes.Contains(claimedJob.JobType))
+                await movieExecutions.MarkCancelledAsync(claimedJob.Id, claimedJob.ConcurrencyToken, CancellationToken.None);
+            await CancelRunningAsync(db, usage, claimedJob, claimedJob.ConcurrencyToken, stoppingToken);
         }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
         {
             if (!publicationCommitted)
                 foreach (var publication in publications) await publisher.DiscardAsync(publication, CancellationToken.None);
             if (GenerationJobTypes.MovieTypes.Contains(claimedJob.JobType))
-                await movieExecutions.MarkCancelledAsync(claimedJob.Id, CancellationToken.None);
+                await movieExecutions.MarkCancelledAsync(claimedJob.Id, claimedJob.ConcurrencyToken, CancellationToken.None);
             await CancelRunningAsync(db, usage, claimedJob, claimedJob.ConcurrencyToken, stoppingToken);
             logger.LogInformation(
                 "Generation job execution cancelled. JobId={JobId}; JobType={JobType}; RequestId={RequestId}; ElapsedMs={ElapsedMs}; UsageFinalized={UsageFinalized}",
@@ -627,7 +641,7 @@ public sealed class GenerationJobWorker(
                 foreach (var publication in publications) await publisher.DiscardAsync(publication, CancellationToken.None);
             var failureCode = MapFailureCode(exception, claimedJob.JobType);
             if (GenerationJobTypes.MovieTypes.Contains(claimedJob.JobType))
-                await movieExecutions.MarkFailedAsync(claimedJob.Id, failureCode, CancellationToken.None);
+                await movieExecutions.MarkFailedAsync(claimedJob.Id, claimedJob.ConcurrencyToken, failureCode, CancellationToken.None);
             var failureUsage = providerUsage ?? (exception as DocumentGenerationStageException)?.Usage;
             failureUsage ??= (exception as PresentationGenerationStageException)?.Usage;
             failureUsage ??= (exception as ResearchGenerationStageException)?.Usage;
@@ -994,7 +1008,11 @@ public sealed class GenerationJobWorker(
             return exception switch
             {
                 MovieProviderUnavailableException => GenerationJobErrorCodes.MovieProviderUnavailable,
+                MovieVideoProviderTimeoutException => GenerationJobErrorCodes.MovieProviderTimeout,
+                MovieVideoStaleWorkerException => GenerationJobErrorCodes.MovieCancelled,
+                MovieVideoProviderCancelledException => GenerationJobErrorCodes.MovieCancelled,
                 MovieVideoProviderException providerException when providerException.Code == GenerationJobErrorCodes.MovieProviderUnavailable => GenerationJobErrorCodes.MovieProviderUnavailable,
+                MovieVideoProviderException providerException when providerException.Code == GenerationJobErrorCodes.MovieProviderUnsupportedRequest => GenerationJobErrorCodes.MovieProviderUnsupportedRequest,
                 MovieVideoProviderException => GenerationJobErrorCodes.MovieGenerationFailed,
                 MovieVideoProviderOutputException => GenerationJobErrorCodes.MovieOutputInvalid,
                 FileStorageUnavailableException or FileStorageOperationException or FileUploadValidationException => GenerationJobErrorCodes.MovieOutputStorageFailed,
@@ -1097,6 +1115,8 @@ public sealed class GenerationJobWorker(
         GenerationJobErrorCodes.SocialStorageFailed => "The social content was generated but could not be saved. Please try again.",
         GenerationJobErrorCodes.SocialCancelled => "The social content generation was cancelled.",
         GenerationJobErrorCodes.MovieProviderUnavailable => "Movie generation is not available yet because no video provider is configured. Your movie plan was saved.",
+        GenerationJobErrorCodes.MovieProviderTimeout => "Movie generation took too long to finish. Your movie plan was saved.",
+        GenerationJobErrorCodes.MovieProviderUnsupportedRequest => "This movie request is not supported by the configured video provider. Your movie plan was saved.",
         GenerationJobErrorCodes.MovieOutputInvalid => "The generated movie clip was invalid. Your movie plan was saved.",
         GenerationJobErrorCodes.MovieOutputStorageFailed => "The movie clip was generated but could not be saved. Your movie plan was saved.",
         GenerationJobErrorCodes.MovieCancelled => "The movie generation was cancelled.",

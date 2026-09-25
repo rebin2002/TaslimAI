@@ -15,6 +15,11 @@ public sealed class MovieVideoOptions
 {
     public bool Enabled { get; set; }
     public string ProviderKey { get; set; } = "unconfigured";
+    public string ApiBaseUrl { get; set; } = "https://api.dev.runwayml.com/v1/";
+    public string ApiKey { get; set; } = string.Empty;
+    public string Model { get; set; } = "gen4.5";
+    public int ProviderTimeoutSeconds { get; set; } = 30;
+    public decimal CreditUsd { get; set; } = 0.01m;
     public int StatusPollIntervalSeconds { get; set; } = 5;
     public int MaxStatusPolls { get; set; } = 120;
     public int MaxTransientRetries { get; set; } = 3;
@@ -32,6 +37,10 @@ public static class MovieVideoExecutionStatuses
     public const string Succeeded = "Succeeded";
     public const string Failed = "Failed";
     public const string Cancelled = "Cancelled";
+    public const string TimedOut = "TimedOut";
+    public const string ProviderUnavailable = "ProviderUnavailable";
+    public const string Generating = "Generating";
+    public const string Completed = "Completed";
 }
 
 public sealed class MovieVideoProviderExecution
@@ -80,101 +89,87 @@ public sealed class MovieVideoExecutionStore(TaslimDbContext db, IOptions<MovieV
         return execution;
     }
 
-    public async Task TouchAsync(Guid jobId, CancellationToken cancellationToken)
+    public async Task TouchAsync(Guid jobId, Guid concurrencyToken, CancellationToken cancellationToken)
     {
         var now = DateTime.UtcNow;
-        await db.GenerationJobs.Where(item => item.Id == jobId && item.Status == GenerationJobStatus.Running)
+        var renewed = await db.GenerationJobs.Where(item => item.Id == jobId && item.Status == GenerationJobStatus.Running && item.ConcurrencyToken == concurrencyToken)
             .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.ClaimExpiresAt, now.AddMinutes(Math.Clamp(settings.ClaimLeaseMinutes, 1, 120))), cancellationToken);
+        if (renewed == 0) throw new MovieVideoStaleWorkerException();
     }
 
-    public async Task PersistSubmittedAsync(MovieVideoProviderExecution execution, string providerJobId, CancellationToken cancellationToken)
+    public async Task PersistSubmittedAsync(MovieVideoProviderExecution execution, Guid concurrencyToken, string providerJobId, CancellationToken cancellationToken)
     {
         execution.ProviderJobId = providerJobId;
-        execution.Status = MovieVideoExecutionStatuses.Submitted;
-        execution.AttemptCount++;
-        execution.UpdatedAt = DateTime.UtcNow;
-        await db.SaveChangesAsync(cancellationToken);
-        await db.MovieClips.Where(item => item.Id == execution.MovieClipId)
+        var now = DateTime.UtcNow;
+        var persisted = await db.MovieVideoProviderExecutions
+            .Where(item => item.Id == execution.Id && item.GenerationJobId == execution.GenerationJobId && item.GenerationJob.Status == GenerationJobStatus.Running && item.GenerationJob.ConcurrencyToken == concurrencyToken)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(item => item.ProviderJobId, providerJobId)
+                .SetProperty(item => item.Status, MovieVideoExecutionStatuses.Queued)
+                .SetProperty(item => item.AttemptCount, item => item.AttemptCount + 1)
+                .SetProperty(item => item.UpdatedAt, now), cancellationToken);
+        if (persisted == 0) throw new MovieVideoStaleWorkerException();
+        await db.MovieClips.Where(item => item.Id == execution.MovieClipId && db.GenerationJobs.Any(job => job.Id == execution.GenerationJobId && job.Status == GenerationJobStatus.Running && job.ConcurrencyToken == concurrencyToken))
             .ExecuteUpdateAsync(setters => setters
                 .SetProperty(item => item.Status, MovieClipStatuses.Generating)
                 .SetProperty(item => item.ProviderKey, execution.ProviderKey)
                 .SetProperty(item => item.ProviderClipId, providerJobId)
-                .SetProperty(item => item.UpdatedAt, DateTime.UtcNow), cancellationToken);
+                .SetProperty(item => item.UpdatedAt, now), cancellationToken);
     }
 
-    public async Task PersistStatusAsync(MovieVideoProviderExecution execution, MovieVideoProviderStatus status, CancellationToken cancellationToken)
+    public async Task PersistStatusAsync(MovieVideoProviderExecution execution, Guid concurrencyToken, MovieVideoProviderStatus status, CancellationToken cancellationToken)
     {
-        execution.Status = status.Status switch
+        var executionStatus = status.Status switch
         {
-            MovieVideoProviderJobStatus.Submitted => MovieVideoExecutionStatuses.Submitted,
+            MovieVideoProviderJobStatus.Submitted => MovieVideoExecutionStatuses.Queued,
             MovieVideoProviderJobStatus.Queued => MovieVideoExecutionStatuses.Queued,
-            MovieVideoProviderJobStatus.Running => MovieVideoExecutionStatuses.Running,
-            MovieVideoProviderJobStatus.Succeeded => MovieVideoExecutionStatuses.Succeeded,
+            MovieVideoProviderJobStatus.Running => MovieVideoExecutionStatuses.Generating,
+            MovieVideoProviderJobStatus.Succeeded => MovieVideoExecutionStatuses.Completed,
             MovieVideoProviderJobStatus.Failed => MovieVideoExecutionStatuses.Failed,
             MovieVideoProviderJobStatus.Cancelled => MovieVideoExecutionStatuses.Cancelled,
-            _ => MovieVideoExecutionStatuses.Running,
+            _ => MovieVideoExecutionStatuses.Generating,
         };
-        execution.ProgressPercent = Math.Clamp(status.ProgressPercent, 0, 100);
-        execution.PollCount++;
-        execution.NextPollAt = status.Status is MovieVideoProviderJobStatus.Succeeded or MovieVideoProviderJobStatus.Failed or MovieVideoProviderJobStatus.Cancelled
-            ? null
-            : DateTime.UtcNow.AddSeconds(Math.Clamp(settings.StatusPollIntervalSeconds, 1, 300));
-        execution.UpdatedAt = DateTime.UtcNow;
-        if (status.Status is MovieVideoProviderJobStatus.Succeeded or MovieVideoProviderJobStatus.Failed or MovieVideoProviderJobStatus.Cancelled)
-            execution.CompletedAt = DateTime.UtcNow;
-        await db.SaveChangesAsync(cancellationToken);
+        var now = DateTime.UtcNow;
+        var terminalStatus = status.Status == MovieVideoProviderJobStatus.Succeeded || status.Status == MovieVideoProviderJobStatus.Failed || status.Status == MovieVideoProviderJobStatus.Cancelled;
+        var persisted = await db.MovieVideoProviderExecutions
+            .Where(item => item.Id == execution.Id && item.GenerationJobId == execution.GenerationJobId && item.GenerationJob.Status == GenerationJobStatus.Running && item.GenerationJob.ConcurrencyToken == concurrencyToken)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(item => item.Status, executionStatus)
+                .SetProperty(item => item.ProgressPercent, Math.Clamp(status.ProgressPercent, 0, 100))
+                .SetProperty(item => item.PollCount, item => item.PollCount + 1)
+                .SetProperty(item => item.LastErrorCode, item => status.Status == MovieVideoProviderJobStatus.Failed ? GenerationJobErrorCodes.MovieGenerationFailed : status.Status == MovieVideoProviderJobStatus.Cancelled ? GenerationJobErrorCodes.MovieCancelled : item.LastErrorCode)
+                .SetProperty(item => item.NextPollAt, item => terminalStatus ? null : now.AddSeconds(Math.Clamp(settings.StatusPollIntervalSeconds, 1, 300)))
+                .SetProperty(item => item.CompletedAt, item => terminalStatus ? now : item.CompletedAt)
+                .SetProperty(item => item.UpdatedAt, now), cancellationToken);
+        if (persisted == 0) throw new MovieVideoStaleWorkerException();
     }
 
-    public async Task MarkFailedAsync(Guid jobId, string code, CancellationToken cancellationToken)
+    public async Task MarkFailedAsync(Guid jobId, Guid concurrencyToken, string code, CancellationToken cancellationToken)
     {
-        var execution = await db.MovieVideoProviderExecutions.FirstOrDefaultAsync(item => item.GenerationJobId == jobId, cancellationToken);
-        if (execution is not null)
-        {
-            execution.Status = MovieVideoExecutionStatuses.Failed;
-            execution.LastErrorCode = code;
-            execution.CompletedAt = DateTime.UtcNow;
-            execution.UpdatedAt = DateTime.UtcNow;
-        }
-        await db.MovieClips.Where(item => item.GenerationJobId == jobId)
-            .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.Status, MovieClipStatuses.Failed).SetProperty(item => item.UpdatedAt, DateTime.UtcNow), cancellationToken);
-        await db.SaveChangesAsync(cancellationToken);
+        var now = DateTime.UtcNow;
+        var executionStatus = code == GenerationJobErrorCodes.MovieProviderUnavailable ? MovieVideoExecutionStatuses.ProviderUnavailable : code == GenerationJobErrorCodes.MovieProviderTimeout ? MovieVideoExecutionStatuses.TimedOut : MovieVideoExecutionStatuses.Failed;
+        await db.MovieVideoProviderExecutions.Where(item => item.GenerationJobId == jobId && item.GenerationJob.Status == GenerationJobStatus.Running && item.GenerationJob.ConcurrencyToken == concurrencyToken)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.Status, executionStatus).SetProperty(item => item.LastErrorCode, code).SetProperty(item => item.CompletedAt, now).SetProperty(item => item.UpdatedAt, now), cancellationToken);
+        await db.MovieClips.Where(item => item.GenerationJobId == jobId && db.GenerationJobs.Any(job => job.Id == jobId && job.Status == GenerationJobStatus.Running && job.ConcurrencyToken == concurrencyToken))
+            .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.Status, MovieClipStatuses.Failed).SetProperty(item => item.UpdatedAt, now), cancellationToken);
     }
 
-    public async Task MarkCancelledAsync(Guid jobId, CancellationToken cancellationToken)
+    public async Task MarkCancelledAsync(Guid jobId, Guid concurrencyToken, CancellationToken cancellationToken)
     {
-        var execution = await db.MovieVideoProviderExecutions.FirstOrDefaultAsync(item => item.GenerationJobId == jobId, cancellationToken);
-        if (execution is not null)
-        {
-            execution.Status = MovieVideoExecutionStatuses.Cancelled;
-            execution.CompletedAt = DateTime.UtcNow;
-            execution.UpdatedAt = DateTime.UtcNow;
-        }
-        await db.MovieClips.Where(item => item.GenerationJobId == jobId)
-            .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.Status, MovieClipStatuses.Cancelled).SetProperty(item => item.UpdatedAt, DateTime.UtcNow), cancellationToken);
-        await db.SaveChangesAsync(cancellationToken);
+        var now = DateTime.UtcNow;
+        await db.MovieVideoProviderExecutions.Where(item => item.GenerationJobId == jobId && item.GenerationJob.Status == GenerationJobStatus.Running && item.GenerationJob.ConcurrencyToken == concurrencyToken)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.Status, MovieVideoExecutionStatuses.Cancelled).SetProperty(item => item.CompletedAt, now).SetProperty(item => item.UpdatedAt, now), cancellationToken);
+        await db.MovieClips.Where(item => item.GenerationJobId == jobId && db.GenerationJobs.Any(job => job.Id == jobId && job.Status == GenerationJobStatus.Running && job.ConcurrencyToken == concurrencyToken))
+            .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.Status, MovieClipStatuses.Cancelled).SetProperty(item => item.UpdatedAt, now), cancellationToken);
     }
 
-    public async Task MarkReadyAsync(Guid jobId, Guid? assetId, Guid? storedFileId, int? durationSeconds, string? metadataJson, CancellationToken cancellationToken)
+    public async Task MarkReadyAsync(Guid jobId, Guid concurrencyToken, Guid? assetId, Guid? storedFileId, int? durationSeconds, string? metadataJson, CancellationToken cancellationToken)
     {
-        var execution = await db.MovieVideoProviderExecutions.FirstOrDefaultAsync(item => item.GenerationJobId == jobId, cancellationToken);
-        if (execution is not null)
-        {
-            execution.Status = MovieVideoExecutionStatuses.Succeeded;
-            execution.ProgressPercent = 100;
-            execution.CompletedAt = DateTime.UtcNow;
-            execution.UpdatedAt = DateTime.UtcNow;
-        }
-        var clip = await db.MovieClips.FirstOrDefaultAsync(item => item.GenerationJobId == jobId, cancellationToken);
-        if (clip is not null)
-        {
-            clip.Status = MovieClipStatuses.Ready;
-            clip.AssetId = assetId;
-            clip.StoredFileId = storedFileId;
-            clip.DurationSeconds = durationSeconds;
-            clip.MetadataJson = metadataJson;
-            clip.UpdatedAt = DateTime.UtcNow;
-        }
-        await db.SaveChangesAsync(cancellationToken);
+        var now = DateTime.UtcNow;
+        await db.MovieVideoProviderExecutions.Where(item => item.GenerationJobId == jobId && item.GenerationJob.Status == GenerationJobStatus.Succeeded && item.GenerationJob.ConcurrencyToken == concurrencyToken)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.Status, MovieVideoExecutionStatuses.Completed).SetProperty(item => item.ProgressPercent, 100).SetProperty(item => item.CompletedAt, now).SetProperty(item => item.UpdatedAt, now), cancellationToken);
+        await db.MovieClips.Where(item => item.GenerationJobId == jobId && db.GenerationJobs.Any(job => job.Id == jobId && job.Status == GenerationJobStatus.Succeeded && job.ConcurrencyToken == concurrencyToken))
+            .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.Status, MovieClipStatuses.Ready).SetProperty(item => item.AssetId, assetId).SetProperty(item => item.StoredFileId, storedFileId).SetProperty(item => item.DurationSeconds, item => durationSeconds ?? item.DurationSeconds).SetProperty(item => item.MetadataJson, metadataJson).SetProperty(item => item.UpdatedAt, now), cancellationToken);
     }
 }
 
@@ -212,7 +207,9 @@ public sealed class MovieVideoGenerationJobHandler(
             input.AdditionalInstructions,
             input.ContinuityGuideJson,
             input.SceneJson,
-            input.ShotJson);
+            input.ShotJson,
+            input.SourceImageUri,
+            input.ContinuationProviderJobId);
         var execution = await executions.GetOrCreateAsync(job, clip.Id, provider.Key, cancellationToken);
         var started = Stopwatch.GetTimestamp();
         progress.Report(5);
@@ -226,16 +223,16 @@ public sealed class MovieVideoGenerationJobHandler(
                     cancellationToken);
                 if (string.IsNullOrWhiteSpace(submission.ProviderJobId) || submission.ProviderJobId.Length > 240)
                     throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieGenerationFailed, false);
-                await executions.PersistSubmittedAsync(execution, submission.ProviderJobId, cancellationToken);
+                await executions.PersistSubmittedAsync(execution, job.ConcurrencyToken, submission.ProviderJobId, cancellationToken);
             }
 
             MovieVideoProviderStatus? terminal = null;
             for (var poll = 0; poll < Math.Clamp(settings.MaxStatusPolls, 1, 10_000); poll++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                await executions.TouchAsync(job.Id, cancellationToken);
+                await executions.TouchAsync(job.Id, job.ConcurrencyToken, cancellationToken);
                 var status = await WithTransientRetriesAsync(token => provider.GetStatusAsync(execution.ProviderJobId!, token), cancellationToken);
-                await executions.PersistStatusAsync(execution, status, cancellationToken);
+                await executions.PersistStatusAsync(execution, job.ConcurrencyToken, status, cancellationToken);
                 progress.Report(Math.Clamp(10 + (int)Math.Round(status.ProgressPercent * 0.8), 10, 90));
                 if (status.Status is MovieVideoProviderJobStatus.Succeeded or MovieVideoProviderJobStatus.Failed or MovieVideoProviderJobStatus.Cancelled)
                 {
@@ -246,9 +243,9 @@ public sealed class MovieVideoGenerationJobHandler(
             }
 
             if (terminal is null)
-                throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieGenerationFailed, true, "The movie provider did not finish within the configured polling limit.");
+                throw new MovieVideoProviderTimeoutException();
             if (terminal.Status == MovieVideoProviderJobStatus.Cancelled)
-                throw new OperationCanceledException(cancellationToken);
+                throw new MovieVideoProviderCancelledException();
             if (terminal.Status == MovieVideoProviderJobStatus.Failed)
                 throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieGenerationFailed, false);
 
@@ -260,8 +257,8 @@ public sealed class MovieVideoGenerationJobHandler(
                 assetType = AssetTypes.Video,
                 contentType = output.ContentType,
                 durationSeconds = output.DurationSeconds,
-                continuityPreserved = true,
-                providerMetadata = output.MetadataJson,
+                referenceImageApplied = !string.IsNullOrWhiteSpace(input.SourceImageUri),
+                unsupportedFeatures = new[] { "continuation" },
             });
             var artifact = new GeneratedStreamFileArtifact(
                 string.IsNullOrWhiteSpace(output.FileName) ? $"movie-{job.Id:N}.mp4" : output.FileName,
@@ -271,7 +268,7 @@ public sealed class MovieVideoGenerationJobHandler(
                 metadata);
             var usage = new AiUsageMetadata(
                 provider.Key,
-                "video",
+                output.ProviderModelKey ?? "video",
                 null,
                 null,
                 null,
@@ -305,20 +302,27 @@ public sealed class MovieVideoGenerationJobHandler(
                     StreamArtifact: artifact)],
                 usage);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException exception)
         {
+            if (exception is MovieVideoStaleWorkerException) throw;
             if (!string.IsNullOrWhiteSpace(execution.ProviderJobId))
             {
                 try { await provider.CancelAsync(execution.ProviderJobId, CancellationToken.None); }
-                catch (Exception exception) { logger.LogWarning("Movie provider cancellation could not be completed. JobId={JobId}; ExceptionType={ExceptionType}", job.Id, exception.GetType().Name); }
+                catch (Exception cancellationException) { logger.LogWarning("Movie provider cancellation could not be completed. JobId={JobId}; ExceptionType={ExceptionType}", job.Id, cancellationException.GetType().Name); }
             }
-            await executions.MarkCancelledAsync(job.Id, CancellationToken.None);
+            await executions.MarkCancelledAsync(job.Id, job.ConcurrencyToken, CancellationToken.None);
             throw;
         }
         catch (Exception exception)
         {
-            var code = exception is MovieVideoProviderException providerException ? providerException.Code : GenerationJobErrorCodes.MovieGenerationFailed;
-            await executions.MarkFailedAsync(job.Id, code, CancellationToken.None);
+            var code = exception switch
+            {
+                MovieVideoProviderException providerException => providerException.Code,
+                MovieVideoProviderTimeoutException => GenerationJobErrorCodes.MovieProviderTimeout,
+                MovieVideoStaleWorkerException => GenerationJobErrorCodes.MovieCancelled,
+                _ => GenerationJobErrorCodes.MovieGenerationFailed,
+            };
+            await executions.MarkFailedAsync(job.Id, job.ConcurrencyToken, code, CancellationToken.None);
             throw;
         }
     }
