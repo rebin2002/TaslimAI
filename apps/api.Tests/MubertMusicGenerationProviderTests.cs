@@ -3,6 +3,7 @@ using System.Text;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Taslim.Api.Contracts;
+using Taslim.Api.Files;
 using Taslim.Api.Music;
 using Xunit;
 
@@ -18,7 +19,7 @@ public sealed class MubertMusicGenerationProviderTests
             {
                 1 => Json(HttpStatusCode.OK, "{\"data\":{\"id\":\"track-1\",\"session_id\":\"session-1\"}}"),
                 2 => Json(HttpStatusCode.OK, "{\"data\":{\"generations\":[{\"status\":\"pending\",\"url\":null}]}}"),
-                3 => Json(HttpStatusCode.OK, "{\"data\":{\"generations\":[{\"status\":\"completed\",\"url\":\"https://download.example/track.mp3\"}]}}"),
+                3 => Json(HttpStatusCode.OK, "{\"data\":{\"generations\":[{\"status\":\"completed\",\"url\":\"https://download.example/track.mp3?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=test\"}]}}"),
                 _ => Binary(HttpStatusCode.OK, "ID3-test-audio", "audio/mpeg"),
             });
         var provider = CreateProvider(handler, pollIntervalMilliseconds: 100);
@@ -48,7 +49,7 @@ public sealed class MubertMusicGenerationProviderTests
                 1 => new HttpResponseMessage(HttpStatusCode.ServiceUnavailable),
                 2 => Json(HttpStatusCode.OK, "{\"data\":{\"id\":\"track-2\",\"session_id\":\"session-2\"}}"),
                 3 => Json(HttpStatusCode.OK, "{\"data\":{\"generations\":[{\"status\":\"completed\",\"url\":\"https://download.example/track.mp3\"}]}}"),
-                _ => Binary(HttpStatusCode.OK, "audio", "audio/mpeg"),
+                _ => Binary(HttpStatusCode.OK, "ID3-audio", "audio/mpeg"),
             });
         var provider = CreateProvider(handler, retryAttempts: 1, retryDelayMilliseconds: 25);
 
@@ -113,6 +114,71 @@ public sealed class MubertMusicGenerationProviderTests
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => generation);
     }
 
+    [Fact]
+    public async Task Oversized_download_is_rejected_before_a_music_result_is_returned()
+    {
+        var handler = CompleteTrackHandler(_ => Binary(HttpStatusCode.OK, "ID3-too-large", "audio/mpeg"));
+        var provider = CreateProvider(handler, maxOutputBytes: 8);
+
+        await Assert.ThrowsAsync<MusicOutputInvalidException>(() => provider.GenerateAsync(Input()));
+    }
+
+    [Fact]
+    public async Task Html_body_with_an_audio_mime_type_is_rejected()
+    {
+        var handler = CompleteTrackHandler(_ => Binary(HttpStatusCode.OK, "<html>provider error</html>", "audio/mpeg"));
+        var provider = CreateProvider(handler);
+
+        await Assert.ThrowsAsync<MusicOutputInvalidException>(() => provider.GenerateAsync(Input()));
+    }
+
+    [Fact]
+    public async Task Mismatched_download_mime_type_is_rejected()
+    {
+        var handler = CompleteTrackHandler(_ => Binary(HttpStatusCode.OK, "ID3-audio", "audio/wav"));
+        var provider = CreateProvider(handler);
+
+        await Assert.ThrowsAsync<MusicOutputInvalidException>(() => provider.GenerateAsync(Input()));
+    }
+
+    [Fact]
+    public async Task Truncated_download_is_rejected_when_content_length_is_declared()
+    {
+        var handler = CompleteTrackHandler(_ => BinaryWithDeclaredLength(HttpStatusCode.OK, "ID3", "audio/mpeg", 10));
+        var provider = CreateProvider(handler);
+
+        await Assert.ThrowsAsync<MusicOutputInvalidException>(() => provider.GenerateAsync(Input()));
+    }
+
+    [Fact]
+    public async Task Redirect_to_private_ip_is_rejected_before_following_the_redirect()
+    {
+        var handler = new MubertHandler(
+            (_, requestNumber) => requestNumber switch
+            {
+                1 => Json(HttpStatusCode.OK, "{\"data\":{\"id\":\"track-private-redirect\",\"session_id\":\"session\"}}"),
+                2 => Json(HttpStatusCode.OK, "{\"data\":{\"generations\":[{\"status\":\"completed\",\"url\":\"https://1.1.1.1/track.mp3\"}]}}"),
+                3 => Redirect(HttpStatusCode.Found, "https://127.0.0.1/metadata"),
+                _ => throw new InvalidOperationException("private redirect must not be requested"),
+            });
+        var provider = CreateProvider(handler, urlPolicy: new ProviderUrlPolicy());
+
+        await Assert.ThrowsAsync<MusicOutputInvalidException>(() => provider.GenerateAsync(Input()));
+        Assert.Equal(3, handler.Requests.Count);
+    }
+
+    [Fact]
+    public async Task Hanging_download_is_cancelled_by_the_provider_timeout()
+    {
+        var handler = CompleteTrackHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StreamContent(new BlockingStream()),
+        });
+        var provider = CreateProvider(handler, providerTimeoutSeconds: 1);
+
+        await Assert.ThrowsAsync<MusicProviderTimeoutException>(() => provider.GenerateAsync(Input()));
+    }
+
     private static MubertMusicGenerationProvider CreateProvider(
         HttpMessageHandler handler,
         string customerId = "customer",
@@ -120,16 +186,19 @@ public sealed class MubertMusicGenerationProviderTests
         int maxPollAttempts = 3,
         int pollIntervalMilliseconds = 1,
         int retryAttempts = 2,
-        int retryDelayMilliseconds = 1) => new(
+        int retryDelayMilliseconds = 1,
+        int maxOutputBytes = 1024,
+        int providerTimeoutSeconds = 15,
+        IProviderUrlPolicy? urlPolicy = null) => new(
             new HttpClient(handler),
             Options.Create(new MusicGenerationOptions
             {
                 Enabled = true,
                 ProviderKey = "mubert",
                 Model = "mubert-text-to-music",
-                ProviderTimeoutSeconds = 15,
+                ProviderTimeoutSeconds = providerTimeoutSeconds,
                 MaxPromptCharacters = 255,
-                MaxOutputBytes = 1024,
+                MaxOutputBytes = maxOutputBytes,
                 MubertApiBaseUrl = "https://music-api.mubert.com/api/v3/public/",
                 MubertCustomerId = customerId,
                 MubertAccessToken = accessToken,
@@ -138,7 +207,8 @@ public sealed class MubertMusicGenerationProviderTests
                 MubertMaxRetryAttempts = retryAttempts,
                 MubertRetryBaseDelayMilliseconds = retryDelayMilliseconds,
             }),
-            NullLogger<MubertMusicGenerationProvider>.Instance);
+            NullLogger<MubertMusicGenerationProvider>.Instance,
+            urlPolicy ?? new MockedProviderUrlPolicy());
 
     private static MusicGenerationInput Input() => new(
         "Warm piano and soft strings",
@@ -207,4 +277,33 @@ public sealed class MubertMusicGenerationProviderTests
             Headers = { ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(contentType) },
         },
     };
+
+    private static MubertHandler CompleteTrackHandler(Func<int, HttpResponseMessage> download) => new(
+        (_, requestNumber) => requestNumber switch
+        {
+            1 => Json(HttpStatusCode.OK, "{\"data\":{\"id\":\"track-fixture\",\"session_id\":\"session\"}}"),
+            2 => Json(HttpStatusCode.OK, "{\"data\":{\"generations\":[{\"status\":\"completed\",\"url\":\"https://download.example/track.mp3\"}]}}"),
+            _ => download(requestNumber),
+        });
+
+    private static HttpResponseMessage BinaryWithDeclaredLength(HttpStatusCode status, string body, string contentType, long length)
+    {
+        var response = Binary(status, body, contentType);
+        response.Content.Headers.ContentLength = length;
+        return response;
+    }
+
+    private static HttpResponseMessage Redirect(HttpStatusCode status, string location) => new(status)
+    {
+        Headers = { Location = new Uri(location) },
+    };
+
+    private sealed class MockedProviderUrlPolicy : IProviderUrlPolicy
+    {
+        public Task EnsureSafeAsync(Uri uri, CancellationToken cancellationToken = default)
+        {
+            if (uri.Scheme != Uri.UriSchemeHttps) throw new InvalidDataException();
+            return Task.CompletedTask;
+        }
+    }
 }

@@ -261,7 +261,9 @@ builder.Services.AddScoped<IGenerationJobHandler, ResearchGenerationJobHandler>(
 builder.Services.AddSingleton<ISocialPromptBuilder, SocialPromptBuilder>();
 builder.Services.AddScoped<ISocialGenerationProvider, AiSocialGenerationProvider>();
 builder.Services.AddScoped<IGenerationJobHandler, SocialGenerationJobHandler>();
-builder.Services.AddHttpClient<MubertMusicGenerationProvider>();
+builder.Services.AddSingleton<IProviderUrlPolicy, ProviderUrlPolicy>();
+builder.Services.AddHttpClient<MubertMusicGenerationProvider>()
+    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
 builder.Services.AddSingleton<IMusicGenerationProvider>(services => services.GetRequiredService<MubertMusicGenerationProvider>());
 builder.Services.AddHttpClient<StableAudioMusicGenerationProvider>();
 builder.Services.AddSingleton<IMusicGenerationProvider>(services => services.GetRequiredService<StableAudioMusicGenerationProvider>());

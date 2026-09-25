@@ -30,6 +30,8 @@ public sealed class GeneratedAssetPublisher(
 
         var assetType = output.Asset?.AssetType.Trim().ToLowerInvariant();
         if (assetType is not null && !AssetTypes.Supported.Contains(assetType)) throw new InvalidOperationException("Generated asset type is not supported.");
+        var outputMetadata = GeneratedMediaSecurity.NormalizeMetadataJson(output.MetadataJson);
+        var assetMetadata = GeneratedMediaSecurity.NormalizeMetadataJson(output.Asset?.MetadataJson);
         StoredFile? createdFile = null;
         var storedFileId = output.StoredFileId;
         if (output.FileArtifact is not null)
@@ -76,7 +78,7 @@ public sealed class GeneratedAssetPublisher(
             GenerationJobId = job.Id,
             StoredFileId = storedFileId,
             OutputType = output.OutputType,
-            MetadataJson = output.MetadataJson,
+            MetadataJson = outputMetadata,
             CreatedAt = DateTime.UtcNow,
         };
 
@@ -96,8 +98,7 @@ public sealed class GeneratedAssetPublisher(
                 Description = NormalizeDescription(output.Asset.Description),
                 AssetType = assetType!,
                 MimeType = storedFile?.ContentType,
-                Status = AssetStatus.Active,
-                MetadataJson = output.Asset.MetadataJson,
+                MetadataJson = assetMetadata,
                 CreatedAt = now,
                 UpdatedAt = now,
             };
