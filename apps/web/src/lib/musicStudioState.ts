@@ -4,6 +4,10 @@ export function isMusicJob(job: GenerationJob | null): boolean {
   return job?.jobType === "music.generate";
 }
 
+export function isMusicProviderUnavailable(job: GenerationJob | null): boolean {
+  return job?.status === "Failed" && job.errorCode === "MUSIC_PROVIDER_UNAVAILABLE";
+}
+
 export function canCancelMusicJob(job: GenerationJob | null): boolean {
   return !!job && (job.status === "Pending" || job.status === "Queued" || job.status === "Running") && !job.cancellationRequested;
 }
