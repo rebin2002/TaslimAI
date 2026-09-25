@@ -243,6 +243,8 @@ builder.Services.AddScoped<ISocialGenerationProvider, AiSocialGenerationProvider
 builder.Services.AddScoped<IGenerationJobHandler, SocialGenerationJobHandler>();
 builder.Services.AddHttpClient<MubertMusicGenerationProvider>();
 builder.Services.AddSingleton<IMusicGenerationProvider>(services => services.GetRequiredService<MubertMusicGenerationProvider>());
+builder.Services.AddHttpClient<StableAudioMusicGenerationProvider>();
+builder.Services.AddSingleton<IMusicGenerationProvider>(services => services.GetRequiredService<StableAudioMusicGenerationProvider>());
 builder.Services.AddScoped<IGenerationJobHandler, MusicGenerationJobHandler>();
 builder.Services.AddSingleton<IVoiceGenerationProvider>(services => services.GetRequiredService<OpenAiVoiceGenerationProvider>());
 builder.Services.AddSingleton<IVoiceGenerationProvider, UnconfiguredVoiceGenerationProvider>();

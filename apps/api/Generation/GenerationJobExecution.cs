@@ -1006,7 +1006,11 @@ public sealed class GenerationJobWorker(
             return exception switch
             {
                 MusicRequestValidationException validation => validation.Code,
-                MusicProviderUnavailableException or MusicProviderTimeoutException => GenerationJobErrorCodes.MusicProviderUnavailable,
+                MusicProviderUnavailableException => GenerationJobErrorCodes.MusicProviderUnavailable,
+                MusicProviderTimeoutException => GenerationJobErrorCodes.MusicProviderTimeout,
+                MusicProviderRateLimitException => GenerationJobErrorCodes.MusicProviderRateLimited,
+                MusicProviderRejectedException => GenerationJobErrorCodes.MusicPromptRejected,
+                MusicProviderInvalidRequestException => GenerationJobErrorCodes.MusicProviderInvalidRequest,
                 MusicOutputInvalidException => GenerationJobErrorCodes.MusicOutputInvalid,
                 FileStorageUnavailableException or FileStorageOperationException or FileUploadValidationException => GenerationJobErrorCodes.MusicOutputStorageFailed,
                 _ => GenerationJobErrorCodes.MusicGenerationFailed,
@@ -1094,6 +1098,9 @@ public sealed class GenerationJobWorker(
         GenerationJobErrorCodes.MovieCancelled => "The movie generation was cancelled.",
         GenerationJobErrorCodes.MovieGenerationFailed => "The movie could not be generated. Your movie plan was saved.",
         GenerationJobErrorCodes.MusicProviderUnavailable or GenerationJobErrorCodes.MusicProviderTimeout => "Music generation is temporarily unavailable. Please try again later.",
+        GenerationJobErrorCodes.MusicProviderRateLimited => "Music generation is temporarily busy. Please try again later.",
+        GenerationJobErrorCodes.MusicPromptRejected => "This music request could not be completed. Try a different description.",
+        GenerationJobErrorCodes.MusicProviderInvalidRequest => "Please check the music request and try again.",
         GenerationJobErrorCodes.MusicOutputInvalid => "The generated music was invalid. Please try again.",
         GenerationJobErrorCodes.MusicOutputStorageFailed => "The music was generated but could not be saved. Please try again.",
         GenerationJobErrorCodes.MusicCancelled => "The music generation was cancelled.",

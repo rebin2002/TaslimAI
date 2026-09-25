@@ -126,7 +126,7 @@ public sealed class MusicGenerationTests : IClassFixture<MusicGenerationApiFacto
         var playback = await owner.GetAsync($"/api/assets/{asset.Id}/download?inline=true");
         Assert.Equal(HttpStatusCode.OK, playback.StatusCode);
         Assert.Equal("audio/mpeg", playback.Content.Headers.ContentType?.MediaType);
-        Assert.Equal("deterministic music", await playback.Content.ReadAsStringAsync());
+        Assert.Equal("ID3\u0004\u0000\u0000\u0000\u0000\u0000\u0000deterministic music", await playback.Content.ReadAsStringAsync());
         var usage = await db.UsageTransactions.AsNoTracking().SingleAsync(item => item.GenerationJobId == created.Job.Id);
         Assert.Equal(0m, usage.ChargedAmount);
 
@@ -157,6 +157,39 @@ public sealed class MusicGenerationTests : IClassFixture<MusicGenerationApiFacto
         Assert.Equal(GenerationJobErrorCodes.MusicGenreUnsupported, body.GetProperty("error").GetProperty("code").GetString());
     }
 
+    [Fact]
+    public async Task Music_submission_is_idempotent_across_retries()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, $"music-idempotent-{Guid.NewGuid():N}@example.com");
+        var payload = new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            description = "A calm instrumental bed",
+            purpose = "A product launch video",
+            genre = "cinematic",
+            mood = "calm",
+            durationSeconds = 30,
+            vocalPreference = "instrumental",
+            language = "auto",
+        };
+        var key = $"music-retry-{Guid.NewGuid():N}";
+
+        var first = await SendWithCsrf(client, HttpMethod.Post, "/api/music-generation/jobs", payload, key);
+        var second = await SendWithCsrf(client, HttpMethod.Post, "/api/music-generation/jobs", payload, key);
+        Assert.Equal(HttpStatusCode.Accepted, first.StatusCode);
+        Assert.Equal(HttpStatusCode.Accepted, second.StatusCode);
+        var firstJob = (await first.Content.ReadFromJsonAsync<CreateMusicGenerationResponse>())!.Job;
+        var secondJob = (await second.Content.ReadFromJsonAsync<CreateMusicGenerationResponse>())!.Job;
+        Assert.Equal(firstJob.Id, secondJob.Id);
+
+        await WaitForTerminal(client, firstJob.Id);
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.Equal(1, await db.GenerationJobs.CountAsync(item => item.IdempotencyKey == key));
+        Assert.Equal(1, await db.UsageTransactions.CountAsync(item => item.RequestId == $"generation:{firstJob.Id:N}"));
+    }
+
     private static async Task<AuthResponse> Register(HttpClient client, string email)
     {
         var response = await SendWithCsrf(client, HttpMethod.Post, "/api/auth/register", new { displayName = "Music Tester", email, password = "StrongPassword!123", preferredLanguage = "en" });
@@ -176,11 +209,12 @@ public sealed class MusicGenerationTests : IClassFixture<MusicGenerationApiFacto
         throw new TimeoutException($"Music job {id} did not reach a terminal state.");
     }
 
-    private static async Task<HttpResponseMessage> SendWithCsrf(HttpClient client, HttpMethod method, string path, object? payload)
+    private static async Task<HttpResponseMessage> SendWithCsrf(HttpClient client, HttpMethod method, string path, object? payload, string? idempotencyKey = null)
     {
         var csrf = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
         using var request = new HttpRequestMessage(method, path);
         request.Headers.Add("X-CSRF-TOKEN", csrf.GetProperty("token").GetString());
+        if (idempotencyKey is not null) request.Headers.Add("Idempotency-Key", idempotencyKey);
         if (payload is not null) request.Content = JsonContent.Create(payload);
         return await client.SendAsync(request);
     }
@@ -196,7 +230,7 @@ internal sealed class DeterministicMusicProvider : IMusicGenerationProvider
     {
         await Task.Delay(30, cancellationToken);
         return new MusicProviderResult(
-            "deterministic music"u8.ToArray(),
+            "ID3\u0004\u0000\u0000\u0000\u0000\u0000\u0000deterministic music"u8.ToArray(),
             "audio/mpeg",
             "mp3",
             request.DurationSeconds,
