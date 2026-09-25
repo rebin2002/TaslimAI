@@ -254,11 +254,23 @@ internal sealed class InvalidQualityGenerationJobHandler : IGenerationJobHandler
     {
         progress.Report(100);
         await Task.Yield();
-        var artifact = new GeneratedFileArtifact("invalid.png", "image/png", "not-an-image"u8.ToArray());
+        var artifact = new GeneratedFileArtifact("invalid.png", "image/png", SignatureValidPng());
         var asset = new GeneratedAssetDescriptor("Invalid output", null, AssetTypes.Image);
         return new GenerationHandlerResult(
             "{}",
             [new GenerationHandlerOutput(GenerationJobOutputTypes.StoredFile, null, null, artifact, asset)],
             new AiUsageMetadata("test", "test", null, null, null, 0m, 0m, 1, "completed", true));
+    }
+
+    private static byte[] SignatureValidPng()
+    {
+        var bytes = new byte[40];
+        new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }.CopyTo(bytes, 0);
+        BinaryPrimitives.WriteUInt32BigEndian(bytes.AsSpan(8, 4), 13);
+        "IHDR"u8.CopyTo(bytes.AsSpan(12, 4));
+        BinaryPrimitives.WriteInt32BigEndian(bytes.AsSpan(16, 4), 0);
+        BinaryPrimitives.WriteInt32BigEndian(bytes.AsSpan(20, 4), 0);
+        "IEND"u8.CopyTo(bytes.AsSpan(32, 4));
+        return bytes;
     }
 }

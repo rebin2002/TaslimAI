@@ -601,16 +601,33 @@ public sealed class GenerationProviderAttempt
 {
     public Guid Id { get; set; }
     public Guid GenerationJobId { get; set; }
+    public Guid JobConcurrencyToken { get; set; }
+    public string IdempotencyKey { get; set; } = string.Empty;
+    public string? Capability { get; set; }
     public int AttemptNumber { get; set; }
+    public int RetryNumber { get; set; }
+    public bool IsRetry { get; set; }
+    public bool IsFallback { get; set; }
     public string Provider { get; set; } = string.Empty;
     public string? Model { get; set; }
+    public string? ProviderExecutionId { get; set; }
     public GenerationProviderAttemptStatus Status { get; set; } = GenerationProviderAttemptStatus.Started;
+    public string ResultClassification { get; set; } = "Started";
+    public bool RateLimited { get; set; }
+    public bool TimedOut { get; set; }
+    public bool CircuitOpen { get; set; }
+    public bool QualityControlRejected { get; set; }
     public decimal? EstimatedProviderCostUsd { get; set; }
     public bool EstimatedProviderCostKnown { get; set; }
     public decimal? ActualProviderCostUsd { get; set; }
     public bool ActualProviderCostKnown { get; set; }
     public string? CostEstimateJson { get; set; }
     public string? FailureCode { get; set; }
+    public string? PricingVersion { get; set; }
+    public string? PricingSnapshotJson { get; set; }
+    public string Currency { get; set; } = UsageCurrencies.Usd;
+    public string? SafeMetadataJson { get; set; }
+    public long? LatencyMs { get; set; }
     public string FinalizationKey { get; set; } = string.Empty;
     public DateTime StartedAt { get; set; }
     public DateTime? CompletedAt { get; set; }

@@ -1,26 +1,5 @@
 namespace Taslim.Api.Domain;
 
-public sealed class ProviderAttempt
-{
-    public Guid Id { get; set; }
-    public Guid GenerationJobId { get; set; }
-    public Guid JobConcurrencyToken { get; set; }
-    public string IdempotencyKey { get; set; } = string.Empty;
-    public string Capability { get; set; } = string.Empty;
-    public string ProviderKey { get; set; } = string.Empty;
-    public int AttemptNumber { get; set; }
-    public string ResultCategory { get; set; } = string.Empty;
-    public string? ErrorCode { get; set; }
-    public long? LatencyMs { get; set; }
-    public decimal? EstimatedCostUsd { get; set; }
-    public bool IsRetry { get; set; }
-    public bool IsFallback { get; set; }
-    public DateTime StartedAt { get; set; }
-    public DateTime? CompletedAt { get; set; }
-
-    public GenerationJob GenerationJob { get; set; } = null!;
-}
-
 public sealed class ProviderCircuit
 {
     public Guid Id { get; set; }

@@ -41,7 +41,7 @@ public sealed class MubertMusicGenerationProviderTests
     }
 
     [Fact]
-    public async Task Retries_transient_provider_response_with_a_bounded_attempt_count()
+    public async Task Does_not_retry_billable_track_creation_post()
     {
         var handler = new MubertHandler(
             (_, requestNumber) => requestNumber switch
@@ -53,10 +53,8 @@ public sealed class MubertMusicGenerationProviderTests
             });
         var provider = CreateProvider(handler, retryAttempts: 1, retryDelayMilliseconds: 25);
 
-        var result = await provider.GenerateAsync(Input());
-
-        Assert.Equal("mp3", result.Format);
-        Assert.Equal(4, handler.Requests.Count);
+        await Assert.ThrowsAsync<MusicProviderUnavailableException>(() => provider.GenerateAsync(Input()));
+        Assert.Single(handler.Requests);
     }
 
     [Fact]

@@ -175,6 +175,7 @@ public sealed class FakeVoiceGenerationProvider(
     FakeProviderScenarioCatalog scenarios,
     FakeProviderCallLog calls) : FakeProviderBase(FakeProviderKind.Voice, scenarios, calls), IVoiceGenerationProvider
 {
+    private static readonly byte[] Mp3 = [0x49, 0x44, 0x33, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFB, 0x90, 0x64];
     public string Key => "fake-voice";
 
     public async Task<VoiceProviderResult> GenerateAsync(VoiceGenerationInput request, CancellationToken cancellationToken = default)
@@ -191,7 +192,7 @@ public sealed class FakeVoiceGenerationProvider(
 
         AfterResult();
         if (IsMalformed) return new VoiceProviderResult("bad"u8.ToArray(), "text/plain", "txt", null, null, new VoiceProviderUsage("fake-voice-model", 1, 3, 0m, 1));
-        var content = Encoding.UTF8.GetBytes("fake voice output");
+        var content = Mp3;
         return new VoiceProviderResult(content, "audio/mpeg", "mp3", 1200, 24000, new VoiceProviderUsage("fake-voice-model", request.Text.Length, content.Length, 0.004m, 2, CostBasis: UsageCostBasis.Actual));
     }
 }
@@ -200,6 +201,7 @@ public sealed class FakeMusicGenerationProvider(
     FakeProviderScenarioCatalog scenarios,
     FakeProviderCallLog calls) : FakeProviderBase(FakeProviderKind.Music, scenarios, calls), IMusicGenerationProvider
 {
+    private static readonly byte[] Mp3 = [0x49, 0x44, 0x33, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFB, 0x90, 0x64];
     public string Key => "fake-music";
 
     public async Task<MusicProviderResult> GenerateAsync(MusicGenerationInput request, CancellationToken cancellationToken = default)
@@ -216,7 +218,7 @@ public sealed class FakeMusicGenerationProvider(
 
         AfterResult();
         if (IsMalformed) return new MusicProviderResult("bad"u8.ToArray(), "text/plain", "txt", request.DurationSeconds, new MusicProviderUsage(1, 1, 0m, 0m, 1));
-        var content = Encoding.UTF8.GetBytes("fake music output");
+        var content = Mp3;
         return new MusicProviderResult(content, "audio/mpeg", "mp3", request.DurationSeconds, new MusicProviderUsage(10, 20, 0.004m, 0.004m, 2, CostBasis: UsageCostBasis.Actual));
     }
 }
@@ -270,7 +272,7 @@ public sealed class FakeMovieVideoProvider(
         cancellationToken.ThrowIfCancellationRequested();
         if (IsMalformed)
             return Task.FromResult(new MovieVideoProviderOutput("text/plain", "fake.txt", 3, _ => Task.FromResult<Stream>(new MemoryStream("bad"u8.ToArray())), 1, null, 0m, 0m, null, UsageCostBasis.Actual, "{}"));
-        var content = "fake movie output"u8.ToArray();
+        var content = new byte[] { 0, 0, 0, 24, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6F, 0x6D, 0, 0, 0, 0, 0x69, 0x73, 0x6F, 0x6D, 0, 0, 0, 0 };
         return Task.FromResult(new MovieVideoProviderOutput("video/mp4", "fake-movie.mp4", content.Length, _ => Task.FromResult<Stream>(new MemoryStream(content)), 1, "{}", 0.01m, 0.01m, "USD", UsageCostBasis.Actual, "{\"deterministic\":true}"));
     }
 

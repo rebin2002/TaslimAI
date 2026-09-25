@@ -278,7 +278,11 @@ public sealed class RunwayMovieVideoProvider(
 
     private async Task<string> SendJsonWithRetryAsync(HttpMethod method, Uri uri, object? payload, CancellationToken cancellationToken)
     {
-        var maxRetries = Math.Clamp(settings.MaxTransientRetries, 0, 8);
+        // Generation submission is a billable POST without provider idempotency;
+        // only safe polling/retrieval methods may be retried in this adapter.
+        var maxRetries = method == HttpMethod.Get || method == HttpMethod.Head
+            ? Math.Clamp(settings.MaxTransientRetries, 0, 8)
+            : 0;
         for (var attempt = 0; ; attempt++)
         {
             using var request = new HttpRequestMessage(method, uri);

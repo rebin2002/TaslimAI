@@ -69,7 +69,9 @@ public sealed class AzureSpeechVoiceGenerationProvider(
         var ssml = BuildSsml(request, voice);
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(Math.Clamp(settings.ProviderTimeoutSeconds, 5, 300)));
-        var maximumAttempts = Math.Clamp(azure.MaxRetryAttempts, 0, 4);
+        // Synthesis is a billable POST without a provider idempotency key. Never
+        // replay it in the adapter; durable retry policy must make the decision.
+        const int maximumAttempts = 0;
         var stopwatch = Stopwatch.StartNew();
 
         for (var attempt = 0; ; attempt++)

@@ -164,9 +164,14 @@ public sealed class UsageAccountingUnitTests
             new SafeUsageChargingService(),
             new UsageCostControl(db, Options.Create(new UsageControlOptions()), NullLogger<UsageCostControl>.Instance),
             NullLogger<UsageLedgerService>.Instance);
+        var workspaceId = Guid.NewGuid();
+        var userId = Guid.NewGuid();
+        db.Workspaces.Add(new Workspace { Id = workspaceId, Name = "Test", Slug = $"test-{workspaceId:N}", Type = WorkspaceType.Personal, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow });
+        db.Users.Add(new ApplicationUser { Id = userId, UserName = "duplicate@example.com", NormalizedUserName = "DUPLICATE@EXAMPLE.COM", Email = "duplicate@example.com", NormalizedEmail = "DUPLICATE@EXAMPLE.COM", DisplayName = "Test", CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow });
+        await db.SaveChangesAsync();
         var transaction = new UsageTransaction
         {
-            Id = Guid.NewGuid(), WorkspaceId = Guid.NewGuid(), UserId = Guid.NewGuid(), RequestId = "duplicate-completion",
+            Id = Guid.NewGuid(), WorkspaceId = workspaceId, UserId = userId, RequestId = "duplicate-completion",
             Feature = UsageFeature.Generation, Provider = "pending", Model = "pending", CreatedAt = DateTime.UtcNow,
         };
         db.UsageTransactions.Add(transaction);
@@ -198,9 +203,14 @@ public sealed class UsageAccountingUnitTests
             new SafeUsageChargingService(),
             new UsageCostControl(db, Options.Create(new UsageControlOptions()), NullLogger<UsageCostControl>.Instance),
             NullLogger<UsageLedgerService>.Instance);
+        var workspaceId = Guid.NewGuid();
+        var userId = Guid.NewGuid();
+        db.Workspaces.Add(new Workspace { Id = workspaceId, Name = "Test", Slug = $"test-{workspaceId:N}", Type = WorkspaceType.Personal, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow });
+        db.Users.Add(new ApplicationUser { Id = userId, UserName = "cancelled@example.com", NormalizedUserName = "CANCELLED@EXAMPLE.COM", Email = "cancelled@example.com", NormalizedEmail = "CANCELLED@EXAMPLE.COM", DisplayName = "Test", CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow });
+        await db.SaveChangesAsync();
         var transaction = new UsageTransaction
         {
-            Id = Guid.NewGuid(), WorkspaceId = Guid.NewGuid(), UserId = Guid.NewGuid(), RequestId = "cancelled-generation",
+            Id = Guid.NewGuid(), WorkspaceId = workspaceId, UserId = userId, RequestId = "cancelled-generation",
             Feature = UsageFeature.Generation, Provider = "pending", Model = "pending", CreatedAt = DateTime.UtcNow,
         };
         db.UsageTransactions.Add(transaction);

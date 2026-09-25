@@ -174,8 +174,9 @@ public sealed class ProviderGenerationE2ETests : IClassFixture<ProviderGeneratio
                     null,
                     null)),
             });
-            clip.GenerationJobId = job.Id;
-            await db.SaveChangesAsync();
+            await db.MovieClips
+                .Where(item => item.Id == clip.Id)
+                .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.GenerationJobId, job.Id));
             movieJobId = job.Id;
         }
         var movie = await WaitForTerminal(client, movieJobId);

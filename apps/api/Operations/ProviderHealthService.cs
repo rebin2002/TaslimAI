@@ -56,6 +56,20 @@ public sealed class ProviderHealthService(
         DateTime CreatedAt,
         DateTime? CompletedAt);
 
+    private sealed record AttemptTelemetry(
+        string JobType,
+        string Provider,
+        GenerationProviderAttemptStatus Status,
+        string ResultClassification,
+        string? FailureCode,
+        bool IsRetry,
+        bool IsFallback,
+        bool RateLimited,
+        bool TimedOut,
+        bool QualityControlRejected,
+        DateTime StartedAt,
+        DateTime? CompletedAt);
+
     public async Task<IReadOnlyList<AdminProviderHealthDto>> GetAsync(
         (DateTime FromUtc, DateTime ToUtc) range,
         CancellationToken cancellationToken)
@@ -88,9 +102,25 @@ public sealed class ProviderHealthService(
                 transaction.CreatedAt,
                 transaction.CompletedAt))
             .ToArrayAsync(cancellationToken);
+        var attempts = await db.GenerationProviderAttempts.AsNoTracking()
+            .Where(attempt => attempt.StartedAt >= range.FromUtc && attempt.StartedAt < range.ToUtc)
+            .Select(attempt => new AttemptTelemetry(
+                attempt.GenerationJob.JobType,
+                attempt.Provider,
+                attempt.Status,
+                attempt.ResultClassification,
+                attempt.FailureCode,
+                attempt.IsRetry,
+                attempt.IsFallback,
+                attempt.RateLimited,
+                attempt.TimedOut,
+                attempt.QualityControlRejected,
+                attempt.StartedAt,
+                attempt.CompletedAt))
+            .ToArrayAsync(cancellationToken);
 
         var definitions = Definitions();
-        return definitions.Select(definition => Build(definition, jobs, usage)).ToArray();
+        return definitions.Select(definition => Build(definition, jobs, usage, attempts)).ToArray();
     }
 
     private IReadOnlyList<ProviderDefinition> Definitions()
@@ -120,7 +150,8 @@ public sealed class ProviderHealthService(
     private static AdminProviderHealthDto Build(
         ProviderDefinition definition,
         IReadOnlyList<JobTelemetry> jobs,
-        IReadOnlyList<UsageTelemetry> usage)
+        IReadOnlyList<UsageTelemetry> usage,
+        IReadOnlyList<AttemptTelemetry> attempts)
     {
         var providerUsage = definition.Feature.HasValue
             ? usage.Where(item => item.Feature == definition.Feature.Value).ToArray()
@@ -128,6 +159,9 @@ public sealed class ProviderHealthService(
         var providerJobs = definition.JobTypes.Count == 0
             ? Array.Empty<JobTelemetry>()
             : jobs.Where(item => definition.JobTypes.Contains(item.JobType)).ToArray();
+        var providerAttempts = definition.JobTypes.Count == 0
+            ? Array.Empty<AttemptTelemetry>()
+            : attempts.Where(item => definition.JobTypes.Contains(item.JobType)).ToArray();
         var successfulUsage = providerUsage.Where(item => item.Status == UsageTransactionStatus.Completed).ToArray();
         var failedUsage = providerUsage.Where(item => item.Status == UsageTransactionStatus.Failed).ToArray();
         var failedJobs = providerJobs.Where(item => item.Status == GenerationJobStatus.Failed).ToArray();
@@ -146,9 +180,15 @@ public sealed class ProviderHealthService(
         var failureCount = failedUsage.Length > 0
             ? failedUsage.Length
             : failedJobs.Length;
-        var rateLimitCount = failedJobs.Count(item => IsRateLimit(item.ErrorCode)) + failedUsage.Count(item => IsRateLimit(item.FailureCode));
-        var timeoutCount = failedJobs.Count(item => IsTimeout(item.ErrorCode)) + failedUsage.Count(item => IsTimeout(item.FailureCode));
-        var qualityControlCount = failedJobs.Count(item => IsQualityControlFailure(item.ErrorCode)) + failedUsage.Count(item => IsQualityControlFailure(item.FailureCode));
+        var rateLimitCount = providerAttempts.Length > 0
+            ? providerAttempts.Count(item => item.RateLimited || IsRateLimit(item.ResultClassification) || IsRateLimit(item.FailureCode))
+            : failedJobs.Count(item => IsRateLimit(item.ErrorCode)) + failedUsage.Count(item => IsRateLimit(item.FailureCode));
+        var timeoutCount = providerAttempts.Length > 0
+            ? providerAttempts.Count(item => item.TimedOut || IsTimeout(item.ResultClassification) || IsTimeout(item.FailureCode))
+            : failedJobs.Count(item => IsTimeout(item.ErrorCode)) + failedUsage.Count(item => IsTimeout(item.FailureCode));
+        var qualityControlCount = providerAttempts.Length > 0
+            ? providerAttempts.Count(item => item.QualityControlRejected || IsQualityControlFailure(item.ResultClassification) || IsQualityControlFailure(item.FailureCode))
+            : failedJobs.Count(item => IsQualityControlFailure(item.ErrorCode)) + failedUsage.Count(item => IsQualityControlFailure(item.FailureCode));
         var lastSuccessAt = successfulUsage.Select(item => item.CompletedAt ?? item.CreatedAt)
             .Concat(providerJobs.Where(item => item.Status == GenerationJobStatus.Succeeded).Select(item => item.CompletedAt ?? item.CreatedAt))
             .OrderByDescending(item => item)
@@ -181,9 +221,9 @@ public sealed class ProviderHealthService(
             rateLimitCount,
             timeoutCount,
             qualityControlCount,
-            providerJobs.Sum(item => item.RetryCount),
-            0,
-            false,
+            providerAttempts.Length > 0 ? providerAttempts.Count(item => item.IsRetry) : providerJobs.Sum(item => item.RetryCount),
+            providerAttempts.Count(item => item.IsFallback),
+            providerAttempts.Length > 0,
             providerUsage.Sum(item => item.EstimatedProviderCostUsd ?? 0m),
             providerUsage.Sum(item => item.ProviderCostUsd),
             hasLastSuccess ? lastSuccessAt : null,

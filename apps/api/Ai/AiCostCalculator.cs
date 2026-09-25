@@ -42,7 +42,7 @@ public sealed class AiCostCalculator(AiModelCatalog catalog) : IAiCostCalculator
             model.PricingVersion ?? "unversioned",
             model.PricingEffectiveDateUtc ?? DateTime.UnixEpoch,
             "USD per 1M tokens",
-            model.PricingSource,
+            model.PricingSource ?? "configured",
             new Dictionary<string, decimal>
             {
                 ["input"] = model.InputPricePerMillion.Value,

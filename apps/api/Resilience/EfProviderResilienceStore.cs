@@ -66,21 +66,24 @@ public sealed class EfProviderResilienceStore(TaslimDbContext db) : IProviderRes
     public async Task<ProviderAttemptRecord> StartAttemptAsync(Guid generationJobId, Guid jobConcurrencyToken, string idempotencyKey, string capability, string providerKey, int attemptNumber, bool isRetry, bool isFallback, DateTime startedAt, CancellationToken cancellationToken = default)
     {
         await EnsureCurrentClaimAsync(generationJobId, jobConcurrencyToken, cancellationToken);
-        var attempt = new ProviderAttempt
+        var attempt = new GenerationProviderAttempt
         {
             Id = Guid.NewGuid(),
             GenerationJobId = generationJobId,
             JobConcurrencyToken = jobConcurrencyToken,
             IdempotencyKey = $"{idempotencyKey}:{attemptNumber}",
             Capability = capability,
-            ProviderKey = providerKey,
             AttemptNumber = attemptNumber,
-            ResultCategory = "started",
+            RetryNumber = isRetry ? Math.Max(1, attemptNumber - 1) : 0,
             IsRetry = isRetry,
             IsFallback = isFallback,
+            Provider = string.IsNullOrWhiteSpace(providerKey) ? "unknown" : providerKey.Trim(),
+            Status = GenerationProviderAttemptStatus.Started,
+            ResultClassification = "Started",
+            FinalizationKey = $"{idempotencyKey}:{attemptNumber}",
             StartedAt = startedAt,
         };
-        db.ProviderAttempts.Add(attempt);
+        db.GenerationProviderAttempts.Add(attempt);
         await db.SaveChangesAsync(cancellationToken);
         return new(attempt.Id, generationJobId, jobConcurrencyToken, attempt.IdempotencyKey, capability, providerKey, attemptNumber, isRetry, isFallback, startedAt);
     }
@@ -88,13 +91,24 @@ public sealed class EfProviderResilienceStore(TaslimDbContext db) : IProviderRes
     public async Task CompleteAttemptAsync(ProviderAttemptRecord attempt, ProviderAttemptResultCategory result, string? errorCode, long latencyMs, decimal? estimatedCostUsd, DateTime completedAt, CancellationToken cancellationToken = default)
     {
         await EnsureCurrentClaimAsync(attempt.GenerationJobId, attempt.JobConcurrencyToken, cancellationToken);
-        var row = await db.ProviderAttempts.SingleOrDefaultAsync(item => item.Id == attempt.Id, cancellationToken);
+        var row = await db.GenerationProviderAttempts.SingleOrDefaultAsync(item => item.Id == attempt.Id, cancellationToken);
         if (row is null || row.JobConcurrencyToken != attempt.JobConcurrencyToken)
             throw new StaleProviderWorkerException(attempt.GenerationJobId);
-        row.ResultCategory = result.ToString();
-        row.ErrorCode = errorCode;
+        row.ResultClassification = result.ToString();
+        row.Status = result switch
+        {
+            ProviderAttemptResultCategory.Success => GenerationProviderAttemptStatus.Succeeded,
+            ProviderAttemptResultCategory.Cancelled => GenerationProviderAttemptStatus.Cancelled,
+            ProviderAttemptResultCategory.CostGuardRejected => GenerationProviderAttemptStatus.Rejected,
+            _ => GenerationProviderAttemptStatus.Failed,
+        };
+        row.FailureCode = errorCode;
         row.LatencyMs = latencyMs;
-        row.EstimatedCostUsd = estimatedCostUsd;
+        row.EstimatedProviderCostUsd = estimatedCostUsd;
+        row.EstimatedProviderCostKnown = estimatedCostUsd.HasValue;
+        row.RateLimited = result == ProviderAttemptResultCategory.RateLimited;
+        row.TimedOut = result == ProviderAttemptResultCategory.TimedOut;
+        row.CircuitOpen = result == ProviderAttemptResultCategory.CircuitOpen;
         row.CompletedAt = completedAt;
         await db.SaveChangesAsync(cancellationToken);
     }
@@ -165,8 +179,11 @@ public sealed class EfProviderResilienceStore(TaslimDbContext db) : IProviderRes
     public Task<bool> IsCancellationRequestedAsync(Guid generationJobId, CancellationToken cancellationToken = default) =>
         db.GenerationJobs.AsNoTracking().Where(item => item.Id == generationJobId).Select(item => item.CancellationRequested).SingleOrDefaultAsync(cancellationToken);
 
-    public Task<decimal> GetCumulativeEstimatedCostAsync(Guid generationJobId, CancellationToken cancellationToken = default) =>
-        db.ProviderAttempts.Where(item => item.GenerationJobId == generationJobId).SumAsync(item => item.EstimatedCostUsd ?? 0m, cancellationToken);
+    public async Task<decimal> GetCumulativeEstimatedCostAsync(Guid generationJobId, CancellationToken cancellationToken = default) =>
+        (decimal)await db.GenerationProviderAttempts
+            .Where(item => item.GenerationJobId == generationJobId && item.EstimatedProviderCostKnown)
+            .Select(item => (double?)(item.EstimatedProviderCostUsd ?? 0m))
+            .SumAsync(cancellationToken);
 
     private async Task<ProviderCircuit> GetOrCreateCircuitAsync(string providerKey, string capability, DateTime now, CancellationToken cancellationToken)
     {

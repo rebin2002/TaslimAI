@@ -110,12 +110,18 @@ public sealed class AiCoreTests
 
     private static AiModelCatalog ConfiguredCatalog() => new(new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
     {
+        ["Ai:Models:gpt-5.6-luna:ProviderKey"] = "openai",
+        ["Ai:Models:gpt-5.6-luna:CapabilityTier"] = "Fast",
         ["Ai:Models:gpt-5.6-luna:InputPricePerMillion"] = "0.2",
         ["Ai:Models:gpt-5.6-luna:CachedInputPricePerMillion"] = "0.02",
         ["Ai:Models:gpt-5.6-luna:OutputPricePerMillion"] = "1.2",
+        ["Ai:Models:gpt-5.6-terra:ProviderKey"] = "openai",
+        ["Ai:Models:gpt-5.6-terra:CapabilityTier"] = "Smart",
         ["Ai:Models:gpt-5.6-terra:InputPricePerMillion"] = "2",
         ["Ai:Models:gpt-5.6-terra:CachedInputPricePerMillion"] = "0.2",
         ["Ai:Models:gpt-5.6-terra:OutputPricePerMillion"] = "12",
+        ["Ai:Models:gpt-5.6-sol:ProviderKey"] = "openai",
+        ["Ai:Models:gpt-5.6-sol:CapabilityTier"] = "Advanced",
         ["Ai:Models:gpt-5.6-sol:InputPricePerMillion"] = "4",
         ["Ai:Models:gpt-5.6-sol:CachedInputPricePerMillion"] = "0.4",
         ["Ai:Models:gpt-5.6-sol:OutputPricePerMillion"] = "20",

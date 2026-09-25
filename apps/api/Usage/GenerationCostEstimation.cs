@@ -120,7 +120,7 @@ public sealed class GenerationCostEstimator(Microsoft.Extensions.Options.IOption
         Add(GenerationCostDimension.MusicDurationSeconds, request.MusicDurationSeconds, "seconds", pricing.MusicUsdPerSecond, "musicPerSecond");
         Add(GenerationCostDimension.VideoDurationSeconds, request.VideoDurationSeconds, "seconds", pricing.VideoUsdPerSecond, "videoPerSecond");
 
-        var amount = components.Count == 0 || unknown ? null : decimal.Round(components.Sum(item => item.AmountUsd!.Value), 8, MidpointRounding.AwayFromZero);
+        decimal? amount = components.Count == 0 || unknown ? null : decimal.Round(components.Sum(item => item.AmountUsd!.Value), 8, MidpointRounding.AwayFromZero);
         return new GenerationCostEstimate(
             !unknown && amount.HasValue,
             amount,

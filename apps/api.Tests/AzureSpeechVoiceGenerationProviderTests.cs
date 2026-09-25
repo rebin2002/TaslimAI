@@ -109,7 +109,7 @@ public sealed class AzureSpeechVoiceGenerationProviderTests
     }
 
     [Fact]
-    public async Task Transient_rate_limit_retries_safely_then_succeeds()
+    public async Task Transient_synthesis_failure_is_not_replayed_by_adapter()
     {
         var calls = 0;
         var handler = new StubHandler(_ =>
@@ -126,10 +126,8 @@ public sealed class AzureSpeechVoiceGenerationProviderTests
             AzureSpeech = EnabledAzure(maxRetryAttempts: 1, retryBaseDelayMilliseconds: 25),
         });
 
-        var result = await provider.GenerateAsync(Input());
-
-        Assert.Equal(2, calls);
-        Assert.Equal("mp3", result.Format);
+        await Assert.ThrowsAsync<VoiceProviderUnavailableException>(() => provider.GenerateAsync(Input()));
+        Assert.Equal(1, calls);
     }
 
     [Fact]

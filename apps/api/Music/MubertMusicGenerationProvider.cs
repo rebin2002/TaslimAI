@@ -146,7 +146,9 @@ public sealed class MubertMusicGenerationProvider(
         object? payload,
         CancellationToken cancellationToken)
     {
-        var maxRetries = Math.Clamp(settings.MubertMaxRetryAttempts, 0, 5);
+        // Track creation is a billable POST without an idempotency contract;
+        // only the idempotent status GET may be retried here.
+        var maxRetries = method == HttpMethod.Get ? Math.Clamp(settings.MubertMaxRetryAttempts, 0, 5) : 0;
         for (var attempt = 0; ; attempt++)
         {
             using var message = new HttpRequestMessage(method, uri);

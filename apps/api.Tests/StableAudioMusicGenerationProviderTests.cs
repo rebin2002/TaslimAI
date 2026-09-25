@@ -4,6 +4,7 @@ using System.Text;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Taslim.Api.Contracts;
+using Taslim.Api.Domain;
 using Taslim.Api.Music;
 using Xunit;
 

@@ -110,7 +110,8 @@ public sealed class OpenAiImageGenerationProvider(
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(Math.Clamp(settings.ProviderTimeoutSeconds, 1, 300)));
         var stopwatch = Stopwatch.StartNew();
-        var maxAttempts = 2;
+        // Image generation is a billable POST without a provider idempotency key.
+        const int maxAttempts = 1;
 
         for (var attempt = 1; attempt <= maxAttempts; attempt++)
         {

@@ -25,9 +25,6 @@ public sealed class GeneratedAssetPublisher(
 {
     public async Task<PreparedGenerationOutput> PrepareAsync(GenerationJob job, GenerationHandlerOutput output, CancellationToken cancellationToken = default)
     {
-        var quality = await qualityControl.ValidateAsync(job, output, cancellationToken);
-        if (quality.IsFailure) throw new GenerationQualityControlException(quality);
-
         var assetType = output.Asset?.AssetType.Trim().ToLowerInvariant();
         if (assetType is not null && !AssetTypes.Supported.Contains(assetType)) throw new InvalidOperationException("Generated asset type is not supported.");
         var outputMetadata = GeneratedMediaSecurity.NormalizeMetadataJson(output.MetadataJson);
@@ -71,6 +68,21 @@ public sealed class GeneratedAssetPublisher(
         }
         if (output.Asset is not null && (storedFile is null || storedFile.Status != StoredFileStatus.Ready))
             throw new InvalidOperationException("Generated assets require a completed private stored file.");
+
+        try
+        {
+            var quality = await qualityControl.ValidateAsync(job, output, cancellationToken);
+            if (quality.IsFailure) throw new GenerationQualityControlException(quality);
+        }
+        catch
+        {
+            if (createdFile is not null)
+            {
+                try { await files.DeleteAsync(createdFile, CancellationToken.None); }
+                catch (Exception exception) { logger.LogWarning(exception, "Generated file cleanup failed after QC rejection. FileId={FileId}; JobId={JobId}", createdFile.Id, job.Id); }
+            }
+            throw;
+        }
 
         var jobOutput = new GenerationJobOutput
         {

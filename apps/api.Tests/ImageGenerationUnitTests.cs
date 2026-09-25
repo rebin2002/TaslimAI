@@ -95,7 +95,13 @@ public sealed class ImageGenerationUnitTests
         {
             OpenAI = new OpenAiOptions { Enabled = true, ApiKey = "test-key", BaseUrl = "https://example.test/v1" },
         });
-        var imageOptions = Options.Create(new ImageGenerationOptions { Enabled = true, ProviderKey = "openai", Model = "gpt-image-2.5-sunburst" });
+        var imageOptions = Options.Create(new ImageGenerationOptions
+        {
+            Enabled = true,
+            ProviderKey = "openai",
+            Model = "gpt-image-2.5-sunburst",
+            Pricing = new ImagePricingOptions { TextInputUsdPerMillion = 5m, ImageOutputUsdPerMillion = 30m },
+        });
         var provider = new OpenAiImageGenerationProvider(httpClient, aiOptions, imageOptions, NullLogger<OpenAiImageGenerationProvider>.Instance);
         var prompt = new TaslimImagePromptBuilder().Build(new ImageGenerationInput("A test image", "auto", "square", "standard", null, null, null, null, null, null));
 
@@ -110,16 +116,16 @@ public sealed class ImageGenerationUnitTests
     }
 
     [Fact]
-    public async Task OpenAi_provider_reuses_a_stable_idempotency_key_across_retries()
+    public async Task OpenAi_provider_sends_one_billable_submission_with_a_stable_idempotency_key()
     {
         var handler = new RecordingImageResponseHandler(Png);
         using var httpClient = new HttpClient(handler);
         var provider = CreateProvider(httpClient);
         var prompt = CreatePrompt(generationJobId: Guid.Parse("11111111-1111-1111-1111-111111111111"));
 
-        await provider.GenerateAsync(prompt.Request, prompt.Prompt);
+        await Assert.ThrowsAsync<ImageProviderUnavailableException>(() => provider.GenerateAsync(prompt.Request, prompt.Prompt));
 
-        Assert.Equal(2, handler.IdempotencyKeys.Count);
+        Assert.Single(handler.IdempotencyKeys);
         Assert.All(handler.IdempotencyKeys, key => Assert.Equal("taslim-image-11111111111111111111111111111111", key));
         Assert.Equal("gpt-image-2.5-sunburst", handler.Model);
     }

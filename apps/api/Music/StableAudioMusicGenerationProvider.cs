@@ -7,6 +7,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.Options;
 using Taslim.Api.Contracts;
+using Taslim.Api.Domain;
 
 namespace Taslim.Api.Music;
 

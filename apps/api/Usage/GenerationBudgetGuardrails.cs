@@ -93,13 +93,19 @@ public sealed class GenerationBudgetService(
         {
             Id = Guid.NewGuid(),
             GenerationJobId = job.Id,
+            JobConcurrencyToken = job.ConcurrencyToken,
+            IdempotencyKey = $"generation:{job.Id:N}:attempt:{snapshot.ProviderAttempts + 1}",
+            Capability = job.JobType,
             AttemptNumber = snapshot.ProviderAttempts + 1,
             Provider = string.IsNullOrWhiteSpace(provider) ? "unknown" : provider.Trim(),
             Model = string.IsNullOrWhiteSpace(model) ? null : model.Trim(),
             Status = GenerationProviderAttemptStatus.Started,
+            ResultClassification = "Started",
             EstimatedProviderCostUsd = estimate.AmountUsd,
             EstimatedProviderCostKnown = estimate.IsKnown && estimate.AmountUsd.HasValue,
             CostEstimateJson = estimate.ToJson(),
+            PricingVersion = estimate.PricingVersion,
+            Currency = estimate.Currency,
             FinalizationKey = $"generation:{job.Id:N}:attempt:{snapshot.ProviderAttempts + 1}",
             StartedAt = DateTime.UtcNow,
         };
@@ -115,19 +121,30 @@ public sealed class GenerationBudgetService(
         attempt.ActualProviderCostUsd = actualCostKnown ? actualProviderCostUsd : null;
         attempt.ActualProviderCostKnown = actualCostKnown && actualProviderCostUsd.HasValue;
         attempt.FailureCode = failureCode;
+        attempt.ResultClassification = status.ToString();
+        attempt.RateLimited = HasFailureToken(failureCode, "RATE_LIMIT");
+        attempt.TimedOut = HasFailureToken(failureCode, "TIMEOUT") || HasFailureToken(failureCode, "TIMED_OUT");
+        attempt.QualityControlRejected = HasFailureToken(failureCode, "QUALITY")
+            || HasFailureToken(failureCode, "OUTPUT_INVALID")
+            || HasFailureToken(failureCode, "CITATION_VALIDATION");
         attempt.CompletedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(cancellationToken);
     }
 
-    private Task<decimal> EstimatedCostForWorkspaceAsync(Guid workspaceId, CancellationToken cancellationToken) =>
-        db.GenerationProviderAttempts
-            .Where(item => item.GenerationJob.WorkspaceId == workspaceId && item.EstimatedProviderCostKnown)
-            .SumAsync(item => item.EstimatedProviderCostUsd ?? 0m, cancellationToken);
+    private static bool HasFailureToken(string? value, string token) =>
+        value?.Contains(token, StringComparison.OrdinalIgnoreCase) == true;
 
-    private Task<decimal> EstimatedCostForUserAsync(Guid userId, CancellationToken cancellationToken) =>
-        db.GenerationProviderAttempts
+    private async Task<decimal> EstimatedCostForWorkspaceAsync(Guid workspaceId, CancellationToken cancellationToken) =>
+        (decimal)await db.GenerationProviderAttempts
+            .Where(item => item.GenerationJob.WorkspaceId == workspaceId && item.EstimatedProviderCostKnown)
+            .Select(item => (double?)(item.EstimatedProviderCostUsd ?? 0m))
+            .SumAsync(cancellationToken);
+
+    private async Task<decimal> EstimatedCostForUserAsync(Guid userId, CancellationToken cancellationToken) =>
+        (decimal)await db.GenerationProviderAttempts
             .Where(item => item.GenerationJob.CreatedByUserId == userId && item.EstimatedProviderCostKnown)
-            .SumAsync(item => item.EstimatedProviderCostUsd ?? 0m, cancellationToken);
+            .Select(item => (double?)(item.EstimatedProviderCostUsd ?? 0m))
+            .SumAsync(cancellationToken);
 }
 
 public sealed class GenerationBudgetRejectedException(string code, string message) : Exception(message)
