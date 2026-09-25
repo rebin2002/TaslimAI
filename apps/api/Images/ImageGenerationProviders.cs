@@ -29,6 +29,18 @@ public sealed record ImageProviderResult(
     int? Height,
     ImageProviderUsage Usage);
 
+public sealed record ImageGenerationCapabilities(
+    IReadOnlySet<string> AspectRatios,
+    IReadOnlySet<string> Qualities,
+    IReadOnlySet<string> OutputContentTypes,
+    bool SupportsReferenceImages,
+    int MaxImagesPerRequest);
+
+public interface IImageGenerationProviderCapabilities
+{
+    ImageGenerationCapabilities Capabilities { get; }
+}
+
 public interface IImageGenerationProvider
 {
     string Key { get; }
@@ -61,12 +73,29 @@ public sealed class OpenAiImageGenerationProvider(
     HttpClient httpClient,
     IOptions<AiOptions> aiOptions,
     IOptions<ImageGenerationOptions> imageOptions,
-    ILogger<OpenAiImageGenerationProvider> logger) : IImageGenerationProvider
+    ILogger<OpenAiImageGenerationProvider> logger) : IImageGenerationProvider, IImageGenerationProviderCapabilities
 {
+    private static readonly ImageGenerationCapabilities ProviderCapabilities = new(
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ImageGenerationValues.Square,
+            ImageGenerationValues.Portrait,
+            ImageGenerationValues.Landscape,
+        },
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ImageGenerationValues.Standard,
+            ImageGenerationValues.High,
+        },
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "image/png" },
+        SupportsReferenceImages: false,
+        MaxImagesPerRequest: 1);
+
     private readonly AiOptions aiSettings = aiOptions.Value;
     private readonly ImageGenerationOptions settings = imageOptions.Value;
 
     public string Key => "openai";
+    public ImageGenerationCapabilities Capabilities => ProviderCapabilities;
 
     public async Task<ImageProviderResult> GenerateAsync(
         ImageGenerationInput request,
@@ -78,9 +107,80 @@ public sealed class OpenAiImageGenerationProvider(
             throw new ImageProviderUnavailableException();
 
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(TimeSpan.FromSeconds(Math.Clamp(settings.ProviderTimeoutSeconds, 15, 300)));
-        using var message = new HttpRequestMessage(HttpMethod.Post, BuildImagesUrl(aiSettings.OpenAI.BaseUrl));
+        timeout.CancelAfter(TimeSpan.FromSeconds(Math.Clamp(settings.ProviderTimeoutSeconds, 1, 300)));
+        var stopwatch = Stopwatch.StartNew();
+        var maxAttempts = 2;
+
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            timeout.Token.ThrowIfCancellationRequested();
+            using var message = BuildRequest(request, prompt);
+            HttpResponseMessage? response = null;
+            try
+            {
+                response = await httpClient.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
+                var requestId = response.Headers.TryGetValues("x-request-id", out var ids) ? ids.FirstOrDefault() : null;
+                var body = await ReadResponseBodyAsync(response.Content, timeout.Token);
+                if (response.IsSuccessStatusCode)
+                {
+                    var result = ParseSuccessfulResponse(body, prompt, stopwatch.ElapsedMilliseconds);
+                    logger.LogInformation("Image provider completed. ProviderKey={ProviderKey}; DurationMs={DurationMs}; RequestId={RequestId}; Attempt={Attempt}", Key, stopwatch.ElapsedMilliseconds, requestId ?? "none", attempt);
+                    return result;
+                }
+
+                var error = ReadError(body);
+                var retryable = response.StatusCode is HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests
+                    || (int)response.StatusCode >= 500;
+                logger.LogWarning("Image provider returned HTTP {StatusCode}. ErrorCode={ErrorCode}; RequestId={RequestId}; Attempt={Attempt}; Retryable={Retryable}",
+                    (int)response.StatusCode, error.Code ?? "unknown", requestId ?? "none", attempt, retryable);
+                if (string.Equals(error.Code, "moderation_blocked", StringComparison.OrdinalIgnoreCase))
+                    throw new ImageProviderSafetyException();
+                if (response.StatusCode == HttpStatusCode.TooManyRequests)
+                {
+                    if (attempt < maxAttempts) { await Task.Delay(250, timeout.Token); continue; }
+                    throw new ImageProviderRateLimitException();
+                }
+                if (retryable && attempt < maxAttempts)
+                {
+                    await Task.Delay(250, timeout.Token);
+                    continue;
+                }
+                if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden or HttpStatusCode.ServiceUnavailable)
+                    throw new ImageProviderUnavailableException();
+                if (response.StatusCode is HttpStatusCode.BadRequest or HttpStatusCode.NotFound)
+                    throw new ImageProviderUnsupportedRequestException();
+                throw new ImageProviderFailureException();
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && timeout.IsCancellationRequested)
+            {
+                logger.LogWarning("Image provider timed out. ProviderKey={ProviderKey}; Attempt={Attempt}", Key, attempt);
+                throw new ImageProviderTimeoutException();
+            }
+            catch (HttpRequestException exception) when (attempt < maxAttempts)
+            {
+                logger.LogWarning(exception, "Image provider request failed transiently. ProviderKey={ProviderKey}; Attempt={Attempt}", Key, attempt);
+                await Task.Delay(250, timeout.Token);
+            }
+            catch (HttpRequestException exception)
+            {
+                logger.LogWarning(exception, "Image provider request failed. ProviderKey={ProviderKey}", Key);
+                throw new ImageProviderUnavailableException();
+            }
+            finally
+            {
+                response?.Dispose();
+            }
+        }
+
+        throw new ImageProviderUnavailableException();
+    }
+
+    private HttpRequestMessage BuildRequest(ImageGenerationInput request, ImagePromptBuildResult prompt)
+    {
+        var message = new HttpRequestMessage(HttpMethod.Post, BuildImagesUrl(aiSettings.OpenAI.BaseUrl));
         message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", aiSettings.OpenAI.ApiKey);
+        if (request.GenerationJobId.HasValue)
+            message.Headers.TryAddWithoutValidation("Idempotency-Key", $"taslim-image-{request.GenerationJobId.Value:N}");
         message.Content = JsonContent.Create(new
         {
             model = settings.Model,
@@ -92,59 +192,55 @@ public sealed class OpenAiImageGenerationProvider(
             background = "opaque",
             moderation = "auto",
         });
+        return message;
+    }
 
-        var stopwatch = Stopwatch.StartNew();
-        HttpResponseMessage response;
+    private async Task<string> ReadResponseBodyAsync(HttpContent content, CancellationToken cancellationToken)
+    {
+        var maxBytes = Math.Min(32L * 1_048_576, (long)Math.Max(1, settings.MaxOutputBytes) * 4 / 3 + 128 * 1024);
+        if (content.Headers.ContentLength.HasValue && content.Headers.ContentLength.Value > maxBytes)
+            throw new ImageOutputInvalidException();
+        await using var input = await content.ReadAsStreamAsync(cancellationToken);
+        await using var output = new MemoryStream();
+        var buffer = new byte[16 * 1024];
+        var total = 0L;
+        while (true)
+        {
+            var read = await input.ReadAsync(buffer, cancellationToken);
+            if (read == 0) break;
+            total += read;
+            if (total > maxBytes) throw new ImageOutputInvalidException();
+            await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+        }
+        return Encoding.UTF8.GetString(output.GetBuffer(), 0, checked((int)output.Length));
+    }
+
+    private ImageProviderResult ParseSuccessfulResponse(string body, ImagePromptBuildResult prompt, long latencyMs)
+    {
         try
         {
-            response = await httpClient.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
-        }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-        {
-            logger.LogWarning("OpenAI image provider timed out. ProviderKey={ProviderKey}; ModelKey={ModelKey}", Key, settings.Model);
-            throw new ImageProviderTimeoutException();
-        }
-        catch (HttpRequestException exception)
-        {
-            logger.LogWarning(exception, "OpenAI image provider request failed. ProviderKey={ProviderKey}; ModelKey={ModelKey}", Key, settings.Model);
-            throw new ImageProviderFailureException();
-        }
-
-        using (response)
-        {
-            var requestId = response.Headers.TryGetValues("x-request-id", out var ids) ? ids.FirstOrDefault() : null;
-            var body = await response.Content.ReadAsStringAsync(timeout.Token);
-            if (!response.IsSuccessStatusCode)
-            {
-                var error = ReadError(body);
-                logger.LogWarning("OpenAI image provider returned HTTP {StatusCode}. ErrorCode={ErrorCode}; RequestId={RequestId}", (int)response.StatusCode, error.Code ?? "unknown", requestId ?? "none");
-                if (string.Equals(error.Code, "moderation_blocked", StringComparison.OrdinalIgnoreCase)) throw new ImageProviderSafetyException();
-                if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden or HttpStatusCode.TooManyRequests or HttpStatusCode.ServiceUnavailable)
-                    throw new ImageProviderUnavailableException();
-                throw new ImageProviderFailureException();
-            }
-
-            try
-            {
-                using var document = JsonDocument.Parse(body);
-                var root = document.RootElement;
-                var data = root.GetProperty("data");
-                if (data.GetArrayLength() != 1) throw new ImageOutputInvalidException();
-                var encoded = data[0].GetProperty("b64_json").GetString();
-                if (string.IsNullOrWhiteSpace(encoded)) throw new ImageOutputInvalidException();
-                var bytes = Convert.FromBase64String(encoded);
-                var info = ImageBinaryInspector.Read(bytes);
-                if (info is null || !string.Equals(info.ContentType, "image/png", StringComparison.OrdinalIgnoreCase)) throw new ImageOutputInvalidException();
-                var usage = ReadUsage(root, prompt, stopwatch.ElapsedMilliseconds);
-                logger.LogInformation("OpenAI image provider completed. ProviderKey={ProviderKey}; ModelKey={ModelKey}; DurationMs={DurationMs}; RequestId={RequestId}", Key, settings.Model, stopwatch.ElapsedMilliseconds, requestId ?? "none");
-                return new ImageProviderResult(bytes, info.ContentType, info.Format, info.Width, info.Height, usage);
-            }
-            catch (FormatException) { throw new ImageOutputInvalidException(); }
-            catch (JsonException exception)
-            {
-                logger.LogWarning(exception, "OpenAI image provider returned an unreadable response. RequestId={RequestId}", requestId ?? "none");
+            using var document = JsonDocument.Parse(body);
+            var root = document.RootElement;
+            var data = root.GetProperty("data");
+            if (data.ValueKind != JsonValueKind.Array || data.GetArrayLength() != 1)
                 throw new ImageOutputInvalidException();
-            }
+            var encoded = data[0].GetProperty("b64_json").GetString();
+            var maxEncodedLength = (long)Math.Ceiling(Math.Max(1, settings.MaxOutputBytes) * 4d / 3d) + 4;
+            if (string.IsNullOrWhiteSpace(encoded) || encoded.Length > maxEncodedLength)
+                throw new ImageOutputInvalidException();
+            var bytes = Convert.FromBase64String(encoded);
+            var info = ImageBinaryInspector.Read(bytes);
+            if (info is null || !ProviderCapabilities.OutputContentTypes.Contains(info.ContentType)
+                || info.Width is <= 0 || info.Height is <= 0)
+                throw new ImageOutputInvalidException();
+            var usage = ReadUsage(root, prompt, latencyMs);
+            return new ImageProviderResult(bytes, info.ContentType, info.Format, info.Width, info.Height, usage);
+        }
+        catch (FormatException) { throw new ImageOutputInvalidException(); }
+        catch (JsonException exception)
+        {
+            logger.LogWarning(exception, "Image provider returned an unreadable response without logging response contents.");
+            throw new ImageOutputInvalidException();
         }
     }
 
@@ -167,8 +263,6 @@ public sealed class OpenAiImageGenerationProvider(
     {
         var textTokens = Math.Max(0, textInput ?? input ?? EstimateTextTokens(prompt.Prompt));
         var imageTokens = Math.Max(0, imageInput ?? 0);
-        // The Images API currently reports billable image output through normal output_tokens.
-        // Keep ImageOutputTokens null unless output_tokens_details.image_tokens is present.
         var outputTokens = Math.Max(0, imageOutput ?? output ?? EstimateOutputTokens(prompt.NormalizedAspectRatio, prompt.NormalizedQuality));
         return decimal.Round(
             textTokens * settings.Pricing.TextInputUsdPerMillion / 1_000_000m
@@ -231,8 +325,12 @@ public static class ImageBinaryInspector
 
     public static ImageBinaryInfo? Read(ReadOnlySpan<byte> bytes)
     {
-        if (bytes.Length >= 24 && bytes[..8].SequenceEqual(PngSignature))
-            return new ImageBinaryInfo("image/png", "png", ReadBigEndianInt(bytes[16..20]), ReadBigEndianInt(bytes[20..24]));
+        if (bytes.Length >= 33 && bytes[..8].SequenceEqual(PngSignature) && bytes[12..16].SequenceEqual("IHDR"u8))
+        {
+            var width = ReadBigEndianInt(bytes[16..20]);
+            var height = ReadBigEndianInt(bytes[20..24]);
+            return width > 0 && height > 0 ? new ImageBinaryInfo("image/png", "png", width, height) : null;
+        }
         if (bytes.Length >= 12 && bytes[..4].SequenceEqual("RIFF"u8) && bytes[8..12].SequenceEqual("WEBP"u8))
             return ReadWebp(bytes);
         if (bytes.Length >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF)
@@ -248,7 +346,11 @@ public static class ImageBinaryInspector
             var height = 1 + bytes[27] + (bytes[28] << 8) + (bytes[29] << 16);
             return new ImageBinaryInfo("image/webp", "webp", width, height);
         }
-        return new ImageBinaryInfo("image/webp", "webp", null, null);
+        if (bytes.Length >= 17 && bytes[12..16].SequenceEqual("VP8L"u8) && bytes[16] == 0x2F)
+            return new ImageBinaryInfo("image/webp", "webp", null, null);
+        if (bytes.Length >= 20 && bytes[12..16].SequenceEqual("VP8 "u8))
+            return new ImageBinaryInfo("image/webp", "webp", null, null);
+        return null;
     }
 
     private static ImageBinaryInfo? ReadJpeg(ReadOnlySpan<byte> bytes)
@@ -265,11 +367,12 @@ public static class ImageBinaryInspector
             if (length < 2 || index + length > bytes.Length) break;
             if (marker is 0xC0 or 0xC1 or 0xC2 or 0xC3 or 0xC5 or 0xC6 or 0xC7 or 0xC9 or 0xCA or 0xCB or 0xCD or 0xCE or 0xCF)
             {
+                if (index + 7 > bytes.Length) return null;
                 return new ImageBinaryInfo("image/jpeg", "jpeg", (bytes[index + 5] << 8) + bytes[index + 6], (bytes[index + 3] << 8) + bytes[index + 4]);
             }
             index += length;
         }
-        return new ImageBinaryInfo("image/jpeg", "jpeg", null, null);
+        return null;
     }
 
     private static int ReadBigEndianInt(ReadOnlySpan<byte> value) => (value[0] << 24) | (value[1] << 16) | (value[2] << 8) | value[3];

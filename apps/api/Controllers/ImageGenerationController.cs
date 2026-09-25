@@ -19,7 +19,8 @@ public sealed class ImageGenerationController(
     IGenerationJobService jobs,
     IOptions<ImageGenerationOptions> options,
     IImagePromptBuilder promptBuilder,
-    IUsageCostControl costControl) : ControllerBase
+    IUsageCostControl costControl,
+    IEnumerable<IImageGenerationProvider> providers) : ControllerBase
 {
     [HttpPost("jobs")]
     [ValidateAntiForgeryToken]
@@ -29,7 +30,8 @@ public sealed class ImageGenerationController(
         try
         {
             var input = ImageGenerationContractMapper.ToInput(request);
-            ImageGenerationRequestValidator.Validate(input, options.Value);
+            var provider = providers.FirstOrDefault(item => string.Equals(item.Key, options.Value.ProviderKey, StringComparison.OrdinalIgnoreCase));
+            ImageGenerationRequestValidator.Validate(input, options.Value, (provider as IImageGenerationProviderCapabilities)?.Capabilities);
             var prompt = promptBuilder.Build(input);
             var estimate = ImageGenerationCostEstimator.Estimate(prompt, options.Value.Pricing);
             var preflight = await costControl.CheckPreflightAsync(request.WorkspaceId, UsageFeature.Image, estimate, cancellationToken);

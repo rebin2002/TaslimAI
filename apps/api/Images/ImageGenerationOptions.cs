@@ -12,6 +12,8 @@ public sealed class ImageGenerationOptions
     public int MaxTitleCharacters { get; set; } = 160;
     public int MaxImagesPerJob { get; set; } = 1;
     public int MaxOutputBytes { get; set; } = 10 * 1_048_576;
+    public int MaxImageDimension { get; set; } = 16_384;
+    public long MaxImagePixels { get; set; } = 25_000_000;
     public string PricingVersion { get; set; } = "gpt-image-2.5-sunburst-2026-09-08";
     public DateTime PricingEffectiveDateUtc { get; set; } = new(2026, 9, 8, 0, 0, 0, DateTimeKind.Utc);
     public string PricingSource { get; set; } = "https://developers.openai.com/api/docs/models/gpt-image-2.5-sunburst";
@@ -55,3 +57,6 @@ public sealed class ImageProviderFailureException(string safeCode = "IMAGE_GENER
 }
 public sealed class ImageProviderSafetyException() : Exception("The image provider declined the request for safety reasons.");
 public sealed class ImageOutputInvalidException() : Exception("The image provider returned an invalid image.");
+public sealed class ImageProviderRateLimitException() : Exception("The image provider is temporarily rate limited.");
+public sealed class ImageProviderUnsupportedRequestException() : Exception("The image request is not supported.");
+public sealed class ImageOutputStorageException(Exception? innerException = null) : Exception("The generated image could not be stored.", innerException);

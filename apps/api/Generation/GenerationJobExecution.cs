@@ -515,6 +515,10 @@ public sealed class GenerationJobWorker(
                 {
                     publications.Add(await publisher.PrepareAsync(current, output, stoppingToken));
                 }
+                catch (Exception exception) when (exception is not OperationCanceledException && string.Equals(claimedJob.JobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new ImageOutputStorageException(exception);
+                }
                 catch (Exception exception) when (exception is not OperationCanceledException && string.Equals(claimedJob.JobType, GenerationJobTypes.DocumentGenerate, StringComparison.OrdinalIgnoreCase))
                 {
                     var stage = output.FileArtifact?.RepresentationType?.Equals(AssetRepresentationTypes.Pdf, StringComparison.OrdinalIgnoreCase) == true
@@ -1058,9 +1062,12 @@ public sealed class GenerationJobWorker(
             ImageRequestValidationException validation => validation.Code,
             ImageProviderUnavailableException => GenerationJobErrorCodes.ImageProviderUnavailable,
             ImageProviderTimeoutException => GenerationJobErrorCodes.ImageProviderUnavailable,
+            ImageProviderRateLimitException => GenerationJobErrorCodes.ImageProviderUnavailable,
+            ImageProviderUnsupportedRequestException => GenerationJobErrorCodes.ImageRequestInvalid,
             ImageProviderSafetyException => GenerationJobErrorCodes.ImageSafetyRefusal,
             ImageOutputInvalidException => GenerationJobErrorCodes.ImageOutputInvalid,
             ImageProviderFailureException failure => failure.SafeCode,
+            ImageOutputStorageException => GenerationJobErrorCodes.ImageOutputStorageFailed,
             FileStorageUnavailableException => GenerationJobErrorCodes.ImageOutputStorageFailed,
             FileStorageOperationException => GenerationJobErrorCodes.ImageOutputStorageFailed,
             FileUploadValidationException => GenerationJobErrorCodes.ImageOutputStorageFailed,
@@ -1071,10 +1078,10 @@ public sealed class GenerationJobWorker(
     private static string FailureMessage(string code) => code switch
     {
         GenerationJobErrorCodes.ImageProviderUnavailable => "Image generation is temporarily unavailable. Please try again later.",
+        GenerationJobErrorCodes.ImageRequestInvalid => "Please check the image request and try again.",
         GenerationJobErrorCodes.ImageSafetyRefusal => "This request could not be completed by the image safety system. Try a different description.",
         GenerationJobErrorCodes.ImageOutputInvalid => "The image result was invalid. Please try again.",
         GenerationJobErrorCodes.ImageOutputStorageFailed => "The image was generated but could not be saved. Please try again.",
-        GenerationJobErrorCodes.ImageRequestInvalid => "Please check the image request and try again.",
         GenerationJobErrorCodes.ImageCancelled => "The image generation was cancelled.",
         GenerationJobErrorCodes.DocumentProviderUnavailable => "Document generation is temporarily unavailable. Please try again later.",
         GenerationJobErrorCodes.DocumentProviderConfiguration => "Document generation is temporarily unavailable. Please try again later.",
