@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canCancelVoiceJob, isVoiceJob, parseVoiceJobResult } from "./voiceStudioState";
+import { canCancelVoiceJob, formatVoiceDuration, formatVoiceFileSize, isVoiceAsset, isVoiceJob, parseVoiceJobResult } from "./voiceStudioState";
 import type { GenerationJob } from "./api";
 
 const baseJob: GenerationJob = {
@@ -39,5 +39,23 @@ describe("voiceStudioState", () => {
     expect(canCancelVoiceJob({ ...baseJob, status: "Running", progressPercent: 50 })).toBe(true);
     expect(canCancelVoiceJob({ ...baseJob, status: "Running", cancellationRequested: true })).toBe(false);
     expect(canCancelVoiceJob(baseJob)).toBe(false);
+  });
+
+  it("keeps only Voice audio assets in the recent shelf", () => {
+    const asset = {
+      id: "asset-1", workspaceId: "workspace-1", projectId: null, projectName: null, name: "Narration", description: null,
+      assetType: "audio" as const, mimeType: "audio/mpeg", status: "Active" as const, hasFile: true, canPreview: true,
+      fileSizeBytes: 2048, sourceStudio: "voice", sourceJobTitle: "Generated speech", createdAt: "2026-09-23T00:00:00Z", updatedAt: "2026-09-23T00:00:00Z", archivedAt: null, representations: [],
+    };
+    expect(isVoiceAsset(asset)).toBe(true);
+    expect(isVoiceAsset({ ...asset, sourceStudio: "music" })).toBe(false);
+    expect(isVoiceAsset({ ...asset, assetType: "music" })).toBe(false);
+  });
+
+  it("formats player duration and file size without inventing missing metadata", () => {
+    expect(formatVoiceDuration(90500)).toBe("1:30");
+    expect(formatVoiceDuration(null)).toBe("0:00");
+    expect(formatVoiceFileSize(2048)).toBe("2.0 KB");
+    expect(formatVoiceFileSize(null)).toBe("");
   });
 });

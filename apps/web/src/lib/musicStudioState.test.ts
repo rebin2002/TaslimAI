@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { GenerationJob } from "./api";
-import { canCancelMusicJob, isMusicJob, parseMusicJobResult, safeMusicJobView } from "./musicStudioState";
+import { canCancelMusicJob, isMusicJob, isMusicProviderUnavailable, parseMusicJobResult, safeMusicJobView } from "./musicStudioState";
 
 function job(overrides: Partial<GenerationJob> = {}): GenerationJob {
   return {
@@ -28,6 +28,8 @@ describe("music studio state", () => {
   it("exposes a safe failed view and ignores malformed results", () => {
     const failed = job({ status: "Failed", errorCode: "MUSIC_PROVIDER_UNAVAILABLE", errorMessage: "Music generation is temporarily unavailable. Please try again later." });
     expect(safeMusicJobView(failed)).toMatchObject({ status: "Failed", errorCode: "MUSIC_PROVIDER_UNAVAILABLE" });
+    expect(isMusicProviderUnavailable(failed)).toBe(true);
+    expect(isMusicProviderUnavailable(job({ status: "Failed", errorCode: "MUSIC_GENERATION_FAILED" }))).toBe(false);
     expect(parseMusicJobResult(job({ status: "Succeeded", resultJson: "not-json" }))).toBeNull();
   });
 });
