@@ -254,9 +254,12 @@ public sealed class UnconfiguredVoiceGenerationProvider : IVoiceGenerationProvid
 }
 
 public sealed class VoiceProviderUnavailableException() : Exception("No configured voice provider is available.");
+public sealed class VoiceProviderAuthenticationException() : Exception("The voice provider could not authenticate the request.");
+public sealed class VoiceProviderRateLimitException() : Exception("The voice provider rate limit was reached.");
 public sealed class VoiceProviderTimeoutException() : Exception("The voice provider timed out.");
 public sealed class VoiceProviderFailureException() : Exception("The voice provider failed safely.");
 public sealed class VoiceProviderConfigurationException() : Exception("The voice provider configuration is incomplete.");
+public sealed class VoiceProviderInvalidInputException() : Exception("The voice provider rejected the voice input.");
 public sealed class VoiceProviderUnsupportedRequestException() : Exception("The voice provider does not support this request.");
 public sealed class VoiceLanguageUnsupportedException() : Exception("The configured voice provider does not support this language.");
 public sealed class VoiceOutputInvalidException() : Exception("The voice provider returned invalid audio.");
