@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { GenerationJob } from "./api";
-import { displaySocialProgress, formatSocialPostForCopy, isSocialSourceReady, parseSocialJobResult, socialStudioState } from "./socialStudioState";
+import { displaySocialProgress, formatSocialPostForCopy, isSocialSourceReady, normalizeSocialPreviewPlatform, parseSocialJobResult, socialStudioState } from "./socialStudioState";
 
 const job = (overrides: Partial<GenerationJob> = {}): GenerationJob => ({ id: "job-1", workspaceId: "workspace-1", projectId: null, jobType: "social.generate", status: "Running", title: null, progressPercent: 100, resultJson: null, errorCode: null, errorMessage: null, cancellationRequested: false, createdAt: "2026-01-01T00:00:00Z", queuedAt: null, startedAt: null, completedAt: null, failedAt: null, cancelledAt: null, outputs: [], ...overrides });
 
@@ -21,5 +21,9 @@ describe("socialStudioState", () => {
   it("only treats supported extracted source files as ready", () => {
     expect(isSocialSourceReady({ id: "file-1", originalFileName: "brief.pdf", extension: ".pdf", status: "Ready", textExtractionStatus: "Ready", sizeBytes: 100 } as never)).toBe(true);
     expect(isSocialSourceReady({ id: "file-2", originalFileName: "image.png", extension: ".png", status: "Ready", textExtractionStatus: "Ready", sizeBytes: 100 } as never)).toBe(false);
+  });
+  it("normalizes unknown result platforms to the safe multi-platform preview", () => {
+    expect(normalizeSocialPreviewPlatform(" LinkedIn ")).toBe("linkedin");
+    expect(normalizeSocialPreviewPlatform("provider-specific")).toBe("multi");
   });
 });
