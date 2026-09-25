@@ -139,7 +139,8 @@ public sealed class GenerationJobUsageService(IUsageLedgerService ledger) : IGen
                                             : UsageFeature.Generation,
             cancellationToken,
             job.Id,
-            estimatedProviderCostUsd);
+            estimatedProviderCostUsd,
+            job.CostEstimateJson);
 
     public Task CompleteAsync(UsageTransaction transaction, AiUsageMetadata usage, CancellationToken cancellationToken = default) =>
         ledger.CompleteAsync(transaction, usage, cancellationToken);
@@ -223,6 +224,9 @@ public sealed class GenerationJobService(
             IdempotencyKey = normalizedKey,
             RequestFingerprint = requestFingerprint,
             RequestId = requestId,
+            EstimatedProviderCostUsd = request.EstimatedProviderCostUsd,
+            EstimatedProviderCostKnown = request.EstimatedProviderCostUsd.HasValue,
+            CostEstimateJson = request.InternalCostEstimate?.ToJson(),
             ProgressPercent = 0,
             CreatedAt = now,
         };
@@ -478,6 +482,7 @@ public sealed class GenerationJobWorker(
         var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
         var notifications = scope.ServiceProvider.GetRequiredService<INotificationEventWriter>();
         var usage = scope.ServiceProvider.GetRequiredService<IGenerationJobUsageService>();
+        var budget = scope.ServiceProvider.GetRequiredService<IGenerationBudgetService>();
         var publisher = scope.ServiceProvider.GetRequiredService<IGeneratedAssetPublisher>();
         var movieExecutions = scope.ServiceProvider.GetRequiredService<MovieVideoExecutionStore>();
         using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
@@ -485,6 +490,7 @@ public sealed class GenerationJobWorker(
         var publications = new List<PreparedGenerationOutput>();
         var publicationCommitted = false;
         AiUsageMetadata? providerUsage = null;
+        GenerationProviderAttempt? providerAttempt = null;
         var executionStarted = Stopwatch.GetTimestamp();
         logger.LogInformation(
             "Generation job execution started. JobId={JobId}; WorkspaceId={WorkspaceId}; JobType={JobType}; RequestId={RequestId}; RetryCount={RetryCount}",
@@ -499,6 +505,10 @@ public sealed class GenerationJobWorker(
                 await TryNotifyAsync(() => notifications.CreateGenerationFailedAsync(claimedJob.Id, stoppingToken), claimedJob.Id);
                 return;
             }
+            var estimate = claimedJob.EstimatedProviderCostKnown == true && claimedJob.EstimatedProviderCostUsd.HasValue
+                ? new GenerationCostEstimate(true, claimedJob.EstimatedProviderCostUsd, UsageCurrencies.Usd, null, null, null, [])
+                : GenerationCostEstimate.Unknown("job_estimate_missing");
+            providerAttempt = await budget.BeginAttemptAsync(claimedJob, claimedJob.Provider ?? "selected", claimedJob.ProviderModel, estimate, stoppingToken);
             var progress = new SerializedProgress(value => UpdateProgressSafelyAsync(claimedJob.Id, claimedJob.ConcurrencyToken, value, stoppingToken));
             var result = await handler.ExecuteAsync(claimedJob, progress, cancellation.Token);
             await progress.DrainAsync();
@@ -603,6 +613,8 @@ public sealed class GenerationJobWorker(
                 return;
             }
             publicationCommitted = true;
+            if (providerAttempt is not null)
+                await budget.CompleteAttemptAsync(providerAttempt, result.Usage?.ActualCost, result.Usage?.ActualCost.HasValue == true, GenerationProviderAttemptStatus.Succeeded, cancellationToken: stoppingToken);
             logger.LogInformation(
                 "Generation job execution completed. JobId={JobId}; JobType={JobType}; RequestId={RequestId}; ProviderKey={ProviderKey}; ProviderModel={ProviderModel}; ElapsedMs={ElapsedMs}; UsageFinalized={UsageFinalized}",
                 claimedJob.Id, claimedJob.JobType, claimedJob.RequestId, result.Usage?.ProviderKey, result.Usage?.ModelKey,
@@ -633,7 +645,9 @@ public sealed class GenerationJobWorker(
             if (!publicationCommitted)
                 foreach (var publication in publications) await publisher.DiscardAsync(publication, CancellationToken.None);
             if (GenerationJobTypes.MovieTypes.Contains(claimedJob.JobType))
-                await movieExecutions.MarkCancelledAsync(claimedJob.Id, claimedJob.ConcurrencyToken, CancellationToken.None);
+await movieExecutions.MarkCancelledAsync(claimedJob.Id, claimedJob.ConcurrencyToken, CancellationToken.None);
+            if (providerAttempt is not null)
+                await budget.CompleteAttemptAsync(providerAttempt, null, false, GenerationProviderAttemptStatus.Cancelled, GenerationJobErrorCodes.Cancelled, CancellationToken.None);
             await CancelRunningAsync(db, usage, claimedJob, claimedJob.ConcurrencyToken, stoppingToken);
             logger.LogInformation(
                 "Generation job execution cancelled. JobId={JobId}; JobType={JobType}; RequestId={RequestId}; ElapsedMs={ElapsedMs}; UsageFinalized={UsageFinalized}",
@@ -650,7 +664,7 @@ public sealed class GenerationJobWorker(
             failureUsage ??= (exception as PresentationGenerationStageException)?.Usage;
             failureUsage ??= (exception as ResearchGenerationStageException)?.Usage;
             failureUsage ??= (exception as SocialGenerationStageException)?.Usage;
-            var qualityFailure = exception as GenerationQualityControlException ?? exception.InnerException as GenerationQualityControlException;
+var qualityFailure = exception as GenerationQualityControlException ?? exception.InnerException as GenerationQualityControlException;
             if (qualityFailure is not null)
             {
                 var qualityMetadata = JsonSerializer.Serialize(new
@@ -667,6 +681,8 @@ public sealed class GenerationJobWorker(
                     SafeMetadataJson = qualityMetadata,
                 };
             }
+            if (providerAttempt is not null)
+                await budget.CompleteAttemptAsync(providerAttempt, failureUsage?.ActualCost, failureUsage?.ActualCost.HasValue == true, GenerationProviderAttemptStatus.Failed, failureCode, CancellationToken.None);
             if (string.Equals(claimedJob.JobType, GenerationJobTypes.DocumentGenerate, StringComparison.OrdinalIgnoreCase))
             {
                 var stage = (exception as DocumentGenerationStageException)?.Stage ?? DocumentGenerationStages.Execution;
@@ -963,6 +979,7 @@ public sealed class GenerationJobWorker(
 
     private static string MapFailureCode(Exception exception, string jobType)
     {
+if (exception is GenerationBudgetRejectedException budgetRejected) return budgetRejected.Code;
         var qualityFailure = exception as GenerationQualityControlException ?? exception.InnerException as GenerationQualityControlException;
         if (qualityFailure is not null)
         {

@@ -89,7 +89,7 @@ public sealed class ImageGenerationTests : IClassFixture<ImageGenerationApiFacto
         Assert.Equal("gpt-image-2.5-sunburst-2026-09-08", usage.PricingVersion);
         Assert.Contains("imageOutput", usage.PricingSnapshotJson, StringComparison.Ordinal);
 
-        var changedPricing = new ImageGenerationOptions { PricingVersion = "future-pricing-schedule" }.Pricing.ToSnapshot(new ImageGenerationOptions { PricingVersion = "future-pricing-schedule" }).ToJson();
+        var changedPricing = new ImageGenerationOptions { PricingVersion = "future-pricing-schedule" }.Pricing.ToSnapshot(new ImageGenerationOptions { PricingVersion = "future-pricing-schedule" })?.ToJson();
         Assert.DoesNotContain("future-pricing-schedule", usage.PricingSnapshotJson, StringComparison.Ordinal);
         Assert.NotEqual(changedPricing, usage.PricingSnapshotJson);
 

@@ -52,7 +52,7 @@ public interface IImageGenerationProvider
 
 public static class ImageGenerationCostEstimator
 {
-    public static decimal Estimate(ImagePromptBuildResult prompt, ImagePricingOptions pricing)
+    public static decimal? Estimate(ImagePromptBuildResult prompt, ImagePricingOptions pricing)
     {
         var textTokens = Math.Max(1, (prompt.Prompt.Length + 3) / 4);
         var outputTokens = prompt.NormalizedAspectRatio switch
@@ -61,9 +61,10 @@ public static class ImageGenerationCostEstimator
             ImageGenerationValues.Landscape => prompt.NormalizedQuality == ImageGenerationValues.High ? 6208 : 1568,
             _ => prompt.NormalizedQuality == ImageGenerationValues.High ? 4160 : 1056,
         };
+        if (!pricing.TextInputUsdPerMillion.HasValue || !pricing.ImageOutputUsdPerMillion.HasValue) return null;
         return decimal.Round(
-            textTokens * pricing.TextInputUsdPerMillion / 1_000_000m
-            + outputTokens * pricing.ImageOutputUsdPerMillion / 1_000_000m,
+            textTokens * pricing.TextInputUsdPerMillion.Value / 1_000_000m
+            + outputTokens * pricing.ImageOutputUsdPerMillion.Value / 1_000_000m,
             8,
             MidpointRounding.AwayFromZero);
     }
@@ -259,15 +260,19 @@ public sealed class OpenAiImageGenerationProvider(
         return new ImageProviderUsage(input, textInput, imageInput, output, actualCost, "completed", Math.Max(1, (int)Math.Min(int.MaxValue, latencyMs)), imageOutput, costBasis);
     }
 
-    private decimal CalculateCost(int? input, int? textInput, int? imageInput, int? output, int? imageOutput, ImagePromptBuildResult prompt)
+    private decimal? CalculateCost(int? input, int? textInput, int? imageInput, int? output, int? imageOutput, ImagePromptBuildResult prompt)
     {
         var textTokens = Math.Max(0, textInput ?? input ?? EstimateTextTokens(prompt.Prompt));
         var imageTokens = Math.Max(0, imageInput ?? 0);
         var outputTokens = Math.Max(0, imageOutput ?? output ?? EstimateOutputTokens(prompt.NormalizedAspectRatio, prompt.NormalizedQuality));
+        if (textTokens > 0 && !settings.Pricing.TextInputUsdPerMillion.HasValue
+            || imageTokens > 0 && !settings.Pricing.ImageInputUsdPerMillion.HasValue
+            || outputTokens > 0 && !settings.Pricing.ImageOutputUsdPerMillion.HasValue)
+            return null;
         return decimal.Round(
-            textTokens * settings.Pricing.TextInputUsdPerMillion / 1_000_000m
-            + imageTokens * settings.Pricing.ImageInputUsdPerMillion / 1_000_000m
-            + outputTokens * settings.Pricing.ImageOutputUsdPerMillion / 1_000_000m,
+            textTokens * settings.Pricing.TextInputUsdPerMillion.GetValueOrDefault() / 1_000_000m
+            + imageTokens * settings.Pricing.ImageInputUsdPerMillion.GetValueOrDefault() / 1_000_000m
+            + outputTokens * settings.Pricing.ImageOutputUsdPerMillion.GetValueOrDefault() / 1_000_000m,
             8,
             MidpointRounding.AwayFromZero);
     }

@@ -90,7 +90,7 @@ public sealed class ImageGenerationJobHandler(
             generated.Usage.ImageInputTokens,
             generated.Usage.ImageOutputTokens,
             settings.PricingVersion,
-            settings.Pricing.ToSnapshot(settings).ToJson(),
+            settings.Pricing.ToSnapshot(settings)?.ToJson(),
             settings.Currency,
             generated.Usage.CostBasis);
         return new GenerationHandlerResult(resultJson, [new GenerationHandlerOutput(GenerationJobOutputTypes.StoredFile, null, metadata, artifact, asset)], usage);

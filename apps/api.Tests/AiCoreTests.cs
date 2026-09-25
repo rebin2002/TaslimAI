@@ -15,7 +15,7 @@ public sealed class AiCoreTests
     public void Router_selects_configured_internal_model_for_each_tier(string tier, string modelKey)
     {
         var options = Options.Create(new AiOptions { DefaultChatTier = "Smart", AllowMockProvider = false, OpenAI = new OpenAiOptions { Enabled = true, ApiKey = "test-only" } });
-        var router = new AiModelRouter(options, new AiModelCatalog(new ConfigurationBuilder().Build()));
+        var router = new AiModelRouter(options, ConfiguredCatalog());
         var selection = router.Select(new AiChatRequest([], "system", tier));
         Assert.Equal("openai", selection.ProviderKey);
         Assert.Equal(modelKey, selection.ModelKey);
@@ -26,7 +26,7 @@ public sealed class AiCoreTests
     public void Router_rejects_when_production_has_no_real_provider()
     {
         var options = Options.Create(new AiOptions { AllowMockProvider = false, OpenAI = new OpenAiOptions { Enabled = false } });
-        var router = new AiModelRouter(options, new AiModelCatalog(new ConfigurationBuilder().Build()));
+        var router = new AiModelRouter(options, ConfiguredCatalog());
         Assert.Throws<AiProviderUnavailableException>(() => router.Select(new AiChatRequest([], "system", "Smart")));
     }
 
@@ -50,7 +50,7 @@ public sealed class AiCoreTests
     public async Task Completion_service_calculates_catalog_cost_and_preserves_usage()
     {
         var options = Options.Create(new AiOptions { AllowMockProvider = false, OpenAI = new OpenAiOptions { Enabled = true, ApiKey = "test-only" } });
-        var catalog = new AiModelCatalog(new ConfigurationBuilder().Build());
+        var catalog = ConfiguredCatalog();
         var router = new AiModelRouter(options, catalog);
         var completion = new ChatCompletionService(router, [new FakeProvider()], new AiCostCalculator(catalog), NullLogger<ChatCompletionService>.Instance);
         var result = await completion.CompleteAsync(new AiChatRequest([new("user", "hello")], "system", "Smart"));
@@ -58,13 +58,13 @@ public sealed class AiCoreTests
         Assert.Equal(1000, result.Usage.InputTokens);
         Assert.Equal(200, result.Usage.CachedInputTokens);
         Assert.Equal(1000, result.Usage.OutputTokens);
-        Assert.Equal(0.01364m, result.Usage.ActualCost);
+        Assert.Equal(0.01364m, result.Usage.EstimatedCost);
     }
 
     [Fact]
     public void Cost_calculator_caps_cached_tokens_at_input_tokens()
     {
-        var catalog = new AiModelCatalog(new ConfigurationBuilder().Build());
+        var catalog = ConfiguredCatalog();
         var calculator = new AiCostCalculator(catalog);
         var cost = calculator.Calculate(new AiUsageMetadata("openai", "gpt-5.6-terra", 1000, 1500, 1000, null, null, 0, "completed", false));
         Assert.Equal(0.0122m, cost);
@@ -107,4 +107,17 @@ public sealed class AiCoreTests
             yield return new AiMessageCompleted(new AiUsageMetadata(selection.ProviderKey, selection.ModelKey, 1000, 200, 1000, null, null, 4, "completed", false));
         }
     }
+
+    private static AiModelCatalog ConfiguredCatalog() => new(new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+    {
+        ["Ai:Models:gpt-5.6-luna:InputPricePerMillion"] = "0.2",
+        ["Ai:Models:gpt-5.6-luna:CachedInputPricePerMillion"] = "0.02",
+        ["Ai:Models:gpt-5.6-luna:OutputPricePerMillion"] = "1.2",
+        ["Ai:Models:gpt-5.6-terra:InputPricePerMillion"] = "2",
+        ["Ai:Models:gpt-5.6-terra:CachedInputPricePerMillion"] = "0.2",
+        ["Ai:Models:gpt-5.6-terra:OutputPricePerMillion"] = "12",
+        ["Ai:Models:gpt-5.6-sol:InputPricePerMillion"] = "4",
+        ["Ai:Models:gpt-5.6-sol:CachedInputPricePerMillion"] = "0.4",
+        ["Ai:Models:gpt-5.6-sol:OutputPricePerMillion"] = "20",
+    }).Build());
 }

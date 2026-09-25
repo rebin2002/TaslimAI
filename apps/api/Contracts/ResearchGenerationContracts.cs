@@ -249,8 +249,9 @@ public sealed class ResearchContextLimitException : Exception;
 
 public static class ResearchGenerationCostEstimator
 {
-    public static decimal Estimate(ResearchGenerationOptions options) =>
-        decimal.Round(Math.Max(0m, options.MaxOutputTokens / 1_000m * options.EstimatedOutputUsdPer1KTokens), 8, MidpointRounding.AwayFromZero);
+    public static decimal? Estimate(ResearchGenerationOptions options) => options.EstimatedOutputUsdPer1KTokens.HasValue
+        ? decimal.Round(Math.Max(0m, options.MaxOutputTokens / 1_000m * options.EstimatedOutputUsdPer1KTokens.Value), 8, MidpointRounding.AwayFromZero)
+        : null;
 }
 
 public static class ResearchBlockTypes

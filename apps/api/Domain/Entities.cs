@@ -459,6 +459,7 @@ public static class UsageCostBasis
 {
     public const string Actual = "Actual";
     public const string Estimated = "Estimated";
+    public const string Unknown = "Unknown";
 }
 
 public enum UsageChargeUnit
@@ -556,6 +557,9 @@ public sealed class GenerationJob
     public string? Title { get; set; }
     public string? Provider { get; set; }
     public string? ProviderModel { get; set; }
+    public decimal? EstimatedProviderCostUsd { get; set; }
+    public bool? EstimatedProviderCostKnown { get; set; }
+    public string? CostEstimateJson { get; set; }
     public string InputJson { get; set; } = "{}";
     public string? IdempotencyKey { get; set; }
     public string? RequestFingerprint { get; set; }
@@ -581,6 +585,37 @@ public sealed class GenerationJob
     public ICollection<GenerationJobOutput> Outputs { get; set; } = [];
     public ICollection<Asset> Assets { get; set; } = [];
     public ICollection<ResearchSource> ResearchSources { get; set; } = [];
+    public ICollection<GenerationProviderAttempt> ProviderAttempts { get; set; } = [];
+}
+
+public enum GenerationProviderAttemptStatus
+{
+    Started,
+    Succeeded,
+    Failed,
+    Cancelled,
+    Rejected,
+}
+
+public sealed class GenerationProviderAttempt
+{
+    public Guid Id { get; set; }
+    public Guid GenerationJobId { get; set; }
+    public int AttemptNumber { get; set; }
+    public string Provider { get; set; } = string.Empty;
+    public string? Model { get; set; }
+    public GenerationProviderAttemptStatus Status { get; set; } = GenerationProviderAttemptStatus.Started;
+    public decimal? EstimatedProviderCostUsd { get; set; }
+    public bool EstimatedProviderCostKnown { get; set; }
+    public decimal? ActualProviderCostUsd { get; set; }
+    public bool ActualProviderCostKnown { get; set; }
+    public string? CostEstimateJson { get; set; }
+    public string? FailureCode { get; set; }
+    public string FinalizationKey { get; set; } = string.Empty;
+    public DateTime StartedAt { get; set; }
+    public DateTime? CompletedAt { get; set; }
+
+    public GenerationJob GenerationJob { get; set; } = null!;
 }
 
 public sealed class ResearchSource
@@ -724,12 +759,14 @@ public sealed class UsageTransaction
     public int? LatencyMs { get; set; }
     public decimal? EstimatedProviderCostUsd { get; set; }
     public decimal ProviderCostUsd { get; set; }
+    public bool ProviderCostKnown { get; set; }
     public decimal ChargedAmount { get; set; }
     public UsageChargeUnit ChargedUnit { get; set; } = UsageChargeUnit.Usd;
     public string Currency { get; set; } = "USD";
     public string? CostBasis { get; set; }
     public string? PricingVersion { get; set; }
     public string? PricingSnapshotJson { get; set; }
+    public string? CostEstimateJson { get; set; }
     public string? SafeMetadataJson { get; set; }
     public bool IsAnomalous { get; set; }
     public string? AnomalyCode { get; set; }

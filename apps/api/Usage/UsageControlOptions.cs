@@ -3,6 +3,7 @@ namespace Taslim.Api.Usage;
 public sealed class UsageControlOptions
 {
     public bool GuardrailsEnabled { get; set; }
+    public bool RejectUnknownEstimates { get; set; } = true;
     public decimal? MaxEstimatedProviderCostPerGenerationUsd { get; set; }
     public decimal? DailyWorkspaceProviderCostCeilingUsd { get; set; }
     public decimal? MonthlyWorkspaceProviderCostCeilingUsd { get; set; }
@@ -14,7 +15,7 @@ public sealed class UsageControlOptions
 
 public sealed record UsagePreflightResult(
     bool Allowed,
-    decimal EstimatedProviderCostUsd,
+    decimal? EstimatedProviderCostUsd,
     string? RejectionCode = null,
     string? RejectionMessage = null);
 

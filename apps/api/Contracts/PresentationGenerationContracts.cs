@@ -176,7 +176,9 @@ public sealed class PresentationRequestValidationException(string code, string m
 
 public static class PresentationGenerationCostEstimator
 {
-    public static decimal Estimate(PresentationGenerationOptions options) => Math.Round(Math.Max(0m, options.MaxOutputTokens / 1_000m * options.EstimatedOutputUsdPer1KTokens), 8);
+    public static decimal? Estimate(PresentationGenerationOptions options) => options.EstimatedOutputUsdPer1KTokens.HasValue
+        ? Math.Round(Math.Max(0m, options.MaxOutputTokens / 1_000m * options.EstimatedOutputUsdPer1KTokens.Value), 8)
+        : null;
 }
 
 public static class PresentationDraftValidator

@@ -17,7 +17,7 @@ public sealed class PresentationGenerationOptions
     public int MaxNotesCharacters { get; set; } = 1_000;
     public int MaxVisualSuggestionCharacters { get; set; } = 400;
     public int MaxSourceRefsPerSlide { get; set; } = 8;
-    public decimal EstimatedOutputUsdPer1KTokens { get; set; } = 0.01m;
+    public decimal? EstimatedOutputUsdPer1KTokens { get; set; }
     public string RequestedTier { get; set; } = "Smart";
     public int ProviderTimeoutSeconds { get; set; } = 180;
     public string DefaultTheme { get; set; } = "professional-navy";

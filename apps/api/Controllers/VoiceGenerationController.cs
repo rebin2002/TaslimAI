@@ -29,7 +29,7 @@ public sealed class VoiceGenerationController(
         {
             var input = VoiceGenerationContractMapper.ToInput(request);
             VoiceGenerationRequestValidator.Validate(input, options.Value);
-            var preflight = await costControl.CheckPreflightAsync(request.WorkspaceId, UsageFeature.Voice, 0m, cancellationToken);
+            var preflight = await costControl.CheckPreflightAsync(request.WorkspaceId, UsageFeature.Voice, null, cancellationToken);
             if (!preflight.Allowed)
                 return ApiResults.Error(this, StatusCodes.Status429TooManyRequests, preflight.RejectionCode ?? "COST_GUARDRAIL_REJECTED", preflight.RejectionMessage ?? "This operation exceeds a configured safety limit.");
 
