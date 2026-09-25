@@ -17,10 +17,17 @@ public interface IGeneratedAssetPublisher
     Task DiscardAsync(PreparedGenerationOutput publication, CancellationToken cancellationToken = default);
 }
 
-public sealed class GeneratedAssetPublisher(TaslimDbContext db, FileProcessingService files, ILogger<GeneratedAssetPublisher> logger) : IGeneratedAssetPublisher
+public sealed class GeneratedAssetPublisher(
+    TaslimDbContext db,
+    FileProcessingService files,
+    IGenerationQualityControl qualityControl,
+    ILogger<GeneratedAssetPublisher> logger) : IGeneratedAssetPublisher
 {
     public async Task<PreparedGenerationOutput> PrepareAsync(GenerationJob job, GenerationHandlerOutput output, CancellationToken cancellationToken = default)
     {
+        var quality = await qualityControl.ValidateAsync(job, output, cancellationToken);
+        if (quality.IsFailure) throw new GenerationQualityControlException(quality);
+
         var assetType = output.Asset?.AssetType.Trim().ToLowerInvariant();
         if (assetType is not null && !AssetTypes.Supported.Contains(assetType)) throw new InvalidOperationException("Generated asset type is not supported.");
         StoredFile? createdFile = null;

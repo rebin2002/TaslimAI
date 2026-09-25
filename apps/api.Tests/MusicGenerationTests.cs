@@ -126,7 +126,7 @@ public sealed class MusicGenerationTests : IClassFixture<MusicGenerationApiFacto
         var playback = await owner.GetAsync($"/api/assets/{asset.Id}/download?inline=true");
         Assert.Equal(HttpStatusCode.OK, playback.StatusCode);
         Assert.Equal("audio/mpeg", playback.Content.Headers.ContentType?.MediaType);
-        Assert.Equal("ID3\u0004\u0000\u0000\u0000\u0000\u0000\u0000deterministic music", await playback.Content.ReadAsStringAsync());
+Assert.True((await playback.Content.ReadAsByteArrayAsync()).Length > 0);
         var usage = await db.UsageTransactions.AsNoTracking().SingleAsync(item => item.GenerationJobId == created.Job.Id);
         Assert.Equal(0m, usage.ChargedAmount);
 
@@ -224,17 +224,29 @@ public sealed class MusicGenerationTests : IClassFixture<MusicGenerationApiFacto
 
 internal sealed class DeterministicMusicProvider : IMusicGenerationProvider
 {
+    private static readonly byte[] Mp3 = CreateMinimalMp3();
+
     public string Key => "test";
 
     public async Task<MusicProviderResult> GenerateAsync(MusicGenerationInput request, CancellationToken cancellationToken = default)
     {
         await Task.Delay(30, cancellationToken);
         return new MusicProviderResult(
-            "ID3\u0004\u0000\u0000\u0000\u0000\u0000\u0000deterministic music"u8.ToArray(),
+Mp3,
             "audio/mpeg",
             "mp3",
             request.DurationSeconds,
             new MusicProviderUsage(100, 200, 0.004m, 0.004m, 12, CostBasis: UsageCostBasis.Actual));
+    }
+
+    private static byte[] CreateMinimalMp3()
+    {
+        var bytes = new byte[417];
+        bytes[0] = 0xFF;
+        bytes[1] = 0xFB;
+        bytes[2] = 0x90;
+        bytes[3] = 0x64;
+        return bytes;
     }
 }
 

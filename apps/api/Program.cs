@@ -175,6 +175,8 @@ builder.Services.AddScoped<IPaymentReconciliationService, PaymentReconciliationS
 builder.Services.AddSingleton<IPaymentProvider, UnconfiguredPaymentProvider>();
 builder.Services.AddScoped<IAssetService, AssetService>();
 builder.Services.AddScoped<IGeneratedAssetPublisher, GeneratedAssetPublisher>();
+builder.Services.Configure<GenerationQualityControlOptions>(builder.Configuration.GetSection("GenerationQualityControl"));
+builder.Services.AddScoped<IGenerationQualityControl, GenerationQualityControlService>();
 builder.Services.AddScoped<IUsageLedgerService, UsageLedgerService>();
 builder.Services.AddSingleton<IUsageChargingService, SafeUsageChargingService>();
 builder.Services.Configure<UsageControlOptions>(builder.Configuration.GetSection("UsageControls"));
