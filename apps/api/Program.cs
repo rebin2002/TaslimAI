@@ -165,6 +165,7 @@ builder.Services.AddCors(options => options.AddPolicy("Frontend", policy =>
         .AllowAnyMethod()
         .AllowCredentials()));
 builder.Services.AddScoped<WorkspaceAccessService>();
+builder.Services.AddScoped<MovieCollaborationAccess>();
 builder.Services.Configure<BillingOptions>(builder.Configuration.GetSection("Billing"));
 builder.Services.AddScoped<IBillingProvisioningService, BillingProvisioningService>();
 builder.Services.AddScoped<IBillingAccountService, BillingAccountService>();
@@ -205,6 +206,7 @@ builder.Services.AddScoped<IMovieStudioService, MovieStudioService>();
 builder.Services.AddScoped<IMovieV2Service, MovieV2Service>();
 builder.Services.AddScoped<IMovieGuideService, MovieGuideService>();
 builder.Services.AddScoped<IMovieStoryService, MovieStoryService>();
+builder.Services.AddScoped<IMovieCollaborationService, MovieCollaborationService>();
 builder.Services.Configure<MovieVideoOptions>(builder.Configuration.GetSection("MovieVideo"));
 builder.Services.AddScoped<MovieVideoExecutionStore>();
 builder.Services.AddHttpClient<RunwayMovieVideoProvider>();
