@@ -258,6 +258,8 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.Property(item => item.ContinuityRules).HasMaxLength(8_000).IsRequired();
             entity.Property(item => item.ReferenceAssetIdsJson).HasMaxLength(20_000);
             entity.Property(item => item.CurrentRevisionNumber).IsRequired();
+            entity.Property(item => item.CinematographyIntent).HasMaxLength(30);
+            entity.Property(item => item.CinematographyBibleReferencesJson).HasMaxLength(20_000);
             entity.HasIndex(item => item.MovieProjectId).IsUnique();
             entity.HasOne(item => item.MovieProject).WithOne(item => item.Guide).HasForeignKey<MovieContinuityGuide>(item => item.MovieProjectId).OnDelete(DeleteBehavior.Cascade);
         });
@@ -465,6 +467,7 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.Property(item => item.Description).HasMaxLength(8_000).IsRequired();
             entity.Property(item => item.CameraAndFraming).HasMaxLength(2_000);
             entity.Property(item => item.CameraMotion).HasMaxLength(2_000);
+            entity.Property(item => item.CinematographyJson).HasMaxLength(20_000);
             entity.Property(item => item.Narration).HasMaxLength(8_000);
             entity.Property(item => item.Dialogue).HasMaxLength(8_000);
             entity.Property(item => item.VisualContinuityNotes).HasMaxLength(4_000);

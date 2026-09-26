@@ -14,6 +14,9 @@ namespace Taslim.Api.Controllers;
 [Route("api/movie-studio")]
 public sealed class MovieStudioController(IMovieStudioService movies, IMovieGuideService guides, IMovieStoryService stories) : ControllerBase
 {
+    [HttpGet("cinematography/presets")]
+    public IActionResult CinematographyPresets() => Ok(CinematographyPresetCatalog.All);
+
     [HttpGet("provider")]
     public async Task<IActionResult> Provider(CancellationToken cancellationToken) => Ok(new MovieStudioProviderResponse(await movies.ProviderReadinessAsync()));
 
@@ -49,6 +52,7 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieGuid
             return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result);
         }
         catch (MovieGuideLockedException exception) { return ApiResults.Error(this, 409, "MOVIE_GUIDE_LOCKED", exception.Message); }
+        catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_GUIDE_INVALID", exception.Message); }
     }
 
     [HttpPost("projects/{id:guid}/guide/revisions")]

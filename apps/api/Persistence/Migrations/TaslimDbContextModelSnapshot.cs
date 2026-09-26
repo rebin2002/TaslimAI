@@ -2742,6 +2742,14 @@ namespace Taslim.Api.Persistence.Migrations
                         .HasMaxLength(4000)
                         .HasColumnType("character varying(4000)");
 
+                    b.Property<string>("CinematographyBibleReferencesJson")
+                        .HasMaxLength(20000)
+                        .HasColumnType("character varying(20000)");
+
+                    b.Property<string>("CinematographyIntent")
+                        .HasMaxLength(30)
+                        .HasColumnType("character varying(30)");
+
                     b.Property<string>("ContinuityRules")
                         .IsRequired()
                         .HasMaxLength(8000)
@@ -3144,6 +3152,10 @@ namespace Taslim.Api.Persistence.Migrations
                     b.Property<string>("CameraMotion")
                         .HasMaxLength(2000)
                         .HasColumnType("character varying(2000)");
+
+                    b.Property<string>("CinematographyJson")
+                        .HasMaxLength(20000)
+                        .HasColumnType("character varying(20000)");
 
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
