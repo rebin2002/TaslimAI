@@ -93,4 +93,14 @@ describe("Full Movie workspace foundation", () => {
     expect(shotDesignerSource).toContain("Unsupported");
   });
 
+  it("organizes storyboard work by scene and shot without inventing artwork", () => {
+    expect(workspaceSource).toContain("api.getMovieStoryboard(projectId)");
+    expect(workspaceSource).toContain("Storyboard candidates");
+    expect(workspaceSource).toContain("Create candidate from Shot Plan");
+    expect(workspaceSource).toContain("No storyboard has been generated for this shot.");
+    expect(workspaceSource).toContain("No Asset attached");
+    expect(workspaceSource).toContain("Request revision");
+    expect(workspaceSource).toContain("Storyboard composition approved.");
+  });
+
 });
