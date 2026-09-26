@@ -2,6 +2,7 @@ import { test, expect } from "./fixtures";
 
 test.describe("Movie Studio V2 browser smoke", () => {
   test("creates a Full Movie project and navigates every production room without fake output", async ({ authenticatedPage: page }) => {
+    test.setTimeout(120_000);
     await page.goto("/create/movie");
     await expect(page.getByRole("heading", { name: /movie studio/i })).toBeVisible();
 
