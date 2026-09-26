@@ -127,4 +127,13 @@ describe("Full Movie workspace foundation", () => {
     expect(directorSource).toContain("Review → explicit approval → execute");
   });
 
+  it("keeps loading and failure states useful without fabricating project content", () => {
+    expect(workspaceSource).toContain("WorkspaceSkeleton");
+    expect(workspaceSource).toContain('aria-busy="true"');
+    expect(workspaceSource).toContain("Try again");
+    expect(workspaceSource).toContain('role="alert"');
+    expect(workspaceSource).toContain('aria-label={item.label}');
+    expect(workspaceSource).toContain('data-module-state={isFuture ? "foundation" : "operational"}');
+  });
+
 });
