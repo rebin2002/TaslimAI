@@ -28,13 +28,13 @@ public interface IDirectorActionExecutor
 
 public sealed record DirectorActionExecution(bool Succeeded, string? FailureCode, string SafeMessage, string? ResultJson);
 
-public sealed class MovieDirectorContextAssembler(TaslimDbContext db)
+public sealed class MovieDirectorContextAssembler(TaslimDbContext db, IMovieCharacterContinuityService continuity)
 {
     private const int MaxStoryScenes = 40;
     private const int MaxStoryElementsPerScene = 40;
     private const int MaxRelevantReferences = 12;
 
-    public async Task<DirectorContextAssemblyResult?> AssembleAsync(Guid userId, Guid movieProjectId, CancellationToken cancellationToken = default)
+    public async Task<DirectorContextAssemblyResult?> AssembleAsync(Guid userId, Guid movieProjectId, Guid? targetShotId = null, CancellationToken cancellationToken = default)
     {
         var movie = await db.MovieProjects.AsNoTracking()
             .Include(item => item.Guide).ThenInclude(item => item.Revisions)
@@ -57,6 +57,8 @@ public sealed class MovieDirectorContextAssembler(TaslimDbContext db)
             ? null
             : new DirectorStoryContext(approvedStoryRevision.Id, approvedStoryRevision.RevisionNumber, approvedStoryRevision.Premise, approvedStoryRevision.Logline, approvedStoryRevision.Synopsis, approvedStoryRevision.Treatment, approvedStoryRevision.Authorship);
 
+        var continuitySnapshot = await continuity.BuildSnapshotAsync(userId, movieProjectId, null, targetShotId, cancellationToken);
+
         var context = new DirectorContextDto(
             movie.Id, movie.WorkspaceId, movie.Title, movie.Description, movie.DurationSeconds, movie.AspectRatio, movie.Style, movie.Language,
             new DirectorGuideContext(movie.Guide.VisualLanguage, movie.Guide.CameraLanguage, movie.Guide.ColorAndLighting, movie.Guide.SoundAndNarration, movie.Guide.ContinuityRules, lockedRevision.RevisionNumber, true, lockedRevision.CinematographyBibleJson),
@@ -66,7 +68,8 @@ public sealed class MovieDirectorContextAssembler(TaslimDbContext db)
             movie.Characters.OrderBy(item => item.CreatedAt).Select(item => new DirectorCharacterContext(item.Name, item.Description, item.Appearance, item.ContinuityNotes)).ToArray(),
             movie.Locations.OrderBy(item => item.CreatedAt).Select(item => new DirectorLocationContext(item.Name, item.Description, item.VisualContinuityNotes)).ToArray(),
             DateTime.UtcNow,
-            ApprovedStory: approvedStoryContext);
+            ApprovedStory: approvedStoryContext,
+            Continuity: continuitySnapshot is null ? null : new DirectorContinuityContext(continuitySnapshot.MovieSceneId, continuitySnapshot.MovieShotId, continuitySnapshot.SnapshotHash, continuitySnapshot.Characters, continuitySnapshot.Warnings));
         var snapshotJson = JsonSerializer.Serialize(context, DirectorJson.Options);
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(snapshotJson))).ToLowerInvariant();
         return new DirectorContextAssemblyResult(context, snapshotJson, hash);
@@ -136,7 +139,7 @@ public sealed class MovieDirectorService(
         if (movie is null || !await access.IsMemberAsync(userId, movie.WorkspaceId, cancellationToken)) return null;
         if (!string.IsNullOrWhiteSpace(request.StoryAction))
             return await CreateStoryProposalAsync(userId, movie, request, cancellationToken);
-        var context = await assembler.AssembleAsync(userId, movieProjectId, cancellationToken);
+        var context = await assembler.AssembleAsync(userId, movieProjectId, request.ShotId, cancellationToken);
         if (context is null) return null;
         var shot = request.ShotId.HasValue
             ? context.Context.Scenes.SelectMany(item => item.Shots).FirstOrDefault(item => item.Id == request.ShotId.Value)
@@ -190,7 +193,8 @@ public sealed class MovieDirectorService(
     {
         var proposal = await QueryProposal().FirstOrDefaultAsync(item => item.Id == proposalId, cancellationToken);
         if (proposal is null || !await access.IsMemberAsync(userId, proposal.WorkspaceId, cancellationToken)) return null;
-        var context = await assembler.AssembleAsync(userId, proposal.MovieProjectId, cancellationToken);
+        var targetShotId = proposal.Actions.Select(item => TryGetShotId(item.PayloadJson)).FirstOrDefault(item => item.HasValue);
+        var context = await assembler.AssembleAsync(userId, proposal.MovieProjectId, targetShotId, cancellationToken);
         if (context is null) return null;
         var storyAction = proposal.Actions.FirstOrDefault(item => item.ActionType == DirectorActionTypes.StoryAssistance);
         var storyContext = storyAction is null ? null : await assembler.AssembleStoryAsync(proposal.MovieProjectId, ReadStoryPayload(storyAction)?.TargetSceneId, ReadStoryPayload(storyAction)?.TargetElementId, cancellationToken);
@@ -297,6 +301,11 @@ public sealed class MovieDirectorService(
     private static DirectorActionDto ToDto(DirectorAction action) => new(action.Id, action.DirectorProposalId, action.ActionType, action.Status, action.ApprovalRequired, action.FailureCode, action.CreatedAt, action.ApprovedAt, action.StartedAt, action.CompletedAt, action.Results.OrderBy(item => item.CreatedAt).Select(ToDto).ToArray());
     private static DirectorActionResultDto ToDto(DirectorActionResult result) => new(result.Id, result.Status, result.SafeMessage, result.ResultJson, result.CreatedAt);
     private static IReadOnlyList<string> ParseRationale(string json) { try { return JsonSerializer.Deserialize<string[]>(json) ?? []; } catch (JsonException) { return []; } }
+    private static Guid? TryGetShotId(string payloadJson)
+    {
+        try { return JsonSerializer.Deserialize<DirectorGenerateShotPayload>(payloadJson, DirectorJson.Options)?.ShotId; }
+        catch (JsonException) { return null; }
+    }
     private static DirectorStoryActionPayload? ReadStoryPayload(DirectorAction action) { try { return JsonSerializer.Deserialize<DirectorStoryActionPayload>(action.PayloadJson, DirectorJson.Options); } catch (JsonException) { return null; } }
     private static DirectorStoryReviewDto? ReadStoryReview(DirectorAction action)
     {
