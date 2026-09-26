@@ -419,3 +419,32 @@ public sealed class MovieProductionReviewRequest
     public string? Reason { get; set; }
     public string? MetadataJson { get; set; }
 }
+
+public sealed class MovieProductionMotionPreviewRequest
+{
+    public Guid SourceVersionId { get; set; }
+    public string? Label { get; set; }
+    public string CompositionJson { get; set; } = "{}";
+    public string? StageProvenanceJson { get; set; }
+}
+
+public sealed class MovieProductionRenderRequest
+{
+    public Guid SourceVersionId { get; set; }
+    public string? Label { get; set; }
+    public string? Title { get; set; }
+    public decimal? EstimatedProviderCostUsd { get; set; }
+}
+
+public sealed class MovieProductionTakeRequest
+{
+    public string? Label { get; set; }
+    public string QualityLevel { get; set; } = MovieQualityLevels.Standard;
+    public string? Notes { get; set; }
+}
+
+public sealed record MovieProductionRenderResponse(
+    MovieProductionVersionDto Version,
+    GenerationJobDto Job,
+    Guid ClipId,
+    MovieStudioProjectDto Project);

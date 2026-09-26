@@ -733,6 +733,7 @@ public sealed record MovieSetDto(Guid Id, Guid? MovieLocationId, string Name, st
 public sealed record MoviePropDto(Guid Id, string Name, string Description, string? Category, string? ContinuityNotes, Guid? ReferenceAssetId);
 public sealed record MovieWorldReferenceDto(Guid Id, string Name, string Kind, string? Description, string? TagsJson, Guid? AssetId);
 public sealed record MovieWorldUsageDto(Guid Id, Guid MovieSceneId, Guid? MovieShotId, string EntityType, Guid EntityId, string? Role);
+public sealed record MovieWorldUsageDetailDto(Guid Id, Guid MovieSceneId, Guid? MovieShotId, int SceneSequence, string SceneTitle, int? ShotSequence, string? ShotDescription, string EntityType, Guid EntityId, string EntityName, string? Role);
 public sealed record MovieContinuityFactDto(Guid Id, string ScopeType, Guid? ScopeId, string FactKey, string FactValue, string? Notes, DateTime UpdatedAt);
 public sealed record MovieContinuityLockDto(Guid Id, string EntityType, Guid? EntityId, string FieldName, string LockedValue, string Strength, string? Reason, DateTime CreatedAt, DateTime? ReleasedAt);
 public sealed record MovieWorldDto(IReadOnlyList<MovieLocationDto> Locations, IReadOnlyList<MovieSetDto> Sets, IReadOnlyList<MoviePropDto> Props, IReadOnlyList<MovieWorldReferenceDto> References, IReadOnlyList<MovieWorldUsageDto> Usages, IReadOnlyList<MovieContinuityFactDto> Facts, IReadOnlyList<MovieContinuityLockDto> Locks);
