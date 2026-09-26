@@ -1946,3 +1946,23 @@ body { background: var(--canvas); }
 @media (max-width: 1180px) { .movie-story-editor-layout { grid-template-columns: 130px minmax(0,1fr) 185px; gap: 12px; } .movie-screenplay-element { grid-template-columns: 79px minmax(0,.45fr) minmax(0,2fr) 22px; } .movie-screenplay-element input[placeholder="(parenthetical)"] { grid-column: 2; } }
 @media (max-width: 860px) { .movie-story-editor-layout { grid-template-columns: 1fr; }.movie-story-sections { position: static; flex-direction: row; align-items: center; overflow-x: auto; padding-bottom: 4px; }.movie-story-sections > .movie-inspector-label, .movie-story-provenance { display: none; }.movie-story-sections > button { flex: 0 0 auto; padding-inline: 10px; }.movie-story-history { padding: 18px 0 0; border-top: 1px solid var(--movie-line); border-inline-start: 0; }.movie-story-history-item { width: auto; min-width: 150px; display: inline-flex; margin-inline-end: 5px; vertical-align: top; }.movie-story-history .movie-section-head { display: flex; }.movie-story-history-note { max-width: 250px; }.movie-story-statusbar { align-items: flex-start; flex-direction: column; }.movie-story-actions { justify-content: flex-start; } }
 @media (max-width: 560px) { .movie-story-manuscript { padding: 13px; }.movie-story-manuscript-head { flex-direction: column; }.movie-screenplay-toolbar { align-items: flex-start; flex-wrap: wrap; }.movie-screenplay-toolbar label { flex: 1 0 100%; margin-inline-start: 0; }.movie-screenplay-scene { padding: 10px; }.movie-screenplay-scene > header { grid-template-columns: 23px minmax(0,1fr); }.movie-screenplay-scene-meta { grid-column: 2; }.movie-screenplay-element { grid-template-columns: 1fr 22px; }.movie-screenplay-element select { grid-column: 1; }.movie-screenplay-element input, .movie-screenplay-element textarea { grid-column: 1; }.movie-screenplay-element button { grid-column: 2; grid-row: 1 / span 4; }.movie-story-actions { gap: 5px; }.movie-story-actions .movie-story-state { flex: 1 0 100%; } }
+
+/* Director-assisted Story review controls */
+.movie-story-copy-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+.movie-story-copy-grid .movie-record-line { min-height: 100%; padding: 14px; border: 1px solid #edf1f5; border-radius: 9px; background: #fbfcfd; }
+.movie-story-safety-note { max-width: 760px; margin: -4px 0 18px; color: #6f7f8f; font-size: 12px; line-height: 1.65; }
+.movie-story-assist-controls { display: flex; align-items: end; gap: 10px; flex-wrap: wrap; }
+.movie-story-assist-controls label { display: flex; min-width: 210px; flex: 1; flex-direction: column; gap: 6px; color: #7c8997; font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: .08em; }
+.movie-story-assist-controls select { min-height: 38px; padding: 0 10px; color: var(--ink); border: 1px solid #dfe7ef; border-radius: 8px; background: white; font-size: 12px; font-weight: 600; text-transform: none; letter-spacing: normal; }
+.movie-story-proposal-review { border-color: #b9dcd8; box-shadow: 0 10px 28px rgba(24, 167, 156, .07); }
+.movie-story-diff { margin-top: 16px; }
+.movie-story-diff > div { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin-top: 7px; }
+.movie-story-diff article { min-width: 0; padding: 13px; border: 1px solid #e7edf2; border-radius: 8px; background: #fafbfd; }
+.movie-story-diff article.is-proposed { border-color: #b9dcd8; background: #f0fbf9; }
+.movie-story-diff small { color: #8593a1; font-size: 9px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+.movie-story-diff p { margin: 8px 0 0; color: #526273; white-space: pre-wrap; font-size: 12px; line-height: 1.6; }
+.movie-story-findings { margin-top: 16px; padding: 13px; border: 1px solid #f3dfae; border-radius: 8px; background: #fffaf0; color: #806c43; font-size: 12px; }
+.movie-story-findings ul { margin: 8px 0 0; padding-inline-start: 18px; }
+.movie-story-review-actions { display: flex; align-items: center; gap: 8px; margin-top: 18px; flex-wrap: wrap; }
+.movie-story-approved-note { color: #4d8c6b; font-size: 11px; font-weight: 700; }
+@media (max-width: 720px) { .movie-story-copy-grid, .movie-story-diff > div { grid-template-columns: 1fr; }.movie-story-assist-controls { display: block; }.movie-story-assist-controls label { margin-bottom: 10px; }.movie-story-assist-controls .movie-workspace-button { width: 100%; } }

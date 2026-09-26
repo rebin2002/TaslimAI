@@ -31,7 +31,7 @@ import {
   Users,
   Workflow,
 } from "lucide-react";
-import { api, type MovieOverview, type MovieProject, type MovieProjectShell, type MovieScene, type MovieScreenplayElementType, type MovieStory, type MovieStoryRevision, type MovieStoryRevisionInput } from "@/lib/api";
+import { api, type DirectorProposal, type DirectorStoryAction, type MovieOverview, type MovieProject, type MovieProjectShell, type MovieScene, type MovieScreenplayElementType, type MovieStory, type MovieStoryRevision, type MovieStoryRevisionInput } from "@/lib/api";
 import { assetFileUrl } from "@/lib/apiBase";
 
 export const fullMovieModules = [
@@ -310,6 +310,10 @@ function StoryModule({ projectId }: { projectId: string }) {
   const [dirty, setDirty] = useState(false);
   const [savedAt, setSavedAt] = useState<Date | null>(null);
   const [error, setError] = useState("");
+  const [storyProposal, setStoryProposal] = useState<DirectorProposal | null>(null);
+  const [storyAction, setStoryAction] = useState<DirectorStoryAction>("improve_logline");
+  const [storySceneId, setStorySceneId] = useState<string | null>(null);
+  const [storyBusy, setStoryBusy] = useState(false);
 
   useEffect(() => {
     let mounted = true;
@@ -429,6 +433,45 @@ function StoryModule({ projectId }: { projectId: string }) {
     } catch (cause) { setError(cause instanceof Error ? cause.message : "That revision could not be opened."); }
   }
 
+  async function createStoryProposal() {
+    setStoryBusy(true);
+    setError("");
+    try {
+      const result = await api.createMovieDirectorProposal(projectId, { storyAction, targetSceneId: storySceneId });
+      setStoryProposal(result.proposal);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "The Director proposal could not be created.");
+    } finally { setStoryBusy(false); }
+  }
+
+  async function reviewStoryProposal(approve: boolean) {
+    if (!storyProposal) return;
+    setStoryBusy(true);
+    try {
+      const result = approve ? await api.approveMovieDirectorProposal(storyProposal.id) : await api.rejectMovieDirectorProposal(storyProposal.id);
+      setStoryProposal(result);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "The proposal review could not be saved."); }
+    finally { setStoryBusy(false); }
+  }
+
+  async function applyStoryProposal() {
+    const action = storyProposal?.actions.find((item) => item.actionType === "story_assistance");
+    if (!action || storyProposal.status !== "Approved") return;
+    setStoryBusy(true);
+    try {
+      const result = await api.executeMovieDirectorAction(action.id);
+      if (result.action.status !== "Succeeded") throw new Error(result.result.safeMessage);
+      const nextStory = await api.getMovieStory(projectId);
+      setStory(nextStory);
+      setSelectedRevision(nextStory.currentRevision);
+      setDraft(nextStory.currentRevision ? revisionToDraft(nextStory.currentRevision) : emptyStoryDraft());
+      setDraftRevisionId(nextStory.currentRevision?.status === "Draft" ? nextStory.currentRevision.id : null);
+      setDirty(false);
+      setStoryProposal(null);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "The approved Story proposal could not be applied."); }
+    finally { setStoryBusy(false); }
+  }
+
   if (loading) return <div className="movie-story-loading"><span className="loading-spinner" /><p>Opening the story room…</p></div>;
   if (!story) return <div className="movie-module-empty"><BookOpen size={20} /><strong>Story unavailable</strong><p>{error || "This story is not available in the current workspace."}</p></div>;
 
@@ -445,6 +488,8 @@ function StoryModule({ projectId }: { projectId: string }) {
     {error && <div className="movie-workspace-error-inline"><XCircleIcon /> {error}</div>}
     {approved && <div className="movie-story-approval-banner"><LockKeyhole size={15} /><div><strong>Approved screenplay · Revision {approved.revisionNumber}</strong><span>Downstream Director and scene breakdown should use this revision. Your current draft remains separate.</span></div></div>}
     {!approved && <div className="movie-story-approval-banner is-muted"><BookOpen size={15} /><div><strong>No approved screenplay yet</strong><span>Finish a human review before production decisions treat this story as authoritative.</span></div></div>}
+    <section className="movie-workspace-section movie-director-story-assist"><div className="movie-section-head"><div><span className="movie-workspace-kicker">Director assistance</span><h3>Propose, review, then apply</h3></div><Sparkles size={17} /></div><p className="movie-story-safety-note">The Director uses the locked guide, current or approved Story, selected scene, and bounded Cast / World references. It never silently rewrites an approved revision.</p><div className="movie-story-assist-controls"><label><span>Action</span><select value={storyAction} onChange={(event) => setStoryAction(event.target.value as DirectorStoryAction)}><option value="develop_premise">Develop premise</option><option value="improve_logline">Improve logline</option><option value="expand_synopsis">Expand synopsis</option><option value="create_refine_treatment">Create / refine treatment</option><option value="propose_screenplay_scene">Propose screenplay scene</option><option value="rewrite_selected_passage">Rewrite selected passage</option><option value="improve_dialogue">Improve dialogue</option><option value="tighten_pacing">Tighten pacing</option><option value="identify_story_inconsistencies">Identify story inconsistencies</option></select></label>{(current?.scenes.length ?? approved?.scenes.length ?? 0) > 0 && <label><span>Target scene</span><select value={storySceneId ?? ""} onChange={(event) => setStorySceneId(event.target.value || null)}><option value="">Choose a scene</option>{(current?.scenes ?? approved?.scenes ?? []).map((scene) => <option key={scene.id} value={scene.id}>{scene.sceneIdentifier} · {scene.slugline}</option>)}</select></label>}<button className="movie-workspace-button is-primary" type="button" onClick={() => void createStoryProposal()} disabled={storyBusy}>{storyBusy ? "Working…" : "Create proposal"}</button></div></section>
+    {storyProposal?.storyReview && <StoryProposalReview proposal={storyProposal} busy={storyBusy} onReview={(approveProposal) => void reviewStoryProposal(approveProposal)} onApply={() => void applyStoryProposal()} />}
     <div className="movie-story-editor-layout">
       <nav className="movie-story-sections" aria-label="Story sections"><span className="movie-inspector-label">Manuscript</span>{storySections.map((item) => <button type="button" key={item} className={section === item ? "is-active" : ""} onClick={() => setSection(item)}>{item}<ChevronRight size={13} /></button>)}<div className="movie-story-provenance"><span className="movie-inspector-label">Revision provenance</span><strong>{draft.authorship}</strong><p>{draft.authorship === "AiSuggested" ? "AI suggestion — review before treating as authored." : draft.authorship === "HumanEdited" ? "Human-edited from an earlier suggestion or pass." : "Written or materially authored by a human."}</p></div></nav>
       <div className="movie-story-manuscript">
@@ -455,6 +500,12 @@ function StoryModule({ projectId }: { projectId: string }) {
     </div>
   </div>;
 }
+
+function StoryProposalReview({ proposal, busy, onReview, onApply }: { proposal: DirectorProposal; busy: boolean; onReview: (approve: boolean) => void; onApply: () => void }) {
+  const review = proposal.storyReview!;
+  return <section className="movie-workspace-section movie-story-proposal-review"><div className="movie-section-head"><div><span className="movie-workspace-kicker">Proposal review · {proposal.status}</span><h3>{proposal.title}</h3></div><span className="movie-section-count">{review.appliesToStory ? "Revision candidate" : "Review only"}</span></div><p>{proposal.summary}</p>{review.changes.map((change) => <div className="movie-story-diff" key={`${change.field}-${change.target}`}><span className="movie-inspector-label">{change.field}</span><div><article><small>Existing content</small><p>{change.existingContent}</p></article><article className="is-proposed"><small>Proposed content</small><p>{change.proposedContent}</p></article></div></div>)}{review.findings.length > 0 && <div className="movie-story-findings"><strong>Director findings</strong><ul>{review.findings.map((finding) => <li key={finding}>{finding.replaceAll("_", " ")}</li>)}</ul></div>}<div className="movie-story-review-actions">{proposal.status === "PendingApproval" && <><button className="movie-workspace-button is-primary" type="button" onClick={() => onReview(true)} disabled={busy}>Accept proposal</button><button className="movie-workspace-button" type="button" onClick={() => onReview(false)} disabled={busy}>Reject</button></>}{proposal.status === "Approved" && review.appliesToStory && <button className="movie-workspace-button is-primary" type="button" onClick={onApply} disabled={busy}>Apply to editable Story revision</button>}{proposal.status === "Approved" && !review.appliesToStory && <span className="movie-story-approved-note">Findings accepted. No Story text was changed.</span>}</div></section>;
+}
+
 
 function StoryTextEditor({ section, draft, editable, onUpdate }: { section: Exclude<StorySection, "Screenplay">; draft: MovieStoryRevisionInput; editable: boolean; onUpdate: (value: string) => void }) {
   const key = section.toLowerCase() as "premise" | "logline" | "synopsis" | "treatment";
