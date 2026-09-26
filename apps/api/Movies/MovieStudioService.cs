@@ -15,6 +15,7 @@ public interface IMovieStudioService
     Task<MovieStudioProjectShellDto?> GetShellAsync(Guid userId, Guid id, CancellationToken cancellationToken);
     Task<MovieCastDto?> GetCastAsync(Guid userId, Guid id, CancellationToken cancellationToken);
     Task<MovieCharacterDetailDto?> GetCharacterDetailAsync(Guid userId, Guid characterId, CancellationToken cancellationToken);
+    Task<MovieWorldWorkspaceDto?> GetWorldAsync(Guid userId, Guid id, CancellationToken cancellationToken);
     Task<MovieStudioProjectDto?> UpdateGuideAsync(Guid userId, Guid id, MovieStudioGuideRequest request, CancellationToken cancellationToken);
     Task<MovieSceneDto?> AddSceneAsync(Guid userId, Guid id, MovieStudioSceneRequest request, CancellationToken cancellationToken);
     Task<MovieCharacterDto?> AddCharacterAsync(Guid userId, Guid id, MovieStudioCharacterRequest request, CancellationToken cancellationToken);
@@ -151,6 +152,32 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         return character is null || !await collaboration.HasPermissionAsync(userId, character.MovieProjectId, MoviePermissions.View, cancellationToken)
             ? null
             : new MovieCharacterDetailDto(ToCastProjectDto(character.MovieProject), ToDto(character));
+    }
+
+    public async Task<MovieWorldWorkspaceDto?> GetWorldAsync(Guid userId, Guid id, CancellationToken cancellationToken)
+    {
+        var movie = await db.MovieProjects.AsNoTracking().FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
+        if (movie is null || !await collaboration.HasPermissionAsync(userId, id, MoviePermissions.View, cancellationToken)) return null;
+
+        var locations = await db.MovieLocations.AsNoTracking().Where(item => item.MovieProjectId == id).OrderBy(item => item.CreatedAt).ToArrayAsync(cancellationToken);
+        var sets = await db.MovieSets.AsNoTracking().Where(item => item.MovieProjectId == id).Include(item => item.Variations).OrderBy(item => item.CreatedAt).ToArrayAsync(cancellationToken);
+        var props = await db.MovieProps.AsNoTracking().Where(item => item.MovieProjectId == id).OrderBy(item => item.CreatedAt).ToArrayAsync(cancellationToken);
+        var references = await db.MovieWorldReferences.AsNoTracking().Where(item => item.MovieProjectId == id).OrderBy(item => item.CreatedAt).ToArrayAsync(cancellationToken);
+        var usages = await db.MovieWorldUsages.AsNoTracking().Where(item => item.MovieProjectId == id).Include(item => item.MovieScene).Include(item => item.MovieShot).OrderBy(item => item.CreatedAt).ToArrayAsync(cancellationToken);
+        var facts = await db.MovieContinuityFacts.AsNoTracking().Where(item => item.MovieProjectId == id).OrderBy(item => item.CreatedAt).ToArrayAsync(cancellationToken);
+        var locks = await db.MovieContinuityLocks.AsNoTracking().Where(item => item.MovieProjectId == id && item.ReleasedAt == null).OrderByDescending(item => item.CreatedAt).ToArrayAsync(cancellationToken);
+        var world = new MovieWorldDto(locations.Select(ToDto).ToArray(), sets.Select(ToDto).ToArray(), props.Select(ToDto).ToArray(), references.Select(ToDto).ToArray(), usages.Select(ToDto).ToArray(), facts.Select(ToDto).ToArray(), locks.Select(ToDto).ToArray());
+
+        var names = locations.ToDictionary(item => (Type: MovieWorldEntityTypes.Location, item.Id), item => item.Name);
+        foreach (var item in sets) names[(MovieWorldEntityTypes.Set, item.Id)] = item.Name;
+        foreach (var item in props) names[(MovieWorldEntityTypes.Prop, item.Id)] = item.Name;
+        var usageDetails = usages.Select(item => new MovieWorldUsageDetailDto(item.Id, item.MovieSceneId, item.MovieShotId, item.MovieScene.Sequence, item.MovieScene.Title, item.MovieShot?.Sequence, item.MovieShot?.Description, item.EntityType, item.EntityId, names.GetValueOrDefault((item.EntityType, item.EntityId), "World record"), item.Role)).ToArray();
+
+        var assetIds = locations.Select(item => item.ReferenceAssetId).Concat(sets.Select(item => item.ReferenceAssetId)).Concat(sets.SelectMany(item => item.Variations.Select(variation => variation.ReferenceAssetId))).Concat(props.Select(item => item.ReferenceAssetId)).Concat(references.Select(item => item.AssetId)).Where(item => item.HasValue).Select(item => item!.Value).Distinct().ToArray();
+        var assets = assetIds.Length == 0
+            ? Array.Empty<MovieWorldAssetDto>()
+            : await db.Assets.AsNoTracking().Where(item => item.WorkspaceId == movie.WorkspaceId && assetIds.Contains(item.Id)).OrderBy(item => item.Name).Select(item => new MovieWorldAssetDto(item.Id, item.Name, item.AssetType, item.MimeType, item.StoredFileId.HasValue, item.StoredFileId.HasValue && (item.MimeType != null && (item.MimeType.StartsWith("image/") || item.MimeType.StartsWith("audio/") || item.MimeType.StartsWith("video/")))).ToArrayAsync(cancellationToken);
+        return new MovieWorldWorkspaceDto(movie.Id, movie.WorkspaceId, movie.ProjectId, movie.Status, movie.Title, movie.Description, movie.DurationSeconds, movie.AspectRatio, movie.Style, movie.Language, world, usageDetails, assets);
     }
 
     public async Task<MovieStudioProjectDto?> UpdateGuideAsync(Guid userId, Guid id, MovieStudioGuideRequest request, CancellationToken cancellationToken)

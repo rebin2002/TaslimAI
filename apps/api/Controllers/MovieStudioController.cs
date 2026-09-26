@@ -63,6 +63,13 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieGuid
         return result is null ? ApiResults.Error(this, 404, "MOVIE_CHARACTER_NOT_FOUND", "Movie character not found.") : Ok(result);
     }
 
+    [HttpGet("projects/{id:guid}/world")]
+    public async Task<IActionResult> GetWorld(Guid id, CancellationToken cancellationToken)
+    {
+        var result = await movies.GetWorldAsync(GetUserId(), id, cancellationToken);
+        return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result);
+    }
+
     [HttpPatch("projects/{id:guid}/guide")]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> UpdateGuide(Guid id, MovieStudioGuideRequest request, CancellationToken cancellationToken)
