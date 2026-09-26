@@ -8,7 +8,7 @@ The implementation intentionally does not reference or modify Batch 3.13 Social 
 
 ## Workflow model
 
-Quick Movie captures a title, description, duration, aspect ratio, style, language, optional existing Project, and additional instructions. The API persists a `MovieProject`, creates a `MovieClip`, and queues a durable `GenerationJob` with type `movie.quick.generate`. The worker submits through `IMovieVideoProvider`, persists the provider job identifier, polls with bounded retry/backoff, supports cancellation, retrieves the output as a stream, and publishes it through the existing private `StoredFile` → `Asset` path. When no provider is configured, the default implementation fails safely with `MOVIE_PROVIDER_UNAVAILABLE`; the plan, clip, usage transaction, and job history remain available for continuation.
+Quick Movie captures a title, description, duration, aspect ratio, style, language, optional existing Project, and additional instructions. The API persists a `MovieProject` plus a starter `MovieScene`/`MovieShot` plan; it does **not** queue expensive video generation. Video generation remains an explicit action after composition approval and uses the existing durable `GenerationJob` path. When a provider is eventually invoked, the worker submits through `IMovieVideoProvider`, persists the provider job identifier, polls with bounded retry/backoff, supports cancellation, retrieves the output as a stream, and publishes it through the existing private `StoredFile` → `Asset` path.
 
 Full Movie Project creates a durable planning workspace. If the user does not select an existing Project, the API creates a Taslim Project with type `Movie`. The Movie Project owns a Movie Guide / Continuity Guide and collections for scenes, characters, locations, shots, clips, and assemblies. The first UI exposes the guide and starter planning columns for scenes, characters, and locations. Shot, clip, and assembly persistence is present for future studio stages.
 
@@ -24,16 +24,31 @@ Movie-specific tables are additive and live beside the existing Projects, Assets
 | `MovieCharacter` | Durable character identity and continuity notes | Movie Project, optional Asset reference |
 | `MovieLocation` | Durable location identity and visual continuity | Movie Project, optional Asset reference |
 | `MovieShot` | Shot description, framing, motion, narration, dialogue | Scene |
+| `MovieProductionVersion` | Versioned storyboard, keyframe, motion-preview, or render candidate | Shot, optional Generation Job, optional Asset(s), creator/reviewer |
+| `MovieProductionVersionAsset` | Role-tagged reusable Asset reference, including first/last frame planning | Production Version, Asset |
+| `MovieProductionStageTransition` | Immutable stage provenance and review audit trail | Shot, Version, actor, optional Generation Job |
 | `MovieClip` | Provider output and continuity attachment | Project, Scene, Shot, Generation Job, Asset, Stored File |
 | `MovieAssembly` | Future final-assembly record | Project, Generation Job, Asset |
 
-The EF-generated migration `20260923153752_AddMovieStudioFoundation` creates the planning tables. The additive migration `20260924012646_AddMovieVideoProviderExecution` adds continuity snapshots, scene clip links, and the durable provider execution table. Existing private storage remains the boundary for actual media files: `StoredFile` carries the storage key and provider, while `Asset` is the user-facing library record.
+The EF-generated migration `20260923153752_AddMovieStudioFoundation` creates the planning tables. The additive migration `20260924012646_AddMovieVideoProviderExecution` adds continuity snapshots, scene clip links, and the durable provider execution table. `20260926101042_AddMovieStoryboardProductionFunnel` adds the approval-gated production records and backfills existing shots to `ShotPlan`. Existing private storage remains the boundary for actual media files: `StoredFile` carries the storage key and provider, while `Asset` is the user-facing library record.
 
 The schema does not store public provider URLs as final assets. Provider identifiers and metadata are retained as nullable fields so a configured provider can be reconciled with Taslim-owned private storage later.
 
 ## Generation jobs and usage accounting
 
-Movie operations use the existing durable `GenerationJob` queue. The supported job types are `movie.quick.generate`, `movie.clip.generate`, and `movie.assembly`. Quick Movie creates a project-level clip; authenticated scene-level and shot-level generation routes create `movie.clip.generate` jobs that retain their scene/shot links and continuity snapshot. Assembly remains a reserved future stage.
+Movie operations use the existing durable `GenerationJob` queue. The supported job types are `movie.quick.generate`, `movie.clip.generate`, and `movie.assembly`; the production funnel does not add a provider, router, retry, or cost system. Storyboard and keyframe versions may optionally link an existing `GenerationJob` and one or more existing `Asset` records, but creating a candidate is persistence-only. Explicit scene/shot generation routes continue to create `movie.clip.generate` jobs that retain their scene/shot links and continuity snapshot. Assembly remains a reserved future stage.
+
+The canonical shot state machine is:
+
+```text
+ShotPlan
+  → StoryboardCandidate → ApprovedStoryboard
+  → ProductionKeyframe → ApprovedKeyframe
+  → MotionPreview
+  → ProductionRender → SelectedFinalTake
+```
+
+Only pending versions can be approved or rejected. A keyframe requires an approved storyboard source; motion preview requires an approved keyframe; production render requires an approved motion preview. Rejection retains the version and reason without advancing the shot. `RegenerationMetadataJson` records selective regeneration intent, while `StageProvenanceJson`, role-tagged Asset references, optional first/last-frame Asset IDs, and immutable transition rows preserve how a version was produced.
 
 `GenerationJobUsageService` maps every movie job type to `UsageFeature.Movie`. This preserves the repository's existing feature naming convention and allows pending, failed, cancelled, and completed transactions to appear in existing usage reporting without a new accounting subsystem.
 
@@ -65,13 +80,16 @@ All endpoints require authentication and workspace membership. Mutating endpoint
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /api/movie-studio/provider` | Report provider readiness and supported operations |
-| `POST /api/movie-studio/projects` | Create Quick Movie or Full Movie Project; Quick also queues a generation job |
+| `POST /api/movie-studio/projects` | Create Quick Movie or Full Movie Project; Quick creates a starter shot plan without a video job |
 | `GET /api/movie-studio/projects/{id}` | Load the durable plan and guide |
 | `PATCH /api/movie-studio/projects/{id}/guide` | Update continuity-guide fields |
 | `POST /api/movie-studio/projects/{id}/scenes` | Add an ordered scene |
 | `POST /api/movie-studio/projects/{id}/characters` | Add a character record |
 | `POST /api/movie-studio/projects/{id}/locations` | Add a location record |
 | `POST /api/movie-studio/scenes/{sceneId}/shots` | Add an ordered shot with narration/dialogue and continuity fields |
+| `GET /api/movie-studio/shots/{shotId}/production` | Read current production stage, versions, and immutable transitions |
+| `POST /api/movie-studio/shots/{shotId}/production/versions` | Persist a storyboard/keyframe/motion/render candidate with optional first/last-frame, Asset, and GenerationJob links |
+| `POST /api/movie-studio/production/versions/{versionId}/review` | Approve or reject a pending candidate and advance the state machine when approved |
 | `POST /api/movie-studio/projects/{id}/scenes/{sceneId}/generate` | Queue a provider-neutral scene clip job |
 | `POST /api/movie-studio/shots/{shotId}/generate` | Queue a provider-neutral shot clip job |
 

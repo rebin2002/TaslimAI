@@ -133,6 +133,7 @@ public sealed class MovieShot
     public Guid Id { get; set; }
     public Guid MovieSceneId { get; set; }
     public int Sequence { get; set; }
+    public string ProductionStage { get; set; } = MovieProductionStages.ShotPlan;
     public string Description { get; set; } = string.Empty;
     public string? CameraAndFraming { get; set; }
     public string? CameraMotion { get; set; }
@@ -144,6 +145,8 @@ public sealed class MovieShot
     public DateTime UpdatedAt { get; set; }
     public MovieScene Scene { get; set; } = null!;
     public ICollection<MovieClip> Clips { get; set; } = [];
+    public ICollection<MovieProductionVersion> ProductionVersions { get; set; } = [];
+    public ICollection<MovieProductionStageTransition> ProductionTransitions { get; set; } = [];
 }
 
 public sealed class MovieClip
@@ -309,7 +312,7 @@ public sealed record MovieProviderReadinessDto(bool Ready, IReadOnlyList<string>
 
 public sealed record MovieGuideDto(Guid Id, string VisualLanguage, string CameraLanguage, string ColorAndLighting, string SoundAndNarration, string ContinuityRules, DateTime UpdatedAt);
 public sealed record MovieSceneDto(Guid Id, int Sequence, string Title, string Summary, int? DurationSeconds, string? ContinuityNotes, string? Narration, string? Dialogue, IReadOnlyList<MovieShotDto> Shots, IReadOnlyList<MovieClipDto> Clips);
-public sealed record MovieShotDto(Guid Id, int Sequence, string Description, string? CameraAndFraming, string? CameraMotion, int? DurationSeconds, string? Narration, string? Dialogue, string? VisualContinuityNotes, IReadOnlyList<MovieClipDto> Clips);
+public sealed record MovieShotDto(Guid Id, int Sequence, string Description, string? CameraAndFraming, string? CameraMotion, int? DurationSeconds, string? Narration, string? Dialogue, string? VisualContinuityNotes, string ProductionStage, IReadOnlyList<MovieClipDto> Clips, IReadOnlyList<MovieProductionVersionDto> ProductionVersions);
 public sealed record MovieCharacterDto(Guid Id, string Name, string Description, string? Appearance, string? VoiceAndPerformance, string? ContinuityNotes, Guid? ReferenceAssetId);
 public sealed record MovieLocationDto(Guid Id, string Name, string Description, string? VisualContinuityNotes, Guid? ReferenceAssetId);
 public sealed record MovieClipDto(Guid Id, Guid? MovieSceneId, Guid? MovieShotId, Guid? GenerationJobId, Guid? AssetId, string Status, int? DurationSeconds, string? MetadataJson, string? ContinuitySnapshotJson);
