@@ -174,12 +174,68 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieGuid
         catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_LOCATION_INVALID", exception.Message); }
     }
 
+    [HttpPost("projects/{id:guid}/sets")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> AddSet(Guid id, MovieStudioSetRequest request, CancellationToken cancellationToken)
+    {
+        try { var result = await movies.AddSetAsync(GetUserId(), id, request, cancellationToken); return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result); }
+        catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_SET_INVALID", exception.Message); }
+    }
+
+    [HttpPost("sets/{setId:guid}/variations")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> AddSetVariation(Guid setId, MovieStudioSetVariationRequest request, CancellationToken cancellationToken)
+    {
+        try { var result = await movies.AddSetVariationAsync(GetUserId(), setId, request, cancellationToken); return result is null ? ApiResults.Error(this, 404, "MOVIE_SET_NOT_FOUND", "Movie set not found.") : Ok(result); }
+        catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_SET_VARIATION_INVALID", exception.Message); }
+    }
+
+    [HttpPost("projects/{id:guid}/props")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> AddProp(Guid id, MovieStudioPropRequest request, CancellationToken cancellationToken)
+    {
+        try { var result = await movies.AddPropAsync(GetUserId(), id, request, cancellationToken); return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result); }
+        catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_PROP_INVALID", exception.Message); }
+    }
+
+    [HttpPost("projects/{id:guid}/world-references")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> AddWorldReference(Guid id, MovieStudioWorldReferenceRequest request, CancellationToken cancellationToken)
+    {
+        try { var result = await movies.AddWorldReferenceAsync(GetUserId(), id, request, cancellationToken); return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result); }
+        catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_WORLD_REFERENCE_INVALID", exception.Message); }
+    }
+
+    [HttpPost("projects/{id:guid}/continuity-facts")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> AddContinuityFact(Guid id, MovieStudioContinuityFactRequest request, CancellationToken cancellationToken)
+    {
+        try { var result = await movies.AddContinuityFactAsync(GetUserId(), id, request, cancellationToken); return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result); }
+        catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_CONTINUITY_FACT_INVALID", exception.Message); }
+    }
+
+    [HttpPost("projects/{id:guid}/continuity-locks")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> AddContinuityLock(Guid id, MovieStudioContinuityLockRequest request, CancellationToken cancellationToken)
+    {
+        try { var result = await movies.AddContinuityLockAsync(GetUserId(), id, request, cancellationToken); return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result); }
+        catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_CONTINUITY_LOCK_INVALID", exception.Message); }
+    }
+
     [HttpPost("scenes/{sceneId:guid}/shots")]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> AddShot(Guid sceneId, MovieStudioShotRequest request, CancellationToken cancellationToken)
     {
         try { var result = await movies.AddShotAsync(GetUserId(), sceneId, request, cancellationToken); return result is null ? ApiResults.Error(this, 404, "MOVIE_SCENE_NOT_FOUND", "Movie scene not found.") : Ok(result); }
         catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_SHOT_INVALID", exception.Message); }
+    }
+
+    [HttpPost("scenes/{sceneId:guid}/world-usage")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> AddWorldUsage(Guid sceneId, MovieStudioWorldUsageRequest request, CancellationToken cancellationToken)
+    {
+        try { var result = await movies.AddWorldUsageAsync(GetUserId(), sceneId, request, cancellationToken); return result is null ? ApiResults.Error(this, 404, "MOVIE_SCENE_NOT_FOUND", "Movie scene not found.") : Ok(result); }
+        catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_WORLD_USAGE_INVALID", exception.Message); }
     }
 
     [HttpPost("projects/{id:guid}/scenes/{sceneId:guid}/generate")]

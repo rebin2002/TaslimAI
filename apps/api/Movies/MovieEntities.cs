@@ -132,6 +132,40 @@ public static class MovieGuideRevisionStatuses
     public const string Locked = "Locked";
 }
 
+public static class MovieWorldEntityTypes
+{
+    public const string Location = "location";
+    public const string Set = "set";
+    public const string Prop = "prop";
+    public static readonly IReadOnlySet<string> Supported = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { Location, Set, Prop };
+}
+
+public static class MovieWorldReferenceKinds
+{
+    public const string Moodboard = "moodboard";
+    public const string Location = "location";
+    public const string Set = "set";
+    public const string Prop = "prop";
+    public const string Continuity = "continuity";
+    public const string Other = "other";
+}
+
+public static class MovieWorldScopes
+{
+    public const string Project = "project";
+    public const string Scene = "scene";
+    public const string Shot = "shot";
+    public const string Location = "location";
+    public const string Set = "set";
+    public const string Prop = "prop";
+}
+
+public static class MovieContinuityLockStrengths
+{
+    public const string Soft = "soft";
+    public const string Hard = "hard";
+}
+
 public sealed class MovieProject
 {
     public Guid Id { get; set; }
@@ -164,6 +198,12 @@ public sealed class MovieProject
     public ICollection<MovieAct> Acts { get; set; } = [];
     public ICollection<MovieCharacter> Characters { get; set; } = [];
     public ICollection<MovieLocation> Locations { get; set; } = [];
+    public ICollection<MovieSet> Sets { get; set; } = [];
+    public ICollection<MovieProp> Props { get; set; } = [];
+    public ICollection<MovieWorldReference> WorldReferences { get; set; } = [];
+    public ICollection<MovieContinuityFact> ContinuityFacts { get; set; } = [];
+    public ICollection<MovieContinuityLock> ContinuityLocks { get; set; } = [];
+    public ICollection<MovieWorldUsage> WorldUsages { get; set; } = [];
     public ICollection<MovieClip> Clips { get; set; } = [];
     public ICollection<MovieAssembly> Assemblies { get; set; } = [];
 }
@@ -326,6 +366,135 @@ public sealed class MovieLocation
     public Asset? ReferenceAsset { get; set; }
 }
 
+public sealed class MovieSet
+{
+    public Guid Id { get; set; }
+    public Guid MovieProjectId { get; set; }
+    public Guid? MovieLocationId { get; set; }
+    public string Name { get; set; } = string.Empty;
+    public string Description { get; set; } = string.Empty;
+    public string EnvironmentType { get; set; } = "practical";
+    public string? VisualDescription { get; set; }
+    public string? TimeOfDay { get; set; }
+    public string? Weather { get; set; }
+    public string? ContinuityNotes { get; set; }
+    public Guid? ReferenceAssetId { get; set; }
+    public DateTime CreatedAt { get; set; }
+    public DateTime UpdatedAt { get; set; }
+    public MovieProject MovieProject { get; set; } = null!;
+    public MovieLocation? MovieLocation { get; set; }
+    public Asset? ReferenceAsset { get; set; }
+    public ICollection<MovieSetVariation> Variations { get; set; } = [];
+}
+
+public sealed class MovieSetVariation
+{
+    public Guid Id { get; set; }
+    public Guid MovieSetId { get; set; }
+    public string Name { get; set; } = string.Empty;
+    public string? VisualDescription { get; set; }
+    public string? TimeOfDay { get; set; }
+    public string? Weather { get; set; }
+    public string? Lighting { get; set; }
+    public string? ContinuityNotes { get; set; }
+    public Guid? ReferenceAssetId { get; set; }
+    public bool IsDefault { get; set; }
+    public DateTime CreatedAt { get; set; }
+    public DateTime UpdatedAt { get; set; }
+    public MovieSet MovieSet { get; set; } = null!;
+    public Asset? ReferenceAsset { get; set; }
+}
+
+public sealed class MovieProp
+{
+    public Guid Id { get; set; }
+    public Guid MovieProjectId { get; set; }
+    public string Name { get; set; } = string.Empty;
+    public string Description { get; set; } = string.Empty;
+    public string? Category { get; set; }
+    public string? ContinuityNotes { get; set; }
+    public Guid? ReferenceAssetId { get; set; }
+    public DateTime CreatedAt { get; set; }
+    public DateTime UpdatedAt { get; set; }
+    public MovieProject MovieProject { get; set; } = null!;
+    public Asset? ReferenceAsset { get; set; }
+}
+
+public sealed class MovieWorldReference
+{
+    public Guid Id { get; set; }
+    public Guid MovieProjectId { get; set; }
+    public string Name { get; set; } = string.Empty;
+    public string Kind { get; set; } = MovieWorldReferenceKinds.Other;
+    public string? Description { get; set; }
+    public string? TagsJson { get; set; }
+    public Guid? AssetId { get; set; }
+    public DateTime CreatedAt { get; set; }
+    public DateTime UpdatedAt { get; set; }
+    public MovieProject MovieProject { get; set; } = null!;
+    public Asset? Asset { get; set; }
+    public ICollection<MovieWorldReferenceLink> Links { get; set; } = [];
+}
+
+public sealed class MovieWorldReferenceLink
+{
+    public Guid Id { get; set; }
+    public Guid MovieProjectId { get; set; }
+    public Guid MovieWorldReferenceId { get; set; }
+    public string EntityType { get; set; } = string.Empty;
+    public Guid EntityId { get; set; }
+    public string? Role { get; set; }
+    public DateTime CreatedAt { get; set; }
+    public MovieProject MovieProject { get; set; } = null!;
+    public MovieWorldReference Reference { get; set; } = null!;
+}
+
+public sealed class MovieWorldUsage
+{
+    public Guid Id { get; set; }
+    public Guid MovieProjectId { get; set; }
+    public Guid MovieSceneId { get; set; }
+    public Guid? MovieShotId { get; set; }
+    public string EntityType { get; set; } = string.Empty;
+    public Guid EntityId { get; set; }
+    public string? Role { get; set; }
+    public DateTime CreatedAt { get; set; }
+    public MovieProject MovieProject { get; set; } = null!;
+    public MovieScene MovieScene { get; set; } = null!;
+    public MovieShot? MovieShot { get; set; }
+}
+
+public sealed class MovieContinuityFact
+{
+    public Guid Id { get; set; }
+    public Guid MovieProjectId { get; set; }
+    public string ScopeType { get; set; } = MovieWorldScopes.Project;
+    public Guid? ScopeId { get; set; }
+    public string FactKey { get; set; } = string.Empty;
+    public string FactValue { get; set; } = string.Empty;
+    public string? Notes { get; set; }
+    public DateTime CreatedAt { get; set; }
+    public DateTime UpdatedAt { get; set; }
+    public MovieProject MovieProject { get; set; } = null!;
+}
+
+public sealed class MovieContinuityLock
+{
+    public Guid Id { get; set; }
+    public Guid MovieProjectId { get; set; }
+    public string EntityType { get; set; } = MovieWorldScopes.Project;
+    public Guid? EntityId { get; set; }
+    public string FieldName { get; set; } = string.Empty;
+    public string LockedValue { get; set; } = string.Empty;
+    public string Strength { get; set; } = MovieContinuityLockStrengths.Hard;
+    public string? Reason { get; set; }
+    public Guid CreatedByUserId { get; set; }
+    public DateTime CreatedAt { get; set; }
+    public DateTime? ReleasedAt { get; set; }
+    public MovieProject MovieProject { get; set; } = null!;
+    public ApplicationUser CreatedByUser { get; set; } = null!;
+}
+
 public sealed class MovieShot
 {
     public Guid Id { get; set; }
@@ -419,7 +588,8 @@ public sealed record MovieVideoGenerationRequest(
     string? SceneJson,
     string? ShotJson,
     string? SourceImageUri = null,
-    string? ContinuationProviderJobId = null);
+    string? ContinuationProviderJobId = null,
+    string? WorldContextJson = null);
 
 public sealed record MovieVideoSubmission(string ProviderJobId);
 public sealed record MovieVideoProviderStatus(
@@ -508,7 +678,8 @@ public sealed record MovieGenerationInput(
     string? SceneJson,
     string? ShotJson,
     string? SourceImageUri = null,
-    string? ContinuationProviderJobId = null);
+    string? ContinuationProviderJobId = null,
+    string? WorldContextJson = null);
 
 public sealed record MovieProviderReadinessDto(bool Ready, IReadOnlyList<string> SupportedOperations);
 
@@ -523,9 +694,17 @@ public sealed record MovieCharacterRelationshipDto(Guid Id, Guid RelatedCharacte
 public sealed record MovieCharacterContinuityLockDto(Guid Id, string FieldKey, string LockedValue, Guid? CharacterStateId, DateTime ApprovedAt);
 public sealed record MovieCharacterDto(Guid Id, string Name, string? Role, string Description, string? Appearance, string? PhysicalDescription, string? Wardrobe, string? VoiceReference, string? PersonalityAndStoryNotes, string? VoiceAndPerformance, string? ContinuityNotes, Guid? ReferenceAssetId, IReadOnlyList<Guid> ReferenceAssetIds, IReadOnlyList<MovieCharacterStateDto> States, IReadOnlyList<MovieCharacterRelationshipDto> Relationships, IReadOnlyList<MovieCharacterContinuityLockDto> ContinuityLocks);
 public sealed record MovieLocationDto(Guid Id, string Name, string Description, string? VisualContinuityNotes, Guid? ReferenceAssetId);
+public sealed record MovieSetVariationDto(Guid Id, Guid MovieSetId, string Name, string? VisualDescription, string? TimeOfDay, string? Weather, string? Lighting, string? ContinuityNotes, Guid? ReferenceAssetId, bool IsDefault);
+public sealed record MovieSetDto(Guid Id, Guid? MovieLocationId, string Name, string Description, string EnvironmentType, string? VisualDescription, string? TimeOfDay, string? Weather, string? ContinuityNotes, Guid? ReferenceAssetId, IReadOnlyList<MovieSetVariationDto> Variations);
+public sealed record MoviePropDto(Guid Id, string Name, string Description, string? Category, string? ContinuityNotes, Guid? ReferenceAssetId);
+public sealed record MovieWorldReferenceDto(Guid Id, string Name, string Kind, string? Description, string? TagsJson, Guid? AssetId);
+public sealed record MovieWorldUsageDto(Guid Id, Guid MovieSceneId, Guid? MovieShotId, string EntityType, Guid EntityId, string? Role);
+public sealed record MovieContinuityFactDto(Guid Id, string ScopeType, Guid? ScopeId, string FactKey, string FactValue, string? Notes, DateTime UpdatedAt);
+public sealed record MovieContinuityLockDto(Guid Id, string EntityType, Guid? EntityId, string FieldName, string LockedValue, string Strength, string? Reason, DateTime CreatedAt, DateTime? ReleasedAt);
+public sealed record MovieWorldDto(IReadOnlyList<MovieLocationDto> Locations, IReadOnlyList<MovieSetDto> Sets, IReadOnlyList<MoviePropDto> Props, IReadOnlyList<MovieWorldReferenceDto> References, IReadOnlyList<MovieWorldUsageDto> Usages, IReadOnlyList<MovieContinuityFactDto> Facts, IReadOnlyList<MovieContinuityLockDto> Locks);
 public sealed record MovieClipDto(Guid Id, Guid? MovieSceneId, Guid? MovieShotId, Guid? GenerationJobId, Guid? AssetId, string Status, int? DurationSeconds, string? MetadataJson, string? ContinuitySnapshotJson);
 public sealed record MovieAssemblyDto(Guid Id, Guid? GenerationJobId, Guid? AssetId, string Status, string OutputFormat, string? MetadataJson, DateTime CreatedAt, DateTime? CompletedAt);
-public sealed record MovieStudioProjectDto(Guid Id, Guid WorkspaceId, Guid? ProjectId, string Mode, string Status, string Title, string Description, int DurationSeconds, string AspectRatio, string Style, string Language, string? AdditionalInstructions, DateTime CreatedAt, DateTime UpdatedAt, MovieGuideDto Guide, IReadOnlyList<MovieSceneDto> Scenes, IReadOnlyList<MovieCharacterDto> Characters, IReadOnlyList<MovieLocationDto> Locations, IReadOnlyList<MovieClipDto> Clips, IReadOnlyList<MovieAssemblyDto> Assemblies);
+public sealed record MovieStudioProjectDto(Guid Id, Guid WorkspaceId, Guid? ProjectId, string Mode, string Status, string Title, string Description, int DurationSeconds, string AspectRatio, string Style, string Language, string? AdditionalInstructions, DateTime CreatedAt, DateTime UpdatedAt, MovieGuideDto Guide, IReadOnlyList<MovieSceneDto> Scenes, IReadOnlyList<MovieCharacterDto> Characters, IReadOnlyList<MovieLocationDto> Locations, IReadOnlyList<MovieClipDto> Clips, IReadOnlyList<MovieAssemblyDto> Assemblies, MovieWorldDto World);
 public sealed record MovieStudioProjectResponse(MovieStudioProjectDto Project, GenerationJobDto? Job);
 public sealed record MovieStudioProviderResponse(MovieProviderReadinessDto Provider);
 public sealed record MovieStudioGenerationResponse(MovieStudioProjectDto Project, GenerationJobDto Job, Guid ClipId);
@@ -592,6 +771,13 @@ public sealed class MovieStudioContinuityLockRequest
 }
 
 public sealed record MovieStudioLocationRequest(string Name, string Description, string? VisualContinuityNotes, Guid? ReferenceAssetId);
+public sealed record MovieStudioSetRequest(string Name, string Description, string? EnvironmentType, Guid? MovieLocationId, string? VisualDescription, string? TimeOfDay, string? Weather, string? ContinuityNotes, Guid? ReferenceAssetId);
+public sealed record MovieStudioSetVariationRequest(string Name, string? VisualDescription, string? TimeOfDay, string? Weather, string? Lighting, string? ContinuityNotes, Guid? ReferenceAssetId, bool IsDefault = false);
+public sealed record MovieStudioPropRequest(string Name, string Description, string? Category, string? ContinuityNotes, Guid? ReferenceAssetId);
+public sealed record MovieStudioWorldReferenceRequest(string Name, string Kind, string? Description, string? TagsJson, Guid? AssetId);
+public sealed record MovieStudioWorldUsageRequest(string EntityType, Guid EntityId, Guid? MovieShotId, string? Role);
+public sealed record MovieStudioContinuityFactRequest(string ScopeType, Guid? ScopeId, string FactKey, string FactValue, string? Notes);
+public sealed record MovieStudioContinuityLockRequest(string EntityType, Guid? EntityId, string FieldName, string LockedValue, string? Strength, string? Reason);
 public sealed record MovieStudioShotRequest(string Description, string? CameraAndFraming, string? CameraMotion, int? DurationSeconds, string? Narration, string? Dialogue, string? VisualContinuityNotes);
 public sealed record MovieStudioGuideRequest(string? VisualLanguage, string? CameraLanguage, string? ColorAndLighting, string? SoundAndNarration, string? ContinuityRules);
 public sealed class MovieGuideRevisionRequest
