@@ -11,7 +11,7 @@ namespace Taslim.Api.Controllers;
 [ApiController]
 [Authorize]
 [Route("api/movie-studio")]
-public sealed class MovieStudioController(IMovieStudioService movies) : ControllerBase
+public sealed class MovieStudioController(IMovieStudioService movies, IMovieGuideService guides) : ControllerBase
 {
     [HttpGet("provider")]
     public async Task<IActionResult> Provider(CancellationToken cancellationToken) => Ok(new MovieStudioProviderResponse(await movies.ProviderReadinessAsync()));
@@ -42,8 +42,70 @@ public sealed class MovieStudioController(IMovieStudioService movies) : Controll
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> UpdateGuide(Guid id, MovieStudioGuideRequest request, CancellationToken cancellationToken)
     {
-        var result = await movies.UpdateGuideAsync(GetUserId(), id, request, cancellationToken);
+        try
+        {
+            var result = await movies.UpdateGuideAsync(GetUserId(), id, request, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result);
+        }
+        catch (MovieGuideLockedException exception) { return ApiResults.Error(this, 409, "MOVIE_GUIDE_LOCKED", exception.Message); }
+    }
+
+    [HttpPost("projects/{id:guid}/guide/revisions")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> CreateGuideRevision(Guid id, MovieGuideRevisionRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await guides.CreateRevisionAsync(GetUserId(), id, request, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : CreatedAtAction(nameof(GetGuideHistory), new { id }, result);
+        }
+        catch (MovieGuideValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_GUIDE_INVALID", exception.Message); }
+        catch (MovieGuideLockedException exception) { return ApiResults.Error(this, 409, "MOVIE_GUIDE_LOCKED", exception.Message); }
+    }
+
+    [HttpGet("projects/{id:guid}/guide/history")]
+    public async Task<IActionResult> GetGuideHistory(Guid id, CancellationToken cancellationToken)
+    {
+        var result = await guides.GetHistoryAsync(GetUserId(), id, cancellationToken);
         return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result);
+    }
+
+    [HttpPost("projects/{id:guid}/guide/lock")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> LockGuide(Guid id, MovieGuideLockRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await guides.LockAsync(GetUserId(), id, request.RevisionNumber, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result);
+        }
+        catch (MovieGuideValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_GUIDE_INVALID", exception.Message); }
+        catch (MovieGuideLockedException exception) { return ApiResults.Error(this, 409, "MOVIE_GUIDE_LOCKED", exception.Message); }
+    }
+
+    [HttpPost("projects/{id:guid}/guide/unlock")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> UnlockGuide(Guid id, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await guides.UnlockAsync(GetUserId(), id, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result);
+        }
+        catch (MovieGuideValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_GUIDE_INVALID", exception.Message); }
+    }
+
+    [HttpGet("projects/{id:guid}/director-context")]
+    public async Task<IActionResult> GetDirectorContext(Guid id, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await guides.GetDirectorContextAsync(GetUserId(), id, cancellationToken);
+            return result is null
+                ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.")
+                : Ok(result);
+        }
+        catch (MovieGuideNotLockedException exception) { return ApiResults.Error(this, 409, "MOVIE_GUIDE_NOT_LOCKED", exception.Message); }
     }
 
     [HttpPost("projects/{id:guid}/scenes")]

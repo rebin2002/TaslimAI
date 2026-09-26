@@ -45,6 +45,7 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
         public DbSet<PaymentReconciliationRecord> PaymentReconciliationRecords => Set<PaymentReconciliationRecord>();
         public DbSet<MovieProject> MovieProjects => Set<MovieProject>();
     public DbSet<MovieContinuityGuide> MovieContinuityGuides => Set<MovieContinuityGuide>();
+    public DbSet<MovieGuideRevision> MovieGuideRevisions => Set<MovieGuideRevision>();
     public DbSet<MovieScene> MovieScenes => Set<MovieScene>();
     public DbSet<MovieCharacter> MovieCharacters => Set<MovieCharacter>();
     public DbSet<MovieLocation> MovieLocations => Set<MovieLocation>();
@@ -162,8 +163,26 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.Property(item => item.SoundAndNarration).HasMaxLength(4_000).IsRequired();
             entity.Property(item => item.ContinuityRules).HasMaxLength(8_000).IsRequired();
             entity.Property(item => item.ReferenceAssetIdsJson).HasMaxLength(20_000);
+            entity.Property(item => item.CurrentRevisionNumber).IsRequired();
             entity.HasIndex(item => item.MovieProjectId).IsUnique();
             entity.HasOne(item => item.MovieProject).WithOne(item => item.Guide).HasForeignKey<MovieContinuityGuide>(item => item.MovieProjectId).OnDelete(DeleteBehavior.Cascade);
+        });
+        builder.Entity<MovieGuideRevision>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.Status).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.StoryBibleJson).HasMaxLength(50_000).IsRequired();
+            entity.Property(item => item.CharacterBibleReferencesJson).HasMaxLength(50_000).IsRequired();
+            entity.Property(item => item.WorldBibleReferencesJson).HasMaxLength(50_000).IsRequired();
+            entity.Property(item => item.VisualBibleJson).HasMaxLength(50_000).IsRequired();
+            entity.Property(item => item.CinematographyBibleJson).HasMaxLength(50_000).IsRequired();
+            entity.Property(item => item.AudioBibleJson).HasMaxLength(50_000).IsRequired();
+            entity.Property(item => item.ContinuityBibleJson).HasMaxLength(50_000).IsRequired();
+            entity.HasIndex(item => new { item.MovieContinuityGuideId, item.RevisionNumber }).IsUnique();
+            entity.HasIndex(item => new { item.MovieContinuityGuideId, item.Status });
+            entity.HasOne(item => item.Guide).WithMany(item => item.Revisions).HasForeignKey(item => item.MovieContinuityGuideId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.CreatedByUser).WithMany().HasForeignKey(item => item.CreatedByUserId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(item => item.LockedByUser).WithMany().HasForeignKey(item => item.LockedByUserId).OnDelete(DeleteBehavior.Restrict);
         });
         builder.Entity<MovieScene>(entity =>
         {

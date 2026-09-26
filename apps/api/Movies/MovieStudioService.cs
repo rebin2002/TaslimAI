@@ -53,14 +53,16 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
             DurationSeconds = request.DurationSeconds, AspectRatio = request.AspectRatio, Style = request.Style.Trim(),
             Language = request.Language.ToLowerInvariant(), AdditionalInstructions = MovieStudioHelpers.Clean(request.AdditionalInstructions),
             CreatedAt = now, UpdatedAt = now,
-            Guide = new MovieContinuityGuide
-            {
-                Id = Guid.NewGuid(), VisualLanguage = request.VisualLanguage?.Trim() ?? string.Empty,
-                CameraLanguage = request.CameraLanguage?.Trim() ?? string.Empty, ColorAndLighting = request.ColorAndLighting?.Trim() ?? string.Empty,
-                SoundAndNarration = request.SoundAndNarration?.Trim() ?? string.Empty, ContinuityRules = request.ContinuityRules?.Trim() ?? string.Empty,
-                UpdatedAt = now,
-            },
         };
+        var guide = new MovieContinuityGuide
+        {
+            Id = Guid.NewGuid(), VisualLanguage = request.VisualLanguage?.Trim() ?? string.Empty,
+            CameraLanguage = request.CameraLanguage?.Trim() ?? string.Empty, ColorAndLighting = request.ColorAndLighting?.Trim() ?? string.Empty,
+            SoundAndNarration = request.SoundAndNarration?.Trim() ?? string.Empty, ContinuityRules = request.ContinuityRules?.Trim() ?? string.Empty,
+            CurrentRevisionNumber = 1, UpdatedAt = now,
+        };
+        guide.Revisions.Add(MovieGuideService.CreateInitialRevision(guide, userId, now, request));
+        movie.Guide = guide;
         db.MovieProjects.Add(movie);
         await db.SaveChangesAsync(cancellationToken);
 
@@ -104,12 +106,25 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
     {
         var movie = await db.MovieProjects.Include(item => item.Guide).FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
         if (movie is null || !await access.IsMemberAsync(userId, movie.WorkspaceId, cancellationToken)) return null;
+        if (movie.Guide.LockedRevisionNumber is not null) throw new MovieGuideLockedException();
         movie.Guide.VisualLanguage = request.VisualLanguage?.Trim() ?? string.Empty;
         movie.Guide.CameraLanguage = request.CameraLanguage?.Trim() ?? string.Empty;
         movie.Guide.ColorAndLighting = request.ColorAndLighting?.Trim() ?? string.Empty;
         movie.Guide.SoundAndNarration = request.SoundAndNarration?.Trim() ?? string.Empty;
         movie.Guide.ContinuityRules = request.ContinuityRules?.Trim() ?? string.Empty;
-        movie.Guide.UpdatedAt = movie.UpdatedAt = DateTime.UtcNow;
+        var now = DateTime.UtcNow;
+        movie.Guide.Revisions.Add(MovieGuideService.BuildRevision(movie.Guide, userId, new MovieGuideRevisionRequest
+        {
+            StoryBibleJson = "{}",
+            CharacterBibleReferencesJson = "[]",
+            WorldBibleReferencesJson = "[]",
+            VisualBibleJson = JsonSerializer.Serialize(new { visualLanguage = movie.Guide.VisualLanguage, colorAndLighting = movie.Guide.ColorAndLighting }),
+            CinematographyBibleJson = JsonSerializer.Serialize(new { cameraLanguage = movie.Guide.CameraLanguage }),
+            AudioBibleJson = JsonSerializer.Serialize(new { soundAndNarration = movie.Guide.SoundAndNarration }),
+            ContinuityBibleJson = JsonSerializer.Serialize(new { continuityRules = movie.Guide.ContinuityRules }),
+        }, movie.Guide.CurrentRevisionNumber + 1, now));
+        movie.Guide.CurrentRevisionNumber++;
+        movie.Guide.UpdatedAt = movie.UpdatedAt = now;
         await db.SaveChangesAsync(cancellationToken);
         return await GetAsync(userId, id, cancellationToken);
     }
@@ -226,7 +241,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
 
     private IQueryable<MovieProject> Query() => db.MovieProjects.AsNoTracking().Include(item => item.Guide).Include(item => item.Scenes).ThenInclude(scene => scene.Shots).ThenInclude(shot => shot.Clips).Include(item => item.Scenes).ThenInclude(scene => scene.Clips).Include(item => item.Clips).Include(item => item.Characters).Include(item => item.Locations).Include(item => item.Assemblies);
 
-    private static MovieStudioProjectDto ToDto(MovieProject movie) => new(movie.Id, movie.WorkspaceId, movie.ProjectId, movie.Mode, movie.Status, movie.Title, movie.Description, movie.DurationSeconds, movie.AspectRatio, movie.Style, movie.Language, movie.AdditionalInstructions, movie.CreatedAt, movie.UpdatedAt, new MovieGuideDto(movie.Guide.Id, movie.Guide.VisualLanguage, movie.Guide.CameraLanguage, movie.Guide.ColorAndLighting, movie.Guide.SoundAndNarration, movie.Guide.ContinuityRules, movie.Guide.UpdatedAt), movie.Scenes.OrderBy(scene => scene.Sequence).Select(scene => ToDto(scene, scene.Shots.OrderBy(shot => shot.Sequence).Select(shot => ToDto(shot, shot.Clips.Select(ToDto).ToArray())).ToArray(), scene.Clips.Where(clip => clip.MovieShotId is null).Select(ToDto).ToArray())).ToArray(), movie.Characters.OrderBy(character => character.CreatedAt).Select(ToDto).ToArray(), movie.Locations.OrderBy(location => location.CreatedAt).Select(ToDto).ToArray(), movie.Clips.Where(clip => clip.MovieSceneId is null).Select(ToDto).ToArray(), movie.Assemblies.OrderByDescending(assembly => assembly.CreatedAt).Select(ToDto).ToArray());
+    private static MovieStudioProjectDto ToDto(MovieProject movie) => new(movie.Id, movie.WorkspaceId, movie.ProjectId, movie.Mode, movie.Status, movie.Title, movie.Description, movie.DurationSeconds, movie.AspectRatio, movie.Style, movie.Language, movie.AdditionalInstructions, movie.CreatedAt, movie.UpdatedAt, new MovieGuideDto(movie.Guide.Id, movie.Guide.VisualLanguage, movie.Guide.CameraLanguage, movie.Guide.ColorAndLighting, movie.Guide.SoundAndNarration, movie.Guide.ContinuityRules, movie.Guide.UpdatedAt, movie.Guide.CurrentRevisionNumber, movie.Guide.LockedRevisionNumber, movie.Guide.LockedAt), movie.Scenes.OrderBy(scene => scene.Sequence).Select(scene => ToDto(scene, scene.Shots.OrderBy(shot => shot.Sequence).Select(shot => ToDto(shot, shot.Clips.Select(ToDto).ToArray())).ToArray(), scene.Clips.Where(clip => clip.MovieShotId is null).Select(ToDto).ToArray())).ToArray(), movie.Characters.OrderBy(character => character.CreatedAt).Select(ToDto).ToArray(), movie.Locations.OrderBy(location => location.CreatedAt).Select(ToDto).ToArray(), movie.Clips.Where(clip => clip.MovieSceneId is null).Select(ToDto).ToArray(), movie.Assemblies.OrderByDescending(assembly => assembly.CreatedAt).Select(ToDto).ToArray());
     private static string ContinuitySnapshot(MovieContinuityGuide guide) => JsonSerializer.Serialize(new { guide.VisualLanguage, guide.CameraLanguage, guide.ColorAndLighting, guide.SoundAndNarration, guide.ContinuityRules, guide.ReferenceAssetIdsJson, guide.UpdatedAt });
     private static string SceneSnapshot(MovieScene scene) => JsonSerializer.Serialize(new { scene.Id, scene.Sequence, scene.Title, scene.Summary, scene.DurationSeconds, scene.ContinuityNotes, scene.Narration, scene.Dialogue });
     private static string ShotSnapshot(MovieShot shot) => JsonSerializer.Serialize(new { shot.Id, shot.Sequence, shot.Description, shot.CameraAndFraming, shot.CameraMotion, shot.DurationSeconds, shot.Narration, shot.Dialogue, shot.VisualContinuityNotes });

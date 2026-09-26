@@ -37,6 +37,28 @@ public static class MovieAssemblyStatuses
     public const string Failed = "Failed";
 }
 
+public static class MovieGuideSectionTypes
+{
+    public const string StoryBible = "story_bible";
+    public const string CharacterBibleReferences = "character_bible_references";
+    public const string WorldBibleReferences = "world_bible_references";
+    public const string VisualBible = "visual_bible";
+    public const string CinematographyBible = "cinematography_bible";
+    public const string AudioBible = "audio_bible";
+    public const string ContinuityBible = "continuity_bible";
+    public static readonly IReadOnlyList<string> All =
+    [
+        StoryBible, CharacterBibleReferences, WorldBibleReferences, VisualBible,
+        CinematographyBible, AudioBible, ContinuityBible,
+    ];
+}
+
+public static class MovieGuideRevisionStatuses
+{
+    public const string Draft = "Draft";
+    public const string Locked = "Locked";
+}
+
 public sealed class MovieProject
 {
     public Guid Id { get; set; }
@@ -78,6 +100,33 @@ public sealed class MovieContinuityGuide
     public string? ReferenceAssetIdsJson { get; set; }
     public DateTime UpdatedAt { get; set; }
     public MovieProject MovieProject { get; set; } = null!;
+    public int CurrentRevisionNumber { get; set; } = 1;
+    public int? LockedRevisionNumber { get; set; }
+    public DateTime? LockedAt { get; set; }
+    public Guid? LockedByUserId { get; set; }
+    public ICollection<MovieGuideRevision> Revisions { get; set; } = [];
+}
+
+public sealed class MovieGuideRevision
+{
+    public Guid Id { get; set; }
+    public Guid MovieContinuityGuideId { get; set; }
+    public int RevisionNumber { get; set; }
+    public string Status { get; set; } = MovieGuideRevisionStatuses.Draft;
+    public string StoryBibleJson { get; set; } = "{}";
+    public string CharacterBibleReferencesJson { get; set; } = "[]";
+    public string WorldBibleReferencesJson { get; set; } = "[]";
+    public string VisualBibleJson { get; set; } = "{}";
+    public string CinematographyBibleJson { get; set; } = "{}";
+    public string AudioBibleJson { get; set; } = "{}";
+    public string ContinuityBibleJson { get; set; } = "{}";
+    public Guid CreatedByUserId { get; set; }
+    public DateTime CreatedAt { get; set; }
+    public DateTime? LockedAt { get; set; }
+    public Guid? LockedByUserId { get; set; }
+    public MovieContinuityGuide Guide { get; set; } = null!;
+    public ApplicationUser CreatedByUser { get; set; } = null!;
+    public ApplicationUser? LockedByUser { get; set; }
 }
 
 public sealed class MovieScene
@@ -307,7 +356,10 @@ public sealed record MovieGenerationInput(
 
 public sealed record MovieProviderReadinessDto(bool Ready, IReadOnlyList<string> SupportedOperations);
 
-public sealed record MovieGuideDto(Guid Id, string VisualLanguage, string CameraLanguage, string ColorAndLighting, string SoundAndNarration, string ContinuityRules, DateTime UpdatedAt);
+public sealed record MovieGuideDto(Guid Id, string VisualLanguage, string CameraLanguage, string ColorAndLighting, string SoundAndNarration, string ContinuityRules, DateTime UpdatedAt, int CurrentRevisionNumber = 1, int? LockedRevisionNumber = null, DateTime? LockedAt = null);
+public sealed record MovieGuideSectionDto(string Type, string ContentJson);
+public sealed record MovieGuideRevisionDto(Guid Id, int RevisionNumber, string Status, IReadOnlyList<MovieGuideSectionDto> Sections, Guid CreatedByUserId, DateTime CreatedAt, DateTime? LockedAt, Guid? LockedByUserId);
+public sealed record MovieDirectorContextDto(Guid MovieProjectId, Guid MovieGuideId, bool IsAuthoritative, int RevisionNumber, DateTime? LockedAt, IReadOnlyList<MovieGuideSectionDto> Sections);
 public sealed record MovieSceneDto(Guid Id, int Sequence, string Title, string Summary, int? DurationSeconds, string? ContinuityNotes, string? Narration, string? Dialogue, IReadOnlyList<MovieShotDto> Shots, IReadOnlyList<MovieClipDto> Clips);
 public sealed record MovieShotDto(Guid Id, int Sequence, string Description, string? CameraAndFraming, string? CameraMotion, int? DurationSeconds, string? Narration, string? Dialogue, string? VisualContinuityNotes, IReadOnlyList<MovieClipDto> Clips);
 public sealed record MovieCharacterDto(Guid Id, string Name, string Description, string? Appearance, string? VoiceAndPerformance, string? ContinuityNotes, Guid? ReferenceAssetId);
@@ -318,6 +370,8 @@ public sealed record MovieStudioProjectDto(Guid Id, Guid WorkspaceId, Guid? Proj
 public sealed record MovieStudioProjectResponse(MovieStudioProjectDto Project, GenerationJobDto? Job);
 public sealed record MovieStudioProviderResponse(MovieProviderReadinessDto Provider);
 public sealed record MovieStudioGenerationResponse(MovieStudioProjectDto Project, GenerationJobDto Job, Guid ClipId);
+public sealed record MovieGuideRevisionResponse(MovieGuideRevisionDto Revision, MovieDirectorContextDto? AuthoritativeContext);
+public sealed record MovieGuideHistoryResponse(Guid MovieGuideId, int CurrentRevisionNumber, int? LockedRevisionNumber, IReadOnlyList<MovieGuideRevisionDto> Revisions);
 
 public sealed class MovieStudioCreateRequest
 {
@@ -343,6 +397,20 @@ public sealed record MovieStudioCharacterRequest(string Name, string Description
 public sealed record MovieStudioLocationRequest(string Name, string Description, string? VisualContinuityNotes, Guid? ReferenceAssetId);
 public sealed record MovieStudioShotRequest(string Description, string? CameraAndFraming, string? CameraMotion, int? DurationSeconds, string? Narration, string? Dialogue, string? VisualContinuityNotes);
 public sealed record MovieStudioGuideRequest(string? VisualLanguage, string? CameraLanguage, string? ColorAndLighting, string? SoundAndNarration, string? ContinuityRules);
+public sealed class MovieGuideRevisionRequest
+{
+    public string StoryBibleJson { get; set; } = "{}";
+    public string CharacterBibleReferencesJson { get; set; } = "[]";
+    public string WorldBibleReferencesJson { get; set; } = "[]";
+    public string VisualBibleJson { get; set; } = "{}";
+    public string CinematographyBibleJson { get; set; } = "{}";
+    public string AudioBibleJson { get; set; } = "{}";
+    public string ContinuityBibleJson { get; set; } = "{}";
+}
+public sealed class MovieGuideLockRequest
+{
+    public int? RevisionNumber { get; set; }
+}
 public sealed record MovieStudioGenerationRequest(string? Title = null);
 
 public static class MovieStudioValidation
