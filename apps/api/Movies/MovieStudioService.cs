@@ -22,7 +22,7 @@ public interface IMovieStudioService
     Task<MovieProviderReadinessDto> ProviderReadinessAsync();
 }
 
-public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessService access, IGenerationJobService jobs, IMovieVideoProvider provider) : IMovieStudioService
+public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessService access, MovieCollaborationAccess collaboration, IGenerationJobService jobs, IMovieVideoProvider provider) : IMovieStudioService
 {
     public async Task<MovieStudioProjectResponse?> CreateAsync(Guid userId, MovieStudioCreateRequest request, CancellationToken cancellationToken, string? idempotencyKey = null)
     {
@@ -62,6 +62,11 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
             },
         };
         db.MovieProjects.Add(movie);
+        db.MovieTeamMembers.Add(new MovieTeamMember
+        {
+            Id = Guid.NewGuid(), MovieProjectId = movie.Id, UserId = userId, Role = MovieTeamRoles.Producer,
+            IsProjectOwner = true, CreatedAt = now, UpdatedAt = now,
+        });
         await db.SaveChangesAsync(cancellationToken);
 
         GenerationJobDto? job = null;
@@ -97,13 +102,13 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
     public async Task<MovieStudioProjectDto?> GetAsync(Guid userId, Guid id, CancellationToken cancellationToken)
     {
         var movie = await Query().FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
-        return movie is null || !await access.IsMemberAsync(userId, movie.WorkspaceId, cancellationToken) ? null : ToDto(movie);
+        return movie is null || !await collaboration.HasPermissionAsync(userId, id, MoviePermissions.View, cancellationToken) ? null : ToDto(movie);
     }
 
     public async Task<MovieStudioProjectDto?> UpdateGuideAsync(Guid userId, Guid id, MovieStudioGuideRequest request, CancellationToken cancellationToken)
     {
         var movie = await db.MovieProjects.Include(item => item.Guide).FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
-        if (movie is null || !await access.IsMemberAsync(userId, movie.WorkspaceId, cancellationToken)) return null;
+        if (movie is null || !await collaboration.HasPermissionAsync(userId, id, MoviePermissions.Edit, cancellationToken)) return null;
         movie.Guide.VisualLanguage = request.VisualLanguage?.Trim() ?? string.Empty;
         movie.Guide.CameraLanguage = request.CameraLanguage?.Trim() ?? string.Empty;
         movie.Guide.ColorAndLighting = request.ColorAndLighting?.Trim() ?? string.Empty;
@@ -117,7 +122,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
     public async Task<MovieSceneDto?> AddSceneAsync(Guid userId, Guid id, MovieStudioSceneRequest request, CancellationToken cancellationToken)
     {
         var movie = await db.MovieProjects.FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
-        if (movie is null || !await access.IsMemberAsync(userId, movie.WorkspaceId, cancellationToken)) return null;
+        if (movie is null || !await collaboration.HasPermissionAsync(userId, id, MoviePermissions.Edit, cancellationToken)) return null;
         if (string.IsNullOrWhiteSpace(request.Title) || string.IsNullOrWhiteSpace(request.Summary)) throw new MovieStudioValidationException("Scene title and summary are required.");
         var now = DateTime.UtcNow;
         var scene = new MovieScene { Id = Guid.NewGuid(), MovieProjectId = id, Sequence = await db.MovieScenes.CountAsync(item => item.MovieProjectId == id, cancellationToken) + 1, Title = request.Title.Trim(), Summary = request.Summary.Trim(), DurationSeconds = request.DurationSeconds, ContinuityNotes = MovieStudioHelpers.Clean(request.ContinuityNotes), Narration = MovieStudioHelpers.Clean(request.Narration), Dialogue = MovieStudioHelpers.Clean(request.Dialogue), CreatedAt = now, UpdatedAt = now };
@@ -129,7 +134,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
     public async Task<MovieCharacterDto?> AddCharacterAsync(Guid userId, Guid id, MovieStudioCharacterRequest request, CancellationToken cancellationToken)
     {
         var movie = await db.MovieProjects.FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
-        if (movie is null || !await access.IsMemberAsync(userId, movie.WorkspaceId, cancellationToken)) return null;
+        if (movie is null || !await collaboration.HasPermissionAsync(userId, id, MoviePermissions.Edit, cancellationToken)) return null;
         if (string.IsNullOrWhiteSpace(request.Name) || string.IsNullOrWhiteSpace(request.Description)) throw new MovieStudioValidationException("Character name and description are required.");
         var now = DateTime.UtcNow;
         var character = new MovieCharacter { Id = Guid.NewGuid(), MovieProjectId = id, Name = request.Name.Trim(), Description = request.Description.Trim(), Appearance = MovieStudioHelpers.Clean(request.Appearance), VoiceAndPerformance = MovieStudioHelpers.Clean(request.VoiceAndPerformance), ContinuityNotes = MovieStudioHelpers.Clean(request.ContinuityNotes), ReferenceAssetId = request.ReferenceAssetId, CreatedAt = now, UpdatedAt = now };
@@ -141,7 +146,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
     public async Task<MovieLocationDto?> AddLocationAsync(Guid userId, Guid id, MovieStudioLocationRequest request, CancellationToken cancellationToken)
     {
         var movie = await db.MovieProjects.FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
-        if (movie is null || !await access.IsMemberAsync(userId, movie.WorkspaceId, cancellationToken)) return null;
+        if (movie is null || !await collaboration.HasPermissionAsync(userId, id, MoviePermissions.Edit, cancellationToken)) return null;
         if (string.IsNullOrWhiteSpace(request.Name) || string.IsNullOrWhiteSpace(request.Description)) throw new MovieStudioValidationException("Location name and description are required.");
         var now = DateTime.UtcNow;
         var location = new MovieLocation { Id = Guid.NewGuid(), MovieProjectId = id, Name = request.Name.Trim(), Description = request.Description.Trim(), VisualContinuityNotes = MovieStudioHelpers.Clean(request.VisualContinuityNotes), ReferenceAssetId = request.ReferenceAssetId, CreatedAt = now, UpdatedAt = now };
@@ -153,7 +158,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
     public async Task<MovieShotDto?> AddShotAsync(Guid userId, Guid sceneId, MovieStudioShotRequest request, CancellationToken cancellationToken)
     {
         var scene = await db.MovieScenes.Include(item => item.MovieProject).FirstOrDefaultAsync(item => item.Id == sceneId, cancellationToken);
-        if (scene is null || !await access.IsMemberAsync(userId, scene.MovieProject.WorkspaceId, cancellationToken)) return null;
+        if (scene is null || !await collaboration.HasPermissionAsync(userId, scene.MovieProjectId, MoviePermissions.Edit, cancellationToken)) return null;
         if (string.IsNullOrWhiteSpace(request.Description)) throw new MovieStudioValidationException("Shot description is required.");
         var now = DateTime.UtcNow;
         var shot = new MovieShot { Id = Guid.NewGuid(), MovieSceneId = sceneId, Sequence = await db.MovieShots.CountAsync(item => item.MovieSceneId == sceneId, cancellationToken) + 1, Description = request.Description.Trim(), CameraAndFraming = MovieStudioHelpers.Clean(request.CameraAndFraming), CameraMotion = MovieStudioHelpers.Clean(request.CameraMotion), DurationSeconds = request.DurationSeconds, Narration = MovieStudioHelpers.Clean(request.Narration), Dialogue = MovieStudioHelpers.Clean(request.Dialogue), VisualContinuityNotes = MovieStudioHelpers.Clean(request.VisualContinuityNotes), CreatedAt = now, UpdatedAt = now };
@@ -165,14 +170,14 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
     public async Task<MovieStudioGenerationResponse?> GenerateSceneAsync(Guid userId, Guid movieProjectId, Guid sceneId, MovieStudioGenerationRequest request, CancellationToken cancellationToken, string? idempotencyKey = null)
     {
         var scene = await db.MovieScenes.Include(item => item.MovieProject).ThenInclude(item => item.Guide).FirstOrDefaultAsync(item => item.Id == sceneId && item.MovieProjectId == movieProjectId, cancellationToken);
-        if (scene is null || !await access.IsMemberAsync(userId, scene.MovieProject.WorkspaceId, cancellationToken)) return null;
+        if (scene is null || !await collaboration.HasPermissionAsync(userId, movieProjectId, MoviePermissions.Generate, cancellationToken)) return null;
         return await QueueClipAsync(userId, scene.MovieProject, scene, null, request, cancellationToken, idempotencyKey);
     }
 
     public async Task<MovieStudioGenerationResponse?> GenerateShotAsync(Guid userId, Guid shotId, MovieStudioGenerationRequest request, CancellationToken cancellationToken, string? idempotencyKey = null)
     {
         var shot = await db.MovieShots.Include(item => item.Scene).ThenInclude(item => item.MovieProject).ThenInclude(item => item.Guide).FirstOrDefaultAsync(item => item.Id == shotId, cancellationToken);
-        if (shot is null || !await access.IsMemberAsync(userId, shot.Scene.MovieProject.WorkspaceId, cancellationToken)) return null;
+        if (shot is null || !await collaboration.HasPermissionAsync(userId, shot.Scene.MovieProjectId, MoviePermissions.Generate, cancellationToken)) return null;
         return await QueueClipAsync(userId, shot.Scene.MovieProject, shot.Scene, shot, request, cancellationToken, idempotencyKey);
     }
 

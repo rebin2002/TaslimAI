@@ -64,6 +64,11 @@ public sealed class MovieProject
     public ICollection<MovieLocation> Locations { get; set; } = [];
     public ICollection<MovieClip> Clips { get; set; } = [];
     public ICollection<MovieAssembly> Assemblies { get; set; } = [];
+    public ICollection<MovieTeamMember> TeamMembers { get; set; } = [];
+    public ICollection<MovieComment> Comments { get; set; } = [];
+    public ICollection<MovieReview> Reviews { get; set; } = [];
+    public ICollection<MovieProductionAssignment> Assignments { get; set; } = [];
+    public ICollection<MovieProductionCredit> Credits { get; set; } = [];
 }
 
 public sealed class MovieContinuityGuide
