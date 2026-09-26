@@ -203,6 +203,75 @@ public sealed record MovieShotProductionDto(
     IReadOnlyList<MovieProductionVersionDto> Versions,
     IReadOnlyList<MovieProductionStageTransitionDto> Transitions);
 
+public sealed record MovieStoryboardCandidateDto(
+    Guid Id,
+    Guid MovieShotId,
+    int VersionNumber,
+    string Stage,
+    string Status,
+    string? Label,
+    string CompositionJson,
+    string? RegenerationMetadataJson,
+    string? StageProvenanceJson,
+    Guid? SourceVersionId,
+    Guid? AssetId,
+    Guid? FirstFrameAssetId,
+    Guid? LastFrameAssetId,
+    string? FirstFrameNotes,
+    string? LastFrameNotes,
+    string? RejectionReason,
+    DateTime CreatedAt,
+    DateTime UpdatedAt,
+    DateTime? ReviewedAt,
+    IReadOnlyList<MovieProductionAssetReferenceDto> AssetReferences);
+
+public sealed record MovieCinematographySummaryDto(
+    string? CameraAndFraming,
+    string? CameraMotion,
+    string? Intent,
+    string? ShotSize,
+    string? FocalLength,
+    string? CameraAngle,
+    string? Lighting,
+    string? PaletteLook,
+    string? CompositionNotes);
+
+public sealed record MovieStoryboardShotDto(
+    Guid Id,
+    int Sequence,
+    string Description,
+    string ShotPlanStatus,
+    string CurrentStage,
+    int? DurationSeconds,
+    IReadOnlyList<string> ContinuityWarnings,
+    MovieCinematographySummaryDto Cinematography,
+    IReadOnlyList<MovieStoryboardCandidateDto> Candidates,
+    Guid? ApprovedCandidateId,
+    string ApprovalStatus);
+
+public sealed record MovieStoryboardSceneDto(
+    Guid Id,
+    int Sequence,
+    string Title,
+    string Summary,
+    int? DurationSeconds,
+    string? ContinuityNotes,
+    IReadOnlyList<MovieStoryboardShotDto> Shots);
+
+public sealed record MovieStoryboardProjectDto(
+    Guid Id,
+    Guid WorkspaceId,
+    string Status,
+    string Title,
+    string Description,
+    int DurationSeconds,
+    string AspectRatio,
+    string Style,
+    string Language,
+    MovieGuideDto Guide,
+    bool ProviderReady,
+    IReadOnlyList<MovieStoryboardSceneDto> Scenes);
+
 public sealed class MovieProductionVersionRequest
 {
     public string Stage { get; set; } = MovieProductionStages.StoryboardCandidate;

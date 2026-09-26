@@ -1,16 +1,20 @@
 "use client";
+/* eslint-disable @next/next/no-img-element -- storyboard previews use authenticated Asset URLs. */
 
 import Link from "next/link";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   ArrowLeft,
   AudioLines,
+  AlertTriangle,
   BookOpen,
   Check,
+  CheckCircle2,
   ChevronRight,
   Clapperboard,
   Film,
   Gauge,
+  ImageOff,
   Layers3,
   ListChecks,
   Map,
@@ -19,10 +23,11 @@ import {
   ShieldCheck,
   SlidersHorizontal,
   Sparkles,
+  X,
   Users,
   Workflow,
 } from "lucide-react";
-import { api, type MovieProject, type MovieScene } from "@/lib/api";
+import { api, type MovieProject, type MovieScene, type MovieStoryboardCandidate, type MovieStoryboardProject, type MovieStoryboardScene, type MovieStoryboardShot } from "@/lib/api";
 import { assetFileUrl } from "@/lib/apiBase";
 
 export const fullMovieModules = [
@@ -85,6 +90,7 @@ function formatDuration(seconds: number | null | undefined) {
 export function FullMovieWorkspaceView({ projectId, module }: { projectId: string; module: string }) {
   const activeModule = moduleFromSlug(module);
   const [project, setProject] = useState<MovieProject | null>(null);
+  const [storyboard, setStoryboard] = useState<MovieStoryboardProject | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [selectedSceneId, setSelectedSceneId] = useState<string | null>(null);
@@ -93,9 +99,14 @@ export function FullMovieWorkspaceView({ projectId, module }: { projectId: strin
 
   useEffect(() => {
     let mounted = true;
-    void api.getMovieProject(projectId).then((result) => {
+    const load = activeModule === "storyboard" ? api.getMovieStoryboard(projectId) : api.getMovieProject(projectId);
+    void load.then((result) => {
       if (!mounted) return;
-      setProject(result);
+      if (activeModule === "storyboard") {
+        setStoryboard(result as MovieStoryboardProject);
+      } else {
+        setProject(result as MovieProject);
+      }
       setSelectedSceneId(result.scenes[0]?.id ?? null);
     }).catch((cause) => {
       if (mounted) setError(cause instanceof Error ? cause.message : "This movie project could not be loaded.");
@@ -103,12 +114,16 @@ export function FullMovieWorkspaceView({ projectId, module }: { projectId: strin
       if (mounted) setLoading(false);
     });
     return () => { mounted = false; };
-  }, [projectId]);
+  }, [activeModule, projectId]);
 
-  const selectedScene = useMemo(() => project?.scenes.find((scene) => scene.id === selectedSceneId) ?? project?.scenes[0] ?? null, [project, selectedSceneId]);
+  const workspaceProject = project ?? storyboard;
+  const selectedScene = useMemo(() => workspaceProject?.scenes.find((scene) => scene.id === selectedSceneId) ?? workspaceProject?.scenes[0] ?? null, [workspaceProject, selectedSceneId]);
   const readyClips = project?.clips.filter((clip) => hasReadyAsset(clip.status, clip.assetId)) ?? [];
   const outputAssetId = project?.assemblies.find((assembly) => hasReadyAsset(assembly.status, assembly.assetId))?.assetId ?? readyClips[0]?.assetId ?? null;
-  const completionPercent = project ? Math.min(100, Math.round(((project.scenes.length ? readyClips.length : 0) / Math.max(project.scenes.length, 1)) * 100)) : 0;
+  const storyboardShots = storyboard?.scenes.flatMap((scene) => scene.shots) ?? [];
+  const completionPercent = project
+    ? Math.min(100, Math.round(((project.scenes.length ? readyClips.length : 0) / Math.max(project.scenes.length, 1)) * 100))
+    : storyboardShots.length ? Math.round((storyboardShots.filter((shot) => shot.approvalStatus === "Approved").length / storyboardShots.length) * 100) : 0;
   const copy = moduleCopy[activeModule];
 
   async function addScene() {
@@ -138,8 +153,13 @@ export function FullMovieWorkspaceView({ projectId, module }: { projectId: strin
     }
   }
 
+  async function refreshStoryboard() {
+    const next = await api.getMovieStoryboard(projectId);
+    setStoryboard(next);
+  }
+
   if (loading) return <div className="movie-studio-page"><div className="movie-workspace-loading"><span className="loading-spinner" /><p>Loading the production workspace…</p></div></div>;
-  if (!project) return <div className="movie-studio-page"><div className="movie-workspace-error"><XCircleIcon /><h1>Workspace unavailable</h1><p>{error || "This movie project is not available in the current workspace."}</p><Link href="/create/movie" className="movie-workspace-button is-primary"><ArrowLeft size={14} /> Back to Movie Studio</Link></div></div>;
+  if (!workspaceProject) return <div className="movie-studio-page"><div className="movie-workspace-error"><XCircleIcon /><h1>Workspace unavailable</h1><p>{error || "This movie project is not available in the current workspace."}</p><Link href="/create/movie" className="movie-workspace-button is-primary"><ArrowLeft size={14} /> Back to Movie Studio</Link></div></div>;
 
   return (
     <div className="movie-studio-page movie-full-workspace">
@@ -147,11 +167,11 @@ export function FullMovieWorkspaceView({ projectId, module }: { projectId: strin
         <Link href="/create/movie" className="movie-workspace-back"><ArrowLeft size={14} /> Movie Studio</Link>
         <div className="movie-workspace-heading">
           <div>
-            <span className="movie-workspace-kicker">Full Movie Project · {project.status}</span>
-            <h1>{project.title}</h1>
-            <p>{project.description}</p>
+            <span className="movie-workspace-kicker">Full Movie Project · {workspaceProject.status}</span>
+            <h1>{workspaceProject.title}</h1>
+            <p>{workspaceProject.description}</p>
           </div>
-          <div className="movie-workspace-meta"><span>{project.aspectRatio}</span><span>{formatDuration(project.durationSeconds)}</span><span>{project.style}</span></div>
+          <div className="movie-workspace-meta"><span>{workspaceProject.aspectRatio}</span><span>{formatDuration(workspaceProject.durationSeconds)}</span><span>{workspaceProject.style}</span></div>
         </div>
       </header>
 
@@ -161,7 +181,7 @@ export function FullMovieWorkspaceView({ projectId, module }: { projectId: strin
           <div className="movie-workspace-nav-list">
             {fullMovieModules.map((item) => {
               const Icon = item.icon;
-              const href = `/create/movie/${project.id}/${item.slug}`;
+              const href = activeModule === "storyboard" ? `/create/movie/${storyboard!.id}/${item.slug}` : `/create/movie/${project!.id}/${item.slug}`;
               return <Link key={item.slug} href={href} className={`movie-workspace-nav-item ${activeModule === item.slug ? "is-active" : ""}`} aria-current={activeModule === item.slug ? "page" : undefined}><Icon size={15} /><span>{item.label}</span>{activeModule === item.slug && <ChevronRight size={13} />}</Link>;
             })}
           </div>
@@ -170,14 +190,14 @@ export function FullMovieWorkspaceView({ projectId, module }: { projectId: strin
 
         <main className="movie-workspace-main">
           <div className="movie-module-heading"><div><span className="movie-workspace-kicker">{copy.eyebrow}</span><h2>{copy.title}</h2><p>{copy.description}</p></div><span className="movie-module-index">{String(fullMovieModules.findIndex((item) => item.slug === activeModule) + 1).padStart(2, "0")} / 12</span></div>
-          {activeModule === "overview" && <OverviewModule project={project} outputAssetId={outputAssetId} completionPercent={completionPercent} selectedScene={selectedScene} onSelectScene={setSelectedSceneId} />}
-          {activeModule === "story" && <StoryModule project={project} />}
-          {activeModule === "cast" && <CastModule project={project} />}
-          {activeModule === "world" && <WorldModule project={project} />}
-          {activeModule === "scenes" && <ScenesModule project={project} selectedSceneId={selectedScene?.id ?? null} newScene={newScene} addingScene={addingScene} onSelectScene={setSelectedSceneId} onChangeScene={setNewScene} onAddScene={() => void addScene()} onGenerate={generateScene} />}
-          {activeModule === "storyboard" && <StoryboardModule project={project} />}
-          {activeModule === "production" && <ProductionModule project={project} completionPercent={completionPercent} />}
-          {activeModule === "edit" && <EditModule project={project} />}
+          {activeModule === "overview" && project && <OverviewModule project={project} outputAssetId={outputAssetId} completionPercent={completionPercent} selectedScene={selectedScene as MovieScene | null} onSelectScene={setSelectedSceneId} />}
+          {activeModule === "story" && project && <StoryModule project={project} />}
+          {activeModule === "cast" && project && <CastModule project={project} />}
+          {activeModule === "world" && project && <WorldModule project={project} />}
+          {activeModule === "scenes" && project && <ScenesModule project={project} selectedSceneId={selectedScene?.id ?? null} newScene={newScene} addingScene={addingScene} onSelectScene={setSelectedSceneId} onChangeScene={setNewScene} onAddScene={() => void addScene()} onGenerate={generateScene} />}
+          {activeModule === "storyboard" && storyboard && <StoryboardModule storyboard={storyboard} onRefresh={() => void refreshStoryboard()} onError={setError} />}
+          {activeModule === "production" && project && <ProductionModule project={project} completionPercent={completionPercent} />}
+          {activeModule === "edit" && project && <EditModule project={project} />}
           {activeModule === "audio" && <FutureModule icon={<AudioLines size={20} />} title="Audio is not connected yet" text="The sound stage is reserved for real narration, ambience, and music assets. Nothing is simulated here." />}
           {activeModule === "qc" && <FutureModule icon={<ShieldCheck size={20} />} title="QC is a future review gate" text="Continuity and delivery checks will appear once this project has a real cut to inspect." />}
           {activeModule === "exports" && <FutureModule icon={<Play size={20} />} title="Exports are not available yet" text="Final packaging stays unavailable until there is a reviewable project output." />}
@@ -188,7 +208,7 @@ export function FullMovieWorkspaceView({ projectId, module }: { projectId: strin
         <aside className="movie-director-panel">
           <div className="movie-director-heading"><span className="movie-workspace-kicker">Director / Inspector</span><SlidersHorizontal size={16} /></div>
           <div className="movie-director-section"><span className="movie-inspector-label">Current module</span><strong>{copy.title}</strong><p>{activeModule === "overview" ? "One place to see what is decided and what still needs a deliberate next step." : "Select a real project record to keep the next decision grounded."}</p></div>
-          <div className="movie-director-section"><span className="movie-inspector-label">Continuity signal</span><div className="movie-inspector-meter"><span style={{ width: `${project.scenes.length ? Math.max(16, completionPercent) : 16}%` }} /></div><div className="movie-inspector-meter-meta"><span>{readyClips.length} ready clips</span><strong>{completionPercent}%</strong></div></div>
+          <div className="movie-director-section"><span className="movie-inspector-label">Continuity signal</span><div className="movie-inspector-meter"><span style={{ width: `${workspaceProject.scenes.length ? Math.max(16, completionPercent) : 16}%` }} /></div><div className="movie-inspector-meter-meta"><span>{activeModule === "storyboard" ? `${storyboardShots.length} shots planned` : `${readyClips.length} ready clips`}</span><strong>{completionPercent}%</strong></div></div>
           {selectedScene ? <div className="movie-director-section"><span className="movie-inspector-label">Selected scene</span><strong>{String(selectedScene.sequence).padStart(2, "0")} · {selectedScene.title}</strong><p>{selectedScene.summary}</p><span className="movie-inspector-detail">{formatDuration(selectedScene.durationSeconds)} · {selectedScene.shots.length} shots planned</span></div> : <div className="movie-director-empty"><Film size={18} /><p>Select a scene to inspect its intent and continuity notes.</p></div>}
           <div className="movie-director-note"><Sparkles size={14} /><p>The Director region stays quiet until the project has a decision to make.</p></div>
         </aside>
@@ -227,8 +247,68 @@ function ScenesModule({ project, selectedSceneId, newScene, addingScene, onSelec
   return <div className="movie-module-stack"><div className="movie-scene-workspace"><section className="movie-workspace-section movie-scene-list-panel"><div className="movie-section-head"><div><span className="movie-workspace-kicker">Ordered story</span><h3>{project.scenes.length} scenes planned</h3></div><ListChecks size={17} /></div>{project.scenes.length ? <div className="movie-scene-list-modern">{project.scenes.map((scene) => <SceneListItem key={scene.id} scene={scene} isSelected={scene.id === selectedSceneId} onSelect={() => onSelectScene(scene.id)} onGenerate={() => void onGenerate(scene.id)} />)}</div> : <EmptyModule text="Add the first scene to give the project a beginning." />}</section><section className="movie-workspace-section movie-scene-inspector"><span className="movie-workspace-kicker">Inspector</span>{project.scenes.find((scene) => scene.id === selectedSceneId) ? <SceneInspector scene={project.scenes.find((scene) => scene.id === selectedSceneId)!} /> : <EmptyModule title="Select a scene" text="The inspector will show scene intent, continuity, and shot count." />}</section></div><form className="movie-add-scene-modern" onSubmit={(event) => { event.preventDefault(); onAddScene(); }}><div><span className="movie-workspace-kicker">Planning action</span><h3>Add a scene</h3></div><label><span className="sr-only">Scene title</span><input value={newScene.title} onChange={(event) => onChangeScene({ ...newScene, title: event.target.value })} placeholder="Scene title" /></label><label><span className="sr-only">Scene summary</span><input value={newScene.summary} onChange={(event) => onChangeScene({ ...newScene, summary: event.target.value })} placeholder="One-line scene intent" /></label><button className="movie-workspace-button is-primary" type="submit" disabled={addingScene || !newScene.title.trim() || !newScene.summary.trim()}>{addingScene ? "Saving…" : "Add scene"}</button></form></div>;
 }
 
-function StoryboardModule({ project }: { project: MovieProject }) {
-  return <div className="movie-module-stack"><section className="movie-workspace-section"><div className="movie-section-head"><div><span className="movie-workspace-kicker">Filmstrip</span><h3>Scenes, not placeholders</h3></div><span className="movie-section-count">{project.scenes.length} frames planned</span></div>{project.scenes.length ? <div className="movie-filmstrip">{project.scenes.map((scene) => { const clip = readyClipForScene(scene); return <article className="movie-filmstrip-card" key={scene.id}>{clip?.assetId ? <video src={assetFileUrl(clip.assetId, true)} preload="metadata" muted aria-label={scene.title} /> : <div className="movie-filmstrip-placeholder"><Film size={19} /><span>No footage</span></div>}<div><span>{String(scene.sequence).padStart(2, "0")}</span><strong>{scene.title}</strong><small>{formatDuration(scene.durationSeconds)}</small></div></article>; })}</div> : <EmptyGeneratedStage title="Your storyboard is empty" text="Planned scenes will become the first visual pass here." />}</section><ModuleIntro icon={<Layers3 size={18} />} title="Storyboard foundation" text="This surface is ready for real frames. It will not manufacture thumbnails for scenes that have no generated footage." /></div>;
+function StoryboardModule({ storyboard, onRefresh, onError }: { storyboard: MovieStoryboardProject; onRefresh: () => void; onError: (message: string) => void }) {
+  const shotCount = storyboard.scenes.reduce((count, scene) => count + scene.shots.length, 0);
+  return <div className="movie-module-stack movie-storyboard-room">
+    <section className="movie-storyboard-summary">
+      <div><span className="movie-workspace-kicker">Operational funnel</span><h3>Shot Plan → Storyboard Candidate → Approved Storyboard</h3><p>Review candidates by scene and shot. Approval is explicit; rejected versions remain in the record for revision.</p></div>
+      <div className="movie-storyboard-summary-stats"><span><strong>{storyboard.scenes.length}</strong> scenes</span><span><strong>{shotCount}</strong> shots</span><span><strong>{storyboard.scenes.flatMap((scene) => scene.shots).filter((shot) => shot.approvalStatus === "Approved").length}</strong> approved</span></div>
+    </section>
+    {!storyboard.scenes.length ? <section className="movie-workspace-section movie-storyboard-empty-state"><div className="movie-empty-orbit"><ListChecks size={23} /></div><h3>Start with the Shot Plan</h3><p>No scenes or shots have been planned yet. The storyboard room will show real candidates once a shot exists.</p><Link href={`/create/movie/${storyboard.id}/scenes`} className="movie-workspace-button is-primary"><Clapperboard size={14} /> Open Scenes</Link></section> : !shotCount ? <section className="movie-workspace-section movie-storyboard-empty-state"><div className="movie-empty-orbit"><ListChecks size={23} /></div><h3>Shot Plans are the next step</h3><p>{storyboard.scenes.length} scene{storyboard.scenes.length === 1 ? " is" : "s are"} saved, but no shots have been added. Add a shot plan before creating storyboard candidates.</p><Link href={`/create/movie/${storyboard.id}/scenes`} className="movie-workspace-button is-primary"><Clapperboard size={14} /> Add Shot Plan</Link></section> : storyboard.scenes.map((scene) => <StoryboardSceneCard key={scene.id} scene={scene} providerReady={storyboard.providerReady} onRefresh={onRefresh} onError={onError} />)}
+    <ModuleIntro icon={<Layers3 size={18} />} title="No artwork is invented here" text={storyboard.providerReady ? "Generation remains an explicit, provider-backed action. Only persisted Asset records are previewed in this room." : "Storyboard generation is unavailable because no provider is enabled. Shot plans and persisted candidate records remain reviewable."} />
+  </div>;
+}
+
+function StoryboardSceneCard({ scene, providerReady, onRefresh, onError }: { scene: MovieStoryboardScene; providerReady: boolean; onRefresh: () => void; onError: (message: string) => void }) {
+  return <section className="movie-workspace-section movie-storyboard-scene"><div className="movie-section-head"><div><span className="movie-workspace-kicker">Scene {String(scene.sequence).padStart(2, "0")}</span><h3>{scene.title}</h3><p className="movie-storyboard-scene-summary">{scene.summary}</p></div><span className="movie-section-count">{scene.shots.length} shots</span></div>{scene.continuityNotes && <div className="movie-storyboard-scene-continuity"><AlertTriangle size={14} /> {scene.continuityNotes}</div>}<div className="movie-storyboard-shot-list">{scene.shots.map((shot) => <StoryboardShotCard key={shot.id} shot={shot} providerReady={providerReady} onRefresh={onRefresh} onError={onError} />)}</div></section>;
+}
+
+function StoryboardShotCard({ shot, providerReady, onRefresh, onError }: { shot: MovieStoryboardShot; providerReady: boolean; onRefresh: () => void; onError: (message: string) => void }) {
+  const [working, setWorking] = useState(false);
+  const [reviewing, setReviewing] = useState<string | null>(null);
+  const [reason, setReason] = useState("");
+  const approvedCandidate = shot.candidates.find((candidate) => candidate.id === shot.approvedCandidateId) ?? null;
+  const latestCandidate = shot.candidates[0] ?? null;
+  const hasPendingCandidate = shot.candidates.some((candidate) => candidate.status === "PendingApproval");
+  const createCandidate = async () => {
+    setWorking(true);
+    try {
+      await api.createMovieProductionVersion(shot.id, { stage: "StoryboardCandidate", label: `Shot ${String(shot.sequence).padStart(2, "0")} storyboard candidate`, compositionJson: JSON.stringify({ shotPlan: shot.description, cinematography: shot.cinematography }), stageProvenanceJson: JSON.stringify({ source: "shot-plan", workflow: "storyboard" }) });
+      onRefresh();
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : "The storyboard candidate could not be created.");
+    } finally {
+      setWorking(false);
+    }
+  };
+  const reviewCandidate = async (candidate: MovieStoryboardCandidate, approve: boolean) => {
+    setWorking(true);
+    try {
+      await api.reviewMovieProductionVersion(candidate.id, { approve, reason: approve ? "Storyboard composition approved." : reason.trim() || "Revision requested." });
+      setReviewing(null);
+      setReason("");
+      onRefresh();
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : "The storyboard review could not be saved.");
+    } finally {
+      setWorking(false);
+    }
+  };
+  return <article className="movie-storyboard-shot-card"><div className="movie-storyboard-shot-heading"><div><span className="movie-storyboard-shot-number">Shot {String(shot.sequence).padStart(2, "0")}</span><h4>{shot.description}</h4></div><span className={`movie-storyboard-approval is-${shot.approvalStatus.toLowerCase()}`}>{shot.approvalStatus === "Approved" ? <CheckCircle2 size={12} /> : shot.approvalStatus === "Rejected" ? <X size={12} /> : null}{shot.approvalStatus === "NotStarted" ? "Not started" : shot.approvalStatus}</span></div>
+    <div className="movie-storyboard-shot-grid"><div><span className="movie-inspector-label">Shot Plan</span><strong>{shot.shotPlanStatus}</strong><small>{formatDuration(shot.durationSeconds)} · Current stage: {shot.currentStage}</small></div><div><span className="movie-inspector-label">Cinematography</span><p>{cinematographyText(shot)}</p></div><div><span className="movie-inspector-label">Continuity warnings</span>{shot.continuityWarnings.length ? <ul className="movie-storyboard-warnings">{shot.continuityWarnings.map((warning) => <li key={warning}><AlertTriangle size={12} />{warning}</li>)}</ul> : <p className="movie-storyboard-clear"><Check size={12} /> No recorded warnings</p>}</div></div>
+    <div className="movie-storyboard-candidates"><div className="movie-storyboard-candidates-heading"><span className="movie-inspector-label">Storyboard candidates</span><span>{shot.candidates.length} version{shot.candidates.length === 1 ? "" : "s"}</span></div>{shot.candidates.length ? shot.candidates.map((candidate) => <StoryboardCandidateCard key={candidate.id} candidate={candidate} approved={candidate.id === approvedCandidate?.id} reviewing={reviewing === candidate.id} reason={reason} working={working} onReviewStart={() => setReviewing(candidate.id)} onReasonChange={setReason} onReviewCancel={() => { setReviewing(null); setReason(""); }} onReview={(approve) => void reviewCandidate(candidate, approve)} />) : <div className="movie-storyboard-no-candidates"><ImageOff size={16} /><span>No storyboard has been generated for this shot.</span><small>Create a persisted candidate record from the Shot Plan; no artwork is fabricated.</small></div>}</div>
+    <div className="movie-storyboard-shot-actions"><button type="button" className="movie-workspace-button is-primary" onClick={() => void createCandidate()} disabled={working || hasPendingCandidate}>{working ? "Saving…" : latestCandidate?.status === "Rejected" ? "Create revision candidate" : "Create candidate from Shot Plan"}</button>{!providerReady && <span className="movie-storyboard-provider-note"><span className="movie-live-dot" /> Generation provider disabled; no paid workflow will run.</span>}</div>
+  </article>;
+}
+
+function StoryboardCandidateCard({ candidate, approved, reviewing, reason, working, onReviewStart, onReasonChange, onReviewCancel, onReview }: { candidate: MovieStoryboardCandidate; approved: boolean; reviewing: boolean; reason: string; working: boolean; onReviewStart: () => void; onReasonChange: (value: string) => void; onReviewCancel: () => void; onReview: (approve: boolean) => void }) {
+  const assetId = candidate.assetId ?? candidate.firstFrameAssetId;
+  return <div className={`movie-storyboard-candidate ${approved ? "is-approved" : ""} ${candidate.status === "Rejected" ? "is-rejected" : ""}`}><div className="movie-storyboard-candidate-preview">{assetId ? <img src={assetFileUrl(assetId, true)} alt={`Storyboard candidate ${candidate.versionNumber}`} /> : <div><ImageOff size={19} /><span>No Asset attached</span></div>}</div><div className="movie-storyboard-candidate-copy"><div className="movie-storyboard-candidate-topline"><strong>V{candidate.versionNumber} · {candidate.label || "Untitled candidate"}</strong><span>{approved ? "Approved storyboard" : candidate.status}</span></div>{candidate.rejectionReason && <p className="movie-storyboard-rejection"><X size={12} /> {candidate.rejectionReason}</p>}<div className="movie-storyboard-candidate-meta"><span>Recorded {new Date(candidate.createdAt).toLocaleDateString()}</span>{candidate.reviewedAt && <span>Reviewed {new Date(candidate.reviewedAt).toLocaleDateString()}</span>}</div>{reviewing ? <div className="movie-storyboard-review-form"><label><span>Revision reason</span><textarea value={reason} onChange={(event) => onReasonChange(event.target.value)} maxLength={2000} rows={2} placeholder="What needs another pass?" /></label><div><button type="button" className="movie-text-action" onClick={() => onReview(false)} disabled={working}>Request revision</button><button type="button" className="movie-text-action is-muted" onClick={onReviewCancel} disabled={working}>Cancel</button></div></div> : candidate.status === "PendingApproval" ? <div className="movie-storyboard-review-actions"><button type="button" className="movie-text-action" onClick={() => onReview(true)} disabled={working}><Check size={12} /> Approve</button><button type="button" className="movie-text-action is-reject" onClick={onReviewStart} disabled={working}><X size={12} /> Request revision</button></div> : null}</div></div>;
+}
+
+function cinematographyText(shot: MovieStoryboardShot) {
+  const values = [shot.cinematography.cameraAndFraming, shot.cinematography.cameraMotion, shot.cinematography.intent, shot.cinematography.shotSize, shot.cinematography.focalLength, shot.cinematography.cameraAngle, shot.cinematography.lighting, shot.cinematography.paletteLook, shot.cinematography.compositionNotes].filter(Boolean);
+  return values.length ? values.join(" · ") : "No cinematography intent recorded.";
 }
 
 function ProductionModule({ project, completionPercent }: { project: MovieProject; completionPercent: number }) {

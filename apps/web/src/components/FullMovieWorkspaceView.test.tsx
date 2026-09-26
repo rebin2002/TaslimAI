@@ -14,7 +14,7 @@ describe("Full Movie workspace foundation", () => {
   });
 
   it("uses durable project routes and marks future surfaces honestly", () => {
-    expect(workspaceSource).toContain("/create/movie/${project.id}/${item.slug}");
+    expect(workspaceSource).toContain("/create/movie/${project!.id}/${item.slug}");
     expect(workspaceSource).toContain("Foundation surface");
     expect(workspaceSource).toContain("No generated footage yet");
     expect(workspaceSource).toContain("Team controls are not connected yet");
@@ -25,5 +25,15 @@ describe("Full Movie workspace foundation", () => {
     expect(createSource).toContain('router.push(`/create/movie/${result.project.id}/overview`)');
     expect(createSource).toContain("Quick Movie stays intentionally small");
     expect(createSource).toContain("function QuickMovieResult");
+  });
+
+  it("organizes storyboard work by scene and shot without inventing artwork", () => {
+    expect(workspaceSource).toContain("api.getMovieStoryboard(projectId)");
+    expect(workspaceSource).toContain("Storyboard candidates");
+    expect(workspaceSource).toContain("Create candidate from Shot Plan");
+    expect(workspaceSource).toContain("No storyboard has been generated for this shot.");
+    expect(workspaceSource).toContain("No Asset attached");
+    expect(workspaceSource).toContain("Request revision");
+    expect(workspaceSource).toContain("Storyboard composition approved.");
   });
 });
