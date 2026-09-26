@@ -300,6 +300,14 @@ public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWork
         return (await response.Content.ReadFromJsonAsync<AuthResponse>())!;
     }
 
+    private async Task AddWorkspaceMember(Guid workspaceId, Guid userId)
+    {
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        db.WorkspaceMembers.Add(new WorkspaceMember { Id = Guid.NewGuid(), WorkspaceId = workspaceId, UserId = userId, Role = WorkspaceRole.Member, JoinedAt = DateTime.UtcNow });
+        await db.SaveChangesAsync();
+    }
+
     private static async Task<T> SendWithCsrf<T>(HttpClient client, HttpMethod method, string path, object payload)
     {
         var response = await SendWithCsrf(client, method, path, payload);
