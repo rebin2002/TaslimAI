@@ -12,6 +12,7 @@ public interface IMovieStudioService
 {
     Task<MovieStudioProjectResponse?> CreateAsync(Guid userId, MovieStudioCreateRequest request, CancellationToken cancellationToken, string? idempotencyKey = null);
     Task<MovieStudioProjectDto?> GetAsync(Guid userId, Guid id, CancellationToken cancellationToken);
+    Task<MovieWorkspaceResponse?> GetWorkspaceAsync(Guid userId, Guid id, string? module, CancellationToken cancellationToken);
     Task<MovieStudioProjectDto?> UpdateGuideAsync(Guid userId, Guid id, MovieStudioGuideRequest request, CancellationToken cancellationToken);
     Task<MovieSceneDto?> AddSceneAsync(Guid userId, Guid id, MovieStudioSceneRequest request, CancellationToken cancellationToken);
     Task<MovieCharacterDto?> AddCharacterAsync(Guid userId, Guid id, MovieStudioCharacterRequest request, CancellationToken cancellationToken);
@@ -124,6 +125,71 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
     {
         var movie = await Query().FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
         return movie is null || !await collaboration.HasPermissionAsync(userId, id, MoviePermissions.View, cancellationToken) ? null : ToDto(movie);
+    }
+
+    public async Task<MovieWorkspaceResponse?> GetWorkspaceAsync(Guid userId, Guid id, string? module, CancellationToken cancellationToken)
+    {
+        var requestedModule = MovieWorkspaceModules.Normalize(module);
+        var baseProject = await db.MovieProjects.AsNoTracking()
+            .Where(item => item.Id == id)
+            .Select(item => new
+            {
+                item.Id, item.WorkspaceId, item.ProjectId, item.Mode, item.Status, item.Title, item.Description,
+                item.DurationSeconds, item.AspectRatio, item.Style, item.Language, item.AdditionalInstructions,
+                item.CreatedAt, item.UpdatedAt,
+                Guide = new MovieWorkspaceGuideDto(
+                    item.Guide.Id, item.Guide.VisualLanguage, item.Guide.CameraLanguage, item.Guide.ColorAndLighting,
+                    item.Guide.SoundAndNarration, item.Guide.ContinuityRules, item.Guide.UpdatedAt),
+            })
+            .FirstOrDefaultAsync(cancellationToken);
+
+        if (baseProject is null || !await collaboration.HasPermissionAsync(userId, id, MoviePermissions.View, cancellationToken)) return null;
+
+        // Scene and clip summaries are the stable shell contract. They intentionally
+        // omit screenplay, asset metadata, production JSON, and character/world detail.
+        var sceneRows = await db.MovieScenes.AsNoTracking()
+            .Where(item => item.MovieProjectId == id)
+            .OrderBy(item => item.Sequence)
+            .Select(item => new
+            {
+                item.Id, item.Sequence, item.Title, item.Summary, item.DurationSeconds,
+                item.ContinuityNotes, item.Narration, item.Dialogue,
+                ShotCount = item.Shots.Count(),
+            })
+            .ToListAsync(cancellationToken);
+        var clips = await db.MovieClips.AsNoTracking()
+            .Where(item => item.MovieProjectId == id)
+            .OrderByDescending(item => item.CreatedAt)
+            .Select(item => new MovieWorkspaceClipDto(item.Id, item.MovieSceneId, item.MovieShotId, item.AssetId, item.Status, item.DurationSeconds))
+            .ToListAsync(cancellationToken);
+        var sceneClips = clips.Where(item => item.MovieSceneId.HasValue).ToLookup(item => item.MovieSceneId!.Value);
+        var projectedScenes = sceneRows.Select(item => new MovieWorkspaceSceneDto(
+                item.Id, item.Sequence, item.Title, item.Summary, item.DurationSeconds,
+                item.ContinuityNotes, item.Narration, item.Dialogue, item.ShotCount, sceneClips[item.Id].ToArray())).ToArray();
+
+        var characters = requestedModule == MovieWorkspaceModules.Cast
+            ? await db.MovieCharacters.AsNoTracking().Where(item => item.MovieProjectId == id).OrderBy(item => item.CreatedAt)
+                .Select(item => new MovieWorkspaceCharacterDto(item.Id, item.Name, item.Role, item.Description, item.Appearance, item.VoiceAndPerformance, item.ContinuityNotes, item.CreatedAt, item.UpdatedAt))
+                .ToListAsync(cancellationToken)
+            : [];
+        var locations = requestedModule == MovieWorkspaceModules.World
+            ? await db.MovieLocations.AsNoTracking().Where(item => item.MovieProjectId == id).OrderBy(item => item.CreatedAt)
+                .Select(item => new MovieWorkspaceLocationDto(item.Id, item.Name, item.Description, item.VisualContinuityNotes))
+                .ToListAsync(cancellationToken)
+            : [];
+        var assemblies = requestedModule is MovieWorkspaceModules.Overview or MovieWorkspaceModules.Production
+            ? await db.MovieAssemblies.AsNoTracking().Where(item => item.MovieProjectId == id).OrderByDescending(item => item.CreatedAt)
+                .Select(item => new MovieWorkspaceAssemblyDto(item.Id, item.AssetId, item.Status, item.CreatedAt, item.CompletedAt))
+                .ToListAsync(cancellationToken)
+            : [];
+
+        var project = new MovieWorkspaceProjectDto(
+            baseProject.Id, baseProject.WorkspaceId, baseProject.ProjectId, baseProject.Mode, baseProject.Status,
+            baseProject.Title, baseProject.Description, baseProject.DurationSeconds, baseProject.AspectRatio,
+            baseProject.Style, baseProject.Language, baseProject.AdditionalInstructions, baseProject.CreatedAt,
+            baseProject.UpdatedAt, baseProject.Guide, projectedScenes, characters, locations, clips, assemblies,
+            requestedModule == MovieWorkspaceModules.World ? new MovieWorkspaceWorldDto(locations) : null);
+        return new MovieWorkspaceResponse(requestedModule, project);
     }
 
     public async Task<MovieStudioProjectDto?> UpdateGuideAsync(Guid userId, Guid id, MovieStudioGuideRequest request, CancellationToken cancellationToken)
@@ -587,7 +653,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         return new MovieStudioGenerationResponse(await GetAsync(userId, movie.Id, cancellationToken) ?? throw new InvalidOperationException("Movie project disappeared."), GenerationJobContractMapper.ToDto(job), clip.Id);
     }
 
-    private IQueryable<MovieProject> Query() => db.MovieProjects.AsNoTracking()
+    private IQueryable<MovieProject> Query() => db.MovieProjects.AsNoTracking().AsSplitQuery()
         .Include(item => item.Guide)
         .Include(item => item.Scenes).ThenInclude(scene => scene.Shots).ThenInclude(shot => shot.Clips)
         .Include(item => item.Scenes).ThenInclude(scene => scene.Shots).ThenInclude(shot => shot.ProductionVersions).ThenInclude(version => version.AssetReferences)

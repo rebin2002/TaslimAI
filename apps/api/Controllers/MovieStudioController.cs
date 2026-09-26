@@ -42,6 +42,16 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieGuid
         return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result);
     }
 
+    [HttpGet("projects/{id:guid}/workspace")]
+    public async Task<IActionResult> Workspace(Guid id, [FromQuery] string? module, CancellationToken cancellationToken)
+    {
+        var result = await movies.GetWorkspaceAsync(GetUserId(), id, module, cancellationToken);
+        if (result is null) return ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.");
+        Response.Headers["X-Movie-Read-Model"] = "workspace-v1";
+        Response.Headers["X-Movie-Read-Module"] = result.Module;
+        return Ok(result);
+    }
+
     [HttpPatch("projects/{id:guid}/guide")]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> UpdateGuide(Guid id, MovieStudioGuideRequest request, CancellationToken cancellationToken)

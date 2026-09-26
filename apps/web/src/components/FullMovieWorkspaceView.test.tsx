@@ -15,6 +15,8 @@ describe("Full Movie workspace foundation", () => {
 
   it("uses durable project routes and marks future surfaces honestly", () => {
     expect(workspaceSource).toContain("/create/movie/${project.id}/${item.slug}");
+    expect(workspaceSource).toContain("api.getMovieWorkspace(projectId, activeModule)");
+    expect(workspaceSource).not.toContain("api.getMovieProject(projectId)");
     expect(workspaceSource).toContain("Foundation surface");
     expect(workspaceSource).toContain("No generated footage yet");
     expect(workspaceSource).toContain("Team controls are not connected yet");

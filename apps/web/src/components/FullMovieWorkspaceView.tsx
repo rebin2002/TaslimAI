@@ -93,7 +93,7 @@ export function FullMovieWorkspaceView({ projectId, module }: { projectId: strin
 
   useEffect(() => {
     let mounted = true;
-    void api.getMovieProject(projectId).then((result) => {
+    void api.getMovieWorkspace(projectId, activeModule).then((result) => {
       if (!mounted) return;
       setProject(result);
       setSelectedSceneId(result.scenes[0]?.id ?? null);
@@ -103,7 +103,7 @@ export function FullMovieWorkspaceView({ projectId, module }: { projectId: strin
       if (mounted) setLoading(false);
     });
     return () => { mounted = false; };
-  }, [projectId]);
+  }, [projectId, activeModule]);
 
   const selectedScene = useMemo(() => project?.scenes.find((scene) => scene.id === selectedSceneId) ?? project?.scenes[0] ?? null, [project, selectedSceneId]);
   const readyClips = project?.clips.filter((clip) => hasReadyAsset(clip.status, clip.assetId)) ?? [];
@@ -252,7 +252,7 @@ function SceneListItem({ scene, isSelected, onSelect, onGenerate }: { scene: Mov
 }
 
 function SceneInspector({ scene }: { scene: MovieScene }) {
-  return <div className="movie-inspector-content"><h3>{scene.title}</h3><p>{scene.summary}</p><div className="movie-inspector-facts"><span><strong>{formatDuration(scene.durationSeconds)}</strong> duration</span><span><strong>{scene.shots.length}</strong> shots</span></div><RecordLine label="Continuity" value={scene.continuityNotes} /><RecordLine label="Narration" value={scene.narration} /><RecordLine label="Dialogue" value={scene.dialogue} /></div>;
+  return <div className="movie-inspector-content"><h3>{scene.title}</h3><p>{scene.summary}</p><div className="movie-inspector-facts"><span><strong>{formatDuration(scene.durationSeconds)}</strong> duration</span><span><strong>{scene.shotCount ?? scene.shots.length}</strong> shots</span></div><RecordLine label="Continuity" value={scene.continuityNotes} /><RecordLine label="Narration" value={scene.narration} /><RecordLine label="Dialogue" value={scene.dialogue} /></div>;
 }
 
 function ContinuityItem({ label, value }: { label: string; value: string | null | undefined }) {
