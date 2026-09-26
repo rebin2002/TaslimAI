@@ -59,6 +59,14 @@ When Movie Studio queues a scene or shot clip, it stores a provider-neutral `Wor
 - **Shot Designer** adds shot-scoped usage records and receives scene-level plus shot-level world context in the generation input.
 - **Movie Director** can treat active `MovieContinuityLock` records and default set variations as authoritative constraints without regenerating world identities.
 
+## Bounded continuity projections
+
+`MovieWorldContinuityProjector` is the single read-model seam for scene- and shot-specific World continuity. It resolves only the target's scene/shot usages, the referenced locations, sets and variations, props, applicable project/scene/shot facts, and active locks. It never serializes the complete World graph or project references. Hard bounds are enforced for usages (128), locations (16), sets (16), variations per set (8), props (32), facts (64), locks (64), and warnings (64).
+
+`MovieWorldContinuitySnapshotDto` is an immutable record contract with `snapshotVersion`, a stable SHA-256 `snapshotHash`, target identifiers, bounded records for locations, sets/variations, props, facts, locks, and explainable warnings. Warning sources identify the originating World/continuity record and targets identify the scene/shot projection. Deterministic conflict codes include `locked_variation_mismatch`, `prop_state_inconsistency`, `conflicting_location_usage`, `conflicting_set_usage`, `conflicting_location_set_usage`, and `conflicting_locked_continuity_fact`.
+
+The projection is available through project, scene, and shot World-continuity read routes. Shot production reads expose the same snapshot, Director context includes the target-shot snapshot before its versioned hash is stored, and scene/shot Generation Job input uses the snapshot JSON. Storyboard, keyframe, motion-preview, and render callers can therefore reference the bounded snapshot through the existing production shot read without introducing a second production or World hierarchy.
+
 ## Migration and tests
 
 The additive EF migrations are:

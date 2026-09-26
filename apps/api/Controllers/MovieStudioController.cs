@@ -12,7 +12,7 @@ namespace Taslim.Api.Controllers;
 [ApiController]
 [Authorize]
 [Route("api/movie-studio")]
-public sealed class MovieStudioController(IMovieStudioService movies, IMovieGuideService guides, IMovieStoryService stories) : ControllerBase
+public sealed class MovieStudioController(IMovieStudioService movies, IMovieGuideService guides, IMovieStoryService stories, IMovieWorldContinuityService worldContinuity) : ControllerBase
 {
     [HttpGet("cinematography/presets")]
     public IActionResult CinematographyPresets() => Ok(CinematographyPresetCatalog.All);
@@ -241,6 +241,27 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieGuid
     {
         try { var result = await movies.AddWorldUsageAsync(GetUserId(), sceneId, request, cancellationToken); return result is null ? ApiResults.Error(this, 404, "MOVIE_SCENE_NOT_FOUND", "Movie scene not found.") : Ok(result); }
         catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_WORLD_USAGE_INVALID", exception.Message); }
+    }
+
+    [HttpGet("projects/{movieProjectId:guid}/world-continuity")]
+    public async Task<IActionResult> GetWorldContinuity(Guid movieProjectId, CancellationToken cancellationToken)
+    {
+        var result = await worldContinuity.GetProjectAsync(GetUserId(), movieProjectId, cancellationToken);
+        return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result);
+    }
+
+    [HttpGet("scenes/{sceneId:guid}/world-continuity")]
+    public async Task<IActionResult> GetSceneWorldContinuity(Guid sceneId, CancellationToken cancellationToken)
+    {
+        var result = await worldContinuity.GetSceneAsync(GetUserId(), sceneId, cancellationToken);
+        return result is null ? ApiResults.Error(this, 404, "MOVIE_SCENE_NOT_FOUND", "Movie scene not found.") : Ok(result);
+    }
+
+    [HttpGet("shots/{shotId:guid}/world-continuity")]
+    public async Task<IActionResult> GetShotWorldContinuity(Guid shotId, CancellationToken cancellationToken)
+    {
+        var result = await worldContinuity.GetShotAsync(GetUserId(), shotId, cancellationToken);
+        return result is null ? ApiResults.Error(this, 404, "MOVIE_SHOT_NOT_FOUND", "Movie shot not found.") : Ok(result);
     }
 
     [HttpGet("shots/{shotId:guid}/production")]

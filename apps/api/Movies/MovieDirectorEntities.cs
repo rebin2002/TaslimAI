@@ -173,7 +173,8 @@ public sealed record DirectorContextDto(
     IReadOnlyList<DirectorLocationContext> Locations,
     DateTime AssembledAt,
     int ContextVersion = 1,
-    DirectorStoryContext? ApprovedStory = null);
+    DirectorStoryContext? ApprovedStory = null,
+    MovieWorldContinuitySnapshotDto? WorldContinuity = null);
 
 public sealed record DirectorGuideContext(
     string VisualLanguage,

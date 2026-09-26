@@ -28,15 +28,14 @@ public interface IDirectorActionExecutor
 
 public sealed record DirectorActionExecution(bool Succeeded, string? FailureCode, string SafeMessage, string? ResultJson);
 
-public sealed class MovieDirectorContextAssembler(TaslimDbContext db)
+public sealed class MovieDirectorContextAssembler(TaslimDbContext db, MovieWorldContinuityProjector worldContinuity)
 {
-    public async Task<DirectorContextAssemblyResult?> AssembleAsync(Guid userId, Guid movieProjectId, CancellationToken cancellationToken = default)
+    public async Task<DirectorContextAssemblyResult?> AssembleAsync(Guid userId, Guid movieProjectId, CancellationToken cancellationToken = default, Guid? targetShotId = null)
     {
         var movie = await db.MovieProjects.AsNoTracking()
             .Include(item => item.Guide).ThenInclude(item => item.Revisions)
             .Include(item => item.Scenes).ThenInclude(item => item.Shots)
             .Include(item => item.Characters)
-            .Include(item => item.Locations)
             .FirstOrDefaultAsync(item => item.Id == movieProjectId, cancellationToken);
         if (movie is null) return null;
         var lockedRevision = movie.Guide.LockedRevisionNumber is int lockedRevisionNumber
@@ -53,6 +52,12 @@ public sealed class MovieDirectorContextAssembler(TaslimDbContext db)
             ? null
             : new DirectorStoryContext(approvedStoryRevision.Id, approvedStoryRevision.RevisionNumber, approvedStoryRevision.Premise, approvedStoryRevision.Logline, approvedStoryRevision.Synopsis, approvedStoryRevision.Treatment, approvedStoryRevision.Authorship);
 
+        var targetShot = targetShotId.HasValue
+            ? movie.Scenes.SelectMany(item => item.Shots).FirstOrDefault(item => item.Id == targetShotId.Value)
+            : movie.Scenes.OrderBy(item => item.Sequence).SelectMany(item => item.Shots.OrderBy(shot => shot.Sequence)).FirstOrDefault();
+        var worldSnapshot = targetShot is null
+            ? null
+            : await worldContinuity.ProjectAsync(movieProjectId, targetShot.MovieSceneId, targetShot.Id, cancellationToken);
         var context = new DirectorContextDto(
             movie.Id, movie.WorkspaceId, movie.Title, movie.Description, movie.DurationSeconds, movie.AspectRatio, movie.Style, movie.Language,
             new DirectorGuideContext(movie.Guide.VisualLanguage, movie.Guide.CameraLanguage, movie.Guide.ColorAndLighting, movie.Guide.SoundAndNarration, movie.Guide.ContinuityRules, lockedRevision.RevisionNumber, true, lockedRevision.CinematographyBibleJson),
@@ -60,9 +65,10 @@ public sealed class MovieDirectorContextAssembler(TaslimDbContext db)
                 scene.Id, scene.Sequence, scene.Title, scene.Summary, scene.DurationSeconds, scene.ContinuityNotes,
                 scene.Shots.OrderBy(item => item.Sequence).Select(shot => new DirectorShotContext(shot.Id, shot.Sequence, shot.Description, shot.CameraAndFraming, shot.CameraMotion, shot.DurationSeconds, shot.Narration, shot.Dialogue, shot.VisualContinuityNotes)).ToArray())).ToArray(),
             movie.Characters.OrderBy(item => item.CreatedAt).Select(item => new DirectorCharacterContext(item.Name, item.Description, item.Appearance, item.ContinuityNotes)).ToArray(),
-            movie.Locations.OrderBy(item => item.CreatedAt).Select(item => new DirectorLocationContext(item.Name, item.Description, item.VisualContinuityNotes)).ToArray(),
+            worldSnapshot?.Locations.Select(item => new DirectorLocationContext(item.Name, item.Description, item.VisualContinuityNotes)).ToArray() ?? [],
             DateTime.UtcNow,
-            ApprovedStory: approvedStoryContext);
+            ApprovedStory: approvedStoryContext,
+            WorldContinuity: worldSnapshot);
         var snapshotJson = JsonSerializer.Serialize(context, DirectorJson.Options);
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(snapshotJson))).ToLowerInvariant();
         return new DirectorContextAssemblyResult(context, snapshotJson, hash);
@@ -80,7 +86,7 @@ public sealed class MovieDirectorService(
     {
         var movie = await db.MovieProjects.AsNoTracking().FirstOrDefaultAsync(item => item.Id == movieProjectId, cancellationToken);
         if (movie is null || !await access.IsMemberAsync(userId, movie.WorkspaceId, cancellationToken)) return null;
-        var context = await assembler.AssembleAsync(userId, movieProjectId, cancellationToken);
+        var context = await assembler.AssembleAsync(userId, movieProjectId, cancellationToken, request.ShotId);
         if (context is null) return null;
         var shot = request.ShotId.HasValue
             ? context.Context.Scenes.SelectMany(item => item.Shots).FirstOrDefault(item => item.Id == request.ShotId.Value)

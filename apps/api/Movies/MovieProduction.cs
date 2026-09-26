@@ -201,7 +201,8 @@ public sealed record MovieShotProductionDto(
     Guid MovieShotId,
     string CurrentStage,
     IReadOnlyList<MovieProductionVersionDto> Versions,
-    IReadOnlyList<MovieProductionStageTransitionDto> Transitions);
+    IReadOnlyList<MovieProductionStageTransitionDto> Transitions,
+    MovieWorldContinuitySnapshotDto? WorldContinuity = null);
 
 public sealed class MovieProductionVersionRequest
 {
