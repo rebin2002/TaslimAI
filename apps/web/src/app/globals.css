@@ -2118,3 +2118,22 @@ body { background: var(--canvas); }
   .movie-storyboard-candidate-preview { min-height: 125px; }
   .movie-storyboard-candidate-preview img { min-height: 125px; }
 }
+/* Movie V2 production keyframe workflow surfaces. */
+.movie-production-list { display: flex; flex-direction: column; gap: 9px; }
+.movie-production-list .movie-section-head { margin-bottom: 2px; }
+.movie-production-card { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 14px 15px; border: 1px solid rgba(143,176,204,.15); border-radius: 9px; background: rgba(14,42,61,.32); }
+.movie-production-card h3 { margin: 7px 0 5px; color: #e6f1f5; font-size: 12px; }
+.movie-production-card p { margin: 0; color: #7f9bab; font-size: 9px; line-height: 1.5; }
+.movie-production-card-status { display: flex; flex: 0 0 auto; flex-direction: column; align-items: flex-end; gap: 8px; }
+.movie-production-pill { display: inline-flex; align-items: center; gap: 4px; padding: 5px 7px; color: #849dab; border: 1px solid rgba(143,176,204,.16); border-radius: 999px; background: rgba(5,19,31,.36); font-size: 8px; font-weight: 900; letter-spacing: .04em; text-transform: uppercase; white-space: nowrap; }
+.movie-production-pill.is-pending { color: #e1b66d; border-color: rgba(225,182,109,.28); }
+.movie-production-pill.is-approved { color: var(--movie-teal); border-color: rgba(85,209,193,.28); }
+.movie-production-actions { display: flex; align-items: center; gap: 7px; }
+.movie-text-action.is-muted { color: #9cabb4; background: rgba(143,176,204,.08); }
+.movie-production-reference { display: inline-flex; align-items: center; gap: 4px; margin: 8px 6px 0 0; color: var(--movie-teal); font-size: 8px; font-weight: 800; }
+.movie-keyframe-plan { display: grid; grid-template-columns: repeat(2, minmax(130px, 1fr)); align-items: end; gap: 8px; max-width: 430px; }
+.movie-keyframe-plan label { display: flex; flex-direction: column; gap: 4px; color: #7794a5; font-size: 8px; font-weight: 800; }
+.movie-keyframe-plan input { width: 100%; min-width: 0; padding: 7px 8px; color: #e8f4f7; border: 1px solid rgba(143,176,204,.2); border-radius: 5px; outline: 0; background: rgba(5,19,31,.46); font-size: 9px; }
+.movie-keyframe-plan input:focus { border-color: var(--movie-teal); }
+.movie-keyframe-plan button { grid-column: 1 / -1; justify-self: end; }
+@media (max-width: 720px) { .movie-production-card { align-items: stretch; flex-direction: column; }.movie-production-card-status { align-items: flex-start; }.movie-keyframe-plan { width: 100%; max-width: none; }.movie-keyframe-plan button { justify-self: stretch; width: 100%; } }
