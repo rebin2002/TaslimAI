@@ -18,6 +18,79 @@ public static class MovieProjectStatuses
     public const string Archived = "Archived";
 }
 
+public static class MovieProductionStatuses
+{
+    public const string Draft = "Draft";
+    public const string InDevelopment = "InDevelopment";
+    public const string PreProduction = "PreProduction";
+    public const string Production = "Production";
+    public const string PostProduction = "PostProduction";
+    public const string Locked = "Locked";
+    public const string Completed = "Completed";
+    public const string Archived = "Archived";
+    public static readonly IReadOnlySet<string> Supported = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        Draft, InDevelopment, PreProduction, Production, PostProduction, Locked, Completed, Archived,
+    };
+}
+
+public static class MovieQualityLevels
+{
+    public const string Fast = "Fast";
+    public const string Standard = "Standard";
+    public const string Cinematic = "Cinematic";
+    public const string Studio = "Studio";
+    public static readonly IReadOnlySet<string> Supported = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        Fast, Standard, Cinematic, Studio,
+    };
+}
+
+public static class MovieHierarchyStatuses
+{
+    public const string Planned = "Planned";
+    public const string InProgress = "InProgress";
+    public const string Approved = "Approved";
+    public const string Archived = "Archived";
+    public static readonly IReadOnlySet<string> Supported = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        Planned, InProgress, Approved, Archived,
+    };
+}
+
+public static class MovieShotStatuses
+{
+    public const string Planned = "Planned";
+    public const string InProgress = "InProgress";
+    public const string ReadyForReview = "ReadyForReview";
+    public const string Approved = "Approved";
+    public const string Archived = "Archived";
+    public static readonly IReadOnlySet<string> Supported = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        Planned, InProgress, ReadyForReview, Approved, Archived,
+    };
+}
+
+public static class MovieTakeStatuses
+{
+    public const string Draft = "Draft";
+    public const string Generating = "Generating";
+    public const string Ready = "Ready";
+    public const string Rejected = "Rejected";
+    public const string Approved = "Approved";
+    public const string Archived = "Archived";
+    public static readonly IReadOnlySet<string> Supported = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        Draft, Generating, Ready, Rejected, Approved, Archived,
+    };
+}
+
+public static class MovieApprovalDecisions
+{
+    public const string Approved = "Approved";
+    public const string Rejected = "Rejected";
+}
+
 public static class MovieClipStatuses
 {
     public const string Planned = "Planned";
@@ -52,6 +125,12 @@ public sealed class MovieProject
     public string Style { get; set; } = "cinematic";
     public string Language { get; set; } = LanguageCodes.English;
     public string? AdditionalInstructions { get; set; }
+    public string ProductionStatus { get; set; } = MovieProductionStatuses.Draft;
+    public string QualityLevel { get; set; } = MovieQualityLevels.Standard;
+    public bool AutoDirectorEnabled { get; set; }
+    public DateTime? StatusChangedAt { get; set; }
+    public Guid? StatusChangedByUserId { get; set; }
+    public DateTime? ArchivedAt { get; set; }
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
 
@@ -60,6 +139,7 @@ public sealed class MovieProject
     public ApplicationUser CreatedByUser { get; set; } = null!;
     public MovieContinuityGuide Guide { get; set; } = null!;
     public ICollection<MovieScene> Scenes { get; set; } = [];
+    public ICollection<MovieAct> Acts { get; set; } = [];
     public ICollection<MovieCharacter> Characters { get; set; } = [];
     public ICollection<MovieLocation> Locations { get; set; } = [];
     public ICollection<MovieClip> Clips { get; set; } = [];
@@ -84,6 +164,7 @@ public sealed class MovieScene
 {
     public Guid Id { get; set; }
     public Guid MovieProjectId { get; set; }
+    public Guid? MovieSequenceId { get; set; }
     public int Sequence { get; set; }
     public string Title { get; set; } = string.Empty;
     public string Summary { get; set; } = string.Empty;
@@ -91,9 +172,12 @@ public sealed class MovieScene
     public string? ContinuityNotes { get; set; }
     public string? Narration { get; set; }
     public string? Dialogue { get; set; }
+    public string Status { get; set; } = MovieHierarchyStatuses.Planned;
+    public DateTime? ArchivedAt { get; set; }
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
     public MovieProject MovieProject { get; set; } = null!;
+    public MovieSequence? MovieSequence { get; set; }
     public ICollection<MovieShot> Shots { get; set; } = [];
     public ICollection<MovieClip> Clips { get; set; } = [];
 }
@@ -132,6 +216,8 @@ public sealed class MovieShot
 {
     public Guid Id { get; set; }
     public Guid MovieSceneId { get; set; }
+    public Guid? SelectedTakeId { get; set; }
+    public Guid? FinalTakeId { get; set; }
     public int Sequence { get; set; }
     public string Description { get; set; } = string.Empty;
     public string? CameraAndFraming { get; set; }
@@ -140,9 +226,14 @@ public sealed class MovieShot
     public string? Narration { get; set; }
     public string? Dialogue { get; set; }
     public string? VisualContinuityNotes { get; set; }
+    public string Status { get; set; } = MovieShotStatuses.Planned;
+    public DateTime? ArchivedAt { get; set; }
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
     public MovieScene Scene { get; set; } = null!;
+    public MovieTake? SelectedTake { get; set; }
+    public MovieTake? FinalTake { get; set; }
+    public ICollection<MovieTake> Takes { get; set; } = [];
     public ICollection<MovieClip> Clips { get; set; } = [];
 }
 
