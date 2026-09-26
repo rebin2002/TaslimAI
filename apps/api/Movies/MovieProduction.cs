@@ -207,7 +207,8 @@ public sealed record MovieProductionVersionDto(
     DateTime CreatedAt,
     DateTime UpdatedAt,
     DateTime? ReviewedAt,
-    IReadOnlyList<MovieProductionAssetReferenceDto> AssetReferences);
+    IReadOnlyList<MovieProductionAssetReferenceDto> AssetReferences,
+    MovieProductionExecutionDto? Execution = null);
 public sealed record MovieProductionStageTransitionDto(
     Guid Id,
     Guid MovieShotId,
@@ -226,7 +227,8 @@ public sealed record MovieShotProductionDto(
     string CurrentStage,
     IReadOnlyList<MovieProductionVersionDto> Versions,
     IReadOnlyList<MovieProductionStageTransitionDto> Transitions,
-    MovieWorldContinuitySnapshotDto? WorldContinuity = null);
+    MovieWorldContinuitySnapshotDto? WorldContinuity = null,
+    IReadOnlyList<MovieV2TakeDto> Takes = null!);
 
 public sealed record MovieStoryboardCandidateDto(
     Guid Id,
@@ -296,6 +298,100 @@ public sealed record MovieStoryboardProjectDto(
     MovieGuideDto Guide,
     bool ProviderReady,
     IReadOnlyList<MovieStoryboardSceneDto> Scenes);
+
+public sealed record MovieProductionProviderAttemptDto(
+    int AttemptNumber,
+    int RetryNumber,
+    bool IsRetry,
+    bool IsFallback,
+    string Status,
+    string ResultClassification,
+    string? FailureCode,
+    bool RateLimited,
+    bool TimedOut,
+    bool CircuitOpen,
+    bool QualityControlRejected,
+    DateTime StartedAt,
+    DateTime? CompletedAt);
+
+public sealed record MovieProductionExecutionDto(
+    Guid GenerationJobId,
+    string JobType,
+    string Status,
+    int ProgressPercent,
+    int RetryCount,
+    int AttemptCount,
+    string QualityControlStatus,
+    string? ErrorCode,
+    string? ErrorMessage,
+    Guid? AssetId,
+    string? AssetType,
+    IReadOnlyList<MovieProductionProviderAttemptDto> Attempts);
+
+public static class MovieProductionProjection
+{
+    public static MovieV2TakeDto ToTakeDto(MovieTake take) => new(
+        take.Id,
+        take.MovieShotId,
+        take.VersionNumber,
+        take.Label,
+        take.Status,
+        take.QualityLevel,
+        take.AutoDirectorEnabled,
+        take.MovieClipId,
+        take.GenerationJobId,
+        take.AssetId,
+        take.Notes,
+        take.SelectedAt,
+        take.FinalizedAt,
+        take.CreatedAt,
+        take.UpdatedAt,
+        take.Approvals.OrderByDescending(item => item.CreatedAt)
+            .Select(item => new MovieV2TakeApprovalDto(item.Id, item.UserId, item.Decision, item.Comment, item.CreatedAt))
+            .ToArray(),
+        ToExecution(take.GenerationJob));
+
+    public static MovieProductionExecutionDto? ToExecution(GenerationJob? job)
+    {
+        if (job is null) return null;
+        var attempts = job.ProviderAttempts.OrderBy(item => item.AttemptNumber).ThenBy(item => item.StartedAt).ToArray();
+        var qualityControlStatus = attempts.Any(item => item.QualityControlRejected)
+            || job.ErrorCode?.Contains("OUTPUT_INVALID", StringComparison.OrdinalIgnoreCase) == true
+            ? "Failed"
+            : job.Status == GenerationJobStatus.Succeeded
+                ? "Passed"
+                : attempts.Length > 0
+                    ? "Pending"
+                    : "NotRecorded";
+        var asset = job.Assets.OrderByDescending(item => item.CreatedAt).FirstOrDefault();
+        return new MovieProductionExecutionDto(
+            job.Id,
+            job.JobType,
+            job.Status.ToString(),
+            job.ProgressPercent,
+            job.RetryCount,
+            attempts.Length,
+            qualityControlStatus,
+            job.ErrorCode,
+            job.ErrorMessage,
+            asset?.Id,
+            asset?.AssetType,
+            attempts.Select(item => new MovieProductionProviderAttemptDto(
+                item.AttemptNumber,
+                item.RetryNumber,
+                item.IsRetry,
+                item.IsFallback,
+                item.Status.ToString(),
+                item.ResultClassification,
+                item.FailureCode,
+                item.RateLimited,
+                item.TimedOut,
+                item.CircuitOpen,
+                item.QualityControlRejected,
+                item.StartedAt,
+                item.CompletedAt)).ToArray());
+    }
+}
 
 public sealed class MovieProductionVersionRequest
 {
