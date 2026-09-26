@@ -1,5 +1,5 @@
 "use client";
-
+/* eslint-disable @next/next/no-img-element -- production previews use authenticated API URLs with session cookies. */
 import Link from "next/link";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
@@ -22,7 +22,7 @@ import {
   Users,
   Workflow,
 } from "lucide-react";
-import { api, type MovieProject, type MovieScene } from "@/lib/api";
+import { api, type MovieProductionVersion, type MovieProject, type MovieScene, type MovieShot, type MovieTake } from "@/lib/api";
 import { assetFileUrl } from "@/lib/apiBase";
 
 export const fullMovieModules = [
@@ -138,6 +138,11 @@ export function FullMovieWorkspaceView({ projectId, module }: { projectId: strin
     }
   }
 
+  async function refreshProject() {
+    const result = await api.getMovieProject(projectId);
+    setProject(result);
+  }
+
   if (loading) return <div className="movie-studio-page"><div className="movie-workspace-loading"><span className="loading-spinner" /><p>Loading the production workspace…</p></div></div>;
   if (!project) return <div className="movie-studio-page"><div className="movie-workspace-error"><XCircleIcon /><h1>Workspace unavailable</h1><p>{error || "This movie project is not available in the current workspace."}</p><Link href="/create/movie" className="movie-workspace-button is-primary"><ArrowLeft size={14} /> Back to Movie Studio</Link></div></div>;
 
@@ -176,7 +181,7 @@ export function FullMovieWorkspaceView({ projectId, module }: { projectId: strin
           {activeModule === "world" && <WorldModule project={project} />}
           {activeModule === "scenes" && <ScenesModule project={project} selectedSceneId={selectedScene?.id ?? null} newScene={newScene} addingScene={addingScene} onSelectScene={setSelectedSceneId} onChangeScene={setNewScene} onAddScene={() => void addScene()} onGenerate={generateScene} />}
           {activeModule === "storyboard" && <StoryboardModule project={project} />}
-          {activeModule === "production" && <ProductionModule project={project} completionPercent={completionPercent} />}
+          {activeModule === "production" && <ProductionModule project={project} completionPercent={completionPercent} onRefresh={refreshProject} />}
           {activeModule === "edit" && <EditModule project={project} />}
           {activeModule === "audio" && <FutureModule icon={<AudioLines size={20} />} title="Audio is not connected yet" text="The sound stage is reserved for real narration, ambience, and music assets. Nothing is simulated here." />}
           {activeModule === "qc" && <FutureModule icon={<ShieldCheck size={20} />} title="QC is a future review gate" text="Continuity and delivery checks will appear once this project has a real cut to inspect." />}
@@ -231,10 +236,95 @@ function StoryboardModule({ project }: { project: MovieProject }) {
   return <div className="movie-module-stack"><section className="movie-workspace-section"><div className="movie-section-head"><div><span className="movie-workspace-kicker">Filmstrip</span><h3>Scenes, not placeholders</h3></div><span className="movie-section-count">{project.scenes.length} frames planned</span></div>{project.scenes.length ? <div className="movie-filmstrip">{project.scenes.map((scene) => { const clip = readyClipForScene(scene); return <article className="movie-filmstrip-card" key={scene.id}>{clip?.assetId ? <video src={assetFileUrl(clip.assetId, true)} preload="metadata" muted aria-label={scene.title} /> : <div className="movie-filmstrip-placeholder"><Film size={19} /><span>No footage</span></div>}<div><span>{String(scene.sequence).padStart(2, "0")}</span><strong>{scene.title}</strong><small>{formatDuration(scene.durationSeconds)}</small></div></article>; })}</div> : <EmptyGeneratedStage title="Your storyboard is empty" text="Planned scenes will become the first visual pass here." />}</section><ModuleIntro icon={<Layers3 size={18} />} title="Storyboard foundation" text="This surface is ready for real frames. It will not manufacture thumbnails for scenes that have no generated footage." /></div>;
 }
 
-function ProductionModule({ project, completionPercent }: { project: MovieProject; completionPercent: number }) {
-  const ready = project.clips.filter((clip) => hasReadyAsset(clip.status, clip.assetId)).length;
-  const inFlight = project.clips.filter((clip) => ["Pending", "Queued", "Generating", "Running"].includes(clip.status)).length;
-  return <div className="movie-module-stack"><section className="movie-production-hero"><div><span className="movie-workspace-kicker">Production signal</span><h3>{completionPercent}% of the current plan has a reviewable clip</h3><p>Only durable project records are counted here. Empty stages stay visible instead of looking complete.</p></div><div className="movie-production-ring"><strong>{completionPercent}%</strong><span>ready</span></div></section><div className="movie-metric-row"><Metric label="Scenes" value={project.scenes.length} /><Metric label="Ready clips" value={ready} /><Metric label="In progress" value={inFlight} /><Metric label="Assemblies" value={project.assemblies.length} /></div><ModuleIntro icon={<Workflow size={18} />} title="Production controls are intentionally restrained" text="Queueing a scene is supported where the API is available. Batch planning, approvals, and scheduling remain future surfaces." /></div>;
+function ProductionModule({ project, completionPercent, onRefresh }: { project: MovieProject; completionPercent: number; onRefresh: () => Promise<void> }) {
+  const [busyKey, setBusyKey] = useState("");
+  const [actionError, setActionError] = useState("");
+  const shots = project.scenes.flatMap((scene) => scene.shots.map((shot) => ({ scene, shot }))).sort((a, b) => a.scene.sequence - b.scene.sequence || a.shot.sequence - b.shot.sequence);
+  const versions = shots.flatMap(({ shot }) => shot.productionVersions ?? []);
+  const takes = shots.flatMap(({ shot }) => shot.takes ?? []);
+  const ready = takes.filter((take) => Boolean(take.assetId) && ["Ready", "Approved"].includes(take.status)).length;
+  const inFlight = versions.filter((version) => ["Pending", "Queued", "Running"].includes(version.execution?.status ?? "")).length;
+  const failed = versions.filter((version) => version.execution?.status === "Failed").length;
+
+  async function action(key: string, work: () => Promise<unknown>) {
+    setBusyKey(key);
+    setActionError("");
+    try {
+      await work();
+      await onRefresh();
+    } catch (cause) {
+      setActionError(cause instanceof Error ? cause.message : "The production action could not be completed.");
+    } finally {
+      setBusyKey("");
+    }
+  }
+
+  return <div className="movie-module-stack">
+    <section className="movie-production-hero">
+      <div><span className="movie-workspace-kicker">Production signal</span><h3>{completionPercent}% of the current plan has a reviewable clip</h3><p>Production stays deliberate: approved keyframes lead to motion previews, renders, and canonical takes. Nothing renders because a shot exists.</p></div>
+      <div className="movie-production-ring"><strong>{completionPercent}%</strong><span>ready</span></div>
+    </section>
+    <div className="movie-metric-row"><Metric label="Scenes" value={project.scenes.length} /><Metric label="MovieTakes" value={takes.length} /><Metric label="Reviewable takes" value={ready} /><Metric label="Render failures" value={failed} /></div>
+    {actionError && <div className="movie-workspace-error-inline" role="alert"><XCircleIcon /> {actionError}</div>}
+    <section className="movie-production-board">
+      <div className="movie-section-head"><div><span className="movie-workspace-kicker">Scene / shot rail</span><h3>Production candidates and canonical takes</h3></div><span className="movie-section-count">{versions.length} versions · {inFlight} active</span></div>
+      {shots.length ? <div className="movie-production-groups">{shots.map(({ scene, shot }) => <ProductionShotGroup key={shot.id} sceneTitle={scene.title} sceneSequence={scene.sequence} shot={shot} busyKey={busyKey} onAction={action} />)}</div> : <EmptyModule title="No shots are planned yet" text="Add a scene and shot before opening a production action." />}
+    </section>
+    <ModuleIntro icon={<ShieldCheck size={18} />} title="Shared Wave 5 controls remain in charge" text="Generation Jobs, cost guardrails, provider attempts, resilience, QC, Assets, and the Usage Ledger remain the only execution path. A failed provider attempt is visible here, never replaced by fake footage." />
+  </div>;
+}
+
+function ProductionShotGroup({ sceneTitle, sceneSequence, shot, busyKey, onAction }: { sceneTitle: string; sceneSequence: number; shot: MovieShot; busyKey: string; onAction: (key: string, work: () => Promise<unknown>) => Promise<void> }) {
+  const versions = [...(shot.productionVersions ?? [])].sort((a, b) => b.versionNumber - a.versionNumber);
+  const keyframe = versions.find((version) => version.stage === "ProductionKeyframe" && version.status === "PendingApproval");
+  const approvedKeyframe = versions.find((version) => version.stage === "ApprovedKeyframe" && version.status === "Approved");
+  const motionPreview = versions.find((version) => version.stage === "MotionPreview" && ["Approved", "PendingApproval"].includes(version.status));
+  const render = versions.find((version) => version.stage === "ProductionRender");
+  const takes = [...(shot.takes ?? [])].sort((a, b) => b.versionNumber - a.versionNumber);
+  const isBusy = (action: string) => busyKey === `${shot.id}:${action}`;
+
+  return <article className="movie-production-group">
+    <div className="movie-production-shot-heading"><div><span className="movie-production-scene-label">Scene {String(sceneSequence).padStart(2, "0")} · {sceneTitle}</span><h4>Shot {String(shot.sequence).padStart(2, "0")}</h4><p>{shot.description}</p></div><span className="movie-stage-pill">{shot.productionStage}</span></div>
+    <div className="movie-production-lifecycle">
+      <ProductionCheckpoint label="Keyframe" state={approvedKeyframe ? "Approved" : keyframe ? "Pending approval" : "Not started"} tone={approvedKeyframe ? "ready" : keyframe ? "pending" : "quiet"} />
+      <ProductionCheckpoint label="Motion preview" state={motionPreview?.status ?? "Not started"} tone={motionPreview ? motionPreview.status === "Approved" ? "ready" : "pending" : "quiet"} />
+      <ProductionCheckpoint label="Production render" state={render?.execution?.status ?? "Not started"} tone={render?.execution?.status === "Succeeded" ? "ready" : render?.execution?.status === "Failed" ? "failed" : render ? "pending" : "quiet"} />
+      <ProductionCheckpoint label="MovieTake" state={takes.length ? `${takes.length} canonical` : "Not created"} tone={takes.length ? "ready" : "quiet"} />
+    </div>
+    <div className="movie-production-action-row">
+      {keyframe && <button type="button" className="movie-workspace-button is-primary" disabled={Boolean(busyKey)} onClick={() => void onAction(`${shot.id}:approve-keyframe`, () => api.reviewMovieProductionVersion(keyframe.id, { approve: true, reason: "Keyframe approved in Production." }))}>{isBusy("approve-keyframe") ? "Approving…" : "Approve keyframe"}</button>}
+      {approvedKeyframe && !motionPreview && <button type="button" className="movie-workspace-button is-secondary" disabled={Boolean(busyKey)} onClick={() => void onAction(`${shot.id}:motion-preview`, () => api.createMovieMotionPreview(shot.id, { sourceVersionId: approvedKeyframe.id, label: "Motion preview" }))}>{isBusy("motion-preview") ? "Preparing…" : "Create motion preview"}</button>}
+      {motionPreview?.status === "PendingApproval" && <button type="button" className="movie-workspace-button is-primary" disabled={Boolean(busyKey)} onClick={() => void onAction(`${shot.id}:approve-motion`, () => api.reviewMovieProductionVersion(motionPreview.id, { approve: true, reason: "Motion preview approved in Production." }))}>{isBusy("approve-motion") ? "Approving…" : "Approve motion preview"}</button>}
+      {motionPreview?.status === "Approved" && (!render || render.execution?.status === "Failed") && <button type="button" className="movie-workspace-button is-secondary" disabled={Boolean(busyKey)} onClick={() => void onAction(`${shot.id}:render`, () => api.queueMovieProductionRender(shot.id, { sourceVersionId: motionPreview.id, label: render ? "Render retry" : "Production render" }))}>{isBusy("render") ? "Queueing…" : render ? "Retry render" : "Start production render"}</button>}
+      {render?.execution?.status === "Succeeded" && !takes.some((take) => take.generationJobId === render.generationJobId) && <button type="button" className="movie-workspace-button is-primary" disabled={Boolean(busyKey)} onClick={() => void onAction(`${shot.id}:take`, () => api.createMovieTakeFromProduction(render.id, { label: "Rendered take" }))}>{isBusy("take") ? "Saving…" : "Create MovieTake"}</button>}
+    </div>
+    {versions.length ? <div className="movie-production-version-list"><span className="movie-production-subhead">Version history</span>{versions.map((version) => <ProductionVersionCard key={version.id} version={version} shot={shot} busyKey={busyKey} onAction={onAction} />)}</div> : <div className="movie-production-empty-line">No production versions yet. Start from an approved storyboard/keyframe hand-off.</div>}
+    <div className="movie-production-takes"><div className="movie-production-subhead-row"><span className="movie-production-subhead">Canonical MovieTake</span><span className="movie-take-definition">artifact candidates stay separate from rendered takes</span></div>{takes.length ? takes.map((take) => <MovieTakeCard key={take.id} take={take} shot={shot} busyKey={busyKey} onAction={onAction} />) : <div className="movie-production-empty-line">A MovieTake appears only after a real render has produced a private Asset.</div>}</div>
+  </article>;
+}
+
+function ProductionCheckpoint({ label, state, tone }: { label: string; state: string; tone: "ready" | "pending" | "failed" | "quiet" }) {
+  return <div className={`movie-production-checkpoint is-${tone}`}><span>{label}</span><strong>{state}</strong></div>;
+}
+
+function ProductionVersionCard({ version, shot, busyKey, onAction }: { version: MovieProductionVersion; shot: MovieShot; busyKey: string; onAction: (key: string, work: () => Promise<unknown>) => Promise<void> }) {
+  const execution = version.execution;
+  const outputAssetId = version.assetId ?? execution?.assetId ?? null;
+  const outputIsVideo = version.stage === "ProductionRender" || execution?.assetType?.toLowerCase() === "video";
+  const isBusy = (action: string) => busyKey === `${shot.id}:${action}`;
+  return <div className="movie-production-version-card"><div className="movie-production-version-top"><div><span className="movie-production-version-number">v{version.versionNumber} · {version.stage}</span><strong>{version.label || "Untitled candidate"}</strong></div><span className={`movie-stage-pill is-${version.status.toLowerCase()}`}>{version.status}</span></div>{outputAssetId ? outputIsVideo ? <video className="movie-production-output" src={assetFileUrl(outputAssetId, true)} controls preload="metadata" aria-label={`${version.stage} output`} /> : <img className="movie-production-output" src={assetFileUrl(outputAssetId, true)} alt={`${version.stage} output`} /> : <div className="movie-production-preview-empty"><Film size={15} /><span>{execution ? `${execution.status} · ${execution.progressPercent}%` : "No generated output"}</span></div>}{execution && <ProductionExecutionSummary execution={execution} />}{version.rejectionReason && <div className="movie-production-failure"><XCircleIcon /> {version.rejectionReason}</div>}{version.stage === "ProductionKeyframe" && version.status === "PendingApproval" && <button type="button" className="movie-text-action" disabled={Boolean(busyKey)} onClick={() => void onAction(`${shot.id}:approve-keyframe`, () => api.reviewMovieProductionVersion(version.id, { approve: true, reason: "Keyframe approved in Production." }))}>{isBusy("approve-keyframe") ? "Approving…" : "Approve keyframe"}</button>}</div>;
+}
+
+function ProductionExecutionSummary({ execution }: { execution: NonNullable<MovieProductionVersion["execution"]> }) {
+  const failures = execution.attempts.filter((attempt) => attempt.failureCode || attempt.qualityControlRejected);
+  return <div className="movie-production-execution"><div><span>Job</span><strong>{execution.status} · {execution.progressPercent}%</strong></div><div><span>QC</span><strong>{execution.qualityControlStatus}</strong></div><div><span>Retries</span><strong>{execution.retryCount} · {execution.attemptCount} attempts</strong></div>{(execution.errorCode || failures.length > 0) && <div className="movie-production-failure-detail"><span>Failure / resilience</span><strong>{execution.errorCode || failures.at(-1)?.failureCode || "Provider attempt failed"}</strong>{execution.errorMessage && <small>{execution.errorMessage}</small>}</div>}</div>;
+}
+
+function MovieTakeCard({ take, shot, busyKey, onAction }: { take: MovieTake; shot: MovieShot; busyKey: string; onAction: (key: string, work: () => Promise<unknown>) => Promise<void> }) {
+  const isBusy = (action: string) => busyKey === `${shot.id}:${action}`;
+  const selected = Boolean(take.selectedAt);
+  const finalized = Boolean(take.finalizedAt);
+  return <div className={`movie-take-card ${selected ? "is-selected" : ""} ${finalized ? "is-final" : ""}`}><div className="movie-take-copy"><span>MovieTake v{take.versionNumber}</span><strong>{take.label}</strong><small>{take.status} · {take.qualityLevel}{selected ? " · Selected" : ""}{finalized ? " · Final" : ""}</small></div>{take.assetId ? <video className="movie-take-video" src={assetFileUrl(take.assetId, true)} controls preload="metadata" aria-label={take.label} /> : <div className="movie-production-preview-empty"><Film size={15} /><span>Private output pending</span></div>}<div className="movie-take-actions">{take.status !== "Approved" && take.status !== "Rejected" && <button type="button" className="movie-text-action" disabled={Boolean(busyKey)} onClick={() => void onAction(`${shot.id}:approve-take`, () => api.approveMovieTake(take.id, { decision: "Approved", comment: "Take approved in Production." }))}>{isBusy("approve-take") ? "Approving…" : "Approve take"}</button>}{!selected && <button type="button" className="movie-text-action" disabled={Boolean(busyKey) || take.status === "Rejected"} onClick={() => void onAction(`${shot.id}:select-take`, () => api.selectMovieTake(take.id))}>{isBusy("select-take") ? "Selecting…" : "Select take"}</button>}{!finalized && <button type="button" className="movie-workspace-button is-primary" disabled={Boolean(busyKey) || take.status !== "Approved"} onClick={() => void onAction(`${shot.id}:finalize-take`, () => api.finalizeMovieTake(take.id))}>{isBusy("finalize-take") ? "Finalizing…" : "Finalize take"}</button>}</div></div>;
 }
 
 function EditModule({ project }: { project: MovieProject }) {

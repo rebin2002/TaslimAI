@@ -26,4 +26,20 @@ describe("Full Movie workspace foundation", () => {
     expect(createSource).toContain("Quick Movie stays intentionally small");
     expect(createSource).toContain("function QuickMovieResult");
   });
+
+  it("keeps production actions explicit and preserves the candidate/take distinction", () => {
+    expect(workspaceSource).toContain("Approve keyframe");
+    expect(workspaceSource).toContain("Create motion preview");
+    expect(workspaceSource).toContain("Start production render");
+    expect(workspaceSource).toContain("Create MovieTake");
+    expect(workspaceSource).toContain("artifact candidates stay separate from rendered takes");
+    expect(workspaceSource).toContain("A MovieTake appears only after a real render has produced a private Asset.");
+  });
+
+  it("surfaces existing generation, resilience, and QC signals instead of inventing footage", () => {
+    expect(workspaceSource).toContain("retryCount");
+    expect(workspaceSource).toContain("qualityControlStatus");
+    expect(workspaceSource).toContain("Failure / resilience");
+    expect(workspaceSource).toContain("No generated output");
+  });
 });

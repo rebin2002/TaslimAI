@@ -274,6 +274,43 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieGuid
         catch (MovieProductionValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
     }
 
+    [HttpPost("shots/{shotId:guid}/production/motion-preview")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> CreateMotionPreview(Guid shotId, MovieProductionMotionPreviewRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await movies.CreateMotionPreviewAsync(GetUserId(), shotId, request, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_SHOT_NOT_FOUND", "Movie shot not found.") : Ok(result);
+        }
+        catch (MovieProductionValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
+    }
+
+    [HttpPost("shots/{shotId:guid}/production/render")]
+    [ValidateAntiForgeryToken]
+    [EnableRateLimiting(RateLimiting.ExpensiveAi)]
+    public async Task<IActionResult> QueueProductionRender(Guid shotId, MovieProductionRenderRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await movies.QueueProductionRenderAsync(GetUserId(), shotId, request, cancellationToken, Request.Headers["Idempotency-Key"].FirstOrDefault());
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_SHOT_NOT_FOUND", "Movie shot not found.") : Accepted(result);
+        }
+        catch (MovieProductionValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
+    }
+
+    [HttpPost("production/versions/{versionId:guid}/take")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> CreateProductionTake(Guid versionId, MovieProductionTakeRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await movies.CreateTakeFromProductionAsync(GetUserId(), versionId, request, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_PRODUCTION_VERSION_NOT_FOUND", "Production version not found.") : Ok(result);
+        }
+        catch (MovieProductionValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
+    }
+
     [HttpPost("projects/{id:guid}/scenes/{sceneId:guid}/generate")]
     [ValidateAntiForgeryToken]
     [EnableRateLimiting(RateLimiting.ExpensiveAi)]
