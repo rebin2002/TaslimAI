@@ -209,7 +209,8 @@ public sealed class MovieVideoGenerationJobHandler(
             input.SceneJson,
             input.ShotJson,
             input.SourceImageUri,
-            input.ContinuationProviderJobId);
+            input.ContinuationProviderJobId,
+            input.WorldContextJson);
         var execution = await executions.GetOrCreateAsync(job, clip.Id, provider.Key, cancellationToken);
         var started = Stopwatch.GetTimestamp();
         progress.Report(5);

@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using Taslim.Api.Persistence;
@@ -11,9 +12,11 @@ using Taslim.Api.Persistence;
 namespace Taslim.Api.Persistence.Migrations
 {
     [DbContext(typeof(TaslimDbContext))]
-    partial class TaslimDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260926101007_AddMovieWorldFoundation")]
+    partial class AddMovieWorldFoundation
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -2913,64 +2916,6 @@ namespace Taslim.Api.Persistence.Migrations
                     b.ToTable("MovieSets");
                 });
 
-            modelBuilder.Entity("Taslim.Api.Movies.MovieSetVariation", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("ContinuityNotes")
-                        .HasMaxLength(4000)
-                        .HasColumnType("character varying(4000)");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<bool>("IsDefault")
-                        .HasColumnType("boolean");
-
-                    b.Property<string>("Lighting")
-                        .HasMaxLength(2000)
-                        .HasColumnType("character varying(2000)");
-
-                    b.Property<Guid>("MovieSetId")
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("Name")
-                        .IsRequired()
-                        .HasMaxLength(160)
-                        .HasColumnType("character varying(160)");
-
-                    b.Property<Guid?>("ReferenceAssetId")
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("TimeOfDay")
-                        .HasMaxLength(80)
-                        .HasColumnType("character varying(80)");
-
-                    b.Property<DateTime>("UpdatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("VisualDescription")
-                        .HasMaxLength(4000)
-                        .HasColumnType("character varying(4000)");
-
-                    b.Property<string>("Weather")
-                        .HasMaxLength(160)
-                        .HasColumnType("character varying(160)");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("ReferenceAssetId");
-
-                    b.HasIndex("MovieSetId", "IsDefault");
-
-                    b.HasIndex("MovieSetId", "Name")
-                        .IsUnique();
-
-                    b.ToTable("MovieSetVariations");
-                });
-
             modelBuilder.Entity("Taslim.Api.Movies.MovieShot", b =>
                 {
                     b.Property<Guid>("Id")
@@ -4138,24 +4083,6 @@ namespace Taslim.Api.Persistence.Migrations
                     b.Navigation("ReferenceAsset");
                 });
 
-            modelBuilder.Entity("Taslim.Api.Movies.MovieSetVariation", b =>
-                {
-                    b.HasOne("Taslim.Api.Movies.MovieSet", "MovieSet")
-                        .WithMany("Variations")
-                        .HasForeignKey("MovieSetId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.HasOne("Taslim.Api.Domain.Asset", "ReferenceAsset")
-                        .WithMany()
-                        .HasForeignKey("ReferenceAssetId")
-                        .OnDelete(DeleteBehavior.SetNull);
-
-                    b.Navigation("MovieSet");
-
-                    b.Navigation("ReferenceAsset");
-                });
-
             modelBuilder.Entity("Taslim.Api.Movies.MovieShot", b =>
                 {
                     b.HasOne("Taslim.Api.Movies.MovieScene", "Scene")
@@ -4411,11 +4338,6 @@ namespace Taslim.Api.Persistence.Migrations
                     b.Navigation("Clips");
 
                     b.Navigation("Shots");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Movies.MovieSet", b =>
-                {
-                    b.Navigation("Variations");
                 });
 
             modelBuilder.Entity("Taslim.Api.Movies.MovieShot", b =>
