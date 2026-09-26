@@ -42,6 +42,7 @@ import { api, type Asset, type CinematographyPreset, type DirectorProposal, type
 import { assetFileUrl } from "@/lib/apiBase";
 import { MovieWorldWorkspace } from "@/components/MovieWorldWorkspace";
 import { ShotDesigner, type ShotDesignerDraft } from "@/components/ShotDesigner";
+import { MovieDirectorPanel } from "@/components/MovieDirectorPanel";
 
 export const fullMovieModules = [
   { slug: "overview", label: "Overview", icon: Gauge },
@@ -150,6 +151,7 @@ function FullMovieProjectWorkspace({ projectId, module }: { projectId: string; m
   }, [activeModule, projectId]);
 
   const selectedScene = useMemo(() => project?.scenes.find((scene) => scene.id === selectedSceneId) ?? project?.scenes[0] ?? null, [project, selectedSceneId]);
+  const selectedShot = useMemo(() => selectedScene?.shots[0] ?? null, [selectedScene]);
   const readyClips = project?.clips.filter((clip) => hasReadyAsset(clip.status, clip.assetId)) ?? [];
   const outputAssetId = overview?.latestOutputAssetId ?? project?.assemblies.find((assembly) => hasReadyAsset(assembly.status, assembly.assetId))?.assetId ?? readyClips[0]?.assetId ?? null;
   const completionPercent = overview?.progress.production.percent ?? (project ? Math.min(100, Math.round(((project.scenes.length ? readyClips.length : 0) / Math.max(project.scenes.length, 1)) * 100)) : 0);
@@ -264,13 +266,7 @@ function FullMovieProjectWorkspace({ projectId, module }: { projectId: string; m
           {error && <div className="movie-workspace-error-inline"><XCircleIcon /> {error}</div>}
         </main>
 
-        <aside className="movie-director-panel">
-          <div className="movie-director-heading"><span className="movie-workspace-kicker">Director / Inspector</span><SlidersHorizontal size={16} /></div>
-          <div className="movie-director-section"><span className="movie-inspector-label">Current module</span><strong>{copy.title}</strong><p>{activeModule === "overview" ? "One place to see what is decided and what still needs a deliberate next step." : "Select a real project record to keep the next decision grounded."}</p></div>
-          <div className="movie-director-section"><span className="movie-inspector-label">Continuity signal</span><div className="movie-inspector-meter"><span style={{ width: `${Math.max(16, completionPercent)}%` }} /></div><div className="movie-inspector-meter-meta"><span>{overview ? `${overview.takes.finalized} final takes` : `${readyClips.length} ready clips`}</span><strong>{completionPercent}%</strong></div></div>
-          {overview ? <div className="movie-director-section"><span className="movie-inspector-label">Next decision</span><strong>{overview.nextActions[0]?.label ?? "No action queued"}</strong><p>{overview.nextActions[0]?.reason ?? "The persisted project state has no outstanding setup recommendation."}</p></div> : activeModule === "story" ? <div className="movie-director-section"><span className="movie-inspector-label">Writing focus</span><strong>Approved story is the production source</strong><p>Drafts stay separate until a reviewer approves them. Director and breakdown surfaces should use the approved revision when one exists.</p></div> : selectedScene ? <div className="movie-director-section"><span className="movie-inspector-label">Selected scene</span><strong>{String(selectedScene.sequence).padStart(2, "0")} · {selectedScene.title}</strong><p>{selectedScene.summary}</p><span className="movie-inspector-detail">{formatDuration(selectedScene.durationSeconds)} · {selectedScene.shots.length} shots planned</span></div> : <div className="movie-director-empty"><Film size={18} /><p>Select a scene to inspect its intent and continuity notes.</p></div>}
-          <div className="movie-director-note"><Sparkles size={14} /><p>The Director region stays quiet until the project has a decision to make.</p></div>
-        </aside>
+        {project ? <MovieDirectorPanel project={project} activeModule={activeModule} selectedScene={selectedScene} selectedShot={selectedShot} onProjectRefresh={refreshProject} /> : <aside className="movie-director-panel"><div className="movie-director-heading"><span className="movie-workspace-kicker">Director / Inspector</span><SlidersHorizontal size={16} /></div><div className="movie-director-section"><span className="movie-inspector-label">Current module</span><strong>{copy.title}</strong><p>Load the full project room to enable grounded Director proposals.</p></div><div className="movie-director-note"><Sparkles size={14} /><p>Director actions remain scoped to persisted movie project records.</p></div></aside>}
       </div>
     </div>
   );

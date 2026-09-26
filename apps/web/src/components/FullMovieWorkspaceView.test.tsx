@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 const workspaceSource = readFileSync(new URL("./FullMovieWorkspaceView.tsx", import.meta.url), "utf8");
 const shotDesignerSource = readFileSync(new URL("./ShotDesigner.tsx", import.meta.url), "utf8");
 const createSource = readFileSync(new URL("./MovieStudioView.tsx", import.meta.url), "utf8");
+const directorSource = readFileSync(new URL("./MovieDirectorPanel.tsx", import.meta.url), "utf8");
 
 describe("Full Movie workspace foundation", () => {
   it("keeps the requested restrained production map in order", () => {
@@ -116,6 +117,13 @@ describe("Full Movie workspace foundation", () => {
     expect(workspaceSource).toContain("qualityControlStatus");
     expect(workspaceSource).toContain("Failure / resilience");
     expect(workspaceSource).toContain("No generated output");
+  });
+
+  it("keeps one Director contextual across rooms and targets real shots", () => {
+    expect(workspaceSource).toContain("<MovieDirectorPanel");
+    expect(workspaceSource).toContain("selectedShot={selectedShot}");
+    expect(workspaceSource).toContain("api.addMovieShot");
+    expect(directorSource).toContain("Review → explicit approval → execute");
   });
 
 });
