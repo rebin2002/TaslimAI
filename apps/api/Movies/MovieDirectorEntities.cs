@@ -175,7 +175,8 @@ public sealed record DirectorContextDto(
     DateTime AssembledAt,
     int ContextVersion = 1,
     DirectorStoryContext? ApprovedStory = null,
-    DirectorContinuityContext? Continuity = null);
+    DirectorContinuityContext? Continuity = null,
+    MovieWorldContinuitySnapshotDto? WorldContinuity = null);
 
 public sealed record DirectorGuideContext(
     string VisualLanguage,

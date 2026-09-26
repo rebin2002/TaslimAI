@@ -28,7 +28,7 @@ public interface IDirectorActionExecutor
 
 public sealed record DirectorActionExecution(bool Succeeded, string? FailureCode, string SafeMessage, string? ResultJson);
 
-public sealed class MovieDirectorContextAssembler(TaslimDbContext db, IMovieCharacterContinuityService continuity)
+public sealed class MovieDirectorContextAssembler(TaslimDbContext db, IMovieCharacterContinuityService continuity, MovieWorldContinuityProjector worldContinuity)
 {
     private const int MaxStoryScenes = 40;
     private const int MaxStoryElementsPerScene = 40;
@@ -58,6 +58,12 @@ public sealed class MovieDirectorContextAssembler(TaslimDbContext db, IMovieChar
             : new DirectorStoryContext(approvedStoryRevision.Id, approvedStoryRevision.RevisionNumber, approvedStoryRevision.Premise, approvedStoryRevision.Logline, approvedStoryRevision.Synopsis, approvedStoryRevision.Treatment, approvedStoryRevision.Authorship);
 
         var continuitySnapshot = await continuity.BuildSnapshotAsync(userId, movieProjectId, null, targetShotId, cancellationToken);
+        var targetShot = targetShotId.HasValue
+            ? movie.Scenes.SelectMany(item => item.Shots).FirstOrDefault(item => item.Id == targetShotId.Value)
+            : movie.Scenes.OrderBy(item => item.Sequence).SelectMany(item => item.Shots.OrderBy(shot => shot.Sequence)).FirstOrDefault();
+        var worldSnapshot = targetShot is null
+            ? null
+            : await worldContinuity.ProjectAsync(movieProjectId, targetShot.MovieSceneId, targetShot.Id, cancellationToken);
 
         var context = new DirectorContextDto(
             movie.Id, movie.WorkspaceId, movie.Title, movie.Description, movie.DurationSeconds, movie.AspectRatio, movie.Style, movie.Language,
@@ -66,10 +72,11 @@ public sealed class MovieDirectorContextAssembler(TaslimDbContext db, IMovieChar
                 scene.Id, scene.Sequence, scene.Title, scene.Summary, scene.DurationSeconds, scene.ContinuityNotes,
                 scene.Shots.OrderBy(item => item.Sequence).Select(shot => new DirectorShotContext(shot.Id, shot.Sequence, shot.Description, shot.CameraAndFraming, shot.CameraMotion, shot.DurationSeconds, shot.Narration, shot.Dialogue, shot.VisualContinuityNotes)).ToArray())).ToArray(),
             movie.Characters.OrderBy(item => item.CreatedAt).Select(item => new DirectorCharacterContext(item.Name, item.Description, item.Appearance, item.ContinuityNotes)).ToArray(),
-            movie.Locations.OrderBy(item => item.CreatedAt).Select(item => new DirectorLocationContext(item.Name, item.Description, item.VisualContinuityNotes)).ToArray(),
+            worldSnapshot?.Locations.Select(item => new DirectorLocationContext(item.Name, item.Description, item.VisualContinuityNotes)).ToArray() ?? movie.Locations.OrderBy(item => item.CreatedAt).Select(item => new DirectorLocationContext(item.Name, item.Description, item.VisualContinuityNotes)).ToArray(),
             DateTime.UtcNow,
             ApprovedStory: approvedStoryContext,
-            Continuity: continuitySnapshot is null ? null : new DirectorContinuityContext(continuitySnapshot.MovieSceneId, continuitySnapshot.MovieShotId, continuitySnapshot.SnapshotHash, continuitySnapshot.Characters, continuitySnapshot.Warnings));
+            Continuity: continuitySnapshot is null ? null : new DirectorContinuityContext(continuitySnapshot.MovieSceneId, continuitySnapshot.MovieShotId, continuitySnapshot.SnapshotHash, continuitySnapshot.Characters, continuitySnapshot.Warnings),
+            WorldContinuity: worldSnapshot);
         var snapshotJson = JsonSerializer.Serialize(context, DirectorJson.Options);
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(snapshotJson))).ToLowerInvariant();
         return new DirectorContextAssemblyResult(context, snapshotJson, hash);

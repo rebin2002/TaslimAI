@@ -204,6 +204,8 @@ builder.Services.AddScoped<INotificationService>(services => services.GetRequire
 builder.Services.AddScoped<INotificationEventWriter>(services => services.GetRequiredService<NotificationService>());
 builder.Services.AddScoped<IMovieStudioService, MovieStudioService>();
 builder.Services.AddScoped<IMovieCharacterContinuityService, MovieCharacterContinuityService>();
+builder.Services.AddScoped<MovieWorldContinuityProjector>();
+builder.Services.AddScoped<IMovieWorldContinuityService, MovieWorldContinuityService>();
 builder.Services.AddScoped<IMovieV2Service, MovieV2Service>();
 builder.Services.AddScoped<IMovieGuideService, MovieGuideService>();
 builder.Services.AddScoped<IMovieStoryService, MovieStoryService>();
