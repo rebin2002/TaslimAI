@@ -46,6 +46,15 @@ describe("Full Movie workspace foundation", () => {
     expect(workspaceSource).toContain("projectShell");
   });
 
+  it("makes Scenes the explicit screenplay-to-production bridge", () => {
+    expect(workspaceSource).toContain("api.getMovieScenesWorkspace(projectId)");
+    expect(workspaceSource).toContain("api.breakDownMovieScreenplay(projectId)");
+    expect(workspaceSource).toContain("Screenplay → production scenes → shots");
+    expect(workspaceSource).toContain("Acts, sequences, scenes");
+    expect(workspaceSource).toContain("Existing scenes and shots are never silently replaced");
+    expect(workspaceSource).toContain("api.reorderMovieEntity(\"scenes\"");
+  });
+
   it("keeps Quick Movie on a separate compact result path", () => {
     expect(createSource).toContain('mode === "Full"');
     expect(createSource).toContain('router.push(`/create/movie/${result.project.id}/overview`)');
