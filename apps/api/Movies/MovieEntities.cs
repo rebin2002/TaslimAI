@@ -76,6 +76,8 @@ public sealed class MovieContinuityGuide
     public string SoundAndNarration { get; set; } = string.Empty;
     public string ContinuityRules { get; set; } = string.Empty;
     public string? ReferenceAssetIdsJson { get; set; }
+    public string? CinematographyIntent { get; set; }
+    public string? CinematographyBibleReferencesJson { get; set; }
     public DateTime UpdatedAt { get; set; }
     public MovieProject MovieProject { get; set; } = null!;
 }
@@ -136,6 +138,7 @@ public sealed class MovieShot
     public string Description { get; set; } = string.Empty;
     public string? CameraAndFraming { get; set; }
     public string? CameraMotion { get; set; }
+    public string? CinematographyJson { get; set; }
     public int? DurationSeconds { get; set; }
     public string? Narration { get; set; }
     public string? Dialogue { get; set; }
@@ -307,9 +310,10 @@ public sealed record MovieGenerationInput(
 
 public sealed record MovieProviderReadinessDto(bool Ready, IReadOnlyList<string> SupportedOperations);
 
-public sealed record MovieGuideDto(Guid Id, string VisualLanguage, string CameraLanguage, string ColorAndLighting, string SoundAndNarration, string ContinuityRules, DateTime UpdatedAt);
+public sealed record MovieCinematographyBibleDto(string? Intent, string? PresetId, string? Notes, IReadOnlyList<CinematographyCapabilityReference> CapabilityReferences);
+public sealed record MovieGuideDto(Guid Id, string VisualLanguage, string CameraLanguage, string ColorAndLighting, string SoundAndNarration, string ContinuityRules, DateTime UpdatedAt, MovieCinematographyBibleDto? CinematographyBible = null);
 public sealed record MovieSceneDto(Guid Id, int Sequence, string Title, string Summary, int? DurationSeconds, string? ContinuityNotes, string? Narration, string? Dialogue, IReadOnlyList<MovieShotDto> Shots, IReadOnlyList<MovieClipDto> Clips);
-public sealed record MovieShotDto(Guid Id, int Sequence, string Description, string? CameraAndFraming, string? CameraMotion, int? DurationSeconds, string? Narration, string? Dialogue, string? VisualContinuityNotes, IReadOnlyList<MovieClipDto> Clips);
+public sealed record MovieShotDto(Guid Id, int Sequence, string Description, string? CameraAndFraming, string? CameraMotion, string? CinematographyJson, int? DurationSeconds, string? Narration, string? Dialogue, string? VisualContinuityNotes, IReadOnlyList<MovieClipDto> Clips);
 public sealed record MovieCharacterDto(Guid Id, string Name, string Description, string? Appearance, string? VoiceAndPerformance, string? ContinuityNotes, Guid? ReferenceAssetId);
 public sealed record MovieLocationDto(Guid Id, string Name, string Description, string? VisualContinuityNotes, Guid? ReferenceAssetId);
 public sealed record MovieClipDto(Guid Id, Guid? MovieSceneId, Guid? MovieShotId, Guid? GenerationJobId, Guid? AssetId, string Status, int? DurationSeconds, string? MetadataJson, string? ContinuitySnapshotJson);
@@ -336,13 +340,14 @@ public sealed class MovieStudioCreateRequest
     public string? ColorAndLighting { get; set; }
     public string? SoundAndNarration { get; set; }
     public string? ContinuityRules { get; set; }
+    public CinematographyIntentSelection? Cinematography { get; set; }
 }
 
 public sealed record MovieStudioSceneRequest(string Title, string Summary, int? DurationSeconds, string? ContinuityNotes, string? Narration, string? Dialogue);
 public sealed record MovieStudioCharacterRequest(string Name, string Description, string? Appearance, string? VoiceAndPerformance, string? ContinuityNotes, Guid? ReferenceAssetId);
 public sealed record MovieStudioLocationRequest(string Name, string Description, string? VisualContinuityNotes, Guid? ReferenceAssetId);
-public sealed record MovieStudioShotRequest(string Description, string? CameraAndFraming, string? CameraMotion, int? DurationSeconds, string? Narration, string? Dialogue, string? VisualContinuityNotes);
-public sealed record MovieStudioGuideRequest(string? VisualLanguage, string? CameraLanguage, string? ColorAndLighting, string? SoundAndNarration, string? ContinuityRules);
+public sealed record MovieStudioShotRequest(string Description, string? CameraAndFraming, string? CameraMotion, int? DurationSeconds, string? Narration, string? Dialogue, string? VisualContinuityNotes, CinematographyIntentSelection? Cinematography = null);
+public sealed record MovieStudioGuideRequest(string? VisualLanguage, string? CameraLanguage, string? ColorAndLighting, string? SoundAndNarration, string? ContinuityRules, CinematographyIntentSelection? Cinematography = null);
 public sealed record MovieStudioGenerationRequest(string? Title = null);
 
 public static class MovieStudioValidation
@@ -355,6 +360,8 @@ public static class MovieStudioValidation
         if (request.AspectRatio is not ("16:9" or "9:16" or "1:1" or "4:5" or "4:3")) return "Choose a supported aspect ratio.";
         if (!LanguageCodes.Supported.Contains(request.Language)) return "Choose English, Arabic, or Kurdish.";
         if (request.Mode is not (MovieProjectModes.Quick or MovieProjectModes.Full)) return "Choose Quick Movie or Full Movie Project.";
+        var cinematographyValidation = CinematographyIntentValidator.Validate(request.Cinematography);
+        if (cinematographyValidation is not null) return cinematographyValidation;
         return null;
     }
 }

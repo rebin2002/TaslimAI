@@ -58,6 +58,8 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                 Id = Guid.NewGuid(), VisualLanguage = request.VisualLanguage?.Trim() ?? string.Empty,
                 CameraLanguage = request.CameraLanguage?.Trim() ?? string.Empty, ColorAndLighting = request.ColorAndLighting?.Trim() ?? string.Empty,
                 SoundAndNarration = request.SoundAndNarration?.Trim() ?? string.Empty, ContinuityRules = request.ContinuityRules?.Trim() ?? string.Empty,
+                CinematographyIntent = CinematographyIntentValidator.Normalize(request.Cinematography)?.Intent,
+                CinematographyBibleReferencesJson = CinematographyIntentValidator.ToJson(request.Cinematography),
                 UpdatedAt = now,
             },
         };
@@ -104,11 +106,16 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
     {
         var movie = await db.MovieProjects.Include(item => item.Guide).FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
         if (movie is null || !await access.IsMemberAsync(userId, movie.WorkspaceId, cancellationToken)) return null;
+        var cinematographyValidation = CinematographyIntentValidator.Validate(request.Cinematography);
+        if (cinematographyValidation is not null) throw new MovieStudioValidationException(cinematographyValidation);
         movie.Guide.VisualLanguage = request.VisualLanguage?.Trim() ?? string.Empty;
         movie.Guide.CameraLanguage = request.CameraLanguage?.Trim() ?? string.Empty;
         movie.Guide.ColorAndLighting = request.ColorAndLighting?.Trim() ?? string.Empty;
         movie.Guide.SoundAndNarration = request.SoundAndNarration?.Trim() ?? string.Empty;
         movie.Guide.ContinuityRules = request.ContinuityRules?.Trim() ?? string.Empty;
+        var cinematography = CinematographyIntentValidator.Normalize(request.Cinematography);
+        movie.Guide.CinematographyIntent = cinematography?.Intent;
+        movie.Guide.CinematographyBibleReferencesJson = CinematographyIntentValidator.ToJson(cinematography);
         movie.Guide.UpdatedAt = movie.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(cancellationToken);
         return await GetAsync(userId, id, cancellationToken);
@@ -155,8 +162,10 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         var scene = await db.MovieScenes.Include(item => item.MovieProject).FirstOrDefaultAsync(item => item.Id == sceneId, cancellationToken);
         if (scene is null || !await access.IsMemberAsync(userId, scene.MovieProject.WorkspaceId, cancellationToken)) return null;
         if (string.IsNullOrWhiteSpace(request.Description)) throw new MovieStudioValidationException("Shot description is required.");
+        var cinematographyValidation = CinematographyIntentValidator.Validate(request.Cinematography);
+        if (cinematographyValidation is not null) throw new MovieStudioValidationException(cinematographyValidation);
         var now = DateTime.UtcNow;
-        var shot = new MovieShot { Id = Guid.NewGuid(), MovieSceneId = sceneId, Sequence = await db.MovieShots.CountAsync(item => item.MovieSceneId == sceneId, cancellationToken) + 1, Description = request.Description.Trim(), CameraAndFraming = MovieStudioHelpers.Clean(request.CameraAndFraming), CameraMotion = MovieStudioHelpers.Clean(request.CameraMotion), DurationSeconds = request.DurationSeconds, Narration = MovieStudioHelpers.Clean(request.Narration), Dialogue = MovieStudioHelpers.Clean(request.Dialogue), VisualContinuityNotes = MovieStudioHelpers.Clean(request.VisualContinuityNotes), CreatedAt = now, UpdatedAt = now };
+        var shot = new MovieShot { Id = Guid.NewGuid(), MovieSceneId = sceneId, Sequence = await db.MovieShots.CountAsync(item => item.MovieSceneId == sceneId, cancellationToken) + 1, Description = request.Description.Trim(), CameraAndFraming = MovieStudioHelpers.Clean(request.CameraAndFraming), CameraMotion = MovieStudioHelpers.Clean(request.CameraMotion), CinematographyJson = CinematographyIntentValidator.ToJson(request.Cinematography), DurationSeconds = request.DurationSeconds, Narration = MovieStudioHelpers.Clean(request.Narration), Dialogue = MovieStudioHelpers.Clean(request.Dialogue), VisualContinuityNotes = MovieStudioHelpers.Clean(request.VisualContinuityNotes), CreatedAt = now, UpdatedAt = now };
         db.MovieShots.Add(shot);
         await db.SaveChangesAsync(cancellationToken);
         return ToDto(shot, []);
@@ -226,12 +235,18 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
 
     private IQueryable<MovieProject> Query() => db.MovieProjects.AsNoTracking().Include(item => item.Guide).Include(item => item.Scenes).ThenInclude(scene => scene.Shots).ThenInclude(shot => shot.Clips).Include(item => item.Scenes).ThenInclude(scene => scene.Clips).Include(item => item.Clips).Include(item => item.Characters).Include(item => item.Locations).Include(item => item.Assemblies);
 
-    private static MovieStudioProjectDto ToDto(MovieProject movie) => new(movie.Id, movie.WorkspaceId, movie.ProjectId, movie.Mode, movie.Status, movie.Title, movie.Description, movie.DurationSeconds, movie.AspectRatio, movie.Style, movie.Language, movie.AdditionalInstructions, movie.CreatedAt, movie.UpdatedAt, new MovieGuideDto(movie.Guide.Id, movie.Guide.VisualLanguage, movie.Guide.CameraLanguage, movie.Guide.ColorAndLighting, movie.Guide.SoundAndNarration, movie.Guide.ContinuityRules, movie.Guide.UpdatedAt), movie.Scenes.OrderBy(scene => scene.Sequence).Select(scene => ToDto(scene, scene.Shots.OrderBy(shot => shot.Sequence).Select(shot => ToDto(shot, shot.Clips.Select(ToDto).ToArray())).ToArray(), scene.Clips.Where(clip => clip.MovieShotId is null).Select(ToDto).ToArray())).ToArray(), movie.Characters.OrderBy(character => character.CreatedAt).Select(ToDto).ToArray(), movie.Locations.OrderBy(location => location.CreatedAt).Select(ToDto).ToArray(), movie.Clips.Where(clip => clip.MovieSceneId is null).Select(ToDto).ToArray(), movie.Assemblies.OrderByDescending(assembly => assembly.CreatedAt).Select(ToDto).ToArray());
-    private static string ContinuitySnapshot(MovieContinuityGuide guide) => JsonSerializer.Serialize(new { guide.VisualLanguage, guide.CameraLanguage, guide.ColorAndLighting, guide.SoundAndNarration, guide.ContinuityRules, guide.ReferenceAssetIdsJson, guide.UpdatedAt });
+    private static MovieStudioProjectDto ToDto(MovieProject movie) => new(movie.Id, movie.WorkspaceId, movie.ProjectId, movie.Mode, movie.Status, movie.Title, movie.Description, movie.DurationSeconds, movie.AspectRatio, movie.Style, movie.Language, movie.AdditionalInstructions, movie.CreatedAt, movie.UpdatedAt, new MovieGuideDto(movie.Guide.Id, movie.Guide.VisualLanguage, movie.Guide.CameraLanguage, movie.Guide.ColorAndLighting, movie.Guide.SoundAndNarration, movie.Guide.ContinuityRules, movie.Guide.UpdatedAt, ToCinematographyBible(movie.Guide)), movie.Scenes.OrderBy(scene => scene.Sequence).Select(scene => ToDto(scene, scene.Shots.OrderBy(shot => shot.Sequence).Select(shot => ToDto(shot, shot.Clips.Select(ToDto).ToArray())).ToArray(), scene.Clips.Where(clip => clip.MovieShotId is null).Select(ToDto).ToArray())).ToArray(), movie.Characters.OrderBy(character => character.CreatedAt).Select(ToDto).ToArray(), movie.Locations.OrderBy(location => location.CreatedAt).Select(ToDto).ToArray(), movie.Clips.Where(clip => clip.MovieSceneId is null).Select(ToDto).ToArray(), movie.Assemblies.OrderByDescending(assembly => assembly.CreatedAt).Select(ToDto).ToArray());
+    private static MovieCinematographyBibleDto? ToCinematographyBible(MovieContinuityGuide guide)
+    {
+        var selection = CinematographyIntentValidator.FromJson(guide.CinematographyBibleReferencesJson);
+        if (selection is null && string.IsNullOrWhiteSpace(guide.CinematographyIntent)) return null;
+        return new MovieCinematographyBibleDto(guide.CinematographyIntent ?? selection?.Intent, selection?.PresetId, selection?.Notes, selection?.CapabilityReferences ?? []);
+    }
+    private static string ContinuitySnapshot(MovieContinuityGuide guide) => JsonSerializer.Serialize(new { guide.VisualLanguage, guide.CameraLanguage, guide.ColorAndLighting, guide.SoundAndNarration, guide.ContinuityRules, guide.ReferenceAssetIdsJson, guide.CinematographyIntent, guide.CinematographyBibleReferencesJson, guide.UpdatedAt });
     private static string SceneSnapshot(MovieScene scene) => JsonSerializer.Serialize(new { scene.Id, scene.Sequence, scene.Title, scene.Summary, scene.DurationSeconds, scene.ContinuityNotes, scene.Narration, scene.Dialogue });
-    private static string ShotSnapshot(MovieShot shot) => JsonSerializer.Serialize(new { shot.Id, shot.Sequence, shot.Description, shot.CameraAndFraming, shot.CameraMotion, shot.DurationSeconds, shot.Narration, shot.Dialogue, shot.VisualContinuityNotes });
+    private static string ShotSnapshot(MovieShot shot) => JsonSerializer.Serialize(new { shot.Id, shot.Sequence, shot.Description, shot.CameraAndFraming, shot.CameraMotion, shot.CinematographyJson, shot.DurationSeconds, shot.Narration, shot.Dialogue, shot.VisualContinuityNotes });
     private static MovieSceneDto ToDto(MovieScene scene, IReadOnlyList<MovieShotDto> shots, IReadOnlyList<MovieClipDto> clips) => new(scene.Id, scene.Sequence, scene.Title, scene.Summary, scene.DurationSeconds, scene.ContinuityNotes, scene.Narration, scene.Dialogue, shots, clips);
-    private static MovieShotDto ToDto(MovieShot shot, IReadOnlyList<MovieClipDto> clips) => new(shot.Id, shot.Sequence, shot.Description, shot.CameraAndFraming, shot.CameraMotion, shot.DurationSeconds, shot.Narration, shot.Dialogue, shot.VisualContinuityNotes, clips);
+    private static MovieShotDto ToDto(MovieShot shot, IReadOnlyList<MovieClipDto> clips) => new(shot.Id, shot.Sequence, shot.Description, shot.CameraAndFraming, shot.CameraMotion, shot.CinematographyJson, shot.DurationSeconds, shot.Narration, shot.Dialogue, shot.VisualContinuityNotes, clips);
     private static MovieCharacterDto ToDto(MovieCharacter character) => new(character.Id, character.Name, character.Description, character.Appearance, character.VoiceAndPerformance, character.ContinuityNotes, character.ReferenceAssetId);
     private static MovieLocationDto ToDto(MovieLocation location) => new(location.Id, location.Name, location.Description, location.VisualContinuityNotes, location.ReferenceAssetId);
     private static MovieClipDto ToDto(MovieClip clip) => new(clip.Id, clip.MovieSceneId, clip.MovieShotId, clip.GenerationJobId, clip.AssetId, clip.Status, clip.DurationSeconds, clip.MetadataJson, clip.ContinuitySnapshotJson);
