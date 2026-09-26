@@ -4,6 +4,7 @@ using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Taslim.Api.Contracts;
+using Taslim.Api.Domain;
 using Taslim.Api.Movies;
 using Taslim.Api.Persistence;
 using Xunit;
@@ -39,6 +40,16 @@ public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWork
         });
         var scene = await SendWithCsrf<MovieSceneDto>(client, HttpMethod.Post, $"/api/movie-studio/projects/{project.Project.Id}/scenes", new { title = "Dawn", summary = "A quiet opening beat." });
         var shot = await SendWithCsrf<MovieShotDto>(client, HttpMethod.Post, $"/api/movie-studio/scenes/{scene.Id}/shots", new { description = "Wide shot of the empty street.", cameraAndFraming = "24mm wide" });
+
+        using (var storyboardResponse = await client.GetAsync($"/api/movie-studio/projects/{project.Project.Id}/storyboard"))
+        {
+            storyboardResponse.EnsureSuccessStatusCode();
+            using var storyboardJson = JsonDocument.Parse(await storyboardResponse.Content.ReadAsStringAsync());
+            Assert.True(storyboardJson.RootElement.TryGetProperty("scenes", out var scenes));
+            Assert.Contains(scenes.EnumerateArray(), item => item.GetProperty("title").GetString() == "Dawn");
+            Assert.False(storyboardJson.RootElement.TryGetProperty("characters", out _));
+            Assert.False(storyboardJson.RootElement.TryGetProperty("locations", out _));
+        }
 
         var candidate = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post, $"/api/movie-studio/shots/{shot.Id}/production/versions", new
         {
@@ -84,6 +95,198 @@ public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWork
         Assert.Equal(2, await db.MovieProductionVersions.CountAsync(item => item.MovieShotId == shot.Id));
     }
 
+    [Fact]
+    public async Task Production_review_requires_approve_permission_and_keeps_candidate_history()
+    {
+        using var owner = factory.CreateClient();
+        var ownerAuth = await Register(owner);
+        var project = await SendWithCsrf<MovieStudioProjectResponse>(owner, HttpMethod.Post, "/api/movie-studio/projects", new
+        {
+            workspaceId = ownerAuth.PersonalWorkspace.Id,
+            mode = MovieProjectModes.Full,
+            title = "Approval boundary",
+            description = "A storyboard approval security test.",
+            durationSeconds = 20,
+            aspectRatio = "16:9",
+            style = "cinematic",
+            language = "en",
+        });
+        var scene = await SendWithCsrf<MovieSceneDto>(owner, HttpMethod.Post, $"/api/movie-studio/projects/{project.Project.Id}/scenes", new { title = "Opening", summary = "A controlled opening." });
+        var shot = await SendWithCsrf<MovieShotDto>(owner, HttpMethod.Post, $"/api/movie-studio/scenes/{scene.Id}/shots", new { description = "A locked-off opening frame." });
+        var candidate = await SendWithCsrf<MovieProductionVersionDto>(owner, HttpMethod.Post, $"/api/movie-studio/shots/{shot.Id}/production/versions", new { stage = MovieProductionStages.StoryboardCandidate, compositionJson = "{}" });
+
+        using var reviewer = factory.CreateClient();
+        var reviewerAuth = await Register(reviewer);
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.WorkspaceMembers.Add(new WorkspaceMember { Id = Guid.NewGuid(), WorkspaceId = ownerAuth.PersonalWorkspace.Id, UserId = reviewerAuth.User.Id, Role = WorkspaceRole.Member, JoinedAt = DateTime.UtcNow });
+            db.MovieTeamMembers.Add(new MovieTeamMember { Id = Guid.NewGuid(), MovieProjectId = project.Project.Id, UserId = reviewerAuth.User.Id, Role = MovieTeamRoles.Writer, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow });
+            await db.SaveChangesAsync();
+        }
+
+        using var forbidden = await SendWithCsrf(reviewer, HttpMethod.Post, $"/api/movie-studio/production/versions/{candidate.Id}/review", new { approve = true, reason = "Should be forbidden." });
+        Assert.Equal(HttpStatusCode.Forbidden, forbidden.StatusCode);
+        using var production = await owner.GetAsync($"/api/movie-studio/shots/{shot.Id}/production");
+        var productionBody = await production.Content.ReadFromJsonAsync<MovieShotProductionDto>();
+        Assert.NotNull(productionBody);
+        Assert.Single(productionBody!.Versions);
+        Assert.Equal(MovieProductionVersionStatuses.PendingApproval, productionBody.Versions[0].Status);
+    }
+
+    [Fact]
+    public async Task Production_mutations_require_movie_team_edit_and_approval_permissions()
+    {
+        using var owner = factory.CreateClient();
+        var ownerAuth = await Register(owner);
+        var project = await SendWithCsrf<MovieStudioProjectResponse>(owner, HttpMethod.Post, "/api/movie-studio/projects", new
+        {
+            workspaceId = ownerAuth.PersonalWorkspace.Id,
+            mode = MovieProjectModes.Full,
+            title = "Production authorization",
+            description = "Team permission gate.",
+            durationSeconds = 24,
+            aspectRatio = "16:9",
+            style = "cinematic",
+            language = "en",
+        });
+        var scene = await SendWithCsrf<MovieSceneDto>(owner, HttpMethod.Post, $"/api/movie-studio/projects/{project.Project.Id}/scenes", new { title = "Gate", summary = "A permission boundary." });
+        var shot = await SendWithCsrf<MovieShotDto>(owner, HttpMethod.Post, $"/api/movie-studio/scenes/{scene.Id}/shots", new { description = "A protected shot." });
+
+        using var writer = factory.CreateClient();
+        var writerAuth = await Register(writer);
+        await AddWorkspaceMember(ownerAuth.PersonalWorkspace.Id, writerAuth.User.Id);
+        await SendWithCsrf<MovieTeamMemberDto>(owner, HttpMethod.Post, $"/api/movie-studio/projects/{project.Project.Id}/collaboration/team", new
+        {
+            userId = writerAuth.User.Id,
+            role = MovieTeamRoles.Writer,
+            permissions = Array.Empty<string>(),
+            permissionOverrides = new[] { new { permission = MoviePermissions.Edit, granted = false } },
+        });
+
+        var forbiddenCreate = await SendWithCsrf(writer, HttpMethod.Post, $"/api/movie-studio/shots/{shot.Id}/production/versions", new { stage = MovieProductionStages.StoryboardCandidate, compositionJson = "{}" });
+        Assert.Equal(HttpStatusCode.Forbidden, forbiddenCreate.StatusCode);
+
+        var candidate = await SendWithCsrf<MovieProductionVersionDto>(owner, HttpMethod.Post, $"/api/movie-studio/shots/{shot.Id}/production/versions", new { stage = MovieProductionStages.StoryboardCandidate, compositionJson = "{}" });
+        var forbiddenReview = await SendWithCsrf(writer, HttpMethod.Post, $"/api/movie-studio/production/versions/{candidate.Id}/review", new { approve = true });
+        Assert.Equal(HttpStatusCode.Forbidden, forbiddenReview.StatusCode);
+    }
+    [Fact]
+    public async Task Production_render_is_explicit_and_does_not_collapse_into_a_movie_take()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client);
+        var project = await SendWithCsrf<MovieStudioProjectResponse>(client, HttpMethod.Post, "/api/movie-studio/projects", new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            mode = MovieProjectModes.Quick,
+            title = "Explicit production",
+            description = "A render should require a deliberate action.",
+            durationSeconds = 24,
+            aspectRatio = "16:9",
+            style = "cinematic",
+            language = "en",
+        });
+        var scene = await SendWithCsrf<MovieSceneDto>(client, HttpMethod.Post, $"/api/movie-studio/projects/{project.Project.Id}/scenes", new { title = "Dawn", summary = "A quiet opening beat." });
+        var shot = await SendWithCsrf<MovieShotDto>(client, HttpMethod.Post, $"/api/movie-studio/scenes/{scene.Id}/shots", new { description = "A locked-off street wide shot." });
+        var candidate = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post, $"/api/movie-studio/shots/{shot.Id}/production/versions", new { stage = MovieProductionStages.StoryboardCandidate, compositionJson = "{\"frame\":\"wide\"}" });
+        var approvedStoryboard = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post, $"/api/movie-studio/production/versions/{candidate.Id}/review", new { approve = true });
+        var keyframe = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post, $"/api/movie-studio/shots/{shot.Id}/production/versions", new { stage = MovieProductionStages.ProductionKeyframe, sourceVersionId = approvedStoryboard.Id, compositionJson = "{\"frame\":\"keyframe\"}" });
+        var approvedKeyframe = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post, $"/api/movie-studio/production/versions/{keyframe.Id}/review", new { approve = true });
+        var motion = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post, $"/api/movie-studio/shots/{shot.Id}/production/motion-preview", new { sourceVersionId = approvedKeyframe.Id });
+        var approvedMotion = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post, $"/api/movie-studio/production/versions/{motion.Id}/review", new { approve = true });
+
+        var render = await SendWithCsrf<MovieProductionRenderResponse>(client, HttpMethod.Post, $"/api/movie-studio/shots/{shot.Id}/production/render", new { sourceVersionId = approvedMotion.Id, label = "Explicit render" });
+        Assert.Equal(render.Job.Id, render.Version.GenerationJobId);
+        Assert.NotEqual(Guid.Empty, render.ClipId);
+
+        var production = await client.GetFromJsonAsync<MovieShotProductionDto>($"/api/movie-studio/shots/{shot.Id}/production");
+        Assert.NotNull(production);
+        Assert.Contains(production!.Versions, item => item.Stage == MovieProductionStages.ProductionRender && item.GenerationJobId == render.Job.Id);
+        Assert.Empty(production.Takes);
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.Equal(0, await db.MovieTakes.CountAsync(item => item.MovieShotId == shot.Id));
+    }
+    [Fact]
+    public async Task Selective_regeneration_requires_confirmation_preserves_history_and_invalidates_downstream()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client);
+        var project = await SendWithCsrf<MovieStudioProjectResponse>(client, HttpMethod.Post, "/api/movie-studio/projects", new
+        {
+            workspaceId = auth.PersonalWorkspace.Id, mode = MovieProjectModes.Quick, title = "Selective wave", description = "Regenerate one shot only.", durationSeconds = 24, aspectRatio = "16:9", style = "cinematic", language = "en",
+        });
+        var scene = await SendWithCsrf<MovieSceneDto>(client, HttpMethod.Post, $"/api/movie-studio/projects/{project.Project.Id}/scenes", new { title = "Dawn", summary = "A quiet opening beat." });
+        var shot = await SendWithCsrf<MovieShotDto>(client, HttpMethod.Post, $"/api/movie-studio/scenes/{scene.Id}/shots", new { description = "Wide shot of the empty street." });
+        var storyboard = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post, $"/api/movie-studio/shots/{shot.Id}/production/versions", new { stage = MovieProductionStages.StoryboardCandidate, compositionJson = "{\"layout\":\"left\"}" });
+        await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post, $"/api/movie-studio/production/versions/{storyboard.Id}/review", new { approve = true, reason = "Approved composition." });
+        var downstream = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post, $"/api/movie-studio/shots/{shot.Id}/production/versions", new { stage = MovieProductionStages.ProductionKeyframe, sourceVersionId = storyboard.Id, compositionJson = "{\"frame\":\"approved\"}" });
+        downstream = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post, $"/api/movie-studio/production/versions/{downstream.Id}/review", new { approve = true, reason = "Approved keyframe." });
+
+        using (var beforeConfirmation = factory.Services.CreateScope())
+        {
+            var db = beforeConfirmation.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            Assert.Equal(0, await db.GenerationJobs.CountAsync(item => item.WorkspaceId == auth.PersonalWorkspace.Id));
+        }
+        var preview = await SendWithCsrf<MovieSelectiveRegenerationResponse>(client, HttpMethod.Post, $"/api/movie-studio/shots/{shot.Id}/regeneration-requests", new
+        {
+            actionType = MovieRegenerationActionTypes.ProductionKeyframeCandidate,
+            requestedStage = MovieProductionStages.ProductionKeyframe,
+            reason = "The character silhouette needs the approved continuity update.",
+            sourceVersionId = storyboard.Id,
+            changedInputsJson = "{\"characterContinuity\":\"updated\"}",
+            compositionJson = "{\"frame\":\"updated\"}",
+            estimatedProviderCostUsd = 0.25m,
+        });
+        Assert.Equal(MovieRegenerationStatuses.PendingConfirmation, preview.Request.Status);
+        Assert.True(preview.Request.CostPreview.ConfirmationRequired);
+        Assert.Null(preview.Job);
+
+        var notConfirmed = await SendWithCsrf(client, HttpMethod.Post, $"/api/movie-studio/regeneration-requests/{preview.Request.Id}/confirm", new { confirm = false });
+        Assert.Equal(HttpStatusCode.BadRequest, notConfirmed.StatusCode);
+
+        var confirmed = await SendWithCsrf<MovieSelectiveRegenerationResponse>(client, HttpMethod.Post, $"/api/movie-studio/regeneration-requests/{preview.Request.Id}/confirm", new { confirm = true });
+        Assert.Equal(MovieRegenerationStatuses.Confirmed, confirmed.Request.Status);
+        Assert.NotNull(confirmed.Job);
+        Assert.NotNull(confirmed.ProductionVersion);
+        Assert.NotNull(confirmed.Take);
+        Assert.Equal(GenerationJobStatus.Queued.ToString(), confirmed.Job!.Status);
+        Assert.Equal(MovieTakeStatuses.Generating, confirmed.Take!.Status);
+
+        using var scope = factory.Services.CreateScope();
+        var dbAfter = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.Equal(1, await dbAfter.GenerationJobs.CountAsync(item => item.Id == confirmed.Job.Id));
+        Assert.Equal(3, await dbAfter.MovieProductionVersions.CountAsync(item => item.MovieShotId == shot.Id));
+        Assert.Equal(MovieProductionVersionStatuses.ReviewRequired, await dbAfter.MovieProductionVersions.Where(item => item.Id == downstream.Id).Select(item => item.Status).SingleAsync());
+        Assert.Contains(await dbAfter.MovieProductionStageTransitions.Where(item => item.MovieShotId == shot.Id).ToListAsync(), item => item.EventType == "invalidated" && item.MovieProductionVersionId == downstream.Id);
+        var job = await dbAfter.GenerationJobs.AsNoTracking().SingleAsync(item => item.Id == confirmed.Job.Id);
+        using var input = JsonDocument.Parse(job.InputJson);
+        Assert.Equal(preview.Request.Id.ToString(), input.RootElement.GetProperty("SelectiveRegenerationId").GetString());
+        Assert.Contains("characterContinuity", input.RootElement.GetProperty("ChangedInputsJson").GetString());
+        Assert.Equal(0, await dbAfter.MovieVideoProviderExecutions.CountAsync(item => item.GenerationJobId == confirmed.Job.Id));
+    }
+    [Fact]
+    public async Task Selective_regeneration_is_target_and_workspace_isolated()
+    {
+        using var owner = factory.CreateClient();
+        var auth = await Register(owner);
+        var project = await SendWithCsrf<MovieStudioProjectResponse>(owner, HttpMethod.Post, "/api/movie-studio/projects", new { workspaceId = auth.PersonalWorkspace.Id, mode = MovieProjectModes.Quick, title = "Private selective", description = "Target isolation.", durationSeconds = 12, aspectRatio = "16:9", style = "cinematic", language = "en" });
+        var scene = await SendWithCsrf<MovieSceneDto>(owner, HttpMethod.Post, $"/api/movie-studio/projects/{project.Project.Id}/scenes", new { title = "One", summary = "One shot." });
+        var shot = await SendWithCsrf<MovieShotDto>(owner, HttpMethod.Post, $"/api/movie-studio/scenes/{scene.Id}/shots", new { description = "The target shot." });
+
+        using var outsider = factory.CreateClient();
+        await Register(outsider);
+        var response = await SendWithCsrf(outsider, HttpMethod.Post, $"/api/movie-studio/shots/{shot.Id}/regeneration-requests", new
+        {
+            actionType = MovieRegenerationActionTypes.Cinematography, requestedStage = MovieProductionStages.StoryboardCandidate,
+            reason = "Unauthorized direction change.", changedInputsJson = "{\"lens\":\"50mm\"}", compositionJson = "{}",
+        });
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        using var scope = factory.Services.CreateScope();
+        Assert.False(await scope.ServiceProvider.GetRequiredService<TaslimDbContext>().MovieRegenerationRequests.AnyAsync(item => item.MovieShotId == shot.Id));
+    }
+
     private static async Task<AuthResponse> Register(HttpClient client)
     {
         var response = await SendWithCsrf(client, HttpMethod.Post, "/api/auth/register", new
@@ -95,6 +298,14 @@ public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWork
         });
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         return (await response.Content.ReadFromJsonAsync<AuthResponse>())!;
+    }
+
+    private async Task AddWorkspaceMember(Guid workspaceId, Guid userId)
+    {
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        db.WorkspaceMembers.Add(new WorkspaceMember { Id = Guid.NewGuid(), WorkspaceId = workspaceId, UserId = userId, Role = WorkspaceRole.Member, JoinedAt = DateTime.UtcNow });
+        await db.SaveChangesAsync();
     }
 
     private static async Task<T> SendWithCsrf<T>(HttpClient client, HttpMethod method, string path, object payload)

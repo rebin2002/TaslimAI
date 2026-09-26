@@ -24,19 +24,19 @@ Movie-specific tables are additive and live beside the existing Projects, Assets
 | `MovieCharacter` | Durable character identity and continuity notes | Movie Project, optional Asset reference |
 | `MovieLocation` | Durable location identity and visual continuity | Movie Project, optional Asset reference |
 | `MovieShot` | Shot description, framing, motion, narration, dialogue | Scene |
-| `MovieProductionVersion` | Versioned storyboard, keyframe, motion-preview, or render candidate | Shot, optional Generation Job, optional Asset(s), creator/reviewer |
+| `MovieProductionVersion` | Versioned storyboard, keyframe, motion-preview, or render candidate | Shot, optional Generation Job, optional Asset(s), creator/reviewer; immutable continuity/cinematography references |
 | `MovieProductionVersionAsset` | Role-tagged reusable Asset reference, including first/last frame planning | Production Version, Asset |
 | `MovieProductionStageTransition` | Immutable stage provenance and review audit trail | Shot, Version, actor, optional Generation Job |
 | `MovieClip` | Provider output and continuity attachment | Project, Scene, Shot, Generation Job, Asset, Stored File |
 | `MovieAssembly` | Future final-assembly record | Project, Generation Job, Asset |
 
-The EF-generated migration `20260923153752_AddMovieStudioFoundation` creates the planning tables. The additive migration `20260924012646_AddMovieVideoProviderExecution` adds continuity snapshots, scene clip links, and the durable provider execution table. `20260926101042_AddMovieStoryboardProductionFunnel` adds the approval-gated production records and backfills existing shots to `ShotPlan`. Existing private storage remains the boundary for actual media files: `StoredFile` carries the storage key and provider, while `Asset` is the user-facing library record.
+The EF-generated migration `20260923153752_AddMovieStudioFoundation` creates the planning tables. The additive migration `20260924012646_AddMovieVideoProviderExecution` adds continuity snapshots, scene clip links, and the durable provider execution table. `20260926101042_AddMovieStoryboardProductionFunnel` adds the approval-gated production records and backfills existing shots to `ShotPlan`. The additive `AddMovieProductionKeyframeReferences` migration stores bounded continuity and cinematography reference JSON on each production version. Existing private storage remains the boundary for actual media files: `StoredFile` carries the storage key and provider, while `Asset` is the user-facing library record.
 
 The schema does not store public provider URLs as final assets. Provider identifiers and metadata are retained as nullable fields so a configured provider can be reconciled with Taslim-owned private storage later.
 
 ## Generation jobs and usage accounting
 
-Movie operations use the existing durable `GenerationJob` queue. The supported job types are `movie.quick.generate`, `movie.clip.generate`, and `movie.assembly`; the production funnel does not add a provider, router, retry, or cost system. Storyboard and keyframe versions may optionally link an existing `GenerationJob` and one or more existing `Asset` records, but creating a candidate is persistence-only. Explicit scene/shot generation routes continue to create `movie.clip.generate` jobs that retain their scene/shot links and continuity snapshot. Assembly remains a reserved future stage.
+Movie operations use the existing durable `GenerationJob` queue. The supported job types are `movie.quick.generate`, `movie.clip.generate`, and `movie.assembly`; the production funnel does not add a provider, router, retry, or cost system. Storyboard and keyframe versions may optionally link an existing shared `image.generate` job and one or more existing `Asset` records, but creating a candidate is persistence-only. The API rejects unrelated job types and cross-project job links. Explicit scene/shot generation routes continue to create `movie.clip.generate` jobs that retain their scene/shot links and continuity snapshot. Assembly remains a reserved future stage.
 
 The canonical shot state machine is:
 
@@ -48,7 +48,7 @@ ShotPlan
   → ProductionRender → SelectedFinalTake
 ```
 
-Only pending versions can be approved or rejected. A keyframe requires an approved storyboard source; motion preview requires an approved keyframe; production render requires an approved motion preview. Rejection retains the version and reason without advancing the shot. `RegenerationMetadataJson` records selective regeneration intent, while `StageProvenanceJson`, role-tagged Asset references, optional first/last-frame Asset IDs, and immutable transition rows preserve how a version was produced.
+Only pending versions can be approved or rejected, and the caller needs the movie `Approve` permission to review. A keyframe requires an approved storyboard source; motion preview requires an approved keyframe; production render requires an approved motion preview. Rejection retains the version and reason without advancing the shot. `RegenerationMetadataJson` records selective regeneration intent, while `StageProvenanceJson`, role-tagged Asset references, optional first/last-frame Asset IDs/notes, immutable continuity snapshot references, shot cinematography references, and immutable transition rows preserve how a version was produced.
 
 `GenerationJobUsageService` maps every movie job type to `UsageFeature.Movie`. This preserves the repository's existing feature naming convention and allows pending, failed, cancelled, and completed transactions to appear in existing usage reporting without a new accounting subsystem.
 
@@ -88,14 +88,14 @@ All endpoints require authentication and workspace membership. Mutating endpoint
 | `POST /api/movie-studio/projects/{id}/locations` | Add a location record |
 | `POST /api/movie-studio/scenes/{sceneId}/shots` | Add an ordered shot with narration/dialogue and continuity fields |
 | `GET /api/movie-studio/shots/{shotId}/production` | Read current production stage, versions, and immutable transitions |
-| `POST /api/movie-studio/shots/{shotId}/production/versions` | Persist a storyboard/keyframe/motion/render candidate with optional first/last-frame, Asset, and GenerationJob links |
+| `POST /api/movie-studio/shots/{shotId}/production/versions` | Persist a storyboard/keyframe/motion/render candidate with optional first/last-frame, Asset, and validated shared-queue GenerationJob links; capture continuity/cinematography references |
 | `POST /api/movie-studio/production/versions/{versionId}/review` | Approve or reject a pending candidate and advance the state machine when approved |
 | `POST /api/movie-studio/projects/{id}/scenes/{sceneId}/generate` | Queue a provider-neutral scene clip job |
 | `POST /api/movie-studio/shots/{shotId}/generate` | Queue a provider-neutral shot clip job |
 
 ## UI foundation
 
-The `/create/movie` page follows the existing Taslim studio visual language while using a cinematic dark hero, warm amber production accents, restrained card surfaces, and a responsive planning board. The first screen presents two workflow tabs. Quick Movie keeps the form compact and provider status visible. Full Movie Project adds the Movie Guide fields and, after creation, shows an editable production board for scenes, characters, and locations.
+The `/create/movie` page follows the existing Taslim studio visual language while using a cinematic dark hero, warm amber production accents, restrained card surfaces, and a responsive planning board. The first screen presents two workflow tabs. Quick Movie keeps the form compact and provider status visible. Full Movie Project adds the Movie Guide fields and, after creation, shows an editable production board for scenes, characters, and locations. The existing Storyboard room exposes candidate approval, while the existing Production room exposes only the next gated keyframe action plus optional first/last-frame notes; neither room is redesigned.
 
 The page uses the existing `LocaleProvider`, whose `localeDirection` switches Arabic and Kurdish to RTL. Movie strings are provided for English, Arabic, and Kurdish. The layout uses document direction rather than hard-coded left-to-right assumptions, and the stylesheet includes reduced-motion behavior through the existing global rule.
 

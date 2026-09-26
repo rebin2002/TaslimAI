@@ -1,0 +1,105 @@
+.movie-world-room { display: grid; gap: 16px; color: #eef5fb; }
+.movie-world-only-main { width: min(100%, 1370px); margin: 0 auto; }
+.movie-world-hero { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; padding: 24px 26px; border: 1px solid rgba(85,209,193,.22); border-radius: 15px; background: radial-gradient(circle at 90% 0%, rgba(85,209,193,.12), transparent 35%), rgba(7,23,36,.68); }
+.movie-world-hero h3 { max-width: 680px; margin: 8px 0 7px; color: #f3f8fb; font-size: clamp(25px, 3vw, 39px); line-height: .98; letter-spacing: -.065em; }
+.movie-world-hero p { max-width: 610px; margin: 0; color: #8ea8b9; font-size: 11px; line-height: 1.65; }
+.movie-world-signal { display: grid; grid-template-columns: auto auto; gap: 5px 10px; min-width: 145px; color: #66d6c7; font-size: 10px; }
+.movie-world-signal span { grid-column: 2; color: #8ba7ba; }
+.movie-world-signal svg { grid-row: 1 / span 2; margin-top: 2px; }
+.movie-world-signal strong { grid-column: 2; color: #e2f1f3; font-size: 13px; }
+.movie-world-room-nav { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.movie-world-room-nav button { display: flex; align-items: center; gap: 11px; min-width: 0; padding: 13px 15px; color: #7894a9; border: 1px solid rgba(143,176,204,.15); border-radius: 10px; background: rgba(7,23,36,.48); text-align: start; transition: transform .16s ease, border-color .16s ease, background .16s ease; }
+.movie-world-room-nav button:hover { transform: translateY(-1px); border-color: rgba(85,209,193,.35); }
+.movie-world-room-nav button.is-active { color: #eaf6f5; border-color: rgba(85,209,193,.45); background: rgba(38,87,91,.3); box-shadow: 0 10px 30px rgba(0,0,0,.16); }
+.movie-world-room-nav svg { flex: 0 0 auto; color: #55d1c1; }
+.movie-world-room-nav span { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 3px; }
+.movie-world-room-nav strong { font-size: 12px; }
+.movie-world-room-nav small { overflow: hidden; color: #6d899e; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.movie-world-room-nav em { color: #92b5bc; font-size: 11px; font-style: normal; }
+.movie-world-layout { display: grid; grid-template-columns: minmax(230px, .7fr) minmax(0, 1.7fr); gap: 16px; align-items: start; }
+.movie-world-collection, .movie-world-inspector, .movie-world-support-card { min-width: 0; padding: 19px; border: 1px solid rgba(143,176,204,.16); border-radius: 13px; background: rgba(7,23,36,.62); }
+.movie-world-section-head, .movie-world-inspector-head, .movie-world-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.movie-world-section-head h4, .movie-world-inspector-head h4, .movie-world-card-head h4 { margin: 6px 0 0; color: #eff7fa; font-size: 18px; letter-spacing: -.045em; }
+.movie-world-section-head { padding-bottom: 16px; border-bottom: 1px solid rgba(143,176,204,.13); }
+.movie-world-add, .movie-world-edit, .movie-world-inline-add { display: inline-flex; align-items: center; gap: 5px; padding: 7px 9px; color: #071421; border: 0; border-radius: 5px; background: #55d1c1; font-size: 9px; font-weight: 800; }
+.movie-world-edit, .movie-world-inline-add { color: #9dded8; border: 1px solid rgba(85,209,193,.25); background: rgba(85,209,193,.08); }
+.movie-world-list { display: grid; gap: 6px; padding-top: 15px; }
+.movie-world-list-item { display: flex; align-items: center; gap: 9px; min-width: 0; padding: 10px; color: #8ba5b7; border: 1px solid transparent; border-radius: 8px; background: transparent; text-align: start; }
+.movie-world-list-item:hover { background: rgba(143,176,204,.07); }
+.movie-world-list-item.is-selected { color: #edf7f6; border-color: rgba(85,209,193,.28); background: rgba(85,209,193,.09); }
+.movie-world-list-image { display: grid; flex: 0 0 auto; place-items: center; width: 29px; height: 29px; color: #55d1c1; border-radius: 7px; background: rgba(85,209,193,.1); }
+.movie-world-list-item > span:nth-child(2) { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 3px; }
+.movie-world-list-item strong { overflow: hidden; color: inherit; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.movie-world-list-item small { overflow: hidden; color: #6d899f; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.movie-world-list-item .is-locked { flex: 0 0 auto; color: #f0c475; }
+.movie-world-inspector { min-height: 426px; }
+.movie-world-inspector-head { padding-bottom: 16px; border-bottom: 1px solid rgba(143,176,204,.13); }
+.movie-world-inspector-head h4 { font-size: 27px; }
+.movie-world-description { max-width: 720px; margin: 18px 0 0; color: #bbced8; font-size: 13px; line-height: 1.65; }
+.movie-world-note-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 22px; }
+.movie-world-note-grid > div { min-width: 0; padding-top: 10px; border-top: 1px solid rgba(143,176,204,.13); }
+.movie-world-note-grid span, .movie-world-facts span { color: #6e8ca0; font-size: 8px; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; }
+.movie-world-note-grid p { margin: 5px 0 0; color: #a5bbc7; font-size: 10px; line-height: 1.5; }
+.movie-world-asset-chip { display: flex; align-items: center; gap: 9px; max-width: 360px; margin-top: 18px; padding: 9px 10px; color: #9bded7; border: 1px solid rgba(85,209,193,.22); border-radius: 8px; background: rgba(85,209,193,.07); }
+.movie-world-asset-chip > span { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 3px; }
+.movie-world-asset-chip small { color: #6f929c; font-size: 8px; text-transform: uppercase; }
+.movie-world-asset-chip strong { overflow: hidden; color: #d9f0ed; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.movie-world-asset-chip a, .movie-world-card-head a { display: inline-flex; align-items: center; gap: 5px; color: #8fd5cd; font-size: 9px; font-weight: 800; }
+.movie-world-variations, .movie-world-usage { margin-top: 25px; padding-top: 19px; border-top: 1px solid rgba(143,176,204,.13); }
+.movie-world-card-head h5 { margin: 5px 0 0; color: #dae9ee; font-size: 14px; }
+.movie-world-card-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
+.movie-world-reference-form { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(110px, .7fr) minmax(0, 1fr) auto; gap: 7px; margin-top: 15px; padding: 10px; border: 1px solid rgba(85,209,193,.18); border-radius: 8px; background: rgba(85,209,193,.05); }
+.movie-world-reference-form input, .movie-world-reference-form select { min-width: 0; padding: 8px; color: #dceef0; border: 1px solid rgba(143,176,204,.16); border-radius: 5px; outline: 0; background: rgba(0,0,0,.16); font-size: 9px; }
+.movie-world-reference-form select option { color: #172639; }
+.movie-world-card-head > span { color: #7794a8; font-size: 9px; }
+.movie-world-inline-form { display: flex; gap: 5px; margin-top: 12px; }
+.movie-world-inline-form input { flex: 1; min-width: 0; padding: 8px; color: #e3f0f3; border: 1px solid rgba(143,176,204,.18); border-radius: 5px; outline: 0; background: rgba(0,0,0,.15); font-size: 10px; }
+.movie-world-inline-form button { display: grid; place-items: center; width: 31px; color: #071421; border-radius: 5px; background: #55d1c1; }
+.movie-world-variation-list { display: grid; gap: 7px; margin-top: 13px; }
+.movie-world-variation-list > div { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 8px; padding: 9px; border-left: 2px solid rgba(143,176,204,.2); background: rgba(143,176,204,.04); }
+.movie-world-variation-list > div.is-default { border-left-color: #55d1c1; background: rgba(85,209,193,.07); }
+.movie-world-variation-list span { color: #c7dce2; font-size: 10px; font-weight: 800; }
+.movie-world-variation-list em { color: #55d1c1; font-size: 8px; font-style: normal; font-weight: 800; text-transform: uppercase; }
+.movie-world-variation-list small { grid-column: 1 / -1; color: #7692a4; font-size: 9px; }
+.movie-world-usage-row { display: flex; align-items: flex-start; gap: 11px; padding: 10px 0; border-bottom: 1px solid rgba(143,176,204,.1); }
+.movie-world-usage-row > span { color: #55d1c1; font-size: 10px; font-weight: 800; }
+.movie-world-usage-row div { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+.movie-world-usage-row strong { color: #dcebf0; font-size: 10px; }
+.movie-world-usage-row small { color: #7995a7; font-size: 9px; line-height: 1.45; }
+.movie-world-bottom-grid { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(280px, .85fr); gap: 16px; }
+.movie-world-reference-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 17px; }
+.movie-world-reference { display: flex; align-items: center; gap: 9px; min-width: 0; padding: 10px; color: #b6ced8; border: 1px solid rgba(143,176,204,.13); border-radius: 8px; background: rgba(143,176,204,.04); }
+.movie-world-reference:hover { border-color: rgba(85,209,193,.3); }
+.movie-world-reference-mark { display: grid; flex: 0 0 auto; place-items: center; width: 28px; height: 28px; color: #55d1c1; border-radius: 7px; background: rgba(85,209,193,.09); }
+.movie-world-reference > span:nth-child(2) { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 3px; }
+.movie-world-reference strong { overflow: hidden; color: #dbeaf0; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.movie-world-reference small { overflow: hidden; color: #718d9f; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.movie-world-reference > svg { flex: 0 0 auto; color: #7196aa; }
+.movie-world-facts { display: grid; gap: 10px; margin-top: 17px; }
+.movie-world-facts > div { display: grid; gap: 4px; padding: 9px 0; border-top: 1px solid rgba(143,176,204,.1); }
+.movie-world-facts strong { color: #d2e5e9; font-size: 10px; }
+.movie-world-facts small { color: #7c98a8; font-size: 9px; line-height: 1.45; }
+.movie-world-lock span { display: inline-flex; align-items: center; gap: 4px; color: #f0c475; }
+.movie-world-muted { color: #7692a4; font-size: 10px; line-height: 1.55; }
+.movie-world-empty { display: flex; min-height: 260px; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: #55d1c1; text-align: center; }
+.movie-world-empty strong { color: #dcecf0; font-size: 13px; }
+.movie-world-empty p { max-width: 230px; margin: 0 0 7px; color: #7895a8; font-size: 10px; line-height: 1.5; }
+.movie-world-loading { display: grid; min-height: 360px; place-items: center; color: #83a2b2; font-size: 11px; }
+.movie-world-loading .loading-spinner { border-color: rgba(255,255,255,.15); border-top-color: #55d1c1; }
+.movie-world-editor { display: grid; gap: 13px; }
+.movie-world-editor label { display: grid; gap: 6px; }
+.movie-world-editor label > span { color: #92adbc; font-size: 9px; font-weight: 800; }
+.movie-world-editor label > span small { color: #68869a; font-weight: 400; }
+.movie-world-editor input, .movie-world-editor textarea, .movie-world-editor select { width: 100%; padding: 9px 0; color: #edf6f8; border: 0; border-bottom: 1px solid rgba(143,176,204,.2); outline: 0; background: transparent; font-size: 11px; }
+.movie-world-editor textarea { min-height: 60px; resize: vertical; line-height: 1.5; }
+.movie-world-editor select option { color: #182a3a; }
+.movie-world-editor input:focus, .movie-world-editor textarea:focus, .movie-world-editor select:focus { border-color: #55d1c1; }
+.movie-world-field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.movie-world-editor-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; padding-top: 15px; border-top: 1px solid rgba(143,176,204,.13); }
+.movie-world-cancel, .movie-world-save { display: inline-flex; align-items: center; gap: 6px; padding: 9px 12px; border-radius: 5px; font-size: 10px; font-weight: 800; }
+.movie-world-cancel { color: #8ba6b6; border: 1px solid rgba(143,176,204,.18); background: transparent; }
+.movie-world-save { color: #071421; background: #55d1c1; }
+.movie-world-save:disabled { opacity: .55; cursor: wait; }
+.movie-world-editor-badge { display: inline-flex; align-items: center; gap: 5px; color: #f0c475; font-size: 8px; }
+@media (max-width: 900px) { .movie-world-layout, .movie-world-bottom-grid { grid-template-columns: 1fr; } .movie-world-inspector { min-height: 0; } }
+@media (max-width: 620px) { .movie-world-hero { align-items: flex-start; flex-direction: column; padding: 18px; } .movie-world-signal { grid-template-columns: auto auto; } .movie-world-room-nav { grid-template-columns: 1fr; } .movie-world-reference-grid, .movie-world-note-grid, .movie-world-field-grid, .movie-world-reference-form { grid-template-columns: 1fr; } .movie-world-card-actions { align-items: flex-end; flex-direction: column; } .movie-world-collection, .movie-world-inspector, .movie-world-support-card { padding: 15px; } }

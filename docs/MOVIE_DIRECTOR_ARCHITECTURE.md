@@ -8,7 +8,7 @@ Auto Director is a planning mode, not a fifth quality tier. The selectable quali
 
 ## Flow
 
-1. `POST /api/movie-director/projects/{movieProjectId}/proposals` assembles a bounded snapshot of the Movie Project, scenes, shots, guide, characters, and locations.
+1. `POST /api/movie-director/projects/{movieProjectId}/proposals` resolves a target (`project`, `story_revision`, `scene`, `shot`, `storyboard_version`, `production_version`, or `take`) and assembles a bounded snapshot of the locked Guide, approved Story when available, target hierarchy, relevant Cast/World, cinematography, production, and relevant collaboration state.
 2. The quality planner produces a provider-neutral recommendation and rationale. The proposal contains a generic plan, estimated USD amount when the shared estimator can determine one, and a generated shot action in `PendingApproval`.
 3. `POST /api/movie-director/proposals/{proposalId}/approve` changes the proposal to `Approved` and its actions to `Ready`. This is the explicit user approval boundary.
 4. `POST /api/movie-director/actions/{actionId}/execute` is the separate execution command. An action that is not `Ready` is rejected with `DIRECTOR_APPROVAL_REQUIRED`.
@@ -31,6 +31,18 @@ The additive migration `AddMovieDirectorFoundation` creates:
 | `DirectorHistoryEvent` | Context, proposal, approval, execution, and failure timeline |
 
 Context snapshots are versioned and SHA-256 hashed. Payloads and rationale are bounded by EF column lengths. All reads and writes are workspace-authorized through `WorkspaceAccessService`.
+
+### Targeted context contract
+
+`MovieDirectorContextAssembler` never loads the full Cast/World projection for a target. It resolves every target through the requested Movie Project, then selects:
+
+- target-linked scenes, shots, storyboard/production versions, and takes;
+- Cast whose names or approved-screenplay character references occur in the target, plus their target-relevant continuity locks;
+- World entities attached through target scene/shot usage, plus target-scoped facts, active locks, and linked references;
+- the approved Story revision when one exists, otherwise an explicit `null` Story selection;
+- target-scoped reviews, assignments, and comments.
+
+The serialized snapshot has a deterministic `100,000`-byte maximum and a separate optional-material budget. Locked Guide sections, Cast locks, World locks, and continuity facts are critical inputs: they are never silently truncated; an over-budget critical set fails with `DIRECTOR_CONTEXT_BUDGET_EXCEEDED`. Snapshot provenance identifies source kind, entity/revision, lock state, and priority. `AssembledAt` is excluded from identity by using a stable snapshot timestamp, so identical source state produces the same SHA-256 hash. Assembly duration is recorded in the safe Director history event for performance instrumentation.
 
 ## Shared Wave 5 boundaries
 

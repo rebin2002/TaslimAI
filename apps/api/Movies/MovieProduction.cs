@@ -28,6 +28,7 @@ public static class MovieProductionVersionStatuses
     public const string PendingApproval = "PendingApproval";
     public const string Approved = "Approved";
     public const string Rejected = "Rejected";
+    public const string ReviewRequired = "ReviewRequired";
     public const string Selected = "Selected";
 }
 
@@ -51,6 +52,8 @@ public sealed class MovieProductionVersion
     public string CompositionJson { get; set; } = "{}";
     public string? RegenerationMetadataJson { get; set; }
     public string? StageProvenanceJson { get; set; }
+    public string? ContinuitySnapshotReferenceJson { get; set; }
+    public string? CinematographyReferenceJson { get; set; }
     public Guid? SourceVersionId { get; set; }
     public Guid? GenerationJobId { get; set; }
     public Guid? AssetId { get; set; }
@@ -59,6 +62,9 @@ public sealed class MovieProductionVersion
     public string? FirstFrameNotes { get; set; }
     public string? LastFrameNotes { get; set; }
     public string? RejectionReason { get; set; }
+    public Guid? ContinuitySnapshotId { get; set; }
+    public int? ContinuitySnapshotVersion { get; set; }
+    public string? ContinuitySnapshotHash { get; set; }
     public Guid CreatedByUserId { get; set; }
     public Guid? ReviewedByUserId { get; set; }
     public DateTime CreatedAt { get; set; }
@@ -66,6 +72,7 @@ public sealed class MovieProductionVersion
     public DateTime? ReviewedAt { get; set; }
     public MovieShot MovieShot { get; set; } = null!;
     public MovieProductionVersion? SourceVersion { get; set; }
+    public MovieTake? ResultingTake { get; set; }
     public GenerationJob? GenerationJob { get; set; }
     public Asset? Asset { get; set; }
     public Asset? FirstFrameAsset { get; set; }
@@ -109,6 +116,14 @@ public sealed class MovieProductionStageTransition
 
 public static class MovieProductionWorkflow
 {
+    public static readonly IReadOnlySet<string> SupportedGenerationJobTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        GenerationJobTypes.ImageGenerate,
+        GenerationJobTypes.MovieQuickGenerate,
+        GenerationJobTypes.MovieClipGenerate,
+        GenerationJobTypes.MovieAssembly,
+    };
+
     public static string? ValidateVersionCreation(string stage, MovieProductionVersion? source)
     {
         if (!MovieProductionStages.Persisted.Contains(stage)) return "Choose a supported production stage.";
@@ -126,6 +141,12 @@ public static class MovieProductionWorkflow
         };
     }
 
+    public static bool IsGenerationJobTypeAllowed(string stage, string jobType) =>
+        SupportedGenerationJobTypes.Contains(jobType) &&
+        (stage is MovieProductionStages.StoryboardCandidate or MovieProductionStages.ProductionKeyframe
+            ? string.Equals(jobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase)
+            : true);
+
     public static (string NextStage, string Status)? ApprovalResult(string stage) => stage switch
     {
         MovieProductionStages.StoryboardCandidate => (MovieProductionStages.ApprovedStoryboard, MovieProductionVersionStatuses.Approved),
@@ -137,7 +158,7 @@ public static class MovieProductionWorkflow
 
     public static string? ValidateReview(string stage, string status)
     {
-        if (status is not (MovieProductionVersionStatuses.PendingApproval or MovieProductionVersionStatuses.Rejected))
+        if (status is not (MovieProductionVersionStatuses.PendingApproval or MovieProductionVersionStatuses.Rejected or MovieProductionVersionStatuses.ReviewRequired))
             return "Only pending or rejected versions can be reviewed.";
         return ApprovalResult(stage) is null ? "This version cannot be approved at its current stage." : null;
     }
@@ -172,6 +193,8 @@ public sealed record MovieProductionVersionDto(
     string CompositionJson,
     string? RegenerationMetadataJson,
     string? StageProvenanceJson,
+    string? ContinuitySnapshotReferenceJson,
+    string? CinematographyReferenceJson,
     Guid? SourceVersionId,
     Guid? GenerationJobId,
     Guid? AssetId,
@@ -180,10 +203,14 @@ public sealed record MovieProductionVersionDto(
     string? FirstFrameNotes,
     string? LastFrameNotes,
     string? RejectionReason,
+    Guid? ContinuitySnapshotId,
+    int? ContinuitySnapshotVersion,
+    string? ContinuitySnapshotHash,
     DateTime CreatedAt,
     DateTime UpdatedAt,
     DateTime? ReviewedAt,
-    IReadOnlyList<MovieProductionAssetReferenceDto> AssetReferences);
+    IReadOnlyList<MovieProductionAssetReferenceDto> AssetReferences,
+    MovieProductionExecutionDto? Execution = null);
 public sealed record MovieProductionStageTransitionDto(
     Guid Id,
     Guid MovieShotId,
@@ -201,7 +228,174 @@ public sealed record MovieShotProductionDto(
     Guid MovieShotId,
     string CurrentStage,
     IReadOnlyList<MovieProductionVersionDto> Versions,
-    IReadOnlyList<MovieProductionStageTransitionDto> Transitions);
+    IReadOnlyList<MovieProductionStageTransitionDto> Transitions,
+    MovieWorldContinuitySnapshotDto? WorldContinuity = null,
+    IReadOnlyList<MovieV2TakeDto> Takes = null!,
+    IReadOnlyList<MovieRegenerationRequestDto> RegenerationRequests = null!);
+
+public sealed record MovieStoryboardCandidateDto(
+    Guid Id,
+    Guid MovieShotId,
+    int VersionNumber,
+    string Stage,
+    string Status,
+    string? Label,
+    string CompositionJson,
+    string? RegenerationMetadataJson,
+    string? StageProvenanceJson,
+    Guid? SourceVersionId,
+    Guid? AssetId,
+    Guid? FirstFrameAssetId,
+    Guid? LastFrameAssetId,
+    string? FirstFrameNotes,
+    string? LastFrameNotes,
+    string? RejectionReason,
+    DateTime CreatedAt,
+    DateTime UpdatedAt,
+    DateTime? ReviewedAt,
+    IReadOnlyList<MovieProductionAssetReferenceDto> AssetReferences);
+
+public sealed record MovieCinematographySummaryDto(
+    string? CameraAndFraming,
+    string? CameraMotion,
+    string? Intent,
+    string? ShotSize,
+    string? FocalLength,
+    string? CameraAngle,
+    string? Lighting,
+    string? PaletteLook,
+    string? CompositionNotes);
+
+public sealed record MovieStoryboardShotDto(
+    Guid Id,
+    int Sequence,
+    string Description,
+    string ShotPlanStatus,
+    string CurrentStage,
+    int? DurationSeconds,
+    IReadOnlyList<string> ContinuityWarnings,
+    MovieCinematographySummaryDto Cinematography,
+    IReadOnlyList<MovieStoryboardCandidateDto> Candidates,
+    Guid? ApprovedCandidateId,
+    string ApprovalStatus);
+
+public sealed record MovieStoryboardSceneDto(
+    Guid Id,
+    int Sequence,
+    string Title,
+    string Summary,
+    int? DurationSeconds,
+    string? ContinuityNotes,
+    IReadOnlyList<MovieStoryboardShotDto> Shots);
+
+public sealed record MovieStoryboardProjectDto(
+    Guid Id,
+    Guid WorkspaceId,
+    string Status,
+    string Title,
+    string Description,
+    int DurationSeconds,
+    string AspectRatio,
+    string Style,
+    string Language,
+    MovieGuideDto Guide,
+    bool ProviderReady,
+    IReadOnlyList<MovieStoryboardSceneDto> Scenes);
+
+public sealed record MovieProductionProviderAttemptDto(
+    int AttemptNumber,
+    int RetryNumber,
+    bool IsRetry,
+    bool IsFallback,
+    string Status,
+    string ResultClassification,
+    string? FailureCode,
+    bool RateLimited,
+    bool TimedOut,
+    bool CircuitOpen,
+    bool QualityControlRejected,
+    DateTime StartedAt,
+    DateTime? CompletedAt);
+
+public sealed record MovieProductionExecutionDto(
+    Guid GenerationJobId,
+    string JobType,
+    string Status,
+    int ProgressPercent,
+    int RetryCount,
+    int AttemptCount,
+    string QualityControlStatus,
+    string? ErrorCode,
+    string? ErrorMessage,
+    Guid? AssetId,
+    string? AssetType,
+    IReadOnlyList<MovieProductionProviderAttemptDto> Attempts);
+
+public static class MovieProductionProjection
+{
+    public static MovieV2TakeDto ToTakeDto(MovieTake take) => new(
+        take.Id,
+        take.MovieShotId,
+        take.VersionNumber,
+        take.Label,
+        take.Status,
+        take.QualityLevel,
+        take.AutoDirectorEnabled,
+        take.MovieClipId,
+        take.GenerationJobId,
+        take.MovieProductionVersionId,
+        take.AssetId,
+        take.Notes,
+        take.SelectedAt,
+        take.FinalizedAt,
+        take.CreatedAt,
+        take.UpdatedAt,
+        take.Approvals.OrderByDescending(item => item.CreatedAt)
+            .Select(item => new MovieV2TakeApprovalDto(item.Id, item.UserId, item.Decision, item.Comment, item.CreatedAt))
+            .ToArray(),
+        ToExecution(take.GenerationJob));
+
+    public static MovieProductionExecutionDto? ToExecution(GenerationJob? job)
+    {
+        if (job is null) return null;
+        var attempts = job.ProviderAttempts.OrderBy(item => item.AttemptNumber).ThenBy(item => item.StartedAt).ToArray();
+        var qualityControlStatus = attempts.Any(item => item.QualityControlRejected)
+            || job.ErrorCode?.Contains("OUTPUT_INVALID", StringComparison.OrdinalIgnoreCase) == true
+            ? "Failed"
+            : job.Status == GenerationJobStatus.Succeeded
+                ? "Passed"
+                : attempts.Length > 0
+                    ? "Pending"
+                    : "NotRecorded";
+        var asset = job.Assets.OrderByDescending(item => item.CreatedAt).FirstOrDefault();
+        return new MovieProductionExecutionDto(
+            job.Id,
+            job.JobType,
+            job.Status.ToString(),
+            job.ProgressPercent,
+            job.RetryCount,
+            attempts.Length,
+            qualityControlStatus,
+            job.ErrorCode,
+            job.ErrorMessage,
+            asset?.Id,
+            asset?.AssetType,
+            attempts.Select(item => new MovieProductionProviderAttemptDto(
+                item.AttemptNumber,
+                item.RetryNumber,
+                item.IsRetry,
+                item.IsFallback,
+                item.Status.ToString(),
+                item.ResultClassification,
+                item.FailureCode,
+                item.RateLimited,
+                item.TimedOut,
+                item.CircuitOpen,
+                item.QualityControlRejected,
+                item.StartedAt,
+                item.CompletedAt)).ToArray());
+    }
+}
 
 public sealed class MovieProductionVersionRequest
 {
@@ -226,3 +420,32 @@ public sealed class MovieProductionReviewRequest
     public string? Reason { get; set; }
     public string? MetadataJson { get; set; }
 }
+
+public sealed class MovieProductionMotionPreviewRequest
+{
+    public Guid SourceVersionId { get; set; }
+    public string? Label { get; set; }
+    public string CompositionJson { get; set; } = "{}";
+    public string? StageProvenanceJson { get; set; }
+}
+
+public sealed class MovieProductionRenderRequest
+{
+    public Guid SourceVersionId { get; set; }
+    public string? Label { get; set; }
+    public string? Title { get; set; }
+    public decimal? EstimatedProviderCostUsd { get; set; }
+}
+
+public sealed class MovieProductionTakeRequest
+{
+    public string? Label { get; set; }
+    public string QualityLevel { get; set; } = MovieQualityLevels.Standard;
+    public string? Notes { get; set; }
+}
+
+public sealed record MovieProductionRenderResponse(
+    MovieProductionVersionDto Version,
+    GenerationJobDto Job,
+    Guid ClipId,
+    MovieStudioProjectDto Project);

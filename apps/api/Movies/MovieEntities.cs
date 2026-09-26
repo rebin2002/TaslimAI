@@ -77,12 +77,14 @@ public static class MovieTakeStatuses
     public const string Draft = "Draft";
     public const string Generating = "Generating";
     public const string Ready = "Ready";
+    public const string ReviewRequired = "ReviewRequired";
+    public const string Failed = "Failed";
     public const string Rejected = "Rejected";
     public const string Approved = "Approved";
     public const string Archived = "Archived";
     public static readonly IReadOnlySet<string> Supported = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
-        Draft, Generating, Ready, Rejected, Approved, Archived,
+        Draft, Generating, Ready, ReviewRequired, Failed, Rejected, Approved, Archived,
     };
 }
 
@@ -512,6 +514,12 @@ public sealed class MovieShot
     public int Sequence { get; set; }
     public string ProductionStage { get; set; } = MovieProductionStages.ShotPlan;
     public string Description { get; set; } = string.Empty;
+    public string? Purpose { get; set; }
+    public string? Subjects { get; set; }
+    public string? SubjectCharacterIdsJson { get; set; }
+    public string? LocationSet { get; set; }
+    public string? ProductionRequirements { get; set; }
+    public string? ContinuityReferences { get; set; }
     public string? CameraAndFraming { get; set; }
     public string? CameraMotion { get; set; }
     public string? CinematographyJson { get; set; }
@@ -530,6 +538,7 @@ public sealed class MovieShot
     public ICollection<MovieClip> Clips { get; set; } = [];
     public ICollection<MovieProductionVersion> ProductionVersions { get; set; } = [];
     public ICollection<MovieProductionStageTransition> ProductionTransitions { get; set; } = [];
+    public ICollection<MovieRegenerationRequest> RegenerationRequests { get; set; } = [];
 }
 
 public sealed class MovieClip
@@ -547,6 +556,9 @@ public sealed class MovieClip
     public int? DurationSeconds { get; set; }
     public string? MetadataJson { get; set; }
     public string? ContinuitySnapshotJson { get; set; }
+    public Guid? ContinuitySnapshotId { get; set; }
+    public int? ContinuitySnapshotVersion { get; set; }
+    public string? ContinuitySnapshotHash { get; set; }
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
     public MovieProject MovieProject { get; set; } = null!;
@@ -691,7 +703,12 @@ public sealed record MovieGenerationInput(
     string? ShotJson,
     string? SourceImageUri = null,
     string? ContinuationProviderJobId = null,
-    string? WorldContextJson = null);
+    string? WorldContextJson = null,
+    Guid? SelectiveRegenerationId = null,
+    Guid? SourceProductionVersionId = null,
+    string? ChangedInputsJson = null,
+    string? SelectiveActionType = null,
+    string? SelectiveReason = null);
 
 public sealed record MovieProviderReadinessDto(bool Ready, IReadOnlyList<string> SupportedOperations);
 
@@ -701,22 +718,30 @@ public sealed record MovieGuideSectionDto(string Type, string ContentJson);
 public sealed record MovieGuideRevisionDto(Guid Id, int RevisionNumber, string Status, IReadOnlyList<MovieGuideSectionDto> Sections, Guid CreatedByUserId, DateTime CreatedAt, DateTime? LockedAt, Guid? LockedByUserId);
 public sealed record MovieDirectorContextDto(Guid MovieProjectId, Guid MovieGuideId, bool IsAuthoritative, int RevisionNumber, DateTime? LockedAt, IReadOnlyList<MovieGuideSectionDto> Sections);
 public sealed record MovieSceneDto(Guid Id, int Sequence, string Title, string Summary, int? DurationSeconds, string? ContinuityNotes, string? Narration, string? Dialogue, IReadOnlyList<MovieShotDto> Shots, IReadOnlyList<MovieClipDto> Clips);
-public sealed record MovieShotDto(Guid Id, int Sequence, string Description, string? CameraAndFraming, string? CameraMotion, string? CinematographyJson, int? DurationSeconds, string? Narration, string? Dialogue, string? VisualContinuityNotes, string ProductionStage, IReadOnlyList<MovieClipDto> Clips, IReadOnlyList<MovieProductionVersionDto> ProductionVersions);
+public sealed record MovieShotDto(Guid Id, int Sequence, string Description, string? Purpose, string? Subjects, IReadOnlyList<Guid> SubjectCharacterIds, string? LocationSet, int? DurationSeconds, string? ProductionRequirements, string? ContinuityReferences, string? CameraAndFraming, string? CameraMotion, string? CinematographyJson, string? CinematographySummary, string? Narration, string? Dialogue, string? VisualContinuityNotes, string Status, string PlanState, MovieShotReadinessDto Readiness, string ProductionStage, IReadOnlyList<MovieClipDto> Clips, IReadOnlyList<MovieProductionVersionDto> ProductionVersions, IReadOnlyList<MovieV2TakeDto> Takes);
 public sealed record MovieCharacterStateDto(Guid Id, string Key, string? Label, string? Wardrobe, string? AgeOrTimeState, string? Appearance, string? InjuryOrCondition, string? LocationOrStoryState, string? ContinuityNotes, DateTime CreatedAt, DateTime UpdatedAt);
 public sealed record MovieCharacterRelationshipDto(Guid Id, Guid RelatedCharacterId, string RelatedCharacterName, string RelationshipType, string? Notes);
 public sealed record MovieCharacterContinuityLockDto(Guid Id, string FieldKey, string LockedValue, Guid? CharacterStateId, DateTime ApprovedAt);
 public sealed record MovieCharacterDto(Guid Id, string Name, string? Role, string Description, string? Appearance, string? PhysicalDescription, string? Wardrobe, string? VoiceReference, string? PersonalityAndStoryNotes, string? VoiceAndPerformance, string? ContinuityNotes, Guid? ReferenceAssetId, IReadOnlyList<Guid> ReferenceAssetIds, IReadOnlyList<MovieCharacterStateDto> States, IReadOnlyList<MovieCharacterRelationshipDto> Relationships, IReadOnlyList<MovieCharacterContinuityLockDto> ContinuityLocks);
+public sealed record MovieCastProjectDto(Guid Id, Guid WorkspaceId, Guid? ProjectId, string Mode, string Status, string Title, string Description, int DurationSeconds, string AspectRatio, string Style, string Language, DateTime CreatedAt, DateTime UpdatedAt);
+public sealed record MovieCastCharacterDto(Guid Id, string Name, string? Role, string Description, string? Appearance, Guid? ReferenceAssetId, IReadOnlyList<Guid> ReferenceAssetIds, int ReferenceAssetCount, int StateCount, MovieCharacterStateDto? LatestState, int RelationshipCount, IReadOnlyList<string> RelationshipTypes, int LockedFactCount, IReadOnlyList<string> LockedFieldKeys, DateTime UpdatedAt);
+public sealed record MovieCastDto(MovieCastProjectDto Project, IReadOnlyList<MovieCastCharacterDto> Characters);
+public sealed record MovieCharacterDetailDto(MovieCastProjectDto Project, MovieCharacterDto Character);
 public sealed record MovieLocationDto(Guid Id, string Name, string Description, string? VisualContinuityNotes, Guid? ReferenceAssetId);
 public sealed record MovieSetVariationDto(Guid Id, Guid MovieSetId, string Name, string? VisualDescription, string? TimeOfDay, string? Weather, string? Lighting, string? ContinuityNotes, Guid? ReferenceAssetId, bool IsDefault);
 public sealed record MovieSetDto(Guid Id, Guid? MovieLocationId, string Name, string Description, string EnvironmentType, string? VisualDescription, string? TimeOfDay, string? Weather, string? ContinuityNotes, Guid? ReferenceAssetId, IReadOnlyList<MovieSetVariationDto> Variations);
 public sealed record MoviePropDto(Guid Id, string Name, string Description, string? Category, string? ContinuityNotes, Guid? ReferenceAssetId);
 public sealed record MovieWorldReferenceDto(Guid Id, string Name, string Kind, string? Description, string? TagsJson, Guid? AssetId);
 public sealed record MovieWorldUsageDto(Guid Id, Guid MovieSceneId, Guid? MovieShotId, string EntityType, Guid EntityId, string? Role);
+public sealed record MovieWorldUsageDetailDto(Guid Id, Guid MovieSceneId, Guid? MovieShotId, int SceneSequence, string SceneTitle, int? ShotSequence, string? ShotDescription, string EntityType, Guid EntityId, string EntityName, string? Role);
 public sealed record MovieContinuityFactDto(Guid Id, string ScopeType, Guid? ScopeId, string FactKey, string FactValue, string? Notes, DateTime UpdatedAt);
 public sealed record MovieContinuityLockDto(Guid Id, string EntityType, Guid? EntityId, string FieldName, string LockedValue, string Strength, string? Reason, DateTime CreatedAt, DateTime? ReleasedAt);
 public sealed record MovieWorldDto(IReadOnlyList<MovieLocationDto> Locations, IReadOnlyList<MovieSetDto> Sets, IReadOnlyList<MoviePropDto> Props, IReadOnlyList<MovieWorldReferenceDto> References, IReadOnlyList<MovieWorldUsageDto> Usages, IReadOnlyList<MovieContinuityFactDto> Facts, IReadOnlyList<MovieContinuityLockDto> Locks);
-public sealed record MovieClipDto(Guid Id, Guid? MovieSceneId, Guid? MovieShotId, Guid? GenerationJobId, Guid? AssetId, string Status, int? DurationSeconds, string? MetadataJson, string? ContinuitySnapshotJson);
+public sealed record MovieWorldAssetDto(Guid Id, string Name, string AssetType, string? MimeType, bool HasFile, bool CanPreview);
+public sealed record MovieWorldWorkspaceDto(Guid MovieProjectId, Guid WorkspaceId, Guid? ProjectId, string Status, string Title, string Description, int DurationSeconds, string AspectRatio, string Style, string Language, MovieWorldDto World, IReadOnlyList<MovieWorldUsageDetailDto> UsageDetails, IReadOnlyList<MovieWorldAssetDto> Assets);
+public sealed record MovieClipDto(Guid Id, Guid? MovieSceneId, Guid? MovieShotId, Guid? GenerationJobId, Guid? AssetId, string Status, int? DurationSeconds, string? MetadataJson, string? ContinuitySnapshotJson, Guid? ContinuitySnapshotId = null, int? ContinuitySnapshotVersion = null, string? ContinuitySnapshotHash = null);
 public sealed record MovieAssemblyDto(Guid Id, Guid? GenerationJobId, Guid? AssetId, string Status, string OutputFormat, string? MetadataJson, DateTime CreatedAt, DateTime? CompletedAt);
+public sealed record MovieStudioProjectShellDto(Guid Id, Guid WorkspaceId, Guid? ProjectId, string Mode, string Status, string Title, string Description, int DurationSeconds, string AspectRatio, string Style, string Language, string? AdditionalInstructions, DateTime CreatedAt, DateTime UpdatedAt);
 public sealed record MovieStudioProjectDto(Guid Id, Guid WorkspaceId, Guid? ProjectId, string Mode, string Status, string Title, string Description, int DurationSeconds, string AspectRatio, string Style, string Language, string? AdditionalInstructions, DateTime CreatedAt, DateTime UpdatedAt, MovieGuideDto Guide, IReadOnlyList<MovieSceneDto> Scenes, IReadOnlyList<MovieCharacterDto> Characters, IReadOnlyList<MovieLocationDto> Locations, IReadOnlyList<MovieClipDto> Clips, IReadOnlyList<MovieAssemblyDto> Assemblies, MovieWorldDto World);
 public sealed record MovieStudioProjectResponse(MovieStudioProjectDto Project, GenerationJobDto? Job);
 public sealed record MovieStudioProviderResponse(MovieProviderReadinessDto Provider);
@@ -806,7 +831,7 @@ public sealed class MovieGuideLockRequest
 {
     public int? RevisionNumber { get; set; }
 }
-public sealed record MovieStudioShotRequest(string Description, string? CameraAndFraming, string? CameraMotion, int? DurationSeconds, string? Narration, string? Dialogue, string? VisualContinuityNotes, CinematographyIntentSelection? Cinematography = null);
+public sealed record MovieStudioShotRequest(string Description, string? CameraAndFraming, string? CameraMotion, int? DurationSeconds, string? Narration, string? Dialogue, string? VisualContinuityNotes, CinematographyIntentSelection? Cinematography = null, string? Purpose = null, string? Subjects = null, string? LocationSet = null, string? ProductionRequirements = null, string? ContinuityReferences = null, IReadOnlyList<Guid>? SubjectCharacterIds = null);
 public sealed record MovieStudioGuideRequest(string? VisualLanguage, string? CameraLanguage, string? ColorAndLighting, string? SoundAndNarration, string? ContinuityRules, CinematographyIntentSelection? Cinematography = null);
 public sealed record MovieStudioGenerationRequest(string? Title = null, decimal? EstimatedProviderCostUsd = null, GenerationCostEstimate? InternalCostEstimate = null);
 
