@@ -20,6 +20,15 @@ describe("Full Movie workspace foundation", () => {
     expect(workspaceSource).toContain("Team controls are not connected yet");
   });
 
+  it("treats Cast as an operational room with durable reads, shared assets, states, and visible locks", () => {
+    expect(workspaceSource).toContain("getMovieCast(projectId)");
+    expect(workspaceSource).toContain("getMovieCharacterDetail");
+    expect(workspaceSource).toContain("Shared Asset library");
+    expect(workspaceSource).toContain("Character states");
+    expect(workspaceSource).toContain("approved and protected");
+    expect(workspaceSource).toContain("No reference asset");
+  });
+
   it("keeps Quick Movie on a separate compact result path", () => {
     expect(createSource).toContain('mode === "Full"');
     expect(createSource).toContain('router.push(`/create/movie/${result.project.id}/overview`)');

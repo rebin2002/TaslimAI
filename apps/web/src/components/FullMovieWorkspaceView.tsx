@@ -11,18 +11,22 @@ import {
   Clapperboard,
   Film,
   Gauge,
+  Image as ImageIcon,
   Layers3,
   ListChecks,
+  LockKeyhole,
   Map,
   PencilRuler,
   Play,
+  Plus,
+  Save,
   ShieldCheck,
   SlidersHorizontal,
   Sparkles,
   Users,
   Workflow,
 } from "lucide-react";
-import { api, type MovieProject, type MovieScene } from "@/lib/api";
+import { api, type Asset, type MovieCast, type MovieCharacter, type MovieCharacterState, type MovieProject, type MovieScene } from "@/lib/api";
 import { assetFileUrl } from "@/lib/apiBase";
 
 export const fullMovieModules = [
@@ -82,6 +86,10 @@ function formatDuration(seconds: number | null | undefined) {
   return minutes ? `${minutes}m ${remainder}s` : `${remainder}s`;
 }
 
+function projectShellFromCast(cast: MovieCast): MovieProject {
+  return { ...cast.project, additionalInstructions: null, guide: { id: "cast-room", visualLanguage: "", cameraLanguage: "", colorAndLighting: "", soundAndNarration: "", continuityRules: "", updatedAt: cast.project.updatedAt }, scenes: [], characters: [], locations: [], clips: [], assemblies: [], world: { locations: [], sets: [], props: [], references: [], usages: [], facts: [], locks: [] } };
+}
+
 export function FullMovieWorkspaceView({ projectId, module }: { projectId: string; module: string }) {
   const activeModule = moduleFromSlug(module);
   const [project, setProject] = useState<MovieProject | null>(null);
@@ -93,7 +101,8 @@ export function FullMovieWorkspaceView({ projectId, module }: { projectId: strin
 
   useEffect(() => {
     let mounted = true;
-    void api.getMovieProject(projectId).then((result) => {
+    const load = activeModule === "cast" ? api.getMovieCast(projectId).then(projectShellFromCast) : api.getMovieProject(projectId);
+    void load.then((result) => {
       if (!mounted) return;
       setProject(result);
       setSelectedSceneId(result.scenes[0]?.id ?? null);
@@ -103,7 +112,7 @@ export function FullMovieWorkspaceView({ projectId, module }: { projectId: strin
       if (mounted) setLoading(false);
     });
     return () => { mounted = false; };
-  }, [projectId]);
+  }, [activeModule, projectId]);
 
   const selectedScene = useMemo(() => project?.scenes.find((scene) => scene.id === selectedSceneId) ?? project?.scenes[0] ?? null, [project, selectedSceneId]);
   const readyClips = project?.clips.filter((clip) => hasReadyAsset(clip.status, clip.assetId)) ?? [];
@@ -172,7 +181,7 @@ export function FullMovieWorkspaceView({ projectId, module }: { projectId: strin
           <div className="movie-module-heading"><div><span className="movie-workspace-kicker">{copy.eyebrow}</span><h2>{copy.title}</h2><p>{copy.description}</p></div><span className="movie-module-index">{String(fullMovieModules.findIndex((item) => item.slug === activeModule) + 1).padStart(2, "0")} / 12</span></div>
           {activeModule === "overview" && <OverviewModule project={project} outputAssetId={outputAssetId} completionPercent={completionPercent} selectedScene={selectedScene} onSelectScene={setSelectedSceneId} />}
           {activeModule === "story" && <StoryModule project={project} />}
-          {activeModule === "cast" && <CastModule project={project} />}
+          {activeModule === "cast" && <CastModule projectId={project.id} />}
           {activeModule === "world" && <WorldModule project={project} />}
           {activeModule === "scenes" && <ScenesModule project={project} selectedSceneId={selectedScene?.id ?? null} newScene={newScene} addingScene={addingScene} onSelectScene={setSelectedSceneId} onChangeScene={setNewScene} onAddScene={() => void addScene()} onGenerate={generateScene} />}
           {activeModule === "storyboard" && <StoryboardModule project={project} />}
@@ -215,8 +224,116 @@ function StoryModule({ project }: { project: MovieProject }) {
   return <div className="movie-module-stack"><section className="movie-story-hero"><span className="movie-workspace-kicker">Creative brief</span><h3>{project.title}</h3><p>{project.description}</p><div className="movie-story-facts"><span>{formatDuration(project.durationSeconds)}</span><span>{project.aspectRatio}</span><span>{project.style}</span><span>{project.language.toUpperCase()}</span></div></section><section className="movie-workspace-section"><div className="movie-section-head"><div><span className="movie-workspace-kicker">Continuity guide</span><h3>Rules that travel with the story</h3></div><BookOpen size={17} /></div><div className="movie-continuity-grid movie-continuity-grid-wide"><ContinuityItem label="Visual language" value={project.guide.visualLanguage} /><ContinuityItem label="Camera language" value={project.guide.cameraLanguage} /><ContinuityItem label="Color & lighting" value={project.guide.colorAndLighting} /><ContinuityItem label="Sound & narration" value={project.guide.soundAndNarration} /><ContinuityItem label="Continuity rules" value={project.guide.continuityRules} /></div></section></div>;
 }
 
-function CastModule({ project }: { project: MovieProject }) {
-  return <div className="movie-module-stack"><ModuleIntro icon={<Users size={18} />} title="Characters stay intentional" text="The cast surface shows durable character records only. It does not invent visual references or performances." />{project.characters.length ? <div className="movie-record-grid">{project.characters.map((character) => <article className="movie-record-card" key={character.id}><span className="movie-record-index">Character</span><h3>{character.name}</h3><p>{character.description}</p><RecordLine label="Appearance" value={character.appearance} /><RecordLine label="Performance" value={character.voiceAndPerformance} /><RecordLine label="Continuity" value={character.continuityNotes} /></article>)}</div> : <EmptyModule title="No cast records yet" text="Add character records when the story has a person worth keeping consistent." />}</div>;
+type CharacterDraft = Omit<MovieCharacter, "id" | "states" | "relationships" | "continuityLocks">;
+type StateDraft = Omit<MovieCharacterState, "id" | "createdAt" | "updatedAt"> & { key: string };
+const emptyCharacterDraft: CharacterDraft = { name: "", role: "", description: "", appearance: "", physicalDescription: "", wardrobe: "", voiceReference: "", personalityAndStoryNotes: "", voiceAndPerformance: "", continuityNotes: "", referenceAssetId: null, referenceAssetIds: [] };
+const emptyStateDraft: StateDraft = { key: "", label: "", wardrobe: "", ageOrTimeState: "", appearance: "", injuryOrCondition: "", locationOrStoryState: "", continuityNotes: "" };
+
+function CastModule({ projectId }: { projectId: string }) {
+  const [cast, setCast] = useState<MovieCast | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [detail, setDetail] = useState<MovieCharacter | null>(null);
+  const [assets, setAssets] = useState<Asset[]>([]);
+  const [draft, setDraft] = useState<CharacterDraft>(emptyCharacterDraft);
+  const [stateDraft, setStateDraft] = useState<StateDraft>(emptyStateDraft);
+  const [editingStateId, setEditingStateId] = useState<string | null>(null);
+  const [relationship, setRelationship] = useState({ relatedCharacterId: "", relationshipType: "", notes: "" });
+  const [lock, setLock] = useState({ fieldKey: "appearance", lockedValue: "", characterStateId: "" });
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  async function loadCast(nextSelectedId?: string | null) {
+    const result = await api.getMovieCast(projectId);
+    setCast(result);
+    const nextId = nextSelectedId === undefined ? (selectedId ?? result.characters[0]?.id ?? null) : nextSelectedId;
+    setSelectedId(nextId);
+    if (nextId) {
+      const loaded = await api.getMovieCharacterDetail(nextId);
+      setDetail(loaded.character);
+      setDraft(draftFromCharacter(loaded.character));
+    } else {
+      setDetail(null);
+      setDraft(emptyCharacterDraft);
+    }
+  }
+
+  useEffect(() => {
+    let mounted = true;
+    void api.getMovieCast(projectId).then((result) => {
+      if (!mounted) return;
+      setCast(result);
+      setSelectedId(result.characters[0]?.id ?? null);
+      if (result.characters[0]) return api.getMovieCharacterDetail(result.characters[0].id).then((loaded) => { if (mounted) { setDetail(loaded.character); setDraft(draftFromCharacter(loaded.character)); } });
+      return undefined;
+    }).catch((cause) => { if (mounted) setError(cause instanceof Error ? cause.message : "The cast room could not be loaded."); }).finally(() => { if (mounted) setLoading(false); });
+    return () => { mounted = false; };
+  }, [projectId]);
+
+  useEffect(() => {
+    if (!cast) return;
+    void api.listAssets(cast.project.workspaceId, { assetType: "image", status: "Active", pageSize: 24 }).then((result) => setAssets(result.items)).catch(() => setAssets([]));
+  }, [cast]);
+
+  async function selectCharacter(id: string) {
+    setError("");
+    try { const loaded = await api.getMovieCharacterDetail(id); setSelectedId(id); setDetail(loaded.character); setDraft(draftFromCharacter(loaded.character)); setStateDraft(emptyStateDraft); setEditingStateId(null); } catch (cause) { setError(cause instanceof Error ? cause.message : "The character could not be loaded."); }
+  }
+  async function saveCharacter() {
+    if (!draft.name.trim() || !draft.description.trim()) return;
+    setSaving(true); setError("");
+    try {
+      const payload = { ...draft, name: draft.name.trim(), description: draft.description.trim(), referenceAssetIds: draft.referenceAssetIds };
+      const saved = selectedId ? await api.updateMovieCharacter(selectedId, payload) : await api.addMovieCharacter(projectId, payload);
+      await loadCast(saved.id);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "The character card could not be saved."); } finally { setSaving(false); }
+  }
+  async function saveState() {
+    if (!detail || !stateDraft.key.trim()) return;
+    setSaving(true); setError("");
+    try {
+      const saved = editingStateId ? await api.updateMovieCharacterState(editingStateId, stateDraft) : await api.addMovieCharacterState(detail.id, stateDraft);
+      const next = { ...detail, states: editingStateId ? detail.states.map((item) => item.id === saved.id ? saved : item) : [...detail.states, saved] };
+      setDetail(next); setStateDraft(emptyStateDraft); setEditingStateId(null); await loadCast(detail.id);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "The character state could not be saved."); } finally { setSaving(false); }
+  }
+  async function saveRelationship() {
+    if (!detail || !relationship.relatedCharacterId || !relationship.relationshipType.trim()) return;
+    setSaving(true); setError("");
+    try { await api.addMovieCharacterRelationship(detail.id, relationship); setRelationship({ relatedCharacterId: "", relationshipType: "", notes: "" }); const loaded = await api.getMovieCharacterDetail(detail.id); setDetail(loaded.character); await loadCast(detail.id); } catch (cause) { setError(cause instanceof Error ? cause.message : "The relationship could not be saved."); } finally { setSaving(false); }
+  }
+  async function saveLock() {
+    if (!detail || !lock.lockedValue.trim()) return;
+    setSaving(true); setError("");
+    try { await api.lockMovieCharacterFact(detail.id, { fieldKey: lock.fieldKey, lockedValue: lock.lockedValue, characterStateId: lock.characterStateId || null }); setLock({ ...lock, lockedValue: "" }); const loaded = await api.getMovieCharacterDetail(detail.id); setDetail(loaded.character); await loadCast(detail.id); } catch (cause) { setError(cause instanceof Error ? cause.message : "The continuity fact could not be locked."); } finally { setSaving(false); }
+  }
+  function toggleAsset(assetId: string) { setDraft((current) => { const ids = current.referenceAssetIds.includes(assetId) ? current.referenceAssetIds.filter((id) => id !== assetId) : [...current.referenceAssetIds, assetId]; return { ...current, referenceAssetIds: ids, referenceAssetId: ids[0] ?? null }; }); }
+  if (loading) return <div className="movie-workspace-section movie-cast-loading"><span className="loading-spinner" /><span>Loading cast records…</span></div>;
+  if (!cast) return <EmptyModule title="Cast room unavailable" text={error || "The cast read model is not available in this workspace."} />;
+  const lockedCardFields = new Set((detail?.continuityLocks ?? []).filter((item) => !item.characterStateId).map((item) => item.fieldKey));
+  const lockedStateFields = new Set((detail?.continuityLocks ?? []).filter((item) => item.characterStateId === (editingStateId ?? lock.characterStateId)).map((item) => item.fieldKey));
+  return <div className="movie-module-stack movie-cast-room">
+    <section className="movie-cast-hero"><div><span className="movie-workspace-kicker">Character cards · {cast.characters.length} records</span><h3>Durable identities for the film</h3><p>Reference assets stay in the shared Asset library. Empty imagery stays empty until a real asset is attached.</p></div><div className="movie-cast-hero-stat"><strong>{cast.characters.filter((item) => item.referenceAssetCount > 0).length}</strong><span>with references</span></div></section>
+    <div className="movie-cast-layout"><section className="movie-cast-index movie-workspace-section"><div className="movie-section-head"><div><span className="movie-workspace-kicker">Cast index</span><h3>{cast.characters.length ? "Choose a character" : "No cast records yet"}</h3></div><span className="movie-section-count">{cast.characters.length} total</span></div>{cast.characters.length ? <div className="movie-cast-card-grid">{cast.characters.map((item) => <button key={item.id} type="button" className={`movie-cast-card ${selectedId === item.id ? "is-selected" : ""}`} onClick={() => void selectCharacter(item.id)}><CharacterAssetPreview assetId={item.referenceAssetId} name={item.name} /><span className="movie-record-index">{item.role || "Role not set"}</span><strong>{item.name}</strong><small>{item.description}</small><div className="movie-cast-card-meta"><span>{item.stateCount} state{item.stateCount === 1 ? "" : "s"}</span><span>{item.lockedFactCount ? <><LockKeyhole size={11} /> {item.lockedFactCount} locked</> : "No locks"}</span></div><div className="movie-cast-current-state"><span>Current state</span><strong>{item.latestState?.label || item.latestState?.key || "No state set"}</strong></div>{item.relationshipTypes.length > 0 && <em>{item.relationshipTypes.join(" · ")}</em>}</button>)}</div> : <EmptyModule title="No cast records yet" text="Create the first character card when the story has a person worth keeping consistent. No face or reference is fabricated here." />}</section>
+      <section className="movie-cast-editor movie-workspace-section"><div className="movie-section-head"><div><span className="movie-workspace-kicker">Character card</span><h3>{detail?.name || "Create a character"}</h3></div>{detail && <span className="movie-section-count">{detail.continuityLocks.length} locked facts</span>}</div><CharacterEditor draft={draft} lockedFields={lockedCardFields} onChange={setDraft} onSave={() => void saveCharacter()} saving={saving} assets={assets} onToggleAsset={toggleAsset} /><StateEditor detail={detail} draft={stateDraft} lockedFields={lockedStateFields} editingStateId={editingStateId} onChange={setStateDraft} onEdit={(state) => { setEditingStateId(state.id); setStateDraft(state); }} onSave={() => void saveState()} saving={saving} /><CastSecondaryEditors detail={detail} cast={cast} relationship={relationship} onRelationshipChange={setRelationship} onSaveRelationship={() => void saveRelationship()} lock={lock} onLockChange={setLock} onSaveLock={() => void saveLock()} saving={saving} /></section></div>
+    {error && <div className="movie-workspace-error-inline"><XCircleIcon /> {error}</div>}
+  </div>;
+}
+
+function draftFromCharacter(character: MovieCharacter): CharacterDraft { return { name: character.name, role: character.role, description: character.description, appearance: character.appearance, physicalDescription: character.physicalDescription, wardrobe: character.wardrobe, voiceReference: character.voiceReference, personalityAndStoryNotes: character.personalityAndStoryNotes, voiceAndPerformance: character.voiceAndPerformance, continuityNotes: character.continuityNotes, referenceAssetId: character.referenceAssetId, referenceAssetIds: character.referenceAssetIds }; }
+function CharacterAssetPreview({ assetId, name }: { assetId: string | null; name: string }) { return <div className="movie-cast-card-art">{assetId ? <img src={assetFileUrl(assetId, true)} alt={`${name} reference`} loading="lazy" /> : <><ImageIcon size={24} /><span>No reference asset</span></>}</div>; }
+function CharacterEditor({ draft, lockedFields, onChange, onSave, saving, assets, onToggleAsset }: { draft: CharacterDraft; lockedFields: Set<string>; onChange: (draft: CharacterDraft) => void; onSave: () => void; saving: boolean; assets: Asset[]; onToggleAsset: (id: string) => void }) {
+  const field = (key: keyof CharacterDraft, label: string, multiline = true) => <label className={`movie-cast-field ${multiline ? "is-wide" : ""}`}><span>{label}{lockedFields.has(key) && <LockKeyhole size={11} />}</span>{multiline ? <textarea value={String(draft[key] ?? "")} disabled={lockedFields.has(key)} onChange={(event) => onChange({ ...draft, [key]: event.target.value })} /> : <input value={String(draft[key] ?? "")} disabled={lockedFields.has(key)} onChange={(event) => onChange({ ...draft, [key]: event.target.value })} />}</label>;
+  return <div className="movie-cast-editor-body"><div className="movie-cast-form-grid">{field("name", "Name", false)}{field("role", "Role / importance", false)}{field("description", "Story function / description")}{field("appearance", "Appearance")}{field("physicalDescription", "Physical description")}{field("wardrobe", "Wardrobe / reference direction")}{field("personalityAndStoryNotes", "Personality / story notes")}{field("voiceReference", "Voice reference")}{field("voiceAndPerformance", "Performance notes")}{field("continuityNotes", "Continuity notes")}</div><div className="movie-cast-asset-picker"><div className="movie-section-head"><div><span className="movie-workspace-kicker">Reference assets</span><h3>Shared Asset library</h3></div><span className="movie-section-count">{draft.referenceAssetIds.length} selected</span></div>{assets.length ? <div className="movie-cast-asset-grid">{assets.map((asset) => <button type="button" key={asset.id} className={`movie-cast-asset ${draft.referenceAssetIds.includes(asset.id) ? "is-selected" : ""}`} onClick={() => onToggleAsset(asset.id)}><img src={assetFileUrl(asset.id, true)} alt={asset.name} loading="lazy" /><span>{asset.name}</span></button>)}</div> : <p className="movie-cast-muted">No active image assets are available in this workspace. Add one in Assets, then return here.</p>}</div><div className="movie-cast-save-row"><p>Locked fields stay read-only here; an approved value is never silently overwritten.</p><button type="button" className="movie-workspace-button is-primary" onClick={onSave} disabled={saving || !draft.name.trim() || !draft.description.trim()}><Save size={14} /> {saving ? "Saving…" : "Save character card"}</button></div></div>;
+}
+
+function StateEditor({ detail, draft, lockedFields, editingStateId, onChange, onEdit, onSave, saving }: { detail: MovieCharacter | null; draft: StateDraft; lockedFields: Set<string>; editingStateId: string | null; onChange: (draft: StateDraft) => void; onEdit: (state: MovieCharacterState) => void; onSave: () => void; saving: boolean }) {
+  const field = (key: keyof StateDraft, label: string) => <label className="movie-cast-field"><span>{label}{lockedFields.has(key) && <LockKeyhole size={11} />}</span><textarea value={String(draft[key] ?? "")} disabled={lockedFields.has(key)} onChange={(event) => onChange({ ...draft, [key]: event.target.value })} /></label>;
+  return <section className="movie-cast-subsection"><div className="movie-section-head"><div><span className="movie-workspace-kicker">Story / production context</span><h3>Character states</h3></div><span className="movie-section-count">{detail?.states.length ?? 0} saved</span></div>{detail?.states.length ? <div className="movie-cast-state-list">{detail.states.map((state) => <button type="button" key={state.id} className={`movie-cast-state ${editingStateId === state.id ? "is-selected" : ""}`} onClick={() => onEdit(state)}><span>{state.label || state.key}</span><small>{state.wardrobe || state.injuryOrCondition || state.ageOrTimeState || "No state detail set"}</small><em>{detail.continuityLocks.filter((item) => item.characterStateId === state.id).length ? <><LockKeyhole size={11} /> Locked facts</> : "Editable context"}</em></button>)}</div> : <p className="movie-cast-muted">No wardrobe, injury, age/time, or performance variation has been persisted yet.</p>}<div className="movie-cast-form-grid movie-cast-state-form">{field("key", "State key")}{field("label", "Label")}{field("wardrobe", "Wardrobe")}{field("ageOrTimeState", "Age / time state")}{field("appearance", "Appearance variation")}{field("injuryOrCondition", "Injury / condition")}{field("locationOrStoryState", "Location / story state")}{field("continuityNotes", "State continuity notes")}</div><div className="movie-cast-save-row"><p>{editingStateId ? "Editing a persisted state." : "Add only a state supported by the production context."}</p><button type="button" className="movie-workspace-button" onClick={onSave} disabled={saving || !draft.key.trim()}><Plus size={14} /> {saving ? "Saving…" : editingStateId ? "Update state" : "Add state"}</button></div></section>;
+}
+
+function CastSecondaryEditors({ detail, cast, relationship, onRelationshipChange, onSaveRelationship, lock, onLockChange, onSaveLock, saving }: { detail: MovieCharacter | null; cast: MovieCast; relationship: { relatedCharacterId: string; relationshipType: string; notes: string }; onRelationshipChange: (value: { relatedCharacterId: string; relationshipType: string; notes: string }) => void; onSaveRelationship: () => void; lock: { fieldKey: string; lockedValue: string; characterStateId: string }; onLockChange: (value: { fieldKey: string; lockedValue: string; characterStateId: string }) => void; onSaveLock: () => void; saving: boolean }) {
+  return <section className="movie-cast-subsection movie-cast-secondary"><div className="movie-section-head"><div><span className="movie-workspace-kicker">Connections & approvals</span><h3>Relationships and locks</h3></div><LockKeyhole size={16} /></div><div className="movie-cast-secondary-grid"><div><span className="movie-inspector-label">Relationships</span>{detail?.relationships.length ? <div className="movie-cast-chip-list">{detail.relationships.map((item) => <span key={item.id}>{item.relationshipType} · {item.relatedCharacterName}</span>)}</div> : <p className="movie-cast-muted">No relationships persisted.</p>}<select value={relationship.relatedCharacterId} onChange={(event) => onRelationshipChange({ ...relationship, relatedCharacterId: event.target.value })}><option value="">Related character</option>{cast.characters.filter((item) => item.id !== detail?.id).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select><input value={relationship.relationshipType} onChange={(event) => onRelationshipChange({ ...relationship, relationshipType: event.target.value })} placeholder="Relationship type" /><textarea value={relationship.notes} onChange={(event) => onRelationshipChange({ ...relationship, notes: event.target.value })} placeholder="Optional relationship note" /><button type="button" className="movie-workspace-button" onClick={onSaveRelationship} disabled={saving || !relationship.relatedCharacterId || !relationship.relationshipType.trim()}><Plus size={14} /> Add relationship</button></div><div><span className="movie-inspector-label">Continuity locks</span>{detail?.continuityLocks.length ? <div className="movie-cast-lock-list">{detail.continuityLocks.map((item) => <div key={item.id}><LockKeyhole size={12} /><strong>{item.fieldKey}</strong><span>{item.lockedValue}</span><small>{item.characterStateId ? "State fact" : "Card fact"} · approved and protected</small></div>)}</div> : <p className="movie-cast-muted">No facts are locked. Locks explain why a field is read-only and prevent silent mutation.</p>}<select value={lock.characterStateId} onChange={(event) => onLockChange({ ...lock, characterStateId: event.target.value })}><option value="">Lock a card fact</option>{detail?.states.map((item) => <option key={item.id} value={item.id}>Lock a state fact · {item.label || item.key}</option>)}</select><select value={lock.fieldKey} onChange={(event) => onLockChange({ ...lock, fieldKey: event.target.value })}>{(lock.characterStateId ? ["label", "wardrobe", "ageOrTimeState", "appearance", "injuryOrCondition", "locationOrStoryState", "continuityNotes"] : ["name", "role", "description", "appearance", "physicalDescription", "wardrobe", "voiceReference", "personalityAndStoryNotes", "voiceAndPerformance", "continuityNotes"]).map((field) => <option key={field} value={field}>{field}</option>)}</select><input value={lock.lockedValue} onChange={(event) => onLockChange({ ...lock, lockedValue: event.target.value })} placeholder="Exact current value to approve" /><button type="button" className="movie-workspace-button" onClick={onSaveLock} disabled={saving || !lock.lockedValue.trim()}><LockKeyhole size={14} /> Approve lock</button></div></div></section>;
 }
 
 function WorldModule({ project }: { project: MovieProject }) {

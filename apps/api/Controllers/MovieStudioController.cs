@@ -42,6 +42,20 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieGuid
         return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result);
     }
 
+    [HttpGet("projects/{id:guid}/cast")]
+    public async Task<IActionResult> GetCast(Guid id, CancellationToken cancellationToken)
+    {
+        var result = await movies.GetCastAsync(GetUserId(), id, cancellationToken);
+        return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result);
+    }
+
+    [HttpGet("characters/{characterId:guid}/detail")]
+    public async Task<IActionResult> GetCharacterDetail(Guid characterId, CancellationToken cancellationToken)
+    {
+        var result = await movies.GetCharacterDetailAsync(GetUserId(), characterId, cancellationToken);
+        return result is null ? ApiResults.Error(this, 404, "MOVIE_CHARACTER_NOT_FOUND", "Movie character not found.") : Ok(result);
+    }
+
     [HttpPatch("projects/{id:guid}/guide")]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> UpdateGuide(Guid id, MovieStudioGuideRequest request, CancellationToken cancellationToken)

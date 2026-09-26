@@ -146,6 +146,39 @@ public sealed class MovieStudioCastTests : IClassFixture<GenerationJobsApiFactor
         Assert.Equal(HttpStatusCode.NotFound, update.StatusCode);
     }
 
+    [Fact]
+    public async Task Cast_read_models_return_only_cast_context_and_detail()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Cast Read Model Owner");
+        var movie = await CreateMovie(client, auth.PersonalWorkspace.Id);
+        var character = await SendWithCsrf<Taslim.Api.Movies.MovieCharacterDto>(client, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/characters", new { name = "Read Model Mara", role = "Lead", description = "A persisted lead." });
+        var cast = await client.GetFromJsonAsync<Taslim.Api.Movies.MovieCastDto>($"/api/movie-studio/projects/{movie.Project.Id}/cast");
+        Assert.NotNull(cast);
+        Assert.Equal(movie.Project.Id, cast!.Project.Id);
+        var summary = Assert.Single(cast.Characters);
+        Assert.Equal(character.Id, summary.Id);
+        Assert.Equal(0, summary.ReferenceAssetCount);
+        Assert.Null(summary.LatestState);
+        Assert.DoesNotContain("scenes", JsonSerializer.Serialize(cast), StringComparison.OrdinalIgnoreCase);
+        var detail = await client.GetFromJsonAsync<Taslim.Api.Movies.MovieCharacterDetailDto>($"/api/movie-studio/characters/{character.Id}/detail");
+        Assert.Equal(character.Id, detail!.Character.Id);
+        Assert.Equal("A persisted lead.", detail.Character.Description);
+    }
+
+    [Fact]
+    public async Task Lock_values_are_trimmed_and_protected_from_card_updates()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Cast Lock Owner");
+        var movie = await CreateMovie(client, auth.PersonalWorkspace.Id);
+        var character = await SendWithCsrf<Taslim.Api.Movies.MovieCharacterDto>(client, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/characters", new { name = "Trimmed Lock", description = "A lock test.", appearance = "Exact appearance" });
+        var locked = await SendWithCsrf<Taslim.Api.Movies.MovieCharacterContinuityLockDto>(client, HttpMethod.Post, $"/api/movie-studio/characters/{character.Id}/continuity-locks", new { fieldKey = "appearance", lockedValue = "  Exact appearance  " });
+        Assert.Equal("Exact appearance", locked.LockedValue);
+        var blocked = await SendWithCsrf(client, HttpMethod.Patch, $"/api/movie-studio/characters/{character.Id}", new { name = "Trimmed Lock", description = "A lock test.", appearance = "Changed" });
+        Assert.Equal(HttpStatusCode.Conflict, blocked.StatusCode);
+    }
+
     private static async Task<Taslim.Api.Movies.MovieStudioProjectResponse> CreateMovie(HttpClient client, Guid workspaceId) =>
         await SendWithCsrf<Taslim.Api.Movies.MovieStudioProjectResponse>(client, HttpMethod.Post, "/api/movie-studio/projects", new
         {
