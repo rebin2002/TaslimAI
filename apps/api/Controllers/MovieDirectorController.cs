@@ -21,6 +21,8 @@ public sealed class MovieDirectorController(IMovieDirectorService director) : Co
             return result is null ? ApiResults.Error(this, 404, "DIRECTOR_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result);
         }
         catch (DirectorValidationException exception) { return ApiResults.Error(this, 400, "DIRECTOR_REQUEST_INVALID", exception.Message); }
+        catch (DirectorContextTargetException exception) { return ApiResults.Error(this, 400, "DIRECTOR_CONTEXT_TARGET_INVALID", exception.Message); }
+        catch (DirectorContextBudgetException exception) { return ApiResults.Error(this, 413, "DIRECTOR_CONTEXT_BUDGET_EXCEEDED", exception.Message); }
     }
 
     [HttpGet("proposals/{proposalId:guid}")]

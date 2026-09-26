@@ -1,340 +1,363 @@
-using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
-using Microsoft.EntityFrameworkCore;
-using Taslim.Api.Authorization;
 using Taslim.Api.Domain;
-using Taslim.Api.Generation;
-using Taslim.Api.Persistence;
 using Taslim.Api.Usage;
 
 namespace Taslim.Api.Movies;
 
-public interface IMovieDirectorService
+public static class DirectorQualityLevels
 {
-    Task<DirectorProposalResponse?> CreateProposalAsync(Guid userId, Guid movieProjectId, DirectorProposalRequest request, CancellationToken cancellationToken = default);
-    Task<DirectorProposalResponse?> GetProposalAsync(Guid userId, Guid proposalId, CancellationToken cancellationToken = default);
-    Task<IReadOnlyList<DirectorHistoryDto>?> GetHistoryAsync(Guid userId, Guid movieProjectId, CancellationToken cancellationToken = default);
-    Task<DirectorProposalDto?> ApproveProposalAsync(Guid userId, Guid proposalId, CancellationToken cancellationToken = default);
-    Task<DirectorProposalDto?> RejectProposalAsync(Guid userId, Guid proposalId, CancellationToken cancellationToken = default);
-    Task<DirectorActionExecutionResponse?> ExecuteActionAsync(Guid userId, Guid actionId, CancellationToken cancellationToken = default);
+    public const string Fast = "Fast";
+    public const string Standard = "Standard";
+    public const string Cinematic = "Cinematic";
+    public const string Studio = "Studio";
+    public const string Auto = "Auto";
+
+    public static readonly IReadOnlySet<string> Selectable = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        Fast, Standard, Cinematic, Studio, Auto,
+    };
 }
 
-public interface IDirectorActionExecutor
+public static class DirectorProposalStatuses
 {
-    string ActionType { get; }
-    Task<DirectorActionExecution> ExecuteAsync(DirectorAction action, CancellationToken cancellationToken = default);
+    public const string PendingApproval = "PendingApproval";
+    public const string Approved = "Approved";
+    public const string Rejected = "Rejected";
+    public const string Expired = "Expired";
 }
 
-public sealed record DirectorActionExecution(bool Succeeded, string? FailureCode, string SafeMessage, string? ResultJson);
-
-public sealed class MovieDirectorContextAssembler(TaslimDbContext db, IMovieCharacterContinuityService continuity, MovieWorldContinuityProjector worldContinuity)
+public static class DirectorActionStatuses
 {
-    private const int MaxStoryScenes = 40;
-    private const int MaxStoryElementsPerScene = 40;
-    private const int MaxRelevantReferences = 12;
-
-    public async Task<DirectorContextAssemblyResult?> AssembleAsync(Guid userId, Guid movieProjectId, Guid? targetShotId = null, CancellationToken cancellationToken = default)
-    {
-        var movie = await db.MovieProjects.AsNoTracking()
-            .Include(item => item.Guide).ThenInclude(item => item.Revisions)
-            .Include(item => item.Scenes).ThenInclude(item => item.Shots)
-            .Include(item => item.Characters)
-            .Include(item => item.Locations)
-            .FirstOrDefaultAsync(item => item.Id == movieProjectId, cancellationToken);
-        if (movie is null) return null;
-        var lockedRevision = movie.Guide.LockedRevisionNumber is int lockedRevisionNumber
-            ? movie.Guide.Revisions.FirstOrDefault(item => item.RevisionNumber == lockedRevisionNumber && item.Status == MovieGuideRevisionStatuses.Locked)
-            : null;
-        if (lockedRevision is null) return null;
-        var story = await db.MovieStories.AsNoTracking()
-            .Include(item => item.Revisions)
-            .FirstOrDefaultAsync(item => item.MovieProjectId == movieProjectId, cancellationToken);
-        var approvedStoryRevision = story?.ApprovedRevisionId is Guid approvedRevisionId
-            ? story.Revisions.FirstOrDefault(item => item.Id == approvedRevisionId && item.Status == MovieStoryRevisionStatuses.Approved)
-            : null;
-        var approvedStoryContext = approvedStoryRevision is null
-            ? null
-            : new DirectorStoryContext(approvedStoryRevision.Id, approvedStoryRevision.RevisionNumber, approvedStoryRevision.Premise, approvedStoryRevision.Logline, approvedStoryRevision.Synopsis, approvedStoryRevision.Treatment, approvedStoryRevision.Authorship);
-
-        var continuitySnapshot = await continuity.BuildSnapshotAsync(userId, movieProjectId, null, targetShotId, cancellationToken);
-        var targetShot = targetShotId.HasValue
-            ? movie.Scenes.SelectMany(item => item.Shots).FirstOrDefault(item => item.Id == targetShotId.Value)
-            : movie.Scenes.OrderBy(item => item.Sequence).SelectMany(item => item.Shots.OrderBy(shot => shot.Sequence)).FirstOrDefault();
-        var worldSnapshot = targetShot is null
-            ? null
-            : await worldContinuity.ProjectAsync(movieProjectId, targetShot.MovieSceneId, targetShot.Id, cancellationToken);
-
-        var context = new DirectorContextDto(
-            movie.Id, movie.WorkspaceId, movie.Title, movie.Description, movie.DurationSeconds, movie.AspectRatio, movie.Style, movie.Language,
-            new DirectorGuideContext(movie.Guide.VisualLanguage, movie.Guide.CameraLanguage, movie.Guide.ColorAndLighting, movie.Guide.SoundAndNarration, movie.Guide.ContinuityRules, lockedRevision.RevisionNumber, true, lockedRevision.CinematographyBibleJson),
-            movie.Scenes.OrderBy(item => item.Sequence).Select(scene => new DirectorSceneContext(
-                scene.Id, scene.Sequence, scene.Title, scene.Summary, scene.DurationSeconds, scene.ContinuityNotes,
-                scene.Shots.OrderBy(item => item.Sequence).Select(shot => new DirectorShotContext(shot.Id, shot.Sequence, shot.Description, shot.CameraAndFraming, shot.CameraMotion, shot.DurationSeconds, shot.Narration, shot.Dialogue, shot.VisualContinuityNotes)).ToArray())).ToArray(),
-            movie.Characters.OrderBy(item => item.CreatedAt).Select(item => new DirectorCharacterContext(item.Name, item.Description, item.Appearance, item.ContinuityNotes)).ToArray(),
-            worldSnapshot?.Locations.Select(item => new DirectorLocationContext(item.Name, item.Description, item.VisualContinuityNotes)).ToArray() ?? movie.Locations.OrderBy(item => item.CreatedAt).Select(item => new DirectorLocationContext(item.Name, item.Description, item.VisualContinuityNotes)).ToArray(),
-            DateTime.UtcNow,
-            ApprovedStory: approvedStoryContext,
-            Continuity: continuitySnapshot is null ? null : new DirectorContinuityContext(continuitySnapshot.MovieSceneId, continuitySnapshot.MovieShotId, continuitySnapshot.SnapshotHash, continuitySnapshot.Characters, continuitySnapshot.Warnings),
-            WorldContinuity: worldSnapshot);
-        var snapshotJson = JsonSerializer.Serialize(context, DirectorJson.Options);
-        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(snapshotJson))).ToLowerInvariant();
-        return new DirectorContextAssemblyResult(context, snapshotJson, hash);
-    }
-
-    public async Task<(DirectorStoryBoundedContextDto Context, string SnapshotJson, string SnapshotHash)?> AssembleStoryAsync(Guid movieProjectId, Guid? targetSceneId, Guid? targetElementId, CancellationToken cancellationToken = default)
-    {
-        var movie = await db.MovieProjects.AsNoTracking()
-            .Include(item => item.Guide).ThenInclude(item => item.Revisions)
-            .Include(item => item.Scenes).ThenInclude(item => item.Shots)
-            .Include(item => item.Characters)
-            .Include(item => item.Locations)
-            .FirstOrDefaultAsync(item => item.Id == movieProjectId, cancellationToken);
-        if (movie is null) return null;
-        var lockedRevision = movie.Guide.LockedRevisionNumber is int revisionNumber
-            ? movie.Guide.Revisions.FirstOrDefault(item => item.RevisionNumber == revisionNumber && item.Status == MovieGuideRevisionStatuses.Locked)
-            : null;
-        if (lockedRevision is null) return null;
-
-        var story = await db.MovieStories.AsNoTracking()
-            .Include(item => item.Revisions).ThenInclude(item => item.Scenes).ThenInclude(item => item.Elements)
-            .FirstOrDefaultAsync(item => item.MovieProjectId == movieProjectId, cancellationToken);
-        var current = story?.CurrentRevisionId is Guid currentId ? story.Revisions.FirstOrDefault(item => item.Id == currentId) : null;
-        var approved = story?.ApprovedRevisionId is Guid approvedId ? story.Revisions.FirstOrDefault(item => item.Id == approvedId && item.Status == MovieStoryRevisionStatuses.Approved) : null;
-        var currentContext = current is null ? null : ToStoryRevisionContext(current);
-        var approvedContext = approved is null ? null : ToStoryRevisionContext(approved);
-        var target = currentContext?.Scenes.FirstOrDefault(item => item.Id == targetSceneId)
-            ?? approvedContext?.Scenes.FirstOrDefault(item => item.Id == targetSceneId);
-        var movieScenes = movie.Scenes.OrderBy(item => item.Sequence).Take(MaxStoryScenes).Select(scene => new DirectorSceneContext(scene.Id, scene.Sequence, Limit(scene.Title, 160), Limit(scene.Summary, 1_200), scene.DurationSeconds, Limit(scene.ContinuityNotes, 1_200), [])).ToArray();
-        var context = new DirectorStoryBoundedContextDto(
-            movie.Id,
-            movie.WorkspaceId,
-            new DirectorGuideContext(Limit(movie.Guide.VisualLanguage, 2_000), Limit(movie.Guide.CameraLanguage, 2_000), Limit(movie.Guide.ColorAndLighting, 2_000), Limit(movie.Guide.SoundAndNarration, 2_000), Limit(movie.Guide.ContinuityRules, 4_000), lockedRevision.RevisionNumber, true, Limit(lockedRevision.CinematographyBibleJson, 8_000)),
-            currentContext,
-            approvedContext,
-            target,
-            movieScenes,
-            movie.Characters.OrderBy(item => item.CreatedAt).Take(MaxRelevantReferences).Select(item => new DirectorCharacterContext(Limit(item.Name, 160), Limit(item.Description, 1_200), Limit(item.Appearance, 1_200), Limit(item.ContinuityNotes, 1_200))).ToArray(),
-            movie.Locations.OrderBy(item => item.CreatedAt).Take(MaxRelevantReferences).Select(item => new DirectorLocationContext(Limit(item.Name, 160), Limit(item.Description, 1_200), Limit(item.VisualContinuityNotes, 1_200))).ToArray(),
-            DateTime.UtcNow);
-        var snapshotJson = JsonSerializer.Serialize(context, DirectorJson.Options);
-        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(snapshotJson))).ToLowerInvariant();
-        return (context, snapshotJson, hash);
-    }
-
-    private static DirectorStoryRevisionContext ToStoryRevisionContext(MovieStoryRevision revision) => new(
-        revision.Id, revision.RevisionNumber, revision.Status, revision.Authorship,
-        Limit(revision.Premise, 8_000), Limit(revision.Logline, 2_000), Limit(revision.Synopsis, 8_000), Limit(revision.Treatment, 8_000),
-        revision.Scenes.OrderBy(item => item.Ordinal).Take(MaxStoryScenes).Select(scene => new DirectorScreenplaySceneContext(
-            scene.Id, scene.MovieSceneId, Limit(scene.SceneIdentifier, 80), scene.ActNumber, scene.SequenceNumber, Limit(scene.Slugline, 500), Limit(scene.Synopsis, 2_000),
-            scene.Elements.OrderBy(item => item.Ordinal).Take(MaxStoryElementsPerScene).Select(element => new DirectorScreenplayElementContext(element.Id, element.ElementType, Limit(element.Content, 6_000), Limit(element.CharacterName, 160), Limit(element.Parenthetical, 500))).ToArray())).ToArray());
-
-    private static string Limit(string? value, int maximum) => string.IsNullOrWhiteSpace(value) ? string.Empty : value.Length <= maximum ? value : value[..maximum];
+    public const string PendingApproval = "PendingApproval";
+    public const string Ready = "Ready";
+    public const string Running = "Running";
+    public const string Succeeded = "Succeeded";
+    public const string Failed = "Failed";
+    public const string Cancelled = "Cancelled";
 }
 
-public sealed class MovieDirectorService(
-    TaslimDbContext db,
-    WorkspaceAccessService access,
-    MovieDirectorContextAssembler assembler,
-    DirectorQualityPlanner qualityPlanner,
-    DirectorStoryProposalPlanner storyPlanner,
-    IEnumerable<IDirectorActionExecutor> executors) : IMovieDirectorService
+public static class DirectorActionTypes
 {
-    public async Task<DirectorProposalResponse?> CreateProposalAsync(Guid userId, Guid movieProjectId, DirectorProposalRequest request, CancellationToken cancellationToken = default)
-    {
-        var movie = await db.MovieProjects.AsNoTracking().FirstOrDefaultAsync(item => item.Id == movieProjectId, cancellationToken);
-        if (movie is null || !await access.IsMemberAsync(userId, movie.WorkspaceId, cancellationToken)) return null;
-        if (!string.IsNullOrWhiteSpace(request.StoryAction))
-            return await CreateStoryProposalAsync(userId, movie, request, cancellationToken);
-        var context = await assembler.AssembleAsync(userId, movieProjectId, request.ShotId, cancellationToken);
-        if (context is null) return null;
-        var shot = request.ShotId.HasValue
-            ? context.Context.Scenes.SelectMany(item => item.Shots).FirstOrDefault(item => item.Id == request.ShotId.Value)
-            : context.Context.Scenes.SelectMany(item => item.Shots).FirstOrDefault();
-        if (shot is null) throw new DirectorValidationException("Select a shot before creating a Director proposal.");
-        if (request.BudgetLimitUsd is < 0) throw new DirectorValidationException("Budget limit cannot be negative.");
+    public const string GenerateShot = "generate_shot";
+}
 
-        var recommendation = qualityPlanner.Recommend(new DirectorShotPlanningRequest(
-            shot.Id, request.Importance, request.Complexity, request.BudgetSensitivity,
-            shot.DurationSeconds ?? Math.Min(movie.DurationSeconds, 60), context.Context.Guide.ContinuityRules.Length > 0,
-            request.RequestedQuality, request.BudgetLimitUsd));
-        var rationale = recommendation.Reasons.ToArray();
-        var now = DateTime.UtcNow;
-        var directorContext = await GetOrCreateContextAsync(movie, context, cancellationToken);
-        var proposal = new DirectorProposal
+public static class DirectorHistoryEventTypes
+{
+    public const string ContextAssembled = "context_assembled";
+    public const string ProposalCreated = "proposal_created";
+    public const string ProposalApproved = "proposal_approved";
+    public const string ProposalRejected = "proposal_rejected";
+    public const string ActionReady = "action_ready";
+    public const string ActionStarted = "action_started";
+    public const string ActionSucceeded = "action_succeeded";
+    public const string ActionFailed = "action_failed";
+}
+
+public static class DirectorContextTargetTypes
+{
+    public const string Project = "project";
+    public const string StoryRevision = "story_revision";
+    public const string Scene = "scene";
+    public const string Shot = "shot";
+    public const string StoryboardVersion = "storyboard_version";
+    public const string ProductionVersion = "production_version";
+    public const string Take = "take";
+
+    public static readonly IReadOnlySet<string> Supported = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        Project, StoryRevision, Scene, Shot, StoryboardVersion, ProductionVersion, Take,
+    };
+}
+
+public sealed class DirectorProjectContext
+{
+    public Guid Id { get; set; }
+    public Guid WorkspaceId { get; set; }
+    public Guid MovieProjectId { get; set; }
+    public string TargetType { get; set; } = DirectorContextTargetTypes.Project;
+    public Guid TargetId { get; set; }
+    public int ContextVersion { get; set; } = 1;
+    public string SnapshotJson { get; set; } = string.Empty;
+    public string SnapshotHash { get; set; } = string.Empty;
+    public DateTime CreatedAt { get; set; }
+    public DateTime UpdatedAt { get; set; }
+
+    public Workspace Workspace { get; set; } = null!;
+    public MovieProject MovieProject { get; set; } = null!;
+    public ICollection<DirectorProposal> Proposals { get; set; } = [];
+    public ICollection<DirectorDecision> Decisions { get; set; } = [];
+}
+
+public sealed class DirectorProposal
+{
+    public Guid Id { get; set; }
+    public Guid WorkspaceId { get; set; }
+    public Guid MovieProjectId { get; set; }
+    public Guid DirectorProjectContextId { get; set; }
+    public Guid CreatedByUserId { get; set; }
+    public string Status { get; set; } = DirectorProposalStatuses.PendingApproval;
+    public string Title { get; set; } = string.Empty;
+    public string Summary { get; set; } = string.Empty;
+    public string RationaleJson { get; set; } = "[]";
+    public DateTime CreatedAt { get; set; }
+    public DateTime? ApprovedAt { get; set; }
+    public DateTime? RejectedAt { get; set; }
+
+    public Workspace Workspace { get; set; } = null!;
+    public MovieProject MovieProject { get; set; } = null!;
+    public DirectorProjectContext Context { get; set; } = null!;
+    public ApplicationUser CreatedByUser { get; set; } = null!;
+    public ICollection<DirectorAction> Actions { get; set; } = [];
+}
+
+public sealed class DirectorAction
+{
+    public Guid Id { get; set; }
+    public Guid WorkspaceId { get; set; }
+    public Guid MovieProjectId { get; set; }
+    public Guid DirectorProposalId { get; set; }
+    public string ActionType { get; set; } = string.Empty;
+    public string Status { get; set; } = DirectorActionStatuses.PendingApproval;
+    public bool ApprovalRequired { get; set; } = true;
+    public string PayloadJson { get; set; } = string.Empty;
+    public string? IdempotencyKey { get; set; }
+    public string? FailureCode { get; set; }
+    public DateTime CreatedAt { get; set; }
+    public DateTime? ApprovedAt { get; set; }
+    public DateTime? StartedAt { get; set; }
+    public DateTime? CompletedAt { get; set; }
+
+    public Workspace Workspace { get; set; } = null!;
+    public MovieProject MovieProject { get; set; } = null!;
+    public DirectorProposal Proposal { get; set; } = null!;
+    public ICollection<DirectorActionResult> Results { get; set; } = [];
+    public ICollection<DirectorHistoryEvent> History { get; set; } = [];
+}
+
+public sealed class DirectorActionResult
+{
+    public Guid Id { get; set; }
+    public Guid DirectorActionId { get; set; }
+    public string Status { get; set; } = string.Empty;
+    public string? ResultJson { get; set; }
+    public string SafeMessage { get; set; } = string.Empty;
+    public DateTime CreatedAt { get; set; }
+
+    public DirectorAction Action { get; set; } = null!;
+}
+
+public sealed class DirectorDecision
+{
+    public Guid Id { get; set; }
+    public Guid DirectorProjectContextId { get; set; }
+    public Guid? MovieShotId { get; set; }
+    public string DecisionType { get; set; } = string.Empty;
+    public string QualityLevel { get; set; } = DirectorQualityLevels.Fast;
+    public string RationaleJson { get; set; } = "[]";
+    public decimal? EstimatedCostUsd { get; set; }
+    public DateTime CreatedAt { get; set; }
+
+    public DirectorProjectContext Context { get; set; } = null!;
+    public MovieShot? MovieShot { get; set; }
+}
+
+public sealed class DirectorHistoryEvent
+{
+    public Guid Id { get; set; }
+    public Guid WorkspaceId { get; set; }
+    public Guid? DirectorProposalId { get; set; }
+    public Guid? DirectorActionId { get; set; }
+    public string EventType { get; set; } = string.Empty;
+    public string? SafeDetailsJson { get; set; }
+    public DateTime CreatedAt { get; set; }
+
+    public Workspace Workspace { get; set; } = null!;
+    public DirectorProposal? Proposal { get; set; }
+    public DirectorAction? Action { get; set; }
+}
+
+public sealed record DirectorContextDto(
+    Guid MovieProjectId,
+    Guid WorkspaceId,
+    string Title,
+    string Description,
+    int DurationSeconds,
+    string AspectRatio,
+    string Style,
+    string Language,
+    DirectorGuideContext Guide,
+    IReadOnlyList<DirectorSceneContext> Scenes,
+    IReadOnlyList<DirectorCharacterContext> Characters,
+    IReadOnlyList<DirectorLocationContext> Locations,
+    DateTime AssembledAt,
+    int ContextVersion = 1,
+    DirectorStoryContext? ApprovedStory = null,
+    DirectorContextTargetDto? Target = null,
+    DirectorWorldContext? World = null,
+    DirectorProductionContext? Production = null,
+    DirectorCollaborationContext? Collaboration = null,
+    DirectorContextBudgetDto? Budget = null,
+    IReadOnlyList<DirectorContextSourceDto>? Provenance = null);
+
+public sealed record DirectorGuideContext(
+    string VisualLanguage,
+    string CameraLanguage,
+    string ColorAndLighting,
+    string SoundAndNarration,
+    string ContinuityRules,
+    int? RevisionNumber = null,
+    bool IsAuthoritative = false,
+    string? CinematographyBibleJson = null,
+    IReadOnlyList<DirectorGuideSectionContext>? LockedSections = null);
+public sealed record DirectorStoryContext(Guid RevisionId, int RevisionNumber, string Premise, string Logline, string Synopsis, string Treatment, string Authorship);
+public sealed record DirectorSceneContext(Guid Id, int Sequence, string Title, string Summary, int? DurationSeconds, string? ContinuityNotes, IReadOnlyList<DirectorShotContext> Shots);
+public sealed record DirectorShotContext(Guid Id, int Sequence, string Description, string? CameraAndFraming, string? CameraMotion, int? DurationSeconds, string? Narration, string? Dialogue, string? VisualContinuityNotes, string? CinematographyJson = null);
+public sealed record DirectorCharacterContext(string Name, string Description, string? Appearance, string? ContinuityNotes, IReadOnlyList<DirectorLockedFactContext>? LockedFacts = null, Guid? Id = null);
+public sealed record DirectorLocationContext(string Name, string Description, string? VisualContinuityNotes, Guid? Id = null);
+public sealed record DirectorGuideSectionContext(string Type, string ContentJson);
+public sealed record DirectorLockedFactContext(string FieldKey, string LockedValue, Guid? StateId = null);
+public sealed record DirectorContextTargetDto(string Type, Guid Id, Guid? StoryRevisionId, Guid? SceneId, Guid? ShotId, Guid? ProductionVersionId, Guid? TakeId);
+public sealed record DirectorContextSourceDto(string Kind, Guid Id, string Revision, bool IsLocked, string Priority);
+public sealed record DirectorContextBudgetDto(int MaxBytes, int UsedBytes, int CriticalBytes, int OptionalBytes, bool CriticalFactsComplete, bool OptionalMaterialTrimmed = false);
+public sealed record DirectorWorldContext(IReadOnlyList<DirectorWorldEntityContext> Entities, IReadOnlyList<DirectorContinuityFactContext> Facts, IReadOnlyList<DirectorContinuityLockContext> Locks);
+public sealed record DirectorWorldEntityContext(Guid Id, string EntityType, string Name, string Description, string? ContinuityNotes, string? Role, bool IsLocked);
+public sealed record DirectorContinuityFactContext(Guid Id, string ScopeType, Guid? ScopeId, string FactKey, string FactValue, string? Notes, bool IsLocked);
+public sealed record DirectorContinuityLockContext(Guid Id, string EntityType, Guid? EntityId, string FieldName, string LockedValue, string Strength, string? Reason);
+public sealed record DirectorProductionContext(Guid? ShotId, string? ShotProductionStage, Guid? ProductionVersionId, string? Stage, string? Status, string? CompositionJson, Guid? TakeId, string? TakeStatus, string? TakeQualityLevel);
+public sealed record DirectorCollaborationContext(IReadOnlyList<DirectorReviewContext> Reviews, IReadOnlyList<DirectorAssignmentContext> Assignments, IReadOnlyList<DirectorCommentContext> Comments);
+public sealed record DirectorReviewContext(Guid Id, string TargetType, Guid TargetId, string Status, bool IsFinal, string? DecisionNote);
+public sealed record DirectorAssignmentContext(Guid Id, string TargetType, Guid TargetId, string Status, string Title);
+public sealed record DirectorCommentContext(Guid Id, string TargetType, Guid TargetId, bool IsResolved);
+
+public sealed record DirectorContextAssemblyResult(DirectorContextDto Context, string SnapshotJson, string SnapshotHash, long AssemblyMilliseconds = 0);
+
+public sealed record DirectorCostEstimate(bool IsKnown, decimal? AmountUsd, string Currency, string? UnknownReason);
+public sealed record DirectorCostRequest(int DurationSeconds, string QualityLevel);
+
+public interface IDirectorCostEstimator
+{
+    DirectorCostEstimate Estimate(DirectorCostRequest request);
+}
+
+public sealed record DirectorShotPlanningRequest(
+    Guid? ShotId,
+    int Importance,
+    int Complexity,
+    int BudgetSensitivity,
+    int DurationSeconds,
+    bool RequiresContinuity,
+    string RequestedQuality = DirectorQualityLevels.Auto,
+    decimal? BudgetLimitUsd = null);
+
+public sealed record DirectorQualityRecommendation(
+    string QualityLevel,
+    string SelectionMode,
+    decimal ImportanceScore,
+    decimal ComplexityScore,
+    decimal BudgetSensitivityScore,
+    decimal? EstimatedCostUsd,
+    IReadOnlyList<string> Reasons,
+    bool BudgetConstrained);
+
+public sealed class DirectorQualityPlanner(IDirectorCostEstimator costEstimator)
+{
+    public DirectorQualityRecommendation Recommend(DirectorShotPlanningRequest request)
+    {
+        var importance = Normalize(request.Importance);
+        var complexity = Normalize(request.Complexity);
+        var budgetSensitivity = Normalize(request.BudgetSensitivity);
+        var score = decimal.Round((importance * 0.5m) + (complexity * 0.3m) + ((1m - budgetSensitivity) * 0.2m), 2);
+        var requested = NormalizeQuality(request.RequestedQuality);
+        var level = requested == DirectorQualityLevels.Auto
+            ? score >= 0.88m ? DirectorQualityLevels.Studio
+            : score >= 0.68m ? DirectorQualityLevels.Cinematic
+            : score >= 0.38m ? DirectorQualityLevels.Standard
+            : DirectorQualityLevels.Fast
+            : requested;
+        var reasons = new List<string>
         {
-            Id = Guid.NewGuid(), WorkspaceId = movie.WorkspaceId, MovieProjectId = movie.Id, DirectorProjectContextId = directorContext.Id,
-            CreatedByUserId = userId, Status = DirectorProposalStatuses.PendingApproval,
-            Title = string.IsNullOrWhiteSpace(request.Goal) ? $"Plan shot {shot.Sequence}" : request.Goal.Trim(),
-            Summary = $"Prepare shot {shot.Sequence} at {recommendation.QualityLevel} quality.",
-            RationaleJson = JsonSerializer.Serialize(rationale), CreatedAt = now,
+            importance >= 0.7m ? "high_story_importance" : "lower_story_importance",
+            complexity >= 0.7m ? "high_shot_complexity" : "manageable_shot_complexity",
+            request.RequiresContinuity ? "continuity_sensitive" : "continuity_flexible",
         };
-        var action = new DirectorAction
+        var estimate = costEstimator.Estimate(new DirectorCostRequest(Math.Clamp(request.DurationSeconds, 1, 3600), level));
+        var constrained = false;
+        if (request.BudgetLimitUsd.HasValue && estimate.IsKnown && estimate.AmountUsd > request.BudgetLimitUsd.Value && level != DirectorQualityLevels.Fast)
         {
-            Id = Guid.NewGuid(), WorkspaceId = movie.WorkspaceId, MovieProjectId = movie.Id, DirectorProposalId = proposal.Id,
-            ActionType = DirectorActionTypes.GenerateShot, Status = DirectorActionStatuses.PendingApproval, ApprovalRequired = true,
-            PayloadJson = JsonSerializer.Serialize(new DirectorGenerateShotPayload(shot.Id, recommendation.QualityLevel, shot.DurationSeconds ?? 60, recommendation.EstimatedCostUsd)), CreatedAt = now,
-        };
-        proposal.Actions.Add(action);
-        db.DirectorProposals.Add(proposal);
-        db.DirectorDecisions.Add(new DirectorDecision
-        {
-            Id = Guid.NewGuid(), DirectorProjectContextId = directorContext.Id, MovieShotId = shot.Id, DecisionType = "quality_recommendation",
-            QualityLevel = recommendation.QualityLevel, RationaleJson = JsonSerializer.Serialize(rationale), EstimatedCostUsd = recommendation.EstimatedCostUsd, CreatedAt = now,
-        });
-        db.DirectorHistoryEvents.Add(new DirectorHistoryEvent
-        {
-            Id = Guid.NewGuid(), WorkspaceId = movie.WorkspaceId, DirectorProposalId = proposal.Id, EventType = DirectorHistoryEventTypes.ContextAssembled,
-            SafeDetailsJson = JsonSerializer.Serialize(new { contextVersion = context.Context.ContextVersion, snapshotHash = context.SnapshotHash }), CreatedAt = now,
-        });
-        db.DirectorHistoryEvents.Add(new DirectorHistoryEvent
-        {
-            Id = Guid.NewGuid(), WorkspaceId = movie.WorkspaceId, DirectorProposalId = proposal.Id, EventType = DirectorHistoryEventTypes.ProposalCreated,
-            SafeDetailsJson = JsonSerializer.Serialize(new { qualityLevel = recommendation.QualityLevel, estimatedCostUsd = recommendation.EstimatedCostUsd }), CreatedAt = now,
-        });
-        await db.SaveChangesAsync(cancellationToken);
-        return new DirectorProposalResponse(ToDto(proposal, rationale, [new DirectorPlanItemDto(shot.Id, shot.Sequence, shot.Description, recommendation)]), context.Context);
-    }
-
-    public async Task<DirectorProposalResponse?> GetProposalAsync(Guid userId, Guid proposalId, CancellationToken cancellationToken = default)
-    {
-        var proposal = await QueryProposal().FirstOrDefaultAsync(item => item.Id == proposalId, cancellationToken);
-        if (proposal is null || !await access.IsMemberAsync(userId, proposal.WorkspaceId, cancellationToken)) return null;
-        var targetShotId = proposal.Actions.Select(item => TryGetShotId(item.PayloadJson)).FirstOrDefault(item => item.HasValue);
-        var context = await assembler.AssembleAsync(userId, proposal.MovieProjectId, targetShotId, cancellationToken);
-        if (context is null) return null;
-        var storyAction = proposal.Actions.FirstOrDefault(item => item.ActionType == DirectorActionTypes.StoryAssistance);
-        var storyContext = storyAction is null ? null : await assembler.AssembleStoryAsync(proposal.MovieProjectId, ReadStoryPayload(storyAction)?.TargetSceneId, ReadStoryPayload(storyAction)?.TargetElementId, cancellationToken);
-        return new DirectorProposalResponse(ToDto(proposal), context.Context, storyContext?.Context);
-    }
-
-    public async Task<IReadOnlyList<DirectorHistoryDto>?> GetHistoryAsync(Guid userId, Guid movieProjectId, CancellationToken cancellationToken = default)
-    {
-        var movie = await db.MovieProjects.AsNoTracking().FirstOrDefaultAsync(item => item.Id == movieProjectId, cancellationToken);
-        if (movie is null || !await access.IsMemberAsync(userId, movie.WorkspaceId, cancellationToken)) return null;
-        return await db.DirectorHistoryEvents.AsNoTracking().Where(item => item.WorkspaceId == movie.WorkspaceId && (item.Proposal == null || item.Proposal.MovieProjectId == movieProjectId))
-            .OrderByDescending(item => item.CreatedAt).Take(200).Select(item => new DirectorHistoryDto(item.Id, item.EventType, item.SafeDetailsJson, item.CreatedAt)).ToListAsync(cancellationToken);
-    }
-
-    public async Task<DirectorProposalDto?> ApproveProposalAsync(Guid userId, Guid proposalId, CancellationToken cancellationToken = default) => await SetProposalStatusAsync(userId, proposalId, true, cancellationToken);
-    public async Task<DirectorProposalDto?> RejectProposalAsync(Guid userId, Guid proposalId, CancellationToken cancellationToken = default) => await SetProposalStatusAsync(userId, proposalId, false, cancellationToken);
-
-    public async Task<DirectorActionExecutionResponse?> ExecuteActionAsync(Guid userId, Guid actionId, CancellationToken cancellationToken = default)
-    {
-        var action = await db.DirectorActions.Include(item => item.Proposal).Include(item => item.Results).FirstOrDefaultAsync(item => item.Id == actionId, cancellationToken);
-        if (action is null || !await access.IsMemberAsync(userId, action.WorkspaceId, cancellationToken)) return null;
-        if (action.Status != DirectorActionStatuses.Ready) throw new DirectorActionNotApprovedException();
-        var executor = executors.FirstOrDefault(item => string.Equals(item.ActionType, action.ActionType, StringComparison.OrdinalIgnoreCase));
-        if (executor is null) throw new DirectorActionExecutionException("DIRECTOR_ACTION_UNSUPPORTED", "This Director action is not available.");
-        action.Status = DirectorActionStatuses.Running;
-        action.StartedAt = DateTime.UtcNow;
-        db.DirectorHistoryEvents.Add(new DirectorHistoryEvent { Id = Guid.NewGuid(), WorkspaceId = action.WorkspaceId, DirectorActionId = action.Id, DirectorProposalId = action.DirectorProposalId, EventType = DirectorHistoryEventTypes.ActionStarted, CreatedAt = DateTime.UtcNow });
-        await db.SaveChangesAsync(cancellationToken);
-
-        DirectorActionExecution execution;
-        try { execution = await executor.ExecuteAsync(action, cancellationToken); }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
-        catch (Exception) { execution = new(false, "DIRECTOR_ACTION_FAILED", "The Director action could not be completed.", null); }
-        var now = DateTime.UtcNow;
-        action.Status = execution.Succeeded ? DirectorActionStatuses.Succeeded : DirectorActionStatuses.Failed;
-        action.FailureCode = execution.FailureCode;
-        action.CompletedAt = now;
-        var result = new DirectorActionResult { Id = Guid.NewGuid(), DirectorActionId = action.Id, Status = action.Status, SafeMessage = execution.SafeMessage, ResultJson = execution.ResultJson, CreatedAt = now };
-        db.DirectorActionResults.Add(result);
-        db.DirectorHistoryEvents.Add(new DirectorHistoryEvent { Id = Guid.NewGuid(), WorkspaceId = action.WorkspaceId, DirectorActionId = action.Id, DirectorProposalId = action.DirectorProposalId, EventType = execution.Succeeded ? DirectorHistoryEventTypes.ActionSucceeded : DirectorHistoryEventTypes.ActionFailed, SafeDetailsJson = JsonSerializer.Serialize(new { execution.FailureCode }), CreatedAt = now });
-        await db.SaveChangesAsync(cancellationToken);
-        return new DirectorActionExecutionResponse(ToDto(action), ToDto(result));
-    }
-
-    private async Task<DirectorProposalDto?> SetProposalStatusAsync(Guid userId, Guid proposalId, bool approve, CancellationToken cancellationToken)
-    {
-        var proposal = await db.DirectorProposals.Include(item => item.Actions).Include(item => item.MovieProject).FirstOrDefaultAsync(item => item.Id == proposalId, cancellationToken);
-        if (proposal is null || !await access.IsMemberAsync(userId, proposal.WorkspaceId, cancellationToken)) return null;
-        if (proposal.Status != DirectorProposalStatuses.PendingApproval) throw new DirectorValidationException("This proposal is no longer awaiting approval.");
-        var now = DateTime.UtcNow;
-        proposal.Status = approve ? DirectorProposalStatuses.Approved : DirectorProposalStatuses.Rejected;
-        proposal.ApprovedAt = approve ? now : null;
-        proposal.RejectedAt = approve ? null : now;
-        foreach (var action in proposal.Actions) { action.Status = approve ? DirectorActionStatuses.Ready : DirectorActionStatuses.Cancelled; action.ApprovedAt = approve ? now : null; }
-        db.DirectorHistoryEvents.Add(new DirectorHistoryEvent { Id = Guid.NewGuid(), WorkspaceId = proposal.WorkspaceId, DirectorProposalId = proposal.Id, EventType = approve ? DirectorHistoryEventTypes.ProposalApproved : DirectorHistoryEventTypes.ProposalRejected, CreatedAt = now });
-        if (approve) foreach (var action in proposal.Actions) db.DirectorHistoryEvents.Add(new DirectorHistoryEvent { Id = Guid.NewGuid(), WorkspaceId = proposal.WorkspaceId, DirectorProposalId = proposal.Id, DirectorActionId = action.Id, EventType = DirectorHistoryEventTypes.ActionReady, CreatedAt = now });
-        await db.SaveChangesAsync(cancellationToken);
-        return ToDto(proposal);
-    }
-
-    private async Task<DirectorProposalResponse?> CreateStoryProposalAsync(Guid userId, MovieProject movie, DirectorProposalRequest request, CancellationToken cancellationToken)
-    {
-        var assembled = await assembler.AssembleAsync(userId, movie.Id, cancellationToken);
-        var storyContext = await assembler.AssembleStoryAsync(movie.Id, request.TargetSceneId, request.TargetElementId, cancellationToken);
-        if (assembled is null || storyContext is null) return null;
-        var plan = storyPlanner.Build(request, storyContext.Value.Context);
-        var now = DateTime.UtcNow;
-        var directorContext = await GetOrCreateContextAsync(movie, assembled, cancellationToken);
-        var proposal = new DirectorProposal
-        {
-            Id = Guid.NewGuid(), WorkspaceId = movie.WorkspaceId, MovieProjectId = movie.Id, DirectorProjectContextId = directorContext.Id,
-            CreatedByUserId = userId, Status = DirectorProposalStatuses.PendingApproval, Title = plan.Title, Summary = plan.Summary,
-            RationaleJson = JsonSerializer.Serialize(plan.Rationale), CreatedAt = now,
-        };
-        proposal.Actions.Add(new DirectorAction
-        {
-            Id = Guid.NewGuid(), WorkspaceId = movie.WorkspaceId, MovieProjectId = movie.Id, DirectorProposalId = proposal.Id,
-            ActionType = DirectorActionTypes.StoryAssistance, Status = DirectorActionStatuses.PendingApproval, ApprovalRequired = true,
-            PayloadJson = JsonSerializer.Serialize(plan.Payload, DirectorJson.Options), CreatedAt = now,
-        });
-        db.DirectorProposals.Add(proposal);
-        db.DirectorHistoryEvents.Add(new DirectorHistoryEvent { Id = Guid.NewGuid(), WorkspaceId = movie.WorkspaceId, DirectorProposalId = proposal.Id, EventType = DirectorHistoryEventTypes.ContextAssembled, SafeDetailsJson = JsonSerializer.Serialize(new { contextVersion = storyContext.Value.Context.ContextVersion, snapshotHash = storyContext.Value.SnapshotHash }), CreatedAt = now });
-        db.DirectorHistoryEvents.Add(new DirectorHistoryEvent { Id = Guid.NewGuid(), WorkspaceId = movie.WorkspaceId, DirectorProposalId = proposal.Id, EventType = DirectorHistoryEventTypes.ProposalCreated, SafeDetailsJson = JsonSerializer.Serialize(new { action = plan.Payload.Action, appliesToStory = plan.Review.AppliesToStory }), CreatedAt = now });
-        await db.SaveChangesAsync(cancellationToken);
-        return new DirectorProposalResponse(ToDto(proposal, plan.Rationale, [], plan.Review), assembled.Context, storyContext.Value.Context);
-    }
-
-    private async Task<DirectorProjectContext> GetOrCreateContextAsync(MovieProject movie, DirectorContextAssemblyResult assembled, CancellationToken cancellationToken)
-    {
-        var existing = await db.DirectorProjectContexts.FirstOrDefaultAsync(item => item.MovieProjectId == movie.Id, cancellationToken);
-        if (existing is null)
-        {
-            existing = new DirectorProjectContext { Id = Guid.NewGuid(), WorkspaceId = movie.WorkspaceId, MovieProjectId = movie.Id, SnapshotJson = assembled.SnapshotJson, SnapshotHash = assembled.SnapshotHash, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow };
-            db.DirectorProjectContexts.Add(existing);
+            level = DirectorQualityLevels.Fast;
+            constrained = true;
+            reasons.Add("budget_limit_selected_lower_quality");
+            estimate = costEstimator.Estimate(new DirectorCostRequest(Math.Clamp(request.DurationSeconds, 1, 3600), level));
         }
-        else { existing.ContextVersion++; existing.SnapshotJson = assembled.SnapshotJson; existing.SnapshotHash = assembled.SnapshotHash; existing.UpdatedAt = DateTime.UtcNow; }
-        return existing;
+        if (budgetSensitivity >= 0.7m) reasons.Add("budget_sensitive");
+        return new DirectorQualityRecommendation(level, requested, importance, complexity, budgetSensitivity, estimate.AmountUsd, reasons, constrained);
     }
 
-    private IQueryable<DirectorProposal> QueryProposal() => db.DirectorProposals.AsNoTracking().Include(item => item.Actions).ThenInclude(item => item.Results).Include(item => item.MovieProject);
-
-    private static DirectorProposalDto ToDto(DirectorProposal proposal, IReadOnlyList<string>? rationale = null, IReadOnlyList<DirectorPlanItemDto>? plan = null, DirectorStoryReviewDto? storyReview = null) =>
-        new(proposal.Id, proposal.MovieProjectId, proposal.Status, proposal.Title, proposal.Summary, rationale ?? ParseRationale(proposal.RationaleJson), plan ?? [], proposal.Actions.OrderBy(item => item.CreatedAt).Select(ToDto).ToArray(), proposal.CreatedAt, proposal.ApprovedAt, storyReview ?? proposal.Actions.Select(ReadStoryReview).FirstOrDefault(item => item is not null));
-    private static DirectorActionDto ToDto(DirectorAction action) => new(action.Id, action.DirectorProposalId, action.ActionType, action.Status, action.ApprovalRequired, action.FailureCode, action.CreatedAt, action.ApprovedAt, action.StartedAt, action.CompletedAt, action.Results.OrderBy(item => item.CreatedAt).Select(ToDto).ToArray());
-    private static DirectorActionResultDto ToDto(DirectorActionResult result) => new(result.Id, result.Status, result.SafeMessage, result.ResultJson, result.CreatedAt);
-    private static IReadOnlyList<string> ParseRationale(string json) { try { return JsonSerializer.Deserialize<string[]>(json) ?? []; } catch (JsonException) { return []; } }
-    private static Guid? TryGetShotId(string payloadJson)
-    {
-        try { return JsonSerializer.Deserialize<DirectorGenerateShotPayload>(payloadJson, DirectorJson.Options)?.ShotId; }
-        catch (JsonException) { return null; }
-    }
-    private static DirectorStoryActionPayload? ReadStoryPayload(DirectorAction action) { try { return JsonSerializer.Deserialize<DirectorStoryActionPayload>(action.PayloadJson, DirectorJson.Options); } catch (JsonException) { return null; } }
-    private static DirectorStoryReviewDto? ReadStoryReview(DirectorAction action)
-    {
-        if (!string.Equals(action.ActionType, DirectorActionTypes.StoryAssistance, StringComparison.OrdinalIgnoreCase)) return null;
-        var payload = ReadStoryPayload(action);
-        return payload is null ? null : new DirectorStoryReviewDto(payload.Action, payload.BaseRevisionId, payload.Changes, payload.Findings, !string.Equals(payload.Action, DirectorStoryActionTypes.IdentifyInconsistencies, StringComparison.OrdinalIgnoreCase));
-    }
+    private static decimal Normalize(int value) => Math.Clamp(value, 0, 100) / 100m;
+    private static string NormalizeQuality(string value) => DirectorQualityLevels.Selectable.FirstOrDefault(item => string.Equals(item, value?.Trim(), StringComparison.OrdinalIgnoreCase)) ?? DirectorQualityLevels.Auto;
 }
 
-public sealed class MovieDirectorActionExecutor(IMovieStudioService movies, IMovieVideoProvider provider) : IDirectorActionExecutor
+public sealed class MovieDirectorCostEstimator(IMovieVideoProvider provider, IGenerationCostEstimator estimator) : IDirectorCostEstimator
 {
-    public string ActionType => DirectorActionTypes.GenerateShot;
-    public async Task<DirectorActionExecution> ExecuteAsync(DirectorAction action, CancellationToken cancellationToken = default)
+    public DirectorCostEstimate Estimate(DirectorCostRequest request)
     {
-        if (!provider.IsAvailable) return new(false, GenerationJobErrorCodes.MovieProviderUnavailable, "The movie generation capability is not available.", null);
-        DirectorGenerateShotPayload? payload;
-        try { payload = JsonSerializer.Deserialize<DirectorGenerateShotPayload>(action.PayloadJson, DirectorJson.Options); }
-        catch (JsonException) { payload = null; }
-        if (payload is null) return new(false, "DIRECTOR_ACTION_INVALID", "The Director action payload is invalid.", null);
-        var result = await movies.GenerateShotAsync(action.Proposal.CreatedByUserId, payload.ShotId, new MovieStudioGenerationRequest($"Director: {payload.QualityLevel}", payload.EstimatedCostUsd), cancellationToken, action.IdempotencyKey ?? $"director:{action.Id:N}");
-        return result is null
-            ? new(false, "DIRECTOR_SHOT_NOT_FOUND", "The Director shot could not be found.", null)
-            : new(true, null, "The Director queued the shot for generation.", JsonSerializer.Serialize(new { result.Job.Id, result.ClipId }));
+        if (!provider.IsAvailable) return new(false, null, UsageCurrencies.Usd, "movie_capability_unavailable");
+        var duration = Math.Max(1, request.DurationSeconds) * QualityMultiplier(request.QualityLevel);
+        var estimate = estimator.Estimate(new GenerationCostEstimationRequest(provider.Key, VideoDurationSeconds: duration));
+        return new DirectorCostEstimate(estimate.IsKnown, estimate.AmountUsd, estimate.Currency, estimate.UnknownReason);
     }
+
+    private static decimal QualityMultiplier(string quality) => quality switch
+    {
+        DirectorQualityLevels.Studio => 1.5m,
+        DirectorQualityLevels.Cinematic => 1.25m,
+        DirectorQualityLevels.Standard => 1m,
+        _ => 0.75m,
+    };
+}
+
+public sealed class DirectorValidationException(string message) : Exception(message);
+public sealed class DirectorContextTargetException(string message) : Exception(message);
+public sealed class DirectorContextBudgetException(string message) : Exception(message);
+public sealed class DirectorActionNotApprovedException() : Exception("The Director action requires explicit user approval.");
+public sealed class DirectorActionExecutionException(string code, string message) : Exception(message)
+{
+    public string Code { get; } = code;
+}
+
+public sealed class DirectorProposalRequest
+{
+    public Guid? ShotId { get; set; }
+    public string? ContextTargetType { get; set; }
+    public Guid? ContextTargetId { get; set; }
+    public string? Goal { get; set; }
+    public string RequestedQuality { get; set; } = DirectorQualityLevels.Auto;
+    public decimal? BudgetLimitUsd { get; set; }
+    public int Importance { get; set; } = 50;
+    public int Complexity { get; set; } = 50;
+    public int BudgetSensitivity { get; set; } = 50;
+}
+
+public sealed class DirectorContextTargetRequest
+{
+    public string? TargetType { get; set; }
+    public Guid? TargetId { get; set; }
+}
+
+public sealed record DirectorPlanItemDto(Guid ShotId, int Sequence, string Description, DirectorQualityRecommendation Recommendation);
+public sealed record DirectorActionDto(Guid Id, Guid ProposalId, string ActionType, string Status, bool ApprovalRequired, string? FailureCode, DateTime CreatedAt, DateTime? ApprovedAt, DateTime? StartedAt, DateTime? CompletedAt, IReadOnlyList<DirectorActionResultDto> Results);
+public sealed record DirectorActionResultDto(Guid Id, string Status, string SafeMessage, string? ResultJson, DateTime CreatedAt);
+public sealed record DirectorProposalDto(Guid Id, Guid MovieProjectId, string Status, string Title, string Summary, IReadOnlyList<string> Rationale, IReadOnlyList<DirectorPlanItemDto> Plan, IReadOnlyList<DirectorActionDto> Actions, DateTime CreatedAt, DateTime? ApprovedAt);
+public sealed record DirectorProposalResponse(DirectorProposalDto Proposal, DirectorContextDto Context);
+public sealed record DirectorHistoryDto(Guid Id, string EventType, string? SafeDetailsJson, DateTime CreatedAt);
+public sealed record DirectorActionExecutionResponse(DirectorActionDto Action, DirectorActionResultDto Result);
+
+public sealed record DirectorGenerateShotPayload(Guid ShotId, string QualityLevel, int DurationSeconds, decimal? EstimatedCostUsd);
+
+public static class DirectorJson
+{
+    public static readonly JsonSerializerOptions Options = new(JsonSerializerDefaults.Web)
+    {
+        WriteIndented = false,
+    };
 }
