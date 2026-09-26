@@ -62,6 +62,48 @@ public sealed class MovieStudioController(IMovieStudioService movies) : Controll
         catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_CHARACTER_INVALID", exception.Message); }
     }
 
+    [HttpPatch("characters/{characterId:guid}")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> UpdateCharacter(Guid characterId, MovieStudioCharacterRequest request, CancellationToken cancellationToken)
+    {
+        try { var result = await movies.UpdateCharacterAsync(GetUserId(), characterId, request, cancellationToken); return result is null ? ApiResults.Error(this, 404, "MOVIE_CHARACTER_NOT_FOUND", "Movie character not found.") : Ok(result); }
+        catch (MovieStudioContinuityLockException exception) { return ApiResults.Error(this, 409, "MOVIE_CHARACTER_CONTINUITY_LOCKED", exception.Message); }
+        catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_CHARACTER_INVALID", exception.Message); }
+    }
+
+    [HttpPost("characters/{characterId:guid}/states")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> AddCharacterState(Guid characterId, MovieStudioCharacterStateRequest request, CancellationToken cancellationToken)
+    {
+        try { var result = await movies.AddCharacterStateAsync(GetUserId(), characterId, request, cancellationToken); return result is null ? ApiResults.Error(this, 404, "MOVIE_CHARACTER_NOT_FOUND", "Movie character not found.") : Ok(result); }
+        catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_CHARACTER_STATE_INVALID", exception.Message); }
+    }
+
+    [HttpPatch("character-states/{stateId:guid}")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> UpdateCharacterState(Guid stateId, MovieStudioCharacterStateRequest request, CancellationToken cancellationToken)
+    {
+        try { var result = await movies.UpdateCharacterStateAsync(GetUserId(), stateId, request, cancellationToken); return result is null ? ApiResults.Error(this, 404, "MOVIE_CHARACTER_STATE_NOT_FOUND", "Movie character state not found.") : Ok(result); }
+        catch (MovieStudioContinuityLockException exception) { return ApiResults.Error(this, 409, "MOVIE_CHARACTER_CONTINUITY_LOCKED", exception.Message); }
+        catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_CHARACTER_STATE_INVALID", exception.Message); }
+    }
+
+    [HttpPost("characters/{characterId:guid}/relationships")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> AddCharacterRelationship(Guid characterId, MovieStudioCharacterRelationshipRequest request, CancellationToken cancellationToken)
+    {
+        try { var result = await movies.AddCharacterRelationshipAsync(GetUserId(), characterId, request, cancellationToken); return result is null ? ApiResults.Error(this, 404, "MOVIE_CHARACTER_NOT_FOUND", "Movie character not found.") : Ok(result); }
+        catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_CHARACTER_RELATIONSHIP_INVALID", exception.Message); }
+    }
+
+    [HttpPost("characters/{characterId:guid}/continuity-locks")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> AddContinuityLock(Guid characterId, MovieStudioContinuityLockRequest request, CancellationToken cancellationToken)
+    {
+        try { var result = await movies.AddContinuityLockAsync(GetUserId(), characterId, request, cancellationToken); return result is null ? ApiResults.Error(this, 404, "MOVIE_CHARACTER_NOT_FOUND", "Movie character not found.") : Ok(result); }
+        catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_CHARACTER_CONTINUITY_LOCK_INVALID", exception.Message); }
+    }
+
     [HttpPost("projects/{id:guid}/locations")]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> AddLocation(Guid id, MovieStudioLocationRequest request, CancellationToken cancellationToken)
