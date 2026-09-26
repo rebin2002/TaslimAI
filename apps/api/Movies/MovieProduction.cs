@@ -343,6 +343,7 @@ public static class MovieProductionProjection
         take.AutoDirectorEnabled,
         take.MovieClipId,
         take.GenerationJobId,
+        take.MovieProductionVersionId,
         take.AssetId,
         take.Notes,
         take.SelectedAt,

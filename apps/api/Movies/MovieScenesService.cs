@@ -34,7 +34,7 @@ public sealed class MovieScenesService(TaslimDbContext db, MovieCollaborationAcc
         var story = await ApprovedStoryAsync(movieProjectId, cancellationToken);
         if (story is null || story.Revision is null) throw new MovieScenesWorkflowException("MOVIE_SCREENPLAY_NOT_APPROVED", "Approve a screenplay revision before breaking it down into production scenes.");
 
-        var existingSceneIds = await db.MovieScenes.Where(item => item.MovieProjectId == movieProjectId).Select(item => item.Id).ToHashSetAsync(cancellationToken);
+        var existingSceneIds = (await db.MovieScenes.Where(item => item.MovieProjectId == movieProjectId).Select(item => item.Id).ToListAsync(cancellationToken)).ToHashSet();
         var trackedScreenplayScenes = await db.MovieScreenplayScenes
             .Where(item => item.MovieStoryRevisionId == story.Revision.Id)
             .ToDictionaryAsync(item => item.Id, cancellationToken);
