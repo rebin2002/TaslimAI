@@ -512,6 +512,12 @@ public sealed class MovieShot
     public int Sequence { get; set; }
     public string ProductionStage { get; set; } = MovieProductionStages.ShotPlan;
     public string Description { get; set; } = string.Empty;
+    public string? Purpose { get; set; }
+    public string? Subjects { get; set; }
+    public string? SubjectCharacterIdsJson { get; set; }
+    public string? LocationSet { get; set; }
+    public string? ProductionRequirements { get; set; }
+    public string? ContinuityReferences { get; set; }
     public string? CameraAndFraming { get; set; }
     public string? CameraMotion { get; set; }
     public string? CinematographyJson { get; set; }
@@ -701,7 +707,7 @@ public sealed record MovieGuideSectionDto(string Type, string ContentJson);
 public sealed record MovieGuideRevisionDto(Guid Id, int RevisionNumber, string Status, IReadOnlyList<MovieGuideSectionDto> Sections, Guid CreatedByUserId, DateTime CreatedAt, DateTime? LockedAt, Guid? LockedByUserId);
 public sealed record MovieDirectorContextDto(Guid MovieProjectId, Guid MovieGuideId, bool IsAuthoritative, int RevisionNumber, DateTime? LockedAt, IReadOnlyList<MovieGuideSectionDto> Sections);
 public sealed record MovieSceneDto(Guid Id, int Sequence, string Title, string Summary, int? DurationSeconds, string? ContinuityNotes, string? Narration, string? Dialogue, IReadOnlyList<MovieShotDto> Shots, IReadOnlyList<MovieClipDto> Clips);
-public sealed record MovieShotDto(Guid Id, int Sequence, string Description, string? CameraAndFraming, string? CameraMotion, string? CinematographyJson, int? DurationSeconds, string? Narration, string? Dialogue, string? VisualContinuityNotes, string ProductionStage, IReadOnlyList<MovieClipDto> Clips, IReadOnlyList<MovieProductionVersionDto> ProductionVersions);
+public sealed record MovieShotDto(Guid Id, int Sequence, string Description, string? Purpose, string? Subjects, IReadOnlyList<Guid> SubjectCharacterIds, string? LocationSet, int? DurationSeconds, string? ProductionRequirements, string? ContinuityReferences, string? CameraAndFraming, string? CameraMotion, string? CinematographyJson, string? CinematographySummary, string? Narration, string? Dialogue, string? VisualContinuityNotes, string Status, string PlanState, MovieShotReadinessDto Readiness, string ProductionStage, IReadOnlyList<MovieClipDto> Clips, IReadOnlyList<MovieProductionVersionDto> ProductionVersions);
 public sealed record MovieCharacterStateDto(Guid Id, string Key, string? Label, string? Wardrobe, string? AgeOrTimeState, string? Appearance, string? InjuryOrCondition, string? LocationOrStoryState, string? ContinuityNotes, DateTime CreatedAt, DateTime UpdatedAt);
 public sealed record MovieCharacterRelationshipDto(Guid Id, Guid RelatedCharacterId, string RelatedCharacterName, string RelationshipType, string? Notes);
 public sealed record MovieCharacterContinuityLockDto(Guid Id, string FieldKey, string LockedValue, Guid? CharacterStateId, DateTime ApprovedAt);
@@ -806,7 +812,7 @@ public sealed class MovieGuideLockRequest
 {
     public int? RevisionNumber { get; set; }
 }
-public sealed record MovieStudioShotRequest(string Description, string? CameraAndFraming, string? CameraMotion, int? DurationSeconds, string? Narration, string? Dialogue, string? VisualContinuityNotes, CinematographyIntentSelection? Cinematography = null);
+public sealed record MovieStudioShotRequest(string Description, string? CameraAndFraming, string? CameraMotion, int? DurationSeconds, string? Narration, string? Dialogue, string? VisualContinuityNotes, CinematographyIntentSelection? Cinematography = null, string? Purpose = null, string? Subjects = null, string? LocationSet = null, string? ProductionRequirements = null, string? ContinuityReferences = null, IReadOnlyList<Guid>? SubjectCharacterIds = null);
 public sealed record MovieStudioGuideRequest(string? VisualLanguage, string? CameraLanguage, string? ColorAndLighting, string? SoundAndNarration, string? ContinuityRules, CinematographyIntentSelection? Cinematography = null);
 public sealed record MovieStudioGenerationRequest(string? Title = null, decimal? EstimatedProviderCostUsd = null, GenerationCostEstimate? InternalCostEstimate = null);
 

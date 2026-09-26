@@ -478,6 +478,12 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasKey(item => item.Id);
             entity.Property(item => item.ProductionStage).HasMaxLength(40).IsRequired();
             entity.Property(item => item.Description).HasMaxLength(8_000).IsRequired();
+            entity.Property(item => item.Purpose).HasMaxLength(2_000);
+            entity.Property(item => item.Subjects).HasMaxLength(4_000);
+            entity.Property(item => item.SubjectCharacterIdsJson).HasMaxLength(8_000);
+            entity.Property(item => item.LocationSet).HasMaxLength(2_000);
+            entity.Property(item => item.ProductionRequirements).HasMaxLength(4_000);
+            entity.Property(item => item.ContinuityReferences).HasMaxLength(4_000);
             entity.Property(item => item.CameraAndFraming).HasMaxLength(2_000);
             entity.Property(item => item.CameraMotion).HasMaxLength(2_000);
             entity.Property(item => item.CinematographyJson).HasMaxLength(20_000);

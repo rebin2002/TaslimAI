@@ -26,4 +26,13 @@ describe("Full Movie workspace foundation", () => {
     expect(createSource).toContain("Quick Movie stays intentionally small");
     expect(createSource).toContain("function QuickMovieResult");
   });
+
+  it("keeps shot planning scene-scoped, explainable, and non-generating", () => {
+    expect(workspaceSource).toContain("api.getMovieSceneShotPlan(scene.id)");
+    expect(workspaceSource).toContain("api.addMovieShot(scene.id, input)");
+    expect(workspaceSource).toContain("api.reorderMovieShot(shotId, sequence)");
+    expect(workspaceSource).toContain("api.archiveMovieShot(shotId)");
+    expect(workspaceSource).toContain("creating a shot never starts generation");
+    expect(workspaceSource).toContain("shot.readiness.summary");
+  });
 });

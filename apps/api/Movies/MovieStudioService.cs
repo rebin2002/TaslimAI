@@ -29,6 +29,11 @@ public interface IMovieStudioService
     Task<MovieContinuityLockDto?> AddContinuityLockAsync(Guid userId, Guid id, MovieStudioContinuityLockRequest request, CancellationToken cancellationToken);
     Task<MovieWorldUsageDto?> AddWorldUsageAsync(Guid userId, Guid sceneId, MovieStudioWorldUsageRequest request, CancellationToken cancellationToken);
     Task<MovieShotDto?> AddShotAsync(Guid userId, Guid sceneId, MovieStudioShotRequest request, CancellationToken cancellationToken);
+    Task<MovieSceneShotPlanDto?> GetSceneShotPlanAsync(Guid userId, Guid sceneId, CancellationToken cancellationToken);
+    Task<MovieShotDto?> GetShotPlanningAsync(Guid userId, Guid shotId, CancellationToken cancellationToken);
+    Task<MovieShotDto?> UpdateShotPlanningAsync(Guid userId, Guid shotId, MovieStudioShotUpdateRequest request, CancellationToken cancellationToken);
+    Task<MovieSceneShotPlanDto?> ReorderShotAsync(Guid userId, Guid shotId, MovieShotReorderRequest request, CancellationToken cancellationToken);
+    Task<MovieSceneShotPlanDto?> ArchiveShotAsync(Guid userId, Guid shotId, CancellationToken cancellationToken);
     Task<MovieShotProductionDto?> GetShotProductionAsync(Guid userId, Guid shotId, CancellationToken cancellationToken);
     Task<MovieProductionVersionDto?> CreateProductionVersionAsync(Guid userId, Guid shotId, MovieProductionVersionRequest request, CancellationToken cancellationToken);
     Task<MovieProductionVersionDto?> ReviewProductionVersionAsync(Guid userId, Guid versionId, MovieProductionReviewRequest request, CancellationToken cancellationToken);
@@ -394,17 +399,89 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         if (string.IsNullOrWhiteSpace(request.Description)) throw new MovieStudioValidationException("Shot description is required.");
         var cinematographyValidation = CinematographyIntentValidator.Validate(request.Cinematography);
         if (cinematographyValidation is not null) throw new MovieStudioValidationException(cinematographyValidation);
+        await ValidateSubjectCharacterIdsAsync(request.SubjectCharacterIds, scene.MovieProjectId, cancellationToken);
         var now = DateTime.UtcNow;
-        var shot = new MovieShot { Id = Guid.NewGuid(), MovieSceneId = sceneId, Sequence = await db.MovieShots.CountAsync(item => item.MovieSceneId == sceneId, cancellationToken) + 1, Description = request.Description.Trim(), CameraAndFraming = MovieStudioHelpers.Clean(request.CameraAndFraming), CameraMotion = MovieStudioHelpers.Clean(request.CameraMotion), CinematographyJson = CinematographyIntentValidator.ToJson(request.Cinematography), DurationSeconds = request.DurationSeconds, Narration = MovieStudioHelpers.Clean(request.Narration), Dialogue = MovieStudioHelpers.Clean(request.Dialogue), VisualContinuityNotes = MovieStudioHelpers.Clean(request.VisualContinuityNotes), CreatedAt = now, UpdatedAt = now };
+        var shot = new MovieShot
+        {
+            Id = Guid.NewGuid(), MovieSceneId = sceneId, Sequence = await db.MovieShots.CountAsync(item => item.MovieSceneId == sceneId, cancellationToken) + 1,
+            Description = request.Description.Trim(), Purpose = ShotText(request.Purpose, 2_000), Subjects = ShotText(request.Subjects, 4_000),
+            SubjectCharacterIdsJson = MovieShotReadiness.SerializeSubjectCharacterIds(request.SubjectCharacterIds), LocationSet = ShotText(request.LocationSet, 2_000),
+            ProductionRequirements = ShotText(request.ProductionRequirements, 4_000), ContinuityReferences = ShotText(request.ContinuityReferences, 4_000),
+            CameraAndFraming = MovieStudioHelpers.Clean(request.CameraAndFraming), CameraMotion = MovieStudioHelpers.Clean(request.CameraMotion),
+            CinematographyJson = CinematographyIntentValidator.ToJson(request.Cinematography), DurationSeconds = request.DurationSeconds,
+            Narration = MovieStudioHelpers.Clean(request.Narration), Dialogue = MovieStudioHelpers.Clean(request.Dialogue), VisualContinuityNotes = MovieStudioHelpers.Clean(request.VisualContinuityNotes),
+            CreatedAt = now, UpdatedAt = now,
+        };
         db.MovieShots.Add(shot);
         await db.SaveChangesAsync(cancellationToken);
         return ToDto(shot, []);
     }
 
+    public async Task<MovieSceneShotPlanDto?> GetSceneShotPlanAsync(Guid userId, Guid sceneId, CancellationToken cancellationToken)
+    {
+        var scene = await PlanningQuery().FirstOrDefaultAsync(item => item.Id == sceneId, cancellationToken);
+        if (scene is null || !await collaboration.HasPermissionAsync(userId, scene.MovieProjectId, MoviePermissions.View, cancellationToken)) return null;
+        return ToShotPlanDto(scene);
+    }
+
+    public async Task<MovieShotDto?> GetShotPlanningAsync(Guid userId, Guid shotId, CancellationToken cancellationToken)
+    {
+        var shot = await PlanningShotQuery().FirstOrDefaultAsync(item => item.Id == shotId, cancellationToken);
+        if (shot is null || !await collaboration.HasPermissionAsync(userId, shot.Scene.MovieProjectId, MoviePermissions.View, cancellationToken)) return null;
+        return ToDto(shot, shot.Clips.OrderBy(item => item.CreatedAt).Select(ToDto).ToArray());
+    }
+
+    public async Task<MovieShotDto?> UpdateShotPlanningAsync(Guid userId, Guid shotId, MovieStudioShotUpdateRequest request, CancellationToken cancellationToken)
+    {
+        var shot = await PlanningShotQuery().FirstOrDefaultAsync(item => item.Id == shotId, cancellationToken);
+        if (shot is null || !await collaboration.HasPermissionAsync(userId, shot.Scene.MovieProjectId, MoviePermissions.Edit, cancellationToken)) return null;
+        if (string.IsNullOrWhiteSpace(request.Description)) throw new MovieStudioValidationException("Shot description is required.");
+        if (!string.IsNullOrWhiteSpace(request.Status) && !MovieShotStatuses.Supported.Contains(request.Status.Trim())) throw new MovieStudioValidationException("Shot status is not supported.");
+        if (string.Equals(request.Status?.Trim(), MovieShotStatuses.Approved, StringComparison.OrdinalIgnoreCase) && !await collaboration.HasPermissionAsync(userId, shot.Scene.MovieProjectId, MoviePermissions.Approve, cancellationToken)) return null;
+        var cinematographyValidation = CinematographyIntentValidator.Validate(request.Cinematography);
+        if (cinematographyValidation is not null) throw new MovieStudioValidationException(cinematographyValidation);
+        await ValidateSubjectCharacterIdsAsync(request.SubjectCharacterIds, shot.Scene.MovieProjectId, cancellationToken);
+        var now = DateTime.UtcNow;
+        shot.Description = request.Description.Trim(); shot.Purpose = ShotText(request.Purpose, 2_000); shot.Subjects = ShotText(request.Subjects, 4_000);
+        shot.SubjectCharacterIdsJson = MovieShotReadiness.SerializeSubjectCharacterIds(request.SubjectCharacterIds); shot.LocationSet = ShotText(request.LocationSet, 2_000);
+        shot.DurationSeconds = request.DurationSeconds; shot.ProductionRequirements = ShotText(request.ProductionRequirements, 4_000); shot.ContinuityReferences = ShotText(request.ContinuityReferences, 4_000);
+        shot.CameraAndFraming = MovieStudioHelpers.Clean(request.CameraAndFraming); shot.CameraMotion = MovieStudioHelpers.Clean(request.CameraMotion);
+        shot.CinematographyJson = CinematographyIntentValidator.ToJson(request.Cinematography); shot.Narration = MovieStudioHelpers.Clean(request.Narration);
+        shot.Dialogue = MovieStudioHelpers.Clean(request.Dialogue); shot.VisualContinuityNotes = MovieStudioHelpers.Clean(request.VisualContinuityNotes);
+        if (!string.IsNullOrWhiteSpace(request.Status)) { shot.Status = request.Status.Trim(); shot.ArchivedAt = shot.Status == MovieShotStatuses.Archived ? now : null; }
+        shot.UpdatedAt = now;
+        await db.SaveChangesAsync(cancellationToken);
+        return ToDto(shot, shot.Clips.OrderBy(item => item.CreatedAt).Select(ToDto).ToArray());
+    }
+
+    public async Task<MovieSceneShotPlanDto?> ReorderShotAsync(Guid userId, Guid shotId, MovieShotReorderRequest request, CancellationToken cancellationToken)
+    {
+        var shot = await db.MovieShots.Include(item => item.Scene).FirstOrDefaultAsync(item => item.Id == shotId, cancellationToken);
+        if (shot is null || !await collaboration.HasPermissionAsync(userId, shot.Scene.MovieProjectId, MoviePermissions.Edit, cancellationToken)) return null;
+        if (shot.Status == MovieShotStatuses.Archived) throw new MovieStudioValidationException("Archived shots cannot be reordered.");
+        var shots = await db.MovieShots.Where(item => item.MovieSceneId == shot.MovieSceneId && item.Status != MovieShotStatuses.Archived).OrderBy(item => item.Sequence).ToListAsync(cancellationToken);
+        if (request.Sequence < 1 || request.Sequence > shots.Count) throw new MovieStudioValidationException($"Shot order must be between 1 and {shots.Count}.");
+        shots.Remove(shot); shots.Insert(request.Sequence - 1, shot);
+        for (var index = 0; index < shots.Count; index++) shots[index].Sequence = 10_000 + index;
+        await db.SaveChangesAsync(cancellationToken);
+        for (var index = 0; index < shots.Count; index++) shots[index].Sequence = index + 1;
+        await db.SaveChangesAsync(cancellationToken);
+        return await GetSceneShotPlanAsync(userId, shot.MovieSceneId, cancellationToken);
+    }
+
+    public async Task<MovieSceneShotPlanDto?> ArchiveShotAsync(Guid userId, Guid shotId, CancellationToken cancellationToken)
+    {
+        var shot = await db.MovieShots.Include(item => item.Scene).FirstOrDefaultAsync(item => item.Id == shotId, cancellationToken);
+        if (shot is null || !await collaboration.HasPermissionAsync(userId, shot.Scene.MovieProjectId, MoviePermissions.Edit, cancellationToken)) return null;
+        shot.Status = MovieShotStatuses.Archived; shot.ArchivedAt = DateTime.UtcNow; shot.UpdatedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync(cancellationToken);
+        return await GetSceneShotPlanAsync(userId, shot.MovieSceneId, cancellationToken);
+    }
+
     public async Task<MovieShotProductionDto?> GetShotProductionAsync(Guid userId, Guid shotId, CancellationToken cancellationToken)
     {
         var shot = await ProductionQuery().FirstOrDefaultAsync(item => item.Id == shotId, cancellationToken);
-        if (shot is null || !await access.IsMemberAsync(userId, shot.Scene.MovieProject.WorkspaceId, cancellationToken)) return null;
+        if (shot is null || !await collaboration.HasPermissionAsync(userId, shot.Scene.MovieProjectId, MoviePermissions.View, cancellationToken)) return null;
         return ToProductionDto(shot);
     }
 
@@ -414,7 +491,8 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
             .Include(item => item.Scene).ThenInclude(item => item.MovieProject)
             .Include(item => item.ProductionVersions)
             .FirstOrDefaultAsync(item => item.Id == shotId, cancellationToken);
-        if (shot is null || !await access.IsMemberAsync(userId, shot.Scene.MovieProject.WorkspaceId, cancellationToken)) return null;
+        var requiredPermission = request.GenerationJobId.HasValue ? MoviePermissions.Generate : MoviePermissions.Edit;
+        if (shot is null || !await collaboration.HasPermissionAsync(userId, shot.Scene.MovieProjectId, requiredPermission, cancellationToken)) return null;
         if (string.IsNullOrWhiteSpace(request.CompositionJson) || request.CompositionJson.Length > 20_000 || !MovieProductionWorkflow.IsJsonObject(request.CompositionJson))
             throw new MovieProductionValidationException("PRODUCTION_COMPOSITION_INVALID", "CompositionJson must be a JSON object of 20,000 characters or fewer.");
         if (request.RegenerationMetadataJson is { Length: > 8_000 } || request.StageProvenanceJson is { Length: > 20_000 })
@@ -486,7 +564,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
             .Include(item => item.MovieShot).ThenInclude(item => item.Scene).ThenInclude(item => item.MovieProject)
             .Include(item => item.AssetReferences)
             .FirstOrDefaultAsync(item => item.Id == versionId, cancellationToken);
-        if (version is null || !await access.IsMemberAsync(userId, version.MovieShot.Scene.MovieProject.WorkspaceId, cancellationToken)) return null;
+        if (version is null || !await collaboration.HasPermissionAsync(userId, version.MovieShot.Scene.MovieProjectId, MoviePermissions.Approve, cancellationToken)) return null;
         var reviewError = MovieProductionWorkflow.ValidateReview(version.Stage, version.Status);
         if (reviewError is not null) throw new MovieProductionValidationException("PRODUCTION_REVIEW_INVALID", reviewError);
         if (request.Reason is { Length: > 2_000 } || request.MetadataJson is { Length: > 8_000 })
@@ -533,6 +611,8 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
     {
         var shot = await db.MovieShots.Include(item => item.Scene).ThenInclude(item => item.MovieProject).ThenInclude(item => item.Guide).FirstOrDefaultAsync(item => item.Id == shotId, cancellationToken);
         if (shot is null || !await collaboration.HasPermissionAsync(userId, shot.Scene.MovieProjectId, MoviePermissions.Generate, cancellationToken)) return null;
+        var readiness = MovieShotReadiness.Evaluate(shot);
+        if (!readiness.Ready) throw new MovieStudioValidationException($"Shot is not ready for generation. {readiness.Summary}");
         return await QueueClipAsync(userId, shot.Scene.MovieProject, shot.Scene, shot, request, cancellationToken, idempotencyKey);
     }
 
@@ -605,6 +685,15 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         .Include(item => item.ContinuityFacts)
         .Include(item => item.ContinuityLocks)
         .Include(item => item.Assemblies);
+
+    private IQueryable<MovieScene> PlanningQuery() => db.MovieScenes.AsNoTracking()
+        .Include(item => item.Shots).ThenInclude(shot => shot.Clips)
+        .Include(item => item.Shots).ThenInclude(shot => shot.ProductionVersions).ThenInclude(version => version.AssetReferences);
+
+    private IQueryable<MovieShot> PlanningShotQuery() => db.MovieShots
+        .Include(item => item.Scene).ThenInclude(scene => scene.MovieProject)
+        .Include(item => item.Clips)
+        .Include(item => item.ProductionVersions).ThenInclude(version => version.AssetReferences);
     private IQueryable<MovieShot> ProductionQuery() => db.MovieShots.AsNoTracking().Include(item => item.Scene).ThenInclude(scene => scene.MovieProject).Include(item => item.ProductionVersions).ThenInclude(version => version.AssetReferences).Include(item => item.ProductionTransitions);
 
     private static MovieStudioProjectDto ToDto(MovieProject movie) => new(movie.Id, movie.WorkspaceId, movie.ProjectId, movie.Mode, movie.Status, movie.Title, movie.Description, movie.DurationSeconds, movie.AspectRatio, movie.Style, movie.Language, movie.AdditionalInstructions, movie.CreatedAt, movie.UpdatedAt, new MovieGuideDto(movie.Guide.Id, movie.Guide.VisualLanguage, movie.Guide.CameraLanguage, movie.Guide.ColorAndLighting, movie.Guide.SoundAndNarration, movie.Guide.ContinuityRules, movie.Guide.UpdatedAt, movie.Guide.CurrentRevisionNumber, movie.Guide.LockedRevisionNumber, movie.Guide.LockedAt, ToCinematographyBible(movie.Guide)), movie.Scenes.OrderBy(scene => scene.Sequence).Select(scene => ToDto(scene, scene.Shots.OrderBy(shot => shot.Sequence).Select(shot => ToDto(shot, shot.Clips.Select(ToDto).ToArray())).ToArray(), scene.Clips.Where(clip => clip.MovieShotId is null).Select(ToDto).ToArray())).ToArray(), movie.Characters.OrderBy(character => character.CreatedAt).Select(ToDto).ToArray(), movie.Locations.OrderBy(location => location.CreatedAt).Select(ToDto).ToArray(), movie.Clips.Where(clip => clip.MovieSceneId is null).Select(ToDto).ToArray(), movie.Assemblies.OrderByDescending(assembly => assembly.CreatedAt).Select(ToDto).ToArray(), MovieWorld(movie));
@@ -686,7 +775,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         return JsonSerializer.Serialize(new { locations, sets, props, references, usages = usageSnapshots, facts, locks });
     }
     private static string SceneSnapshot(MovieScene scene) => JsonSerializer.Serialize(new { scene.Id, scene.Sequence, scene.Title, scene.Summary, scene.DurationSeconds, scene.ContinuityNotes, scene.Narration, scene.Dialogue });
-    private static string ShotSnapshot(MovieShot shot) => JsonSerializer.Serialize(new { shot.Id, shot.Sequence, shot.Description, shot.CameraAndFraming, shot.CameraMotion, shot.CinematographyJson, shot.DurationSeconds, shot.Narration, shot.Dialogue, shot.VisualContinuityNotes });
+    private static string ShotSnapshot(MovieShot shot) => JsonSerializer.Serialize(new { shot.Id, shot.Sequence, shot.Description, shot.Purpose, shot.Subjects, subjectCharacterIds = MovieShotReadiness.ParseSubjectCharacterIds(shot.SubjectCharacterIdsJson), shot.LocationSet, shot.DurationSeconds, shot.ProductionRequirements, shot.ContinuityReferences, shot.CameraAndFraming, shot.CameraMotion, shot.CinematographyJson, shot.Narration, shot.Dialogue, shot.VisualContinuityNotes });
     private async Task<MovieCharacterDto?> GetCharacterDtoAsync(Guid userId, Guid characterId, CancellationToken cancellationToken)
     {
         var movie = await Query().FirstOrDefaultAsync(item => item.Characters.Any(character => character.Id == characterId), cancellationToken);
@@ -777,7 +866,15 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
     }
 
     private static MovieSceneDto ToDto(MovieScene scene, IReadOnlyList<MovieShotDto> shots, IReadOnlyList<MovieClipDto> clips) => new(scene.Id, scene.Sequence, scene.Title, scene.Summary, scene.DurationSeconds, scene.ContinuityNotes, scene.Narration, scene.Dialogue, shots, clips);
-    private static MovieShotDto ToDto(MovieShot shot, IReadOnlyList<MovieClipDto> clips) => new(shot.Id, shot.Sequence, shot.Description, shot.CameraAndFraming, shot.CameraMotion, shot.CinematographyJson, shot.DurationSeconds, shot.Narration, shot.Dialogue, shot.VisualContinuityNotes, shot.ProductionStage, clips, shot.ProductionVersions.OrderByDescending(item => item.VersionNumber).Select(ToDto).ToArray());
+    private static MovieShotDto ToDto(MovieShot shot, IReadOnlyList<MovieClipDto> clips) => new(shot.Id, shot.Sequence, shot.Description, shot.Purpose, shot.Subjects, MovieShotReadiness.ParseSubjectCharacterIds(shot.SubjectCharacterIdsJson), shot.LocationSet, shot.DurationSeconds, shot.ProductionRequirements, shot.ContinuityReferences, shot.CameraAndFraming, shot.CameraMotion, shot.CinematographyJson, MovieShotReadiness.CinematographySummary(shot), shot.Narration, shot.Dialogue, shot.VisualContinuityNotes, shot.Status, MovieShotReadiness.PlanState(shot), MovieShotReadiness.Evaluate(shot), shot.ProductionStage, clips, shot.ProductionVersions.OrderByDescending(item => item.VersionNumber).Select(ToDto).ToArray());
+    private static MovieSceneShotPlanDto ToShotPlanDto(MovieScene scene)
+    {
+        var shots = scene.Shots.OrderBy(item => item.Sequence).Select(item => ToDto(item, item.Clips.OrderBy(clip => clip.CreatedAt).Select(ToDto).ToArray())).ToArray();
+        var active = scene.Shots.Where(item => item.Status != MovieShotStatuses.Archived).ToArray();
+        var totalDuration = active.Sum(item => item.DurationSeconds ?? 0);
+        var coverage = scene.DurationSeconds is > 0 ? Math.Min(100, (int)Math.Round(totalDuration * 100d / scene.DurationSeconds.Value)) : 0;
+        return new MovieSceneShotPlanDto(scene.Id, scene.Sequence, scene.Title, scene.Summary, scene.DurationSeconds, scene.Status, shots.Length, active.Length, active.Count(item => MovieShotReadiness.Evaluate(item).Ready), totalDuration, coverage, shots);
+    }
     private static MovieCharacterDto ToDto(MovieCharacter character) => new(character.Id, character.Name, character.Role, character.Description, character.Appearance, character.PhysicalDescription, character.Wardrobe, character.VoiceReference, character.PersonalityAndStoryNotes, character.VoiceAndPerformance, character.ContinuityNotes, character.ReferenceAssetId, character.ReferenceAssets.OrderBy(item => item.SortOrder).Select(item => item.AssetId).ToArray(), character.States.OrderBy(item => item.CreatedAt).Select(ToDto).ToArray(), character.Relationships.OrderBy(item => item.CreatedAt).Select(item => new MovieCharacterRelationshipDto(item.Id, item.RelatedCharacterId, item.RelatedCharacter?.Name ?? string.Empty, item.RelationshipType, item.Notes)).ToArray(), character.ContinuityLocks.Where(item => item.MovieCharacterStateId is null).OrderBy(item => item.ApprovedAt).Select(ToDto).Concat(character.States.SelectMany(item => item.ContinuityLocks).OrderBy(item => item.ApprovedAt).Select(ToDto)).ToArray());
     private static MovieCharacterStateDto ToDto(MovieCharacterState state) => new(state.Id, state.Key, state.Label, state.Wardrobe, state.AgeOrTimeState, state.Appearance, state.InjuryOrCondition, state.LocationOrStoryState, state.ContinuityNotes, state.CreatedAt, state.UpdatedAt);
     private static MovieCharacterContinuityLockDto ToDto(MovieCharacterContinuityLock lockEntity) => new(lockEntity.Id, lockEntity.FieldKey, lockEntity.LockedValue, lockEntity.MovieCharacterStateId, lockEntity.ApprovedAt);
@@ -793,6 +890,22 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
     private static MovieAssemblyDto ToDto(MovieAssembly assembly) => new(assembly.Id, assembly.GenerationJobId, assembly.AssetId, assembly.Status, assembly.OutputFormat, assembly.MetadataJson, assembly.CreatedAt, assembly.CompletedAt);
     private static MovieShotProductionDto ToProductionDto(MovieShot shot) => new(shot.Id, shot.ProductionStage, shot.ProductionVersions.OrderByDescending(item => item.VersionNumber).Select(ToDto).ToArray(), shot.ProductionTransitions.OrderBy(item => item.CreatedAt).Select(item => new MovieProductionStageTransitionDto(item.Id, item.MovieShotId, item.MovieProductionVersionId, item.FromStage, item.ToStage, item.EventType, item.Reason, item.MetadataJson, item.SourceVersionId, item.GenerationJobId, item.ActorUserId, item.CreatedAt)).ToArray());
     private static MovieProductionVersionDto ToDto(MovieProductionVersion version) => new(version.Id, version.MovieShotId, version.VersionNumber, version.Stage, version.Status, version.Label, version.CompositionJson, version.RegenerationMetadataJson, version.StageProvenanceJson, version.SourceVersionId, version.GenerationJobId, version.AssetId, version.FirstFrameAssetId, version.LastFrameAssetId, version.FirstFrameNotes, version.LastFrameNotes, version.RejectionReason, version.CreatedAt, version.UpdatedAt, version.ReviewedAt, version.AssetReferences.OrderBy(item => item.Role).Select(item => new MovieProductionAssetReferenceDto(item.AssetId, item.Role)).ToArray());
+    private async Task ValidateSubjectCharacterIdsAsync(IEnumerable<Guid>? ids, Guid movieProjectId, CancellationToken cancellationToken)
+    {
+        var distinct = (ids ?? []).Distinct().ToArray();
+        if (distinct.Length == 0) return;
+        var count = await db.MovieCharacters.CountAsync(item => item.MovieProjectId == movieProjectId && distinct.Contains(item.Id), cancellationToken);
+        if (count != distinct.Length) throw new MovieStudioValidationException("Every shot subject character must belong to this movie project.");
+    }
+
+    private static string? ShotText(string? value, int maxLength)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        var normalized = value.Trim();
+        if (normalized.Length > maxLength) throw new MovieStudioValidationException($"A shot planning field cannot exceed {maxLength} characters.");
+        return normalized;
+    }
+
     private static void AddAsset(IDictionary<Guid, string> assets, Guid? assetId, string role)
     {
         if (assetId.HasValue) assets[assetId.Value] = role;

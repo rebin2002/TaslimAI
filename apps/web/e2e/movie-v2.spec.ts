@@ -19,6 +19,23 @@ test.describe("Movie Studio V2 browser smoke", () => {
     await expect(page.getByText("No output yet")).toBeVisible();
     await expect(page.getByText("No generated footage yet")).toBeVisible();
 
+    await page.getByRole("link", { name: "Scenes", exact: true }).click();
+    await page.getByPlaceholder("Scene title").fill("Morning street");
+    await page.getByPlaceholder("One-line scene intent").fill("Establish the street before Mara arrives.");
+    await page.getByRole("button", { name: "Add scene", exact: true }).click();
+    await expect(page.getByText("Add shot to scene")).toBeVisible();
+    await page.getByLabel("Shot purpose").fill("Establish the quiet morning mood.");
+    await page.getByLabel("Shot description").fill("Mara crosses into the morning light.");
+    await page.getByLabel("Subjects / characters").fill("Mara");
+    await page.getByLabel("Location / set").fill("Old city street set");
+    await page.getByLabel("Expected duration").fill("6");
+    await page.getByLabel("Production requirements").fill("Canvas bag and restrained crossing performance.");
+    await page.getByLabel("Camera / framing").fill("Medium-wide, eye level");
+    await page.getByLabel("Continuity references").fill("Cool dawn palette; follows the empty street.");
+    await page.getByRole("button", { name: "Add planned shot", exact: true }).click();
+    await expect(page.getByText("1/1 ready for Storyboard")).toBeVisible();
+    await expect(page.getByText("creating a shot never starts generation")).toBeVisible();
+
     for (const room of ["Story", "Cast", "World", "Scenes", "Storyboard", "Production", "Team"]) {
       await page.getByRole("link", { name: room, exact: true }).click();
       await expect(page).toHaveURL(new RegExp(`/create/movie/${projectId}/${room.toLowerCase()}$`));
