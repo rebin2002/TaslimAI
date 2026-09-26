@@ -274,6 +274,40 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieGuid
         catch (MovieProductionValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
     }
 
+    [HttpPost("shots/{shotId:guid}/regeneration-requests")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> CreateRegenerationRequest(Guid shotId, MovieRegenerationRequestInput request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await movies.CreateRegenerationRequestAsync(GetUserId(), shotId, request, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_SHOT_NOT_FOUND", "Movie shot not found.") : Ok(result);
+        }
+        catch (MovieProductionValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
+    }
+
+    [HttpGet("regeneration-requests/{requestId:guid}")]
+    public async Task<IActionResult> GetRegenerationRequest(Guid requestId, CancellationToken cancellationToken)
+    {
+        var result = await movies.GetRegenerationRequestAsync(GetUserId(), requestId, cancellationToken);
+        return result is null ? ApiResults.Error(this, 404, "MOVIE_REGENERATION_NOT_FOUND", "Selective regeneration request not found.") : Ok(result);
+    }
+
+    [HttpPost("regeneration-requests/{requestId:guid}/confirm")]
+    [ValidateAntiForgeryToken]
+    [EnableRateLimiting(RateLimiting.ExpensiveAi)]
+    public async Task<IActionResult> ConfirmRegeneration(Guid requestId, MovieRegenerationConfirmationRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await movies.ConfirmRegenerationAsync(GetUserId(), requestId, request, cancellationToken, Request.Headers["Idempotency-Key"].FirstOrDefault());
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_REGENERATION_NOT_FOUND", "Selective regeneration request not found.") : Accepted(result);
+        }
+        catch (MovieProductionValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
+        catch (GenerationJobForbiddenException) { return Forbid(); }
+        catch (GenerationJobValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
+    }
+
     [HttpPost("projects/{id:guid}/scenes/{sceneId:guid}/generate")]
     [ValidateAntiForgeryToken]
     [EnableRateLimiting(RateLimiting.ExpensiveAi)]

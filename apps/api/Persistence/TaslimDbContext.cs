@@ -72,6 +72,7 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
     public DbSet<MovieAssembly> MovieAssemblies => Set<MovieAssembly>();
     public DbSet<MovieTake> MovieTakes => Set<MovieTake>();
     public DbSet<MovieTakeApproval> MovieTakeApprovals => Set<MovieTakeApproval>();
+    public DbSet<MovieRegenerationRequest> MovieRegenerationRequests => Set<MovieRegenerationRequest>();
     public DbSet<MovieVideoProviderExecution> MovieVideoProviderExecutions => Set<MovieVideoProviderExecution>();
     public DbSet<MovieProductionVersion> MovieProductionVersions => Set<MovieProductionVersion>();
     public DbSet<MovieProductionVersionAsset> MovieProductionVersionAssets => Set<MovieProductionVersionAsset>();
@@ -505,6 +506,7 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasOne(item => item.MovieShot).WithMany(item => item.Takes).HasForeignKey(item => item.MovieShotId).OnDelete(DeleteBehavior.Cascade);
             entity.HasOne(item => item.MovieClip).WithMany().HasForeignKey(item => item.MovieClipId).OnDelete(DeleteBehavior.SetNull);
             entity.HasOne(item => item.GenerationJob).WithMany().HasForeignKey(item => item.GenerationJobId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne(item => item.MovieProductionVersion).WithOne(item => item.ResultingTake).HasForeignKey<MovieTake>(item => item.MovieProductionVersionId).OnDelete(DeleteBehavior.SetNull);
             entity.HasOne(item => item.Asset).WithMany().HasForeignKey(item => item.AssetId).OnDelete(DeleteBehavior.SetNull);
         });
         builder.Entity<MovieTakeApproval>(entity =>
@@ -515,6 +517,29 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasIndex(item => new { item.MovieTakeId, item.CreatedAt });
             entity.HasOne(item => item.MovieTake).WithMany(item => item.Approvals).HasForeignKey(item => item.MovieTakeId).OnDelete(DeleteBehavior.Cascade);
             entity.HasOne(item => item.User).WithMany().HasForeignKey(item => item.UserId).OnDelete(DeleteBehavior.Restrict);
+        });
+        builder.Entity<MovieRegenerationRequest>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.TargetType).HasMaxLength(40).IsRequired();
+            entity.Property(item => item.ActionType).HasMaxLength(80).IsRequired();
+            entity.Property(item => item.RequestedStage).HasMaxLength(40).IsRequired();
+            entity.Property(item => item.Reason).HasMaxLength(2_000).IsRequired();
+            entity.Property(item => item.ChangedInputsJson).HasMaxLength(20_000).IsRequired();
+            entity.Property(item => item.CompositionJson).HasMaxLength(20_000).IsRequired();
+            entity.Property(item => item.CostEstimateJson).HasMaxLength(20_000);
+            entity.Property(item => item.Status).HasMaxLength(40).IsRequired();
+            entity.Property(item => item.EstimatedProviderCostUsd).HasPrecision(18, 8);
+            entity.HasIndex(item => new { item.MovieShotId, item.CreatedAt });
+            entity.HasIndex(item => item.GenerationJobId);
+            entity.HasIndex(item => item.SourceVersionId);
+            entity.HasOne(item => item.MovieShot).WithMany(item => item.RegenerationRequests).HasForeignKey(item => item.MovieShotId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.SourceVersion).WithMany().HasForeignKey(item => item.SourceVersionId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(item => item.CreatedByUser).WithMany().HasForeignKey(item => item.CreatedByUserId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(item => item.ConfirmedByUser).WithMany().HasForeignKey(item => item.ConfirmedByUserId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(item => item.GenerationJob).WithMany().HasForeignKey(item => item.GenerationJobId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne(item => item.ResultingProductionVersion).WithMany().HasForeignKey(item => item.ResultingProductionVersionId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne(item => item.ResultingTake).WithMany().HasForeignKey(item => item.ResultingTakeId).OnDelete(DeleteBehavior.SetNull);
         });
         builder.Entity<MovieProductionVersion>(entity =>
         {

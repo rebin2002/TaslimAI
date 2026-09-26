@@ -19,6 +19,7 @@ public sealed record MovieV2TakeDto(
     bool AutoDirectorEnabled,
     Guid? MovieClipId,
     Guid? GenerationJobId,
+    Guid? MovieProductionVersionId,
     Guid? AssetId,
     string? Notes,
     DateTime? SelectedAt,

@@ -51,6 +51,7 @@ public sealed class MovieTake
     public bool AutoDirectorEnabled { get; set; }
     public Guid? MovieClipId { get; set; }
     public Guid? GenerationJobId { get; set; }
+    public Guid? MovieProductionVersionId { get; set; }
     public Guid? AssetId { get; set; }
     public string? Notes { get; set; }
     public string? MetadataJson { get; set; }
@@ -68,6 +69,7 @@ public sealed class MovieTake
     public MovieShot MovieShot { get; set; } = null!;
     public MovieClip? MovieClip { get; set; }
     public GenerationJob? GenerationJob { get; set; }
+    public MovieProductionVersion? MovieProductionVersion { get; set; }
     public Asset? Asset { get; set; }
     public ICollection<MovieTakeApproval> Approvals { get; set; } = [];
 }

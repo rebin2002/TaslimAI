@@ -77,12 +77,14 @@ public static class MovieTakeStatuses
     public const string Draft = "Draft";
     public const string Generating = "Generating";
     public const string Ready = "Ready";
+    public const string ReviewRequired = "ReviewRequired";
+    public const string Failed = "Failed";
     public const string Rejected = "Rejected";
     public const string Approved = "Approved";
     public const string Archived = "Archived";
     public static readonly IReadOnlySet<string> Supported = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
-        Draft, Generating, Ready, Rejected, Approved, Archived,
+        Draft, Generating, Ready, ReviewRequired, Failed, Rejected, Approved, Archived,
     };
 }
 
@@ -530,6 +532,7 @@ public sealed class MovieShot
     public ICollection<MovieClip> Clips { get; set; } = [];
     public ICollection<MovieProductionVersion> ProductionVersions { get; set; } = [];
     public ICollection<MovieProductionStageTransition> ProductionTransitions { get; set; } = [];
+    public ICollection<MovieRegenerationRequest> RegenerationRequests { get; set; } = [];
 }
 
 public sealed class MovieClip
@@ -691,7 +694,12 @@ public sealed record MovieGenerationInput(
     string? ShotJson,
     string? SourceImageUri = null,
     string? ContinuationProviderJobId = null,
-    string? WorldContextJson = null);
+    string? WorldContextJson = null,
+    Guid? SelectiveRegenerationId = null,
+    Guid? SourceProductionVersionId = null,
+    string? ChangedInputsJson = null,
+    string? SelectiveActionType = null,
+    string? SelectiveReason = null);
 
 public sealed record MovieProviderReadinessDto(bool Ready, IReadOnlyList<string> SupportedOperations);
 
