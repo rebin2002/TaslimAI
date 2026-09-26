@@ -9,6 +9,7 @@ namespace Taslim.Api.Movies;
 public interface IMovieV2Service
 {
     Task<MovieV2HierarchyDto?> GetHierarchyAsync(Guid userId, Guid movieProjectId, CancellationToken cancellationToken);
+    Task<MovieV2OverviewDto?> GetOverviewAsync(Guid userId, Guid movieProjectId, CancellationToken cancellationToken);
     Task<MovieV2ActDto?> AddActAsync(Guid userId, Guid movieProjectId, MovieV2ActRequest request, CancellationToken cancellationToken);
     Task<MovieV2SequenceDto?> AddSequenceAsync(Guid userId, Guid actId, MovieV2SequenceRequest request, CancellationToken cancellationToken);
     Task<MovieV2SceneDto?> AddSceneAsync(Guid userId, Guid sequenceId, MovieV2SceneRequest request, CancellationToken cancellationToken);
@@ -28,6 +29,94 @@ public sealed class MovieV2Service(TaslimDbContext db, WorkspaceAccessService ac
         var movie = await HierarchyQuery().FirstOrDefaultAsync(item => item.Id == movieProjectId, cancellationToken);
         if (movie is null || !await access.IsMemberAsync(userId, movie.WorkspaceId, cancellationToken)) return null;
         return ToDto(movie);
+    }
+
+    public async Task<MovieV2OverviewDto?> GetOverviewAsync(Guid userId, Guid movieProjectId, CancellationToken cancellationToken)
+    {
+        var movie = await db.MovieProjects.AsNoTracking()
+            .FirstOrDefaultAsync(item => item.Id == movieProjectId, cancellationToken);
+        if (movie is null || !await access.IsMemberAsync(userId, movie.WorkspaceId, cancellationToken)) return null;
+
+        var story = await db.MovieStories.AsNoTracking()
+            .Where(item => item.MovieProjectId == movieProjectId)
+            .Select(item => new OverviewStoryRow(item.ApprovalState, item.CurrentRevisionId, item.ApprovedRevisionId, item.UpdatedAt))
+            .FirstOrDefaultAsync(cancellationToken);
+        var revisionNumber = story?.CurrentRevisionId is Guid revisionId
+            ? await db.MovieStoryRevisions.AsNoTracking().Where(item => item.Id == revisionId).Select(item => (int?)item.RevisionNumber).FirstOrDefaultAsync(cancellationToken) ?? 0
+            : 0;
+        var screenplaySceneCount = story?.CurrentRevisionId is Guid currentRevisionId
+            ? await db.MovieScreenplayScenes.AsNoTracking().CountAsync(item => item.MovieStoryRevisionId == currentRevisionId, cancellationToken)
+            : 0;
+
+        var sceneQuery = db.MovieScenes.AsNoTracking().Where(item => item.MovieProjectId == movieProjectId);
+        var shotQuery = db.MovieShots.AsNoTracking().Where(item => item.Scene.MovieProjectId == movieProjectId);
+        var totalScenes = await sceneQuery.CountAsync(cancellationToken);
+        var totalShots = await shotQuery.CountAsync(cancellationToken);
+        var sceneCounts = await sceneQuery.GroupBy(item => item.Status).ToDictionaryAsync(group => group.Key, group => group.Count(), cancellationToken);
+        var shotCounts = await shotQuery.GroupBy(item => item.Status).ToDictionaryAsync(group => group.Key, group => group.Count(), cancellationToken);
+
+        var totalCharacters = await db.MovieCharacters.AsNoTracking().CountAsync(item => item.MovieProjectId == movieProjectId, cancellationToken);
+        var readyCharacters = await db.MovieCharacters.AsNoTracking().CountAsync(item => item.MovieProjectId == movieProjectId && item.Description != "" && item.Appearance != null, cancellationToken);
+        var worldCount = await db.MovieLocations.AsNoTracking().CountAsync(item => item.MovieProjectId == movieProjectId, cancellationToken)
+            + await db.MovieSets.AsNoTracking().CountAsync(item => item.MovieProjectId == movieProjectId, cancellationToken)
+            + await db.MovieProps.AsNoTracking().CountAsync(item => item.MovieProjectId == movieProjectId, cancellationToken);
+
+        var storyboardShots = await db.MovieProductionVersions.AsNoTracking()
+            .Where(item => item.MovieShot.Scene.MovieProjectId == movieProjectId && (item.Stage == MovieProductionStages.StoryboardCandidate || item.Stage == MovieProductionStages.ApprovedStoryboard))
+            .Select(item => item.MovieShotId).Distinct().CountAsync(cancellationToken);
+        var keyframeShots = await db.MovieProductionVersions.AsNoTracking()
+            .Where(item => item.MovieShot.Scene.MovieProjectId == movieProjectId && (item.Stage == MovieProductionStages.ProductionKeyframe || item.Stage == MovieProductionStages.ApprovedKeyframe))
+            .Select(item => item.MovieShotId).Distinct().CountAsync(cancellationToken);
+        var productionShots = await db.MovieProductionVersions.AsNoTracking()
+            .Where(item => item.MovieShot.Scene.MovieProjectId == movieProjectId && (item.Stage == MovieProductionStages.ProductionRender || item.Stage == MovieProductionStages.SelectedFinalTake))
+            .Select(item => item.MovieShotId).Distinct().CountAsync(cancellationToken);
+        var selectedTakes = await shotQuery.CountAsync(item => item.SelectedTakeId != null, cancellationToken);
+        var finalizedTakes = await shotQuery.CountAsync(item => item.FinalTakeId != null, cancellationToken);
+        var totalTakes = await db.MovieTakes.AsNoTracking().CountAsync(item => item.MovieShot.Scene.MovieProjectId == movieProjectId, cancellationToken);
+        var pendingTakeApprovals = await db.MovieTakes.AsNoTracking().CountAsync(item => item.MovieShot.Scene.MovieProjectId == movieProjectId && item.Status == MovieTakeStatuses.Ready, cancellationToken);
+        var rejectedTakes = await db.MovieTakes.AsNoTracking().CountAsync(item => item.MovieShot.Scene.MovieProjectId == movieProjectId && item.Status == MovieTakeStatuses.Rejected, cancellationToken);
+
+        var pendingProductionApprovals = await db.MovieProductionVersions.AsNoTracking().CountAsync(item => item.MovieShot.Scene.MovieProjectId == movieProjectId && item.Status == MovieProductionVersionStatuses.PendingApproval, cancellationToken);
+        var pendingCollaborativeReviews = await db.MovieReviews.AsNoTracking().CountAsync(item => item.MovieProjectId == movieProjectId && item.Status == MovieReviewStatuses.Pending, cancellationToken);
+        var pendingScreenplayApprovals = story is not null && (story.ApprovalState == MovieStoryApprovalStates.InReview || (story.CurrentRevisionId.HasValue && await db.MovieStoryRevisions.AsNoTracking().AnyAsync(item => item.Id == story.CurrentRevisionId && item.Status == MovieStoryRevisionStatuses.Submitted, cancellationToken))) ? 1 : 0;
+        var pendingDirectorProposals = await db.DirectorProposals.AsNoTracking().CountAsync(item => item.MovieProjectId == movieProjectId && item.Status == DirectorProposalStatuses.PendingApproval, cancellationToken);
+        var unresolvedComments = await db.MovieComments.AsNoTracking().CountAsync(item => item.MovieProjectId == movieProjectId && item.ResolvedAt == null, cancellationToken);
+        var changesRequested = await db.MovieReviews.AsNoTracking().CountAsync(item => item.MovieProjectId == movieProjectId && item.Status == MovieReviewStatuses.ChangesRequested, cancellationToken);
+
+        var blockedItems = await sceneQuery.Where(item => !item.Shots.Any())
+            .OrderBy(item => item.Sequence).Take(6)
+            .Select(item => new MovieV2OverviewBlockedItemDto(item.Id, "scene", item.Title, "No shots have been planned for this scene.", "scenes"))
+            .ToListAsync(cancellationToken);
+        blockedItems.AddRange(await shotQuery.Where(item => item.Status == MovieShotStatuses.InProgress && item.SelectedTakeId == null)
+            .OrderBy(item => item.UpdatedAt).Take(Math.Max(0, 6 - blockedItems.Count))
+            .Select(item => new MovieV2OverviewBlockedItemDto(item.Id, "shot", $"Shot {item.Sequence}", "In progress without a selected take.", "production"))
+            .ToListAsync(cancellationToken));
+
+        var warnings = new List<MovieV2OverviewWarningDto>();
+        if (story is null || story.ApprovalState != MovieStoryApprovalStates.Approved)
+            warnings.Add(new("story-not-approved", "attention", "Story is not approved", "The story is not yet an approved source of truth for production.", "story", null, "story"));
+        if (unresolvedComments > 0)
+            warnings.Add(new("unresolved-comments", "attention", $"{unresolvedComments} unresolved review comment{(unresolvedComments == 1 ? "" : "s")}", "Resolve collaborative comments before locking the next production gate.", "team", null, "comment"));
+        if (changesRequested > 0)
+            warnings.Add(new("changes-requested", "blocked", $"{changesRequested} review{(changesRequested == 1 ? "" : "s")} need changes", "A collaborator has requested changes on a reviewable item.", "team", null, "review"));
+        if (blockedItems.Count > 0)
+            warnings.Add(new("blocked-items", "blocked", $"{blockedItems.Count} production item{(blockedItems.Count == 1 ? "" : "s")} blocked", "Some scenes or shots cannot advance until their plan is complete.", blockedItems[0].Module, blockedItems[0].EntityId, blockedItems[0].EntityType));
+
+        var nextActions = BuildNextActions(story, totalCharacters, totalCharacters == 0 ? 0 : readyCharacters, worldCount, totalScenes, totalShots, pendingProductionApprovals, storyboardShots, keyframeShots, productionShots, totalShots);
+        var recentActivity = await BuildRecentActivityAsync(movieProjectId, story, cancellationToken);
+        var cost = await BuildCostSummaryAsync(movie, movieProjectId, cancellationToken);
+        var latestOutputAssetId = await db.MovieAssemblies.AsNoTracking().Where(item => item.MovieProjectId == movieProjectId && item.Status == MovieAssemblyStatuses.Ready && item.AssetId != null).OrderByDescending(item => item.CompletedAt ?? item.CreatedAt).Select(item => item.AssetId).FirstOrDefaultAsync(cancellationToken);
+
+        return new MovieV2OverviewDto(
+            new(movie.Id, movie.WorkspaceId, movie.Title, movie.Description, movie.Status, movie.ProductionStatus, movie.QualityLevel, movie.AutoDirectorEnabled, movie.DurationSeconds, movie.AspectRatio, movie.Style, movie.Language, movie.CreatedAt, movie.UpdatedAt),
+            new(story?.ApprovalState ?? "NotStarted", revisionNumber, screenplaySceneCount, story is not null && HasStoryContent(story.ApprovalState)),
+            new(totalCharacters, readyCharacters, totalCharacters == 0 ? "NotStarted" : readyCharacters == totalCharacters ? "Ready" : "NeedsDefinition"),
+            new(worldCount, worldCount, worldCount == 0 ? "NotStarted" : "Defined"),
+            Counts(totalScenes, sceneCounts), Counts(totalShots, shotCounts),
+            new(Stage("Storyboard", totalShots, storyboardShots), Stage("Keyframe", totalShots, keyframeShots), Stage("Production", totalShots, productionShots), Stage("Final", totalShots, finalizedTakes)),
+            new(totalTakes, selectedTakes, finalizedTakes, pendingTakeApprovals, rejectedTakes),
+            new(new(pendingProductionApprovals, pendingProductionApprovals == 0 ? "Clear" : "Pending"), new(pendingCollaborativeReviews, pendingCollaborativeReviews == 0 ? "Clear" : "Pending"), new(pendingScreenplayApprovals, pendingScreenplayApprovals == 0 ? "Clear" : "Pending"), new(pendingDirectorProposals, pendingDirectorProposals == 0 ? "Clear" : "Pending")),
+            cost, latestOutputAssetId, nextActions, warnings, blockedItems, recentActivity);
     }
 
     public async Task<MovieV2ActDto?> AddActAsync(Guid userId, Guid movieProjectId, MovieV2ActRequest request, CancellationToken cancellationToken)
@@ -239,6 +328,59 @@ public sealed class MovieV2Service(TaslimDbContext db, WorkspaceAccessService ac
     }
 
     private static MovieV2HierarchyDto ToDto(MovieProject movie) => new(movie.Id, movie.WorkspaceId, movie.Title, movie.ProductionStatus, movie.QualityLevel, movie.AutoDirectorEnabled, movie.StatusChangedAt, movie.ArchivedAt, movie.CreatedAt, movie.UpdatedAt, movie.Acts.OrderBy(item => item.Sequence).Select(item => ToDto(item)).ToArray());
+
+    private static MovieV2OverviewCountsDto Counts(int total, IReadOnlyDictionary<string, int> groups) => new(total, Count(groups, MovieHierarchyStatuses.Planned), Count(groups, MovieHierarchyStatuses.InProgress), Count(groups, MovieHierarchyStatuses.Approved), Count(groups, MovieHierarchyStatuses.Archived));
+    private static int Count(IReadOnlyDictionary<string, int> groups, string status) => groups.FirstOrDefault(item => string.Equals(item.Key, status, StringComparison.OrdinalIgnoreCase)).Value;
+    private static MovieV2OverviewStageDto Stage(string status, int total, int completed) => new(status, total, completed, total == 0 ? null : Math.Clamp((int)Math.Round(completed * 100d / total), 0, 100), completed > 0);
+    private static bool HasStoryContent(string approvalState) => !string.Equals(approvalState, MovieStoryApprovalStates.Draft, StringComparison.OrdinalIgnoreCase) || string.Equals(approvalState, MovieStoryApprovalStates.Approved, StringComparison.OrdinalIgnoreCase);
+
+    private static IReadOnlyList<MovieV2OverviewActionDto> BuildNextActions(OverviewStoryRow? story, int characterCount, int readyCharacters, int worldCount, int sceneCount, int shotCount, int pendingProductionApprovals, int storyboardShots, int keyframeShots, int productionShots, int totalShots)
+    {
+        var actions = new List<MovieV2OverviewActionDto>();
+        if (story is null || !string.Equals(story.ApprovalState, MovieStoryApprovalStates.Approved, StringComparison.OrdinalIgnoreCase)) actions.Add(new("complete-story", "Complete Story", "Approve the story before production decisions accumulate.", "story", "high"));
+        if (characterCount == 0 || readyCharacters < characterCount) actions.Add(new("define-cast", characterCount == 0 ? "Add main characters" : "Finish character continuity", "Give the cast durable records before planning dependent shots.", "cast", "high"));
+        if (worldCount == 0) actions.Add(new("define-world", "Define a location", "Set the first repeatable world record for scene continuity.", "world", "high"));
+        if (sceneCount == 0) actions.Add(new("plan-scenes", "Break screenplay into scenes", "Create the story spine that production can measure.", "scenes", "high"));
+        else if (shotCount == 0) actions.Add(new("plan-shots", "Plan shots", "Every scene needs at least one canonical shot plan.", "scenes", "high"));
+        else if (storyboardShots < totalShots) actions.Add(new("build-storyboard", "Build storyboard", "Create storyboard candidates for the remaining shots.", "storyboard", "medium"));
+        else if (pendingProductionApprovals > 0) actions.Add(new("approve-storyboard", "Review production approvals", "Pending production versions are waiting for a deliberate decision.", "production", "high"));
+        else if (keyframeShots < totalShots) actions.Add(new("approve-keyframe", "Advance keyframes", "Storyboard coverage is present; advance approved shots to keyframe.", "production", "medium"));
+        else if (productionShots < totalShots) actions.Add(new("review-production", "Review production render", "The remaining shots do not yet have a production render.", "production", "medium"));
+        if (actions.Count == 0) actions.Add(new("review-final-cut", "Review final cut", "The current persisted plan has no outstanding setup action.", "overview", "low"));
+        return actions.Take(4).ToArray();
+    }
+
+    private async Task<IReadOnlyList<MovieV2OverviewActivityDto>> BuildRecentActivityAsync(Guid movieProjectId, OverviewStoryRow? story, CancellationToken cancellationToken)
+    {
+        var activity = new List<MovieV2OverviewActivityDto>();
+        var scenes = await db.MovieScenes.AsNoTracking().Where(item => item.MovieProjectId == movieProjectId).OrderByDescending(item => item.UpdatedAt).Take(3).Select(item => new MovieV2OverviewActivityDto($"scene-{item.Id}", "Scene updated", item.Title, item.UpdatedAt, "scenes")).ToListAsync(cancellationToken);
+        activity.AddRange(scenes);
+        var shots = await db.MovieShots.AsNoTracking().Where(item => item.Scene.MovieProjectId == movieProjectId).OrderByDescending(item => item.UpdatedAt).Take(3).Select(item => new MovieV2OverviewActivityDto($"shot-{item.Id}", "Shot updated", $"Shot {item.Sequence} · {item.Status}", item.UpdatedAt, "scenes")).ToListAsync(cancellationToken);
+        activity.AddRange(shots);
+        var approvals = await db.MovieProductionVersions.AsNoTracking().Where(item => item.MovieShot.Scene.MovieProjectId == movieProjectId).OrderByDescending(item => item.UpdatedAt).Take(3).Select(item => new MovieV2OverviewActivityDto($"version-{item.Id}", "Production version", $"{item.Stage} · {item.Status}", item.UpdatedAt, "production")).ToListAsync(cancellationToken);
+        activity.AddRange(approvals);
+        if (story is not null) activity.Add(new MovieV2OverviewActivityDto("story", "Story updated", story.ApprovalState, story.UpdatedAt, "story"));
+        return activity.OrderByDescending(item => item.OccurredAt).Take(8).ToArray();
+    }
+
+    private async Task<MovieV2OverviewCostDto> BuildCostSummaryAsync(MovieProject movie, Guid movieProjectId, CancellationToken cancellationToken)
+    {
+        var jobIds = await db.MovieClips.AsNoTracking().Where(item => item.MovieProjectId == movieProjectId && item.GenerationJobId != null).Select(item => item.GenerationJobId!.Value)
+            .Concat(db.MovieAssemblies.AsNoTracking().Where(item => item.MovieProjectId == movieProjectId && item.GenerationJobId != null).Select(item => item.GenerationJobId!.Value))
+            .Concat(db.MovieTakes.AsNoTracking().Where(item => item.MovieShot.Scene.MovieProjectId == movieProjectId && item.GenerationJobId != null).Select(item => item.GenerationJobId!.Value))
+            .Concat(db.MovieProductionVersions.AsNoTracking().Where(item => item.MovieShot.Scene.MovieProjectId == movieProjectId && item.GenerationJobId != null).Select(item => item.GenerationJobId!.Value))
+            .Distinct().ToArrayAsync(cancellationToken);
+        var jobs = db.GenerationJobs.AsNoTracking().Where(item => jobIds.Contains(item.Id));
+        if (movie.ProjectId.HasValue) jobs = jobs.Concat(db.GenerationJobs.AsNoTracking().Where(item => item.ProjectId == movie.ProjectId && GenerationJobTypes.MovieTypes.Contains(item.JobType))).Distinct();
+        var jobRows = await jobs.Select(item => new { item.Id, item.Status, item.EstimatedProviderCostUsd, item.EstimatedProviderCostKnown }).ToListAsync(cancellationToken);
+        var costJobIds = jobRows.Select(item => item.Id).ToArray();
+        var usage = await db.UsageTransactions.AsNoTracking().Where(item => item.GenerationJobId != null && costJobIds.Contains(item.GenerationJobId.Value) && item.ProviderCostKnown).Select(item => item.ProviderCostUsd).ToListAsync(cancellationToken);
+        var actual = usage.Count == 0 ? (decimal?)null : usage.Sum();
+        var remaining = jobRows.Where(item => item.Status is GenerationJobStatus.Pending or GenerationJobStatus.Queued or GenerationJobStatus.Running).Where(item => item.EstimatedProviderCostKnown == true && item.EstimatedProviderCostUsd.HasValue).Sum(item => item.EstimatedProviderCostUsd!.Value);
+        var remainingValue = remaining == 0 ? (decimal?)null : remaining;
+        return new MovieV2OverviewCostDto(actual.HasValue || remainingValue.HasValue, actual, remainingValue, "USD", actual.HasValue || remainingValue.HasValue ? null : "No recorded provider cost for this project yet.");
+    }
+    private sealed record OverviewStoryRow(string ApprovalState, Guid? CurrentRevisionId, Guid? ApprovedRevisionId, DateTime UpdatedAt);
     private static MovieV2ActDto ToDto(MovieAct act, IReadOnlyList<MovieV2SequenceDto> sequences) => new(act.Id, act.Sequence, act.Title, act.Summary, act.Status, act.ArchivedAt, act.CreatedAt, act.UpdatedAt, sequences);
     private static MovieV2SequenceDto ToDto(MovieSequence sequence, IReadOnlyList<MovieV2SceneDto> scenes) => new(sequence.Id, sequence.Sequence, sequence.Title, sequence.Summary, sequence.Status, sequence.ArchivedAt, sequence.CreatedAt, sequence.UpdatedAt, scenes);
     private static MovieV2SceneDto ToDto(MovieScene scene, IReadOnlyList<MovieV2ShotDto> shots) => new(scene.Id, scene.Sequence, scene.Title, scene.Summary, scene.Status, scene.MovieSequenceId, scene.ArchivedAt, scene.CreatedAt, scene.UpdatedAt, shots);

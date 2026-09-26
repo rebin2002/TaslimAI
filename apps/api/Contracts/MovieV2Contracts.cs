@@ -134,3 +134,121 @@ public sealed class MovieV2ApprovalRequest
 }
 
 public sealed record MovieV2OrderRequest(int Sequence);
+
+public sealed record MovieV2OverviewProjectDto(
+    Guid Id,
+    Guid WorkspaceId,
+    string Title,
+    string Description,
+    string Status,
+    string ProductionStatus,
+    string QualityLevel,
+    bool AutoDirectorEnabled,
+    int DurationSeconds,
+    string AspectRatio,
+    string Style,
+    string Language,
+    DateTime CreatedAt,
+    DateTime UpdatedAt);
+
+public sealed record MovieV2OverviewStageDto(
+    string Status,
+    int Total,
+    int Completed,
+    int? Percent,
+    bool Started);
+
+public sealed record MovieV2OverviewStoryDto(
+    string Status,
+    int RevisionNumber,
+    int ScreenplaySceneCount,
+    bool HasContent);
+
+public sealed record MovieV2OverviewResourceDto(
+    int Total,
+    int? Ready,
+    string Status);
+
+public sealed record MovieV2OverviewCountsDto(
+    int Total,
+    int Planned,
+    int InProgress,
+    int Approved,
+    int Archived);
+
+public sealed record MovieV2OverviewProgressDto(
+    MovieV2OverviewStageDto Storyboard,
+    MovieV2OverviewStageDto Keyframe,
+    MovieV2OverviewStageDto Production,
+    MovieV2OverviewStageDto SelectedFinalTakes);
+
+public sealed record MovieV2OverviewTakeSummaryDto(
+    int Total,
+    int Selected,
+    int Finalized,
+    int PendingApproval,
+    int Rejected);
+
+public sealed record MovieV2OverviewApprovalBucketDto(
+    int Pending,
+    string Status);
+
+public sealed record MovieV2OverviewApprovalSummaryDto(
+    MovieV2OverviewApprovalBucketDto Production,
+    MovieV2OverviewApprovalBucketDto Collaborative,
+    MovieV2OverviewApprovalBucketDto Screenplay,
+    MovieV2OverviewApprovalBucketDto DirectorProposals);
+
+public sealed record MovieV2OverviewCostDto(
+    bool IsKnown,
+    decimal? RecordedProviderCostUsd,
+    decimal? EstimatedRemainingProviderCostUsd,
+    string Currency,
+    string? Note);
+
+public sealed record MovieV2OverviewActionDto(
+    string Key,
+    string Label,
+    string Reason,
+    string Module,
+    string Priority);
+
+public sealed record MovieV2OverviewWarningDto(
+    string Key,
+    string Severity,
+    string Label,
+    string Detail,
+    string? Module,
+    Guid? EntityId,
+    string? EntityType);
+
+public sealed record MovieV2OverviewActivityDto(
+    string Key,
+    string Label,
+    string Detail,
+    DateTime OccurredAt,
+    string? Module);
+
+public sealed record MovieV2OverviewBlockedItemDto(
+    Guid EntityId,
+    string EntityType,
+    string Label,
+    string Detail,
+    string Module);
+
+public sealed record MovieV2OverviewDto(
+    MovieV2OverviewProjectDto Project,
+    MovieV2OverviewStoryDto Story,
+    MovieV2OverviewResourceDto Cast,
+    MovieV2OverviewResourceDto World,
+    MovieV2OverviewCountsDto Scenes,
+    MovieV2OverviewCountsDto Shots,
+    MovieV2OverviewProgressDto Progress,
+    MovieV2OverviewTakeSummaryDto Takes,
+    MovieV2OverviewApprovalSummaryDto Approvals,
+    MovieV2OverviewCostDto Cost,
+    Guid? LatestOutputAssetId,
+    IReadOnlyList<MovieV2OverviewActionDto> NextActions,
+    IReadOnlyList<MovieV2OverviewWarningDto> Warnings,
+    IReadOnlyList<MovieV2OverviewBlockedItemDto> BlockedItems,
+    IReadOnlyList<MovieV2OverviewActivityDto> RecentActivity);
