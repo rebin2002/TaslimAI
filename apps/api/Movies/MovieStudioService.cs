@@ -12,6 +12,7 @@ public interface IMovieStudioService
 {
     Task<MovieStudioProjectResponse?> CreateAsync(Guid userId, MovieStudioCreateRequest request, CancellationToken cancellationToken, string? idempotencyKey = null);
     Task<MovieStudioProjectDto?> GetAsync(Guid userId, Guid id, CancellationToken cancellationToken);
+    Task<MovieWorldWorkspaceDto?> GetWorldAsync(Guid userId, Guid id, CancellationToken cancellationToken);
     Task<MovieStudioProjectDto?> UpdateGuideAsync(Guid userId, Guid id, MovieStudioGuideRequest request, CancellationToken cancellationToken);
     Task<MovieSceneDto?> AddSceneAsync(Guid userId, Guid id, MovieStudioSceneRequest request, CancellationToken cancellationToken);
     Task<MovieCharacterDto?> AddCharacterAsync(Guid userId, Guid id, MovieStudioCharacterRequest request, CancellationToken cancellationToken);
@@ -21,9 +22,12 @@ public interface IMovieStudioService
     Task<MovieCharacterRelationshipDto?> AddCharacterRelationshipAsync(Guid userId, Guid characterId, MovieStudioCharacterRelationshipRequest request, CancellationToken cancellationToken);
     Task<MovieCharacterContinuityLockDto?> AddCharacterContinuityLockAsync(Guid userId, Guid characterId, MovieCharacterContinuityLockRequest request, CancellationToken cancellationToken);
     Task<MovieLocationDto?> AddLocationAsync(Guid userId, Guid id, MovieStudioLocationRequest request, CancellationToken cancellationToken);
+    Task<MovieLocationDto?> UpdateLocationAsync(Guid userId, Guid locationId, MovieStudioLocationRequest request, CancellationToken cancellationToken);
     Task<MovieSetDto?> AddSetAsync(Guid userId, Guid id, MovieStudioSetRequest request, CancellationToken cancellationToken);
+    Task<MovieSetDto?> UpdateSetAsync(Guid userId, Guid setId, MovieStudioSetRequest request, CancellationToken cancellationToken);
     Task<MovieSetVariationDto?> AddSetVariationAsync(Guid userId, Guid setId, MovieStudioSetVariationRequest request, CancellationToken cancellationToken);
     Task<MoviePropDto?> AddPropAsync(Guid userId, Guid id, MovieStudioPropRequest request, CancellationToken cancellationToken);
+    Task<MoviePropDto?> UpdatePropAsync(Guid userId, Guid propId, MovieStudioPropRequest request, CancellationToken cancellationToken);
     Task<MovieWorldReferenceDto?> AddWorldReferenceAsync(Guid userId, Guid id, MovieStudioWorldReferenceRequest request, CancellationToken cancellationToken);
     Task<MovieContinuityFactDto?> AddContinuityFactAsync(Guid userId, Guid id, MovieStudioContinuityFactRequest request, CancellationToken cancellationToken);
     Task<MovieContinuityLockDto?> AddContinuityLockAsync(Guid userId, Guid id, MovieStudioContinuityLockRequest request, CancellationToken cancellationToken);
@@ -124,6 +128,32 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
     {
         var movie = await Query().FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
         return movie is null || !await collaboration.HasPermissionAsync(userId, id, MoviePermissions.View, cancellationToken) ? null : ToDto(movie);
+    }
+
+    public async Task<MovieWorldWorkspaceDto?> GetWorldAsync(Guid userId, Guid id, CancellationToken cancellationToken)
+    {
+        var movie = await db.MovieProjects.AsNoTracking().FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
+        if (movie is null || !await collaboration.HasPermissionAsync(userId, id, MoviePermissions.View, cancellationToken)) return null;
+
+        var locations = await db.MovieLocations.AsNoTracking().Where(item => item.MovieProjectId == id).OrderBy(item => item.CreatedAt).ToArrayAsync(cancellationToken);
+        var sets = await db.MovieSets.AsNoTracking().Where(item => item.MovieProjectId == id).Include(item => item.Variations).OrderBy(item => item.CreatedAt).ToArrayAsync(cancellationToken);
+        var props = await db.MovieProps.AsNoTracking().Where(item => item.MovieProjectId == id).OrderBy(item => item.CreatedAt).ToArrayAsync(cancellationToken);
+        var references = await db.MovieWorldReferences.AsNoTracking().Where(item => item.MovieProjectId == id).OrderBy(item => item.CreatedAt).ToArrayAsync(cancellationToken);
+        var usages = await db.MovieWorldUsages.AsNoTracking().Where(item => item.MovieProjectId == id).Include(item => item.MovieScene).Include(item => item.MovieShot).OrderBy(item => item.CreatedAt).ToArrayAsync(cancellationToken);
+        var facts = await db.MovieContinuityFacts.AsNoTracking().Where(item => item.MovieProjectId == id).OrderBy(item => item.CreatedAt).ToArrayAsync(cancellationToken);
+        var locks = await db.MovieContinuityLocks.AsNoTracking().Where(item => item.MovieProjectId == id && item.ReleasedAt == null).OrderByDescending(item => item.CreatedAt).ToArrayAsync(cancellationToken);
+        var world = new MovieWorldDto(locations.Select(ToDto).ToArray(), sets.Select(ToDto).ToArray(), props.Select(ToDto).ToArray(), references.Select(ToDto).ToArray(), usages.Select(ToDto).ToArray(), facts.Select(ToDto).ToArray(), locks.Select(ToDto).ToArray());
+
+        var names = locations.ToDictionary(item => (Type: MovieWorldEntityTypes.Location, item.Id), item => item.Name);
+        foreach (var item in sets) names[(MovieWorldEntityTypes.Set, item.Id)] = item.Name;
+        foreach (var item in props) names[(MovieWorldEntityTypes.Prop, item.Id)] = item.Name;
+        var usageDetails = usages.Select(item => new MovieWorldUsageDetailDto(item.Id, item.MovieSceneId, item.MovieShotId, item.MovieScene.Sequence, item.MovieScene.Title, item.MovieShot?.Sequence, item.MovieShot?.Description, item.EntityType, item.EntityId, names.GetValueOrDefault((item.EntityType, item.EntityId), "World record"), item.Role)).ToArray();
+
+        var assetIds = locations.Select(item => item.ReferenceAssetId).Concat(sets.Select(item => item.ReferenceAssetId)).Concat(sets.SelectMany(item => item.Variations.Select(variation => variation.ReferenceAssetId))).Concat(props.Select(item => item.ReferenceAssetId)).Concat(references.Select(item => item.AssetId)).Where(item => item.HasValue).Select(item => item!.Value).Distinct().ToArray();
+        var assets = assetIds.Length == 0
+            ? Array.Empty<MovieWorldAssetDto>()
+            : await db.Assets.AsNoTracking().Where(item => item.WorkspaceId == movie.WorkspaceId && assetIds.Contains(item.Id)).OrderBy(item => item.Name).Select(item => new MovieWorldAssetDto(item.Id, item.Name, item.AssetType, item.MimeType, item.StoredFileId.HasValue, item.StoredFileId.HasValue && (item.MimeType != null && (item.MimeType.StartsWith("image/") || item.MimeType.StartsWith("audio/") || item.MimeType.StartsWith("video/")))).ToArrayAsync(cancellationToken);
+        return new MovieWorldWorkspaceDto(movie.Id, movie.WorkspaceId, movie.ProjectId, movie.Status, movie.Title, movie.Description, movie.DurationSeconds, movie.AspectRatio, movie.Style, movie.Language, world, usageDetails, assets);
     }
 
     public async Task<MovieStudioProjectDto?> UpdateGuideAsync(Guid userId, Guid id, MovieStudioGuideRequest request, CancellationToken cancellationToken)
@@ -283,6 +313,18 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         return ToDto(location);
     }
 
+    public async Task<MovieLocationDto?> UpdateLocationAsync(Guid userId, Guid locationId, MovieStudioLocationRequest request, CancellationToken cancellationToken)
+    {
+        var location = await db.MovieLocations.Include(item => item.MovieProject).FirstOrDefaultAsync(item => item.Id == locationId, cancellationToken);
+        if (location is null || !await collaboration.HasPermissionAsync(userId, location.MovieProjectId, MoviePermissions.Edit, cancellationToken)) return null;
+        ValidateRequired(request.Name, request.Description, "Location name and description are required.");
+        await EnsureAssetInWorkspaceAsync(request.ReferenceAssetId, location.MovieProject.WorkspaceId, cancellationToken);
+        await EnsureWorldLocksAllowAsync(location.MovieProjectId, MovieWorldEntityTypes.Location, locationId, new Dictionary<string, string?> { ["name"] = request.Name.Trim(), ["description"] = request.Description.Trim(), ["visualContinuityNotes"] = MovieStudioHelpers.Clean(request.VisualContinuityNotes), ["referenceAssetId"] = request.ReferenceAssetId?.ToString() }, cancellationToken);
+        location.Name = request.Name.Trim(); location.Description = request.Description.Trim(); location.VisualContinuityNotes = MovieStudioHelpers.Clean(request.VisualContinuityNotes); location.ReferenceAssetId = request.ReferenceAssetId; location.UpdatedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync(cancellationToken);
+        return ToDto(location);
+    }
+
     public async Task<MovieSetDto?> AddSetAsync(Guid userId, Guid id, MovieStudioSetRequest request, CancellationToken cancellationToken)
     {
         var movie = await GetAuthorizedMovieAsync(userId, id, cancellationToken);
@@ -296,6 +338,19 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         db.MovieSets.Add(item);
         await db.SaveChangesAsync(cancellationToken);
         return ToDto(item);
+    }
+
+    public async Task<MovieSetDto?> UpdateSetAsync(Guid userId, Guid setId, MovieStudioSetRequest request, CancellationToken cancellationToken)
+    {
+        var set = await db.MovieSets.Include(item => item.MovieProject).Include(item => item.Variations).FirstOrDefaultAsync(item => item.Id == setId, cancellationToken);
+        if (set is null || !await collaboration.HasPermissionAsync(userId, set.MovieProjectId, MoviePermissions.Edit, cancellationToken)) return null;
+        ValidateRequired(request.Name, request.Description, "Set name and description are required.");
+        if (request.MovieLocationId.HasValue && !await db.MovieLocations.AnyAsync(item => item.Id == request.MovieLocationId && item.MovieProjectId == set.MovieProjectId, cancellationToken)) throw new MovieStudioValidationException("The set location must belong to this movie project.");
+        await EnsureAssetInWorkspaceAsync(request.ReferenceAssetId, set.MovieProject.WorkspaceId, cancellationToken);
+        await EnsureWorldLocksAllowAsync(set.MovieProjectId, MovieWorldEntityTypes.Set, setId, new Dictionary<string, string?> { ["name"] = request.Name.Trim(), ["description"] = request.Description.Trim(), ["environmentType"] = string.IsNullOrWhiteSpace(request.EnvironmentType) ? "practical" : request.EnvironmentType.Trim(), ["visualDescription"] = MovieStudioHelpers.Clean(request.VisualDescription), ["timeOfDay"] = MovieStudioHelpers.Clean(request.TimeOfDay), ["weather"] = MovieStudioHelpers.Clean(request.Weather), ["continuityNotes"] = MovieStudioHelpers.Clean(request.ContinuityNotes), ["referenceAssetId"] = request.ReferenceAssetId?.ToString(), ["movieLocationId"] = request.MovieLocationId?.ToString() }, cancellationToken);
+        set.MovieLocationId = request.MovieLocationId; set.Name = request.Name.Trim(); set.Description = request.Description.Trim(); set.EnvironmentType = string.IsNullOrWhiteSpace(request.EnvironmentType) ? "practical" : request.EnvironmentType.Trim(); set.VisualDescription = MovieStudioHelpers.Clean(request.VisualDescription); set.TimeOfDay = MovieStudioHelpers.Clean(request.TimeOfDay); set.Weather = MovieStudioHelpers.Clean(request.Weather); set.ContinuityNotes = MovieStudioHelpers.Clean(request.ContinuityNotes); set.ReferenceAssetId = request.ReferenceAssetId; set.UpdatedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync(cancellationToken);
+        return ToDto(set);
     }
 
     public async Task<MovieSetVariationDto?> AddSetVariationAsync(Guid userId, Guid setId, MovieStudioSetVariationRequest request, CancellationToken cancellationToken)
@@ -323,6 +378,18 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         db.MovieProps.Add(item);
         await db.SaveChangesAsync(cancellationToken);
         return ToDto(item);
+    }
+
+    public async Task<MoviePropDto?> UpdatePropAsync(Guid userId, Guid propId, MovieStudioPropRequest request, CancellationToken cancellationToken)
+    {
+        var prop = await db.MovieProps.Include(item => item.MovieProject).FirstOrDefaultAsync(item => item.Id == propId, cancellationToken);
+        if (prop is null || !await collaboration.HasPermissionAsync(userId, prop.MovieProjectId, MoviePermissions.Edit, cancellationToken)) return null;
+        ValidateRequired(request.Name, request.Description, "Prop name and description are required.");
+        await EnsureAssetInWorkspaceAsync(request.ReferenceAssetId, prop.MovieProject.WorkspaceId, cancellationToken);
+        await EnsureWorldLocksAllowAsync(prop.MovieProjectId, MovieWorldEntityTypes.Prop, propId, new Dictionary<string, string?> { ["name"] = request.Name.Trim(), ["description"] = request.Description.Trim(), ["category"] = MovieStudioHelpers.Clean(request.Category), ["continuityNotes"] = MovieStudioHelpers.Clean(request.ContinuityNotes), ["referenceAssetId"] = request.ReferenceAssetId?.ToString() }, cancellationToken);
+        prop.Name = request.Name.Trim(); prop.Description = request.Description.Trim(); prop.Category = MovieStudioHelpers.Clean(request.Category); prop.ContinuityNotes = MovieStudioHelpers.Clean(request.ContinuityNotes); prop.ReferenceAssetId = request.ReferenceAssetId; prop.UpdatedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync(cancellationToken);
+        return ToDto(prop);
     }
 
     public async Task<MovieWorldReferenceDto?> AddWorldReferenceAsync(Guid userId, Guid id, MovieStudioWorldReferenceRequest request, CancellationToken cancellationToken)
@@ -628,6 +695,15 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
     {
         if (assetId.HasValue && !await db.Assets.AnyAsync(item => item.Id == assetId && item.WorkspaceId == workspaceId, cancellationToken))
             throw new MovieStudioValidationException("The reference asset must belong to this workspace.");
+    }
+
+    private async Task EnsureWorldLocksAllowAsync(Guid movieProjectId, string entityType, Guid entityId, IReadOnlyDictionary<string, string?> values, CancellationToken cancellationToken)
+    {
+        var locks = await db.MovieContinuityLocks.AsNoTracking().Where(item => item.MovieProjectId == movieProjectId && item.EntityType == entityType && item.EntityId == entityId && item.ReleasedAt == null).ToArrayAsync(cancellationToken);
+        foreach (var locked in locks)
+        {
+            if (values.TryGetValue(locked.FieldName, out var next) && !string.Equals(next, locked.LockedValue, StringComparison.Ordinal)) throw new MovieStudioContinuityLockException(locked.FieldName);
+        }
     }
 
     private async Task<bool> WorldEntityBelongsToProjectAsync(string entityType, Guid entityId, Guid movieProjectId, CancellationToken cancellationToken) => entityType.ToLowerInvariant() switch

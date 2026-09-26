@@ -24,6 +24,7 @@ import {
 } from "lucide-react";
 import { api, type MovieProject, type MovieScene } from "@/lib/api";
 import { assetFileUrl } from "@/lib/apiBase";
+import { MovieWorldWorkspace } from "@/components/MovieWorldWorkspace";
 
 export const fullMovieModules = [
   { slug: "overview", label: "Overview", icon: Gauge },
@@ -83,6 +84,15 @@ function formatDuration(seconds: number | null | undefined) {
 }
 
 export function FullMovieWorkspaceView({ projectId, module }: { projectId: string; module: string }) {
+  if (moduleFromSlug(module) === "world") return <WorldOnlyWorkspace projectId={projectId} />;
+  return <FullMovieProjectWorkspace projectId={projectId} module={module} />;
+}
+
+function WorldOnlyWorkspace({ projectId }: { projectId: string }) {
+  return <div className="movie-studio-page movie-full-workspace"><header className="movie-workspace-header"><Link href={`/create/movie/${projectId}/overview`} className="movie-workspace-back"><ArrowLeft size={14} /> Movie Studio</Link><div className="movie-workspace-heading"><div><span className="movie-workspace-kicker">Focused production read model</span><h1>World room</h1><p>Locations, sets, props, references, usage, and continuity — without loading the complete project graph.</p></div><div className="movie-workspace-meta"><span>World V2</span><span>Asset-backed</span></div></div></header><main className="movie-world-only-main"><MovieWorldWorkspace projectId={projectId} /></main></div>;
+}
+
+function FullMovieProjectWorkspace({ projectId, module }: { projectId: string; module: string }) {
   const activeModule = moduleFromSlug(module);
   const [project, setProject] = useState<MovieProject | null>(null);
   const [loading, setLoading] = useState(true);
@@ -173,7 +183,7 @@ export function FullMovieWorkspaceView({ projectId, module }: { projectId: strin
           {activeModule === "overview" && <OverviewModule project={project} outputAssetId={outputAssetId} completionPercent={completionPercent} selectedScene={selectedScene} onSelectScene={setSelectedSceneId} />}
           {activeModule === "story" && <StoryModule project={project} />}
           {activeModule === "cast" && <CastModule project={project} />}
-          {activeModule === "world" && <WorldModule project={project} />}
+          {activeModule === "world" && <WorldModule projectId={project.id} />}
           {activeModule === "scenes" && <ScenesModule project={project} selectedSceneId={selectedScene?.id ?? null} newScene={newScene} addingScene={addingScene} onSelectScene={setSelectedSceneId} onChangeScene={setNewScene} onAddScene={() => void addScene()} onGenerate={generateScene} />}
           {activeModule === "storyboard" && <StoryboardModule project={project} />}
           {activeModule === "production" && <ProductionModule project={project} completionPercent={completionPercent} />}
@@ -219,8 +229,8 @@ function CastModule({ project }: { project: MovieProject }) {
   return <div className="movie-module-stack"><ModuleIntro icon={<Users size={18} />} title="Characters stay intentional" text="The cast surface shows durable character records only. It does not invent visual references or performances." />{project.characters.length ? <div className="movie-record-grid">{project.characters.map((character) => <article className="movie-record-card" key={character.id}><span className="movie-record-index">Character</span><h3>{character.name}</h3><p>{character.description}</p><RecordLine label="Appearance" value={character.appearance} /><RecordLine label="Performance" value={character.voiceAndPerformance} /><RecordLine label="Continuity" value={character.continuityNotes} /></article>)}</div> : <EmptyModule title="No cast records yet" text="Add character records when the story has a person worth keeping consistent." />}</div>;
 }
 
-function WorldModule({ project }: { project: MovieProject }) {
-  return <div className="movie-module-stack"><ModuleIntro icon={<Map size={18} />} title="The world is a continuity decision" text="Locations are kept separate from scene execution so visual identity can travel with the project." />{project.locations.length ? <div className="movie-record-grid">{project.locations.map((location) => <article className="movie-record-card" key={location.id}><span className="movie-record-index">Location</span><h3>{location.name}</h3><p>{location.description}</p><RecordLine label="Visual continuity" value={location.visualContinuityNotes} /></article>)}</div> : <EmptyModule title="No locations defined yet" text="World records will appear here once the first location is part of the plan." />}</div>;
+function WorldModule({ projectId }: { projectId: string }) {
+  return <div className="movie-module-stack"><MovieWorldWorkspace projectId={projectId} /></div>;
 }
 
 function ScenesModule({ project, selectedSceneId, newScene, addingScene, onSelectScene, onChangeScene, onAddScene, onGenerate }: { project: MovieProject; selectedSceneId: string | null; newScene: { title: string; summary: string }; addingScene: boolean; onSelectScene: (sceneId: string) => void; onChangeScene: (value: { title: string; summary: string }) => void; onAddScene: () => void; onGenerate: (sceneId: string) => Promise<void> }) {

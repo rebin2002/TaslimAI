@@ -42,6 +42,13 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieGuid
         return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result);
     }
 
+    [HttpGet("projects/{id:guid}/world")]
+    public async Task<IActionResult> GetWorld(Guid id, CancellationToken cancellationToken)
+    {
+        var result = await movies.GetWorldAsync(GetUserId(), id, cancellationToken);
+        return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result);
+    }
+
     [HttpPatch("projects/{id:guid}/guide")]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> UpdateGuide(Guid id, MovieStudioGuideRequest request, CancellationToken cancellationToken)
@@ -179,11 +186,29 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieGuid
         catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_LOCATION_INVALID", exception.Message); }
     }
 
+    [HttpPatch("locations/{locationId:guid}")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> UpdateLocation(Guid locationId, MovieStudioLocationRequest request, CancellationToken cancellationToken)
+    {
+        try { var result = await movies.UpdateLocationAsync(GetUserId(), locationId, request, cancellationToken); return result is null ? ApiResults.Error(this, 404, "MOVIE_LOCATION_NOT_FOUND", "Movie location not found.") : Ok(result); }
+        catch (MovieStudioContinuityLockException exception) { return ApiResults.Error(this, 409, "MOVIE_WORLD_CONTINUITY_LOCKED", exception.Message); }
+        catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_LOCATION_INVALID", exception.Message); }
+    }
+
     [HttpPost("projects/{id:guid}/sets")]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> AddSet(Guid id, MovieStudioSetRequest request, CancellationToken cancellationToken)
     {
         try { var result = await movies.AddSetAsync(GetUserId(), id, request, cancellationToken); return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result); }
+        catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_SET_INVALID", exception.Message); }
+    }
+
+    [HttpPatch("sets/{setId:guid}")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> UpdateSet(Guid setId, MovieStudioSetRequest request, CancellationToken cancellationToken)
+    {
+        try { var result = await movies.UpdateSetAsync(GetUserId(), setId, request, cancellationToken); return result is null ? ApiResults.Error(this, 404, "MOVIE_SET_NOT_FOUND", "Movie set not found.") : Ok(result); }
+        catch (MovieStudioContinuityLockException exception) { return ApiResults.Error(this, 409, "MOVIE_WORLD_CONTINUITY_LOCKED", exception.Message); }
         catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_SET_INVALID", exception.Message); }
     }
 
@@ -200,6 +225,15 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieGuid
     public async Task<IActionResult> AddProp(Guid id, MovieStudioPropRequest request, CancellationToken cancellationToken)
     {
         try { var result = await movies.AddPropAsync(GetUserId(), id, request, cancellationToken); return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result); }
+        catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_PROP_INVALID", exception.Message); }
+    }
+
+    [HttpPatch("props/{propId:guid}")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> UpdateProp(Guid propId, MovieStudioPropRequest request, CancellationToken cancellationToken)
+    {
+        try { var result = await movies.UpdatePropAsync(GetUserId(), propId, request, cancellationToken); return result is null ? ApiResults.Error(this, 404, "MOVIE_PROP_NOT_FOUND", "Movie prop not found.") : Ok(result); }
+        catch (MovieStudioContinuityLockException exception) { return ApiResults.Error(this, 409, "MOVIE_WORLD_CONTINUITY_LOCKED", exception.Message); }
         catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_PROP_INVALID", exception.Message); }
     }
 

@@ -84,6 +84,28 @@ public sealed class MovieWorldTests : IClassFixture<TaslimApiFactory>
         Assert.Equal("MOVIE_WORLD_USAGE_INVALID", error.GetProperty("error").GetProperty("code").GetString());
     }
 
+    [Fact]
+    public async Task World_read_model_is_scoped_and_locked_identity_cannot_be_overwritten()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "World Lock Owner");
+        var movie = await CreateMovie(client, auth.PersonalWorkspace.Id, "World Lock Movie");
+        var location = await SendJson<MovieLocationDto>(client, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/locations", new { name = "Locked Pier", description = "The pier has one continuous geography.", visualContinuityNotes = "Keep the lighthouse on frame right." });
+
+        var world = await client.GetFromJsonAsync<JsonElement>($"/api/movie-studio/projects/{movie.Project.Id}/world");
+        Assert.Equal(movie.Project.Id, world.GetProperty("movieProjectId").GetGuid());
+        Assert.Equal("World Lock Movie", world.GetProperty("title").GetString());
+        Assert.Contains(world.GetProperty("world").GetProperty("locations").EnumerateArray(), item => item.GetProperty("id").GetGuid() == location.Id);
+        Assert.False(world.GetProperty("world").TryGetProperty("scenes", out _));
+
+        var lockRecord = await SendJson<MovieContinuityLockDto>(client, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/continuity-locks", new { entityType = "location", entityId = location.Id, fieldName = "description", lockedValue = location.Description, strength = "hard" });
+        Assert.Equal("hard", lockRecord.Strength);
+        var rejected = await SendWithCsrf(client, HttpMethod.Patch, $"/api/movie-studio/locations/{location.Id}", new { name = location.Name, description = "A changed geography that must not replace the lock.", visualContinuityNotes = location.VisualContinuityNotes, referenceAssetId = location.ReferenceAssetId });
+        Assert.Equal(HttpStatusCode.Conflict, rejected.StatusCode);
+        var error = await rejected.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("MOVIE_WORLD_CONTINUITY_LOCKED", error.GetProperty("error").GetProperty("code").GetString());
+    }
+
     private static async Task<AuthResponse> Register(HttpClient client, string displayName)
     {
         var response = await SendWithCsrf(client, HttpMethod.Post, "/api/auth/register", new { displayName, email = $"movie-world-{Guid.NewGuid():N}@example.com", password = "StrongPassword!123", preferredLanguage = "en" });
