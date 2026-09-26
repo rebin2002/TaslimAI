@@ -162,14 +162,14 @@ Mutation routes retain antiforgery/CSRF protection. Cross-workspace and cross-pr
 
 ## 12. Persistence and migration policy
 
-All ten foundations changed overlapping EF model metadata. The integrated branch preserves the approved feature migrations and adds explicit additive reconciliation migrations after the model was composed:
+All ten foundations changed overlapping EF model metadata. The integrated branch preserves the approved feature migrations and retains two reconciliation identities after the model was composed:
 
 - `20260926131600_ReconcileMovieV2Integration`
 - `20260926131800_ReconcileMovieV2CollaborationDirector`
 
-The reconciliation migrations are generated from the final `TaslimDbContext` model rather than hand-editing the generated snapshot. Their `Up` methods contain additive table/column/index operations; the destructive operations are limited to reversible `Down` methods. EF reports no pending model changes after the final migration is compiled.
+The approved feature migrations already create the relevant tables, columns, indexes, constraints, and backfills in upgrade order. The two reconciliation identities are therefore intentional no-op history markers; replaying their originally generated DDL would fail on a real upgrade with duplicate objects. The final EF snapshot remains the model authority, and EF reports no pending model changes.
 
-A real PostgreSQL database was not available in the sandbox during validation, so migration application and idempotent script execution against PostgreSQL remain deployment-time checks.
+A disposable PostgreSQL 16 database is required for the final gate. The validation must apply the complete chain from the initial migration through both reconciliation markers and inspect migration history/schema before any deployment decision.
 
 ## 13. Validation expectations
 
