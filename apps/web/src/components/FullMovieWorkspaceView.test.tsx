@@ -14,7 +14,7 @@ describe("Full Movie workspace foundation", () => {
   });
 
   it("uses durable project routes and marks future surfaces honestly", () => {
-    expect(workspaceSource).toContain("/create/movie/${project.id}/${item.slug}");
+    expect(workspaceSource).toContain("/create/movie/${workspace.id}/${item.slug}");
     expect(workspaceSource).toContain("Foundation surface");
     expect(workspaceSource).toContain("No generated footage yet");
     expect(workspaceSource).toContain("Team controls are not connected yet");
@@ -25,6 +25,16 @@ describe("Full Movie workspace foundation", () => {
     expect(workspaceSource).toContain("Production path");
     expect(workspaceSource).toContain("Kept separate by source");
     expect(workspaceSource).toContain("No inferred completion");
+  });
+
+  it("keeps Story focused on revisions, provenance, and typed screenplay elements", () => {
+    expect(workspaceSource).toContain('const storySections: StorySection[] = ["Premise", "Logline", "Synopsis", "Treatment", "Screenplay"]');
+    expect(workspaceSource).toContain("api.getMovieStory(projectId)");
+    expect(workspaceSource).toContain("MovieStoryRevisionInput");
+    expect(workspaceSource).toContain("AiSuggested");
+    expect(workspaceSource).toContain("Approved screenplay");
+    expect(workspaceSource).toContain("Structured pages");
+    expect(workspaceSource).toContain("projectShell");
   });
 
   it("keeps Quick Movie on a separate compact result path", () => {

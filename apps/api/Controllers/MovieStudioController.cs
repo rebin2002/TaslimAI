@@ -42,6 +42,13 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieGuid
         return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result);
     }
 
+    [HttpGet("projects/{id:guid}/shell")]
+    public async Task<IActionResult> GetShell(Guid id, CancellationToken cancellationToken)
+    {
+        var result = await movies.GetShellAsync(GetUserId(), id, cancellationToken);
+        return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result);
+    }
+
     [HttpPatch("projects/{id:guid}/guide")]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> UpdateGuide(Guid id, MovieStudioGuideRequest request, CancellationToken cancellationToken)
@@ -316,6 +323,21 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieGuid
             return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : CreatedAtAction(nameof(GetStoryRevision), new { movieProjectId, revisionId = result.CurrentRevisionId }, result);
         }
         catch (MovieStoryValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_STORY_INVALID", exception.Message); }
+        catch (MovieCollaborationForbiddenException) { return Forbid(); }
+    }
+
+    [HttpPatch("projects/{movieProjectId:guid}/story/revisions/{revisionId:guid}")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> UpdateStoryDraft(Guid movieProjectId, Guid revisionId, MovieStoryRevisionRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await stories.UpdateDraftAsync(GetUserId(), movieProjectId, revisionId, request, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_STORY_REVISION_NOT_FOUND", "Movie story revision not found.") : Ok(result);
+        }
+        catch (MovieStoryValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_STORY_INVALID", exception.Message); }
+        catch (MovieStoryWorkflowException exception) { return ApiResults.Error(this, 409, exception.Code, exception.Message); }
+        catch (MovieCollaborationForbiddenException) { return Forbid(); }
     }
 
     [HttpGet("projects/{movieProjectId:guid}/story/revisions/{revisionId:guid}")]
@@ -349,6 +371,7 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieGuid
             return result is null ? ApiResults.Error(this, 404, notFoundCode, "Movie story revision not found.") : Ok(result);
         }
         catch (MovieStoryWorkflowException exception) { return ApiResults.Error(this, 409, exception.Code, exception.Message); }
+        catch (MovieCollaborationForbiddenException) { return Forbid(); }
     }
 
     private Guid GetUserId() => Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier) ?? throw new InvalidOperationException("Authenticated user identifier is missing."));
