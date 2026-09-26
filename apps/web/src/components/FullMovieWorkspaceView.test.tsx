@@ -55,6 +55,15 @@ describe("Full Movie workspace foundation", () => {
     expect(workspaceSource).toContain("api.reorderMovieEntity(\"scenes\"");
   });
 
+  it("keeps shot planning scene-scoped, explainable, and non-generating", () => {
+    expect(workspaceSource).toContain("api.getMovieSceneShotPlan(scene.id)");
+    expect(workspaceSource).toContain("api.addMovieShot(scene.id, input)");
+    expect(workspaceSource).toContain("api.reorderMovieShot(shotId, sequence)");
+    expect(workspaceSource).toContain("api.archiveMovieShot(shotId)");
+    expect(workspaceSource).toContain("creating a shot never starts generation");
+    expect(workspaceSource).toContain("shot.readiness.summary");
+  });
+
   it("keeps Quick Movie on a separate compact result path", () => {
     expect(createSource).toContain('mode === "Full"');
     expect(createSource).toContain('router.push(`/create/movie/${result.project.id}/overview`)');
