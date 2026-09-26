@@ -28,6 +28,7 @@ public static class MovieProductionVersionStatuses
     public const string PendingApproval = "PendingApproval";
     public const string Approved = "Approved";
     public const string Rejected = "Rejected";
+    public const string ReviewRequired = "ReviewRequired";
     public const string Selected = "Selected";
 }
 
@@ -71,6 +72,7 @@ public sealed class MovieProductionVersion
     public DateTime? ReviewedAt { get; set; }
     public MovieShot MovieShot { get; set; } = null!;
     public MovieProductionVersion? SourceVersion { get; set; }
+    public MovieTake? ResultingTake { get; set; }
     public GenerationJob? GenerationJob { get; set; }
     public Asset? Asset { get; set; }
     public Asset? FirstFrameAsset { get; set; }
@@ -156,7 +158,7 @@ public static class MovieProductionWorkflow
 
     public static string? ValidateReview(string stage, string status)
     {
-        if (status is not (MovieProductionVersionStatuses.PendingApproval or MovieProductionVersionStatuses.Rejected))
+        if (status is not (MovieProductionVersionStatuses.PendingApproval or MovieProductionVersionStatuses.Rejected or MovieProductionVersionStatuses.ReviewRequired))
             return "Only pending or rejected versions can be reviewed.";
         return ApprovalResult(stage) is null ? "This version cannot be approved at its current stage." : null;
     }
@@ -228,7 +230,8 @@ public sealed record MovieShotProductionDto(
     IReadOnlyList<MovieProductionVersionDto> Versions,
     IReadOnlyList<MovieProductionStageTransitionDto> Transitions,
     MovieWorldContinuitySnapshotDto? WorldContinuity = null,
-    IReadOnlyList<MovieV2TakeDto> Takes = null!);
+    IReadOnlyList<MovieV2TakeDto> Takes = null!,
+    IReadOnlyList<MovieRegenerationRequestDto> RegenerationRequests = null!);
 
 public sealed record MovieStoryboardCandidateDto(
     Guid Id,

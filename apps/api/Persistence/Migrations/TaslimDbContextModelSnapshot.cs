@@ -3868,6 +3868,107 @@ namespace Taslim.Api.Persistence.Migrations
                     b.ToTable("MovieProps");
                 });
 
+            modelBuilder.Entity("Taslim.Api.Movies.MovieRegenerationRequest", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("ActionType")
+                        .IsRequired()
+                        .HasMaxLength(80)
+                        .HasColumnType("character varying(80)");
+
+                    b.Property<string>("ChangedInputsJson")
+                        .IsRequired()
+                        .HasMaxLength(20000)
+                        .HasColumnType("character varying(20000)");
+
+                    b.Property<string>("CompositionJson")
+                        .IsRequired()
+                        .HasMaxLength(20000)
+                        .HasColumnType("character varying(20000)");
+
+                    b.Property<DateTime?>("ConfirmedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid?>("ConfirmedByUserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("CostEstimateJson")
+                        .HasMaxLength(20000)
+                        .HasColumnType("character varying(20000)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("CreatedByUserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<bool>("EstimatedProviderCostKnown")
+                        .HasColumnType("boolean");
+
+                    b.Property<decimal?>("EstimatedProviderCostUsd")
+                        .HasPrecision(18, 8)
+                        .HasColumnType("numeric(18,8)");
+
+                    b.Property<Guid?>("GenerationJobId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("MovieShotId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Reason")
+                        .IsRequired()
+                        .HasMaxLength(2000)
+                        .HasColumnType("character varying(2000)");
+
+                    b.Property<string>("RequestedStage")
+                        .IsRequired()
+                        .HasMaxLength(40)
+                        .HasColumnType("character varying(40)");
+
+                    b.Property<Guid?>("ResultingProductionVersionId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("ResultingTakeId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("SourceVersionId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(40)
+                        .HasColumnType("character varying(40)");
+
+                    b.Property<Guid>("TargetId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("TargetType")
+                        .IsRequired()
+                        .HasMaxLength(40)
+                        .HasColumnType("character varying(40)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ConfirmedByUserId");
+
+                    b.HasIndex("CreatedByUserId");
+
+                    b.HasIndex("GenerationJobId");
+
+                    b.HasIndex("ResultingProductionVersionId");
+
+                    b.HasIndex("ResultingTakeId");
+
+                    b.HasIndex("SourceVersionId");
+
+                    b.HasIndex("MovieShotId", "CreatedAt");
+
+                    b.ToTable("MovieRegenerationRequests");
+                });
+
             modelBuilder.Entity("Taslim.Api.Movies.MovieReview", b =>
                 {
                     b.Property<Guid>("Id")
@@ -4551,6 +4652,9 @@ namespace Taslim.Api.Persistence.Migrations
                     b.Property<Guid?>("MovieClipId")
                         .HasColumnType("uuid");
 
+                    b.Property<Guid?>("MovieProductionVersionId")
+                        .HasColumnType("uuid");
+
                     b.Property<Guid>("MovieShotId")
                         .HasColumnType("uuid");
 
@@ -4597,6 +4701,9 @@ namespace Taslim.Api.Persistence.Migrations
                     b.HasIndex("GenerationJobId");
 
                     b.HasIndex("MovieClipId");
+
+                    b.HasIndex("MovieProductionVersionId")
+                        .IsUnique();
 
                     b.HasIndex("MovieShotId", "Status");
 
@@ -6261,6 +6368,60 @@ namespace Taslim.Api.Persistence.Migrations
                     b.Navigation("ReferenceAsset");
                 });
 
+            modelBuilder.Entity("Taslim.Api.Movies.MovieRegenerationRequest", b =>
+                {
+                    b.HasOne("Taslim.Api.Domain.ApplicationUser", "ConfirmedByUser")
+                        .WithMany()
+                        .HasForeignKey("ConfirmedByUserId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("Taslim.Api.Domain.ApplicationUser", "CreatedByUser")
+                        .WithMany()
+                        .HasForeignKey("CreatedByUserId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("Taslim.Api.Domain.GenerationJob", "GenerationJob")
+                        .WithMany()
+                        .HasForeignKey("GenerationJobId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.HasOne("Taslim.Api.Movies.MovieShot", "MovieShot")
+                        .WithMany("RegenerationRequests")
+                        .HasForeignKey("MovieShotId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("Taslim.Api.Movies.MovieProductionVersion", "ResultingProductionVersion")
+                        .WithMany()
+                        .HasForeignKey("ResultingProductionVersionId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.HasOne("Taslim.Api.Movies.MovieTake", "ResultingTake")
+                        .WithMany()
+                        .HasForeignKey("ResultingTakeId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.HasOne("Taslim.Api.Movies.MovieProductionVersion", "SourceVersion")
+                        .WithMany()
+                        .HasForeignKey("SourceVersionId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.Navigation("ConfirmedByUser");
+
+                    b.Navigation("CreatedByUser");
+
+                    b.Navigation("GenerationJob");
+
+                    b.Navigation("MovieShot");
+
+                    b.Navigation("ResultingProductionVersion");
+
+                    b.Navigation("ResultingTake");
+
+                    b.Navigation("SourceVersion");
+                });
+
             modelBuilder.Entity("Taslim.Api.Movies.MovieReview", b =>
                 {
                     b.HasOne("Taslim.Api.Movies.MovieProject", "MovieProject")
@@ -6453,6 +6614,11 @@ namespace Taslim.Api.Persistence.Migrations
                         .HasForeignKey("MovieClipId")
                         .OnDelete(DeleteBehavior.SetNull);
 
+                    b.HasOne("Taslim.Api.Movies.MovieProductionVersion", "MovieProductionVersion")
+                        .WithOne("ResultingTake")
+                        .HasForeignKey("Taslim.Api.Movies.MovieTake", "MovieProductionVersionId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
                     b.HasOne("Taslim.Api.Movies.MovieShot", "MovieShot")
                         .WithMany("Takes")
                         .HasForeignKey("MovieShotId")
@@ -6464,6 +6630,8 @@ namespace Taslim.Api.Persistence.Migrations
                     b.Navigation("GenerationJob");
 
                     b.Navigation("MovieClip");
+
+                    b.Navigation("MovieProductionVersion");
 
                     b.Navigation("MovieShot");
                 });
@@ -6782,6 +6950,8 @@ namespace Taslim.Api.Persistence.Migrations
                 {
                     b.Navigation("AssetReferences");
 
+                    b.Navigation("ResultingTake");
+
                     b.Navigation("Transitions");
                 });
 
@@ -6854,6 +7024,8 @@ namespace Taslim.Api.Persistence.Migrations
                     b.Navigation("ProductionTransitions");
 
                     b.Navigation("ProductionVersions");
+
+                    b.Navigation("RegenerationRequests");
 
                     b.Navigation("Takes");
                 });

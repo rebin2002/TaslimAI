@@ -5,6 +5,7 @@ using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
 using Taslim.Api.Generation;
 using Taslim.Api.Persistence;
+using Taslim.Api.Usage;
 
 namespace Taslim.Api.Movies;
 
@@ -42,6 +43,9 @@ public interface IMovieStudioService
     Task<MovieShotProductionDto?> GetShotProductionAsync(Guid userId, Guid shotId, CancellationToken cancellationToken);
     Task<MovieProductionVersionDto?> CreateProductionVersionAsync(Guid userId, Guid shotId, MovieProductionVersionRequest request, CancellationToken cancellationToken);
     Task<MovieProductionVersionDto?> ReviewProductionVersionAsync(Guid userId, Guid versionId, MovieProductionReviewRequest request, CancellationToken cancellationToken);
+    Task<MovieSelectiveRegenerationResponse?> CreateRegenerationRequestAsync(Guid userId, Guid shotId, MovieRegenerationRequestInput request, CancellationToken cancellationToken);
+    Task<MovieSelectiveRegenerationResponse?> ConfirmRegenerationAsync(Guid userId, Guid requestId, MovieRegenerationConfirmationRequest request, CancellationToken cancellationToken, string? idempotencyKey = null);
+    Task<MovieSelectiveRegenerationResponse?> GetRegenerationRequestAsync(Guid userId, Guid requestId, CancellationToken cancellationToken);
     Task<MovieProductionVersionDto?> CreateMotionPreviewAsync(Guid userId, Guid shotId, MovieProductionMotionPreviewRequest request, CancellationToken cancellationToken);
     Task<MovieProductionRenderResponse?> QueueProductionRenderAsync(Guid userId, Guid shotId, MovieProductionRenderRequest request, CancellationToken cancellationToken, string? idempotencyKey = null);
     Task<MovieV2TakeDto?> CreateTakeFromProductionAsync(Guid userId, Guid versionId, MovieProductionTakeRequest request, CancellationToken cancellationToken);
@@ -792,6 +796,168 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         return MovieProductionProjection.ToTakeDto(take);
     }
 
+    public async Task<MovieSelectiveRegenerationResponse?> CreateRegenerationRequestAsync(Guid userId, Guid shotId, MovieRegenerationRequestInput request, CancellationToken cancellationToken)
+    {
+        var shot = await db.MovieShots.Include(item => item.Scene).ThenInclude(item => item.MovieProject).Include(item => item.ProductionVersions).ThenInclude(item => item.ResultingTake)
+            .FirstOrDefaultAsync(item => item.Id == shotId, cancellationToken);
+        if (shot is null || !await collaboration.HasPermissionAsync(userId, shot.Scene.MovieProjectId, MoviePermissions.Generate, cancellationToken)) return null;
+        ValidateRegenerationRequest(request);
+
+        MovieProductionVersion? source = null;
+        if (request.SourceVersionId.HasValue)
+        {
+            source = shot.ProductionVersions.FirstOrDefault(item => item.Id == request.SourceVersionId.Value);
+            if (source is null) throw new MovieProductionValidationException("PRODUCTION_SOURCE_NOT_FOUND", "The source version does not belong to this shot.");
+        }
+        var workflowError = MovieProductionWorkflow.ValidateVersionCreation(request.RequestedStage.Trim(), source);
+        if (workflowError is not null) throw new MovieProductionValidationException("PRODUCTION_STAGE_INVALID", workflowError);
+
+        var durationSeconds = Math.Clamp(shot.DurationSeconds ?? shot.Scene.DurationSeconds ?? Math.Min(shot.Scene.MovieProject.DurationSeconds, 60), 1, 3600);
+        var estimate = request.InternalCostEstimate
+            ?? (request.EstimatedProviderCostUsd.HasValue
+                ? new GenerationCostEstimate(true, Math.Max(0m, request.EstimatedProviderCostUsd.Value), UsageCurrencies.Usd, null, null, null, [])
+                : costEstimator.Estimate(new GenerationCostEstimationRequest(provider.Key, VideoDurationSeconds: durationSeconds)));
+        var now = DateTime.UtcNow;
+        var regeneration = new MovieRegenerationRequest
+        {
+            Id = Guid.NewGuid(), MovieShotId = shotId, TargetId = shotId, ActionType = request.ActionType.Trim().ToLowerInvariant(),
+            RequestedStage = request.RequestedStage.Trim(), Reason = request.Reason.Trim(), SourceVersionId = source?.Id,
+            ChangedInputsJson = request.ChangedInputsJson.Trim(), CompositionJson = request.CompositionJson.Trim(),
+            EstimatedProviderCostUsd = estimate.AmountUsd, EstimatedProviderCostKnown = estimate.IsKnown && estimate.AmountUsd.HasValue,
+            CostEstimateJson = estimate.ToJson(), Status = MovieRegenerationStatuses.PendingConfirmation, CreatedByUserId = userId, CreatedAt = now,
+        };
+        db.MovieRegenerationRequests.Add(regeneration);
+        await db.SaveChangesAsync(cancellationToken);
+        return await GetRegenerationRequestAsync(userId, regeneration.Id, cancellationToken);
+    }
+
+    public async Task<MovieSelectiveRegenerationResponse?> ConfirmRegenerationAsync(Guid userId, Guid requestId, MovieRegenerationConfirmationRequest request, CancellationToken cancellationToken, string? idempotencyKey = null)
+    {
+        var regeneration = await RegenerationQuery().FirstOrDefaultAsync(item => item.Id == requestId, cancellationToken);
+        if (regeneration is null || !await collaboration.HasPermissionAsync(userId, regeneration.MovieShot.Scene.MovieProjectId, MoviePermissions.Generate, cancellationToken)) return null;
+        if (regeneration.Status == MovieRegenerationStatuses.Confirmed) return ToSelectiveResponse(regeneration);
+        if (!request.Confirm) throw new MovieProductionValidationException("REGENERATION_CONFIRMATION_REQUIRED", "Explicit confirmation is required before queuing selective regeneration.");
+
+        var shot = regeneration.MovieShot;
+        var movie = shot.Scene.MovieProject;
+        var source = regeneration.SourceVersionId.HasValue ? await db.MovieProductionVersions.FirstOrDefaultAsync(item => item.Id == regeneration.SourceVersionId.Value && item.MovieShotId == shot.Id, cancellationToken) : null;
+        var workflowError = MovieProductionWorkflow.ValidateVersionCreation(regeneration.RequestedStage, source);
+        if (workflowError is not null) throw new MovieProductionValidationException("PRODUCTION_STAGE_INVALID", workflowError);
+        var now = DateTime.UtcNow;
+        var clip = new MovieClip
+        {
+            Id = Guid.NewGuid(), MovieProjectId = movie.Id, MovieSceneId = shot.Scene.Id, MovieShotId = shot.Id,
+            Status = MovieClipStatuses.Queued, DurationSeconds = Math.Clamp(shot.DurationSeconds ?? shot.Scene.DurationSeconds ?? Math.Min(movie.DurationSeconds, 60), 1, 3600),
+            ContinuitySnapshotJson = await ContinuitySnapshotAsync(movie.Id, movie.Guide, cancellationToken), CreatedAt = now, UpdatedAt = now,
+        };
+        db.MovieClips.Add(clip);
+        await db.SaveChangesAsync(cancellationToken);
+
+        var job = await jobs.CreateAsync(userId, new CreateGenerationJobRequest
+        {
+            WorkspaceId = movie.WorkspaceId, ProjectId = movie.ProjectId, JobType = GenerationJobTypes.MovieClipGenerate,
+            Title = $"Selective {regeneration.ActionType} for {movie.Title}", EstimatedProviderCostUsd = regeneration.EstimatedProviderCostUsd,
+            InternalCostEstimate = ParseCostEstimate(regeneration.CostEstimateJson),
+            InputJson = JsonSerializer.Serialize(new MovieGenerationInput(
+                MovieStudioOperations.SceneClip, movie.Id, clip.Id, shot.Scene.Id, shot.Id, shot.Description, clip.DurationSeconds!.Value,
+                movie.AspectRatio, movie.Style, movie.Language, movie.AdditionalInstructions, clip.ContinuitySnapshotJson,
+                SceneSnapshot(shot.Scene), ShotSnapshot(shot), WorldContextJson: await WorldContextSnapshotAsync(movie.Id, shot.Scene.Id, shot.Id, cancellationToken),
+                SelectiveRegenerationId: regeneration.Id, SourceProductionVersionId: source?.Id, ChangedInputsJson: regeneration.ChangedInputsJson,
+                SelectiveActionType: regeneration.ActionType, SelectiveReason: regeneration.Reason)),
+        }, cancellationToken, idempotencyKey);
+        clip.GenerationJobId = job.Id;
+
+        var version = new MovieProductionVersion
+        {
+            Id = Guid.NewGuid(), MovieShotId = shot.Id, VersionNumber = (shot.ProductionVersions.Count == 0 ? 0 : shot.ProductionVersions.Max(item => item.VersionNumber)) + 1,
+            Stage = regeneration.RequestedStage, Status = MovieProductionVersionStatuses.PendingApproval,
+            Label = $"Selective {regeneration.ActionType}", CompositionJson = regeneration.CompositionJson,
+            RegenerationMetadataJson = JsonSerializer.Serialize(new { regeneration.Id, target = new { regeneration.TargetType, regeneration.TargetId }, regeneration.ActionType, regeneration.Reason, regeneration.ChangedInputsJson, providerBoundary = "shot_clip_replacement_only" }),
+            StageProvenanceJson = JsonSerializer.Serialize(new { sourceVersionId = source?.Id, generationJobId = job.Id, operation = MovieStudioOperations.SceneClip, providerBoundary = "No pixel-level or object-level editing; the provider receives a complete shot clip request." }),
+            SourceVersionId = source?.Id, GenerationJobId = job.Id, CreatedByUserId = userId, CreatedAt = now, UpdatedAt = now,
+        };
+        var take = new MovieTake
+        {
+            Id = Guid.NewGuid(), MovieShotId = shot.Id, VersionNumber = (await db.MovieTakes.Where(item => item.MovieShotId == shot.Id).MaxAsync(item => (int?)item.VersionNumber, cancellationToken) ?? 0) + 1,
+            Label = $"Selective {regeneration.ActionType}", Status = MovieTakeStatuses.Generating, QualityLevel = movie.QualityLevel,
+            AutoDirectorEnabled = movie.AutoDirectorEnabled, MovieClipId = clip.Id, GenerationJobId = job.Id, MovieProductionVersionId = version.Id,
+            CreatedAt = now, UpdatedAt = now,
+        };
+        version.ResultingTake = take;
+        InvalidateDownstream(regeneration, shot, version, userId, now);
+        db.MovieProductionVersions.Add(version);
+        db.MovieTakes.Add(take);
+        regeneration.Status = MovieRegenerationStatuses.Confirmed;
+        regeneration.ConfirmedByUserId = userId;
+        regeneration.ConfirmedAt = now;
+        regeneration.GenerationJobId = job.Id;
+        regeneration.ResultingProductionVersionId = version.Id;
+        regeneration.ResultingTakeId = take.Id;
+        shot.ProductionStage = regeneration.RequestedStage;
+        shot.UpdatedAt = now;
+        await db.SaveChangesAsync(cancellationToken);
+        return await GetRegenerationRequestAsync(userId, requestId, cancellationToken);
+    }
+
+    public async Task<MovieSelectiveRegenerationResponse?> GetRegenerationRequestAsync(Guid userId, Guid requestId, CancellationToken cancellationToken)
+    {
+        var regeneration = await RegenerationQuery().AsNoTracking().FirstOrDefaultAsync(item => item.Id == requestId, cancellationToken);
+        if (regeneration is null || !await access.IsMemberAsync(userId, regeneration.MovieShot.Scene.MovieProject.WorkspaceId, cancellationToken)) return null;
+        return ToSelectiveResponse(regeneration);
+    }
+
+    private static void ValidateRegenerationRequest(MovieRegenerationRequestInput request)
+    {
+        if (MovieRegenerationWorkflow.ValidateAction(request.ActionType.Trim(), request.RequestedStage.Trim()) is { } error)
+            throw new MovieProductionValidationException("REGENERATION_ACTION_INVALID", error);
+        if (!request.SourceVersionId.HasValue)
+            throw new MovieProductionValidationException("REGENERATION_SOURCE_REQUIRED", "Every selective regeneration must identify its source production version.");
+        if (string.IsNullOrWhiteSpace(request.Reason) || request.Reason.Trim().Length > 2_000)
+            throw new MovieProductionValidationException("REGENERATION_REASON_INVALID", "A regeneration reason between 1 and 2,000 characters is required.");
+        if (string.IsNullOrWhiteSpace(request.ChangedInputsJson) || request.ChangedInputsJson.Length > 20_000 || !MovieRegenerationWorkflow.IsJsonObject(request.ChangedInputsJson) || !MovieRegenerationWorkflow.HasChangedInputs(request.ChangedInputsJson))
+            throw new MovieProductionValidationException("REGENERATION_CHANGED_INPUTS_INVALID", "ChangedInputsJson must be a non-empty JSON object.");
+        if (string.IsNullOrWhiteSpace(request.CompositionJson) || request.CompositionJson.Length > 20_000 || !MovieRegenerationWorkflow.IsJsonObject(request.CompositionJson))
+            throw new MovieProductionValidationException("PRODUCTION_COMPOSITION_INVALID", "CompositionJson must be a JSON object of 20,000 characters or fewer.");
+    }
+
+    private void InvalidateDownstream(MovieRegenerationRequest regeneration, MovieShot shot, MovieProductionVersion newVersion, Guid userId, DateTime now)
+    {
+        var threshold = StageRank(regeneration.RequestedStage);
+        foreach (var version in shot.ProductionVersions.Where(item => item.Id != newVersion.Id && StageRank(item.Stage) > threshold && item.Status is MovieProductionVersionStatuses.Approved or MovieProductionVersionStatuses.Selected or MovieProductionVersionStatuses.ReviewRequired))
+        {
+            version.Status = MovieProductionVersionStatuses.ReviewRequired;
+            version.UpdatedAt = now;
+            db.MovieProductionStageTransitions.Add(new MovieProductionStageTransition
+            {
+                Id = Guid.NewGuid(), MovieShotId = shot.Id, MovieProductionVersionId = version.Id, FromStage = version.Stage, ToStage = version.Stage,
+                EventType = "invalidated", Reason = $"Upstream selective regeneration changed {regeneration.RequestedStage}.", MetadataJson = regeneration.ChangedInputsJson,
+                SourceVersionId = regeneration.SourceVersionId, GenerationJobId = regeneration.GenerationJobId, ActorUserId = userId, CreatedAt = now,
+            });
+            if (version.ResultingTake is { } take)
+            {
+                take.Status = MovieTakeStatuses.ReviewRequired;
+                take.UpdatedAt = now;
+                if (shot.SelectedTakeId == take.Id) shot.SelectedTakeId = null;
+                if (shot.FinalTakeId == take.Id) shot.FinalTakeId = null;
+            }
+        }
+    }
+
+    private IQueryable<MovieRegenerationRequest> RegenerationQuery() => db.MovieRegenerationRequests
+        .Include(item => item.MovieShot).ThenInclude(item => item.Scene).ThenInclude(item => item.MovieProject).ThenInclude(item => item.Guide)
+        .Include(item => item.MovieShot).ThenInclude(item => item.ProductionVersions).ThenInclude(item => item.ResultingTake)
+        .Include(item => item.SourceVersion)
+        .Include(item => item.GenerationJob)
+        .Include(item => item.ResultingProductionVersion).ThenInclude(item => item!.AssetReferences)
+        .Include(item => item.ResultingTake).ThenInclude(item => item!.Approvals);
+
+    private static GenerationCostEstimate? ParseCostEstimate(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return null;
+        try { return JsonSerializer.Deserialize<GenerationCostEstimate>(json); }
+        catch (JsonException) { return null; }
+    }
+
     public async Task<MovieStudioGenerationResponse?> GenerateSceneAsync(Guid userId, Guid movieProjectId, Guid sceneId, MovieStudioGenerationRequest request, CancellationToken cancellationToken, string? idempotencyKey = null)
     {
         var scene = await db.MovieScenes.Include(item => item.MovieProject).ThenInclude(item => item.Guide).FirstOrDefaultAsync(item => item.Id == sceneId && item.MovieProjectId == movieProjectId, cancellationToken);
@@ -906,7 +1072,10 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         .Include(item => item.Takes).ThenInclude(take => take.Approvals)
         .Include(item => item.Takes).ThenInclude(take => take.GenerationJob).ThenInclude(job => job!.ProviderAttempts)
         .Include(item => item.Takes).ThenInclude(take => take.GenerationJob).ThenInclude(job => job!.Assets)
-        .Include(item => item.ProductionTransitions);
+        .Include(item => item.ProductionTransitions)
+        .Include(item => item.RegenerationRequests).ThenInclude(request => request.GenerationJob)
+        .Include(item => item.RegenerationRequests).ThenInclude(request => request.ResultingProductionVersion).ThenInclude(version => version!.AssetReferences)
+        .Include(item => item.RegenerationRequests).ThenInclude(request => request.ResultingTake).ThenInclude(take => take!.Approvals);
 
     private static MovieStudioProjectDto ToDto(MovieProject movie) => new(movie.Id, movie.WorkspaceId, movie.ProjectId, movie.Mode, movie.Status, movie.Title, movie.Description, movie.DurationSeconds, movie.AspectRatio, movie.Style, movie.Language, movie.AdditionalInstructions, movie.CreatedAt, movie.UpdatedAt, new MovieGuideDto(movie.Guide.Id, movie.Guide.VisualLanguage, movie.Guide.CameraLanguage, movie.Guide.ColorAndLighting, movie.Guide.SoundAndNarration, movie.Guide.ContinuityRules, movie.Guide.UpdatedAt, movie.Guide.CurrentRevisionNumber, movie.Guide.LockedRevisionNumber, movie.Guide.LockedAt, ToCinematographyBible(movie.Guide)), movie.Scenes.OrderBy(scene => scene.Sequence).Select(scene => ToDto(scene, scene.Shots.OrderBy(shot => shot.Sequence).Select(shot => ToDto(shot, shot.Clips.Select(ToDto).ToArray())).ToArray(), scene.Clips.Where(clip => clip.MovieShotId is null).Select(ToDto).ToArray())).ToArray(), movie.Characters.OrderBy(character => character.CreatedAt).Select(ToDto).ToArray(), movie.Locations.OrderBy(location => location.CreatedAt).Select(ToDto).ToArray(), movie.Clips.Where(clip => clip.MovieSceneId is null).Select(ToDto).ToArray(), movie.Assemblies.OrderByDescending(assembly => assembly.CreatedAt).Select(ToDto).ToArray(), MovieWorld(movie));
 
@@ -1062,7 +1231,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
     }
 
     private static MovieSceneDto ToDto(MovieScene scene, IReadOnlyList<MovieShotDto> shots, IReadOnlyList<MovieClipDto> clips) => new(scene.Id, scene.Sequence, scene.Title, scene.Summary, scene.DurationSeconds, scene.ContinuityNotes, scene.Narration, scene.Dialogue, shots, clips);
-    private static MovieShotDto ToDto(MovieShot shot, IReadOnlyList<MovieClipDto> clips) => new(shot.Id, shot.Sequence, shot.Description, shot.Purpose, shot.Subjects, MovieShotReadiness.ParseSubjectCharacterIds(shot.SubjectCharacterIdsJson), shot.LocationSet, shot.DurationSeconds, shot.ProductionRequirements, shot.ContinuityReferences, shot.CameraAndFraming, shot.CameraMotion, shot.CinematographyJson, MovieShotReadiness.CinematographySummary(shot), shot.Narration, shot.Dialogue, shot.VisualContinuityNotes, shot.Status, MovieShotReadiness.PlanState(shot), MovieShotReadiness.Evaluate(shot), shot.ProductionStage, clips, shot.ProductionVersions.OrderByDescending(item => item.VersionNumber).Select(ToDto).ToArray(), shot.Takes.OrderBy(item => item.VersionNumber).Select(MovieProductionProjection.ToTakeDto).ToArray());
+    private static MovieShotDto ToDto(MovieShot shot, IReadOnlyList<MovieClipDto> clips) => new(shot.Id, shot.Sequence, shot.Description, shot.Purpose, shot.Subjects, MovieShotReadiness.ParseSubjectCharacterIds(shot.SubjectCharacterIdsJson), shot.LocationSet, shot.DurationSeconds, shot.ProductionRequirements, shot.ContinuityReferences, shot.CameraAndFraming, shot.CameraMotion, shot.CinematographyJson, MovieShotReadiness.CinematographySummary(shot), shot.Narration, shot.Dialogue, shot.VisualContinuityNotes, shot.Status, MovieShotReadiness.PlanState(shot), MovieShotReadiness.Evaluate(shot), shot.ProductionStage, clips, shot.ProductionVersions.OrderByDescending(item => item.VersionNumber).Select(ToDto).ToArray(), shot.Takes.OrderBy(item => item.VersionNumber).Select(MovieProductionProjection.ToTakeDto).ToArray(), shot.RegenerationRequests.OrderBy(item => item.CreatedAt).Select(ToRegenerationDto).ToArray());
     private static MovieSceneShotPlanDto ToShotPlanDto(MovieScene scene)
     {
         var shots = scene.Shots.OrderBy(item => item.Sequence).Select(item => ToDto(item, item.Clips.OrderBy(clip => clip.CreatedAt).Select(ToDto).ToArray())).ToArray();
@@ -1168,6 +1337,8 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         shot.CinematographyJson,
     });
 
+    private static MovieRegenerationRequestDto ToRegenerationDto(MovieRegenerationRequest request) => new(request.Id, request.MovieShotId, request.TargetType, request.TargetId, request.ActionType, request.RequestedStage, request.Reason, request.SourceVersionId, request.ChangedInputsJson, request.CompositionJson, request.Status, request.CreatedByUserId, request.ConfirmedByUserId, request.GenerationJobId, request.ResultingProductionVersionId, request.ResultingTakeId, request.CreatedAt, request.ConfirmedAt, new MovieRegenerationCostPreviewDto(request.EstimatedProviderCostUsd, request.EstimatedProviderCostKnown, UsageCurrencies.Usd, request.CostEstimateJson, true));
+    private static MovieSelectiveRegenerationResponse ToSelectiveResponse(MovieRegenerationRequest request) => new(ToRegenerationDto(request), request.GenerationJob is null ? null : GenerationJobContractMapper.ToDto(request.GenerationJob), request.ResultingProductionVersion is null ? null : ToDto(request.ResultingProductionVersion), request.ResultingTake is null ? null : MovieProductionProjection.ToTakeDto(request.ResultingTake));
     private static void AddAsset(IDictionary<Guid, string> assets, Guid? assetId, string role)
     {
         if (assetId.HasValue) assets[assetId.Value] = role;
