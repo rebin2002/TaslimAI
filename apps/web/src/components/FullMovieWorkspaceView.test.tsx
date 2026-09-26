@@ -20,6 +20,13 @@ describe("Full Movie workspace foundation", () => {
     expect(workspaceSource).toContain("Team controls are not connected yet");
   });
 
+  it("uses the bounded overview read model instead of loading the full graph", () => {
+    expect(workspaceSource).toContain("api.getMovieOverview(projectId)");
+    expect(workspaceSource).toContain("Production path");
+    expect(workspaceSource).toContain("Kept separate by source");
+    expect(workspaceSource).toContain("No inferred completion");
+  });
+
   it("keeps Quick Movie on a separate compact result path", () => {
     expect(createSource).toContain('mode === "Full"');
     expect(createSource).toContain('router.push(`/create/movie/${result.project.id}/overview`)');

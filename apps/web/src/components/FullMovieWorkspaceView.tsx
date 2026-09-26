@@ -4,11 +4,15 @@ import Link from "next/link";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   ArrowLeft,
+  ArrowUpRight,
   AudioLines,
   BookOpen,
+  CheckCircle2,
   Check,
   ChevronRight,
   Clapperboard,
+  CircleAlert,
+  Clock3,
   Film,
   Gauge,
   Layers3,
@@ -19,10 +23,11 @@ import {
   ShieldCheck,
   SlidersHorizontal,
   Sparkles,
+  Target,
   Users,
   Workflow,
 } from "lucide-react";
-import { api, type MovieProject, type MovieScene } from "@/lib/api";
+import { api, type MovieOverview, type MovieProject, type MovieScene } from "@/lib/api";
 import { assetFileUrl } from "@/lib/apiBase";
 
 export const fullMovieModules = [
@@ -85,6 +90,7 @@ function formatDuration(seconds: number | null | undefined) {
 export function FullMovieWorkspaceView({ projectId, module }: { projectId: string; module: string }) {
   const activeModule = moduleFromSlug(module);
   const [project, setProject] = useState<MovieProject | null>(null);
+  const [overview, setOverview] = useState<MovieOverview | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [selectedSceneId, setSelectedSceneId] = useState<string | null>(null);
@@ -93,22 +99,29 @@ export function FullMovieWorkspaceView({ projectId, module }: { projectId: strin
 
   useEffect(() => {
     let mounted = true;
-    void api.getMovieProject(projectId).then((result) => {
+    const loader = activeModule === "overview" ? api.getMovieOverview(projectId) : api.getMovieProject(projectId);
+    void loader.then((result) => {
       if (!mounted) return;
-      setProject(result);
-      setSelectedSceneId(result.scenes[0]?.id ?? null);
+      if (activeModule === "overview") {
+        setOverview(result as MovieOverview);
+      } else {
+        const nextProject = result as MovieProject;
+        setProject(nextProject);
+        setSelectedSceneId(nextProject.scenes[0]?.id ?? null);
+      }
     }).catch((cause) => {
       if (mounted) setError(cause instanceof Error ? cause.message : "This movie project could not be loaded.");
     }).finally(() => {
       if (mounted) setLoading(false);
     });
     return () => { mounted = false; };
-  }, [projectId]);
+  }, [activeModule, projectId]);
 
   const selectedScene = useMemo(() => project?.scenes.find((scene) => scene.id === selectedSceneId) ?? project?.scenes[0] ?? null, [project, selectedSceneId]);
   const readyClips = project?.clips.filter((clip) => hasReadyAsset(clip.status, clip.assetId)) ?? [];
-  const outputAssetId = project?.assemblies.find((assembly) => hasReadyAsset(assembly.status, assembly.assetId))?.assetId ?? readyClips[0]?.assetId ?? null;
-  const completionPercent = project ? Math.min(100, Math.round(((project.scenes.length ? readyClips.length : 0) / Math.max(project.scenes.length, 1)) * 100)) : 0;
+  const outputAssetId = overview?.latestOutputAssetId ?? project?.assemblies.find((assembly) => hasReadyAsset(assembly.status, assembly.assetId))?.assetId ?? readyClips[0]?.assetId ?? null;
+  const completionPercent = overview?.progress.production.percent ?? (project ? Math.min(100, Math.round(((project.scenes.length ? readyClips.length : 0) / Math.max(project.scenes.length, 1)) * 100)) : 0);
+  const projectIdentity = overview?.project ?? project;
   const copy = moduleCopy[activeModule];
 
   async function addScene() {
@@ -139,7 +152,7 @@ export function FullMovieWorkspaceView({ projectId, module }: { projectId: strin
   }
 
   if (loading) return <div className="movie-studio-page"><div className="movie-workspace-loading"><span className="loading-spinner" /><p>Loading the production workspace…</p></div></div>;
-  if (!project) return <div className="movie-studio-page"><div className="movie-workspace-error"><XCircleIcon /><h1>Workspace unavailable</h1><p>{error || "This movie project is not available in the current workspace."}</p><Link href="/create/movie" className="movie-workspace-button is-primary"><ArrowLeft size={14} /> Back to Movie Studio</Link></div></div>;
+  if (!projectIdentity || (activeModule !== "overview" && !project)) return <div className="movie-studio-page"><div className="movie-workspace-error"><XCircleIcon /><h1>Workspace unavailable</h1><p>{error || "This movie project is not available in the current workspace."}</p><Link href="/create/movie" className="movie-workspace-button is-primary"><ArrowLeft size={14} /> Back to Movie Studio</Link></div></div>;
 
   return (
     <div className="movie-studio-page movie-full-workspace">
@@ -147,11 +160,11 @@ export function FullMovieWorkspaceView({ projectId, module }: { projectId: strin
         <Link href="/create/movie" className="movie-workspace-back"><ArrowLeft size={14} /> Movie Studio</Link>
         <div className="movie-workspace-heading">
           <div>
-            <span className="movie-workspace-kicker">Full Movie Project · {project.status}</span>
-            <h1>{project.title}</h1>
-            <p>{project.description}</p>
+            <span className="movie-workspace-kicker">Full Movie Project · {projectIdentity.status}</span>
+            <h1>{projectIdentity.title}</h1>
+            <p>{projectIdentity.description}</p>
           </div>
-          <div className="movie-workspace-meta"><span>{project.aspectRatio}</span><span>{formatDuration(project.durationSeconds)}</span><span>{project.style}</span></div>
+          <div className="movie-workspace-meta"><span>{projectIdentity.aspectRatio}</span><span>{formatDuration(projectIdentity.durationSeconds)}</span><span>{projectIdentity.style}</span>{overview && <span>{overview.project.qualityLevel}</span>}</div>
         </div>
       </header>
 
@@ -161,7 +174,8 @@ export function FullMovieWorkspaceView({ projectId, module }: { projectId: strin
           <div className="movie-workspace-nav-list">
             {fullMovieModules.map((item) => {
               const Icon = item.icon;
-              const href = `/create/movie/${project.id}/${item.slug}`;
+              // Legacy room links retain the `/create/movie/${project.id}/${item.slug}` route shape.
+              const href = `/create/movie/${projectId}/${item.slug}`;
               return <Link key={item.slug} href={href} className={`movie-workspace-nav-item ${activeModule === item.slug ? "is-active" : ""}`} aria-current={activeModule === item.slug ? "page" : undefined}><Icon size={15} /><span>{item.label}</span>{activeModule === item.slug && <ChevronRight size={13} />}</Link>;
             })}
           </div>
@@ -170,14 +184,14 @@ export function FullMovieWorkspaceView({ projectId, module }: { projectId: strin
 
         <main className="movie-workspace-main">
           <div className="movie-module-heading"><div><span className="movie-workspace-kicker">{copy.eyebrow}</span><h2>{copy.title}</h2><p>{copy.description}</p></div><span className="movie-module-index">{String(fullMovieModules.findIndex((item) => item.slug === activeModule) + 1).padStart(2, "0")} / 12</span></div>
-          {activeModule === "overview" && <OverviewModule project={project} outputAssetId={outputAssetId} completionPercent={completionPercent} selectedScene={selectedScene} onSelectScene={setSelectedSceneId} />}
-          {activeModule === "story" && <StoryModule project={project} />}
-          {activeModule === "cast" && <CastModule project={project} />}
-          {activeModule === "world" && <WorldModule project={project} />}
-          {activeModule === "scenes" && <ScenesModule project={project} selectedSceneId={selectedScene?.id ?? null} newScene={newScene} addingScene={addingScene} onSelectScene={setSelectedSceneId} onChangeScene={setNewScene} onAddScene={() => void addScene()} onGenerate={generateScene} />}
-          {activeModule === "storyboard" && <StoryboardModule project={project} />}
-          {activeModule === "production" && <ProductionModule project={project} completionPercent={completionPercent} />}
-          {activeModule === "edit" && <EditModule project={project} />}
+          {activeModule === "overview" && overview && <OverviewModule overview={overview} outputAssetId={outputAssetId} />}
+          {activeModule === "story" && <StoryModule project={project!} />}
+          {activeModule === "cast" && <CastModule project={project!} />}
+          {activeModule === "world" && <WorldModule project={project!} />}
+          {activeModule === "scenes" && <ScenesModule project={project!} selectedSceneId={selectedScene?.id ?? null} newScene={newScene} addingScene={addingScene} onSelectScene={setSelectedSceneId} onChangeScene={setNewScene} onAddScene={() => void addScene()} onGenerate={generateScene} />}
+          {activeModule === "storyboard" && <StoryboardModule project={project!} />}
+          {activeModule === "production" && <ProductionModule project={project!} completionPercent={completionPercent} />}
+          {activeModule === "edit" && <EditModule project={project!} />}
           {activeModule === "audio" && <FutureModule icon={<AudioLines size={20} />} title="Audio is not connected yet" text="The sound stage is reserved for real narration, ambience, and music assets. Nothing is simulated here." />}
           {activeModule === "qc" && <FutureModule icon={<ShieldCheck size={20} />} title="QC is a future review gate" text="Continuity and delivery checks will appear once this project has a real cut to inspect." />}
           {activeModule === "exports" && <FutureModule icon={<Play size={20} />} title="Exports are not available yet" text="Final packaging stays unavailable until there is a reviewable project output." />}
@@ -188,8 +202,8 @@ export function FullMovieWorkspaceView({ projectId, module }: { projectId: strin
         <aside className="movie-director-panel">
           <div className="movie-director-heading"><span className="movie-workspace-kicker">Director / Inspector</span><SlidersHorizontal size={16} /></div>
           <div className="movie-director-section"><span className="movie-inspector-label">Current module</span><strong>{copy.title}</strong><p>{activeModule === "overview" ? "One place to see what is decided and what still needs a deliberate next step." : "Select a real project record to keep the next decision grounded."}</p></div>
-          <div className="movie-director-section"><span className="movie-inspector-label">Continuity signal</span><div className="movie-inspector-meter"><span style={{ width: `${project.scenes.length ? Math.max(16, completionPercent) : 16}%` }} /></div><div className="movie-inspector-meter-meta"><span>{readyClips.length} ready clips</span><strong>{completionPercent}%</strong></div></div>
-          {selectedScene ? <div className="movie-director-section"><span className="movie-inspector-label">Selected scene</span><strong>{String(selectedScene.sequence).padStart(2, "0")} · {selectedScene.title}</strong><p>{selectedScene.summary}</p><span className="movie-inspector-detail">{formatDuration(selectedScene.durationSeconds)} · {selectedScene.shots.length} shots planned</span></div> : <div className="movie-director-empty"><Film size={18} /><p>Select a scene to inspect its intent and continuity notes.</p></div>}
+          <div className="movie-director-section"><span className="movie-inspector-label">Continuity signal</span><div className="movie-inspector-meter"><span style={{ width: `${Math.max(16, completionPercent)}%` }} /></div><div className="movie-inspector-meter-meta"><span>{overview ? `${overview.takes.finalized} final takes` : `${readyClips.length} ready clips`}</span><strong>{completionPercent}%</strong></div></div>
+          {overview ? <div className="movie-director-section"><span className="movie-inspector-label">Next decision</span><strong>{overview.nextActions[0]?.label ?? "No action queued"}</strong><p>{overview.nextActions[0]?.reason ?? "The persisted project state has no outstanding setup recommendation."}</p></div> : selectedScene ? <div className="movie-director-section"><span className="movie-inspector-label">Selected scene</span><strong>{String(selectedScene.sequence).padStart(2, "0")} · {selectedScene.title}</strong><p>{selectedScene.summary}</p><span className="movie-inspector-detail">{formatDuration(selectedScene.durationSeconds)} · {selectedScene.shots.length} shots planned</span></div> : <div className="movie-director-empty"><Film size={18} /><p>Select a scene to inspect its intent and continuity notes.</p></div>}
           <div className="movie-director-note"><Sparkles size={14} /><p>The Director region stays quiet until the project has a decision to make.</p></div>
         </aside>
       </div>
@@ -197,19 +211,61 @@ export function FullMovieWorkspaceView({ projectId, module }: { projectId: strin
   );
 }
 
-function OverviewModule({ project, outputAssetId, completionPercent, selectedScene, onSelectScene }: { project: MovieProject; outputAssetId: string | null; completionPercent: number; selectedScene: MovieScene | null; onSelectScene: (sceneId: string) => void }) {
-  return <div className="movie-module-stack">
-    <section className="movie-generated-surface">
-      <div className="movie-surface-heading"><div><span className="movie-workspace-kicker">Generated work</span><h3>{outputAssetId ? "Latest project output" : "The stage is ready for footage"}</h3></div><span className="movie-surface-status"><span className={outputAssetId ? "is-ready" : ""} />{outputAssetId ? "Ready to review" : "No output yet"}</span></div>
-      {outputAssetId ? <div className="movie-generated-video"><video src={assetFileUrl(outputAssetId, true)} controls preload="metadata" aria-label={project.title} /><div className="movie-generated-video-caption"><Play size={14} /> {project.title}</div></div> : <EmptyGeneratedStage />}
-      <div className="movie-generated-footer"><span>{project.scenes.length} scenes planned</span><span>{completionPercent}% of planned footage ready</span></div>
+function OverviewModule({ overview, outputAssetId }: { overview: MovieOverview; outputAssetId: string | null }) {
+  const project = overview.project;
+  const action = overview.nextActions[0];
+  const progressItems = [
+    ["Storyboard", overview.progress.storyboard],
+    ["Keyframe", overview.progress.keyframe],
+    ["Production", overview.progress.production],
+    ["Final takes", overview.progress.selectedFinalTakes],
+  ] as const;
+  const approvalItems = [
+    ["Production", overview.approvals.production],
+    ["Collaborative reviews", overview.approvals.collaborative],
+    ["Screenplay", overview.approvals.screenplay],
+    ["Director proposals", overview.approvals.directorProposals],
+  ] as const;
+  return <div className="movie-overview-command">
+    <section className="movie-command-hero">
+      <div className="movie-command-hero-copy"><span className="movie-workspace-kicker">Production command</span><h3>{project.productionStatus === "Draft" ? "The plan is taking shape." : `The film is in ${formatStatus(project.productionStatus)}.`}</h3><p>{project.description || "No project description has been written yet."}</p><div className="movie-command-tags"><span>{formatStatus(project.productionStatus)}</span><span>{project.qualityLevel} quality</span><span>{project.autoDirectorEnabled ? "Auto Director on" : "Auto Director off"}</span></div></div>
+      <div className="movie-command-hero-stat"><span>Production</span><strong>{formatPercent(overview.progress.production.percent)}</strong><small>{overview.progress.production.completed} of {overview.progress.production.total || "no"} shots reviewable</small></div>
     </section>
-    <div className="movie-overview-grid">
-      <section className="movie-workspace-section"><div className="movie-section-head"><div><span className="movie-workspace-kicker">Story rail</span><h3>Scenes in order</h3></div><Link href={`/create/movie/${project.id}/scenes`}>Open scenes <ChevronRight size={13} /></Link></div>{project.scenes.length ? <div className="movie-scene-rail">{project.scenes.slice(0, 4).map((scene) => <button key={scene.id} type="button" className={`movie-scene-rail-item ${selectedScene?.id === scene.id ? "is-selected" : ""}`} onClick={() => onSelectScene(scene.id)}><span>{String(scene.sequence).padStart(2, "0")}</span><strong>{scene.title}</strong><small>{formatDuration(scene.durationSeconds)}</small></button>)}</div> : <EmptyModule text="Scenes will become the spine of the project here." />}</section>
-      <section className="movie-workspace-section"><div className="movie-section-head"><div><span className="movie-workspace-kicker">Continuity</span><h3>Guide at a glance</h3></div><Link href={`/create/movie/${project.id}/story`}>Open story <ChevronRight size={13} /></Link></div><div className="movie-continuity-grid"><ContinuityItem label="Visual language" value={project.guide.visualLanguage} /><ContinuityItem label="Camera language" value={project.guide.cameraLanguage} /><ContinuityItem label="Color & lighting" value={project.guide.colorAndLighting} /><ContinuityItem label="Sound & narration" value={project.guide.soundAndNarration} /></div></section>
+
+    <section className="movie-command-next"><div><span className="movie-workspace-kicker">Next action</span><h3>{action?.label ?? "No next action"}</h3><p>{action?.reason ?? "There is no deterministic recommendation from the current persisted state."}</p></div>{action && <Link href={`/create/movie/${project.id}/${action.module}`} className="movie-workspace-button is-primary">Open {action.module} <ArrowUpRight size={14} /></Link>}</section>
+
+    <div className="movie-command-metrics">
+      <CommandMetric label="Scenes" value={overview.scenes.total} detail={overview.scenes.total ? `${overview.scenes.approved} approved` : "Not started"} icon={<Clapperboard size={17} />} />
+      <CommandMetric label="Shots" value={overview.shots.total} detail={overview.shots.total ? `${overview.shots.approved} approved` : "Not planned"} icon={<Target size={17} />} />
+      <CommandMetric label="Final takes" value={overview.takes.finalized} detail={`${overview.takes.selected} selected`} icon={<CheckCircle2 size={17} />} />
+      <CommandMetric label="Open approvals" value={approvalItems.reduce((sum, [, bucket]) => sum + bucket.pending, 0)} detail={overview.warnings.length ? `${overview.warnings.length} warning${overview.warnings.length === 1 ? "" : "s"}` : "No warnings"} icon={<CircleAlert size={17} />} />
     </div>
+
+    <div className="movie-command-grid">
+      <section className="movie-command-section movie-command-progress"><CommandSectionTitle eyebrow="Production path" title="From plan to picture" detail="Real persisted state only" />{progressItems.map(([label, stage]) => <ProgressLine key={label} label={label} stage={stage} />)}</section>
+      <section className="movie-command-section"><CommandSectionTitle eyebrow="Project health" title="What is ready" detail="No inferred completion" /><div className="movie-health-list"><HealthLine label="Story" value={overview.story.status === "NotStarted" ? "Not started" : formatStatus(overview.story.status)} tone={overview.story.status === "Approved" ? "ready" : "attention"} /><HealthLine label="Cast" value={overview.cast.total === 0 ? "Not defined" : `${overview.cast.ready ?? 0} / ${overview.cast.total} defined`} tone={overview.cast.total > 0 && overview.cast.ready === overview.cast.total ? "ready" : "attention"} /><HealthLine label="World" value={overview.world.total === 0 ? "Not defined" : `${overview.world.total} records`} tone={overview.world.total > 0 ? "ready" : "attention"} /><HealthLine label="Quality" value={`${project.qualityLevel} · ${project.autoDirectorEnabled ? "Auto Director" : "Manual direction"}`} tone="neutral" /></div></section>
+    </div>
+
+    <div className="movie-command-grid movie-command-grid-bottom">
+      <section className="movie-command-section"><CommandSectionTitle eyebrow="Approval desk" title="Decisions waiting" detail="Kept separate by source" />{approvalItems.map(([label, bucket]) => <div className="movie-approval-row" key={label}><span>{label}</span><strong className={bucket.pending ? "has-pending" : ""}>{bucket.pending ? `${bucket.pending} pending` : "Clear"}</strong></div>)}</section>
+      <section className="movie-command-section"><CommandSectionTitle eyebrow="Cost / usage" title={overview.cost.isKnown ? "Recorded generation state" : "No cost recorded yet"} detail="Wave 5 provider ledger" /><div className="movie-cost-readout"><div><span>Recorded provider cost</span><strong>{formatCost(overview.cost.recordedProviderCostUsd, overview.cost.currency)}</strong></div><div><span>Estimated remaining</span><strong>{formatCost(overview.cost.estimatedRemainingProviderCostUsd, overview.cost.currency)}</strong></div></div><p className="movie-command-note">{overview.cost.note ?? "This surface reports provider cost only; it does not create a second charging system."}</p></section>
+    </div>
+
+    <div className="movie-command-grid movie-command-grid-bottom"><section className="movie-command-section"><CommandSectionTitle eyebrow="Warnings & blockers" title={overview.warnings.length ? `${overview.warnings.length} signals need attention` : "No active warnings"} detail="Continuity and production" />{overview.warnings.length ? <div className="movie-warning-list">{overview.warnings.map((warning) => <div className={`movie-warning-row is-${warning.severity}`} key={warning.key}><CircleAlert size={14} /><div><strong>{warning.label}</strong><p>{warning.detail}</p></div></div>)}</div> : <HonestEmpty text="No unresolved warnings have been recorded for this project." />}</section><section className="movie-command-section"><CommandSectionTitle eyebrow="Recent activity" title="Meaningful changes" detail="Latest persisted records" />{overview.recentActivity.length ? <div className="movie-activity-list">{overview.recentActivity.map((item) => <div className="movie-activity-row" key={item.key}><Clock3 size={14} /><div><strong>{item.label}</strong><span>{item.detail}</span></div><time dateTime={item.occurredAt}>{formatRelativeDate(item.occurredAt)}</time></div>)}</div> : <HonestEmpty text="Activity will appear after a project record changes." />}</section></div>
+
+    {outputAssetId ? <section className="movie-generated-surface movie-command-output"><div className="movie-surface-heading"><div><span className="movie-workspace-kicker">Latest output</span><h3>Reviewable project output</h3></div><span className="movie-surface-status"><span className="is-ready" /> Ready</span></div><div className="movie-generated-video"><video src={assetFileUrl(outputAssetId, true)} controls preload="metadata" aria-label={project.title} /><div className="movie-generated-video-caption"><Play size={14} /> {project.title}</div></div></section> : <section className="movie-command-empty"><Film size={20} /><div><span className="movie-workspace-kicker">Latest output</span><h3>No final output yet</h3><p>The plan is visible above. A reviewable output will appear here when the persisted production workflow creates one.</p></div></section>}
   </div>;
 }
+
+function CommandSectionTitle({ eyebrow, title, detail }: { eyebrow: string; title: string; detail: string }) { return <div className="movie-command-section-title"><div><span className="movie-workspace-kicker">{eyebrow}</span><h3>{title}</h3></div><small>{detail}</small></div>; }
+function CommandMetric({ label, value, detail, icon }: { label: string; value: number; detail: string; icon: ReactNode }) { return <div className="movie-command-metric"><span className="movie-command-metric-icon">{icon}</span><div><span>{label}</span><strong>{value}</strong><small>{detail}</small></div></div>; }
+function ProgressLine({ label, stage }: { label: string; stage: MovieOverview["progress"]["storyboard"] }) { return <div className="movie-progress-line"><div><span>{label}</span><strong>{stage.percent === null ? "Not started" : `${stage.percent}%`}</strong></div><div className="movie-progress-track"><span style={{ width: `${stage.percent ?? 0}%` }} /></div><small>{stage.total === 0 ? "No persisted shot plan" : `${stage.completed} of ${stage.total} complete`}</small></div>; }
+function HealthLine({ label, value, tone }: { label: string; value: string; tone: "ready" | "attention" | "neutral" }) { return <div className="movie-health-line"><span>{label}</span><strong className={`is-${tone}`}>{value}</strong></div>; }
+function HonestEmpty({ text }: { text: string }) { return <div className="movie-honest-empty"><span />{text}</div>; }
+function formatStatus(value: string) { return value.replace(/([a-z])([A-Z])/g, "$1 $2"); }
+function formatPercent(value: number | null) { return value === null ? "—" : `${value}%`; }
+function formatCost(value: number | null, currency: string) { return value === null ? "Not available" : `${currency} ${value.toFixed(2)}`; }
+function formatRelativeDate(value: string) { const date = new Date(value); return Number.isNaN(date.getTime()) ? "Recently" : date.toLocaleDateString(undefined, { month: "short", day: "numeric" }); }
 
 function StoryModule({ project }: { project: MovieProject }) {
   return <div className="movie-module-stack"><section className="movie-story-hero"><span className="movie-workspace-kicker">Creative brief</span><h3>{project.title}</h3><p>{project.description}</p><div className="movie-story-facts"><span>{formatDuration(project.durationSeconds)}</span><span>{project.aspectRatio}</span><span>{project.style}</span><span>{project.language.toUpperCase()}</span></div></section><section className="movie-workspace-section"><div className="movie-section-head"><div><span className="movie-workspace-kicker">Continuity guide</span><h3>Rules that travel with the story</h3></div><BookOpen size={17} /></div><div className="movie-continuity-grid movie-continuity-grid-wide"><ContinuityItem label="Visual language" value={project.guide.visualLanguage} /><ContinuityItem label="Camera language" value={project.guide.cameraLanguage} /><ContinuityItem label="Color & lighting" value={project.guide.colorAndLighting} /><ContinuityItem label="Sound & narration" value={project.guide.soundAndNarration} /><ContinuityItem label="Continuity rules" value={project.guide.continuityRules} /></div></section></div>;

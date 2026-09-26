@@ -19,6 +19,13 @@ public sealed class MovieStudioV2Controller(IMovieV2Service movies) : Controller
         return result is null ? NotFoundResult("MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result);
     });
 
+    [HttpGet("projects/{id:guid}/overview")]
+    public async Task<IActionResult> Overview(Guid id, CancellationToken cancellationToken) => await Execute(async () =>
+    {
+        var result = await movies.GetOverviewAsync(UserId(), id, cancellationToken);
+        return result is null ? NotFoundResult("MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result);
+    });
+
     [HttpPost("projects/{id:guid}/acts")]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> AddAct(Guid id, MovieV2ActRequest request, CancellationToken cancellationToken) => await Execute(async () =>

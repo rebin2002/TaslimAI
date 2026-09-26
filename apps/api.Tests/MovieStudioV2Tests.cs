@@ -79,6 +79,27 @@ public sealed class MovieStudioV2Tests
         Assert.Null(await service.AddTakeAsync(outsiderId, shotId, new MovieV2TakeRequest(), CancellationToken.None));
     }
 
+    [Fact]
+    public async Task Overview_returns_bounded_progress_actions_and_warnings_without_crossing_workspace_scope()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        var (userId, movieId, _) = await SeedAsync(db);
+        var service = new MovieV2Service(db, new WorkspaceAccessService(db));
+
+        var overview = await service.GetOverviewAsync(userId, movieId, CancellationToken.None);
+
+        Assert.NotNull(overview);
+        Assert.Equal(1, overview!.Scenes.Total);
+        Assert.Equal(1, overview.Shots.Total);
+        Assert.Equal(0, overview.Progress.Production.Completed);
+        Assert.Equal("Complete Story", overview.NextActions[0].Label);
+        Assert.Contains(overview.Warnings, item => item.Key == "story-not-approved");
+        Assert.Contains(overview.RecentActivity, item => item.Module == "scenes");
+        Assert.Null(await service.GetOverviewAsync(Guid.NewGuid(), movieId, CancellationToken.None));
+    }
+
     private static TaslimDbContext CreateDb(SqliteConnection connection) => new(new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connection).Options);
 
     private static async Task<(Guid UserId, Guid MovieId, Guid ShotId)> SeedAsync(TaslimDbContext db)
