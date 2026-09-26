@@ -1,8 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import {
+  AlertCircle,
   ArrowLeft,
   AudioLines,
   BookOpen,
@@ -16,6 +17,7 @@ import {
   Map,
   PencilRuler,
   Play,
+  RefreshCw,
   ShieldCheck,
   SlidersHorizontal,
   Sparkles,
@@ -39,6 +41,8 @@ export const fullMovieModules = [
   { slug: "exports", label: "Exports", icon: Play },
   { slug: "team", label: "Team", icon: Users },
 ] as const;
+
+const futureModules = new Set<ModuleSlug>(["audio", "qc", "exports", "team"]);
 
 type ModuleSlug = (typeof fullMovieModules)[number]["slug"];
 
@@ -91,6 +95,22 @@ export function FullMovieWorkspaceView({ projectId, module }: { projectId: strin
   const [newScene, setNewScene] = useState({ title: "", summary: "" });
   const [addingScene, setAddingScene] = useState(false);
 
+  const loadProject = useCallback(() => {
+    setLoading(true);
+    setError("");
+    let mounted = true;
+    void api.getMovieProject(projectId).then((result) => {
+      if (!mounted) return;
+      setProject(result);
+      setSelectedSceneId(result.scenes[0]?.id ?? null);
+    }).catch((cause) => {
+      if (mounted) setError(cause instanceof Error ? cause.message : "This movie project could not be loaded.");
+    }).finally(() => {
+      if (mounted) setLoading(false);
+    });
+    return () => { mounted = false; };
+  }, [projectId]);
+
   useEffect(() => {
     let mounted = true;
     void api.getMovieProject(projectId).then((result) => {
@@ -138,8 +158,8 @@ export function FullMovieWorkspaceView({ projectId, module }: { projectId: strin
     }
   }
 
-  if (loading) return <div className="movie-studio-page"><div className="movie-workspace-loading"><span className="loading-spinner" /><p>Loading the production workspace…</p></div></div>;
-  if (!project) return <div className="movie-studio-page"><div className="movie-workspace-error"><XCircleIcon /><h1>Workspace unavailable</h1><p>{error || "This movie project is not available in the current workspace."}</p><Link href="/create/movie" className="movie-workspace-button is-primary"><ArrowLeft size={14} /> Back to Movie Studio</Link></div></div>;
+  if (loading) return <WorkspaceSkeleton />;
+  if (!project) return <div className="movie-studio-page movie-full-workspace"><div className="movie-workspace-error" role="alert"><XCircleIcon /><h1>Workspace unavailable</h1><p>{error || "This movie project is not available in the current workspace."}</p><div className="movie-workspace-error-actions"><button type="button" className="movie-workspace-button is-primary" onClick={loadProject}><RefreshCw size={14} /> Try again</button><Link href="/create/movie" className="movie-workspace-button is-secondary"><ArrowLeft size={14} /> Back to Movie Studio</Link></div></div></div>;
 
   return (
     <div className="movie-studio-page movie-full-workspace">
@@ -162,7 +182,8 @@ export function FullMovieWorkspaceView({ projectId, module }: { projectId: strin
             {fullMovieModules.map((item) => {
               const Icon = item.icon;
               const href = `/create/movie/${project.id}/${item.slug}`;
-              return <Link key={item.slug} href={href} className={`movie-workspace-nav-item ${activeModule === item.slug ? "is-active" : ""}`} aria-current={activeModule === item.slug ? "page" : undefined}><Icon size={15} /><span>{item.label}</span>{activeModule === item.slug && <ChevronRight size={13} />}</Link>;
+              const isFuture = futureModules.has(item.slug);
+              return <Link key={item.slug} href={href} aria-label={item.label} className={`movie-workspace-nav-item ${activeModule === item.slug ? "is-active" : ""}`} aria-current={activeModule === item.slug ? "page" : undefined} data-module-state={isFuture ? "foundation" : "operational"}><Icon size={15} /><span>{item.label}</span>{isFuture && <span className="movie-nav-state" aria-hidden="true">Soon</span>}{activeModule === item.slug && <ChevronRight size={13} />}</Link>;
             })}
           </div>
           <div className="movie-workspace-nav-foot"><span className="movie-live-dot" /> <span>Plan saved locally to this project</span></div>
@@ -182,7 +203,7 @@ export function FullMovieWorkspaceView({ projectId, module }: { projectId: strin
           {activeModule === "qc" && <FutureModule icon={<ShieldCheck size={20} />} title="QC is a future review gate" text="Continuity and delivery checks will appear once this project has a real cut to inspect." />}
           {activeModule === "exports" && <FutureModule icon={<Play size={20} />} title="Exports are not available yet" text="Final packaging stays unavailable until there is a reviewable project output." />}
           {activeModule === "team" && <FutureModule icon={<Users size={20} />} title="Team controls are not connected yet" text="This route is reserved for shared roles, review notes, and permissions. No access controls are implied by this shell." />}
-          {error && <div className="movie-workspace-error-inline"><XCircleIcon /> {error}</div>}
+          {error && <div className="movie-workspace-error-inline" role="alert"><AlertCircle size={15} aria-hidden="true" /><span>{error}</span><button type="button" onClick={loadProject}><RefreshCw size={12} /> Retry</button></div>}
         </main>
 
         <aside className="movie-director-panel">
@@ -269,6 +290,13 @@ function ModuleIntro({ icon, title, text }: { icon: ReactNode; title: string; te
 
 function EmptyGeneratedStage({ title = "No generated footage yet", text = "The plan is saved. Real scene output will appear here when it exists." }: { title?: string; text?: string }) {
   return <div className="movie-generated-empty"><div className="movie-empty-orbit"><Film size={25} /></div><h4>{title}</h4><p>{text}</p></div>;
+}
+
+function WorkspaceSkeleton() {
+  return <div className="movie-studio-page movie-full-workspace" aria-busy="true" aria-label="Loading movie workspace">
+    <div className="movie-workspace-skeleton-header"><span className="movie-skeleton-line is-short" /><span className="movie-skeleton-line is-title" /><span className="movie-skeleton-line is-copy" /></div>
+    <div className="movie-workspace-skeleton-layout"><div className="movie-workspace-skeleton-nav">{Array.from({ length: 8 }, (_, index) => <span className="movie-skeleton-line" key={index} />)}</div><div className="movie-workspace-skeleton-main"><span className="movie-skeleton-line is-kicker" /><span className="movie-skeleton-line is-heading" /><span className="movie-skeleton-line is-copy" /><div className="movie-skeleton-stage" /><div className="movie-skeleton-rows"><span /><span /><span /></div></div><div className="movie-workspace-skeleton-inspector"><span className="movie-skeleton-line is-short" /><span className="movie-skeleton-line" /><span className="movie-skeleton-line is-copy" /><span className="movie-skeleton-line" /></div></div>
+  </div>;
 }
 
 function EmptyModule({ title = "Nothing here yet", text }: { title?: string; text: string }) {

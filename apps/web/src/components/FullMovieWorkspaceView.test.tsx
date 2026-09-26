@@ -20,6 +20,15 @@ describe("Full Movie workspace foundation", () => {
     expect(workspaceSource).toContain("Team controls are not connected yet");
   });
 
+  it("keeps loading and failure states useful without fabricating project content", () => {
+    expect(workspaceSource).toContain("WorkspaceSkeleton");
+    expect(workspaceSource).toContain('aria-busy="true"');
+    expect(workspaceSource).toContain("Try again");
+    expect(workspaceSource).toContain('role="alert"');
+    expect(workspaceSource).toContain('aria-label={item.label}');
+    expect(workspaceSource).toContain('data-module-state={isFuture ? "foundation" : "operational"}');
+  });
+
   it("keeps Quick Movie on a separate compact result path", () => {
     expect(createSource).toContain('mode === "Full"');
     expect(createSource).toContain('router.push(`/create/movie/${result.project.id}/overview`)');
