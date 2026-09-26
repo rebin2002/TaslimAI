@@ -27,6 +27,15 @@ describe("Full Movie workspace foundation", () => {
     expect(workspaceSource).toContain("No inferred completion");
   });
 
+  it("treats Cast as an operational room with durable reads, shared assets, states, and visible locks", () => {
+    expect(workspaceSource).toContain("getMovieCast(projectId)");
+    expect(workspaceSource).toContain("getMovieCharacterDetail");
+    expect(workspaceSource).toContain("Shared Asset library");
+    expect(workspaceSource).toContain("Character states");
+    expect(workspaceSource).toContain("approved and protected");
+    expect(workspaceSource).toContain("No reference asset");
+  });
+
   it("keeps Story focused on revisions, provenance, and typed screenplay elements", () => {
     expect(workspaceSource).toContain('const storySections: StorySection[] = ["Premise", "Logline", "Synopsis", "Treatment", "Screenplay"]');
     expect(workspaceSource).toContain("api.getMovieStory(projectId)");
