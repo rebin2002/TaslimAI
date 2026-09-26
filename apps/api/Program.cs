@@ -204,6 +204,7 @@ builder.Services.AddScoped<INotificationEventWriter>(services => services.GetReq
 builder.Services.AddScoped<IMovieStudioService, MovieStudioService>();
 builder.Services.AddScoped<IMovieV2Service, MovieV2Service>();
 builder.Services.AddScoped<IMovieGuideService, MovieGuideService>();
+builder.Services.AddScoped<IMovieStoryService, MovieStoryService>();
 builder.Services.Configure<MovieVideoOptions>(builder.Configuration.GetSection("MovieVideo"));
 builder.Services.AddScoped<MovieVideoExecutionStore>();
 builder.Services.AddHttpClient<RunwayMovieVideoProvider>();

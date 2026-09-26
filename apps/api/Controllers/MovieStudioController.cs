@@ -2,6 +2,7 @@ using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
+using Taslim.Api.Contracts;
 using Taslim.Api.Infrastructure;
 using Taslim.Api.Movies;
 using Taslim.Api.Generation;
@@ -11,7 +12,7 @@ namespace Taslim.Api.Controllers;
 [ApiController]
 [Authorize]
 [Route("api/movie-studio")]
-public sealed class MovieStudioController(IMovieStudioService movies, IMovieGuideService guides) : ControllerBase
+public sealed class MovieStudioController(IMovieStudioService movies, IMovieGuideService guides, IMovieStoryService stories) : ControllerBase
 {
     [HttpGet("provider")]
     public async Task<IActionResult> Provider(CancellationToken cancellationToken) => Ok(new MovieStudioProviderResponse(await movies.ProviderReadinessAsync()));
@@ -254,6 +255,65 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieGuid
     {
         var result = await movies.GenerateShotAsync(GetUserId(), shotId, request, cancellationToken, Request.Headers["Idempotency-Key"].FirstOrDefault());
         return result is null ? ApiResults.Error(this, 404, "MOVIE_SHOT_NOT_FOUND", "Movie shot not found.") : Accepted(result);
+    }
+
+    [HttpGet("projects/{movieProjectId:guid}/story")]
+    public async Task<IActionResult> GetStory(Guid movieProjectId, CancellationToken cancellationToken)
+    {
+        var result = await stories.GetAsync(GetUserId(), movieProjectId, cancellationToken);
+        return result is null ? ApiResults.Error(this, 404, "MOVIE_STORY_NOT_FOUND", "Movie story not found.") : Ok(result);
+    }
+
+    [HttpGet("projects/{movieProjectId:guid}/story/revisions")]
+    public async Task<IActionResult> ListStoryRevisions(Guid movieProjectId, CancellationToken cancellationToken)
+    {
+        var result = await stories.ListRevisionsAsync(GetUserId(), movieProjectId, cancellationToken);
+        return result is null ? ApiResults.Error(this, 404, "MOVIE_STORY_NOT_FOUND", "Movie story not found.") : Ok(result);
+    }
+
+    [HttpPost("projects/{movieProjectId:guid}/story/revisions")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> CreateStoryRevision(Guid movieProjectId, MovieStoryRevisionRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await stories.CreateRevisionAsync(GetUserId(), movieProjectId, request, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : CreatedAtAction(nameof(GetStoryRevision), new { movieProjectId, revisionId = result.CurrentRevisionId }, result);
+        }
+        catch (MovieStoryValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_STORY_INVALID", exception.Message); }
+    }
+
+    [HttpGet("projects/{movieProjectId:guid}/story/revisions/{revisionId:guid}")]
+    public async Task<IActionResult> GetStoryRevision(Guid movieProjectId, Guid revisionId, CancellationToken cancellationToken)
+    {
+        var result = await stories.GetRevisionAsync(GetUserId(), movieProjectId, revisionId, cancellationToken);
+        return result is null ? ApiResults.Error(this, 404, "MOVIE_STORY_REVISION_NOT_FOUND", "Movie story revision not found.") : Ok(result);
+    }
+
+    [HttpPost("projects/{movieProjectId:guid}/story/revisions/{revisionId:guid}/submit")]
+    [ValidateAntiForgeryToken]
+    public Task<IActionResult> SubmitStoryRevision(Guid movieProjectId, Guid revisionId, CancellationToken cancellationToken) => TransitionStoryRevision(() => stories.SubmitAsync(GetUserId(), movieProjectId, revisionId, cancellationToken), "MOVIE_STORY_REVISION_NOT_FOUND");
+
+    [HttpPost("projects/{movieProjectId:guid}/story/revisions/{revisionId:guid}/approve")]
+    [ValidateAntiForgeryToken]
+    public Task<IActionResult> ApproveStoryRevision(Guid movieProjectId, Guid revisionId, CancellationToken cancellationToken) => TransitionStoryRevision(() => stories.ApproveAsync(GetUserId(), movieProjectId, revisionId, cancellationToken), "MOVIE_STORY_REVISION_NOT_FOUND");
+
+    [HttpPost("projects/{movieProjectId:guid}/story/revisions/{revisionId:guid}/reject")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> RejectStoryRevision(Guid movieProjectId, Guid revisionId, MovieStoryRejectRequest request, CancellationToken cancellationToken)
+    {
+        try { return await TransitionStoryRevision(() => stories.RejectAsync(GetUserId(), movieProjectId, revisionId, request.Reason, cancellationToken), "MOVIE_STORY_REVISION_NOT_FOUND"); }
+        catch (MovieStoryWorkflowException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
+    }
+
+    private async Task<IActionResult> TransitionStoryRevision(Func<Task<MovieStoryRevisionDto?>> transition, string notFoundCode)
+    {
+        try
+        {
+            var result = await transition();
+            return result is null ? ApiResults.Error(this, 404, notFoundCode, "Movie story revision not found.") : Ok(result);
+        }
+        catch (MovieStoryWorkflowException exception) { return ApiResults.Error(this, 409, exception.Code, exception.Message); }
     }
 
     private Guid GetUserId() => Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier) ?? throw new InvalidOperationException("Authenticated user identifier is missing."));
