@@ -282,7 +282,7 @@ export type CinematographyIntentSelection = { intent?: string | null; presetId?:
 export type CinematographyPreset = CinematographyIntentSelection & { id: string; name: string; summary: string; shotSize: string; focalLength: string; lensIntent: string; apertureDepthOfField: string; cameraAngle: string; cameraMovement: string; frameRateIntent: string; lighting: string; paletteLook: string; compositionNotes: string };
 export type MovieCinematographyBible = { intent: string | null; presetId: string | null; notes: string | null; capabilityReferences: CinematographyCapabilityReference[] };
 export type MovieGuide = { id: string; visualLanguage: string; cameraLanguage: string; colorAndLighting: string; soundAndNarration: string; continuityRules: string; updatedAt: string; currentRevisionNumber?: number; lockedRevisionNumber?: number | null; lockedAt?: string | null; cinematographyBible?: MovieCinematographyBible | null };
-export type MovieScene = { id: string; sequence: number; title: string; summary: string; durationSeconds: number | null; continuityNotes: string | null; narration: string | null; dialogue: string | null; shots: MovieShot[]; clips: MovieClip[] };
+export type MovieScene = { shotCount?: number; id: string; sequence: number; title: string; summary: string; durationSeconds: number | null; continuityNotes: string | null; narration: string | null; dialogue: string | null; shots: MovieShot[]; clips: MovieClip[] };
 export type MovieProductionStage = "ShotPlan" | "StoryboardCandidate" | "ApprovedStoryboard" | "ProductionKeyframe" | "ApprovedKeyframe" | "MotionPreview" | "ProductionRender" | "SelectedFinalTake";
 export type MovieProductionAssetReference = { assetId: string; role: string };
 export type MovieProductionVersionInput = { stage: MovieProductionStage; label?: string | null; compositionJson: string; regenerationMetadataJson?: string | null; stageProvenanceJson?: string | null; sourceVersionId?: string | null; generationJobId?: string | null; assetId?: string | null; firstFrameAssetId?: string | null; lastFrameAssetId?: string | null; firstFrameNotes?: string | null; lastFrameNotes?: string | null; assetReferences?: MovieProductionAssetReference[] };
@@ -371,6 +371,12 @@ export type MovieScenesSequence = { id: string; sequence: number; title: string;
 export type MovieScenesAct = { id: string; sequence: number; title: string; summary: string | null; status: string; sequences: MovieScenesSequence[] };
 export type MovieScenesWorkspace = { movieProjectId: string; projectTitle: string; productionStatus: string; screenplayApprovalState: string; approvedRevisionId: string | null; approvedRevisionNumber: number | null; acts: MovieScenesAct[]; sceneCount: number; linkedSceneCount: number; shotCount: number };
 export type MovieScenesBreakdown = { movieProjectId: string; approvedRevisionId: string; approvedRevisionNumber: number; createdSceneCount: number; existingLinkedSceneCount: number; workspace: MovieScenesWorkspace };
+export type MovieWorkspaceScene = Omit<MovieScene, "shots" | "clips"> & { shotCount: number; clips: Pick<MovieClip, "id" | "movieSceneId" | "movieShotId" | "assetId" | "status" | "durationSeconds">[] };
+export type MovieWorkspaceCharacter = Pick<MovieCharacter, "id" | "name" | "role" | "description" | "appearance" | "voiceAndPerformance" | "continuityNotes"> & { createdAt: string; updatedAt: string };
+export type MovieWorkspaceLocation = Pick<MovieLocation, "id" | "name" | "description" | "visualContinuityNotes">;
+export type MovieWorkspaceAssembly = Pick<MovieAssembly, "id" | "assetId" | "status" | "createdAt" | "completedAt">;
+export type MovieWorkspaceProject = Omit<MovieProject, "scenes" | "characters" | "locations" | "clips" | "assemblies" | "world" | "guide"> & { guide: Pick<MovieGuide, "id" | "visualLanguage" | "cameraLanguage" | "colorAndLighting" | "soundAndNarration" | "continuityRules" | "updatedAt">; scenes: MovieWorkspaceScene[]; characters: MovieWorkspaceCharacter[]; locations: MovieWorkspaceLocation[]; clips: Pick<MovieClip, "id" | "movieSceneId" | "movieShotId" | "assetId" | "status" | "durationSeconds">[]; assemblies: MovieWorkspaceAssembly[]; world: { locations: MovieWorkspaceLocation[] } | null };
+export type MovieWorkspaceResponse = { module: string; project: MovieWorkspaceProject };
 export type MovieProviderReadiness = { ready: boolean; supportedOperations: string[] };
 export type MovieStudioResponse = { project: MovieProject; job: GenerationJob | null };
 export type MovieStudioCreateInput = { workspaceId: string; projectId?: string | null; mode: "Quick" | "Full"; title: string; description: string; durationSeconds: number; aspectRatio: string; style: string; language: string; additionalInstructions?: string | null; visualLanguage?: string | null; cameraLanguage?: string | null; colorAndLighting?: string | null; soundAndNarration?: string | null; continuityRules?: string | null; cinematography?: CinematographyIntentSelection | null };
@@ -715,10 +721,14 @@ export class ApiError extends Error {
   constructor(public status: number, message: string, public fields?: Record<string, string[]>, public code?: string) { super(message); }
 }
 
+const movieWorkspaceRequests = new Map<string, Promise<MovieProject>>;
+function normalizeMovieWorkspaceProject(project: MovieWorkspaceProject): MovieProject { return { ...project, guide: { ...project.guide }, scenes: project.scenes.map((scene) => ({ ...scene, shots: [], clips: scene.clips.map((clip) => ({ ...clip, generationJobId: null, metadataJson: null, continuitySnapshotJson: null })) })), characters: project.characters.map((character) => ({ ...character, physicalDescription: null, wardrobe: null, voiceReference: null, personalityAndStoryNotes: null, referenceAssetId: null, referenceAssetIds: [], states: [], relationships: [], continuityLocks: [] })), locations: project.locations.map((location) => ({ ...location, referenceAssetId: null })), clips: project.clips.map((clip) => ({ ...clip, generationJobId: null, metadataJson: null, continuitySnapshotJson: null })), assemblies: project.assemblies.map((assembly) => ({ ...assembly, generationJobId: null, outputFormat: "mp4", metadataJson: null })), world: { locations: (project.world?.locations ?? project.locations).map((location) => ({ ...location, referenceAssetId: null })), sets: [], props: [], references: [], usages: [], facts: [], locks: [] } }; }
+function clearMovieWorkspaceRequests() { movieWorkspaceRequests.clear(); }
+
 export const api = {
   me: () => request<AuthResponse>("/api/auth/me"),
   passwordPolicy: () => request<PasswordPolicy>("/api/auth/password-policy"),
-  register: async (input: RegisterInput) => { const result = await request<AuthResponse>("/api/auth/register", { method: "POST", body: JSON.stringify(input) }, true); csrfToken = null; await csrf(true); return result; },
+  register: async (input: RegisterInput) => { const result = await request<AuthResponse>("/api/auth/register", { method: "POST", body: JSON.stringify(input) }, true); csrfToken = null; clearMovieWorkspaceRequests(); await csrf(true); return result; },
   login: async (input: LoginInput) => { const result = await request<AuthResponse>("/api/auth/login", { method: "POST", body: JSON.stringify(input) }, true); csrfToken = null; await csrf(true); return result; },
   logout: async () => { const result = await request<{ success: boolean }>("/api/auth/logout", { method: "POST" }, true); csrfToken = null; await csrf(true); return result; },
   updateProfile: (input: ProfileInput) => request<AuthResponse>("/api/auth/profile", { method: "PATCH", body: JSON.stringify(input) }, true),
@@ -767,6 +777,7 @@ export const api = {
   createMovieProject: (input: MovieStudioCreateInput) => request<MovieStudioResponse>("/api/movie-studio/projects", { method: "POST", body: JSON.stringify(input) }, true),
   getMovieOverview: (id: string) => request<MovieOverview>(`/api/movie-studio/projects/${id}/overview`),
   getMovieProject: (id: string) => request<MovieProject>(`/api/movie-studio/projects/${id}`),
+  getMovieWorkspace: (id: string, module = "overview") => { const key = `${id}:${module}`; const pending = movieWorkspaceRequests.get(key); if (pending) return pending; const promise = request<MovieWorkspaceResponse>(`/api/movie-studio/projects/${id}/workspace?module=${encodeURIComponent(module)}`).then((response) => normalizeMovieWorkspaceProject(response.project)).finally(() => movieWorkspaceRequests.delete(key)); movieWorkspaceRequests.set(key, promise); return promise; },
   getMovieWorld: (id: string) => request<MovieWorldWorkspace>(`/api/movie-studio/projects/${id}/world`),
   getMovieCast: (id: string) => request<MovieCast>(`/api/movie-studio/projects/${id}/cast`),
   getMovieCharacterDetail: (characterId: string) => request<MovieCharacterDetail>(`/api/movie-studio/characters/${characterId}/detail`),

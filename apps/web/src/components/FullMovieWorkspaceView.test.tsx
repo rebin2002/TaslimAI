@@ -121,6 +121,7 @@ describe("Full Movie workspace foundation", () => {
 
   it("keeps one Director contextual across rooms and targets real shots", () => {
     expect(workspaceSource).toContain("<MovieDirectorPanel");
+    expect(workspaceSource).toContain("shotCount ?? scene.shots.length");
     expect(workspaceSource).toContain("selectedShot={selectedShot}");
     expect(workspaceSource).toContain("api.addMovieShot");
     expect(directorSource).toContain("Review → explicit approval → execute");
