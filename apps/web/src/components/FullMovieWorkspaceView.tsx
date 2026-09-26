@@ -22,8 +22,9 @@ import {
   Users,
   Workflow,
 } from "lucide-react";
-import { api, type MovieProject, type MovieScene } from "@/lib/api";
+import { api, type CinematographyPreset, type MovieProject, type MovieScene } from "@/lib/api";
 import { assetFileUrl } from "@/lib/apiBase";
+import { ShotDesigner, type ShotDesignerDraft } from "@/components/ShotDesigner";
 
 export const fullMovieModules = [
   { slug: "overview", label: "Overview", icon: Gauge },
@@ -90,6 +91,8 @@ export function FullMovieWorkspaceView({ projectId, module }: { projectId: strin
   const [selectedSceneId, setSelectedSceneId] = useState<string | null>(null);
   const [newScene, setNewScene] = useState({ title: "", summary: "" });
   const [addingScene, setAddingScene] = useState(false);
+  const [presets, setPresets] = useState<CinematographyPreset[]>([]);
+  const [savingShot, setSavingShot] = useState(false);
 
   useEffect(() => {
     let mounted = true;
@@ -102,6 +105,9 @@ export function FullMovieWorkspaceView({ projectId, module }: { projectId: strin
     }).finally(() => {
       if (mounted) setLoading(false);
     });
+    void api.getCinematographyPresets().then((catalog) => {
+      if (mounted) setPresets(catalog);
+    }).catch(() => undefined);
     return () => { mounted = false; };
   }, [projectId]);
 
@@ -135,6 +141,29 @@ export function FullMovieWorkspaceView({ projectId, module }: { projectId: strin
       setProject(result.project);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "This scene could not be queued.");
+    }
+  }
+
+  async function addShot(sceneId: string, draft: ShotDesignerDraft): Promise<boolean> {
+    if (!project) return false;
+    setSavingShot(true);
+    setError("");
+    try {
+      const shot = await api.addMovieShot(sceneId, {
+        description: draft.description,
+        durationSeconds: draft.durationSeconds,
+        cameraAndFraming: [draft.cinematography.shotSize, draft.cinematography.focalLength, draft.cinematography.cameraAngle].filter(Boolean).join(" · ") || null,
+        cameraMotion: draft.cinematography.cameraMovement ?? null,
+        visualContinuityNotes: draft.cinematography.compositionNotes ?? null,
+        cinematography: draft.cinematography,
+      });
+      setProject((current) => current ? { ...current, scenes: current.scenes.map((scene) => scene.id === sceneId ? { ...scene, shots: [...scene.shots, shot] } : scene) } : current);
+      return true;
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "The shot could not be saved.");
+      return false;
+    } finally {
+      setSavingShot(false);
     }
   }
 
@@ -174,7 +203,7 @@ export function FullMovieWorkspaceView({ projectId, module }: { projectId: strin
           {activeModule === "story" && <StoryModule project={project} />}
           {activeModule === "cast" && <CastModule project={project} />}
           {activeModule === "world" && <WorldModule project={project} />}
-          {activeModule === "scenes" && <ScenesModule project={project} selectedSceneId={selectedScene?.id ?? null} newScene={newScene} addingScene={addingScene} onSelectScene={setSelectedSceneId} onChangeScene={setNewScene} onAddScene={() => void addScene()} onGenerate={generateScene} />}
+          {activeModule === "scenes" && <ScenesModule project={project} presets={presets} savingShot={savingShot} selectedSceneId={selectedScene?.id ?? null} newScene={newScene} addingScene={addingScene} onSelectScene={setSelectedSceneId} onChangeScene={setNewScene} onAddScene={() => void addScene()} onAddShot={addShot} onGenerate={generateScene} />}
           {activeModule === "storyboard" && <StoryboardModule project={project} />}
           {activeModule === "production" && <ProductionModule project={project} completionPercent={completionPercent} />}
           {activeModule === "edit" && <EditModule project={project} />}
@@ -223,8 +252,9 @@ function WorldModule({ project }: { project: MovieProject }) {
   return <div className="movie-module-stack"><ModuleIntro icon={<Map size={18} />} title="The world is a continuity decision" text="Locations are kept separate from scene execution so visual identity can travel with the project." />{project.locations.length ? <div className="movie-record-grid">{project.locations.map((location) => <article className="movie-record-card" key={location.id}><span className="movie-record-index">Location</span><h3>{location.name}</h3><p>{location.description}</p><RecordLine label="Visual continuity" value={location.visualContinuityNotes} /></article>)}</div> : <EmptyModule title="No locations defined yet" text="World records will appear here once the first location is part of the plan." />}</div>;
 }
 
-function ScenesModule({ project, selectedSceneId, newScene, addingScene, onSelectScene, onChangeScene, onAddScene, onGenerate }: { project: MovieProject; selectedSceneId: string | null; newScene: { title: string; summary: string }; addingScene: boolean; onSelectScene: (sceneId: string) => void; onChangeScene: (value: { title: string; summary: string }) => void; onAddScene: () => void; onGenerate: (sceneId: string) => Promise<void> }) {
-  return <div className="movie-module-stack"><div className="movie-scene-workspace"><section className="movie-workspace-section movie-scene-list-panel"><div className="movie-section-head"><div><span className="movie-workspace-kicker">Ordered story</span><h3>{project.scenes.length} scenes planned</h3></div><ListChecks size={17} /></div>{project.scenes.length ? <div className="movie-scene-list-modern">{project.scenes.map((scene) => <SceneListItem key={scene.id} scene={scene} isSelected={scene.id === selectedSceneId} onSelect={() => onSelectScene(scene.id)} onGenerate={() => void onGenerate(scene.id)} />)}</div> : <EmptyModule text="Add the first scene to give the project a beginning." />}</section><section className="movie-workspace-section movie-scene-inspector"><span className="movie-workspace-kicker">Inspector</span>{project.scenes.find((scene) => scene.id === selectedSceneId) ? <SceneInspector scene={project.scenes.find((scene) => scene.id === selectedSceneId)!} /> : <EmptyModule title="Select a scene" text="The inspector will show scene intent, continuity, and shot count." />}</section></div><form className="movie-add-scene-modern" onSubmit={(event) => { event.preventDefault(); onAddScene(); }}><div><span className="movie-workspace-kicker">Planning action</span><h3>Add a scene</h3></div><label><span className="sr-only">Scene title</span><input value={newScene.title} onChange={(event) => onChangeScene({ ...newScene, title: event.target.value })} placeholder="Scene title" /></label><label><span className="sr-only">Scene summary</span><input value={newScene.summary} onChange={(event) => onChangeScene({ ...newScene, summary: event.target.value })} placeholder="One-line scene intent" /></label><button className="movie-workspace-button is-primary" type="submit" disabled={addingScene || !newScene.title.trim() || !newScene.summary.trim()}>{addingScene ? "Saving…" : "Add scene"}</button></form></div>;
+function ScenesModule({ project, presets, savingShot, selectedSceneId, newScene, addingScene, onSelectScene, onChangeScene, onAddScene, onAddShot, onGenerate }: { project: MovieProject; presets: CinematographyPreset[]; savingShot: boolean; selectedSceneId: string | null; newScene: { title: string; summary: string }; addingScene: boolean; onSelectScene: (sceneId: string) => void; onChangeScene: (value: { title: string; summary: string }) => void; onAddScene: () => void; onAddShot: (sceneId: string, draft: ShotDesignerDraft) => Promise<boolean>; onGenerate: (sceneId: string) => Promise<void> }) {
+  const selectedScene = project.scenes.find((scene) => scene.id === selectedSceneId);
+  return <div className="movie-module-stack"><div className="movie-scene-workspace"><section className="movie-workspace-section movie-scene-list-panel"><div className="movie-section-head"><div><span className="movie-workspace-kicker">Ordered story</span><h3>{project.scenes.length} scenes planned</h3></div><ListChecks size={17} /></div>{project.scenes.length ? <div className="movie-scene-list-modern">{project.scenes.map((scene) => <SceneListItem key={scene.id} scene={scene} isSelected={scene.id === selectedSceneId} onSelect={() => onSelectScene(scene.id)} onGenerate={() => void onGenerate(scene.id)} />)}</div> : <EmptyModule text="Add the first scene to give the project a beginning." />}</section><section className="movie-workspace-section movie-scene-inspector"><span className="movie-workspace-kicker">Inspector</span>{selectedScene ? <SceneInspector scene={selectedScene} guide={project.guide} presets={presets} saving={savingShot} onAddShot={onAddShot} /> : <EmptyModule title="Select a scene" text="The inspector will show scene intent, continuity, and shot count." />}</section></div><form className="movie-add-scene-modern" onSubmit={(event) => { event.preventDefault(); onAddScene(); }}><div><span className="movie-workspace-kicker">Planning action</span><h3>Add a scene</h3></div><label><span className="sr-only">Scene title</span><input value={newScene.title} onChange={(event) => onChangeScene({ ...newScene, title: event.target.value })} placeholder="Scene title" /></label><label><span className="sr-only">Scene summary</span><input value={newScene.summary} onChange={(event) => onChangeScene({ ...newScene, summary: event.target.value })} placeholder="One-line scene intent" /></label><button className="movie-workspace-button is-primary" type="submit" disabled={addingScene || !newScene.title.trim() || !newScene.summary.trim()}>{addingScene ? "Saving…" : "Add scene"}</button></form></div>;
 }
 
 function StoryboardModule({ project }: { project: MovieProject }) {
@@ -251,8 +281,8 @@ function SceneListItem({ scene, isSelected, onSelect, onGenerate }: { scene: Mov
   return <article className={`movie-scene-list-item ${isSelected ? "is-selected" : ""}`}><button type="button" className="movie-scene-list-main" onClick={onSelect}><span className="movie-scene-sequence">{String(scene.sequence).padStart(2, "0")}</span><span><strong>{scene.title}</strong><small>{scene.summary}</small></span><ChevronRight size={14} /></button><div className="movie-scene-list-actions"><span className={`movie-scene-state ${clip ? "is-ready" : hasPending ? "is-pending" : ""}`}>{clip ? <><Check size={12} /> Ready</> : hasPending ? "In progress" : "Planned"}</span>{!clip && <button type="button" className="movie-text-action" onClick={onGenerate} disabled={hasPending}>{hasPending ? "Queued" : <><Sparkles size={12} /> Generate</>}</button>}</div></article>;
 }
 
-function SceneInspector({ scene }: { scene: MovieScene }) {
-  return <div className="movie-inspector-content"><h3>{scene.title}</h3><p>{scene.summary}</p><div className="movie-inspector-facts"><span><strong>{formatDuration(scene.durationSeconds)}</strong> duration</span><span><strong>{scene.shots.length}</strong> shots</span></div><RecordLine label="Continuity" value={scene.continuityNotes} /><RecordLine label="Narration" value={scene.narration} /><RecordLine label="Dialogue" value={scene.dialogue} /></div>;
+function SceneInspector({ scene, guide, presets, saving, onAddShot }: { scene: MovieScene; guide: MovieProject["guide"]; presets: CinematographyPreset[]; saving: boolean; onAddShot: (sceneId: string, draft: ShotDesignerDraft) => Promise<boolean> }) {
+  return <div className="movie-inspector-content"><h3>{scene.title}</h3><p>{scene.summary}</p><div className="movie-inspector-facts"><span><strong>{formatDuration(scene.durationSeconds)}</strong> duration</span><span><strong>{scene.shots.length}</strong> shots</span></div><RecordLine label="Continuity" value={scene.continuityNotes} /><RecordLine label="Narration" value={scene.narration} /><RecordLine label="Dialogue" value={scene.dialogue} /><ShotDesigner scene={scene} guide={guide} presets={presets} saving={saving} onAddShot={(draft) => onAddShot(scene.id, draft)} /></div>;
 }
 
 function ContinuityItem({ label, value }: { label: string; value: string | null | undefined }) {
