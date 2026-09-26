@@ -547,6 +547,9 @@ public sealed class MovieClip
     public int? DurationSeconds { get; set; }
     public string? MetadataJson { get; set; }
     public string? ContinuitySnapshotJson { get; set; }
+    public Guid? ContinuitySnapshotId { get; set; }
+    public int? ContinuitySnapshotVersion { get; set; }
+    public string? ContinuitySnapshotHash { get; set; }
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
     public MovieProject MovieProject { get; set; } = null!;
@@ -715,7 +718,7 @@ public sealed record MovieWorldUsageDto(Guid Id, Guid MovieSceneId, Guid? MovieS
 public sealed record MovieContinuityFactDto(Guid Id, string ScopeType, Guid? ScopeId, string FactKey, string FactValue, string? Notes, DateTime UpdatedAt);
 public sealed record MovieContinuityLockDto(Guid Id, string EntityType, Guid? EntityId, string FieldName, string LockedValue, string Strength, string? Reason, DateTime CreatedAt, DateTime? ReleasedAt);
 public sealed record MovieWorldDto(IReadOnlyList<MovieLocationDto> Locations, IReadOnlyList<MovieSetDto> Sets, IReadOnlyList<MoviePropDto> Props, IReadOnlyList<MovieWorldReferenceDto> References, IReadOnlyList<MovieWorldUsageDto> Usages, IReadOnlyList<MovieContinuityFactDto> Facts, IReadOnlyList<MovieContinuityLockDto> Locks);
-public sealed record MovieClipDto(Guid Id, Guid? MovieSceneId, Guid? MovieShotId, Guid? GenerationJobId, Guid? AssetId, string Status, int? DurationSeconds, string? MetadataJson, string? ContinuitySnapshotJson);
+public sealed record MovieClipDto(Guid Id, Guid? MovieSceneId, Guid? MovieShotId, Guid? GenerationJobId, Guid? AssetId, string Status, int? DurationSeconds, string? MetadataJson, string? ContinuitySnapshotJson, Guid? ContinuitySnapshotId = null, int? ContinuitySnapshotVersion = null, string? ContinuitySnapshotHash = null);
 public sealed record MovieAssemblyDto(Guid Id, Guid? GenerationJobId, Guid? AssetId, string Status, string OutputFormat, string? MetadataJson, DateTime CreatedAt, DateTime? CompletedAt);
 public sealed record MovieStudioProjectDto(Guid Id, Guid WorkspaceId, Guid? ProjectId, string Mode, string Status, string Title, string Description, int DurationSeconds, string AspectRatio, string Style, string Language, string? AdditionalInstructions, DateTime CreatedAt, DateTime UpdatedAt, MovieGuideDto Guide, IReadOnlyList<MovieSceneDto> Scenes, IReadOnlyList<MovieCharacterDto> Characters, IReadOnlyList<MovieLocationDto> Locations, IReadOnlyList<MovieClipDto> Clips, IReadOnlyList<MovieAssemblyDto> Assemblies, MovieWorldDto World);
 public sealed record MovieStudioProjectResponse(MovieStudioProjectDto Project, GenerationJobDto? Job);

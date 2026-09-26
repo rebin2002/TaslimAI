@@ -37,7 +37,7 @@ public interface IMovieStudioService
     Task<MovieProviderReadinessDto> ProviderReadinessAsync();
 }
 
-public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessService access, MovieCollaborationAccess collaboration, IGenerationJobService jobs, IMovieVideoProvider provider) : IMovieStudioService
+public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessService access, MovieCollaborationAccess collaboration, IGenerationJobService jobs, IMovieVideoProvider provider, IMovieCharacterContinuityService continuity) : IMovieStudioService
 {
     public async Task<MovieStudioProjectResponse?> CreateAsync(Guid userId, MovieStudioCreateRequest request, CancellationToken cancellationToken, string? idempotencyKey = null)
     {
@@ -455,6 +455,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
             if (job is null) throw new MovieProductionValidationException("PRODUCTION_JOB_NOT_FOUND", "The linked GenerationJob is not available in the movie workspace.");
         }
 
+        var continuitySnapshot = await continuity.BuildSnapshotForTargetAsync(shot.Scene.MovieProjectId, shot.Scene.Id, shot.Id, true, cancellationToken);
         var now = DateTime.UtcNow;
         var version = new MovieProductionVersion
         {
@@ -463,6 +464,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
             RegenerationMetadataJson = request.RegenerationMetadataJson?.Trim(), StageProvenanceJson = request.StageProvenanceJson?.Trim(), SourceVersionId = source?.Id,
             GenerationJobId = request.GenerationJobId, AssetId = request.AssetId, FirstFrameAssetId = request.FirstFrameAssetId, LastFrameAssetId = request.LastFrameAssetId,
             FirstFrameNotes = CleanBounded(request.FirstFrameNotes, 2_000), LastFrameNotes = CleanBounded(request.LastFrameNotes, 2_000), CreatedByUserId = userId, CreatedAt = now, UpdatedAt = now,
+            ContinuitySnapshotId = continuitySnapshot.SnapshotId, ContinuitySnapshotVersion = continuitySnapshot.Version, ContinuitySnapshotHash = continuitySnapshot.SnapshotHash,
         };
         foreach (var asset in assetIds) version.AssetReferences.Add(new MovieProductionVersionAsset { MovieProductionVersionId = version.Id, AssetId = asset.Key, Role = asset.Value, CreatedAt = now });
         var provenance = new MovieProductionStageTransition
@@ -551,10 +553,15 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
             MovieShotId = shot?.Id,
             Status = MovieClipStatuses.Queued,
             DurationSeconds = durationSeconds,
-            ContinuitySnapshotJson = await ContinuitySnapshotAsync(movie.Id, movie.Guide, cancellationToken),
+            ContinuitySnapshotJson = null,
             CreatedAt = now,
             UpdatedAt = now,
         };
+        var continuitySnapshot = await continuity.BuildSnapshotForTargetAsync(movie.Id, scene.Id, shot?.Id, true, cancellationToken);
+        clip.ContinuitySnapshotJson = continuitySnapshot.SnapshotJson;
+        clip.ContinuitySnapshotId = continuitySnapshot.SnapshotId;
+        clip.ContinuitySnapshotVersion = continuitySnapshot.Version;
+        clip.ContinuitySnapshotHash = continuitySnapshot.SnapshotHash;
         db.MovieClips.Add(clip);
         await db.SaveChangesAsync(cancellationToken);
         var job = await jobs.CreateAsync(userId, new CreateGenerationJobRequest
@@ -759,23 +766,6 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         }
     }
 
-    private async Task<string> ContinuitySnapshotAsync(Guid movieProjectId, MovieContinuityGuide guide, CancellationToken cancellationToken)
-    {
-        var characters = await db.MovieCharacters.AsNoTracking().Where(item => item.MovieProjectId == movieProjectId).Include(item => item.States).ThenInclude(state => state.ContinuityLocks).Include(item => item.ContinuityLocks).Include(item => item.ReferenceAssets).Include(item => item.Relationships).ToListAsync(cancellationToken);
-        return JsonSerializer.Serialize(new
-        {
-            guide = new { guide.VisualLanguage, guide.CameraLanguage, guide.ColorAndLighting, guide.SoundAndNarration, guide.ContinuityRules, guide.ReferenceAssetIdsJson, guide.UpdatedAt },
-            characters = characters.Select(character => new
-            {
-                character.Id, character.Name, character.Role, character.Description, character.Appearance, character.PhysicalDescription, character.Wardrobe,
-                character.VoiceReference, character.PersonalityAndStoryNotes, character.VoiceAndPerformance, character.ContinuityNotes,
-                referenceAssetIds = character.ReferenceAssets.OrderBy(item => item.SortOrder).Select(item => item.AssetId).ToArray(),
-                states = character.States.OrderBy(item => item.CreatedAt).Select(state => new { state.Id, state.Key, state.Label, state.Wardrobe, state.AgeOrTimeState, state.Appearance, state.InjuryOrCondition, state.LocationOrStoryState, state.ContinuityNotes }),
-                continuityLocks = character.ContinuityLocks.Where(item => item.MovieCharacterStateId is null).Concat(character.States.SelectMany(state => state.ContinuityLocks)).OrderBy(item => item.ApprovedAt).Select(lockEntity => new { lockEntity.Id, lockEntity.MovieCharacterStateId, lockEntity.FieldKey, lockEntity.LockedValue, lockEntity.ApprovedAt })
-            })
-        });
-    }
-
     private static MovieSceneDto ToDto(MovieScene scene, IReadOnlyList<MovieShotDto> shots, IReadOnlyList<MovieClipDto> clips) => new(scene.Id, scene.Sequence, scene.Title, scene.Summary, scene.DurationSeconds, scene.ContinuityNotes, scene.Narration, scene.Dialogue, shots, clips);
     private static MovieShotDto ToDto(MovieShot shot, IReadOnlyList<MovieClipDto> clips) => new(shot.Id, shot.Sequence, shot.Description, shot.CameraAndFraming, shot.CameraMotion, shot.CinematographyJson, shot.DurationSeconds, shot.Narration, shot.Dialogue, shot.VisualContinuityNotes, shot.ProductionStage, clips, shot.ProductionVersions.OrderByDescending(item => item.VersionNumber).Select(ToDto).ToArray());
     private static MovieCharacterDto ToDto(MovieCharacter character) => new(character.Id, character.Name, character.Role, character.Description, character.Appearance, character.PhysicalDescription, character.Wardrobe, character.VoiceReference, character.PersonalityAndStoryNotes, character.VoiceAndPerformance, character.ContinuityNotes, character.ReferenceAssetId, character.ReferenceAssets.OrderBy(item => item.SortOrder).Select(item => item.AssetId).ToArray(), character.States.OrderBy(item => item.CreatedAt).Select(ToDto).ToArray(), character.Relationships.OrderBy(item => item.CreatedAt).Select(item => new MovieCharacterRelationshipDto(item.Id, item.RelatedCharacterId, item.RelatedCharacter?.Name ?? string.Empty, item.RelationshipType, item.Notes)).ToArray(), character.ContinuityLocks.Where(item => item.MovieCharacterStateId is null).OrderBy(item => item.ApprovedAt).Select(ToDto).Concat(character.States.SelectMany(item => item.ContinuityLocks).OrderBy(item => item.ApprovedAt).Select(ToDto)).ToArray());
@@ -789,10 +779,10 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
     private static MovieWorldUsageDto ToDto(MovieWorldUsage item) => new(item.Id, item.MovieSceneId, item.MovieShotId, item.EntityType, item.EntityId, item.Role);
     private static MovieContinuityFactDto ToDto(MovieContinuityFact item) => new(item.Id, item.ScopeType, item.ScopeId, item.FactKey, item.FactValue, item.Notes, item.UpdatedAt);
     private static MovieContinuityLockDto ToDto(MovieContinuityLock item) => new(item.Id, item.EntityType, item.EntityId, item.FieldName, item.LockedValue, item.Strength, item.Reason, item.CreatedAt, item.ReleasedAt);
-    private static MovieClipDto ToDto(MovieClip clip) => new(clip.Id, clip.MovieSceneId, clip.MovieShotId, clip.GenerationJobId, clip.AssetId, clip.Status, clip.DurationSeconds, clip.MetadataJson, clip.ContinuitySnapshotJson);
+    private static MovieClipDto ToDto(MovieClip clip) => new(clip.Id, clip.MovieSceneId, clip.MovieShotId, clip.GenerationJobId, clip.AssetId, clip.Status, clip.DurationSeconds, clip.MetadataJson, clip.ContinuitySnapshotJson, clip.ContinuitySnapshotId, clip.ContinuitySnapshotVersion, clip.ContinuitySnapshotHash);
     private static MovieAssemblyDto ToDto(MovieAssembly assembly) => new(assembly.Id, assembly.GenerationJobId, assembly.AssetId, assembly.Status, assembly.OutputFormat, assembly.MetadataJson, assembly.CreatedAt, assembly.CompletedAt);
     private static MovieShotProductionDto ToProductionDto(MovieShot shot) => new(shot.Id, shot.ProductionStage, shot.ProductionVersions.OrderByDescending(item => item.VersionNumber).Select(ToDto).ToArray(), shot.ProductionTransitions.OrderBy(item => item.CreatedAt).Select(item => new MovieProductionStageTransitionDto(item.Id, item.MovieShotId, item.MovieProductionVersionId, item.FromStage, item.ToStage, item.EventType, item.Reason, item.MetadataJson, item.SourceVersionId, item.GenerationJobId, item.ActorUserId, item.CreatedAt)).ToArray());
-    private static MovieProductionVersionDto ToDto(MovieProductionVersion version) => new(version.Id, version.MovieShotId, version.VersionNumber, version.Stage, version.Status, version.Label, version.CompositionJson, version.RegenerationMetadataJson, version.StageProvenanceJson, version.SourceVersionId, version.GenerationJobId, version.AssetId, version.FirstFrameAssetId, version.LastFrameAssetId, version.FirstFrameNotes, version.LastFrameNotes, version.RejectionReason, version.CreatedAt, version.UpdatedAt, version.ReviewedAt, version.AssetReferences.OrderBy(item => item.Role).Select(item => new MovieProductionAssetReferenceDto(item.AssetId, item.Role)).ToArray());
+    private static MovieProductionVersionDto ToDto(MovieProductionVersion version) => new(version.Id, version.MovieShotId, version.VersionNumber, version.Stage, version.Status, version.Label, version.CompositionJson, version.RegenerationMetadataJson, version.StageProvenanceJson, version.SourceVersionId, version.GenerationJobId, version.AssetId, version.FirstFrameAssetId, version.LastFrameAssetId, version.FirstFrameNotes, version.LastFrameNotes, version.RejectionReason, version.ContinuitySnapshotId, version.ContinuitySnapshotVersion, version.ContinuitySnapshotHash, version.CreatedAt, version.UpdatedAt, version.ReviewedAt, version.AssetReferences.OrderBy(item => item.Role).Select(item => new MovieProductionAssetReferenceDto(item.AssetId, item.Role)).ToArray());
     private static void AddAsset(IDictionary<Guid, string> assets, Guid? assetId, string role)
     {
         if (assetId.HasValue) assets[assetId.Value] = role;

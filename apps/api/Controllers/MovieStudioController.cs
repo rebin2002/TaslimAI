@@ -12,7 +12,7 @@ namespace Taslim.Api.Controllers;
 [ApiController]
 [Authorize]
 [Route("api/movie-studio")]
-public sealed class MovieStudioController(IMovieStudioService movies, IMovieGuideService guides, IMovieStoryService stories) : ControllerBase
+public sealed class MovieStudioController(IMovieStudioService movies, IMovieGuideService guides, IMovieStoryService stories, IMovieCharacterContinuityService continuity) : ControllerBase
 {
     [HttpGet("cinematography/presets")]
     public IActionResult CinematographyPresets() => Ok(CinematographyPresetCatalog.All);
@@ -111,6 +111,36 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieGuid
                 : Ok(result);
         }
         catch (MovieGuideNotLockedException exception) { return ApiResults.Error(this, 409, "MOVIE_GUIDE_NOT_LOCKED", exception.Message); }
+    }
+
+    [HttpGet("projects/{id:guid}/continuity/characters")]
+    public async Task<IActionResult> ProjectCharacterContinuity(Guid id, [FromQuery] Guid? sceneId, [FromQuery] Guid? shotId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await continuity.ProjectAsync(GetUserId(), id, sceneId, shotId, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result);
+        }
+        catch (MovieContinuityTargetException exception) { return ApiResults.Error(this, 400, "MOVIE_CONTINUITY_TARGET_INVALID", exception.Message); }
+    }
+
+    [HttpPost("projects/{id:guid}/continuity/snapshots")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> CreateCharacterContinuitySnapshot(Guid id, MovieCharacterContinuitySnapshotRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await continuity.BuildSnapshotAsync(GetUserId(), id, request.MovieSceneId, request.MovieShotId, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : CreatedAtAction(nameof(GetCharacterContinuitySnapshot), new { snapshotId = result.SnapshotId }, result);
+        }
+        catch (MovieContinuityTargetException exception) { return ApiResults.Error(this, 400, "MOVIE_CONTINUITY_TARGET_INVALID", exception.Message); }
+    }
+
+    [HttpGet("continuity/snapshots/{snapshotId:guid}")]
+    public async Task<IActionResult> GetCharacterContinuitySnapshot(Guid snapshotId, CancellationToken cancellationToken)
+    {
+        var result = await continuity.GetSnapshotAsync(GetUserId(), snapshotId, cancellationToken);
+        return result is null ? ApiResults.Error(this, 404, "MOVIE_CONTINUITY_SNAPSHOT_NOT_FOUND", "Continuity snapshot not found.") : Ok(result);
     }
 
     [HttpPost("projects/{id:guid}/scenes")]

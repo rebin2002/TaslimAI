@@ -173,7 +173,8 @@ public sealed record DirectorContextDto(
     IReadOnlyList<DirectorLocationContext> Locations,
     DateTime AssembledAt,
     int ContextVersion = 1,
-    DirectorStoryContext? ApprovedStory = null);
+    DirectorStoryContext? ApprovedStory = null,
+    DirectorContinuityContext? Continuity = null);
 
 public sealed record DirectorGuideContext(
     string VisualLanguage,
@@ -189,6 +190,7 @@ public sealed record DirectorSceneContext(Guid Id, int Sequence, string Title, s
 public sealed record DirectorShotContext(Guid Id, int Sequence, string Description, string? CameraAndFraming, string? CameraMotion, int? DurationSeconds, string? Narration, string? Dialogue, string? VisualContinuityNotes);
 public sealed record DirectorCharacterContext(string Name, string Description, string? Appearance, string? ContinuityNotes);
 public sealed record DirectorLocationContext(string Name, string Description, string? VisualContinuityNotes);
+public sealed record DirectorContinuityContext(Guid? MovieSceneId, Guid? MovieShotId, string SnapshotHash, IReadOnlyList<MovieCharacterContinuityCharacterDto> Characters, IReadOnlyList<MovieCharacterContinuityWarningDto> Warnings);
 
 public sealed record DirectorContextAssemblyResult(DirectorContextDto Context, string SnapshotJson, string SnapshotHash);
 

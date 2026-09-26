@@ -59,6 +59,9 @@ public sealed class MovieProductionVersion
     public string? FirstFrameNotes { get; set; }
     public string? LastFrameNotes { get; set; }
     public string? RejectionReason { get; set; }
+    public Guid? ContinuitySnapshotId { get; set; }
+    public int? ContinuitySnapshotVersion { get; set; }
+    public string? ContinuitySnapshotHash { get; set; }
     public Guid CreatedByUserId { get; set; }
     public Guid? ReviewedByUserId { get; set; }
     public DateTime CreatedAt { get; set; }
@@ -180,6 +183,9 @@ public sealed record MovieProductionVersionDto(
     string? FirstFrameNotes,
     string? LastFrameNotes,
     string? RejectionReason,
+    Guid? ContinuitySnapshotId,
+    int? ContinuitySnapshotVersion,
+    string? ContinuitySnapshotHash,
     DateTime CreatedAt,
     DateTime UpdatedAt,
     DateTime? ReviewedAt,
