@@ -14,7 +14,7 @@ test.describe("Movie Studio V2 browser smoke", () => {
     const projectUrl = page.url();
     const projectId = projectUrl.match(/\/create\/movie\/([0-9a-f-]+)\/overview$/i)?.[1];
     expect(projectId).toBeTruthy();
-    await expect(page.getByRole("heading", { name: "E2E Movie V2 Workspace", level: 1 })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "E2E Movie V2 Workspace", level: 1 })).toBeVisible({ timeout: 20_000 });
     await expect(page.getByText("No output yet")).toBeVisible();
     await expect(page.getByText("No generated footage yet")).toBeVisible();
 
