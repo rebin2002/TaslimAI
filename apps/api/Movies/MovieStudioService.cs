@@ -12,6 +12,7 @@ public interface IMovieStudioService
 {
     Task<MovieStudioProjectResponse?> CreateAsync(Guid userId, MovieStudioCreateRequest request, CancellationToken cancellationToken, string? idempotencyKey = null);
     Task<MovieStudioProjectDto?> GetAsync(Guid userId, Guid id, CancellationToken cancellationToken);
+    Task<MovieStudioProjectShellDto?> GetShellAsync(Guid userId, Guid id, CancellationToken cancellationToken);
     Task<MovieStudioProjectDto?> UpdateGuideAsync(Guid userId, Guid id, MovieStudioGuideRequest request, CancellationToken cancellationToken);
     Task<MovieSceneDto?> AddSceneAsync(Guid userId, Guid id, MovieStudioSceneRequest request, CancellationToken cancellationToken);
     Task<MovieCharacterDto?> AddCharacterAsync(Guid userId, Guid id, MovieStudioCharacterRequest request, CancellationToken cancellationToken);
@@ -124,6 +125,14 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
     {
         var movie = await Query().FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
         return movie is null || !await collaboration.HasPermissionAsync(userId, id, MoviePermissions.View, cancellationToken) ? null : ToDto(movie);
+    }
+
+    public async Task<MovieStudioProjectShellDto?> GetShellAsync(Guid userId, Guid id, CancellationToken cancellationToken)
+    {
+        var movie = await db.MovieProjects.AsNoTracking().FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
+        return movie is null || !await collaboration.HasPermissionAsync(userId, id, MoviePermissions.View, cancellationToken)
+            ? null
+            : new MovieStudioProjectShellDto(movie.Id, movie.WorkspaceId, movie.ProjectId, movie.Mode, movie.Status, movie.Title, movie.Description, movie.DurationSeconds, movie.AspectRatio, movie.Style, movie.Language, movie.AdditionalInstructions, movie.CreatedAt, movie.UpdatedAt);
     }
 
     public async Task<MovieStudioProjectDto?> UpdateGuideAsync(Guid userId, Guid id, MovieStudioGuideRequest request, CancellationToken cancellationToken)

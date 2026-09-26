@@ -1,9 +1,12 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Taslim.Api.Contracts;
+using Taslim.Api.Domain;
 using Taslim.Api.Movies;
+using Taslim.Api.Persistence;
 using Xunit;
 
 namespace Taslim.Api.Tests;
@@ -118,7 +121,70 @@ public sealed class MovieStoryTests : IClassFixture<TaslimApiFactory>
         {
             premise = "Private premise", logline = "Private logline", synopsis = "Private synopsis", treatment = "Private treatment", scenes = Array.Empty<object>(),
         });
-        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Draft_can_be_saved_without_overwriting_the_approved_revision()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, $"story-draft-owner-{Guid.NewGuid():N}@example.com");
+        var movie = await CreateMovie(client, auth.PersonalWorkspace.Id, "Draft safety movie");
+        var first = await CreateRevision(client, movie.Project.Id, MovieStoryAuthorship.Human);
+        var approved = await SendWithCsrf<MovieStoryRevisionDto>(client, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/story/revisions/{first.CurrentRevisionId}/approve", null);
+        var second = await CreateRevision(client, movie.Project.Id, MovieStoryAuthorship.HumanEdited);
+
+        var updated = await SendWithCsrf<MovieStoryRevisionDto>(client, HttpMethod.Patch, $"/api/movie-studio/projects/{movie.Project.Id}/story/revisions/{second.CurrentRevisionId}", new
+        {
+            premise = "The approved premise remains untouched.",
+            logline = "A new draft tests a more dangerous choice before the city closes its borders.",
+            synopsis = "The witness follows a new clue through a changing city.",
+            treatment = "The witness moves from secrecy to an irreversible public choice.",
+            authorship = MovieStoryAuthorship.HumanEdited,
+            changeSummary = "Sharper second pass",
+            scenes = Array.Empty<object>(),
+        });
+
+        Assert.Equal(second.CurrentRevisionId, updated.Id);
+        Assert.Equal("Draft", updated.Status);
+        var story = await client.GetFromJsonAsync<MovieStoryDto>($"/api/movie-studio/projects/{movie.Project.Id}/story");
+        Assert.NotNull(story);
+        Assert.Equal(approved.Id, story!.ApprovedRevisionId);
+        Assert.Equal("Approved", story.ApprovedRevision!.Status);
+        Assert.Equal("A guarded witness must choose truth over safety before the city closes its borders.", story.ApprovedRevision.Logline);
+        Assert.Equal(updated.Id, story.CurrentRevisionId);
+        Assert.Equal("A new draft tests a more dangerous choice before the city closes its borders.", story.CurrentRevision!.Logline);
+
+        var immutable = await SendWithCsrf(client, HttpMethod.Patch, $"/api/movie-studio/projects/{movie.Project.Id}/story/revisions/{approved.Id}", new
+        {
+            premise = "No overwrite", logline = "No overwrite", synopsis = "No overwrite", treatment = "No overwrite", authorship = MovieStoryAuthorship.Human, scenes = Array.Empty<object>(),
+        });
+        Assert.Equal(HttpStatusCode.Conflict, immutable.StatusCode);
+    }
+
+    [Fact]
+    public async Task Story_approval_requires_movie_approval_permission()
+    {
+        using var owner = factory.CreateClient();
+        var ownerAuth = await Register(owner, $"story-approval-owner-{Guid.NewGuid():N}@example.com");
+        var movie = await CreateMovie(owner, ownerAuth.PersonalWorkspace.Id, "Approval authority movie");
+        var draft = await CreateRevision(owner, movie.Project.Id, MovieStoryAuthorship.Human);
+        using var writer = factory.CreateClient();
+        var writerAuth = await Register(writer, $"story-approval-writer-{Guid.NewGuid():N}@example.com");
+        await AddWorkspaceMember(ownerAuth.PersonalWorkspace.Id, writerAuth.User.Id);
+        var teamResponse = await SendWithCsrf<MovieTeamMemberDto>(owner, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/collaboration/team", new
+        {
+            userId = writerAuth.User.Id,
+            role = MovieTeamRoles.Writer,
+            permissions = Array.Empty<string>(),
+        });
+        Assert.DoesNotContain(MoviePermissions.Approve, teamResponse.Permissions);
+
+        var forbidden = await SendWithCsrf(writer, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/story/revisions/{draft.CurrentRevisionId}/approve", null);
+        Assert.Equal(HttpStatusCode.Forbidden, forbidden.StatusCode);
+
+        var approved = await SendWithCsrf<MovieStoryRevisionDto>(owner, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/story/revisions/{draft.CurrentRevisionId}/approve", null);
+        Assert.Equal(MovieStoryRevisionStatuses.Approved, approved.Status);
     }
 
     private static async Task<MovieStudioProjectResponse> CreateMovie(HttpClient client, Guid workspaceId, string title)
@@ -146,6 +212,14 @@ public sealed class MovieStoryTests : IClassFixture<TaslimApiFactory>
         var response = await SendWithCsrf(client, HttpMethod.Post, "/api/auth/register", new { displayName = "Story Tester", email, password = "StrongPassword!123", preferredLanguage = "en" });
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         return (await response.Content.ReadFromJsonAsync<AuthResponse>())!;
+    }
+
+    private async Task AddWorkspaceMember(Guid workspaceId, Guid userId)
+    {
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        db.WorkspaceMembers.Add(new WorkspaceMember { Id = Guid.NewGuid(), WorkspaceId = workspaceId, UserId = userId, Role = WorkspaceRole.Member, JoinedAt = DateTime.UtcNow });
+        await db.SaveChangesAsync();
     }
 
     private static async Task<T> SendWithCsrf<T>(HttpClient client, HttpMethod method, string path, object? payload)

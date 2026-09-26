@@ -102,4 +102,6 @@ public sealed record MovieStoryDto(
     DateTime UpdatedAt,
     MovieStoryRevisionDto? CurrentRevision,
     MovieStoryRevisionDto? ApprovedRevision,
-    IReadOnlyList<MovieStoryRevisionSummaryDto> Revisions);
+    IReadOnlyList<MovieStoryRevisionSummaryDto> Revisions,
+    bool CanEdit,
+    bool CanApprove);
