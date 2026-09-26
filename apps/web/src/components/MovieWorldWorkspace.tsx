@@ -115,6 +115,7 @@ export function MovieWorldWorkspace({ projectId }: { projectId: string }) {
   const refs = data.world.references;
 
   return <div className="movie-world-room">
+    <header className="movie-world-project-heading"><span className="movie-workspace-kicker">Full Movie Project · {data.status}</span><h1>{data.title}</h1><p>{data.description}</p></header>
     <section className="movie-world-hero">
       <div><span className="movie-workspace-kicker">Visual production room</span><h3>Build the world once. Carry it into every shot.</h3><p>Identity, references, and continuity facts stay visible together — without loading the rest of the movie graph.</p></div>
       <div className="movie-world-signal"><Sparkles size={18} /><span>{data.world.locks.length} active locks</span><strong>{data.world.references.length} references</strong></div>

@@ -118,7 +118,7 @@ export function FullMovieWorkspaceView({ projectId, module }: { projectId: strin
 }
 
 function WorldOnlyWorkspace({ projectId }: { projectId: string }) {
-  return <div className="movie-studio-page movie-full-workspace"><header className="movie-workspace-header"><Link href={`/create/movie/${projectId}/overview`} className="movie-workspace-back"><ArrowLeft size={14} /> Movie Studio</Link><div className="movie-workspace-heading"><div><span className="movie-workspace-kicker">Focused production read model</span><h1>World room</h1><p>Locations, sets, props, references, usage, and continuity — without loading the complete project graph.</p></div><div className="movie-workspace-meta"><span>World V2</span><span>Asset-backed</span></div></div></header><main className="movie-world-only-main"><MovieWorldWorkspace projectId={projectId} /></main></div>;
+  return <div className="movie-studio-page movie-full-workspace"><header className="movie-workspace-header"><Link href={`/create/movie/${projectId}/overview`} className="movie-workspace-back"><ArrowLeft size={14} /> Movie Studio</Link><div className="movie-workspace-heading"><div><span className="movie-workspace-kicker">Focused production read model</span><h2>World room</h2><p>Locations, sets, props, references, usage, and continuity — without loading the complete project graph.</p></div><div className="movie-workspace-meta"><span>World V2</span><span>Asset-backed</span></div></div></header><main className="movie-world-only-main movie-workspace-main"><MovieWorldWorkspace projectId={projectId} /></main></div>;
 }
 
 function FullMovieProjectWorkspace({ projectId, module }: { projectId: string; module: string }) {
