@@ -5,10 +5,13 @@ import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "re
 import {
   ArrowDown,
   ArrowDown,
+  ArrowDown,
   ArrowLeft,
   ArrowUp,
   ArrowUp,
+  ArrowUp,
   ArrowUpRight,
+  Archive,
   Archive,
   AudioLines,
   BookOpen,
@@ -36,9 +39,10 @@ import {
   Users,
   Workflow,
 } from "lucide-react";
-import { api, type Asset, type DirectorProposal, type DirectorStoryAction, type MovieCast, type MovieCharacter, type MovieCharacterState, type MovieOverview, type MovieProject, type MovieProjectShell, type MovieScene, type MovieSceneShotPlan, type MovieSceneWorkspace, type MovieScenesWorkspace, type MovieScreenplayElementType, type MovieShot, type MovieShotPlanningInput, type MovieStory, type MovieStoryRevision, type MovieStoryRevisionInput } from "@/lib/api";
+import { api, type Asset, type CinematographyPreset, type DirectorProposal, type DirectorStoryAction, type MovieCast, type MovieCharacter, type MovieCharacterState, type MovieOverview, type MovieProject, type MovieProjectShell, type MovieScene, type MovieSceneShotPlan, type MovieSceneWorkspace, type MovieScenesWorkspace, type MovieScreenplayElementType, type MovieShot, type MovieShotPlanningInput, type MovieStory, type MovieStoryRevision, type MovieStoryRevisionInput } from "@/lib/api";
 import { assetFileUrl } from "@/lib/apiBase";
 import { MovieWorldWorkspace } from "@/components/MovieWorldWorkspace";
+import { ShotDesigner, type ShotDesignerDraft } from "@/components/ShotDesigner";
 
 export const fullMovieModules = [
   { slug: "overview", label: "Overview", icon: Gauge },
@@ -116,6 +120,8 @@ function FullMovieProjectWorkspace({ projectId, module }: { projectId: string; m
   const [selectedSceneId, setSelectedSceneId] = useState<string | null>(null);
   const [newScene, setNewScene] = useState({ title: "", summary: "" });
   const [addingScene, setAddingScene] = useState(false);
+  const [presets, setPresets] = useState<CinematographyPreset[]>([]);
+  const [savingShot, setSavingShot] = useState(false);
 
   useEffect(() => {
     let mounted = true;
@@ -134,6 +140,7 @@ function FullMovieProjectWorkspace({ projectId, module }: { projectId: string; m
     }).finally(() => {
       if (mounted) setLoading(false);
     });
+    void api.getCinematographyPresets().then((catalog) => { if (mounted) setPresets(catalog); }).catch(() => undefined);
     return () => { mounted = false; };
   }, [activeModule, projectId]);
 
@@ -157,6 +164,16 @@ function FullMovieProjectWorkspace({ projectId, module }: { projectId: string; m
     } finally {
       setAddingScene(false);
     }
+  }
+
+  async function addShot(sceneId: string, draft: ShotDesignerDraft): Promise<boolean> {
+    if (!project) return false;
+    setSavingShot(true); setError("");
+    try {
+      const shot = await api.addMovieShot(sceneId, { description: draft.description, durationSeconds: draft.durationSeconds, cameraAndFraming: [draft.cinematography.shotSize, draft.cinematography.focalLength, draft.cinematography.cameraAngle].filter(Boolean).join(" · ") || null, cameraMotion: draft.cinematography.cameraMovement ?? null, visualContinuityNotes: draft.cinematography.compositionNotes ?? null, cinematography: draft.cinematography });
+      setProject((current) => current ? { ...current, scenes: current.scenes.map((scene) => scene.id === sceneId ? { ...scene, shots: [...scene.shots, shot] } : scene) } : current);
+      return true;
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "The shot could not be saved."); return false; } finally { setSavingShot(false); }
   }
 
   function applyShotPlan(plan: MovieSceneShotPlan) {
@@ -212,7 +229,7 @@ function FullMovieProjectWorkspace({ projectId, module }: { projectId: string; m
           {activeModule === "story" && <StoryModule projectId={workspace.id} />}
           {activeModule === "cast" && <CastModule projectId={workspace.id} />}
           {activeModule === "world" && <WorldModule projectId={fullProject.id} />}
-          {activeModule === "scenes" && <ScenesModule projectId={fullProject.id} selectedSceneId={selectedScene?.id ?? null} onSelectScene={setSelectedSceneId} onGenerate={generateScene} onPlanChange={applyShotPlan} />}
+          {activeModule === "scenes" && <ScenesModule projectId={fullProject.id} project={fullProject} presets={presets} savingShot={savingShot} onAddShot={addShot} selectedSceneId={selectedScene?.id ?? null} onSelectScene={setSelectedSceneId} onGenerate={generateScene} onPlanChange={applyShotPlan} />}
           {activeModule === "storyboard" && <StoryboardModule project={fullProject} />}
           {activeModule === "production" && <ProductionModule project={fullProject} completionPercent={completionPercent} />}
           {activeModule === "edit" && <EditModule project={fullProject} />}
@@ -657,7 +674,7 @@ function WorldModule({ projectId }: { projectId: string }) {
   return <div className="movie-module-stack"><MovieWorldWorkspace projectId={projectId} /></div>;
 }
 
-function ScenesModule({ projectId, selectedSceneId, onSelectScene, onGenerate, onPlanChange }: { projectId: string; selectedSceneId: string | null; onSelectScene: (sceneId: string) => void; onGenerate: (sceneId: string) => Promise<void>; onPlanChange: (plan: MovieSceneShotPlan) => void }) {
+function ScenesModule({ projectId, project, presets, savingShot, onAddShot, selectedSceneId, onSelectScene, onGenerate, onPlanChange }: { projectId: string; project: MovieProject; presets: CinematographyPreset[]; savingShot: boolean; onAddShot: (sceneId: string, draft: ShotDesignerDraft) => Promise<boolean>; selectedSceneId: string | null; onSelectScene: (sceneId: string) => void; onGenerate: (sceneId: string) => Promise<void>; onPlanChange: (plan: MovieSceneShotPlan) => void }) {
   const [workspace, setWorkspace] = useState<MovieScenesWorkspace | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -704,7 +721,7 @@ function ScenesModule({ projectId, selectedSceneId, onSelectScene, onGenerate, o
     <section className="movie-scene-command-bar"><div><span className="movie-workspace-kicker">Production bridge</span><h3>Screenplay → production scenes → shots</h3><p>Break down approved story material into durable production records. Existing scenes and shots are never silently replaced.</p></div><button type="button" className="movie-workspace-button is-primary" onClick={() => void breakDown()} disabled={breakdownBusy || workspace.screenplayApprovalState !== "Approved"}>{breakdownBusy ? "Mapping…" : workspace.linkedSceneCount ? "Map unlinked screenplay scenes" : "Break down approved screenplay"}</button></section>
     <div className="movie-scenes-summary"><Metric label="Acts" value={workspace.acts.length} /><Metric label="Sequences" value={sequences.length} /><Metric label="Scenes" value={workspace.sceneCount} /><Metric label="Shots ready for planning" value={workspace.shotCount} /></div>
     {workspace.screenplayApprovalState !== "Approved" && <div className="movie-scenes-callout"><BookOpen size={15} /><span>{workspace.screenplayApprovalState === "NotAvailable" ? "No approved screenplay is linked yet. Manual production scene creation remains available." : `Screenplay status: ${workspace.screenplayApprovalState}. Approve a revision before mapping it.`}</span></div>}
-    <div className="movie-scene-workspace movie-scenes-hierarchy-layout"><section className="movie-workspace-section movie-scene-list-panel"><div className="movie-section-head"><div><span className="movie-workspace-kicker">Canonical hierarchy</span><h3>Acts, sequences, scenes</h3></div><span className="movie-section-count">{workspace.linkedSceneCount} linked</span></div>{workspace.acts.length ? workspace.acts.map((act) => <SceneAct key={act.id} act={act} selectedSceneId={selectedScene?.id ?? null} onSelect={onSelectScene} onGenerate={onGenerate} onReorder={reorderScene} />) : <EmptyModule title="No production hierarchy yet" text="Create a scene below or map an approved screenplay to establish the production spine." />}</section><section className="movie-workspace-section movie-scene-inspector"><span className="movie-workspace-kicker">Scene inspector</span>{selectedScene ? <><ScenesInspector scene={selectedScene} /><ShotPlanBoard scene={selectedScene} onPlanChange={onPlanChange} /></> : <EmptyModule title="Select a scene" text="The inspector will show screenplay source, continuity, world records, and shot readiness." />}</section></div>
+    <div className="movie-scene-workspace movie-scenes-hierarchy-layout"><section className="movie-workspace-section movie-scene-list-panel"><div className="movie-section-head"><div><span className="movie-workspace-kicker">Canonical hierarchy</span><h3>Acts, sequences, scenes</h3></div><span className="movie-section-count">{workspace.linkedSceneCount} linked</span></div>{workspace.acts.length ? workspace.acts.map((act) => <SceneAct key={act.id} act={act} selectedSceneId={selectedScene?.id ?? null} onSelect={onSelectScene} onGenerate={onGenerate} onReorder={reorderScene} />) : <EmptyModule title="No production hierarchy yet" text="Create a scene below or map an approved screenplay to establish the production spine." />}</section><section className="movie-workspace-section movie-scene-inspector"><span className="movie-workspace-kicker">Scene inspector</span>{selectedScene ? <><ScenesInspector scene={selectedScene} /><ShotPlanBoard scene={selectedScene} onPlanChange={onPlanChange} />{project.scenes.find((item) => item.id === selectedScene.id) && <SceneShotDesigner scene={project.scenes.find((item) => item.id === selectedScene.id)!} guide={project.guide} presets={presets} saving={savingShot} onAddShot={onAddShot} />}</> : <EmptyModule title="Select a scene" text="The inspector will show screenplay source, continuity, world records, and shot readiness." />}</section></div>
     <form className="movie-add-scene-modern movie-scenes-add-form" onSubmit={(event) => { event.preventDefault(); void addScene(); }}><div><span className="movie-workspace-kicker">Manual production scene</span><h3>Keep editing possible</h3></div><label><span className="sr-only">Scene title</span><input value={newScene.title} onChange={(event) => setNewScene({ ...newScene, title: event.target.value })} placeholder="Scene title" /></label><label><span className="sr-only">Scene purpose</span><input value={newScene.summary} onChange={(event) => setNewScene({ ...newScene, summary: event.target.value })} placeholder="Description / purpose" /></label><label><span className="sr-only">Sequence</span><select value={newScene.sequenceId} onChange={(event) => setNewScene({ ...newScene, sequenceId: event.target.value })}><option value="">First sequence</option>{sequences.map((sequence) => <option key={sequence.id} value={sequence.id}>{sequence.sequence}. {sequence.title}</option>)}</select></label><button className="movie-workspace-button is-primary" type="submit" disabled={addingScene || !newScene.title.trim() || !newScene.summary.trim()}>{addingScene ? "Saving…" : "Add scene"}</button></form>
     {error && <div className="movie-workspace-error-inline"><XCircleIcon /> {error}</div>}
   </div>;
@@ -778,6 +795,10 @@ function ShotPlanBoard({ scene, onPlanChange }: { scene: { id: string; durationS
 function ShotPlanCard({ shot, index, count, onEdit, onMove, onArchive }: { shot: MovieShot; index: number; count: number; onEdit: () => void; onMove: (sequence: number) => void; onArchive: () => void }) {
   const archived = shot.status === "Archived";
   return <article className={`movie-shot-plan-card ${archived ? "is-archived" : ""}`}><div className="movie-shot-plan-card-head"><span className="movie-scene-sequence">{String(shot.sequence).padStart(2, "0")}</span><div><strong>{shot.description}</strong><small>{shot.planState} · {shot.durationSeconds ? `${shot.durationSeconds}s` : "duration unset"}</small></div><span className={`movie-shot-readiness ${shot.readiness.ready ? "is-ready" : ""}`}>{shot.readiness.ready ? <><Check size={12} /> Ready</> : "Needs detail"}</span></div><div className="movie-shot-plan-facts"><span><b>Purpose</b>{shot.purpose || "Not set"}</span><span><b>Subjects</b>{shot.subjects || "Not set"}</span><span><b>Set</b>{shot.locationSet || "Not set"}</span><span><b>Requirements</b>{shot.productionRequirements || "Not set"}</span></div>{!shot.readiness.ready && <p className="movie-shot-missing">{shot.readiness.summary}</p>}<div className="movie-shot-card-actions"><button type="button" className="movie-text-action" onClick={onEdit} disabled={archived}><PencilRuler size={12} /> Edit</button><button type="button" className="movie-text-action" onClick={() => onMove(shot.sequence - 1)} disabled={index === 0 || archived}><ArrowUp size={12} /> Up</button><button type="button" className="movie-text-action" onClick={() => onMove(shot.sequence + 1)} disabled={index === count - 1 || archived}><ArrowDown size={12} /> Down</button><button type="button" className="movie-text-action is-danger" onClick={onArchive} disabled={archived}><Archive size={12} /> {archived ? "Archived" : "Archive"}</button></div></article>;
+}
+
+function SceneShotDesigner({ scene, guide, presets, saving, onAddShot }: { scene: MovieScene; guide: MovieProject["guide"]; presets: CinematographyPreset[]; saving: boolean; onAddShot: (sceneId: string, draft: ShotDesignerDraft) => Promise<boolean> }) {
+  return <ShotDesigner scene={scene} guide={guide} presets={presets} saving={saving} onAddShot={(draft) => onAddShot(scene.id, draft)} />;
 }
 
 function StoryboardModule({ project }: { project: MovieProject }) {

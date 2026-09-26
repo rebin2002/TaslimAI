@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const workspaceSource = readFileSync(new URL("./FullMovieWorkspaceView.tsx", import.meta.url), "utf8");
+const shotDesignerSource = readFileSync(new URL("./ShotDesigner.tsx", import.meta.url), "utf8");
 const createSource = readFileSync(new URL("./MovieStudioView.tsx", import.meta.url), "utf8");
 
 describe("Full Movie workspace foundation", () => {
@@ -81,4 +82,15 @@ describe("Full Movie workspace foundation", () => {
     expect(workspaceSource).toContain("Apply to editable Story revision");
     expect(workspaceSource).toContain("It never silently rewrites an approved revision.");
   });
+  it("mounts Shot Designer from the scene inspector without mutating the guide", () => {
+    expect(workspaceSource).toContain("<ShotDesigner scene={scene} guide={guide} presets={presets}");
+    expect(workspaceSource).toContain("api.addMovieShot(sceneId");
+    expect(shotDesignerSource).toContain("A shot override never rewrites the Movie Guide");
+    expect(shotDesignerSource).toContain("Guide stays locked; this saves as a shot-level override");
+    expect(shotDesignerSource).toContain("Native");
+    expect(shotDesignerSource).toContain("Translated");
+    expect(shotDesignerSource).toContain("Simulated/Post");
+    expect(shotDesignerSource).toContain("Unsupported");
+  });
+
 });
