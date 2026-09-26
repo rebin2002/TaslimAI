@@ -3,7 +3,9 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
+  ArrowDown,
   ArrowLeft,
+  ArrowUp,
   AudioLines,
   BookOpen,
   Check,
@@ -12,7 +14,6 @@ import {
   Film,
   Gauge,
   Layers3,
-  ListChecks,
   Map,
   PencilRuler,
   Play,
@@ -22,7 +23,7 @@ import {
   Users,
   Workflow,
 } from "lucide-react";
-import { api, type MovieProject, type MovieScene } from "@/lib/api";
+import { api, type MovieProject, type MovieScene, type MovieSceneWorkspace, type MovieScenesWorkspace } from "@/lib/api";
 import { assetFileUrl } from "@/lib/apiBase";
 
 export const fullMovieModules = [
@@ -88,8 +89,6 @@ export function FullMovieWorkspaceView({ projectId, module }: { projectId: strin
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [selectedSceneId, setSelectedSceneId] = useState<string | null>(null);
-  const [newScene, setNewScene] = useState({ title: "", summary: "" });
-  const [addingScene, setAddingScene] = useState(false);
 
   useEffect(() => {
     let mounted = true;
@@ -111,21 +110,6 @@ export function FullMovieWorkspaceView({ projectId, module }: { projectId: strin
   const completionPercent = project ? Math.min(100, Math.round(((project.scenes.length ? readyClips.length : 0) / Math.max(project.scenes.length, 1)) * 100)) : 0;
   const copy = moduleCopy[activeModule];
 
-  async function addScene() {
-    if (!project || !newScene.title.trim() || !newScene.summary.trim()) return;
-    setAddingScene(true);
-    setError("");
-    try {
-      const scene = await api.addMovieScene(project.id, { title: newScene.title.trim(), summary: newScene.summary.trim() });
-      setProject((current) => current ? { ...current, scenes: [...current.scenes, scene] } : current);
-      setSelectedSceneId(scene.id);
-      setNewScene({ title: "", summary: "" });
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "The scene could not be saved.");
-    } finally {
-      setAddingScene(false);
-    }
-  }
 
   async function generateScene(sceneId: string) {
     if (!project) return;
@@ -174,7 +158,7 @@ export function FullMovieWorkspaceView({ projectId, module }: { projectId: strin
           {activeModule === "story" && <StoryModule project={project} />}
           {activeModule === "cast" && <CastModule project={project} />}
           {activeModule === "world" && <WorldModule project={project} />}
-          {activeModule === "scenes" && <ScenesModule project={project} selectedSceneId={selectedScene?.id ?? null} newScene={newScene} addingScene={addingScene} onSelectScene={setSelectedSceneId} onChangeScene={setNewScene} onAddScene={() => void addScene()} onGenerate={generateScene} />}
+          {activeModule === "scenes" && <ScenesModule projectId={project.id} selectedSceneId={selectedScene?.id ?? null} onSelectScene={setSelectedSceneId} onGenerate={generateScene} />}
           {activeModule === "storyboard" && <StoryboardModule project={project} />}
           {activeModule === "production" && <ProductionModule project={project} completionPercent={completionPercent} />}
           {activeModule === "edit" && <EditModule project={project} />}
@@ -223,10 +207,67 @@ function WorldModule({ project }: { project: MovieProject }) {
   return <div className="movie-module-stack"><ModuleIntro icon={<Map size={18} />} title="The world is a continuity decision" text="Locations are kept separate from scene execution so visual identity can travel with the project." />{project.locations.length ? <div className="movie-record-grid">{project.locations.map((location) => <article className="movie-record-card" key={location.id}><span className="movie-record-index">Location</span><h3>{location.name}</h3><p>{location.description}</p><RecordLine label="Visual continuity" value={location.visualContinuityNotes} /></article>)}</div> : <EmptyModule title="No locations defined yet" text="World records will appear here once the first location is part of the plan." />}</div>;
 }
 
-function ScenesModule({ project, selectedSceneId, newScene, addingScene, onSelectScene, onChangeScene, onAddScene, onGenerate }: { project: MovieProject; selectedSceneId: string | null; newScene: { title: string; summary: string }; addingScene: boolean; onSelectScene: (sceneId: string) => void; onChangeScene: (value: { title: string; summary: string }) => void; onAddScene: () => void; onGenerate: (sceneId: string) => Promise<void> }) {
-  return <div className="movie-module-stack"><div className="movie-scene-workspace"><section className="movie-workspace-section movie-scene-list-panel"><div className="movie-section-head"><div><span className="movie-workspace-kicker">Ordered story</span><h3>{project.scenes.length} scenes planned</h3></div><ListChecks size={17} /></div>{project.scenes.length ? <div className="movie-scene-list-modern">{project.scenes.map((scene) => <SceneListItem key={scene.id} scene={scene} isSelected={scene.id === selectedSceneId} onSelect={() => onSelectScene(scene.id)} onGenerate={() => void onGenerate(scene.id)} />)}</div> : <EmptyModule text="Add the first scene to give the project a beginning." />}</section><section className="movie-workspace-section movie-scene-inspector"><span className="movie-workspace-kicker">Inspector</span>{project.scenes.find((scene) => scene.id === selectedSceneId) ? <SceneInspector scene={project.scenes.find((scene) => scene.id === selectedSceneId)!} /> : <EmptyModule title="Select a scene" text="The inspector will show scene intent, continuity, and shot count." />}</section></div><form className="movie-add-scene-modern" onSubmit={(event) => { event.preventDefault(); onAddScene(); }}><div><span className="movie-workspace-kicker">Planning action</span><h3>Add a scene</h3></div><label><span className="sr-only">Scene title</span><input value={newScene.title} onChange={(event) => onChangeScene({ ...newScene, title: event.target.value })} placeholder="Scene title" /></label><label><span className="sr-only">Scene summary</span><input value={newScene.summary} onChange={(event) => onChangeScene({ ...newScene, summary: event.target.value })} placeholder="One-line scene intent" /></label><button className="movie-workspace-button is-primary" type="submit" disabled={addingScene || !newScene.title.trim() || !newScene.summary.trim()}>{addingScene ? "Saving…" : "Add scene"}</button></form></div>;
+function ScenesModule({ projectId, selectedSceneId, onSelectScene, onGenerate }: { projectId: string; selectedSceneId: string | null; onSelectScene: (sceneId: string) => void; onGenerate: (sceneId: string) => Promise<void> }) {
+  const [workspace, setWorkspace] = useState<MovieScenesWorkspace | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [breakdownBusy, setBreakdownBusy] = useState(false);
+  const [newScene, setNewScene] = useState({ title: "", summary: "", sequenceId: "" });
+  const [addingScene, setAddingScene] = useState(false);
+  const selectedScene = useMemo(() => workspace?.acts.flatMap((act) => act.sequences.flatMap((sequence) => sequence.scenes)).find((scene) => scene.id === selectedSceneId) ?? workspace?.acts[0]?.sequences[0]?.scenes[0] ?? null, [workspace, selectedSceneId]);
+  const sequences = workspace?.acts.flatMap((act) => act.sequences) ?? [];
+  const refresh = async () => {
+    setLoading(true);
+    try { setWorkspace(await api.getMovieScenesWorkspace(projectId)); } catch (cause) { setError(cause instanceof Error ? cause.message : "The Scenes room could not be loaded."); } finally { setLoading(false); }
+  };
+  useEffect(() => { void refresh(); }, [projectId]);
+  useEffect(() => { if (!selectedSceneId && selectedScene) onSelectScene(selectedScene.id); }, [selectedScene, selectedSceneId, onSelectScene]);
+  async function breakDown() {
+    setBreakdownBusy(true); setError("");
+    try { const result = await api.breakDownMovieScreenplay(projectId); setWorkspace(result.workspace); const first = result.workspace.acts[0]?.sequences[0]?.scenes[0]; if (first) onSelectScene(first.id); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "The approved screenplay could not be broken down."); }
+    finally { setBreakdownBusy(false); }
+  }
+  async function reorderScene(scene: MovieSceneWorkspace, delta: number) {
+    setError("");
+    try { await api.reorderMovieEntity("scenes", scene.id, scene.sequence + delta); await refresh(); onSelectScene(scene.id); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "The scene order could not be saved."); }
+  }
+  async function addScene() {
+    if (!newScene.title.trim() || !newScene.summary.trim()) return;
+    setAddingScene(true); setError("");
+    try {
+      let sequenceId = newScene.sequenceId || sequences[0]?.id;
+      if (!sequenceId) {
+        const act = await api.addMovieV2Act(projectId, { title: "Act 1" });
+        const sequence = await api.addMovieV2Sequence(act.id, { title: "Sequence 1" });
+        sequenceId = sequence.id;
+      }
+      const scene = await api.addMovieV2Scene(sequenceId, { title: newScene.title.trim(), summary: newScene.summary.trim() });
+      await refresh(); onSelectScene(scene.id); setNewScene({ title: "", summary: "", sequenceId });
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "The production scene could not be saved."); }
+    finally { setAddingScene(false); }
+  }
+  if (loading) return <section className="movie-workspace-section"><div className="movie-workspace-loading"><span className="loading-spinner" /><p>Loading the scene map…</p></div></section>;
+  if (!workspace) return <EmptyModule title="Scenes workspace unavailable" text={error || "The production hierarchy could not be loaded."} />;
+  return <div className="movie-module-stack">
+    <section className="movie-scene-command-bar"><div><span className="movie-workspace-kicker">Production bridge</span><h3>Screenplay → production scenes → shots</h3><p>Break down approved story material into durable production records. Existing scenes and shots are never silently replaced.</p></div><button type="button" className="movie-workspace-button is-primary" onClick={() => void breakDown()} disabled={breakdownBusy || workspace.screenplayApprovalState !== "Approved"}>{breakdownBusy ? "Mapping…" : workspace.linkedSceneCount ? "Map unlinked screenplay scenes" : "Break down approved screenplay"}</button></section>
+    <div className="movie-scenes-summary"><Metric label="Acts" value={workspace.acts.length} /><Metric label="Sequences" value={sequences.length} /><Metric label="Scenes" value={workspace.sceneCount} /><Metric label="Shots ready for planning" value={workspace.shotCount} /></div>
+    {workspace.screenplayApprovalState !== "Approved" && <div className="movie-scenes-callout"><BookOpen size={15} /><span>{workspace.screenplayApprovalState === "NotAvailable" ? "No approved screenplay is linked yet. Manual production scene creation remains available." : `Screenplay status: ${workspace.screenplayApprovalState}. Approve a revision before mapping it.`}</span></div>}
+    <div className="movie-scene-workspace movie-scenes-hierarchy-layout"><section className="movie-workspace-section movie-scene-list-panel"><div className="movie-section-head"><div><span className="movie-workspace-kicker">Canonical hierarchy</span><h3>Acts, sequences, scenes</h3></div><span className="movie-section-count">{workspace.linkedSceneCount} linked</span></div>{workspace.acts.length ? workspace.acts.map((act) => <SceneAct key={act.id} act={act} selectedSceneId={selectedScene?.id ?? null} onSelect={onSelectScene} onGenerate={onGenerate} onReorder={reorderScene} />) : <EmptyModule title="No production hierarchy yet" text="Create a scene below or map an approved screenplay to establish the production spine." />}</section><section className="movie-workspace-section movie-scene-inspector"><span className="movie-workspace-kicker">Scene inspector</span>{selectedScene ? <ScenesInspector scene={selectedScene} /> : <EmptyModule title="Select a scene" text="The inspector will show screenplay source, continuity, world records, and shot readiness." />}</section></div>
+    <form className="movie-add-scene-modern movie-scenes-add-form" onSubmit={(event) => { event.preventDefault(); void addScene(); }}><div><span className="movie-workspace-kicker">Manual production scene</span><h3>Keep editing possible</h3></div><label><span className="sr-only">Scene title</span><input value={newScene.title} onChange={(event) => setNewScene({ ...newScene, title: event.target.value })} placeholder="Scene title" /></label><label><span className="sr-only">Scene purpose</span><input value={newScene.summary} onChange={(event) => setNewScene({ ...newScene, summary: event.target.value })} placeholder="Description / purpose" /></label><label><span className="sr-only">Sequence</span><select value={newScene.sequenceId} onChange={(event) => setNewScene({ ...newScene, sequenceId: event.target.value })}><option value="">First sequence</option>{sequences.map((sequence) => <option key={sequence.id} value={sequence.id}>{sequence.sequence}. {sequence.title}</option>)}</select></label><button className="movie-workspace-button is-primary" type="submit" disabled={addingScene || !newScene.title.trim() || !newScene.summary.trim()}>{addingScene ? "Saving…" : "Add scene"}</button></form>
+    {error && <div className="movie-workspace-error-inline"><XCircleIcon /> {error}</div>}
+  </div>;
 }
-
+function SceneAct({ act, selectedSceneId, onSelect, onGenerate, onReorder }: { act: import("@/lib/api").MovieScenesAct; selectedSceneId: string | null; onSelect: (id: string) => void; onGenerate: (id: string) => Promise<void>; onReorder: (scene: MovieSceneWorkspace, delta: number) => Promise<void> }) {
+  return <div className="movie-hierarchy-act"><div className="movie-hierarchy-label"><span>ACT {String(act.sequence).padStart(2, "0")}</span><strong>{act.title}</strong><small className={`movie-hierarchy-status is-${act.status.toLowerCase()}`}>{act.status}</small></div>{act.sequences.map((sequence) => <div className="movie-hierarchy-sequence" key={sequence.id}><div className="movie-hierarchy-sequence-head"><span>SEQ {String(sequence.sequence).padStart(2, "0")}</span><strong>{sequence.title}</strong><small>{sequence.scenes.length} scenes</small></div>{sequence.scenes.map((scene, index) => <SceneWorkspaceItem key={scene.id} scene={scene} isSelected={scene.id === selectedSceneId} canMoveUp={index > 0} canMoveDown={index < sequence.scenes.length - 1} onSelect={() => onSelect(scene.id)} onGenerate={() => void onGenerate(scene.id)} onReorder={(delta) => void onReorder(scene, delta)} />)}</div>)}</div>;
+}
+function SceneWorkspaceItem({ scene, isSelected, canMoveUp, canMoveDown, onSelect, onGenerate, onReorder }: { scene: MovieSceneWorkspace; isSelected: boolean; canMoveUp: boolean; canMoveDown: boolean; onSelect: () => void; onGenerate: () => void; onReorder: (delta: number) => void }) {
+  return <article className={`movie-scene-list-item ${isSelected ? "is-selected" : ""}`}><button type="button" className="movie-scene-list-main" onClick={onSelect}><span className="movie-scene-sequence">{String(scene.sequence).padStart(2, "0")}</span><span><strong>{scene.title}</strong><small>{scene.slug}</small></span><ChevronRight size={14} /></button><div className="movie-scene-list-actions"><span className={`movie-scene-state ${scene.approvalState === "Linked" ? "is-ready" : ""}`}>{scene.approvalState === "Linked" ? <><Check size={12} /> Screenplay linked</> : "Production only"}</span><span className="movie-scene-shot-count">{scene.shotCount} shots</span><span className="movie-scene-order-actions"><button type="button" aria-label={`Move ${scene.title} up`} onClick={() => onReorder(-1)} disabled={!canMoveUp}><ArrowUp size={11} /></button><button type="button" aria-label={`Move ${scene.title} down`} onClick={() => onReorder(1)} disabled={!canMoveDown}><ArrowDown size={11} /></button></span><button type="button" className="movie-text-action" onClick={onGenerate}><Sparkles size={12} /> Generate</button></div></article>;
+}
+function ScenesInspector({ scene }: { scene: MovieSceneWorkspace }) {
+  return <div className="movie-inspector-content"><div className="movie-scenes-inspector-topline"><span className="movie-scene-state is-ready">{scene.productionStatus}</span><span className="movie-scene-state">{scene.approvalState}</span></div><h3>{scene.title}</h3><p>{scene.description}</p><div className="movie-inspector-facts"><span><strong>{scene.shotCount}</strong> shots</span><span><strong>{scene.storyPosition}</strong> position</span></div><div className="movie-scenes-detail-grid"><RecordLine label="Slug / source" value={scene.slug} /><RecordLine label="Purpose" value={scene.purpose} /><RecordLine label="Characters" value={scene.characters.join(", ") || null} /><RecordLine label="Location" value={scene.locations.map((item) => item.name).join(", ") || null} /><RecordLine label="Set" value={scene.sets.map((item) => item.name).join(", ") || null} /><RecordLine label="Screenplay" value={scene.screenplaySource ? `${scene.screenplaySource}${scene.screenplayRevisionNumber ? ` · revision ${scene.screenplayRevisionNumber}` : ""}` : null} /></div>{scene.screenplaySynopsis && <div className="movie-scenes-source-note"><BookOpen size={14} /><p>{scene.screenplaySynopsis}</p></div>}{scene.continuityWarnings.length ? <div className="movie-scenes-warning-list"><span className="movie-inspector-label">Continuity warnings</span>{scene.continuityWarnings.map((warning) => <p key={warning}>{warning}</p>)}</div> : <div className="movie-scenes-clear-signal"><ShieldCheck size={14} /> No persisted continuity warnings</div>}</div>;
+}
 function StoryboardModule({ project }: { project: MovieProject }) {
   return <div className="movie-module-stack"><section className="movie-workspace-section"><div className="movie-section-head"><div><span className="movie-workspace-kicker">Filmstrip</span><h3>Scenes, not placeholders</h3></div><span className="movie-section-count">{project.scenes.length} frames planned</span></div>{project.scenes.length ? <div className="movie-filmstrip">{project.scenes.map((scene) => { const clip = readyClipForScene(scene); return <article className="movie-filmstrip-card" key={scene.id}>{clip?.assetId ? <video src={assetFileUrl(clip.assetId, true)} preload="metadata" muted aria-label={scene.title} /> : <div className="movie-filmstrip-placeholder"><Film size={19} /><span>No footage</span></div>}<div><span>{String(scene.sequence).padStart(2, "0")}</span><strong>{scene.title}</strong><small>{formatDuration(scene.durationSeconds)}</small></div></article>; })}</div> : <EmptyGeneratedStage title="Your storyboard is empty" text="Planned scenes will become the first visual pass here." />}</section><ModuleIntro icon={<Layers3 size={18} />} title="Storyboard foundation" text="This surface is ready for real frames. It will not manufacture thumbnails for scenes that have no generated footage." /></div>;
 }
@@ -243,16 +284,6 @@ function EditModule({ project }: { project: MovieProject }) {
 
 function FutureModule({ icon, title, text }: { icon: ReactNode; title: string; text: string }) {
   return <div className="movie-module-stack"><section className="movie-future-module"><div className="movie-future-icon">{icon}</div><span className="movie-workspace-kicker">Foundation surface</span><h3>{title}</h3><p>{text}</p><div className="movie-future-rule"><span /> <small>Not available in this foundation</small> <span /></div></section></div>;
-}
-
-function SceneListItem({ scene, isSelected, onSelect, onGenerate }: { scene: MovieScene; isSelected: boolean; onSelect: () => void; onGenerate: () => void }) {
-  const clip = readyClipForScene(scene);
-  const hasPending = scene.clips.some((item) => ["Pending", "Queued", "Generating", "Running"].includes(item.status));
-  return <article className={`movie-scene-list-item ${isSelected ? "is-selected" : ""}`}><button type="button" className="movie-scene-list-main" onClick={onSelect}><span className="movie-scene-sequence">{String(scene.sequence).padStart(2, "0")}</span><span><strong>{scene.title}</strong><small>{scene.summary}</small></span><ChevronRight size={14} /></button><div className="movie-scene-list-actions"><span className={`movie-scene-state ${clip ? "is-ready" : hasPending ? "is-pending" : ""}`}>{clip ? <><Check size={12} /> Ready</> : hasPending ? "In progress" : "Planned"}</span>{!clip && <button type="button" className="movie-text-action" onClick={onGenerate} disabled={hasPending}>{hasPending ? "Queued" : <><Sparkles size={12} /> Generate</>}</button>}</div></article>;
-}
-
-function SceneInspector({ scene }: { scene: MovieScene }) {
-  return <div className="movie-inspector-content"><h3>{scene.title}</h3><p>{scene.summary}</p><div className="movie-inspector-facts"><span><strong>{formatDuration(scene.durationSeconds)}</strong> duration</span><span><strong>{scene.shots.length}</strong> shots</span></div><RecordLine label="Continuity" value={scene.continuityNotes} /><RecordLine label="Narration" value={scene.narration} /><RecordLine label="Dialogue" value={scene.dialogue} /></div>;
 }
 
 function ContinuityItem({ label, value }: { label: string; value: string | null | undefined }) {

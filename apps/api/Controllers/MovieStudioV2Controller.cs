@@ -10,12 +10,27 @@ namespace Taslim.Api.Controllers;
 [ApiController]
 [Authorize]
 [Route("api/movie-studio")]
-public sealed class MovieStudioV2Controller(IMovieV2Service movies) : ControllerBase
+public sealed class MovieStudioV2Controller(IMovieV2Service movies, IMovieScenesService scenes) : ControllerBase
 {
     [HttpGet("projects/{id:guid}/hierarchy")]
     public async Task<IActionResult> Hierarchy(Guid id, CancellationToken cancellationToken) => await Execute(async () =>
     {
         var result = await movies.GetHierarchyAsync(UserId(), id, cancellationToken);
+        return result is null ? NotFoundResult("MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result);
+    });
+
+    [HttpGet("projects/{id:guid}/scenes/workspace")]
+    public async Task<IActionResult> ScenesWorkspace(Guid id, CancellationToken cancellationToken) => await Execute(async () =>
+    {
+        var result = await scenes.GetWorkspaceAsync(UserId(), id, cancellationToken);
+        return result is null ? NotFoundResult("MOVIE_SCENES_WORKSPACE_NOT_FOUND", "Movie scenes workspace not found.") : Ok(result);
+    });
+
+    [HttpPost("projects/{id:guid}/scenes/breakdown")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> BreakDownScenes(Guid id, CancellationToken cancellationToken) => await Execute(async () =>
+    {
+        var result = await scenes.BreakDownApprovedScreenplayAsync(UserId(), id, cancellationToken);
         return result is null ? NotFoundResult("MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result);
     });
 
@@ -119,6 +134,7 @@ public sealed class MovieStudioV2Controller(IMovieV2Service movies) : Controller
     {
         try { return await action(); }
         catch (MovieV2ValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_V2_REQUEST_INVALID", exception.Message); }
+        catch (MovieScenesWorkflowException exception) { return ApiResults.Error(this, 409, exception.Code, exception.Message); }
         catch (MovieV2NotFoundException) { return NotFoundResult("MOVIE_RESOURCE_NOT_FOUND", "Movie resource not found."); }
     }
 

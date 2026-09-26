@@ -86,6 +86,72 @@ public sealed record MovieV2HierarchyDto(
     DateTime UpdatedAt,
     IReadOnlyList<MovieV2ActDto> Acts);
 
+public sealed record MovieScenesWorkspaceDto(
+    Guid MovieProjectId,
+    string ProjectTitle,
+    string ProductionStatus,
+    string ScreenplayApprovalState,
+    Guid? ApprovedRevisionId,
+    int? ApprovedRevisionNumber,
+    IReadOnlyList<MovieScenesActDto> Acts,
+    int SceneCount,
+    int LinkedSceneCount,
+    int ShotCount);
+
+public sealed record MovieScenesActDto(
+    Guid Id,
+    int Sequence,
+    string Title,
+    string? Summary,
+    string Status,
+    IReadOnlyList<MovieScenesSequenceDto> Sequences);
+
+public sealed record MovieScenesSequenceDto(
+    Guid Id,
+    int Sequence,
+    string Title,
+    string? Summary,
+    string Status,
+    IReadOnlyList<MovieSceneWorkspaceDto> Scenes);
+
+public sealed record MovieSceneWorkspaceDto(
+    Guid Id,
+    int Sequence,
+    string Title,
+    string Slug,
+    string Description,
+    string? Purpose,
+    int? DurationSeconds,
+    string ProductionStatus,
+    string ApprovalState,
+    string StoryPosition,
+    int ActSequence,
+    int SequencePosition,
+    Guid? MovieSequenceId,
+    Guid? ScreenplaySceneId,
+    string? ScreenplaySceneIdentifier,
+    string? ScreenplaySource,
+    string? ScreenplaySynopsis,
+    int? ScreenplayRevisionNumber,
+    IReadOnlyList<string> Characters,
+    IReadOnlyList<MovieSceneWorldReferenceDto> Locations,
+    IReadOnlyList<MovieSceneWorldReferenceDto> Sets,
+    IReadOnlyList<string> ContinuityWarnings,
+    int ShotCount,
+    DateTime? ArchivedAt,
+    DateTime CreatedAt,
+    DateTime UpdatedAt);
+
+public sealed record MovieSceneWorldReferenceDto(Guid Id, string Name, string? Role);
+
+public sealed record MovieScenesBreakdownDto(
+    Guid MovieProjectId,
+    Guid ApprovedRevisionId,
+    int ApprovedRevisionNumber,
+    int CreatedSceneCount,
+    int ExistingLinkedSceneCount,
+    MovieScenesWorkspaceDto Workspace);
+
 public sealed class MovieV2ActRequest
 {
     public string Title { get; set; } = string.Empty;
