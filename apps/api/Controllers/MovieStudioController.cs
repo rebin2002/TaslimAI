@@ -253,6 +253,15 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieGuid
         catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_LOCATION_INVALID", exception.Message); }
     }
 
+    [HttpPatch("locations/{locationId:guid}")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> UpdateLocation(Guid locationId, MovieStudioLocationRequest request, CancellationToken cancellationToken)
+    {
+        try { var result = await movies.UpdateLocationAsync(GetUserId(), locationId, request, cancellationToken); return result is null ? ApiResults.Error(this, 404, "MOVIE_LOCATION_NOT_FOUND", "Movie location not found.") : Ok(result); }
+        catch (MovieStudioContinuityLockException exception) { return ApiResults.Error(this, 409, "MOVIE_WORLD_CONTINUITY_LOCKED", exception.Message); }
+        catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_LOCATION_INVALID", exception.Message); }
+    }
+
     [HttpPost("projects/{id:guid}/sets")]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> AddSet(Guid id, MovieStudioSetRequest request, CancellationToken cancellationToken)

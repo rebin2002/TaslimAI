@@ -374,9 +374,18 @@ public sealed class MovieV2Service(TaslimDbContext db, WorkspaceAccessService ac
             .Concat(db.MovieTakes.AsNoTracking().Where(item => item.MovieShot.Scene.MovieProjectId == movieProjectId && item.GenerationJobId != null).Select(item => item.GenerationJobId!.Value))
             .Concat(db.MovieProductionVersions.AsNoTracking().Where(item => item.MovieShot.Scene.MovieProjectId == movieProjectId && item.GenerationJobId != null).Select(item => item.GenerationJobId!.Value))
             .Distinct().ToArrayAsync(cancellationToken);
-        var jobs = db.GenerationJobs.AsNoTracking().Where(item => jobIds.Contains(item.Id));
-        if (movie.ProjectId.HasValue) jobs = jobs.Concat(db.GenerationJobs.AsNoTracking().Where(item => item.ProjectId == movie.ProjectId && GenerationJobTypes.MovieTypes.Contains(item.JobType))).Distinct();
-        var jobRows = await jobs.Select(item => new { item.Id, item.Status, item.EstimatedProviderCostUsd, item.EstimatedProviderCostKnown }).ToListAsync(cancellationToken);
+        var jobRows = await db.GenerationJobs.AsNoTracking().Where(item => jobIds.Contains(item.Id))
+            .Select(item => new { item.Id, item.Status, item.EstimatedProviderCostUsd, item.EstimatedProviderCostKnown })
+            .ToListAsync(cancellationToken);
+        if (movie.ProjectId.HasValue)
+        {
+            var movieJobTypes = new[] { GenerationJobTypes.MovieQuickGenerate, GenerationJobTypes.MovieClipGenerate, GenerationJobTypes.MovieAssembly };
+            var projectJobs = await db.GenerationJobs.AsNoTracking()
+                .Where(item => item.ProjectId == movie.ProjectId && movieJobTypes.Contains(item.JobType))
+                .Select(item => new { item.Id, item.Status, item.EstimatedProviderCostUsd, item.EstimatedProviderCostKnown })
+                .ToListAsync(cancellationToken);
+            jobRows = jobRows.Concat(projectJobs).GroupBy(item => item.Id).Select(group => group.First()).ToList();
+        }
         var costJobIds = jobRows.Select(item => item.Id).ToArray();
         var usage = await db.UsageTransactions.AsNoTracking().Where(item => item.GenerationJobId != null && costJobIds.Contains(item.GenerationJobId.Value) && item.ProviderCostKnown).Select(item => item.ProviderCostUsd).ToListAsync(cancellationToken);
         var actual = usage.Count == 0 ? (decimal?)null : usage.Sum();

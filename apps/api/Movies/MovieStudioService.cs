@@ -27,6 +27,7 @@ public interface IMovieStudioService
     Task<MovieCharacterRelationshipDto?> AddCharacterRelationshipAsync(Guid userId, Guid characterId, MovieStudioCharacterRelationshipRequest request, CancellationToken cancellationToken);
     Task<MovieCharacterContinuityLockDto?> AddCharacterContinuityLockAsync(Guid userId, Guid characterId, MovieCharacterContinuityLockRequest request, CancellationToken cancellationToken);
     Task<MovieLocationDto?> AddLocationAsync(Guid userId, Guid id, MovieStudioLocationRequest request, CancellationToken cancellationToken);
+    Task<MovieLocationDto?> UpdateLocationAsync(Guid userId, Guid locationId, MovieStudioLocationRequest request, CancellationToken cancellationToken);
     Task<MovieSetDto?> AddSetAsync(Guid userId, Guid id, MovieStudioSetRequest request, CancellationToken cancellationToken);
     Task<MovieSetVariationDto?> AddSetVariationAsync(Guid userId, Guid setId, MovieStudioSetVariationRequest request, CancellationToken cancellationToken);
     Task<MoviePropDto?> AddPropAsync(Guid userId, Guid id, MovieStudioPropRequest request, CancellationToken cancellationToken);
@@ -413,6 +414,28 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         var now = DateTime.UtcNow;
         var location = new MovieLocation { Id = Guid.NewGuid(), MovieProjectId = id, Name = request.Name.Trim(), Description = request.Description.Trim(), VisualContinuityNotes = MovieStudioHelpers.Clean(request.VisualContinuityNotes), ReferenceAssetId = request.ReferenceAssetId, CreatedAt = now, UpdatedAt = now };
         db.MovieLocations.Add(location);
+        await db.SaveChangesAsync(cancellationToken);
+        return ToDto(location);
+    }
+
+    public async Task<MovieLocationDto?> UpdateLocationAsync(Guid userId, Guid locationId, MovieStudioLocationRequest request, CancellationToken cancellationToken)
+    {
+        var location = await db.MovieLocations.Include(item => item.MovieProject).FirstOrDefaultAsync(item => item.Id == locationId, cancellationToken);
+        if (location is null || !await collaboration.HasPermissionAsync(userId, location.MovieProjectId, MoviePermissions.Edit, cancellationToken)) return null;
+        ValidateRequired(request.Name, request.Description, "Location name and description are required.");
+        await EnsureAssetInWorkspaceAsync(request.ReferenceAssetId, location.MovieProject.WorkspaceId, cancellationToken);
+        await EnsureWorldLocksAllowAsync(location.MovieProjectId, MovieWorldEntityTypes.Location, locationId, new Dictionary<string, string?>
+        {
+            ["name"] = request.Name.Trim(),
+            ["description"] = request.Description.Trim(),
+            ["visualContinuityNotes"] = MovieStudioHelpers.Clean(request.VisualContinuityNotes),
+            ["referenceAssetId"] = request.ReferenceAssetId?.ToString(),
+        }, cancellationToken);
+        location.Name = request.Name.Trim();
+        location.Description = request.Description.Trim();
+        location.VisualContinuityNotes = MovieStudioHelpers.Clean(request.VisualContinuityNotes);
+        location.ReferenceAssetId = request.ReferenceAssetId;
+        location.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(cancellationToken);
         return ToDto(location);
     }
@@ -1175,6 +1198,18 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
     {
         if (assetId.HasValue && !await db.Assets.AnyAsync(item => item.Id == assetId && item.WorkspaceId == workspaceId, cancellationToken))
             throw new MovieStudioValidationException("The reference asset must belong to this workspace.");
+    }
+
+    private async Task EnsureWorldLocksAllowAsync(Guid movieProjectId, string entityType, Guid entityId, IReadOnlyDictionary<string, string?> values, CancellationToken cancellationToken)
+    {
+        var locks = await db.MovieContinuityLocks.AsNoTracking()
+            .Where(item => item.MovieProjectId == movieProjectId && item.EntityType == entityType && item.EntityId == entityId && item.ReleasedAt == null)
+            .ToArrayAsync(cancellationToken);
+        foreach (var locked in locks)
+        {
+            if (values.TryGetValue(locked.FieldName, out var next) && !string.Equals(next, locked.LockedValue, StringComparison.Ordinal))
+                throw new MovieStudioContinuityLockException(locked.FieldName);
+        }
     }
 
     private async Task<bool> WorldEntityBelongsToProjectAsync(string entityType, Guid entityId, Guid movieProjectId, CancellationToken cancellationToken) => entityType.ToLowerInvariant() switch

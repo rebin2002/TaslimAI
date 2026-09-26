@@ -135,6 +135,10 @@ public static class MovieOperationalFixtures
         var shot = await PostAsync<MovieShotDto>(client, $"/api/movie-studio/scenes/{scene.Id}/shots", new
         {
             description = "A slow push toward the compass on a crate.",
+            purpose = "Reveal the compass as the courier's decision point.",
+            subjects = "Brass compass on the crate.",
+            locationSet = "Harbor Warehouse.",
+            productionRequirements = "Wet practical surface and readable compass face.",
             cameraAndFraming = "24mm wide, subject left",
             cameraMotion = "slow push",
             durationSeconds = 5,
