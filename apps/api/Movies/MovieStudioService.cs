@@ -19,7 +19,7 @@ public interface IMovieStudioService
     Task<MovieCharacterStateDto?> AddCharacterStateAsync(Guid userId, Guid characterId, MovieStudioCharacterStateRequest request, CancellationToken cancellationToken);
     Task<MovieCharacterStateDto?> UpdateCharacterStateAsync(Guid userId, Guid stateId, MovieStudioCharacterStateRequest request, CancellationToken cancellationToken);
     Task<MovieCharacterRelationshipDto?> AddCharacterRelationshipAsync(Guid userId, Guid characterId, MovieStudioCharacterRelationshipRequest request, CancellationToken cancellationToken);
-    Task<MovieCharacterContinuityLockDto?> AddContinuityLockAsync(Guid userId, Guid characterId, MovieStudioContinuityLockRequest request, CancellationToken cancellationToken);
+    Task<MovieCharacterContinuityLockDto?> AddCharacterContinuityLockAsync(Guid userId, Guid characterId, MovieCharacterContinuityLockRequest request, CancellationToken cancellationToken);
     Task<MovieLocationDto?> AddLocationAsync(Guid userId, Guid id, MovieStudioLocationRequest request, CancellationToken cancellationToken);
     Task<MovieSetDto?> AddSetAsync(Guid userId, Guid id, MovieStudioSetRequest request, CancellationToken cancellationToken);
     Task<MovieSetVariationDto?> AddSetVariationAsync(Guid userId, Guid setId, MovieStudioSetVariationRequest request, CancellationToken cancellationToken);
@@ -109,34 +109,6 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
             });
             db.MovieScenes.Add(scene);
             await db.SaveChangesAsync(cancellationToken);
-
-            var clip = new MovieClip
-            {
-                Id = Guid.NewGuid(),
-                MovieProjectId = movie.Id,
-                MovieSceneId = scene.Id,
-                MovieShotId = scene.Shots.Single().Id,
-                Status = MovieClipStatuses.Queued,
-                ContinuitySnapshotJson = ContinuitySnapshot(movie.Guide),
-                CreatedAt = now,
-                UpdatedAt = now,
-            };
-            db.MovieClips.Add(clip);
-            await db.SaveChangesAsync(cancellationToken);
-            var createdJob = await jobs.CreateAsync(userId, new CreateGenerationJobRequest
-            {
-                WorkspaceId = request.WorkspaceId,
-                ProjectId = projectId,
-                JobType = GenerationJobTypes.MovieQuickGenerate,
-                Title = request.Title.Trim(),
-                InputJson = JsonSerializer.Serialize(new MovieGenerationInput(
-                    MovieStudioOperations.QuickMovie, movie.Id, clip.Id, scene.Id, scene.Shots.Single().Id, movie.Description, movie.DurationSeconds, movie.AspectRatio,
-                    movie.Style, movie.Language, movie.AdditionalInstructions, ContinuitySnapshot(movie.Guide), SceneSnapshot(scene), ShotSnapshot(scene.Shots.Single()),
-                    WorldContextJson: await WorldContextSnapshotAsync(movie.Id, scene.Id, scene.Shots.Single().Id, cancellationToken))),
-            }, cancellationToken, idempotencyKey);
-            clip.GenerationJobId = createdJob.Id;
-            await db.SaveChangesAsync(cancellationToken);
-            job = GenerationJobContractMapper.ToDto(createdJob);
         }
 
         var saved = await GetAsync(userId, movie.Id, cancellationToken);
@@ -270,7 +242,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         db.MovieCharacterRelationships.Add(relationship); character.UpdatedAt = now; await db.SaveChangesAsync(cancellationToken); return new MovieCharacterRelationshipDto(relationship.Id, related.Id, related.Name, relationship.RelationshipType, relationship.Notes);
     }
 
-    public async Task<MovieCharacterContinuityLockDto?> AddContinuityLockAsync(Guid userId, Guid characterId, MovieStudioContinuityLockRequest request, CancellationToken cancellationToken)
+    public async Task<MovieCharacterContinuityLockDto?> AddCharacterContinuityLockAsync(Guid userId, Guid characterId, MovieCharacterContinuityLockRequest request, CancellationToken cancellationToken)
     {
         var character = await db.MovieCharacters.Include(item => item.MovieProject).FirstOrDefaultAsync(item => item.Id == characterId, cancellationToken);
         if (character is null || !await access.IsMemberAsync(userId, character.MovieProject.WorkspaceId, cancellationToken)) return null;

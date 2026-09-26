@@ -771,7 +771,7 @@ public sealed class MovieStudioCharacterRelationshipRequest
     public string RelationshipType { get; set; } = string.Empty;
     public string? Notes { get; set; }
 }
-public sealed class MovieStudioContinuityLockRequest
+public sealed class MovieCharacterContinuityLockRequest
 {
     public Guid? CharacterStateId { get; set; }
     public string FieldKey { get; set; } = string.Empty;
@@ -786,8 +786,6 @@ public sealed record MovieStudioWorldReferenceRequest(string Name, string Kind, 
 public sealed record MovieStudioWorldUsageRequest(string EntityType, Guid EntityId, Guid? MovieShotId, string? Role);
 public sealed record MovieStudioContinuityFactRequest(string ScopeType, Guid? ScopeId, string FactKey, string FactValue, string? Notes);
 public sealed record MovieStudioContinuityLockRequest(string EntityType, Guid? EntityId, string FieldName, string LockedValue, string? Strength, string? Reason);
-public sealed record MovieStudioShotRequest(string Description, string? CameraAndFraming, string? CameraMotion, int? DurationSeconds, string? Narration, string? Dialogue, string? VisualContinuityNotes);
-public sealed record MovieStudioGuideRequest(string? VisualLanguage, string? CameraLanguage, string? ColorAndLighting, string? SoundAndNarration, string? ContinuityRules);
 public sealed class MovieGuideRevisionRequest
 {
     public string StoryBibleJson { get; set; } = "{}";

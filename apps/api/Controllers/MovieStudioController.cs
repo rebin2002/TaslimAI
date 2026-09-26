@@ -165,9 +165,9 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieGuid
 
     [HttpPost("characters/{characterId:guid}/continuity-locks")]
     [ValidateAntiForgeryToken]
-    public async Task<IActionResult> AddContinuityLock(Guid characterId, MovieStudioContinuityLockRequest request, CancellationToken cancellationToken)
+    public async Task<IActionResult> AddContinuityLock(Guid characterId, MovieCharacterContinuityLockRequest request, CancellationToken cancellationToken)
     {
-        try { var result = await movies.AddContinuityLockAsync(GetUserId(), characterId, request, cancellationToken); return result is null ? ApiResults.Error(this, 404, "MOVIE_CHARACTER_NOT_FOUND", "Movie character not found.") : Ok(result); }
+        try { var result = await movies.AddCharacterContinuityLockAsync(GetUserId(), characterId, request, cancellationToken); return result is null ? ApiResults.Error(this, 404, "MOVIE_CHARACTER_NOT_FOUND", "Movie character not found.") : Ok(result); }
         catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_CHARACTER_CONTINUITY_LOCK_INVALID", exception.Message); }
     }
 
