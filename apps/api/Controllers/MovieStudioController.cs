@@ -239,6 +239,37 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieGuid
         catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_WORLD_USAGE_INVALID", exception.Message); }
     }
 
+    [HttpGet("shots/{shotId:guid}/production")]
+    public async Task<IActionResult> GetShotProduction(Guid shotId, CancellationToken cancellationToken)
+    {
+        var result = await movies.GetShotProductionAsync(GetUserId(), shotId, cancellationToken);
+        return result is null ? ApiResults.Error(this, 404, "MOVIE_SHOT_NOT_FOUND", "Movie shot not found.") : Ok(result);
+    }
+
+    [HttpPost("shots/{shotId:guid}/production/versions")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> CreateProductionVersion(Guid shotId, MovieProductionVersionRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await movies.CreateProductionVersionAsync(GetUserId(), shotId, request, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_SHOT_NOT_FOUND", "Movie shot not found.") : Ok(result);
+        }
+        catch (MovieProductionValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
+    }
+
+    [HttpPost("production/versions/{versionId:guid}/review")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> ReviewProductionVersion(Guid versionId, MovieProductionReviewRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await movies.ReviewProductionVersionAsync(GetUserId(), versionId, request, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_PRODUCTION_VERSION_NOT_FOUND", "Production version not found.") : Ok(result);
+        }
+        catch (MovieProductionValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
+    }
+
     [HttpPost("projects/{id:guid}/scenes/{sceneId:guid}/generate")]
     [ValidateAntiForgeryToken]
     [EnableRateLimiting(RateLimiting.ExpensiveAi)]
