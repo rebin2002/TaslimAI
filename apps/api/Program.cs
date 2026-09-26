@@ -166,6 +166,7 @@ builder.Services.AddCors(options => options.AddPolicy("Frontend", policy =>
         .AllowCredentials()));
 builder.Services.AddScoped<WorkspaceAccessService>();
 builder.Services.AddScoped<MovieCollaborationAccess>();
+builder.Services.AddScoped<MovieAuthorizationService>();
 builder.Services.Configure<BillingOptions>(builder.Configuration.GetSection("Billing"));
 builder.Services.AddScoped<IBillingProvisioningService, BillingProvisioningService>();
 builder.Services.AddScoped<IBillingAccountService, BillingAccountService>();

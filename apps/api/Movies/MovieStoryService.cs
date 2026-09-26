@@ -16,19 +16,19 @@ public interface IMovieStoryService
     Task<MovieStoryRevisionDto?> RejectAsync(Guid userId, Guid movieProjectId, Guid revisionId, string reason, CancellationToken cancellationToken);
 }
 
-public sealed class MovieStoryService(TaslimDbContext db, WorkspaceAccessService access) : IMovieStoryService
+public sealed class MovieStoryService(TaslimDbContext db, MovieAuthorizationService authorization) : IMovieStoryService
 {
     public async Task<MovieStoryDto?> GetAsync(Guid userId, Guid movieProjectId, CancellationToken cancellationToken)
     {
         var story = await Query().SingleOrDefaultAsync(item => item.MovieProjectId == movieProjectId, cancellationToken);
-        return story is null || !await access.IsMemberAsync(userId, story.WorkspaceId, cancellationToken) ? null : ToDto(story);
+        return story is null || !await authorization.CanPermissionAsync(userId, movieProjectId, MoviePermissions.View, cancellationToken) ? null : ToDto(story);
     }
 
     public async Task<IReadOnlyList<MovieStoryRevisionSummaryDto>?> ListRevisionsAsync(Guid userId, Guid movieProjectId, CancellationToken cancellationToken)
     {
         var story = await db.MovieStories.AsNoTracking().SingleOrDefaultAsync(item => item.MovieProjectId == movieProjectId, cancellationToken);
         if (story is null) return null;
-        if (!await access.IsMemberAsync(userId, story.WorkspaceId, cancellationToken)) return null;
+        if (!await authorization.CanPermissionAsync(userId, movieProjectId, MoviePermissions.View, cancellationToken)) return null;
         return await db.MovieStoryRevisions.AsNoTracking()
             .Where(item => item.MovieStoryId == story.Id)
             .OrderByDescending(item => item.RevisionNumber)
@@ -41,7 +41,7 @@ public sealed class MovieStoryService(TaslimDbContext db, WorkspaceAccessService
         Validate(request);
         var movie = await db.MovieProjects.AsNoTracking().SingleOrDefaultAsync(item => item.Id == movieProjectId, cancellationToken);
         if (movie is null) return null;
-        if (!await access.IsMemberAsync(userId, movie.WorkspaceId, cancellationToken)) return null;
+        if (!await authorization.CanAsync(userId, movieProjectId, MovieOperationalActions.StoryEdit, cancellationToken)) return null;
         await ValidateSceneLinksAsync(movieProjectId, request.Scenes, cancellationToken);
 
         var story = await db.MovieStories.Include(item => item.Revisions).SingleOrDefaultAsync(item => item.MovieProjectId == movieProjectId, cancellationToken);
@@ -103,7 +103,7 @@ public sealed class MovieStoryService(TaslimDbContext db, WorkspaceAccessService
     public async Task<MovieStoryRevisionDto?> GetRevisionAsync(Guid userId, Guid movieProjectId, Guid revisionId, CancellationToken cancellationToken)
     {
         var revision = await QueryRevisions().SingleOrDefaultAsync(item => item.Id == revisionId && item.MovieStory.MovieProjectId == movieProjectId, cancellationToken);
-        return revision is null || !await access.IsMemberAsync(userId, revision.MovieStory.WorkspaceId, cancellationToken) ? null : ToDto(revision);
+        return revision is null || !await authorization.CanPermissionAsync(userId, movieProjectId, MoviePermissions.View, cancellationToken) ? null : ToDto(revision);
     }
 
     public Task<MovieStoryRevisionDto?> SubmitAsync(Guid userId, Guid movieProjectId, Guid revisionId, CancellationToken cancellationToken) =>
@@ -118,7 +118,10 @@ public sealed class MovieStoryService(TaslimDbContext db, WorkspaceAccessService
     private async Task<MovieStoryRevisionDto?> TransitionAsync(Guid userId, Guid movieProjectId, Guid revisionId, string targetStatus, string? reason, CancellationToken cancellationToken)
     {
         var revision = await db.MovieStoryRevisions.Include(item => item.MovieStory).SingleOrDefaultAsync(item => item.Id == revisionId && item.MovieStory.MovieProjectId == movieProjectId, cancellationToken);
-        if (revision is null || !await access.IsMemberAsync(userId, revision.MovieStory.WorkspaceId, cancellationToken)) return null;
+        var requiredAction = targetStatus == MovieStoryRevisionStatuses.Submitted
+            ? MovieOperationalActions.StoryEdit
+            : MovieOperationalActions.StoryApproval;
+        if (revision is null || !await authorization.CanAsync(userId, movieProjectId, requiredAction, cancellationToken)) return null;
         if (revision.Status is MovieStoryRevisionStatuses.Approved or MovieStoryRevisionStatuses.Rejected or MovieStoryRevisionStatuses.Superseded)
             throw new MovieStoryWorkflowException("MOVIE_STORY_REVISION_IMMUTABLE", "This revision is immutable.");
         var now = DateTime.UtcNow;

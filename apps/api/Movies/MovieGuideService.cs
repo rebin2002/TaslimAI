@@ -14,12 +14,12 @@ public interface IMovieGuideService
     Task<MovieDirectorContextDto?> GetDirectorContextAsync(Guid userId, Guid movieProjectId, CancellationToken cancellationToken);
 }
 
-public sealed class MovieGuideService(TaslimDbContext db, WorkspaceAccessService access) : IMovieGuideService
+public sealed class MovieGuideService(TaslimDbContext db, MovieAuthorizationService authorization) : IMovieGuideService
 {
     public async Task<MovieGuideRevisionResponse?> CreateRevisionAsync(Guid userId, Guid movieProjectId, MovieGuideRevisionRequest request, CancellationToken cancellationToken)
     {
         var guide = await LoadGuideAsync(movieProjectId, cancellationToken);
-        if (guide is null || !await access.IsMemberAsync(userId, guide.MovieProject.WorkspaceId, cancellationToken)) return null;
+        if (guide is null || !await authorization.CanAsync(userId, movieProjectId, MovieOperationalActions.GuideEdit, cancellationToken)) return null;
         if (guide.LockedRevisionNumber is not null) throw new MovieGuideLockedException();
 
         ValidateRequest(request);
@@ -35,14 +35,14 @@ public sealed class MovieGuideService(TaslimDbContext db, WorkspaceAccessService
     public async Task<MovieGuideHistoryResponse?> GetHistoryAsync(Guid userId, Guid movieProjectId, CancellationToken cancellationToken)
     {
         var guide = await LoadGuideAsync(movieProjectId, cancellationToken);
-        if (guide is null || !await access.IsMemberAsync(userId, guide.MovieProject.WorkspaceId, cancellationToken)) return null;
+        if (guide is null || !await authorization.CanPermissionAsync(userId, movieProjectId, MoviePermissions.View, cancellationToken)) return null;
         return ToHistory(guide);
     }
 
     public async Task<MovieGuideRevisionResponse?> LockAsync(Guid userId, Guid movieProjectId, int? revisionNumber, CancellationToken cancellationToken)
     {
         var guide = await LoadGuideAsync(movieProjectId, cancellationToken);
-        if (guide is null || !await access.IsMemberAsync(userId, guide.MovieProject.WorkspaceId, cancellationToken)) return null;
+        if (guide is null || !await authorization.CanAsync(userId, movieProjectId, MovieOperationalActions.GuideApproval, cancellationToken)) return null;
         if (guide.LockedRevisionNumber is not null) throw new MovieGuideLockedException();
 
         var targetNumber = revisionNumber ?? guide.CurrentRevisionNumber;
@@ -65,7 +65,7 @@ public sealed class MovieGuideService(TaslimDbContext db, WorkspaceAccessService
     public async Task<MovieGuideHistoryResponse?> UnlockAsync(Guid userId, Guid movieProjectId, CancellationToken cancellationToken)
     {
         var guide = await LoadGuideAsync(movieProjectId, cancellationToken);
-        if (guide is null || !await access.IsMemberAsync(userId, guide.MovieProject.WorkspaceId, cancellationToken)) return null;
+        if (guide is null || !await authorization.CanAsync(userId, movieProjectId, MovieOperationalActions.GuideApproval, cancellationToken)) return null;
         if (guide.LockedRevisionNumber is null) throw new MovieGuideValidationException("Movie Guide is already unlocked.");
 
         var locked = guide.Revisions.Single(item => item.RevisionNumber == guide.LockedRevisionNumber.Value);
@@ -83,7 +83,7 @@ public sealed class MovieGuideService(TaslimDbContext db, WorkspaceAccessService
     public async Task<MovieDirectorContextDto?> GetDirectorContextAsync(Guid userId, Guid movieProjectId, CancellationToken cancellationToken)
     {
         var guide = await LoadGuideAsync(movieProjectId, cancellationToken);
-        if (guide is null || !await access.IsMemberAsync(userId, guide.MovieProject.WorkspaceId, cancellationToken)) return null;
+        if (guide is null || !await authorization.CanPermissionAsync(userId, movieProjectId, MoviePermissions.View, cancellationToken)) return null;
         if (guide.LockedRevisionNumber is not int lockedRevisionNumber) throw new MovieGuideNotLockedException();
         var revision = guide.Revisions.Single(item => item.RevisionNumber == lockedRevisionNumber);
         return ToDirectorContext(movieProjectId, guide, revision);

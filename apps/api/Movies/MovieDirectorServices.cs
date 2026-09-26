@@ -23,7 +23,7 @@ public interface IMovieDirectorService
 public interface IDirectorActionExecutor
 {
     string ActionType { get; }
-    Task<DirectorActionExecution> ExecuteAsync(DirectorAction action, CancellationToken cancellationToken = default);
+    Task<DirectorActionExecution> ExecuteAsync(DirectorAction action, Guid executingUserId, CancellationToken cancellationToken = default);
 }
 
 public sealed record DirectorActionExecution(bool Succeeded, string? FailureCode, string SafeMessage, string? ResultJson);
@@ -71,15 +71,14 @@ public sealed class MovieDirectorContextAssembler(TaslimDbContext db)
 
 public sealed class MovieDirectorService(
     TaslimDbContext db,
-    WorkspaceAccessService access,
     MovieDirectorContextAssembler assembler,
     DirectorQualityPlanner qualityPlanner,
-    IEnumerable<IDirectorActionExecutor> executors) : IMovieDirectorService
+    IEnumerable<IDirectorActionExecutor> executors, MovieAuthorizationService authorization) : IMovieDirectorService
 {
     public async Task<DirectorProposalResponse?> CreateProposalAsync(Guid userId, Guid movieProjectId, DirectorProposalRequest request, CancellationToken cancellationToken = default)
     {
         var movie = await db.MovieProjects.AsNoTracking().FirstOrDefaultAsync(item => item.Id == movieProjectId, cancellationToken);
-        if (movie is null || !await access.IsMemberAsync(userId, movie.WorkspaceId, cancellationToken)) return null;
+        if (movie is null || !await authorization.CanAsync(userId, movieProjectId, MovieOperationalActions.DirectorProposalCreate, cancellationToken)) return null;
         var context = await assembler.AssembleAsync(userId, movieProjectId, cancellationToken);
         if (context is null) return null;
         var shot = request.ShotId.HasValue
@@ -133,7 +132,7 @@ public sealed class MovieDirectorService(
     public async Task<DirectorProposalResponse?> GetProposalAsync(Guid userId, Guid proposalId, CancellationToken cancellationToken = default)
     {
         var proposal = await QueryProposal().FirstOrDefaultAsync(item => item.Id == proposalId, cancellationToken);
-        if (proposal is null || !await access.IsMemberAsync(userId, proposal.WorkspaceId, cancellationToken)) return null;
+        if (proposal is null || !await authorization.CanPermissionAsync(userId, proposal.MovieProjectId, MoviePermissions.View, cancellationToken)) return null;
         var context = await assembler.AssembleAsync(userId, proposal.MovieProjectId, cancellationToken);
         return context is null ? null : new DirectorProposalResponse(ToDto(proposal), context.Context);
     }
@@ -141,7 +140,7 @@ public sealed class MovieDirectorService(
     public async Task<IReadOnlyList<DirectorHistoryDto>?> GetHistoryAsync(Guid userId, Guid movieProjectId, CancellationToken cancellationToken = default)
     {
         var movie = await db.MovieProjects.AsNoTracking().FirstOrDefaultAsync(item => item.Id == movieProjectId, cancellationToken);
-        if (movie is null || !await access.IsMemberAsync(userId, movie.WorkspaceId, cancellationToken)) return null;
+        if (movie is null || !await authorization.CanPermissionAsync(userId, movieProjectId, MoviePermissions.View, cancellationToken)) return null;
         return await db.DirectorHistoryEvents.AsNoTracking().Where(item => item.WorkspaceId == movie.WorkspaceId && (item.Proposal == null || item.Proposal.MovieProjectId == movieProjectId))
             .OrderByDescending(item => item.CreatedAt).Take(200).Select(item => new DirectorHistoryDto(item.Id, item.EventType, item.SafeDetailsJson, item.CreatedAt)).ToListAsync(cancellationToken);
     }
@@ -152,7 +151,7 @@ public sealed class MovieDirectorService(
     public async Task<DirectorActionExecutionResponse?> ExecuteActionAsync(Guid userId, Guid actionId, CancellationToken cancellationToken = default)
     {
         var action = await db.DirectorActions.Include(item => item.Proposal).Include(item => item.Results).FirstOrDefaultAsync(item => item.Id == actionId, cancellationToken);
-        if (action is null || !await access.IsMemberAsync(userId, action.WorkspaceId, cancellationToken)) return null;
+        if (action is null || !await authorization.CanAsync(userId, action.MovieProjectId, MovieOperationalActions.DirectorProposalExecution, cancellationToken)) return null;
         if (action.Status != DirectorActionStatuses.Ready) throw new DirectorActionNotApprovedException();
         var executor = executors.FirstOrDefault(item => string.Equals(item.ActionType, action.ActionType, StringComparison.OrdinalIgnoreCase));
         if (executor is null) throw new DirectorActionExecutionException("DIRECTOR_ACTION_UNSUPPORTED", "This Director action is not available.");
@@ -162,7 +161,7 @@ public sealed class MovieDirectorService(
         await db.SaveChangesAsync(cancellationToken);
 
         DirectorActionExecution execution;
-        try { execution = await executor.ExecuteAsync(action, cancellationToken); }
+        try { execution = await executor.ExecuteAsync(action, userId, cancellationToken); }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception) { execution = new(false, "DIRECTOR_ACTION_FAILED", "The Director action could not be completed.", null); }
         var now = DateTime.UtcNow;
@@ -179,7 +178,7 @@ public sealed class MovieDirectorService(
     private async Task<DirectorProposalDto?> SetProposalStatusAsync(Guid userId, Guid proposalId, bool approve, CancellationToken cancellationToken)
     {
         var proposal = await db.DirectorProposals.Include(item => item.Actions).Include(item => item.MovieProject).FirstOrDefaultAsync(item => item.Id == proposalId, cancellationToken);
-        if (proposal is null || !await access.IsMemberAsync(userId, proposal.WorkspaceId, cancellationToken)) return null;
+        if (proposal is null || !await authorization.CanAsync(userId, proposal.MovieProjectId, MovieOperationalActions.DirectorProposalApproval, cancellationToken)) return null;
         if (proposal.Status != DirectorProposalStatuses.PendingApproval) throw new DirectorValidationException("This proposal is no longer awaiting approval.");
         var now = DateTime.UtcNow;
         proposal.Status = approve ? DirectorProposalStatuses.Approved : DirectorProposalStatuses.Rejected;
@@ -216,14 +215,14 @@ public sealed class MovieDirectorService(
 public sealed class MovieDirectorActionExecutor(IMovieStudioService movies, IMovieVideoProvider provider) : IDirectorActionExecutor
 {
     public string ActionType => DirectorActionTypes.GenerateShot;
-    public async Task<DirectorActionExecution> ExecuteAsync(DirectorAction action, CancellationToken cancellationToken = default)
+    public async Task<DirectorActionExecution> ExecuteAsync(DirectorAction action, Guid executingUserId, CancellationToken cancellationToken = default)
     {
         if (!provider.IsAvailable) return new(false, GenerationJobErrorCodes.MovieProviderUnavailable, "The movie generation capability is not available.", null);
         DirectorGenerateShotPayload? payload;
         try { payload = JsonSerializer.Deserialize<DirectorGenerateShotPayload>(action.PayloadJson, DirectorJson.Options); }
         catch (JsonException) { payload = null; }
         if (payload is null) return new(false, "DIRECTOR_ACTION_INVALID", "The Director action payload is invalid.", null);
-        var result = await movies.GenerateShotAsync(action.Proposal.CreatedByUserId, payload.ShotId, new MovieStudioGenerationRequest($"Director: {payload.QualityLevel}", payload.EstimatedCostUsd), cancellationToken, action.IdempotencyKey ?? $"director:{action.Id:N}");
+        var result = await movies.GenerateShotAsync(executingUserId, payload.ShotId, new MovieStudioGenerationRequest($"Director: {payload.QualityLevel}", payload.EstimatedCostUsd), cancellationToken, action.IdempotencyKey ?? $"director:{action.Id:N}");
         return result is null
             ? new(false, "DIRECTOR_SHOT_NOT_FOUND", "The Director shot could not be found.", null)
             : new(true, null, "The Director queued the shot for generation.", JsonSerializer.Serialize(new { result.Job.Id, result.ClipId }));

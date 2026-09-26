@@ -125,6 +125,12 @@ public sealed class MovieCollaborationTests : IClassFixture<TaslimApiFactory>
         var reviewer = Assert.Single(collaboration!.Team, item => item.UserId == editorAuth.User.Id);
         Assert.Contains(MoviePermissions.Approve, reviewer.Permissions);
         Assert.DoesNotContain(MoviePermissions.Generate, reviewer.Permissions);
+        var capabilities = await editor.GetFromJsonAsync<MovieCapabilityResponse>($"/api/movie-studio/projects/{movie.Project.Id}/capabilities");
+        Assert.NotNull(capabilities);
+        Assert.True(capabilities!.Capabilities[MovieOperationalActions.ReviewsDecision]);
+        Assert.False(capabilities.Capabilities[MovieOperationalActions.Generate]);
+        Assert.False(capabilities.Capabilities[MovieOperationalActions.TeamManagement]);
+        Assert.False(capabilities.Capabilities[MovieOperationalActions.BudgetManagement]);
 
         var decided = await SendWithCsrf<MovieReviewDto>(editor, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/collaboration/reviews/{review.Id}/decision", new
         {

@@ -309,6 +309,40 @@ export type MovieProject = { id: string; workspaceId: string; projectId: string 
 export type MovieProviderReadiness = { ready: boolean; supportedOperations: string[] };
 export type MovieStudioResponse = { project: MovieProject; job: GenerationJob | null };
 export type MovieStudioCreateInput = { workspaceId: string; projectId?: string | null; mode: "Quick" | "Full"; title: string; description: string; durationSeconds: number; aspectRatio: string; style: string; language: string; additionalInstructions?: string | null; visualLanguage?: string | null; cameraLanguage?: string | null; colorAndLighting?: string | null; soundAndNarration?: string | null; continuityRules?: string | null; cinematography?: CinematographyIntentSelection | null };
+export const movieOperationalActions = {
+  storyEdit: "story.edit",
+  storyApproval: "story.approve",
+  guideEdit: "guide.edit",
+  guideApproval: "guide.approve",
+  castEdit: "cast.edit",
+  worldEdit: "world.edit",
+  sceneEdit: "scene.edit",
+  shotEdit: "shot.edit",
+  productionVersionEdit: "production.version.edit",
+  generate: "generate",
+  renderTake: "render.take",
+  storyboardApproval: "storyboard.approve",
+  keyframeApproval: "keyframe.approve",
+  productionReview: "production.review",
+  takeCreate: "take.create",
+  takeSelect: "take.select",
+  takeApproval: "take.approve",
+  takeFinalization: "take.finalize",
+  directorProposalCreate: "director.proposal.create",
+  directorProposalApproval: "director.proposal.approve",
+  directorProposalExecution: "director.proposal.execute",
+  comments: "comments",
+  reviewsRequest: "reviews.request",
+  reviewsDecision: "reviews.decide",
+  finalReviewDecision: "reviews.final.decide",
+  teamManagement: "team.manage",
+  budgetManagement: "budget.manage",
+} as const;
+export type MovieOperationalAction = typeof movieOperationalActions[keyof typeof movieOperationalActions];
+export type MovieCapabilityResponse = { movieProjectId: string; permissions: string[]; capabilities: Record<string, boolean> };
+export function canMovieAction(capabilities: MovieCapabilityResponse | null | undefined, action: MovieOperationalAction): boolean {
+  return capabilities?.capabilities[action] === true;
+}
 export type ActivityItem = {
   jobId: string;
   workspaceId: string;
@@ -688,6 +722,7 @@ export const api = {
   getCinematographyPresets: () => request<CinematographyPreset[]>("/api/movie-studio/cinematography/presets"),
   createMovieProject: (input: MovieStudioCreateInput) => request<MovieStudioResponse>("/api/movie-studio/projects", { method: "POST", body: JSON.stringify(input) }, true),
   getMovieProject: (id: string) => request<MovieProject>(`/api/movie-studio/projects/${id}`),
+  getMovieCapabilities: (id: string) => request<MovieCapabilityResponse>(`/api/movie-studio/projects/${id}/capabilities`),
   updateMovieGuide: (id: string, input: Partial<Omit<MovieGuide, "cinematographyBible">> & { cinematography?: CinematographyIntentSelection | null }) => request<MovieProject>(`/api/movie-studio/projects/${id}/guide`, { method: "PATCH", body: JSON.stringify(input) }, true),
   addMovieScene: (id: string, input: { title: string; summary: string; durationSeconds?: number | null; continuityNotes?: string | null; narration?: string | null; dialogue?: string | null }) => request<MovieScene>(`/api/movie-studio/projects/${id}/scenes`, { method: "POST", body: JSON.stringify(input) }, true),
   addMovieCharacter: (id: string, input: MovieCharacterInput) => request<MovieCharacter>(`/api/movie-studio/projects/${id}/characters`, { method: "POST", body: JSON.stringify(input) }, true),

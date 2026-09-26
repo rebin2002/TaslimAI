@@ -57,7 +57,7 @@ public interface IMovieCollaborationService
     Task<bool> RemoveCreditAsync(Guid userId, Guid movieProjectId, Guid creditId, CancellationToken cancellationToken);
 }
 
-public sealed class MovieCollaborationService(TaslimDbContext db, WorkspaceAccessService workspaceAccess, MovieCollaborationAccess access) : IMovieCollaborationService
+public sealed class MovieCollaborationService(TaslimDbContext db, WorkspaceAccessService workspaceAccess, MovieCollaborationAccess access, MovieAuthorizationService authorization) : IMovieCollaborationService
 {
     public async Task<MovieCollaborationDto?> GetAsync(Guid userId, Guid movieProjectId, CancellationToken cancellationToken)
     {
@@ -87,7 +87,7 @@ public sealed class MovieCollaborationService(TaslimDbContext db, WorkspaceAcces
 
     public async Task<MovieTeamMemberDto?> AddMemberAsync(Guid userId, Guid movieProjectId, MovieTeamMemberRequest request, CancellationToken cancellationToken)
     {
-        await access.RequireAsync(userId, movieProjectId, MoviePermissions.ManageTeam, cancellationToken);
+        await authorization.RequireAsync(userId, movieProjectId, MovieOperationalActions.TeamManagement, cancellationToken);
         ValidateRoleAndPermissions(request.Role, request.Permissions ?? [], request.PermissionOverrides ?? []);
         var movie = await db.MovieProjects.AsNoTracking().FirstOrDefaultAsync(item => item.Id == movieProjectId, cancellationToken);
         if (movie is null) return null;
@@ -104,7 +104,7 @@ public sealed class MovieCollaborationService(TaslimDbContext db, WorkspaceAcces
 
     public async Task<MovieTeamMemberDto?> UpdateMemberAsync(Guid userId, Guid movieProjectId, Guid memberId, MovieTeamMemberRequest request, CancellationToken cancellationToken)
     {
-        await access.RequireAsync(userId, movieProjectId, MoviePermissions.ManageTeam, cancellationToken);
+        await authorization.RequireAsync(userId, movieProjectId, MovieOperationalActions.TeamManagement, cancellationToken);
         ValidateRoleAndPermissions(request.Role, request.Permissions ?? [], request.PermissionOverrides ?? []);
         var member = await db.MovieTeamMembers.Include(item => item.PermissionOverrides).FirstOrDefaultAsync(item => item.Id == memberId && item.MovieProjectId == movieProjectId, cancellationToken);
         if (member is null) return null;
@@ -122,7 +122,7 @@ public sealed class MovieCollaborationService(TaslimDbContext db, WorkspaceAcces
 
     public async Task<bool> RemoveMemberAsync(Guid userId, Guid movieProjectId, Guid memberId, CancellationToken cancellationToken)
     {
-        await access.RequireAsync(userId, movieProjectId, MoviePermissions.ManageTeam, cancellationToken);
+        await authorization.RequireAsync(userId, movieProjectId, MovieOperationalActions.TeamManagement, cancellationToken);
         var member = await db.MovieTeamMembers.FirstOrDefaultAsync(item => item.Id == memberId && item.MovieProjectId == movieProjectId, cancellationToken);
         if (member is null) return false;
         if (member.IsProjectOwner) throw new MovieCollaborationValidationException("The project owner cannot be removed.");
@@ -133,7 +133,7 @@ public sealed class MovieCollaborationService(TaslimDbContext db, WorkspaceAcces
 
     public async Task<MovieCommentDto?> AddCommentAsync(Guid userId, Guid movieProjectId, MovieCommentRequest request, CancellationToken cancellationToken)
     {
-        await access.RequireAsync(userId, movieProjectId, MoviePermissions.Comment, cancellationToken);
+        await authorization.RequireAsync(userId, movieProjectId, MovieOperationalActions.Comments, cancellationToken);
         await EnsureTargetAsync(movieProjectId, request.TargetType, request.TargetId, cancellationToken);
         if (string.IsNullOrWhiteSpace(request.Body) || request.Body.Trim().Length > 4000) throw new MovieCollaborationValidationException("Comment body must be between 1 and 4,000 characters.");
         if (request.ParentCommentId.HasValue && !await db.MovieComments.AnyAsync(item => item.Id == request.ParentCommentId && item.MovieProjectId == movieProjectId, cancellationToken))
@@ -151,7 +151,7 @@ public sealed class MovieCollaborationService(TaslimDbContext db, WorkspaceAcces
 
     public async Task<MovieCommentDto?> ResolveCommentAsync(Guid userId, Guid movieProjectId, Guid commentId, CancellationToken cancellationToken)
     {
-        await access.RequireAsync(userId, movieProjectId, MoviePermissions.Comment, cancellationToken);
+        await authorization.RequireAsync(userId, movieProjectId, MovieOperationalActions.Comments, cancellationToken);
         var comment = await db.MovieComments.FirstOrDefaultAsync(item => item.Id == commentId && item.MovieProjectId == movieProjectId, cancellationToken);
         if (comment is null) return null;
         comment.ResolvedAt ??= DateTime.UtcNow;
@@ -162,11 +162,11 @@ public sealed class MovieCollaborationService(TaslimDbContext db, WorkspaceAcces
 
     public async Task<MovieReviewDto?> RequestReviewAsync(Guid userId, Guid movieProjectId, MovieReviewRequest request, CancellationToken cancellationToken)
     {
-        await access.RequireAsync(userId, movieProjectId, MoviePermissions.Comment, cancellationToken);
+        await authorization.RequireAsync(userId, movieProjectId, MovieOperationalActions.ReviewsRequest, cancellationToken);
         await EnsureTargetAsync(movieProjectId, request.TargetType, request.TargetId, cancellationToken);
         if (request.ReviewerUserId == userId || !await db.MovieTeamMembers.AnyAsync(item => item.MovieProjectId == movieProjectId && item.UserId == request.ReviewerUserId, cancellationToken))
             throw new MovieCollaborationValidationException("The reviewer must be a different current human movie-team member.");
-        if (request.IsFinal && !await access.HasPermissionAsync(userId, movieProjectId, MoviePermissions.FinalApproval, cancellationToken)) throw new MovieCollaborationForbiddenException("Final approval requests require final-approval authority.");
+        if (request.IsFinal && !await authorization.CanAsync(userId, movieProjectId, MovieOperationalActions.FinalReviewDecision, cancellationToken)) throw new MovieCollaborationForbiddenException("Final approval requests require final-approval authority.");
         if (!string.IsNullOrWhiteSpace(request.RequestNote) && request.RequestNote.Trim().Length > 4000) throw new MovieCollaborationValidationException("Review note cannot exceed 4,000 characters.");
         var review = new MovieReview { Id = Guid.NewGuid(), MovieProjectId = movieProjectId, TargetType = request.TargetType.Trim().ToLowerInvariant(), TargetId = request.TargetId, RequestedByUserId = userId, ReviewerUserId = request.ReviewerUserId, IsFinal = request.IsFinal, RequestNote = MovieStudioHelpers.Clean(request.RequestNote), Status = MovieReviewStatuses.Pending, CreatedAt = DateTime.UtcNow };
         db.MovieReviews.Add(review);
@@ -179,7 +179,7 @@ public sealed class MovieCollaborationService(TaslimDbContext db, WorkspaceAcces
         var review = await db.MovieReviews.FirstOrDefaultAsync(item => item.Id == reviewId && item.MovieProjectId == movieProjectId, cancellationToken);
         if (review is null) return null;
         if (review.ReviewerUserId != userId) throw new MovieCollaborationForbiddenException("Only the assigned reviewer can decide this review.");
-        await access.RequireAsync(userId, movieProjectId, review.IsFinal ? MoviePermissions.FinalApproval : MoviePermissions.Approve, cancellationToken);
+        await authorization.RequireAsync(userId, movieProjectId, review.IsFinal ? MovieOperationalActions.FinalReviewDecision : MovieOperationalActions.ReviewsDecision, cancellationToken);
         if (!MovieReviewStatuses.Decisions.Contains(request.Status)) throw new MovieCollaborationValidationException("Choose Approved, ChangesRequested, or Rejected.");
         if (!string.IsNullOrWhiteSpace(request.DecisionNote) && request.DecisionNote.Trim().Length > 4000) throw new MovieCollaborationValidationException("Decision note cannot exceed 4,000 characters.");
         review.Status = request.Status.Trim();
@@ -191,7 +191,7 @@ public sealed class MovieCollaborationService(TaslimDbContext db, WorkspaceAcces
 
     public async Task<MovieAssignmentDto?> AddAssignmentAsync(Guid userId, Guid movieProjectId, MovieAssignmentRequest request, CancellationToken cancellationToken)
     {
-        await access.RequireAsync(userId, movieProjectId, MoviePermissions.ManageTeam, cancellationToken);
+        await authorization.RequireAsync(userId, movieProjectId, MovieOperationalActions.TeamManagement, cancellationToken);
         await EnsureTargetAsync(movieProjectId, request.TargetType, request.TargetId, cancellationToken);
         await EnsureTeamUserAsync(movieProjectId, request.AssigneeUserId, cancellationToken);
         ValidateAssignment(request.Title, request.Description, request.Status);
@@ -206,7 +206,7 @@ public sealed class MovieCollaborationService(TaslimDbContext db, WorkspaceAcces
     {
         var assignment = await db.MovieProductionAssignments.FirstOrDefaultAsync(item => item.Id == assignmentId && item.MovieProjectId == movieProjectId, cancellationToken);
         if (assignment is null) return null;
-        if (assignment.AssigneeUserId != userId) await access.RequireAsync(userId, movieProjectId, MoviePermissions.ManageTeam, cancellationToken);
+        if (assignment.AssigneeUserId != userId) await authorization.RequireAsync(userId, movieProjectId, MovieOperationalActions.TeamManagement, cancellationToken);
         ValidateAssignment(assignment.Title, request.Description, request.Status);
         assignment.Status = request.Status.Trim();
         assignment.Description = MovieStudioHelpers.Clean(request.Description);
@@ -219,7 +219,7 @@ public sealed class MovieCollaborationService(TaslimDbContext db, WorkspaceAcces
 
     public async Task<MovieProductionCreditDto?> AddCreditAsync(Guid userId, Guid movieProjectId, MovieProductionCreditRequest request, CancellationToken cancellationToken)
     {
-        await access.RequireAsync(userId, movieProjectId, MoviePermissions.ManageTeam, cancellationToken);
+        await authorization.RequireAsync(userId, movieProjectId, MovieOperationalActions.TeamManagement, cancellationToken);
         if (!MovieTeamRoles.Supported.Contains(request.Role)) throw new MovieCollaborationValidationException("Choose a supported production role.");
         await EnsureTeamUserAsync(movieProjectId, request.UserId, cancellationToken);
         if (!string.IsNullOrWhiteSpace(request.CreditName) && request.CreditName.Trim().Length > 160) throw new MovieCollaborationValidationException("Credit name cannot exceed 160 characters.");
@@ -232,7 +232,7 @@ public sealed class MovieCollaborationService(TaslimDbContext db, WorkspaceAcces
 
     public async Task<bool> RemoveCreditAsync(Guid userId, Guid movieProjectId, Guid creditId, CancellationToken cancellationToken)
     {
-        await access.RequireAsync(userId, movieProjectId, MoviePermissions.ManageTeam, cancellationToken);
+        await authorization.RequireAsync(userId, movieProjectId, MovieOperationalActions.TeamManagement, cancellationToken);
         var credit = await db.MovieProductionCredits.FirstOrDefaultAsync(item => item.Id == creditId && item.MovieProjectId == movieProjectId, cancellationToken);
         if (credit is null) return false;
         db.MovieProductionCredits.Remove(credit);
