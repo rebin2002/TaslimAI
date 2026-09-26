@@ -207,6 +207,10 @@ builder.Services.AddScoped<IMovieV2Service, MovieV2Service>();
 builder.Services.AddScoped<IMovieGuideService, MovieGuideService>();
 builder.Services.AddScoped<IMovieStoryService, MovieStoryService>();
 builder.Services.AddScoped<IMovieCollaborationService, MovieCollaborationService>();
+builder.Services.AddScoped<MovieDirectorContextAssembler>();
+builder.Services.AddScoped<IDirectorCostEstimator, MovieDirectorCostEstimator>();
+builder.Services.AddScoped<DirectorQualityPlanner>();
+builder.Services.AddScoped<IMovieDirectorService, MovieDirectorService>();
 builder.Services.Configure<MovieVideoOptions>(builder.Configuration.GetSection("MovieVideo"));
 builder.Services.AddScoped<MovieVideoExecutionStore>();
 builder.Services.AddHttpClient<RunwayMovieVideoProvider>();
@@ -217,6 +221,7 @@ builder.Services.AddSingleton<IMovieVideoProvider>(services =>
         ? services.GetRequiredService<RunwayMovieVideoProvider>()
         : new UnavailableMovieVideoProvider();
 });
+builder.Services.AddScoped<IDirectorActionExecutor, MovieDirectorActionExecutor>();
 builder.Services.AddScoped<IActivityCenterService, ActivityCenterService>();
 builder.Services.AddSingleton<IGenerationJobHandler, SystemTestGenerationJobHandler>();
 if (builder.Configuration.GetValue("GenerationJobs:WorkerEnabled", !builder.Environment.IsEnvironment("Testing")))

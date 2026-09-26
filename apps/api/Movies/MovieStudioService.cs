@@ -563,6 +563,8 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
             ProjectId = movie.ProjectId,
             JobType = shot is null ? GenerationJobTypes.MovieClipGenerate : GenerationJobTypes.MovieClipGenerate,
             Title = string.IsNullOrWhiteSpace(request.Title) ? movie.Title : request.Title.Trim(),
+            EstimatedProviderCostUsd = request.EstimatedProviderCostUsd,
+            InternalCostEstimate = request.InternalCostEstimate,
             InputJson = JsonSerializer.Serialize(new MovieGenerationInput(
                 MovieStudioOperations.SceneClip,
                 movie.Id,

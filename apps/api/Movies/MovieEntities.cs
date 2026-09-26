@@ -2,6 +2,7 @@ using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
 using Taslim.Api.Generation;
 using Taslim.Api.Ai;
+using Taslim.Api.Usage;
 
 namespace Taslim.Api.Movies;
 
@@ -807,7 +808,7 @@ public sealed class MovieGuideLockRequest
 }
 public sealed record MovieStudioShotRequest(string Description, string? CameraAndFraming, string? CameraMotion, int? DurationSeconds, string? Narration, string? Dialogue, string? VisualContinuityNotes, CinematographyIntentSelection? Cinematography = null);
 public sealed record MovieStudioGuideRequest(string? VisualLanguage, string? CameraLanguage, string? ColorAndLighting, string? SoundAndNarration, string? ContinuityRules, CinematographyIntentSelection? Cinematography = null);
-public sealed record MovieStudioGenerationRequest(string? Title = null);
+public sealed record MovieStudioGenerationRequest(string? Title = null, decimal? EstimatedProviderCostUsd = null, GenerationCostEstimate? InternalCostEstimate = null);
 
 public static class MovieStudioValidation
 {

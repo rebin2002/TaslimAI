@@ -83,6 +83,12 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
     public DbSet<MovieReview> MovieReviews => Set<MovieReview>();
     public DbSet<MovieProductionAssignment> MovieProductionAssignments => Set<MovieProductionAssignment>();
     public DbSet<MovieProductionCredit> MovieProductionCredits => Set<MovieProductionCredit>();
+    public DbSet<DirectorProjectContext> DirectorProjectContexts => Set<DirectorProjectContext>();
+    public DbSet<DirectorProposal> DirectorProposals => Set<DirectorProposal>();
+    public DbSet<DirectorAction> DirectorActions => Set<DirectorAction>();
+    public DbSet<DirectorActionResult> DirectorActionResults => Set<DirectorActionResult>();
+    public DbSet<DirectorDecision> DirectorDecisions => Set<DirectorDecision>();
+    public DbSet<DirectorHistoryEvent> DirectorHistoryEvents => Set<DirectorHistoryEvent>();
     public DbSet<DataProtectionKey> DataProtectionKeys => Set<DataProtectionKey>();
 
     protected override void OnModelCreating(ModelBuilder builder)
@@ -673,6 +679,76 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasIndex(item => new { item.MovieProjectId, item.SortOrder });
             entity.HasOne(item => item.MovieProject).WithMany(item => item.Credits).HasForeignKey(item => item.MovieProjectId).OnDelete(DeleteBehavior.Cascade);
             entity.HasOne(item => item.User).WithMany().HasForeignKey(item => item.UserId).OnDelete(DeleteBehavior.Restrict);
+        });
+        builder.Entity<DirectorProjectContext>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.SnapshotJson).HasMaxLength(100_000).IsRequired();
+            entity.Property(item => item.SnapshotHash).HasMaxLength(64).IsRequired();
+            entity.HasIndex(item => item.MovieProjectId).IsUnique();
+            entity.HasIndex(item => new { item.WorkspaceId, item.UpdatedAt });
+            entity.HasOne(item => item.Workspace).WithMany().HasForeignKey(item => item.WorkspaceId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(item => item.MovieProject).WithMany().HasForeignKey(item => item.MovieProjectId).OnDelete(DeleteBehavior.Cascade);
+        });
+        builder.Entity<DirectorProposal>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.Status).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.Title).HasMaxLength(160).IsRequired();
+            entity.Property(item => item.Summary).HasMaxLength(4_000).IsRequired();
+            entity.Property(item => item.RationaleJson).HasMaxLength(20_000).IsRequired();
+            entity.HasIndex(item => new { item.MovieProjectId, item.CreatedAt });
+            entity.HasIndex(item => new { item.WorkspaceId, item.Status, item.CreatedAt });
+            entity.HasOne(item => item.Workspace).WithMany().HasForeignKey(item => item.WorkspaceId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(item => item.MovieProject).WithMany().HasForeignKey(item => item.MovieProjectId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.Context).WithMany(item => item.Proposals).HasForeignKey(item => item.DirectorProjectContextId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(item => item.CreatedByUser).WithMany().HasForeignKey(item => item.CreatedByUserId).OnDelete(DeleteBehavior.Restrict);
+        });
+        builder.Entity<DirectorAction>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.ActionType).HasMaxLength(80).IsRequired();
+            entity.Property(item => item.Status).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.PayloadJson).HasMaxLength(20_000).IsRequired();
+            entity.Property(item => item.IdempotencyKey).HasMaxLength(180);
+            entity.Property(item => item.FailureCode).HasMaxLength(100);
+            entity.HasIndex(item => new { item.DirectorProposalId, item.CreatedAt });
+            entity.HasIndex(item => new { item.WorkspaceId, item.Status, item.CreatedAt });
+            entity.HasOne(item => item.Workspace).WithMany().HasForeignKey(item => item.WorkspaceId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(item => item.MovieProject).WithMany().HasForeignKey(item => item.MovieProjectId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.Proposal).WithMany(item => item.Actions).HasForeignKey(item => item.DirectorProposalId).OnDelete(DeleteBehavior.Cascade);
+        });
+        builder.Entity<DirectorActionResult>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.Status).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.ResultJson).HasMaxLength(20_000);
+            entity.Property(item => item.SafeMessage).HasMaxLength(1_000).IsRequired();
+            entity.HasIndex(item => new { item.DirectorActionId, item.CreatedAt });
+            entity.HasOne(item => item.Action).WithMany(item => item.Results).HasForeignKey(item => item.DirectorActionId).OnDelete(DeleteBehavior.Cascade);
+        });
+        builder.Entity<DirectorDecision>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.DecisionType).HasMaxLength(80).IsRequired();
+            entity.Property(item => item.QualityLevel).HasMaxLength(20).IsRequired();
+            entity.Property(item => item.RationaleJson).HasMaxLength(20_000).IsRequired();
+            entity.Property(item => item.EstimatedCostUsd).HasPrecision(18, 8);
+            entity.HasIndex(item => new { item.DirectorProjectContextId, item.CreatedAt });
+            entity.HasOne(item => item.Context).WithMany(item => item.Decisions).HasForeignKey(item => item.DirectorProjectContextId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.MovieShot).WithMany().HasForeignKey(item => item.MovieShotId).OnDelete(DeleteBehavior.SetNull);
+        });
+        builder.Entity<DirectorHistoryEvent>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.EventType).HasMaxLength(80).IsRequired();
+            entity.Property(item => item.SafeDetailsJson).HasMaxLength(8_000);
+            entity.HasIndex(item => new { item.WorkspaceId, item.CreatedAt });
+            entity.HasIndex(item => item.DirectorProposalId);
+            entity.HasIndex(item => item.DirectorActionId);
+            entity.HasOne(item => item.Workspace).WithMany().HasForeignKey(item => item.WorkspaceId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(item => item.Proposal).WithMany().HasForeignKey(item => item.DirectorProposalId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.Action).WithMany(item => item.History).HasForeignKey(item => item.DirectorActionId).OnDelete(DeleteBehavior.Cascade);
         });
 
         builder.Entity<StoredFile>(entity =>
