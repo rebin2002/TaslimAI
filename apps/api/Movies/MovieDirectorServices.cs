@@ -33,22 +33,36 @@ public sealed class MovieDirectorContextAssembler(TaslimDbContext db)
     public async Task<DirectorContextAssemblyResult?> AssembleAsync(Guid userId, Guid movieProjectId, CancellationToken cancellationToken = default)
     {
         var movie = await db.MovieProjects.AsNoTracking()
-            .Include(item => item.Guide)
+            .Include(item => item.Guide).ThenInclude(item => item.Revisions)
             .Include(item => item.Scenes).ThenInclude(item => item.Shots)
             .Include(item => item.Characters)
             .Include(item => item.Locations)
             .FirstOrDefaultAsync(item => item.Id == movieProjectId, cancellationToken);
         if (movie is null) return null;
+        var lockedRevision = movie.Guide.LockedRevisionNumber is int lockedRevisionNumber
+            ? movie.Guide.Revisions.FirstOrDefault(item => item.RevisionNumber == lockedRevisionNumber && item.Status == MovieGuideRevisionStatuses.Locked)
+            : null;
+        if (lockedRevision is null) return null;
+        var story = await db.MovieStories.AsNoTracking()
+            .Include(item => item.Revisions)
+            .FirstOrDefaultAsync(item => item.MovieProjectId == movieProjectId, cancellationToken);
+        var approvedStoryRevision = story?.ApprovedRevisionId is Guid approvedRevisionId
+            ? story.Revisions.FirstOrDefault(item => item.Id == approvedRevisionId && item.Status == MovieStoryRevisionStatuses.Approved)
+            : null;
+        var approvedStoryContext = approvedStoryRevision is null
+            ? null
+            : new DirectorStoryContext(approvedStoryRevision.Id, approvedStoryRevision.RevisionNumber, approvedStoryRevision.Premise, approvedStoryRevision.Logline, approvedStoryRevision.Synopsis, approvedStoryRevision.Treatment, approvedStoryRevision.Authorship);
 
         var context = new DirectorContextDto(
             movie.Id, movie.WorkspaceId, movie.Title, movie.Description, movie.DurationSeconds, movie.AspectRatio, movie.Style, movie.Language,
-            new DirectorGuideContext(movie.Guide.VisualLanguage, movie.Guide.CameraLanguage, movie.Guide.ColorAndLighting, movie.Guide.SoundAndNarration, movie.Guide.ContinuityRules),
+            new DirectorGuideContext(movie.Guide.VisualLanguage, movie.Guide.CameraLanguage, movie.Guide.ColorAndLighting, movie.Guide.SoundAndNarration, movie.Guide.ContinuityRules, lockedRevision.RevisionNumber, true, lockedRevision.CinematographyBibleJson),
             movie.Scenes.OrderBy(item => item.Sequence).Select(scene => new DirectorSceneContext(
                 scene.Id, scene.Sequence, scene.Title, scene.Summary, scene.DurationSeconds, scene.ContinuityNotes,
                 scene.Shots.OrderBy(item => item.Sequence).Select(shot => new DirectorShotContext(shot.Id, shot.Sequence, shot.Description, shot.CameraAndFraming, shot.CameraMotion, shot.DurationSeconds, shot.Narration, shot.Dialogue, shot.VisualContinuityNotes)).ToArray())).ToArray(),
             movie.Characters.OrderBy(item => item.CreatedAt).Select(item => new DirectorCharacterContext(item.Name, item.Description, item.Appearance, item.ContinuityNotes)).ToArray(),
             movie.Locations.OrderBy(item => item.CreatedAt).Select(item => new DirectorLocationContext(item.Name, item.Description, item.VisualContinuityNotes)).ToArray(),
-            DateTime.UtcNow);
+            DateTime.UtcNow,
+            ApprovedStory: approvedStoryContext);
         var snapshotJson = JsonSerializer.Serialize(context, DirectorJson.Options);
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(snapshotJson))).ToLowerInvariant();
         return new DirectorContextAssemblyResult(context, snapshotJson, hash);

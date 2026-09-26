@@ -172,9 +172,19 @@ public sealed record DirectorContextDto(
     IReadOnlyList<DirectorCharacterContext> Characters,
     IReadOnlyList<DirectorLocationContext> Locations,
     DateTime AssembledAt,
-    int ContextVersion = 1);
+    int ContextVersion = 1,
+    DirectorStoryContext? ApprovedStory = null);
 
-public sealed record DirectorGuideContext(string VisualLanguage, string CameraLanguage, string ColorAndLighting, string SoundAndNarration, string ContinuityRules);
+public sealed record DirectorGuideContext(
+    string VisualLanguage,
+    string CameraLanguage,
+    string ColorAndLighting,
+    string SoundAndNarration,
+    string ContinuityRules,
+    int? RevisionNumber = null,
+    bool IsAuthoritative = false,
+    string? CinematographyBibleJson = null);
+public sealed record DirectorStoryContext(Guid RevisionId, int RevisionNumber, string Premise, string Logline, string Synopsis, string Treatment, string Authorship);
 public sealed record DirectorSceneContext(Guid Id, int Sequence, string Title, string Summary, int? DurationSeconds, string? ContinuityNotes, IReadOnlyList<DirectorShotContext> Shots);
 public sealed record DirectorShotContext(Guid Id, int Sequence, string Description, string? CameraAndFraming, string? CameraMotion, int? DurationSeconds, string? Narration, string? Dialogue, string? VisualContinuityNotes);
 public sealed record DirectorCharacterContext(string Name, string Description, string? Appearance, string? ContinuityNotes);
