@@ -44,14 +44,51 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
         public DbSet<SubscriptionLifecycleEvent> SubscriptionLifecycleEvents => Set<SubscriptionLifecycleEvent>();
         public DbSet<PaymentReconciliationRecord> PaymentReconciliationRecords => Set<PaymentReconciliationRecord>();
         public DbSet<MovieProject> MovieProjects => Set<MovieProject>();
+    public DbSet<MovieAct> MovieActs => Set<MovieAct>();
+    public DbSet<MovieSequence> MovieSequences => Set<MovieSequence>();
+    public DbSet<MovieStory> MovieStories => Set<MovieStory>();
+    public DbSet<MovieStoryRevision> MovieStoryRevisions => Set<MovieStoryRevision>();
+    public DbSet<MovieScreenplayScene> MovieScreenplayScenes => Set<MovieScreenplayScene>();
+    public DbSet<MovieScreenplayElement> MovieScreenplayElements => Set<MovieScreenplayElement>();
     public DbSet<MovieContinuityGuide> MovieContinuityGuides => Set<MovieContinuityGuide>();
+    public DbSet<MovieGuideRevision> MovieGuideRevisions => Set<MovieGuideRevision>();
     public DbSet<MovieScene> MovieScenes => Set<MovieScene>();
     public DbSet<MovieCharacter> MovieCharacters => Set<MovieCharacter>();
+    public DbSet<MovieCharacterState> MovieCharacterStates => Set<MovieCharacterState>();
+    public DbSet<MovieCharacterReferenceAsset> MovieCharacterReferenceAssets => Set<MovieCharacterReferenceAsset>();
+    public DbSet<MovieCharacterRelationship> MovieCharacterRelationships => Set<MovieCharacterRelationship>();
+    public DbSet<MovieCharacterContinuityLock> MovieCharacterContinuityLocks => Set<MovieCharacterContinuityLock>();
     public DbSet<MovieLocation> MovieLocations => Set<MovieLocation>();
+    public DbSet<MovieSet> MovieSets => Set<MovieSet>();
+    public DbSet<MovieSetVariation> MovieSetVariations => Set<MovieSetVariation>();
+    public DbSet<MovieProp> MovieProps => Set<MovieProp>();
+    public DbSet<MovieWorldReference> MovieWorldReferences => Set<MovieWorldReference>();
+    public DbSet<MovieWorldReferenceLink> MovieWorldReferenceLinks => Set<MovieWorldReferenceLink>();
+    public DbSet<MovieWorldUsage> MovieWorldUsages => Set<MovieWorldUsage>();
+    public DbSet<MovieContinuityFact> MovieContinuityFacts => Set<MovieContinuityFact>();
+    public DbSet<MovieContinuityLock> MovieContinuityLocks => Set<MovieContinuityLock>();
     public DbSet<MovieShot> MovieShots => Set<MovieShot>();
     public DbSet<MovieClip> MovieClips => Set<MovieClip>();
     public DbSet<MovieAssembly> MovieAssemblies => Set<MovieAssembly>();
+    public DbSet<MovieTake> MovieTakes => Set<MovieTake>();
+    public DbSet<MovieTakeApproval> MovieTakeApprovals => Set<MovieTakeApproval>();
     public DbSet<MovieVideoProviderExecution> MovieVideoProviderExecutions => Set<MovieVideoProviderExecution>();
+    public DbSet<MovieProductionVersion> MovieProductionVersions => Set<MovieProductionVersion>();
+    public DbSet<MovieProductionVersionAsset> MovieProductionVersionAssets => Set<MovieProductionVersionAsset>();
+    public DbSet<MovieProductionStageTransition> MovieProductionStageTransitions => Set<MovieProductionStageTransition>();
+    public DbSet<MovieTeamMember> MovieTeamMembers => Set<MovieTeamMember>();
+    public DbSet<MovieTeamMemberPermission> MovieTeamMemberPermissions => Set<MovieTeamMemberPermission>();
+    public DbSet<MovieComment> MovieComments => Set<MovieComment>();
+    public DbSet<MovieCommentMention> MovieCommentMentions => Set<MovieCommentMention>();
+    public DbSet<MovieReview> MovieReviews => Set<MovieReview>();
+    public DbSet<MovieProductionAssignment> MovieProductionAssignments => Set<MovieProductionAssignment>();
+    public DbSet<MovieProductionCredit> MovieProductionCredits => Set<MovieProductionCredit>();
+    public DbSet<DirectorProjectContext> DirectorProjectContexts => Set<DirectorProjectContext>();
+    public DbSet<DirectorProposal> DirectorProposals => Set<DirectorProposal>();
+    public DbSet<DirectorAction> DirectorActions => Set<DirectorAction>();
+    public DbSet<DirectorActionResult> DirectorActionResults => Set<DirectorActionResult>();
+    public DbSet<DirectorDecision> DirectorDecisions => Set<DirectorDecision>();
+    public DbSet<DirectorHistoryEvent> DirectorHistoryEvents => Set<DirectorHistoryEvent>();
     public DbSet<DataProtectionKey> DataProtectionKeys => Set<DataProtectionKey>();
 
     protected override void OnModelCreating(ModelBuilder builder)
@@ -147,11 +184,82 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.Property(item => item.Style).HasMaxLength(100).IsRequired();
             entity.Property(item => item.Language).HasMaxLength(5).IsRequired();
             entity.Property(item => item.AdditionalInstructions).HasMaxLength(8_000);
+            entity.Property(item => item.ProductionStatus).HasMaxLength(40).HasDefaultValue(MovieProductionStatuses.Draft).IsRequired();
+            entity.Property(item => item.QualityLevel).HasMaxLength(20).HasDefaultValue(MovieQualityLevels.Standard).IsRequired();
+            entity.Property(item => item.AutoDirectorEnabled).IsRequired();
             entity.HasIndex(item => new { item.WorkspaceId, item.UpdatedAt });
             entity.HasIndex(item => item.ProjectId);
             entity.HasOne(item => item.Workspace).WithMany().HasForeignKey(item => item.WorkspaceId).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne(item => item.Project).WithMany().HasForeignKey(item => item.ProjectId).OnDelete(DeleteBehavior.SetNull);
             entity.HasOne(item => item.CreatedByUser).WithMany().HasForeignKey(item => item.CreatedByUserId).OnDelete(DeleteBehavior.Restrict);
+        });
+        builder.Entity<MovieAct>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.Title).HasMaxLength(160).IsRequired();
+            entity.Property(item => item.Summary).HasMaxLength(8_000);
+            entity.Property(item => item.Status).HasMaxLength(30).HasDefaultValue(MovieHierarchyStatuses.Planned).IsRequired();
+            entity.HasIndex(item => new { item.MovieProjectId, item.Sequence }).IsUnique();
+            entity.HasOne(item => item.MovieProject).WithMany(item => item.Acts).HasForeignKey(item => item.MovieProjectId).OnDelete(DeleteBehavior.Cascade);
+        });
+        builder.Entity<MovieSequence>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.Title).HasMaxLength(160).IsRequired();
+            entity.Property(item => item.Summary).HasMaxLength(8_000);
+            entity.Property(item => item.Status).HasMaxLength(30).HasDefaultValue(MovieHierarchyStatuses.Planned).IsRequired();
+            entity.HasIndex(item => new { item.MovieActId, item.Sequence }).IsUnique();
+            entity.HasOne(item => item.MovieAct).WithMany(item => item.Sequences).HasForeignKey(item => item.MovieActId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<MovieStory>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.Premise).HasMaxLength(8_000).IsRequired();
+            entity.Property(item => item.Logline).HasMaxLength(2_000).IsRequired();
+            entity.Property(item => item.Synopsis).HasMaxLength(20_000).IsRequired();
+            entity.Property(item => item.Treatment).HasMaxLength(40_000).IsRequired();
+            entity.Property(item => item.ApprovalState).HasMaxLength(30).IsRequired();
+            entity.HasIndex(item => item.MovieProjectId).IsUnique();
+            entity.HasIndex(item => new { item.WorkspaceId, item.UpdatedAt });
+            entity.HasOne(item => item.MovieProject).WithOne().HasForeignKey<MovieStory>(item => item.MovieProjectId).OnDelete(DeleteBehavior.Cascade);
+        });
+        builder.Entity<MovieStoryRevision>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.Premise).HasMaxLength(8_000).IsRequired();
+            entity.Property(item => item.Logline).HasMaxLength(2_000).IsRequired();
+            entity.Property(item => item.Synopsis).HasMaxLength(20_000).IsRequired();
+            entity.Property(item => item.Treatment).HasMaxLength(40_000).IsRequired();
+            entity.Property(item => item.Status).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.Authorship).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.ChangeSummary).HasMaxLength(2_000);
+            entity.Property(item => item.RejectionReason).HasMaxLength(2_000);
+            entity.HasIndex(item => new { item.MovieStoryId, item.RevisionNumber }).IsUnique();
+            entity.HasIndex(item => new { item.MovieStoryId, item.Status });
+            entity.HasOne(item => item.MovieStory).WithMany(item => item.Revisions).HasForeignKey(item => item.MovieStoryId).OnDelete(DeleteBehavior.Cascade);
+        });
+        builder.Entity<MovieScreenplayScene>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.SceneIdentifier).HasMaxLength(80).IsRequired();
+            entity.Property(item => item.Slugline).HasMaxLength(500).IsRequired();
+            entity.Property(item => item.Synopsis).HasMaxLength(4_000);
+            entity.HasIndex(item => new { item.MovieStoryRevisionId, item.Ordinal }).IsUnique();
+            entity.HasIndex(item => new { item.MovieStoryRevisionId, item.SceneIdentifier }).IsUnique();
+            entity.HasIndex(item => item.MovieSceneId);
+            entity.HasOne(item => item.Revision).WithMany(item => item.Scenes).HasForeignKey(item => item.MovieStoryRevisionId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.MovieScene).WithMany().HasForeignKey(item => item.MovieSceneId).OnDelete(DeleteBehavior.SetNull);
+        });
+        builder.Entity<MovieScreenplayElement>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.ElementType).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.Content).HasMaxLength(20_000).IsRequired();
+            entity.Property(item => item.CharacterName).HasMaxLength(160);
+            entity.Property(item => item.Parenthetical).HasMaxLength(500);
+            entity.HasIndex(item => new { item.MovieScreenplaySceneId, item.Ordinal }).IsUnique();
+            entity.HasOne(item => item.Scene).WithMany(item => item.Elements).HasForeignKey(item => item.MovieScreenplaySceneId).OnDelete(DeleteBehavior.Cascade);
         });
         builder.Entity<MovieContinuityGuide>(entity =>
         {
@@ -162,8 +270,28 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.Property(item => item.SoundAndNarration).HasMaxLength(4_000).IsRequired();
             entity.Property(item => item.ContinuityRules).HasMaxLength(8_000).IsRequired();
             entity.Property(item => item.ReferenceAssetIdsJson).HasMaxLength(20_000);
+            entity.Property(item => item.CurrentRevisionNumber).IsRequired();
+            entity.Property(item => item.CinematographyIntent).HasMaxLength(30);
+            entity.Property(item => item.CinematographyBibleReferencesJson).HasMaxLength(20_000);
             entity.HasIndex(item => item.MovieProjectId).IsUnique();
             entity.HasOne(item => item.MovieProject).WithOne(item => item.Guide).HasForeignKey<MovieContinuityGuide>(item => item.MovieProjectId).OnDelete(DeleteBehavior.Cascade);
+        });
+        builder.Entity<MovieGuideRevision>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.Status).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.StoryBibleJson).HasMaxLength(50_000).IsRequired();
+            entity.Property(item => item.CharacterBibleReferencesJson).HasMaxLength(50_000).IsRequired();
+            entity.Property(item => item.WorldBibleReferencesJson).HasMaxLength(50_000).IsRequired();
+            entity.Property(item => item.VisualBibleJson).HasMaxLength(50_000).IsRequired();
+            entity.Property(item => item.CinematographyBibleJson).HasMaxLength(50_000).IsRequired();
+            entity.Property(item => item.AudioBibleJson).HasMaxLength(50_000).IsRequired();
+            entity.Property(item => item.ContinuityBibleJson).HasMaxLength(50_000).IsRequired();
+            entity.HasIndex(item => new { item.MovieContinuityGuideId, item.RevisionNumber }).IsUnique();
+            entity.HasIndex(item => new { item.MovieContinuityGuideId, item.Status });
+            entity.HasOne(item => item.Guide).WithMany(item => item.Revisions).HasForeignKey(item => item.MovieContinuityGuideId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.CreatedByUser).WithMany().HasForeignKey(item => item.CreatedByUserId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(item => item.LockedByUser).WithMany().HasForeignKey(item => item.LockedByUserId).OnDelete(DeleteBehavior.Restrict);
         });
         builder.Entity<MovieScene>(entity =>
         {
@@ -173,20 +301,72 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.Property(item => item.ContinuityNotes).HasMaxLength(4_000);
             entity.Property(item => item.Narration).HasMaxLength(8_000);
             entity.Property(item => item.Dialogue).HasMaxLength(8_000);
-            entity.HasIndex(item => new { item.MovieProjectId, item.Sequence }).IsUnique();
+            entity.Property(item => item.Status).HasMaxLength(30).HasDefaultValue(MovieHierarchyStatuses.Planned).IsRequired();
+            entity.HasIndex(item => item.MovieSequenceId);
+            entity.HasIndex(item => new { item.MovieSequenceId, item.Sequence }).IsUnique();
             entity.HasOne(item => item.MovieProject).WithMany(item => item.Scenes).HasForeignKey(item => item.MovieProjectId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.MovieSequence).WithMany(item => item.Scenes).HasForeignKey(item => item.MovieSequenceId).OnDelete(DeleteBehavior.SetNull);
         });
         builder.Entity<MovieCharacter>(entity =>
         {
             entity.HasKey(item => item.Id);
             entity.Property(item => item.Name).HasMaxLength(160).IsRequired();
+            entity.Property(item => item.Role).HasMaxLength(160);
             entity.Property(item => item.Description).HasMaxLength(8_000).IsRequired();
             entity.Property(item => item.Appearance).HasMaxLength(4_000);
+            entity.Property(item => item.PhysicalDescription).HasMaxLength(4_000);
+            entity.Property(item => item.Wardrobe).HasMaxLength(4_000);
+            entity.Property(item => item.VoiceReference).HasMaxLength(4_000);
+            entity.Property(item => item.PersonalityAndStoryNotes).HasMaxLength(8_000);
             entity.Property(item => item.VoiceAndPerformance).HasMaxLength(4_000);
             entity.Property(item => item.ContinuityNotes).HasMaxLength(4_000);
             entity.HasIndex(item => item.MovieProjectId);
             entity.HasOne(item => item.MovieProject).WithMany(item => item.Characters).HasForeignKey(item => item.MovieProjectId).OnDelete(DeleteBehavior.Cascade);
             entity.HasOne(item => item.ReferenceAsset).WithMany().HasForeignKey(item => item.ReferenceAssetId).OnDelete(DeleteBehavior.SetNull);
+        });
+        builder.Entity<MovieCharacterState>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.Key).HasMaxLength(120).IsRequired();
+            entity.Property(item => item.Label).HasMaxLength(160);
+            entity.Property(item => item.Wardrobe).HasMaxLength(4_000);
+            entity.Property(item => item.AgeOrTimeState).HasMaxLength(1_000);
+            entity.Property(item => item.Appearance).HasMaxLength(4_000);
+            entity.Property(item => item.InjuryOrCondition).HasMaxLength(4_000);
+            entity.Property(item => item.LocationOrStoryState).HasMaxLength(4_000);
+            entity.Property(item => item.ContinuityNotes).HasMaxLength(4_000);
+            entity.HasIndex(item => new { item.MovieCharacterId, item.Key }).IsUnique();
+            entity.HasOne(item => item.Character).WithMany(item => item.States).HasForeignKey(item => item.MovieCharacterId).OnDelete(DeleteBehavior.Cascade);
+        });
+        builder.Entity<MovieCharacterReferenceAsset>(entity =>
+        {
+            entity.HasKey(item => new { item.MovieCharacterId, item.AssetId });
+            entity.Property(item => item.Label).HasMaxLength(160);
+            entity.Property(item => item.SortOrder).IsRequired();
+            entity.HasIndex(item => new { item.MovieCharacterId, item.SortOrder });
+            entity.HasIndex(item => item.AssetId);
+            entity.HasOne(item => item.Character).WithMany(item => item.ReferenceAssets).HasForeignKey(item => item.MovieCharacterId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.Asset).WithMany().HasForeignKey(item => item.AssetId).OnDelete(DeleteBehavior.Restrict);
+        });
+        builder.Entity<MovieCharacterRelationship>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.RelationshipType).HasMaxLength(120).IsRequired();
+            entity.Property(item => item.Notes).HasMaxLength(4_000);
+            entity.HasIndex(item => new { item.MovieCharacterId, item.RelatedCharacterId, item.RelationshipType }).IsUnique();
+            entity.HasOne(item => item.Character).WithMany(item => item.Relationships).HasForeignKey(item => item.MovieCharacterId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.RelatedCharacter).WithMany().HasForeignKey(item => item.RelatedCharacterId).OnDelete(DeleteBehavior.Restrict);
+        });
+        builder.Entity<MovieCharacterContinuityLock>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.FieldKey).HasMaxLength(120).IsRequired();
+            entity.Property(item => item.LockedValue).HasMaxLength(8_000).IsRequired();
+            entity.HasIndex(item => new { item.MovieCharacterId, item.MovieCharacterStateId, item.FieldKey }).IsUnique();
+            entity.HasIndex(item => item.ApprovedByUserId);
+            entity.HasOne(item => item.Character).WithMany(item => item.ContinuityLocks).HasForeignKey(item => item.MovieCharacterId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.CharacterState).WithMany(item => item.ContinuityLocks).HasForeignKey(item => item.MovieCharacterStateId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne(item => item.ApprovedByUser).WithMany().HasForeignKey(item => item.ApprovedByUserId).OnDelete(DeleteBehavior.Restrict);
         });
         builder.Entity<MovieLocation>(entity =>
         {
@@ -198,17 +378,195 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasOne(item => item.MovieProject).WithMany(item => item.Locations).HasForeignKey(item => item.MovieProjectId).OnDelete(DeleteBehavior.Cascade);
             entity.HasOne(item => item.ReferenceAsset).WithMany().HasForeignKey(item => item.ReferenceAssetId).OnDelete(DeleteBehavior.SetNull);
         });
+        builder.Entity<MovieSet>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.Name).HasMaxLength(160).IsRequired();
+            entity.Property(item => item.Description).HasMaxLength(8_000).IsRequired();
+            entity.Property(item => item.EnvironmentType).HasMaxLength(40).IsRequired();
+            entity.Property(item => item.VisualDescription).HasMaxLength(4_000);
+            entity.Property(item => item.TimeOfDay).HasMaxLength(80);
+            entity.Property(item => item.Weather).HasMaxLength(160);
+            entity.Property(item => item.ContinuityNotes).HasMaxLength(4_000);
+            entity.HasIndex(item => item.MovieProjectId);
+            entity.HasIndex(item => item.MovieLocationId);
+            entity.HasOne(item => item.MovieProject).WithMany(item => item.Sets).HasForeignKey(item => item.MovieProjectId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.MovieLocation).WithMany().HasForeignKey(item => item.MovieLocationId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne(item => item.ReferenceAsset).WithMany().HasForeignKey(item => item.ReferenceAssetId).OnDelete(DeleteBehavior.SetNull);
+        });
+        builder.Entity<MovieSetVariation>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.Name).HasMaxLength(160).IsRequired();
+            entity.Property(item => item.VisualDescription).HasMaxLength(4_000);
+            entity.Property(item => item.TimeOfDay).HasMaxLength(80);
+            entity.Property(item => item.Weather).HasMaxLength(160);
+            entity.Property(item => item.Lighting).HasMaxLength(2_000);
+            entity.Property(item => item.ContinuityNotes).HasMaxLength(4_000);
+            entity.HasIndex(item => new { item.MovieSetId, item.Name }).IsUnique();
+            entity.HasIndex(item => new { item.MovieSetId, item.IsDefault });
+            entity.HasOne(item => item.MovieSet).WithMany(item => item.Variations).HasForeignKey(item => item.MovieSetId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.ReferenceAsset).WithMany().HasForeignKey(item => item.ReferenceAssetId).OnDelete(DeleteBehavior.SetNull);
+        });
+        builder.Entity<MovieProp>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.Name).HasMaxLength(160).IsRequired();
+            entity.Property(item => item.Description).HasMaxLength(8_000).IsRequired();
+            entity.Property(item => item.Category).HasMaxLength(80);
+            entity.Property(item => item.ContinuityNotes).HasMaxLength(4_000);
+            entity.HasIndex(item => item.MovieProjectId);
+            entity.HasOne(item => item.MovieProject).WithMany(item => item.Props).HasForeignKey(item => item.MovieProjectId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.ReferenceAsset).WithMany().HasForeignKey(item => item.ReferenceAssetId).OnDelete(DeleteBehavior.SetNull);
+        });
+        builder.Entity<MovieWorldReference>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.Name).HasMaxLength(160).IsRequired();
+            entity.Property(item => item.Kind).HasMaxLength(40).IsRequired();
+            entity.Property(item => item.Description).HasMaxLength(4_000);
+            entity.Property(item => item.TagsJson).HasMaxLength(4_000);
+            entity.HasIndex(item => new { item.MovieProjectId, item.Kind });
+            entity.HasOne(item => item.MovieProject).WithMany(item => item.WorldReferences).HasForeignKey(item => item.MovieProjectId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.Asset).WithMany().HasForeignKey(item => item.AssetId).OnDelete(DeleteBehavior.SetNull);
+        });
+        builder.Entity<MovieWorldReferenceLink>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.EntityType).HasMaxLength(40).IsRequired();
+            entity.Property(item => item.Role).HasMaxLength(120);
+            entity.HasIndex(item => new { item.MovieWorldReferenceId, item.EntityType, item.EntityId }).IsUnique();
+            entity.HasIndex(item => new { item.MovieProjectId, item.EntityType, item.EntityId });
+            entity.HasOne(item => item.MovieProject).WithMany().HasForeignKey(item => item.MovieProjectId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.Reference).WithMany(item => item.Links).HasForeignKey(item => item.MovieWorldReferenceId).OnDelete(DeleteBehavior.Cascade);
+        });
+        builder.Entity<MovieWorldUsage>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.EntityType).HasMaxLength(40).IsRequired();
+            entity.Property(item => item.Role).HasMaxLength(120);
+            entity.HasIndex(item => new { item.MovieSceneId, item.MovieShotId, item.EntityType, item.EntityId }).IsUnique();
+            entity.HasIndex(item => new { item.MovieProjectId, item.EntityType, item.EntityId });
+            entity.HasOne(item => item.MovieProject).WithMany(item => item.WorldUsages).HasForeignKey(item => item.MovieProjectId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.MovieScene).WithMany().HasForeignKey(item => item.MovieSceneId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.MovieShot).WithMany().HasForeignKey(item => item.MovieShotId).OnDelete(DeleteBehavior.SetNull);
+        });
+        builder.Entity<MovieContinuityFact>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.ScopeType).HasMaxLength(40).IsRequired();
+            entity.Property(item => item.FactKey).HasMaxLength(160).IsRequired();
+            entity.Property(item => item.FactValue).HasMaxLength(4_000).IsRequired();
+            entity.Property(item => item.Notes).HasMaxLength(4_000);
+            entity.HasIndex(item => new { item.MovieProjectId, item.ScopeType, item.ScopeId, item.FactKey });
+            entity.HasOne(item => item.MovieProject).WithMany(item => item.ContinuityFacts).HasForeignKey(item => item.MovieProjectId).OnDelete(DeleteBehavior.Cascade);
+        });
+        builder.Entity<MovieContinuityLock>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.EntityType).HasMaxLength(40).IsRequired();
+            entity.Property(item => item.FieldName).HasMaxLength(160).IsRequired();
+            entity.Property(item => item.LockedValue).HasMaxLength(4_000).IsRequired();
+            entity.Property(item => item.Strength).HasMaxLength(20).IsRequired();
+            entity.Property(item => item.Reason).HasMaxLength(4_000);
+            entity.HasIndex(item => new { item.MovieProjectId, item.EntityType, item.EntityId, item.FieldName, item.ReleasedAt });
+            entity.HasOne(item => item.MovieProject).WithMany(item => item.ContinuityLocks).HasForeignKey(item => item.MovieProjectId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.CreatedByUser).WithMany().HasForeignKey(item => item.CreatedByUserId).OnDelete(DeleteBehavior.Restrict);
+        });
         builder.Entity<MovieShot>(entity =>
         {
             entity.HasKey(item => item.Id);
+            entity.Property(item => item.ProductionStage).HasMaxLength(40).IsRequired();
             entity.Property(item => item.Description).HasMaxLength(8_000).IsRequired();
             entity.Property(item => item.CameraAndFraming).HasMaxLength(2_000);
             entity.Property(item => item.CameraMotion).HasMaxLength(2_000);
+            entity.Property(item => item.CinematographyJson).HasMaxLength(20_000);
             entity.Property(item => item.Narration).HasMaxLength(8_000);
             entity.Property(item => item.Dialogue).HasMaxLength(8_000);
             entity.Property(item => item.VisualContinuityNotes).HasMaxLength(4_000);
+            entity.Property(item => item.Status).HasMaxLength(30).HasDefaultValue(MovieShotStatuses.Planned).IsRequired();
+            entity.HasIndex(item => item.SelectedTakeId);
+            entity.HasIndex(item => item.FinalTakeId);
             entity.HasIndex(item => new { item.MovieSceneId, item.Sequence }).IsUnique();
             entity.HasOne(item => item.Scene).WithMany(item => item.Shots).HasForeignKey(item => item.MovieSceneId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.SelectedTake).WithMany().HasForeignKey(item => item.SelectedTakeId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne(item => item.FinalTake).WithMany().HasForeignKey(item => item.FinalTakeId).OnDelete(DeleteBehavior.SetNull);
+        });
+        builder.Entity<MovieTake>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.Label).HasMaxLength(160).IsRequired();
+            entity.Property(item => item.Status).HasMaxLength(30).HasDefaultValue(MovieTakeStatuses.Draft).IsRequired();
+            entity.Property(item => item.QualityLevel).HasMaxLength(20).HasDefaultValue(MovieQualityLevels.Standard).IsRequired();
+            entity.Property(item => item.Notes).HasMaxLength(4_000);
+            entity.Property(item => item.MetadataJson).HasMaxLength(20_000);
+            entity.HasIndex(item => new { item.MovieShotId, item.VersionNumber }).IsUnique();
+            entity.HasIndex(item => new { item.MovieShotId, item.Status });
+            entity.HasOne(item => item.MovieShot).WithMany(item => item.Takes).HasForeignKey(item => item.MovieShotId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.MovieClip).WithMany().HasForeignKey(item => item.MovieClipId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne(item => item.GenerationJob).WithMany().HasForeignKey(item => item.GenerationJobId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne(item => item.Asset).WithMany().HasForeignKey(item => item.AssetId).OnDelete(DeleteBehavior.SetNull);
+        });
+        builder.Entity<MovieTakeApproval>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.Decision).HasMaxLength(20).IsRequired();
+            entity.Property(item => item.Comment).HasMaxLength(4_000);
+            entity.HasIndex(item => new { item.MovieTakeId, item.CreatedAt });
+            entity.HasOne(item => item.MovieTake).WithMany(item => item.Approvals).HasForeignKey(item => item.MovieTakeId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.User).WithMany().HasForeignKey(item => item.UserId).OnDelete(DeleteBehavior.Restrict);
+        });
+        builder.Entity<MovieProductionVersion>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.Stage).HasMaxLength(40).IsRequired();
+            entity.Property(item => item.Status).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.Label).HasMaxLength(160);
+            entity.Property(item => item.CompositionJson).HasMaxLength(20_000).IsRequired();
+            entity.Property(item => item.RegenerationMetadataJson).HasMaxLength(8_000);
+            entity.Property(item => item.StageProvenanceJson).HasMaxLength(20_000);
+            entity.Property(item => item.FirstFrameNotes).HasMaxLength(2_000);
+            entity.Property(item => item.LastFrameNotes).HasMaxLength(2_000);
+            entity.Property(item => item.RejectionReason).HasMaxLength(2_000);
+            entity.HasIndex(item => new { item.MovieShotId, item.VersionNumber }).IsUnique();
+            entity.HasIndex(item => new { item.MovieShotId, item.Stage, item.Status });
+            entity.HasIndex(item => item.GenerationJobId);
+            entity.HasIndex(item => item.AssetId);
+            entity.HasIndex(item => item.FirstFrameAssetId);
+            entity.HasIndex(item => item.LastFrameAssetId);
+            entity.HasOne(item => item.MovieShot).WithMany(item => item.ProductionVersions).HasForeignKey(item => item.MovieShotId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.SourceVersion).WithMany().HasForeignKey(item => item.SourceVersionId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(item => item.GenerationJob).WithMany().HasForeignKey(item => item.GenerationJobId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne(item => item.Asset).WithMany().HasForeignKey(item => item.AssetId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne(item => item.FirstFrameAsset).WithMany().HasForeignKey(item => item.FirstFrameAssetId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne(item => item.LastFrameAsset).WithMany().HasForeignKey(item => item.LastFrameAssetId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne(item => item.CreatedByUser).WithMany().HasForeignKey(item => item.CreatedByUserId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(item => item.ReviewedByUser).WithMany().HasForeignKey(item => item.ReviewedByUserId).OnDelete(DeleteBehavior.Restrict);
+        });
+        builder.Entity<MovieProductionVersionAsset>(entity =>
+        {
+            entity.HasKey(item => new { item.MovieProductionVersionId, item.AssetId, item.Role });
+            entity.Property(item => item.Role).HasMaxLength(40).IsRequired();
+            entity.HasIndex(item => item.AssetId);
+            entity.HasOne(item => item.MovieProductionVersion).WithMany(item => item.AssetReferences).HasForeignKey(item => item.MovieProductionVersionId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.Asset).WithMany().HasForeignKey(item => item.AssetId).OnDelete(DeleteBehavior.Restrict);
+        });
+        builder.Entity<MovieProductionStageTransition>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.FromStage).HasMaxLength(40).IsRequired();
+            entity.Property(item => item.ToStage).HasMaxLength(40).IsRequired();
+            entity.Property(item => item.EventType).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.Reason).HasMaxLength(2_000);
+            entity.Property(item => item.MetadataJson).HasMaxLength(8_000);
+            entity.HasIndex(item => new { item.MovieShotId, item.CreatedAt });
+            entity.HasIndex(item => item.MovieProductionVersionId);
+            entity.HasIndex(item => item.GenerationJobId);
+            entity.HasOne(item => item.MovieShot).WithMany(item => item.ProductionTransitions).HasForeignKey(item => item.MovieShotId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.MovieProductionVersion).WithMany(item => item.Transitions).HasForeignKey(item => item.MovieProductionVersionId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.SourceVersion).WithMany().HasForeignKey(item => item.SourceVersionId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(item => item.GenerationJob).WithMany().HasForeignKey(item => item.GenerationJobId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne(item => item.ActorUser).WithMany().HasForeignKey(item => item.ActorUserId).OnDelete(DeleteBehavior.Restrict);
         });
         builder.Entity<MovieClip>(entity =>
         {
@@ -217,7 +575,7 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.Property(item => item.ProviderKey).HasMaxLength(80);
             entity.Property(item => item.ProviderClipId).HasMaxLength(240);
             entity.Property(item => item.MetadataJson).HasMaxLength(20_000);
-            entity.Property(item => item.ContinuitySnapshotJson).HasMaxLength(20_000);
+            entity.Property(item => item.ContinuitySnapshotJson).HasMaxLength(100_000);
             entity.HasIndex(item => new { item.MovieProjectId, item.Status });
             entity.HasIndex(item => item.GenerationJobId);
             entity.HasOne(item => item.MovieProject).WithMany(item => item.Clips).HasForeignKey(item => item.MovieProjectId).OnDelete(DeleteBehavior.Cascade);
@@ -250,6 +608,147 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasOne(item => item.MovieProject).WithMany(item => item.Assemblies).HasForeignKey(item => item.MovieProjectId).OnDelete(DeleteBehavior.Cascade);
             entity.HasOne(item => item.GenerationJob).WithMany().HasForeignKey(item => item.GenerationJobId).OnDelete(DeleteBehavior.SetNull);
             entity.HasOne(item => item.Asset).WithMany().HasForeignKey(item => item.AssetId).OnDelete(DeleteBehavior.SetNull);
+        });
+        builder.Entity<MovieTeamMember>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.Role).HasMaxLength(40).IsRequired();
+            entity.HasIndex(item => new { item.MovieProjectId, item.UserId }).IsUnique();
+            entity.HasIndex(item => item.UserId);
+            entity.HasOne(item => item.MovieProject).WithMany(item => item.TeamMembers).HasForeignKey(item => item.MovieProjectId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.User).WithMany().HasForeignKey(item => item.UserId).OnDelete(DeleteBehavior.Restrict);
+        });
+        builder.Entity<MovieTeamMemberPermission>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.Permission).HasMaxLength(40).IsRequired();
+            entity.HasIndex(item => new { item.MovieTeamMemberId, item.Permission }).IsUnique();
+            entity.HasOne(item => item.MovieTeamMember).WithMany(item => item.PermissionOverrides).HasForeignKey(item => item.MovieTeamMemberId).OnDelete(DeleteBehavior.Cascade);
+        });
+        builder.Entity<MovieComment>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.TargetType).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.Body).HasMaxLength(4_000).IsRequired();
+            entity.HasIndex(item => new { item.MovieProjectId, item.TargetType, item.TargetId, item.CreatedAt });
+            entity.HasIndex(item => item.AuthorUserId);
+            entity.HasOne(item => item.MovieProject).WithMany(item => item.Comments).HasForeignKey(item => item.MovieProjectId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.AuthorUser).WithMany().HasForeignKey(item => item.AuthorUserId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(item => item.ParentComment).WithMany().HasForeignKey(item => item.ParentCommentId).OnDelete(DeleteBehavior.Restrict);
+        });
+        builder.Entity<MovieCommentMention>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.HasIndex(item => new { item.CommentId, item.MentionedUserId }).IsUnique();
+            entity.HasIndex(item => item.MentionedUserId);
+            entity.HasOne(item => item.Comment).WithMany(item => item.Mentions).HasForeignKey(item => item.CommentId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.MentionedUser).WithMany().HasForeignKey(item => item.MentionedUserId).OnDelete(DeleteBehavior.Restrict);
+        });
+        builder.Entity<MovieReview>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.TargetType).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.Status).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.RequestNote).HasMaxLength(4_000);
+            entity.Property(item => item.DecisionNote).HasMaxLength(4_000);
+            entity.HasIndex(item => new { item.MovieProjectId, item.TargetType, item.TargetId, item.CreatedAt });
+            entity.HasIndex(item => new { item.ReviewerUserId, item.Status });
+            entity.HasOne(item => item.MovieProject).WithMany(item => item.Reviews).HasForeignKey(item => item.MovieProjectId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.RequestedByUser).WithMany().HasForeignKey(item => item.RequestedByUserId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(item => item.ReviewerUser).WithMany().HasForeignKey(item => item.ReviewerUserId).OnDelete(DeleteBehavior.Restrict);
+        });
+        builder.Entity<MovieProductionAssignment>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.TargetType).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.Title).HasMaxLength(200).IsRequired();
+            entity.Property(item => item.Description).HasMaxLength(4_000);
+            entity.Property(item => item.Status).HasMaxLength(30).IsRequired();
+            entity.HasIndex(item => new { item.MovieProjectId, item.Status, item.DueAt });
+            entity.HasIndex(item => item.AssigneeUserId);
+            entity.HasOne(item => item.MovieProject).WithMany(item => item.Assignments).HasForeignKey(item => item.MovieProjectId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.AssigneeUser).WithMany().HasForeignKey(item => item.AssigneeUserId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(item => item.AssignedByUser).WithMany().HasForeignKey(item => item.AssignedByUserId).OnDelete(DeleteBehavior.Restrict);
+        });
+        builder.Entity<MovieProductionCredit>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.Role).HasMaxLength(40).IsRequired();
+            entity.Property(item => item.CreditName).HasMaxLength(160);
+            entity.HasIndex(item => new { item.MovieProjectId, item.UserId, item.Role }).IsUnique();
+            entity.HasIndex(item => new { item.MovieProjectId, item.SortOrder });
+            entity.HasOne(item => item.MovieProject).WithMany(item => item.Credits).HasForeignKey(item => item.MovieProjectId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.User).WithMany().HasForeignKey(item => item.UserId).OnDelete(DeleteBehavior.Restrict);
+        });
+        builder.Entity<DirectorProjectContext>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.SnapshotJson).HasMaxLength(100_000).IsRequired();
+            entity.Property(item => item.SnapshotHash).HasMaxLength(64).IsRequired();
+            entity.HasIndex(item => item.MovieProjectId).IsUnique();
+            entity.HasIndex(item => new { item.WorkspaceId, item.UpdatedAt });
+            entity.HasOne(item => item.Workspace).WithMany().HasForeignKey(item => item.WorkspaceId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(item => item.MovieProject).WithMany().HasForeignKey(item => item.MovieProjectId).OnDelete(DeleteBehavior.Cascade);
+        });
+        builder.Entity<DirectorProposal>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.Status).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.Title).HasMaxLength(160).IsRequired();
+            entity.Property(item => item.Summary).HasMaxLength(4_000).IsRequired();
+            entity.Property(item => item.RationaleJson).HasMaxLength(20_000).IsRequired();
+            entity.HasIndex(item => new { item.MovieProjectId, item.CreatedAt });
+            entity.HasIndex(item => new { item.WorkspaceId, item.Status, item.CreatedAt });
+            entity.HasOne(item => item.Workspace).WithMany().HasForeignKey(item => item.WorkspaceId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(item => item.MovieProject).WithMany().HasForeignKey(item => item.MovieProjectId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.Context).WithMany(item => item.Proposals).HasForeignKey(item => item.DirectorProjectContextId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(item => item.CreatedByUser).WithMany().HasForeignKey(item => item.CreatedByUserId).OnDelete(DeleteBehavior.Restrict);
+        });
+        builder.Entity<DirectorAction>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.ActionType).HasMaxLength(80).IsRequired();
+            entity.Property(item => item.Status).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.PayloadJson).HasMaxLength(20_000).IsRequired();
+            entity.Property(item => item.IdempotencyKey).HasMaxLength(180);
+            entity.Property(item => item.FailureCode).HasMaxLength(100);
+            entity.HasIndex(item => new { item.DirectorProposalId, item.CreatedAt });
+            entity.HasIndex(item => new { item.WorkspaceId, item.Status, item.CreatedAt });
+            entity.HasOne(item => item.Workspace).WithMany().HasForeignKey(item => item.WorkspaceId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(item => item.MovieProject).WithMany().HasForeignKey(item => item.MovieProjectId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.Proposal).WithMany(item => item.Actions).HasForeignKey(item => item.DirectorProposalId).OnDelete(DeleteBehavior.Cascade);
+        });
+        builder.Entity<DirectorActionResult>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.Status).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.ResultJson).HasMaxLength(20_000);
+            entity.Property(item => item.SafeMessage).HasMaxLength(1_000).IsRequired();
+            entity.HasIndex(item => new { item.DirectorActionId, item.CreatedAt });
+            entity.HasOne(item => item.Action).WithMany(item => item.Results).HasForeignKey(item => item.DirectorActionId).OnDelete(DeleteBehavior.Cascade);
+        });
+        builder.Entity<DirectorDecision>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.DecisionType).HasMaxLength(80).IsRequired();
+            entity.Property(item => item.QualityLevel).HasMaxLength(20).IsRequired();
+            entity.Property(item => item.RationaleJson).HasMaxLength(20_000).IsRequired();
+            entity.Property(item => item.EstimatedCostUsd).HasPrecision(18, 8);
+            entity.HasIndex(item => new { item.DirectorProjectContextId, item.CreatedAt });
+            entity.HasOne(item => item.Context).WithMany(item => item.Decisions).HasForeignKey(item => item.DirectorProjectContextId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.MovieShot).WithMany().HasForeignKey(item => item.MovieShotId).OnDelete(DeleteBehavior.SetNull);
+        });
+        builder.Entity<DirectorHistoryEvent>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.EventType).HasMaxLength(80).IsRequired();
+            entity.Property(item => item.SafeDetailsJson).HasMaxLength(8_000);
+            entity.HasIndex(item => new { item.WorkspaceId, item.CreatedAt });
+            entity.HasIndex(item => item.DirectorProposalId);
+            entity.HasIndex(item => item.DirectorActionId);
+            entity.HasOne(item => item.Workspace).WithMany().HasForeignKey(item => item.WorkspaceId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(item => item.Proposal).WithMany().HasForeignKey(item => item.DirectorProposalId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.Action).WithMany(item => item.History).HasForeignKey(item => item.DirectorActionId).OnDelete(DeleteBehavior.Cascade);
         });
 
         builder.Entity<StoredFile>(entity =>
