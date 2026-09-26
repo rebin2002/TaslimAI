@@ -12,7 +12,7 @@ namespace Taslim.Api.Controllers;
 [ApiController]
 [Authorize]
 [Route("api/movie-studio")]
-public sealed class MovieStudioController(IMovieStudioService movies, IMovieGuideService guides, IMovieStoryService stories, IMovieCharacterContinuityService continuity, IMovieWorldContinuityService worldContinuity) : ControllerBase
+public sealed class MovieStudioController(IMovieStudioService movies, IMovieGuideService guides, IMovieStoryService stories, IMovieCharacterContinuityService continuity, IMovieWorldContinuityService worldContinuity, MovieAuthorizationService authorization) : ControllerBase
 {
     [HttpGet("cinematography/presets")]
     public IActionResult CinematographyPresets() => Ok(CinematographyPresetCatalog.All);
@@ -42,6 +42,12 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieGuid
         return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result);
     }
 
+    [HttpGet("projects/{id:guid}/capabilities")]
+    public async Task<IActionResult> Capabilities(Guid id, CancellationToken cancellationToken)
+    {
+        var result = await authorization.GetCapabilitiesAsync(GetUserId(), id, cancellationToken);
+        return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result);
+    }
     [HttpGet("projects/{id:guid}/shell")]
     public async Task<IActionResult> GetShell(Guid id, CancellationToken cancellationToken)
     {
