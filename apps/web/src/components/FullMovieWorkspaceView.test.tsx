@@ -26,4 +26,15 @@ describe("Full Movie workspace foundation", () => {
     expect(createSource).toContain("Quick Movie stays intentionally small");
     expect(createSource).toContain("function QuickMovieResult");
   });
+
+  it("keeps Story assistance behind a visible proposal review and apply boundary", () => {
+    expect(workspaceSource).toContain("Director assistance");
+    expect(workspaceSource).toContain("Create proposal");
+    expect(workspaceSource).toContain("Existing content");
+    expect(workspaceSource).toContain("Proposed content");
+    expect(workspaceSource).toContain("Accept proposal");
+    expect(workspaceSource).toContain("Reject");
+    expect(workspaceSource).toContain("Apply to editable Story revision");
+    expect(workspaceSource).toContain("It never silently rewrites an approved revision.");
+  });
 });

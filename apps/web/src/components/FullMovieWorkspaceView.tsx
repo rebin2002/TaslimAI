@@ -22,7 +22,7 @@ import {
   Users,
   Workflow,
 } from "lucide-react";
-import { api, type MovieProject, type MovieScene } from "@/lib/api";
+import { api, type DirectorProposal, type DirectorStoryAction, type MovieProject, type MovieScene, type MovieStory } from "@/lib/api";
 import { assetFileUrl } from "@/lib/apiBase";
 
 export const fullMovieModules = [
@@ -90,6 +90,11 @@ export function FullMovieWorkspaceView({ projectId, module }: { projectId: strin
   const [selectedSceneId, setSelectedSceneId] = useState<string | null>(null);
   const [newScene, setNewScene] = useState({ title: "", summary: "" });
   const [addingScene, setAddingScene] = useState(false);
+  const [story, setStory] = useState<MovieStory | null>(null);
+  const [storyProposal, setStoryProposal] = useState<DirectorProposal | null>(null);
+  const [storyAction, setStoryAction] = useState<DirectorStoryAction>("improve_logline");
+  const [storySceneId, setStorySceneId] = useState<string | null>(null);
+  const [storyBusy, setStoryBusy] = useState(false);
 
   useEffect(() => {
     let mounted = true;
@@ -104,6 +109,19 @@ export function FullMovieWorkspaceView({ projectId, module }: { projectId: strin
     });
     return () => { mounted = false; };
   }, [projectId]);
+
+  useEffect(() => {
+    if (activeModule !== "story") return;
+    let mounted = true;
+    void api.getMovieStory(projectId).then((result) => {
+      if (!mounted) return;
+      setStory(result);
+      setStorySceneId(result.currentRevision?.scenes[0]?.id ?? result.approvedRevision?.scenes[0]?.id ?? null);
+    }).catch((cause) => {
+      if (mounted && (!(cause instanceof Error) || !/404|not found/i.test(cause.message))) setError(cause instanceof Error ? cause.message : "The Story could not be loaded.");
+    });
+    return () => { mounted = false; };
+  }, [activeModule, projectId]);
 
   const selectedScene = useMemo(() => project?.scenes.find((scene) => scene.id === selectedSceneId) ?? project?.scenes[0] ?? null, [project, selectedSceneId]);
   const readyClips = project?.clips.filter((clip) => hasReadyAsset(clip.status, clip.assetId)) ?? [];
@@ -136,6 +154,42 @@ export function FullMovieWorkspaceView({ projectId, module }: { projectId: strin
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "This scene could not be queued.");
     }
+  }
+
+  async function createStoryProposal() {
+    if (!project) return;
+    setStoryBusy(true);
+    setError("");
+    try {
+      const result = await api.createMovieDirectorProposal(project.id, { storyAction, targetSceneId: storySceneId });
+      setStoryProposal(result.proposal);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "The Director proposal could not be created.");
+    } finally { setStoryBusy(false); }
+  }
+
+  async function reviewStoryProposal(approve: boolean) {
+    if (!storyProposal) return;
+    setStoryBusy(true);
+    try {
+      const result = approve ? await api.approveMovieDirectorProposal(storyProposal.id) : await api.rejectMovieDirectorProposal(storyProposal.id);
+      setStoryProposal(result);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "The proposal review could not be saved."); }
+    finally { setStoryBusy(false); }
+  }
+
+  async function applyStoryProposal() {
+    const action = storyProposal?.actions.find((item) => item.actionType === "story_assistance");
+    if (!action || storyProposal?.status !== "Approved") return;
+    setStoryBusy(true);
+    try {
+      const result = await api.executeMovieDirectorAction(action.id);
+      if (result.action.status !== "Succeeded") throw new Error(result.result.safeMessage);
+      const nextStory = await api.getMovieStory(projectId);
+      setStory(nextStory);
+      setStoryProposal(null);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "The approved Story proposal could not be applied."); }
+    finally { setStoryBusy(false); }
   }
 
   if (loading) return <div className="movie-studio-page"><div className="movie-workspace-loading"><span className="loading-spinner" /><p>Loading the production workspace…</p></div></div>;
@@ -171,7 +225,7 @@ export function FullMovieWorkspaceView({ projectId, module }: { projectId: strin
         <main className="movie-workspace-main">
           <div className="movie-module-heading"><div><span className="movie-workspace-kicker">{copy.eyebrow}</span><h2>{copy.title}</h2><p>{copy.description}</p></div><span className="movie-module-index">{String(fullMovieModules.findIndex((item) => item.slug === activeModule) + 1).padStart(2, "0")} / 12</span></div>
           {activeModule === "overview" && <OverviewModule project={project} outputAssetId={outputAssetId} completionPercent={completionPercent} selectedScene={selectedScene} onSelectScene={setSelectedSceneId} />}
-          {activeModule === "story" && <StoryModule project={project} />}
+          {activeModule === "story" && <StoryModule project={project} story={story} proposal={storyProposal} action={storyAction} selectedSceneId={storySceneId} busy={storyBusy} onActionChange={setStoryAction} onSceneChange={setStorySceneId} onCreateProposal={() => void createStoryProposal()} onReview={(approve) => void reviewStoryProposal(approve)} onApply={() => void applyStoryProposal()} />}
           {activeModule === "cast" && <CastModule project={project} />}
           {activeModule === "world" && <WorldModule project={project} />}
           {activeModule === "scenes" && <ScenesModule project={project} selectedSceneId={selectedScene?.id ?? null} newScene={newScene} addingScene={addingScene} onSelectScene={setSelectedSceneId} onChangeScene={setNewScene} onAddScene={() => void addScene()} onGenerate={generateScene} />}
@@ -211,8 +265,20 @@ function OverviewModule({ project, outputAssetId, completionPercent, selectedSce
   </div>;
 }
 
-function StoryModule({ project }: { project: MovieProject }) {
-  return <div className="movie-module-stack"><section className="movie-story-hero"><span className="movie-workspace-kicker">Creative brief</span><h3>{project.title}</h3><p>{project.description}</p><div className="movie-story-facts"><span>{formatDuration(project.durationSeconds)}</span><span>{project.aspectRatio}</span><span>{project.style}</span><span>{project.language.toUpperCase()}</span></div></section><section className="movie-workspace-section"><div className="movie-section-head"><div><span className="movie-workspace-kicker">Continuity guide</span><h3>Rules that travel with the story</h3></div><BookOpen size={17} /></div><div className="movie-continuity-grid movie-continuity-grid-wide"><ContinuityItem label="Visual language" value={project.guide.visualLanguage} /><ContinuityItem label="Camera language" value={project.guide.cameraLanguage} /><ContinuityItem label="Color & lighting" value={project.guide.colorAndLighting} /><ContinuityItem label="Sound & narration" value={project.guide.soundAndNarration} /><ContinuityItem label="Continuity rules" value={project.guide.continuityRules} /></div></section></div>;
+function StoryModule({ project, story, proposal, action, selectedSceneId, busy, onActionChange, onSceneChange, onCreateProposal, onReview, onApply }: { project: MovieProject; story: MovieStory | null; proposal: DirectorProposal | null; action: DirectorStoryAction; selectedSceneId: string | null; busy: boolean; onActionChange: (value: DirectorStoryAction) => void; onSceneChange: (value: string | null) => void; onCreateProposal: () => void; onReview: (approve: boolean) => void; onApply: () => void }) {
+  const revision = story?.currentRevision ?? story?.approvedRevision;
+  const scenes = revision?.scenes ?? [];
+  return <div className="movie-module-stack">
+    <section className="movie-story-hero"><span className="movie-workspace-kicker">Creative brief</span><h3>{project.title}</h3><p>{project.description}</p><div className="movie-story-facts"><span>{formatDuration(project.durationSeconds)}</span><span>{project.aspectRatio}</span><span>{project.style}</span><span>{project.language.toUpperCase()}</span></div></section>
+    <section className="movie-workspace-section"><div className="movie-section-head"><div><span className="movie-workspace-kicker">Story revision</span><h3>{revision ? `Revision ${revision.revisionNumber} · ${revision.status}` : "No Story revision yet"}</h3></div><BookOpen size={17} /></div>{revision ? <div className="movie-story-copy-grid"><RecordLine label="Premise" value={revision.premise} /><RecordLine label="Logline" value={revision.logline} /><RecordLine label="Synopsis" value={revision.synopsis} /><RecordLine label="Treatment" value={revision.treatment} /></div> : <EmptyModule title="Start with a Director proposal" text="The Director can develop a bounded first pass while you remain in control of the revision." />}</section>
+    <section className="movie-workspace-section movie-director-story-assist"><div className="movie-section-head"><div><span className="movie-workspace-kicker">Director assistance</span><h3>Propose, review, then apply</h3></div><Sparkles size={17} /></div><p className="movie-story-safety-note">The Director uses the locked guide, current or approved Story, selected scene, and bounded Cast / World references. It never silently rewrites an approved revision.</p><div className="movie-story-assist-controls"><label><span>Action</span><select value={action} onChange={(event) => onActionChange(event.target.value as DirectorStoryAction)}><option value="develop_premise">Develop premise</option><option value="improve_logline">Improve logline</option><option value="expand_synopsis">Expand synopsis</option><option value="create_refine_treatment">Create / refine treatment</option><option value="propose_screenplay_scene">Propose screenplay scene</option><option value="rewrite_selected_passage">Rewrite selected passage</option><option value="improve_dialogue">Improve dialogue</option><option value="tighten_pacing">Tighten pacing</option><option value="identify_story_inconsistencies">Identify story inconsistencies</option></select></label>{scenes.length > 0 && <label><span>Target scene</span><select value={selectedSceneId ?? ""} onChange={(event) => onSceneChange(event.target.value || null)}><option value="">Choose a scene</option>{scenes.map((scene) => <option key={scene.id} value={scene.id}>{scene.sceneIdentifier} · {scene.slugline}</option>)}</select></label>}<button className="movie-workspace-button is-primary" type="button" onClick={onCreateProposal} disabled={busy}>{busy ? "Working…" : "Create proposal"}</button></div></section>
+    {proposal?.storyReview && <StoryProposalReview proposal={proposal} busy={busy} onReview={onReview} onApply={onApply} />}
+  </div>;
+}
+
+function StoryProposalReview({ proposal, busy, onReview, onApply }: { proposal: DirectorProposal; busy: boolean; onReview: (approve: boolean) => void; onApply: () => void }) {
+  const review = proposal.storyReview!;
+  return <section className="movie-workspace-section movie-story-proposal-review"><div className="movie-section-head"><div><span className="movie-workspace-kicker">Proposal review · {proposal.status}</span><h3>{proposal.title}</h3></div><span className="movie-section-count">{review.appliesToStory ? "Revision candidate" : "Review only"}</span></div><p>{proposal.summary}</p>{review.changes.map((change) => <div className="movie-story-diff" key={`${change.field}-${change.target}`}><span className="movie-inspector-label">{change.field}</span><div><article><small>Existing content</small><p>{change.existingContent}</p></article><article className="is-proposed"><small>Proposed content</small><p>{change.proposedContent}</p></article></div></div>)}{review.findings.length > 0 && <div className="movie-story-findings"><strong>Director findings</strong><ul>{review.findings.map((finding) => <li key={finding}>{finding.replaceAll("_", " ")}</li>)}</ul></div>}<div className="movie-story-review-actions">{proposal.status === "PendingApproval" && <><button className="movie-workspace-button is-primary" type="button" onClick={() => onReview(true)} disabled={busy}>Accept proposal</button><button className="movie-workspace-button" type="button" onClick={() => onReview(false)} disabled={busy}>Reject</button></>}{proposal.status === "Approved" && review.appliesToStory && <button className="movie-workspace-button is-primary" type="button" onClick={onApply} disabled={busy}>Apply to editable Story revision</button>}{proposal.status === "Approved" && !review.appliesToStory && <span className="movie-story-approved-note">Findings accepted. No Story text was changed.</span>}</div></section>;
 }
 
 function CastModule({ project }: { project: MovieProject }) {
