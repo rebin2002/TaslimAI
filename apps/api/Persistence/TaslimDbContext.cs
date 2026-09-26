@@ -683,10 +683,11 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
         builder.Entity<DirectorProjectContext>(entity =>
         {
             entity.HasKey(item => item.Id);
+            entity.Property(item => item.TargetType).HasMaxLength(40).IsRequired();
             entity.Property(item => item.SnapshotJson).HasMaxLength(100_000).IsRequired();
             entity.Property(item => item.SnapshotHash).HasMaxLength(64).IsRequired();
-            entity.HasIndex(item => item.MovieProjectId).IsUnique();
             entity.HasIndex(item => new { item.WorkspaceId, item.UpdatedAt });
+            entity.HasIndex(item => new { item.MovieProjectId, item.TargetType, item.TargetId }).IsUnique();
             entity.HasOne(item => item.Workspace).WithMany().HasForeignKey(item => item.WorkspaceId).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne(item => item.MovieProject).WithMany().HasForeignKey(item => item.MovieProjectId).OnDelete(DeleteBehavior.Cascade);
         });
