@@ -259,6 +259,7 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieGuid
             var result = await movies.CreateProductionVersionAsync(GetUserId(), shotId, request, cancellationToken);
             return result is null ? ApiResults.Error(this, 404, "MOVIE_SHOT_NOT_FOUND", "Movie shot not found.") : Ok(result);
         }
+        catch (MovieCollaborationForbiddenException) { return Forbid(); }
         catch (MovieProductionValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
     }
 
@@ -271,6 +272,7 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieGuid
             var result = await movies.ReviewProductionVersionAsync(GetUserId(), versionId, request, cancellationToken);
             return result is null ? ApiResults.Error(this, 404, "MOVIE_PRODUCTION_VERSION_NOT_FOUND", "Production version not found.") : Ok(result);
         }
+        catch (MovieCollaborationForbiddenException) { return Forbid(); }
         catch (MovieProductionValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
     }
 

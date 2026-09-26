@@ -51,6 +51,8 @@ public sealed class MovieProductionVersion
     public string CompositionJson { get; set; } = "{}";
     public string? RegenerationMetadataJson { get; set; }
     public string? StageProvenanceJson { get; set; }
+    public string? ContinuitySnapshotReferenceJson { get; set; }
+    public string? CinematographyReferenceJson { get; set; }
     public Guid? SourceVersionId { get; set; }
     public Guid? GenerationJobId { get; set; }
     public Guid? AssetId { get; set; }
@@ -109,6 +111,14 @@ public sealed class MovieProductionStageTransition
 
 public static class MovieProductionWorkflow
 {
+    public static readonly IReadOnlySet<string> SupportedGenerationJobTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        GenerationJobTypes.ImageGenerate,
+        GenerationJobTypes.MovieQuickGenerate,
+        GenerationJobTypes.MovieClipGenerate,
+        GenerationJobTypes.MovieAssembly,
+    };
+
     public static string? ValidateVersionCreation(string stage, MovieProductionVersion? source)
     {
         if (!MovieProductionStages.Persisted.Contains(stage)) return "Choose a supported production stage.";
@@ -125,6 +135,12 @@ public static class MovieProductionWorkflow
             _ => "The source version is not approved for this production stage.",
         };
     }
+
+    public static bool IsGenerationJobTypeAllowed(string stage, string jobType) =>
+        SupportedGenerationJobTypes.Contains(jobType) &&
+        (stage is MovieProductionStages.StoryboardCandidate or MovieProductionStages.ProductionKeyframe
+            ? string.Equals(jobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase)
+            : true);
 
     public static (string NextStage, string Status)? ApprovalResult(string stage) => stage switch
     {
@@ -172,6 +188,8 @@ public sealed record MovieProductionVersionDto(
     string CompositionJson,
     string? RegenerationMetadataJson,
     string? StageProvenanceJson,
+    string? ContinuitySnapshotReferenceJson,
+    string? CinematographyReferenceJson,
     Guid? SourceVersionId,
     Guid? GenerationJobId,
     Guid? AssetId,

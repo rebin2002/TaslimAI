@@ -525,6 +525,8 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.Property(item => item.CompositionJson).HasMaxLength(20_000).IsRequired();
             entity.Property(item => item.RegenerationMetadataJson).HasMaxLength(8_000);
             entity.Property(item => item.StageProvenanceJson).HasMaxLength(20_000);
+            entity.Property(item => item.ContinuitySnapshotReferenceJson).HasMaxLength(20_000);
+            entity.Property(item => item.CinematographyReferenceJson).HasMaxLength(20_000);
             entity.Property(item => item.FirstFrameNotes).HasMaxLength(2_000);
             entity.Property(item => item.LastFrameNotes).HasMaxLength(2_000);
             entity.Property(item => item.RejectionReason).HasMaxLength(2_000);

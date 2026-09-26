@@ -1,3 +1,4 @@
+using Taslim.Api.Domain;
 using Taslim.Api.Movies;
 using Xunit;
 
@@ -42,5 +43,13 @@ public sealed class MovieProductionWorkflowTests
         Assert.True(MovieProductionWorkflow.IsJsonObject("{\"seed\":42}"));
         Assert.False(MovieProductionWorkflow.IsJsonObject("[1,2,3]"));
         Assert.False(MovieProductionWorkflow.IsJsonObject("not-json"));
+    }
+
+    [Fact]
+    public void Keyframes_only_accept_shared_image_generation_jobs()
+    {
+        Assert.True(MovieProductionWorkflow.IsGenerationJobTypeAllowed(MovieProductionStages.ProductionKeyframe, GenerationJobTypes.ImageGenerate));
+        Assert.False(MovieProductionWorkflow.IsGenerationJobTypeAllowed(MovieProductionStages.ProductionKeyframe, GenerationJobTypes.SystemTest));
+        Assert.True(MovieProductionWorkflow.IsGenerationJobTypeAllowed(MovieProductionStages.ProductionRender, GenerationJobTypes.MovieClipGenerate));
     }
 }
