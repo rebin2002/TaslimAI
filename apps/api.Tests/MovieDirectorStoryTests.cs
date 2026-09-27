@@ -77,6 +77,59 @@ public sealed class MovieDirectorStoryTests : IClassFixture<TaslimApiFactory>
     }
 
     [Fact]
+    public async Task Empty_story_develop_premise_targets_same_movie_project_and_creates_first_ai_revision_after_approval()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Empty Story Director Owner");
+        var movie = await CreateMovie(client, auth.PersonalWorkspace.Id);
+        await LockGuide(client, movie.Project.Id);
+
+        var proposal = await SendWithCsrf<DirectorProposalResponse>(client, HttpMethod.Post, $"/api/movie-director/projects/{movie.Project.Id}/proposals", new
+        {
+            storyAction = DirectorStoryActionTypes.DevelopPremise,
+        });
+
+        Assert.Equal(movie.Project.Id, proposal.Proposal.MovieProjectId);
+        Assert.Equal(DirectorProposalStatuses.PendingApproval, proposal.Proposal.Status);
+        Assert.NotNull(proposal.Proposal.StoryReview);
+        Assert.Null(proposal.Proposal.StoryReview!.BaseRevisionId);
+        Assert.NotNull(proposal.StoryContext);
+
+        var beforeApproval = await SendWithCsrf(client, HttpMethod.Post, $"/api/movie-director/actions/{proposal.Proposal.Actions[0].Id}/execute", null);
+        Assert.Equal(HttpStatusCode.Conflict, beforeApproval.StatusCode);
+        Assert.Contains("DIRECTOR_APPROVAL_REQUIRED", await beforeApproval.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        var approved = await SendWithCsrf<DirectorProposalDto>(client, HttpMethod.Post, $"/api/movie-director/proposals/{proposal.Proposal.Id}/approve", null);
+        var applied = await SendWithCsrf<DirectorActionExecutionResponse>(client, HttpMethod.Post, $"/api/movie-director/actions/{approved.Actions[0].Id}/execute", null);
+        Assert.Equal(DirectorActionStatuses.Succeeded, applied.Action.Status);
+
+        var story = await client.GetFromJsonAsync<MovieStoryDto>($"/api/movie-studio/projects/{movie.Project.Id}/story");
+        Assert.NotNull(story);
+        Assert.Equal(movie.Project.Id, story!.MovieProjectId);
+        Assert.Equal(MovieStoryAuthorship.AiSuggested, story.CurrentRevision!.Authorship);
+        Assert.Equal(MovieStoryRevisionStatuses.Draft, story.CurrentRevision.Status);
+        Assert.Contains("bounded Story Director test", story.CurrentRevision.Premise, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Empty_story_without_locked_guide_returns_actionable_prerequisite_not_project_not_found()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Unlocked Story Director Owner");
+        var movie = await CreateMovie(client, auth.PersonalWorkspace.Id);
+
+        var response = await SendWithCsrf(client, HttpMethod.Post, $"/api/movie-director/projects/{movie.Project.Id}/proposals", new
+        {
+            storyAction = DirectorStoryActionTypes.DevelopPremise,
+        });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.Contains("Lock the Movie Guide before creating a Story Director proposal.", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("Movie project not found", body, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task Story_director_proposals_do_not_cross_workspace_boundaries()
     {
         using var owner = factory.CreateClient();

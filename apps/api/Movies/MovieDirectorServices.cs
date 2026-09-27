@@ -169,6 +169,7 @@ public sealed class MovieDirectorContextAssembler(TaslimDbContext db)
         var context = new DirectorStoryBoundedContextDto(
             movie.Id,
             movie.WorkspaceId,
+            Limit(movie.Description, 8_000),
             new DirectorGuideContext(Limit(movie.Guide.VisualLanguage, 2_000), Limit(movie.Guide.CameraLanguage, 2_000), Limit(movie.Guide.ColorAndLighting, 2_000), Limit(movie.Guide.SoundAndNarration, 2_000), Limit(movie.Guide.ContinuityRules, 4_000), lockedRevision.RevisionNumber, true, Limit(lockedRevision.CinematographyBibleJson, 8_000)),
             currentContext,
             approvedContext,
@@ -328,10 +329,13 @@ public sealed class MovieDirectorService(
 {
     public async Task<DirectorProposalResponse?> CreateProposalAsync(Guid userId, Guid movieProjectId, DirectorProposalRequest request, CancellationToken cancellationToken = default)
     {
-        var movie = await db.MovieProjects.AsNoTracking().FirstOrDefaultAsync(item => item.Id == movieProjectId, cancellationToken);
+        var movie = await db.MovieProjects.AsNoTracking().Include(item => item.Guide).FirstOrDefaultAsync(item => item.Id == movieProjectId, cancellationToken);
         if (movie is null || !await access.IsMemberAsync(userId, movie.WorkspaceId, cancellationToken)) return null;
         if (!string.IsNullOrWhiteSpace(request.StoryAction))
+        {
+            if (movie.Guide.LockedRevisionNumber is null) throw new DirectorValidationException("Lock the Movie Guide before creating a Story Director proposal.");
             return await CreateStoryProposalAsync(userId, movie, request, cancellationToken);
+        }
         var contextTarget = new DirectorContextTargetRequest
         {
             TargetType = request.ContextTargetType ?? (request.ShotId.HasValue ? DirectorContextTargetTypes.Shot : DirectorContextTargetTypes.Project),
