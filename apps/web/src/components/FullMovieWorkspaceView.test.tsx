@@ -83,6 +83,13 @@ describe("Full Movie workspace foundation", () => {
     expect(workspaceSource).toContain("Apply to editable Story revision");
     expect(workspaceSource).toContain("It never silently rewrites an approved revision.");
   });
+  it("keeps Story Director proposals on the canonical MovieProject and explains the guide prerequisite", () => {
+    expect(workspaceSource).toContain("createMovieDirectorProposal(projectId");
+    expect(workspaceSource).toContain("guideLocked={projectShell?.lockedGuideRevisionNumber != null}");
+    expect(workspaceSource).toContain("Lock the Movie Guide before creating a Story Director proposal.");
+    expect(workspaceSource).toContain("Open Cast to lock it");
+    expect(workspaceSource).toContain("disabled={storyBusy || !guideLocked}");
+  });
   it("mounts Shot Designer from the scene inspector without mutating the guide", () => {
     expect(workspaceSource).toContain("<ShotDesigner scene={scene} guide={guide} presets={presets}");
     expect(workspaceSource).toContain("api.addMovieShot(sceneId");

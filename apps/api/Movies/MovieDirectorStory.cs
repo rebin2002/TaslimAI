@@ -56,6 +56,7 @@ public sealed record DirectorScreenplayElementContext(
 public sealed record DirectorStoryBoundedContextDto(
     Guid MovieProjectId,
     Guid WorkspaceId,
+    string MovieBrief,
     DirectorGuideContext Guide,
     DirectorStoryRevisionContext? CurrentRevision,
     DirectorStoryRevisionContext? ApprovedRevision,
@@ -178,10 +179,13 @@ public sealed class DirectorStoryProposalPlanner
         return new DirectorStoryProposalPlan(payload, review, label, $"Review a bounded Director {label.ToLowerInvariant()} proposal before it becomes a new Story revision.", ["provider_independent_deterministic_proposal", "bounded_locked_guide_story_and_reference_context", applies ? "explicit_approval_required_before_story_apply" : "review_only_diagnostic"]);
     }
 
-    private static string DevelopPremise(DirectorStoryBoundedContextDto context, DirectorStoryRevisionContext? source) =>
-        string.IsNullOrWhiteSpace(source?.Premise)
-            ? $"{context.RelevantMovieScenes.FirstOrDefault()?.Summary ?? "A story shaped by its central conflict"}. The choice must carry a consequence."
+    private static string DevelopPremise(DirectorStoryBoundedContextDto context, DirectorStoryRevisionContext? source)
+    {
+        var seed = !string.IsNullOrWhiteSpace(context.MovieBrief) ? context.MovieBrief : context.RelevantMovieScenes.FirstOrDefault()?.Summary ?? "The story begins with a central conflict";
+        return string.IsNullOrWhiteSpace(source?.Premise)
+            ? $"{seed}. The choice must carry a consequence."
             : AppendOnce(source.Premise, " The protagonist's defining choice creates a consequence that cannot be undone.");
+    }
 
     private static string ImproveLogline(DirectorStoryBoundedContextDto context, DirectorStoryRevisionContext? source) =>
         string.IsNullOrWhiteSpace(source?.Logline)

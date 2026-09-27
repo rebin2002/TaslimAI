@@ -147,10 +147,10 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
 
     public async Task<MovieStudioProjectShellDto?> GetShellAsync(Guid userId, Guid id, CancellationToken cancellationToken)
     {
-        var movie = await db.MovieProjects.AsNoTracking().FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
+        var movie = await db.MovieProjects.AsNoTracking().Include(item => item.Guide).FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
         return movie is null || !await collaboration.HasPermissionAsync(userId, id, MoviePermissions.View, cancellationToken)
             ? null
-            : new MovieStudioProjectShellDto(movie.Id, movie.WorkspaceId, movie.ProjectId, movie.Mode, movie.Status, movie.Title, movie.Description, movie.DurationSeconds, movie.AspectRatio, movie.Style, movie.Language, movie.AdditionalInstructions, movie.CreatedAt, movie.UpdatedAt);
+            : new MovieStudioProjectShellDto(movie.Id, movie.WorkspaceId, movie.ProjectId, movie.Mode, movie.Status, movie.Title, movie.Description, movie.DurationSeconds, movie.AspectRatio, movie.Style, movie.Language, movie.AdditionalInstructions, movie.CreatedAt, movie.UpdatedAt, movie.Guide.LockedRevisionNumber);
     }
 
     public async Task<MovieCastDto?> GetCastAsync(Guid userId, Guid id, CancellationToken cancellationToken)

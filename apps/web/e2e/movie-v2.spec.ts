@@ -54,4 +54,33 @@ test.describe("Movie Studio V2 browser smoke", () => {
     await expect(page.getByText(/Quick Movie stays intentionally small/i)).toBeVisible();
     await expect(page).not.toHaveURL(/\/create\/movie\/[0-9a-f-]+\/overview$/i);
   });
+
+  test("creates an empty Story Director proposal for the same MovieProject after the guide is locked", async ({ authenticatedPage: page }) => {
+    test.setTimeout(120_000);
+    await page.goto("/create/movie");
+    await page.getByRole("button", { name: /full movie/i }).first().click();
+    await page.getByLabel("Movie title").fill("E2E Empty Story Director");
+    await page.getByLabel("Describe your movie").fill("A deterministic premise about a choice and its consequence.");
+    await page.getByRole("button", { name: /create full project/i }).click();
+    await expect(page).toHaveURL(/\/create\/movie\/([0-9a-f-]+)\/overview$/i);
+    const projectId = page.url().match(/\/create\/movie\/([0-9a-f-]+)\/overview$/i)?.[1];
+    expect(projectId).toBeTruthy();
+
+    await page.getByRole("link", { name: "Story", exact: true }).click();
+    await expect(page.getByText("Lock the Movie Guide before creating a Story Director proposal.")).toBeVisible({ timeout: 20_000 });
+    await expect(page.getByRole("button", { name: "Create proposal", exact: true })).toBeDisabled();
+
+    await page.getByRole("link", { name: "Cast", exact: true }).click();
+    await expect(page.getByRole("button", { name: /lock current guide/i })).toBeVisible({ timeout: 20_000 });
+    await page.getByRole("button", { name: /lock current guide/i }).click();
+    await expect(page.getByRole("button", { name: /lock current guide/i })).toHaveCount(0, { timeout: 20_000 });
+
+    await page.getByRole("link", { name: "Story", exact: true }).click();
+    await expect(page).toHaveURL(new RegExp(`/create/movie/${projectId}/story$`));
+    await expect(page.getByRole("button", { name: "Create proposal", exact: true })).toBeEnabled();
+    await page.getByRole("button", { name: "Create proposal", exact: true }).click();
+    await expect(page.getByText("Existing content")).toBeVisible({ timeout: 20_000 });
+    await expect(page.getByText(/movie project not found/i)).toHaveCount(0);
+    await expect(page).toHaveURL(new RegExp(`/create/movie/${projectId}/story$`));
+  });
 });
