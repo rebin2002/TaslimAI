@@ -27,7 +27,12 @@ public interface IDirectorActionExecutor
     Task<DirectorActionExecution> ExecuteAsync(DirectorAction action, CancellationToken cancellationToken = default);
 }
 
-public sealed record DirectorActionExecution(bool Succeeded, string? FailureCode, string SafeMessage, string? ResultJson);
+public sealed record DirectorActionExecution(
+    bool Succeeded,
+    string? FailureCode,
+    string SafeMessage,
+    string? ResultJson,
+    IReadOnlyList<string>? InternalReasonCodes = null);
 
 public sealed class MovieDirectorContextAssembler(TaslimDbContext db)
 {
@@ -177,7 +182,8 @@ public sealed class MovieDirectorContextAssembler(TaslimDbContext db)
             movieScenes,
             movie.Characters.OrderBy(item => item.CreatedAt).Take(MaxRelevantReferences).Select(item => new DirectorCharacterContext(Limit(item.Name, 160), Limit(item.Description, 1_200), Limit(item.Appearance, 1_200), Limit(item.ContinuityNotes, 1_200))).ToArray(),
             movie.Locations.OrderBy(item => item.CreatedAt).Take(MaxRelevantReferences).Select(item => new DirectorLocationContext(Limit(item.Name, 160), Limit(item.Description, 1_200), Limit(item.VisualContinuityNotes, 1_200))).ToArray(),
-            DateTime.UtcNow);
+            DateTime.UtcNow,
+            Language: movie.Language);
         var snapshotJson = JsonSerializer.Serialize(context, DirectorJson.Options);
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(snapshotJson))).ToLowerInvariant();
         return (context, snapshotJson, hash);
@@ -437,7 +443,12 @@ public sealed class MovieDirectorService(
         action.CompletedAt = now;
         var result = new DirectorActionResult { Id = Guid.NewGuid(), DirectorActionId = action.Id, Status = action.Status, SafeMessage = execution.SafeMessage, ResultJson = execution.ResultJson, CreatedAt = now };
         db.DirectorActionResults.Add(result);
-        db.DirectorHistoryEvents.Add(new DirectorHistoryEvent { Id = Guid.NewGuid(), WorkspaceId = action.WorkspaceId, DirectorActionId = action.Id, DirectorProposalId = action.DirectorProposalId, EventType = execution.Succeeded ? DirectorHistoryEventTypes.ActionSucceeded : DirectorHistoryEventTypes.ActionFailed, SafeDetailsJson = JsonSerializer.Serialize(new { execution.FailureCode }), CreatedAt = now });
+        db.DirectorHistoryEvents.Add(new DirectorHistoryEvent
+        {
+            Id = Guid.NewGuid(), WorkspaceId = action.WorkspaceId, DirectorActionId = action.Id, DirectorProposalId = action.DirectorProposalId,
+            EventType = execution.Succeeded ? DirectorHistoryEventTypes.ActionSucceeded : DirectorHistoryEventTypes.ActionFailed,
+            SafeDetailsJson = JsonSerializer.Serialize(new { execution.FailureCode, validationReasonCodes = execution.InternalReasonCodes?.Take(16).ToArray() }), CreatedAt = now,
+        });
         await db.SaveChangesAsync(cancellationToken);
         return new DirectorActionExecutionResponse(ToDto(action), ToDto(result));
     }

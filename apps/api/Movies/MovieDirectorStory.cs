@@ -65,7 +65,8 @@ public sealed record DirectorStoryBoundedContextDto(
     IReadOnlyList<DirectorCharacterContext> RelevantCharacters,
     IReadOnlyList<DirectorLocationContext> RelevantWorldReferences,
     DateTime AssembledAt,
-    int ContextVersion = 1);
+    int ContextVersion = 1,
+    string Language = "en");
 
 public sealed record DirectorStoryFieldChangeDto(
     string Field,
@@ -107,8 +108,12 @@ public sealed record DirectorStoryProposalPlan(
     string Summary,
     IReadOnlyList<string> Rationale);
 
-public sealed class DirectorStoryProposalPlanner
+public sealed class DirectorStoryProposalPlanner(IMovieDirectorCreativeOutputValidator? outputValidator = null)
 {
+    private readonly IMovieDirectorCreativeOutputValidator validator = outputValidator ?? new MovieDirectorCreativeOutputValidator(
+        Microsoft.Extensions.Options.Options.Create(new MovieDirectorCreativeOutputValidationOptions()),
+        Microsoft.Extensions.Logging.Abstractions.NullLogger<MovieDirectorCreativeOutputValidator>.Instance);
+
     public DirectorStoryProposalPlan Build(DirectorProposalRequest request, DirectorStoryBoundedContextDto context)
     {
         var action = DirectorStoryActionTypes.Normalize(request.StoryAction);
@@ -172,9 +177,17 @@ public sealed class DirectorStoryProposalPlanner
                 throw new DirectorValidationException("Choose a supported Story assistance action.");
         }
 
+        var payloadValidation = validator.ValidateAndRepair(
+            new DirectorStoryActionPayload(action, baseRevisionId, premise, logline, synopsis, treatment, targetSceneId, targetElementId, proposedScene, replacement, findings, changes),
+            context);
+        if (!payloadValidation.IsValid || payloadValidation.Output is null)
+            throw new DirectorCreativeOutputValidationException(payloadValidation);
+
+        var validatedPayload = payloadValidation.Output;
+        changes = validatedPayload.Changes?.ToList() ?? [];
         var applies = !string.Equals(action, DirectorStoryActionTypes.IdentifyInconsistencies, StringComparison.OrdinalIgnoreCase);
         var review = new DirectorStoryReviewDto(action, baseRevisionId, changes, findings, applies);
-        var payload = new DirectorStoryActionPayload(action, baseRevisionId, premise, logline, synopsis, treatment, targetSceneId, targetElementId, proposedScene, replacement, findings, changes);
+        var payload = validatedPayload with { Changes = changes };
         var label = Label(action);
         return new DirectorStoryProposalPlan(payload, review, label, $"Review a bounded Director {label.ToLowerInvariant()} proposal before it becomes a new Story revision.", ["provider_independent_deterministic_proposal", "bounded_locked_guide_story_and_reference_context", applies ? "explicit_approval_required_before_story_apply" : "review_only_diagnostic"]);
     }
