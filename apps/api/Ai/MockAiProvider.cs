@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using System.Text.Json;
 
 namespace Taslim.Api.Ai;
 
@@ -22,7 +23,26 @@ public sealed class MockAiProvider(ILogger<MockAiProvider> logger) : IAiProvider
             throw new MockAiProviderException();
         }
 
-        var content = latestUserMessage.Contains("hello taslim", StringComparison.OrdinalIgnoreCase)
+        var content = request.StructuredOutput?.Name == "taslim_movie_synopsis_development"
+            ? JsonSerializer.Serialize(new
+            {
+                premise = "A guarded courier must decide whether to deliver the truth when silence would keep them safe.",
+                logline = "When a hidden message exposes the cost of silence, a guarded courier must cross one dangerous night and choose who gets the truth.",
+                treatment = "The courier begins by protecting a fragile routine, is forced into motion by the message, loses the safety of familiar allies, and reaches a final choice where delivery matters more than escape.",
+                synopsis = "A guarded courier protects a quiet routine until an unexpected message reveals that someone will be harmed if the truth stays hidden. The courier follows a single urgent lead, but each attempt to pass the message on closes another safe route and forces a meaningful sacrifice. With no time left to remain neutral, the courier chooses to deliver the truth publicly, accepting the cost of being seen. The immediate danger recedes, yet the courier returns changed: safety is no longer measured by silence, but by the responsibility to act.",
+                setup = "The courier lives by a quiet routine built around staying unseen.",
+                protagonistMotivation = "The courier wants to protect personal safety without abandoning someone vulnerable.",
+                incitingEvent = "A message reveals an imminent harm that silence would allow.",
+                escalation = "Every attempt to pass the message safely removes another escape route.",
+                complications = new[] { "The courier's trusted route becomes unsafe, forcing a public choice." },
+                climaxChoice = "The courier delivers the truth publicly instead of disappearing with it.",
+                resolution = "The danger eases, while the courier accepts a new responsibility.",
+                emotionalArc = "The courier moves from guarded self-preservation to accountable courage.",
+                canonAnchors = new[] { "current or approved story foundation", "locked Movie Guide" },
+                proposedElements = new[] { "the hidden message", "the closing escape route", "the public delivery" },
+                beatCount = 4,
+            })
+            : latestUserMessage.Contains("hello taslim", StringComparison.OrdinalIgnoreCase)
             ? "Hello! Taslim Chat is connected and ready."
             : "Taslim Chat is connected and ready to help you shape that idea. This is a development response while the first real model provider is being prepared.";
         foreach (var chunk in Split(content, 18))

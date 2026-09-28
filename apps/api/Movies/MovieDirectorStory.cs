@@ -8,6 +8,7 @@ public static class DirectorStoryActionTypes
     public const string DevelopPremise = "develop_premise";
     public const string ImproveLogline = "improve_logline";
     public const string ExpandSynopsis = "expand_synopsis";
+    public const string DevelopSynopsis = "develop_synopsis";
     public const string CreateOrRefineTreatment = "create_refine_treatment";
     public const string ProposeScreenplayScene = "propose_screenplay_scene";
     public const string RewriteSelectedPassage = "rewrite_selected_passage";
@@ -17,7 +18,7 @@ public static class DirectorStoryActionTypes
 
     public static readonly IReadOnlySet<string> All = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
-        DevelopPremise, ImproveLogline, ExpandSynopsis, CreateOrRefineTreatment,
+        DevelopPremise, ImproveLogline, ExpandSynopsis, DevelopSynopsis, CreateOrRefineTreatment,
         ProposeScreenplayScene, RewriteSelectedPassage, ImproveDialogue, TightenPacing,
         IdentifyInconsistencies,
     };
@@ -56,6 +57,7 @@ public sealed record DirectorScreenplayElementContext(
 public sealed record DirectorStoryBoundedContextDto(
     Guid MovieProjectId,
     Guid WorkspaceId,
+    int DurationSeconds,
     string MovieBrief,
     DirectorGuideContext Guide,
     DirectorStoryRevisionContext? CurrentRevision,
@@ -78,7 +80,8 @@ public sealed record DirectorStoryReviewDto(
     Guid? BaseRevisionId,
     IReadOnlyList<DirectorStoryFieldChangeDto> Changes,
     IReadOnlyList<string> Findings,
-    bool AppliesToStory);
+    bool AppliesToStory,
+    MovieSynopsisDevelopmentDto? SynopsisDevelopment = null);
 
 public sealed record DirectorStoryActionPayload(
     string Action,
@@ -92,7 +95,8 @@ public sealed record DirectorStoryActionPayload(
     MovieStorySceneRequest? ProposedScene,
     string? ReplacementContent,
     IReadOnlyList<string> Findings,
-    IReadOnlyList<DirectorStoryFieldChangeDto> Changes);
+    IReadOnlyList<DirectorStoryFieldChangeDto> Changes,
+    MovieSynopsisDevelopmentDto? SynopsisDevelopment = null);
 
 public sealed record DirectorStoryApplyResult(
     bool Applied,
@@ -107,8 +111,19 @@ public sealed record DirectorStoryProposalPlan(
     string Summary,
     IReadOnlyList<string> Rationale);
 
-public sealed class DirectorStoryProposalPlanner
+public sealed class DirectorStoryProposalPlanner(IMovieSynopsisDevelopmentService synopsisDevelopment)
 {
+    public async Task<DirectorStoryProposalPlan> BuildAsync(DirectorProposalRequest request, DirectorStoryBoundedContextDto context, CancellationToken cancellationToken = default)
+    {
+        var action = DirectorStoryActionTypes.Normalize(request.StoryAction);
+        if (action is not (DirectorStoryActionTypes.ExpandSynopsis or DirectorStoryActionTypes.DevelopSynopsis))
+            return Build(request, context);
+
+        var source = context.CurrentRevision ?? context.ApprovedRevision;
+        var draft = await synopsisDevelopment.GenerateAsync(context, source, cancellationToken);
+        return BuildSynopsisPlan(action, source, draft, context.DurationSeconds);
+    }
+
     public DirectorStoryProposalPlan Build(DirectorProposalRequest request, DirectorStoryBoundedContextDto context)
     {
         var action = DirectorStoryActionTypes.Normalize(request.StoryAction);
@@ -138,9 +153,8 @@ public sealed class DirectorStoryProposalPlanner
                 changes.Add(new("logline", null, Bound(source?.Logline), logline));
                 break;
             case DirectorStoryActionTypes.ExpandSynopsis:
-                synopsis = ExpandSynopsis(context, source);
-                changes.Add(new("synopsis", null, Bound(source?.Synopsis), synopsis));
-                break;
+            case DirectorStoryActionTypes.DevelopSynopsis:
+                throw new DirectorValidationException("Synopsis development requires the structured synopsis provider.");
             case DirectorStoryActionTypes.CreateOrRefineTreatment:
                 treatment = RefineTreatment(context, source);
                 changes.Add(new("treatment", null, Bound(source?.Treatment), treatment));
@@ -179,6 +193,50 @@ public sealed class DirectorStoryProposalPlanner
         return new DirectorStoryProposalPlan(payload, review, label, $"Review a bounded Director {label.ToLowerInvariant()} proposal before it becomes a new Story revision.", ["provider_independent_deterministic_proposal", "bounded_locked_guide_story_and_reference_context", applies ? "explicit_approval_required_before_story_apply" : "review_only_diagnostic"]);
     }
 
+    private static DirectorStoryProposalPlan BuildSynopsisPlan(string action, DirectorStoryRevisionContext? source, MovieSynopsisDevelopmentDraft draft, int durationSeconds)
+    {
+        var proposed = new MovieSynopsisDevelopmentDto(
+            "proposed",
+            MovieSynopsisScopes.ForDuration(durationSeconds).Scope,
+            durationSeconds,
+            draft.Synopsis,
+            draft.Setup,
+            draft.ProtagonistMotivation,
+            draft.IncitingEvent,
+            draft.Escalation,
+            draft.Complications,
+            draft.ClimaxChoice,
+            draft.Resolution,
+            draft.EmotionalArc,
+            draft.CanonAnchors,
+            draft.ProposedElements,
+            draft.BeatCount);
+        var changes = new[]
+        {
+            new DirectorStoryFieldChangeDto(
+                "synopsis",
+                null,
+                Bound(source?.Synopsis),
+                $"[PROPOSED — not canon until approved]\n{draft.Synopsis}"),
+        };
+        var review = new DirectorStoryReviewDto(action, source?.RevisionId, changes, ["structured_synopsis_development", "new_creative_details_are_proposed_until_approved"], true, proposed);
+        var payload = new DirectorStoryActionPayload(
+            action,
+            source?.RevisionId,
+            source is null ? draft.Premise : null,
+            source is null ? draft.Logline : null,
+            draft.Synopsis,
+            source is null ? draft.Treatment : null,
+            null,
+            null,
+            null,
+            null,
+            ["structured_synopsis_development", "duration_bounded", "canon_preserved", "proposed_material_explicit"],
+            changes,
+            proposed);
+        return new DirectorStoryProposalPlan(payload, review, "Develop synopsis", "Review a duration-aware synopsis proposal with a complete narrative arc before it becomes a new Story revision.", ["structured_ai_synopsis_output", "runtime_bounded_narrative_scope", "approved_and_locked_canon_preserved", "explicit_approval_required_before_story_apply"]);
+    }
+
     private static string DevelopPremise(DirectorStoryBoundedContextDto context, DirectorStoryRevisionContext? source)
     {
         var seed = !string.IsNullOrWhiteSpace(context.MovieBrief) ? context.MovieBrief : context.RelevantMovieScenes.FirstOrDefault()?.Summary ?? "The story begins with a central conflict";
@@ -191,9 +249,6 @@ public sealed class DirectorStoryProposalPlanner
         string.IsNullOrWhiteSpace(source?.Logline)
             ? $"When the central conflict arrives in {context.RelevantMovieScenes.FirstOrDefault()?.Title ?? "an unfamiliar world"}, a determined protagonist must act before the cost becomes irreversible."
             : AppendOnce(source.Logline, " The clock, consequence, and defining choice are now explicit.");
-
-    private static string ExpandSynopsis(DirectorStoryBoundedContextDto context, DirectorStoryRevisionContext? source) =>
-        AppendOnce(source?.Synopsis, $" The locked guide keeps the dramatic turn grounded in {context.Guide.ContinuityRules}.");
 
     private static string RefineTreatment(DirectorStoryBoundedContextDto context, DirectorStoryRevisionContext? source) =>
         AppendOnce(source?.Treatment, $" The treatment is organized around setup, escalation, and a consequential final turn while preserving the locked visual language: {context.Guide.VisualLanguage}.");
@@ -254,7 +309,8 @@ public sealed class DirectorStoryProposalPlanner
     {
         DirectorStoryActionTypes.DevelopPremise => "Develop premise",
         DirectorStoryActionTypes.ImproveLogline => "Improve logline",
-        DirectorStoryActionTypes.ExpandSynopsis => "Expand synopsis",
+        DirectorStoryActionTypes.ExpandSynopsis => "Develop synopsis",
+        DirectorStoryActionTypes.DevelopSynopsis => "Develop synopsis",
         DirectorStoryActionTypes.CreateOrRefineTreatment => "Create or refine treatment",
         DirectorStoryActionTypes.ProposeScreenplayScene => "Propose screenplay scene",
         DirectorStoryActionTypes.RewriteSelectedPassage => "Rewrite selected passage",
