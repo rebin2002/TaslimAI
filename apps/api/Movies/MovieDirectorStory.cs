@@ -111,74 +111,80 @@ public sealed record DirectorStoryProposalPlan(
     IReadOnlyList<string> Rationale,
     DirectorCreativeQualityRecommendation? Routing = null);
 
+/// <summary>
+/// Converts a validated AI Story response into the existing review/action contract.
+/// This class performs only normalization, bounds, and validation; it never invents
+/// creative prose or screenplay content.
+/// </summary>
 public sealed class DirectorStoryProposalPlanner
 {
-    public DirectorStoryProposalPlan Build(
+    public DirectorStoryProposalPlan BuildFromAiDraft(
         DirectorProposalRequest request,
         DirectorStoryBoundedContextDto context,
-        DirectorCreativeQualityRecommendation? routing = null)
+        DirectorCreativeQualityRecommendation routing,
+        DirectorStoryAiDraft draft)
     {
         var action = DirectorStoryActionTypes.Normalize(request.StoryAction);
         if (action.Length == 0) throw new DirectorValidationException("Choose a supported Story assistance action.");
+        if (!string.Equals(action, routing.TaskType, StringComparison.OrdinalIgnoreCase))
+            throw new DirectorStoryCreativeException(DirectorStoryCreativeFailureCodes.Invalid, "The Story AI response did not match the requested creative task.");
 
         var source = context.CurrentRevision ?? context.ApprovedRevision;
         var baseRevisionId = source?.RevisionId;
-        var changes = new List<DirectorStoryFieldChangeDto>();
-        var findings = new List<string>();
-        string? premise = null;
-        string? logline = null;
-        string? synopsis = null;
-        string? treatment = null;
+        var premise = Resolve(draft.Premise, source?.Premise);
+        var logline = Resolve(draft.Logline, source?.Logline);
+        var synopsis = Resolve(draft.Synopsis, source?.Synopsis);
+        var treatment = Resolve(draft.Treatment, source?.Treatment);
         Guid? targetSceneId = request.TargetSceneId;
         Guid? targetElementId = request.TargetElementId;
         MovieStorySceneRequest? proposedScene = null;
         string? replacement = null;
+        var findings = draft.Findings ?? [];
 
         switch (action)
         {
             case DirectorStoryActionTypes.DevelopPremise:
-                premise = DevelopPremise(context, source);
-                changes.Add(new("premise", null, Bound(source?.Premise), premise));
+                Require(draft.Premise, "premise");
                 break;
             case DirectorStoryActionTypes.ImproveLogline:
-                logline = ImproveLogline(context, source);
-                changes.Add(new("logline", null, Bound(source?.Logline), logline));
+                Require(draft.Logline, "logline");
                 break;
             case DirectorStoryActionTypes.ExpandSynopsis:
-                synopsis = ExpandSynopsis(context, source);
-                changes.Add(new("synopsis", null, Bound(source?.Synopsis), synopsis));
+                Require(draft.Synopsis, "synopsis");
                 break;
             case DirectorStoryActionTypes.CreateOrRefineTreatment:
-                treatment = RefineTreatment(context, source);
-                changes.Add(new("treatment", null, Bound(source?.Treatment), treatment));
+                Require(draft.Treatment, "treatment");
                 break;
             case DirectorStoryActionTypes.ProposeScreenplayScene:
-                proposedScene = ProposeScene(context, source, request.Goal);
-                changes.Add(new("screenplay_scene", proposedScene.SceneIdentifier, "No scene in the current revision.", SceneText(proposedScene)));
+                proposedScene = ToSceneRequest(draft.ProposedScene);
                 break;
             case DirectorStoryActionTypes.RewriteSelectedPassage:
-                (targetSceneId, targetElementId, replacement) = RewritePassage(context, request, source);
-                var existingPassage = source?.Scenes.SelectMany(item => item.Elements).FirstOrDefault(item => item.Id == targetElementId)?.Content ?? string.Empty;
-                changes.Add(new("screenplay_passage", targetSceneId?.ToString(), Bound(existingPassage), replacement));
+                ValidatePassageTarget(request, source, out targetSceneId, out targetElementId);
+                replacement = Require(draft.ReplacementContent, "replacementContent");
                 break;
             case DirectorStoryActionTypes.ImproveDialogue:
-                (targetSceneId, replacement) = ImproveDialogue(context, request, source);
-                var dialogue = source?.Scenes.FirstOrDefault(item => item.Id == targetSceneId)?.Elements.Where(item => item.ElementType.Equals(MovieScreenplayElementTypes.Dialogue, StringComparison.OrdinalIgnoreCase)).Select(item => item.Content).FirstOrDefault() ?? string.Empty;
-                changes.Add(new("dialogue", targetSceneId?.ToString(), Bound(dialogue), replacement));
+                (targetSceneId, targetElementId) = ValidateDialogueTarget(request, context, source);
+                replacement = Require(draft.ReplacementContent, "replacementContent");
                 break;
             case DirectorStoryActionTypes.TightenPacing:
-                synopsis = TightenPacing(context, source);
-                changes.Add(new("synopsis", null, Bound(source?.Synopsis), synopsis));
-                findings.Add("pacing_pass_reduces_repetition_and_surfaces_the_next_turn");
+                Require(draft.Synopsis, "synopsis");
                 break;
             case DirectorStoryActionTypes.IdentifyInconsistencies:
-                findings.AddRange(FindInconsistencies(context, source));
-                changes.Add(new("diagnostic", null, "Current story remains unchanged.", "Director findings are review-only; no story text will be changed."));
+                if (draft.Findings is null) throw Invalid("findings");
                 break;
             default:
                 throw new DirectorValidationException("Choose a supported Story assistance action.");
         }
 
+        if (!string.Equals(action, DirectorStoryActionTypes.IdentifyInconsistencies, StringComparison.OrdinalIgnoreCase))
+        {
+            Require(premise, "premise");
+            Require(logline, "logline");
+            Require(synopsis, "synopsis");
+            Require(treatment, "treatment");
+        }
+
+        var changes = BuildChanges(action, source, premise, logline, synopsis, treatment, proposedScene, replacement, targetSceneId, findings);
         var applies = !string.Equals(action, DirectorStoryActionTypes.IdentifyInconsistencies, StringComparison.OrdinalIgnoreCase);
         var review = new DirectorStoryReviewDto(action, baseRevisionId, changes, findings, applies);
         var payload = new DirectorStoryActionPayload(
@@ -194,90 +200,92 @@ public sealed class DirectorStoryProposalPlanner
             replacement,
             findings,
             changes,
-            routing?.QualityLevel ?? DirectorQualityLevels.Fast,
-            routing?.AiCoreTier ?? "Fast",
-            routing?.EstimatedCostUsd);
+            routing.QualityLevel,
+            routing.AiCoreTier,
+            routing.EstimatedCostUsd);
         var label = Label(action);
         var rationale = new List<string>
         {
-            routing is null ? "provider_independent_deterministic_proposal" : $"director_quality_{routing.QualityLevel.ToLowerInvariant()}",
+            "ai_core_structured_output_validated",
+            $"director_quality_{routing.QualityLevel.ToLowerInvariant()}",
             "bounded_locked_guide_story_and_reference_context",
             applies ? "explicit_approval_required_before_story_apply" : "review_only_diagnostic",
         };
         return new DirectorStoryProposalPlan(payload, review, label, $"Review a bounded Director {label.ToLowerInvariant()} proposal before it becomes a new Story revision.", rationale, routing);
     }
 
-    private static string DevelopPremise(DirectorStoryBoundedContextDto context, DirectorStoryRevisionContext? source)
+    private static IReadOnlyList<DirectorStoryFieldChangeDto> BuildChanges(
+        string action,
+        DirectorStoryRevisionContext? source,
+        string? premise,
+        string? logline,
+        string? synopsis,
+        string? treatment,
+        MovieStorySceneRequest? proposedScene,
+        string? replacement,
+        Guid? targetSceneId,
+        IReadOnlyList<string> findings)
     {
-        var seed = !string.IsNullOrWhiteSpace(context.MovieBrief) ? context.MovieBrief : context.RelevantMovieScenes.FirstOrDefault()?.Summary ?? "The story begins with a central conflict";
-        return string.IsNullOrWhiteSpace(source?.Premise)
-            ? $"{seed}. The choice must carry a consequence."
-            : AppendOnce(source.Premise, " The protagonist's defining choice creates a consequence that cannot be undone.");
-    }
-
-    private static string ImproveLogline(DirectorStoryBoundedContextDto context, DirectorStoryRevisionContext? source) =>
-        string.IsNullOrWhiteSpace(source?.Logline)
-            ? $"When the central conflict arrives in {context.RelevantMovieScenes.FirstOrDefault()?.Title ?? "an unfamiliar world"}, a determined protagonist must act before the cost becomes irreversible."
-            : AppendOnce(source.Logline, " The clock, consequence, and defining choice are now explicit.");
-
-    private static string ExpandSynopsis(DirectorStoryBoundedContextDto context, DirectorStoryRevisionContext? source) =>
-        AppendOnce(source?.Synopsis, $" The locked guide keeps the dramatic turn grounded in {context.Guide.ContinuityRules}.");
-
-    private static string RefineTreatment(DirectorStoryBoundedContextDto context, DirectorStoryRevisionContext? source) =>
-        AppendOnce(source?.Treatment, $" The treatment is organized around setup, escalation, and a consequential final turn while preserving the locked visual language: {context.Guide.VisualLanguage}.");
-
-    private static string TightenPacing(DirectorStoryBoundedContextDto context, DirectorStoryRevisionContext? source) =>
-        AppendOnce(source?.Synopsis, " Each beat should enter later, turn sooner, and leave on the next necessary question.");
-
-    private static MovieStorySceneRequest ProposeScene(DirectorStoryBoundedContextDto context, DirectorStoryRevisionContext? source, string? goal)
-    {
-        var number = (source?.Scenes.Count ?? 0) + 1;
-        var movieScene = context.RelevantMovieScenes.LastOrDefault();
-        var identifier = $"DIRECTOR-PROPOSAL-{number}";
-        return new MovieStorySceneRequest
+        return action switch
         {
-            SceneIdentifier = identifier,
-            ActNumber = 1,
-            SequenceNumber = number,
-            MovieSceneId = movieScene?.Id,
-            Slugline = $"INT. {movieScene?.Title.ToUpperInvariant() ?? "STORY ROOM"} - NIGHT",
-            Synopsis = goal?.Trim() is { Length: > 0 } ? goal.Trim() : "The protagonist faces the next irreversible choice.",
-            Elements =
-            [
-                new MovieScreenplayElementRequest { ElementType = MovieScreenplayElementTypes.Action, Content = "The room holds its breath as the choice becomes unavoidable." },
-                new MovieScreenplayElementRequest { ElementType = MovieScreenplayElementTypes.Dialogue, CharacterName = context.RelevantCharacters.FirstOrDefault()?.Name ?? "PROTAGONIST", Content = "Then we do it now." },
-            ],
+            DirectorStoryActionTypes.DevelopPremise => [new("premise", null, Bound(source?.Premise), premise!)],
+            DirectorStoryActionTypes.ImproveLogline => [new("logline", null, Bound(source?.Logline), logline!)],
+            DirectorStoryActionTypes.ExpandSynopsis or DirectorStoryActionTypes.TightenPacing => [new("synopsis", null, Bound(source?.Synopsis), synopsis!)],
+            DirectorStoryActionTypes.CreateOrRefineTreatment => [new("treatment", null, Bound(source?.Treatment), treatment!)],
+            DirectorStoryActionTypes.ProposeScreenplayScene => [new("screenplay_scene", proposedScene!.SceneIdentifier, "No scene in the current revision.", SceneText(proposedScene))],
+            DirectorStoryActionTypes.RewriteSelectedPassage => [new("screenplay_passage", targetSceneId?.ToString(), ExistingPassage(source, targetSceneId, replacement), replacement!)],
+            DirectorStoryActionTypes.ImproveDialogue => [new("dialogue", targetSceneId?.ToString(), ExistingDialogue(source, targetSceneId), replacement!)],
+            _ => [new("diagnostic", null, "Current story remains unchanged.", findings.Count == 0 ? "No bounded inconsistency was returned." : string.Join("; ", findings))],
         };
     }
 
-    private static (Guid? SceneId, Guid? ElementId, string Replacement) RewritePassage(DirectorStoryBoundedContextDto context, DirectorProposalRequest request, DirectorStoryRevisionContext? source)
+    private static MovieStorySceneRequest ToSceneRequest(DirectorStoryAiSceneDraft? draft)
     {
-        if (!request.TargetSceneId.HasValue || !request.TargetElementId.HasValue) throw new DirectorValidationException("Select a screenplay scene and passage before requesting a rewrite.");
-        var element = source?.Scenes.SelectMany(item => item.Elements).FirstOrDefault(item => item.Id == request.TargetElementId.Value);
-        if (element is null) throw new DirectorValidationException("The selected screenplay passage is not in the bounded Story context.");
-        return (request.TargetSceneId, request.TargetElementId, string.IsNullOrWhiteSpace(request.SelectedPassage) ? AppendOnce(element.Content, " The choice lands with a clear consequence.") : $"{request.SelectedPassage.Trim()} The choice lands with a clear consequence.");
+        if (draft is null || string.IsNullOrWhiteSpace(draft.SceneIdentifier) || string.IsNullOrWhiteSpace(draft.Slugline) || string.IsNullOrWhiteSpace(draft.Synopsis) || draft.Elements is null || draft.Elements.Count == 0)
+            throw Invalid("proposedScene");
+        if (draft.Elements.Any(item => item is null || string.IsNullOrWhiteSpace(item.Content) || string.IsNullOrWhiteSpace(item.ElementType)))
+            throw Invalid("proposedScene.elements");
+        return new MovieStorySceneRequest
+        {
+            SceneIdentifier = Bound(draft.SceneIdentifier, 160),
+            ActNumber = draft.ActNumber,
+            SequenceNumber = draft.SequenceNumber,
+            MovieSceneId = draft.MovieSceneId,
+            Slugline = Bound(draft.Slugline, 500),
+            Synopsis = Bound(draft.Synopsis, 8_000),
+            Elements = draft.Elements.Take(80).Select(item => new MovieScreenplayElementRequest
+            {
+                ElementType = Bound(item.ElementType, 80),
+                Content = Bound(item.Content, 8_000),
+                CharacterName = string.IsNullOrWhiteSpace(item.CharacterName) ? null : Bound(item.CharacterName, 160),
+                Parenthetical = string.IsNullOrWhiteSpace(item.Parenthetical) ? null : Bound(item.Parenthetical, 500),
+            }).ToList(),
+        };
     }
 
-    private static (Guid? SceneId, string Replacement) ImproveDialogue(DirectorStoryBoundedContextDto context, DirectorProposalRequest request, DirectorStoryRevisionContext? source)
+    private static void ValidatePassageTarget(DirectorProposalRequest request, DirectorStoryRevisionContext? source, out Guid? sceneId, out Guid? elementId)
+    {
+        if (!request.TargetSceneId.HasValue || !request.TargetElementId.HasValue) throw new DirectorValidationException("Select a screenplay scene and passage before requesting a rewrite.");
+        var scene = source?.Scenes.FirstOrDefault(item => item.Id == request.TargetSceneId.Value);
+        if (scene is null || scene.Elements.All(item => item.Id != request.TargetElementId.Value)) throw new DirectorValidationException("The selected screenplay passage is not in the bounded Story context.");
+        sceneId = request.TargetSceneId;
+        elementId = request.TargetElementId;
+    }
+
+    private static (Guid? SceneId, Guid? ElementId) ValidateDialogueTarget(DirectorProposalRequest request, DirectorStoryBoundedContextDto context, DirectorStoryRevisionContext? source)
     {
         var scene = request.TargetSceneId.HasValue ? source?.Scenes.FirstOrDefault(item => item.Id == request.TargetSceneId.Value) : context.TargetScene ?? source?.Scenes.FirstOrDefault();
         if (scene is null) throw new DirectorValidationException("Select a screenplay scene before requesting dialogue improvement.");
         var dialogue = scene.Elements.FirstOrDefault(item => item.ElementType.Equals(MovieScreenplayElementTypes.Dialogue, StringComparison.OrdinalIgnoreCase));
         if (dialogue is null) throw new DirectorValidationException("The selected screenplay scene does not contain dialogue to improve.");
-        return (scene.Id, AppendOnce(dialogue.Content, " We have one chance, and I am choosing it."));
+        return (scene.Id, dialogue.Id);
     }
 
-    private static IReadOnlyList<string> FindInconsistencies(DirectorStoryBoundedContextDto context, DirectorStoryRevisionContext? source)
-    {
-        var results = new List<string>();
-        if (source is null) results.Add("story_has_no_current_revision");
-        if (source is not null && source.Scenes.Count == 0) results.Add("story_has_no_screenplay_scenes");
-        if (source is not null && source.Scenes.Any(scene => scene.Elements.Count == 0)) results.Add("one_or_more_screenplay_scenes_have_no_elements");
-        if (context.RelevantCharacters.Count == 0) results.Add("story_has_no_bounded_cast_reference");
-        if (results.Count == 0) results.Add("no_bounded_inconsistency_found");
-        return results;
-    }
-
+    private static string ExistingPassage(DirectorStoryRevisionContext? source, Guid? sceneId, string? replacement) => Bound(source?.Scenes.FirstOrDefault(item => item.Id == sceneId)?.Elements.FirstOrDefault(item => item.Content != replacement)?.Content);
+    private static string ExistingDialogue(DirectorStoryRevisionContext? source, Guid? sceneId) => Bound(source?.Scenes.FirstOrDefault(item => item.Id == sceneId)?.Elements.FirstOrDefault(item => item.ElementType.Equals(MovieScreenplayElementTypes.Dialogue, StringComparison.OrdinalIgnoreCase))?.Content);
+    private static string? Resolve(string? generated, string? existing) => string.IsNullOrWhiteSpace(generated) ? existing : Bound(generated, 40_000);
+    private static string Require(string? value, string field) => string.IsNullOrWhiteSpace(value) ? throw Invalid(field) : Bound(value, 40_000);
+    private static DirectorStoryCreativeException Invalid(string field) => new(DirectorStoryCreativeFailureCodes.Invalid, $"The Story AI response was invalid or incomplete ({field}). Please try again.");
     private static string Label(string action) => action switch
     {
         DirectorStoryActionTypes.DevelopPremise => "Develop premise",
@@ -290,8 +298,6 @@ public sealed class DirectorStoryProposalPlanner
         DirectorStoryActionTypes.TightenPacing => "Tighten pacing",
         _ => "Identify story inconsistencies",
     };
-
-    private static string AppendOnce(string? value, string suffix) => string.IsNullOrWhiteSpace(value) ? suffix.Trim() : value.Trim().EndsWith(suffix.Trim(), StringComparison.Ordinal) ? value.Trim() : $"{value.Trim()}{suffix}";
-    private static string Bound(string? value) => string.IsNullOrWhiteSpace(value) ? "(empty)" : value.Length <= 6_000 ? value : $"{value[..6_000]}…";
+    private static string Bound(string? value, int max = 6_000) => string.IsNullOrWhiteSpace(value) ? "(empty)" : value.Length <= max ? value.Trim() : $"{value[..max].Trim()}…";
     private static string SceneText(MovieStorySceneRequest scene) => $"{scene.Slugline}\n{scene.Synopsis}\n{string.Join("\n", scene.Elements.Select(item => $"{item.ElementType}: {item.Content}"))}";
 }

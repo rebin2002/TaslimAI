@@ -7,7 +7,7 @@ This wave extends the existing Movie Director proposal/action architecture for S
 1. The user requests a Story action.
 2. `MovieDirectorContextAssembler.AssembleStoryAsync` builds a bounded snapshot containing the locked Movie Guide, current and approved Story revision snapshots, an optional target screenplay scene, up to 40 Movie scenes, and up to 12 Cast and World references.
 3. `DirectorCreativeQualityPlanner` selects **Fast**, **Standard**, **Cinematic**, or **Studio**. Auto Director is only a selection mode; it maps internally to existing AI Core capability tiers (`Fast`, `Smart`, or `Advanced`).
-4. `MovieDirectorStoryAiService` sends the bounded Story task through the existing AI Core structured-output path. The deterministic planner remains the safe fallback for test responses, unavailable providers, or non-canonical output.
+4. `MovieDirectorStoryAiService` sends the bounded Story task through the existing AI Core structured-output path. The response must pass bounded Story validation; unavailable, timed-out, malformed, or invalid AI output returns a safe creative-unavailable/invalid error and creates no proposal or fake creative text. Any configured provider/model fallback remains inside the existing AI Core boundary.
 5. Internal usage, when returned by AI Core, is completed through the existing `UsageLedgerService` with `UsageFeature.Movie`; customer charging remains disabled by the existing charging service.
 6. The user sees existing content, proposed content, findings, and the proposal status.
 7. `POST /api/movie-director/proposals/{proposalId}/approve` is the explicit approval boundary. Rejection cancels the action.
@@ -42,5 +42,5 @@ The response adds `storyReview` to the existing `DirectorProposalDto` and `story
 - Only execute an action after `proposal.status === Approved` and `action.status === Ready`.
 - Refresh Story after a successful execution and use `currentRevision` for the new editable revision; keep `approvedRevision` as the unchanged approved source of truth.
 - Preserve `Authorship` and `ParentRevisionId` when adding future human editing controls. A direct human edit should continue to use the existing Story revision contract with `HumanEdited`.
-- The current planner is deterministic and mock-safe, while the production path already routes through AI Core. Provider and model identifiers remain internal; quality/cost decisions are expressed only through the four Movie quality tiers and existing usage infrastructure.
+- The Story proposal planner is a validation/normalization boundary only; it never invents premise, logline, synopsis, treatment, screenplay, dialogue, or passage text. Development/test `MockAiProvider` remains available only through the existing configuration, while production Story work fails honestly when no legitimate AI response is available. Provider and model identifiers remain internal; quality/cost decisions are expressed only through the four Movie quality tiers and existing usage infrastructure.
 - Collaboration authorization remains the existing `WorkspaceAccessService` membership check on proposal reads/writes and action execution.

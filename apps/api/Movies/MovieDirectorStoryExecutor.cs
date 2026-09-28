@@ -42,15 +42,17 @@ public sealed class MovieDirectorStoryActionExecutor(TaslimDbContext db, IMovieS
 
         var request = new MovieStoryRevisionRequest
         {
-            Premise = payload.Premise ?? current?.Premise ?? "A protagonist faces a defining choice.",
-            Logline = payload.Logline ?? current?.Logline ?? "A protagonist must act before a defining choice becomes irreversible.",
-            Synopsis = payload.Synopsis ?? current?.Synopsis ?? "The protagonist is forced to confront the central conflict.",
-            Treatment = payload.Treatment ?? current?.Treatment ?? "The story moves from setup through escalation to a consequential choice.",
+            Premise = payload.Premise ?? current?.Premise ?? string.Empty,
+            Logline = payload.Logline ?? current?.Logline ?? string.Empty,
+            Synopsis = payload.Synopsis ?? current?.Synopsis ?? string.Empty,
+            Treatment = payload.Treatment ?? current?.Treatment ?? string.Empty,
             Authorship = MovieStoryAuthorship.AiSuggested,
             ParentRevisionId = payload.BaseRevisionId,
             ChangeSummary = $"Director proposal: {payload.Action}",
             Scenes = scenes,
         };
+        if (string.IsNullOrWhiteSpace(request.Premise) || string.IsNullOrWhiteSpace(request.Logline) || string.IsNullOrWhiteSpace(request.Synopsis) || string.IsNullOrWhiteSpace(request.Treatment))
+            return new(false, DirectorStoryCreativeFailureCodes.Invalid, "The approved Story AI output is incomplete and cannot be applied.", null);
         try
         {
             var result = await stories.CreateRevisionAsync(action.Proposal.CreatedByUserId, action.MovieProjectId, request, cancellationToken);

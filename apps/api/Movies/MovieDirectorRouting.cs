@@ -237,13 +237,13 @@ public sealed class DirectorCreativeQualityPlanner(IDirectorCreativeCostEstimato
 public sealed record DirectorStoryAiGeneration(DirectorStoryProposalPlan Plan, AiUsageMetadata? Usage);
 
 /// <summary>
-/// Story proposals use the existing AI Core structured-output path. A deterministic
-/// proposal remains the safe development/test fallback when the mock provider or a
-/// provider returns non-canonical output; no provider details are exposed.
+/// Story proposals use the existing AI Core structured-output path. A proposal is
+/// created only after the response passes the bounded Story output validator; there
+/// is no deterministic creative fallback.
 /// </summary>
 public sealed class MovieDirectorStoryAiService(
     IChatCompletionService completion,
-    DirectorStoryProposalPlanner deterministicPlanner,
+    DirectorStoryProposalPlanner proposalPlanner,
     DirectorCreativeQualityPlanner qualityPlanner)
 {
     public async Task<DirectorStoryAiGeneration> BuildAsync(
@@ -263,16 +263,17 @@ public sealed class MovieDirectorStoryAiService(
             request.BudgetLimitUsd,
             Math.Clamp((serializedContext.Length + 3) / 4, 256, 64_000),
             profile.OutputTokens));
-        var fallback = deterministicPlanner.Build(request, context, routing);
         var aiRequest = new AiChatRequest(
             [new AiChatMessage("user", JsonSerializer.Serialize(new
             {
                 task = taskType,
                 goal = request.Goal,
                 context,
-                deterministicReview = fallback.Review,
+                targetSceneId = request.TargetSceneId,
+                targetElementId = request.TargetElementId,
+                selectedPassage = BoundInput(request.SelectedPassage, 20_000),
             }, DirectorJson.Options))],
-            "You are Taslim Movie Director. Return only the bounded JSON schema. Preserve locked guide constraints, do not invent provider or model metadata, and make the requested creative change reviewable.",
+            "You are Taslim Movie Director. Return only the bounded JSON schema. Generate the requested Story work from the supplied context, preserve locked guide constraints, and do not invent provider or model metadata. A response is rejected unless it contains the complete required Story fields for the requested operation.",
             routing.AiCoreTier,
             MaxOutputTokens: profile.OutputTokens,
             JsonMode: true,
@@ -281,49 +282,25 @@ public sealed class MovieDirectorStoryAiService(
         try
         {
             var generation = await completion.CompleteAsync(aiRequest, cancellationToken);
-            if (DirectorStoryAiDraft.TryParse(generation.Content, out var draft))
-                return new(ApplyDraft(fallback, draft!), generation.Usage);
-            return new(fallback, generation.Usage);
+            if (!DirectorStoryAiDraft.TryParse(generation.Content, out var draft) || draft is null)
+                throw new DirectorStoryCreativeException(DirectorStoryCreativeFailureCodes.Invalid, "The Story AI response was invalid or incomplete. Please try again.");
+            return new(proposalPlanner.BuildFromAiDraft(request, context, routing, draft), generation.Usage);
         }
-        catch (AiProviderUnavailableException)
+        catch (DirectorStoryCreativeException)
         {
-            return new(fallback, null);
+            throw;
         }
-        catch (AiGenerationException)
+        catch (AiProviderException exception) when (exception.FailureCategory == AiProviderFailureCategories.MalformedResponse)
         {
-            return new(fallback, null);
+            throw new DirectorStoryCreativeException(DirectorStoryCreativeFailureCodes.Invalid, "The Story AI response was invalid or incomplete. Please try again.");
+        }
+        catch (Exception exception) when (exception is AiProviderUnavailableException or AiProviderTimeoutException or AiGenerationException or MockAiProviderException)
+        {
+            throw new DirectorStoryCreativeException(DirectorStoryCreativeFailureCodes.Unavailable, "Story creative generation is currently unavailable. Please try again later.");
         }
     }
 
-    private static DirectorStoryProposalPlan ApplyDraft(DirectorStoryProposalPlan fallback, DirectorStoryAiDraft draft)
-    {
-        var payload = fallback.Payload;
-        var action = payload.Action;
-        if (action == DirectorStoryActionTypes.DevelopPremise && !string.IsNullOrWhiteSpace(draft.Premise)) payload = payload with { Premise = Bound(draft.Premise, 8_000) };
-        if (action == DirectorStoryActionTypes.ImproveLogline && !string.IsNullOrWhiteSpace(draft.Logline)) payload = payload with { Logline = Bound(draft.Logline, 2_000) };
-        if (action == DirectorStoryActionTypes.ExpandSynopsis && !string.IsNullOrWhiteSpace(draft.Synopsis)) payload = payload with { Synopsis = Bound(draft.Synopsis, 20_000) };
-        if (action == DirectorStoryActionTypes.CreateOrRefineTreatment && !string.IsNullOrWhiteSpace(draft.Treatment)) payload = payload with { Treatment = Bound(draft.Treatment, 40_000) };
-        if (action == DirectorStoryActionTypes.RewriteSelectedPassage && !string.IsNullOrWhiteSpace(draft.ReplacementContent)) payload = payload with { ReplacementContent = Bound(draft.ReplacementContent, 20_000) };
-        if (action == DirectorStoryActionTypes.ImproveDialogue && !string.IsNullOrWhiteSpace(draft.ReplacementContent)) payload = payload with { ReplacementContent = Bound(draft.ReplacementContent, 20_000) };
-        if (draft.Findings is { Count: > 0 } && action == DirectorStoryActionTypes.IdentifyInconsistencies) payload = payload with { Findings = draft.Findings.Take(20).Select(item => Bound(item, 500)).ToArray() };
-
-        var changes = payload.Changes.Select(change => change with
-        {
-            ProposedContent = change.Field switch
-            {
-                "premise" => payload.Premise ?? change.ProposedContent,
-                "logline" => payload.Logline ?? change.ProposedContent,
-                "synopsis" => payload.Synopsis ?? change.ProposedContent,
-                "treatment" => payload.Treatment ?? change.ProposedContent,
-                "screenplay_passage" or "dialogue" => payload.ReplacementContent ?? change.ProposedContent,
-                _ => change.ProposedContent,
-            },
-        }).ToArray();
-        var review = fallback.Review with { Changes = changes, Findings = payload.Findings };
-        return fallback with { Payload = payload with { Changes = changes }, Review = review };
-    }
-
-    private static string Bound(string value, int max) => value.Length <= max ? value.Trim() : value[..max].Trim();
+    private static string? BoundInput(string? value, int max) => string.IsNullOrWhiteSpace(value) ? null : value.Length <= max ? value.Trim() : value[..max].Trim();
 }
 
 public sealed class DirectorStoryAiDraft
@@ -334,6 +311,7 @@ public sealed class DirectorStoryAiDraft
     public string? Treatment { get; set; }
     public string? ReplacementContent { get; set; }
     public List<string>? Findings { get; set; }
+    public DirectorStoryAiSceneDraft? ProposedScene { get; set; }
 
     public static bool TryParse(string? content, out DirectorStoryAiDraft? draft)
     {
@@ -355,6 +333,25 @@ public sealed class DirectorStoryAiDraft
     }
 }
 
+public sealed class DirectorStoryAiSceneDraft
+{
+    public string? SceneIdentifier { get; set; }
+    public int? ActNumber { get; set; }
+    public int? SequenceNumber { get; set; }
+    public Guid? MovieSceneId { get; set; }
+    public string? Slugline { get; set; }
+    public string? Synopsis { get; set; }
+    public List<DirectorStoryAiElementDraft>? Elements { get; set; }
+}
+
+public sealed class DirectorStoryAiElementDraft
+{
+    public string? ElementType { get; set; }
+    public string? Content { get; set; }
+    public string? CharacterName { get; set; }
+    public string? Parenthetical { get; set; }
+}
+
 public static class DirectorStoryAiSchema
 {
     public static readonly AiStructuredOutputSpec Spec = new(
@@ -371,6 +368,23 @@ public static class DirectorStoryAiSchema
                 treatment = new { type = new[] { "string", "null" } },
                 replacementContent = new { type = new[] { "string", "null" } },
                 findings = new { type = "array", items = new { type = "string" } },
+                proposedScene = new
+                {
+                    type = new[] { "object", "null" },
+                    additionalProperties = false,
+                    properties = new
+                    {
+                        sceneIdentifier = new { type = new[] { "string", "null" } },
+                        actNumber = new { type = new[] { "integer", "null" } },
+                        sequenceNumber = new { type = new[] { "integer", "null" } },
+                        movieSceneId = new { type = new[] { "string", "null" } },
+                        slugline = new { type = new[] { "string", "null" } },
+                        synopsis = new { type = new[] { "string", "null" } },
+                        elements = new { type = new[] { "array", "null" }, items = new { type = "object" } },
+                    },
+                },
             },
-        }));
+        }),
+        Description: "Bounded Movie Story creative output.",
+        Strict: false);
 }

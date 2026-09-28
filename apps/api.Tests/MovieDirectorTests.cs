@@ -172,6 +172,55 @@ public sealed class MovieDirectorTests
         Assert.DoesNotContain("ModelKey", completion.LastRequest.SystemInstruction, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public async Task Unavailable_story_ai_fails_without_a_deterministic_creative_plan()
+    {
+        var service = CreateStoryAiService(new UnavailableDirectorCompletion());
+
+        var exception = await Assert.ThrowsAsync<DirectorStoryCreativeException>(() => service.BuildAsync(CreateTreatmentRequest(), CreateContext()));
+
+        Assert.Equal(DirectorStoryCreativeFailureCodes.Unavailable, exception.Code);
+        Assert.DoesNotContain("protagonist", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Malformed_story_ai_fails_without_a_deterministic_creative_plan()
+    {
+        var service = CreateStoryAiService(new MalformedDirectorCompletion());
+
+        var exception = await Assert.ThrowsAsync<DirectorStoryCreativeException>(() => service.BuildAsync(CreateTreatmentRequest(), CreateContext()));
+
+        Assert.Equal(DirectorStoryCreativeFailureCodes.Invalid, exception.Code);
+        Assert.DoesNotContain("protagonist", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static MovieDirectorStoryAiService CreateStoryAiService(IChatCompletionService completion) => new(
+        completion,
+        new DirectorStoryProposalPlanner(),
+        new DirectorCreativeQualityPlanner(new TieredCreativeCostEstimator()));
+
+    private static DirectorProposalRequest CreateTreatmentRequest() => new()
+    {
+        StoryAction = DirectorStoryActionTypes.CreateOrRefineTreatment,
+        RequestedQuality = DirectorQualityLevels.Auto,
+        Importance = 100,
+        Complexity = 100,
+        BudgetSensitivity = 0,
+    };
+
+    private static DirectorStoryBoundedContextDto CreateContext() => new(
+        Guid.NewGuid(),
+        Guid.NewGuid(),
+        "A locked movie brief.",
+        new DirectorGuideContext("visual", "camera", "color", "sound", "continuity"),
+        null,
+        null,
+        null,
+        [],
+        [],
+        [],
+        DateTime.UtcNow);
+
     private sealed class FixedCostEstimator(decimal amount) : IDirectorCostEstimator
     {
         public DirectorCostEstimate Estimate(DirectorCostRequest request) => new(true, amount, "USD", null);
@@ -206,7 +255,30 @@ public sealed class MovieDirectorTests
         public Task<AiGenerationResult> CompleteAsync(AiChatRequest request, CancellationToken cancellationToken = default)
         {
             LastRequest = request;
-            return Task.FromResult(new AiGenerationResult("not-canonical", new AiUsageMetadata("internal-test", "internal-test", 20, null, 10, 0m, 0m, 1, "completed", true)));
+            return Task.FromResult(new AiGenerationResult("{\"premise\":\"AI premise\",\"logline\":\"AI logline\",\"synopsis\":\"AI synopsis\",\"treatment\":\"AI treatment\",\"findings\":[]}", new AiUsageMetadata("internal-test", "internal-test", 20, null, 10, 0m, 0m, 1, "completed", true)));
         }
+    }
+
+    private sealed class UnavailableDirectorCompletion : IChatCompletionService
+    {
+        public async IAsyncEnumerable<AiStreamEvent> StreamAsync(AiChatRequest request, [EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            await Task.CompletedTask;
+            yield break;
+        }
+
+        public Task<AiGenerationResult> CompleteAsync(AiChatRequest request, CancellationToken cancellationToken = default) => throw new AiProviderUnavailableException();
+    }
+
+    private sealed class MalformedDirectorCompletion : IChatCompletionService
+    {
+        public async IAsyncEnumerable<AiStreamEvent> StreamAsync(AiChatRequest request, [EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            await Task.CompletedTask;
+            yield break;
+        }
+
+        public Task<AiGenerationResult> CompleteAsync(AiChatRequest request, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new AiGenerationResult("{}", new AiUsageMetadata("test", "test", 1, null, 1, 0m, 0m, 1, "completed", true)));
     }
 }

@@ -13,7 +13,7 @@ Auto Director is a planning mode, not a fifth quality tier. The selectable quali
 3. `POST /api/movie-director/proposals/{proposalId}/approve` changes the proposal to `Approved` and its actions to `Ready`. This is the explicit user approval boundary.
 4. `POST /api/movie-director/actions/{actionId}/execute` is the separate execution command. An action that is not `Ready` is rejected with `DIRECTOR_APPROVAL_REQUIRED`.
 5. The Movie Director action executor calls the existing `IMovieStudioService`, which creates the existing `movie.clip.generate` Generation Job. The job continues through the existing worker, provider resilience, cost guardrails, quality control, asset publication, and usage ledger. Story proposal AI usage, when present, completes through the same Usage Ledger rather than a second ledger.
-6. Action results and safe history events are persisted for explainability and replay review. Provider/model identifiers, prompts, storage keys, raw provider responses, and secrets are not returned by Director contracts.
+6. Story creative output must be a legitimate AI Core response that passes bounded validation. Unavailable, timed-out, malformed, or invalid Story AI output fails honestly with no fake creative proposal and no Story mutation; the planner is not a prose fallback. Action results and safe history events are persisted for explainability and replay review. Provider/model identifiers, prompts, storage keys, raw provider responses, and secrets are not returned by Director contracts.
 
 Rejecting a proposal cancels its pending actions. Proposal and action status transitions are durable and history events are append-only records for the current foundation.
 

@@ -323,6 +323,15 @@ public sealed class MovieDirectorCostEstimator(IMovieVideoProvider provider, IGe
 public sealed class DirectorValidationException(string message) : Exception(message);
 public sealed class DirectorContextTargetException(string message) : Exception(message);
 public sealed class DirectorContextBudgetException(string message) : Exception(message);
+public static class DirectorStoryCreativeFailureCodes
+{
+    public const string Unavailable = "DIRECTOR_STORY_CREATIVE_UNAVAILABLE";
+    public const string Invalid = "DIRECTOR_STORY_CREATIVE_INVALID";
+}
+public sealed class DirectorStoryCreativeException(string code, string message) : Exception(message)
+{
+    public string Code { get; } = code;
+}
 public sealed class DirectorActionNotApprovedException() : Exception("The Director action requires explicit user approval.");
 public sealed class DirectorActionExecutionException(string code, string message) : Exception(message)
 {
