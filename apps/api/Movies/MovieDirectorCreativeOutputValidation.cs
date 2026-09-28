@@ -279,7 +279,12 @@ public sealed class MovieDirectorCreativeOutputValidator(
         AddIf(findings, HasRepeatedSentence(text), DirectorCreativeValidationReasonCodes.DuplicateContent, "output");
 
         var anchors = ContextAnchors(context);
-        if (anchors.Count > 0 && !anchors.Any(anchor => text.Contains(anchor, StringComparison.OrdinalIgnoreCase)))
+        var hasGroundingSources = context.CurrentRevision is not null
+            || context.ApprovedRevision is not null
+            || context.RelevantCharacters.Count > 0
+            || context.RelevantWorldReferences.Count > 0
+            || context.RelevantMovieScenes.Count > 0;
+        if (hasGroundingSources && anchors.Count > 0 && !anchors.Any(anchor => text.Contains(anchor, StringComparison.OrdinalIgnoreCase)))
             Add(findings, DirectorCreativeValidationReasonCodes.ContextUngrounded, "output");
 
         var canonClaim = new[] { "locked canon", "approved canon", "locked guide confirms", "according to the locked guide", "canon requires", "locked continuity says" };
