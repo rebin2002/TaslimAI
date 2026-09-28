@@ -31,6 +31,21 @@ public sealed class AiCoreTests
     }
 
     [Fact]
+    public async Task Development_mock_provider_still_returns_test_usage()
+    {
+        var provider = new MockAiProvider(NullLogger<MockAiProvider>.Instance);
+        var events = new List<AiStreamEvent>();
+        await foreach (var item in provider.StreamAsync(
+                           new AiChatRequest([new("user", "hello taslim")], "system", "Fast"),
+                           new AiProviderSelection("mock", "test-model", "Fast", "Fast", true)))
+            events.Add(item);
+
+        Assert.Contains(events, item => item is AiMessageDelta);
+        var completed = Assert.Single(events.OfType<AiMessageCompleted>());
+        Assert.True(completed.Usage.IsTestResponse);
+    }
+
+    [Fact]
     public void Router_rejects_structured_request_when_selected_tier_lacks_capability()
     {
         var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>

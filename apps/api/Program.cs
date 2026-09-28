@@ -219,6 +219,9 @@ builder.Services.AddScoped<IMovieDirectorCreativeOutputValidator, MovieDirectorC
 builder.Services.AddScoped<DirectorQualityPlanner>();
 builder.Services.AddScoped<IMovieSynopsisDevelopmentService, AiMovieSynopsisDevelopmentService>();
 builder.Services.AddScoped<DirectorStoryProposalPlanner>();
+builder.Services.AddScoped<IDirectorCreativeCostEstimator, DirectorCreativeCostEstimator>();
+builder.Services.AddScoped<DirectorCreativeQualityPlanner>();
+builder.Services.AddScoped<MovieDirectorStoryAiService>();
 builder.Services.AddScoped<IMovieDirectorService, MovieDirectorService>();
 builder.Services.Configure<MovieVideoOptions>(builder.Configuration.GetSection("MovieVideo"));
 builder.Services.AddScoped<MovieVideoExecutionStore>();
