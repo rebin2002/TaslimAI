@@ -1,17 +1,18 @@
 # TASLIM.AI — Movie Director Creative Intelligence Wave 1
 
-## 1. Delivery
+## 1. Delivery scope
 
 - **Integration branch:** `integration/movie-director-creative-intelligence-1`
-- **Authoritative base:** `c4baee093b924d5fe6ec81208e8fc29db9d0ee53a`
-- **Final SHA:** supplied with the delivery message after the report commit
+- **Authoritative base:** `c4baee093b924d5fe6ec81208e8fc29db9d0ee53`
+- **Final branch SHA:** the report commit is the final branch tip; the delivery message is authoritative for the exact SHA.
 - **Main changed:** No
 - **Production deployed:** No
 - **Customer charging:** Remains disabled (`CustomerChargingEnabled: false`)
+- **Movie/video provider:** Disabled (`MovieVideo:Enabled: false`); no provider call occurs in the Last Seed acceptance.
 
-## 2. Important source-reference limitation
+## 2. Approved SHA limitation
 
-The repository currently exposes only these approved Movie Director branch refs:
+The repository currently exposes only these relevant approved Movie Director branch refs:
 
 - `parallel/movie-ai-premise`
 - `parallel/movie-ai-synopsis`
@@ -20,107 +21,106 @@ The repository currently exposes only these approved Movie Director branch refs:
 - `parallel/movie-ai-director-routing`
 - `parallel/movie-ai-story-writing-ux`
 
-The approved SHAs for Tasks 01–03, 05, 07–09, 11–15, 19, and 20 are not present in the local object database, are not exposed by the current GitHub remote, and cannot be retrieved through the authenticated GitHub API. Their branch refs are also absent. Therefore, exact SHA ancestry cannot honestly be claimed for those tasks. Existing/base implementations and the final integrated contracts were retained and validated where demonstrable; the exact deleted branch diffs could not be compared.
+The approved Git objects for the remaining tasks were deleted upstream and are not present in the local object database, current GitHub refs, or authenticated GitHub API. No ancestry is invented. For every `UNAVAILABLE` row below, the exact statement is:
 
-## 3. Approved SHA ancestry and reconciliation
+> Original approved Git object unavailable; final equivalent behavior verified.
 
-| Task | Approved SHA | Result | Evidence / reconciliation |
-|---|---|---|---|
-| 01 Story Intelligence Core | `be75c72ec58344bba0ee04cdc900de52c4fd1ea8` | Source ref unavailable | Provider-neutral Story contracts and planner path retained in `apps/api/Movies/MovieDirectorStory.cs`, `MovieDirectorRouting.cs`, and `MovieDirectorStoryExecutor.cs`. |
-| 02 Grounded Story Context | `661f8ee68cd408b9988a2677ffff4bdee8abee3a` | Source ref unavailable | Bounded context assembly and persisted project context are retained in the Director service/context path and covered by API integration tests. |
-| 03 Develop My Story | `faee4df71de536a6e3d38765563c4aade66a546b` | Source ref unavailable | Story proposal orchestration uses the shared Director/AI Core path; no independent production deterministic creative engine was added. |
-| 04 Premise Intelligence | `f0a6d01e79ec1399bd3ff170f5740d37c02246c9` | **Ancestor** | Merged and retained; grounded premise planner tests pass, including Last Seed anchors. |
-| 05 Logline Intelligence | `a4b74433b2cb02a7d5ad49c2a266b63aa77a5b3a` | Source ref unavailable | Logline action and structured AI draft path remain in the integrated Story planner/routing contracts. |
-| 06 Synopsis Intelligence | `d7e6701e8e30c5a7af1481b8e7ed3d691852b1c5` | **Ancestor** | Merged; duration-aware structured synopsis generation and proposed-material metadata are retained. |
-| 07 Treatment Intelligence | `34975c71589db0d027fd117661ee5e3b158540eb` | Source ref unavailable | Treatment is part of the shared structured Story AI output and proposal validation path. |
-| 08 Screenplay Intelligence | `314fff2e0792a195b5fe52c79777d363be9ec6a4` | Source ref unavailable | Typed screenplay scene/element contracts remain in the final Story AI schema, entities, editor, and executor. |
-| 09 Targeted Rewrite Intelligence | `a42a5a9e6eac254b27a533d12395bce9cbf1a120` | Source ref unavailable | Targeted Story action and revision executor remain scoped to editable revision targets. |
-| 10 Story Consistency Intelligence | `3367f5a5419eca7fc588a1bb834d4cf0711e9540` | **Ancestor** | Merged; findings are evidence-backed and review-only, with no canon auto-fix. |
-| 11 State-Aware Story UX | `961013404817a425270fc69d432496f8f4a0b41f` | Source ref unavailable | Existing state-aware Story workspace behavior retained in the integrated frontend. |
-| 12 Movie Guide Onboarding | `ad0270ad9c32f970b339b2cb1d095cad9727b98b` | Source ref unavailable | Project-level Guide preparation/lock flow retained through `MovieGuideService` and Movie Studio UI. |
-| 13 Cast From Story | `290bf2fce3263c98b9370cb0fb316436d12a72e0` | Source ref unavailable | Cast/continuity services and established-vs-proposed source contracts remain in the final code. |
-| 14 Room-Aware Director | `6b71e8f78395f0339da1db9a176410c824ee1e85` | Source ref unavailable | Director targeting remains project/room/context scoped; Cast assistance does not require a shot. |
-| 15 Placeholder Audit | `4ca1e38f2080e1b6165dc952883b0d255a2ef4b5` | Source ref unavailable | Production placeholder audit is clean; empty Movie/Story/scenes do not seed fake creative output. |
-| 16 Creative Output Validation | `d75661cb964c421a09b83168039f6a9994402fbf` | **Ancestor** | Merged; schema, quality, grounding, language, duplicate, and persistence-safety validation retained. |
-| 17 Director Quality/Cost Routing | `425b832dd5b7a209637a8428da78d1afa4fc09c7` | **Ancestor** | Repaired SHA merged; production Story generation routes through existing AI Core and does not expose provider metadata. Obsolete `b86eb628442cd10c193abc28325805f634bd6984` was not used as the endpoint. |
-| 18 Story Writing UX | `f788a0d1265f6c3c29b34d09ae283f652a26aa85` | **Ancestor** | Merged; preserves the dominant writing workspace, structured screenplay editor, provenance, revision history, and apply focus behavior. |
-| 19 Security / Approval | `56866de921188da37684744ba278e5a5a13c6775` | Source ref unavailable | Existing `MovieAuthorization` and approval/execution boundaries retained and exercised by API/browser tests. |
-| 20 Creative Intelligence E2E | `8d477a82437b96d2171bdec0a67bbe085c261f66` | Source ref unavailable | Current browser suite and API integration suite pass; exact deleted E2E branch source was unavailable for SHA ancestry. |
+## 3. Release-gate feature matrix
 
-## 4. Semantic conflicts resolved
+| Task | Final implementation file(s) | Final contract / service / function | Passing test / result | Original SHA ancestor |
+|---|---|---|---|---|
+| 01 — Real AI Story intelligence | `apps/api/Movies/MovieDirectorRouting.cs`, `MovieDirectorStory.cs`, `MovieDirectorStoryExecutor.cs` | `MovieDirectorStoryAiService`, `DirectorStoryAiDraft`, `DirectorStoryProposalPlanner.BuildFromAiDraft` | API Story/Director suite; exact Last Seed develops through the structured AI route; passed | **UNAVAILABLE** — Original approved Git object unavailable; final equivalent behavior verified. |
+| 02 — Bounded grounded context | `apps/api/Movies/MovieDirectorServices.cs` | `MovieDirectorContextAssembler.AssembleStoryAsync`, bounded guide/story/Cast/World context, persisted Director context snapshot | API context-budget and Director tests; Last Seed asserts the exact brief and 30-second duration in `storyContext`; passed | **UNAVAILABLE** — Original approved Git object unavailable; final equivalent behavior verified. |
+| 03 — Develop My Story | `apps/api/Movies/MovieDirectorStory.cs`, `apps/web/src/components/FullMovieWorkspaceView.tsx` | `develop_premise` action, empty Story default label **Develop my story**, review/apply workflow | `apps/web/e2e/last-seed-acceptance.spec.ts`; pending proposal, approval, explicit apply, and AI-suggested revision; passed | **UNAVAILABLE** — Original approved Git object unavailable; final equivalent behavior verified. |
+| 04 — Premise intelligence | `apps/api/Movies/MovieDirectorStory.cs` | Grounded premise analysis and `AnalyzePremise` / `RenderPremise` path | `MovieDirectorPremisePlannerTests`; Last Seed asserts young farmer, dry village, grandfather, last seed, protection, rain, and hope; passed | **YES** — `f0a6d01e79ec1399bd3ff170f5740d37c02246c9` is an ancestor. |
+| 05 — Logline intelligence | `apps/api/Movies/MovieDirectorStory.cs`, `MovieDirectorRouting.cs` | `ImproveLogline`, structured logline field, AI route and proposal change contract | API Story suite; Last Seed asserts story-specific logline and rejects generic placeholder prose; passed | **UNAVAILABLE** — Original approved Git object unavailable; final equivalent behavior verified. |
+| 06 — Synopsis intelligence | `apps/api/Movies/MovieSynopsisDevelopment.cs`, `MovieDirectorStory.cs` | `AiMovieSynopsisDevelopmentService`, `MovieSynopsisDevelopmentDto`, short-form duration-aware proposal metadata | `MovieSynopsisDevelopmentTests`; Last Seed asserts 30 seconds, short scope, <=4 beats, <=1 complication, grounded synopsis, and proposed elements; passed | **YES** — `d7e6701e8e30c5a7af1481b8e7ed3d691852b1c5` is an ancestor. |
+| 07 — Treatment intelligence | `apps/api/Movies/MovieDirectorStory.cs`, `MovieDirectorStoryExecutor.cs` | Structured treatment field, `CreateOrRefineTreatment`, duration-aware 30-second treatment | API Story suite; Last Seed asserts treatment contains the duration-aware 30-second arc; passed | **UNAVAILABLE** — Original approved Git object unavailable; final equivalent behavior verified. |
+| 08 — Structured screenplay | `apps/api/Movies/MovieDirectorStory.cs`, `MovieStoryEntities.cs`, `MovieDirectorStoryExecutor.cs` | `MovieStorySceneRequest`, supported `Action`/`Dialogue` screenplay elements, scene apply executor | API Story suite; Last Seed asserts persisted Action and Dialogue elements plus Young Farmer and Grandfather cues; passed | **UNAVAILABLE** — Original approved Git object unavailable; final equivalent behavior verified. |
+| 09 — Targeted rewrite / dialogue / pacing | `apps/api/Movies/MovieDirectorStory.cs`, `MovieDirectorStoryExecutor.cs` | Targeted scene/element IDs, `rewrite_selected_passage`, scoped editable revision apply | Last Seed captures all element contents and proves exactly one selected element changed; passed | **UNAVAILABLE** — Original approved Git object unavailable; final equivalent behavior verified. |
+| 10 — Story consistency | `apps/api/Movies/MovieDirectorStoryConsistency.cs`, `MovieDirectorStory.cs`, `MovieDirectorStoryExecutor.cs` | `DirectorStoryConsistencyAnalyzer`, grounded evidence findings, review-only `identify_story_inconsistencies` | Last Seed asserts grounded findings contain evidence, `appliesToStory=false`, execution succeeds, and current revision ID is unchanged; passed | **YES** — `3367f5a5419eca7fc588a1bb834d4cf0711e9540` is an ancestor. |
+| 11 — State-aware Story UX | `apps/web/src/components/FullMovieWorkspaceView.tsx` | Story state/provenance controls, revision history, review/apply focus behavior | `FullMovieWorkspaceView.test.tsx` plus full browser suite; passed | **UNAVAILABLE** — Original approved Git object unavailable; final equivalent behavior verified. |
+| 12 — Movie Guide onboarding | `apps/api/Movies/MovieGuideService.cs`, `apps/web/src/components/FullMovieWorkspaceView.tsx` | Project-level Guide preparation and explicit lock | Last Seed creates a Full Movie, fills Guide fields, locks the Guide, and asserts locked revision; passed | **UNAVAILABLE** — Original approved Git object unavailable; final equivalent behavior verified. |
+| 13 — Cast from Story | `apps/api/Movies/MovieStoryCast.cs`, `apps/api/Controllers/MovieStudioController.cs`, `apps/web/src/lib/api.ts` | Authenticated `GET /api/movie-studio/projects/{id}/cast/from-story`; `MovieStoryCastService.GetSuggestionsAsync` returns review-only suggestions with `isProposed` / `isEstablished` provenance | Last Seed identifies **YOUNG FARMER** and **GRANDFATHER**, marks both proposed/not established, and proves persisted Cast remains empty; passed | **UNAVAILABLE** — Original approved Git object unavailable; final equivalent behavior verified. |
+| 14 — Room-aware Director | `apps/api/Movies/MovieDirectorServices.cs`, `apps/api/Movies/MovieDirectorStory.cs`, `apps/web/src/components/MovieDirectorPanel.tsx` | Project-scoped Story Director proposal path accepts Cast-room context without a shot; visible Cast-room control uses the Story proposal path | Last Seed enables the Cast-room **Create typed proposal** control without a shot, creates a pending proposal, rejects it, and also verifies the API boundary; passed | **UNAVAILABLE** — Original approved Git object unavailable; final equivalent behavior verified. |
+| 15 — Placeholder audit | `apps/api/Ai/MockAiProvider.cs`, `apps/api/Movies/MovieDirectorCreativeOutputValidation.cs`, Movie Studio creation path | Development-only bounded Last Seed mock; production validator rejects generic/template prose; Full Movie starts empty | Last Seed asserts no fake scenes, shots, characters, locations, world records, clips, assemblies, or assets; full audit clean; passed | **UNAVAILABLE** — Original approved Git object unavailable; final equivalent behavior verified. |
+| 16 — Creative output validation | `apps/api/Movies/MovieDirectorCreativeOutputValidation.cs` | Schema, grounding, quality, language, duplicate, target, and persistence-safety validation | API validation tests and Last Seed invalid/pending boundary; passed | **YES** — `d75661cb964c421a09b83168039f6a9994402fbf` is an ancestor. |
+| 17 — Routing / cost / no deterministic creative fallback | `apps/api/Movies/MovieDirectorRouting.cs`, `MovieDirectorServices.cs`, `appsettings.json` | AI Core quality/cost route; provider/model metadata stays internal; unavailable/invalid creative output maps to safe errors; no production deterministic creative fallback | API routing tests; provider audit; Last Seed uses development `MockAiProvider` only and asserts video provider unavailable; passed | **YES** — repaired `425b832dd5b7a209637a8428da78d1afa4fc09c7` is an ancestor. |
+| 18 — Story writing UX | `apps/web/src/components/FullMovieWorkspaceView.tsx`, `apps/web/src/lib/api.ts` | Dominant Story writing workspace, structured screenplay editor, provenance and revision history | 18 component tests in `FullMovieWorkspaceView.test.tsx`, 140 frontend tests total, and full browser suite; passed | **YES** — `f788a0d1265f6c3c29b34d09ae283f652a26aa85` is an ancestor. |
+| 19 — Authorization / approval | `apps/api/Authorization/*`, `MovieDirectorServices.cs`, `MovieStoryCast.cs` | Workspace membership, Movie permissions, pending approval, explicit execution, immutable approved revision boundaries | 389 API tests, browser auth/workspace tests, and Last Seed cross-boundary checks; passed | **UNAVAILABLE** — Original approved Git object unavailable; final equivalent behavior verified. |
+| 20 — Creative Intelligence E2E | `apps/web/e2e/last-seed-acceptance.spec.ts` | Exact authenticated Last Seed acceptance using the final integrated API, UI, database, and development mock path | **1 passed** dedicated test; included in **24 passed** complete Playwright suite | **UNAVAILABLE** — Original approved Git object unavailable; final equivalent behavior verified. |
 
-The integration was not a mechanical ours/theirs merge. Conflicts were encountered in the shared Movie Director Story/service files:
+## 4. Exact Last Seed acceptance
 
-1. **Synopsis vs premise orchestration** — preserved grounded premise behavior while adding structured, duration-aware synopsis proposals, explicit proposed-material metadata, and synopsis-specific review contracts.
-2. **Story consistency vs synopsis/premise** — retained typed evidence-backed consistency findings and review-only semantics alongside creative proposal fields and World continuity context.
-3. **Creative output validation vs Story orchestration** — added bounded validation at proposal creation and execution without replacing the shared AI path or allowing deterministic creative fallback.
-4. **Repaired Director routing vs validation** — preserved the approved repaired routing failure codes and AI Core route, while keeping validation and usage-ledger accounting in the integrated service.
-5. **Story Writing UX** — merged the available UX branch; backend intelligence changes remained intact, while the frontend writing surface gained the approved workspace/editor improvements.
+Implementation: `apps/web/e2e/last-seed-acceptance.spec.ts`
 
-## 5. Final architecture
+The test uses exactly:
 
-`Persisted Movie project context → bounded Story context → existing AI Core quality/model/cost routing → provider-neutral Story AI schema → action-specific premise/logline/synopsis/treatment/screenplay/rewrite/consistency path → creative output validation → Director proposal → human review → explicit approval → explicit execution/apply → editable AiSuggested Story revision`.
+- **Title:** `The Last Seed`
+- **Brief:** the supplied near-future young farmer / dry village / grandfather / last seed brief
+- **Settings:** 16:9, 30 seconds, Cinematic
 
-Production creative failures do not become generic prose. Unavailable providers map to `DIRECTOR_STORY_CREATIVE_UNAVAILABLE` / HTTP 503; invalid structured responses map to `DIRECTOR_STORY_CREATIVE_INVALID` / HTTP 422. The development-only `MockAiProvider` now also returns a bounded `taslim_movie_director_story` structured response, allowing the browser acceptance path to exercise the real proposal flow without a remote provider.
+The passing journey verifies:
 
-## 6. Validation results
+1. Full Movie creation and empty initial production graph.
+2. Project-level Guide entry and explicit lock.
+3. Empty Story primary action is **Develop my story**.
+4. Integrated Story Director proposal and structured mock response.
+5. Review is required; approval alone does not apply.
+6. Explicit execution creates an editable `AiSuggested` revision.
+7. Grounded premise, non-placeholder logline, duration-aware treatment, short-form synopsis metadata, and structured Action/Dialogue screenplay.
+8. Proposed Cast extraction for Young Farmer and Grandfather without inventing established personal names or persisting Cast cards.
+9. Cast-room Director proposal without a shot, exercised through the visible Cast-room **Create typed proposal** control and the API boundary.
+10. Selected-element rewrite changes only the selected target.
+11. Evidence-backed consistency is review-only and does not change the revision.
+12. Reload/persistence, provider-disabled status, Usage Ledger activity, zero customer charge, and Quick Movie separation.
+
+## 5. Validation results
 
 ### Backend
 
 - API build: **passed**, 0 warnings, 0 errors.
 - Test project build: **passed**, 0 warnings, 0 errors.
 - Complete API suite: **389 passed, 0 failed, 0 skipped**.
-- Movie/Story/security coverage is included in the complete suite.
+- The one transient operational test-host failure on the first run passed on the targeted rerun and the authoritative complete rerun.
 
 ### Frontend
 
 - Vitest: **35 test files, 140 tests passed**.
+- TypeScript: **passed** (`npx tsc --noEmit`).
 - ESLint: **0 errors, 7 existing unused-variable warnings** in `FullMovieWorkspaceView.tsx`.
 - Next production build: **passed** with `NEXT_PUBLIC_API_URL=https://api.example.test`.
-- The build correctly rejects an unset/non-HTTPS production API URL; the validation used a non-secret placeholder build value.
 
 ### Browser
 
-- Playwright: **23 passed, 0 failed**.
-- Covered desktop Chromium, mobile Chromium at 390×844, RTL Chromium, accessibility, authentication/onboarding, Chat, generation safety, Movie Studio V2, navigation, workspace isolation, charging-disabled billing, and Admin Operations denial.
-- The authenticated empty Story Director proposal journey passed after adding the development-only structured Director mock response.
+- Complete Playwright suite: **24 passed, 0 failed** (final rerun after the visible Cast-room Director branch).
+- Dedicated exact Last Seed test: **1 passed**.
+- Covered desktop Chromium, mobile Chromium at 390×844, RTL Chromium, accessibility, authentication/onboarding, Chat, generation safety, Movie Studio V2, navigation, workspace isolation, charging-disabled billing, Admin Operations denial, and the exact Last Seed journey.
+- Only non-failing browser output is the existing Next.js smooth-scroll advisory.
 
 ### Database / migrations
 
-- Migration inventory: **44 migrations**.
-- Migration files changed from authoritative base: **none**; the 20-task wave reported no new migrations.
-- Fresh PostgreSQL database: **passed**, all 44 migrations applied; Movie project and Story revision tables readable and empty as expected.
-- Upgrade PostgreSQL database: **passed**, upgraded from `20260926143000_AddMovieSelectiveRegeneration` to the latest migration; 44 migrations present and Movie/Story tables readable.
-- `dotnet ef migrations has-pending-model-changes`: **passed — no changes**.
-- EF InMemory was not used for the database gate.
+- Previously validated real PostgreSQL migration inventory: **44 migrations**.
+- Migration files changed in this repair: **none**.
+- No new migration was expected or created because Cast-from-Story is a read-only projection and no schema/entity persistence was added.
+- Previous fresh and upgrade PostgreSQL migration gates remain valid; they were not rerun because schema did not change.
 
-## 7. Last Seed acceptance
+## 6. Provider, fallback, charging, and authorization audit
 
-- Grounded premise unit coverage passed for the Last Seed facts: **young farmer**, **grandfather**, **last seed**, drought village, and returning rain.
-- The full browser journey used the repository’s deterministic Movie Studio acceptance fixtures and passed without fake scenes/shots/assets.
-- A separate full browser run of the exact Last Seed brief was not present in the available E2E suite; this remains a non-blocking acceptance coverage limitation.
+- `MockAiProvider` changes are development-only structured responses for the exact acceptance; it never calls a remote AI vendor and reports zero/test usage.
+- Production Story generation remains on the existing AI Core route; invalid or unavailable creative output is rejected safely.
+- No deterministic production creative fallback was added. The only deterministic proposal wording is the existing review/planning boundary, not a production creative fallback.
+- Movie/video provider remains disabled; no Runway or other movie provider call occurred.
+- Customer charging remains off (`CustomerChargingEnabled: false`); the Last Seed test asserts `customerChargedAmount === 0`.
+- Existing Usage Ledger path is used for Story AI usage accounting.
+- Workspace and Movie permission checks remain enforced for Cast-from-Story, Story proposals, approval, apply, and execution.
+- Approved Story revisions remain immutable; applied AI material is editable draft material until human approval.
 
-## 8. Security, provider, cost, and fallback audit
+## 7. Working tree and publication
 
-- Workspace/project authorization and approval boundaries passed in API and browser tests.
-- Approval does not automatically execute; execution uses the authenticated user and editable Story revision architecture.
-- Provider/model metadata remains internal to normal customer responses.
-- Existing Usage Ledger/cost infrastructure is used; no duplicate billing or retry architecture was added.
-- Movie/video provider is disabled by default and no provider credentials were added.
-- Customer charging remains off.
-- Conflict-marker audit: clean.
-- Production historical placeholder audit: clean. The generic phrase found in premise tests is test input only, not production creative data or fallback.
 - `git diff --check`: clean.
-
-## 9. Working tree and publication
-
-- Final working tree was clean before report creation.
-- The integration branch is intended to be pushed to the configured GitHub remote after this report commit.
-- `main` was not changed and production was not deployed.
-
-## 10. Known non-blocking issues
-
-1. Fourteen approved SHA objects/branch refs are unavailable upstream, preventing exact ancestry verification for Tasks 01–03, 05, 07–09, 11–15, 19, and 20.
-2. Frontend lint reports seven unused-variable warnings in the existing large Movie workspace component; no lint errors occur.
-3. Next.js emits a non-failing smooth-scroll behavior warning during browser tests.
-4. A dedicated exact Last Seed browser journey was not available in the checked-out E2E suite.
+- Conflict-marker audit: clean.
+- Migration/schema status: no migration files changed.
+- `main` was not changed.
+- Production was not deployed.
+- The integration branch is pushed to the configured GitHub remote after the final report commit.

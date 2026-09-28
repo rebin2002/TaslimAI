@@ -318,6 +318,8 @@ export type MovieCharacter = { id: string; name: string; role: string | null; de
 export type MovieCastProject = Pick<MovieProject, "id" | "workspaceId" | "projectId" | "mode" | "status" | "title" | "description" | "durationSeconds" | "aspectRatio" | "style" | "language" | "createdAt" | "updatedAt">;
 export type MovieCastCharacter = { id: string; name: string; role: string | null; description: string; appearance: string | null; referenceAssetId: string | null; referenceAssetIds: string[]; referenceAssetCount: number; stateCount: number; latestState: MovieCharacterState | null; relationshipCount: number; relationshipTypes: string[]; lockedFactCount: number; lockedFieldKeys: string[]; updatedAt: string };
 export type MovieCast = { project: MovieCastProject; characters: MovieCastCharacter[] };
+export type MovieStoryCastSuggestion = { name: string; role: string | null; description: string; source: string; sourceType: string; isEstablished: boolean; isProposed: boolean; evidence: string[] };
+export type MovieStoryCastSuggestions = { movieProjectId: string; storyRevisionId: string | null; storyRevisionStatus: string; suggestions: MovieStoryCastSuggestion[] };
 export type MovieCharacterDetail = { project: MovieCastProject; character: MovieCharacter };
 export type MovieLocation = { id: string; name: string; description: string; visualContinuityNotes: string | null; referenceAssetId: string | null };
 export type MovieClip = { id: string; movieSceneId: string | null; movieShotId: string | null; generationJobId: string | null; assetId: string | null; status: string; durationSeconds: number | null; metadataJson: string | null; continuitySnapshotJson: string | null };
@@ -783,6 +785,7 @@ export const api = {
   getMovieWorkspace: (id: string, module = "overview") => { const key = `${id}:${module}`; const pending = movieWorkspaceRequests.get(key); if (pending) return pending; const promise = request<MovieWorkspaceResponse>(`/api/movie-studio/projects/${id}/workspace?module=${encodeURIComponent(module)}`).then((response) => normalizeMovieWorkspaceProject(response.project)).finally(() => movieWorkspaceRequests.delete(key)); movieWorkspaceRequests.set(key, promise); return promise; },
   getMovieWorld: (id: string) => request<MovieWorldWorkspace>(`/api/movie-studio/projects/${id}/world`),
   getMovieCast: (id: string) => request<MovieCast>(`/api/movie-studio/projects/${id}/cast`),
+  getMovieCastFromStory: (id: string) => request<MovieStoryCastSuggestions>(`/api/movie-studio/projects/${id}/cast/from-story`),
   getMovieCharacterDetail: (characterId: string) => request<MovieCharacterDetail>(`/api/movie-studio/characters/${characterId}/detail`),
   getMovieProjectShell: (id: string) => request<MovieProjectShell>(`/api/movie-studio/projects/${id}/shell`),
   getMovieStory: (id: string) => request<MovieStory>(`/api/movie-studio/projects/${id}/story`),
