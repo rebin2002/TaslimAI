@@ -46,6 +46,20 @@ describe("Full Movie workspace foundation", () => {
     expect(workspaceSource).toContain("Approved screenplay");
     expect(workspaceSource).toContain("Structured pages");
     expect(workspaceSource).toContain("projectShell");
+    expect(workspaceSource).toContain("movie-workspace-layout ${activeModule === \"story\" ? \"is-story-layout\" : \"\"}");
+    expect(workspaceSource).toContain("Current manuscript section");
+    expect(workspaceSource).toContain("storyAuthorshipLabel");
+    expect(workspaceSource).toContain("storyAuthorshipDescription");
+  });
+
+  it("keeps the active Story section spacious, accessible, and visible after Director application", () => {
+    expect(workspaceSource).toContain("sectionForDirectorApply");
+    expect(workspaceSource).toContain("setFocusAfterDirectorApply(changedSection)");
+    expect(workspaceSource).toContain("story-editor-${focusAfterDirectorApply.toLowerCase()}");
+    expect(workspaceSource).toContain('aria-label="Story sections"');
+    expect(workspaceSource).toContain('aria-controls={`story-editor-${item.toLowerCase()}`}');
+    expect(workspaceSource).toContain('id={`story-editor-${key}`}');
+    expect(workspaceSource).not.toContain('if (!auto) setSection("Screenplay")');
   });
 
   it("makes Scenes the explicit screenplay-to-production bridge", () => {
