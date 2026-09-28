@@ -287,10 +287,30 @@ internal sealed class ValidMovieStoryCompletionService : IChatCompletionService
         yield break;
     }
 
-    public Task<AiGenerationResult> CompleteAsync(AiChatRequest request, CancellationToken cancellationToken = default) =>
-        Task.FromResult(new AiGenerationResult(
-            "{\"premise\":\"AI generated premise for the bounded Story Director test: the guarded witness chooses truth before the city closes its borders.\",\"logline\":\"AI generated logline: the guarded witness chooses truth before the city closes its borders.\",\"synopsis\":\"AI generated synopsis: the guarded witness follows a clue through the changing city before the irreversible choice.\",\"treatment\":\"AI generated treatment preserving the locked guide: the guarded witness moves from secrecy to a public choice in the city.\",\"replacementContent\":\"AI generated replacement passage.\",\"findings\":[],\"proposedScene\":{\"sceneIdentifier\":\"AI-SCENE-1\",\"actNumber\":1,\"sequenceNumber\":1,\"slugline\":\"INT. STORY ROOM - NIGHT\",\"synopsis\":\"AI generated scene synopsis.\",\"elements\":[{\"elementType\":\"Action\",\"content\":\"The choice becomes unavoidable.\"},{\"elementType\":\"Dialogue\",\"characterName\":\"PROTAGONIST\",\"content\":\"Then we do it now.\"}]}}",
-            new AiUsageMetadata("test-story", "test-story", 100, null, 200, 0m, 0m, 1, "test-complete", true)));
+    public Task<AiGenerationResult> CompleteAsync(AiChatRequest request, CancellationToken cancellationToken = default)
+    {
+        var content = request.StructuredOutput?.Name == "taslim_movie_synopsis_development"
+            ? JsonSerializer.Serialize(new
+            {
+                premise = "A guarded courier must choose whether to deliver the truth when silence would keep them safe.",
+                logline = "When a hidden message reveals imminent harm, a guarded courier must cross one dangerous night and choose who gets the truth.",
+                treatment = "The courier protects a quiet routine, is forced into motion by the message, loses familiar safety, and reaches a final choice where delivery matters more than escape.",
+                synopsis = "A guarded courier protects a quiet routine until an unexpected message reveals that someone will be harmed if the truth stays hidden. The courier follows one urgent lead, but each attempt to pass the message on closes another safe route and forces a meaningful sacrifice. With no time left to remain neutral, the courier chooses to deliver the truth publicly, accepting the cost of being seen.",
+                setup = "The courier lives by a quiet routine built around staying unseen.",
+                protagonistMotivation = "The courier wants to protect personal safety without abandoning someone vulnerable.",
+                incitingEvent = "A message reveals imminent harm that silence would allow.",
+                escalation = "Every attempt to pass the message safely removes another escape route.",
+                complications = new[] { "The trusted route becomes unsafe, forcing a public choice." },
+                climaxChoice = "The courier delivers the truth publicly instead of disappearing with it.",
+                resolution = "The danger eases while the courier accepts a new responsibility.",
+                emotionalArc = "The courier moves from guarded self-preservation to accountable courage.",
+                canonAnchors = new[] { "current story foundation", "locked Movie Guide" },
+                proposedElements = new[] { "the hidden message", "the closing escape route", "the public delivery" },
+                beatCount = 4,
+            })
+            : "{\"premise\":\"AI generated premise for the bounded Story Director test: the guarded witness chooses truth before the city closes its borders.\",\"logline\":\"AI generated logline: the guarded witness chooses truth before the city closes its borders.\",\"synopsis\":\"AI generated synopsis: the guarded witness follows a clue through the changing city before the irreversible choice.\",\"treatment\":\"AI generated treatment preserving the locked guide: the guarded witness moves from secrecy to a public choice in the city.\",\"replacementContent\":\"AI generated replacement passage.\",\"findings\":[],\"proposedScene\":{\"sceneIdentifier\":\"AI-SCENE-1\",\"actNumber\":1,\"sequenceNumber\":1,\"slugline\":\"INT. STORY ROOM - NIGHT\",\"synopsis\":\"AI generated scene synopsis.\",\"elements\":[{\"elementType\":\"Action\",\"content\":\"The choice becomes unavoidable.\"},{\"elementType\":\"Dialogue\",\"characterName\":\"PROTAGONIST\",\"content\":\"Then we do it now.\"}]}}";
+        return Task.FromResult(new AiGenerationResult(content, new AiUsageMetadata("test-story", "test-story", 100, null, 200, 0m, 0m, 1, "test-complete", true)));
+    }
 }
 
 public sealed class MovieDirectorStoryFailureTests : IClassFixture<UnavailableMovieDirectorStoryApiFactory>
