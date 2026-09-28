@@ -356,7 +356,8 @@ public sealed class MovieDirectorService(
     WorkspaceAccessService access,
     MovieDirectorContextAssembler assembler,
     DirectorQualityPlanner qualityPlanner,
-    DirectorStoryProposalPlanner storyPlanner,
+    MovieDirectorStoryAiService storyAiPlanner,
+    IUsageLedgerService usageLedger,
     IEnumerable<IDirectorActionExecutor> executors) : IMovieDirectorService
 {
     public async Task<DirectorProposalResponse?> CreateProposalAsync(Guid userId, Guid movieProjectId, DirectorProposalRequest request, CancellationToken cancellationToken = default)
@@ -495,7 +496,8 @@ public sealed class MovieDirectorService(
         var assembled = await assembler.AssembleAsync(userId, movie.Id, cancellationToken);
         var storyContext = await assembler.AssembleStoryAsync(movie.Id, request.TargetSceneId, request.TargetElementId, cancellationToken);
         if (assembled is null || storyContext is null) return null;
-        var plan = await storyPlanner.BuildAsync(request, storyContext.Value.Context, cancellationToken);
+        var generation = await storyAiPlanner.BuildAsync(request, storyContext.Value.Context, cancellationToken);
+        var plan = generation.Plan;
         var now = DateTime.UtcNow;
         var directorContext = await GetOrCreateContextAsync(movie, assembled, cancellationToken);
         var proposal = new DirectorProposal
@@ -512,8 +514,13 @@ public sealed class MovieDirectorService(
         });
         db.DirectorProposals.Add(proposal);
         db.DirectorHistoryEvents.Add(new DirectorHistoryEvent { Id = Guid.NewGuid(), WorkspaceId = movie.WorkspaceId, DirectorProposalId = proposal.Id, EventType = DirectorHistoryEventTypes.ContextAssembled, SafeDetailsJson = JsonSerializer.Serialize(new { contextVersion = storyContext.Value.Context.ContextVersion, snapshotHash = storyContext.Value.SnapshotHash }), CreatedAt = now });
-        db.DirectorHistoryEvents.Add(new DirectorHistoryEvent { Id = Guid.NewGuid(), WorkspaceId = movie.WorkspaceId, DirectorProposalId = proposal.Id, EventType = DirectorHistoryEventTypes.ProposalCreated, SafeDetailsJson = JsonSerializer.Serialize(new { action = plan.Payload.Action, appliesToStory = plan.Review.AppliesToStory }), CreatedAt = now });
+        db.DirectorHistoryEvents.Add(new DirectorHistoryEvent { Id = Guid.NewGuid(), WorkspaceId = movie.WorkspaceId, DirectorProposalId = proposal.Id, EventType = DirectorHistoryEventTypes.ProposalCreated, SafeDetailsJson = JsonSerializer.Serialize(new { action = plan.Payload.Action, appliesToStory = plan.Review.AppliesToStory, qualityLevel = plan.Payload.QualityLevel, estimatedCostUsd = plan.Payload.EstimatedCostUsd }), CreatedAt = now });
         await db.SaveChangesAsync(cancellationToken);
+        if (generation.Usage is not null)
+        {
+            var transaction = await usageLedger.GetOrCreatePendingAsync(movie.WorkspaceId, userId, movie.ProjectId, null, $"director-story:{proposal.Id:N}", UsageFeature.Movie, cancellationToken, estimatedProviderCostUsd: generation.Usage.EstimatedCost, costEstimateJson: JsonSerializer.Serialize(new { qualityLevel = plan.Payload.QualityLevel, estimatedCostUsd = plan.Payload.EstimatedCostUsd }));
+            await usageLedger.CompleteAsync(transaction, generation.Usage, cancellationToken);
+        }
         return new DirectorProposalResponse(ToDto(proposal, plan.Rationale, [], plan.Review), assembled.Context, storyContext.Value.Context);
     }
 

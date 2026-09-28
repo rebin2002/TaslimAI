@@ -244,7 +244,8 @@ public sealed record DirectorStoryAiGeneration(DirectorStoryProposalPlan Plan, A
 public sealed class MovieDirectorStoryAiService(
     IChatCompletionService completion,
     DirectorStoryProposalPlanner proposalPlanner,
-    DirectorCreativeQualityPlanner qualityPlanner)
+    DirectorCreativeQualityPlanner qualityPlanner,
+    IMovieSynopsisDevelopmentService? synopsisDevelopment = null)
 {
     public async Task<DirectorStoryAiGeneration> BuildAsync(
         DirectorProposalRequest request,
@@ -252,6 +253,11 @@ public sealed class MovieDirectorStoryAiService(
         CancellationToken cancellationToken = default)
     {
         var taskType = DirectorStoryActionTypes.Normalize(request.StoryAction);
+        if (taskType is DirectorStoryActionTypes.ExpandSynopsis or DirectorStoryActionTypes.DevelopSynopsis && synopsisDevelopment is not null)
+        {
+            var synopsisPlan = await proposalPlanner.BuildAsync(request, context, cancellationToken);
+            return new(synopsisPlan, null);
+        }
         var profile = DirectorCreativeRoutingProfiles.For(taskType);
         var serializedContext = JsonSerializer.Serialize(context, DirectorJson.Options);
         var routing = qualityPlanner.Recommend(new DirectorCreativeRoutingRequest(
