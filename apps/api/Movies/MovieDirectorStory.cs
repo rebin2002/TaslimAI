@@ -767,6 +767,6 @@ public sealed class DirectorStoryProposalPlanner(IMovieSynopsisDevelopmentServic
     };
 
     private static string AppendOnce(string? value, string suffix) => string.IsNullOrWhiteSpace(value) ? suffix.Trim() : value.Trim().EndsWith(suffix.Trim(), StringComparison.Ordinal) ? value.Trim() : $"{value.Trim()}{suffix}";
-    private static string Bound(string? value) => string.IsNullOrWhiteSpace(value) ? "(empty)" : value.Length <= 6_000 ? value : $"{value[..6_000]}…";
+    private static string Bound(string? value, int max = 6_000) => string.IsNullOrWhiteSpace(value) ? "(empty)" : value.Length <= max ? value.Trim() : $"{value[..max].Trim()}…";
     private static string SceneText(MovieStorySceneRequest scene) => $"{scene.Slugline}\n{scene.Synopsis}\n{string.Join("\n", scene.Elements.Select(item => $"{item.ElementType}: {item.Content}"))}";
 }

@@ -27,7 +27,7 @@ public interface IDirectorActionExecutor
     Task<DirectorActionExecution> ExecuteAsync(DirectorAction action, CancellationToken cancellationToken = default);
 }
 
-public sealed record DirectorActionExecution(bool Succeeded, string? FailureCode, string SafeMessage, string? ResultJson);
+public sealed record DirectorActionExecution(bool Succeeded, string? FailureCode, string SafeMessage, string? ResultJson, IReadOnlyList<string>? FailureReasonCodes = null);
 
 public sealed class MovieDirectorContextAssembler(TaslimDbContext db, MovieWorldContinuityProjector worldContinuity)
 {
