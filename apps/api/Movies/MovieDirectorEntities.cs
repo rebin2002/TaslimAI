@@ -209,16 +209,17 @@ public sealed record DirectorGuideContext(
 public sealed record DirectorStoryContext(Guid RevisionId, int RevisionNumber, string Premise, string Logline, string Synopsis, string Treatment, string Authorship);
 public sealed record DirectorSceneContext(Guid Id, int Sequence, string Title, string Summary, int? DurationSeconds, string? ContinuityNotes, IReadOnlyList<DirectorShotContext> Shots);
 public sealed record DirectorShotContext(Guid Id, int Sequence, string Description, string? CameraAndFraming, string? CameraMotion, int? DurationSeconds, string? Narration, string? Dialogue, string? VisualContinuityNotes, string? CinematographyJson = null);
-public sealed record DirectorCharacterContext(string Name, string Description, string? Appearance, string? ContinuityNotes, IReadOnlyList<DirectorLockedFactContext>? LockedFacts = null, Guid? Id = null);
+public sealed record DirectorCharacterContext(string Name, string Description, string? Appearance, string? ContinuityNotes, IReadOnlyList<DirectorLockedFactContext>? LockedFacts = null, Guid? Id = null, IReadOnlyList<DirectorCharacterStateContext>? States = null);
+public sealed record DirectorCharacterStateContext(Guid Id, string Key, string? Label, string? Wardrobe, string? AgeOrTimeState, string? Appearance, string? InjuryOrCondition, string? LocationOrStoryState, string? ContinuityNotes, IReadOnlyList<DirectorLockedFactContext>? LockedFacts = null);
 public sealed record DirectorLocationContext(string Name, string Description, string? VisualContinuityNotes, Guid? Id = null);
 public sealed record DirectorContinuityContext(Guid? MovieSceneId, Guid? MovieShotId, string SnapshotHash, IReadOnlyList<MovieCharacterContinuityCharacterDto> Characters, IReadOnlyList<MovieCharacterContinuityWarningDto> Warnings);
 
 public sealed record DirectorGuideSectionContext(string Type, string ContentJson);
-public sealed record DirectorLockedFactContext(string FieldKey, string LockedValue, Guid? StateId = null);
+public sealed record DirectorLockedFactContext(string FieldKey, string LockedValue, Guid? StateId = null, Guid? LockId = null);
 public sealed record DirectorContextTargetDto(string Type, Guid Id, Guid? StoryRevisionId, Guid? SceneId, Guid? ShotId, Guid? ProductionVersionId, Guid? TakeId);
 public sealed record DirectorContextSourceDto(string Kind, Guid Id, string Revision, bool IsLocked, string Priority);
 public sealed record DirectorContextBudgetDto(int MaxBytes, int UsedBytes, int CriticalBytes, int OptionalBytes, bool CriticalFactsComplete, bool OptionalMaterialTrimmed = false);
-public sealed record DirectorWorldContext(IReadOnlyList<DirectorWorldEntityContext> Entities, IReadOnlyList<DirectorContinuityFactContext> Facts, IReadOnlyList<DirectorContinuityLockContext> Locks);
+public sealed record DirectorWorldContext(IReadOnlyList<DirectorWorldEntityContext> Entities, IReadOnlyList<DirectorContinuityFactContext> Facts, IReadOnlyList<DirectorContinuityLockContext> Locks, IReadOnlyList<MovieWorldContinuityWarning>? Warnings = null);
 public sealed record DirectorWorldEntityContext(Guid Id, string EntityType, string Name, string Description, string? ContinuityNotes, string? Role, bool IsLocked);
 public sealed record DirectorContinuityFactContext(Guid Id, string ScopeType, Guid? ScopeId, string FactKey, string FactValue, string? Notes, bool IsLocked);
 public sealed record DirectorContinuityLockContext(Guid Id, string EntityType, Guid? EntityId, string FieldName, string LockedValue, string Strength, string? Reason);

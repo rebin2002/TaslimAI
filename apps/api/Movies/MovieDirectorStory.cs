@@ -65,7 +65,58 @@ public sealed record DirectorStoryBoundedContextDto(
     IReadOnlyList<DirectorCharacterContext> RelevantCharacters,
     IReadOnlyList<DirectorLocationContext> RelevantWorldReferences,
     DateTime AssembledAt,
-    int ContextVersion = 1);
+    int ContextVersion = 1,
+    DirectorWorldContext? World = null);
+
+public static class DirectorStoryFindingTypes
+{
+    public const string HardContinuityConflict = "hard_continuity_conflict";
+    public const string PossibleInconsistency = "possible_inconsistency";
+    public const string CreativeSuggestion = "creative_suggestion";
+}
+
+public static class DirectorStoryFindingSeverities
+{
+    public const string Error = "error";
+    public const string Warning = "warning";
+    public const string Suggestion = "suggestion";
+    public const string Info = "info";
+}
+
+public static class DirectorStoryFindingCategories
+{
+    public const string ApprovedStory = "approved_story";
+    public const string LockedMovieGuide = "locked_movie_guide";
+    public const string CastContinuity = "cast_continuity";
+    public const string WorldContinuity = "world_continuity";
+    public const string CharacterState = "character_state";
+    public const string Chronology = "chronology";
+    public const string ScreenplayFact = "screenplay_fact";
+    public const string Coverage = "coverage";
+}
+
+public sealed record DirectorStoryEvidenceDto(
+    string Source,
+    string? SourceType,
+    Guid? SourceId,
+    string? Revision,
+    string Excerpt);
+
+public sealed record DirectorStoryFindingTargetDto(
+    string TargetType,
+    Guid? TargetId,
+    string? Label);
+
+public sealed record DirectorStoryFindingDto(
+    string FindingType,
+    string Severity,
+    string Category,
+    IReadOnlyList<DirectorStoryEvidenceDto> Evidence,
+    DirectorStoryFindingTargetDto AffectedTarget,
+    string Explanation,
+    string SuggestedCorrection,
+    decimal Confidence,
+    string? Uncertainty);
 
 public sealed record DirectorStoryFieldChangeDto(
     string Field,
@@ -77,7 +128,7 @@ public sealed record DirectorStoryReviewDto(
     string Action,
     Guid? BaseRevisionId,
     IReadOnlyList<DirectorStoryFieldChangeDto> Changes,
-    IReadOnlyList<string> Findings,
+    IReadOnlyList<DirectorStoryFindingDto> Findings,
     bool AppliesToStory);
 
 public sealed record DirectorStoryActionPayload(
@@ -91,14 +142,14 @@ public sealed record DirectorStoryActionPayload(
     Guid? TargetElementId,
     MovieStorySceneRequest? ProposedScene,
     string? ReplacementContent,
-    IReadOnlyList<string> Findings,
+    IReadOnlyList<DirectorStoryFindingDto> Findings,
     IReadOnlyList<DirectorStoryFieldChangeDto> Changes);
 
 public sealed record DirectorStoryApplyResult(
     bool Applied,
     Guid? RevisionId,
     string SafeMessage,
-    IReadOnlyList<string> Findings);
+    IReadOnlyList<DirectorStoryFindingDto> Findings);
 
 public sealed record DirectorStoryProposalPlan(
     DirectorStoryActionPayload Payload,
@@ -117,7 +168,6 @@ public sealed class DirectorStoryProposalPlanner
         var source = context.CurrentRevision ?? context.ApprovedRevision;
         var baseRevisionId = source?.RevisionId;
         var changes = new List<DirectorStoryFieldChangeDto>();
-        var findings = new List<string>();
         string? premise = null;
         string? logline = null;
         string? synopsis = null;
@@ -126,6 +176,7 @@ public sealed class DirectorStoryProposalPlanner
         Guid? targetElementId = request.TargetElementId;
         MovieStorySceneRequest? proposedScene = null;
         string? replacement = null;
+        IReadOnlyList<DirectorStoryFindingDto> findings = [];
 
         switch (action)
         {
@@ -162,10 +213,9 @@ public sealed class DirectorStoryProposalPlanner
             case DirectorStoryActionTypes.TightenPacing:
                 synopsis = TightenPacing(context, source);
                 changes.Add(new("synopsis", null, Bound(source?.Synopsis), synopsis));
-                findings.Add("pacing_pass_reduces_repetition_and_surfaces_the_next_turn");
                 break;
             case DirectorStoryActionTypes.IdentifyInconsistencies:
-                findings.AddRange(FindInconsistencies(context, source));
+                findings = DirectorStoryConsistencyAnalyzer.Analyze(context);
                 changes.Add(new("diagnostic", null, "Current story remains unchanged.", "Director findings are review-only; no story text will be changed."));
                 break;
             default:
@@ -237,17 +287,6 @@ public sealed class DirectorStoryProposalPlanner
         var dialogue = scene.Elements.FirstOrDefault(item => item.ElementType.Equals(MovieScreenplayElementTypes.Dialogue, StringComparison.OrdinalIgnoreCase));
         if (dialogue is null) throw new DirectorValidationException("The selected screenplay scene does not contain dialogue to improve.");
         return (scene.Id, AppendOnce(dialogue.Content, " We have one chance, and I am choosing it."));
-    }
-
-    private static IReadOnlyList<string> FindInconsistencies(DirectorStoryBoundedContextDto context, DirectorStoryRevisionContext? source)
-    {
-        var results = new List<string>();
-        if (source is null) results.Add("story_has_no_current_revision");
-        if (source is not null && source.Scenes.Count == 0) results.Add("story_has_no_screenplay_scenes");
-        if (source is not null && source.Scenes.Any(scene => scene.Elements.Count == 0)) results.Add("one_or_more_screenplay_scenes_have_no_elements");
-        if (context.RelevantCharacters.Count == 0) results.Add("story_has_no_bounded_cast_reference");
-        if (results.Count == 0) results.Add("no_bounded_inconsistency_found");
-        return results;
     }
 
     private static string Label(string action) => action switch
