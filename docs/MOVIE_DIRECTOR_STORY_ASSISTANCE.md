@@ -31,7 +31,26 @@ Relevant request fields:
 | `selectedPassage` | Optional user-selected passage text; it is not required for the deterministic test-safe planner. |
 | `goal` | Optional user goal used for a proposed scene synopsis or proposal title. |
 
-The response adds `storyReview` to the existing `DirectorProposalDto` and `storyContext` to the existing `DirectorProposalResponse`. `storyReview.changes` contains `field`, `target`, `existingContent`, and `proposedContent`; `findings` is used by the review-only inconsistency action; `appliesToStory` distinguishes a revision candidate from diagnostics.
+The response adds `storyReview` to the existing `DirectorProposalDto` and `storyContext` to the existing `DirectorProposalResponse`. `storyReview.changes` contains `field`, `target`, `existingContent`, and `proposedContent`; `appliesToStory` distinguishes a revision candidate from diagnostics.
+
+### Story consistency findings
+
+`identify_story_inconsistencies` now returns typed, review-only findings. Each finding has:
+
+| Field | Meaning |
+| --- | --- |
+| `findingType` | `hard_continuity_conflict`, `possible_inconsistency`, or `creative_suggestion` |
+| `severity` | `error`, `warning`, `suggestion`, or `info` |
+| `category` | Approved Story, locked Movie Guide, Cast continuity, World continuity, character state, chronology, screenplay fact, or coverage |
+| `evidence` | One or more bounded sources with source type/id, revision, and excerpt |
+| `affectedTarget` | The Story revision, screenplay scene/element, or project affected |
+| `explanation` | Grounded statement of what was observed; no inferred contradiction is presented as fact |
+| `suggestedCorrection` | A review suggestion only; it is never applied automatically |
+| `confidence` / `uncertainty` | A bounded confidence score and, where applicable, why human review is still needed |
+
+The bounded context includes the current and approved Story revisions, the locked Guide sections, relevant Cast states and lock IDs, and the existing World continuity projection (including its deterministic warnings). Chronology checks use persisted Story and production scene ordering. Lexical checks only report explicit opposing terms (for example, a hard Cast lock for `red` against a scene explicitly containing `blue`); they do not infer unstated plot meaning. Existing World continuity engine warnings are reused as evidence rather than recomputed as a second engine.
+
+No database migration is required: findings are stored in the existing Director action payload/result JSON and remain review-only.
 
 ## Task 2 integration notes
 

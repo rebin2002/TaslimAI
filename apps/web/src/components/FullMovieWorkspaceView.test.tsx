@@ -83,6 +83,13 @@ describe("Full Movie workspace foundation", () => {
     expect(workspaceSource).toContain("Apply to editable Story revision");
     expect(workspaceSource).toContain("It never silently rewrites an approved revision.");
   });
+  it("renders Story consistency findings as typed, grounded review evidence", () => {
+    expect(workspaceSource).toContain("Grounded Director findings");
+    expect(workspaceSource).toContain("finding.findingType.replaceAll");
+    expect(workspaceSource).toContain("finding.suggestedCorrection");
+    expect(workspaceSource).toContain("finding.evidence.map");
+    expect(workspaceSource).toContain("No grounded inconsistencies found");
+  });
   it("keeps Story Director proposals on the canonical MovieProject and explains the guide prerequisite", () => {
     expect(workspaceSource).toContain("createMovieDirectorProposal(projectId");
     expect(workspaceSource).toContain("guideLocked={projectShell?.lockedGuideRevisionNumber != null}");
