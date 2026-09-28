@@ -169,6 +169,7 @@ public sealed class MovieDirectorContextAssembler(TaslimDbContext db)
         var context = new DirectorStoryBoundedContextDto(
             movie.Id,
             movie.WorkspaceId,
+            movie.DurationSeconds,
             Limit(movie.Description, 8_000),
             new DirectorGuideContext(Limit(movie.Guide.VisualLanguage, 2_000), Limit(movie.Guide.CameraLanguage, 2_000), Limit(movie.Guide.ColorAndLighting, 2_000), Limit(movie.Guide.SoundAndNarration, 2_000), Limit(movie.Guide.ContinuityRules, 4_000), lockedRevision.RevisionNumber, true, Limit(lockedRevision.CinematographyBibleJson, 8_000)),
             currentContext,
@@ -465,7 +466,7 @@ public sealed class MovieDirectorService(
         var assembled = await assembler.AssembleAsync(userId, movie.Id, cancellationToken);
         var storyContext = await assembler.AssembleStoryAsync(movie.Id, request.TargetSceneId, request.TargetElementId, cancellationToken);
         if (assembled is null || storyContext is null) return null;
-        var plan = storyPlanner.Build(request, storyContext.Value.Context);
+        var plan = await storyPlanner.BuildAsync(request, storyContext.Value.Context, cancellationToken);
         var now = DateTime.UtcNow;
         var directorContext = await GetOrCreateContextAsync(movie, assembled, cancellationToken);
         var proposal = new DirectorProposal
@@ -518,7 +519,7 @@ public sealed class MovieDirectorService(
     {
         if (!string.Equals(action.ActionType, DirectorActionTypes.StoryAssistance, StringComparison.OrdinalIgnoreCase)) return null;
         var payload = ReadStoryPayload(action);
-        return payload is null ? null : new DirectorStoryReviewDto(payload.Action, payload.BaseRevisionId, payload.Changes, payload.Findings, !string.Equals(payload.Action, DirectorStoryActionTypes.IdentifyInconsistencies, StringComparison.OrdinalIgnoreCase));
+        return payload is null ? null : new DirectorStoryReviewDto(payload.Action, payload.BaseRevisionId, payload.Changes, payload.Findings, !string.Equals(payload.Action, DirectorStoryActionTypes.IdentifyInconsistencies, StringComparison.OrdinalIgnoreCase), payload.SynopsisDevelopment);
     }
 }
 

@@ -23,6 +23,7 @@ public sealed class MovieDirectorController(IMovieDirectorService director) : Co
         catch (DirectorValidationException exception) { return ApiResults.Error(this, 400, "DIRECTOR_REQUEST_INVALID", exception.Message); }
         catch (DirectorContextTargetException exception) { return ApiResults.Error(this, 400, "DIRECTOR_CONTEXT_TARGET_INVALID", exception.Message); }
         catch (DirectorContextBudgetException exception) { return ApiResults.Error(this, 413, "DIRECTOR_CONTEXT_BUDGET_EXCEEDED", exception.Message); }
+        catch (DirectorSynopsisGenerationException exception) { return ApiResults.Error(this, 503, "DIRECTOR_SYNOPSIS_UNAVAILABLE", exception.Message); }
     }
 
     [HttpGet("proposals/{proposalId:guid}")]

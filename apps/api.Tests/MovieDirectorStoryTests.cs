@@ -112,6 +112,81 @@ public sealed class MovieDirectorStoryTests : IClassFixture<TaslimApiFactory>
     }
 
     [Fact]
+    public async Task Synopsis_development_creates_a_short_runtime_bounded_proposal_without_mutating_empty_story()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Short Synopsis Owner");
+        var movie = await CreateMovie(client, auth.PersonalWorkspace.Id, 30);
+        await LockGuide(client, movie.Project.Id);
+
+        var proposal = await SendWithCsrf<DirectorProposalResponse>(client, HttpMethod.Post, $"/api/movie-director/projects/{movie.Project.Id}/proposals", new
+        {
+            storyAction = DirectorStoryActionTypes.ExpandSynopsis,
+        });
+
+        var review = proposal.Proposal.StoryReview!;
+        var synopsis = review.SynopsisDevelopment!;
+        Assert.Equal("proposed", synopsis.Status);
+        Assert.Equal("short", synopsis.Scope);
+        Assert.Equal(30, synopsis.DurationSeconds);
+        Assert.Equal(4, synopsis.BeatCount);
+        Assert.Single(synopsis.Complications);
+        Assert.NotEmpty(synopsis.Setup);
+        Assert.NotEmpty(synopsis.ProtagonistMotivation);
+        Assert.NotEmpty(synopsis.IncitingEvent);
+        Assert.NotEmpty(synopsis.Escalation);
+        Assert.NotEmpty(synopsis.ClimaxChoice);
+        Assert.NotEmpty(synopsis.Resolution);
+        Assert.NotEmpty(synopsis.EmotionalArc);
+        Assert.NotEmpty(synopsis.ProposedElements);
+        Assert.Contains("PROPOSED", review.Changes[0].ProposedContent, StringComparison.Ordinal);
+
+        var storyBeforeApproval = await client.GetAsync($"/api/movie-studio/projects/{movie.Project.Id}/story");
+        Assert.Equal(HttpStatusCode.NotFound, storyBeforeApproval.StatusCode);
+
+        var approved = await SendWithCsrf<DirectorProposalDto>(client, HttpMethod.Post, $"/api/movie-director/proposals/{proposal.Proposal.Id}/approve", null);
+        var applied = await SendWithCsrf<DirectorActionExecutionResponse>(client, HttpMethod.Post, $"/api/movie-director/actions/{approved.Actions[0].Id}/execute", null);
+        Assert.Equal(DirectorActionStatuses.Succeeded, applied.Action.Status);
+        var story = await client.GetFromJsonAsync<MovieStoryDto>($"/api/movie-studio/projects/{movie.Project.Id}/story");
+        Assert.NotNull(story?.CurrentRevision);
+        Assert.Empty(story!.CurrentRevision!.Scenes);
+        Assert.Contains("A guarded courier", story.CurrentRevision.Synopsis, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Synopsis_development_refines_medium_story_without_overwriting_approved_foundations()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Medium Synopsis Owner");
+        var movie = await CreateMovie(client, auth.PersonalWorkspace.Id, 1_800);
+        await LockGuide(client, movie.Project.Id);
+        var original = await CreateStory(client, movie.Project.Id, "Human");
+        await SendWithCsrf<MovieStoryRevisionDto>(client, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/story/revisions/{original.CurrentRevisionId}/approve", null);
+
+        var proposal = await SendWithCsrf<DirectorProposalResponse>(client, HttpMethod.Post, $"/api/movie-director/projects/{movie.Project.Id}/proposals", new
+        {
+            storyAction = DirectorStoryActionTypes.DevelopSynopsis,
+        });
+        var synopsis = proposal.Proposal.StoryReview!.SynopsisDevelopment!;
+        Assert.Equal("medium", synopsis.Scope);
+        Assert.Equal(1_800, synopsis.DurationSeconds);
+        Assert.True(synopsis.BeatCount <= 8);
+        Assert.True(synopsis.Complications.Count <= 3);
+        Assert.Equal(original.CurrentRevisionId, proposal.Proposal.StoryReview.BaseRevisionId);
+
+        var approved = await SendWithCsrf<DirectorProposalDto>(client, HttpMethod.Post, $"/api/movie-director/proposals/{proposal.Proposal.Id}/approve", null);
+        await SendWithCsrf<DirectorActionExecutionResponse>(client, HttpMethod.Post, $"/api/movie-director/actions/{approved.Actions[0].Id}/execute", null);
+        var story = await client.GetFromJsonAsync<MovieStoryDto>($"/api/movie-studio/projects/{movie.Project.Id}/story");
+        Assert.Equal(original.Premise, story!.ApprovedRevision!.Premise);
+        Assert.Equal(original.Logline, story.ApprovedRevision.Logline);
+        Assert.Equal(original.Treatment, story.ApprovedRevision.Treatment);
+        Assert.Equal(original.Premise, story.CurrentRevision!.Premise);
+        Assert.Equal(original.Logline, story.CurrentRevision.Logline);
+        Assert.Equal(original.Treatment, story.CurrentRevision.Treatment);
+        Assert.NotEqual(original.Synopsis, story.CurrentRevision.Synopsis);
+    }
+
+    [Fact]
     public async Task Empty_story_without_locked_guide_returns_actionable_prerequisite_not_project_not_found()
     {
         using var client = factory.CreateClient();
@@ -142,11 +217,11 @@ public sealed class MovieDirectorStoryTests : IClassFixture<TaslimApiFactory>
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 
-    private static async Task<MovieStudioProjectResponse> CreateMovie(HttpClient client, Guid workspaceId)
+    private static async Task<MovieStudioProjectResponse> CreateMovie(HttpClient client, Guid workspaceId, int durationSeconds = 120)
     {
         return await SendWithCsrf<MovieStudioProjectResponse>(client, HttpMethod.Post, "/api/movie-studio/projects", new
         {
-            workspaceId, mode = MovieProjectModes.Full, title = $"Director Story {Guid.NewGuid():N}", description = "A bounded Story Director test.", durationSeconds = 120, aspectRatio = "16:9", style = "cinematic", language = "en",
+            workspaceId, mode = MovieProjectModes.Full, title = $"Director Story {Guid.NewGuid():N}", description = "A bounded Story Director test.", durationSeconds, aspectRatio = "16:9", style = "cinematic", language = "en",
         });
     }
 
