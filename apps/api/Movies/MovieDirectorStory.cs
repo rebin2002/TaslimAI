@@ -155,8 +155,11 @@ public sealed record DirectorStoryProposalPlan(
     string Summary,
     IReadOnlyList<string> Rationale);
 
-public sealed class DirectorStoryProposalPlanner(IMovieSynopsisDevelopmentService synopsisDevelopment)
+public sealed class DirectorStoryProposalPlanner(IMovieSynopsisDevelopmentService? synopsisDevelopment = null, IMovieDirectorCreativeOutputValidator? outputValidator = null)
 {
+    private readonly IMovieDirectorCreativeOutputValidator validator = outputValidator ?? new MovieDirectorCreativeOutputValidator(
+        Microsoft.Extensions.Options.Options.Create(new MovieDirectorCreativeOutputValidationOptions()),
+        Microsoft.Extensions.Logging.Abstractions.NullLogger<MovieDirectorCreativeOutputValidator>.Instance);
     public async Task<DirectorStoryProposalPlan> BuildAsync(DirectorProposalRequest request, DirectorStoryBoundedContextDto context, CancellationToken cancellationToken = default)
     {
         var action = DirectorStoryActionTypes.Normalize(request.StoryAction);
@@ -164,6 +167,7 @@ public sealed class DirectorStoryProposalPlanner(IMovieSynopsisDevelopmentServic
             return Build(request, context);
 
         var source = context.CurrentRevision ?? context.ApprovedRevision;
+        if (synopsisDevelopment is null) throw new DirectorSynopsisGenerationException("The synopsis development provider is not configured.");
         var draft = await synopsisDevelopment.GenerateAsync(context, source, cancellationToken);
         return BuildSynopsisPlan(action, source, draft, context.DurationSeconds);
     }
@@ -240,9 +244,14 @@ public sealed class DirectorStoryProposalPlanner(IMovieSynopsisDevelopmentServic
                 throw new DirectorValidationException("Choose a supported Story assistance action.");
         }
 
+        var rawPayload = new DirectorStoryActionPayload(action, baseRevisionId, premise, logline, synopsis, treatment, targetSceneId, targetElementId, proposedScene, replacement, findings, changes, null, groundedFindings);
+        var payloadValidation = validator.ValidateAndRepair(rawPayload, context);
+        if (!payloadValidation.IsValid || payloadValidation.Output is null)
+            throw new DirectorCreativeOutputValidationException(payloadValidation);
+        var payload = payloadValidation.Output;
+        changes = payload.Changes.ToList();
         var applies = !string.Equals(action, DirectorStoryActionTypes.IdentifyInconsistencies, StringComparison.OrdinalIgnoreCase);
-        var review = new DirectorStoryReviewDto(action, baseRevisionId, changes, findings, applies, null, groundedFindings);
-        var payload = new DirectorStoryActionPayload(action, baseRevisionId, premise, logline, synopsis, treatment, targetSceneId, targetElementId, proposedScene, replacement, findings, changes, null, groundedFindings);
+        var review = new DirectorStoryReviewDto(action, baseRevisionId, changes, payload.Findings, applies, payload.SynopsisDevelopment, payload.GroundedFindings);
         var label = Label(action);
         return new DirectorStoryProposalPlan(payload, review, label, $"Review a bounded Director {label.ToLowerInvariant()} proposal before it becomes a new Story revision.", ["provider_independent_deterministic_proposal", "bounded_locked_guide_story_and_reference_context", applies ? "explicit_approval_required_before_story_apply" : "review_only_diagnostic"]);
     }

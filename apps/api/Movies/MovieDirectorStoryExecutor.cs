@@ -5,7 +5,11 @@ using Taslim.Api.Persistence;
 
 namespace Taslim.Api.Movies;
 
-public sealed class MovieDirectorStoryActionExecutor(TaslimDbContext db, IMovieStoryService stories) : IDirectorActionExecutor
+public sealed class MovieDirectorStoryActionExecutor(
+    TaslimDbContext db,
+    IMovieStoryService stories,
+    MovieDirectorContextAssembler assembler,
+    IMovieDirectorCreativeOutputValidator validator) : IDirectorActionExecutor
 {
     public string ActionType => DirectorActionTypes.StoryAssistance;
 
@@ -17,15 +21,29 @@ public sealed class MovieDirectorStoryActionExecutor(TaslimDbContext db, IMovieS
         if (payload is null || !DirectorStoryActionTypes.All.Contains(payload.Action))
             return new(false, "DIRECTOR_STORY_ACTION_INVALID", "The Story proposal payload is invalid.", null);
 
-        if (string.Equals(payload.Action, DirectorStoryActionTypes.IdentifyInconsistencies, StringComparison.OrdinalIgnoreCase))
-            return new(true, null, "The Director findings were recorded for review; no Story text was changed.", JsonSerializer.Serialize(new DirectorStoryApplyResult(false, null, "Review-only Story findings.", payload.Findings)));
-
         var story = await db.MovieStories.AsNoTracking()
             .Include(item => item.Revisions).ThenInclude(item => item.Scenes).ThenInclude(item => item.Elements)
             .SingleOrDefaultAsync(item => item.MovieProjectId == action.MovieProjectId, cancellationToken);
         var current = story?.CurrentRevisionId is Guid currentId ? story.Revisions.SingleOrDefault(item => item.Id == currentId) : null;
         if (story?.CurrentRevisionId != payload.BaseRevisionId)
             return new(false, "DIRECTOR_STORY_BASE_CHANGED", "The Story changed after this proposal was created. Create a fresh proposal before applying it.", null);
+
+        var storyContext = await assembler.AssembleStoryAsync(action.MovieProjectId, payload.TargetSceneId, payload.TargetElementId, cancellationToken);
+        if (storyContext is null)
+            return new(false, "DIRECTOR_CREATIVE_CONTEXT_UNAVAILABLE", "The current locked Story context is unavailable. Create a new proposal after checking the Movie Guide.", null);
+
+        var validation = validator.ValidateAndRepair(payload, storyContext.Value.Context);
+        if (!validation.IsValid || validation.Output is null)
+            return new(
+                false,
+                "DIRECTOR_CREATIVE_OUTPUT_INVALID",
+                "The Director proposal no longer passes Story quality checks. Create a new proposal with the current locked context.",
+                null,
+                validation.ReasonCodes);
+        payload = validation.Output;
+
+        if (string.Equals(payload.Action, DirectorStoryActionTypes.IdentifyInconsistencies, StringComparison.OrdinalIgnoreCase))
+            return new(true, null, "The Director findings were recorded for review; no Story text was changed.", JsonSerializer.Serialize(new DirectorStoryApplyResult(false, null, "Review-only Story findings.", payload.Findings, payload.GroundedFindings)));
 
         var scenes = current?.Scenes.OrderBy(item => item.Ordinal).Select(ToRequest).ToList() ?? [];
         if (payload.ProposedScene is not null) scenes.Add(payload.ProposedScene);
