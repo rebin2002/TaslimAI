@@ -1,5 +1,7 @@
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Taslim.Api.Contracts;
+using Taslim.Api.Domain;
 
 namespace Taslim.Api.Movies;
 
@@ -65,7 +67,9 @@ public sealed record DirectorStoryBoundedContextDto(
     IReadOnlyList<DirectorCharacterContext> RelevantCharacters,
     IReadOnlyList<DirectorLocationContext> RelevantWorldReferences,
     DateTime AssembledAt,
-    int ContextVersion = 1);
+    int ContextVersion = 1,
+    int DurationSeconds = 0,
+    string Language = LanguageCodes.English);
 
 public sealed record DirectorStoryFieldChangeDto(
     string Field,
@@ -130,8 +134,15 @@ public sealed class DirectorStoryProposalPlanner
         switch (action)
         {
             case DirectorStoryActionTypes.DevelopPremise:
-                premise = DevelopPremise(context, source);
+                var premiseAnalysis = AnalyzePremise(context, source);
+                premise = RenderPremise(context, premiseAnalysis);
                 changes.Add(new("premise", null, Bound(source?.Premise), premise));
+                findings.Add("premise_source_facts_preserved");
+                if (premiseAnalysis.SourceFacts.Count > 0 && premiseAnalysis.ProposedAdditions.Count > 0) findings.Add("premise_creative_additions_explicit");
+                findings.Add("creative_additions_goal_stakes_choice_emotional_engine_theme");
+                if (IsGenericBoilerplate(source?.Premise)) findings.Add("generic_premise_boilerplate_replaced");
+                findings.Add($"premise_language_{NormalizeLanguage(context.Language)}");
+                findings.Add(context.DurationSeconds is > 0 and <= 90 ? "premise_duration_short_form" : "premise_duration_full_arc");
                 break;
             case DirectorStoryActionTypes.ImproveLogline:
                 logline = ImproveLogline(context, source);
@@ -179,12 +190,211 @@ public sealed class DirectorStoryProposalPlanner
         return new DirectorStoryProposalPlan(payload, review, label, $"Review a bounded Director {label.ToLowerInvariant()} proposal before it becomes a new Story revision.", ["provider_independent_deterministic_proposal", "bounded_locked_guide_story_and_reference_context", applies ? "explicit_approval_required_before_story_apply" : "review_only_diagnostic"]);
     }
 
-    private static string DevelopPremise(DirectorStoryBoundedContextDto context, DirectorStoryRevisionContext? source)
+    private static string DevelopPremise(DirectorStoryBoundedContextDto context, DirectorStoryRevisionContext? source) => RenderPremise(context, AnalyzePremise(context, source));
+
+    private static PremiseDevelopmentAnalysis AnalyzePremise(DirectorStoryBoundedContextDto context, DirectorStoryRevisionContext? source)
     {
-        var seed = !string.IsNullOrWhiteSpace(context.MovieBrief) ? context.MovieBrief : context.RelevantMovieScenes.FirstOrDefault()?.Summary ?? "The story begins with a central conflict";
-        return string.IsNullOrWhiteSpace(source?.Premise)
-            ? $"{seed}. The choice must carry a consequence."
-            : AppendOnce(source.Premise, " The protagonist's defining choice creates a consequence that cannot be undone.");
+        var sourceFacts = new List<string>();
+        AddFact(sourceFacts, context.MovieBrief);
+        AddFact(sourceFacts, source?.Premise);
+        foreach (var character in context.RelevantCharacters.Take(4))
+        {
+            AddFact(sourceFacts, character.Name);
+            AddFact(sourceFacts, character.Description);
+            AddFact(sourceFacts, character.ContinuityNotes);
+        }
+        foreach (var location in context.RelevantWorldReferences.Take(3))
+        {
+            AddFact(sourceFacts, location.Name);
+            AddFact(sourceFacts, location.Description);
+        }
+
+        var sourceText = string.Join(" ", sourceFacts);
+        var scarceObject = MatchValue(sourceText, @"\b(?:the|a|an|her|his|their|its|my|our)\s+(?:(?:[a-z][a-z-]*['’]s)\s+)?(?:last|only|final|remaining)\s+[a-z][a-z-]*(?:\s+[a-z][a-z-]*){0,2}\b(?=\s+(?:while|but|and|because|that|who|offers?|waits?)\b|[,.!?;]|$)");
+        var relationship = MatchValue(sourceText, @"\b(?:grandfather|grandmother|father|mother|parent|brother|sister|child|mentor|ancestor)\b");
+        var weatherTurn = MatchValue(sourceText, @"\b(?:rain|rains|storm|snow|flood|sun|sunlight|dawn|winter|summer)\b")
+            ?? MatchValue(sourceText, @"\b(?:drought|dry)\b");
+        var protagonist = ResolveProtagonist(context, sourceText);
+        var goal = ResolveGoal(sourceText, scarceObject);
+        var setting = ResolveSetting(context, sourceText);
+        var opposition = ResolveOpposition(context, sourceText);
+        var stakes = ResolveStakes(sourceText, scarceObject, weatherTurn);
+        var emotionalEngine = relationship is not null
+            ? $"the responsibility carried through the {relationship} bond"
+            : HasAny(sourceText, "community", "village", "belong", "together")
+                ? "the need to belong without surrendering conviction"
+                : "the pressure between safety and responsibility";
+        var theme = HasAny(sourceText, "hope", "rain", "community", "village", "together")
+            ? "whether hope is protected by one person or made real through collective risk"
+            : "the cost of choosing responsibility over safety";
+        var sourceHasSpecificAnchor = context.RelevantCharacters.Count > 0
+            || context.RelevantWorldReferences.Count > 0
+            || context.RelevantMovieScenes.Count > 0
+            || scarceObject is not null
+            || relationship is not null
+            || weatherTurn is not null
+            || Regex.IsMatch(sourceText, @"\b(?:young|old|child|farmer|worker|doctor|teacher|parent|sibling|leader|stranger|courier|artist|soldier)\b", RegexOptions.IgnoreCase);
+        var proposedAdditions = new List<string>
+        {
+            $"goal: {goal}",
+            $"stakes: {stakes}",
+            $"emotional_engine: {emotionalEngine}",
+            $"theme: {theme}",
+        };
+        if (weatherTurn is not null) proposedAdditions.Add($"pressure_turn: {weatherTurn} changes the meaning of the choice");
+        return new PremiseDevelopmentAnalysis(sourceFacts, sourceText, protagonist, goal, setting, opposition, stakes, emotionalEngine, theme, scarceObject, relationship, weatherTurn, sourceHasSpecificAnchor, proposedAdditions);
+    }
+
+    private static string RenderPremise(DirectorStoryBoundedContextDto context, PremiseDevelopmentAnalysis analysis)
+    {
+        var language = NormalizeLanguage(context.Language);
+        if (language == LanguageCodes.Arabic) return RenderArabicPremise(context, analysis);
+        if (language == LanguageCodes.Kurdish) return RenderKurdishPremise(context, analysis);
+
+        var subject = analysis.Protagonist.Contains(", ", StringComparison.Ordinal) ? $"{analysis.Protagonist}," : analysis.Protagonist;
+        var opening = $"{subject} must {analysis.Goal} in {analysis.Setting}, while {analysis.Opposition}.";
+        var pressure = analysis.WeatherTurn is not null
+            ? $"As {analysis.WeatherTurn} changes the possibility of renewal, failure could mean {analysis.Stakes}."
+            : $"If the plan fails, {analysis.Stakes}.";
+        var choice = context.DurationSeconds is > 0 and <= 90
+            ? $"That choice exposes {analysis.EmotionalEngine} and asks {analysis.Theme}."
+            : $"The emotional engine is {analysis.EmotionalEngine}: the defining choice is whether to accept a shared risk rather than protect a narrower safety. The story's thematic direction is {analysis.Theme}.";
+        var premise = $"{opening} {pressure} {choice}";
+        if (!analysis.SourceHasSpecificAnchor && !string.IsNullOrWhiteSpace(context.MovieBrief))
+            premise = $"{context.MovieBrief.Trim().TrimEnd('.')}. {premise}";
+        if (IsGenericBoilerplate(premise) && analysis.SourceFacts.Count > 0)
+        {
+            var brief = context.MovieBrief.Trim();
+            premise = $"{(brief.Length <= 280 ? brief : brief[..280]).TrimEnd('.')}. {opening} {pressure} {choice}";
+        }
+        return LimitPremise(premise);
+    }
+
+    private static string RenderArabicPremise(DirectorStoryBoundedContextDto context, PremiseDevelopmentAnalysis analysis)
+    {
+        var brief = !string.IsNullOrWhiteSpace(context.MovieBrief) ? context.MovieBrief.Trim().TrimEnd('.') : analysis.SourceText.Trim().TrimEnd('.');
+        return LimitPremise($"{brief}. يتطور الصراع حول هدف الشخصية الرئيسية في مواجهة ضغط الجماعة أو القوة التي تعيقها، وتصبح المخاطرة مرتبطة بما قد يخسره من يعتمدون على القرار. يدفعها الارتباط العاطفي والمسؤولية إلى اختيار واضح، فيما يختبر الموضوع معنى الأمل حين يتحول الأمان الفردي إلى مخاطرة مشتركة.");
+    }
+
+    private static string RenderKurdishPremise(DirectorStoryBoundedContextDto context, PremiseDevelopmentAnalysis analysis)
+    {
+        var brief = !string.IsNullOrWhiteSpace(context.MovieBrief) ? context.MovieBrief.Trim().TrimEnd('.') : analysis.SourceText.Trim().TrimEnd('.');
+        return LimitPremise($"{brief}. ملمڵانێکەکە لەسەر ئامانجی کەسایەتیی سەرەکی و ئەو بەربەستەی ڕێگری لێ دەکات دروست دەبێت، و شکستهێنان نرخێکی هەیە بۆ ئەوانەی پشت بەو بڕیارە دەبەستن. پەیوەندیی هەستی و بەرپرسیارێتییەکەی ناچار دەکات هەڵبژاردنێکی ڕوون بکات؛ چیرۆکەکەش دەپرسی ئایا هیوا بە پاراستنی تاکەکەس دەمێنێتەوە یان بە مەترسیی هاوبەش دەبێتە ڕاستی.");
+    }
+
+    private sealed record PremiseDevelopmentAnalysis(
+        IReadOnlyList<string> SourceFacts,
+        string SourceText,
+        string Protagonist,
+        string Goal,
+        string Setting,
+        string Opposition,
+        string Stakes,
+        string EmotionalEngine,
+        string Theme,
+        string? ScarceObject,
+        string? Relationship,
+        string? WeatherTurn,
+        bool SourceHasSpecificAnchor,
+        IReadOnlyList<string> ProposedAdditions);
+
+    private static string ResolveProtagonist(DirectorStoryBoundedContextDto context, string sourceText)
+    {
+        var character = context.RelevantCharacters.FirstOrDefault(item => !string.IsNullOrWhiteSpace(item.Name));
+        if (character is not null)
+        {
+            var descriptor = MatchValue($"{character.Description} {character.ContinuityNotes}", @"\b(?:a|an|the)?\s*((?:(?:young|old|elderly|reluctant|ambitious|孤独)\s+)?[a-z][a-z-]*)\b");
+            return descriptor is not null && !descriptor.Equals(character.Name, StringComparison.OrdinalIgnoreCase)
+                ? $"{character.Name}, {descriptor}"
+                : character.Name;
+        }
+
+        var articlePhrase = MatchValue(sourceText, @"\b(?:a|an|the)\s+((?:(?:young|old|elderly|reluctant|ambitious)\s+)?[a-z][a-z-]*(?:\s+[a-z][a-z-]*){0,2})\s+(?=(?:in|from|who|must|needs|tries|seeks|discovers|finds|works|struggles))");
+        return articlePhrase ?? "the central character";
+    }
+
+    private static string ResolveGoal(string sourceText, string? scarceObject)
+    {
+        var modalGoal = MatchValue(sourceText, @"\b(?:must|needs to|tries to|seeks to|wants to|hopes to|works to|is determined to|struggles to|efforts to)\s+([^,.!?;]{2,100})");
+        var directGoal = MatchValue(sourceText, @"\b(?:protect|save|find|deliver|escape|return|plant|defend|unite|survive|restore|build|reclaim|convince|stop|reach|choose|keep)\w*\s+(?:the|a|an|her|his|their|it|them)?\s*[a-z][^,.!?;]{0,70}");
+        var goal = modalGoal is not null && !modalGoal.Contains("decide what to do", StringComparison.OrdinalIgnoreCase)
+            ? modalGoal
+            : directGoal ?? modalGoal;
+        if (string.IsNullOrWhiteSpace(goal)) return "make the defining choice suggested by the brief";
+        goal = Regex.Replace(goal.Trim(), @"^(?:her|his|their|the protagonist's)\s+(?:effort|efforts|plan|attempt|attempts)\s+to\s+", string.Empty, RegexOptions.IgnoreCase);
+        if (scarceObject is not null && Regex.IsMatch(goal, @"\b(?:it|them)\b", RegexOptions.IgnoreCase))
+            goal = Regex.Replace(goal, @"\b(?:it|them)\b", scarceObject, RegexOptions.IgnoreCase);
+        return goal.Trim().TrimEnd('.', ',', ';');
+    }
+
+    private static string ResolveSetting(DirectorStoryBoundedContextDto context, string sourceText)
+    {
+        var setting = MatchValue(sourceText, @"\b(?:in|within|among|inside|across|under)\s+((?:the|a|an)?\s*[a-z][a-z-]*(?:\s+[a-z][a-z-]*){0,4})(?=\s+(?:guards?|holds?|faces?|must|while|where|as|that|who|opposes?|waits?|offers?)\b|[,.!?;]|$)");
+        if (setting is not null) return setting;
+        var location = context.RelevantWorldReferences.FirstOrDefault(item => !string.IsNullOrWhiteSpace(item.Name));
+        return location?.Name ?? "the world defined by the brief";
+    }
+
+    private static string ResolveOpposition(DirectorStoryBoundedContextDto context, string sourceText)
+    {
+        if (HasAny(sourceText, "community", "village", "council", "crowd", "people") && HasAny(sourceText, "oppos", "against", "refus", "block", "pressure", "threat"))
+            return "the community opposing the plan";
+        var opposingClause = MatchValue(sourceText, @"\b(?:but|while|even as|against)\s+([^,.!?;]{2,100})");
+        if (opposingClause is not null) return opposingClause;
+        var character = context.RelevantCharacters.Skip(1).FirstOrDefault(item => !string.IsNullOrWhiteSpace(item.Name));
+        if (character is not null) return $"the pressure exerted by {character.Name}";
+        if (HasAny(sourceText, "drought", "scarcity", "war", "storm", "illness", "deadline", "famine")) return "a force that makes delay costly";
+        return "opposition that tests the protagonist's plan";
+    }
+
+    private static string ResolveStakes(string sourceText, string? scarceObject, string? weatherTurn)
+    {
+        if (scarceObject is not null)
+            return $"losing {scarceObject} could erase the remaining chance of renewal for those who depend on it";
+        if (HasAny(sourceText, "survival", "death", "life", "future", "family", "home", "hope"))
+            return "the future, safety, or belonging the protagonist is trying to protect";
+        return weatherTurn is not null
+            ? "the chance to turn a brief opening into a future for the people at risk"
+            : "the trust, safety, or future the protagonist will lose if the choice fails";
+    }
+
+    private static bool IsGenericBoilerplate(string? premise)
+    {
+        if (string.IsNullOrWhiteSpace(premise)) return false;
+        var normalized = premise.Trim().ToLowerInvariant();
+        var fragments = new[]
+        {
+            "the choice must carry a consequence",
+            "the protagonist's defining choice creates a consequence",
+            "a protagonist faces a defining choice",
+            "the central conflict",
+            "the choice lands with a clear consequence",
+        };
+        return fragments.Any(normalized.Contains);
+    }
+
+    private static string NormalizeLanguage(string? language) => language?.Trim().ToLowerInvariant() switch
+    {
+        LanguageCodes.Arabic => LanguageCodes.Arabic,
+        LanguageCodes.Kurdish => LanguageCodes.Kurdish,
+        _ => LanguageCodes.English,
+    };
+
+    private static string LimitPremise(string value) => value.Trim().Length <= 1_800 ? value.Trim() : $"{value.Trim()[..1_797]}…";
+
+    private static string? MatchValue(string value, string pattern)
+    {
+        var match = Regex.Match(value, pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        if (!match.Success) return null;
+        var result = match.Groups.Count > 1 ? match.Groups[1].Value : match.Value;
+        return string.IsNullOrWhiteSpace(result) ? null : result.Trim();
+    }
+
+    private static bool HasAny(string value, params string[] terms) => terms.Any(term => value.Contains(term, StringComparison.OrdinalIgnoreCase));
+
+    private static void AddFact(ICollection<string> facts, string? value)
+    {
+        if (!string.IsNullOrWhiteSpace(value)) facts.Add(value.Trim());
     }
 
     private static string ImproveLogline(DirectorStoryBoundedContextDto context, DirectorStoryRevisionContext? source) =>
