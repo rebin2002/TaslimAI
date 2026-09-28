@@ -4,15 +4,15 @@
 
 Movie Director V2 gives Taslim one provider-neutral Director surface for a Movie Project. It coordinates context, planning, quality recommendations, proposals, user approval, action execution, explainable decisions, and history without creating a second AI/provider system.
 
-Auto Director is a planning mode, not a fifth quality tier. The selectable quality levels remain **Fast**, **Standard**, **Cinematic**, and **Studio**. Auto Director recommends one of those levels per shot using importance, complexity, continuity sensitivity, budget sensitivity, budget limits, and the shared cost-estimation hook.
+Auto Director is a planning mode, not a fifth quality tier. The selectable quality levels remain **Fast**, **Standard**, **Cinematic**, and **Studio**. Auto Director recommends one of those levels per shot or Story task using importance, complexity, continuity sensitivity where applicable, budget sensitivity, budget limits, and the shared cost-estimation hook. Story quality maps to existing AI Core capability tiers: Fast → Fast, Standard → Smart, and Cinematic/Studio → Advanced.
 
 ## Flow
 
 1. `POST /api/movie-director/projects/{movieProjectId}/proposals` resolves a target (`project`, `story_revision`, `scene`, `shot`, `storyboard_version`, `production_version`, or `take`) and assembles a bounded snapshot of the locked Guide, approved Story when available, target hierarchy, relevant Cast/World, cinematography, production, and relevant collaboration state.
-2. The quality planner produces a provider-neutral recommendation and rationale. The proposal contains a generic plan, estimated USD amount when the shared estimator can determine one, and a generated shot action in `PendingApproval`.
+2. The quality planner produces a provider-neutral recommendation and rationale. For Story tasks it also routes the bounded structured-output request through AI Core; the proposal contains a generic plan, estimated USD amount when the shared estimator can determine one, and a generated action in `PendingApproval`.
 3. `POST /api/movie-director/proposals/{proposalId}/approve` changes the proposal to `Approved` and its actions to `Ready`. This is the explicit user approval boundary.
 4. `POST /api/movie-director/actions/{actionId}/execute` is the separate execution command. An action that is not `Ready` is rejected with `DIRECTOR_APPROVAL_REQUIRED`.
-5. The Movie Director action executor calls the existing `IMovieStudioService`, which creates the existing `movie.clip.generate` Generation Job. The job continues through the existing worker, provider resilience, cost guardrails, quality control, asset publication, and usage ledger.
+5. The Movie Director action executor calls the existing `IMovieStudioService`, which creates the existing `movie.clip.generate` Generation Job. The job continues through the existing worker, provider resilience, cost guardrails, quality control, asset publication, and usage ledger. Story proposal AI usage, when present, completes through the same Usage Ledger rather than a second ledger.
 6. Action results and safe history events are persisted for explainability and replay review. Provider/model identifiers, prompts, storage keys, raw provider responses, and secrets are not returned by Director contracts.
 
 Rejecting a proposal cancels its pending actions. Proposal and action status transitions are durable and history events are append-only records for the current foundation.
@@ -46,8 +46,10 @@ The serialized snapshot has a deterministic `100,000`-byte maximum and a separat
 
 ## Shared Wave 5 boundaries
 
-The Director does **not** add routing, providers, provider enablement, spending, billing, or autonomous execution. It reuses:
+The Director does **not** add providers, provider enablement, spending, billing, a fifth quality tier, or autonomous execution. It reuses existing routing and accounting infrastructure:
 
+- `IChatCompletionService`, `IAiModelRouter`, and the existing AI Core capability tiers for Story tasks;
+- `IAiCostCalculator` and the existing model pricing catalog for internal Story estimates;
 - `IMovieStudioService` and the existing Movie generation request contract;
 - `IGenerationJobService` and `movie.clip.generate`;
 - `IGenerationCostEstimator` via `MovieDirectorCostEstimator`;
@@ -56,7 +58,7 @@ The Director does **not** add routing, providers, provider enablement, spending,
 - `IGenerationQualityControl` through the existing worker;
 - `IGeneratedAssetPublisher`, Assets, private Stored Files, and Usage Ledger.
 
-The default movie provider remains the existing unavailable provider. No new provider is enabled and no paid provider call is made by this foundation.
+The default movie provider remains the existing unavailable provider. No new provider is enabled. Customer charging remains off; internal usage may be recorded through the existing ledger when AI Core returns usage.
 
 ## API surface
 

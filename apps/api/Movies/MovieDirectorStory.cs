@@ -92,7 +92,10 @@ public sealed record DirectorStoryActionPayload(
     MovieStorySceneRequest? ProposedScene,
     string? ReplacementContent,
     IReadOnlyList<string> Findings,
-    IReadOnlyList<DirectorStoryFieldChangeDto> Changes);
+    IReadOnlyList<DirectorStoryFieldChangeDto> Changes,
+    string QualityLevel = DirectorQualityLevels.Fast,
+    string AiCoreTier = "Fast",
+    decimal? EstimatedCostUsd = null);
 
 public sealed record DirectorStoryApplyResult(
     bool Applied,
@@ -105,11 +108,15 @@ public sealed record DirectorStoryProposalPlan(
     DirectorStoryReviewDto Review,
     string Title,
     string Summary,
-    IReadOnlyList<string> Rationale);
+    IReadOnlyList<string> Rationale,
+    DirectorCreativeQualityRecommendation? Routing = null);
 
 public sealed class DirectorStoryProposalPlanner
 {
-    public DirectorStoryProposalPlan Build(DirectorProposalRequest request, DirectorStoryBoundedContextDto context)
+    public DirectorStoryProposalPlan Build(
+        DirectorProposalRequest request,
+        DirectorStoryBoundedContextDto context,
+        DirectorCreativeQualityRecommendation? routing = null)
     {
         var action = DirectorStoryActionTypes.Normalize(request.StoryAction);
         if (action.Length == 0) throw new DirectorValidationException("Choose a supported Story assistance action.");
@@ -174,9 +181,30 @@ public sealed class DirectorStoryProposalPlanner
 
         var applies = !string.Equals(action, DirectorStoryActionTypes.IdentifyInconsistencies, StringComparison.OrdinalIgnoreCase);
         var review = new DirectorStoryReviewDto(action, baseRevisionId, changes, findings, applies);
-        var payload = new DirectorStoryActionPayload(action, baseRevisionId, premise, logline, synopsis, treatment, targetSceneId, targetElementId, proposedScene, replacement, findings, changes);
+        var payload = new DirectorStoryActionPayload(
+            action,
+            baseRevisionId,
+            premise,
+            logline,
+            synopsis,
+            treatment,
+            targetSceneId,
+            targetElementId,
+            proposedScene,
+            replacement,
+            findings,
+            changes,
+            routing?.QualityLevel ?? DirectorQualityLevels.Fast,
+            routing?.AiCoreTier ?? "Fast",
+            routing?.EstimatedCostUsd);
         var label = Label(action);
-        return new DirectorStoryProposalPlan(payload, review, label, $"Review a bounded Director {label.ToLowerInvariant()} proposal before it becomes a new Story revision.", ["provider_independent_deterministic_proposal", "bounded_locked_guide_story_and_reference_context", applies ? "explicit_approval_required_before_story_apply" : "review_only_diagnostic"]);
+        var rationale = new List<string>
+        {
+            routing is null ? "provider_independent_deterministic_proposal" : $"director_quality_{routing.QualityLevel.ToLowerInvariant()}",
+            "bounded_locked_guide_story_and_reference_context",
+            applies ? "explicit_approval_required_before_story_apply" : "review_only_diagnostic",
+        };
+        return new DirectorStoryProposalPlan(payload, review, label, $"Review a bounded Director {label.ToLowerInvariant()} proposal before it becomes a new Story revision.", rationale, routing);
     }
 
     private static string DevelopPremise(DirectorStoryBoundedContextDto context, DirectorStoryRevisionContext? source)

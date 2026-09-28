@@ -12,6 +12,11 @@ public static class DirectorQualityLevels
     public const string Studio = "Studio";
     public const string Auto = "Auto";
 
+    public static readonly IReadOnlySet<string> QualityTiers = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        Fast, Standard, Cinematic, Studio,
+    };
+
     public static readonly IReadOnlySet<string> Selectable = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
         Fast, Standard, Cinematic, Studio, Auto,
