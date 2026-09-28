@@ -23,7 +23,9 @@ public sealed class MockAiProvider(ILogger<MockAiProvider> logger) : IAiProvider
             throw new MockAiProviderException();
         }
 
-        var content = request.StructuredOutput?.Name == "taslim_movie_synopsis_development"
+        var content = request.StructuredOutput?.Name == "taslim_movie_director_story"
+            ? "{\"premise\":\"A guarded courier must choose whether to deliver the truth when silence would keep them safe.\",\"logline\":\"When a hidden message reveals imminent harm, a guarded courier must cross one dangerous night and choose who gets the truth.\",\"synopsis\":\"A guarded courier protects a quiet routine until a hidden message forces a public choice.\",\"treatment\":\"The courier moves from guarded silence to accountable action while preserving the locked guide.\",\"replacementContent\":\"The courier chooses the truth before the safe route closes.\",\"findings\":[]}"
+            : request.StructuredOutput?.Name == "taslim_movie_synopsis_development"
             ? JsonSerializer.Serialize(new
             {
                 premise = "A guarded courier must decide whether to deliver the truth when silence would keep them safe.",
