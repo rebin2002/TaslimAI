@@ -297,6 +297,8 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         var movie = await db.MovieProjects.FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
         if (movie is null || !await collaboration.HasPermissionAsync(userId, id, MoviePermissions.Edit, cancellationToken)) return null;
         if (string.IsNullOrWhiteSpace(request.Title) || string.IsNullOrWhiteSpace(request.Summary)) throw new MovieStudioValidationException("Scene title and summary are required.");
+        var durationValidation = MovieDurationBudgetPolicy.ValidateSceneDuration(request.DurationSeconds);
+        if (durationValidation is not null) throw new MovieStudioValidationException(durationValidation);
         var now = DateTime.UtcNow;
         var scene = new MovieScene { Id = Guid.NewGuid(), MovieProjectId = id, Sequence = await db.MovieScenes.CountAsync(item => item.MovieProjectId == id, cancellationToken) + 1, Title = request.Title.Trim(), Summary = request.Summary.Trim(), DurationSeconds = request.DurationSeconds, ContinuityNotes = MovieStudioHelpers.Clean(request.ContinuityNotes), Narration = MovieStudioHelpers.Clean(request.Narration), Dialogue = MovieStudioHelpers.Clean(request.Dialogue), CreatedAt = now, UpdatedAt = now };
         db.MovieScenes.Add(scene);
@@ -549,6 +551,8 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         var scene = await db.MovieScenes.Include(item => item.MovieProject).FirstOrDefaultAsync(item => item.Id == sceneId, cancellationToken);
         if (scene is null || !await collaboration.HasPermissionAsync(userId, scene.MovieProjectId, MoviePermissions.Edit, cancellationToken)) return null;
         if (string.IsNullOrWhiteSpace(request.Description)) throw new MovieStudioValidationException("Shot description is required.");
+        var durationValidation = MovieDurationBudgetPolicy.ValidateShotDuration(request.DurationSeconds);
+        if (durationValidation is not null) throw new MovieStudioValidationException(durationValidation);
         var cinematographyValidation = CinematographyIntentValidator.Validate(request.Cinematography);
         if (cinematographyValidation is not null) throw new MovieStudioValidationException(cinematographyValidation);
         await ValidateSubjectCharacterIdsAsync(request.SubjectCharacterIds, scene.MovieProjectId, cancellationToken);
@@ -588,6 +592,8 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         var shot = await PlanningShotQuery().FirstOrDefaultAsync(item => item.Id == shotId, cancellationToken);
         if (shot is null || !await collaboration.HasPermissionAsync(userId, shot.Scene.MovieProjectId, MoviePermissions.Edit, cancellationToken)) return null;
         if (string.IsNullOrWhiteSpace(request.Description)) throw new MovieStudioValidationException("Shot description is required.");
+        var durationValidation = MovieDurationBudgetPolicy.ValidateShotDuration(request.DurationSeconds);
+        if (durationValidation is not null) throw new MovieStudioValidationException(durationValidation);
         if (!string.IsNullOrWhiteSpace(request.Status) && !MovieShotStatuses.Supported.Contains(request.Status.Trim())) throw new MovieStudioValidationException("Shot status is not supported.");
         if (string.Equals(request.Status?.Trim(), MovieShotStatuses.Approved, StringComparison.OrdinalIgnoreCase) && !await collaboration.HasPermissionAsync(userId, shot.Scene.MovieProjectId, MoviePermissions.Approve, cancellationToken)) return null;
         var cinematographyValidation = CinematographyIntentValidator.Validate(request.Cinematography);
