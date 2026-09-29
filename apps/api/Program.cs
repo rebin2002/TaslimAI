@@ -8,6 +8,7 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using System.Security.Claims;
 using Taslim.Api.Ai;
 using Taslim.Api.Activity;
@@ -191,6 +192,11 @@ builder.Services.AddScoped<IGenerationBudgetService, GenerationBudgetService>();
 builder.Services.AddScoped<IAdminUsageService, AdminUsageService>();
 builder.Services.AddScoped<IAdminOperationsService, AdminOperationsService>();
 builder.Services.AddScoped<ProviderHealthService>();
+builder.Services.AddOptions<ProviderCapabilityRegistryOptions>()
+    .Bind(builder.Configuration.GetSection("ProviderCapabilities"))
+    .ValidateOnStart();
+builder.Services.AddSingleton<IValidateOptions<ProviderCapabilityRegistryOptions>, ProviderCapabilityRegistryOptionsValidator>();
+builder.Services.AddSingleton<IProviderCapabilityRegistry, ProviderCapabilityRegistry>();
 builder.Services.Configure<GenerationJobOptions>(builder.Configuration.GetSection("GenerationJobs"));
 builder.Services.Configure<ProviderResilienceOptions>(builder.Configuration.GetSection("ProviderResilience"));
 builder.Services.AddScoped<IGenerationJobQueue, DatabaseGenerationJobQueue>();
