@@ -131,6 +131,7 @@ public static class GenerationJobErrorCodes
     public const string TypeNotSupported = "JOB_TYPE_NOT_SUPPORTED";
     public const string Cancelled = "JOB_CANCELLED";
     public const string ExecutionFailed = "JOB_EXECUTION_FAILED";
+    public const string NoBillableAsset = "GENERATION_NO_BILLABLE_ASSET";
     public const string NotCancellable = "JOB_NOT_CANCELLABLE";
     public const string NotFound = "JOB_NOT_FOUND";
     public const string ImageRequestInvalid = "IMAGE_REQUEST_INVALID";
@@ -454,7 +455,11 @@ public enum UsageTransactionStatus
     Cancelled,
     Refunded,
 }
-
+public enum UsageTransactionAdjustmentType
+{
+    Refund,
+    Reversal,
+}
 public static class UsageCostBasis
 {
     public const string Actual = "Actual";
@@ -781,6 +786,8 @@ public sealed class UsageTransaction
     public decimal ProviderCostUsd { get; set; }
     public bool ProviderCostKnown { get; set; }
     public decimal ChargedAmount { get; set; }
+    public decimal ReversedAmount { get; set; }
+    public bool IsBillable { get; set; }
     public UsageChargeUnit ChargedUnit { get; set; } = UsageChargeUnit.Usd;
     public string Currency { get; set; } = "USD";
     public string? CostBasis { get; set; }
@@ -792,11 +799,33 @@ public sealed class UsageTransaction
     public string? AnomalyCode { get; set; }
     public DateTime? AnomalyDetectedAt { get; set; }
     public DateTime CreatedAt { get; set; }
+    public DateTime? ReservedAt { get; set; }
+    public DateTime? ActualRecordedAt { get; set; }
+    public DateTime? BillableAt { get; set; }
     public DateTime? CompletedAt { get; set; }
     public DateTime? RefundedAt { get; set; }
     public string? FailureCode { get; set; }
 
     public GenerationJob? GenerationJob { get; set; }
+    public ICollection<UsageTransactionAdjustment> Adjustments { get; set; } = [];
+    public decimal NetChargedAmount => Math.Max(0m, ChargedAmount - ReversedAmount);
+}
+
+public sealed class UsageTransactionAdjustment
+{
+    public Guid Id { get; set; }
+    public Guid WorkspaceId { get; set; }
+    public Guid UsageTransactionId { get; set; }
+    public UsageTransactionAdjustmentType Type { get; set; }
+    public decimal AmountUsd { get; set; }
+    public string Currency { get; set; } = UsageCurrencies.Usd;
+    public string IdempotencyKey { get; set; } = string.Empty;
+    public string Reason { get; set; } = string.Empty;
+    public Guid? ActorUserId { get; set; }
+    public DateTime CreatedAt { get; set; }
+
+    public Workspace Workspace { get; set; } = null!;
+    public UsageTransaction UsageTransaction { get; set; } = null!;
 }
 
 public sealed record AiProviderDefinition(string Key, string Name, bool Enabled);

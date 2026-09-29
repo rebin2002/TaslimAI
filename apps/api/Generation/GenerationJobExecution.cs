@@ -106,7 +106,7 @@ public sealed class SystemTestGenerationJobHandler : IGenerationJobHandler
 public interface IGenerationJobUsageService
 {
     Task<UsageTransaction> BeginAsync(GenerationJob job, decimal? estimatedProviderCostUsd = null, CancellationToken cancellationToken = default);
-    Task CompleteAsync(UsageTransaction transaction, AiUsageMetadata usage, CancellationToken cancellationToken = default);
+    Task CompleteAsync(UsageTransaction transaction, AiUsageMetadata usage, bool hasBillableAsset = true, CancellationToken cancellationToken = default);
     Task FailAsync(UsageTransaction transaction, string failureCode, AiUsageMetadata? usage = null, CancellationToken cancellationToken = default);
     Task CancelAsync(UsageTransaction transaction, string cancellationCode, CancellationToken cancellationToken = default);
 }
@@ -142,8 +142,10 @@ public sealed class GenerationJobUsageService(IUsageLedgerService ledger) : IGen
             estimatedProviderCostUsd,
             job.CostEstimateJson);
 
-    public Task CompleteAsync(UsageTransaction transaction, AiUsageMetadata usage, CancellationToken cancellationToken = default) =>
-        ledger.CompleteAsync(transaction, usage, cancellationToken);
+    public Task CompleteAsync(UsageTransaction transaction, AiUsageMetadata usage, bool hasBillableAsset = true, CancellationToken cancellationToken = default) =>
+        hasBillableAsset
+            ? ledger.CompleteAsync(transaction, usage, cancellationToken)
+            : ledger.FailAsync(transaction, GenerationJobErrorCodes.NoBillableAsset, usage, cancellationToken);
 
     public Task FailAsync(UsageTransaction transaction, string failureCode, AiUsageMetadata? usage = null, CancellationToken cancellationToken = default) =>
         ledger.FailAsync(transaction, failureCode, usage, cancellationToken);
@@ -449,6 +451,10 @@ public sealed class GenerationJobValidationException(string code, string message
 }
 
 public sealed class GenerationJobForbiddenException : Exception;
+public sealed class GenerationNoBillableAssetException(AiUsageMetadata? usage) : Exception
+{
+    public AiUsageMetadata? Usage { get; } = usage;
+}
 
 public sealed class GenerationJobWorker(
     IServiceScopeFactory scopeFactory,
@@ -641,6 +647,8 @@ public sealed class GenerationJobWorker(
                 }
             }
             AttachAssetRepresentations(publications);
+            if (!publications.Any(item => item.Asset is not null))
+                throw new GenerationNoBillableAssetException(providerUsage);
             var resultJson = AddPublishedAssetReference(result.ResultJson, publications);
             if (result.Usage is not null)
             {
@@ -676,7 +684,7 @@ public sealed class GenerationJobWorker(
                             db.GenerationJobOutputs.Add(publication.Output);
                             if (publication.Asset is not null) db.Assets.Add(publication.Asset);
                         }
-                        await usage.CompleteAsync(await usage.BeginAsync(current, cancellationToken: stoppingToken), result.Usage ?? new AiUsageMetadata("system", "unknown", null, null, null, 0m, 0m, 0, "completed", true), stoppingToken);
+                        await usage.CompleteAsync(await usage.BeginAsync(current, cancellationToken: stoppingToken), result.Usage ?? new AiUsageMetadata("system", "unknown", null, null, null, 0m, 0m, 0, "completed", true), hasBillableAsset: true, cancellationToken: stoppingToken);
                         await completionTransaction.CommitAsync(stoppingToken);
                     }
                 }
@@ -1070,7 +1078,8 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
 
     private static string MapFailureCode(Exception exception, string jobType)
     {
-if (exception is GenerationBudgetRejectedException budgetRejected) return budgetRejected.Code;
+        if (exception is GenerationNoBillableAssetException) return GenerationJobErrorCodes.NoBillableAsset;
+        if (exception is GenerationBudgetRejectedException budgetRejected) return budgetRejected.Code;
         var qualityFailure = exception as GenerationQualityControlException ?? exception.InnerException as GenerationQualityControlException;
         if (qualityFailure is not null)
         {
@@ -1214,6 +1223,7 @@ if (exception is GenerationBudgetRejectedException budgetRejected) return budget
 
     private static string FailureMessage(string code) => code switch
     {
+        GenerationJobErrorCodes.NoBillableAsset => "The generation completed without a publishable asset. Please try again.",
         GenerationJobErrorCodes.ImageProviderUnavailable => "Image generation is temporarily unavailable. Please try again later.",
         GenerationJobErrorCodes.ImageRequestInvalid => "Please check the image request and try again.",
         GenerationJobErrorCodes.ImageSafetyRefusal => "This request could not be completed by the image safety system. Try a different description.",

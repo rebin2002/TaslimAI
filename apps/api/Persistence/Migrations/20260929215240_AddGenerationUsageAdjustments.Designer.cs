@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using Taslim.Api.Persistence;
@@ -11,9 +12,11 @@ using Taslim.Api.Persistence;
 namespace Taslim.Api.Persistence.Migrations
 {
     [DbContext(typeof(TaslimDbContext))]
-    partial class TaslimDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260929215240_AddGenerationUsageAdjustments")]
+    partial class AddGenerationUsageAdjustments
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -169,332 +172,6 @@ namespace Taslim.Api.Persistence.Migrations
                     b.HasKey("UserId", "LoginProvider", "Name");
 
                     b.ToTable("AspNetUserTokens", (string)null);
-                });
-
-            modelBuilder.Entity("Taslim.Api.Benchmarking.ProviderBenchmarkEvidence", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<DateTime>("CapturedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("ContentHash")
-                        .HasMaxLength(128)
-                        .HasColumnType("character varying(128)");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("EvidenceKey")
-                        .IsRequired()
-                        .HasMaxLength(180)
-                        .HasColumnType("character varying(180)");
-
-                    b.Property<string>("EvidenceType")
-                        .IsRequired()
-                        .HasMaxLength(60)
-                        .HasColumnType("character varying(60)");
-
-                    b.Property<string>("PayloadJson")
-                        .HasMaxLength(40000)
-                        .HasColumnType("character varying(40000)");
-
-                    b.Property<string>("ProvenanceJson")
-                        .HasMaxLength(20000)
-                        .HasColumnType("character varying(20000)");
-
-                    b.Property<Guid>("ProviderBenchmarkMeasurementId")
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("Reference")
-                        .HasMaxLength(600)
-                        .HasColumnType("character varying(600)");
-
-                    b.Property<string>("Source")
-                        .IsRequired()
-                        .HasMaxLength(160)
-                        .HasColumnType("character varying(160)");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("EvidenceType", "CapturedAt");
-
-                    b.HasIndex("ProviderBenchmarkMeasurementId", "EvidenceKey")
-                        .IsUnique();
-
-                    b.ToTable("ProviderBenchmarkEvidence");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Benchmarking.ProviderBenchmarkMeasurement", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<bool>("ActualCostKnown")
-                        .HasColumnType("boolean");
-
-                    b.Property<decimal?>("ActualCostUsd")
-                        .HasPrecision(18, 8)
-                        .HasColumnType("numeric(18,8)");
-
-                    b.Property<int>("AttemptNumber")
-                        .HasColumnType("integer");
-
-                    b.Property<DateTime?>("CompletedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<decimal?>("ContinuityScore")
-                        .HasPrecision(5, 2)
-                        .HasColumnType("numeric(5,2)");
-
-                    b.Property<string>("Currency")
-                        .IsRequired()
-                        .HasMaxLength(3)
-                        .HasColumnType("character varying(3)");
-
-                    b.Property<string>("ErrorCode")
-                        .HasMaxLength(100)
-                        .HasColumnType("character varying(100)");
-
-                    b.Property<decimal?>("EstimatedCostUsd")
-                        .HasPrecision(18, 8)
-                        .HasColumnType("numeric(18,8)");
-
-                    b.Property<long?>("GenerationLatencyMs")
-                        .HasColumnType("bigint");
-
-                    b.Property<string>("MeasurementKey")
-                        .IsRequired()
-                        .HasMaxLength(180)
-                        .HasColumnType("character varying(180)");
-
-                    b.Property<string>("MetricsJson")
-                        .HasMaxLength(40000)
-                        .HasColumnType("character varying(40000)");
-
-                    b.Property<string>("ModelKey")
-                        .IsRequired()
-                        .HasMaxLength(160)
-                        .HasColumnType("character varying(160)");
-
-                    b.Property<long?>("OutputBytes")
-                        .HasColumnType("bigint");
-
-                    b.Property<int?>("OutputDurationMs")
-                        .HasColumnType("integer");
-
-                    b.Property<int?>("OutputHeight")
-                        .HasColumnType("integer");
-
-                    b.Property<int?>("OutputWidth")
-                        .HasColumnType("integer");
-
-                    b.Property<decimal?>("PromptAdherenceScore")
-                        .HasPrecision(5, 2)
-                        .HasColumnType("numeric(5,2)");
-
-                    b.Property<string>("ProvenanceJson")
-                        .HasMaxLength(20000)
-                        .HasColumnType("character varying(20000)");
-
-                    b.Property<Guid>("ProviderBenchmarkRunId")
-                        .HasColumnType("uuid");
-
-                    b.Property<Guid>("ProviderBenchmarkScenarioId")
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("ProviderKey")
-                        .IsRequired()
-                        .HasMaxLength(80)
-                        .HasColumnType("character varying(80)");
-
-                    b.Property<decimal?>("QualityScore")
-                        .HasPrecision(5, 2)
-                        .HasColumnType("numeric(5,2)");
-
-                    b.Property<long?>("QueueLatencyMs")
-                        .HasColumnType("bigint");
-
-                    b.Property<DateTime>("RecordedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<int>("RetryCount")
-                        .HasColumnType("integer");
-
-                    b.Property<DateTime>("StartedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("Status")
-                        .IsRequired()
-                        .HasMaxLength(30)
-                        .HasColumnType("character varying(30)");
-
-                    b.Property<decimal?>("TemporalStabilityScore")
-                        .HasPrecision(5, 2)
-                        .HasColumnType("numeric(5,2)");
-
-                    b.Property<long?>("TimeToFirstFrameMs")
-                        .HasColumnType("bigint");
-
-                    b.Property<long?>("TotalLatencyMs")
-                        .HasColumnType("bigint");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("ProviderBenchmarkRunId", "MeasurementKey")
-                        .IsUnique();
-
-                    b.HasIndex("ProviderBenchmarkScenarioId", "ProviderKey", "ModelKey");
-
-                    b.HasIndex("ProviderKey", "ModelKey", "RecordedAt");
-
-                    b.ToTable("ProviderBenchmarkMeasurements");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Benchmarking.ProviderBenchmarkRun", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("BenchmarkDefinition")
-                        .IsRequired()
-                        .HasMaxLength(160)
-                        .HasColumnType("character varying(160)");
-
-                    b.Property<DateTime?>("CompletedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("CompletionCode")
-                        .HasMaxLength(100)
-                        .HasColumnType("character varying(100)");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("EnvironmentFingerprint")
-                        .HasMaxLength(240)
-                        .HasColumnType("character varying(240)");
-
-                    b.Property<string>("FixtureManifestHash")
-                        .HasMaxLength(128)
-                        .HasColumnType("character varying(128)");
-
-                    b.Property<string>("HarnessVersion")
-                        .HasMaxLength(80)
-                        .HasColumnType("character varying(80)");
-
-                    b.Property<string>("ProvenanceJson")
-                        .HasMaxLength(20000)
-                        .HasColumnType("character varying(20000)");
-
-                    b.Property<string>("RunKey")
-                        .IsRequired()
-                        .HasMaxLength(180)
-                        .HasColumnType("character varying(180)");
-
-                    b.Property<DateTime>("StartedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("Status")
-                        .IsRequired()
-                        .HasMaxLength(30)
-                        .HasColumnType("character varying(30)");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("RunKey")
-                        .IsUnique();
-
-                    b.HasIndex("Status", "CreatedAt");
-
-                    b.ToTable("ProviderBenchmarkRuns");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Benchmarking.ProviderBenchmarkScenario", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("AspectRatio")
-                        .HasMaxLength(30)
-                        .HasColumnType("character varying(30)");
-
-                    b.Property<string>("CameraMotion")
-                        .HasMaxLength(120)
-                        .HasColumnType("character varying(120)");
-
-                    b.Property<string>("CharacteristicsHash")
-                        .IsRequired()
-                        .HasMaxLength(128)
-                        .HasColumnType("character varying(128)");
-
-                    b.Property<string>("CharacteristicsJson")
-                        .HasMaxLength(40000)
-                        .HasColumnType("character varying(40000)");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<int?>("DurationSeconds")
-                        .HasColumnType("integer");
-
-                    b.Property<string>("FixtureProvenanceJson")
-                        .HasMaxLength(20000)
-                        .HasColumnType("character varying(20000)");
-
-                    b.Property<string>("FixtureRevision")
-                        .IsRequired()
-                        .HasMaxLength(80)
-                        .HasColumnType("character varying(80)");
-
-                    b.Property<bool?>("HasDialogue")
-                        .HasColumnType("boolean");
-
-                    b.Property<bool?>("HasNativeAudio")
-                        .HasColumnType("boolean");
-
-                    b.Property<Guid>("ProviderBenchmarkRunId")
-                        .HasColumnType("uuid");
-
-                    b.Property<int?>("ReferenceFrameCount")
-                        .HasColumnType("integer");
-
-                    b.Property<bool?>("RequiresCharacterContinuity")
-                        .HasColumnType("boolean");
-
-                    b.Property<string>("ScenarioKey")
-                        .IsRequired()
-                        .HasMaxLength(160)
-                        .HasColumnType("character varying(160)");
-
-                    b.Property<string>("ShotType")
-                        .IsRequired()
-                        .HasMaxLength(80)
-                        .HasColumnType("character varying(80)");
-
-                    b.Property<int?>("SubjectCount")
-                        .HasColumnType("integer");
-
-                    b.Property<string>("TargetResolution")
-                        .HasMaxLength(40)
-                        .HasColumnType("character varying(40)");
-
-                    b.Property<DateTime>("UpdatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("CharacteristicsHash", "ShotType");
-
-                    b.HasIndex("ProviderBenchmarkRunId", "ScenarioKey")
-                        .IsUnique();
-
-                    b.ToTable("ProviderBenchmarkScenarios");
                 });
 
             modelBuilder.Entity("Taslim.Api.Domain.ActivityReadState", b =>
@@ -1224,9 +901,6 @@ namespace Taslim.Api.Persistence.Migrations
                     b.Property<int>("RetryCount")
                         .HasColumnType("integer");
 
-                    b.Property<Guid?>("RetryOfJobId")
-                        .HasColumnType("uuid");
-
                     b.Property<DateTime?>("StartedAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -1245,8 +919,6 @@ namespace Taslim.Api.Persistence.Migrations
                     b.HasKey("Id");
 
                     b.HasIndex("ProjectId");
-
-                    b.HasIndex("RetryOfJobId");
 
                     b.HasIndex("CreatedByUserId", "IdempotencyKey")
                         .IsUnique()
@@ -1966,72 +1638,6 @@ namespace Taslim.Api.Persistence.Migrations
                     b.HasIndex("WorkspaceId", "Status");
 
                     b.ToTable("Projects");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Domain.ProviderCapabilityPricing", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("CapabilityKey")
-                        .IsRequired()
-                        .HasMaxLength(80)
-                        .HasColumnType("character varying(80)");
-
-                    b.Property<string>("ProviderKey")
-                        .IsRequired()
-                        .HasMaxLength(80)
-                        .HasColumnType("character varying(80)");
-
-                    b.Property<string>("ModelKey")
-                        .IsRequired()
-                        .HasMaxLength(160)
-                        .HasColumnType("character varying(160)");
-
-                    b.Property<string>("SourceResolution")
-                        .IsRequired()
-                        .HasMaxLength(20)
-                        .HasColumnType("character varying(20)");
-
-                    b.Property<string>("TargetResolution")
-                        .IsRequired()
-                        .HasMaxLength(20)
-                        .HasColumnType("character varying(20)");
-
-                    b.Property<string>("QualityTier")
-                        .IsRequired()
-                        .HasMaxLength(30)
-                        .HasColumnType("character varying(30)");
-
-                    b.Property<string>("ProcessingPath")
-                        .IsRequired()
-                        .HasMaxLength(60)
-                        .HasColumnType("character varying(60)");
-
-                    b.Property<bool>("SupportsUpscaling").HasColumnType("boolean");
-                    b.Property<int>("MaxDurationSeconds").HasColumnType("integer");
-                    b.Property<int>("MaxRetryAttempts").HasColumnType("integer");
-                    b.Property<int>("MaxUpscalePasses").HasColumnType("integer");
-                    b.Property<decimal?>("BasePriceUsdPerSecondMin").HasPrecision(18, 8).HasColumnType("numeric(18,8)");
-                    b.Property<decimal?>("BasePriceUsdPerSecondMax").HasPrecision(18, 8).HasColumnType("numeric(18,8)");
-                    b.Property<decimal?>("BasePriceUsdFixedMin").HasPrecision(18, 8).HasColumnType("numeric(18,8)");
-                    b.Property<decimal?>("BasePriceUsdFixedMax").HasPrecision(18, 8).HasColumnType("numeric(18,8)");
-                    b.Property<decimal?>("UpscalePriceUsdPerSecondMin").HasPrecision(18, 8).HasColumnType("numeric(18,8)");
-                    b.Property<decimal?>("UpscalePriceUsdPerSecondMax").HasPrecision(18, 8).HasColumnType("numeric(18,8)");
-                    b.Property<decimal?>("UpscalePriceUsdFixedMin").HasPrecision(18, 8).HasColumnType("numeric(18,8)");
-                    b.Property<decimal?>("UpscalePriceUsdFixedMax").HasPrecision(18, 8).HasColumnType("numeric(18,8)");
-                    b.Property<string>("Currency").IsRequired().HasMaxLength(3).HasColumnType("character varying(3)");
-                    b.Property<string>("PricingVersion").IsRequired().HasMaxLength(100).HasColumnType("character varying(100)");
-                    b.Property<DateTime>("EffectiveAtUtc").HasColumnType("timestamp with time zone");
-                    b.Property<string>("Source").IsRequired().HasMaxLength(500).HasColumnType("character varying(500)");
-                    b.Property<bool>("IsActive").HasColumnType("boolean");
-                    b.Property<DateTime>("CreatedAt").HasColumnType("timestamp with time zone");
-                    b.Property<DateTime>("UpdatedAt").HasColumnType("timestamp with time zone");
-                    b.HasKey("Id");
-                    b.HasIndex("CapabilityKey", "IsActive", "ProviderKey", "ModelKey");
-                    b.HasIndex("SourceResolution", "TargetResolution", "QualityTier", "ProcessingPath");
-                    b.ToTable("ProviderCapabilityPricings");
                 });
 
             modelBuilder.Entity("Taslim.Api.Domain.ProviderCircuit", b =>
@@ -3775,116 +3381,6 @@ namespace Taslim.Api.Persistence.Migrations
                     b.ToTable("MovieContinuityLocks");
                 });
 
-            modelBuilder.Entity("Taslim.Api.Movies.MovieFinalMaster", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<DateTime?>("CompletedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<Guid?>("GenerationJobId")
-                        .HasColumnType("uuid");
-
-                    b.Property<Guid>("MovieProjectId")
-                        .HasColumnType("uuid");
-
-                    b.Property<Guid>("MovieShotId")
-                        .HasColumnType("uuid");
-
-                    b.Property<Guid?>("OutputAssetId")
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("ProvenanceJson")
-                        .HasMaxLength(20000)
-                        .HasColumnType("character varying(20000)");
-
-                    b.Property<string>("QcResultJson")
-                        .HasMaxLength(20000)
-                        .HasColumnType("character varying(20000)");
-
-                    b.Property<string>("QcStatus")
-                        .IsRequired()
-                        .HasMaxLength(30)
-                        .HasColumnType("character varying(30)");
-
-                    b.Property<DateTime>("RequestedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<Guid>("RequestedByUserId")
-                        .HasColumnType("uuid");
-
-                    b.Property<Guid?>("SourceAssetId")
-                        .HasColumnType("uuid");
-
-                    b.Property<int?>("SourceHeight")
-                        .HasColumnType("integer");
-
-                    b.Property<Guid?>("SourceMovieClipId")
-                        .HasColumnType("uuid");
-
-                    b.Property<Guid>("SourceTakeId")
-                        .HasColumnType("uuid");
-
-                    b.Property<int?>("SourceWidth")
-                        .HasColumnType("integer");
-
-                    b.Property<string>("State")
-                        .IsRequired()
-                        .HasMaxLength(40)
-                        .HasColumnType("character varying(40)");
-
-                    b.Property<string>("StateReason")
-                        .HasMaxLength(2000)
-                        .HasColumnType("character varying(2000)");
-
-                    b.Property<DateTime?>("SupersededAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<Guid?>("SupersededByMasterId")
-                        .HasColumnType("uuid");
-
-                    b.Property<Guid?>("SupersedesMasterId")
-                        .HasColumnType("uuid");
-
-                    b.Property<int>("TargetHeight")
-                        .HasColumnType("integer");
-
-                    b.Property<string>("TargetProfile")
-                        .IsRequired()
-                        .HasMaxLength(40)
-                        .HasColumnType("character varying(40)");
-
-                    b.Property<int>("TargetWidth")
-                        .HasColumnType("integer");
-
-                    b.Property<DateTime>("UpdatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("GenerationJobId");
-
-                    b.HasIndex("MovieProjectId");
-
-                    b.HasIndex("OutputAssetId");
-
-                    b.HasIndex("RequestedByUserId");
-
-                    b.HasIndex("SourceAssetId");
-
-                    b.HasIndex("SourceMovieClipId");
-
-                    b.HasIndex("SupersedesMasterId");
-
-                    b.HasIndex("MovieShotId", "RequestedAt");
-
-                    b.HasIndex("SourceTakeId", "TargetProfile", "SupersededByMasterId");
-
-                    b.ToTable("MovieFinalMasters");
-                });
-
             modelBuilder.Entity("Taslim.Api.Movies.MovieGuideRevision", b =>
                 {
                     b.Property<Guid>("Id")
@@ -5255,9 +4751,6 @@ namespace Taslim.Api.Persistence.Migrations
                         .HasColumnType("character varying(20)")
                         .HasDefaultValue("Standard");
 
-                    b.Property<Guid?>("RetryOfTakeId")
-                        .HasColumnType("uuid");
-
                     b.Property<DateTime?>("SelectedAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -5269,7 +4762,7 @@ namespace Taslim.Api.Persistence.Migrations
                         .ValueGeneratedOnAdd()
                         .HasMaxLength(30)
                         .HasColumnType("character varying(30)")
-                        .HasDefaultValue("Planned");
+                        .HasDefaultValue("Draft");
 
                     b.Property<DateTime?>("StatusChangedAt")
                         .HasColumnType("timestamp with time zone");
@@ -5293,8 +4786,6 @@ namespace Taslim.Api.Persistence.Migrations
 
                     b.HasIndex("MovieProductionVersionId")
                         .IsUnique();
-
-                    b.HasIndex("RetryOfTakeId");
 
                     b.HasIndex("MovieShotId", "Status");
 
@@ -5335,73 +4826,6 @@ namespace Taslim.Api.Persistence.Migrations
                     b.HasIndex("MovieTakeId", "CreatedAt");
 
                     b.ToTable("MovieTakeApprovals");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Movies.MovieTakeUpscaleAudit", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<DateTime?>("CompletedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("EligibilityCode")
-                        .IsRequired()
-                        .HasMaxLength(60)
-                        .HasColumnType("character varying(60)");
-
-                    b.Property<Guid?>("GenerationJobId")
-                        .HasColumnType("uuid");
-
-                    b.Property<Guid>("MovieProjectId")
-                        .HasColumnType("uuid");
-
-                    b.Property<Guid>("MovieTakeId")
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("OutcomeNote")
-                        .HasMaxLength(500)
-                        .HasColumnType("character varying(500)");
-
-                    b.Property<Guid>("RequestedByUserId")
-                        .HasColumnType("uuid");
-
-                    b.Property<Guid?>("SourceAssetId")
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("SourceResolution")
-                        .HasMaxLength(20)
-                        .HasColumnType("character varying(20)");
-
-                    b.Property<string>("Status")
-                        .IsRequired()
-                        .HasMaxLength(30)
-                        .HasColumnType("character varying(30)");
-
-                    b.Property<string>("TargetMasterResolution")
-                        .IsRequired()
-                        .HasMaxLength(20)
-                        .HasColumnType("character varying(20)");
-
-                    b.Property<bool>("WasFinal")
-                        .HasColumnType("boolean");
-
-                    b.Property<bool>("WasSelected")
-                        .HasColumnType("boolean");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("RequestedByUserId");
-
-                    b.HasIndex("MovieProjectId", "CreatedAt");
-
-                    b.HasIndex("MovieTakeId", "CreatedAt");
-
-                    b.ToTable("MovieTakeUpscaleAudits");
                 });
 
             modelBuilder.Entity("Taslim.Api.Movies.MovieTeamMember", b =>
@@ -5711,230 +5135,6 @@ namespace Taslim.Api.Persistence.Migrations
                     b.ToTable("Notifications");
                 });
 
-            modelBuilder.Entity("Taslim.Api.Upscaling.UpscalingAttempt", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<int>("AttemptNumber")
-                        .HasColumnType("integer");
-
-                    b.Property<DateTime?>("CompletedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("ExecutionReference")
-                        .HasMaxLength(240)
-                        .HasColumnType("character varying(240)");
-
-                    b.Property<string>("FailureCode")
-                        .HasMaxLength(100)
-                        .HasColumnType("character varying(100)");
-
-                    b.Property<string>("IdempotencyKey")
-                        .IsRequired()
-                        .HasMaxLength(180)
-                        .HasColumnType("character varying(180)");
-
-                    b.Property<bool>("Retryable")
-                        .HasColumnType("boolean");
-
-                    b.Property<string>("SafeMetadataJson")
-                        .HasMaxLength(8000)
-                        .HasColumnType("character varying(8000)");
-
-                    b.Property<DateTime>("StartedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("Status")
-                        .IsRequired()
-                        .HasMaxLength(40)
-                        .HasColumnType("character varying(40)");
-
-                    b.Property<Guid>("UpscalingJobId")
-                        .HasColumnType("uuid");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("UpscalingJobId", "AttemptNumber")
-                        .IsUnique();
-
-                    b.HasIndex("UpscalingJobId", "IdempotencyKey");
-
-                    b.ToTable("UpscalingAttempts");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Upscaling.UpscalingJob", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<DateTime?>("CancelledAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<DateTime?>("CompletedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<Guid>("CreatedByUserId")
-                        .HasColumnType("uuid");
-
-                    b.Property<Guid?>("CurrentAttemptId")
-                        .HasColumnType("uuid");
-
-                    b.Property<DateTime?>("FailedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("IdempotencyKey")
-                        .HasMaxLength(80)
-                        .HasColumnType("character varying(80)");
-
-                    b.Property<string>("LastErrorCode")
-                        .HasMaxLength(100)
-                        .HasColumnType("character varying(100)");
-
-                    b.Property<string>("LastErrorMessage")
-                        .HasMaxLength(1000)
-                        .HasColumnType("character varying(1000)");
-
-                    b.Property<int>("MaxRetryCount")
-                        .HasColumnType("integer");
-
-                    b.Property<Guid?>("OutputAssetId")
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("OutputProvenanceJson")
-                        .HasMaxLength(20000)
-                        .HasColumnType("character varying(20000)");
-
-                    b.Property<int>("ProgressPercent")
-                        .HasColumnType("integer");
-
-                    b.Property<Guid?>("ProjectId")
-                        .HasColumnType("uuid");
-
-                    b.Property<DateTime?>("QualityControlAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<DateTime?>("QueuedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("RequestFingerprint")
-                        .IsRequired()
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)");
-
-                    b.Property<int>("RetryCount")
-                        .HasColumnType("integer");
-
-                    b.Property<Guid>("SourceAssetId")
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("SourceProvenanceJson")
-                        .IsRequired()
-                        .HasMaxLength(20000)
-                        .HasColumnType("character varying(20000)");
-
-                    b.Property<DateTime?>("StartedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("Status")
-                        .IsRequired()
-                        .HasMaxLength(40)
-                        .HasColumnType("character varying(40)");
-
-                    b.Property<string>("TargetResolution")
-                        .IsRequired()
-                        .HasMaxLength(20)
-                        .HasColumnType("character varying(20)");
-
-                    b.Property<string>("Title")
-                        .HasMaxLength(160)
-                        .HasColumnType("character varying(160)");
-
-                    b.Property<Guid>("WorkspaceId")
-                        .HasColumnType("uuid");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("CurrentAttemptId");
-
-                    b.HasIndex("OutputAssetId");
-
-                    b.HasIndex("ProjectId");
-
-                    b.HasIndex("SourceAssetId");
-
-                    b.HasIndex("CreatedByUserId", "IdempotencyKey")
-                        .IsUnique()
-                        .HasFilter("\"IdempotencyKey\" IS NOT NULL");
-
-                    b.HasIndex("WorkspaceId", "CreatedAt");
-
-                    b.HasIndex("WorkspaceId", "Status", "CreatedAt");
-
-                    b.HasIndex("WorkspaceId", "TargetResolution", "CreatedAt");
-
-                    b.ToTable("UpscalingJobs", null, t =>
-                        {
-                            t.HasCheckConstraint("CK_UpscalingJobs_ProgressPercent", "\"ProgressPercent\" BETWEEN 0 AND 100");
-                        });
-                });
-
-            modelBuilder.Entity("Taslim.Api.Upscaling.UpscalingQualityHandoff", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<Guid>("OutputAssetId")
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("ReviewNote")
-                        .HasMaxLength(2000)
-                        .HasColumnType("character varying(2000)");
-
-                    b.Property<DateTime?>("ReviewedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<Guid?>("ReviewedByUserId")
-                        .HasColumnType("uuid");
-
-                    b.Property<Guid>("SourceAssetId")
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("Status")
-                        .IsRequired()
-                        .HasMaxLength(30)
-                        .HasColumnType("character varying(30)");
-
-                    b.Property<string>("TargetResolution")
-                        .IsRequired()
-                        .HasMaxLength(20)
-                        .HasColumnType("character varying(20)");
-
-                    b.Property<Guid>("UpscalingJobId")
-                        .HasColumnType("uuid");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("ReviewedByUserId");
-
-                    b.HasIndex("SourceAssetId");
-
-                    b.HasIndex("OutputAssetId", "Status");
-
-                    b.HasIndex("UpscalingJobId", "CreatedAt");
-
-                    b.ToTable("UpscalingQualityHandoffs");
-                });
-
             modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityRoleClaim<System.Guid>", b =>
                 {
                     b.HasOne("Microsoft.AspNetCore.Identity.IdentityRole<System.Guid>", null)
@@ -5984,47 +5184,6 @@ namespace Taslim.Api.Persistence.Migrations
                         .HasForeignKey("UserId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
-                });
-
-            modelBuilder.Entity("Taslim.Api.Benchmarking.ProviderBenchmarkEvidence", b =>
-                {
-                    b.HasOne("Taslim.Api.Benchmarking.ProviderBenchmarkMeasurement", "Measurement")
-                        .WithMany("Evidence")
-                        .HasForeignKey("ProviderBenchmarkMeasurementId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("Measurement");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Benchmarking.ProviderBenchmarkMeasurement", b =>
-                {
-                    b.HasOne("Taslim.Api.Benchmarking.ProviderBenchmarkRun", "Run")
-                        .WithMany()
-                        .HasForeignKey("ProviderBenchmarkRunId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.HasOne("Taslim.Api.Benchmarking.ProviderBenchmarkScenario", "Scenario")
-                        .WithMany("Measurements")
-                        .HasForeignKey("ProviderBenchmarkScenarioId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("Run");
-
-                    b.Navigation("Scenario");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Benchmarking.ProviderBenchmarkScenario", b =>
-                {
-                    b.HasOne("Taslim.Api.Benchmarking.ProviderBenchmarkRun", "Run")
-                        .WithMany("Scenarios")
-                        .HasForeignKey("ProviderBenchmarkRunId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("Run");
                 });
 
             modelBuilder.Entity("Taslim.Api.Domain.ActivityReadState", b =>
@@ -6254,11 +5413,6 @@ namespace Taslim.Api.Persistence.Migrations
                         .HasForeignKey("ProjectId")
                         .OnDelete(DeleteBehavior.SetNull);
 
-                    b.HasOne("Taslim.Api.Domain.GenerationJob", "RetryOfJob")
-                        .WithMany("Retries")
-                        .HasForeignKey("RetryOfJobId")
-                        .OnDelete(DeleteBehavior.Restrict);
-
                     b.HasOne("Taslim.Api.Domain.Workspace", "Workspace")
                         .WithMany()
                         .HasForeignKey("WorkspaceId")
@@ -6268,8 +5422,6 @@ namespace Taslim.Api.Persistence.Migrations
                     b.Navigation("CreatedByUser");
 
                     b.Navigation("Project");
-
-                    b.Navigation("RetryOfJob");
 
                     b.Navigation("Workspace");
                 });
@@ -7062,76 +6214,6 @@ namespace Taslim.Api.Persistence.Migrations
                     b.Navigation("MovieProject");
                 });
 
-            modelBuilder.Entity("Taslim.Api.Movies.MovieFinalMaster", b =>
-                {
-                    b.HasOne("Taslim.Api.Domain.GenerationJob", "GenerationJob")
-                        .WithMany()
-                        .HasForeignKey("GenerationJobId")
-                        .OnDelete(DeleteBehavior.SetNull);
-
-                    b.HasOne("Taslim.Api.Movies.MovieProject", "MovieProject")
-                        .WithMany()
-                        .HasForeignKey("MovieProjectId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.HasOne("Taslim.Api.Movies.MovieShot", "MovieShot")
-                        .WithMany()
-                        .HasForeignKey("MovieShotId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.HasOne("Taslim.Api.Domain.Asset", "OutputAsset")
-                        .WithMany()
-                        .HasForeignKey("OutputAssetId")
-                        .OnDelete(DeleteBehavior.SetNull);
-
-                    b.HasOne("Taslim.Api.Domain.ApplicationUser", "RequestedByUser")
-                        .WithMany()
-                        .HasForeignKey("RequestedByUserId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.HasOne("Taslim.Api.Domain.Asset", "SourceAsset")
-                        .WithMany()
-                        .HasForeignKey("SourceAssetId")
-                        .OnDelete(DeleteBehavior.SetNull);
-
-                    b.HasOne("Taslim.Api.Movies.MovieClip", "SourceMovieClip")
-                        .WithMany()
-                        .HasForeignKey("SourceMovieClipId")
-                        .OnDelete(DeleteBehavior.SetNull);
-
-                    b.HasOne("Taslim.Api.Movies.MovieTake", "SourceTake")
-                        .WithMany()
-                        .HasForeignKey("SourceTakeId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.HasOne("Taslim.Api.Movies.MovieFinalMaster", "SupersedesMaster")
-                        .WithMany()
-                        .HasForeignKey("SupersedesMasterId")
-                        .OnDelete(DeleteBehavior.Restrict);
-
-                    b.Navigation("GenerationJob");
-
-                    b.Navigation("MovieProject");
-
-                    b.Navigation("MovieShot");
-
-                    b.Navigation("OutputAsset");
-
-                    b.Navigation("RequestedByUser");
-
-                    b.Navigation("SourceAsset");
-
-                    b.Navigation("SourceMovieClip");
-
-                    b.Navigation("SourceTake");
-
-                    b.Navigation("SupersedesMaster");
-                });
-
             modelBuilder.Entity("Taslim.Api.Movies.MovieGuideRevision", b =>
                 {
                     b.HasOne("Taslim.Api.Domain.ApplicationUser", "CreatedByUser")
@@ -7644,10 +6726,6 @@ namespace Taslim.Api.Persistence.Migrations
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
 
-                    b.HasOne("Taslim.Api.Movies.MovieTake", "RetryOfTake")
-                        .WithMany("Retries")
-                        .HasForeignKey("RetryOfTakeId");
-
                     b.Navigation("Asset");
 
                     b.Navigation("GenerationJob");
@@ -7657,8 +6735,6 @@ namespace Taslim.Api.Persistence.Migrations
                     b.Navigation("MovieProductionVersion");
 
                     b.Navigation("MovieShot");
-
-                    b.Navigation("RetryOfTake");
                 });
 
             modelBuilder.Entity("Taslim.Api.Movies.MovieTakeApproval", b =>
@@ -7678,33 +6754,6 @@ namespace Taslim.Api.Persistence.Migrations
                     b.Navigation("MovieTake");
 
                     b.Navigation("User");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Movies.MovieTakeUpscaleAudit", b =>
-                {
-                    b.HasOne("Taslim.Api.Movies.MovieProject", "MovieProject")
-                        .WithMany()
-                        .HasForeignKey("MovieProjectId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.HasOne("Taslim.Api.Movies.MovieTake", "MovieTake")
-                        .WithMany("UpscaleAudits")
-                        .HasForeignKey("MovieTakeId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.HasOne("Taslim.Api.Domain.ApplicationUser", "RequestedByUser")
-                        .WithMany()
-                        .HasForeignKey("RequestedByUserId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.Navigation("MovieProject");
-
-                    b.Navigation("MovieTake");
-
-                    b.Navigation("RequestedByUser");
                 });
 
             modelBuilder.Entity("Taslim.Api.Movies.MovieTeamMember", b =>
@@ -7849,114 +6898,6 @@ namespace Taslim.Api.Persistence.Migrations
                         .IsRequired();
                 });
 
-            modelBuilder.Entity("Taslim.Api.Benchmarking.ProviderBenchmarkMeasurement", b =>
-                {
-                    b.Navigation("Evidence");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Benchmarking.ProviderBenchmarkRun", b =>
-                {
-                    b.Navigation("Scenarios");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Benchmarking.ProviderBenchmarkScenario", b =>
-                {
-                    b.Navigation("Measurements");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Upscaling.UpscalingAttempt", b =>
-                {
-                    b.HasOne("Taslim.Api.Upscaling.UpscalingJob", "UpscalingJob")
-                        .WithMany("Attempts")
-                        .HasForeignKey("UpscalingJobId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("UpscalingJob");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Upscaling.UpscalingJob", b =>
-                {
-                    b.HasOne("Taslim.Api.Domain.ApplicationUser", "CreatedByUser")
-                        .WithMany()
-                        .HasForeignKey("CreatedByUserId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.HasOne("Taslim.Api.Upscaling.UpscalingAttempt", "CurrentAttempt")
-                        .WithMany()
-                        .HasForeignKey("CurrentAttemptId")
-                        .OnDelete(DeleteBehavior.SetNull);
-
-                    b.HasOne("Taslim.Api.Domain.Asset", "OutputAsset")
-                        .WithMany()
-                        .HasForeignKey("OutputAssetId")
-                        .OnDelete(DeleteBehavior.SetNull);
-
-                    b.HasOne("Taslim.Api.Domain.Project", "Project")
-                        .WithMany()
-                        .HasForeignKey("ProjectId")
-                        .OnDelete(DeleteBehavior.SetNull);
-
-                    b.HasOne("Taslim.Api.Domain.Asset", "SourceAsset")
-                        .WithMany()
-                        .HasForeignKey("SourceAssetId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.HasOne("Taslim.Api.Domain.Workspace", "Workspace")
-                        .WithMany()
-                        .HasForeignKey("WorkspaceId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.Navigation("CreatedByUser");
-
-                    b.Navigation("CurrentAttempt");
-
-                    b.Navigation("OutputAsset");
-
-                    b.Navigation("Project");
-
-                    b.Navigation("SourceAsset");
-
-                    b.Navigation("Workspace");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Upscaling.UpscalingQualityHandoff", b =>
-                {
-                    b.HasOne("Taslim.Api.Domain.Asset", "OutputAsset")
-                        .WithMany()
-                        .HasForeignKey("OutputAssetId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.HasOne("Taslim.Api.Domain.ApplicationUser", "ReviewedByUser")
-                        .WithMany()
-                        .HasForeignKey("ReviewedByUserId")
-                        .OnDelete(DeleteBehavior.Restrict);
-
-                    b.HasOne("Taslim.Api.Domain.Asset", "SourceAsset")
-                        .WithMany()
-                        .HasForeignKey("SourceAssetId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.HasOne("Taslim.Api.Upscaling.UpscalingJob", "UpscalingJob")
-                        .WithMany("QualityHandoffs")
-                        .HasForeignKey("UpscalingJobId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("OutputAsset");
-
-                    b.Navigation("ReviewedByUser");
-
-                    b.Navigation("SourceAsset");
-
-                    b.Navigation("UpscalingJob");
-                });
-
             modelBuilder.Entity("Taslim.Api.Domain.ApplicationUser", b =>
                 {
                     b.Navigation("WorkspaceMemberships");
@@ -8003,8 +6944,6 @@ namespace Taslim.Api.Persistence.Migrations
                     b.Navigation("ProviderAttempts");
 
                     b.Navigation("ResearchSources");
-
-                    b.Navigation("Retries");
                 });
 
             modelBuilder.Entity("Taslim.Api.Domain.PaymentAttempt", b =>
@@ -8210,10 +7149,6 @@ namespace Taslim.Api.Persistence.Migrations
             modelBuilder.Entity("Taslim.Api.Movies.MovieTake", b =>
                 {
                     b.Navigation("Approvals");
-
-                    b.Navigation("Retries");
-
-                    b.Navigation("UpscaleAudits");
                 });
 
             modelBuilder.Entity("Taslim.Api.Movies.MovieTeamMember", b =>
@@ -8224,13 +7159,6 @@ namespace Taslim.Api.Persistence.Migrations
             modelBuilder.Entity("Taslim.Api.Movies.MovieWorldReference", b =>
                 {
                     b.Navigation("Links");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Upscaling.UpscalingJob", b =>
-                {
-                    b.Navigation("Attempts");
-
-                    b.Navigation("QualityHandoffs");
                 });
 #pragma warning restore 612, 618
         }
