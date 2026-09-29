@@ -4532,6 +4532,10 @@ b.Property<string>("TargetOutputRequirementsJson")
                         .HasMaxLength(4000)
                         .HasColumnType("character varying(4000)");
 
+                    b.Property<string>("QualityRequirementsJson")
+                        .HasMaxLength(24000)
+                        .HasColumnType("character varying(24000)");
+
                     b.HasKey("Id");
 
                     b.HasIndex("FinalTakeId");
