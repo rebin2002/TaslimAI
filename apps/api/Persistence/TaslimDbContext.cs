@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
 using Microsoft.AspNetCore.DataProtection.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
+using Taslim.Api.Benchmarking;
 using Taslim.Api.Domain;
 using Taslim.Api.Movies;
 using Taslim.Api.Notifications;
@@ -31,6 +32,10 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
     public DbSet<AssetRepresentation> AssetRepresentations => Set<AssetRepresentation>();
     public DbSet<ResearchSource> ResearchSources => Set<ResearchSource>();
     public DbSet<ResearchEvidence> ResearchEvidence => Set<ResearchEvidence>();
+    public DbSet<ProviderBenchmarkRun> ProviderBenchmarkRuns => Set<ProviderBenchmarkRun>();
+    public DbSet<ProviderBenchmarkScenario> ProviderBenchmarkScenarios => Set<ProviderBenchmarkScenario>();
+    public DbSet<ProviderBenchmarkMeasurement> ProviderBenchmarkMeasurements => Set<ProviderBenchmarkMeasurement>();
+    public DbSet<ProviderBenchmarkEvidence> ProviderBenchmarkEvidence => Set<ProviderBenchmarkEvidence>();
         public DbSet<Plan> Plans => Set<Plan>();
         public DbSet<Subscription> Subscriptions => Set<Subscription>();
         public DbSet<BillingPeriod> BillingPeriods => Set<BillingPeriod>();
@@ -884,6 +889,97 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasOne(attempt => attempt.GenerationJob)
                 .WithMany(job => job.ProviderAttempts)
                 .HasForeignKey(attempt => attempt.GenerationJobId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<ProviderBenchmarkRun>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.RunKey).HasMaxLength(180).IsRequired();
+            entity.Property(item => item.BenchmarkDefinition).HasMaxLength(160).IsRequired();
+            entity.Property(item => item.FixtureManifestHash).HasMaxLength(128);
+            entity.Property(item => item.HarnessVersion).HasMaxLength(80);
+            entity.Property(item => item.EnvironmentFingerprint).HasMaxLength(240);
+            entity.Property(item => item.ProvenanceJson).HasMaxLength(20_000);
+            entity.Property(item => item.Status).HasConversion<string>().HasMaxLength(30).IsRequired();
+            entity.Property(item => item.CompletionCode).HasMaxLength(100);
+            entity.Property(item => item.CreatedAt).IsRequired();
+            entity.Property(item => item.StartedAt).IsRequired();
+            entity.HasIndex(item => item.RunKey).IsUnique();
+            entity.HasIndex(item => new { item.Status, item.CreatedAt });
+        });
+
+        builder.Entity<ProviderBenchmarkScenario>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.ScenarioKey).HasMaxLength(160).IsRequired();
+            entity.Property(item => item.FixtureRevision).HasMaxLength(80).IsRequired();
+            entity.Property(item => item.CharacteristicsHash).HasMaxLength(128).IsRequired();
+            entity.Property(item => item.ShotType).HasMaxLength(80).IsRequired();
+            entity.Property(item => item.CameraMotion).HasMaxLength(120);
+            entity.Property(item => item.AspectRatio).HasMaxLength(30);
+            entity.Property(item => item.TargetResolution).HasMaxLength(40);
+            entity.Property(item => item.CharacteristicsJson).HasMaxLength(40_000);
+            entity.Property(item => item.FixtureProvenanceJson).HasMaxLength(20_000);
+            entity.Property(item => item.CreatedAt).IsRequired();
+            entity.Property(item => item.UpdatedAt).IsRequired();
+            entity.HasIndex(item => new { item.ProviderBenchmarkRunId, item.ScenarioKey }).IsUnique();
+            entity.HasIndex(item => new { item.CharacteristicsHash, item.ShotType });
+            entity.HasOne(item => item.Run)
+                .WithMany(item => item.Scenarios)
+                .HasForeignKey(item => item.ProviderBenchmarkRunId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<ProviderBenchmarkMeasurement>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.MeasurementKey).HasMaxLength(180).IsRequired();
+            entity.Property(item => item.ProviderKey).HasMaxLength(80).IsRequired();
+            entity.Property(item => item.ModelKey).HasMaxLength(160).IsRequired();
+            entity.Property(item => item.Status).HasConversion<string>().HasMaxLength(30).IsRequired();
+            entity.Property(item => item.ErrorCode).HasMaxLength(100);
+            entity.Property(item => item.EstimatedCostUsd).HasPrecision(18, 8);
+            entity.Property(item => item.ActualCostUsd).HasPrecision(18, 8);
+            entity.Property(item => item.QualityScore).HasPrecision(5, 2);
+            entity.Property(item => item.ContinuityScore).HasPrecision(5, 2);
+            entity.Property(item => item.TemporalStabilityScore).HasPrecision(5, 2);
+            entity.Property(item => item.PromptAdherenceScore).HasPrecision(5, 2);
+            entity.Property(item => item.Currency).HasMaxLength(3).IsRequired();
+            entity.Property(item => item.MetricsJson).HasMaxLength(40_000);
+            entity.Property(item => item.ProvenanceJson).HasMaxLength(20_000);
+            entity.Property(item => item.StartedAt).IsRequired();
+            entity.Property(item => item.RecordedAt).IsRequired();
+            entity.HasIndex(item => new { item.ProviderBenchmarkRunId, item.MeasurementKey }).IsUnique();
+            entity.HasIndex(item => new { item.ProviderBenchmarkScenarioId, item.ProviderKey, item.ModelKey });
+            entity.HasIndex(item => new { item.ProviderKey, item.ModelKey, item.RecordedAt });
+            entity.HasOne(item => item.Run)
+                .WithMany()
+                .HasForeignKey(item => item.ProviderBenchmarkRunId)
+                .OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.Scenario)
+                .WithMany(item => item.Measurements)
+                .HasForeignKey(item => item.ProviderBenchmarkScenarioId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<ProviderBenchmarkEvidence>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.EvidenceKey).HasMaxLength(180).IsRequired();
+            entity.Property(item => item.EvidenceType).HasMaxLength(60).IsRequired();
+            entity.Property(item => item.Source).HasMaxLength(160).IsRequired();
+            entity.Property(item => item.Reference).HasMaxLength(600);
+            entity.Property(item => item.ContentHash).HasMaxLength(128);
+            entity.Property(item => item.PayloadJson).HasMaxLength(40_000);
+            entity.Property(item => item.ProvenanceJson).HasMaxLength(20_000);
+            entity.Property(item => item.CapturedAt).IsRequired();
+            entity.Property(item => item.CreatedAt).IsRequired();
+            entity.HasIndex(item => new { item.ProviderBenchmarkMeasurementId, item.EvidenceKey }).IsUnique();
+            entity.HasIndex(item => new { item.EvidenceType, item.CapturedAt });
+            entity.HasOne(item => item.Measurement)
+                .WithMany(item => item.Evidence)
+                .HasForeignKey(item => item.ProviderBenchmarkMeasurementId)
                 .OnDelete(DeleteBehavior.Cascade);
         });
 
