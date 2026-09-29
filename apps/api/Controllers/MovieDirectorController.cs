@@ -52,6 +52,7 @@ public sealed class MovieDirectorController(IMovieDirectorService director) : Co
             return result is null ? ApiResults.Error(this, 404, "DIRECTOR_PROPOSAL_NOT_FOUND", "Director proposal not found.") : Ok(result);
         }
         catch (DirectorValidationException exception) { return ApiResults.Error(this, 409, "DIRECTOR_PROPOSAL_NOT_PENDING", exception.Message); }
+        catch (DirectorProposalStaleException exception) { return ApiResults.Error(this, 409, "DIRECTOR_PROPOSAL_STALE", exception.Message); }
     }
 
     [HttpPost("proposals/{proposalId:guid}/reject")]
@@ -76,6 +77,7 @@ public sealed class MovieDirectorController(IMovieDirectorService director) : Co
             return result is null ? ApiResults.Error(this, 404, "DIRECTOR_ACTION_NOT_FOUND", "Director action not found.") : Ok(result);
         }
         catch (DirectorActionNotApprovedException exception) { return ApiResults.Error(this, 409, "DIRECTOR_APPROVAL_REQUIRED", exception.Message); }
+        catch (DirectorProposalStaleException exception) { return ApiResults.Error(this, 409, "DIRECTOR_PROPOSAL_STALE", exception.Message); }
         catch (DirectorActionExecutionException exception) { return ApiResults.Error(this, 409, exception.Code, exception.Message); }
     }
 
