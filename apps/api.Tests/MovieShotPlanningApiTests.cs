@@ -65,6 +65,44 @@ public sealed class MovieShotPlanningApiTests : IClassFixture<GenerationJobsNoWo
     }
 
     [Fact]
+    public async Task Shot_production_contract_is_persisted_and_returned_without_provider_fields()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Shot Contract Planner");
+        var movie = await CreateMovie(client, auth.PersonalWorkspace.Id);
+        var scene = await SendWithCsrf<MovieSceneDto>(client, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/scenes", new { title = "Contract", summary = "A contract test scene." });
+
+        var shot = await SendWithCsrf<MovieShotDto>(client, HttpMethod.Post, $"/api/movie-studio/scenes/{scene.Id}/shots", new
+        {
+            description = "The lead holds on the doorway.",
+            durationSeconds = 12,
+            narrativeImportance = "critical",
+            productionComplexity = new { level = "high", drivers = new[] { "continuity", "performance" }, notes = "Protect the blocking." },
+            qualityRequirements = new { minimumLevel = MovieQualityLevels.Cinematic, acceptanceCriteria = new[] { "Readable expression" } },
+            continuitySensitivity = "locked",
+            upscaleSuitability = "preferred",
+            targetOutputRequirements = new { aspectRatio = "16:9", resolutionIntent = "uhd", frameRateIntent = "24 fps" },
+        });
+
+        Assert.NotNull(shot.ProductionContract);
+        Assert.Equal(12, shot.ProductionContract!.DurationSeconds);
+        Assert.Equal(MovieShotNarrativeImportance.Critical, shot.ProductionContract.NarrativeImportance);
+        Assert.Equal(MovieShotComplexityLevels.High, shot.ProductionContract.ProductionComplexity!.Level);
+        Assert.Equal(MovieQualityLevels.Cinematic, shot.ProductionContract.QualityRequirements!.MinimumLevel);
+        Assert.Equal(MovieShotContinuitySensitivities.Locked, shot.ProductionContract.ContinuitySensitivity);
+        Assert.Equal(MovieShotUpscaleSuitabilities.Preferred, shot.ProductionContract.UpscaleSuitability);
+        Assert.Equal("uhd", shot.ProductionContract.TargetOutputRequirements!.ResolutionIntent);
+        Assert.DoesNotContain("provider", (await client.GetStringAsync($"/api/movie-studio/shots/{shot.Id}")), StringComparison.OrdinalIgnoreCase);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var stored = await db.MovieShots.SingleAsync(item => item.Id == shot.Id);
+        Assert.Equal(MovieShotNarrativeImportance.Critical, stored.NarrativeImportance);
+        Assert.Contains("continuity", stored.ProductionComplexityJson, StringComparison.Ordinal);
+        Assert.Contains("resolutionIntent", stored.TargetOutputRequirementsJson, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Shot_edit_and_generation_respect_collaboration_boundaries()
     {
         using var owner = factory.CreateClient();

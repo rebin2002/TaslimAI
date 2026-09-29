@@ -231,7 +231,8 @@ public sealed record MovieShotProductionDto(
     IReadOnlyList<MovieProductionStageTransitionDto> Transitions,
     MovieWorldContinuitySnapshotDto? WorldContinuity = null,
     IReadOnlyList<MovieV2TakeDto> Takes = null!,
-    IReadOnlyList<MovieRegenerationRequestDto> RegenerationRequests = null!);
+    IReadOnlyList<MovieRegenerationRequestDto> RegenerationRequests = null!,
+    MovieShotProductionContractDto? ProductionContract = null);
 
 public sealed record MovieStoryboardCandidateDto(
     Guid Id,

@@ -49,6 +49,12 @@ public sealed class MovieStudioShotUpdateRequest
     public string? VisualContinuityNotes { get; set; }
     public CinematographyIntentSelection? Cinematography { get; set; }
     public IReadOnlyList<Guid>? SubjectCharacterIds { get; set; }
+    public string? NarrativeImportance { get; set; }
+    public MovieShotComplexityProfile? ProductionComplexity { get; set; }
+    public MovieShotQualityRequirements? QualityRequirements { get; set; }
+    public string? ContinuitySensitivity { get; set; }
+    public string? UpscaleSuitability { get; set; }
+    public MovieShotTargetOutputRequirements? TargetOutputRequirements { get; set; }
     public string? Status { get; set; }
 }
 
