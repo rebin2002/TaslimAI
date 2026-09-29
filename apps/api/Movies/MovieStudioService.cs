@@ -980,7 +980,19 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         if (workflowError is not null) throw new MovieProductionValidationException("PRODUCTION_STAGE_INVALID", workflowError);
         var now = DateTime.UtcNow;
         var durationSeconds = Math.Clamp(shot.DurationSeconds ?? shot.Scene.DurationSeconds ?? Math.Min(movie.DurationSeconds, 60), 1, 3600);
-        var estimate = EstimateMovieCost(durationSeconds);
+        var estimate = await movieCostEstimator.EstimateAsync(
+            new MovieGenerationCostRequest(durationSeconds, "1080p", "1080p", movie.QualityLevel, "native"),
+            provider.Key,
+            cancellationToken: cancellationToken);
+        var refreshedPreflight = await costGuardrails.EvaluateAsync(
+            userId,
+            movie.WorkspaceId,
+            movie.ProjectId,
+            estimate.ToGenerationCostEstimate(),
+            confirmationAccepted: true,
+            cancellationToken: cancellationToken);
+        if (!refreshedPreflight.Allowed)
+            throw new MovieProductionValidationException(refreshedPreflight.RejectionCode!, refreshedPreflight.RejectionMessage!);
         regeneration.EstimatedProviderCostUsd = estimate.AmountUsd;
         regeneration.EstimatedProviderCostKnown = estimate.IsKnown && estimate.AmountUsd.HasValue;
         regeneration.CostEstimateJson = estimate.ToJson();
