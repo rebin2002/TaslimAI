@@ -222,6 +222,7 @@ builder.Services.AddScoped<MovieWorldContinuityProjector>();
 builder.Services.AddScoped<IMovieWorldContinuityService, MovieWorldContinuityService>();
 builder.Services.AddScoped<IMovieV2Service, MovieV2Service>();
 builder.Services.AddScoped<IMovieFinalMasteringService, MovieFinalMasteringService>();
+builder.Services.AddScoped<IMovieTakeUpscaleEligibilityService, MovieTakeUpscaleEligibilityService>();
 builder.Services.AddScoped<IMovieScenesService, MovieScenesService>();
 builder.Services.AddScoped<IMovieGuideService, MovieGuideService>();
 builder.Services.AddScoped<IMovieStoryService, MovieStoryService>();

@@ -82,6 +82,7 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
     public DbSet<MovieAssembly> MovieAssemblies => Set<MovieAssembly>();
     public DbSet<MovieTake> MovieTakes => Set<MovieTake>();
     public DbSet<MovieTakeApproval> MovieTakeApprovals => Set<MovieTakeApproval>();
+    public DbSet<MovieTakeUpscaleAudit> MovieTakeUpscaleAudits => Set<MovieTakeUpscaleAudit>();
     public DbSet<MovieRegenerationRequest> MovieRegenerationRequests => Set<MovieRegenerationRequest>();
     public DbSet<MovieVideoProviderExecution> MovieVideoProviderExecutions => Set<MovieVideoProviderExecution>();
     public DbSet<MovieFinalMaster> MovieFinalMasters => Set<MovieFinalMaster>();
@@ -545,6 +546,22 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasIndex(item => new { item.MovieTakeId, item.CreatedAt });
             entity.HasOne(item => item.MovieTake).WithMany(item => item.Approvals).HasForeignKey(item => item.MovieTakeId).OnDelete(DeleteBehavior.Cascade);
             entity.HasOne(item => item.User).WithMany().HasForeignKey(item => item.UserId).OnDelete(DeleteBehavior.Restrict);
+        });
+        builder.Entity<MovieTakeUpscaleAudit>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.TargetMasterResolution).HasMaxLength(20).IsRequired();
+            entity.Property(item => item.SourceResolution).HasMaxLength(20);
+            entity.Property(item => item.Status).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.EligibilityCode).HasMaxLength(60).IsRequired();
+            entity.Property(item => item.OutcomeNote).HasMaxLength(500);
+            entity.Property(item => item.WasSelected).IsRequired();
+            entity.Property(item => item.WasFinal).IsRequired();
+            entity.HasIndex(item => new { item.MovieTakeId, item.CreatedAt });
+            entity.HasIndex(item => new { item.MovieProjectId, item.CreatedAt });
+            entity.HasOne(item => item.MovieTake).WithMany(item => item.UpscaleAudits).HasForeignKey(item => item.MovieTakeId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.MovieProject).WithMany().HasForeignKey(item => item.MovieProjectId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.RequestedByUser).WithMany().HasForeignKey(item => item.RequestedByUserId).OnDelete(DeleteBehavior.Restrict);
         });
         builder.Entity<MovieRegenerationRequest>(entity =>
         {
