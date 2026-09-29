@@ -115,59 +115,96 @@ public sealed class EfProviderResilienceStore(TaslimDbContext db) : IProviderRes
 
     public async Task<ProviderCircuitAdmission> TryAcquireCircuitAsync(string providerKey, string capability, DateTime now, TimeSpan probeLease, CancellationToken cancellationToken = default)
     {
-        var circuit = await GetOrCreateCircuitAsync(providerKey, capability, now, cancellationToken);
-        var state = ParseState(circuit.State);
-        if (state == ProviderCircuitState.Closed)
-            return ProviderCircuitAdmission.Allowed;
-        if (state == ProviderCircuitState.Open && circuit.OpenUntil > now)
-            return ProviderCircuitAdmission.Open;
-        if (state == ProviderCircuitState.Open)
+        for (var retry = 0; retry < 3; retry++)
         {
-            circuit.State = "half_open";
-            circuit.ProbeExpiresAt = now.Add(probeLease);
-            circuit.UpdatedAt = now;
-            await db.SaveChangesAsync(cancellationToken);
-            return ProviderCircuitAdmission.Allowed;
+            var circuit = await GetOrCreateCircuitAsync(providerKey, capability, now, cancellationToken);
+            var state = ParseState(circuit.State);
+            if (state == ProviderCircuitState.Closed)
+                return ProviderCircuitAdmission.Allowed;
+            if (state == ProviderCircuitState.Open && circuit.OpenUntil > now)
+                return ProviderCircuitAdmission.Open;
+
+            if (state == ProviderCircuitState.Open)
+            {
+                circuit.State = "half_open";
+                circuit.ProbeExpiresAt = now.Add(probeLease);
+                circuit.UpdatedAt = now;
+            }
+            else if (circuit.ProbeExpiresAt is null || circuit.ProbeExpiresAt <= now)
+            {
+                circuit.ProbeExpiresAt = now.Add(probeLease);
+                circuit.UpdatedAt = now;
+            }
+            else
+            {
+                return ProviderCircuitAdmission.ProbeInProgress;
+            }
+
+            try
+            {
+                await db.SaveChangesAsync(cancellationToken);
+                return ProviderCircuitAdmission.Allowed;
+            }
+            catch (DbUpdateConcurrencyException) when (retry < 2)
+            {
+                db.ChangeTracker.Clear();
+            }
         }
-        if (circuit.ProbeExpiresAt is null || circuit.ProbeExpiresAt <= now)
-        {
-            circuit.ProbeExpiresAt = now.Add(probeLease);
-            circuit.UpdatedAt = now;
-            await db.SaveChangesAsync(cancellationToken);
-            return ProviderCircuitAdmission.Allowed;
-        }
+
         return ProviderCircuitAdmission.ProbeInProgress;
     }
 
     public async Task RecordCircuitSuccessAsync(string providerKey, string capability, DateTime now, CancellationToken cancellationToken = default)
     {
-        var circuit = await GetOrCreateCircuitAsync(providerKey, capability, now, cancellationToken);
-        circuit.State = "closed";
-        circuit.ConsecutiveFailures = 0;
-        circuit.OpenedAt = null;
-        circuit.OpenUntil = null;
-        circuit.ProbeExpiresAt = null;
-        circuit.LastSuccessAt = now;
-        circuit.UpdatedAt = now;
-        circuit.RowVersion = Guid.NewGuid();
-        await db.SaveChangesAsync(cancellationToken);
+        for (var retry = 0; retry < 3; retry++)
+        {
+            var circuit = await GetOrCreateCircuitAsync(providerKey, capability, now, cancellationToken);
+            circuit.State = "closed";
+            circuit.ConsecutiveFailures = 0;
+            circuit.OpenedAt = null;
+            circuit.OpenUntil = null;
+            circuit.ProbeExpiresAt = null;
+            circuit.LastSuccessAt = now;
+            circuit.UpdatedAt = now;
+            circuit.RowVersion = Guid.NewGuid();
+            try
+            {
+                await db.SaveChangesAsync(cancellationToken);
+                return;
+            }
+            catch (DbUpdateConcurrencyException) when (retry < 2)
+            {
+                db.ChangeTracker.Clear();
+            }
+        }
     }
 
     public async Task RecordCircuitFailureAsync(string providerKey, string capability, DateTime now, int failureThreshold, TimeSpan openDuration, CancellationToken cancellationToken = default)
     {
-        var circuit = await GetOrCreateCircuitAsync(providerKey, capability, now, cancellationToken);
-        circuit.ConsecutiveFailures++;
-        circuit.LastFailureAt = now;
-        circuit.UpdatedAt = now;
-        circuit.RowVersion = Guid.NewGuid();
-        if (circuit.ConsecutiveFailures >= Math.Max(1, failureThreshold) || ParseState(circuit.State) == ProviderCircuitState.HalfOpen)
+        for (var retry = 0; retry < 3; retry++)
         {
-            circuit.State = "open";
-            circuit.OpenedAt = now;
-            circuit.OpenUntil = now.Add(openDuration);
-            circuit.ProbeExpiresAt = null;
+            var circuit = await GetOrCreateCircuitAsync(providerKey, capability, now, cancellationToken);
+            circuit.ConsecutiveFailures++;
+            circuit.LastFailureAt = now;
+            circuit.UpdatedAt = now;
+            circuit.RowVersion = Guid.NewGuid();
+            if (circuit.ConsecutiveFailures >= Math.Max(1, failureThreshold) || ParseState(circuit.State) == ProviderCircuitState.HalfOpen)
+            {
+                circuit.State = "open";
+                circuit.OpenedAt = now;
+                circuit.OpenUntil = now.Add(openDuration);
+                circuit.ProbeExpiresAt = null;
+            }
+            try
+            {
+                await db.SaveChangesAsync(cancellationToken);
+                return;
+            }
+            catch (DbUpdateConcurrencyException) when (retry < 2)
+            {
+                db.ChangeTracker.Clear();
+            }
         }
-        await db.SaveChangesAsync(cancellationToken);
     }
 
     public async Task<ProviderCircuitSnapshot?> GetCircuitAsync(string providerKey, string capability, CancellationToken cancellationToken = default)
