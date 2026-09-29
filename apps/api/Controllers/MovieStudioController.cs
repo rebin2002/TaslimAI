@@ -12,10 +12,13 @@ namespace Taslim.Api.Controllers;
 [ApiController]
 [Authorize]
 [Route("api/movie-studio")]
-public sealed class MovieStudioController(IMovieStudioService movies, IMovieProductionComplexityService complexity, IMovieDurationBudgetService durationBudgets, IMovieGuideService guides, IMovieStoryService stories, IMovieStoryCastService storyCast, IMovieCharacterContinuityService continuity, IMovieWorldContinuityService worldContinuity, IMovieProductionContinuityService productionContinuity, MovieAuthorizationService authorization, MovieShotImportanceService shotImportance) : ControllerBase
+public sealed class MovieStudioController(IMovieStudioService movies, IMovieProductionComplexityService complexity, IMovieDurationBudgetService durationBudgets, IMovieGuideService guides, IMovieStoryService stories, IMovieStoryCastService storyCast, IMovieCharacterContinuityService continuity, IMovieWorldContinuityService worldContinuity, IMovieProductionContinuityService productionContinuity, MovieAuthorizationService authorization, MovieShotImportanceService shotImportance, IMovieCinematographyPlanningService cinematographyPlanning) : ControllerBase
 {
     [HttpGet("cinematography/presets")]
     public IActionResult CinematographyPresets() => Ok(CinematographyPresetCatalog.All);
+
+    [HttpGet("cinematography/planning-values")]
+    public IActionResult CinematographyPlanningValues() => Ok(CinematographyPlanningValueCatalog.Current);
 
     [HttpGet("provider")]
     public async Task<IActionResult> Provider(CancellationToken cancellationToken) => Ok(new MovieStudioProviderResponse(await movies.ProviderReadinessAsync()));
@@ -397,6 +400,18 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
             return result is null ? ApiResults.Error(this, 404, "MOVIE_SHOT_NOT_FOUND", "Movie shot not found.") : Ok(result);
         }
         catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_SHOT_IMPORTANCE_INVALID", exception.Message); }
+    }
+
+    [HttpPost("shots/{shotId:guid}/cinematography/plan")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> PlanCinematography(Guid shotId, MovieCinematographyPlanRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await cinematographyPlanning.PlanAsync(GetUserId(), shotId, request, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_SHOT_NOT_FOUND", "Movie shot not found.") : Ok(result);
+        }
+        catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_CINEMATOGRAPHY_PLAN_INVALID", exception.Message); }
     }
 
     [HttpPost("shots/{shotId:guid}/reorder")]
