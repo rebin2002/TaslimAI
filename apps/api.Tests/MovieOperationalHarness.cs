@@ -548,7 +548,7 @@ public sealed class MovieOperationalE2ETests : IClassFixture<MovieOperationalApi
     }
 
     [Fact]
-    public async Task Quick_movie_remains_a_small_persisted_plan_without_full_movie_approval_records()
+    public async Task Quick_movie_saves_only_the_brief_until_the_user_creates_a_scene_and_shot()
     {
         using var client = factory.CreateClient();
         var diagnostics = new MovieOperationalDiagnostics();
@@ -566,15 +566,23 @@ public sealed class MovieOperationalE2ETests : IClassFixture<MovieOperationalApi
         }, diagnostics);
         Assert.Equal(MovieProjectModes.Quick, quick.Project.Mode);
         Assert.Null(quick.Job);
-        Assert.Single(quick.Project.Scenes);
-        Assert.Single(quick.Project.Scenes[0].Shots);
+        Assert.Empty(quick.Project.Scenes);
         Assert.Empty(quick.Project.Characters);
         Assert.Empty(quick.Project.World.Locations);
         Assert.Empty(quick.Project.World.Sets);
         Assert.Empty(quick.Project.World.Props);
-        Assert.Equal(MovieProductionStages.ShotPlan, quick.Project.Scenes[0].Shots[0].ProductionStage);
-        Assert.Empty(quick.Project.Scenes[0].Shots[0].ProductionVersions);
         Assert.Empty(quick.Project.Clips);
+
+        var scene = await MovieOperationalFixtures.PostAsync<MovieSceneDto>(client,
+            $"/api/movie-studio/projects/{quick.Project.Id}/scenes",
+            new { title = "Human-authored scene", summary = "A scene entered by the user." }, diagnostics);
+        var shot = await MovieOperationalFixtures.PostAsync<MovieShotDto>(client,
+            $"/api/movie-studio/scenes/{scene.Id}/shots",
+            new { description = "A human-authored shot plan." }, diagnostics);
+        Assert.Equal("Human-authored scene", scene.Title);
+        Assert.Equal("A human-authored shot plan.", shot.Description);
+        Assert.Equal(MovieProductionStages.ShotPlan, shot.ProductionStage);
+        Assert.Empty(shot.ProductionVersions);
         Assert.All(diagnostics.Samples, sample => Assert.InRange(sample.StatusCode, 200, 299));
         output.WriteLine(diagnostics.Summary());
     }

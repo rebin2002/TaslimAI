@@ -8,7 +8,7 @@
 
 Movie Studio has two customer-facing workflows:
 
-- **Quick Movie:** a short brief creates a durable Movie Project and an internal plan. It does not expose the Full Movie approval workspace and does not queue expensive rendering merely because the project was created.
+- **Quick Movie:** a short brief creates a durable Movie Project and saves the brief without seeding scenes or shots. It does not expose the Full Movie approval workspace and does not queue expensive rendering merely because the project was created.
 - **Full Movie Project:** a persistent production workspace with story, cast, world, scenes, storyboard, production, collaboration, Director, and future delivery surfaces. Foundation modules honestly show unavailable/upcoming states rather than fabricating output.
 
 The browser owns presentation and navigation. The API owns authentication, workspace/project authorization, persistence, planning, generation-job orchestration, provider safety, assets, QC, and usage accounting.

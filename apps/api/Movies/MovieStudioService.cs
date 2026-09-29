@@ -112,28 +112,15 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         {
             var scene = new MovieScene
             {
-                Id = Guid.NewGuid(),
-                MovieProjectId = movie.Id,
-                Sequence = 1,
-                Title = "Opening shot plan",
-                Summary = movie.Description,
-                DurationSeconds = movie.DurationSeconds,
-                CreatedAt = now,
-                UpdatedAt = now,
+                Id = Guid.NewGuid(), MovieProjectId = movie.Id, Sequence = 1, Title = "Opening shot plan", Summary = movie.Description,
+                DurationSeconds = movie.DurationSeconds, CreatedAt = now, UpdatedAt = now,
             };
             var quickShot = new MovieShot
             {
-                Id = Guid.NewGuid(),
-                MovieSceneId = scene.Id,
-                Sequence = 1,
-                Description = movie.Description,
-                DurationSeconds = Math.Min(movie.DurationSeconds, 60),
-                ProductionStage = MovieProductionStages.ShotPlan,
-                CreatedAt = now,
-                UpdatedAt = now,
+                Id = Guid.NewGuid(), MovieSceneId = scene.Id, Sequence = 1, Description = movie.Description,
+                DurationSeconds = Math.Min(movie.DurationSeconds, 60), ProductionStage = MovieProductionStages.ShotPlan, CreatedAt = now, UpdatedAt = now,
             };
-            quickShot.QualityRequirementsJson = MovieShotQualityRequirementsPlanner.Serialize(
-                MovieShotQualityRequirementsPlanner.Plan(quickShot, QualityPlanningContext(movie, scene, quickShot)));
+            quickShot.QualityRequirementsJson = MovieShotQualityRequirementsPlanner.Serialize(MovieShotQualityRequirementsPlanner.Plan(quickShot, QualityPlanningContext(movie, scene, quickShot)));
             scene.Shots.Add(quickShot);
             db.MovieScenes.Add(scene);
             await db.SaveChangesAsync(cancellationToken);
