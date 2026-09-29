@@ -27,6 +27,22 @@ public sealed class MovieVideoOptions
     public int RetryMaxDelaySeconds { get; set; } = 30;
     public int ClaimLeaseMinutes { get; set; } = 15;
     public long MaxOutputBytes { get; set; } = 250 * 1024 * 1024;
+    public ManusMovieVideoOptions Manus { get; set; } = new();
+}
+
+/// <summary>
+/// Manus API settings are bound only on the API process. They are never part
+/// of movie request/result DTOs or sent to the browser.
+/// </summary>
+public sealed class ManusMovieVideoOptions
+{
+    public bool Enabled { get; set; }
+    public string ApiBaseUrl { get; set; } = "https://api.manus.ai/";
+    public string ApiKey { get; set; } = string.Empty;
+    public string AgentProfile { get; set; } = "standard";
+    public decimal? CreditUsdPerCredit { get; set; }
+    public int MaxPromptCharacters { get; set; } = 12_000;
+    public int MaxTaskMessages { get; set; } = 50;
 }
 
 public static class MovieVideoExecutionStatuses
