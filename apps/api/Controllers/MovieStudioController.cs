@@ -12,7 +12,7 @@ namespace Taslim.Api.Controllers;
 [ApiController]
 [Authorize]
 [Route("api/movie-studio")]
-public sealed class MovieStudioController(IMovieStudioService movies, IMovieProductionComplexityService complexity, IMovieDurationBudgetService durationBudgets, IMovieGuideService guides, IMovieStoryService stories, IMovieStoryCastService storyCast, IMovieCharacterContinuityService continuity, IMovieWorldContinuityService worldContinuity, MovieAuthorizationService authorization, MovieShotImportanceService shotImportance) : ControllerBase
+public sealed class MovieStudioController(IMovieStudioService movies, IMovieProductionComplexityService complexity, IMovieDurationBudgetService durationBudgets, IMovieGuideService guides, IMovieStoryService stories, IMovieStoryCastService storyCast, IMovieCharacterContinuityService continuity, IMovieWorldContinuityService worldContinuity, IMovieProductionContinuityService productionContinuity, MovieAuthorizationService authorization, MovieShotImportanceService shotImportance) : ControllerBase
 {
     [HttpGet("cinematography/presets")]
     public IActionResult CinematographyPresets() => Ok(CinematographyPresetCatalog.All);
@@ -445,6 +445,27 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
     public async Task<IActionResult> GetShotWorldContinuity(Guid shotId, CancellationToken cancellationToken)
     {
         var result = await worldContinuity.GetShotAsync(GetUserId(), shotId, cancellationToken);
+        return result is null ? ApiResults.Error(this, 404, "MOVIE_SHOT_NOT_FOUND", "Movie shot not found.") : Ok(result);
+    }
+
+    [HttpGet("projects/{id:guid}/continuity-review")]
+    public async Task<IActionResult> ReviewProductionContinuity(Guid id, [FromQuery] Guid? sceneId, [FromQuery] Guid? shotId, CancellationToken cancellationToken)
+    {
+        var result = await productionContinuity.ReviewProjectAsync(GetUserId(), id, sceneId, shotId, cancellationToken);
+        return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result);
+    }
+
+    [HttpGet("scenes/{sceneId:guid}/continuity-review")]
+    public async Task<IActionResult> ReviewSceneProductionContinuity(Guid sceneId, CancellationToken cancellationToken)
+    {
+        var result = await productionContinuity.ReviewSceneAsync(GetUserId(), sceneId, cancellationToken);
+        return result is null ? ApiResults.Error(this, 404, "MOVIE_SCENE_NOT_FOUND", "Movie scene not found.") : Ok(result);
+    }
+
+    [HttpGet("shots/{shotId:guid}/continuity-review")]
+    public async Task<IActionResult> ReviewShotProductionContinuity(Guid shotId, CancellationToken cancellationToken)
+    {
+        var result = await productionContinuity.ReviewShotAsync(GetUserId(), shotId, cancellationToken);
         return result is null ? ApiResults.Error(this, 404, "MOVIE_SHOT_NOT_FOUND", "Movie shot not found.") : Ok(result);
     }
 
