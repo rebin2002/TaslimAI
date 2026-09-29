@@ -77,6 +77,9 @@ public sealed class MovieDirectorPlanningActionExecutor(string actionType) : IDi
 {
     public string ActionType => actionType;
 
+    // Kept for direct deterministic unit callers; production dispatch uses the authenticated interface overload below.
+    public Task<DirectorActionExecution> ExecuteAsync(DirectorAction action, CancellationToken cancellationToken = default) => ExecuteAsync(action, Guid.Empty, cancellationToken);
+
     public Task<DirectorActionExecution> ExecuteAsync(DirectorAction action, Guid executingUserId, CancellationToken cancellationToken = default)
     {
         DirectorRoomActionPayload? payload;

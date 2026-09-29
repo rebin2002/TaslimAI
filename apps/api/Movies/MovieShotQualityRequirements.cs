@@ -53,7 +53,8 @@ public sealed record MovieShotQualityRequirementDto(
 public sealed record MovieShotQualityRequirementsDto(
     string ProfileVersion,
     IReadOnlyList<MovieShotQualityRequirementDto> Requirements,
-    IReadOnlyList<string> GroundingSignals)
+    IReadOnlyList<string> GroundingSignals,
+    string? ExplicitMinimumLevel = null)
 {
     public int ScoreFor(string key) => Requirements.FirstOrDefault(item =>
         string.Equals(item.Key, key, StringComparison.Ordinal))?.Score ?? 0;
@@ -184,7 +185,8 @@ public static class MovieShotQualityRequirementsPlanner
                 hasContinuity ? "Shot, character, world, or project continuity references are explicit." : hasCharacter || hasEnvironment ? "Visible subject or environment continuity is relevant but not explicitly locked." : "No continuity anchor is grounded beyond the shot itself."),
         };
         var grounding = BuildGroundingSignals(shot, context, hasCloseUp, hasCharacter, hasEnvironment, hasMotion, hasText, hasDialogue, hasVfx);
-        var quality = new MovieShotQualityRequirementsDto(ProfileVersion, requirements, grounding);
+        var explicitMinimumLevel = MovieShotProductionContractSerialization.FromJson<MovieShotQualityRequirements>(shot.QualityRequirementsJson)?.MinimumLevel;
+        var quality = new MovieShotQualityRequirementsDto(ProfileVersion, requirements, grounding, explicitMinimumLevel);
         var priorities = requirements.Where(item => item.Required)
             .OrderByDescending(item => item.Score).ThenBy(item => item.Key, StringComparer.Ordinal)
             .Select(item => item.Key).ToArray();
@@ -353,6 +355,7 @@ public static class MovieShotQualityRequirementsPlanner
 
     private static bool EquivalentRequirements(MovieShotQualityRequirementsDto first, MovieShotQualityRequirementsDto second) =>
         string.Equals(first.ProfileVersion, second.ProfileVersion, StringComparison.Ordinal)
+        && string.Equals(first.ExplicitMinimumLevel, second.ExplicitMinimumLevel, StringComparison.Ordinal)
         && first.GroundingSignals.SequenceEqual(second.GroundingSignals, StringComparer.Ordinal)
         && first.Requirements.Count == second.Requirements.Count
         && first.Requirements.Zip(second.Requirements).All(pair => pair.First == pair.Second);

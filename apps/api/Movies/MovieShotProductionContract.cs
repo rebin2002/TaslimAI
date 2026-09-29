@@ -206,13 +206,17 @@ public static class MovieShotProductionContractProjection
                 latestVersion.ContinuitySnapshotHash,
                 latestVersion.CinematographyReferenceJson);
 
+        var quality = MovieShotProductionContractSerialization.FromJson<MovieShotQualityRequirements>(shot.QualityRequirementsJson);
+        if (MovieShotQualityRequirementsPlanner.TryParse(shot.QualityRequirementsJson, out var profile) && profile?.QualityRequirements.ExplicitMinimumLevel is { Length: > 0 } minimumLevel && string.IsNullOrWhiteSpace(quality?.MinimumLevel))
+            quality = new MovieShotQualityRequirements(minimumLevel);
+
         return new MovieShotProductionContractDto(
             MovieShotProductionContractSchema.CurrentVersion,
             shot.DurationSeconds,
             shot.NarrativeImportance,
             CinematographyIntentValidator.FromJson(shot.CinematographyJson),
             MovieShotProductionContractSerialization.FromJson<MovieShotComplexityProfile>(shot.ProductionComplexityJson),
-            MovieShotProductionContractSerialization.FromJson<MovieShotQualityRequirements>(shot.QualityRequirementsJson),
+            quality,
             shot.ContinuitySensitivity,
             shot.UpscaleSuitability,
             MovieShotProductionContractSerialization.FromJson<MovieShotTargetOutputRequirements>(shot.TargetOutputRequirementsJson),

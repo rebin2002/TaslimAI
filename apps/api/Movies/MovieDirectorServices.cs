@@ -928,6 +928,11 @@ public sealed class MovieDirectorService(
         if (context is null || context.ContextVersion != proposal.ContextVersion || !string.Equals(context.SnapshotHash, proposal.ContextSnapshotHash, StringComparison.Ordinal))
             await ExpireStaleProposalAsync(proposal, cancellationToken);
 
+        // Shot-plan approval is still a review decision; the shot executor performs the
+        // payload-vs-current-scene hash check immediately before applying any shots.
+        if (proposal.Actions.Any(item => item.ActionType is DirectorShotPlanningActionTypes.ProposeShots or DirectorShotPlanningActionTypes.RegenerateShots))
+            return;
+
         var roomAction = proposal.Actions.FirstOrDefault(item => DirectorActionTypes.RoomPlanning.Contains(item.ActionType));
         var roomPayload = roomAction is null ? null : ReadRoomPayload(roomAction);
         var current = await assembler.AssembleAsync(userId, proposal.MovieProjectId, new DirectorContextTargetRequest { TargetType = context!.TargetType, TargetId = context.TargetId, Room = roomPayload?.Room, SelectedSceneId = roomPayload?.SceneId, SelectedShotId = roomPayload?.ShotId }, cancellationToken);
