@@ -191,6 +191,8 @@ builder.Services.Configure<UsageControlOptions>(builder.Configuration.GetSection
 builder.Services.AddScoped<IUsageCostControl, UsageCostControl>();
 builder.Services.Configure<GenerationCostPricingOptions>(builder.Configuration.GetSection("GenerationCostPricing"));
 builder.Services.AddSingleton<IGenerationCostEstimator, GenerationCostEstimator>();
+builder.Services.Configure<MovieGenerationCostEstimatorOptions>(builder.Configuration.GetSection("MovieGenerationCostEstimator"));
+builder.Services.AddScoped<IMovieGenerationCostEstimator, MovieGenerationCostEstimator>();
 builder.Services.Configure<GenerationBudgetOptions>(builder.Configuration.GetSection("GenerationBudget"));
 builder.Services.AddScoped<IGenerationBudgetService, GenerationBudgetService>();
 builder.Services.AddScoped<IAdminUsageService, AdminUsageService>();

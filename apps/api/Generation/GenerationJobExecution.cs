@@ -238,7 +238,7 @@ public sealed class GenerationJobService(
             RetryCount = retryOf is null ? 0 : retryOf.RetryCount + 1,
             EstimatedProviderCostUsd = request.EstimatedProviderCostUsd,
             EstimatedProviderCostKnown = request.EstimatedProviderCostUsd.HasValue,
-            CostEstimateJson = request.InternalCostEstimate?.ToJson(),
+            CostEstimateJson = request.InternalCostEstimateJson ?? request.InternalCostEstimate?.ToJson(),
             ProgressPercent = 0,
             CreatedAt = now,
         };

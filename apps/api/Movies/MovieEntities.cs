@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+using Microsoft.AspNetCore.Mvc.ModelBinding;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
 using Taslim.Api.Generation;
@@ -871,7 +873,17 @@ public sealed class MovieGuideLockRequest
 }
 public sealed record MovieStudioShotRequest(string Description, string? CameraAndFraming, string? CameraMotion, int? DurationSeconds, string? Narration, string? Dialogue, string? VisualContinuityNotes, CinematographyIntentSelection? Cinematography = null, string? Purpose = null, string? Subjects = null, string? LocationSet = null, string? ProductionRequirements = null, string? ContinuityReferences = null, IReadOnlyList<Guid>? SubjectCharacterIds = null);
 public sealed record MovieStudioGuideRequest(string? VisualLanguage, string? CameraLanguage, string? ColorAndLighting, string? SoundAndNarration, string? ContinuityRules, CinematographyIntentSelection? Cinematography = null);
-public sealed record MovieStudioGenerationRequest(string? Title = null, decimal? EstimatedProviderCostUsd = null, GenerationCostEstimate? InternalCostEstimate = null);
+public sealed record MovieStudioGenerationRequest(
+    string? Title = null,
+    [property: JsonIgnore, BindNever] decimal? EstimatedProviderCostUsd = null,
+    [property: JsonIgnore, BindNever] GenerationCostEstimate? InternalCostEstimate = null,
+    string? SourceResolution = null,
+    string? TargetResolution = null,
+    string? QualityTier = null,
+    string? ProcessingPath = null,
+    int RetryAttempts = 0,
+    bool UpscalingRequested = false,
+    int UpscalePasses = 0);
 
 public static class MovieStudioValidation
 {

@@ -28,6 +28,7 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
     public DbSet<UpscalingJob> UpscalingJobs => Set<UpscalingJob>();
     public DbSet<UpscalingAttempt> UpscalingAttempts => Set<UpscalingAttempt>();
     public DbSet<UpscalingQualityHandoff> UpscalingQualityHandoffs => Set<UpscalingQualityHandoff>();
+    public DbSet<ProviderCapabilityPricing> ProviderCapabilityPricings => Set<ProviderCapabilityPricing>();
     public DbSet<ProviderCircuit> ProviderCircuits => Set<ProviderCircuit>();
     public DbSet<ProviderExecutionFinalization> ProviderExecutionFinalizations => Set<ProviderExecutionFinalization>();
     public DbSet<ActivityReadState> ActivityReadStates => Set<ActivityReadState>();
@@ -1083,6 +1084,31 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
                 .WithMany(item => item.Evidence)
                 .HasForeignKey(item => item.ProviderBenchmarkMeasurementId)
                 .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<ProviderCapabilityPricing>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.CapabilityKey).HasMaxLength(80).IsRequired();
+            entity.Property(item => item.ProviderKey).HasMaxLength(80).IsRequired();
+            entity.Property(item => item.ModelKey).HasMaxLength(160).IsRequired();
+            entity.Property(item => item.SourceResolution).HasMaxLength(20).IsRequired();
+            entity.Property(item => item.TargetResolution).HasMaxLength(20).IsRequired();
+            entity.Property(item => item.QualityTier).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.ProcessingPath).HasMaxLength(60).IsRequired();
+            entity.Property(item => item.BasePriceUsdPerSecondMin).HasPrecision(18, 8);
+            entity.Property(item => item.BasePriceUsdPerSecondMax).HasPrecision(18, 8);
+            entity.Property(item => item.BasePriceUsdFixedMin).HasPrecision(18, 8);
+            entity.Property(item => item.BasePriceUsdFixedMax).HasPrecision(18, 8);
+            entity.Property(item => item.UpscalePriceUsdPerSecondMin).HasPrecision(18, 8);
+            entity.Property(item => item.UpscalePriceUsdPerSecondMax).HasPrecision(18, 8);
+            entity.Property(item => item.UpscalePriceUsdFixedMin).HasPrecision(18, 8);
+            entity.Property(item => item.UpscalePriceUsdFixedMax).HasPrecision(18, 8);
+            entity.Property(item => item.Currency).HasMaxLength(3).IsRequired();
+            entity.Property(item => item.PricingVersion).HasMaxLength(100).IsRequired();
+            entity.Property(item => item.Source).HasMaxLength(500).IsRequired();
+            entity.HasIndex(item => new { item.CapabilityKey, item.IsActive, item.ProviderKey, item.ModelKey });
+            entity.HasIndex(item => new { item.SourceResolution, item.TargetResolution, item.QualityTier, item.ProcessingPath });
         });
 
         builder.Entity<GenerationJobOutput>(entity =>

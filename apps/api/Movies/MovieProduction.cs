@@ -1,4 +1,6 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
+using Microsoft.AspNetCore.Mvc.ModelBinding;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
 
@@ -435,6 +437,7 @@ public sealed class MovieProductionRenderRequest
     public Guid SourceVersionId { get; set; }
     public string? Label { get; set; }
     public string? Title { get; set; }
+    [JsonIgnore, BindNever]
     public decimal? EstimatedProviderCostUsd { get; set; }
 }
 

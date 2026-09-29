@@ -56,7 +56,7 @@ public interface IMovieStudioService
     Task<MovieProviderReadinessDto> ProviderReadinessAsync();
 }
 
-public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessService access, MovieCollaborationAccess collaboration, IGenerationJobService jobs, IMovieVideoProvider provider, IMovieCharacterContinuityService continuity, MovieWorldContinuityProjector worldContinuity, IGenerationCostEstimator costEstimator) : IMovieStudioService
+public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessService access, MovieCollaborationAccess collaboration, IGenerationJobService jobs, IMovieVideoProvider provider, IMovieCharacterContinuityService continuity, MovieWorldContinuityProjector worldContinuity, IMovieGenerationCostEstimator movieCostEstimator) : IMovieStudioService
 {
     public async Task<MovieStudioProjectResponse?> CreateAsync(Guid userId, MovieStudioCreateRequest request, CancellationToken cancellationToken, string? idempotencyKey = null)
     {
@@ -828,7 +828,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                 return new MovieProductionRenderResponse(ToDto(existing), GenerationJobContractMapper.ToDto(existing.GenerationJob), existingClip.Id, await GetAsync(userId, shot.Scene.MovieProjectId, cancellationToken) ?? throw new InvalidOperationException("Movie project disappeared."));
         }
 
-        var queued = await QueueClipAsync(userId, shot.Scene.MovieProject, shot.Scene, shot, new MovieStudioGenerationRequest(request.Title, request.EstimatedProviderCostUsd), cancellationToken, idempotencyKey);
+        var queued = await QueueClipAsync(userId, shot.Scene.MovieProject, shot.Scene, shot, new MovieStudioGenerationRequest(request.Title), cancellationToken, idempotencyKey);
         var version = await CreateProductionVersionAsync(userId, shotId, new MovieProductionVersionRequest
         {
             Stage = MovieProductionStages.ProductionRender,
@@ -918,18 +918,19 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         var workflowError = MovieProductionWorkflow.ValidateVersionCreation(request.RequestedStage.Trim(), source);
         if (workflowError is not null) throw new MovieProductionValidationException("PRODUCTION_STAGE_INVALID", workflowError);
 
-        var durationSeconds = Math.Clamp(shot.DurationSeconds ?? shot.Scene.DurationSeconds ?? Math.Min(shot.Scene.MovieProject.DurationSeconds, 60), 1, 3600);
-        var estimate = request.InternalCostEstimate
-            ?? (request.EstimatedProviderCostUsd.HasValue
-                ? new GenerationCostEstimate(true, Math.Max(0m, request.EstimatedProviderCostUsd.Value), UsageCurrencies.Usd, null, null, null, [])
-                : costEstimator.Estimate(new GenerationCostEstimationRequest(provider.Key, VideoDurationSeconds: durationSeconds)));
+        var movie = shot.Scene.MovieProject;
+        var durationSeconds = Math.Clamp(shot.DurationSeconds ?? shot.Scene.DurationSeconds ?? Math.Min(movie.DurationSeconds, 60), 1, 3600);
+        var estimate = await movieCostEstimator.EstimateAsync(
+            new MovieGenerationCostRequest(durationSeconds, "1080p", "1080p", movie.QualityLevel, "native"),
+            provider.Key,
+            cancellationToken: cancellationToken);
         var now = DateTime.UtcNow;
         var regeneration = new MovieRegenerationRequest
         {
             Id = Guid.NewGuid(), MovieShotId = shotId, TargetId = shotId, ActionType = request.ActionType.Trim().ToLowerInvariant(),
             RequestedStage = request.RequestedStage.Trim(), Reason = request.Reason.Trim(), SourceVersionId = source?.Id,
             ChangedInputsJson = request.ChangedInputsJson.Trim(), CompositionJson = request.CompositionJson.Trim(),
-            EstimatedProviderCostUsd = estimate.AmountUsd, EstimatedProviderCostKnown = estimate.IsKnown && estimate.AmountUsd.HasValue,
+            EstimatedProviderCostUsd = estimate.MaximumAmountUsd, EstimatedProviderCostKnown = estimate.IsEstimated && estimate.MaximumAmountUsd.HasValue,
             CostEstimateJson = estimate.ToJson(), Status = MovieRegenerationStatuses.PendingConfirmation, CreatedByUserId = userId, CreatedAt = now,
         };
         db.MovieRegenerationRequests.Add(regeneration);
@@ -963,7 +964,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         {
             WorkspaceId = movie.WorkspaceId, ProjectId = movie.ProjectId, JobType = GenerationJobTypes.MovieClipGenerate,
             Title = $"Selective {regeneration.ActionType} for {movie.Title}", EstimatedProviderCostUsd = regeneration.EstimatedProviderCostUsd,
-            InternalCostEstimate = ParseCostEstimate(regeneration.CostEstimateJson),
+            InternalCostEstimateJson = regeneration.CostEstimateJson,
             InputJson = JsonSerializer.Serialize(new MovieGenerationInput(
                 MovieStudioOperations.SceneClip, movie.Id, clip.Id, shot.Scene.Id, shot.Id, shot.Description, clip.DurationSeconds!.Value,
                 movie.AspectRatio, movie.Style, movie.Language, movie.AdditionalInstructions, clip.ContinuitySnapshotJson,
@@ -1057,13 +1058,6 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         .Include(item => item.ResultingProductionVersion).ThenInclude(item => item!.AssetReferences)
         .Include(item => item.ResultingTake).ThenInclude(item => item!.Approvals);
 
-    private static GenerationCostEstimate? ParseCostEstimate(string? json)
-    {
-        if (string.IsNullOrWhiteSpace(json)) return null;
-        try { return JsonSerializer.Deserialize<GenerationCostEstimate>(json); }
-        catch (JsonException) { return null; }
-    }
-
     public async Task<MovieStudioGenerationResponse?> GenerateSceneAsync(Guid userId, Guid movieProjectId, Guid sceneId, MovieStudioGenerationRequest request, CancellationToken cancellationToken, string? idempotencyKey = null)
     {
         var scene = await db.MovieScenes.Include(item => item.MovieProject).ThenInclude(item => item.Guide).FirstOrDefaultAsync(item => item.Id == sceneId && item.MovieProjectId == movieProjectId, cancellationToken);
@@ -1103,6 +1097,18 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         }
         var description = shot?.Description ?? scene.Summary;
         var durationSeconds = Math.Clamp(shot?.DurationSeconds ?? scene.DurationSeconds ?? Math.Min(movie.DurationSeconds, 60), 1, 3600);
+        var estimate = await movieCostEstimator.EstimateAsync(
+            new MovieGenerationCostRequest(
+                durationSeconds,
+                request.SourceResolution ?? "1080p",
+                request.TargetResolution ?? "1080p",
+                request.QualityTier ?? movie.QualityLevel,
+                request.ProcessingPath ?? "native",
+                request.RetryAttempts,
+                request.UpscalingRequested,
+                request.UpscalePasses),
+            provider.Key,
+            cancellationToken: cancellationToken);
         var now = DateTime.UtcNow;
         var clip = new MovieClip
         {
@@ -1129,8 +1135,8 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
             ProjectId = movie.ProjectId,
             JobType = shot is null ? GenerationJobTypes.MovieClipGenerate : GenerationJobTypes.MovieClipGenerate,
             Title = string.IsNullOrWhiteSpace(request.Title) ? movie.Title : request.Title.Trim(),
-            EstimatedProviderCostUsd = request.EstimatedProviderCostUsd,
-            InternalCostEstimate = request.InternalCostEstimate,
+            EstimatedProviderCostUsd = estimate.MaximumAmountUsd,
+            InternalCostEstimateJson = estimate.ToJson(),
             InputJson = JsonSerializer.Serialize(new MovieGenerationInput(
                 MovieStudioOperations.SceneClip,
                 movie.Id,
@@ -1473,7 +1479,31 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         shot.CinematographyJson,
     });
 
-    private static MovieRegenerationRequestDto ToRegenerationDto(MovieRegenerationRequest request) => new(request.Id, request.MovieShotId, request.TargetType, request.TargetId, request.ActionType, request.RequestedStage, request.Reason, request.SourceVersionId, request.ChangedInputsJson, request.CompositionJson, request.Status, request.CreatedByUserId, request.ConfirmedByUserId, request.GenerationJobId, request.ResultingProductionVersionId, request.ResultingTakeId, request.CreatedAt, request.ConfirmedAt, new MovieRegenerationCostPreviewDto(request.EstimatedProviderCostUsd, request.EstimatedProviderCostKnown, UsageCurrencies.Usd, request.CostEstimateJson, true));
+    private static MovieRegenerationRequestDto ToRegenerationDto(MovieRegenerationRequest request)
+    {
+        var estimate = ParseMovieCostEstimate(request.CostEstimateJson);
+        return new MovieRegenerationRequestDto(
+            request.Id, request.MovieShotId, request.TargetType, request.TargetId, request.ActionType, request.RequestedStage,
+            request.Reason, request.SourceVersionId, request.ChangedInputsJson, request.CompositionJson, request.Status,
+            request.CreatedByUserId, request.ConfirmedByUserId, request.GenerationJobId, request.ResultingProductionVersionId,
+            request.ResultingTakeId, request.CreatedAt, request.ConfirmedAt,
+            new MovieRegenerationCostPreviewDto(
+                request.EstimatedProviderCostUsd,
+                request.EstimatedProviderCostKnown,
+                estimate?.Currency ?? UsageCurrencies.Usd,
+                request.CostEstimateJson,
+                true,
+                estimate?.State ?? MovieGenerationCostEstimateStates.Unevaluated,
+                estimate?.MinimumAmountUsd,
+                estimate?.MaximumAmountUsd));
+    }
+
+    private static MovieGenerationCostEstimate? ParseMovieCostEstimate(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return null;
+        try { return JsonSerializer.Deserialize<MovieGenerationCostEstimate>(json); }
+        catch (JsonException) { return null; }
+    }
     private static MovieSelectiveRegenerationResponse ToSelectiveResponse(MovieRegenerationRequest request) => new(ToRegenerationDto(request), request.GenerationJob is null ? null : GenerationJobContractMapper.ToDto(request.GenerationJob), request.ResultingProductionVersion is null ? null : ToDto(request.ResultingProductionVersion), request.ResultingTake is null ? null : MovieProductionProjection.ToTakeDto(request.ResultingTake));
     private static void AddAsset(IDictionary<Guid, string> assets, Guid? assetId, string role)
     {
