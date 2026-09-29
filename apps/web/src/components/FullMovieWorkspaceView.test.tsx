@@ -133,18 +133,21 @@ describe("Full Movie workspace foundation", () => {
   });
 
   it("keeps production actions explicit and preserves the candidate/take distinction", () => {
-    expect(workspaceSource).toContain("Approve keyframe");
-    expect(workspaceSource).toContain("Create motion preview");
-    expect(workspaceSource).toContain("Start production render");
-    expect(workspaceSource).toContain("Create MovieTake");
-    expect(workspaceSource).toContain("artifact candidates stay separate from rendered takes");
-    expect(workspaceSource).toContain("A MovieTake appears only after a real render has produced a private Asset.");
+    expect(workspaceSource).toContain("Approve source frame");
+    expect(workspaceSource).toContain("Create motion check");
+    expect(workspaceSource).toContain("Create master pass");
+    expect(workspaceSource).toContain("Save as take");
+    expect(workspaceSource).toContain("Choose one take, then carry it into the master.");
+    expect(workspaceSource).toContain("A take appears only after a real pass has produced a private output.");
+    expect(workspaceSource).toContain("MovieProductionResolutionPanel");
+    expect(workspaceSource).toContain("selectedTier");
   });
   it("surfaces existing generation, resilience, and QC signals instead of inventing footage", () => {
-    expect(workspaceSource).toContain("retryCount");
     expect(workspaceSource).toContain("qualityControlStatus");
-    expect(workspaceSource).toContain("Failure / resilience");
-    expect(workspaceSource).toContain("No generated output");
+    expect(workspaceSource).toContain("attemptCount");
+    expect(workspaceSource).toContain("Review this pass before continuing");
+    expect(workspaceSource).toContain("No output yet");
+    expect(workspaceSource).not.toContain("Generation Jobs, cost guardrails, provider attempts");
   });
 
   it("keeps one Director contextual across rooms and targets real shots", () => {
