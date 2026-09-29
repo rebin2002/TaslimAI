@@ -527,6 +527,7 @@ public sealed class MovieShot
     public string? Narration { get; set; }
     public string? Dialogue { get; set; }
     public string? VisualContinuityNotes { get; set; }
+    public string? ImportanceOverride { get; set; }
     public string Status { get; set; } = MovieShotStatuses.Planned;
     public DateTime? ArchivedAt { get; set; }
     public DateTime CreatedAt { get; set; }
