@@ -434,6 +434,7 @@ public sealed class MovieProductionRenderRequest
     public Guid SourceVersionId { get; set; }
     public string? Label { get; set; }
     public string? Title { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore]
     public decimal? EstimatedProviderCostUsd { get; set; }
 }
 

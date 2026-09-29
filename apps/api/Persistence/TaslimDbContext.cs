@@ -17,6 +17,7 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
     public DbSet<Conversation> Conversations => Set<Conversation>();
     public DbSet<ChatMessage> ChatMessages => Set<ChatMessage>();
     public DbSet<UsageTransaction> UsageTransactions => Set<UsageTransaction>();
+    public DbSet<UsageTransactionAdjustment> UsageTransactionAdjustments => Set<UsageTransactionAdjustment>();
     public DbSet<PersonalMemory> PersonalMemories => Set<PersonalMemory>();
     public DbSet<StoredFile> StoredFiles => Set<StoredFile>();
     public DbSet<ChatMessageAttachment> ChatMessageAttachments => Set<ChatMessageAttachment>();
@@ -1097,8 +1098,10 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.Property(transaction => transaction.CostBasis).HasMaxLength(20);
             entity.Property(transaction => transaction.ProviderCostUsd).HasPrecision(18, 8).IsRequired();
             entity.Property(transaction => transaction.ChargedAmount).HasPrecision(18, 8).IsRequired();
+            entity.Property(transaction => transaction.ReversedAmount).HasPrecision(18, 8).IsRequired();
             entity.Property(transaction => transaction.EstimatedProviderCostUsd).HasPrecision(18, 8);
             entity.Property(transaction => transaction.ProviderCostKnown).IsRequired();
+            entity.Property(transaction => transaction.IsBillable).IsRequired();
             entity.Property(transaction => transaction.PricingVersion).HasMaxLength(100);
             entity.Property(transaction => transaction.PricingSnapshotJson).HasMaxLength(8_000);
             entity.Property(transaction => transaction.CostEstimateJson).HasMaxLength(8_000);
@@ -1119,6 +1122,21 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasOne<Project>().WithMany().HasForeignKey(transaction => transaction.ProjectId).OnDelete(DeleteBehavior.SetNull);
             entity.HasOne<Conversation>().WithMany().HasForeignKey(transaction => transaction.ConversationId).OnDelete(DeleteBehavior.SetNull);
             entity.HasOne(transaction => transaction.GenerationJob).WithMany().HasForeignKey(transaction => transaction.GenerationJobId).OnDelete(DeleteBehavior.SetNull);
+        });
+        builder.Entity<UsageTransactionAdjustment>(entity =>
+        {
+            entity.HasKey(adjustment => adjustment.Id);
+            entity.Property(adjustment => adjustment.Type).HasConversion<string>().HasMaxLength(20).IsRequired();
+            entity.Property(adjustment => adjustment.AmountUsd).HasPrecision(18, 8).IsRequired();
+            entity.Property(adjustment => adjustment.Currency).HasMaxLength(3).IsRequired();
+            entity.Property(adjustment => adjustment.IdempotencyKey).HasMaxLength(180).IsRequired();
+            entity.Property(adjustment => adjustment.Reason).HasMaxLength(500).IsRequired();
+            entity.Property(adjustment => adjustment.CreatedAt).IsRequired();
+            entity.HasIndex(adjustment => new { adjustment.WorkspaceId, adjustment.IdempotencyKey }).IsUnique();
+            entity.HasIndex(adjustment => adjustment.UsageTransactionId);
+            entity.HasOne(adjustment => adjustment.Workspace).WithMany().HasForeignKey(adjustment => adjustment.WorkspaceId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(adjustment => adjustment.UsageTransaction).WithMany(transaction => transaction.Adjustments).HasForeignKey(adjustment => adjustment.UsageTransactionId).OnDelete(DeleteBehavior.Restrict);
+            entity.ToTable("UsageTransactionAdjustments", table => table.HasCheckConstraint("CK_UsageTransactionAdjustments_PositiveAmount", "\"AmountUsd\" > 0"));
         });
         builder.Entity<Plan>(entity =>
         {

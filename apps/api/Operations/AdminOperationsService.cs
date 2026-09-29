@@ -124,7 +124,7 @@ public sealed class AdminOperationsService(
             ImageInputTokens = group.Sum(item => (long)(item.ImageInputTokens ?? 0)),
             ImageOutputTokens = group.Sum(item => (long)(item.ImageOutputTokens ?? 0)),
             ProviderCostUsd = group.Sum(item => (double)item.ProviderCostUsd),
-            CustomerChargesUsd = group.Sum(item => (double)item.ChargedAmount),
+            CustomerChargesUsd = group.Sum(item => (double)(item.ChargedAmount - item.ReversedAmount)),
             PendingEstimatedProviderCostUsd = group.Sum(item => item.Status == UsageTransactionStatus.Pending ? (double)(item.EstimatedProviderCostUsd ?? 0m) : 0d),
         }).SingleOrDefaultAsync(cancellationToken);
         var features = await usage.GroupBy(item => item.Feature).Select(group => new
@@ -140,7 +140,7 @@ public sealed class AdminOperationsService(
             ImageInputTokens = group.Sum(item => (long)(item.ImageInputTokens ?? 0)),
             ImageOutputTokens = group.Sum(item => (long)(item.ImageOutputTokens ?? 0)),
             ProviderCostUsd = group.Sum(item => (double)item.ProviderCostUsd),
-            CustomerChargesUsd = group.Sum(item => (double)item.ChargedAmount),
+            CustomerChargesUsd = group.Sum(item => (double)(item.ChargedAmount - item.ReversedAmount)),
         }).ToArrayAsync(cancellationToken);
 
         return new AdminUsageOperationsDto(

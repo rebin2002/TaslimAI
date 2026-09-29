@@ -833,7 +833,10 @@ public sealed class MovieGuideLockRequest
 }
 public sealed record MovieStudioShotRequest(string Description, string? CameraAndFraming, string? CameraMotion, int? DurationSeconds, string? Narration, string? Dialogue, string? VisualContinuityNotes, CinematographyIntentSelection? Cinematography = null, string? Purpose = null, string? Subjects = null, string? LocationSet = null, string? ProductionRequirements = null, string? ContinuityReferences = null, IReadOnlyList<Guid>? SubjectCharacterIds = null);
 public sealed record MovieStudioGuideRequest(string? VisualLanguage, string? CameraLanguage, string? ColorAndLighting, string? SoundAndNarration, string? ContinuityRules, CinematographyIntentSelection? Cinematography = null);
-public sealed record MovieStudioGenerationRequest(string? Title = null, decimal? EstimatedProviderCostUsd = null, GenerationCostEstimate? InternalCostEstimate = null);
+public sealed record MovieStudioGenerationRequest(
+    string? Title = null,
+    [property: System.Text.Json.Serialization.JsonIgnore] decimal? EstimatedProviderCostUsd = null,
+    [property: System.Text.Json.Serialization.JsonIgnore] GenerationCostEstimate? InternalCostEstimate = null);
 
 public static class MovieStudioValidation
 {

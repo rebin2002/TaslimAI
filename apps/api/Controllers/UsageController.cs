@@ -27,7 +27,7 @@ public sealed class UsageController(
                 transaction.InputTokens,
                 transaction.CachedInputTokens,
                 transaction.OutputTokens,
-                transaction.ChargedAmount,
+                NetChargedAmount = transaction.ChargedAmount - transaction.ReversedAmount,
             })
             .ToListAsync(cancellationToken);
             var summary = new UsageSummaryDto(
@@ -39,7 +39,7 @@ public sealed class UsageController(
                 transactions.Sum(transaction => (long?)transaction.InputTokens ?? 0L),
                 transactions.Sum(transaction => (long?)transaction.CachedInputTokens ?? 0L),
                 transactions.Sum(transaction => (long?)transaction.OutputTokens ?? 0L),
-                transactions.Sum(transaction => transaction.ChargedAmount),
+                transactions.Sum(transaction => transaction.NetChargedAmount),
             Domain.UsageChargeUnit.Usd.ToString());
         return Ok(summary);
     }
@@ -63,7 +63,7 @@ public sealed class UsageController(
             transaction.InputTokens,
             transaction.CachedInputTokens,
             transaction.OutputTokens,
-            transaction.ChargedAmount,
+            transaction.ChargedAmount - transaction.ReversedAmount,
             transaction.ChargedUnit.ToString(),
             transaction.CreatedAt,
             transaction.CompletedAt,

@@ -902,10 +902,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         if (workflowError is not null) throw new MovieProductionValidationException("PRODUCTION_STAGE_INVALID", workflowError);
 
         var durationSeconds = Math.Clamp(shot.DurationSeconds ?? shot.Scene.DurationSeconds ?? Math.Min(shot.Scene.MovieProject.DurationSeconds, 60), 1, 3600);
-        var estimate = request.InternalCostEstimate
-            ?? (request.EstimatedProviderCostUsd.HasValue
-                ? new GenerationCostEstimate(true, Math.Max(0m, request.EstimatedProviderCostUsd.Value), UsageCurrencies.Usd, null, null, null, [])
-                : costEstimator.Estimate(new GenerationCostEstimationRequest(provider.Key, VideoDurationSeconds: durationSeconds)));
+        var estimate = costEstimator.Estimate(new GenerationCostEstimationRequest(provider.Key, VideoDurationSeconds: durationSeconds));
         var now = DateTime.UtcNow;
         var regeneration = new MovieRegenerationRequest
         {
@@ -1069,6 +1066,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
     {
         var description = shot?.Description ?? scene.Summary;
         var durationSeconds = Math.Clamp(shot?.DurationSeconds ?? scene.DurationSeconds ?? Math.Min(movie.DurationSeconds, 60), 1, 3600);
+        var estimate = costEstimator.Estimate(new GenerationCostEstimationRequest(provider.Key, VideoDurationSeconds: durationSeconds));
         var now = DateTime.UtcNow;
         var clip = new MovieClip
         {
@@ -1095,8 +1093,8 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
             ProjectId = movie.ProjectId,
             JobType = shot is null ? GenerationJobTypes.MovieClipGenerate : GenerationJobTypes.MovieClipGenerate,
             Title = string.IsNullOrWhiteSpace(request.Title) ? movie.Title : request.Title.Trim(),
-            EstimatedProviderCostUsd = request.EstimatedProviderCostUsd,
-            InternalCostEstimate = request.InternalCostEstimate,
+            EstimatedProviderCostUsd = estimate.AmountUsd,
+            InternalCostEstimate = estimate,
             InputJson = JsonSerializer.Serialize(new MovieGenerationInput(
                 MovieStudioOperations.SceneClip,
                 movie.Id,

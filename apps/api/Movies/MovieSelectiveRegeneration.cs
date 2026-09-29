@@ -110,7 +110,9 @@ public sealed class MovieRegenerationRequestInput
     public Guid? SourceVersionId { get; set; }
     public string ChangedInputsJson { get; set; } = "{}";
     public string CompositionJson { get; set; } = "{}";
+    [System.Text.Json.Serialization.JsonIgnore]
     public decimal? EstimatedProviderCostUsd { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore]
     public GenerationCostEstimate? InternalCostEstimate { get; set; }
 }
 
