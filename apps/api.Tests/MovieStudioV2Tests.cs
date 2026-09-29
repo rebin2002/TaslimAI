@@ -1,5 +1,6 @@
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using System.Text.Json;
 using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
@@ -11,6 +12,16 @@ namespace Taslim.Api.Tests;
 
 public sealed class MovieStudioV2Tests
 {
+    [Fact]
+    public void Client_json_cannot_supply_server_trusted_movie_cost_fields()
+    {
+        var request = JsonSerializer.Deserialize<MovieStudioGenerationRequest>("{\"title\":\"clip\",\"estimatedProviderCostUsd\":999,\"internalCostEstimate\":{\"isKnown\":true,\"amountUsd\":999}}", new JsonSerializerOptions(JsonSerializerDefaults.Web));
+
+        Assert.NotNull(request);
+        Assert.Null(request!.EstimatedProviderCostUsd);
+        Assert.Null(request.InternalCostEstimate);
+    }
+
     [Fact]
     public async Task Canonical_hierarchy_orders_children_and_persists_quality_and_auto_director_separately()
     {
@@ -77,6 +88,44 @@ public sealed class MovieStudioV2Tests
 
         Assert.Null(await service.GetHierarchyAsync(outsiderId, movieId, CancellationToken.None));
         Assert.Null(await service.AddTakeAsync(outsiderId, shotId, new MovieV2TakeRequest(), CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Workspace_member_without_movie_team_permission_cannot_mutate_hierarchy()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        var (ownerId, movieId, _) = await SeedAsync(db);
+        var memberId = Guid.NewGuid();
+        var movie = await db.MovieProjects.SingleAsync(item => item.Id == movieId);
+        db.Users.Add(new ApplicationUser { Id = memberId, UserName = "workspace-only", NormalizedUserName = "WORKSPACE-ONLY", DisplayName = "Workspace Only", CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow });
+        db.WorkspaceMembers.Add(new WorkspaceMember { Id = Guid.NewGuid(), WorkspaceId = movie.WorkspaceId, UserId = memberId, Role = WorkspaceRole.Member });
+        await db.SaveChangesAsync();
+        var service = new MovieV2Service(db, new WorkspaceAccessService(db), new MovieCollaborationAccess(db, new WorkspaceAccessService(db)));
+
+        Assert.Null(await service.AddActAsync(memberId, movieId, new MovieV2ActRequest { Title = "Forged Act" }, CancellationToken.None));
+        Assert.NotNull(await service.AddActAsync(ownerId, movieId, new MovieV2ActRequest { Title = "Owner Act" }, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Take_rejects_a_generation_job_that_does_not_match_the_selected_clip()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        var (userId, movieId, shotId) = await SeedAsync(db);
+        var movie = await db.MovieProjects.SingleAsync(item => item.Id == movieId);
+        var now = DateTime.UtcNow;
+        var clipJob = new GenerationJob { Id = Guid.NewGuid(), WorkspaceId = movie.WorkspaceId, ProjectId = movie.ProjectId, CreatedByUserId = userId, JobType = GenerationJobTypes.MovieClipGenerate, Status = GenerationJobStatus.Succeeded, InputJson = "{}", CreatedAt = now };
+        var otherJob = new GenerationJob { Id = Guid.NewGuid(), WorkspaceId = movie.WorkspaceId, ProjectId = movie.ProjectId, CreatedByUserId = userId, JobType = GenerationJobTypes.MovieClipGenerate, Status = GenerationJobStatus.Succeeded, InputJson = "{}", CreatedAt = now };
+        var sceneId = await db.MovieShots.Where(item => item.Id == shotId).Select(item => item.MovieSceneId).SingleAsync();
+        var clip = new MovieClip { Id = Guid.NewGuid(), MovieProjectId = movieId, MovieSceneId = sceneId, MovieShotId = shotId, GenerationJobId = clipJob.Id, Status = MovieClipStatuses.Ready, CreatedAt = now, UpdatedAt = now };
+        db.AddRange(clipJob, otherJob, clip);
+        await db.SaveChangesAsync();
+        var service = new MovieV2Service(db, new WorkspaceAccessService(db));
+
+        await Assert.ThrowsAsync<MovieV2ValidationException>(() => service.AddTakeAsync(userId, shotId, new MovieV2TakeRequest { MovieClipId = clip.Id, GenerationJobId = otherJob.Id }, CancellationToken.None));
     }
 
     [Fact]

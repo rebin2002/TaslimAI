@@ -247,7 +247,8 @@ builder.Services.AddSingleton<IMovieResolutionPlanner, MovieResolutionPlanner>()
 builder.Services.Configure<MovieVideoOptions>(builder.Configuration.GetSection("MovieVideo"));
 builder.Services.Configure<DirectVideoProviderOptions>(builder.Configuration.GetSection("DirectVideoProviders"));
 builder.Services.AddScoped<MovieVideoExecutionStore>();
-builder.Services.AddHttpClient<RunwayMovieVideoProvider>();
+builder.Services.AddHttpClient<RunwayMovieVideoProvider>()
+    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
 builder.Services.AddHttpClient<ManusMovieVideoProvider>();
 builder.Services.AddSingleton<IMovieVideoProvider>(services =>
 {

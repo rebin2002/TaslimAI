@@ -7,6 +7,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Taslim.Api.Domain;
+using Taslim.Api.Files;
 using Taslim.Api.Movies;
 using Taslim.Api.Persistence;
 using Xunit;
@@ -152,6 +153,25 @@ public sealed class RunwayMovieVideoProviderTests
     }
 
     [Fact]
+    public async Task Private_output_url_is_rejected_before_head_or_get()
+    {
+        var handler = new RecordingHandler(_ => throw new InvalidOperationException("private output must not be fetched"));
+        var provider = CreateProvider(handler, EnabledOptions(), new ProviderUrlPolicy());
+        var status = new MovieVideoProviderStatus(
+            MovieVideoProviderJobStatus.Succeeded,
+            100,
+            "video/mp4",
+            "clip.mp4",
+            4,
+            5,
+            $"{{\"taskId\":\"{TaskId}\",\"outputUrl\":\"https://127.0.0.1/clip.mp4\",\"contentType\":\"video/mp4\",\"fileName\":\"clip.mp4\",\"sizeBytes\":4}}",
+            EstimatedCostUsd: 0.01m);
+
+        await Assert.ThrowsAsync<MovieVideoProviderOutputException>(() => provider.RetrieveAsync(TaskId.ToString(), status, CancellationToken.None));
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
     public async Task Unsupported_duration_ratio_and_continuation_are_explicitly_rejected()
     {
         var provider = CreateProvider(new RecordingHandler(_ => JsonResponse($"{{\"id\":\"{TaskId}\"}}")), EnabledOptions());
@@ -201,8 +221,13 @@ public sealed class RunwayMovieVideoProviderTests
         Assert.Equal(MovieClipStatuses.Ready, (await db.MovieClips.AsNoTracking().SingleAsync()).Status);
     }
 
-    private static RunwayMovieVideoProvider CreateProvider(HttpMessageHandler handler, MovieVideoOptions options) =>
-        new(new HttpClient(handler) { BaseAddress = new Uri("https://api.dev.runwayml.com/v1/") }, Options.Create(options), NullLogger<RunwayMovieVideoProvider>.Instance);
+    private static RunwayMovieVideoProvider CreateProvider(HttpMessageHandler handler, MovieVideoOptions options, IProviderUrlPolicy? urlPolicy = null) =>
+        new(new HttpClient(handler) { BaseAddress = new Uri("https://api.dev.runwayml.com/v1/") }, Options.Create(options), NullLogger<RunwayMovieVideoProvider>.Instance, urlPolicy ?? new AllowAllProviderUrlPolicy());
+
+    private sealed class AllowAllProviderUrlPolicy : IProviderUrlPolicy
+    {
+        public Task EnsureSafeAsync(Uri uri, CancellationToken cancellationToken = default) => Task.CompletedTask;
+    }
 
     private static MovieVideoOptions EnabledOptions() => new()
     {
