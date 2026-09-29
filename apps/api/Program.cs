@@ -14,6 +14,7 @@ using Taslim.Api.Activity;
 using Taslim.Api.Assets;
 using Taslim.Api.Authorization;
 using Taslim.Api.Billing;
+using Taslim.Api.Benchmarking;
 using Taslim.Api.Domain;
 using Taslim.Api.Documents;
 using Taslim.Api.Presentations;
@@ -198,6 +199,7 @@ builder.Services.AddScoped<IGenerationJobUsageService, GenerationJobUsageService
 builder.Services.AddScoped<IGenerationJobService, GenerationJobService>();
 builder.Services.AddScoped<IProviderResilienceStore, EfProviderResilienceStore>();
 builder.Services.AddScoped<IProviderResilienceOrchestrator, ProviderResilienceOrchestrator>();
+builder.Services.AddScoped<IProviderBenchmarkService, ProviderBenchmarkService>();
 builder.Services.AddSingleton<IProviderCostGuard, AllowAllProviderCostGuard>();
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddScoped<NotificationService>();
