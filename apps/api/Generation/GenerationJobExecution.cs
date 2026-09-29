@@ -174,7 +174,8 @@ public sealed class GenerationJobService(
     WorkspaceAccessService access,
     IGenerationJobQueue queue,
     IGenerationJobUsageService usage,
-    IHttpContextAccessor httpContextAccessor) : IGenerationJobService
+    IHttpContextAccessor httpContextAccessor,
+    MovieCollaborationAccess? movieCollaboration = null) : IGenerationJobService
 {
     public async Task<GenerationJob> CreateAsync(Guid userId, CreateGenerationJobRequest request, CancellationToken cancellationToken = default, string? idempotencyKey = null, string? requestId = null)
     {
@@ -184,6 +185,8 @@ public sealed class GenerationJobService(
             throw new GenerationJobForbiddenException();
         if (request.ProjectId.HasValue && !await db.Projects.AnyAsync(project => project.Id == request.ProjectId && project.WorkspaceId == request.WorkspaceId, cancellationToken))
             throw new GenerationJobValidationException("PROJECT_NOT_IN_WORKSPACE", "The selected project is not in this workspace.");
+        if (GenerationJobTypes.MovieTypes.Contains(request.JobType.Trim()))
+            await ValidateMovieJobTargetAsync(userId, request, cancellationToken);
 
         try
         {
@@ -277,6 +280,30 @@ public sealed class GenerationJobService(
             inputJson,
             estimatedProviderCostUsd,
         }))));
+
+    private async Task ValidateMovieJobTargetAsync(Guid userId, CreateGenerationJobRequest request, CancellationToken cancellationToken)
+    {
+        var isQuickMovie = string.Equals(request.JobType.Trim(), GenerationJobTypes.MovieQuickGenerate, StringComparison.OrdinalIgnoreCase);
+        if (!isQuickMovie && !string.Equals(request.JobType.Trim(), GenerationJobTypes.MovieClipGenerate, StringComparison.OrdinalIgnoreCase))
+            throw new GenerationJobValidationException("MOVIE_JOB_TARGET_INVALID", "Movie jobs must be created through a validated movie clip target.");
+
+        MovieGenerationInput? input;
+        try { input = JsonSerializer.Deserialize<MovieGenerationInput>(request.InputJson); }
+        catch (JsonException) { input = null; }
+        if (input is null || input.MovieProjectId == Guid.Empty || input.MovieClipId == Guid.Empty || (!isQuickMovie && input.MovieSceneId == Guid.Empty))
+            throw new GenerationJobValidationException("MOVIE_JOB_TARGET_INVALID", "The movie job target is invalid.");
+
+        var clip = await db.MovieClips
+            .Include(item => item.MovieProject)
+            .FirstOrDefaultAsync(item => item.Id == input.MovieClipId, cancellationToken);
+        if (clip is null || clip.MovieProjectId != input.MovieProjectId || clip.MovieProject.WorkspaceId != request.WorkspaceId
+            || (isQuickMovie ? input.Operation != MovieStudioOperations.QuickMovie || input.MovieSceneId.HasValue || input.MovieShotId.HasValue
+                : input.Operation != MovieStudioOperations.SceneClip || clip.MovieSceneId != input.MovieSceneId || clip.MovieShotId != input.MovieShotId)
+            || request.ProjectId != clip.MovieProject.ProjectId || clip.GenerationJobId is not null)
+            throw new GenerationJobValidationException("MOVIE_JOB_TARGET_INVALID", "The movie job target does not belong to the selected project or is no longer available.");
+        if (clip.MovieProject.CreatedByUserId != userId && (movieCollaboration is null || !await movieCollaboration.HasPermissionAsync(userId, clip.MovieProjectId, MoviePermissions.Generate, cancellationToken)))
+            throw new GenerationJobForbiddenException();
+    }
 
     public async Task<GenerationJob?> GetAsync(Guid userId, Guid jobId, CancellationToken cancellationToken = default)
     {
