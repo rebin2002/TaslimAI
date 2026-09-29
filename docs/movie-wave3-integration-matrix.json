@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 1,
+  "branch": "parallel/movie-wave3-integration-prep",
+  "base": "308e146aa73e91443097229a81f97dac008b92ee",
+  "scope": "Wave 3 integration preparation and deterministic acceptance only; no Wave 2 or Wave 3 implementation branch is merged by this branch.",
+  "safetyDefaults": {
+    "customerChargingEnabled": false,
+    "movieVideoEnabled": false,
+    "realMovieProviders": false,
+    "normalUserProviderMetadata": false,
+    "testAdapters": "allowed only through test-host dependency injection"
+  },
+  "sourceBranches": [
+    { "branch": "parallel/movie-wave3-adaptive-resolution-director", "sha": "6029dbbdaa0f6d6a1690cb2b698775cb839463ad", "migration": false, "role": "adaptive recommendation and QC escalation" },
+    { "branch": "parallel/movie-wave3-resolution-pipeline", "sha": "ffb17625eab854317b1f24746504db62af34ce65", "migration": false, "role": "resolution pipeline contract" },
+    { "branch": "parallel/movie-wave3-benchmark-framework", "sha": "4578d7e875cb021bcac7fb1f7c491084b93f82ff", "migration": true, "migrationName": "20260929213039_AddProviderBenchmarkingFoundation", "role": "benchmark measurements and economics evidence" },
+    { "branch": "parallel/movie-wave3-provider-capabilities", "sha": "23a043c278e1c73b8cc231bfc689a1bcf5bdd146", "migration": false, "role": "versioned capability lookup" },
+    { "branch": "parallel/movie-wave3-shot-provider-intelligence", "sha": "7ba2c1fb96b2c2e44bcd64703980eb0fd981d9b2", "migration": false, "role": "shot-type intelligence scoring" },
+    { "branch": "parallel/movie-wave3-upscaling-pipeline", "sha": "40c38d6cdcc9e5d6934fd8339f3673761cb6c7fa", "migration": true, "migrationName": "20260929213223_AddUpscalingJobs", "role": "provider-neutral upscale job boundary" },
+    { "branch": "parallel/movie-wave3-selected-take-upscale", "sha": "dfe1fa15f9e87e3980df4be3ef8dee2d00d826e8", "migration": true, "migrationName": "20260929213333_AddMovieTakeUpscaleAudit", "role": "selected-take-only eligibility and audit" },
+    { "branch": "parallel/movie-wave3-4k-mastering", "sha": "34088557584b57cf5919198841e7f3143353632c", "migration": true, "migrationName": "20260929213335_AddMovieFinalMastering", "role": "final mastering hand-off and provenance" },
+    { "branch": "parallel/movie-wave3-video-adapter-contract", "sha": "e4bca7995ac1eec11976510a290c5a4f9c4e7e00", "migration": false, "role": "provider-neutral video adapter" },
+    { "branch": "parallel/movie-wave3-provider-health-fallback", "sha": "313d04dd1e6e1574882972ae79571dcb5545e92e", "migration": true, "role": "health and fallback policy" },
+    { "branch": "parallel/movie-wave3-direct-provider-foundation", "sha": "3cc668504a84bff819d32be476eb60f75ef912b5", "migration": false, "role": "direct provider adapter foundation; disabled for this gate" },
+    { "branch": "parallel/movie-wave3-manus-adapter", "sha": "3484729691219d91616d997657605d71783ff80e", "migration": false, "role": "external adapter boundary; disabled for this gate" }
+  ],
+  "wave2Dependencies": [
+    { "surface": "shot production contract", "statusOnBase": "partial", "requiredBefore": ["adaptive resolution persistence", "shot provider intelligence", "selected-take upscale"], "action": "Do not merge here; map Wave 3 request fields to the additive contract after Wave 2 integration." },
+    { "surface": "complexity and importance assessments", "statusOnBase": "not present", "requiredBefore": ["adaptive recommendation authority"], "action": "Use the compatibility seam only; do not infer missing assessment values from provider behavior." },
+    { "surface": "runtime budget and cinematography context", "statusOnBase": "partial/implemented foundation", "requiredBefore": ["resolution recommendation", "benchmark scenario identity"], "action": "Preserve current shot duration/cinematography data and reject silent scaling." }
+  ],
+  "features": [
+    { "id": "adaptive-resolution-recommendation", "statusOnBase": "compatibility seam", "sourceBranches": ["parallel/movie-wave3-adaptive-resolution-director", "parallel/movie-wave3-resolution-pipeline"], "dependsOn": ["shot-production-contract", "complexity-profile", "runtime-budgeting", "cinematography"], "mustPreserve": ["deterministic source/master recommendation", "economical draft path may choose a lower source", "target resolution stays provider-neutral", "no provider/model/prompt in product DTO"], "validation": ["MovieWave3IntegrationPrepTests", "integrated adaptive-resolution unit tests", "Wave 3 acceptance E2E"] },
+    { "id": "provider-benchmarking", "statusOnBase": "not present", "sourceBranches": ["parallel/movie-wave3-benchmark-framework", "parallel/movie-wave3-provider-capabilities", "parallel/movie-wave3-shot-provider-intelligence"], "dependsOn": ["shot-production-contract", "adaptive-resolution-recommendation"], "mustPreserve": ["same fixture characteristics across observations", "evidence/provenance retained", "benchmark observations do not silently select a provider", "measurement identifiers remain internal"], "validation": ["ProviderBenchmarkingTests", "EF fresh/upgrade migration", "benchmark fixture replay"] },
+    { "id": "generation-economics", "statusOnBase": "partial existing estimate boundary", "sourceBranches": ["parallel/movie-wave3-benchmark-framework"], "dependsOn": ["provider-benchmarking", "adaptive-resolution-recommendation"], "mustPreserve": ["estimate can be unknown", "estimate is not a charge", "failed jobs never charge", "cost snapshots are auditable and non-user-sensitive"], "validation": ["cost estimate acceptance vector", "GenerationJobs failure accounting", "billing safety audit"] },
+    { "id": "multiple-takes-and-selection", "statusOnBase": "implemented foundation", "sourceBranches": ["existing Movie V2 contracts"], "dependsOn": ["shot-production-contract"], "mustPreserve": ["multiple takes remain distinct", "selection is explicit and server-owned", "finalization is separate from selection", "reload returns the selected/final pointers"], "validation": ["MovieWave3IntegrationE2ETests", "MovieStudioV2Tests", "MovieOperationalE2ETests"] },
+    { "id": "selected-take-upscale-eligibility", "statusOnBase": "compatibility seam", "sourceBranches": ["parallel/movie-wave3-selected-take-upscale", "parallel/movie-wave3-upscaling-pipeline"], "dependsOn": ["multiple-takes-and-selection", "shot-production-contract"], "mustPreserve": ["candidate takes are blocked", "only selected or final ready take is eligible", "eligibility is idempotent/auditable", "eligibility does not itself create a paid job"], "validation": ["MovieWave3IntegrationPrepTests", "MovieTakeUpscaleEligibilityTests", "integrated selected-take E2E"] },
+    { "id": "qc-escalation", "statusOnBase": "compatibility seam", "sourceBranches": ["parallel/movie-wave3-adaptive-resolution-director", "parallel/movie-wave3-4k-mastering"], "dependsOn": ["adaptive-resolution-recommendation", "generation-quality-control"], "mustPreserve": ["low confidence escalates explicitly", "quality failure blocks publication", "QC escalation does not claim a successful master", "failure remains non-chargeable"], "validation": ["MovieWave3IntegrationPrepTests", "GenerationQualityControlTests", "integrated mastering E2E"] },
+    { "id": "reload-and-provenance", "statusOnBase": "implemented foundation", "sourceBranches": ["existing Movie production contracts", "parallel/movie-wave3-4k-mastering"], "dependsOn": ["multiple-takes-and-selection"], "mustPreserve": ["stage provenance survives reload", "source take/asset links are retained", "no provider execution details in normal-user read models"], "validation": ["MovieWave3IntegrationE2ETests", "MovieProductionApiTests", "integrated migration/read-model tests"] },
+    { "id": "provider-and-charging-off", "statusOnBase": "implemented safety default", "sourceBranches": ["none; gate invariant"], "dependsOn": [], "mustPreserve": ["MovieVideo.Enabled=false", "Billing.CustomerChargingEnabled=false", "no real provider call", "test-only adapters never change committed defaults"], "validation": ["MovieWave3IntegrationE2ETests", "gate safety audit", "production config audit"] }
+  ],
+  "acceptance": [
+    { "id": "adaptive-recommendation", "asserts": ["same request produces byte-stable recommendation", "economical draft selects 720p source for 2160p master when safe", "output contains no provider/model/prompt identifiers"], "dependency": "compatibility seam; replace with integrated resolver after Wave 2 contracts land" },
+    { "id": "multiple-takes-selection", "asserts": ["two takes persist", "only explicitly selected take has selection pointer", "finalization is explicit"], "dependency": "current Movie V2 API" },
+    { "id": "upscale-eligibility", "asserts": ["unselected candidate is blocked", "selected ready take is eligible", "draft selected take is blocked"], "dependency": "compatibility seam until selected-take audit migration is integrated" },
+    { "id": "qc-and-cost", "asserts": ["low-confidence recommendation requires QC escalation", "cost estimate is explicit and not a customer charge", "unknown provider cost remains unknown"], "dependency": "adaptive/economics branches" },
+    { "id": "failure-and-reload", "asserts": ["provider-disabled movie job fails", "usage status is Failed with ChargedAmount=0", "no output Asset is published", "selection and provenance survive reload"], "dependency": "current GenerationJob/Usage/Movie V2 APIs" }
+  ],
+  "migrationPlan": {
+    "required": true,
+    "order": [
+      "Wave 2 shot production/complexity/importance migrations, after reconciliation",
+      "20260929213039_AddProviderBenchmarkingFoundation",
+      "20260929213223_AddUpscalingJobs",
+      "20260929213333_AddMovieTakeUpscaleAudit",
+      "20260929213335_AddMovieFinalMastering"
+    ],
+    "rule": "Regenerate one final EF snapshot from the composed model; never hand-edit migration history or apply independent snapshots blindly.",
+    "checks": ["pending-model-changes", "fresh PostgreSQL", "upgrade PostgreSQL", "migration history and indexes"]
+  },
+  "gate": {
+    "commands": {
+      "apiBuild": "dotnet build apps/api/Taslim.Api.csproj",
+      "apiTests": "dotnet test apps/api.Tests/Taslim.Api.Tests.csproj --no-restore",
+      "wave3PrepTests": "dotnet test apps/api.Tests/Taslim.Api.Tests.csproj --no-restore --filter FullyQualifiedName~MovieWave3Integration",
+      "frontendTests": "npm test --workspace @taslim/web",
+      "typescript": "npx tsc --noEmit -p apps/web/tsconfig.json",
+      "eslint": "npm run lint --workspace @taslim/web",
+      "productionBuild": "NEXT_PUBLIC_API_URL=https://api.example.test npm run build --workspace @taslim/web",
+      "efModelConsistency": "dotnet ef migrations has-pending-model-changes --project apps/api --startup-project apps/api",
+      "freshMigration": "dotnet ef database update --project apps/api --startup-project apps/api --connection $FRESH_DATABASE_URL",
+      "upgradeMigration": "dotnet ef database update --project apps/api --startup-project apps/api --connection $UPGRADE_DATABASE_URL",
+      "browserE2E": "npm run test:e2e --workspace @taslim/web"
+    },
+    "optIn": ["RUN_BROWSER_E2E=1", "RUN_DB_MIGRATIONS=1"],
+    "requiredSafety": ["conflict-marker audit", "git diff --check", "production provider/charging config audit", "no committed secrets"]
+  }
+}
