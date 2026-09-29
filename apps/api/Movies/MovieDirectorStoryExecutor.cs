@@ -13,7 +13,7 @@ public sealed class MovieDirectorStoryActionExecutor(
 {
     public string ActionType => DirectorActionTypes.StoryAssistance;
 
-    public async Task<DirectorActionExecution> ExecuteAsync(DirectorAction action, CancellationToken cancellationToken = default)
+    public async Task<DirectorActionExecution> ExecuteAsync(DirectorAction action, Guid executingUserId, CancellationToken cancellationToken = default)
     {
         DirectorStoryActionPayload? payload;
         try { payload = JsonSerializer.Deserialize<DirectorStoryActionPayload>(action.PayloadJson, DirectorJson.Options); }
@@ -49,10 +49,13 @@ public sealed class MovieDirectorStoryActionExecutor(
         if (payload.ProposedScene is not null) scenes.Add(payload.ProposedScene);
         if (payload.TargetElementId is Guid targetElementId && payload.ReplacementContent is { Length: > 0 })
         {
-            var target = scenes.SelectMany(item => item.Elements).FirstOrDefault(item => item is not null && item.Content.Length > 0);
             var original = current?.Scenes.SelectMany(item => item.Elements).FirstOrDefault(item => item.Id == targetElementId);
             if (original is null) return new(false, "DIRECTOR_STORY_PASSAGE_NOT_FOUND", "The selected Story passage is no longer available.", null);
-            var targetScene = scenes.FirstOrDefault(item => item.SceneIdentifier.Equals(current!.Scenes.First(scene => scene.Elements.Any(element => element.Id == targetElementId)).SceneIdentifier, StringComparison.OrdinalIgnoreCase));
+            var originalScene = current?.Scenes.FirstOrDefault(scene => scene.Elements.Any(element => element.Id == targetElementId));
+            if (originalScene is null) return new(false, "DIRECTOR_STORY_PASSAGE_NOT_FOUND", "The selected Story passage is no longer available.", null);
+            if (payload.TargetSceneId.HasValue && payload.TargetSceneId != originalScene.Id)
+                return new(false, "DIRECTOR_STORY_TARGET_INVALID", "The selected Story passage is not part of the requested scene.", null);
+            var targetScene = scenes.FirstOrDefault(item => item.SceneIdentifier.Equals(originalScene.SceneIdentifier, StringComparison.OrdinalIgnoreCase));
             var targetRequest = targetScene?.Elements.FirstOrDefault(item => string.Equals(item.Content, original.Content, StringComparison.Ordinal));
             if (targetRequest is null) return new(false, "DIRECTOR_STORY_PASSAGE_NOT_FOUND", "The selected Story passage is no longer available.", null);
             targetRequest.Content = payload.ReplacementContent;
@@ -73,7 +76,7 @@ public sealed class MovieDirectorStoryActionExecutor(
             return new(false, DirectorStoryCreativeFailureCodes.Invalid, "The approved Story AI output is incomplete and cannot be applied.", null);
         try
         {
-            var result = await stories.CreateRevisionAsync(action.Proposal.CreatedByUserId, action.MovieProjectId, request, cancellationToken);
+            var result = await stories.CreateRevisionAsync(executingUserId, action.MovieProjectId, request, cancellationToken);
             var revisionId = result?.CurrentRevision?.Id;
             return result is null
                 ? new(false, "DIRECTOR_STORY_APPLY_FAILED", "The Story revision could not be created.", null)
