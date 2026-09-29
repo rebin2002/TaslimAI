@@ -4,7 +4,7 @@
 /* eslint-disable react-hooks/exhaustive-deps -- loader callbacks intentionally follow module/project identity. */
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import {
   AlertCircle,
   AlertTriangle,
@@ -249,7 +249,7 @@ function FullMovieProjectWorkspace({ projectId, module }: { projectId: string; m
         </div>
       </header>
 
-      <div className="movie-workspace-layout">
+      <div className={`movie-workspace-layout ${activeModule === "story" ? "is-story-layout" : ""}`}>
         <nav className="movie-workspace-nav" aria-label="Full Movie Project navigation">
           <div className="movie-workspace-nav-label">Project map</div>
           <div className="movie-workspace-nav-list">
@@ -279,7 +279,7 @@ function FullMovieProjectWorkspace({ projectId, module }: { projectId: string; m
           {error && <div className="movie-workspace-error-inline" role="alert"><AlertCircle size={15} aria-hidden="true" /><span>{error}</span><button type="button" onClick={() => void loadProject()}><RefreshCw size={12} /> Retry</button></div>}
         </main>
 
-        {project ? <MovieDirectorPanel project={project} activeModule={activeModule} selectedScene={selectedScene} selectedShot={selectedShot} onProjectRefresh={refreshProject} /> : <aside className="movie-director-panel"><div className="movie-director-heading"><span className="movie-workspace-kicker">Director / Inspector</span><SlidersHorizontal size={16} /></div><div className="movie-director-section"><span className="movie-inspector-label">Current module</span><strong>{copy.title}</strong><p>Load the full project room to enable grounded Director proposals.</p></div><div className="movie-director-note"><Sparkles size={14} /><p>Director actions remain scoped to persisted movie project records.</p></div></aside>}
+        {activeModule !== "story" && (project ? <MovieDirectorPanel project={project} activeModule={activeModule} selectedScene={selectedScene} selectedShot={selectedShot} onProjectRefresh={refreshProject} /> : <aside className="movie-director-panel"><div className="movie-director-heading"><span className="movie-workspace-kicker">Director / Inspector</span><SlidersHorizontal size={16} /></div><div className="movie-director-section"><span className="movie-inspector-label">Current module</span><strong>{copy.title}</strong><p>Load the full project room to enable grounded Director proposals.</p></div><div className="movie-director-note"><Sparkles size={14} /><p>Director actions remain scoped to persisted movie project records.</p></div></aside>)}
       </div>
     </div>
   );
@@ -346,6 +346,58 @@ type StorySection = "Premise" | "Logline" | "Synopsis" | "Treatment" | "Screenpl
 const storySections: StorySection[] = ["Premise", "Logline", "Synopsis", "Treatment", "Screenplay"];
 const screenplayElementTypes: MovieScreenplayElementType[] = ["Action", "Dialogue", "Parenthetical", "Transition", "Note"];
 
+type StorySectionPresentation = {
+  title: string;
+  navDetail: string;
+  description: string;
+};
+
+const storySectionPresentation: Record<StorySection, StorySectionPresentation> = {
+  Premise: { title: "Premise", navDetail: "Dramatic engine", description: "The essential human tension that makes this film worth telling." },
+  Logline: { title: "Logline", navDetail: "One clear promise", description: "A concise, decision-ready expression of the protagonist, goal, pressure, and stakes." },
+  Synopsis: { title: "Synopsis", navDetail: "Complete arc", description: "The story in grounded prose: setup, turns, escalation, and consequence." },
+  Treatment: { title: "Treatment", navDetail: "Prose map", description: "A scene-aware narrative pass that prepares the film for structured pages." },
+  Screenplay: { title: "Screenplay", navDetail: "Structured pages", description: "Typed story blocks remain usable by the downstream scene and production rooms." },
+};
+
+function storyAuthorshipLabel(authorship: MovieStoryRevisionInput["authorship"]) {
+  if (authorship === "AiSuggested") return "AI suggested";
+  if (authorship === "HumanEdited") return "Human edited";
+  return "Human authored";
+}
+
+function storyAuthorshipDescription(authorship: MovieStoryRevisionInput["authorship"]) {
+  if (authorship === "AiSuggested") return "AI-generated material is visible as a suggestion until a human reviews and revises it.";
+  if (authorship === "HumanEdited") return "A human has materially revised an earlier suggestion or prior pass.";
+  return "This revision is written or materially authored by a human.";
+}
+
+function storyAuthorshipTone(authorship: MovieStoryRevisionInput["authorship"]) {
+  if (authorship === "AiSuggested") return "is-ai";
+  if (authorship === "HumanEdited") return "is-human-edited";
+  return "is-human";
+}
+
+function sectionForDirectorApply(proposal: DirectorProposal, requestedAction: DirectorStoryAction): StorySection {
+  const changedFields = proposal.storyReview?.changes.map((change) => `${change.field} ${change.target ?? ""}`.toLowerCase()).join(" ") ?? "";
+  const directlyChanged = storySections.find((candidate) => changedFields.includes(candidate.toLowerCase()));
+  if (directlyChanged) return directlyChanged;
+  if (["screenplay", "scene", "dialogue", "passage", "pacing"].some((term) => changedFields.includes(term))) return "Screenplay";
+
+  const sectionByAction: Record<DirectorStoryAction, StorySection> = {
+    develop_premise: "Premise",
+    improve_logline: "Logline",
+    expand_synopsis: "Synopsis",
+    create_refine_treatment: "Treatment",
+    propose_screenplay_scene: "Screenplay",
+    rewrite_selected_passage: "Screenplay",
+    improve_dialogue: "Screenplay",
+    tighten_pacing: "Screenplay",
+    identify_story_inconsistencies: "Screenplay",
+  };
+  return sectionByAction[requestedAction];
+}
+
 function emptyStoryDraft(): MovieStoryRevisionInput {
   return { premise: "", logline: "", synopsis: "", treatment: "", authorship: "Human", changeSummary: "", scenes: [] };
 }
@@ -366,9 +418,10 @@ function StoryModule({ projectId, guideLocked }: { projectId: string; guideLocke
   const [savedAt, setSavedAt] = useState<Date | null>(null);
   const [error, setError] = useState("");
   const [storyProposal, setStoryProposal] = useState<DirectorProposal | null>(null);
-  const [storyAction, setStoryAction] = useState<DirectorStoryAction>("improve_logline");
+  const [storyAction, setStoryAction] = useState<DirectorStoryAction>("develop_premise");
   const [storySceneId, setStorySceneId] = useState<string | null>(null);
   const [storyBusy, setStoryBusy] = useState(false);
+  const [focusAfterDirectorApply, setFocusAfterDirectorApply] = useState<StorySection | null>(null);
 
   useEffect(() => {
     let mounted = true;
@@ -390,7 +443,7 @@ function StoryModule({ projectId, guideLocked }: { projectId: string; guideLocke
     return () => { mounted = false; };
   }, [projectId]);
 
-  async function saveDraft(auto = false) {
+  async function saveDraft() {
     if (!story?.canEdit || saving) return;
     setSaving(true);
     setError("");
@@ -411,16 +464,14 @@ function StoryModule({ projectId, guideLocked }: { projectId: string; guideLocke
       setError(cause instanceof Error ? cause.message : "The draft could not be saved.");
     } finally {
       setSaving(false);
-      if (!auto) setSection("Screenplay");
     }
   }
 
   useEffect(() => {
     if (!dirty || !story?.canEdit || !draft.premise.trim() || !draft.logline.trim() || !draft.synopsis.trim() || !draft.treatment.trim()) return;
-    const timer = window.setTimeout(() => { void saveDraft(true); }, 1800);
+    const timer = window.setTimeout(() => { void saveDraft(); }, 1800);
     return () => window.clearTimeout(timer);
     // The draft object is intentionally observed through the dirty flag to debounce editor input.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dirty, draft]);
 
   function updateDraft(patch: Partial<MovieStoryRevisionInput>) {
@@ -516,16 +567,35 @@ function StoryModule({ projectId, guideLocked }: { projectId: string; guideLocke
     try {
       const result = await api.executeMovieDirectorAction(action.id);
       if (result.action.status !== "Succeeded") throw new Error(result.result.safeMessage);
+      const changedSection = sectionForDirectorApply(storyProposal, storyAction);
       const nextStory = await api.getMovieStory(projectId);
       setStory(nextStory);
       setSelectedRevision(nextStory.currentRevision);
       setDraft(nextStory.currentRevision ? revisionToDraft(nextStory.currentRevision) : emptyStoryDraft());
       setDraftRevisionId(nextStory.currentRevision?.status === "Draft" ? nextStory.currentRevision.id : null);
       setDirty(false);
+      setSection(changedSection);
+      setFocusAfterDirectorApply(changedSection);
       setStoryProposal(null);
     } catch (cause) { setError(cause instanceof Error ? cause.message : "The approved Story proposal could not be applied."); }
     finally { setStoryBusy(false); }
   }
+
+  useEffect(() => {
+    if (!focusAfterDirectorApply || focusAfterDirectorApply !== section) return;
+    const frame = window.requestAnimationFrame(() => {
+      const target = document.getElementById(`story-editor-${focusAfterDirectorApply.toLowerCase()}`);
+      if (target instanceof HTMLElement) {
+        target.focus({ preventScroll: true });
+        target.scrollIntoView({
+          block: "start",
+          behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+        });
+      }
+      setFocusAfterDirectorApply(null);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [focusAfterDirectorApply, section]);
 
   if (loading) return <div className="movie-story-loading"><span className="loading-spinner" /><p>Opening the story room…</p></div>;
   if (!story) return <div className="movie-module-empty"><BookOpen size={20} /><strong>Story unavailable</strong><p>{error || "This story is not available in the current workspace."}</p></div>;
@@ -535,6 +605,9 @@ function StoryModule({ projectId, guideLocked }: { projectId: string; guideLocke
   const status = selectedRevision?.status ?? "New draft";
   const canEdit = story.canEdit && (!selectedRevision || (selectedRevision.status === "Draft" && selectedRevision.id === story.currentRevisionId));
 
+  const presentation = storySectionPresentation[section];
+  const provenanceTone = storyAuthorshipTone(draft.authorship);
+
   return <div className="movie-story-workspace">
     <section className="movie-story-statusbar">
       <div><span className="movie-workspace-kicker">Story workspace</span><h3>Write the film, one deliberate pass at a time.</h3><p>Structured screenplay elements keep the writing useful to the production rooms that follow.</p></div>
@@ -543,33 +616,48 @@ function StoryModule({ projectId, guideLocked }: { projectId: string; guideLocke
     {error && <div className="movie-workspace-error-inline"><XCircleIcon /> {error}</div>}
     {approved && <div className="movie-story-approval-banner"><LockKeyhole size={15} /><div><strong>Approved screenplay · Revision {approved.revisionNumber}</strong><span>Downstream Director and scene breakdown should use this revision. Your current draft remains separate.</span></div></div>}
     {!approved && <div className="movie-story-approval-banner is-muted"><BookOpen size={15} /><div><strong>No approved screenplay yet</strong><span>Finish a human review before production decisions treat this story as authoritative.</span></div></div>}
-    <section className="movie-workspace-section movie-director-story-assist"><div className="movie-section-head"><div><span className="movie-workspace-kicker">Director assistance</span><h3>Propose, review, then apply</h3></div><Sparkles size={17} /></div><p className="movie-story-safety-note">The Director uses the locked guide, current or approved Story, selected scene, and bounded Cast / World references. It never silently rewrites an approved revision.</p>{!guideLocked && <div className="movie-workspace-error-inline" role="alert"><LockKeyhole size={15} /><span>Lock the Movie Guide before creating a Story Director proposal.</span><Link href={`/create/movie/${projectId}/cast`}>Open Cast to lock it</Link></div>}<div className="movie-story-assist-controls"><label><span>Action</span><select value={storyAction} onChange={(event) => setStoryAction(event.target.value as DirectorStoryAction)}><option value="develop_premise">Develop premise</option><option value="improve_logline">Improve logline</option><option value="expand_synopsis">Expand synopsis</option><option value="create_refine_treatment">Create / refine treatment</option><option value="propose_screenplay_scene">Propose screenplay scene</option><option value="rewrite_selected_passage">Rewrite selected passage</option><option value="improve_dialogue">Improve dialogue</option><option value="tighten_pacing">Tighten pacing</option><option value="identify_story_inconsistencies">Identify story inconsistencies</option></select></label>{(current?.scenes.length ?? approved?.scenes.length ?? 0) > 0 && <label><span>Target scene</span><select value={storySceneId ?? ""} onChange={(event) => setStorySceneId(event.target.value || null)}><option value="">Choose a scene</option>{(current?.scenes ?? approved?.scenes ?? []).map((scene) => <option key={scene.id} value={scene.id}>{scene.sceneIdentifier} · {scene.slugline}</option>)}</select></label>}<button className="movie-workspace-button is-primary" type="button" onClick={() => void createStoryProposal()} disabled={storyBusy || !guideLocked}>{storyBusy ? "Working…" : "Create proposal"}</button></div></section>
+    <section className="movie-workspace-section movie-director-story-assist"><div className="movie-section-head"><div><span className="movie-workspace-kicker">Director assistance</span><h3>Propose, review, then apply</h3></div><Sparkles size={17} /></div><p className="movie-story-safety-note">The Director uses the locked guide, current or approved Story, selected scene, and bounded Cast / World references. It never silently rewrites an approved revision.</p>{!guideLocked && <div className="movie-workspace-error-inline" role="alert"><LockKeyhole size={15} /><span>Lock the Movie Guide before creating a Story Director proposal.</span><Link href={`/create/movie/${projectId}/cast`}>Open Cast to lock it</Link></div>}<div className="movie-story-assist-controls"><label><span>Action</span><select value={storyAction} onChange={(event) => setStoryAction(event.target.value as DirectorStoryAction)}><option value="develop_premise">Develop my story</option><option value="improve_logline">Improve logline</option><option value="expand_synopsis">Expand synopsis</option><option value="create_refine_treatment">Create / refine treatment</option><option value="propose_screenplay_scene">Propose screenplay scene</option><option value="rewrite_selected_passage">Rewrite selected passage</option><option value="improve_dialogue">Improve dialogue</option><option value="tighten_pacing">Tighten pacing</option><option value="identify_story_inconsistencies">Identify story inconsistencies</option></select></label>{(current?.scenes.length ?? approved?.scenes.length ?? 0) > 0 && <label><span>Target scene</span><select value={storySceneId ?? ""} onChange={(event) => setStorySceneId(event.target.value || null)}><option value="">Choose a scene</option>{(current?.scenes ?? approved?.scenes ?? []).map((scene) => <option key={scene.id} value={scene.id}>{scene.sceneIdentifier} · {scene.slugline}</option>)}</select></label>}<button className="movie-workspace-button is-primary" type="button" onClick={() => void createStoryProposal()} disabled={storyBusy || !guideLocked}>{storyBusy ? "Working…" : "Create proposal"}</button></div></section>
     {storyProposal?.storyReview && <StoryProposalReview proposal={storyProposal} busy={storyBusy} onReview={(approveProposal) => void reviewStoryProposal(approveProposal)} onApply={() => void applyStoryProposal()} />}
     <div className="movie-story-editor-layout">
-      <nav className="movie-story-sections" aria-label="Story sections"><span className="movie-inspector-label">Manuscript</span>{storySections.map((item) => <button type="button" key={item} className={section === item ? "is-active" : ""} onClick={() => setSection(item)}>{item}<ChevronRight size={13} /></button>)}<div className="movie-story-provenance"><span className="movie-inspector-label">Revision provenance</span><strong>{draft.authorship}</strong><p>{draft.authorship === "AiSuggested" ? "AI suggestion — review before treating as authored." : draft.authorship === "HumanEdited" ? "Human-edited from an earlier suggestion or pass." : "Written or materially authored by a human."}</p></div></nav>
-      <div className="movie-story-manuscript">
-        <div className="movie-story-manuscript-head"><div><span className="movie-workspace-kicker">{section}</span><h4>{section === "Screenplay" ? "Screenplay" : "Story foundation"}</h4></div><span className="movie-story-revision-chip">{status} · {draft.authorship}</span></div>
+      <nav className="movie-story-sections" aria-label="Story sections">
+        <div className="movie-story-section-context"><span className="movie-inspector-label">Current section</span><strong>{section}</strong><small>{presentation.navDetail}</small></div>
+        {storySections.map((item) => <button type="button" key={item} className={section === item ? "is-active" : ""} onClick={() => setSection(item)} aria-current={section === item ? "step" : undefined} aria-pressed={section === item} aria-controls={`story-editor-${item.toLowerCase()}`}><span className="movie-story-section-copy"><strong>{item}</strong><small>{storySectionPresentation[item].navDetail}</small></span><ChevronRight size={13} aria-hidden="true" /></button>)}
+        <div className="movie-story-provenance"><span className="movie-inspector-label">Revision provenance</span><span className={`movie-story-provenance-badge ${provenanceTone}`}>{draft.authorship === "AiSuggested" ? <Sparkles size={12} /> : <PencilRuler size={12} />}{storyAuthorshipLabel(draft.authorship)}</span><p>{storyAuthorshipDescription(draft.authorship)}</p></div>
+      </nav>
+      <article className={`movie-story-manuscript is-${section.toLowerCase()}`} aria-labelledby="story-current-section">
+        <header className="movie-story-manuscript-head"><div><span className="movie-workspace-kicker">Current manuscript section</span><h4 id="story-current-section">{presentation.title}</h4><p>{presentation.description}</p></div><div className="movie-story-manuscript-meta"><span className={`movie-story-provenance-badge ${provenanceTone}`}>{draft.authorship === "AiSuggested" ? <Sparkles size={12} /> : <PencilRuler size={12} />}{storyAuthorshipLabel(draft.authorship)}</span><span className="movie-story-revision-chip">{status} · Revision {selectedRevision?.revisionNumber ?? "new"}</span></div></header>
         {section === "Screenplay" ? <ScreenplayEditor draft={draft} editable={canEdit} onUpdateDraft={updateDraft} onUpdateScene={updateScene} onUpdateElement={updateElement} onAddScene={addScene} /> : <StoryTextEditor section={section} draft={draft} editable={canEdit} onUpdate={(value) => updateDraft({ [section.toLowerCase()]: value } as Partial<MovieStoryRevisionInput>)} />}
-      </div>
-      <aside className="movie-story-history"><div className="movie-section-head"><div><span className="movie-workspace-kicker">Version control</span><h4>Revision history</h4></div><span className="movie-section-count">{story.revisions.length} passes</span></div>{story.revisions.length ? story.revisions.map((revision) => <button type="button" className={`movie-story-history-item ${revision.id === story.currentRevisionId ? "is-current" : ""} ${revision.id === story.approvedRevisionId ? "is-approved" : ""}`} key={revision.id} onClick={() => void inspectRevision(revision.id)}><span>Revision {revision.revisionNumber}</span><strong>{revision.status}</strong><small>{revision.authorship} · {revision.changeSummary || "No change note"}</small></button>) : <p className="movie-story-history-empty">Your first saved pass will appear here.</p>}<div className="movie-story-history-note"><ShieldCheck size={14} /><span>Approved and rejected revisions are immutable.</span></div></aside>
+      </article>
+      <aside className="movie-story-history" aria-label="Revision history"><div className="movie-section-head"><div><span className="movie-workspace-kicker">Version control</span><h4>Revision history</h4></div><span className="movie-section-count">{story.revisions.length} passes</span></div>{story.revisions.length ? <div className="movie-story-history-list">{story.revisions.map((revision) => <button type="button" className={`movie-story-history-item ${revision.id === story.currentRevisionId ? "is-current" : ""} ${revision.id === story.approvedRevisionId ? "is-approved" : ""}`} key={revision.id} onClick={() => void inspectRevision(revision.id)} aria-current={revision.id === selectedRevision?.id ? "true" : undefined}><span>Revision {revision.revisionNumber}</span><strong>{revision.status}</strong><small>{storyAuthorshipLabel(revision.authorship)} · {revision.changeSummary || "No change note"}</small></button>)}</div> : <p className="movie-story-history-empty">Your first saved pass will appear here.</p>}<div className="movie-story-history-note"><ShieldCheck size={14} /><span>Approved and rejected revisions are immutable.</span></div></aside>
     </div>
   </div>;
 }
 
 function StoryProposalReview({ proposal, busy, onReview, onApply }: { proposal: DirectorProposal; busy: boolean; onReview: (approve: boolean) => void; onApply: () => void }) {
   const review = proposal.storyReview!;
-  return <section className="movie-workspace-section movie-story-proposal-review"><div className="movie-section-head"><div><span className="movie-workspace-kicker">Proposal review · {proposal.status}</span><h3>{proposal.title}</h3></div><span className="movie-section-count">{review.appliesToStory ? "Revision candidate" : "Review only"}</span></div><p>{proposal.summary}</p>{review.changes.map((change) => <div className="movie-story-diff" key={`${change.field}-${change.target}`}><span className="movie-inspector-label">{change.field}</span><div><article><small>Existing content</small><p>{change.existingContent}</p></article><article className="is-proposed"><small>Proposed content</small><p>{change.proposedContent}</p></article></div></div>)}{review.findings.length > 0 && <div className="movie-story-findings"><strong>Director findings</strong><ul>{review.findings.map((finding) => <li key={finding}>{finding.replaceAll("_", " ")}</li>)}</ul></div>}<div className="movie-story-review-actions">{proposal.status === "PendingApproval" && <><button className="movie-workspace-button is-primary" type="button" onClick={() => onReview(true)} disabled={busy}>Accept proposal</button><button className="movie-workspace-button" type="button" onClick={() => onReview(false)} disabled={busy}>Reject</button></>}{proposal.status === "Approved" && review.appliesToStory && <button className="movie-workspace-button is-primary" type="button" onClick={onApply} disabled={busy}>Apply to editable Story revision</button>}{proposal.status === "Approved" && !review.appliesToStory && <span className="movie-story-approved-note">Findings accepted. No Story text was changed.</span>}</div></section>;
+  return <section className="movie-workspace-section movie-story-proposal-review"><div className="movie-section-head"><div><span className="movie-workspace-kicker">Proposal review · {proposal.status}</span><h3>{proposal.title}</h3></div><span className="movie-section-count">{review.appliesToStory ? "Revision candidate" : "Review only"}</span></div><p>{proposal.summary}</p>{review.changes.map((change) => <div className="movie-story-diff" key={`${change.field}-${change.target}`}><span className="movie-inspector-label">{change.field}</span><div><article><small>Existing content</small><p>{change.existingContent}</p></article><article className="is-proposed"><small>Proposed content</small><p>{change.proposedContent}</p></article></div></div>)}{review.findings.length > 0 && <div className="movie-story-findings"><strong>Grounded Director findings</strong><ul>{review.findings.map((finding, index) => <li key={`${finding.category}-${finding.affectedTarget.targetId ?? "project"}-${index}`}><div><b>{finding.findingType.replaceAll("_", " ")}</b><span> · {finding.severity} · {finding.category.replaceAll("_", " ")} · {Math.round(finding.confidence * 100)}% confidence</span></div><p>{finding.explanation}</p><small>Suggested correction: {finding.suggestedCorrection}</small>{finding.uncertainty && <small>Uncertainty: {finding.uncertainty}</small>}<details><summary>Evidence</summary><ul>{finding.evidence.map((evidence, evidenceIndex) => <li key={`${evidence.source}-${evidenceIndex}`}><b>{evidence.source}</b>{evidence.revision && ` · ${evidence.revision}`}<br />{evidence.excerpt}</li>)}</ul></details></li>)}</ul></div>}{review.findings.length === 0 && !review.appliesToStory && <div className="movie-story-findings"><strong>No grounded inconsistencies found</strong><p>The bounded Story, locked Guide, and available continuity records did not produce a typed finding. This is not a claim that unstated story meaning is consistent.</p></div>}<div className="movie-story-review-actions">{proposal.status === "PendingApproval" && <><button className="movie-workspace-button is-primary" type="button" onClick={() => onReview(true)} disabled={busy}>Accept proposal</button><button className="movie-workspace-button" type="button" onClick={() => onReview(false)} disabled={busy}>Reject</button></>}{proposal.status === "Approved" && review.appliesToStory && <button className="movie-workspace-button is-primary" type="button" onClick={onApply} disabled={busy}>Apply to editable Story revision</button>}{proposal.status === "Approved" && !review.appliesToStory && <span className="movie-story-approved-note">Findings accepted. No Story text was changed.</span>}</div></section>;
 }
 
 
 function StoryTextEditor({ section, draft, editable, onUpdate }: { section: Exclude<StorySection, "Screenplay">; draft: MovieStoryRevisionInput; editable: boolean; onUpdate: (value: string) => void }) {
   const key = section.toLowerCase() as "premise" | "logline" | "synopsis" | "treatment";
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const hints: Record<typeof key, string> = { premise: "What is the human truth or dramatic engine?", logline: "Who wants what, what stands in the way, and why now?", synopsis: "The complete story arc in clear, grounded prose.", treatment: "A scene-aware prose map of the story before pages." };
-  return <div className="movie-story-text-editor"><p className="movie-story-writing-prompt">{hints[key]}</p><textarea aria-label={section} value={draft[key]} onChange={(event) => onUpdate(event.target.value)} disabled={!editable} placeholder={`Write the ${section.toLowerCase()}…`} /><span className="movie-story-character-count">{draft[key].length.toLocaleString()} characters</span></div>;
+
+  function resizeTextarea(target: HTMLTextAreaElement) {
+    target.style.height = "0px";
+    target.style.height = `${target.scrollHeight}px`;
+  }
+
+  useEffect(() => {
+    if (textareaRef.current) resizeTextarea(textareaRef.current);
+  }, [key, draft[key]]);
+
+  return <div className={`movie-story-text-editor is-${key}`}><p className="movie-story-writing-prompt" id={`story-editor-${key}-hint`}>{hints[key]}</p><textarea ref={textareaRef} id={`story-editor-${key}`} aria-label={section} aria-describedby={`story-editor-${key}-hint`} value={draft[key]} onInput={(event) => resizeTextarea(event.currentTarget)} onChange={(event) => onUpdate(event.target.value)} disabled={!editable} placeholder={`Write the ${section.toLowerCase()}…`} /><span className="movie-story-character-count">{draft[key].length.toLocaleString()} characters</span></div>;
 }
 
 function ScreenplayEditor({ draft, editable, onUpdateDraft, onUpdateScene, onUpdateElement, onAddScene }: { draft: MovieStoryRevisionInput; editable: boolean; onUpdateDraft: (patch: Partial<MovieStoryRevisionInput>) => void; onUpdateScene: (index: number, patch: Partial<MovieStoryRevisionInput["scenes"][number]>) => void; onUpdateElement: (sceneIndex: number, elementIndex: number, patch: Partial<MovieStoryRevisionInput["scenes"][number]["elements"][number]>) => void; onAddScene: () => void }) {
-  return <div className="movie-screenplay-editor"><div className="movie-screenplay-toolbar"><span>{draft.scenes.length} scenes</span><span>Structured pages</span><label>Authorship<select aria-label="Revision authorship" value={draft.authorship} onChange={(event) => onUpdateDraft({ authorship: event.target.value as MovieStoryRevisionInput["authorship"] })} disabled={!editable}><option value="Human">Human</option><option value="HumanEdited">Human edited</option><option value="AiSuggested">AI suggested</option></select></label></div>{draft.scenes.length ? draft.scenes.map((scene, sceneIndex) => <article className="movie-screenplay-scene" key={`${scene.sceneIdentifier}-${sceneIndex}`}><header><span className="movie-screenplay-scene-number">{String(sceneIndex + 1).padStart(2, "0")}</span><div><input aria-label={`Scene ${sceneIndex + 1} identifier`} value={scene.sceneIdentifier} onChange={(event) => onUpdateScene(sceneIndex, { sceneIdentifier: event.target.value })} disabled={!editable} /><input className="movie-screenplay-slugline" aria-label={`Scene ${sceneIndex + 1} heading`} value={scene.slugline} onChange={(event) => onUpdateScene(sceneIndex, { slugline: event.target.value })} disabled={!editable} /></div><span className="movie-screenplay-scene-meta">Act {scene.actNumber ?? "—"} · Seq {scene.sequenceNumber ?? "—"}</span></header><textarea className="movie-screenplay-scene-note" aria-label={`Scene ${sceneIndex + 1} synopsis`} value={scene.synopsis ?? ""} onChange={(event) => onUpdateScene(sceneIndex, { synopsis: event.target.value })} disabled={!editable} placeholder="Scene intention / beat" />{scene.elements.map((element, elementIndex) => <div className={`movie-screenplay-element is-${element.elementType.toLowerCase()}`} key={`${scene.sceneIdentifier}-${elementIndex}`}><select aria-label={`Scene ${sceneIndex + 1} element ${elementIndex + 1} type`} value={element.elementType} onChange={(event) => onUpdateElement(sceneIndex, elementIndex, { elementType: event.target.value as MovieScreenplayElementType })} disabled={!editable}>{screenplayElementTypes.map((type) => <option key={type} value={type}>{type}</option>)}</select>{element.elementType === "Dialogue" && <input aria-label={`Scene ${sceneIndex + 1} element ${elementIndex + 1} character`} value={element.characterName ?? ""} onChange={(event) => onUpdateElement(sceneIndex, elementIndex, { characterName: event.target.value })} disabled={!editable} placeholder="CHARACTER" />}{element.elementType === "Dialogue" && <input aria-label={`Scene ${sceneIndex + 1} element ${elementIndex + 1} parenthetical`} value={element.parenthetical ?? ""} onChange={(event) => onUpdateElement(sceneIndex, elementIndex, { parenthetical: event.target.value })} disabled={!editable} placeholder="(parenthetical)" />}{element.elementType === "Transition" ? <input aria-label={`Scene ${sceneIndex + 1} transition`} value={element.content} onChange={(event) => onUpdateElement(sceneIndex, elementIndex, { content: event.target.value })} disabled={!editable} placeholder="CUT TO:" /> : <textarea aria-label={`Scene ${sceneIndex + 1} element ${elementIndex + 1} content`} value={element.content} onChange={(event) => onUpdateElement(sceneIndex, elementIndex, { content: event.target.value })} disabled={!editable} placeholder={element.elementType === "Action" ? "Describe what we see and hear…" : "Write the page…"} />}{editable && <button type="button" aria-label="Remove screenplay element" onClick={() => onUpdateScene(sceneIndex, { elements: scene.elements.filter((_, index) => index !== elementIndex) })}><Trash2 size={13} /></button>}</div>)}<div className="movie-screenplay-scene-actions">{editable && <button type="button" className="movie-text-action" onClick={() => onUpdateScene(sceneIndex, { elements: [...scene.elements, { elementType: "Action", content: "", characterName: null, parenthetical: null }] })}><Plus size={12} /> Add element</button>}</div></article>) : <div className="movie-screenplay-empty"><BookOpen size={20} /><strong>Your first scene starts the pages.</strong><p>Use typed screenplay blocks instead of flattening the script into a generic document.</p></div>}{editable && <button type="button" className="movie-add-screenplay-scene" onClick={onAddScene}><Plus size={14} /> Add scene</button>}</div>;
+  return <div className="movie-screenplay-editor" id="story-editor-screenplay" tabIndex={-1} aria-label="Screenplay editor"><div className="movie-screenplay-toolbar"><span>{draft.scenes.length} scenes</span><span>Structured pages</span><label>Authorship<select aria-label="Revision authorship" value={draft.authorship} onChange={(event) => onUpdateDraft({ authorship: event.target.value as MovieStoryRevisionInput["authorship"] })} disabled={!editable}><option value="Human">Human</option><option value="HumanEdited">Human edited</option><option value="AiSuggested">AI suggested</option></select></label></div>{draft.scenes.length ? draft.scenes.map((scene, sceneIndex) => <article className="movie-screenplay-scene" key={`${scene.sceneIdentifier}-${sceneIndex}`}><header><span className="movie-screenplay-scene-number">{String(sceneIndex + 1).padStart(2, "0")}</span><div><input aria-label={`Scene ${sceneIndex + 1} identifier`} value={scene.sceneIdentifier} onChange={(event) => onUpdateScene(sceneIndex, { sceneIdentifier: event.target.value })} disabled={!editable} /><input className="movie-screenplay-slugline" aria-label={`Scene ${sceneIndex + 1} heading`} value={scene.slugline} onChange={(event) => onUpdateScene(sceneIndex, { slugline: event.target.value })} disabled={!editable} /></div><span className="movie-screenplay-scene-meta">Act {scene.actNumber ?? "—"} · Seq {scene.sequenceNumber ?? "—"}</span></header><textarea className="movie-screenplay-scene-note" aria-label={`Scene ${sceneIndex + 1} synopsis`} value={scene.synopsis ?? ""} onChange={(event) => onUpdateScene(sceneIndex, { synopsis: event.target.value })} disabled={!editable} placeholder="Scene intention / beat" />{scene.elements.map((element, elementIndex) => <div className={`movie-screenplay-element is-${element.elementType.toLowerCase()}`} key={`${scene.sceneIdentifier}-${elementIndex}`}><select aria-label={`Scene ${sceneIndex + 1} element ${elementIndex + 1} type`} value={element.elementType} onChange={(event) => onUpdateElement(sceneIndex, elementIndex, { elementType: event.target.value as MovieScreenplayElementType })} disabled={!editable}>{screenplayElementTypes.map((type) => <option key={type} value={type}>{type}</option>)}</select>{element.elementType === "Dialogue" && <input aria-label={`Scene ${sceneIndex + 1} element ${elementIndex + 1} character`} value={element.characterName ?? ""} onChange={(event) => onUpdateElement(sceneIndex, elementIndex, { characterName: event.target.value })} disabled={!editable} placeholder="CHARACTER" />}{element.elementType === "Dialogue" && <input aria-label={`Scene ${sceneIndex + 1} element ${elementIndex + 1} parenthetical`} value={element.parenthetical ?? ""} onChange={(event) => onUpdateElement(sceneIndex, elementIndex, { parenthetical: event.target.value })} disabled={!editable} placeholder="(parenthetical)" />}{element.elementType === "Transition" ? <input aria-label={`Scene ${sceneIndex + 1} transition`} value={element.content} onChange={(event) => onUpdateElement(sceneIndex, elementIndex, { content: event.target.value })} disabled={!editable} placeholder="CUT TO:" /> : <textarea aria-label={`Scene ${sceneIndex + 1} element ${elementIndex + 1} content`} value={element.content} onChange={(event) => onUpdateElement(sceneIndex, elementIndex, { content: event.target.value })} disabled={!editable} placeholder={element.elementType === "Action" ? "Describe what we see and hear…" : "Write the page…"} />}{editable && <button type="button" aria-label="Remove screenplay element" onClick={() => onUpdateScene(sceneIndex, { elements: scene.elements.filter((_, index) => index !== elementIndex) })}><Trash2 size={13} /></button>}</div>)}<div className="movie-screenplay-scene-actions">{editable && <button type="button" className="movie-text-action" onClick={() => onUpdateScene(sceneIndex, { elements: [...scene.elements, { elementType: "Action", content: "", characterName: null, parenthetical: null }] })}><Plus size={12} /> Add element</button>}</div></article>) : <div className="movie-screenplay-empty"><BookOpen size={20} /><strong>Your first scene starts the pages.</strong><p>Use typed screenplay blocks instead of flattening the script into a generic document.</p></div>}{editable && <button type="button" className="movie-add-screenplay-scene" onClick={onAddScene}><Plus size={14} /> Add scene</button>}</div>;
 }
 
 type CharacterDraft = Omit<MovieCharacter, "id" | "states" | "relationships" | "continuityLocks">;

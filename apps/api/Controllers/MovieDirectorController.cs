@@ -21,8 +21,11 @@ public sealed class MovieDirectorController(IMovieDirectorService director) : Co
             return result is null ? ApiResults.Error(this, 404, "DIRECTOR_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result);
         }
         catch (DirectorValidationException exception) { return ApiResults.Error(this, 400, "DIRECTOR_REQUEST_INVALID", exception.Message); }
+        catch (DirectorCreativeOutputValidationException) { return ApiResults.Error(this, 422, "DIRECTOR_CREATIVE_OUTPUT_INVALID", "The Director could not produce a usable Story proposal. Try a clearer goal or add the missing locked context."); }
+        catch (DirectorStoryCreativeException exception) { return ApiResults.Error(this, exception.Code == DirectorStoryCreativeFailureCodes.Unavailable ? 503 : 422, exception.Code, exception.Message); }
         catch (DirectorContextTargetException exception) { return ApiResults.Error(this, 400, "DIRECTOR_CONTEXT_TARGET_INVALID", exception.Message); }
         catch (DirectorContextBudgetException exception) { return ApiResults.Error(this, 413, "DIRECTOR_CONTEXT_BUDGET_EXCEEDED", exception.Message); }
+        catch (DirectorSynopsisGenerationException exception) { return ApiResults.Error(this, 503, "DIRECTOR_SYNOPSIS_UNAVAILABLE", exception.Message); }
     }
 
     [HttpGet("proposals/{proposalId:guid}")]

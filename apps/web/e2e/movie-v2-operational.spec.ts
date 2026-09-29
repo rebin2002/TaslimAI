@@ -104,9 +104,9 @@ test.describe("Movie Studio V2 operational browser contracts", () => {
       page.getByRole("heading", { name: "Old Harbor", level: 3 }),
     ).toBeVisible();
     await page.getByRole("link", { name: "Scenes", exact: true }).click();
-    await expect(page.getByText("Blue Hour Harbor")).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Blue Hour Harbor", level: 3 })).toBeVisible();
     await page.reload();
-    await expect(page.getByText("Blue Hour Harbor")).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Blue Hour Harbor", level: 3 })).toBeVisible();
 
     await page.getByRole("link", { name: "Overview", exact: true }).click();
     await expect(page).toHaveURL(
