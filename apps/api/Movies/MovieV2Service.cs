@@ -168,9 +168,17 @@ public sealed class MovieV2Service(TaslimDbContext db, WorkspaceAccessService ac
             throw new MovieV2ValidationException("The selected generation job does not belong to this workspace.");
         if (request.AssetId.HasValue && !await db.Assets.AnyAsync(item => item.Id == request.AssetId && item.WorkspaceId == shot.Scene.MovieProject.WorkspaceId, cancellationToken))
             throw new MovieV2ValidationException("The selected asset does not belong to this workspace.");
+        var linkedJobStatus = request.GenerationJobId.HasValue
+            ? await db.GenerationJobs.Where(item => item.Id == request.GenerationJobId).Select(item => (GenerationJobStatus?)item.Status).FirstOrDefaultAsync(cancellationToken)
+            : null;
+        var takeStatus = request.AssetId.HasValue && linkedJobStatus == GenerationJobStatus.Succeeded
+            ? MovieTakeStatuses.Succeeded
+            : linkedJobStatus is GenerationJobStatus.Pending or GenerationJobStatus.Queued or GenerationJobStatus.Running
+                ? MovieTakeStatuses.Queued
+                : MovieTakeStatuses.Planned;
         var version = (await db.MovieTakes.Where(item => item.MovieShotId == shotId).MaxAsync(item => (int?)item.VersionNumber, cancellationToken) ?? 0) + 1;
         var now = DateTime.UtcNow;
-        var take = new MovieTake { Id = Guid.NewGuid(), MovieShotId = shotId, VersionNumber = version, Label = string.IsNullOrWhiteSpace(request.Label) ? $"Take {version}" : request.Label.Trim(), QualityLevel = request.QualityLevel.Trim(), AutoDirectorEnabled = request.AutoDirectorEnabled, MovieClipId = request.MovieClipId, GenerationJobId = request.GenerationJobId, AssetId = request.AssetId, Notes = Clean(request.Notes), CreatedAt = now, UpdatedAt = now };
+        var take = new MovieTake { Id = Guid.NewGuid(), MovieShotId = shotId, VersionNumber = version, Label = string.IsNullOrWhiteSpace(request.Label) ? $"Take {version}" : request.Label.Trim(), Status = takeStatus, QualityLevel = request.QualityLevel.Trim(), AutoDirectorEnabled = request.AutoDirectorEnabled, MovieClipId = request.MovieClipId, GenerationJobId = request.GenerationJobId, AssetId = request.AssetId, StatusChangedAt = now, StatusChangedByUserId = userId, Notes = Clean(request.Notes), CreatedAt = now, UpdatedAt = now };
         db.MovieTakes.Add(take);
         await db.SaveChangesAsync(cancellationToken);
         return ToDto(take);
@@ -245,16 +253,32 @@ public sealed class MovieV2Service(TaslimDbContext db, WorkspaceAccessService ac
     {
         var take = await db.MovieTakes.Include(item => item.MovieShot).ThenInclude(item => item.Scene).ThenInclude(item => item.MovieProject).FirstOrDefaultAsync(item => item.Id == takeId, cancellationToken);
         await EnsureAuthorizedAsync(take?.MovieShot.Scene.MovieProject.WorkspaceId, userId, cancellationToken, take?.MovieShot.Scene.MovieProjectId, finalize ? MoviePermissions.FinalApproval : MoviePermissions.Approve);
-        if (take!.Status is MovieTakeStatuses.Archived or MovieTakeStatuses.Rejected) throw new MovieV2ValidationException("Only an active, non-rejected take can be selected.");
+        if (take!.Status is MovieTakeStatuses.Superseded or MovieTakeStatuses.LegacyArchived or MovieTakeStatuses.Failed or MovieTakeStatuses.Cancelled or MovieTakeStatuses.Rejected)
+            throw new MovieV2ValidationException("Only an active, successful take can be selected.");
         var now = DateTime.UtcNow;
         var shot = take.MovieShot;
         var previous = await db.MovieTakes.Where(item => item.MovieShotId == shot.Id && item.Id != takeId && (finalize ? item.FinalizedAt != null : item.SelectedAt != null)).ToListAsync(cancellationToken);
-        foreach (var item in previous) { if (finalize) item.FinalizedAt = null; else item.SelectedAt = null; item.UpdatedAt = now; }
+        foreach (var item in previous)
+        {
+            if (finalize) item.FinalizedAt = null; else item.SelectedAt = null;
+            item.Status = MovieTakeStatuses.Superseded;
+            item.StatusChangedAt = now;
+            item.StatusChangedByUserId = userId;
+            item.UpdatedAt = now;
+        }
         if (finalize)
         {
-            if (take.Status != MovieTakeStatuses.Approved) throw new MovieV2ValidationException("A take must be approved before it can be finalized.");
+            if (take.Status is not (MovieTakeStatuses.Approved or MovieTakeStatuses.Selected))
+                throw new MovieV2ValidationException("A take must be approved before it can be finalized.");
             var previousSelected = await db.MovieTakes.Where(item => item.MovieShotId == shot.Id && item.Id != takeId && item.SelectedAt != null).ToListAsync(cancellationToken);
-            foreach (var item in previousSelected) { item.SelectedAt = null; item.UpdatedAt = now; }
+            foreach (var item in previousSelected)
+            {
+                item.SelectedAt = null;
+                item.Status = MovieTakeStatuses.Superseded;
+                item.StatusChangedAt = now;
+                item.StatusChangedByUserId = userId;
+                item.UpdatedAt = now;
+            }
             shot.SelectedTakeId = take.Id;
             shot.FinalTakeId = take.Id;
             take.SelectedAt = take.SelectedAt ?? now;
@@ -263,6 +287,9 @@ public sealed class MovieV2Service(TaslimDbContext db, WorkspaceAccessService ac
             take.FinalizedByUserId = userId;
         }
         else { shot.SelectedTakeId = take.Id; take.SelectedAt = now; take.SelectedByUserId = userId; }
+        take.Status = MovieTakeStatuses.Selected;
+        take.StatusChangedAt = now;
+        take.StatusChangedByUserId = userId;
         shot.UpdatedAt = now; take.UpdatedAt = now;
         await db.SaveChangesAsync(cancellationToken);
     }
@@ -398,7 +425,7 @@ public sealed class MovieV2Service(TaslimDbContext db, WorkspaceAccessService ac
     private static MovieV2SequenceDto ToDto(MovieSequence sequence, IReadOnlyList<MovieV2SceneDto> scenes) => new(sequence.Id, sequence.Sequence, sequence.Title, sequence.Summary, sequence.Status, sequence.ArchivedAt, sequence.CreatedAt, sequence.UpdatedAt, scenes);
     private static MovieV2SceneDto ToDto(MovieScene scene, IReadOnlyList<MovieV2ShotDto> shots) => new(scene.Id, scene.Sequence, scene.Title, scene.Summary, scene.Status, scene.MovieSequenceId, scene.ArchivedAt, scene.CreatedAt, scene.UpdatedAt, shots);
     private static MovieV2ShotDto ToDto(MovieShot shot, IReadOnlyList<MovieV2TakeDto> takes) => new(shot.Id, shot.Sequence, shot.Description, shot.Status, shot.SelectedTakeId, shot.FinalTakeId, shot.ArchivedAt, shot.CreatedAt, shot.UpdatedAt, takes.OrderBy(item => item.VersionNumber).ToArray());
-    private static MovieV2TakeDto ToDto(MovieTake take) => new(take.Id, take.MovieShotId, take.VersionNumber, take.Label, take.Status, take.QualityLevel, take.AutoDirectorEnabled, take.MovieClipId, take.GenerationJobId, take.MovieProductionVersionId, take.AssetId, take.Notes, take.SelectedAt, take.FinalizedAt, take.CreatedAt, take.UpdatedAt, take.Approvals.OrderByDescending(item => item.CreatedAt).Select(item => new MovieV2TakeApprovalDto(item.Id, item.UserId, item.Decision, item.Comment, item.CreatedAt)).ToArray(), MovieProductionProjection.ToExecution(take.GenerationJob));
+    private static MovieV2TakeDto ToDto(MovieTake take) => new(take.Id, take.MovieShotId, take.VersionNumber, take.Label, take.Status, take.QualityLevel, take.AutoDirectorEnabled, take.MovieClipId, take.GenerationJobId, take.MovieProductionVersionId, take.AssetId, take.Notes, take.SelectedAt, take.FinalizedAt, take.CreatedAt, take.UpdatedAt, take.Approvals.OrderByDescending(item => item.CreatedAt).Select(item => new MovieV2TakeApprovalDto(item.Id, item.UserId, item.Decision, item.Comment, item.CreatedAt)).ToArray(), MovieProductionProjection.ToExecution(take.GenerationJob), take.RetryOfTakeId);
     private static MovieV2ActDto ToDto(MovieAct act) => ToDto(act, act.Sequences.OrderBy(item => item.Sequence).Select(item => ToDto(item, item.Scenes.OrderBy(scene => scene.Sequence).Select(scene => ToDto(scene, scene.Shots.OrderBy(shot => shot.Sequence).Select(shot => ToDto(shot, shot.Takes.Select(ToDto).ToArray())).ToArray())).ToArray())).ToArray());
 }
 

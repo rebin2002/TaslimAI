@@ -549,6 +549,7 @@ public sealed class StoredFile
 public sealed class GenerationJob
 {
     public Guid Id { get; set; }
+    public Guid? RetryOfJobId { get; set; }
     public Guid WorkspaceId { get; set; }
     public Guid? ProjectId { get; set; }
     public Guid CreatedByUserId { get; set; }
@@ -580,6 +581,8 @@ public sealed class GenerationJob
     public DateTime? ClaimExpiresAt { get; set; }
 
     public Workspace Workspace { get; set; } = null!;
+    public GenerationJob? RetryOfJob { get; set; }
+    public ICollection<GenerationJob> Retries { get; set; } = [];
     public Project? Project { get; set; }
     public ApplicationUser CreatedByUser { get; set; } = null!;
     public ICollection<GenerationJobOutput> Outputs { get; set; } = [];

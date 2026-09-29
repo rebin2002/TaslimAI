@@ -862,6 +862,23 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
             throw new MovieProductionValidationException("PRODUCTION_TAKE_NOTES_TOO_LARGE", "Take notes must be 4,000 characters or fewer.");
         if (!MovieQualityLevels.Supported.Contains(request.QualityLevel.Trim()))
             throw new MovieProductionValidationException("PRODUCTION_TAKE_QUALITY_INVALID", "Choose a supported quality level.");
+        var existingTake = await db.MovieTakes.FirstOrDefaultAsync(item => item.MovieShotId == version.MovieShotId && item.GenerationJobId == version.GenerationJobId, cancellationToken);
+        if (existingTake is not null)
+        {
+            var savedAt = DateTime.UtcNow;
+            existingTake.Label = string.IsNullOrWhiteSpace(request.Label) ? existingTake.Label : request.Label.Trim();
+            existingTake.Status = MovieTakeStatuses.Succeeded;
+            existingTake.QualityLevel = request.QualityLevel.Trim();
+            existingTake.MovieProductionVersionId = version.Id;
+            existingTake.AssetId = assetId;
+            existingTake.Notes = MovieStudioHelpers.Clean(request.Notes);
+            existingTake.StatusChangedAt = savedAt;
+            existingTake.UpdatedAt = savedAt;
+            existingTake.GenerationJob = version.GenerationJob;
+            version.ResultingTake = existingTake;
+            await db.SaveChangesAsync(cancellationToken);
+            return MovieProductionProjection.ToTakeDto(existingTake);
+        }
         var versionNumber = (await db.MovieTakes.Where(item => item.MovieShotId == version.MovieShotId).MaxAsync(item => (int?)item.VersionNumber, cancellationToken) ?? 0) + 1;
         var now = DateTime.UtcNow;
         var take = new MovieTake
@@ -968,7 +985,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         var take = new MovieTake
         {
             Id = Guid.NewGuid(), MovieShotId = shot.Id, VersionNumber = (await db.MovieTakes.Where(item => item.MovieShotId == shot.Id).MaxAsync(item => (int?)item.VersionNumber, cancellationToken) ?? 0) + 1,
-            Label = $"Selective {regeneration.ActionType}", Status = MovieTakeStatuses.Generating, QualityLevel = movie.QualityLevel,
+            Label = $"Selective {regeneration.ActionType}", Status = MovieTakeStatuses.Queued, QualityLevel = movie.QualityLevel,
             AutoDirectorEnabled = movie.AutoDirectorEnabled, MovieClipId = clip.Id, GenerationJobId = job.Id, MovieProductionVersionId = version.Id,
             CreatedAt = now, UpdatedAt = now,
         };
@@ -1067,6 +1084,23 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
 
     private async Task<MovieStudioGenerationResponse> QueueClipAsync(Guid userId, MovieProject movie, MovieScene scene, MovieShot? shot, MovieStudioGenerationRequest request, CancellationToken cancellationToken, string? idempotencyKey)
     {
+        if (!string.IsNullOrWhiteSpace(idempotencyKey))
+        {
+            var targetShotId = shot?.Id;
+            var existingClip = await db.MovieClips
+                .Include(item => item.GenerationJob)
+                .FirstOrDefaultAsync(item => item.MovieProjectId == movie.Id
+                    && item.MovieSceneId == scene.Id
+                    && item.MovieShotId == targetShotId
+                    && item.GenerationJob != null
+                    && item.GenerationJob.CreatedByUserId == userId
+                    && item.GenerationJob.IdempotencyKey == idempotencyKey.Trim(), cancellationToken);
+            if (existingClip?.GenerationJob is not null)
+                return new MovieStudioGenerationResponse(
+                    await GetAsync(userId, movie.Id, cancellationToken) ?? throw new InvalidOperationException("Movie project disappeared."),
+                    GenerationJobContractMapper.ToDto(existingClip.GenerationJob),
+                    existingClip.Id);
+        }
         var description = shot?.Description ?? scene.Summary;
         var durationSeconds = Math.Clamp(shot?.DurationSeconds ?? scene.DurationSeconds ?? Math.Min(movie.DurationSeconds, 60), 1, 3600);
         var now = DateTime.UtcNow;
@@ -1115,6 +1149,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                 WorldContextJson: await WorldContextSnapshotAsync(movie.Id, scene.Id, shot?.Id, cancellationToken))),
         }, cancellationToken, idempotencyKey);
         clip.GenerationJobId = job.Id;
+        db.Entry(job).State = EntityState.Detached;
         await db.SaveChangesAsync(cancellationToken);
         return new MovieStudioGenerationResponse(await GetAsync(userId, movie.Id, cancellationToken) ?? throw new InvalidOperationException("Movie project disappeared."), GenerationJobContractMapper.ToDto(job), clip.Id);
     }
