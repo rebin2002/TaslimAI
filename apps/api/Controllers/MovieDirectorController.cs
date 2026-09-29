@@ -24,6 +24,7 @@ public sealed class MovieDirectorController(IMovieDirectorService director) : Co
         catch (DirectorCreativeOutputValidationException) { return ApiResults.Error(this, 422, "DIRECTOR_CREATIVE_OUTPUT_INVALID", "The Director could not produce a usable Story proposal. Try a clearer goal or add the missing locked context."); }
         catch (DirectorStoryCreativeException exception) { return ApiResults.Error(this, exception.Code == DirectorStoryCreativeFailureCodes.Unavailable ? 503 : 422, exception.Code, exception.Message); }
         catch (DirectorScenePlanCreativeException exception) { return ApiResults.Error(this, exception.Code == DirectorScenePlanCreativeFailureCodes.Unavailable ? 503 : 422, exception.Code, exception.Message); }
+        catch (DirectorShotPlanningException exception) { return ApiResults.Error(this, exception.Code == DirectorShotPlanningFailureCodes.Unavailable ? 503 : 422, exception.Code, exception.Message); }
         catch (DirectorContextTargetException exception) { return ApiResults.Error(this, 400, "DIRECTOR_CONTEXT_TARGET_INVALID", exception.Message); }
         catch (DirectorContextBudgetException exception) { return ApiResults.Error(this, 413, "DIRECTOR_CONTEXT_BUDGET_EXCEEDED", exception.Message); }
         catch (DirectorSynopsisGenerationException exception) { return ApiResults.Error(this, 503, "DIRECTOR_SYNOPSIS_UNAVAILABLE", exception.Message); }
