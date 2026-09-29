@@ -208,6 +208,7 @@ builder.Services.AddScoped<IMovieStoryCastService, MovieStoryCastService>();
 builder.Services.AddScoped<IMovieCharacterContinuityService, MovieCharacterContinuityService>();
 builder.Services.AddScoped<MovieWorldContinuityProjector>();
 builder.Services.AddScoped<IMovieWorldContinuityService, MovieWorldContinuityService>();
+builder.Services.AddScoped<IMovieProductionContinuityService, MovieProductionContinuityService>();
 builder.Services.AddScoped<IMovieV2Service, MovieV2Service>();
 builder.Services.AddScoped<IMovieScenesService, MovieScenesService>();
 builder.Services.AddScoped<IMovieGuideService, MovieGuideService>();

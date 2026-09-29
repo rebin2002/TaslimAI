@@ -91,7 +91,16 @@ public static class DirectorStoryFindingCategories
     public const string ApprovedStory = "approved_story";
     public const string LockedMovieGuide = "locked_movie_guide";
     public const string CastContinuity = "cast_continuity";
+    public const string CharacterPresence = "character_presence";
+    public const string Wardrobe = "wardrobe";
+    public const string InjuryState = "injury_state";
     public const string WorldContinuity = "world_continuity";
+    public const string EnvironmentLocation = "environment_location";
+    public const string TimeOfDay = "time_of_day";
+    public const string Weather = "weather";
+    public const string ObjectState = "object_state";
+    public const string ObjectPosition = "object_position";
+    public const string ProductionContinuity = "production_continuity";
     public const string CharacterState = "character_state";
     public const string Chronology = "chronology";
     public const string ScreenplayFact = "screenplay_fact";
