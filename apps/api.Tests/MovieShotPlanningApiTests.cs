@@ -128,6 +128,32 @@ public sealed class MovieShotPlanningApiTests : IClassFixture<GenerationJobsNoWo
         Assert.Equal(HttpStatusCode.NotFound, generation.StatusCode);
     }
 
+    [Fact]
+    public async Task Duration_budget_endpoint_reports_nested_30_second_runtime_without_generation()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Duration Planner");
+        var movie = await CreateMovie(client, auth.PersonalWorkspace.Id, 30);
+        var scene = await SendWithCsrf<MovieSceneDto>(client, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/scenes", new { title = "Short scene", summary = "A bounded scene.", durationSeconds = 30 });
+        await SendWithCsrf<MovieShotDto>(client, HttpMethod.Post, $"/api/movie-studio/scenes/{scene.Id}/shots", new { description = "First beat.", durationSeconds = 10 });
+        await SendWithCsrf<MovieShotDto>(client, HttpMethod.Post, $"/api/movie-studio/scenes/{scene.Id}/shots", new { description = "Second beat.", durationSeconds = 20 });
+        var invalidScene = await SendWithCsrf(client, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/scenes", new { title = "Invalid", summary = "Zero is not a duration.", durationSeconds = 0 });
+        Assert.Equal(HttpStatusCode.BadRequest, invalidScene.StatusCode);
+        Assert.Contains("greater than zero", await invalidScene.Content.ReadAsStringAsync());
+
+        var budget = await client.GetFromJsonAsync<MovieDurationBudgetResult>($"/api/movie-studio/projects/{movie.Project.Id}/duration-budget");
+
+        Assert.NotNull(budget);
+        Assert.Equal(MovieDurationBudgetStatuses.Valid, budget!.Status);
+        Assert.Equal(30, budget.TargetDurationSeconds);
+        Assert.Equal(30, budget.TotalSceneDurationSeconds);
+        Assert.Equal(30, budget.TotalShotDurationSeconds);
+        Assert.Empty(budget.Diagnostics);
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.Equal(0, await db.GenerationJobs.CountAsync(item => item.WorkspaceId == auth.PersonalWorkspace.Id));
+    }
+
     private async Task<AuthResponse> Register(HttpClient client, string displayName)
     {
         var response = await SendWithCsrf(client, HttpMethod.Post, "/api/auth/register", new
@@ -141,7 +167,7 @@ public sealed class MovieShotPlanningApiTests : IClassFixture<GenerationJobsNoWo
         return (await response.Content.ReadFromJsonAsync<AuthResponse>())!;
     }
 
-    private static async Task<MovieStudioProjectResponse> CreateMovie(HttpClient client, Guid workspaceId)
+    private static async Task<MovieStudioProjectResponse> CreateMovie(HttpClient client, Guid workspaceId, int durationSeconds = 60)
     {
         return await SendWithCsrf<MovieStudioProjectResponse>(client, HttpMethod.Post, "/api/movie-studio/projects", new
         {
@@ -149,7 +175,7 @@ public sealed class MovieShotPlanningApiTests : IClassFixture<GenerationJobsNoWo
             mode = MovieProjectModes.Full,
             title = "Shot planning test",
             description = "A durable shot planning test movie.",
-            durationSeconds = 60,
+            durationSeconds,
             aspectRatio = "16:9",
             style = "cinematic",
             language = "en",
