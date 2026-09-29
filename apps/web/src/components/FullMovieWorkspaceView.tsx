@@ -928,6 +928,47 @@ function draftFromShot(shot: MovieShot): ShotDraft {
   return { description: shot.description, purpose: shot.purpose, subjects: shot.subjects, locationSet: shot.locationSet, durationSeconds: shot.durationSeconds, productionRequirements: shot.productionRequirements, continuityReferences: shot.continuityReferences, cameraAndFraming: shot.cameraAndFraming, cameraMotion: shot.cameraMotion, narration: shot.narration, dialogue: shot.dialogue, visualContinuityNotes: shot.visualContinuityNotes, subjectCharacterIds: shot.subjectCharacterIds, status: shot.status };
 }
 
+type ShotDraft = MovieShotPlanningInput & { status?: string | null };
+type ShotEditorDraft = ShotDraft & {
+  qualityRequirements: string;
+  productionComplexity: string;
+  audioDependency: string;
+  vfxRequirements: string;
+  productionNotes: string;
+};
+
+const blankShot: ShotEditorDraft = { description: "", purpose: "", subjects: "", locationSet: "", durationSeconds: null, productionRequirements: "", continuityReferences: "", cameraAndFraming: "", cameraMotion: "", narration: "", dialogue: "", visualContinuityNotes: "", subjectCharacterIds: [], qualityRequirements: "", productionComplexity: "", audioDependency: "", vfxRequirements: "", productionNotes: "" };
+
+const advancedShotLabels = [
+  ["Production complexity", "productionComplexity"],
+  ["Audio / dialogue dependency", "audioDependency"],
+  ["VFX requirements", "vfxRequirements"],
+  ["Production notes", "productionNotes"],
+] as const;
+
+function readShotEditorNotes(value: string | null): Pick<ShotEditorDraft, "qualityRequirements" | "productionComplexity" | "audioDependency" | "vfxRequirements" | "productionNotes"> {
+  const parsed = { qualityRequirements: "", productionComplexity: "", audioDependency: "", vfxRequirements: "", productionNotes: "" };
+  if (!value?.trim()) return parsed;
+  const entries: Array<[keyof typeof parsed, string]> = [["qualityRequirements", "Quality requirements"], ["productionComplexity", "Production complexity"], ["audioDependency", "Audio / dialogue dependency"], ["vfxRequirements", "VFX requirements"], ["productionNotes", "Production notes"]];
+  const found = entries.some(([, label]) => value.includes(`${label}:`));
+  if (!found) return { ...parsed, qualityRequirements: value };
+  for (const [key, label] of entries) {
+    const match = value.match(new RegExp(`${label}:\\s*([^\\n]*)`, "i"));
+    parsed[key] = match?.[1]?.trim() ?? "";
+  }
+  return parsed;
+}
+
+function writeShotEditorNotes(draft: ShotEditorDraft) {
+  const values: Array<[string, string]> = [["Quality requirements", draft.qualityRequirements], ...advancedShotLabels.map(([label, key]) => [label, draft[key]] as [string, string])];
+  const filled = values.filter(([, value]) => value.trim());
+  return filled.length ? filled.map(([label, value]) => `${label}: ${value.trim()}`).join("\n") : null;
+}
+
+function draftFromShot(shot: MovieShot): ShotEditorDraft {
+  return { ...blankShot, description: shot.description, purpose: shot.purpose, subjects: shot.subjects, locationSet: shot.locationSet, durationSeconds: shot.durationSeconds, productionRequirements: shot.productionRequirements, continuityReferences: shot.continuityReferences, cameraAndFraming: shot.cameraAndFraming, cameraMotion: shot.cameraMotion, narration: shot.narration, dialogue: shot.dialogue, visualContinuityNotes: shot.visualContinuityNotes, subjectCharacterIds: shot.subjectCharacterIds, status: shot.status, ...readShotEditorNotes(shot.productionRequirements) };
+}
+
 function ShotPlanBoard({ scene, selectedShotId, onSelectShot, onPlanChange }: { scene: { id: string; durationSeconds: number | null }; selectedShotId: string | null; onSelectShot: (shotId: string | null) => void; onPlanChange: (plan: MovieSceneShotPlan) => void }) {
   const [plan, setPlan] = useState<MovieSceneShotPlan | null>(null);
   const [draft, setDraft] = useState<ShotEditorDraft>(blankShot);
