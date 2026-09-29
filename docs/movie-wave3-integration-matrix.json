@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
-  "branch": "parallel/movie-wave3-integration-prep",
+  "branch": "integration/movie-production-intelligence-wave3",
   "base": "308e146aa73e91443097229a81f97dac008b92ee",
-  "scope": "Wave 3 integration preparation and deterministic acceptance only; no Wave 2 or Wave 3 implementation branch is merged by this branch.",
+  "scope": "Fixed Wave 3 workstreams integrated from the verified origin/main base with deterministic acceptance and safety gates; no deployment, provider enablement, or charging activation.",
   "safetyDefaults": {
     "customerChargingEnabled": false,
     "movieVideoEnabled": false,

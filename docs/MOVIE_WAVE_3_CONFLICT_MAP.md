@@ -1,7 +1,8 @@
 # Taslim AI — Movie Wave 3 Conflict Map
 
 **Fixed comparison base:** `origin/main` at `308e146aa73e91443097229a81f97dac008b92ee`
-**Rule:** inspect and integrate fixed SHAs; do not merge moving branch tips or unrelated Wave 2 work into the preparation branch.
+**Integration branch:** `integration/movie-production-intelligence-wave3`
+**Rule:** inspect and integrate fixed SHAs; do not merge moving branch tips or unrelated work into the integration branch.
 
 ## Highest-risk hotspots
 
@@ -30,6 +31,8 @@ The audited Wave 3 refs include these migration-bearing changes:
 
 Timestamp order is a useful default, not authority. If the composed model requires a different order, record the reason and regenerate the final snapshot. Validate both a fresh database and an upgrade database populated through the base schema; inspect `__EFMigrationsHistory`, indexes, FK constraints, and nullable behavior.
 
+The integrated final-mastering migration is reconciled to own only `MovieFinalMasters`; continuity, shot-planning, and selective-regeneration schema remain owned by their earlier migrations. This avoids duplicate-column/table operations on fresh databases while preserving the composed model snapshot.
+
 ## Semantic conflicts to resolve explicitly
 
 - **Resolution vs. quality:** adaptive recommendation may suggest a source/master plan, but quality-tier and QC contracts remain authoritative. Do not turn a complexity score into a vendor/model choice.
@@ -42,13 +45,13 @@ Timestamp order is a useful default, not authority. If the composed model requir
 
 ## Conflict resolution checklist
 
-- [ ] Fixed SHAs reviewed with `git diff origin/main...<sha>`.
-- [ ] Wave 2 dependency contract landed or explicitly mapped; no guessed fields.
-- [ ] One final `MovieShot`/`MovieTake` selection authority preserved.
-- [ ] One final EF snapshot regenerated from the composed model.
-- [ ] Fresh and upgrade PostgreSQL migration checks pass.
-- [ ] Failed, cancelled, unavailable, and QC-rejected jobs publish no Asset and charge zero.
-- [ ] Reload returns selected/final pointers and source/provenance links.
-- [ ] Normal-user DTO/UI contains no provider/model/prompt/credential details.
-- [ ] Movie video and customer charging remain OFF for the acceptance gate.
-- [ ] No conflict markers, secrets, deployment, or paid generation activity.
+- [x] Fixed SHAs reviewed and integrated from the verified base.
+- [x] Wave 2 dependency contract landed in the verified base and Wave 3 fields reconciled without guessed provider fields.
+- [x] One final `MovieShot`/`MovieTake` selection authority preserved.
+- [x] One final EF snapshot validated against the composed model.
+- [x] Fresh and upgrade PostgreSQL migration checks pass.
+- [x] Failed, cancelled, unavailable, and QC-rejected jobs publish no Asset and charge zero.
+- [x] Reload returns selected/final pointers and source/provenance links.
+- [x] Normal-user Movie DTO/UI contains no provider/model/prompt/credential details; provider-boundary and admin accounting metadata remain internal.
+- [x] Movie video and customer charging remain OFF for the acceptance gate.
+- [x] No conflict markers, secrets, deployment, or paid generation activity.

@@ -1,10 +1,10 @@
-# Taslim AI — Movie Wave 3 Integration Preparation
+# Taslim AI — Movie Wave 3 Integration Gate
 
-**Branch:** `parallel/movie-wave3-integration-prep`
+**Branch:** `integration/movie-production-intelligence-wave3`
 **Base:** `308e146aa73e91443097229a81f97dac008b92ee` (`origin/main`)
-**Scope:** integration matrix, conflict map, safe gate, compatibility seam, and deterministic acceptance only.
+**Scope:** integrated Wave 3 implementation, conflict reconciliation, safe gate, compatibility seam, and deterministic acceptance.
 
-> No Wave 2 or Wave 3 implementation branch is merged here. No deployment, provider enablement, customer charging, or paid generation is performed.
+> The fixed Wave 3 workstreams are integrated on this branch only. No deployment, provider enablement, customer charging, or paid generation is performed.
 
 The machine-readable source of truth is [`movie-wave3-integration-matrix.json`](./movie-wave3-integration-matrix.json). The separate conflict register is [`MOVIE_WAVE_3_CONFLICT_MAP.md`](./MOVIE_WAVE_3_CONFLICT_MAP.md).
 
@@ -12,7 +12,7 @@ The machine-readable source of truth is [`movie-wave3-integration-matrix.json`](
 
 `origin/main` contains the Movie V2 hierarchy, production versions, takes, explicit selection/finalization, quality-control boundary, generation-job usage ledger, provenance JSON, and disabled Movie video defaults. It does **not** contain the audited Wave 2 shot-production/complexity/importance integration or the Wave 3 adaptive-resolution, benchmark, upscale, and mastering migrations.
 
-This branch therefore adds only `MovieWave3IntegrationCompatibility`: a provider-neutral seam for deterministic resolution recommendation, economical draft selection, explicit QC escalation, unknown-cost representation, and selected-take-only eligibility. The seam has no database tables, controllers, provider calls, prompts, model identifiers, or billing behavior. It is intentionally replaceable when the integrated contracts land.
+This branch integrates the fixed Wave 3 contracts and implementation seams, including adaptive resolution, provider capabilities and benchmarking, shot intelligence, provider-neutral video boundaries, upscaling, selected-take audit behavior, final-master hand-off, economics guardrails, and security boundaries. `MovieWave3IntegrationCompatibility` remains a provider-neutral acceptance seam for deterministic resolution recommendation, economical draft selection, explicit QC escalation, unknown-cost representation, and selected-take-only eligibility. No normal-user contract exposes provider/model/prompt/credential details.
 
 ## 2. Integration order
 
@@ -79,4 +79,4 @@ UPGRADE_DATABASE_URL='...' \
 RUN_BROWSER_E2E=1 ./scripts/movie-wave3-integration-gate.sh
 ```
 
-The gate reports skipped optional stages rather than pretending that migrations or browser E2E ran. The final integrated branch must additionally run the Wave 2 migration upgrade and the Wave 3 branch-specific migration tests listed in the JSON matrix.
+The gate reports skipped optional stages rather than pretending that migrations or browser E2E ran. This integrated branch additionally ran the Wave 3 EF model check plus fresh and base-to-Wave-3 PostgreSQL migration paths; browser E2E remains an environment-dependent optional check requiring a disposable running API/web environment.
