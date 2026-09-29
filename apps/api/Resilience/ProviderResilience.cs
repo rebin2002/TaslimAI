@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Net.Http;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Taslim.Api.Domain;
@@ -54,6 +55,37 @@ public sealed class ProviderResilienceOptions
     public decimal MaxEstimatedCostUsd { get; set; } = 5m;
 }
 
+/// <summary>
+/// The caller's non-negotiable routing constraints. Provider and model identifiers
+/// stay on the server; this contract is intentionally capability and policy based.
+/// </summary>
+public sealed record ProviderRouteRequirements(
+    string Capability,
+    int MinimumQualityRank = 0,
+    decimal? MaxEstimatedCostUsd = null,
+    bool RequireIdempotency = true,
+    bool AllowFallback = true);
+
+/// <summary>
+/// Server-owned provider metadata used only by the router. A provider that does not
+/// implement the optional profile interface remains compatible with the safe default.
+/// </summary>
+public sealed record ProviderRoutingProfile(
+    int QualityRank = 0,
+    decimal? EstimatedCostUsd = null,
+    bool SupportsIdempotency = true)
+{
+    public static ProviderRoutingProfile Default { get; } = new();
+}
+
+public sealed record ProviderHealthSignal(
+    string ProviderKey,
+    string Capability,
+    ProviderCircuitState CircuitState,
+    int ConsecutiveFailures,
+    DateTime? OpenUntil,
+    DateTime? ProbeExpiresAt);
+
 public sealed record ProviderResilienceFailure(
     ProviderAttemptResultCategory Category,
     string? Code = null,
@@ -71,10 +103,23 @@ public sealed record ProviderExecutionContext(
 
 public sealed record ProviderExecutionSuccess<T>(T Value, decimal? EstimatedCostUsd = null);
 
+public interface IProviderRoutingProfile<in TInput>
+{
+    ProviderRoutingProfile GetRoutingProfile(string capability, TInput input);
+}
+
 public interface IResilientProvider<TInput, TOutput>
 {
     string Key { get; }
     bool CanHandle(string capability, TInput input);
+
+    // Default interface implementation keeps existing adapters source-compatible
+    // while making quality, cost, and idempotency explicit for new adapters.
+    ProviderRoutingProfile GetRoutingProfile(string capability, TInput input) =>
+        this is IProviderRoutingProfile<TInput> profiled
+            ? profiled.GetRoutingProfile(capability, input)
+            : ProviderRoutingProfile.Default;
+
     Task<ProviderExecutionSuccess<TOutput>> ExecuteAsync(ProviderExecutionContext context, TInput input, CancellationToken cancellationToken);
 }
 
@@ -164,6 +209,64 @@ public sealed record ProviderResilienceExecutionResult<T>(
     public bool Succeeded => Category == ProviderAttemptResultCategory.Success;
 }
 
+public static class ProviderFailureClassifier
+{
+    public static ProviderResilienceFailure Classify(Exception exception) => exception switch
+    {
+        ProviderResilienceException provider => new(provider.Category, provider.Code, provider.SafeMessage),
+        TimeoutException => new(ProviderAttemptResultCategory.TimedOut, "PROVIDER_TIMEOUT"),
+        HttpRequestException => new(ProviderAttemptResultCategory.TransientFailure, "PROVIDER_NETWORK_FAILURE"),
+        OperationCanceledException => new(ProviderAttemptResultCategory.Cancelled, "CANCELLED"),
+        _ => new(ProviderAttemptResultCategory.PermanentFailure, "PROVIDER_FAILURE"),
+    };
+}
+
+public static class ProviderRetryPolicy
+{
+    public const int MaximumRetries = 8;
+
+    public static int NormalizeRetries(int configuredRetries) => Math.Clamp(configuredRetries, 0, MaximumRetries);
+
+    public static bool IsRetryable(ProviderAttemptResultCategory category) => category is
+        ProviderAttemptResultCategory.RateLimited or
+        ProviderAttemptResultCategory.TransientFailure or
+        ProviderAttemptResultCategory.TimedOut;
+
+    public static TimeSpan GetDelay(ProviderResilienceOptions options, int retryOrdinal)
+    {
+        var initial = Math.Max(0, options.InitialBackoffMilliseconds);
+        var maximum = Math.Max(0, options.MaxBackoffMilliseconds);
+        if (initial == 0 || maximum == 0) return TimeSpan.Zero;
+
+        var exponent = Math.Clamp(retryOrdinal, 0, 10);
+        var uncapped = initial * Math.Pow(2, exponent);
+        return TimeSpan.FromMilliseconds(Math.Min(maximum, uncapped));
+    }
+}
+
+public static class ProviderRoutingPolicy
+{
+    public static bool IsFallbackEligible(ProviderAttemptResultCategory category) => category is
+        ProviderAttemptResultCategory.Unavailable or
+        ProviderAttemptResultCategory.RateLimited or
+        ProviderAttemptResultCategory.TransientFailure or
+        ProviderAttemptResultCategory.PermanentFailure or
+        ProviderAttemptResultCategory.TimedOut or
+        ProviderAttemptResultCategory.CircuitOpen;
+
+    public static bool MeetsRequirements(ProviderRoutingProfile profile, ProviderRouteRequirements requirements, decimal configuredMaxCostUsd)
+    {
+        if (profile.QualityRank < requirements.MinimumQualityRank) return false;
+        if (requirements.RequireIdempotency && !profile.SupportsIdempotency) return false;
+        if (profile.EstimatedCostUsd is not { } estimate) return true;
+        if (estimate < 0) return false;
+
+        var requestMax = requirements.MaxEstimatedCostUsd ?? decimal.MaxValue;
+        var configuredMax = configuredMaxCostUsd >= 0 ? configuredMaxCostUsd : decimal.MaxValue;
+        return estimate <= Math.Min(requestMax, configuredMax);
+    }
+}
+
 public sealed class ProviderResilienceOrchestrator(
     IProviderResilienceStore store,
     IProviderCostGuard costGuard,
@@ -173,20 +276,42 @@ public sealed class ProviderResilienceOrchestrator(
 {
     private readonly ProviderResilienceOptions settings = options.Value;
 
-    public async Task<ProviderResilienceExecutionResult<TOutput>> ExecuteAsync<TInput, TOutput>(
+    public Task<ProviderResilienceExecutionResult<TOutput>> ExecuteAsync<TInput, TOutput>(
         Guid generationJobId,
         Guid jobConcurrencyToken,
         string capability,
         string idempotencyKey,
         TInput input,
         IReadOnlyList<IResilientProvider<TInput, TOutput>> providers,
+        CancellationToken cancellationToken = default) => ExecuteAsync(
+            generationJobId,
+            jobConcurrencyToken,
+            new ProviderRouteRequirements(capability),
+            idempotencyKey,
+            input,
+            providers,
+            cancellationToken);
+
+    public async Task<ProviderResilienceExecutionResult<TOutput>> ExecuteAsync<TInput, TOutput>(
+        Guid generationJobId,
+        Guid jobConcurrencyToken,
+        ProviderRouteRequirements requirements,
+        string idempotencyKey,
+        TInput input,
+        IReadOnlyList<IResilientProvider<TInput, TOutput>> providers,
         CancellationToken cancellationToken = default)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(capability);
+        ArgumentException.ThrowIfNullOrWhiteSpace(requirements.Capability);
         ArgumentException.ThrowIfNullOrWhiteSpace(idempotencyKey);
 
         var now = timeProvider.GetUtcNow().UtcDateTime;
-        var claim = await store.TryClaimFinalizationAsync(generationJobId, jobConcurrencyToken, idempotencyKey, now, TimeSpan.FromSeconds(Math.Max(1, settings.ProviderTimeoutSeconds)), cancellationToken);
+        var claim = await store.TryClaimFinalizationAsync(
+            generationJobId,
+            jobConcurrencyToken,
+            idempotencyKey,
+            now,
+            TimeSpan.FromSeconds(Math.Clamp(settings.ProviderTimeoutSeconds, 1, 1_800)),
+            cancellationToken);
         if (claim == ProviderFinalizationClaimResult.StaleWorker)
             throw new StaleProviderWorkerException(generationJobId);
         if (claim == ProviderFinalizationClaimResult.AlreadyCompleted)
@@ -201,16 +326,16 @@ public sealed class ProviderResilienceOrchestrator(
 
         var boundedProviders = providers.Take(Math.Max(1, settings.MaxProviders)).ToArray();
         var attemptCount = 0;
+        var hasSelectedProvider = false;
         ProviderAttemptResultCategory? lastCategory = null;
         string? lastCode = null;
         string? lastProvider = null;
-        var finalCategory = ProviderAttemptResultCategory.Unavailable;
 
         try
         {
             foreach (var provider in boundedProviders)
             {
-                if (!provider.CanHandle(capability, input))
+                if (!provider.CanHandle(requirements.Capability, input))
                 {
                     lastCategory = ProviderAttemptResultCategory.UnsupportedCapability;
                     lastCode = "CAPABILITY_UNSUPPORTED";
@@ -218,38 +343,101 @@ public sealed class ProviderResilienceOrchestrator(
                     continue;
                 }
 
-                var admission = await store.TryAcquireCircuitAsync(provider.Key, capability, timeProvider.GetUtcNow().UtcDateTime, TimeSpan.FromSeconds(Math.Max(1, settings.CircuitProbeLeaseSeconds)), cancellationToken);
+                var profile = provider.GetRoutingProfile(requirements.Capability, input);
+                if (!ProviderRoutingPolicy.MeetsRequirements(profile, requirements, settings.MaxEstimatedCostUsd))
+                {
+                    lastCategory = profile.QualityRank < requirements.MinimumQualityRank || !profile.SupportsIdempotency && requirements.RequireIdempotency
+                        ? ProviderAttemptResultCategory.UnsupportedCapability
+                        : ProviderAttemptResultCategory.CostGuardRejected;
+                    lastCode = profile.QualityRank < requirements.MinimumQualityRank
+                        ? "QUALITY_REQUIREMENT_UNMET"
+                        : !profile.SupportsIdempotency && requirements.RequireIdempotency
+                            ? "IDEMPOTENCY_REQUIRED"
+                            : "COST_LIMIT_EXCEEDED";
+                    lastProvider = provider.Key;
+                    continue;
+                }
+
+                var isFallback = hasSelectedProvider;
+                hasSelectedProvider = true;
+                var admission = await store.TryAcquireCircuitAsync(
+                    provider.Key,
+                    requirements.Capability,
+                    timeProvider.GetUtcNow().UtcDateTime,
+                    TimeSpan.FromSeconds(Math.Clamp(settings.CircuitProbeLeaseSeconds, 1, 3_600)),
+                    cancellationToken);
                 if (admission != ProviderCircuitAdmission.Allowed)
                 {
-                    finalCategory = ProviderAttemptResultCategory.CircuitOpen;
-                    lastCategory = finalCategory;
+                    attemptCount++;
+                    var skippedAttempt = await store.StartAttemptAsync(
+                        generationJobId,
+                        jobConcurrencyToken,
+                        idempotencyKey,
+                        requirements.Capability,
+                        provider.Key,
+                        attemptCount,
+                        false,
+                        isFallback,
+                        timeProvider.GetUtcNow().UtcDateTime,
+                        cancellationToken);
+                    await store.CompleteAttemptAsync(
+                        skippedAttempt,
+                        ProviderAttemptResultCategory.CircuitOpen,
+                        "CIRCUIT_OPEN",
+                        0,
+                        profile.EstimatedCostUsd,
+                        timeProvider.GetUtcNow().UtcDateTime,
+                        cancellationToken);
+                    lastCategory = ProviderAttemptResultCategory.CircuitOpen;
                     lastCode = "CIRCUIT_OPEN";
                     lastProvider = provider.Key;
-                    logger.LogInformation("Provider circuit admission denied. Capability={Capability}; ProviderKey={ProviderKey}; State={State}", capability, provider.Key, admission);
+                    logger.LogInformation("Provider circuit admission denied. Capability={Capability}; ProviderKey={ProviderKey}; State={State}", requirements.Capability, provider.Key, admission);
+                    if (!requirements.AllowFallback) break;
                     continue;
                 }
 
                 var attemptCounter = new AttemptCounter(attemptCount);
-                var providerResult = await ExecuteProviderAsync(provider, generationJobId, jobConcurrencyToken, capability, idempotencyKey, input, provider == boundedProviders[0], attemptCounter, cancellationToken);
+                var providerResult = await ExecuteProviderAsync(
+                    provider,
+                    generationJobId,
+                    jobConcurrencyToken,
+                    requirements,
+                    idempotencyKey,
+                    input,
+                    !isFallback,
+                    profile,
+                    attemptCounter,
+                    cancellationToken);
                 attemptCount = attemptCounter.Value;
                 if (providerResult.Succeeded)
                 {
-                    await store.RecordCircuitSuccessAsync(provider.Key, capability, timeProvider.GetUtcNow().UtcDateTime, cancellationToken);
+                    await store.RecordCircuitSuccessAsync(provider.Key, requirements.Capability, timeProvider.GetUtcNow().UtcDateTime, cancellationToken);
                     await store.CompleteFinalizationAsync(generationJobId, jobConcurrencyToken, idempotencyKey, ProviderAttemptResultCategory.Success, cancellationToken);
                     return providerResult;
                 }
 
                 if (CountsAsProviderFailure(providerResult.Category))
-                    await store.RecordCircuitFailureAsync(provider.Key, capability, timeProvider.GetUtcNow().UtcDateTime, Math.Max(1, settings.CircuitFailureThreshold), TimeSpan.FromSeconds(Math.Max(1, settings.CircuitOpenSeconds)), cancellationToken);
+                    await store.RecordCircuitFailureAsync(
+                        provider.Key,
+                        requirements.Capability,
+                        timeProvider.GetUtcNow().UtcDateTime,
+                        Math.Max(1, settings.CircuitFailureThreshold),
+                        TimeSpan.FromSeconds(Math.Clamp(settings.CircuitOpenSeconds, 1, 3_600)),
+                        cancellationToken);
                 lastCategory = providerResult.Category;
                 lastCode = providerResult.ErrorCode;
                 lastProvider = providerResult.ProviderKey;
-                finalCategory = providerResult.Category;
-                if (providerResult.Category is ProviderAttemptResultCategory.InvalidUserInput or ProviderAttemptResultCategory.ValidationRejected or ProviderAttemptResultCategory.Cancelled or ProviderAttemptResultCategory.CostGuardRejected)
+                if (providerResult.Category is ProviderAttemptResultCategory.InvalidUserInput
+                    or ProviderAttemptResultCategory.ValidationRejected
+                    or ProviderAttemptResultCategory.Cancelled)
+                    break;
+                if (providerResult.Category == ProviderAttemptResultCategory.CostGuardRejected && requirements.AllowFallback)
+                    continue;
+                if (!requirements.AllowFallback || !ProviderRoutingPolicy.IsFallbackEligible(providerResult.Category))
                     break;
             }
 
-            finalCategory = lastCategory ?? ProviderAttemptResultCategory.Unavailable;
+            var finalCategory = lastCategory ?? ProviderAttemptResultCategory.Unavailable;
             await store.CompleteFinalizationAsync(generationJobId, jobConcurrencyToken, idempotencyKey, finalCategory, cancellationToken);
             return new(finalCategory, default, lastCode ?? "PROVIDER_UNAVAILABLE", attemptCount, lastProvider);
         }
@@ -268,28 +456,55 @@ public sealed class ProviderResilienceOrchestrator(
         IResilientProvider<TInput, TOutput> provider,
         Guid generationJobId,
         Guid jobConcurrencyToken,
-        string capability,
+        ProviderRouteRequirements requirements,
         string idempotencyKey,
         TInput input,
         bool isPrimary,
+        ProviderRoutingProfile profile,
         AttemptCounter attemptCounter,
         CancellationToken cancellationToken)
     {
         ProviderResilienceExecutionResult<TOutput>? last = null;
-        var maxAttempts = Math.Max(1, settings.MaxRetriesPerProvider + 1);
+        var maxAttempts = ProviderRetryPolicy.NormalizeRetries(settings.MaxRetriesPerProvider) + 1;
         for (var providerAttempt = 1; providerAttempt <= maxAttempts; providerAttempt++)
         {
             if (cancellationToken.IsCancellationRequested || await store.IsCancellationRequestedAsync(generationJobId, cancellationToken))
                 return new(ProviderAttemptResultCategory.Cancelled, default, "CANCELLED", attemptCounter.Value, provider.Key);
 
-            var estimatedCost = (decimal?)null;
             var cumulativeCost = await store.GetCumulativeEstimatedCostAsync(generationJobId, cancellationToken);
-            var costDecision = await costGuard.CanAttemptAsync(new ProviderCostGuardContext(generationJobId, capability, provider.Key, providerAttempt, estimatedCost, cumulativeCost, settings.MaxEstimatedCostUsd), cancellationToken);
+            var maxCost = Math.Min(
+                requirements.MaxEstimatedCostUsd ?? decimal.MaxValue,
+                settings.MaxEstimatedCostUsd >= 0 ? settings.MaxEstimatedCostUsd : decimal.MaxValue);
+            if (profile.EstimatedCostUsd is { } estimate && estimate >= 0 && cumulativeCost + estimate > maxCost)
+            {
+                return new(ProviderAttemptResultCategory.CostGuardRejected, default, "COST_LIMIT_EXCEEDED", attemptCounter.Value, provider.Key);
+            }
+
+            var costDecision = await costGuard.CanAttemptAsync(
+                new ProviderCostGuardContext(
+                    generationJobId,
+                    requirements.Capability,
+                    provider.Key,
+                    providerAttempt,
+                    profile.EstimatedCostUsd,
+                    cumulativeCost,
+                    maxCost),
+                cancellationToken);
             if (!costDecision.Allowed)
                 return new(ProviderAttemptResultCategory.CostGuardRejected, default, costDecision.Code ?? "COST_GUARD_REJECTED", attemptCounter.Value, provider.Key);
 
             attemptCounter.Value++;
-            var attempt = await store.StartAttemptAsync(generationJobId, jobConcurrencyToken, idempotencyKey, capability, provider.Key, attemptCounter.Value, providerAttempt > 1, !isPrimary, timeProvider.GetUtcNow().UtcDateTime, cancellationToken);
+            var attempt = await store.StartAttemptAsync(
+                generationJobId,
+                jobConcurrencyToken,
+                idempotencyKey,
+                requirements.Capability,
+                provider.Key,
+                attemptCounter.Value,
+                providerAttempt > 1,
+                !isPrimary,
+                timeProvider.GetUtcNow().UtcDateTime,
+                cancellationToken);
             var stopwatch = Stopwatch.StartNew();
             ProviderAttemptResultCategory category;
             string? code = null;
@@ -298,16 +513,30 @@ public sealed class ProviderResilienceOrchestrator(
             try
             {
                 using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                timeout.CancelAfter(TimeSpan.FromSeconds(Math.Max(1, settings.ProviderTimeoutSeconds)));
-                var success = await provider.ExecuteAsync(new ProviderExecutionContext(generationJobId, jobConcurrencyToken, capability, idempotencyKey, attemptCounter.Value, providerAttempt > 1, !isPrimary, estimatedCost), input, timeout.Token);
-                value = success.Value;
-                actualCost = success.EstimatedCostUsd;
-                category = ProviderAttemptResultCategory.Success;
-            }
-            catch (ProviderResilienceException exception)
-            {
-                category = exception.Category;
-                code = exception.Code;
+                timeout.CancelAfter(TimeSpan.FromSeconds(Math.Clamp(settings.ProviderTimeoutSeconds, 1, 1_800)));
+                var success = await provider.ExecuteAsync(
+                    new ProviderExecutionContext(
+                        generationJobId,
+                        jobConcurrencyToken,
+                        requirements.Capability,
+                        idempotencyKey,
+                        attemptCounter.Value,
+                        providerAttempt > 1,
+                        !isPrimary,
+                        profile.EstimatedCostUsd),
+                    input,
+                    timeout.Token);
+                actualCost = success.EstimatedCostUsd ?? profile.EstimatedCostUsd;
+                if (actualCost is { } reportedCost && reportedCost >= 0 && cumulativeCost + reportedCost > maxCost)
+                {
+                    category = ProviderAttemptResultCategory.CostGuardRejected;
+                    code = "COST_LIMIT_EXCEEDED";
+                }
+                else
+                {
+                    value = success.Value;
+                    category = ProviderAttemptResultCategory.Success;
+                }
             }
             catch (OperationCanceledException)
             {
@@ -317,23 +546,41 @@ public sealed class ProviderResilienceOrchestrator(
             }
             catch (Exception exception)
             {
-                category = ProviderAttemptResultCategory.PermanentFailure;
-                code = "PROVIDER_FAILURE";
-                logger.LogWarning("Provider attempt failed with sanitized category. ProviderKey={ProviderKey}; Capability={Capability}; ExceptionType={ExceptionType}", provider.Key, capability, exception.GetType().Name);
+                var failure = ProviderFailureClassifier.Classify(exception);
+                category = failure.Category;
+                code = failure.Code;
+                logger.LogWarning(
+                    "Provider attempt failed with sanitized category. ProviderKey={ProviderKey}; Capability={Capability}; ExceptionType={ExceptionType}; Category={Category}",
+                    provider.Key,
+                    requirements.Capability,
+                    exception.GetType().Name,
+                    category);
             }
             stopwatch.Stop();
-            await store.CompleteAttemptAsync(attempt, category, code, stopwatch.ElapsedMilliseconds, actualCost, timeProvider.GetUtcNow().UtcDateTime, cancellationToken);
+            await store.CompleteAttemptAsync(
+                attempt,
+                category,
+                code,
+                stopwatch.ElapsedMilliseconds,
+                actualCost,
+                timeProvider.GetUtcNow().UtcDateTime,
+                cancellationToken);
             if (category == ProviderAttemptResultCategory.Success)
                 return new(category, value, null, attemptCounter.Value, provider.Key);
 
             last = new(category, default, code, attemptCounter.Value, provider.Key);
-            if (!IsRetryable(category) || providerAttempt >= maxAttempts)
+            if (!ProviderRetryPolicy.IsRetryable(category) || providerAttempt >= maxAttempts)
                 break;
 
-            var backoff = Math.Min(settings.MaxBackoffMilliseconds, settings.InitialBackoffMilliseconds * Math.Pow(2, providerAttempt - 1));
-            logger.LogInformation("Retrying provider attempt. ProviderKey={ProviderKey}; Capability={Capability}; AttemptNumber={AttemptNumber}; Category={Category}", provider.Key, capability, attemptCounter.Value, category);
-            if (backoff > 0)
-                await Task.Delay(TimeSpan.FromMilliseconds(backoff), cancellationToken);
+            var backoff = ProviderRetryPolicy.GetDelay(settings, providerAttempt - 1);
+            logger.LogInformation(
+                "Retrying provider attempt. ProviderKey={ProviderKey}; Capability={Capability}; AttemptNumber={AttemptNumber}; Category={Category}",
+                provider.Key,
+                requirements.Capability,
+                attemptCounter.Value,
+                category);
+            if (backoff > TimeSpan.Zero)
+                await Task.Delay(backoff, cancellationToken);
         }
 
         return last ?? new(ProviderAttemptResultCategory.Unavailable, default, "PROVIDER_UNAVAILABLE", attemptCounter.Value, provider.Key);
@@ -348,15 +595,12 @@ public sealed class ProviderResilienceOrchestrator(
         catch (StaleProviderWorkerException) { }
     }
 
-    private static bool IsRetryable(ProviderAttemptResultCategory category) =>
-        category is ProviderAttemptResultCategory.RateLimited or ProviderAttemptResultCategory.TransientFailure or ProviderAttemptResultCategory.TimedOut;
-
-    private static bool CountsAsProviderFailure(ProviderAttemptResultCategory category) =>
-        category is not (ProviderAttemptResultCategory.InvalidUserInput
-            or ProviderAttemptResultCategory.ValidationRejected
-            or ProviderAttemptResultCategory.UnsupportedCapability
-            or ProviderAttemptResultCategory.Cancelled
-            or ProviderAttemptResultCategory.CostGuardRejected);
+    private static bool CountsAsProviderFailure(ProviderAttemptResultCategory category) => category is not (
+        ProviderAttemptResultCategory.InvalidUserInput or
+        ProviderAttemptResultCategory.ValidationRejected or
+        ProviderAttemptResultCategory.UnsupportedCapability or
+        ProviderAttemptResultCategory.Cancelled or
+        ProviderAttemptResultCategory.CostGuardRejected);
 
     private sealed class AttemptCounter(int value)
     {
@@ -367,4 +611,5 @@ public sealed class ProviderResilienceOrchestrator(
 public interface IProviderResilienceOrchestrator
 {
     Task<ProviderResilienceExecutionResult<TOutput>> ExecuteAsync<TInput, TOutput>(Guid generationJobId, Guid jobConcurrencyToken, string capability, string idempotencyKey, TInput input, IReadOnlyList<IResilientProvider<TInput, TOutput>> providers, CancellationToken cancellationToken = default);
+    Task<ProviderResilienceExecutionResult<TOutput>> ExecuteAsync<TInput, TOutput>(Guid generationJobId, Guid jobConcurrencyToken, ProviderRouteRequirements requirements, string idempotencyKey, TInput input, IReadOnlyList<IResilientProvider<TInput, TOutput>> providers, CancellationToken cancellationToken = default);
 }
