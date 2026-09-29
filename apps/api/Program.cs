@@ -227,12 +227,16 @@ builder.Services.AddScoped<IMovieDirectorService, MovieDirectorService>();
 builder.Services.Configure<MovieVideoOptions>(builder.Configuration.GetSection("MovieVideo"));
 builder.Services.AddScoped<MovieVideoExecutionStore>();
 builder.Services.AddHttpClient<RunwayMovieVideoProvider>();
+builder.Services.AddHttpClient<ManusMovieVideoProvider>();
 builder.Services.AddSingleton<IMovieVideoProvider>(services =>
 {
     var options = services.GetRequiredService<Microsoft.Extensions.Options.IOptions<MovieVideoOptions>>().Value;
-    return options.Enabled && string.Equals(options.ProviderKey, "runway", StringComparison.OrdinalIgnoreCase)
-        ? services.GetRequiredService<RunwayMovieVideoProvider>()
-        : new UnavailableMovieVideoProvider();
+    if (!options.Enabled) return new UnavailableMovieVideoProvider();
+    if (string.Equals(options.ProviderKey, "runway", StringComparison.OrdinalIgnoreCase))
+        return services.GetRequiredService<RunwayMovieVideoProvider>();
+    if (string.Equals(options.ProviderKey, "manus", StringComparison.OrdinalIgnoreCase) && options.Manus.Enabled)
+        return services.GetRequiredService<ManusMovieVideoProvider>();
+    return new UnavailableMovieVideoProvider();
 });
 builder.Services.AddScoped<IDirectorActionExecutor, MovieDirectorActionExecutor>();
 builder.Services.AddScoped<IDirectorActionExecutor, MovieDirectorStoryActionExecutor>();
