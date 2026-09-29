@@ -33,7 +33,9 @@ import {
   directorHistoryLabel,
   directorProposalStatusLabel,
   directorRoomForModule,
+  directorRoomPlan,
   type DirectorRoom,
+  type DirectorRoomAction,
 } from "@/lib/movieDirector";
 
 type DirectorPanelProps = {
@@ -76,6 +78,8 @@ function signalIcon(tone: SignalTone) {
 
 function roomTarget(room: DirectorRoom, project: MovieProject, selectedScene: MovieScene | null, selectedShot: MovieShot | null) {
   switch (room) {
+    case "Overview":
+      return { label: project.title, detail: "project overview and readiness" };
     case "Story":
       return { label: project.title, detail: "creative brief and continuity guide" };
     case "Cast":
@@ -129,12 +133,16 @@ export function MovieDirectorPanel({ project, activeModule, selectedScene, selec
   const [budgetSensitivity, setBudgetSensitivity] = useState(50);
 
   const completionPercent = Math.min(100, Math.round(((project.scenes.length ? project.clips.filter((clip) => Boolean(clip.assetId) && ["Completed", "Succeeded", "Ready"].includes(clip.status)).length : 0) / Math.max(project.scenes.length, 1)) * 100));
+  const roomPlan = useMemo(() => directorRoomPlan(room, project, selectedScene, selectedShot), [room, project, selectedScene, selectedShot]);
+  const [roomAction, setRoomAction] = useState<string>("");
+  const activeRoomAction = roomPlan.validActions.includes(roomAction as DirectorRoomAction) ? roomAction : roomPlan.validActions[0] ?? "";
   const signals = useMemo(() => getSignals(room, project, selectedScene, selectedShot, proposal?.proposal ?? null, completionPercent), [room, project, selectedScene, selectedShot, proposal, completionPercent]);
   const proposalAction = actionForProposal(proposal?.proposal ?? null);
   const planItem = proposal?.proposal.plan[0] ?? null;
   const castRoomStoryAssistance = room === "Cast";
+  const roomPlanning = room === "Scene" || room === "Storyboard" || room === "Production";
   const sceneShotPlanning = room === "Scene" && Boolean(selectedScene);
-  const canPropose = Boolean((selectedShot || sceneShotPlanning || castRoomStoryAssistance) && project.guide.lockedRevisionNumber && !working);
+  const canPropose = Boolean(roomPlan.validActions.length && project.guide.lockedRevisionNumber && !working);
 
   useEffect(() => {
     let mounted = true;
@@ -161,43 +169,24 @@ export function MovieDirectorPanel({ project, activeModule, selectedScene, selec
   }, [project.id]);
 
   async function createProposal() {
-    if (!selectedShot && !sceneShotPlanning && !castRoomStoryAssistance) {
-      setError("Select a scene or shot before creating a Director proposal.");
+    if (!roomPlan.validActions.length) {
+      setError(roomPlan.prerequisites.find((item) => !item.satisfied)?.detail ?? "The current room has no valid Director action for this target.");
       return;
     }
     setWorking("proposal");
     setError("");
     try {
-      const next = await api.createMovieDirectorProposal(project.id, sceneShotPlanning
-        ? {
-          shotPlanningAction: "propose_shots",
-          targetSceneId: selectedScene?.id,
-          requestedShotCount: 3,
-          goal: goal.trim() || "Plan the selected scene into production-ready shots.",
-          requestedQuality: autoDirector ? "Auto" : quality,
-          importance,
-          complexity,
-          budgetSensitivity,
-        }
-        : castRoomStoryAssistance && !selectedShot
-        ? { storyAction: "develop_premise", goal: goal.trim() || "Review Story context for Cast continuity." }
-        : {
-          shotId: selectedShot?.id,
-          goal: goal.trim() || null,
-          requestedQuality: autoDirector ? "Auto" : quality,
-          budgetLimitUsd: null,
-          importance,
-          complexity,
-          budgetSensitivity,
-        });
+      const next = await api.createMovieDirectorProposal(project.id, castRoomStoryAssistance
+        ? { storyAction: "develop_premise", contextRoom: room, contextTargetType: "project", contextTargetId: project.id, goal: goal.trim() || "Review the current Cast continuity context." }
+        : roomPlanning
+          ? { contextRoom: room, roomAction: activeRoomAction, contextTargetType: roomPlan.targetType, contextTargetId: roomPlan.targetType === "shot" ? selectedShot?.id : roomPlan.targetType === "scene" ? selectedScene?.id : project.id, selectedSceneId: selectedScene?.id ?? null, selectedShotId: selectedShot?.id ?? null, goal: goal.trim() || null }
+          : { contextRoom: room, shotId: selectedShot?.id, selectedSceneId: selectedScene?.id ?? null, selectedShotId: selectedShot?.id ?? null, goal: goal.trim() || null, requestedQuality: autoDirector ? "Auto" : quality, budgetLimitUsd: null, importance, complexity, budgetSensitivity });
       setProposal(next);
       if (typeof window !== "undefined") window.sessionStorage.setItem(`taslim:movie-director:proposal:${project.id}`, next.proposal.id);
       setHistory(await api.getMovieDirectorHistory(project.id));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "The Director proposal could not be created.");
-    } finally {
-      setWorking(null);
-    }
+    } finally { setWorking(null); }
   }
 
   async function approveProposal() {
@@ -309,12 +298,14 @@ export function MovieDirectorPanel({ project, activeModule, selectedScene, selec
           {proposalAction?.results.at(-1) && <div className={`movie-director-result is-${proposalAction.results.at(-1)?.status.toLowerCase()}`}><span>{proposalAction.results.at(-1)?.status === "Succeeded" ? <Check size={13} /> : <AlertTriangle size={13} />}</span><p>{proposalAction.results.at(-1)?.safeMessage}</p></div>}
         </> : <>
           <p className="movie-director-summary">{sceneShotPlanning ? "Turn the selected scene into a grounded, production-ready shot plan. Apply is explicit and appends without replacing current shots." : castRoomStoryAssistance && !selectedShot ? "Turn the current Story context into a reviewable Cast continuity plan. No shot is required." : "Turn the current shot into a reviewable plan. The Director will explain the change, quality choice, and rationale before anything can run."}</p>
+          {roomPlanning && <label className="movie-director-field"><span>Valid room action</span><select value={activeRoomAction} onChange={(event) => setRoomAction(event.target.value)}>{roomPlan.validActions.map((action) => <option key={action} value={action}>{directorActionTypeLabel(action)}</option>)}</select></label>}
+          {roomPlanning && roomPlan.prerequisites.some((item) => !item.satisfied) && <div className="movie-director-prerequisites"><span className="movie-inspector-label">Available prerequisites</span>{roomPlan.prerequisites.map((item) => <small key={item.key} className={item.satisfied ? "is-satisfied" : "is-missing"}>{item.satisfied ? "✓" : "!"} {item.label} · {item.detail}</small>)}</div>}
           <label className="movie-director-field"><span>Goal</span><input value={goal} onChange={(event) => setGoal(event.target.value)} maxLength={160} /></label>
           <div className="movie-director-mode"><div><span className="movie-inspector-label">Intelligent mode</span><strong>Auto Director</strong><small>Recommends one of the four quality levels.</small></div><button type="button" className={`movie-director-toggle ${autoDirector ? "is-on" : ""}`} aria-pressed={autoDirector} onClick={() => setAutoDirector((current) => !current)}><span /></button></div>
           <div className="movie-director-quality"><span className="movie-inspector-label">Quality</span><div>{qualityLevels.map((level) => <button type="button" key={level} className={!autoDirector && quality === level ? "is-selected" : ""} onClick={() => { setQuality(level); setAutoDirector(false); }}>{level}</button>)}</div><small>{autoDirector ? "Auto Director is active; quality remains Fast / Standard / Cinematic / Studio." : "Choose a quality level explicitly."}</small></div>
           <div className="movie-director-sliders"><Slider label="Importance" value={importance} onChange={setImportance} /><Slider label="Complexity" value={complexity} onChange={setComplexity} /><Slider label="Budget sensitivity" value={budgetSensitivity} onChange={setBudgetSensitivity} /></div>
           <button type="button" className="movie-workspace-button is-primary movie-director-propose" onClick={() => void createProposal()} disabled={!canPropose}>{working === "proposal" ? <><RotateCcw size={13} className="movie-director-spin" /> Preparing…</> : <><Send size={13} /> Create typed proposal</>}</button>
-          {!selectedShot && !sceneShotPlanning && !castRoomStoryAssistance && <small className="movie-director-help">The Director needs a real scene or shot target. Open Scenes and select a scene.</small>}
+          {!roomPlan.validActions.length && !castRoomStoryAssistance && <small className="movie-director-help">{roomPlan.prerequisites.find((item) => !item.satisfied)?.detail ?? "Open Scenes and select the target needed by this room."}</small>}
         </>}
       </section>
 

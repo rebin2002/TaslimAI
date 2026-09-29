@@ -250,6 +250,11 @@ builder.Services.AddScoped<IDirectorActionExecutor, MovieDirectorStoryActionExec
 builder.Services.AddScoped<IDirectorActionExecutor, MovieDirectorScenePlanActionExecutor>();
 builder.Services.AddScoped<IDirectorActionExecutor, MovieShotPlanningActionExecutor>();
 builder.Services.AddScoped<IDirectorActionExecutor, MovieShotPlanningRegenerationActionExecutor>();
+builder.Services.AddScoped<IDirectorActionExecutor>(_ => new MovieDirectorPlanningActionExecutor(DirectorActionTypes.ScenePlanning));
+builder.Services.AddScoped<IDirectorActionExecutor>(_ => new MovieDirectorPlanningActionExecutor(DirectorActionTypes.ShotPlanning));
+builder.Services.AddScoped<IDirectorActionExecutor>(_ => new MovieDirectorPlanningActionExecutor(DirectorActionTypes.StoryboardPreparation));
+builder.Services.AddScoped<IDirectorActionExecutor>(_ => new MovieDirectorPlanningActionExecutor(DirectorActionTypes.ProductionReadiness));
+builder.Services.AddScoped<IDirectorActionExecutor>(_ => new MovieDirectorPlanningActionExecutor(DirectorActionTypes.ProjectReadiness));
 builder.Services.AddScoped<IActivityCenterService, ActivityCenterService>();
 builder.Services.AddSingleton<IGenerationJobHandler, SystemTestGenerationJobHandler>();
 if (builder.Configuration.GetValue("GenerationJobs:WorkerEnabled", !builder.Environment.IsEnvironment("Testing")))
