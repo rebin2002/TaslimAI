@@ -6,6 +6,7 @@ using Taslim.Api.Benchmarking;
 using Taslim.Api.Domain;
 using Taslim.Api.Movies;
 using Taslim.Api.Notifications;
+using Taslim.Api.Upscaling;
 
 namespace Taslim.Api.Persistence;
 
@@ -24,6 +25,9 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
     public DbSet<GenerationJob> GenerationJobs => Set<GenerationJob>();
     public DbSet<GenerationJobOutput> GenerationJobOutputs => Set<GenerationJobOutput>();
     public DbSet<GenerationProviderAttempt> GenerationProviderAttempts => Set<GenerationProviderAttempt>();
+    public DbSet<UpscalingJob> UpscalingJobs => Set<UpscalingJob>();
+    public DbSet<UpscalingAttempt> UpscalingAttempts => Set<UpscalingAttempt>();
+    public DbSet<UpscalingQualityHandoff> UpscalingQualityHandoffs => Set<UpscalingQualityHandoff>();
     public DbSet<ProviderCircuit> ProviderCircuits => Set<ProviderCircuit>();
     public DbSet<ProviderExecutionFinalization> ProviderExecutionFinalizations => Set<ProviderExecutionFinalization>();
     public DbSet<ActivityReadState> ActivityReadStates => Set<ActivityReadState>();
@@ -863,6 +867,61 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasOne(job => job.CreatedByUser).WithMany().HasForeignKey(job => job.CreatedByUserId).OnDelete(DeleteBehavior.Restrict);
         });
 
+        builder.Entity<UpscalingJob>(entity =>
+        {
+            entity.HasKey(job => job.Id);
+            entity.Property(job => job.TargetResolution).HasMaxLength(20).IsRequired();
+            entity.Property(job => job.Status).HasConversion<string>().HasMaxLength(40).IsRequired();
+            entity.Property(job => job.Title).HasMaxLength(160);
+            entity.Property(job => job.IdempotencyKey).HasMaxLength(80);
+            entity.Property(job => job.RequestFingerprint).HasMaxLength(64).IsRequired();
+            entity.Property(job => job.SourceProvenanceJson).HasMaxLength(20_000).IsRequired();
+            entity.Property(job => job.OutputProvenanceJson).HasMaxLength(20_000);
+            entity.Property(job => job.LastErrorCode).HasMaxLength(100);
+            entity.Property(job => job.LastErrorMessage).HasMaxLength(1_000);
+            entity.Property(job => job.ProgressPercent).IsRequired();
+            entity.Property(job => job.RetryCount).IsRequired();
+            entity.Property(job => job.MaxRetryCount).IsRequired();
+            entity.ToTable("UpscalingJobs", table => table.HasCheckConstraint("CK_UpscalingJobs_ProgressPercent", "\"ProgressPercent\" BETWEEN 0 AND 100"));
+            entity.HasIndex(job => new { job.WorkspaceId, job.CreatedAt });
+            entity.HasIndex(job => new { job.WorkspaceId, job.Status, job.CreatedAt });
+            entity.HasIndex(job => new { job.WorkspaceId, job.TargetResolution, job.CreatedAt });
+            entity.HasIndex(job => new { job.CreatedByUserId, job.IdempotencyKey }).IsUnique().HasFilter("\"IdempotencyKey\" IS NOT NULL");
+            entity.HasIndex(job => job.SourceAssetId);
+            entity.HasIndex(job => job.OutputAssetId);
+            entity.HasOne(job => job.Workspace).WithMany().HasForeignKey(job => job.WorkspaceId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(job => job.Project).WithMany().HasForeignKey(job => job.ProjectId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne(job => job.CreatedByUser).WithMany().HasForeignKey(job => job.CreatedByUserId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(job => job.SourceAsset).WithMany().HasForeignKey(job => job.SourceAssetId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(job => job.OutputAsset).WithMany().HasForeignKey(job => job.OutputAssetId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne(job => job.CurrentAttempt).WithMany().HasForeignKey(job => job.CurrentAttemptId).OnDelete(DeleteBehavior.SetNull);
+        });
+        builder.Entity<UpscalingAttempt>(entity =>
+        {
+            entity.HasKey(attempt => attempt.Id);
+            entity.Property(attempt => attempt.AttemptNumber).IsRequired();
+            entity.Property(attempt => attempt.IdempotencyKey).HasMaxLength(180).IsRequired();
+            entity.Property(attempt => attempt.Status).HasConversion<string>().HasMaxLength(40).IsRequired();
+            entity.Property(attempt => attempt.ExecutionReference).HasMaxLength(240);
+            entity.Property(attempt => attempt.FailureCode).HasMaxLength(100);
+            entity.Property(attempt => attempt.SafeMetadataJson).HasMaxLength(8_000);
+            entity.HasIndex(attempt => new { attempt.UpscalingJobId, attempt.AttemptNumber }).IsUnique();
+            entity.HasIndex(attempt => new { attempt.UpscalingJobId, attempt.IdempotencyKey });
+            entity.HasOne(attempt => attempt.UpscalingJob).WithMany(job => job.Attempts).HasForeignKey(attempt => attempt.UpscalingJobId).OnDelete(DeleteBehavior.Cascade);
+        });
+        builder.Entity<UpscalingQualityHandoff>(entity =>
+        {
+            entity.HasKey(handoff => handoff.Id);
+            entity.Property(handoff => handoff.TargetResolution).HasMaxLength(20).IsRequired();
+            entity.Property(handoff => handoff.Status).HasConversion<string>().HasMaxLength(30).IsRequired();
+            entity.Property(handoff => handoff.ReviewNote).HasMaxLength(2_000);
+            entity.HasIndex(handoff => new { handoff.UpscalingJobId, handoff.CreatedAt });
+            entity.HasIndex(handoff => new { handoff.OutputAssetId, handoff.Status });
+            entity.HasOne(handoff => handoff.UpscalingJob).WithMany(job => job.QualityHandoffs).HasForeignKey(handoff => handoff.UpscalingJobId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(handoff => handoff.SourceAsset).WithMany().HasForeignKey(handoff => handoff.SourceAssetId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(handoff => handoff.OutputAsset).WithMany().HasForeignKey(handoff => handoff.OutputAssetId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(handoff => handoff.ReviewedByUser).WithMany().HasForeignKey(handoff => handoff.ReviewedByUserId).OnDelete(DeleteBehavior.Restrict);
+        });
         builder.Entity<GenerationProviderAttempt>(entity =>
         {
             entity.HasKey(attempt => attempt.Id);
