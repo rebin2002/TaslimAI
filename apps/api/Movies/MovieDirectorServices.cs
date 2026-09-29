@@ -29,7 +29,10 @@ public interface IDirectorActionExecutor
 
 public sealed record DirectorActionExecution(bool Succeeded, string? FailureCode, string SafeMessage, string? ResultJson, IReadOnlyList<string>? FailureReasonCodes = null);
 
-public sealed class MovieDirectorContextAssembler(TaslimDbContext db, MovieWorldContinuityProjector worldContinuity)
+public sealed class MovieDirectorContextAssembler(
+    TaslimDbContext db,
+    MovieWorldContinuityProjector worldContinuity,
+    MovieStoryScenePlanningContextAssembler storyScenePlanning)
 {
     private const int MaxSnapshotBytes = 100_000;
     private const int MaxOptionalBytes = 40_000;
@@ -39,6 +42,23 @@ public sealed class MovieDirectorContextAssembler(TaslimDbContext db, MovieWorld
 
     public Task<DirectorContextAssemblyResult?> AssembleAsync(Guid userId, Guid movieProjectId, CancellationToken cancellationToken = default) =>
         AssembleAsync(userId, movieProjectId, new DirectorContextTargetRequest(), cancellationToken);
+
+    /// <summary>
+    /// Builds the smaller Story-to-scene planning context. This is deliberately separate from
+    /// the existing Story Director context so scene planning does not receive project history,
+    /// production state, or an unbounded Story snapshot.
+    /// </summary>
+    public Task<MovieStoryScenePlanningContextAssemblyResult?> AssembleStoryScenePlanningAsync(
+        Guid movieProjectId,
+        MovieStoryScenePlanningContextRequest? request = null,
+        CancellationToken cancellationToken = default) =>
+        storyScenePlanning.AssembleAsync(movieProjectId, request, cancellationToken);
+
+    public Task<MovieStoryScenePlanningContextAssemblyResult?> AssembleScenePlanningAsync(
+        Guid movieProjectId,
+        MovieStoryScenePlanningContextRequest? request = null,
+        CancellationToken cancellationToken = default) =>
+        AssembleStoryScenePlanningAsync(movieProjectId, request, cancellationToken);
 
     public async Task<DirectorContextAssemblyResult?> AssembleAsync(Guid userId, Guid movieProjectId, DirectorContextTargetRequest request, CancellationToken cancellationToken = default)
     {
