@@ -217,6 +217,9 @@ builder.Services.AddScoped<MovieDirectorContextAssembler>();
 builder.Services.AddScoped<IDirectorCostEstimator, MovieDirectorCostEstimator>();
 builder.Services.Configure<MovieDirectorCreativeOutputValidationOptions>(builder.Configuration.GetSection("MovieDirectorCreativeValidation"));
 builder.Services.AddScoped<IMovieDirectorCreativeOutputValidator, MovieDirectorCreativeOutputValidator>();
+builder.Services.Configure<MovieWave2CreativeOutputValidationOptions>(builder.Configuration.GetSection("MovieWave2CreativeValidation"));
+builder.Services.AddScoped<IMovieWave2CreativeOutputValidator>(services => new MovieWave2CreativeOutputValidator(
+    services.GetRequiredService<Microsoft.Extensions.Options.IOptions<MovieWave2CreativeOutputValidationOptions>>().Value));
 builder.Services.AddScoped<DirectorQualityPlanner>();
 builder.Services.AddScoped<IMovieSynopsisDevelopmentService, AiMovieSynopsisDevelopmentService>();
 builder.Services.AddScoped<DirectorStoryProposalPlanner>();
