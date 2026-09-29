@@ -534,6 +534,7 @@ public sealed class MovieDirectorContextAssembler(
 public sealed class MovieDirectorService(
     TaslimDbContext db,
     WorkspaceAccessService access,
+    MovieAuthorizationService authorization,
     MovieDirectorContextAssembler assembler,
     DirectorQualityPlanner qualityPlanner,
     MovieDirectorStoryAiService storyAiPlanner,
@@ -653,6 +654,8 @@ public sealed class MovieDirectorService(
             MovieProjectId = movie.Id,
             DirectorProjectContextId = directorContext.Id,
             CreatedByUserId = userId,
+            ContextVersion = directorContext.ContextVersion,
+            ContextSnapshotHash = directorContext.SnapshotHash,
             Status = DirectorProposalStatuses.PendingApproval,
             Title = string.IsNullOrWhiteSpace(request.Goal) ? $"{actionType} for {context.SelectedScene.Title}" : request.Goal.Trim(),
             Summary = generation.Summary,
@@ -750,7 +753,7 @@ public sealed class MovieDirectorService(
 
     public async Task<DirectorActionExecutionResponse?> ExecuteActionAsync(Guid userId, Guid actionId, CancellationToken cancellationToken = default)
     {
-        var action = await db.DirectorActions.Include(item => item.Proposal).Include(item => item.Results).FirstOrDefaultAsync(item => item.Id == actionId, cancellationToken);
+        var action = await db.DirectorActions.Include(item => item.Proposal).ThenInclude(item => item.Actions).Include(item => item.Results).FirstOrDefaultAsync(item => item.Id == actionId, cancellationToken);
         if (action is null || !await access.IsMemberAsync(userId, action.WorkspaceId, cancellationToken) || !await authorization.CanAsync(userId, action.MovieProjectId, MovieOperationalActions.DirectorProposalExecution, cancellationToken)) return null;
         EnsureActionIntegrity(action);
         if (action.Status != DirectorActionStatuses.Ready || action.Proposal.Status != DirectorProposalStatuses.Approved) throw new DirectorActionNotApprovedException();
@@ -844,7 +847,7 @@ public sealed class MovieDirectorService(
         var proposal = new DirectorProposal
         {
             Id = Guid.NewGuid(), WorkspaceId = movie.WorkspaceId, MovieProjectId = movie.Id, DirectorProjectContextId = directorContext.Id,
-            CreatedByUserId = userId, Status = DirectorProposalStatuses.PendingApproval,
+            CreatedByUserId = userId, ContextVersion = directorContext.ContextVersion, ContextSnapshotHash = directorContext.SnapshotHash, Status = DirectorProposalStatuses.PendingApproval,
             Title = string.IsNullOrWhiteSpace(request.Goal) ? $"{room} {actionType.Replace('_', ' ')}" : request.Goal.Trim(),
             Summary = selectedShotId.HasValue ? $"Prepare {room.ToLowerInvariant()} context for the selected shot." : selectedSceneId.HasValue ? $"Prepare {room.ToLowerInvariant()} context for the selected scene." : $"Prepare {room.ToLowerInvariant()} context for this movie.",
             RationaleJson = JsonSerializer.Serialize(roomContext.AvailablePrerequisites.Where(item => item.Satisfied).Select(item => item.Key).Concat([actionType]).ToArray()), CreatedAt = now,
@@ -875,7 +878,7 @@ public sealed class MovieDirectorService(
         var proposal = new DirectorProposal
         {
             Id = Guid.NewGuid(), WorkspaceId = movie.WorkspaceId, MovieProjectId = movie.Id, DirectorProjectContextId = directorContext.Id,
-            CreatedByUserId = userId, Status = DirectorProposalStatuses.PendingApproval, Title = generation.Title, Summary = generation.Summary,
+            CreatedByUserId = userId, ContextVersion = directorContext.ContextVersion, ContextSnapshotHash = directorContext.SnapshotHash, Status = DirectorProposalStatuses.PendingApproval, Title = generation.Title, Summary = generation.Summary,
             RationaleJson = JsonSerializer.Serialize(generation.Rationale), CreatedAt = now,
         };
         proposal.Actions.Add(new DirectorAction
@@ -925,7 +928,9 @@ public sealed class MovieDirectorService(
         if (context is null || context.ContextVersion != proposal.ContextVersion || !string.Equals(context.SnapshotHash, proposal.ContextSnapshotHash, StringComparison.Ordinal))
             await ExpireStaleProposalAsync(proposal, cancellationToken);
 
-        var current = await assembler.AssembleAsync(userId, proposal.MovieProjectId, new DirectorContextTargetRequest { TargetType = context!.TargetType, TargetId = context.TargetId }, cancellationToken);
+        var roomAction = proposal.Actions.FirstOrDefault(item => DirectorActionTypes.RoomPlanning.Contains(item.ActionType));
+        var roomPayload = roomAction is null ? null : ReadRoomPayload(roomAction);
+        var current = await assembler.AssembleAsync(userId, proposal.MovieProjectId, new DirectorContextTargetRequest { TargetType = context!.TargetType, TargetId = context.TargetId, Room = roomPayload?.Room, SelectedSceneId = roomPayload?.SceneId, SelectedShotId = roomPayload?.ShotId }, cancellationToken);
         if (current is null || !string.Equals(current.SnapshotHash, proposal.ContextSnapshotHash, StringComparison.Ordinal))
             await ExpireStaleProposalAsync(proposal, cancellationToken);
     }

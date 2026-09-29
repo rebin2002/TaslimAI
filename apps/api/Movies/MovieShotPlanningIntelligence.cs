@@ -453,17 +453,17 @@ public sealed class MovieShotPlanningActionExecutor(
 {
     public string ActionType => DirectorShotPlanningActionTypes.ProposeShots;
 
-    public async Task<DirectorActionExecution> ExecuteAsync(DirectorAction action, CancellationToken cancellationToken = default)
+    public async Task<DirectorActionExecution> ExecuteAsync(DirectorAction action, Guid executingUserId, CancellationToken cancellationToken = default)
     {
         DirectorShotPlanningPayload? payload;
         try { payload = JsonSerializer.Deserialize<DirectorShotPlanningPayload>(action.PayloadJson, DirectorJson.Options); }
         catch (JsonException) { payload = null; }
         if (payload is null || payload.Shots.Count == 0)
             return new(false, DirectorShotPlanningFailureCodes.Invalid, "The shot-planning proposal payload is invalid.", null);
-        if (!await authorization.CanAsync(action.Proposal.CreatedByUserId, action.MovieProjectId, MovieOperationalActions.ShotEdit, cancellationToken))
+        if (!await authorization.CanAsync(executingUserId, action.MovieProjectId, MovieOperationalActions.ShotEdit, cancellationToken))
             return new(false, "DIRECTOR_SHOT_PLAN_UNAUTHORIZED", "The shot plan can no longer be applied by this user.", null);
 
-        var current = await contextAssembler.AssembleAsync(action.Proposal.CreatedByUserId, action.MovieProjectId, payload.MovieSceneId, cancellationToken);
+        var current = await contextAssembler.AssembleAsync(executingUserId, action.MovieProjectId, payload.MovieSceneId, cancellationToken);
         if (current is null)
             return new(false, "DIRECTOR_SCENE_NOT_FOUND", "The shot-planning scene could not be found.", null);
         if (!string.Equals(current.SnapshotHash, payload.ContextHash, StringComparison.Ordinal))
@@ -535,5 +535,5 @@ public sealed class MovieShotPlanningRegenerationActionExecutor(
 {
     private readonly MovieShotPlanningActionExecutor inner = new(db, contextAssembler, authorization);
     public string ActionType => DirectorShotPlanningActionTypes.RegenerateShots;
-    public Task<DirectorActionExecution> ExecuteAsync(DirectorAction action, CancellationToken cancellationToken = default) => inner.ExecuteAsync(action, cancellationToken);
+    public Task<DirectorActionExecution> ExecuteAsync(DirectorAction action, Guid executingUserId, CancellationToken cancellationToken = default) => inner.ExecuteAsync(action, executingUserId, cancellationToken);
 }
