@@ -219,6 +219,7 @@ builder.Services.AddScoped<IMovieScenesService, MovieScenesService>();
 builder.Services.AddScoped<IMovieGuideService, MovieGuideService>();
 builder.Services.AddScoped<IMovieStoryService, MovieStoryService>();
 builder.Services.AddScoped<IMovieCollaborationService, MovieCollaborationService>();
+builder.Services.AddScoped<MovieStoryScenePlanningContextAssembler>();
 builder.Services.AddScoped<MovieDirectorContextAssembler>();
 builder.Services.AddScoped<IDirectorCostEstimator, MovieDirectorCostEstimator>();
 builder.Services.Configure<MovieDirectorCreativeOutputValidationOptions>(builder.Configuration.GetSection("MovieDirectorCreativeValidation"));
