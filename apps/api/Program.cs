@@ -32,6 +32,7 @@ using Taslim.Api.Payments;
 using Taslim.Api.Notifications;
 using Taslim.Api.Resilience;
 using Taslim.Api.Voice;
+using Taslim.Api.Upscaling;
 using FileSettings = Taslim.Api.Files.FileOptions;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -196,6 +197,9 @@ builder.Services.Configure<ProviderResilienceOptions>(builder.Configuration.GetS
 builder.Services.AddScoped<IGenerationJobQueue, DatabaseGenerationJobQueue>();
 builder.Services.AddScoped<IGenerationJobUsageService, GenerationJobUsageService>();
 builder.Services.AddScoped<IGenerationJobService, GenerationJobService>();
+builder.Services.Configure<UpscalingJobOptions>(builder.Configuration.GetSection("UpscalingJobs"));
+builder.Services.AddScoped<IUpscalingJobService, UpscalingJobService>();
+builder.Services.AddSingleton<IUpscalingProvider, UnavailableUpscalingProvider>();
 builder.Services.AddScoped<IProviderResilienceStore, EfProviderResilienceStore>();
 builder.Services.AddScoped<IProviderResilienceOrchestrator, ProviderResilienceOrchestrator>();
 builder.Services.AddSingleton<IProviderCostGuard, AllowAllProviderCostGuard>();
