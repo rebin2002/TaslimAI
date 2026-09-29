@@ -994,7 +994,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         if (!refreshedPreflight.Allowed)
             throw new MovieProductionValidationException(refreshedPreflight.RejectionCode!, refreshedPreflight.RejectionMessage!);
         regeneration.EstimatedProviderCostUsd = estimate.AmountUsd;
-        regeneration.EstimatedProviderCostKnown = estimate.IsKnown && estimate.AmountUsd.HasValue;
+        regeneration.EstimatedProviderCostKnown = estimate.IsEstimated && estimate.AmountUsd.HasValue;
         regeneration.CostEstimateJson = estimate.ToJson();
         var clip = new MovieClip
         {
