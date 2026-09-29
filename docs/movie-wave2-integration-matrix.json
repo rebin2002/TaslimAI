@@ -1,0 +1,248 @@
+{
+  "schemaVersion": 1,
+  "branch": "parallel/movie-wave2-integration-prep",
+  "base": "308e146aa73e91443097229a81f97dac008b92ee",
+  "remoteBranchAtAudit": "absent; branch created locally from base",
+  "scope": "Integration preparation only; no Wave 2 branch is merged by this task.",
+  "sourceBranches": [
+    {
+      "branch": "parallel/movie-wave2-scene-planning",
+      "sha": "0837804a4f30f8c134269da428f828ba6df4f265",
+      "migration": false
+    },
+    {
+      "branch": "parallel/movie-wave2-shot-contract",
+      "sha": "cfd880c7d1ae2401a06b794d6c6bd886761728a9",
+      "migration": true,
+      "migrationName": "20260929132818_AddMovieShotProductionContract"
+    },
+    {
+      "branch": "parallel/movie-wave2-complexity",
+      "sha": "3b9c281f1c3d3101d2de4cbf8886620a21bd1ba0",
+      "migration": true,
+      "migrationName": "20260929133106_AddMovieProductionComplexity"
+    },
+    {
+      "branch": "parallel/movie-wave2-shot-importance",
+      "sha": "1d5b728ef2674f30ecfd411edcf1f544ac226031",
+      "migration": true,
+      "migrationName": "20260929133111_AddMovieShotImportance"
+    },
+    {
+      "branch": "parallel/movie-wave2-duration-budget",
+      "sha": "1987df8d8712511a6c4517c3a31800fefb466e9c",
+      "migration": false
+    }
+  ],
+  "features": [
+    {
+      "id": "scene-planning",
+      "surface": "Scene planning",
+      "statusOnBase": "partial",
+      "implementationBranch": "parallel/movie-wave2-scene-planning",
+      "dependsOn": ["story-guide-context", "continuity", "runtime-budgeting"],
+      "mustPreserve": ["Director proposal -> explicit approval -> explicit execution", "existing MovieScene hierarchy", "stale context rejection", "no deterministic creative fallback"],
+      "validation": ["MovieDirectorScenePlanningTests", "MovieDirectorScenePlanValidationTests", "Last Seed acceptance"]
+    },
+    {
+      "id": "shot-planning",
+      "surface": "Shot planning",
+      "statusOnBase": "implemented",
+      "implementationBranch": "parallel/movie-wave2-duration-budget",
+      "dependsOn": ["scene-planning", "runtime-budgeting", "cinematography", "continuity"],
+      "mustPreserve": ["readiness is explainable", "planning never queues generation", "archived shots do not count as active planning", "workspace and project authorization"],
+      "validation": ["MovieShotPlanningApiTests", "MovieCinematographyTests", "frontend Scenes/Shot UX tests"]
+    },
+    {
+      "id": "shot-production-contract",
+      "surface": "Shot production contract",
+      "statusOnBase": "partial",
+      "implementationBranch": "parallel/movie-wave2-shot-contract",
+      "dependsOn": ["shot-planning", "cinematography", "continuity", "quality-requirements"],
+      "mustPreserve": ["nullable additive fields", "provider/model/cost neutrality", "existing production version and take semantics", "schemaVersioned contract"],
+      "validation": ["MovieShotProductionContractTests", "MovieShotPlanningApiTests", "EF fresh/upgrade migration"]
+    },
+    {
+      "id": "complexity-profile",
+      "surface": "Complexity profile",
+      "statusOnBase": "not present",
+      "implementationBranch": "parallel/movie-wave2-complexity",
+      "dependsOn": ["shot-production-contract", "continuity", "cinematography"],
+      "mustPreserve": ["bounded 0..100 dimensions", "missing values are rejected", "explainable reasons", "no resolution/provider/cost decision"],
+      "validation": ["MovieProductionComplexityTests", "MovieProductionComplexityApiTests", "MovieDirectorContextTests", "EF fresh/upgrade migration"]
+    },
+    {
+      "id": "shot-importance",
+      "surface": "Shot importance",
+      "statusOnBase": "not present",
+      "implementationBranch": "parallel/movie-wave2-shot-importance",
+      "dependsOn": ["shot-production-contract", "story-guide-context", "continuity"],
+      "mustPreserve": ["director assessment is distinguishable from user override", "evidence is bounded", "read/write operations remain project-authorized", "no provider or charge selection"],
+      "validation": ["MovieShotImportanceTests", "MovieAuthorizationPolicyTests", "Last Seed regression"]
+    },
+    {
+      "id": "quality-requirements",
+      "surface": "Quality requirements",
+      "statusOnBase": "partial",
+      "implementationBranch": "parallel/movie-wave2-shot-contract",
+      "dependsOn": ["shot-planning", "complexity-profile"],
+      "mustPreserve": ["Fast/Standard/Cinematic/Studio are the only quality levels", "Auto Director is a planning mode, not a quality level", "acceptance criteria are provider-neutral"],
+      "validation": ["MovieProductionWorkflowTests", "MovieDirectorTests", "MovieShotProductionContractTests"]
+    },
+    {
+      "id": "runtime-budgeting",
+      "surface": "Runtime budgeting",
+      "statusOnBase": "partial",
+      "implementationBranch": "parallel/movie-wave2-duration-budget",
+      "dependsOn": ["scene-planning", "shot-planning"],
+      "mustPreserve": ["active scene/shot totals use integer seconds", "tolerance and diagnostics are deterministic", "missing durations are incomplete, not silently valid", "no automatic scaling or generation"],
+      "validation": ["MovieDurationBudgetTests", "MovieShotPlanningApiTests", "Last Seed 30-second regression"]
+    },
+    {
+      "id": "continuity",
+      "surface": "Continuity",
+      "statusOnBase": "implemented",
+      "implementationBranch": "existing base plus consumers",
+      "dependsOn": ["guide-cast-world-context"],
+      "mustPreserve": ["character and world locks remain authoritative", "bounded snapshots and hashes", "stale Director context fails safely", "continuity warnings do not invent production output"],
+      "validation": ["MovieCharacterContinuityTests", "MovieWorldContinuityTests", "MovieDirectorContextTests", "MovieOperationalE2ETests"]
+    },
+    {
+      "id": "cinematography",
+      "surface": "Cinematography",
+      "statusOnBase": "implemented",
+      "implementationBranch": "existing base; consumed by shot contract",
+      "dependsOn": ["shot-planning", "guide-cast-world-context"],
+      "mustPreserve": ["structured intent is retained", "capability classification is explicit", "presets do not imply provider-native support", "shot overrides do not mutate locked Guide data"],
+      "validation": ["MovieCinematographyTests", "MovieShotProductionContractTests", "frontend Shot UX tests"]
+    },
+    {
+      "id": "scenes-ux",
+      "surface": "Scenes UX",
+      "statusOnBase": "implemented foundation",
+      "implementationBranch": "existing FullMovieWorkspaceView",
+      "dependsOn": ["scene-planning", "runtime-budgeting", "continuity"],
+      "mustPreserve": ["empty states are honest", "real persisted scenes only", "approval and apply are visible", "Quick Movie and Full Movie remain separate"],
+      "validation": ["FullMovieWorkspaceView.test.tsx", "movie-v2-operational.spec.ts", "last-seed-acceptance.spec.ts"]
+    },
+    {
+      "id": "shot-ux",
+      "surface": "Shot UX",
+      "statusOnBase": "implemented foundation",
+      "implementationBranch": "existing FullMovieWorkspaceView",
+      "dependsOn": ["shot-planning", "shot-production-contract", "cinematography", "quality-requirements"],
+      "mustPreserve": ["readiness and duration are visible", "shot planning stays separate from production generation", "production stages show real candidates/takes only", "provider-disabled state is honest"],
+      "validation": ["FullMovieWorkspaceView.test.tsx", "MovieShotPlanningApiTests", "movie-v2-operational.spec.ts"]
+    },
+    {
+      "id": "director-room-awareness",
+      "surface": "Director room awareness",
+      "statusOnBase": "implemented for existing rooms",
+      "implementationBranch": "existing MovieDirectorContext/MovieDirectorServices",
+      "dependsOn": ["story-guide-context", "continuity", "shot-production-contract"],
+      "mustPreserve": ["targeted context is bounded and hashed", "Cast/World/Scene/Shot targets do not require a fabricated shot", "proposal approval and execution remain separate"],
+      "validation": ["MovieDirectorContextTests", "MovieDirectorTests", "Last Seed Cast-room proposal"]
+    },
+    {
+      "id": "story-scene-context",
+      "surface": "Story to Scene context",
+      "statusOnBase": "implemented foundation",
+      "implementationBranch": "existing Story/Director context; scene planning consumes it",
+      "dependsOn": ["approved-story", "scene-planning"],
+      "mustPreserve": ["approved Story revision is authoritative", "screenplay scenes map to canonical MovieScene rows", "source revision IDs and stale checks are persisted", "review-only proposals do not mutate production"],
+      "validation": ["MovieDirectorStoryTests", "MovieDirectorScenePlanningTests", "last-seed-acceptance.spec.ts"]
+    },
+    {
+      "id": "guide-cast-world-context",
+      "surface": "Guide/Cast/World production context",
+      "statusOnBase": "implemented foundation",
+      "implementationBranch": "existing Guide/Cast/World/Director context",
+      "dependsOn": ["continuity", "director-room-awareness"],
+      "mustPreserve": ["locked Guide is a hand-off boundary", "Cast/World records remain reusable source systems", "cross-project and cross-workspace references are rejected", "context is bounded and provenance is explicit"],
+      "validation": ["MovieGuideTests", "MovieStudioCastTests", "MovieWorldTests", "MovieDirectorContextTests", "MovieOperationalE2ETests"]
+    },
+    {
+      "id": "security-approval",
+      "surface": "Security/approval",
+      "statusOnBase": "implemented foundation",
+      "implementationBranch": "existing authorization and Director approval paths",
+      "dependsOn": ["all mutating surfaces"],
+      "mustPreserve": ["CSRF on mutations", "workspace plus Movie permission checks", "reviewer cannot generate or manage budget by implication", "explicit approval is required before execution"],
+      "validation": ["MovieAuthorizationPolicyTests", "MovieCollaborationTests", "MovieProductionApiTests", "Last Seed premature-execution assertion"]
+    },
+    {
+      "id": "output-validation",
+      "surface": "Output validation",
+      "statusOnBase": "implemented foundation",
+      "implementationBranch": "existing creative/output/QC validators",
+      "dependsOn": ["shot-production-contract", "complexity-profile", "quality-requirements"],
+      "mustPreserve": ["malformed or ungrounded creative output fails safely", "no partial Asset/publication on failure", "provider metadata stays internal", "QC remains separate from planning"],
+      "validation": ["MovieDirectorCreativeOutputValidationTests", "GenerationQualityControlTests", "ProviderGenerationE2ETests", "MovieOperationalE2ETests"]
+    },
+    {
+      "id": "placeholder-audit",
+      "surface": "Placeholder audit",
+      "statusOnBase": "implemented acceptance coverage",
+      "implementationBranch": "existing Last Seed and production-source audit",
+      "dependsOn": ["scenes-ux", "shot-ux", "output-validation"],
+      "mustPreserve": ["new Full Movie starts with an empty production graph", "no fake scenes/shots/cast/world/clips/assemblies/assets", "unavailable surfaces say unavailable/upcoming"],
+      "validation": ["last-seed-acceptance.spec.ts", "MovieOperationalE2ETests", "conflict-marker and source audit"]
+    },
+    {
+      "id": "last-seed-acceptance",
+      "surface": "Last Seed acceptance",
+      "statusOnBase": "implemented Wave 1 acceptance; extend after integration",
+      "implementationBranch": "apps/web/e2e/last-seed-acceptance.spec.ts",
+      "dependsOn": ["scene-planning", "shot-production-contract", "complexity-profile", "shot-importance", "runtime-budgeting", "all UX/context rows"],
+      "mustPreserve": ["The Last Seed title/brief/16:9/30 seconds/Cinematic", "empty initial graph", "Guide lock, Story proposal review/apply, Cast-room awareness", "provider disabled and customer charge zero"],
+      "validation": ["dedicated Playwright Last Seed test", "full Playwright suite", "API and database assertions"]
+    },
+    {
+      "id": "adaptive-resolution-contract",
+      "surface": "Adaptive Resolution contract",
+      "statusOnBase": "future contract only",
+      "implementationBranch": "none available in this audit",
+      "dependsOn": ["shot-production-contract", "complexity-profile", "quality-requirements", "runtime-budgeting", "cinematography"],
+      "mustPreserve": ["planning inputs remain provider-neutral", "no resolution/provider/cost decision is inferred in persistence", "capability resolution must be explicit and separately tested", "no provider enablement in Wave 2 integration"],
+      "validation": ["contract/schema tests only when an approved implementation exists", "do not invent an API or merge a missing branch"]
+    }
+  ],
+  "gate": {
+    "required": [
+      "api-build",
+      "api-tests",
+      "frontend-tests",
+      "typescript",
+      "eslint",
+      "production-build",
+      "browser-e2e",
+      "last-seed-acceptance",
+      "database-fresh-migration",
+      "database-upgrade-migration",
+      "ef-model-consistency",
+      "authorization",
+      "creative-fallback-audit",
+      "conflict-marker-audit",
+      "charging-disabled",
+      "movie-video-provider-disabled"
+    ],
+    "safeDefaults": {
+      "customerChargingEnabled": false,
+      "movieVideoEnabled": false,
+      "productionProviders": "disabled unless an explicitly reviewed gate overrides a test-only adapter"
+    },
+    "commands": {
+      "apiBuild": "dotnet build apps/api/Taslim.Api.csproj",
+      "apiTests": "dotnet test apps/api.Tests/Taslim.Api.Tests.csproj",
+      "frontendTests": "npm test --workspace @taslim/web",
+      "typescript": "npx tsc --noEmit -p apps/web/tsconfig.json",
+      "eslint": "npm run lint --workspace @taslim/web",
+      "productionBuild": "NEXT_PUBLIC_API_URL=https://api.example.test npm run build --workspace @taslim/web",
+      "browserE2E": "npm run test:e2e --workspace @taslim/web",
+      "lastSeed": "npx playwright test e2e/last-seed-acceptance.spec.ts --config apps/web/playwright.config.ts --project=chromium",
+      "efModelConsistency": "dotnet ef migrations has-pending-model-changes --project apps/api --startup-project apps/api",
+      "freshMigration": "dotnet ef database update --project apps/api --startup-project apps/api --connection $FRESH_DATABASE_URL",
+      "upgradeMigration": "dotnet ef database update --project apps/api --startup-project apps/api --connection $UPGRADE_DATABASE_URL"
+    }
+  }
+}
