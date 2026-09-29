@@ -229,6 +229,9 @@ builder.Services.AddScoped<DirectorStoryProposalPlanner>();
 builder.Services.AddScoped<IDirectorCreativeCostEstimator, DirectorCreativeCostEstimator>();
 builder.Services.AddScoped<DirectorCreativeQualityPlanner>();
 builder.Services.AddScoped<MovieDirectorStoryAiService>();
+builder.Services.Configure<MovieDirectorScenePlanningOptions>(builder.Configuration.GetSection("MovieDirectorScenePlanning"));
+builder.Services.AddScoped<IMovieDirectorScenePlanValidator, MovieDirectorScenePlanValidator>();
+builder.Services.AddScoped<MovieDirectorScenePlanningAiService>();
 builder.Services.AddScoped<IMovieDirectorService, MovieDirectorService>();
 builder.Services.Configure<MovieVideoOptions>(builder.Configuration.GetSection("MovieVideo"));
 builder.Services.AddScoped<MovieVideoExecutionStore>();
@@ -242,6 +245,7 @@ builder.Services.AddSingleton<IMovieVideoProvider>(services =>
 });
 builder.Services.AddScoped<IDirectorActionExecutor, MovieDirectorActionExecutor>();
 builder.Services.AddScoped<IDirectorActionExecutor, MovieDirectorStoryActionExecutor>();
+builder.Services.AddScoped<IDirectorActionExecutor, MovieDirectorScenePlanActionExecutor>();
 builder.Services.AddScoped<IActivityCenterService, ActivityCenterService>();
 builder.Services.AddSingleton<IGenerationJobHandler, SystemTestGenerationJobHandler>();
 if (builder.Configuration.GetValue("GenerationJobs:WorkerEnabled", !builder.Environment.IsEnvironment("Testing")))

@@ -71,7 +71,8 @@ public sealed record DirectorStoryBoundedContextDto(
     int ContextVersion = 1,
     int DurationSeconds = 0,
     string Language = LanguageCodes.English,
-    DirectorWorldContext? World = null);
+    DirectorWorldContext? World = null,
+    string AspectRatio = "16:9");
 
 public static class DirectorStoryFindingTypes
 {
