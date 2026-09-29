@@ -20,12 +20,13 @@ public static class DirectorCreativeTaskTypes
     public const string ImproveDialogue = DirectorStoryActionTypes.ImproveDialogue;
     public const string TightenPacing = DirectorStoryActionTypes.TightenPacing;
     public const string IdentifyInconsistencies = DirectorStoryActionTypes.IdentifyInconsistencies;
+    public const string PlanShots = "plan_shots";
 
     public static readonly IReadOnlySet<string> All = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
         DevelopPremise, ImproveLogline, ExpandSynopsis, CreateOrRefineTreatment,
         ProposeScreenplayScene, RewriteSelectedPassage, ImproveDialogue, TightenPacing,
-        IdentifyInconsistencies,
+        IdentifyInconsistencies, PlanShots,
     };
 }
 
@@ -158,6 +159,7 @@ public static class DirectorCreativeRoutingProfiles
         DirectorCreativeTaskTypes.RewriteSelectedPassage => (5, 1_800),
         DirectorCreativeTaskTypes.ProposeScreenplayScene => (15, 2_400),
         DirectorCreativeTaskTypes.CreateOrRefineTreatment => (25, 3_200),
+        DirectorCreativeTaskTypes.PlanShots => (25, 4_200),
         _ => (0, 1_000),
     };
 }
