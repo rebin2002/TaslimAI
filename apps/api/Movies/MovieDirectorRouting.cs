@@ -11,6 +11,7 @@ namespace Taslim.Api.Movies;
 /// </summary>
 public static class DirectorCreativeTaskTypes
 {
+    public const string PlanScenes = DirectorScenePlanActionTypes.PlanScenes;
     public const string DevelopPremise = DirectorStoryActionTypes.DevelopPremise;
     public const string ImproveLogline = DirectorStoryActionTypes.ImproveLogline;
     public const string ExpandSynopsis = DirectorStoryActionTypes.ExpandSynopsis;
@@ -23,6 +24,7 @@ public static class DirectorCreativeTaskTypes
 
     public static readonly IReadOnlySet<string> All = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
+        PlanScenes,
         DevelopPremise, ImproveLogline, ExpandSynopsis, CreateOrRefineTreatment,
         ProposeScreenplayScene, RewriteSelectedPassage, ImproveDialogue, TightenPacing,
         IdentifyInconsistencies,
@@ -149,6 +151,7 @@ public static class DirectorCreativeRoutingProfiles
 {
     public static (int ComplexityBias, int OutputTokens) For(string taskType) => taskType.Trim().ToLowerInvariant() switch
     {
+        DirectorCreativeTaskTypes.PlanScenes => (20, 3_600),
         DirectorCreativeTaskTypes.DevelopPremise => (-20, 700),
         DirectorCreativeTaskTypes.ImproveLogline => (-20, 700),
         DirectorCreativeTaskTypes.TightenPacing => (-10, 900),
