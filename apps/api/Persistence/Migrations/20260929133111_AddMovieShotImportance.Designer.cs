@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using Taslim.Api.Persistence;
@@ -11,9 +12,11 @@ using Taslim.Api.Persistence;
 namespace Taslim.Api.Persistence.Migrations
 {
     [DbContext(typeof(TaslimDbContext))]
-    partial class TaslimDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260929133111_AddMovieShotImportance")]
+    partial class AddMovieShotImportance
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -3486,52 +3489,6 @@ namespace Taslim.Api.Persistence.Migrations
                     b.ToTable("MovieProductionAssignments");
                 });
 
-            modelBuilder.Entity("Taslim.Api.Movies.MovieProductionComplexityAssessment", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<Guid>("CreatedByUserId")
-                        .HasColumnType("uuid");
-
-                    b.Property<Guid>("MovieShotId")
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("OverallBand")
-                        .IsRequired()
-                        .HasMaxLength(20)
-                        .HasColumnType("character varying(20)");
-
-                    b.Property<int>("OverallScore")
-                        .HasColumnType("integer");
-
-                    b.Property<string>("ProfileJson")
-                        .IsRequired()
-                        .HasMaxLength(30000)
-                        .HasColumnType("character varying(30000)");
-
-                    b.Property<string>("Source")
-                        .IsRequired()
-                        .HasMaxLength(40)
-                        .HasColumnType("character varying(40)");
-
-                    b.Property<int>("Version")
-                        .HasColumnType("integer");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("MovieShotId", "CreatedAt");
-
-                    b.HasIndex("MovieShotId", "Version")
-                        .IsUnique();
-
-                    b.ToTable("MovieProductionComplexityAssessments");
-                });
-
             modelBuilder.Entity("Taslim.Api.Movies.MovieProductionCredit", b =>
                 {
                     b.Property<Guid>("Id")
@@ -4439,9 +4396,6 @@ namespace Taslim.Api.Persistence.Migrations
                         .HasMaxLength(4000)
                         .HasColumnType("character varying(4000)");
 
-b.Property<string>("ContinuitySensitivity")
-                        .HasMaxLength(20)
-                        .HasColumnType("character varying(20)");
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -4460,9 +4414,10 @@ b.Property<string>("ContinuitySensitivity")
                     b.Property<Guid?>("FinalTakeId")
                         .HasColumnType("uuid");
 
-b.Property<string>("ImportanceOverride")
+                    b.Property<string>("ImportanceOverride")
                         .HasMaxLength(30)
                         .HasColumnType("character varying(30)");
+
                     b.Property<string>("LocationSet")
                         .HasMaxLength(2000)
                         .HasColumnType("character varying(2000)");
@@ -4474,13 +4429,6 @@ b.Property<string>("ImportanceOverride")
                         .HasMaxLength(8000)
                         .HasColumnType("character varying(8000)");
 
-b.Property<string>("NarrativeImportance")
-                        .HasMaxLength(20)
-                        .HasColumnType("character varying(20)");
-
-                    b.Property<string>("ProductionComplexityJson")
-                        .HasMaxLength(20000)
-                        .HasColumnType("character varying(20000)");
                     b.Property<string>("ProductionRequirements")
                         .HasMaxLength(4000)
                         .HasColumnType("character varying(4000)");
@@ -4494,9 +4442,6 @@ b.Property<string>("NarrativeImportance")
                         .HasMaxLength(2000)
                         .HasColumnType("character varying(2000)");
 
-b.Property<string>("QualityRequirementsJson")
-                        .HasMaxLength(20000)
-                        .HasColumnType("character varying(20000)");
                     b.Property<Guid?>("SelectedTakeId")
                         .HasColumnType("uuid");
 
@@ -4518,15 +4463,8 @@ b.Property<string>("QualityRequirementsJson")
                         .HasMaxLength(4000)
                         .HasColumnType("character varying(4000)");
 
-b.Property<string>("TargetOutputRequirementsJson")
-                        .HasMaxLength(20000)
-                        .HasColumnType("character varying(20000)");
                     b.Property<DateTime>("UpdatedAt")
                         .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("UpscaleSuitability")
-                        .HasMaxLength(20)
-                        .HasColumnType("character varying(20)");
 
                     b.Property<string>("VisualContinuityNotes")
                         .HasMaxLength(4000)
@@ -6261,17 +6199,6 @@ b.Property<string>("TargetOutputRequirementsJson")
                     b.Navigation("MovieProject");
                 });
 
-            modelBuilder.Entity("Taslim.Api.Movies.MovieProductionComplexityAssessment", b =>
-                {
-                    b.HasOne("Taslim.Api.Movies.MovieShot", "MovieShot")
-                        .WithMany("ProductionComplexityAssessments")
-                        .HasForeignKey("MovieShotId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("MovieShot");
-                });
-
             modelBuilder.Entity("Taslim.Api.Movies.MovieProductionCredit", b =>
                 {
                     b.HasOne("Taslim.Api.Movies.MovieProject", "MovieProject")
@@ -7108,8 +7035,6 @@ b.Property<string>("TargetOutputRequirementsJson")
             modelBuilder.Entity("Taslim.Api.Movies.MovieShot", b =>
                 {
                     b.Navigation("Clips");
-
-                    b.Navigation("ProductionComplexityAssessments");
 
                     b.Navigation("ProductionTransitions");
 

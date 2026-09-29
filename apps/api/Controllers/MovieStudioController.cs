@@ -12,7 +12,7 @@ namespace Taslim.Api.Controllers;
 [ApiController]
 [Authorize]
 [Route("api/movie-studio")]
-public sealed class MovieStudioController(IMovieStudioService movies, IMovieProductionComplexityService complexity, IMovieGuideService guides, IMovieStoryService stories, IMovieStoryCastService storyCast, IMovieCharacterContinuityService continuity, IMovieWorldContinuityService worldContinuity, MovieAuthorizationService authorization) : ControllerBase
+public sealed class MovieStudioController(IMovieStudioService movies, IMovieProductionComplexityService complexity, IMovieGuideService guides, IMovieStoryService stories, IMovieStoryCastService storyCast, IMovieCharacterContinuityService continuity, IMovieWorldContinuityService worldContinuity, MovieAuthorizationService authorization, MovieShotImportanceService shotImportance) : ControllerBase
 {
     [HttpGet("cinematography/presets")]
     public IActionResult CinematographyPresets() => Ok(CinematographyPresetCatalog.All);
@@ -371,6 +371,25 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
         {
             return ApiResults.Error(this, 400, "MOVIE_PRODUCTION_COMPLEXITY_INVALID", string.Join(" ", exception.Result.Findings.Select(item => item.Message)));
         }
+    }
+
+    [HttpGet("shots/{shotId:guid}/importance")]
+    public async Task<IActionResult> GetShotImportance(Guid shotId, CancellationToken cancellationToken)
+    {
+        var result = await shotImportance.GetAsync(GetUserId(), shotId, cancellationToken);
+        return result is null ? ApiResults.Error(this, 404, "MOVIE_SHOT_NOT_FOUND", "Movie shot not found.") : Ok(result);
+    }
+
+    [HttpPatch("shots/{shotId:guid}/importance")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> SetShotImportanceOverride(Guid shotId, MovieShotImportanceOverrideRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await shotImportance.SetOverrideAsync(GetUserId(), shotId, request, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_SHOT_NOT_FOUND", "Movie shot not found.") : Ok(result);
+        }
+        catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_SHOT_IMPORTANCE_INVALID", exception.Message); }
     }
 
     [HttpPost("shots/{shotId:guid}/reorder")]
