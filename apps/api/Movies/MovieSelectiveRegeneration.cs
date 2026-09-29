@@ -1,4 +1,6 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
+using Microsoft.AspNetCore.Mvc.ModelBinding;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
 using Taslim.Api.Usage;
@@ -73,7 +75,10 @@ public sealed record MovieRegenerationCostPreviewDto(
     bool EstimatedProviderCostKnown,
     string Currency,
     string? CostEstimateJson,
-    bool ConfirmationRequired);
+    bool ConfirmationRequired,
+    string EstimateState = MovieGenerationCostEstimateStates.Unevaluated,
+    decimal? MinimumEstimatedProviderCostUsd = null,
+    decimal? MaximumEstimatedProviderCostUsd = null);
 
 public sealed record MovieRegenerationRequestDto(
     Guid Id,
@@ -110,7 +115,9 @@ public sealed class MovieRegenerationRequestInput
     public Guid? SourceVersionId { get; set; }
     public string ChangedInputsJson { get; set; } = "{}";
     public string CompositionJson { get; set; } = "{}";
+    [JsonIgnore, BindNever]
     public decimal? EstimatedProviderCostUsd { get; set; }
+    [JsonIgnore, BindNever]
     public GenerationCostEstimate? InternalCostEstimate { get; set; }
 }
 

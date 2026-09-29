@@ -1637,6 +1637,72 @@ namespace Taslim.Api.Persistence.Migrations
                     b.ToTable("Projects");
                 });
 
+            modelBuilder.Entity("Taslim.Api.Domain.ProviderCapabilityPricing", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("CapabilityKey")
+                        .IsRequired()
+                        .HasMaxLength(80)
+                        .HasColumnType("character varying(80)");
+
+                    b.Property<string>("ProviderKey")
+                        .IsRequired()
+                        .HasMaxLength(80)
+                        .HasColumnType("character varying(80)");
+
+                    b.Property<string>("ModelKey")
+                        .IsRequired()
+                        .HasMaxLength(160)
+                        .HasColumnType("character varying(160)");
+
+                    b.Property<string>("SourceResolution")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<string>("TargetResolution")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<string>("QualityTier")
+                        .IsRequired()
+                        .HasMaxLength(30)
+                        .HasColumnType("character varying(30)");
+
+                    b.Property<string>("ProcessingPath")
+                        .IsRequired()
+                        .HasMaxLength(60)
+                        .HasColumnType("character varying(60)");
+
+                    b.Property<bool>("SupportsUpscaling").HasColumnType("boolean");
+                    b.Property<int>("MaxDurationSeconds").HasColumnType("integer");
+                    b.Property<int>("MaxRetryAttempts").HasColumnType("integer");
+                    b.Property<int>("MaxUpscalePasses").HasColumnType("integer");
+                    b.Property<decimal?>("BasePriceUsdPerSecondMin").HasPrecision(18, 8).HasColumnType("numeric(18,8)");
+                    b.Property<decimal?>("BasePriceUsdPerSecondMax").HasPrecision(18, 8).HasColumnType("numeric(18,8)");
+                    b.Property<decimal?>("BasePriceUsdFixedMin").HasPrecision(18, 8).HasColumnType("numeric(18,8)");
+                    b.Property<decimal?>("BasePriceUsdFixedMax").HasPrecision(18, 8).HasColumnType("numeric(18,8)");
+                    b.Property<decimal?>("UpscalePriceUsdPerSecondMin").HasPrecision(18, 8).HasColumnType("numeric(18,8)");
+                    b.Property<decimal?>("UpscalePriceUsdPerSecondMax").HasPrecision(18, 8).HasColumnType("numeric(18,8)");
+                    b.Property<decimal?>("UpscalePriceUsdFixedMin").HasPrecision(18, 8).HasColumnType("numeric(18,8)");
+                    b.Property<decimal?>("UpscalePriceUsdFixedMax").HasPrecision(18, 8).HasColumnType("numeric(18,8)");
+                    b.Property<string>("Currency").IsRequired().HasMaxLength(3).HasColumnType("character varying(3)");
+                    b.Property<string>("PricingVersion").IsRequired().HasMaxLength(100).HasColumnType("character varying(100)");
+                    b.Property<DateTime>("EffectiveAtUtc").HasColumnType("timestamp with time zone");
+                    b.Property<string>("Source").IsRequired().HasMaxLength(500).HasColumnType("character varying(500)");
+                    b.Property<bool>("IsActive").HasColumnType("boolean");
+                    b.Property<DateTime>("CreatedAt").HasColumnType("timestamp with time zone");
+                    b.Property<DateTime>("UpdatedAt").HasColumnType("timestamp with time zone");
+                    b.HasKey("Id");
+                    b.HasIndex("CapabilityKey", "IsActive", "ProviderKey", "ModelKey");
+                    b.HasIndex("SourceResolution", "TargetResolution", "QualityTier", "ProcessingPath");
+                    b.ToTable("ProviderCapabilityPricings");
+                });
+
             modelBuilder.Entity("Taslim.Api.Domain.ProviderCircuit", b =>
                 {
                     b.Property<Guid>("Id")

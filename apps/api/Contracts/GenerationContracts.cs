@@ -1,5 +1,6 @@
 using System.ComponentModel.DataAnnotations;
 using System.Text.Json.Serialization;
+using Microsoft.AspNetCore.Mvc.ModelBinding;
 using Taslim.Api.Domain;
 using Taslim.Api.Usage;
 
@@ -21,11 +22,14 @@ public sealed class CreateGenerationJobRequest
     [Required, StringLength(100_000)]
     public string InputJson { get; set; } = "{}";
 
-    [JsonIgnore]
+    [JsonIgnore, BindNever]
     public decimal? EstimatedProviderCostUsd { get; set; }
 
-    [JsonIgnore]
+    [JsonIgnore, BindNever]
     public GenerationCostEstimate? InternalCostEstimate { get; set; }
+
+    [JsonIgnore, BindNever]
+    public string? InternalCostEstimateJson { get; set; }
 }
 
 public sealed record GenerationJobOutputDto(

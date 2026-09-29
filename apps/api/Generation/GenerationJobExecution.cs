@@ -226,7 +226,7 @@ public sealed class GenerationJobService(
             RequestId = requestId,
             EstimatedProviderCostUsd = request.EstimatedProviderCostUsd,
             EstimatedProviderCostKnown = request.EstimatedProviderCostUsd.HasValue,
-            CostEstimateJson = request.InternalCostEstimate?.ToJson(),
+            CostEstimateJson = request.InternalCostEstimateJson ?? request.InternalCostEstimate?.ToJson(),
             ProgressPercent = 0,
             CreatedAt = now,
         };
