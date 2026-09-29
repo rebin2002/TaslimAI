@@ -33,6 +33,7 @@ public sealed class MovieAuthorizationPolicyTests
             [MovieOperationalActions.TakeSelect] = MoviePermissions.Edit,
             [MovieOperationalActions.TakeApproval] = MoviePermissions.Approve,
             [MovieOperationalActions.TakeFinalization] = MoviePermissions.FinalApproval,
+            [MovieOperationalActions.TakeUpscale] = MoviePermissions.Generate,
             [MovieOperationalActions.DirectorProposalCreate] = MoviePermissions.Generate,
             [MovieOperationalActions.DirectorProposalApproval] = MoviePermissions.Approve,
             [MovieOperationalActions.DirectorProposalExecution] = MoviePermissions.Generate,

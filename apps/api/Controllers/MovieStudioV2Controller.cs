@@ -10,7 +10,7 @@ namespace Taslim.Api.Controllers;
 [ApiController]
 [Authorize]
 [Route("api/movie-studio")]
-public sealed class MovieStudioV2Controller(IMovieV2Service movies, IMovieScenesService scenes) : ControllerBase
+public sealed class MovieStudioV2Controller(IMovieV2Service movies, IMovieScenesService scenes, IMovieTakeUpscaleEligibilityService upscaleEligibility) : ControllerBase
 {
     [HttpGet("projects/{id:guid}/hierarchy")]
     public async Task<IActionResult> Hierarchy(Guid id, CancellationToken cancellationToken) => await Execute(async () =>
@@ -119,6 +119,22 @@ public sealed class MovieStudioV2Controller(IMovieV2Service movies, IMovieScenes
     {
         await movies.SelectTakeAsync(UserId(), id, true, cancellationToken);
         return NoContent();
+    });
+
+    [HttpGet("takes/{id:guid}/upscale-eligibility")]
+    public async Task<IActionResult> UpscaleEligibility(Guid id, [FromQuery] string? targetMasterResolution, CancellationToken cancellationToken) => await Execute(async () =>
+    {
+        var result = await upscaleEligibility.EvaluateAsync(UserId(), id, targetMasterResolution ?? MovieUpscaleResolutionCatalog.P4K, cancellationToken);
+        return result is null ? NotFoundResult("MOVIE_TAKE_NOT_FOUND", "Movie take not found.") : Ok(result);
+    });
+
+    [HttpPost("takes/{id:guid}/upscale")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> RequestUpscale(Guid id, MovieTakeUpscaleRequest request, CancellationToken cancellationToken) => await Execute(async () =>
+    {
+        var result = await upscaleEligibility.RequestAsync(UserId(), id, request, cancellationToken);
+        if (result is null) return NotFoundResult("MOVIE_TAKE_NOT_FOUND", "Movie take not found.");
+        return result.Eligible ? Accepted(result) : Conflict(result);
     });
 
     [HttpPost("takes/{id:guid}/approvals")]

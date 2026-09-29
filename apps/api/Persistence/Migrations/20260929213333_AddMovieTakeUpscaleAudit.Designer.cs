@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using Taslim.Api.Persistence;
@@ -11,9 +12,11 @@ using Taslim.Api.Persistence;
 namespace Taslim.Api.Persistence.Migrations
 {
     [DbContext(typeof(TaslimDbContext))]
-    partial class TaslimDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260929213333_AddMovieTakeUpscaleAudit")]
+    partial class AddMovieTakeUpscaleAudit
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -3596,6 +3599,10 @@ namespace Taslim.Api.Persistence.Migrations
                     b.Property<Guid?>("AssetId")
                         .HasColumnType("uuid");
 
+                    b.Property<string>("CinematographyReferenceJson")
+                        .HasMaxLength(20000)
+                        .HasColumnType("character varying(20000)");
+
                     b.Property<string>("CompositionJson")
                         .IsRequired()
                         .HasMaxLength(20000)
@@ -3606,6 +3613,10 @@ namespace Taslim.Api.Persistence.Migrations
 
                     b.Property<Guid?>("ContinuitySnapshotId")
                         .HasColumnType("uuid");
+
+                    b.Property<string>("ContinuitySnapshotReferenceJson")
+                        .HasMaxLength(20000)
+                        .HasColumnType("character varying(20000)");
 
                     b.Property<int?>("ContinuitySnapshotVersion")
                         .HasColumnType("integer");
@@ -3663,14 +3674,6 @@ namespace Taslim.Api.Persistence.Migrations
                         .HasColumnType("character varying(40)");
 
                     b.Property<string>("StageProvenanceJson")
-                        .HasMaxLength(20000)
-                        .HasColumnType("character varying(20000)");
-
-                    b.Property<string>("ContinuitySnapshotReferenceJson")
-                        .HasMaxLength(20000)
-                        .HasColumnType("character varying(20000)");
-
-                    b.Property<string>("CinematographyReferenceJson")
                         .HasMaxLength(20000)
                         .HasColumnType("character varying(20000)");
 
@@ -4389,6 +4392,10 @@ namespace Taslim.Api.Persistence.Migrations
                         .HasMaxLength(20000)
                         .HasColumnType("character varying(20000)");
 
+                    b.Property<string>("ContinuityReferences")
+                        .HasMaxLength(4000)
+                        .HasColumnType("character varying(4000)");
+
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -4396,30 +4403,6 @@ namespace Taslim.Api.Persistence.Migrations
                         .IsRequired()
                         .HasMaxLength(8000)
                         .HasColumnType("character varying(8000)");
-
-                    b.Property<string>("ContinuityReferences")
-                        .HasMaxLength(4000)
-                        .HasColumnType("character varying(4000)");
-
-                    b.Property<string>("LocationSet")
-                        .HasMaxLength(2000)
-                        .HasColumnType("character varying(2000)");
-
-                    b.Property<string>("ProductionRequirements")
-                        .HasMaxLength(4000)
-                        .HasColumnType("character varying(4000)");
-
-                    b.Property<string>("Purpose")
-                        .HasMaxLength(2000)
-                        .HasColumnType("character varying(2000)");
-
-                    b.Property<string>("SubjectCharacterIdsJson")
-                        .HasMaxLength(8000)
-                        .HasColumnType("character varying(8000)");
-
-                    b.Property<string>("Subjects")
-                        .HasMaxLength(4000)
-                        .HasColumnType("character varying(4000)");
 
                     b.Property<string>("Dialogue")
                         .HasMaxLength(8000)
@@ -4431,6 +4414,10 @@ namespace Taslim.Api.Persistence.Migrations
                     b.Property<Guid?>("FinalTakeId")
                         .HasColumnType("uuid");
 
+                    b.Property<string>("LocationSet")
+                        .HasMaxLength(2000)
+                        .HasColumnType("character varying(2000)");
+
                     b.Property<Guid>("MovieSceneId")
                         .HasColumnType("uuid");
 
@@ -4438,10 +4425,18 @@ namespace Taslim.Api.Persistence.Migrations
                         .HasMaxLength(8000)
                         .HasColumnType("character varying(8000)");
 
+                    b.Property<string>("ProductionRequirements")
+                        .HasMaxLength(4000)
+                        .HasColumnType("character varying(4000)");
+
                     b.Property<string>("ProductionStage")
                         .IsRequired()
                         .HasMaxLength(40)
                         .HasColumnType("character varying(40)");
+
+                    b.Property<string>("Purpose")
+                        .HasMaxLength(2000)
+                        .HasColumnType("character varying(2000)");
 
                     b.Property<Guid?>("SelectedTakeId")
                         .HasColumnType("uuid");
@@ -4455,6 +4450,14 @@ namespace Taslim.Api.Persistence.Migrations
                         .HasMaxLength(30)
                         .HasColumnType("character varying(30)")
                         .HasDefaultValue("Planned");
+
+                    b.Property<string>("SubjectCharacterIdsJson")
+                        .HasMaxLength(8000)
+                        .HasColumnType("character varying(8000)");
+
+                    b.Property<string>("Subjects")
+                        .HasMaxLength(4000)
+                        .HasColumnType("character varying(4000)");
 
                     b.Property<DateTime>("UpdatedAt")
                         .HasColumnType("timestamp with time zone");
