@@ -1138,6 +1138,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
     private IQueryable<MovieProject> Query() => db.MovieProjects.AsNoTracking().AsSplitQuery()
         .Include(item => item.Guide)
         .Include(item => item.Scenes).ThenInclude(scene => scene.Shots).ThenInclude(shot => shot.Clips)
+        .Include(item => item.Scenes).ThenInclude(scene => scene.Shots).ThenInclude(shot => shot.ProductionComplexityAssessments)
         .Include(item => item.Scenes).ThenInclude(scene => scene.Shots).ThenInclude(shot => shot.ProductionVersions).ThenInclude(version => version.AssetReferences)
         .Include(item => item.Scenes).ThenInclude(scene => scene.Clips)
         .Include(item => item.Clips)
@@ -1162,11 +1163,13 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
 
     private IQueryable<MovieScene> PlanningQuery() => db.MovieScenes.AsNoTracking()
         .Include(item => item.Shots).ThenInclude(shot => shot.Clips)
+        .Include(item => item.Shots).ThenInclude(shot => shot.ProductionComplexityAssessments)
         .Include(item => item.Shots).ThenInclude(shot => shot.ProductionVersions).ThenInclude(version => version.AssetReferences);
 
     private IQueryable<MovieShot> PlanningShotQuery() => db.MovieShots
         .Include(item => item.Scene).ThenInclude(scene => scene.MovieProject)
         .Include(item => item.Clips)
+        .Include(item => item.ProductionComplexityAssessments)
         .Include(item => item.ProductionVersions).ThenInclude(version => version.AssetReferences);
 
     private IQueryable<MovieShot> ProductionQuery() => db.MovieShots.AsNoTracking()
@@ -1348,7 +1351,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
     }
 
     private static MovieSceneDto ToDto(MovieScene scene, IReadOnlyList<MovieShotDto> shots, IReadOnlyList<MovieClipDto> clips) => new(scene.Id, scene.Sequence, scene.Title, scene.Summary, scene.DurationSeconds, scene.ContinuityNotes, scene.Narration, scene.Dialogue, shots, clips);
-    private static MovieShotDto ToDto(MovieShot shot, IReadOnlyList<MovieClipDto> clips) => new(shot.Id, shot.Sequence, shot.Description, shot.Purpose, shot.Subjects, MovieShotReadiness.ParseSubjectCharacterIds(shot.SubjectCharacterIdsJson), shot.LocationSet, shot.DurationSeconds, shot.ProductionRequirements, shot.ContinuityReferences, shot.CameraAndFraming, shot.CameraMotion, shot.CinematographyJson, MovieShotReadiness.CinematographySummary(shot), shot.Narration, shot.Dialogue, shot.VisualContinuityNotes, shot.Status, MovieShotReadiness.PlanState(shot), MovieShotReadiness.Evaluate(shot), shot.ProductionStage, clips, shot.ProductionVersions.OrderByDescending(item => item.VersionNumber).Select(ToDto).ToArray(), shot.Takes.OrderBy(item => item.VersionNumber).Select(MovieProductionProjection.ToTakeDto).ToArray(), MovieShotProductionContractProjection.FromShot(shot));
+    private static MovieShotDto ToDto(MovieShot shot, IReadOnlyList<MovieClipDto> clips) => new(shot.Id, shot.Sequence, shot.Description, shot.Purpose, shot.Subjects, MovieShotReadiness.ParseSubjectCharacterIds(shot.SubjectCharacterIdsJson), shot.LocationSet, shot.DurationSeconds, shot.ProductionRequirements, shot.ContinuityReferences, shot.CameraAndFraming, shot.CameraMotion, shot.CinematographyJson, MovieShotReadiness.CinematographySummary(shot), shot.Narration, shot.Dialogue, shot.VisualContinuityNotes, shot.Status, MovieShotReadiness.PlanState(shot), MovieShotReadiness.Evaluate(shot), shot.ProductionStage, clips, shot.ProductionVersions.OrderByDescending(item => item.VersionNumber).Select(ToDto).ToArray(), shot.Takes.OrderBy(item => item.VersionNumber).Select(MovieProductionProjection.ToTakeDto).ToArray(), MovieShotProductionContractProjection.FromShot(shot), shot.ProductionComplexityAssessments.OrderByDescending(item => item.Version).Select(MovieProductionComplexityProjection.ToDto).FirstOrDefault());
     private static MovieSceneShotPlanDto ToShotPlanDto(MovieScene scene)
     {
         var shots = scene.Shots.OrderBy(item => item.Sequence).Select(item => ToDto(item, item.Clips.OrderBy(clip => clip.CreatedAt).Select(ToDto).ToArray())).ToArray();
