@@ -26,6 +26,9 @@ public sealed class MovieCinematographyTests : IClassFixture<GenerationJobsNoWor
         Assert.NotNull(presets);
         Assert.Equal(4, presets!.Count);
         Assert.All(presets, preset => Assert.All(preset.CapabilityReferences, reference => Assert.Equal(CinematographyCapabilityClassification.Translated, reference.Classification)));
+        var planningValues = await client.GetFromJsonAsync<CinematographyPlanningValueCatalog>("/api/movie-studio/cinematography/planning-values");
+        Assert.Contains("close_up", planningValues!.ShotSizes);
+        Assert.Contains("match_cut", planningValues.VisualTransitionIntents);
 
         var created = await SendWithCsrf<MovieStudioProjectResponse>(client, HttpMethod.Post, "/api/movie-studio/projects", new
         {
@@ -104,6 +107,50 @@ public sealed class MovieCinematographyTests : IClassFixture<GenerationJobsNoWor
         Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
         var error = await invalid.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal("MOVIE_SHOT_INVALID", error.GetProperty("error").GetProperty("code").GetString());
+    }
+
+    [Fact]
+    public async Task Planning_endpoint_is_grounded_in_the_locked_guide_and_persists_a_typed_plan()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Cinematography Planner");
+        var created = await SendWithCsrf<MovieStudioProjectResponse>(client, HttpMethod.Post, "/api/movie-studio/projects", new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            mode = MovieProjectModes.Full,
+            title = "Grounded plan",
+            description = "A project for deterministic cinematography planning.",
+            durationSeconds = 30,
+            aspectRatio = "9:16",
+            style = "cinematic",
+            language = "en",
+            cinematography = new { intent = CinematographyIntent.Intimate },
+        });
+        var locked = await SendWithCsrf<MovieGuideRevisionResponse>(client, HttpMethod.Post, $"/api/movie-studio/projects/{created.Project.Id}/guide/lock", new { });
+        var scene = await SendWithCsrf<MovieSceneDto>(client, HttpMethod.Post, $"/api/movie-studio/projects/{created.Project.Id}/scenes", new { title = "Confession", summary = "A quiet room holds a difficult truth." });
+        var shot = await SendWithCsrf<MovieShotDto>(client, HttpMethod.Post, $"/api/movie-studio/scenes/{scene.Id}/shots", new
+        {
+            description = "The character raises her eyes.",
+            purpose = "Make the vulnerable confession land through the eyes.",
+        });
+
+        var planned = await SendWithCsrf<MovieCinematographyPlanResponse>(client, HttpMethod.Post, $"/api/movie-studio/shots/{shot.Id}/cinematography/plan", new
+        {
+            characterEmotionalPurpose = "Vulnerable confession",
+            creativeNotes = "Protect the eyeline toward the listener.",
+        });
+
+        Assert.Equal(created.Project.Id, planned.MovieProjectId);
+        Assert.True(planned.GuideGrounded);
+        Assert.True(planned.CanonPreserved);
+        Assert.Equal(locked.Revision.RevisionNumber, planned.LockedGuideRevisionNumber);
+        Assert.Contains("ShotSize", planned.AppliedCanonFields);
+        Assert.Equal("close_up", planned.Plan.ShotSize);
+        Assert.Contains(planned.Plan.Grounding!, item => item.Source == "cinematography_bible" && item.Locked);
+
+        var reloaded = await client.GetFromJsonAsync<MovieShotDto>($"/api/movie-studio/shots/{shot.Id}");
+        Assert.NotNull(reloaded?.CinematographyPlan);
+        Assert.Equal("close_up", reloaded!.CinematographyPlan!.ShotSize);
     }
 
     private static async Task<AuthResponse> Register(HttpClient client, string displayName) =>
