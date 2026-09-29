@@ -855,8 +855,10 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasIndex(job => new { job.WorkspaceId, job.CreatedAt });
             entity.HasIndex(job => new { job.WorkspaceId, job.Status, job.CreatedAt });
             entity.HasIndex(job => job.ProjectId);
+            entity.HasIndex(job => job.RetryOfJobId);
             entity.HasIndex(job => new { job.CreatedByUserId, job.IdempotencyKey }).IsUnique().HasFilter("\"IdempotencyKey\" IS NOT NULL");
             entity.HasOne(job => job.Workspace).WithMany().HasForeignKey(job => job.WorkspaceId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(job => job.RetryOfJob).WithMany(job => job.Retries).HasForeignKey(job => job.RetryOfJobId).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne(job => job.Project).WithMany().HasForeignKey(job => job.ProjectId).OnDelete(DeleteBehavior.SetNull);
             entity.HasOne(job => job.CreatedByUser).WithMany().HasForeignKey(job => job.CreatedByUserId).OnDelete(DeleteBehavior.Restrict);
         });

@@ -169,6 +169,43 @@ public sealed class GenerationJobsTests : IClassFixture<GenerationJobsApiFactory
     }
 
     [Fact]
+    public async Task Terminal_retry_requires_idempotency_and_preserves_parent_lineage()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, $"jobs-retry-lineage-{Guid.NewGuid():N}@example.com");
+        var sourceId = Guid.NewGuid();
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.GenerationJobs.Add(new GenerationJob
+            {
+                Id = sourceId,
+                WorkspaceId = auth.PersonalWorkspace.Id,
+                CreatedByUserId = auth.User.Id,
+                JobType = GenerationJobTypes.SystemTest,
+                Status = GenerationJobStatus.Failed,
+                InputJson = "{}",
+                ErrorCode = "synthetic_failure",
+                ErrorMessage = "Deterministic test failure.",
+                CreatedAt = DateTime.UtcNow.AddMinutes(-1),
+                FailedAt = DateTime.UtcNow.AddSeconds(-30),
+                ConcurrencyToken = Guid.NewGuid(),
+            });
+            await db.SaveChangesAsync();
+        }
+
+        const string retryKey = "generation-retry-lineage-001";
+        var first = await SendWithCsrf<GenerationJobDto>(client, HttpMethod.Post, $"/api/generation/jobs/{sourceId}/retry", null, retryKey);
+        var second = await SendWithCsrf<GenerationJobDto>(client, HttpMethod.Post, $"/api/generation/jobs/{sourceId}/retry", null, retryKey);
+
+        Assert.Equal(first.Id, second.Id);
+        Assert.Equal(sourceId, first.RetryOfJobId);
+        Assert.Equal(1, first.RetryCount);
+        var terminal = await WaitForTerminal(client, first.Id);
+        Assert.Equal("Succeeded", terminal.Status);
+    }
+
+    [Fact]
     public async Task Jobs_support_list_filter_pagination_and_terminal_conflict_cancellation()
     {
         using var client = factory.CreateClient();

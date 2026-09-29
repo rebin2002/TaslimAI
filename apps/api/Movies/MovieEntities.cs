@@ -74,18 +74,56 @@ public static class MovieShotStatuses
 
 public static class MovieTakeStatuses
 {
-    public const string Draft = "Draft";
-    public const string Generating = "Generating";
-    public const string Ready = "Ready";
-    public const string ReviewRequired = "ReviewRequired";
+    public const string Planned = "Planned";
+    public const string Queued = "Queued";
+    public const string Running = "Running";
+    public const string Succeeded = "Succeeded";
     public const string Failed = "Failed";
+    public const string Cancelled = "Cancelled";
+    public const string Selected = "Selected";
+    public const string Superseded = "Superseded";
+    public const string LegacyDraft = "Draft";
+    public const string LegacyGenerating = "Generating";
+    public const string LegacyReady = "Ready";
+    public const string LegacyArchived = "Archived";
+    public const string Draft = Planned;
+    public const string Generating = Queued;
+    public const string Ready = Succeeded;
+    public const string ReviewRequired = "ReviewRequired";
     public const string Rejected = "Rejected";
     public const string Approved = "Approved";
-    public const string Archived = "Archived";
+    public const string Archived = Superseded;
     public static readonly IReadOnlySet<string> Supported = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
-        Draft, Generating, Ready, ReviewRequired, Failed, Rejected, Approved, Archived,
+        Planned, Queued, Running, Succeeded, Failed, Cancelled, Selected, Superseded,
+        ReviewRequired, Rejected, Approved, LegacyDraft, LegacyGenerating, LegacyReady, LegacyArchived,
     };
+}
+
+public static class MovieTakeLifecycle
+{
+    public static bool IsTerminal(string status) => status is MovieTakeStatuses.Succeeded or MovieTakeStatuses.Failed or MovieTakeStatuses.Cancelled or MovieTakeStatuses.Selected or MovieTakeStatuses.Superseded or MovieTakeStatuses.Approved or MovieTakeStatuses.Rejected;
+
+    public static bool HasPublishedAsset(Guid? assetId, Guid? storedFileId) => assetId.HasValue && storedFileId.HasValue;
+
+    public static bool CanTransition(string from, string to)
+    {
+        if (string.Equals(from, to, StringComparison.OrdinalIgnoreCase)) return true;
+        return from switch
+        {
+            MovieTakeStatuses.Planned => to is MovieTakeStatuses.Queued or MovieTakeStatuses.Cancelled,
+            MovieTakeStatuses.LegacyDraft => to is MovieTakeStatuses.Queued or MovieTakeStatuses.Cancelled,
+            MovieTakeStatuses.Queued => to is MovieTakeStatuses.Running or MovieTakeStatuses.Failed or MovieTakeStatuses.Cancelled,
+            MovieTakeStatuses.LegacyGenerating => to is MovieTakeStatuses.Running or MovieTakeStatuses.Failed or MovieTakeStatuses.Cancelled,
+            MovieTakeStatuses.Running => to is MovieTakeStatuses.Succeeded or MovieTakeStatuses.Failed or MovieTakeStatuses.Cancelled,
+            MovieTakeStatuses.Succeeded => to is MovieTakeStatuses.Approved or MovieTakeStatuses.Selected or MovieTakeStatuses.Superseded or MovieTakeStatuses.ReviewRequired,
+            MovieTakeStatuses.LegacyReady => to is MovieTakeStatuses.Approved or MovieTakeStatuses.Selected or MovieTakeStatuses.Superseded or MovieTakeStatuses.ReviewRequired,
+            MovieTakeStatuses.Approved => to is MovieTakeStatuses.Selected or MovieTakeStatuses.Superseded or MovieTakeStatuses.Rejected or MovieTakeStatuses.ReviewRequired,
+            MovieTakeStatuses.Selected => to is MovieTakeStatuses.Superseded or MovieTakeStatuses.ReviewRequired,
+            MovieTakeStatuses.ReviewRequired => to is MovieTakeStatuses.Approved or MovieTakeStatuses.Superseded,
+            _ => false,
+        };
+    }
 }
 
 public static class MovieApprovalDecisions

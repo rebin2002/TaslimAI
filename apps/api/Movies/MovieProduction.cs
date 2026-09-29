@@ -353,7 +353,8 @@ public static class MovieProductionProjection
         take.Approvals.OrderByDescending(item => item.CreatedAt)
             .Select(item => new MovieV2TakeApprovalDto(item.Id, item.UserId, item.Decision, item.Comment, item.CreatedAt))
             .ToArray(),
-        ToExecution(take.GenerationJob));
+        ToExecution(take.GenerationJob),
+        take.RetryOfTakeId);
 
     public static MovieProductionExecutionDto? ToExecution(GenerationJob? job)
     {

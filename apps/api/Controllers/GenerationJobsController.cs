@@ -34,6 +34,21 @@ public sealed class GenerationJobsController(IGenerationJobService jobs) : Contr
         return job is null ? ApiResults.Error(this, 404, GenerationJobErrorCodes.NotFound, "Job not found.") : Ok(GenerationJobContractMapper.ToDto(job));
     }
 
+    [HttpPost("api/generation/jobs/{id:guid}/retry")]
+    [ValidateAntiForgeryToken]
+    [EnableRateLimiting(RateLimiting.Generation)]
+    public async Task<IActionResult> Retry(Guid id, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var job = await jobs.RetryAsync(GetUserId(), id, cancellationToken, Request.Headers["Idempotency-Key"].FirstOrDefault(), HttpContext.TraceIdentifier);
+            return job is null
+                ? ApiResults.Error(this, 404, GenerationJobErrorCodes.NotFound, "Job not found.")
+                : Accepted(GenerationJobContractMapper.ToDto(job));
+        }
+        catch (GenerationJobValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
+    }
+
     [HttpGet("api/generation/jobs")]
     public async Task<IActionResult> List(
         [FromQuery] Guid workspaceId,

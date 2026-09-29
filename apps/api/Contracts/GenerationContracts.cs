@@ -53,7 +53,9 @@ public sealed record GenerationJobDto(
     DateTime? CompletedAt,
     DateTime? FailedAt,
     DateTime? CancelledAt,
-    IReadOnlyList<GenerationJobOutputDto> Outputs);
+    IReadOnlyList<GenerationJobOutputDto> Outputs,
+    Guid? RetryOfJobId = null,
+    int RetryCount = 0);
 
 public sealed record GenerationJobListDto(
     IReadOnlyList<GenerationJobDto> Items,
@@ -92,5 +94,7 @@ public static class GenerationJobContractMapper
         job.CancelledAt,
         job.Outputs.OrderBy(output => output.CreatedAt)
             .Select(output => new GenerationJobOutputDto(output.Id, output.OutputType, output.StoredFileId, output.MetadataJson, output.CreatedAt))
-            .ToArray());
+            .ToArray(),
+        job.RetryOfJobId,
+        job.RetryCount);
 }
