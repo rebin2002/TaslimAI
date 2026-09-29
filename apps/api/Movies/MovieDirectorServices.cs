@@ -44,6 +44,18 @@ public sealed class MovieDirectorContextAssembler(TaslimDbContext db, MovieWorld
     {
         var stopwatch = Stopwatch.StartNew();
         var targetType = NormalizeTargetType(request.TargetType);
+        if (string.IsNullOrWhiteSpace(request.TargetType))
+        {
+            if (request.SelectedShotId.HasValue)
+            {
+                targetType = DirectorContextTargetTypes.Shot;
+            }
+            else if (request.SelectedSceneId.HasValue)
+            {
+                targetType = DirectorContextTargetTypes.Scene;
+            }
+        }
+        var targetId = request.TargetId ?? request.SelectedShotId ?? request.SelectedSceneId;
         var movie = await db.MovieProjects.AsNoTracking().Include(item => item.Guide).ThenInclude(item => item.Revisions)
             .FirstOrDefaultAsync(item => item.Id == movieProjectId, cancellationToken);
         if (movie is null) return null;
@@ -53,8 +65,15 @@ public sealed class MovieDirectorContextAssembler(TaslimDbContext db, MovieWorld
             : null;
         if (lockedRevision is null) return null;
 
-        var target = await ResolveTargetAsync(movieProjectId, targetType, request.TargetId, cancellationToken);
+        var target = await ResolveTargetAsync(movieProjectId, targetType, targetId, cancellationToken);
         if (target is null) throw new DirectorContextTargetException("The Director context target is not part of this movie project.");
+
+        if (request.SelectedSceneId.HasValue && !await db.MovieScenes.AsNoTracking().AnyAsync(item => item.Id == request.SelectedSceneId && item.MovieProjectId == movieProjectId, cancellationToken))
+            throw new DirectorContextTargetException("The selected scene is not part of this movie project.");
+        if (request.SelectedShotId.HasValue && !await db.MovieShots.AsNoTracking().AnyAsync(item => item.Id == request.SelectedShotId && item.Scene.MovieProjectId == movieProjectId, cancellationToken))
+            throw new DirectorContextTargetException("The selected shot is not part of this movie project.");
+        if (request.SelectedSceneId.HasValue && request.SelectedShotId.HasValue && !await db.MovieShots.AsNoTracking().AnyAsync(item => item.Id == request.SelectedShotId && item.MovieSceneId == request.SelectedSceneId, cancellationToken))
+            throw new DirectorContextTargetException("The selected shot does not belong to the selected scene.");
 
         var approvedStoryRevision = await db.MovieStoryRevisions.AsNoTracking()
             .Include(item => item.MovieStory)
@@ -106,6 +125,8 @@ public sealed class MovieDirectorContextAssembler(TaslimDbContext db, MovieWorld
         var sceneContexts = scenes.Select(scene => new DirectorSceneContext(
             scene.Id, scene.Sequence, Bounded(scene.Title, 160), Bounded(scene.Summary, 8_000), scene.DurationSeconds, Bounded(scene.ContinuityNotes, 4_000),
             shots.Where(shot => shot.MovieSceneId == scene.Id).OrderBy(shot => shot.Sequence).ThenBy(shot => shot.Id).Select(ToShotContext).ToArray())).ToArray();
+        var selectedSceneId = request.SelectedSceneId ?? target.SceneId;
+        var selectedShotId = request.SelectedShotId ?? target.ShotId;
         var characterContexts = characters.OrderBy(item => item.Id).Select(item => new DirectorCharacterContext(
             Bounded(item.Name, 160), Bounded(item.Description, 8_000), Bounded(item.Appearance, 4_000), Bounded(item.ContinuityNotes, 4_000),
             item.ContinuityLocks.Where(lockItem => lockItem.MovieCharacterStateId is null).OrderBy(item => item.FieldKey).Select(item => new DirectorLockedFactContext(Bounded(item.FieldKey, 120), Bounded(item.LockedValue, 8_000), null, item.Id)).Concat(
@@ -118,7 +139,8 @@ public sealed class MovieDirectorContextAssembler(TaslimDbContext db, MovieWorld
         var targetDto = new DirectorContextTargetDto(target.Type, target.Id, target.StoryRevisionId, target.SceneId, target.ShotId, target.ProductionVersionId, target.TakeId);
         var contextWithoutBudget = new DirectorContextDto(
             movie.Id, movie.WorkspaceId, Bounded(movie.Title, 160), Bounded(movie.Description, 8_000), movie.DurationSeconds, Bounded(movie.AspectRatio, 20), Bounded(movie.Style, 100), Bounded(movie.Language, 5),
-            guide, sceneContexts, characterContexts, locationContexts, DateTime.UnixEpoch, Target: targetDto, ApprovedStory: approvedStoryContext, World: world, Production: production, Collaboration: collaboration, Provenance: provenance);
+            guide, sceneContexts, characterContexts, locationContexts, DateTime.UnixEpoch, Target: targetDto, ApprovedStory: approvedStoryContext, World: world, Production: production, Collaboration: collaboration, Provenance: provenance,
+            RoomContext: DirectorRoomAwareness.Build(request.Room, true, selectedSceneId, selectedShotId, targetDto, sceneContexts, production));
 
         var criticalJson = JsonSerializer.Serialize(new { contextWithoutBudget.Guide, contextWithoutBudget.ApprovedStory, world.Locks, world.Facts, lockedCast = characterContexts.Select(item => new { item.Id, item.LockedFacts }) }, DirectorJson.Options);
         var criticalBytes = Encoding.UTF8.GetByteCount(criticalJson);
@@ -369,13 +391,12 @@ public sealed class MovieDirectorService(
             if (movie.Guide.LockedRevisionNumber is null) throw new DirectorValidationException("Lock the Movie Guide before creating a Story Director proposal.");
             return await CreateStoryProposalAsync(userId, movie, request, cancellationToken);
         }
-        var contextTarget = new DirectorContextTargetRequest
-        {
-            TargetType = request.ContextTargetType ?? (request.ShotId.HasValue ? DirectorContextTargetTypes.Shot : DirectorContextTargetTypes.Project),
-            TargetId = request.ContextTargetId ?? request.ShotId,
-        };
+        var contextTarget = BuildContextTarget(request);
         var context = await assembler.AssembleAsync(userId, movieProjectId, contextTarget, cancellationToken);
         if (context is null) return null;
+        var room = context.Context.RoomContext?.Room ?? DirectorRoomAwareness.NormalizeRoom(request.ContextRoom);
+        if (room is DirectorRoomTypes.Scene or DirectorRoomTypes.Storyboard or DirectorRoomTypes.Production)
+            return await CreateRoomPlanningProposalAsync(userId, movie, request, context, room, cancellationToken);
         var shot = request.ShotId.HasValue
             ? context.Context.Scenes.SelectMany(item => item.Shots).FirstOrDefault(item => item.Id == request.ShotId.Value)
             : context.Context.Scenes.SelectMany(item => item.Shots).FirstOrDefault();
@@ -429,10 +450,20 @@ public sealed class MovieDirectorService(
         var proposal = await QueryProposal().FirstOrDefaultAsync(item => item.Id == proposalId, cancellationToken);
         if (proposal is null || !await access.IsMemberAsync(userId, proposal.WorkspaceId, cancellationToken)) return null;
         var target = await db.DirectorProjectContexts.AsNoTracking().FirstOrDefaultAsync(item => item.Id == proposal.DirectorProjectContextId && item.MovieProjectId == proposal.MovieProjectId && item.WorkspaceId == proposal.WorkspaceId, cancellationToken);
-        var context = target is null ? null : await assembler.AssembleAsync(userId, proposal.MovieProjectId, new DirectorContextTargetRequest { TargetType = target.TargetType, TargetId = target.TargetId }, cancellationToken);
-        if (context is null) return null;
+        var roomAction = proposal.Actions.FirstOrDefault(item => DirectorActionTypes.RoomPlanning.Contains(item.ActionType));
+        var roomPayload = roomAction is null ? null : ReadRoomPayload(roomAction);
         var storyAction = proposal.Actions.FirstOrDefault(item => item.ActionType == DirectorActionTypes.StoryAssistance);
         var storyPayload = storyAction is null ? null : ReadStoryPayload(storyAction);
+        var contextRoom = roomPayload?.Room ?? storyPayload?.ContextRoom ?? (roomAction is null ? null : RoomForPlanningAction(roomAction.ActionType));
+        var context = target is null ? null : await assembler.AssembleAsync(userId, proposal.MovieProjectId, new DirectorContextTargetRequest
+        {
+            TargetType = target.TargetType,
+            TargetId = target.TargetId,
+            Room = contextRoom,
+            SelectedSceneId = roomPayload?.SceneId,
+            SelectedShotId = roomPayload?.ShotId,
+        }, cancellationToken);
+        if (context is null) return null;
         var storyContext = storyPayload is null ? null : await assembler.AssembleStoryAsync(proposal.MovieProjectId, storyPayload.TargetSceneId, storyPayload.TargetElementId, cancellationToken);
         return new DirectorProposalResponse(ToDto(proposal), context.Context with { ContextVersion = target!.ContextVersion }, storyContext?.Context);
     }
@@ -493,11 +524,12 @@ public sealed class MovieDirectorService(
 
     private async Task<DirectorProposalResponse?> CreateStoryProposalAsync(Guid userId, MovieProject movie, DirectorProposalRequest request, CancellationToken cancellationToken)
     {
-        var assembled = await assembler.AssembleAsync(userId, movie.Id, cancellationToken);
+        var assembled = await assembler.AssembleAsync(userId, movie.Id, BuildContextTarget(request), cancellationToken);
         var storyContext = await assembler.AssembleStoryAsync(movie.Id, request.TargetSceneId, request.TargetElementId, cancellationToken);
         if (assembled is null || storyContext is null) return null;
         var generation = await storyAiPlanner.BuildAsync(request, storyContext.Value.Context, cancellationToken);
         var plan = generation.Plan;
+        var storyPayload = plan.Payload with { ContextRoom = request.ContextRoom };
         var now = DateTime.UtcNow;
         var directorContext = await GetOrCreateContextAsync(movie, assembled, cancellationToken);
         var proposal = new DirectorProposal
@@ -510,7 +542,7 @@ public sealed class MovieDirectorService(
         {
             Id = Guid.NewGuid(), WorkspaceId = movie.WorkspaceId, MovieProjectId = movie.Id, DirectorProposalId = proposal.Id,
             ActionType = DirectorActionTypes.StoryAssistance, Status = DirectorActionStatuses.PendingApproval, ApprovalRequired = true,
-            PayloadJson = JsonSerializer.Serialize(plan.Payload, DirectorJson.Options), CreatedAt = now,
+            PayloadJson = JsonSerializer.Serialize(storyPayload, DirectorJson.Options), CreatedAt = now,
         });
         db.DirectorProposals.Add(proposal);
         db.DirectorHistoryEvents.Add(new DirectorHistoryEvent { Id = Guid.NewGuid(), WorkspaceId = movie.WorkspaceId, DirectorProposalId = proposal.Id, EventType = DirectorHistoryEventTypes.ContextAssembled, SafeDetailsJson = JsonSerializer.Serialize(new { contextVersion = storyContext.Value.Context.ContextVersion, snapshotHash = storyContext.Value.SnapshotHash }), CreatedAt = now });
@@ -522,6 +554,75 @@ public sealed class MovieDirectorService(
             await usageLedger.CompleteAsync(transaction, generation.Usage, cancellationToken);
         }
         return new DirectorProposalResponse(ToDto(proposal, plan.Rationale, [], plan.Review), assembled.Context, storyContext.Value.Context);
+    }
+
+    private async Task<DirectorProposalResponse> CreateRoomPlanningProposalAsync(Guid userId, MovieProject movie, DirectorProposalRequest request, DirectorContextAssemblyResult assembled, string room, CancellationToken cancellationToken)
+    {
+        var roomContext = assembled.Context.RoomContext!;
+        var actionType = string.IsNullOrWhiteSpace(request.RoomAction) ? roomContext.ValidActions.FirstOrDefault() : request.RoomAction.Trim();
+        if (string.IsNullOrWhiteSpace(actionType) || !roomContext.ValidActions.Contains(actionType, StringComparer.OrdinalIgnoreCase))
+        {
+            var missing = roomContext.AvailablePrerequisites.Where(item => !item.Satisfied).Select(item => item.Label).ToArray();
+            throw new DirectorValidationException(missing.Length == 0
+                ? "The selected room has no valid Director action for this target."
+                : $"Complete these Director prerequisites first: {string.Join(", ", missing)}.");
+        }
+
+        var selectedSceneId = roomContext.SelectedSceneId;
+        var selectedShotId = roomContext.SelectedShotId;
+        var actionLabel = actionType.Replace('_', ' ');
+        var now = DateTime.UtcNow;
+        var directorContext = await GetOrCreateContextAsync(movie, assembled, cancellationToken);
+        var proposal = new DirectorProposal
+        {
+            Id = Guid.NewGuid(), WorkspaceId = movie.WorkspaceId, MovieProjectId = movie.Id, DirectorProjectContextId = directorContext.Id,
+            CreatedByUserId = userId, Status = DirectorProposalStatuses.PendingApproval,
+            Title = string.IsNullOrWhiteSpace(request.Goal) ? $"{room} {actionLabel}" : request.Goal.Trim(),
+            Summary = selectedShotId.HasValue
+                ? $"Prepare {room.ToLowerInvariant()} context for shot {selectedShotId.Value.ToString()[..8]}."
+                : selectedSceneId.HasValue
+                    ? $"Prepare {room.ToLowerInvariant()} context for the selected scene."
+                    : $"Prepare {room.ToLowerInvariant()} context for this movie.",
+            RationaleJson = JsonSerializer.Serialize(roomContext.AvailablePrerequisites.Where(item => item.Satisfied).Select(item => item.Key).Concat([actionType]).ToArray()), CreatedAt = now,
+        };
+        proposal.Actions.Add(new DirectorAction
+        {
+            Id = Guid.NewGuid(), WorkspaceId = movie.WorkspaceId, MovieProjectId = movie.Id, DirectorProposalId = proposal.Id,
+            ActionType = actionType, Status = DirectorActionStatuses.PendingApproval, ApprovalRequired = true,
+            PayloadJson = JsonSerializer.Serialize(new DirectorRoomActionPayload(room, actionType, selectedSceneId, selectedShotId), DirectorJson.Options), CreatedAt = now,
+        });
+        db.DirectorProposals.Add(proposal);
+        db.DirectorHistoryEvents.Add(new DirectorHistoryEvent
+        {
+            Id = Guid.NewGuid(), WorkspaceId = movie.WorkspaceId, DirectorProposalId = proposal.Id, EventType = DirectorHistoryEventTypes.ContextAssembled,
+            SafeDetailsJson = JsonSerializer.Serialize(new { contextVersion = directorContext.ContextVersion, snapshotHash = assembled.SnapshotHash, room, actionType, target = assembled.Context.Target?.Type, assemblyMilliseconds = assembled.AssemblyMilliseconds }), CreatedAt = now,
+        });
+        db.DirectorHistoryEvents.Add(new DirectorHistoryEvent
+        {
+            Id = Guid.NewGuid(), WorkspaceId = movie.WorkspaceId, DirectorProposalId = proposal.Id, EventType = DirectorHistoryEventTypes.ProposalCreated,
+            SafeDetailsJson = JsonSerializer.Serialize(new { room, actionType, providerCalled = false }), CreatedAt = now,
+        });
+        await db.SaveChangesAsync(cancellationToken);
+        return new DirectorProposalResponse(ToDto(proposal), assembled.Context with { ContextVersion = directorContext.ContextVersion });
+    }
+
+    private static DirectorContextTargetRequest BuildContextTarget(DirectorProposalRequest request)
+    {
+        var selectedShotId = request.SelectedShotId ?? request.ShotId;
+        var targetType = request.RoomAction?.Trim().ToLowerInvariant() == DirectorActionTypes.ScenePlanning
+            ? DirectorContextTargetTypes.Scene
+            : request.ContextTargetType
+                ?? (selectedShotId.HasValue ? DirectorContextTargetTypes.Shot : request.SelectedSceneId.HasValue ? DirectorContextTargetTypes.Scene : DirectorContextTargetTypes.Project);
+        return new DirectorContextTargetRequest
+        {
+            TargetType = targetType,
+            TargetId = targetType == DirectorContextTargetTypes.Scene && request.SelectedSceneId.HasValue
+                ? request.SelectedSceneId
+                : request.ContextTargetId ?? selectedShotId ?? request.SelectedSceneId,
+            Room = request.ContextRoom,
+            SelectedSceneId = request.SelectedSceneId,
+            SelectedShotId = selectedShotId,
+        };
     }
 
     private async Task<DirectorProjectContext> GetOrCreateContextAsync(MovieProject movie, DirectorContextAssemblyResult assembled, CancellationToken cancellationToken)
@@ -551,6 +652,15 @@ public sealed class MovieDirectorService(
     private static DirectorActionResultDto ToDto(DirectorActionResult result) => new(result.Id, result.Status, result.SafeMessage, result.ResultJson, result.CreatedAt);
     private static IReadOnlyList<string> ParseRationale(string json) { try { return JsonSerializer.Deserialize<string[]>(json) ?? []; } catch (JsonException) { return []; } }
     private static DirectorStoryActionPayload? ReadStoryPayload(DirectorAction action) { try { return JsonSerializer.Deserialize<DirectorStoryActionPayload>(action.PayloadJson, DirectorJson.Options); } catch (JsonException) { return null; } }
+    private static DirectorRoomActionPayload? ReadRoomPayload(DirectorAction action) { try { return JsonSerializer.Deserialize<DirectorRoomActionPayload>(action.PayloadJson, DirectorJson.Options); } catch (JsonException) { return null; } }
+    private static string? RoomForPlanningAction(string actionType) => actionType switch
+    {
+        DirectorActionTypes.ScenePlanning or DirectorActionTypes.ShotPlanning => DirectorRoomTypes.Scene,
+        DirectorActionTypes.StoryboardPreparation => DirectorRoomTypes.Storyboard,
+        DirectorActionTypes.ProductionReadiness => DirectorRoomTypes.Production,
+        DirectorActionTypes.ProjectReadiness => DirectorRoomTypes.Overview,
+        _ => null,
+    };
     private static DirectorStoryReviewDto? ReadStoryReview(DirectorAction action)
     {
         if (!string.Equals(action.ActionType, DirectorActionTypes.StoryAssistance, StringComparison.OrdinalIgnoreCase)) return null;
