@@ -719,7 +719,7 @@ public sealed class MovieDirectorService(
             await usageLedger.CompleteAsync(transaction, generation.Usage, cancellationToken);
         }
         var review = new DirectorShotPlanReviewDto(context.SelectedScene.Id, context.SelectedScene.Title, context.SnapshotHash, context.SelectedScene.DurationSeconds, context.ExistingActiveDurationSeconds, generation.Shots.Sum(item => item.EstimatedDurationSeconds), true, payload.IsRegeneration);
-        return new DirectorProposalResponse(ToDto(proposal, generation.Rationale, [], null, generation.Shots, review), context.DirectorContext with { ContextVersion = directorContext.ContextVersion });
+        return new DirectorProposalResponse(ToDto(proposal, generation.Rationale, [], null, null, generation.Shots, review), context.DirectorContext with { ContextVersion = directorContext.ContextVersion });
     }
 
     public async Task<DirectorProposalResponse?> GetProposalAsync(Guid userId, Guid proposalId, CancellationToken cancellationToken = default)
