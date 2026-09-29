@@ -78,7 +78,8 @@ public sealed record MovieRegenerationCostPreviewDto(
     bool ConfirmationRequired,
     string EstimateState = MovieGenerationCostEstimateStates.Unevaluated,
     decimal? MinimumEstimatedProviderCostUsd = null,
-    decimal? MaximumEstimatedProviderCostUsd = null);
+    decimal? MaximumEstimatedProviderCostUsd = null,
+    GenerationCostPreviewDto? Guardrails = null);
 
 public sealed record MovieRegenerationRequestDto(
     Guid Id,

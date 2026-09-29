@@ -195,6 +195,7 @@ builder.Services.Configure<MovieGenerationCostEstimatorOptions>(builder.Configur
 builder.Services.AddScoped<IMovieGenerationCostEstimator, MovieGenerationCostEstimator>();
 builder.Services.Configure<GenerationBudgetOptions>(builder.Configuration.GetSection("GenerationBudget"));
 builder.Services.AddScoped<IGenerationBudgetService, GenerationBudgetService>();
+builder.Services.AddScoped<IGenerationCostGuardrailService, GenerationCostGuardrailService>();
 builder.Services.AddScoped<IAdminUsageService, AdminUsageService>();
 builder.Services.AddScoped<IAdminOperationsService, AdminOperationsService>();
 builder.Services.AddScoped<ProviderHealthService>();

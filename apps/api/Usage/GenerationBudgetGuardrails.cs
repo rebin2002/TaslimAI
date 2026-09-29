@@ -13,6 +13,11 @@ public sealed class GenerationBudgetOptions
     public decimal? MaxCumulativeEstimatedCostPerJobUsd { get; set; }
     public decimal? WorkspaceInternalSafetyCeilingUsd { get; set; }
     public decimal? UserInternalSafetyCeilingUsd { get; set; }
+    public decimal? UserEstimatedCostCeilingUsd { get; set; }
+    public decimal? ProjectEstimatedCostCeilingUsd { get; set; }
+    public decimal? ExpensiveGenerationWarningThresholdUsd { get; set; }
+    public bool RequireConfirmationForExpensiveGeneration { get; set; } = true;
+    public bool RequireConfirmationForUnknownEstimates { get; set; } = true;
     public bool RejectUnknownEstimates { get; set; } = true;
 }
 
@@ -20,7 +25,8 @@ public sealed record GenerationBudgetSnapshot(
     int ProviderAttempts,
     decimal CumulativeEstimatedCostUsd,
     decimal WorkspaceEstimatedCostUsd,
-    decimal UserEstimatedCostUsd);
+    decimal UserEstimatedCostUsd,
+    decimal ProjectEstimatedCostUsd = 0m);
 
 public sealed record GenerationBudgetDecision(
     bool Allowed,
@@ -57,6 +63,10 @@ public static class GenerationBudgetGuardrail
             return GenerationBudgetDecision.Reject("WORKSPACE_INTERNAL_SAFETY_CEILING_EXCEEDED", "This workspace has reached its internal provider safety ceiling.");
         if (options.UserInternalSafetyCeilingUsd is { } user && snapshot.UserEstimatedCostUsd + amount > user)
             return GenerationBudgetDecision.Reject("USER_INTERNAL_SAFETY_CEILING_EXCEEDED", "This user has reached the internal provider safety ceiling.");
+        if (options.UserEstimatedCostCeilingUsd is { } userCap && snapshot.UserEstimatedCostUsd + amount > userCap)
+            return GenerationBudgetDecision.Reject("USER_COST_CAP_EXCEEDED", "This user has reached the configured generation cost cap.");
+        if (options.ProjectEstimatedCostCeilingUsd is { } projectCap && snapshot.ProjectEstimatedCostUsd + amount > projectCap)
+            return GenerationBudgetDecision.Reject("PROJECT_COST_CAP_EXCEEDED", "This project has reached the configured generation cost cap.");
         return GenerationBudgetDecision.Allow();
     }
 }

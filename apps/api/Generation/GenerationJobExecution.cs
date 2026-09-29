@@ -177,6 +177,7 @@ public sealed class GenerationJobService(
     WorkspaceAccessService access,
     IGenerationJobQueue queue,
     IGenerationJobUsageService usage,
+    IGenerationCostGuardrailService costGuardrails,
     IHttpContextAccessor httpContextAccessor) : IGenerationJobService
 {
     public async Task<GenerationJob> CreateAsync(Guid userId, CreateGenerationJobRequest request, CancellationToken cancellationToken = default, string? idempotencyKey = null, string? requestId = null, Guid? retryOfJobId = null)
@@ -220,6 +221,22 @@ public sealed class GenerationJobService(
                 return existing;
             }
         }
+
+        var estimate = request.InternalCostEstimate
+            ?? (request.EstimatedProviderCostUsd.HasValue
+                ? new GenerationCostEstimate(true, Math.Max(0m, request.EstimatedProviderCostUsd.Value), UsageCurrencies.Usd, null, null, null, [])
+                : GenerationCostEstimate.Unknown("job_estimate_missing"));
+        var preflight = await costGuardrails.EvaluateAsync(
+            userId,
+            request.WorkspaceId,
+            request.ProjectId,
+            estimate,
+            request.ConfirmationAccepted,
+            cancellationToken);
+        if (!preflight.Allowed)
+            throw new GenerationJobValidationException(preflight.RejectionCode ?? "GENERATION_COST_CAP_EXCEEDED", preflight.RejectionMessage ?? "This generation exceeds a configured safety limit.");
+        if (preflight.ConfirmationRequired && !request.ConfirmationAccepted)
+            throw new GenerationJobValidationException("GENERATION_CONFIRMATION_REQUIRED", "Explicit confirmation is required before queueing this generation.");
 
         var now = DateTime.UtcNow;
         requestId ??= httpContextAccessor.HttpContext?.TraceIdentifier;
