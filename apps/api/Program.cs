@@ -188,6 +188,7 @@ builder.Services.Configure<GenerationCostPricingOptions>(builder.Configuration.G
 builder.Services.AddSingleton<IGenerationCostEstimator, GenerationCostEstimator>();
 builder.Services.Configure<GenerationBudgetOptions>(builder.Configuration.GetSection("GenerationBudget"));
 builder.Services.AddScoped<IGenerationBudgetService, GenerationBudgetService>();
+builder.Services.AddScoped<IGenerationCostGuardrailService, GenerationCostGuardrailService>();
 builder.Services.AddScoped<IAdminUsageService, AdminUsageService>();
 builder.Services.AddScoped<IAdminOperationsService, AdminOperationsService>();
 builder.Services.AddScoped<ProviderHealthService>();

@@ -21,9 +21,18 @@ Taslim records **internal provider exposure only**. The feature does not calcula
 | `MaxCumulativeEstimatedCostPerJobUsd` | Includes all known estimates for prior attempts of the job. |
 | `WorkspaceInternalSafetyCeilingUsd` | Includes known attempted exposure for the workspace. |
 | `UserInternalSafetyCeilingUsd` | Includes known attempted exposure for the creating user. |
+| `UserEstimatedCostCeilingUsd` | Rejects a new generation when known user exposure plus the estimate would exceed the user cap. |
+| `ProjectEstimatedCostCeilingUsd` | Rejects a new generation when known project exposure plus the estimate would exceed the project cap. |
+| `ExpensiveGenerationWarningThresholdUsd` | Marks a preview as expensive and can require explicit confirmation. |
 | `RejectUnknownEstimates` | Rejects unknown estimates while guardrails are enabled; the safe default is `true`. |
 
 `GenerationProviderAttempt` is append-only in intent and has unique `(GenerationJobId, AttemptNumber)` and `FinalizationKey` constraints. It records the estimate snapshot, whether estimated and actual cost are known, provider/model identifiers, status, failure code, and terminal time. This is operational/audit data and is not exposed to ordinary users.
+
+## User-safe preflight and confirmation contract
+
+`GenerationCostGuardrailService` is the server-side preflight seam. It returns a `GenerationCostPreflightResult` with an explicit known/unknown estimate state, warning list, workspace/user/project cap snapshots, and a `CanProceed` value. The public `GenerationCostPreviewDto` maps only those safe fields; it contains no provider identity, model identity, prompt, credential, raw upstream response, or pricing-source field. Unknown is represented by a null amount and a reason, never by zero.
+
+The final `GenerationJobService.CreateAsync` call re-evaluates the estimate and caps immediately before queueing. A configured user or project cap rejects the request with a stable safe code; there is no automatic overage path. Expensive or unknown estimates may require explicit confirmation through the internal `ConfirmationAccepted` hook. Movie selective regeneration already has a two-step preview/confirm workflow, so it evaluates caps when the preview is created and rechecks them at confirmation before creating the job. The existing `Billing:CustomerChargingEnabled=false` boundary is unchanged.
 
 ## Exactly-once ledger behavior
 
@@ -37,4 +46,4 @@ The additive migration `20260925143000_AddGenerationCostGuardrails` adds generat
 
 ## Tests
 
-Focused API tests cover configured/unknown estimates, token/media/fixed dimensions, per-job and cumulative retry ceilings, provider-attempt ceilings, workspace/user ceilings, duplicate completion, late completion after cancellation, zero customer charge, and no credit-ledger deduction. `git diff --check` and JSON configuration validation passed. The environment does not contain the .NET SDK (`dotnet` is unavailable), so `dotnet build`/`dotnet test` could not be executed here; no Playwright or deployment was run.
+Focused API tests cover configured/unknown estimates, token/media/fixed dimensions, per-job and cumulative retry ceilings, provider-attempt ceilings, workspace/user/project ceilings, expensive warning/confirmation state, safe preview redaction, duplicate completion, late completion after cancellation, zero customer charge, and no credit-ledger deduction. Frontend unit tests cover unknown estimate rendering, cap blocking, explicit confirmation, and provider/model field redaction. `git diff --check` and JSON configuration validation passed; the API build and full backend suite (393 tests), frontend suite (143 tests), and TypeScript typecheck all passed. No Playwright, provider activation, charging activation, or deployment was run.
