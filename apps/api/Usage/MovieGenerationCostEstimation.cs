@@ -57,6 +57,32 @@ public sealed record MovieGenerationCostEstimate(
     public string ToJson() => System.Text.Json.JsonSerializer.Serialize(this);
 }
 
+public static class MovieGenerationCostEstimateAdapter
+{
+    public static GenerationCostEstimate ToGenerationCostEstimate(this MovieGenerationCostEstimate estimate)
+    {
+        var components = estimate.Components
+            .Select(item => new GenerationCostComponent(
+                GenerationCostDimension.ProviderFixed,
+                1m,
+                item.Unit,
+                null,
+                item.MaximumUsd,
+                item.Dimension))
+            .ToArray();
+
+        return new GenerationCostEstimate(
+            estimate.IsEstimated && estimate.MaximumAmountUsd.HasValue,
+            estimate.MaximumAmountUsd,
+            estimate.Currency,
+            estimate.PricingVersion,
+            estimate.PricingEffectiveAtUtc,
+            estimate.PricingSource,
+            components,
+            estimate.Reason);
+    }
+}
+
 /// <summary>
 /// User intent only. Provider and model selection are server-side resolver inputs.
 /// </summary>
