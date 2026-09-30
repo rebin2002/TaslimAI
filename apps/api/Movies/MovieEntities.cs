@@ -655,7 +655,12 @@ public sealed record MovieVideoGenerationRequest(
     string? ShotJson,
     string? SourceImageUri = null,
     string? ContinuationProviderJobId = null,
-    string? WorldContextJson = null);
+    string? WorldContextJson = null,
+    string? ReferencePackageJson = null,
+    string? SourceResolution = null,
+    string? MasterResolution = null,
+    string? ProcessingPath = null,
+    bool UpscalingRequested = false);
 
 public sealed record MovieVideoSubmission(string ProviderJobId);
 public sealed record MovieVideoProviderStatus(
@@ -755,7 +760,12 @@ public sealed record MovieGenerationInput(
     string? TargetResolution = null,
     string? ProcessingPath = null,
     string? QualityTier = null,
-    string? ContinuitySnapshotHash = null);
+    string? ContinuitySnapshotHash = null,
+    string? ReferencePackageJson = null,
+    string? MasterResolution = null,
+    bool UpscalingRequested = false,
+    int? TakeNumber = null,
+    int? TakeCount = null);
 
 public sealed record MovieProviderReadinessDto(bool Ready, IReadOnlyList<string> SupportedOperations);
 
