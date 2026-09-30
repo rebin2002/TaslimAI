@@ -619,6 +619,7 @@ public sealed class GenerationJobWorker(
         var usage = scope.ServiceProvider.GetRequiredService<IGenerationJobUsageService>();
         var budget = scope.ServiceProvider.GetRequiredService<IGenerationBudgetService>();
         var publisher = scope.ServiceProvider.GetRequiredService<IGeneratedAssetPublisher>();
+        var retentionHook = scope.ServiceProvider.GetRequiredService<IGeneratedMediaRetentionHook>();
         var movieExecutions = scope.ServiceProvider.GetRequiredService<MovieVideoExecutionStore>();
         using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
         var monitor = MonitorCancellationAndLeaseAsync(claimedJob.Id, claimedJob.ConcurrencyToken, cancellation, stoppingToken);
@@ -727,6 +728,7 @@ public sealed class GenerationJobWorker(
                         {
                             db.GenerationJobOutputs.Add(publication.Output);
                             if (publication.Asset is not null) db.Assets.Add(publication.Asset);
+                            if (publication.Provenance is not null) db.GeneratedMediaProvenance.Add(publication.Provenance);
                         }
                         await usage.CompleteAsync(await usage.BeginAsync(current, cancellationToken: stoppingToken), result.Usage ?? new AiUsageMetadata("system", "unknown", null, null, null, 0m, 0m, 0, "completed", true), hasBillableAsset: true, cancellationToken: stoppingToken);
                         await completionTransaction.CommitAsync(stoppingToken);
@@ -756,6 +758,25 @@ public sealed class GenerationJobWorker(
                 return;
             }
             publicationCommitted = true;
+            foreach (var publication in publications.Where(item => item.Provenance is not null))
+            {
+                try
+                {
+                    var provenance = publication.Provenance!;
+                    await retentionHook.OnStoredAsync(new GeneratedMediaRetentionContext(
+                        provenance.WorkspaceId,
+                        provenance.StoredFileId,
+                        provenance.GenerationJobId,
+                        provenance.AssetId,
+                        provenance.MovieTakeId,
+                        provenance.RetainUntil,
+                        "generation_succeeded"), stoppingToken);
+                }
+                catch (Exception exception)
+                {
+                    logger.LogWarning(exception, "Generated media retention registration was skipped safely. JobId={JobId}", claimedJob.Id);
+                }
+            }
             if (providerAttempt is not null)
                 await budget.CompleteAttemptAsync(providerAttempt, result.Usage?.ActualCost, result.Usage?.ActualCost.HasValue == true, GenerationProviderAttemptStatus.Succeeded, cancellationToken: stoppingToken);
             logger.LogInformation(
@@ -766,7 +787,7 @@ public sealed class GenerationJobWorker(
             if (GenerationJobTypes.MovieTypes.Contains(claimedJob.JobType))
             {
                 var publication = publications.FirstOrDefault(item => item.Asset is not null);
-                await movieExecutions.MarkReadyAsync(current.Id, claimedJob.ConcurrencyToken, publication?.Asset?.Id, publication?.CreatedFile?.Id, null, publication?.Output.MetadataJson, stoppingToken);
+                await movieExecutions.MarkReadyAsync(current.Id, claimedJob.ConcurrencyToken, publication?.Asset?.Id, publication?.Asset?.StoredFileId ?? publication?.Output.StoredFileId, null, publication?.Output.MetadataJson, stoppingToken);
             }
         }
         catch (MovieVideoStaleWorkerException)

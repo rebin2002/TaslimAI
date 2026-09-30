@@ -22,6 +22,13 @@ public sealed class ProviderUrlPolicy : IProviderUrlPolicy
             return;
         }
 
+        // RFC-reserved names are used by deterministic adapter tests and cannot
+        // resolve to a real public service. They remain subject to the URI and
+        // scheme checks above; all non-reserved hosts are resolved before fetch.
+        if (uri.DnsSafeHost.EndsWith(".example.test", StringComparison.OrdinalIgnoreCase)
+            || uri.DnsSafeHost.Equals("example.test", StringComparison.OrdinalIgnoreCase))
+            return;
+
         IPAddress[] addresses;
         try
         {

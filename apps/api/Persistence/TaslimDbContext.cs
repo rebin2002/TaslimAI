@@ -25,6 +25,7 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
     public DbSet<ChatMessageAttachment> ChatMessageAttachments => Set<ChatMessageAttachment>();
     public DbSet<GenerationJob> GenerationJobs => Set<GenerationJob>();
     public DbSet<GenerationJobOutput> GenerationJobOutputs => Set<GenerationJobOutput>();
+    public DbSet<GeneratedMediaProvenance> GeneratedMediaProvenance => Set<GeneratedMediaProvenance>();
     public DbSet<GenerationProviderAttempt> GenerationProviderAttempts => Set<GenerationProviderAttempt>();
     public DbSet<UpscalingJob> UpscalingJobs => Set<UpscalingJob>();
     public DbSet<UpscalingAttempt> UpscalingAttempts => Set<UpscalingAttempt>();
@@ -862,6 +863,9 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.Property(file => file.TextExtractionStatus).HasConversion<string>().HasMaxLength(30).IsRequired();
             entity.Property(file => file.ExtractedText).HasMaxLength(1_000_000);
             entity.Property(file => file.MetadataJson).HasMaxLength(20_000);
+            entity.Property(file => file.ContentHashSha256).HasMaxLength(64);
+            entity.Property(file => file.ContainerFormat).HasMaxLength(40);
+            entity.Property(file => file.DurationSeconds);
             entity.Property(file => file.CreatedAt).IsRequired();
             entity.HasIndex(file => new { file.WorkspaceId, file.CreatedAt });
             entity.HasIndex(file => new { file.UserId, file.CreatedAt });
@@ -869,6 +873,7 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasIndex(file => file.ConversationId);
             entity.HasIndex(file => file.Status);
             entity.HasIndex(file => file.StorageKey).IsUnique();
+            entity.HasIndex(file => new { file.WorkspaceId, file.ContentHashSha256 }).IsUnique().HasFilter("\"ContentHashSha256\" IS NOT NULL");
             entity.HasOne(file => file.Workspace).WithMany(workspace => workspace.Files).HasForeignKey(file => file.WorkspaceId).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne(file => file.User).WithMany().HasForeignKey(file => file.UserId).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne(file => file.Project).WithMany(project => project.Files).HasForeignKey(file => file.ProjectId).OnDelete(DeleteBehavior.SetNull);
@@ -1211,6 +1216,29 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasIndex(representation => representation.StoredFileId).IsUnique();
             entity.HasOne(representation => representation.Asset).WithMany(asset => asset.Representations).HasForeignKey(representation => representation.AssetId).OnDelete(DeleteBehavior.Cascade);
             entity.HasOne(representation => representation.StoredFile).WithMany(file => file.AssetRepresentations).HasForeignKey(representation => representation.StoredFileId).OnDelete(DeleteBehavior.Restrict);
+        });
+
+        builder.Entity<GeneratedMediaProvenance>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.OutputType).HasMaxLength(80).IsRequired();
+            entity.Property(item => item.IngestionKey).HasMaxLength(240).IsRequired();
+            entity.Property(item => item.ContentHashSha256).HasMaxLength(64).IsRequired();
+            entity.Property(item => item.ParentContentHashSha256).HasMaxLength(64);
+            entity.Property(item => item.ChainHashSha256).HasMaxLength(64).IsRequired();
+            entity.Property(item => item.SafeMetadataJson).HasMaxLength(20_000);
+            entity.Property(item => item.CleanupReason).HasMaxLength(120);
+            entity.HasIndex(item => item.IngestionKey).IsUnique();
+            entity.HasIndex(item => new { item.WorkspaceId, item.CreatedAt });
+            entity.HasIndex(item => item.GenerationJobId);
+            entity.HasIndex(item => item.MovieTakeId);
+            entity.HasIndex(item => item.MovieClipId);
+            entity.HasOne(item => item.Workspace).WithMany().HasForeignKey(item => item.WorkspaceId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(item => item.StoredFile).WithMany(file => file.GeneratedMediaProvenance).HasForeignKey(item => item.StoredFileId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(item => item.GenerationJob).WithMany(job => job.GeneratedMediaProvenance).HasForeignKey(item => item.GenerationJobId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.Asset).WithMany(asset => asset.GeneratedMediaProvenance).HasForeignKey(item => item.AssetId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne<MovieTake>().WithMany().HasForeignKey(item => item.MovieTakeId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne<MovieClip>().WithMany().HasForeignKey(item => item.MovieClipId).OnDelete(DeleteBehavior.SetNull);
         });
 
         builder.Entity<ResearchSource>(entity =>
