@@ -146,7 +146,7 @@ internal sealed class FakeVideoGenerationAdapter : IVideoGenerationAdapter
         SupportsCancellation: true,
         SupportsContinuation: false,
         SupportsReferenceImages: true,
-        MaxOutputs: 1)
+        MaxOutputs: 1);
 
     public Task<VideoGenerationSubmission> SubmitAsync(VideoGenerationRequest request, CancellationToken cancellationToken = default)
     {

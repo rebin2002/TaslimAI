@@ -155,7 +155,9 @@ public sealed class MovieFinalMasteringService(TaslimDbContext db, MovieCollabor
         var movie = take.MovieShot.Scene.MovieProject;
         await collaboration.RequireAsync(userId, movie.Id, MoviePermissions.FinalApproval, cancellationToken);
         var isSelected = take.SelectedAt.HasValue || take.MovieShot.SelectedTakeId == take.Id || take.MovieShot.FinalTakeId == take.Id;
-        if (!string.Equals(take.Status, MovieTakeStatuses.Approved, StringComparison.OrdinalIgnoreCase) || !isSelected)
+        var isApproved = string.Equals(take.Status, MovieTakeStatuses.Approved, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(take.Status, MovieTakeStatuses.Selected, StringComparison.OrdinalIgnoreCase);
+        if (!isApproved || !isSelected)
             throw new MovieFinalMasteringValidationException("MASTERING_SOURCE_NOT_APPROVED_OR_SELECTED", "Only an approved and selected take can be sent to final mastering.");
 
         var sourceAsset = take.Asset ?? take.MovieClip?.Asset;
