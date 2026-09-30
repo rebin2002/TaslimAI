@@ -437,6 +437,9 @@ public sealed class MovieProductionRenderRequest
     public Guid SourceVersionId { get; set; }
     public string? Label { get; set; }
     public string? Title { get; set; }
+    public string? TargetResolution { get; set; }
+    public string? QualityTier { get; set; }
+    public bool ConfirmationAccepted { get; set; }
     [JsonIgnore, BindNever]
     public decimal? EstimatedProviderCostUsd { get; set; }
 }
