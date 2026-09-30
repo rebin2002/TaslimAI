@@ -8,7 +8,7 @@ The implementation intentionally does not reference or modify Batch 3.13 Social 
 
 ## Workflow model
 
-Quick Movie captures a title, description, duration, aspect ratio, style, language, optional existing Project, and additional instructions. The API persists a `MovieProject` plus a starter `MovieScene`/`MovieShot` plan; it does **not** queue expensive video generation. Video generation remains an explicit action after composition approval and uses the existing durable `GenerationJob` path. When a provider is eventually invoked, the worker submits through `IMovieVideoProvider`, persists the provider job identifier, polls with bounded retry/backoff, supports cancellation, retrieves the output as a stream, and publishes it through the existing private `StoredFile` → `Asset` path.
+Quick Movie captures a title, description, duration, aspect ratio, style, language, optional existing Project, and additional instructions. The API persists the `MovieProject` and brief only; it does **not** seed creative scene/shot rows or queue expensive video generation. Scene and shot planning remain explicit manual actions. Video generation remains an explicit action after composition approval and uses the existing durable `GenerationJob` path. When a provider is eventually invoked, the worker submits through `IMovieVideoProvider`, persists the provider job identifier, polls with bounded retry/backoff, supports cancellation, retrieves the output as a stream, and publishes it through the existing private `StoredFile` → `Asset` path.
 
 Full Movie Project creates a durable planning workspace. If the user does not select an existing Project, the API creates a Taslim Project with type `Movie`. The Movie Project owns a Movie Guide / Continuity Guide and collections for scenes, characters, locations, shots, clips, and assemblies. The first UI exposes the guide and starter planning columns for scenes, characters, and locations. Shot, clip, and assembly persistence is present for future studio stages.
 
@@ -80,7 +80,7 @@ All endpoints require authentication and workspace membership. Mutating endpoint
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /api/movie-studio/provider` | Report provider readiness and supported operations |
-| `POST /api/movie-studio/projects` | Create Quick Movie or Full Movie Project; Quick creates a starter shot plan without a video job |
+| `POST /api/movie-studio/projects` | Create Quick Movie or Full Movie Project; Quick saves the brief without a video job |
 | `GET /api/movie-studio/projects/{id}` | Load the durable plan and guide |
 | `PATCH /api/movie-studio/projects/{id}/guide` | Update continuity-guide fields |
 | `POST /api/movie-studio/projects/{id}/scenes` | Add an ordered scene |
