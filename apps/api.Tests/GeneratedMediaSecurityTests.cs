@@ -1,4 +1,5 @@
 using System.IO.Compression;
+using System.Security.Cryptography;
 using System.Text;
 using Taslim.Api.Files;
 using Xunit;
@@ -42,6 +43,39 @@ public sealed class GeneratedMediaSecurityTests
 
         await Assert.ThrowsAsync<InvalidDataException>(() => bounded.CopyToAsync(destination));
         Assert.True(bounded.BytesRead <= 4);
+    }
+
+    [Fact]
+    public async Task Exact_size_stream_is_hashed_without_buffering_the_payload()
+    {
+        var content = Encoding.UTF8.GetBytes("streamed generated media");
+        using var source = new MemoryStream(content);
+        using var bounded = new CountingReadStream(source, content.Length);
+        using var destination = new MemoryStream();
+
+        await bounded.CopyToAsync(destination);
+
+        Assert.Equal(content, destination.ToArray());
+        Assert.Equal(Convert.ToHexString(SHA256.HashData(content)), bounded.Sha256Hex);
+    }
+
+    [Fact]
+    public void Image_inspection_derives_container_and_dimensions_from_the_header()
+    {
+        var descriptor = GeneratedMediaSecurity.ValidateDescriptor("frame.png", "image/png");
+        var content = new byte[32];
+        new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }.CopyTo(content, 0);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(content.AsSpan(8, 4), 13);
+        "IHDR"u8.CopyTo(content.AsSpan(12, 4));
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32BigEndian(content.AsSpan(16, 4), 640);
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32BigEndian(content.AsSpan(20, 4), 360);
+
+        var inspection = GeneratedMediaInspector.Inspect(descriptor, content, null, "ABCD");
+
+        Assert.Equal("png", inspection.ContainerFormat);
+        Assert.Equal(640, inspection.Width);
+        Assert.Equal(360, inspection.Height);
+        Assert.Equal("ABCD", inspection.ContentHashSha256);
     }
 
     [Fact]

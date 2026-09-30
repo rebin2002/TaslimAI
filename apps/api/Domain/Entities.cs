@@ -542,6 +542,13 @@ public sealed class StoredFile
     public string? ExtractedText { get; set; }
     public int? ExtractedTextLength { get; set; }
     public string? MetadataJson { get; set; }
+    public string? ContentHashSha256 { get; set; }
+    public string? ContainerFormat { get; set; }
+    public int? Width { get; set; }
+    public int? Height { get; set; }
+    public double? DurationSeconds { get; set; }
+    public DateTime? RetainUntil { get; set; }
+    public DateTime? DeletedAt { get; set; }
 
     public Workspace Workspace { get; set; } = null!;
     public ApplicationUser User { get; set; } = null!;
@@ -551,6 +558,7 @@ public sealed class StoredFile
     public ICollection<GenerationJobOutput> GenerationJobOutputs { get; set; } = [];
     public ICollection<Asset> Assets { get; set; } = [];
     public ICollection<AssetRepresentation> AssetRepresentations { get; set; } = [];
+    public ICollection<GeneratedMediaProvenance> GeneratedMediaProvenance { get; set; } = [];
 }
 
 public sealed class GenerationJob
@@ -594,6 +602,7 @@ public sealed class GenerationJob
     public ApplicationUser CreatedByUser { get; set; } = null!;
     public ICollection<GenerationJobOutput> Outputs { get; set; } = [];
     public ICollection<Asset> Assets { get; set; } = [];
+    public ICollection<GeneratedMediaProvenance> GeneratedMediaProvenance { get; set; } = [];
     public ICollection<ResearchSource> ResearchSources { get; set; } = [];
     public ICollection<GenerationProviderAttempt> ProviderAttempts { get; set; } = [];
 }
@@ -714,6 +723,7 @@ public sealed class Asset
     public StoredFile? StoredFile { get; set; }
     public GenerationJob? SourceGenerationJob { get; set; }
     public ICollection<AssetRepresentation> Representations { get; set; } = [];
+    public ICollection<GeneratedMediaProvenance> GeneratedMediaProvenance { get; set; } = [];
 }
 
 public sealed class AssetRepresentation
@@ -729,6 +739,32 @@ public sealed class AssetRepresentation
 
     public Asset Asset { get; set; } = null!;
     public StoredFile StoredFile { get; set; } = null!;
+}
+
+public sealed class GeneratedMediaProvenance
+{
+    public Guid Id { get; set; }
+    public Guid WorkspaceId { get; set; }
+    public Guid StoredFileId { get; set; }
+    public Guid GenerationJobId { get; set; }
+    public Guid? AssetId { get; set; }
+    public Guid? MovieTakeId { get; set; }
+    public Guid? MovieClipId { get; set; }
+    public string OutputType { get; set; } = string.Empty;
+    public string IngestionKey { get; set; } = string.Empty;
+    public string ContentHashSha256 { get; set; } = string.Empty;
+    public string? ParentContentHashSha256 { get; set; }
+    public string ChainHashSha256 { get; set; } = string.Empty;
+    public string? SafeMetadataJson { get; set; }
+    public DateTime CreatedAt { get; set; }
+    public DateTime? RetainUntil { get; set; }
+    public DateTime? CleanedAt { get; set; }
+    public string? CleanupReason { get; set; }
+
+    public Workspace Workspace { get; set; } = null!;
+    public StoredFile StoredFile { get; set; } = null!;
+    public GenerationJob GenerationJob { get; set; } = null!;
+    public Asset? Asset { get; set; }
 }
 
 public sealed class GenerationJobOutput
