@@ -12,7 +12,7 @@ namespace Taslim.Api.Controllers;
 [ApiController]
 [Authorize]
 [Route("api/movie-studio")]
-public sealed class MovieStudioController(IMovieStudioService movies, IMovieGuideService guides, IMovieStoryService stories, IMovieStoryCastService storyCast, IMovieCharacterContinuityService continuity, IMovieWorldContinuityService worldContinuity, MovieAuthorizationService authorization) : ControllerBase
+public sealed class MovieStudioController(IMovieStudioService movies, IMovieGuideService guides, IMovieStoryService stories, IMovieStoryCastService storyCast, IMovieCharacterContinuityService continuity, IMovieWorldContinuityService worldContinuity, IMovieProductionReferencePackageService productionReferences, MovieAuthorizationService authorization) : ControllerBase
 {
     [HttpGet("cinematography/presets")]
     public IActionResult CinematographyPresets() => Ok(CinematographyPresetCatalog.All);
@@ -398,6 +398,17 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieGuid
     {
         var result = await worldContinuity.GetShotAsync(GetUserId(), shotId, cancellationToken);
         return result is null ? ApiResults.Error(this, 404, "MOVIE_SHOT_NOT_FOUND", "Movie shot not found.") : Ok(result);
+    }
+
+    [HttpGet("shots/{shotId:guid}/production-references")]
+    public async Task<IActionResult> GetShotProductionReferences(Guid shotId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await productionReferences.GetForShotAsync(GetUserId(), shotId, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_SHOT_NOT_FOUND", "Movie shot not found.") : Ok(result);
+        }
+        catch (MovieProductionReferenceException exception) { return ApiResults.Error(this, 400, "MOVIE_PRODUCTION_REFERENCES_INVALID", exception.Message); }
     }
 
     [HttpGet("shots/{shotId:guid}/production")]
