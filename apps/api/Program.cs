@@ -233,6 +233,7 @@ builder.Services.AddScoped<IMovieProductionReferencePackageService, MovieProduct
 builder.Services.AddScoped<IMovieV2Service, MovieV2Service>();
 builder.Services.AddScoped<IMovieDialogueProductionService, MovieDialogueProductionService>();
 builder.Services.AddScoped<MovieDialogueVoiceExecutionStore>();
+builder.Services.AddScoped<IMovieTimelineService, MovieTimelineService>();
 builder.Services.AddScoped<IMovieFinalMasteringService, MovieFinalMasteringService>();
 builder.Services.AddScoped<IMovieTakeUpscaleEligibilityService, MovieTakeUpscaleEligibilityService>();
 builder.Services.AddSingleton<IMovieSoundtrackMediaService, UnavailableMovieSoundtrackMediaService>();

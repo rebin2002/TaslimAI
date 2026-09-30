@@ -83,6 +83,10 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
     public DbSet<MovieShot> MovieShots => Set<MovieShot>();
     public DbSet<MovieClip> MovieClips => Set<MovieClip>();
     public DbSet<MovieAssembly> MovieAssemblies => Set<MovieAssembly>();
+    public DbSet<MovieTimeline> MovieTimelines => Set<MovieTimeline>();
+    public DbSet<MovieTimelineRevision> MovieTimelineRevisions => Set<MovieTimelineRevision>();
+    public DbSet<MovieTimelineTrack> MovieTimelineTracks => Set<MovieTimelineTrack>();
+    public DbSet<MovieTimelineItem> MovieTimelineItems => Set<MovieTimelineItem>();
     public DbSet<MovieTake> MovieTakes => Set<MovieTake>();
     public DbSet<MovieTakeApproval> MovieTakeApprovals => Set<MovieTakeApproval>();
     public DbSet<MovieDialogueLine> MovieDialogueLines => Set<MovieDialogueLine>();
@@ -829,6 +833,53 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasOne(item => item.MovieProject).WithMany(item => item.Assemblies).HasForeignKey(item => item.MovieProjectId).OnDelete(DeleteBehavior.Cascade);
             entity.HasOne(item => item.GenerationJob).WithMany().HasForeignKey(item => item.GenerationJobId).OnDelete(DeleteBehavior.SetNull);
             entity.HasOne(item => item.Asset).WithMany().HasForeignKey(item => item.AssetId).OnDelete(DeleteBehavior.SetNull);
+        });
+        builder.Entity<MovieTimeline>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.HasIndex(item => item.MovieProjectId).IsUnique();
+            entity.HasIndex(item => item.CurrentRevisionId);
+            entity.HasIndex(item => item.LockedRevisionId);
+            entity.HasOne(item => item.MovieProject).WithOne().HasForeignKey<MovieTimeline>(item => item.MovieProjectId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.CurrentRevision).WithMany().HasForeignKey(item => item.CurrentRevisionId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne(item => item.LockedRevision).WithMany().HasForeignKey(item => item.LockedRevisionId).OnDelete(DeleteBehavior.SetNull);
+        });
+        builder.Entity<MovieTimelineRevision>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.Status).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.Label).HasMaxLength(160);
+            entity.Property(item => item.ChangeSummary).HasMaxLength(2_000);
+            entity.HasIndex(item => new { item.MovieTimelineId, item.RevisionNumber }).IsUnique();
+            entity.HasIndex(item => new { item.MovieTimelineId, item.Status });
+            entity.HasOne(item => item.Timeline).WithMany(item => item.Revisions).HasForeignKey(item => item.MovieTimelineId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.BaseRevision).WithMany(item => item.DerivedRevisions).HasForeignKey(item => item.BaseRevisionId).OnDelete(DeleteBehavior.Restrict);
+        });
+        builder.Entity<MovieTimelineTrack>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.Kind).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.Name).HasMaxLength(160);
+            entity.HasIndex(item => new { item.MovieTimelineRevisionId, item.TrackNumber }).IsUnique();
+            entity.HasOne(item => item.Revision).WithMany(item => item.Tracks).HasForeignKey(item => item.MovieTimelineRevisionId).OnDelete(DeleteBehavior.Cascade);
+        });
+        builder.Entity<MovieTimelineItem>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.Kind).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.Label).HasMaxLength(160);
+            entity.Property(item => item.MetadataJson).HasMaxLength(20_000);
+            entity.HasIndex(item => new { item.MovieTimelineTrackId, item.Sequence }).IsUnique();
+            entity.HasIndex(item => item.SourceTakeId);
+            entity.HasIndex(item => item.SourceAssetId);
+            entity.ToTable("MovieTimelineItems", table =>
+            {
+                table.HasCheckConstraint("CK_MovieTimelineItems_TimelineRange", "\"TimelineInMilliseconds\" >= 0 AND \"TimelineOutMilliseconds\" > \"TimelineInMilliseconds\"");
+                table.HasCheckConstraint("CK_MovieTimelineItems_Duration", "\"DurationMilliseconds\" = \"TimelineOutMilliseconds\" - \"TimelineInMilliseconds\"");
+            });
+            entity.HasOne(item => item.Track).WithMany(item => item.Items).HasForeignKey(item => item.MovieTimelineTrackId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.SourceTake).WithMany().HasForeignKey(item => item.SourceTakeId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(item => item.SourceAsset).WithMany().HasForeignKey(item => item.SourceAssetId).OnDelete(DeleteBehavior.Restrict);
         });
         builder.Entity<MovieTeamMember>(entity =>
         {
