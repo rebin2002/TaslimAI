@@ -6,7 +6,7 @@
 - **Expected base:** `origin/main` at `4142f533b4c2474586f18aee12025295c56a549d`
 - **Base verification:** passed; the required base is an ancestor of `origin/main`, and `origin/main` is an ancestor of this branch.
 - **Integration status:** complete; all 20 fixed Wave 4 source commits were cherry-picked with `-x` provenance trailers.
-- **Final branch SHA:** the commit containing this report is the final local branch tip at delivery.
+- **Final branch SHA:** provided in the delivery response after the verified report commit.
 - **Main changed:** no.
 - **Deployed:** no.
 - **Customer charging:** remains disabled (`Billing.CustomerChargingEnabled: false`).
@@ -69,6 +69,7 @@ The following defects were corrected rather than reported as gate failures:
 - Tracked-secret filename audit: **clean**.
 - Production customer charging: **disabled**.
 - Production MovieVideo, MusicGeneration, and VoiceGeneration: **absent or disabled**.
+- Disposable local E2E runtime: deterministic generation worker enabled; external providers, paid generation, and customer charging disabled.
 
 ### Backend
 
@@ -85,14 +86,66 @@ The following defects were corrected rather than reported as gate failures:
 - ESLint: **0 errors, 8 existing unused-variable warnings** in `FullMovieWorkspaceView.tsx`.
 - Next production build: **passed** with `NEXT_PUBLIC_API_URL=https://api.example.test`.
 
-### EF and database
+### EF and disposable PostgreSQL
 
-- EF model consistency: **passed** — `No changes have been made to the model since the last migration.`
-- The canonical script's disposable fresh/upgrade PostgreSQL migration steps were not run because `RUN_DB_MIGRATIONS=1`, `FRESH_DATABASE_URL`, and `UPGRADE_DATABASE_URL` were not supplied. No production database was touched.
+Provisioning was local-only: PostgreSQL 16 on `127.0.0.1:5432`, databases `taslim_wave4_fresh` and `taslim_wave4_upgrade`, user/database credentials disposable to this gate, and no production connection or data.
 
-### Browser
+Exact commands:
 
-- Browser E2E was not run because `RUN_BROWSER_E2E=1` and a disposable API/database were not supplied. This is an explicit opt-in gate in the repository script, not a failure of the executed integration gate.
+```bash
+sudo pg_ctlcluster 16 main start
+/home/ubuntu/.dotnet-tools/dotnet-ef database update \
+  --project apps/api --startup-project apps/api --configuration Release \
+  --connection 'Host=127.0.0.1;Port=5432;Database=taslim_wave4_fresh;Username=taslim_wave4;Password=wave4_disposable_only;Ssl Mode=Disable'
+git worktree add --detach /tmp/TaslimAI-wave3 4142f533b4c2474586f18aee12025295c56a549d
+cd /tmp/TaslimAI-wave3
+/home/ubuntu/.dotnet-tools/dotnet-ef database update \
+  --project apps/api --startup-project apps/api --configuration Release \
+  --connection 'Host=127.0.0.1;Port=5432;Database=taslim_wave4_upgrade;Username=taslim_wave4;Password=wave4_disposable_only;Ssl Mode=Disable'
+cd /home/ubuntu/TaslimAI
+/home/ubuntu/.dotnet-tools/dotnet-ef database update \
+  --project apps/api --startup-project apps/api --configuration Release \
+  --connection 'Host=127.0.0.1;Port=5432;Database=taslim_wave4_upgrade;Username=taslim_wave4;Password=wave4_disposable_only;Ssl Mode=Disable'
+/home/ubuntu/.dotnet-tools/dotnet-ef migrations has-pending-model-changes \
+  --project apps/api --startup-project apps/api --configuration Release
+```
+
+Results:
+
+- **Fresh schema from zero:** **61/61 migrations applied**, including **10 Wave 4 migrations**; final migration `20260930123532_AddMovieFinalAssemblyExport`.
+- **Exact Wave 3/base upgrade:** origin/main `4142f533…` applied **51 migrations**, then the integration branch applied **10 Wave 4 migrations** successfully.
+- **Upgrade schema final state:** **61/61 migrations applied**, same final migration identity as fresh.
+- **EF model consistency:** **passed** — `No changes have been made to the model since the last migration.`
+- Both disposable databases: **121 public tables, 297 foreign keys, 121 primary keys, 6 check constraints, 203 unique indexes**.
+- Required Wave 4 indexes/constraints present: generated-media ingestion-key uniqueness, worker-heartbeat worker uniqueness, caption-track sequence uniqueness, soundtrack-cue sequence uniqueness, production-checkpoint project uniqueness, canonical-timeline project uniqueness, and final-master primary key.
+- Wave 4 `Up`-method destructive-operation audit: **no `DropTable`, `DropColumn`, `DropIndex`, `DropForeignKey`, or `AlterColumn` operations** in the 10 Wave 4 `Up` methods. Earlier migration rollback/reconciliation `Down` operations were not treated as forward-release destructive changes.
+- Representative persisted/reloaded upgrade data after browser E2E: **8 MovieProjects, 4 MovieScenes, 4 MovieShots, 4 MovieProductionVersions, 2 MovieTakes**. The `E2E Operational Full Movie` reload joined **1 scene, 1 shot, and 2 production versions**; `E2E Movie V2 Workspace` reloaded **1 scene and 1 shot**. All foreign keys enforced by PostgreSQL.
+
+### Browser E2E
+
+Disposable local services used:
+
+```bash
+ASPNETCORE_URLS=http://127.0.0.1:5000 \
+ConnectionStrings__Postgres='Host=127.0.0.1;Port=5432;Database=taslim_wave4_upgrade;Username=taslim_wave4;Password=wave4_disposable_only;Ssl Mode=Disable' \
+Database__ApplyMigrations=false \
+GenerationJobs__WorkerEnabled=true \
+Ai__AllowMockProvider=true \
+DirectVideoProviders__Enabled=false \
+VideoGenerationAdapters__Enabled=false \
+Billing__CustomerChargingEnabled=false \
+dotnet run --project apps/api --no-launch-profile --configuration Release
+
+E2E_WEB_URL=http://localhost:3000 \
+E2E_API_URL=http://localhost:5000 \
+NEXT_PUBLIC_API_URL=http://localhost:5000 \
+CI=1 npm run test:e2e --workspace @taslim/web
+```
+
+- Playwright Chromium installed locally through `npx playwright install chromium`.
+- Full repository browser suite: **24 passed, 0 failed** across desktop Chromium, mobile Chromium, and RTL Chromium; final run duration **1.5 minutes**.
+- Wave 4 production workspace coverage passed, including movie workspace creation, operational persistence/reload, room navigation, Story Director flow, and no-manufactured-output assertions.
+- The deterministic `system.test` worker path passed separately **2/2**; it uses no external provider and no customer charge.
 
 ## 6. Final gate command
 
@@ -102,8 +155,10 @@ The repository command below completed with exit code 0:
 ./scripts/movie-wave4-integration-gate.sh
 ```
 
-The gate completed repository hygiene, provider/charging safety, API build, Wave 4 acceptance, Wave 3 regression, complete API regression, frontend unit tests, TypeScript, ESLint, and production frontend build successfully.
+The canonical gate completed repository hygiene, provider/charging safety, API build, Wave 4 acceptance, Wave 3 regression, complete API regression, frontend unit tests, TypeScript, ESLint, and production frontend build successfully. The separately mandatory disposable PostgreSQL fresh/upgrade and browser gates also passed as recorded above.
 
-## 7. Publication boundary
+## 7. Final status and publication boundary
+
+**READY_FOR_FINAL_RELEASE_GATE** — both mandatory PostgreSQL fresh+upgrade migration validation and actual browser E2E passed on disposable local infrastructure.
 
 This task changed only the integration branch checkout. It did not merge into `main`, deploy production, enable providers, charge customers, submit external records, or invoke paid generation.
