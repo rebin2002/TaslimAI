@@ -263,9 +263,11 @@ public sealed class FileProcessingService(
         try
         {
             logger.LogInformation("File upload started. FileId={FileId}; WorkspaceId={WorkspaceId}; StorageProvider={StorageProvider}; Extension={Extension}; SizeBytes={SizeBytes}", file.Id, workspaceId, storage.ProviderKey, file.Extension, file.SizeBytes);
-            await using (var input = upload.OpenReadStream())
+            await using (var input = new CountingReadStream(upload.OpenReadStream(), settings.MaxFileSizeBytes))
             {
                 await storage.StoreAsync(storageKey, input, cancellationToken);
+                if (input.BytesRead != validated.SizeBytes)
+                    throw new FileUploadValidationException("The uploaded file changed while it was being stored.");
             }
 
             file.Status = StoredFileStatus.Processing;
@@ -297,6 +299,11 @@ public sealed class FileProcessingService(
         }
         catch (OperationCanceledException)
         {
+            file.Status = StoredFileStatus.Failed;
+            file.TextExtractionStatus = FileExtractionStatus.Failed;
+            file.ProcessedAt = DateTime.UtcNow;
+            await db.SaveChangesAsync(CancellationToken.None);
+            await TryDeleteGeneratedObjectAsync(storageKey, file.Id, workspaceId);
             throw;
         }
         catch (FileStorageUnavailableException)
@@ -306,6 +313,7 @@ public sealed class FileProcessingService(
             file.TextExtractionStatus = FileExtractionStatus.Failed;
             file.ProcessedAt = DateTime.UtcNow;
             await db.SaveChangesAsync(CancellationToken.None);
+            await TryDeleteGeneratedObjectAsync(storageKey, file.Id, workspaceId);
             throw;
         }
         catch (FileStorageOperationException exception)
@@ -315,6 +323,17 @@ public sealed class FileProcessingService(
             file.TextExtractionStatus = FileExtractionStatus.Failed;
             file.ProcessedAt = DateTime.UtcNow;
             await db.SaveChangesAsync(CancellationToken.None);
+            await TryDeleteGeneratedObjectAsync(storageKey, file.Id, workspaceId);
+            throw;
+        }
+        catch (FileUploadValidationException exception)
+        {
+            file.Status = StoredFileStatus.Failed;
+            file.TextExtractionStatus = FileExtractionStatus.Failed;
+            file.ProcessedAt = DateTime.UtcNow;
+            await db.SaveChangesAsync(CancellationToken.None);
+            await TryDeleteGeneratedObjectAsync(storageKey, file.Id, workspaceId);
+            logger.LogWarning(exception, "File upload validation failed after storage began. FileId={FileId}; WorkspaceId={WorkspaceId}", file.Id, workspaceId);
             throw;
         }
         catch (Exception exception)
@@ -323,6 +342,7 @@ public sealed class FileProcessingService(
             file.TextExtractionStatus = FileExtractionStatus.Failed;
             file.ProcessedAt = DateTime.UtcNow;
             await db.SaveChangesAsync(CancellationToken.None);
+            await TryDeleteGeneratedObjectAsync(storageKey, file.Id, workspaceId);
             logger.LogWarning(exception, "File processing failed without logging file contents. FileId={FileId}; WorkspaceId={WorkspaceId}", file.Id, workspaceId);
             return file;
         }

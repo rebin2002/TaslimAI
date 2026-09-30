@@ -712,8 +712,22 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                 throw new MovieProductionValidationException("PRODUCTION_ASSET_ROLE_INVALID", "The asset reference role is not supported.");
             AddAsset(assetIds, reference.AssetId, reference.Role.Trim().ToLowerInvariant());
         }
-        if (assetIds.Count > 0 && await db.Assets.CountAsync(item => item.WorkspaceId == shot.Scene.MovieProject.WorkspaceId && assetIds.Keys.Contains(item.Id), cancellationToken) != assetIds.Count)
-            throw new MovieProductionValidationException("PRODUCTION_ASSET_NOT_FOUND", "Every referenced Asset must belong to the movie workspace.");
+        if (assetIds.Count > 0)
+        {
+            var productionProjectId = shot.Scene.MovieProject.ProjectId;
+            var referencedAssets = await db.Assets.AsNoTracking()
+                .Where(item => item.WorkspaceId == shot.Scene.MovieProject.WorkspaceId && assetIds.Keys.Contains(item.Id))
+                .Select(item => new { item.Id, item.ProjectId, item.Status, item.StoredFileId })
+                .ToListAsync(cancellationToken);
+            if (referencedAssets.Count != assetIds.Count)
+                throw new MovieProductionValidationException("PRODUCTION_ASSET_NOT_FOUND", "Every referenced Asset must belong to the movie workspace.");
+            if (referencedAssets.Any(item => item.Status != AssetStatus.Active
+                || item.ProjectId.HasValue && item.ProjectId != productionProjectId))
+                throw new MovieProductionValidationException("PRODUCTION_ASSET_SCOPE_INVALID", "Referenced assets must be active and belong to this movie project or its workspace.");
+            var storedFileIds = referencedAssets.Where(item => item.StoredFileId.HasValue).Select(item => item.StoredFileId!.Value).ToArray();
+            if (storedFileIds.Length > 0 && await db.StoredFiles.AsNoTracking().CountAsync(item => storedFileIds.Contains(item.Id) && item.Status == StoredFileStatus.Ready, cancellationToken) != storedFileIds.Length)
+                throw new MovieProductionValidationException("PRODUCTION_ASSET_FILE_NOT_READY", "Every referenced asset file must be ready before production can use it.");
+        }
         GenerationJob? linkedJob = null;
         if (request.GenerationJobId.HasValue)
         {
@@ -928,6 +942,12 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         var assetId = clip?.AssetId ?? version.GenerationJob.Assets.OrderByDescending(item => item.CreatedAt).Select(item => (Guid?)item.Id).FirstOrDefault();
         if (!assetId.HasValue)
             throw new MovieProductionValidationException("PRODUCTION_RENDER_OUTPUT_MISSING", "The completed render has no published Asset yet.");
+        var outputAsset = await db.Assets.AsNoTracking().Include(item => item.StoredFile)
+            .FirstOrDefaultAsync(item => item.Id == assetId && item.WorkspaceId == version.MovieShot.Scene.MovieProject.WorkspaceId
+                && item.ProjectId == version.MovieShot.Scene.MovieProject.ProjectId && item.SourceGenerationJobId == version.GenerationJobId
+                && item.Status == AssetStatus.Active, cancellationToken);
+        if (outputAsset is null || outputAsset.StoredFileId.HasValue && outputAsset.StoredFile?.Status != StoredFileStatus.Ready)
+            throw new MovieProductionValidationException("PRODUCTION_RENDER_OUTPUT_INVALID", "The completed render output is not an active, ready asset for this movie project.");
         if (request.Notes is { Length: > 4_000 })
             throw new MovieProductionValidationException("PRODUCTION_TAKE_NOTES_TOO_LARGE", "Take notes must be 4,000 characters or fewer.");
         if (!MovieQualityLevels.Supported.Contains(request.QualityLevel.Trim()))
