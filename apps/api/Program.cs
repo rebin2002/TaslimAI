@@ -225,6 +225,7 @@ builder.Services.AddScoped<INotificationEventWriter>(services => services.GetReq
 builder.Services.AddScoped<IMovieStudioService, MovieStudioService>();
 builder.Services.AddScoped<IMovieProductionGenerationOrchestrator, MovieProductionGenerationOrchestrator>();
 builder.Services.AddScoped<IMovieSoundService, MovieSoundService>();
+builder.Services.AddScoped<IMovieProductionCheckpointService, MovieProductionCheckpointService>();
 builder.Services.AddScoped<IMovieStoryCastService, MovieStoryCastService>();
 builder.Services.AddScoped<IMovieCharacterContinuityService, MovieCharacterContinuityService>();
 builder.Services.AddScoped<MovieWorldContinuityProjector>();

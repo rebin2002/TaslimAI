@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using Taslim.Api.Persistence;
@@ -11,9 +12,11 @@ using Taslim.Api.Persistence;
 namespace Taslim.Api.Persistence.Migrations
 {
     [DbContext(typeof(TaslimDbContext))]
-    partial class TaslimDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260930123217_AddMovieProductionCheckpoints")]
+    partial class AddMovieProductionCheckpoints
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -1126,91 +1129,6 @@ namespace Taslim.Api.Persistence.Migrations
                         {
                             t.HasCheckConstraint("CK_CreditLedgerEntries_NonZeroAmount", "\"Amount\" <> 0");
                         });
-                });
-
-            modelBuilder.Entity("Taslim.Api.Domain.GeneratedMediaProvenance", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<Guid?>("AssetId")
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("ChainHashSha256")
-                        .IsRequired()
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)");
-
-                    b.Property<DateTime?>("CleanedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("CleanupReason")
-                        .HasMaxLength(120)
-                        .HasColumnType("character varying(120)");
-
-                    b.Property<string>("ContentHashSha256")
-                        .IsRequired()
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<Guid>("GenerationJobId")
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("IngestionKey")
-                        .IsRequired()
-                        .HasMaxLength(240)
-                        .HasColumnType("character varying(240)");
-
-                    b.Property<Guid?>("MovieClipId")
-                        .HasColumnType("uuid");
-
-                    b.Property<Guid?>("MovieTakeId")
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("OutputType")
-                        .IsRequired()
-                        .HasMaxLength(80)
-                        .HasColumnType("character varying(80)");
-
-                    b.Property<string>("ParentContentHashSha256")
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)");
-
-                    b.Property<DateTime?>("RetainUntil")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("SafeMetadataJson")
-                        .HasMaxLength(20000)
-                        .HasColumnType("character varying(20000)");
-
-                    b.Property<Guid>("StoredFileId")
-                        .HasColumnType("uuid");
-
-                    b.Property<Guid>("WorkspaceId")
-                        .HasColumnType("uuid");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("AssetId");
-
-                    b.HasIndex("GenerationJobId");
-
-                    b.HasIndex("IngestionKey")
-                        .IsUnique();
-
-                    b.HasIndex("MovieClipId");
-
-                    b.HasIndex("MovieTakeId");
-
-                    b.HasIndex("StoredFileId");
-
-                    b.HasIndex("WorkspaceId", "CreatedAt");
-
-                    b.ToTable("GeneratedMediaProvenance");
                 });
 
             modelBuilder.Entity("Taslim.Api.Domain.GenerationJob", b =>
@@ -2448,14 +2366,6 @@ namespace Taslim.Api.Persistence.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
-                    b.Property<string>("ContainerFormat")
-                        .HasMaxLength(40)
-                        .HasColumnType("character varying(40)");
-
-                    b.Property<string>("ContentHashSha256")
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)");
-
                     b.Property<string>("ContentType")
                         .IsRequired()
                         .HasMaxLength(160)
@@ -2467,12 +2377,6 @@ namespace Taslim.Api.Persistence.Migrations
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
-                    b.Property<DateTime?>("DeletedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<double?>("DurationSeconds")
-                        .HasColumnType("double precision");
-
                     b.Property<string>("Extension")
                         .IsRequired()
                         .HasMaxLength(20)
@@ -2483,9 +2387,6 @@ namespace Taslim.Api.Persistence.Migrations
                         .HasColumnType("character varying(1000000)");
 
                     b.Property<int?>("ExtractedTextLength")
-                        .HasColumnType("integer");
-
-                    b.Property<int?>("Height")
                         .HasColumnType("integer");
 
                     b.Property<string>("MetadataJson")
@@ -2502,9 +2403,6 @@ namespace Taslim.Api.Persistence.Migrations
 
                     b.Property<Guid?>("ProjectId")
                         .HasColumnType("uuid");
-
-                    b.Property<DateTime?>("RetainUntil")
-                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("SizeBytes")
                         .HasColumnType("bigint");
@@ -2537,9 +2435,6 @@ namespace Taslim.Api.Persistence.Migrations
                     b.Property<Guid>("UserId")
                         .HasColumnType("uuid");
 
-                    b.Property<int?>("Width")
-                        .HasColumnType("integer");
-
                     b.Property<Guid>("WorkspaceId")
                         .HasColumnType("uuid");
 
@@ -2555,10 +2450,6 @@ namespace Taslim.Api.Persistence.Migrations
                         .IsUnique();
 
                     b.HasIndex("UserId", "CreatedAt");
-
-                    b.HasIndex("WorkspaceId", "ContentHashSha256")
-                        .IsUnique()
-                        .HasFilter("\"ContentHashSha256\" IS NOT NULL");
 
                     b.HasIndex("WorkspaceId", "CreatedAt");
 
@@ -3311,23 +3202,6 @@ namespace Taslim.Api.Persistence.Migrations
                     b.Property<Guid?>("AssetId")
                         .HasColumnType("uuid");
 
-                    b.Property<int>("AttemptCount")
-                        .HasColumnType("integer");
-
-                    b.Property<string>("AudioMixJson")
-                        .IsRequired()
-                        .HasMaxLength(40000)
-                        .HasColumnType("character varying(40000)");
-
-                    b.Property<string>("CaptionsJson")
-                        .IsRequired()
-                        .HasMaxLength(4000)
-                        .HasColumnType("character varying(4000)");
-
-                    b.Property<string>("CheckpointJson")
-                        .HasMaxLength(4000)
-                        .HasColumnType("character varying(4000)");
-
                     b.Property<DateTime?>("CompletedAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -3336,14 +3210,6 @@ namespace Taslim.Api.Persistence.Migrations
 
                     b.Property<Guid?>("GenerationJobId")
                         .HasColumnType("uuid");
-
-                    b.Property<string>("IdempotencyKey")
-                        .HasMaxLength(80)
-                        .HasColumnType("character varying(80)");
-
-                    b.Property<string>("LastErrorCode")
-                        .HasMaxLength(120)
-                        .HasColumnType("character varying(120)");
 
                     b.Property<string>("MetadataJson")
                         .HasMaxLength(20000)
@@ -3357,52 +3223,10 @@ namespace Taslim.Api.Persistence.Migrations
                         .HasMaxLength(20)
                         .HasColumnType("character varying(20)");
 
-                    b.Property<int>("OutputHeight")
-                        .HasColumnType("integer");
-
-                    b.Property<int>("OutputWidth")
-                        .HasColumnType("integer");
-
-                    b.Property<int>("ProgressPercent")
-                        .HasColumnType("integer");
-
-                    b.Property<string>("ProvenanceJson")
-                        .HasMaxLength(20000)
-                        .HasColumnType("character varying(20000)");
-
-                    b.Property<string>("QcResultJson")
-                        .HasMaxLength(20000)
-                        .HasColumnType("character varying(20000)");
-
-                    b.Property<string>("QcStatus")
-                        .IsRequired()
-                        .HasMaxLength(30)
-                        .HasColumnType("character varying(30)");
-
-                    b.Property<string>("RequestFingerprint")
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)");
-
-                    b.Property<Guid?>("RequestedByUserId")
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("ResolutionProfile")
-                        .IsRequired()
-                        .HasMaxLength(40)
-                        .HasColumnType("character varying(40)");
-
                     b.Property<string>("Status")
                         .IsRequired()
                         .HasMaxLength(30)
                         .HasColumnType("character varying(30)");
-
-                    b.Property<string>("TimelineJson")
-                        .IsRequired()
-                        .HasMaxLength(100000)
-                        .HasColumnType("character varying(100000)");
-
-                    b.Property<DateTime>("UpdatedAt")
-                        .HasColumnType("timestamp with time zone");
 
                     b.HasKey("Id");
 
@@ -3410,144 +3234,9 @@ namespace Taslim.Api.Persistence.Migrations
 
                     b.HasIndex("GenerationJobId");
 
-                    b.HasIndex("RequestedByUserId");
-
                     b.HasIndex("MovieProjectId", "CreatedAt");
 
-                    b.HasIndex("MovieProjectId", "IdempotencyKey")
-                        .IsUnique();
-
                     b.ToTable("MovieAssemblies");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Movies.MovieCaptionCue", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<long>("EndMilliseconds")
-                        .HasColumnType("bigint");
-
-                    b.Property<Guid>("MovieCaptionTrackId")
-                        .HasColumnType("uuid");
-
-                    b.Property<Guid?>("MovieSceneId")
-                        .HasColumnType("uuid");
-
-                    b.Property<Guid?>("MovieShotId")
-                        .HasColumnType("uuid");
-
-                    b.Property<Guid?>("MovieTakeId")
-                        .HasColumnType("uuid");
-
-                    b.Property<int>("Sequence")
-                        .HasColumnType("integer");
-
-                    b.Property<Guid?>("SpeakerCharacterId")
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("SpeakerName")
-                        .HasMaxLength(160)
-                        .HasColumnType("character varying(160)");
-
-                    b.Property<long>("StartMilliseconds")
-                        .HasColumnType("bigint");
-
-                    b.Property<string>("Text")
-                        .IsRequired()
-                        .HasMaxLength(10000)
-                        .HasColumnType("character varying(10000)");
-
-                    b.Property<DateTime>("UpdatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("MovieSceneId");
-
-                    b.HasIndex("MovieShotId");
-
-                    b.HasIndex("MovieTakeId");
-
-                    b.HasIndex("SpeakerCharacterId");
-
-                    b.HasIndex("MovieCaptionTrackId", "Sequence")
-                        .IsUnique();
-
-                    b.HasIndex("MovieCaptionTrackId", "StartMilliseconds", "EndMilliseconds");
-
-                    b.ToTable("MovieCaptionCues");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Movies.MovieCaptionTrack", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<bool>("IsDefault")
-                        .HasColumnType("boolean");
-
-                    b.Property<bool>("IsRtl")
-                        .HasColumnType("boolean");
-
-                    b.Property<string>("Language")
-                        .IsRequired()
-                        .HasMaxLength(35)
-                        .HasColumnType("character varying(35)");
-
-                    b.Property<Guid?>("MovieAssemblyId")
-                        .HasColumnType("uuid");
-
-                    b.Property<Guid>("MovieProjectId")
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("Name")
-                        .IsRequired()
-                        .HasMaxLength(160)
-                        .HasColumnType("character varying(160)");
-
-                    b.Property<int>("Sequence")
-                        .HasColumnType("integer");
-
-                    b.Property<string>("SourceFileName")
-                        .HasMaxLength(255)
-                        .HasColumnType("character varying(255)");
-
-                    b.Property<string>("SourceFormat")
-                        .HasMaxLength(10)
-                        .HasColumnType("character varying(10)");
-
-                    b.Property<string>("Status")
-                        .IsRequired()
-                        .HasMaxLength(20)
-                        .HasColumnType("character varying(20)");
-
-                    b.Property<string>("TrackType")
-                        .IsRequired()
-                        .HasMaxLength(20)
-                        .HasColumnType("character varying(20)");
-
-                    b.Property<DateTime>("UpdatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("MovieAssemblyId");
-
-                    b.HasIndex("MovieProjectId", "Sequence")
-                        .IsUnique();
-
-                    b.HasIndex("MovieProjectId", "Language", "IsDefault");
-
-                    b.ToTable("MovieCaptionTracks");
                 });
 
             modelBuilder.Entity("Taslim.Api.Movies.MovieCharacter", b =>
@@ -4144,193 +3833,6 @@ namespace Taslim.Api.Persistence.Migrations
                     b.ToTable("MovieContinuityLocks");
                 });
 
-            modelBuilder.Entity("Taslim.Api.Movies.MovieDialogueLine", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<Guid>("CreatedByUserId")
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("DeliveryNotes")
-                        .HasMaxLength(2000)
-                        .HasColumnType("character varying(2000)");
-
-                    b.Property<int>("EndMilliseconds")
-                        .HasColumnType("integer");
-
-                    b.Property<string>("Language")
-                        .IsRequired()
-                        .HasMaxLength(16)
-                        .HasColumnType("character varying(16)");
-
-                    b.Property<Guid?>("MovieCharacterId")
-                        .HasColumnType("uuid");
-
-                    b.Property<Guid>("MovieClipId")
-                        .HasColumnType("uuid");
-
-                    b.Property<Guid?>("SelectedTakeId")
-                        .HasColumnType("uuid");
-
-                    b.Property<int>("Sequence")
-                        .HasColumnType("integer");
-
-                    b.Property<string>("SpeakerName")
-                        .IsRequired()
-                        .HasMaxLength(160)
-                        .HasColumnType("character varying(160)");
-
-                    b.Property<int>("StartMilliseconds")
-                        .HasColumnType("integer");
-
-                    b.Property<string>("Status")
-                        .IsRequired()
-                        .ValueGeneratedOnAdd()
-                        .HasMaxLength(30)
-                        .HasColumnType("character varying(30)")
-                        .HasDefaultValue("Draft");
-
-                    b.Property<string>("Text")
-                        .IsRequired()
-                        .HasMaxLength(10000)
-                        .HasColumnType("character varying(10000)");
-
-                    b.Property<DateTime>("UpdatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("MovieCharacterId");
-
-                    b.HasIndex("SelectedTakeId");
-
-                    b.HasIndex("MovieClipId", "Sequence")
-                        .IsUnique();
-
-                    b.HasIndex("MovieClipId", "Status");
-
-                    b.ToTable("MovieDialogueLines");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Movies.MovieDialogueTake", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<DateTime?>("ApprovedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<Guid?>("ApprovedByUserId")
-                        .HasColumnType("uuid");
-
-                    b.Property<Guid?>("AssetId")
-                        .HasColumnType("uuid");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<int?>("DurationMilliseconds")
-                        .HasColumnType("integer");
-
-                    b.Property<Guid?>("GenerationJobId")
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("Label")
-                        .IsRequired()
-                        .HasMaxLength(160)
-                        .HasColumnType("character varying(160)");
-
-                    b.Property<string>("MetadataJson")
-                        .HasMaxLength(20000)
-                        .HasColumnType("character varying(20000)");
-
-                    b.Property<Guid>("MovieClipId")
-                        .HasColumnType("uuid");
-
-                    b.Property<Guid>("MovieDialogueLineId")
-                        .HasColumnType("uuid");
-
-                    b.Property<DateTime?>("SelectedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<Guid?>("SelectedByUserId")
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("Status")
-                        .IsRequired()
-                        .ValueGeneratedOnAdd()
-                        .HasMaxLength(30)
-                        .HasColumnType("character varying(30)")
-                        .HasDefaultValue("Planned");
-
-                    b.Property<Guid?>("StoredFileId")
-                        .HasColumnType("uuid");
-
-                    b.Property<DateTime>("UpdatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("UsageMetadataJson")
-                        .HasMaxLength(20000)
-                        .HasColumnType("character varying(20000)");
-
-                    b.Property<int>("VersionNumber")
-                        .HasColumnType("integer");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("AssetId");
-
-                    b.HasIndex("GenerationJobId");
-
-                    b.HasIndex("StoredFileId");
-
-                    b.HasIndex("MovieClipId", "Status");
-
-                    b.HasIndex("MovieDialogueLineId", "VersionNumber")
-                        .IsUnique();
-
-                    b.ToTable("MovieDialogueTakes");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Movies.MovieDialogueTakeApproval", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("Comment")
-                        .HasMaxLength(4000)
-                        .HasColumnType("character varying(4000)");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("Decision")
-                        .IsRequired()
-                        .HasMaxLength(20)
-                        .HasColumnType("character varying(20)");
-
-                    b.Property<Guid>("MovieDialogueTakeId")
-                        .HasColumnType("uuid");
-
-                    b.Property<Guid>("UserId")
-                        .HasColumnType("uuid");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("UserId");
-
-                    b.HasIndex("MovieDialogueTakeId", "CreatedAt");
-
-                    b.ToTable("MovieDialogueTakeApprovals");
-                });
-
             modelBuilder.Entity("Taslim.Api.Movies.MovieFinalMaster", b =>
                 {
                     b.Property<Guid>("Id")
@@ -4832,9 +4334,6 @@ namespace Taslim.Api.Persistence.Migrations
                     b.Property<Guid?>("GenerationJobId")
                         .HasColumnType("uuid");
 
-                    b.Property<bool>("IsLocked")
-                        .HasColumnType("boolean");
-
                     b.Property<string>("Label")
                         .HasMaxLength(160)
                         .HasColumnType("character varying(160)");
@@ -4845,12 +4344,6 @@ namespace Taslim.Api.Persistence.Migrations
                     b.Property<string>("LastFrameNotes")
                         .HasMaxLength(2000)
                         .HasColumnType("character varying(2000)");
-
-                    b.Property<DateTime?>("LockedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<Guid?>("LockedByUserId")
-                        .HasColumnType("uuid");
 
                     b.Property<Guid>("MovieShotId")
                         .HasColumnType("uuid");
@@ -4903,8 +4396,6 @@ namespace Taslim.Api.Persistence.Migrations
                     b.HasIndex("GenerationJobId");
 
                     b.HasIndex("LastFrameAssetId");
-
-                    b.HasIndex("LockedByUserId");
 
                     b.HasIndex("ReviewedByUserId");
 
@@ -5644,9 +5135,6 @@ namespace Taslim.Api.Persistence.Migrations
                         .HasMaxLength(2000)
                         .HasColumnType("character varying(2000)");
 
-                    b.Property<Guid?>("SelectedKeyframeVersionId")
-                        .HasColumnType("uuid");
-
                     b.Property<Guid?>("SelectedTakeId")
                         .HasColumnType("uuid");
 
@@ -5679,201 +5167,12 @@ namespace Taslim.Api.Persistence.Migrations
 
                     b.HasIndex("FinalTakeId");
 
-                    b.HasIndex("SelectedKeyframeVersionId");
-
                     b.HasIndex("SelectedTakeId");
 
                     b.HasIndex("MovieSceneId", "Sequence")
                         .IsUnique();
 
                     b.ToTable("MovieShots");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Movies.MovieSoundApproval", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("Comment")
-                        .HasMaxLength(2000)
-                        .HasColumnType("character varying(2000)");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("Decision")
-                        .IsRequired()
-                        .HasMaxLength(30)
-                        .HasColumnType("character varying(30)");
-
-                    b.Property<Guid>("MovieSoundTrackId")
-                        .HasColumnType("uuid");
-
-                    b.Property<Guid>("ReviewerUserId")
-                        .HasColumnType("uuid");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("ReviewerUserId");
-
-                    b.HasIndex("MovieSoundTrackId", "CreatedAt");
-
-                    b.ToTable("MovieSoundApprovals");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Movies.MovieSoundLibraryReference", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<Guid>("AssetId")
-                        .HasColumnType("uuid");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<Guid>("CreatedByUserId")
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("Label")
-                        .IsRequired()
-                        .HasMaxLength(160)
-                        .HasColumnType("character varying(160)");
-
-                    b.Property<Guid>("MovieProjectId")
-                        .HasColumnType("uuid");
-
-                    b.Property<DateTime>("UpdatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("AssetId");
-
-                    b.HasIndex("CreatedByUserId");
-
-                    b.HasIndex("MovieProjectId", "AssetId")
-                        .IsUnique();
-
-                    b.HasIndex("MovieProjectId", "UpdatedAt");
-
-                    b.ToTable("MovieSoundLibraryReferences");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Movies.MovieSoundTrack", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<DateTime?>("ApprovedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<Guid?>("ApprovedByUserId")
-                        .HasColumnType("uuid");
-
-                    b.Property<Guid?>("AssetId")
-                        .HasColumnType("uuid");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<Guid>("CreatedByUserId")
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("Description")
-                        .IsRequired()
-                        .HasMaxLength(4000)
-                        .HasColumnType("character varying(4000)");
-
-                    b.Property<int>("EndMilliseconds")
-                        .HasColumnType("integer");
-
-                    b.Property<int>("FadeInMilliseconds")
-                        .HasColumnType("integer");
-
-                    b.Property<int>("FadeOutMilliseconds")
-                        .HasColumnType("integer");
-
-                    b.Property<decimal>("GainDb")
-                        .HasPrecision(8, 2)
-                        .HasColumnType("numeric(8,2)");
-
-                    b.Property<Guid?>("GenerationJobId")
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("Kind")
-                        .IsRequired()
-                        .HasMaxLength(32)
-                        .HasColumnType("character varying(32)");
-
-                    b.Property<string>("Layer")
-                        .IsRequired()
-                        .HasMaxLength(80)
-                        .HasColumnType("character varying(80)");
-
-                    b.Property<Guid?>("LibraryReferenceId")
-                        .HasColumnType("uuid");
-
-                    b.Property<Guid>("MovieProjectId")
-                        .HasColumnType("uuid");
-
-                    b.Property<Guid?>("MovieSceneId")
-                        .HasColumnType("uuid");
-
-                    b.Property<Guid?>("MovieShotId")
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("Name")
-                        .IsRequired()
-                        .HasMaxLength(160)
-                        .HasColumnType("character varying(160)");
-
-                    b.Property<string>("ProvenanceJson")
-                        .HasMaxLength(20000)
-                        .HasColumnType("character varying(20000)");
-
-                    b.Property<string>("SourceKind")
-                        .IsRequired()
-                        .HasMaxLength(30)
-                        .HasColumnType("character varying(30)");
-
-                    b.Property<int>("StartMilliseconds")
-                        .HasColumnType("integer");
-
-                    b.Property<string>("Status")
-                        .IsRequired()
-                        .HasMaxLength(30)
-                        .HasColumnType("character varying(30)");
-
-                    b.Property<DateTime>("UpdatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("ApprovedByUserId");
-
-                    b.HasIndex("AssetId");
-
-                    b.HasIndex("CreatedByUserId");
-
-                    b.HasIndex("GenerationJobId");
-
-                    b.HasIndex("LibraryReferenceId");
-
-                    b.HasIndex("MovieSceneId");
-
-                    b.HasIndex("MovieShotId");
-
-                    b.HasIndex("MovieProjectId", "Status");
-
-                    b.HasIndex("MovieProjectId", "MovieSceneId", "StartMilliseconds");
-
-                    b.HasIndex("MovieProjectId", "MovieShotId", "StartMilliseconds");
-
-                    b.ToTable("MovieSoundTracks");
                 });
 
             modelBuilder.Entity("Taslim.Api.Movies.MovieStory", b =>
@@ -6286,210 +5585,6 @@ namespace Taslim.Api.Persistence.Migrations
                         .IsUnique();
 
                     b.ToTable("MovieTeamMemberPermissions");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Movies.MovieTimeline", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<Guid?>("CurrentRevisionId")
-                        .HasColumnType("uuid");
-
-                    b.Property<int>("CurrentRevisionNumber")
-                        .HasColumnType("integer");
-
-                    b.Property<Guid?>("LockedRevisionId")
-                        .HasColumnType("uuid");
-
-                    b.Property<int?>("LockedRevisionNumber")
-                        .HasColumnType("integer");
-
-                    b.Property<Guid>("MovieProjectId")
-                        .HasColumnType("uuid");
-
-                    b.Property<DateTime>("UpdatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("CurrentRevisionId");
-
-                    b.HasIndex("LockedRevisionId");
-
-                    b.HasIndex("MovieProjectId")
-                        .IsUnique();
-
-                    b.ToTable("MovieTimelines");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Movies.MovieTimelineItem", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<int>("DurationMilliseconds")
-                        .HasColumnType("integer");
-
-                    b.Property<string>("Kind")
-                        .IsRequired()
-                        .HasMaxLength(30)
-                        .HasColumnType("character varying(30)");
-
-                    b.Property<string>("Label")
-                        .HasMaxLength(160)
-                        .HasColumnType("character varying(160)");
-
-                    b.Property<string>("MetadataJson")
-                        .HasMaxLength(20000)
-                        .HasColumnType("character varying(20000)");
-
-                    b.Property<Guid>("MovieTimelineTrackId")
-                        .HasColumnType("uuid");
-
-                    b.Property<int>("Sequence")
-                        .HasColumnType("integer");
-
-                    b.Property<Guid?>("SourceAssetId")
-                        .HasColumnType("uuid");
-
-                    b.Property<int?>("SourceInMilliseconds")
-                        .HasColumnType("integer");
-
-                    b.Property<int?>("SourceOutMilliseconds")
-                        .HasColumnType("integer");
-
-                    b.Property<Guid?>("SourceTakeId")
-                        .HasColumnType("uuid");
-
-                    b.Property<int>("TimelineInMilliseconds")
-                        .HasColumnType("integer");
-
-                    b.Property<int>("TimelineOutMilliseconds")
-                        .HasColumnType("integer");
-
-                    b.Property<DateTime>("UpdatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("SourceAssetId");
-
-                    b.HasIndex("SourceTakeId");
-
-                    b.HasIndex("MovieTimelineTrackId", "Sequence")
-                        .IsUnique();
-
-                    b.ToTable("MovieTimelineItems", t =>
-                        {
-                            t.HasCheckConstraint("CK_MovieTimelineItems_Duration", "\"DurationMilliseconds\" = \"TimelineOutMilliseconds\" - \"TimelineInMilliseconds\"");
-
-                            t.HasCheckConstraint("CK_MovieTimelineItems_TimelineRange", "\"TimelineInMilliseconds\" >= 0 AND \"TimelineOutMilliseconds\" > \"TimelineInMilliseconds\"");
-                        });
-                });
-
-            modelBuilder.Entity("Taslim.Api.Movies.MovieTimelineRevision", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<Guid?>("BaseRevisionId")
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("ChangeSummary")
-                        .HasMaxLength(2000)
-                        .HasColumnType("character varying(2000)");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<Guid>("CreatedByUserId")
-                        .HasColumnType("uuid");
-
-                    b.Property<int>("DurationMilliseconds")
-                        .HasColumnType("integer");
-
-                    b.Property<string>("Label")
-                        .HasMaxLength(160)
-                        .HasColumnType("character varying(160)");
-
-                    b.Property<DateTime?>("LockedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<Guid?>("LockedByUserId")
-                        .HasColumnType("uuid");
-
-                    b.Property<Guid>("MovieTimelineId")
-                        .HasColumnType("uuid");
-
-                    b.Property<int>("RevisionNumber")
-                        .HasColumnType("integer");
-
-                    b.Property<string>("Status")
-                        .IsRequired()
-                        .HasMaxLength(30)
-                        .HasColumnType("character varying(30)");
-
-                    b.Property<DateTime>("UpdatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("BaseRevisionId");
-
-                    b.HasIndex("MovieTimelineId", "RevisionNumber")
-                        .IsUnique();
-
-                    b.HasIndex("MovieTimelineId", "Status");
-
-                    b.ToTable("MovieTimelineRevisions");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Movies.MovieTimelineTrack", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<bool>("IsMuted")
-                        .HasColumnType("boolean");
-
-                    b.Property<string>("Kind")
-                        .IsRequired()
-                        .HasMaxLength(30)
-                        .HasColumnType("character varying(30)");
-
-                    b.Property<Guid>("MovieTimelineRevisionId")
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("Name")
-                        .HasMaxLength(160)
-                        .HasColumnType("character varying(160)");
-
-                    b.Property<int>("TrackNumber")
-                        .HasColumnType("integer");
-
-                    b.Property<DateTime>("UpdatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("MovieTimelineRevisionId", "TrackNumber")
-                        .IsUnique();
-
-                    b.ToTable("MovieTimelineTracks");
                 });
 
             modelBuilder.Entity("Taslim.Api.Movies.MovieVideoProviderExecution", b =>
@@ -7268,50 +6363,6 @@ namespace Taslim.Api.Persistence.Migrations
                     b.Navigation("Workspace");
                 });
 
-            modelBuilder.Entity("Taslim.Api.Domain.GeneratedMediaProvenance", b =>
-                {
-                    b.HasOne("Taslim.Api.Domain.Asset", "Asset")
-                        .WithMany("GeneratedMediaProvenance")
-                        .HasForeignKey("AssetId")
-                        .OnDelete(DeleteBehavior.SetNull);
-
-                    b.HasOne("Taslim.Api.Domain.GenerationJob", "GenerationJob")
-                        .WithMany("GeneratedMediaProvenance")
-                        .HasForeignKey("GenerationJobId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.HasOne("Taslim.Api.Movies.MovieClip", null)
-                        .WithMany()
-                        .HasForeignKey("MovieClipId")
-                        .OnDelete(DeleteBehavior.SetNull);
-
-                    b.HasOne("Taslim.Api.Movies.MovieTake", null)
-                        .WithMany()
-                        .HasForeignKey("MovieTakeId")
-                        .OnDelete(DeleteBehavior.SetNull);
-
-                    b.HasOne("Taslim.Api.Domain.StoredFile", "StoredFile")
-                        .WithMany("GeneratedMediaProvenance")
-                        .HasForeignKey("StoredFileId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.HasOne("Taslim.Api.Domain.Workspace", "Workspace")
-                        .WithMany()
-                        .HasForeignKey("WorkspaceId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.Navigation("Asset");
-
-                    b.Navigation("GenerationJob");
-
-                    b.Navigation("StoredFile");
-
-                    b.Navigation("Workspace");
-                });
-
             modelBuilder.Entity("Taslim.Api.Domain.GenerationJob", b =>
                 {
                     b.HasOne("Taslim.Api.Domain.ApplicationUser", "CreatedByUser")
@@ -7876,73 +6927,9 @@ namespace Taslim.Api.Persistence.Migrations
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
 
-                    b.HasOne("Taslim.Api.Domain.ApplicationUser", "RequestedByUser")
-                        .WithMany()
-                        .HasForeignKey("RequestedByUserId")
-                        .OnDelete(DeleteBehavior.Restrict);
-
                     b.Navigation("Asset");
 
                     b.Navigation("GenerationJob");
-
-                    b.Navigation("MovieProject");
-
-                    b.Navigation("RequestedByUser");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Movies.MovieCaptionCue", b =>
-                {
-                    b.HasOne("Taslim.Api.Movies.MovieCaptionTrack", "MovieCaptionTrack")
-                        .WithMany("Cues")
-                        .HasForeignKey("MovieCaptionTrackId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.HasOne("Taslim.Api.Movies.MovieScene", "MovieScene")
-                        .WithMany()
-                        .HasForeignKey("MovieSceneId")
-                        .OnDelete(DeleteBehavior.SetNull);
-
-                    b.HasOne("Taslim.Api.Movies.MovieShot", "MovieShot")
-                        .WithMany()
-                        .HasForeignKey("MovieShotId")
-                        .OnDelete(DeleteBehavior.SetNull);
-
-                    b.HasOne("Taslim.Api.Movies.MovieTake", "MovieTake")
-                        .WithMany()
-                        .HasForeignKey("MovieTakeId")
-                        .OnDelete(DeleteBehavior.SetNull);
-
-                    b.HasOne("Taslim.Api.Movies.MovieCharacter", "SpeakerCharacter")
-                        .WithMany()
-                        .HasForeignKey("SpeakerCharacterId")
-                        .OnDelete(DeleteBehavior.SetNull);
-
-                    b.Navigation("MovieCaptionTrack");
-
-                    b.Navigation("MovieScene");
-
-                    b.Navigation("MovieShot");
-
-                    b.Navigation("MovieTake");
-
-                    b.Navigation("SpeakerCharacter");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Movies.MovieCaptionTrack", b =>
-                {
-                    b.HasOne("Taslim.Api.Movies.MovieAssembly", "MovieAssembly")
-                        .WithMany("CaptionTracks")
-                        .HasForeignKey("MovieAssemblyId")
-                        .OnDelete(DeleteBehavior.SetNull);
-
-                    b.HasOne("Taslim.Api.Movies.MovieProject", "MovieProject")
-                        .WithMany("CaptionTracks")
-                        .HasForeignKey("MovieProjectId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("MovieAssembly");
 
                     b.Navigation("MovieProject");
                 });
@@ -8197,90 +7184,6 @@ namespace Taslim.Api.Persistence.Migrations
                     b.Navigation("MovieProject");
                 });
 
-            modelBuilder.Entity("Taslim.Api.Movies.MovieDialogueLine", b =>
-                {
-                    b.HasOne("Taslim.Api.Movies.MovieCharacter", "MovieCharacter")
-                        .WithMany()
-                        .HasForeignKey("MovieCharacterId")
-                        .OnDelete(DeleteBehavior.SetNull);
-
-                    b.HasOne("Taslim.Api.Movies.MovieClip", "MovieClip")
-                        .WithMany("DialogueLines")
-                        .HasForeignKey("MovieClipId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.HasOne("Taslim.Api.Movies.MovieDialogueTake", "SelectedTake")
-                        .WithMany()
-                        .HasForeignKey("SelectedTakeId")
-                        .OnDelete(DeleteBehavior.SetNull);
-
-                    b.Navigation("MovieCharacter");
-
-                    b.Navigation("MovieClip");
-
-                    b.Navigation("SelectedTake");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Movies.MovieDialogueTake", b =>
-                {
-                    b.HasOne("Taslim.Api.Domain.Asset", "Asset")
-                        .WithMany()
-                        .HasForeignKey("AssetId")
-                        .OnDelete(DeleteBehavior.SetNull);
-
-                    b.HasOne("Taslim.Api.Domain.GenerationJob", "GenerationJob")
-                        .WithMany()
-                        .HasForeignKey("GenerationJobId")
-                        .OnDelete(DeleteBehavior.SetNull);
-
-                    b.HasOne("Taslim.Api.Movies.MovieClip", "MovieClip")
-                        .WithMany()
-                        .HasForeignKey("MovieClipId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.HasOne("Taslim.Api.Movies.MovieDialogueLine", "DialogueLine")
-                        .WithMany("Takes")
-                        .HasForeignKey("MovieDialogueLineId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.HasOne("Taslim.Api.Domain.StoredFile", "StoredFile")
-                        .WithMany()
-                        .HasForeignKey("StoredFileId")
-                        .OnDelete(DeleteBehavior.SetNull);
-
-                    b.Navigation("Asset");
-
-                    b.Navigation("DialogueLine");
-
-                    b.Navigation("GenerationJob");
-
-                    b.Navigation("MovieClip");
-
-                    b.Navigation("StoredFile");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Movies.MovieDialogueTakeApproval", b =>
-                {
-                    b.HasOne("Taslim.Api.Movies.MovieDialogueTake", "Take")
-                        .WithMany("Approvals")
-                        .HasForeignKey("MovieDialogueTakeId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.HasOne("Taslim.Api.Domain.ApplicationUser", "User")
-                        .WithMany()
-                        .HasForeignKey("UserId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.Navigation("Take");
-
-                    b.Navigation("User");
-                });
-
             modelBuilder.Entity("Taslim.Api.Movies.MovieFinalMaster", b =>
                 {
                     b.HasOne("Taslim.Api.Domain.GenerationJob", "GenerationJob")
@@ -8526,11 +7429,6 @@ namespace Taslim.Api.Persistence.Migrations
                         .HasForeignKey("LastFrameAssetId")
                         .OnDelete(DeleteBehavior.SetNull);
 
-                    b.HasOne("Taslim.Api.Domain.ApplicationUser", "LockedByUser")
-                        .WithMany()
-                        .HasForeignKey("LockedByUserId")
-                        .OnDelete(DeleteBehavior.Restrict);
-
                     b.HasOne("Taslim.Api.Movies.MovieShot", "MovieShot")
                         .WithMany("ProductionVersions")
                         .HasForeignKey("MovieShotId")
@@ -8556,8 +7454,6 @@ namespace Taslim.Api.Persistence.Migrations
                     b.Navigation("GenerationJob");
 
                     b.Navigation("LastFrameAsset");
-
-                    b.Navigation("LockedByUser");
 
                     b.Navigation("MovieShot");
 
@@ -8824,11 +7720,6 @@ namespace Taslim.Api.Persistence.Migrations
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
 
-                    b.HasOne("Taslim.Api.Movies.MovieProductionVersion", "SelectedKeyframeVersion")
-                        .WithMany()
-                        .HasForeignKey("SelectedKeyframeVersionId")
-                        .OnDelete(DeleteBehavior.SetNull);
-
                     b.HasOne("Taslim.Api.Movies.MovieTake", "SelectedTake")
                         .WithMany()
                         .HasForeignKey("SelectedTakeId")
@@ -8838,116 +7729,7 @@ namespace Taslim.Api.Persistence.Migrations
 
                     b.Navigation("Scene");
 
-                    b.Navigation("SelectedKeyframeVersion");
-
                     b.Navigation("SelectedTake");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Movies.MovieSoundApproval", b =>
-                {
-                    b.HasOne("Taslim.Api.Movies.MovieSoundTrack", "Track")
-                        .WithMany("Approvals")
-                        .HasForeignKey("MovieSoundTrackId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.HasOne("Taslim.Api.Domain.ApplicationUser", "ReviewerUser")
-                        .WithMany()
-                        .HasForeignKey("ReviewerUserId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.Navigation("ReviewerUser");
-
-                    b.Navigation("Track");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Movies.MovieSoundLibraryReference", b =>
-                {
-                    b.HasOne("Taslim.Api.Domain.Asset", "Asset")
-                        .WithMany()
-                        .HasForeignKey("AssetId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.HasOne("Taslim.Api.Domain.ApplicationUser", "CreatedByUser")
-                        .WithMany()
-                        .HasForeignKey("CreatedByUserId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.HasOne("Taslim.Api.Movies.MovieProject", "MovieProject")
-                        .WithMany()
-                        .HasForeignKey("MovieProjectId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("Asset");
-
-                    b.Navigation("CreatedByUser");
-
-                    b.Navigation("MovieProject");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Movies.MovieSoundTrack", b =>
-                {
-                    b.HasOne("Taslim.Api.Domain.ApplicationUser", "ApprovedByUser")
-                        .WithMany()
-                        .HasForeignKey("ApprovedByUserId")
-                        .OnDelete(DeleteBehavior.Restrict);
-
-                    b.HasOne("Taslim.Api.Domain.Asset", "Asset")
-                        .WithMany()
-                        .HasForeignKey("AssetId")
-                        .OnDelete(DeleteBehavior.SetNull);
-
-                    b.HasOne("Taslim.Api.Domain.ApplicationUser", "CreatedByUser")
-                        .WithMany()
-                        .HasForeignKey("CreatedByUserId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.HasOne("Taslim.Api.Domain.GenerationJob", "GenerationJob")
-                        .WithMany()
-                        .HasForeignKey("GenerationJobId")
-                        .OnDelete(DeleteBehavior.SetNull);
-
-                    b.HasOne("Taslim.Api.Movies.MovieSoundLibraryReference", "LibraryReference")
-                        .WithMany("Tracks")
-                        .HasForeignKey("LibraryReferenceId")
-                        .OnDelete(DeleteBehavior.SetNull);
-
-                    b.HasOne("Taslim.Api.Movies.MovieProject", "MovieProject")
-                        .WithMany()
-                        .HasForeignKey("MovieProjectId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.HasOne("Taslim.Api.Movies.MovieScene", "MovieScene")
-                        .WithMany()
-                        .HasForeignKey("MovieSceneId")
-                        .OnDelete(DeleteBehavior.Cascade);
-
-                    b.HasOne("Taslim.Api.Movies.MovieShot", "MovieShot")
-                        .WithMany()
-                        .HasForeignKey("MovieShotId")
-                        .OnDelete(DeleteBehavior.Cascade);
-
-                    b.Navigation("ApprovedByUser");
-
-                    b.Navigation("Asset");
-
-                    b.Navigation("CreatedByUser");
-
-                    b.Navigation("GenerationJob");
-
-                    b.Navigation("LibraryReference");
-
-                    b.Navigation("MovieProject");
-
-                    b.Navigation("MovieScene");
-
-                    b.Navigation("MovieShot");
                 });
 
             modelBuilder.Entity("Taslim.Api.Movies.MovieStory", b =>
@@ -9091,85 +7873,6 @@ namespace Taslim.Api.Persistence.Migrations
                         .IsRequired();
 
                     b.Navigation("MovieTeamMember");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Movies.MovieTimeline", b =>
-                {
-                    b.HasOne("Taslim.Api.Movies.MovieTimelineRevision", "CurrentRevision")
-                        .WithMany()
-                        .HasForeignKey("CurrentRevisionId")
-                        .OnDelete(DeleteBehavior.SetNull);
-
-                    b.HasOne("Taslim.Api.Movies.MovieTimelineRevision", "LockedRevision")
-                        .WithMany()
-                        .HasForeignKey("LockedRevisionId")
-                        .OnDelete(DeleteBehavior.SetNull);
-
-                    b.HasOne("Taslim.Api.Movies.MovieProject", "MovieProject")
-                        .WithOne()
-                        .HasForeignKey("Taslim.Api.Movies.MovieTimeline", "MovieProjectId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("CurrentRevision");
-
-                    b.Navigation("LockedRevision");
-
-                    b.Navigation("MovieProject");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Movies.MovieTimelineItem", b =>
-                {
-                    b.HasOne("Taslim.Api.Movies.MovieTimelineTrack", "Track")
-                        .WithMany("Items")
-                        .HasForeignKey("MovieTimelineTrackId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.HasOne("Taslim.Api.Domain.Asset", "SourceAsset")
-                        .WithMany()
-                        .HasForeignKey("SourceAssetId")
-                        .OnDelete(DeleteBehavior.Restrict);
-
-                    b.HasOne("Taslim.Api.Movies.MovieTake", "SourceTake")
-                        .WithMany()
-                        .HasForeignKey("SourceTakeId")
-                        .OnDelete(DeleteBehavior.Restrict);
-
-                    b.Navigation("SourceAsset");
-
-                    b.Navigation("SourceTake");
-
-                    b.Navigation("Track");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Movies.MovieTimelineRevision", b =>
-                {
-                    b.HasOne("Taslim.Api.Movies.MovieTimelineRevision", "BaseRevision")
-                        .WithMany("DerivedRevisions")
-                        .HasForeignKey("BaseRevisionId")
-                        .OnDelete(DeleteBehavior.Restrict);
-
-                    b.HasOne("Taslim.Api.Movies.MovieTimeline", "Timeline")
-                        .WithMany("Revisions")
-                        .HasForeignKey("MovieTimelineId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("BaseRevision");
-
-                    b.Navigation("Timeline");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Movies.MovieTimelineTrack", b =>
-                {
-                    b.HasOne("Taslim.Api.Movies.MovieTimelineRevision", "Revision")
-                        .WithMany("Tracks")
-                        .HasForeignKey("MovieTimelineRevisionId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("Revision");
                 });
 
             modelBuilder.Entity("Taslim.Api.Movies.MovieVideoProviderExecution", b =>
@@ -9399,8 +8102,6 @@ namespace Taslim.Api.Persistence.Migrations
 
             modelBuilder.Entity("Taslim.Api.Domain.Asset", b =>
                 {
-                    b.Navigation("GeneratedMediaProvenance");
-
                     b.Navigation("Representations");
                 });
 
@@ -9434,8 +8135,6 @@ namespace Taslim.Api.Persistence.Migrations
             modelBuilder.Entity("Taslim.Api.Domain.GenerationJob", b =>
                 {
                     b.Navigation("Assets");
-
-                    b.Navigation("GeneratedMediaProvenance");
 
                     b.Navigation("Outputs");
 
@@ -9475,8 +8174,6 @@ namespace Taslim.Api.Persistence.Migrations
                     b.Navigation("Assets");
 
                     b.Navigation("Attachments");
-
-                    b.Navigation("GeneratedMediaProvenance");
 
                     b.Navigation("GenerationJobOutputs");
                 });
@@ -9528,16 +8225,6 @@ namespace Taslim.Api.Persistence.Migrations
                     b.Navigation("Sequences");
                 });
 
-            modelBuilder.Entity("Taslim.Api.Movies.MovieAssembly", b =>
-                {
-                    b.Navigation("CaptionTracks");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Movies.MovieCaptionTrack", b =>
-                {
-                    b.Navigation("Cues");
-                });
-
             modelBuilder.Entity("Taslim.Api.Movies.MovieCharacter", b =>
                 {
                     b.Navigation("ContinuityLocks");
@@ -9554,11 +8241,6 @@ namespace Taslim.Api.Persistence.Migrations
                     b.Navigation("ContinuityLocks");
                 });
 
-            modelBuilder.Entity("Taslim.Api.Movies.MovieClip", b =>
-                {
-                    b.Navigation("DialogueLines");
-                });
-
             modelBuilder.Entity("Taslim.Api.Movies.MovieComment", b =>
                 {
                     b.Navigation("Mentions");
@@ -9567,16 +8249,6 @@ namespace Taslim.Api.Persistence.Migrations
             modelBuilder.Entity("Taslim.Api.Movies.MovieContinuityGuide", b =>
                 {
                     b.Navigation("Revisions");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Movies.MovieDialogueLine", b =>
-                {
-                    b.Navigation("Takes");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Movies.MovieDialogueTake", b =>
-                {
-                    b.Navigation("Approvals");
                 });
 
             modelBuilder.Entity("Taslim.Api.Movies.MovieProductionVersion", b =>
@@ -9595,8 +8267,6 @@ namespace Taslim.Api.Persistence.Migrations
                     b.Navigation("Assemblies");
 
                     b.Navigation("Assignments");
-
-                    b.Navigation("CaptionTracks");
 
                     b.Navigation("Characters");
 
@@ -9665,16 +8335,6 @@ namespace Taslim.Api.Persistence.Migrations
                     b.Navigation("Takes");
                 });
 
-            modelBuilder.Entity("Taslim.Api.Movies.MovieSoundLibraryReference", b =>
-                {
-                    b.Navigation("Tracks");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Movies.MovieSoundTrack", b =>
-                {
-                    b.Navigation("Approvals");
-                });
-
             modelBuilder.Entity("Taslim.Api.Movies.MovieStory", b =>
                 {
                     b.Navigation("Revisions");
@@ -9697,23 +8357,6 @@ namespace Taslim.Api.Persistence.Migrations
             modelBuilder.Entity("Taslim.Api.Movies.MovieTeamMember", b =>
                 {
                     b.Navigation("PermissionOverrides");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Movies.MovieTimeline", b =>
-                {
-                    b.Navigation("Revisions");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Movies.MovieTimelineRevision", b =>
-                {
-                    b.Navigation("DerivedRevisions");
-
-                    b.Navigation("Tracks");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Movies.MovieTimelineTrack", b =>
-                {
-                    b.Navigation("Items");
                 });
 
             modelBuilder.Entity("Taslim.Api.Movies.MovieWorldReference", b =>

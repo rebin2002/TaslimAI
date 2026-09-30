@@ -2,6 +2,7 @@ using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Taslim.Api.Contracts;
+using Taslim.Api.Generation;
 using Taslim.Api.Infrastructure;
 using Taslim.Api.Movies;
 
@@ -10,7 +11,7 @@ namespace Taslim.Api.Controllers;
 [ApiController]
 [Authorize]
 [Route("api/movie-studio")]
-public sealed class MovieStudioV2Controller(IMovieV2Service movies, IMovieScenesService scenes, IMovieFinalMasteringService mastering, IMovieTakeUpscaleEligibilityService upscaleEligibility) : ControllerBase
+public sealed class MovieStudioV2Controller(IMovieV2Service movies, IMovieScenesService scenes, IMovieFinalMasteringService mastering, IMovieTakeUpscaleEligibilityService upscaleEligibility, IMovieProductionCheckpointService checkpoints) : ControllerBase
 {
     [HttpGet("projects/{id:guid}/hierarchy")]
     public async Task<IActionResult> Hierarchy(Guid id, CancellationToken cancellationToken) => await Execute(async () =>
@@ -24,6 +25,21 @@ public sealed class MovieStudioV2Controller(IMovieV2Service movies, IMovieScenes
     {
         var result = await movies.GetOverviewAsync(UserId(), id, cancellationToken);
         return result is null ? NotFoundResult("MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result);
+    });
+
+    [HttpGet("projects/{id:guid}/production/checkpoint")]
+    public async Task<IActionResult> ProductionCheckpoint(Guid id, CancellationToken cancellationToken) => await Execute(async () =>
+    {
+        var result = await checkpoints.GetAsync(UserId(), id, cancellationToken);
+        return result is null ? NotFoundResult("MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result);
+    });
+
+    [HttpPost("projects/{id:guid}/production/checkpoint/recover")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> RecoverProduction(Guid id, MovieProductionRecoveryRequest request, CancellationToken cancellationToken) => await Execute(async () =>
+    {
+        var result = await checkpoints.RecoverAsync(UserId(), id, request, cancellationToken, Request.Headers["Idempotency-Key"].FirstOrDefault());
+        return result is null ? NotFoundResult("MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Accepted(result);
     });
 
     [HttpGet("projects/{id:guid}/scenes/workspace")]
@@ -174,6 +190,9 @@ public sealed class MovieStudioV2Controller(IMovieV2Service movies, IMovieScenes
         catch (MovieV2ValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_V2_REQUEST_INVALID", exception.Message); }
         catch (MovieScenesWorkflowException exception) { return ApiResults.Error(this, 409, exception.Code, exception.Message); }
         catch (MovieFinalMasteringValidationException exception) { return ApiResults.Error(this, 409, exception.Code, exception.Message); }
+        catch (MovieProductionRecoveryException exception) { return ApiResults.Error(this, 409, exception.Code, exception.Message); }
+        catch (GenerationJobForbiddenException) { return ApiResults.Error(this, 403, "MOVIE_PERMISSION_DENIED", "You do not have permission to recover this production pass."); }
+        catch (GenerationJobValidationException exception) { return ApiResults.Error(this, 409, exception.Code, exception.Message); }
         catch (MovieCollaborationForbiddenException exception) { return ApiResults.Error(this, 403, "MOVIE_PERMISSION_DENIED", exception.Message); }
         catch (MovieV2NotFoundException) { return NotFoundResult("MOVIE_RESOURCE_NOT_FOUND", "Movie resource not found."); }
     }

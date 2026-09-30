@@ -150,6 +150,15 @@ describe("Full Movie workspace foundation", () => {
     expect(workspaceSource).not.toContain("Generation Jobs, cost guardrails, provider attempts");
   });
 
+  it("surfaces a durable project checkpoint with blocked dependencies and safe recovery", () => {
+    expect(workspaceSource).toContain("getMovieProductionCheckpoint");
+    expect(workspaceSource).toContain("recoverMovieProduction");
+    expect(workspaceSource).toContain("Production can resume safely");
+    expect(workspaceSource).toContain("Blocked dependencies");
+    expect(workspaceSource).toContain("Resume safely");
+    expect(workspaceSource).toContain("Progress is derived from persisted shot, version, take, and job states.");
+  });
+
   it("keeps one Director contextual across rooms and targets real shots", () => {
     expect(workspaceSource).toContain("<MovieDirectorPanel");
     expect(workspaceSource).toContain("sceneShotCount");
