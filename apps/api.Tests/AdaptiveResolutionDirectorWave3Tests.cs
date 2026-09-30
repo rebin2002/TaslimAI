@@ -2,12 +2,13 @@ using System.Text.Json;
 using Taslim.Api.Movies;
 using Taslim.Api.Movies.AdaptiveResolution;
 using Xunit;
+using Wave3AdaptiveResolutionDirector = Taslim.Api.Movies.AdaptiveResolution.AdaptiveResolutionDirector;
 
 namespace Taslim.Api.Tests;
 
 public sealed class AdaptiveResolutionDirectorWave3Tests
 {
-    private readonly AdaptiveResolutionDirector director = new();
+    private readonly Wave3AdaptiveResolutionDirector director = new();
 
     [Fact]
     public void Fast_1080p_insert_uses_low_source_when_quality_floor_is_met()

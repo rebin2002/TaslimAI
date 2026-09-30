@@ -4,6 +4,7 @@ using System.Text.Json.Serialization;
 using Microsoft.Extensions.Options;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
+using Taslim.Api.Files;
 
 namespace Taslim.Api.Movies;
 
@@ -15,7 +16,8 @@ namespace Taslim.Api.Movies;
 public sealed class ManusMovieVideoProvider(
     HttpClient httpClient,
     IOptions<MovieVideoOptions> options,
-    ILogger<ManusMovieVideoProvider> logger) : IMovieVideoProvider
+    ILogger<ManusMovieVideoProvider> logger,
+    IProviderUrlPolicy? urlPolicy = null) : IMovieVideoProvider
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -26,6 +28,7 @@ public sealed class ManusMovieVideoProvider(
         [MovieStudioOperations.QuickMovie, MovieStudioOperations.SceneClip];
 
     private readonly MovieVideoOptions settings = options.Value;
+    private readonly IProviderUrlPolicy downloadUrlPolicy = urlPolicy ?? new ProviderUrlPolicy();
     private ManusMovieVideoOptions Manus => settings.Manus;
 
     public string Key => "manus";
@@ -42,6 +45,15 @@ public sealed class ManusMovieVideoProvider(
     public async Task<MovieVideoSubmission> SubmitAsync(MovieVideoGenerationRequest request, CancellationToken cancellationToken)
     {
         EnsureAvailable();
+        if (!string.IsNullOrWhiteSpace(request.SourceImageUri)
+            && !request.SourceImageUri.TrimStart().StartsWith("data:image/", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!Uri.TryCreate(request.SourceImageUri.Trim(), UriKind.Absolute, out var sourceUri)
+                || sourceUri.Scheme != Uri.UriSchemeHttps)
+                throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);
+            try { await downloadUrlPolicy.EnsureSafeAsync(sourceUri, cancellationToken); }
+            catch (InvalidDataException) { throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false); }
+        }
         var payload = BuildCreateRequest(request);
         var body = await SendJsonAsync(
             HttpMethod.Post,
@@ -132,6 +144,8 @@ public sealed class ManusMovieVideoProvider(
             || !string.Equals(metadata.ProviderTaskId, providerJobId, StringComparison.Ordinal)
             || !TryGetHttpsUri(metadata.OutputUrl, out var outputUri))
             throw new MovieVideoProviderOutputException();
+        try { await downloadUrlPolicy.EnsureSafeAsync(outputUri, cancellationToken); }
+        catch (InvalidDataException) { throw new MovieVideoProviderOutputException(); }
 
         var contentType = NormalizeVideoContentType(metadata.ContentType, outputUri);
         var fileName = NormalizeFileName(metadata.FileName, outputUri);

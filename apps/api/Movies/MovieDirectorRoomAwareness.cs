@@ -77,7 +77,7 @@ public sealed class MovieDirectorPlanningActionExecutor(string actionType) : IDi
 {
     public string ActionType => actionType;
 
-    public Task<DirectorActionExecution> ExecuteAsync(DirectorAction action, CancellationToken cancellationToken = default)
+    public Task<DirectorActionExecution> ExecuteAsync(DirectorAction action, Guid executingUserId, CancellationToken cancellationToken = default)
     {
         DirectorRoomActionPayload? payload;
         try { payload = System.Text.Json.JsonSerializer.Deserialize<DirectorRoomActionPayload>(action.PayloadJson, DirectorJson.Options); }
@@ -97,4 +97,6 @@ public sealed class MovieDirectorPlanningActionExecutor(string actionType) : IDi
         }, DirectorJson.Options);
         return Task.FromResult(new DirectorActionExecution(true, null, "The Director recorded a room-scoped planning result; no media provider was called.", result));
     }
+
+    public Task<DirectorActionExecution> ExecuteAsync(DirectorAction action, CancellationToken cancellationToken = default) => ExecuteAsync(action, Guid.Empty, cancellationToken);
 }

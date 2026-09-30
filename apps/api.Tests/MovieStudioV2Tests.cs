@@ -129,6 +129,27 @@ public sealed class MovieStudioV2Tests
     }
 
     [Fact]
+    public async Task Take_rejects_archived_or_cross_project_asset_even_when_workspace_matches()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        var (userId, movieId, shotId) = await SeedAsync(db);
+        var movie = await db.MovieProjects.SingleAsync(item => item.Id == movieId);
+        var otherProject = new Project { Id = Guid.NewGuid(), WorkspaceId = movie.WorkspaceId, Name = "Other project", CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow };
+        db.Projects.Add(otherProject);
+        db.Assets.Add(new Asset { Id = Guid.NewGuid(), WorkspaceId = movie.WorkspaceId, ProjectId = otherProject.Id, CreatedByUserId = userId, Name = "foreign", Status = AssetStatus.Active, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow });
+        var archivedId = Guid.NewGuid();
+        db.Assets.Add(new Asset { Id = archivedId, WorkspaceId = movie.WorkspaceId, ProjectId = movie.ProjectId, CreatedByUserId = userId, Name = "archived", Status = AssetStatus.Archived, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow });
+        await db.SaveChangesAsync();
+        var foreignId = await db.Assets.Where(item => item.Name == "foreign").Select(item => item.Id).SingleAsync();
+        var service = new MovieV2Service(db, new WorkspaceAccessService(db));
+
+        await Assert.ThrowsAsync<MovieV2ValidationException>(() => service.AddTakeAsync(userId, shotId, new MovieV2TakeRequest { AssetId = foreignId }, CancellationToken.None));
+        await Assert.ThrowsAsync<MovieV2ValidationException>(() => service.AddTakeAsync(userId, shotId, new MovieV2TakeRequest { AssetId = archivedId }, CancellationToken.None));
+    }
+
+    [Fact]
     public async Task Overview_returns_bounded_progress_actions_and_warnings_without_crossing_workspace_scope()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");

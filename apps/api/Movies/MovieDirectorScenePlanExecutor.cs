@@ -11,7 +11,7 @@ public sealed class MovieDirectorScenePlanActionExecutor(
 {
     public string ActionType => DirectorActionTypes.ScenePlanning;
 
-    public async Task<DirectorActionExecution> ExecuteAsync(DirectorAction action, CancellationToken cancellationToken = default)
+    public async Task<DirectorActionExecution> ExecuteAsync(DirectorAction action, Guid executingUserId, CancellationToken cancellationToken = default)
     {
         DirectorScenePlanActionPayload? payload;
         try { payload = JsonSerializer.Deserialize<DirectorScenePlanActionPayload>(action.PayloadJson, DirectorJson.Options); }

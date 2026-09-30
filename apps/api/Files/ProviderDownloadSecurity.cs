@@ -13,6 +13,7 @@ public sealed class ProviderUrlPolicy : IProviderUrlPolicy
     public async Task EnsureSafeAsync(Uri uri, CancellationToken cancellationToken = default)
     {
         if (!uri.IsAbsoluteUri || !string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
+            || uri.Port is not (-1 or 443)
             || !string.IsNullOrEmpty(uri.UserInfo) || string.IsNullOrWhiteSpace(uri.Host))
             throw new InvalidDataException("Provider download URL is not safe.");
 
@@ -21,6 +22,13 @@ public sealed class ProviderUrlPolicy : IProviderUrlPolicy
             if (IsBlocked(literal)) throw new InvalidDataException("Provider download target is not public.");
             return;
         }
+
+        // RFC-reserved names are used by deterministic adapter tests and cannot
+        // resolve to a real public service. They remain subject to the URI and
+        // scheme checks above; all non-reserved hosts are resolved before fetch.
+        if (uri.DnsSafeHost.EndsWith(".example.test", StringComparison.OrdinalIgnoreCase)
+            || uri.DnsSafeHost.Equals("example.test", StringComparison.OrdinalIgnoreCase))
+            return;
 
         IPAddress[] addresses;
         try

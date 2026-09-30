@@ -96,6 +96,68 @@ public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWork
     }
 
     [Fact]
+    public async Task Keyframe_command_uses_fake_safe_image_job_locks_approval_selects_and_preserves_regeneration_history()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client);
+        var project = await SendWithCsrf<MovieStudioProjectResponse>(client, HttpMethod.Post, "/api/movie-studio/projects", new
+        {
+            workspaceId = auth.PersonalWorkspace.Id, mode = MovieProjectModes.Quick, title = "Keyframe workflow",
+            description = "Storyboard to keyframe without external providers.", durationSeconds = 24,
+            aspectRatio = "16:9", style = "cinematic", language = "en",
+        });
+        var scene = await SendWithCsrf<MovieSceneDto>(client, HttpMethod.Post, $"/api/movie-studio/projects/{project.Project.Id}/scenes", new { title = "Dawn", summary = "A controlled opening." });
+        var shot = await SendWithCsrf<MovieShotDto>(client, HttpMethod.Post, $"/api/movie-studio/scenes/{scene.Id}/shots", new { description = "A wide street at first light." });
+        var storyboard = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post, $"/api/movie-studio/shots/{shot.Id}/production/versions", new { stage = MovieProductionStages.StoryboardCandidate, compositionJson = "{\"blocking\":\"left\"}" });
+        var approvedStoryboard = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post, $"/api/movie-studio/production/versions/{storyboard.Id}/review", new { approve = true });
+        Assert.True(approvedStoryboard.IsLocked);
+
+        var first = await SendWithCsrf<MovieKeyframeGenerationResponse>(client, HttpMethod.Post, $"/api/movie-studio/shots/{shot.Id}/production/keyframe", new
+        {
+            sourceStoryboardVersionId = approvedStoryboard.Id, label = "Keyframe one",
+        });
+        Assert.Equal(MovieProductionStages.ProductionKeyframe, first.Version.Stage);
+        Assert.Equal(approvedStoryboard.Id, first.Version.SourceVersionId);
+        Assert.Equal(GenerationJobTypes.ImageGenerate, first.Job.JobType);
+        Assert.Equal(GenerationJobStatus.Queued.ToString(), first.Job.Status);
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var imageJob = await db.GenerationJobs.SingleAsync(item => item.Id == first.Job.Id);
+            Assert.Contains("ProductionVersionId", imageJob.InputJson);
+            Assert.DoesNotContain("provider", imageJob.InputJson, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("model", imageJob.InputJson, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("prompt", imageJob.InputJson, StringComparison.OrdinalIgnoreCase);
+        }
+
+        var approvedKeyframe = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post, $"/api/movie-studio/production/versions/{first.Version.Id}/review", new { approve = true, reason = "Lock this keyframe." });
+        Assert.Equal(MovieProductionStages.ApprovedKeyframe, approvedKeyframe.Stage);
+        Assert.True(approvedKeyframe.IsLocked);
+        var selected = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post, $"/api/movie-studio/production/versions/{first.Version.Id}/select-keyframe", null);
+        Assert.True(selected.IsSelected);
+
+        var regenerated = await SendWithCsrf<MovieKeyframeGenerationResponse>(client, HttpMethod.Post, $"/api/movie-studio/shots/{shot.Id}/production/keyframe", new
+        {
+            sourceStoryboardVersionId = approvedStoryboard.Id, label = "Keyframe two", compositionJson = "{\"blocking\":\"right\"}",
+            regenerationMetadataJson = "{\"reason\":\"continuity pass\"}",
+        });
+        Assert.NotEqual(first.Version.Id, regenerated.Version.Id);
+        Assert.Equal(first.Version.Id, selected.Id);
+
+        var production = await client.GetFromJsonAsync<MovieShotProductionDto>($"/api/movie-studio/shots/{shot.Id}/production");
+        Assert.NotNull(production);
+        Assert.Equal(first.Version.Id, production!.SelectedKeyframeVersionId);
+        Assert.Equal(first.Version.Id, production.Versions.Single(item => item.IsSelected).Id);
+        Assert.Contains(production.Versions, item => item.Id == regenerated.Version.Id && item.Status == MovieProductionVersionStatuses.PendingApproval);
+        Assert.Contains(production.Transitions, item => item.EventType == "selected" && item.MovieProductionVersionId == first.Version.Id);
+        using var historyScope = factory.Services.CreateScope();
+        var historyDb = historyScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.Equal(3, await historyDb.MovieProductionVersions.CountAsync(item => item.MovieShotId == shot.Id));
+        Assert.Equal(2, await historyDb.GenerationJobs.CountAsync(item => item.WorkspaceId == auth.PersonalWorkspace.Id));
+    }
+
+    [Fact]
     public async Task Production_review_requires_approve_permission_and_keeps_candidate_history()
     {
         using var owner = factory.CreateClient();
@@ -308,7 +370,7 @@ public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWork
         await db.SaveChangesAsync();
     }
 
-    private static async Task<T> SendWithCsrf<T>(HttpClient client, HttpMethod method, string path, object payload)
+    private static async Task<T> SendWithCsrf<T>(HttpClient client, HttpMethod method, string path, object? payload)
     {
         var response = await SendWithCsrf(client, method, path, payload);
         Assert.True(response.IsSuccessStatusCode, await response.Content.ReadAsStringAsync());

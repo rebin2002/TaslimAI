@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
+using System.Security.Cryptography;
 using Taslim.Api.Domain;
 using Taslim.Api.Persistence;
 
@@ -24,6 +25,17 @@ public sealed class FileProcessingService(
         string contentType,
         ReadOnlyMemory<byte> content,
         string? metadataJson,
+        CancellationToken cancellationToken) =>
+        (await StoreGeneratedWithResultAsync(workspaceId, userId, projectId, fileName, contentType, content, metadataJson, cancellationToken)).File;
+
+    public async Task<GeneratedFileStorageResult> StoreGeneratedWithResultAsync(
+        Guid workspaceId,
+        Guid userId,
+        Guid? projectId,
+        string fileName,
+        string contentType,
+        ReadOnlyMemory<byte> content,
+        string? metadataJson,
         CancellationToken cancellationToken)
         {
         if (content.Length <= 0 || content.Length > Math.Min(settings.MaxFileSizeBytes, 25 * 1_048_576))
@@ -31,6 +43,9 @@ public sealed class FileProcessingService(
         var descriptor = GeneratedMediaSecurity.ValidateDescriptor(fileName, contentType);
         GeneratedMediaSecurity.ValidateContent(descriptor, content.Span, settings);
         var metadata = GeneratedMediaSecurity.NormalizeMetadataJson(metadataJson);
+        var hash = Convert.ToHexString(SHA256.HashData(content.Span));
+        var inspection = GeneratedMediaInspector.Inspect(descriptor, content.Span, metadata, hash);
+        var storedMetadata = GeneratedMediaInspector.MergeMetadata(metadata, inspection);
 
         var id = Guid.NewGuid();
         var storedName = $"{id:N}{descriptor.Extension}";
@@ -62,10 +77,15 @@ public sealed class FileProcessingService(
             logger.LogInformation("Generated file storage started. FileId={FileId}; WorkspaceId={WorkspaceId}; StorageProvider={StorageProvider}; SizeBytes={SizeBytes}", file.Id, workspaceId, storage.ProviderKey, content.Length);
             await using var input = new MemoryStream(content.ToArray(), writable: false);
             await storage.StoreAsync(storageKey, input, cancellationToken);
+            file.ContentHashSha256 = hash;
+            file.ContainerFormat = inspection.ContainerFormat;
+            file.Width = inspection.Width;
+            file.Height = inspection.Height;
+            file.DurationSeconds = inspection.DurationSeconds;
+            file.MetadataJson = storedMetadata;
             file.Status = StoredFileStatus.Ready;
             file.ProcessedAt = DateTime.UtcNow;
-            await db.SaveChangesAsync(cancellationToken);
-            return file;
+            return await FinalizeGeneratedFileAsync(file, storageKey, cancellationToken);
         }
         catch (OperationCanceledException)
         {
@@ -93,7 +113,42 @@ public sealed class FileProcessingService(
         catch (Exception exception) { logger.LogWarning(exception, "Generated file cleanup failed. FileId={FileId}; WorkspaceId={WorkspaceId}", fileId, workspaceId); }
     }
 
+    private async Task<GeneratedFileStorageResult> FinalizeGeneratedFileAsync(StoredFile file, string storageKey, CancellationToken cancellationToken)
+    {
+        var duplicate = await db.StoredFiles.AsNoTracking().FirstOrDefaultAsync(item => item.Id != file.Id
+            && item.WorkspaceId == file.WorkspaceId
+            && item.Status == StoredFileStatus.Ready
+            && item.ContentHashSha256 == file.ContentHashSha256, cancellationToken);
+        if (duplicate is null)
+        {
+            await db.SaveChangesAsync(cancellationToken);
+            return new GeneratedFileStorageResult(file, true);
+        }
+
+        await TryDeleteGeneratedObjectAsync(storageKey, file.Id, file.WorkspaceId);
+        file.Status = StoredFileStatus.Deleted;
+        file.DeletedAt = DateTime.UtcNow;
+        file.ProcessedAt = DateTime.UtcNow;
+        file.ContentHashSha256 = null;
+        file.MetadataJson = null;
+        await db.SaveChangesAsync(CancellationToken.None);
+        logger.LogInformation("Generated media duplicate reused. ExistingFileId={ExistingFileId}; DiscardedFileId={DiscardedFileId}; WorkspaceId={WorkspaceId}", duplicate.Id, file.Id, file.WorkspaceId);
+        return new GeneratedFileStorageResult(duplicate, false);
+    }
+
     public async Task<StoredFile> StoreGeneratedStreamAsync(
+        Guid workspaceId,
+        Guid userId,
+        Guid? projectId,
+        string fileName,
+        string contentType,
+        long sizeBytes,
+        Func<CancellationToken, Task<Stream>> openReadAsync,
+        string? metadataJson,
+        CancellationToken cancellationToken) =>
+        (await StoreGeneratedStreamWithResultAsync(workspaceId, userId, projectId, fileName, contentType, sizeBytes, openReadAsync, metadataJson, cancellationToken)).File;
+
+    public async Task<GeneratedFileStorageResult> StoreGeneratedStreamWithResultAsync(
         Guid workspaceId,
         Guid userId,
         Guid? projectId,
@@ -109,7 +164,7 @@ public sealed class FileProcessingService(
         var descriptor = GeneratedMediaSecurity.ValidateDescriptor(fileName, contentType);
         if (!descriptor.ContentType.StartsWith("video/", StringComparison.OrdinalIgnoreCase))
             throw new FileUploadValidationException("Generated stream content type is invalid.");
-        var metadata = GeneratedMediaSecurity.NormalizeMetadataJson(metadataJson);
+        var streamMetadata = GeneratedMediaSecurity.NormalizeMetadataJson(metadataJson);
 
         var id = Guid.NewGuid();
         var storedName = $"{id:N}{descriptor.Extension}";
@@ -131,7 +186,7 @@ public sealed class FileProcessingService(
             Status = StoredFileStatus.Uploading,
             CreatedAt = now,
             TextExtractionStatus = FileExtractionStatus.NotApplicable,
-            MetadataJson = metadata,
+            MetadataJson = streamMetadata,
         };
         db.StoredFiles.Add(file);
         await db.SaveChangesAsync(cancellationToken);
@@ -144,11 +199,16 @@ public sealed class FileProcessingService(
             await storage.StoreAsync(storageKey, bounded, cancellationToken);
             if (bounded.BytesRead != sizeBytes)
                 throw new FileUploadValidationException("Generated video output size did not match its declared size.");
-            GeneratedMediaSecurity.ValidateHeader(descriptor, bounded.Prefix.Span);
+            var inspection = GeneratedMediaInspector.Inspect(descriptor, bounded.Prefix.Span, streamMetadata, bounded.Sha256Hex);
+            file.ContentHashSha256 = bounded.Sha256Hex;
+            file.ContainerFormat = inspection.ContainerFormat;
+            file.Width = inspection.Width;
+            file.Height = inspection.Height;
+            file.DurationSeconds = inspection.DurationSeconds;
+            file.MetadataJson = GeneratedMediaInspector.MergeMetadata(streamMetadata, inspection);
             file.Status = StoredFileStatus.Ready;
             file.ProcessedAt = DateTime.UtcNow;
-            await db.SaveChangesAsync(cancellationToken);
-            return file;
+            return await FinalizeGeneratedFileAsync(file, storageKey, cancellationToken);
         }
         catch (OperationCanceledException)
         {
@@ -203,9 +263,11 @@ public sealed class FileProcessingService(
         try
         {
             logger.LogInformation("File upload started. FileId={FileId}; WorkspaceId={WorkspaceId}; StorageProvider={StorageProvider}; Extension={Extension}; SizeBytes={SizeBytes}", file.Id, workspaceId, storage.ProviderKey, file.Extension, file.SizeBytes);
-            await using (var input = upload.OpenReadStream())
+            await using (var input = new CountingReadStream(upload.OpenReadStream(), settings.MaxFileSizeBytes))
             {
                 await storage.StoreAsync(storageKey, input, cancellationToken);
+                if (input.BytesRead != validated.SizeBytes)
+                    throw new FileUploadValidationException("The uploaded file changed while it was being stored.");
             }
 
             file.Status = StoredFileStatus.Processing;
@@ -237,6 +299,11 @@ public sealed class FileProcessingService(
         }
         catch (OperationCanceledException)
         {
+            file.Status = StoredFileStatus.Failed;
+            file.TextExtractionStatus = FileExtractionStatus.Failed;
+            file.ProcessedAt = DateTime.UtcNow;
+            await db.SaveChangesAsync(CancellationToken.None);
+            await TryDeleteGeneratedObjectAsync(storageKey, file.Id, workspaceId);
             throw;
         }
         catch (FileStorageUnavailableException)
@@ -246,6 +313,7 @@ public sealed class FileProcessingService(
             file.TextExtractionStatus = FileExtractionStatus.Failed;
             file.ProcessedAt = DateTime.UtcNow;
             await db.SaveChangesAsync(CancellationToken.None);
+            await TryDeleteGeneratedObjectAsync(storageKey, file.Id, workspaceId);
             throw;
         }
         catch (FileStorageOperationException exception)
@@ -255,6 +323,17 @@ public sealed class FileProcessingService(
             file.TextExtractionStatus = FileExtractionStatus.Failed;
             file.ProcessedAt = DateTime.UtcNow;
             await db.SaveChangesAsync(CancellationToken.None);
+            await TryDeleteGeneratedObjectAsync(storageKey, file.Id, workspaceId);
+            throw;
+        }
+        catch (FileUploadValidationException exception)
+        {
+            file.Status = StoredFileStatus.Failed;
+            file.TextExtractionStatus = FileExtractionStatus.Failed;
+            file.ProcessedAt = DateTime.UtcNow;
+            await db.SaveChangesAsync(CancellationToken.None);
+            await TryDeleteGeneratedObjectAsync(storageKey, file.Id, workspaceId);
+            logger.LogWarning(exception, "File upload validation failed after storage began. FileId={FileId}; WorkspaceId={WorkspaceId}", file.Id, workspaceId);
             throw;
         }
         catch (Exception exception)
@@ -263,6 +342,7 @@ public sealed class FileProcessingService(
             file.TextExtractionStatus = FileExtractionStatus.Failed;
             file.ProcessedAt = DateTime.UtcNow;
             await db.SaveChangesAsync(CancellationToken.None);
+            await TryDeleteGeneratedObjectAsync(storageKey, file.Id, workspaceId);
             logger.LogWarning(exception, "File processing failed without logging file contents. FileId={FileId}; WorkspaceId={WorkspaceId}", file.Id, workspaceId);
             return file;
         }
@@ -272,8 +352,14 @@ public sealed class FileProcessingService(
     {
         await storage.DeleteAsync(file.StorageKey, cancellationToken);
         file.Status = StoredFileStatus.Deleted;
+        file.DeletedAt = DateTime.UtcNow;
         file.ExtractedText = null;
         file.ExtractedTextLength = null;
+        file.ContentHashSha256 = null;
+        file.ContainerFormat = null;
+        file.Width = null;
+        file.Height = null;
+        file.DurationSeconds = null;
         file.ProcessedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(cancellationToken);
         return true;
@@ -283,8 +369,11 @@ public sealed class FileProcessingService(
 internal sealed class CountingReadStream(Stream inner, long maxBytes) : Stream
 {
     private readonly byte[] prefix = new byte[64];
+    private readonly IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+    private bool hashFinalized;
     public long BytesRead { get; private set; }
     public ReadOnlyMemory<byte> Prefix => prefix[..(int)Math.Min(BytesRead, prefix.Length)];
+    public string? Sha256Hex { get; private set; }
     public override bool CanRead => inner.CanRead;
     public override bool CanSeek => false;
     public override bool CanWrite => false;
@@ -312,6 +401,7 @@ internal sealed class CountingReadStream(Stream inner, long maxBytes) : Stream
             var probe = new byte[1];
             var extra = await inner.ReadAsync(probe.AsMemory(), cancellationToken);
             if (extra > 0) throw new InvalidDataException("Generated stream exceeded the configured size limit.");
+            Record(0, ReadOnlySpan<byte>.Empty);
             return 0;
         }
         var read = await inner.ReadAsync(buffer[..Math.Min(buffer.Length, RemainingBufferSize(buffer.Length))], cancellationToken);
@@ -327,7 +417,13 @@ internal sealed class CountingReadStream(Stream inner, long maxBytes) : Stream
     {
         if (read > 0 && BytesRead < prefix.Length)
             buffer[..Math.Min(read, prefix.Length - (int)BytesRead)].CopyTo(prefix.AsSpan((int)BytesRead));
+        if (read > 0) hash.AppendData(buffer[..read]);
         BytesRead += read;
+        if (read == 0 && !hashFinalized)
+        {
+            Sha256Hex = Convert.ToHexString(hash.GetHashAndReset());
+            hashFinalized = true;
+        }
     }
     public override void Flush() => inner.Flush();
     public override Task FlushAsync(CancellationToken cancellationToken) => inner.FlushAsync(cancellationToken);

@@ -253,7 +253,47 @@ export type AdminOperationsDashboard = {
   billing: { customerChargingEnabled: boolean; configuredProvider: string; paymentProviderConfigured: boolean; subscriptions: { planCode: string; status: string; count: number }[]; paymentAttemptsByStatus: AdminCountBreakdown[]; pendingReconciliationCount: number };
   signals: { runningJobCount: number; queuedOrPendingJobCount: number; recentFailureCount: number; anomalousUsageCountInRange: number; lastCompletedGenerationAt: string | null };
   providers: AdminProviderHealth[];
+  movie: AdminMovieOperations;
+  workers: AdminWorkerOperations;
+  recentAdminActions: AdminOperationAudit[];
 };
+export type AdminMovieOperations = {
+  movieJobCountInRange: number;
+  jobsByStatus: AdminCountBreakdown[];
+  queuedOrPendingCount: number;
+  oldestQueuedAt: string | null;
+  oldestQueueAgeSeconds: number | null;
+  averageQueueAgeSeconds: number | null;
+  totalRetryCount: number;
+  retriedJobCount: number;
+  maxRetryCount: number;
+  failuresByCode: AdminCountBreakdown[];
+  providerDisabledFailureCount: number;
+  qualityControlFailureCount: number;
+  qualityControlByStatus: AdminCountBreakdown[];
+  movieAssetCount: number;
+  movieAssetWithStoredFileCount: number;
+  movieAssetIngestionGapCount: number;
+  completedJobsWithoutAssetCount: number;
+  accountingTransactionCount: number;
+  pendingAccountingCount: number;
+  missingAccountingEvidenceCount: number;
+  estimatedProviderCostUsd: number;
+  actualProviderCostUsd: number;
+  providerStatus: string;
+  providerEnabled: boolean;
+  providerConfigured: boolean;
+  stuckJobCount: number;
+  stuckJobs: { jobId: string; jobType: string; status: string; claimExpiresAt: string | null; startedAt: string | null; retryCount: number; errorCode: string | null }[];
+};
+export type AdminWorkerOperations = {
+  configuredConcurrency: number;
+  observedWorkerCount: number;
+  healthyWorkerCount: number;
+  staleWorkerCount: number;
+  workers: { workerId: string; status: string; startedAt: string; lastSeenAt: string; lastClaimedAt: string | null; lastCompletedAt: string | null; activeJobId: string | null; consecutiveIterationFailures: number; workerConcurrency: number; isStale: boolean }[];
+};
+export type AdminOperationAudit = { id: string; actorUserId: string; action: string; targetType: string; targetId: string | null; outcome: string; reason: string | null; createdAt: string };
 export type GenerationJobStatus = "Pending" | "Queued" | "Running" | "Succeeded" | "Failed" | "Cancelled";
 export type GenerationJobOutput = { id: string; outputType: string; storedFileId: string | null; metadataJson: string | null; createdAt: string };
 export type GenerationCostWarning = { code: string; severity: "warning" | "error" | string; message: string };
@@ -302,24 +342,31 @@ export type MovieScene = { shotCount?: number; id: string; sequence: number; tit
 export type MovieProductionStage = "ShotPlan" | "StoryboardCandidate" | "ApprovedStoryboard" | "ProductionKeyframe" | "ApprovedKeyframe" | "MotionPreview" | "ProductionRender" | "SelectedFinalTake";
 export type MovieProductionAssetReference = { assetId: string; role: string };
 export type MovieProductionVersionInput = { stage: MovieProductionStage; label?: string | null; compositionJson: string; regenerationMetadataJson?: string | null; stageProvenanceJson?: string | null; sourceVersionId?: string | null; generationJobId?: string | null; assetId?: string | null; firstFrameAssetId?: string | null; lastFrameAssetId?: string | null; firstFrameNotes?: string | null; lastFrameNotes?: string | null; assetReferences?: MovieProductionAssetReference[] };
+export type MovieKeyframeGenerationInput = { sourceStoryboardVersionId: string; label?: string | null; compositionJson?: string | null; regenerationMetadataJson?: string | null };
 export type MovieProductionReviewInput = { approve: boolean; reason?: string | null; metadataJson?: string | null };
 export type MovieProductionProviderAttempt = { attemptNumber: number; retryNumber: number; isRetry: boolean; isFallback: boolean; status: string; resultClassification: string; failureCode: string | null; rateLimited: boolean; timedOut: boolean; circuitOpen: boolean; qualityControlRejected: boolean; startedAt: string; completedAt: string | null };
 export type MovieProductionExecution = { generationJobId: string; jobType: string; status: string; progressPercent: number; retryCount: number; attemptCount: number; qualityControlStatus: string; errorCode: string | null; errorMessage: string | null; assetId: string | null; assetType: string | null; attempts: MovieProductionProviderAttempt[] };
 export type MovieTakeApproval = { id: string; userId: string; decision: string; comment: string | null; createdAt: string };
 export type MovieTake = { id: string; movieShotId: string; versionNumber: number; label: string; status: string; qualityLevel: string; autoDirectorEnabled: boolean; movieClipId: string | null; generationJobId: string | null; assetId: string | null; notes: string | null; selectedAt: string | null; finalizedAt: string | null; createdAt: string; updatedAt: string; approvals: MovieTakeApproval[]; execution: MovieProductionExecution | null };
-export type MovieProductionVersion = { id: string; movieShotId: string; versionNumber: number; stage: MovieProductionStage; status: "Draft" | "PendingApproval" | "Approved" | "Rejected" | "Selected"; label: string | null; compositionJson: string; regenerationMetadataJson: string | null; stageProvenanceJson: string | null; continuitySnapshotReferenceJson: string | null; cinematographyReferenceJson: string | null; sourceVersionId: string | null; generationJobId: string | null; assetId: string | null; firstFrameAssetId: string | null; lastFrameAssetId: string | null; firstFrameNotes: string | null; lastFrameNotes: string | null; rejectionReason: string | null; createdAt: string; updatedAt: string; reviewedAt: string | null; assetReferences: MovieProductionAssetReference[]; execution: MovieProductionExecution | null };
+export type MovieTakeUpscaleEligibility = { takeId: string; movieShotId: string; eligible: boolean; isSelected: boolean; isFinal: boolean; code: string; message: string; targetMasterResolution: string; sourceResolution: string | null; auditId: string | null; auditStatus: string | null; evaluatedAt: string };
+export type MovieFinalMaster = { id: string; movieProjectId: string; movieShotId: string; sourceTakeId: string; sourceMovieClipId: string | null; sourceAssetId: string | null; outputAssetId: string | null; generationJobId: string | null; targetProfile: string; sourceWidth: number | null; sourceHeight: number | null; targetWidth: number; targetHeight: number; state: string; stateReason: string | null; qcStatus: string; qcResultJson: string | null; provenanceJson: string | null; supersedesMasterId: string | null; supersededByMasterId: string | null; requestedAt: string; updatedAt: string; completedAt: string | null; supersededAt: string | null };
+export type MovieProductionVersion = { id: string; movieShotId: string; versionNumber: number; stage: MovieProductionStage; status: "Draft" | "PendingApproval" | "Approved" | "Rejected" | "Selected"; label: string | null; compositionJson: string; regenerationMetadataJson: string | null; stageProvenanceJson: string | null; continuitySnapshotReferenceJson: string | null; cinematographyReferenceJson: string | null; sourceVersionId: string | null; generationJobId: string | null; assetId: string | null; firstFrameAssetId: string | null; lastFrameAssetId: string | null; firstFrameNotes: string | null; lastFrameNotes: string | null; rejectionReason: string | null; createdAt: string; updatedAt: string; reviewedAt: string | null; assetReferences: MovieProductionAssetReference[]; execution: MovieProductionExecution | null; isLocked?: boolean; lockedAt?: string | null; lockedByUserId?: string | null; isSelected?: boolean };
 export type MovieRegenerationRequest = { id: string; movieShotId: string; targetType: string; targetId: string; actionType: string; requestedStage: MovieProductionStage; reason: string; sourceVersionId: string | null; changedInputsJson: string; compositionJson: string; status: string; createdByUserId: string; confirmedByUserId: string | null; generationJobId: string | null; resultingProductionVersionId: string | null; resultingTakeId: string | null; createdAt: string; confirmedAt: string | null; costPreview: { estimatedProviderCostUsd: number | null; estimatedProviderCostKnown: boolean; currency: string; costEstimateJson: string | null; confirmationRequired: boolean; guardrails: GenerationCostPreview | null } };
 export type MovieSelectiveRegenerationResponse = { request: MovieRegenerationRequest; job: GenerationJob | null; productionVersion: MovieProductionVersion | null; take: MovieTake | null };
 export type MovieProductionStageTransition = { id: string; movieShotId: string; movieProductionVersionId: string; fromStage: MovieProductionStage; toStage: MovieProductionStage; eventType: string; reason: string | null; metadataJson: string | null; sourceVersionId: string | null; generationJobId: string | null; actorUserId: string; createdAt: string };
+export type MovieProductionCheckpointItem = { shotId: string; sceneTitle: string; sceneSequence: number; shotSequence: number; label: string; state: "Complete" | "Running" | "Blocked" | "Recoverable" | string; currentStage: MovieProductionStage | string; progressPercent: number; blockedReason: string | null; nextAction: string | null; recoveryJobId: string | null; selectedTakeId: string | null; updatedAt: string };
+export type MovieProductionRecoveryAction = { actionId: string; shotId: string; sceneTitle: string; label: string; action: "Retry" | string; reason: string };
+export type MovieProductionCheckpoint = { movieProjectId: string; version: number; state: "NotStarted" | "Active" | "Running" | "Blocked" | "Recoverable" | "Complete" | string; progressPercent: number; totalShots: number; completedShots: number; runningShots: number; blockedShots: number; recoverableShots: number; pendingApprovalShots: number; observedAt: string; lastRecoveredAt: string | null; items: MovieProductionCheckpointItem[]; recoveryActions: MovieProductionRecoveryAction[] };
+export type MovieProductionRecoveryResponse = { checkpoint: MovieProductionCheckpoint; job: GenerationJob | null };
 export type MovieWorldContinuitySource = { entityType: string; entityId: string | null; recordId: string | null; fieldName: string; value: string };
 export type MovieWorldContinuityWarning = { code: string; severity: "warning" | "error"; message: string; source: MovieWorldContinuitySource; target: { scopeType: string; movieProjectId: string; sceneId: string | null; shotId: string | null } };
 export type MovieWorldContinuitySnapshot = { movieProjectId: string; sceneId: string | null; shotId: string | null; snapshotVersion: number; createdAt: string; snapshotHash: string; locations: MovieLocation[]; sets: MovieSet[]; props: (MovieProp & { state: string | null })[]; facts: MovieContinuityFact[]; locks: MovieContinuityLock[]; warnings: MovieWorldContinuityWarning[] };
-export type MovieShotProduction = { movieShotId: string; currentStage: MovieProductionStage; versions: MovieProductionVersion[]; transitions: MovieProductionStageTransition[]; worldContinuity?: MovieWorldContinuitySnapshot | null; takes: MovieTake[]; regenerationRequests: MovieRegenerationRequest[] };
+export type MovieShotProduction = { movieShotId: string; currentStage: MovieProductionStage; versions: MovieProductionVersion[]; transitions: MovieProductionStageTransition[]; worldContinuity?: MovieWorldContinuitySnapshot | null; takes: MovieTake[]; regenerationRequests: MovieRegenerationRequest[]; selectedKeyframeVersionId?: string | null };
 export type MovieShotReadinessCheck = { key: string; label: string; satisfied: boolean; detail: string };
 export type MovieShotReadiness = { ready: boolean; checks: MovieShotReadinessCheck[]; missing: string[]; summary: string };
 export type MovieShotPlanState = "Draft" | "ReadyForStoryboard" | "Storyboard" | "Production" | "Archived";
 export type MovieShotPlanningInput = { description: string; purpose?: string | null; subjects?: string | null; subjectCharacterIds?: string[]; locationSet?: string | null; durationSeconds?: number | null; productionRequirements?: string | null; continuityReferences?: string | null; cameraAndFraming?: string | null; cameraMotion?: string | null; narration?: string | null; dialogue?: string | null; visualContinuityNotes?: string | null; cinematography?: CinematographyIntentSelection | null };
-export type MovieShot = { id: string; sequence: number; description: string; purpose: string | null; subjects: string | null; subjectCharacterIds: string[]; locationSet: string | null; durationSeconds: number | null; productionRequirements: string | null; continuityReferences: string | null; cameraAndFraming: string | null; cameraMotion: string | null; cinematographyJson: string | null; cinematographySummary: string | null; narration: string | null; dialogue: string | null; visualContinuityNotes: string | null; status: string; planState: MovieShotPlanState | string; readiness: MovieShotReadiness; productionStage: MovieProductionStage; clips: MovieClip[]; productionVersions: MovieProductionVersion[]; takes: MovieTake[] };
+export type MovieShot = { id: string; sequence: number; description: string; purpose: string | null; subjects: string | null; subjectCharacterIds: string[]; locationSet: string | null; durationSeconds: number | null; productionRequirements: string | null; continuityReferences: string | null; cameraAndFraming: string | null; cameraMotion: string | null; cinematographyJson: string | null; cinematographySummary: string | null; narration: string | null; dialogue: string | null; visualContinuityNotes: string | null; status: string; planState: MovieShotPlanState | string; readiness: MovieShotReadiness; productionStage: MovieProductionStage; clips: MovieClip[]; productionVersions: MovieProductionVersion[]; takes: MovieTake[]; selectedKeyframeVersionId?: string | null };
 export type MovieSceneShotPlan = { sceneId: string; sceneSequence: number; sceneTitle: string; sceneSummary: string; sceneDurationSeconds: number | null; sceneStatus: string; shotCount: number; activeShotCount: number; readyShotCount: number; totalDurationSeconds: number; coveragePercent: number; shots: MovieShot[] };
 export type MovieStoryboardCandidate = { id: string; movieShotId: string; versionNumber: number; stage: "StoryboardCandidate" | "ApprovedStoryboard"; status: "Draft" | "PendingApproval" | "Approved" | "Rejected" | "Selected"; label: string | null; compositionJson: string; regenerationMetadataJson: string | null; stageProvenanceJson: string | null; sourceVersionId: string | null; assetId: string | null; firstFrameAssetId: string | null; lastFrameAssetId: string | null; firstFrameNotes: string | null; lastFrameNotes: string | null; rejectionReason: string | null; createdAt: string; updatedAt: string; reviewedAt: string | null; assetReferences: MovieProductionAssetReference[] };
 export type MovieCinematographySummary = { cameraAndFraming: string | null; cameraMotion: string | null; intent: string | null; shotSize: string | null; focalLength: string | null; cameraAngle: string | null; lighting: string | null; paletteLook: string | null; compositionNotes: string | null };
@@ -789,6 +836,7 @@ export const api = {
     const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value !== undefined).map(([key, value]) => [key, String(value)]));
     return request<AdminOperationsDashboard>(`/api/admin/operations/dashboard${query.toString() ? `?${query.toString()}` : ""}`);
   },
+  recoverAdminStuckJob: (jobId: string, reason: string) => request<{ jobId: string; status: GenerationJobStatus; retryCount: number; queuedAt: string; auditAction: string }>(`/api/admin/operations/jobs/${jobId}/recover`, { method: "POST", body: JSON.stringify({ reason }) }, true),
   createGenerationJob: (workspaceId: string, inputJson = "{}", title?: string, idempotencyKey = requestId()) => request<GenerationJob>("/api/generation/jobs", generationInit({ method: "POST", body: JSON.stringify({ workspaceId, jobType: "system.test", inputJson, title }) }, idempotencyKey), true),
   createImageGenerationJob: (input: ImageGenerationInput, idempotencyKey = requestId()) => request<{ job: GenerationJob }>("/api/image-generation/jobs", generationInit({ method: "POST", body: JSON.stringify(input) }, idempotencyKey), true).then((response) => response.job),
   createVoiceGenerationJob: (input: VoiceGenerationInput, idempotencyKey = requestId()) => request<{ job: GenerationJob }>("/api/voice-generation/jobs", generationInit({ method: "POST", body: JSON.stringify(input) }, idempotencyKey), true).then((response) => response.job),
@@ -850,14 +898,22 @@ export const api = {
   reviewMovieProductionContinuity: (projectId: string, sceneId?: string | null, shotId?: string | null) => request<MovieProductionContinuityReview>(`/api/movie-studio/projects/${projectId}/continuity-review${sceneId || shotId ? `?${new URLSearchParams({ ...(sceneId ? { sceneId } : {}), ...(shotId ? { shotId } : {}) }).toString()}` : ""}`),
   reviewMovieSceneContinuity: (sceneId: string) => request<MovieProductionContinuityReview>(`/api/movie-studio/scenes/${sceneId}/continuity-review`),
   reviewMovieShotContinuity: (shotId: string) => request<MovieProductionContinuityReview>(`/api/movie-studio/shots/${shotId}/continuity-review`),
+  getMovieProductionCheckpoint: (projectId: string) => request<MovieProductionCheckpoint>(`/api/movie-studio/projects/${projectId}/production/checkpoint`),
+  recoverMovieProduction: (projectId: string, generationJobId: string, idempotencyKey = requestId()) => request<MovieProductionRecoveryResponse>(`/api/movie-studio/projects/${projectId}/production/checkpoint/recover`, generationInit({ method: "POST", body: JSON.stringify({ generationJobId }) }, idempotencyKey), true),
   createMovieProductionVersion: (shotId: string, input: MovieProductionVersionInput, idempotencyKey = requestId()) => request<MovieProductionVersion>(`/api/movie-studio/shots/${shotId}/production/versions`, generationInit({ method: "POST", body: JSON.stringify(input) }, idempotencyKey), true),
+  generateMovieKeyframe: (shotId: string, input: MovieKeyframeGenerationInput, idempotencyKey = requestId()) => request<{ version: MovieProductionVersion; job: GenerationJob }>(`/api/movie-studio/shots/${shotId}/production/keyframe`, generationInit({ method: "POST", body: JSON.stringify(input) }, idempotencyKey), true),
   reviewMovieProductionVersion: (versionId: string, input: MovieProductionReviewInput) => request<MovieProductionVersion>(`/api/movie-studio/production/versions/${versionId}/review`, { method: "POST", body: JSON.stringify(input) }, true),
+  selectMovieKeyframe: (versionId: string) => request<MovieProductionVersion>(`/api/movie-studio/production/versions/${versionId}/select-keyframe`, { method: "POST" }, true),
   createMovieMotionPreview: (shotId: string, input: { sourceVersionId: string; label?: string | null; compositionJson?: string; stageProvenanceJson?: string | null }) => request<MovieProductionVersion>(`/api/movie-studio/shots/${shotId}/production/motion-preview`, { method: "POST", body: JSON.stringify({ compositionJson: "{}", ...input }) }, true),
   queueMovieProductionRender: (shotId: string, input: { sourceVersionId: string; label?: string | null; title?: string | null; estimatedProviderCostUsd?: number | null }, idempotencyKey = requestId()) => request<{ version: MovieProductionVersion; job: GenerationJob; clipId: string; project: MovieProject }>(`/api/movie-studio/shots/${shotId}/production/render`, generationInit({ method: "POST", body: JSON.stringify(input) }, idempotencyKey), true),
   createMovieTakeFromProduction: (versionId: string, input: { label?: string | null; qualityLevel?: string; notes?: string | null }) => request<MovieTake>(`/api/movie-studio/production/versions/${versionId}/take`, { method: "POST", body: JSON.stringify(input) }, true),
   approveMovieTake: (takeId: string, input: { decision: "Approved" | "Rejected"; comment?: string | null }) => request<MovieTake>(`/api/movie-studio/takes/${takeId}/approvals`, { method: "POST", body: JSON.stringify(input) }, true),
   selectMovieTake: (takeId: string) => request<void>(`/api/movie-studio/takes/${takeId}/select`, { method: "POST" }, true),
   finalizeMovieTake: (takeId: string) => request<void>(`/api/movie-studio/takes/${takeId}/finalize`, { method: "POST" }, true),
+  getMovieTakeUpscaleEligibility: (takeId: string, targetMasterResolution = "4k") => request<MovieTakeUpscaleEligibility>(`/api/movie-studio/takes/${takeId}/upscale-eligibility?targetMasterResolution=${encodeURIComponent(targetMasterResolution)}`),
+  requestMovieTakeUpscale: (takeId: string, input: { targetMasterResolution?: string; sourceResolution?: string | null } = {}) => request<MovieTakeUpscaleEligibility>(`/api/movie-studio/takes/${takeId}/upscale`, { method: "POST", body: JSON.stringify({ targetMasterResolution: "4k", ...input }) }, true),
+  getMovieFinalMaster: (shotId: string) => request<MovieFinalMaster>(`/api/movie-studio/shots/${shotId}/final-mastering`),
+  requestMovieFinalMaster: (takeId: string, input: { targetProfile?: string; supersedesMasterId?: string | null } = {}) => request<MovieFinalMaster>(`/api/movie-studio/takes/${takeId}/final-mastering`, { method: "POST", body: JSON.stringify({ targetProfile: "Uhd4K", ...input }) }, true),
   createMovieRegenerationRequest: (shotId: string, input: { actionType: string; requestedStage: MovieProductionStage; reason: string; sourceVersionId?: string | null; changedInputsJson: string; compositionJson?: string }, idempotencyKey = requestId()) => request<MovieSelectiveRegenerationResponse>(`/api/movie-studio/shots/${shotId}/regeneration-requests`, generationInit({ method: "POST", body: JSON.stringify(input) }, idempotencyKey), true),
   confirmMovieRegeneration: (regenerationRequestId: string, confirm = true, idempotencyKey = requestId()) => request<MovieSelectiveRegenerationResponse>(`/api/movie-studio/regeneration-requests/${regenerationRequestId}/confirm`, generationInit({ method: "POST", body: JSON.stringify({ confirm }) }, idempotencyKey), true),
   getMovieRegenerationRequest: (requestId: string) => request<MovieSelectiveRegenerationResponse>(`/api/movie-studio/regeneration-requests/${requestId}`),

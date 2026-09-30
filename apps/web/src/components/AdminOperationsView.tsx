@@ -57,6 +57,7 @@ export function AdminOperationsView() {
   const [to, setTo] = useState(() => dateInputValue(new Date()));
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [recoveringJobId, setRecoveringJobId] = useState<string | null>(null);
 
   const load = useCallback(async (range: { fromUtc: string; toUtc: string }) => {
     setLoading(true);
@@ -70,6 +71,19 @@ export function AdminOperationsView() {
       setLoading(false);
     }
   }, []);
+
+  const recoverJob = async (jobId: string) => {
+    setRecoveringJobId(jobId);
+    setError(null);
+    try {
+      await api.recoverAdminStuckJob(jobId, "Administrator recovered an expired movie worker lease from the operations dashboard.");
+      await load(dashboard?.range ?? presetRange("thirtyDays"));
+    } catch {
+      setError("The expired lease could not be recovered. Refresh the dashboard and verify that the job is still stuck.");
+    } finally {
+      setRecoveringJobId(null);
+    }
+  };
 
   useEffect(() => {
     const timer = window.setTimeout(() => { void load(presetRange("thirtyDays")); }, 0);
@@ -163,6 +177,30 @@ export function AdminOperationsView() {
           <div className="account-card operations-signal"><span>Usage anomalies in range</span><strong>{dashboard.signals.anomalousUsageCountInRange}</strong></div>
           <div className="account-card operations-signal operations-signal-wide"><span>Last completed generation</span><strong>{dateTime(dashboard.signals.lastCompletedGenerationAt)}</strong></div>
         </div>
+      </section>
+
+      <section className="operations-section" aria-labelledby="operations-movie">
+        <div className="operations-section-heading"><div><p className="section-eyebrow">Movie production engine</p><h2 id="operations-movie">Movie operations evidence</h2></div><span>Provider-neutral internal signals</span></div>
+        <div className="operations-three-column">
+          <div className="account-card operations-card"><Workflow size={18} /><h3>Queue & retries</h3><dl className="operations-metric-grid"><div><dt>Movie jobs in range</dt><dd>{dashboard.movie.movieJobCountInRange.toLocaleString()}</dd></div><div><dt>Queued / pending</dt><dd>{dashboard.movie.queuedOrPendingCount.toLocaleString()}</dd></div><div><dt>Oldest queue age</dt><dd>{dashboard.movie.oldestQueueAgeSeconds === null ? "Not recorded" : `${Math.round(dashboard.movie.oldestQueueAgeSeconds / 60)} min`}</dd></div><div><dt>Average queue age</dt><dd>{dashboard.movie.averageQueueAgeSeconds === null ? "Not recorded" : `${Math.round(dashboard.movie.averageQueueAgeSeconds / 60)} min`}</dd></div><div><dt>Total retries</dt><dd>{dashboard.movie.totalRetryCount.toLocaleString()}</dd></div><div><dt>Jobs retried</dt><dd>{dashboard.movie.retriedJobCount.toLocaleString()}</dd></div></dl></div>
+          <div className="account-card operations-card"><ServerCog size={18} /><h3>Provider-disabled state</h3><dl className="operations-metric-grid"><div><dt>Status</dt><dd>{dashboard.movie.providerStatus}</dd></div><div><dt>Enabled</dt><dd>{dashboard.movie.providerEnabled ? "Yes" : "No"}</dd></div><div><dt>Configured</dt><dd>{dashboard.movie.providerConfigured ? "Yes" : "No"}</dd></div><div><dt>Disabled failures</dt><dd>{dashboard.movie.providerDisabledFailureCount.toLocaleString()}</dd></div><div><dt>QC failures</dt><dd>{dashboard.movie.qualityControlFailureCount.toLocaleString()}</dd></div></dl></div>
+          <div className="account-card operations-card"><Boxes size={18} /><h3>Asset & accounting evidence</h3><dl className="operations-metric-grid"><div><dt>Movie assets</dt><dd>{dashboard.movie.movieAssetCount.toLocaleString()}</dd></div><div><dt>Ingestion gaps</dt><dd>{dashboard.movie.movieAssetIngestionGapCount.toLocaleString()}</dd></div><div><dt>Completed without asset</dt><dd>{dashboard.movie.completedJobsWithoutAssetCount.toLocaleString()}</dd></div><div><dt>Accounting transactions</dt><dd>{dashboard.movie.accountingTransactionCount.toLocaleString()}</dd></div><div><dt>Pending accounting</dt><dd>{dashboard.movie.pendingAccountingCount.toLocaleString()}</dd></div><div><dt>Missing evidence</dt><dd>{dashboard.movie.missingAccountingEvidenceCount.toLocaleString()}</dd></div></dl></div>
+        </div>
+        <div className="operations-two-column">
+          <div className="account-card operations-card"><h3>QC outcomes</h3><CountList items={dashboard.movie.qualityControlByStatus} empty="No movie QC records in this period." /></div>
+          <div className="account-card operations-card"><h3>Failure codes</h3><CountList items={dashboard.movie.failuresByCode} empty="No movie failures in this period." /></div>
+        </div>
+        <div className="account-card operations-card"><h3>Stuck movie jobs</h3>{dashboard.movie.stuckJobs.length ? <div className="operations-detail-list">{dashboard.movie.stuckJobs.map((job) => <div key={job.jobId}><span><strong>{job.jobType}</strong><small>{job.jobId} · lease expired · retry {job.retryCount}</small></span><button className="secondary-button" disabled={recoveringJobId === job.jobId} onClick={() => void recoverJob(job.jobId)}>{recoveringJobId === job.jobId ? "Recovering…" : "Recover lease"}</button></div>)}</div> : <p className="operations-empty">No expired movie worker leases recorded.</p>}</div>
+      </section>
+
+      <section className="operations-section" aria-labelledby="operations-workers">
+        <div className="operations-section-heading"><div><p className="section-eyebrow">Worker fleet</p><h2 id="operations-workers">Generation workers</h2></div><span>{dashboard.workers.healthyWorkerCount} healthy · {dashboard.workers.staleWorkerCount} stale</span></div>
+        <div className="account-card operations-card"><dl className="operations-metric-grid"><div><dt>Configured concurrency</dt><dd>{dashboard.workers.configuredConcurrency}</dd></div><div><dt>Observed workers</dt><dd>{dashboard.workers.observedWorkerCount}</dd></div><div><dt>Healthy workers</dt><dd>{dashboard.workers.healthyWorkerCount}</dd></div><div><dt>Stale workers</dt><dd>{dashboard.workers.staleWorkerCount}</dd></div></dl>{dashboard.workers.workers.length ? <div className="operations-detail-list">{dashboard.workers.workers.map((worker) => <div key={worker.workerId}><span><strong>{worker.workerId}</strong><small>{worker.status} · last seen {dateTime(worker.lastSeenAt)}{worker.activeJobId ? ` · active ${worker.activeJobId}` : ""}</small></span><b>{worker.isStale ? "Stale" : "Healthy"}</b></div>)}</div> : <p className="operations-empty">No worker heartbeat has been observed in this environment.</p>}</div>
+      </section>
+
+      <section className="operations-section" aria-labelledby="operations-audit">
+        <div className="operations-section-heading"><div><p className="section-eyebrow">Administrator audit</p><h2 id="operations-audit">Recent operational actions</h2></div><span>Append-only action evidence</span></div>
+        <div className="account-card operations-card">{dashboard.recentAdminActions.length ? <div className="operations-detail-list">{dashboard.recentAdminActions.map((action) => <div key={action.id}><span><strong>{action.action}</strong><small>{action.targetType} · {action.targetId ?? "aggregate"} · {dateTime(action.createdAt)}</small></span><b>{action.outcome}</b></div>)}</div> : <p className="operations-empty">No administrator operational actions recorded.</p>}</div>
       </section>
 
       <section className="operations-section" aria-labelledby="operations-generation">

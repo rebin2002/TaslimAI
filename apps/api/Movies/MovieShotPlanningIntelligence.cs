@@ -453,7 +453,7 @@ public sealed class MovieShotPlanningActionExecutor(
 {
     public string ActionType => DirectorShotPlanningActionTypes.ProposeShots;
 
-    public async Task<DirectorActionExecution> ExecuteAsync(DirectorAction action, CancellationToken cancellationToken = default)
+    public async Task<DirectorActionExecution> ExecuteAsync(DirectorAction action, Guid executingUserId, CancellationToken cancellationToken = default)
     {
         DirectorShotPlanningPayload? payload;
         try { payload = JsonSerializer.Deserialize<DirectorShotPlanningPayload>(action.PayloadJson, DirectorJson.Options); }
@@ -535,5 +535,5 @@ public sealed class MovieShotPlanningRegenerationActionExecutor(
 {
     private readonly MovieShotPlanningActionExecutor inner = new(db, contextAssembler, authorization);
     public string ActionType => DirectorShotPlanningActionTypes.RegenerateShots;
-    public Task<DirectorActionExecution> ExecuteAsync(DirectorAction action, CancellationToken cancellationToken = default) => inner.ExecuteAsync(action, cancellationToken);
+    public Task<DirectorActionExecution> ExecuteAsync(DirectorAction action, Guid executingUserId, CancellationToken cancellationToken = default) => inner.ExecuteAsync(action, executingUserId, cancellationToken);
 }

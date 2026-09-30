@@ -16,6 +16,25 @@ public sealed class AdminOperationsController(IAdminOperationsService operations
         [FromQuery] AdminOperationsQuery query,
         CancellationToken cancellationToken) =>
         Ok(await operations.GetDashboardAsync(query.ToFilter(), cancellationToken));
+
+    [HttpPost("jobs/{jobId:guid}/recover")]
+    public async Task<ActionResult<AdminJobRecoveryResult>> Recover(
+        Guid jobId,
+        [FromBody] AdminJobRecoveryRequest request,
+        CancellationToken cancellationToken)
+    {
+        var actorValue = User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+        if (!Guid.TryParse(actorValue, out var actorUserId)) return Unauthorized();
+        try
+        {
+            var result = await operations.RecoverExpiredJobAsync(actorUserId, jobId, request.Reason, HttpContext.TraceIdentifier, cancellationToken);
+            return result is null ? NotFound() : Ok(result);
+        }
+        catch (AdminOperationConflictException exception)
+        {
+            return Conflict(new { error = new { code = exception.Code, message = exception.Message } });
+        }
+    }
 }
 
 public sealed class AdminOperationsQuery

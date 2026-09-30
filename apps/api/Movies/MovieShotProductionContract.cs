@@ -212,7 +212,7 @@ public static class MovieShotProductionContractProjection
             shot.NarrativeImportance,
             CinematographyIntentValidator.FromJson(shot.CinematographyJson),
             MovieShotProductionContractSerialization.FromJson<MovieShotComplexityProfile>(shot.ProductionComplexityJson),
-            MovieShotProductionContractSerialization.FromJson<MovieShotQualityRequirements>(shot.QualityRequirementsJson),
+            ReadQualityRequirements(shot.QualityRequirementsJson),
             shot.ContinuitySensitivity,
             shot.UpscaleSuitability,
             MovieShotProductionContractSerialization.FromJson<MovieShotTargetOutputRequirements>(shot.TargetOutputRequirementsJson),
@@ -220,5 +220,18 @@ public static class MovieShotProductionContractProjection
             MovieShotReadiness.PlanState(shot),
             shot.ProductionStage,
             approval);
+    }
+
+    private static MovieShotQualityRequirements? ReadQualityRequirements(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return null;
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            if (document.RootElement.TryGetProperty("productionContractQualityRequirements", out var embedded))
+                return JsonSerializer.Deserialize<MovieShotQualityRequirements>(embedded.GetRawText(), new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        }
+        catch (JsonException) { }
+        return MovieShotProductionContractSerialization.FromJson<MovieShotQualityRequirements>(json);
     }
 }
