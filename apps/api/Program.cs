@@ -205,6 +205,8 @@ builder.Services.AddOptions<ProviderCapabilityRegistryOptions>()
 builder.Services.AddSingleton<IValidateOptions<ProviderCapabilityRegistryOptions>, ProviderCapabilityRegistryOptionsValidator>();
 builder.Services.AddSingleton<IProviderCapabilityRegistry, ProviderCapabilityRegistry>();
 builder.Services.Configure<GenerationJobOptions>(builder.Configuration.GetSection("GenerationJobs"));
+builder.Services.PostConfigure<GenerationJobOptions>(options =>
+    options.WorkerEnabled = builder.Configuration.GetValue("GenerationJobs:WorkerEnabled", !builder.Environment.IsEnvironment("Testing")));
 builder.Services.Configure<ProviderResilienceOptions>(builder.Configuration.GetSection("ProviderResilience"));
 builder.Services.AddScoped<IGenerationJobQueue, DatabaseGenerationJobQueue>();
 builder.Services.AddScoped<IGenerationJobUsageService, GenerationJobUsageService>();

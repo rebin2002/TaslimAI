@@ -253,7 +253,47 @@ export type AdminOperationsDashboard = {
   billing: { customerChargingEnabled: boolean; configuredProvider: string; paymentProviderConfigured: boolean; subscriptions: { planCode: string; status: string; count: number }[]; paymentAttemptsByStatus: AdminCountBreakdown[]; pendingReconciliationCount: number };
   signals: { runningJobCount: number; queuedOrPendingJobCount: number; recentFailureCount: number; anomalousUsageCountInRange: number; lastCompletedGenerationAt: string | null };
   providers: AdminProviderHealth[];
+  movie: AdminMovieOperations;
+  workers: AdminWorkerOperations;
+  recentAdminActions: AdminOperationAudit[];
 };
+export type AdminMovieOperations = {
+  movieJobCountInRange: number;
+  jobsByStatus: AdminCountBreakdown[];
+  queuedOrPendingCount: number;
+  oldestQueuedAt: string | null;
+  oldestQueueAgeSeconds: number | null;
+  averageQueueAgeSeconds: number | null;
+  totalRetryCount: number;
+  retriedJobCount: number;
+  maxRetryCount: number;
+  failuresByCode: AdminCountBreakdown[];
+  providerDisabledFailureCount: number;
+  qualityControlFailureCount: number;
+  qualityControlByStatus: AdminCountBreakdown[];
+  movieAssetCount: number;
+  movieAssetWithStoredFileCount: number;
+  movieAssetIngestionGapCount: number;
+  completedJobsWithoutAssetCount: number;
+  accountingTransactionCount: number;
+  pendingAccountingCount: number;
+  missingAccountingEvidenceCount: number;
+  estimatedProviderCostUsd: number;
+  actualProviderCostUsd: number;
+  providerStatus: string;
+  providerEnabled: boolean;
+  providerConfigured: boolean;
+  stuckJobCount: number;
+  stuckJobs: { jobId: string; jobType: string; status: string; claimExpiresAt: string | null; startedAt: string | null; retryCount: number; errorCode: string | null }[];
+};
+export type AdminWorkerOperations = {
+  configuredConcurrency: number;
+  observedWorkerCount: number;
+  healthyWorkerCount: number;
+  staleWorkerCount: number;
+  workers: { workerId: string; status: string; startedAt: string; lastSeenAt: string; lastClaimedAt: string | null; lastCompletedAt: string | null; activeJobId: string | null; consecutiveIterationFailures: number; workerConcurrency: number; isStale: boolean }[];
+};
+export type AdminOperationAudit = { id: string; actorUserId: string; action: string; targetType: string; targetId: string | null; outcome: string; reason: string | null; createdAt: string };
 export type GenerationJobStatus = "Pending" | "Queued" | "Running" | "Succeeded" | "Failed" | "Cancelled";
 export type GenerationJobOutput = { id: string; outputType: string; storedFileId: string | null; metadataJson: string | null; createdAt: string };
 export type GenerationCostWarning = { code: string; severity: "warning" | "error" | string; message: string };
@@ -785,6 +825,7 @@ export const api = {
     const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value !== undefined).map(([key, value]) => [key, String(value)]));
     return request<AdminOperationsDashboard>(`/api/admin/operations/dashboard${query.toString() ? `?${query.toString()}` : ""}`);
   },
+  recoverAdminStuckJob: (jobId: string, reason: string) => request<{ jobId: string; status: GenerationJobStatus; retryCount: number; queuedAt: string; auditAction: string }>(`/api/admin/operations/jobs/${jobId}/recover`, { method: "POST", body: JSON.stringify({ reason }) }, true),
   createGenerationJob: (workspaceId: string, inputJson = "{}", title?: string, idempotencyKey = requestId()) => request<GenerationJob>("/api/generation/jobs", generationInit({ method: "POST", body: JSON.stringify({ workspaceId, jobType: "system.test", inputJson, title }) }, idempotencyKey), true),
   createImageGenerationJob: (input: ImageGenerationInput, idempotencyKey = requestId()) => request<{ job: GenerationJob }>("/api/image-generation/jobs", generationInit({ method: "POST", body: JSON.stringify(input) }, idempotencyKey), true).then((response) => response.job),
   createVoiceGenerationJob: (input: VoiceGenerationInput, idempotencyKey = requestId()) => request<{ job: GenerationJob }>("/api/voice-generation/jobs", generationInit({ method: "POST", body: JSON.stringify(input) }, idempotencyKey), true).then((response) => response.job),

@@ -3,6 +3,8 @@ using Microsoft.Extensions.Options;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
 using Taslim.Api.Files;
+using Taslim.Api.Generation;
+using Taslim.Api.Movies;
 using Taslim.Api.Persistence;
 using FileSettings = Taslim.Api.Files.FileOptions;
 
@@ -11,16 +13,24 @@ namespace Taslim.Api.Operations;
 public interface IAdminOperationsService
 {
     Task<AdminOperationsDashboardDto> GetDashboardAsync(AdminOperationsFilter filter, CancellationToken cancellationToken = default);
+    Task<AdminJobRecoveryResult?> RecoverExpiredJobAsync(Guid actorUserId, Guid jobId, string reason, string? requestId, CancellationToken cancellationToken = default);
+}
+
+public sealed class AdminOperationConflictException(string code, string message) : Exception(message)
+{
+    public string Code { get; } = code;
 }
 
 public sealed class AdminOperationsService(
     TaslimDbContext db,
     IOptions<BillingOptions> billingOptions,
     IOptions<FileSettings> fileOptions,
+    IOptions<GenerationJobOptions> generationOptions,
     ProviderHealthService providerHealth) : IAdminOperationsService
 {
     private const int RecentItemLimit = 20;
     private static readonly TimeSpan LongRunningThreshold = TimeSpan.FromMinutes(15);
+    private static readonly string[] MovieJobTypes = GenerationJobTypes.MovieTypes.ToArray();
 
     public async Task<AdminOperationsDashboardDto> GetDashboardAsync(AdminOperationsFilter filter, CancellationToken cancellationToken = default)
     {
@@ -32,6 +42,14 @@ public sealed class AdminOperationsService(
         var billing = await BuildBillingAsync(range, cancellationToken);
         var signals = await BuildSignalsAsync(range, generation, cancellationToken);
         var providers = await providerHealth.GetAsync(range, cancellationToken);
+        var movie = await BuildMovieAsync(range, providers, cancellationToken);
+        var workers = await BuildWorkersAsync(cancellationToken);
+        var recentAdminActions = await db.AdminOperationAuditEvents.AsNoTracking()
+            .OrderByDescending(item => item.CreatedAt)
+            .ThenByDescending(item => item.Id)
+            .Take(RecentItemLimit)
+            .Select(item => new AdminOperationAuditDto(item.Id, item.ActorUserId, item.Action, item.TargetType, item.TargetId, item.Outcome, item.Reason, item.CreatedAt))
+            .ToArrayAsync(cancellationToken);
 
         return new AdminOperationsDashboardDto(
             new AdminOperationsRangeDto(range.FromUtc, range.ToUtc),
@@ -41,7 +59,61 @@ public sealed class AdminOperationsService(
             assetsAndStorage,
             billing,
             signals,
-            providers);
+            providers,
+            movie,
+            workers,
+            recentAdminActions);
+    }
+
+    public async Task<AdminJobRecoveryResult?> RecoverExpiredJobAsync(
+        Guid actorUserId,
+        Guid jobId,
+        string reason,
+        string? requestId,
+        CancellationToken cancellationToken = default)
+    {
+        var normalizedReason = NormalizeReason(reason);
+        var now = DateTime.UtcNow;
+        var source = await db.GenerationJobs.AsNoTracking().FirstOrDefaultAsync(item => item.Id == jobId, cancellationToken);
+        if (source is null) return null;
+        if (!MovieJobTypes.Contains(source.JobType, StringComparer.Ordinal))
+            throw new AdminOperationConflictException("RECOVERY_SCOPE_UNSUPPORTED", "Only movie generation jobs can be recovered from this operations surface.");
+        if (source.Status != GenerationJobStatus.Running || source.ClaimExpiresAt is null || source.ClaimExpiresAt >= now)
+            throw new AdminOperationConflictException("JOB_NOT_STUCK", "The job does not have an expired worker lease.");
+
+        var recoveryToken = Guid.NewGuid();
+        var updated = await db.GenerationJobs
+            .Where(item => item.Id == jobId
+                && item.Status == GenerationJobStatus.Running
+                && item.ClaimExpiresAt.HasValue
+                && item.ClaimExpiresAt < now)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(item => item.Status, GenerationJobStatus.Queued)
+                .SetProperty(item => item.QueuedAt, now)
+                .SetProperty(item => item.StartedAt, (DateTime?)null)
+                .SetProperty(item => item.ClaimExpiresAt, (DateTime?)null)
+                .SetProperty(item => item.CancellationRequested, false)
+                .SetProperty(item => item.RetryCount, item => item.RetryCount + 1)
+                .SetProperty(item => item.ConcurrencyToken, recoveryToken), cancellationToken);
+        if (updated == 0)
+            throw new AdminOperationConflictException("JOB_RECOVERY_RACE", "The job changed before recovery could be applied.");
+
+        db.AdminOperationAuditEvents.Add(new AdminOperationAuditEvent
+        {
+            Id = Guid.NewGuid(),
+            ActorUserId = actorUserId,
+            Action = AdminOperationActions.RecoverExpiredGenerationJob,
+            TargetType = "generation_job",
+            TargetId = jobId,
+            Outcome = AdminOperationOutcomes.Succeeded,
+            Reason = normalizedReason,
+            RequestId = NormalizeRequestId(requestId),
+            BeforeState = $"status={GenerationJobStatus.Running};retryCount={source.RetryCount}",
+            AfterState = $"status={GenerationJobStatus.Queued};retryCount={source.RetryCount + 1}",
+            CreatedAt = now,
+        });
+        await db.SaveChangesAsync(cancellationToken);
+        return new AdminJobRecoveryResult(jobId, GenerationJobStatus.Queued, source.RetryCount + 1, now, AdminOperationActions.RecoverExpiredGenerationJob);
     }
 
     private async Task<AdminGenerationOverviewDto> BuildGenerationAsync((DateTime FromUtc, DateTime ToUtc) range, CancellationToken cancellationToken)
@@ -61,7 +133,7 @@ public sealed class AdminOperationsService(
             .OrderByDescending(item => item.FailedAt ?? item.CreatedAt)
             .ThenByDescending(item => item.Id)
             .Take(RecentItemLimit)
-            .Select(item => new AdminRecentFailureDto(item.Id, item.JobType, item.ErrorCode, item.FailedAt ?? item.CreatedAt))
+            .Select(item => new AdminRecentFailureDto(item.Id, item.JobType, SanitizeCode(item.ErrorCode), item.FailedAt ?? item.CreatedAt))
             .ToArrayAsync(cancellationToken);
         var now = DateTime.UtcNow;
         var longRunningSince = now.Subtract(LongRunningThreshold);
@@ -91,7 +163,8 @@ public sealed class AdminOperationsService(
             item.CreatedAt,
             item.RetryCount,
             item.ClaimExpiresAt,
-            (item.StartedAt ?? item.QueuedAt ?? item.CreatedAt) <= longRunningSince)).ToArray();
+            (item.StartedAt ?? item.QueuedAt ?? item.CreatedAt) <= longRunningSince,
+            item.ClaimExpiresAt.HasValue && item.ClaimExpiresAt.Value < now)).ToArray();
         var queuedOrPendingCount = await jobs.CountAsync(item => item.Status == GenerationJobStatus.Queued || item.Status == GenerationJobStatus.Pending, cancellationToken);
         var longRunningCount = await jobs.CountAsync(item => item.Status == GenerationJobStatus.Running && (item.StartedAt ?? item.QueuedAt ?? item.CreatedAt) <= longRunningSince, cancellationToken);
         var totalRetryCount = await inRange.SumAsync(item => item.RetryCount, cancellationToken);
@@ -106,6 +179,153 @@ public sealed class AdminOperationsService(
             queuedOrPendingCount,
             longRunningCount,
             totalRetryCount);
+    }
+
+    private async Task<AdminMovieOperationsDto> BuildMovieAsync(
+        (DateTime FromUtc, DateTime ToUtc) range,
+        IReadOnlyList<AdminProviderHealthDto> providers,
+        CancellationToken cancellationToken)
+    {
+        var now = DateTime.UtcNow;
+        var movieJobsInRange = await db.GenerationJobs.AsNoTracking()
+            .Where(item => MovieJobTypes.Contains(item.JobType)
+                && item.CreatedAt >= range.FromUtc && item.CreatedAt < range.ToUtc)
+            .Select(item => new
+            {
+                item.Id,
+                item.JobType,
+                item.Status,
+                item.RetryCount,
+                item.ErrorCode,
+                item.CreatedAt,
+                item.QueuedAt,
+                item.StartedAt,
+                item.CompletedAt,
+                item.ClaimExpiresAt,
+            })
+            .ToArrayAsync(cancellationToken);
+        var queued = await db.GenerationJobs.AsNoTracking()
+            .Where(item => MovieJobTypes.Contains(item.JobType)
+                && (item.Status == GenerationJobStatus.Queued || item.Status == GenerationJobStatus.Pending))
+            .Select(item => new { item.QueuedAt, item.CreatedAt })
+            .ToArrayAsync(cancellationToken);
+        var queueTimes = queued.Select(item => item.QueuedAt ?? item.CreatedAt).ToArray();
+        DateTime? oldestQueuedAt = queueTimes.Length == 0 ? null : queueTimes.Min();
+        var queueAges = queueTimes.Select(item => Math.Max(0d, (now - item).TotalSeconds)).ToArray();
+        var stuckJobs = await db.GenerationJobs.AsNoTracking()
+            .Where(item => MovieJobTypes.Contains(item.JobType)
+                && item.Status == GenerationJobStatus.Running
+                && item.ClaimExpiresAt.HasValue
+                && item.ClaimExpiresAt < now)
+            .OrderBy(item => item.ClaimExpiresAt)
+            .ThenBy(item => item.Id)
+            .Take(RecentItemLimit)
+            .Select(item => new AdminStuckMovieJobDto(item.Id, item.JobType, item.Status, item.ClaimExpiresAt, item.StartedAt, item.RetryCount, SanitizeCode(item.ErrorCode)))
+            .ToArrayAsync(cancellationToken);
+
+        var movieJobIds = movieJobsInRange.Select(item => item.Id).ToArray();
+        var movieAssets = movieJobIds.Length == 0
+            ? []
+            : await db.Assets.AsNoTracking()
+                .Where(item => item.AssetType == AssetTypes.Video && item.SourceGenerationJobId.HasValue && movieJobIds.Contains(item.SourceGenerationJobId.Value))
+                .Select(item => new { item.StoredFileId })
+                .ToArrayAsync(cancellationToken);
+        var movieUsage = await db.UsageTransactions.AsNoTracking()
+            .Where(item => item.Feature == UsageFeature.Movie && item.CreatedAt >= range.FromUtc && item.CreatedAt < range.ToUtc)
+            .Select(item => new { item.GenerationJobId, item.Status, item.EstimatedProviderCostUsd, item.ProviderCostUsd })
+            .ToArrayAsync(cancellationToken);
+        var accountingJobIds = movieUsage.Where(item => item.GenerationJobId.HasValue).Select(item => item.GenerationJobId!.Value).ToHashSet();
+        var completedMovieJobsWithoutAsset = movieJobsInRange.Count(item => item.Status == GenerationJobStatus.Succeeded
+            && !movieAssets.Any(asset => false));
+        if (movieJobIds.Length > 0)
+        {
+            var assetJobIds = await db.Assets.AsNoTracking()
+                .Where(item => item.AssetType == AssetTypes.Video && item.SourceGenerationJobId.HasValue && movieJobIds.Contains(item.SourceGenerationJobId.Value))
+                .Select(item => item.SourceGenerationJobId!.Value)
+                .Distinct()
+                .ToArrayAsync(cancellationToken);
+            var assetJobIdSet = assetJobIds.ToHashSet();
+            completedMovieJobsWithoutAsset = movieJobsInRange.Count(item => item.Status == GenerationJobStatus.Succeeded && !assetJobIdSet.Contains(item.Id));
+        }
+        var missingAccountingEvidence = movieJobsInRange.Count(item => item.Status is GenerationJobStatus.Succeeded or GenerationJobStatus.Failed
+            && !accountingJobIds.Contains(item.Id));
+
+        var qcByStatus = await db.MovieFinalMasters.AsNoTracking()
+            .Where(item => item.RequestedAt >= range.FromUtc && item.RequestedAt < range.ToUtc)
+            .GroupBy(item => item.QcStatus)
+            .Select(group => new AdminCountBreakdownDto(group.Key, group.Count()))
+            .ToArrayAsync(cancellationToken);
+        var reviewRequiredTakes = await db.MovieTakes.AsNoTracking()
+            .CountAsync(item => item.Status == MovieTakeStatuses.ReviewRequired && item.CreatedAt >= range.FromUtc && item.CreatedAt < range.ToUtc, cancellationToken);
+        var qcBreakdown = qcByStatus.ToList();
+        if (reviewRequiredTakes > 0) qcBreakdown.Add(new AdminCountBreakdownDto(MovieTakeStatuses.ReviewRequired, reviewRequiredTakes));
+
+        var movieProvider = providers.FirstOrDefault(item => string.Equals(item.Category, "movie", StringComparison.OrdinalIgnoreCase));
+        var failureCodes = movieJobsInRange
+            .Where(item => item.Status == GenerationJobStatus.Failed)
+            .GroupBy(item => SanitizeCode(item.ErrorCode))
+            .Select(group => new AdminCountBreakdownDto(group.Key, group.Count()))
+            .OrderByDescending(item => item.Count)
+            .ThenBy(item => item.Key)
+            .ToArray();
+        var qcFailureCount = movieJobsInRange.Count(item => item.Status == GenerationJobStatus.Failed && IsQualityControlCode(item.ErrorCode));
+        var providerDisabledFailureCount = movieJobsInRange.Count(item => string.Equals(item.ErrorCode, GenerationJobErrorCodes.MovieProviderUnavailable, StringComparison.Ordinal));
+
+        return new AdminMovieOperationsDto(
+            movieJobsInRange.Length,
+            movieJobsInRange.GroupBy(item => item.Status.ToString()).Select(group => new AdminCountBreakdownDto(group.Key, group.Count())).OrderBy(item => item.Key).ToArray(),
+            queued.Length,
+            oldestQueuedAt,
+            queueAges.Length == 0 ? null : queueAges.Max(),
+            queueAges.Length == 0 ? null : queueAges.Average(),
+            movieJobsInRange.Sum(item => item.RetryCount),
+            movieJobsInRange.Count(item => item.RetryCount > 0),
+            movieJobsInRange.Length == 0 ? 0 : movieJobsInRange.Max(item => item.RetryCount),
+            failureCodes,
+            providerDisabledFailureCount,
+            qcFailureCount,
+            qcBreakdown.OrderBy(item => item.Key).ToArray(),
+            movieAssets.Length,
+            movieAssets.Count(item => item.StoredFileId.HasValue),
+            movieAssets.Count(item => !item.StoredFileId.HasValue),
+            completedMovieJobsWithoutAsset,
+            movieUsage.Length,
+            movieUsage.Count(item => item.Status == UsageTransactionStatus.Pending),
+            missingAccountingEvidence,
+            movieUsage.Sum(item => item.EstimatedProviderCostUsd ?? 0m),
+            movieUsage.Sum(item => item.ProviderCostUsd),
+            movieProvider?.Status ?? "disabled",
+            movieProvider?.Enabled ?? false,
+            movieProvider?.Configured ?? false,
+            stuckJobs.Length,
+            stuckJobs);
+    }
+
+    private async Task<AdminWorkerOperationsDto> BuildWorkersAsync(CancellationToken cancellationToken)
+    {
+        var now = DateTime.UtcNow;
+        var staleAfter = TimeSpan.FromSeconds(Math.Clamp(generationOptions.Value.HeartbeatStaleAfterSeconds, 30, 3_600));
+        var rows = await db.GenerationWorkerHeartbeats.AsNoTracking()
+            .OrderByDescending(item => item.LastSeenAt)
+            .Take(100)
+            .ToArrayAsync(cancellationToken);
+        var workers = rows.Select(item => new AdminWorkerStatusDto(
+            item.WorkerId,
+            item.Status,
+            item.StartedAt,
+            item.LastSeenAt,
+            item.LastClaimedAt,
+            item.LastCompletedAt,
+            item.ActiveJobId,
+            item.ConsecutiveIterationFailures,
+            item.WorkerConcurrency,
+            item.Status != GenerationWorkerStatuses.Running || now - item.LastSeenAt > staleAfter)).ToArray();
+        return new AdminWorkerOperationsDto(
+            Math.Max(1, generationOptions.Value.WorkerConcurrency),
+            workers.Length,
+            workers.Count(item => !item.IsStale),
+            workers.Count(item => item.IsStale),
+            workers);
     }
 
     private async Task<AdminUsageOperationsDto> BuildUsageAsync((DateTime FromUtc, DateTime ToUtc) range, CancellationToken cancellationToken)
@@ -157,18 +377,9 @@ public sealed class AdminOperationsService(
             (decimal)(summary?.CustomerChargesUsd ?? 0d),
             (decimal)(summary?.PendingEstimatedProviderCostUsd ?? 0d),
             features.Select(item => new AdminUsageFeatureOperationsDto(
-                item.Feature.ToString(),
-                item.RequestCount,
-                item.CompletedRequestCount,
-                item.FailedRequestCount,
-                item.PendingRequestCount,
-                item.InputTokens,
-                item.CachedInputTokens,
-                item.OutputTokens,
-                item.ImageInputTokens,
-                item.ImageOutputTokens,
-                (decimal)item.ProviderCostUsd,
-                (decimal)item.CustomerChargesUsd))
+                item.Feature.ToString(), item.RequestCount, item.CompletedRequestCount, item.FailedRequestCount, item.PendingRequestCount,
+                item.InputTokens, item.CachedInputTokens, item.OutputTokens, item.ImageInputTokens, item.ImageOutputTokens,
+                (decimal)item.ProviderCostUsd, (decimal)item.CustomerChargesUsd))
                 .OrderByDescending(item => item.RequestCount)
                 .ThenBy(item => item.Feature)
                 .ToArray());
@@ -192,20 +403,11 @@ public sealed class AdminOperationsService(
     {
         var assets = db.Assets.AsNoTracking();
         var files = db.StoredFiles.AsNoTracking();
-        var assetsByType = await assets
-            .Where(item => item.CreatedAt >= range.FromUtc && item.CreatedAt < range.ToUtc)
-            .GroupBy(item => item.AssetType)
-            .Select(group => new AdminCountBreakdownDto(group.Key, group.Count()))
-            .ToArrayAsync(cancellationToken);
-        var filesByStatus = await files.GroupBy(item => item.Status)
-            .Select(group => new AdminCountBreakdownDto(group.Key.ToString(), group.Count()))
-            .ToArrayAsync(cancellationToken);
-        var filesByProvider = await files.GroupBy(item => item.StorageProvider)
-            .Select(group => new AdminCountBreakdownDto(group.Key, group.Count()))
-            .ToArrayAsync(cancellationToken);
-        var filesByExtraction = await files.GroupBy(item => item.TextExtractionStatus)
-            .Select(group => new AdminCountBreakdownDto(group.Key.ToString(), group.Count()))
-            .ToArrayAsync(cancellationToken);
+        var assetsByType = await assets.Where(item => item.CreatedAt >= range.FromUtc && item.CreatedAt < range.ToUtc)
+            .GroupBy(item => item.AssetType).Select(group => new AdminCountBreakdownDto(group.Key, group.Count())).ToArrayAsync(cancellationToken);
+        var filesByStatus = await files.GroupBy(item => item.Status).Select(group => new AdminCountBreakdownDto(group.Key.ToString(), group.Count())).ToArrayAsync(cancellationToken);
+        var filesByProvider = await files.GroupBy(item => item.StorageProvider).Select(group => new AdminCountBreakdownDto(group.Key, group.Count())).ToArrayAsync(cancellationToken);
+        var filesByExtraction = await files.GroupBy(item => item.TextExtractionStatus).Select(group => new AdminCountBreakdownDto(group.Key.ToString(), group.Count())).ToArrayAsync(cancellationToken);
         var options = fileOptions.Value;
 
         return new AdminAssetsAndStorageDto(
@@ -225,19 +427,12 @@ public sealed class AdminOperationsService(
     private async Task<AdminBillingOperationsDto> BuildBillingAsync((DateTime FromUtc, DateTime ToUtc) range, CancellationToken cancellationToken)
     {
         var subscriptions = await (from subscription in db.Subscriptions.AsNoTracking()
-                                   join plan in db.Plans.AsNoTracking() on subscription.PlanId equals plan.Id
-                                   group subscription by new { plan.Code, subscription.Status } into grouped
-                                   select new AdminSubscriptionBreakdownDto(grouped.Key.Code, grouped.Key.Status.ToString(), grouped.Count()))
+                                    join plan in db.Plans.AsNoTracking() on subscription.PlanId equals plan.Id
+                                    group subscription by new { plan.Code, subscription.Status } into grouped
+                                    select new AdminSubscriptionBreakdownDto(grouped.Key.Code, grouped.Key.Status.ToString(), grouped.Count()))
             .ToArrayAsync(cancellationToken);
-        var attempts = await db.PaymentAttempts.AsNoTracking()
-            .GroupBy(item => item.Status)
-            .Select(group => new AdminCountBreakdownDto(group.Key.ToString(), group.Count()))
-            .ToArrayAsync(cancellationToken);
-        var events = await db.PaymentEvents.AsNoTracking()
-            .Where(item => item.ReceivedAt >= range.FromUtc && item.ReceivedAt < range.ToUtc)
-            .GroupBy(item => item.Status)
-            .Select(group => new AdminCountBreakdownDto(group.Key.ToString(), group.Count()))
-            .ToArrayAsync(cancellationToken);
+        var attempts = await db.PaymentAttempts.AsNoTracking().GroupBy(item => item.Status).Select(group => new AdminCountBreakdownDto(group.Key.ToString(), group.Count())).ToArrayAsync(cancellationToken);
+        var events = await db.PaymentEvents.AsNoTracking().Where(item => item.ReceivedAt >= range.FromUtc && item.ReceivedAt < range.ToUtc).GroupBy(item => item.Status).Select(group => new AdminCountBreakdownDto(group.Key.ToString(), group.Count())).ToArrayAsync(cancellationToken);
         var options = billingOptions.Value;
         var providerConfigured = options.CustomerChargingEnabled && !string.Equals(options.Provider, "unconfigured", StringComparison.OrdinalIgnoreCase);
 
@@ -252,10 +447,7 @@ public sealed class AdminOperationsService(
             await db.PaymentEvents.AsNoTracking().CountAsync(item => item.Status == PaymentEventStatus.Rejected && item.ReceivedAt >= range.FromUtc && item.ReceivedAt < range.ToUtc, cancellationToken));
     }
 
-    private async Task<AdminOperationalSignalsDto> BuildSignalsAsync(
-        (DateTime FromUtc, DateTime ToUtc) range,
-        AdminGenerationOverviewDto generation,
-        CancellationToken cancellationToken)
+    private async Task<AdminOperationalSignalsDto> BuildSignalsAsync((DateTime FromUtc, DateTime ToUtc) range, AdminGenerationOverviewDto generation, CancellationToken cancellationToken)
     {
         var jobs = db.GenerationJobs.AsNoTracking();
         var usage = db.UsageTransactions.AsNoTracking();
@@ -264,11 +456,31 @@ public sealed class AdminOperationsService(
             generation.QueuedOrPendingCount,
             await jobs.CountAsync(item => item.Status == GenerationJobStatus.Failed && (item.FailedAt ?? item.CreatedAt) >= range.FromUtc && (item.FailedAt ?? item.CreatedAt) < range.ToUtc, cancellationToken),
             await usage.CountAsync(item => item.IsAnomalous && item.CreatedAt >= range.FromUtc && item.CreatedAt < range.ToUtc, cancellationToken),
-            await jobs.Where(item => item.Status == GenerationJobStatus.Succeeded && item.CompletedAt.HasValue)
-                .OrderByDescending(item => item.CompletedAt)
-                .Select(item => item.CompletedAt)
-                .FirstOrDefaultAsync(cancellationToken));
+            await jobs.Where(item => item.Status == GenerationJobStatus.Succeeded && item.CompletedAt.HasValue).OrderByDescending(item => item.CompletedAt).Select(item => item.CompletedAt).FirstOrDefaultAsync(cancellationToken));
     }
+
+    private static string NormalizeReason(string reason)
+    {
+        if (string.IsNullOrWhiteSpace(reason)) throw new AdminOperationConflictException("RECOVERY_REASON_REQUIRED", "A recovery reason is required.");
+        var normalized = reason.Trim();
+        if (normalized.Length > 500) throw new AdminOperationConflictException("RECOVERY_REASON_TOO_LONG", "The recovery reason is too long.");
+        return normalized;
+    }
+
+    private static string? NormalizeRequestId(string? requestId) =>
+        string.IsNullOrWhiteSpace(requestId) ? null : requestId.Trim()[..Math.Min(128, requestId.Trim().Length)];
+
+    private static string SanitizeCode(string? code)
+    {
+        if (string.IsNullOrWhiteSpace(code)) return "GENERATION_FAILURE";
+        var safe = new string(code.Trim().Take(96).Where(character => char.IsLetterOrDigit(character) || character is '_' or '-' or '.').ToArray());
+        return string.IsNullOrWhiteSpace(safe) ? "GENERATION_FAILURE" : safe;
+    }
+
+    private static bool IsQualityControlCode(string? code) =>
+        code?.Contains("OUTPUT_INVALID", StringComparison.OrdinalIgnoreCase) == true
+        || code?.Contains("QUALITY", StringComparison.OrdinalIgnoreCase) == true
+        || code?.Contains("QC", StringComparison.OrdinalIgnoreCase) == true;
 
     private static (DateTime FromUtc, DateTime ToUtc) NormalizeRange(DateTime? fromUtc, DateTime? toUtc)
     {

@@ -1,3 +1,4 @@
+using Taslim.Api.Domain;
 using Taslim.Api.Operations;
 
 namespace Taslim.Api.Contracts;
@@ -10,7 +11,10 @@ public sealed record AdminOperationsDashboardDto(
     AdminAssetsAndStorageDto AssetsAndStorage,
     AdminBillingOperationsDto Billing,
     AdminOperationalSignalsDto Signals,
-    IReadOnlyList<AdminProviderHealthDto> Providers);
+    IReadOnlyList<AdminProviderHealthDto> Providers,
+    AdminMovieOperationsDto Movie,
+    AdminWorkerOperationsDto Workers,
+    IReadOnlyList<AdminOperationAuditDto> RecentAdminActions);
 
 public sealed record AdminOperationsRangeDto(DateTime FromUtc, DateTime ToUtc);
 
@@ -41,7 +45,8 @@ public sealed record AdminRunningJobDto(
     DateTime CreatedAt,
     int RetryCount,
     DateTime? ClaimExpiresAt,
-    bool IsLongRunning);
+    bool IsLongRunning,
+    bool IsLeaseExpired);
 
 public sealed record AdminUsageOperationsDto(
     int RequestCount,
@@ -139,6 +144,82 @@ public sealed record AdminSanitizedGenerationFailureDto(
     string JobType,
     string ErrorCode,
     DateTime OccurredAt);
+
+public sealed record AdminMovieOperationsDto(
+    int MovieJobCountInRange,
+    IReadOnlyList<AdminCountBreakdownDto> JobsByStatus,
+    int QueuedOrPendingCount,
+    DateTime? OldestQueuedAt,
+    double? OldestQueueAgeSeconds,
+    double? AverageQueueAgeSeconds,
+    int TotalRetryCount,
+    int RetriedJobCount,
+    int MaxRetryCount,
+    IReadOnlyList<AdminCountBreakdownDto> FailuresByCode,
+    int ProviderDisabledFailureCount,
+    int QualityControlFailureCount,
+    IReadOnlyList<AdminCountBreakdownDto> QualityControlByStatus,
+    int MovieAssetCount,
+    int MovieAssetWithStoredFileCount,
+    int MovieAssetIngestionGapCount,
+    int CompletedJobsWithoutAssetCount,
+    int AccountingTransactionCount,
+    int PendingAccountingCount,
+    int MissingAccountingEvidenceCount,
+    decimal EstimatedProviderCostUsd,
+    decimal ActualProviderCostUsd,
+    string ProviderStatus,
+    bool ProviderEnabled,
+    bool ProviderConfigured,
+    int StuckJobCount,
+    IReadOnlyList<AdminStuckMovieJobDto> StuckJobs);
+
+public sealed record AdminStuckMovieJobDto(
+    Guid JobId,
+    string JobType,
+    GenerationJobStatus Status,
+    DateTime? ClaimExpiresAt,
+    DateTime? StartedAt,
+    int RetryCount,
+    string? ErrorCode);
+
+public sealed record AdminWorkerOperationsDto(
+    int ConfiguredConcurrency,
+    int ObservedWorkerCount,
+    int HealthyWorkerCount,
+    int StaleWorkerCount,
+    IReadOnlyList<AdminWorkerStatusDto> Workers);
+
+public sealed record AdminWorkerStatusDto(
+    string WorkerId,
+    string Status,
+    DateTime StartedAt,
+    DateTime LastSeenAt,
+    DateTime? LastClaimedAt,
+    DateTime? LastCompletedAt,
+    Guid? ActiveJobId,
+    int ConsecutiveIterationFailures,
+    int WorkerConcurrency,
+    bool IsStale);
+
+public sealed record AdminOperationAuditDto(
+    Guid Id,
+    Guid ActorUserId,
+    string Action,
+    string TargetType,
+    Guid? TargetId,
+    string Outcome,
+    string? Reason,
+    DateTime CreatedAt);
+
+public sealed record AdminJobRecoveryRequest(string Reason);
+
+public sealed record AdminJobRecoveryResult(
+    Guid JobId,
+    GenerationJobStatus Status,
+    int RetryCount,
+    DateTime QueuedAt,
+    string AuditAction);
 
 public sealed record AdminOperationsFilter(
     DateTime? FromUtc = null,
