@@ -12,7 +12,7 @@ namespace Taslim.Api.Controllers;
 [ApiController]
 [Authorize]
 [Route("api/movie-studio")]
-public sealed class MovieStudioController(IMovieStudioService movies, IMovieGuideService guides, IMovieStoryService stories, IMovieStoryCastService storyCast, IMovieCharacterContinuityService continuity, IMovieWorldContinuityService worldContinuity, MovieAuthorizationService authorization) : ControllerBase
+public sealed class MovieStudioController(IMovieStudioService movies, IMovieProductionComplexityService complexity, IMovieGuideService guides, IMovieStoryService stories, IMovieStoryCastService storyCast, IMovieCharacterContinuityService continuity, IMovieWorldContinuityService worldContinuity, MovieAuthorizationService authorization) : ControllerBase
 {
     [HttpGet("cinematography/presets")]
     public IActionResult CinematographyPresets() => Ok(CinematographyPresetCatalog.All);
@@ -349,6 +349,28 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieGuid
             return result is null ? ApiResults.Error(this, 404, "MOVIE_SHOT_NOT_FOUND", "Movie shot not found.") : Ok(result);
         }
         catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_SHOT_INVALID", exception.Message); }
+    }
+
+    [HttpGet("shots/{shotId:guid}/production-complexity")]
+    public async Task<IActionResult> GetProductionComplexity(Guid shotId, CancellationToken cancellationToken)
+    {
+        var result = await complexity.GetAsync(GetUserId(), shotId, cancellationToken);
+        return result is null ? NoContent() : Ok(result);
+    }
+
+    [HttpPut("shots/{shotId:guid}/production-complexity")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> SaveProductionComplexity(Guid shotId, MovieProductionComplexityProfileRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await complexity.SaveAsync(GetUserId(), shotId, request, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_SHOT_NOT_FOUND", "Movie shot not found.") : Ok(result);
+        }
+        catch (MovieProductionComplexityValidationException exception)
+        {
+            return ApiResults.Error(this, 400, "MOVIE_PRODUCTION_COMPLEXITY_INVALID", string.Join(" ", exception.Result.Findings.Select(item => item.Message)));
+        }
     }
 
     [HttpPost("shots/{shotId:guid}/reorder")]

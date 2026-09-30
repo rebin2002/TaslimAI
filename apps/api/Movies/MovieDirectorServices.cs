@@ -71,7 +71,8 @@ public sealed class MovieDirectorContextAssembler(TaslimDbContext db, MovieWorld
         var sceneIds = await SelectSceneIdsAsync(movieProjectId, target, storyRevision, cancellationToken);
         var shotIds = await SelectShotIdsAsync(target, sceneIds, cancellationToken);
         var scenes = await db.MovieScenes.AsNoTracking().Where(item => item.MovieProjectId == movieProjectId && sceneIds.Contains(item.Id))
-            .Include(item => item.Shots).OrderBy(item => item.Sequence).ThenBy(item => item.Id).ToListAsync(cancellationToken);
+            .Include(item => item.Shots).ThenInclude(item => item.ProductionComplexityAssessments)
+            .OrderBy(item => item.Sequence).ThenBy(item => item.Id).ToListAsync(cancellationToken);
         var shots = scenes.SelectMany(item => item.Shots).Where(item => shotIds.Count == 0 || shotIds.Contains(item.Id)).OrderBy(item => item.Sequence).ThenBy(item => item.Id).ToArray();
 
         var relevantCharacterIds = await SelectCharacterIdsAsync(movieProjectId, scenes, shots, storyRevision?.Id, cancellationToken);
@@ -344,7 +345,8 @@ public sealed class MovieDirectorContextAssembler(TaslimDbContext db, MovieWorld
         return sources;
     }
 
-    private static DirectorShotContext ToShotContext(MovieShot shot) => new(shot.Id, shot.Sequence, Bounded(shot.Description, 8_000), Bounded(shot.CameraAndFraming, 2_000), Bounded(shot.CameraMotion, 2_000), shot.DurationSeconds, Bounded(shot.Narration, 8_000), Bounded(shot.Dialogue, 8_000), Bounded(shot.VisualContinuityNotes, 4_000), Bounded(shot.CinematographyJson, 20_000));
+    private static DirectorShotContext ToShotContext(MovieShot shot) => new(shot.Id, shot.Sequence, Bounded(shot.Description, 8_000), Bounded(shot.CameraAndFraming, 2_000), Bounded(shot.CameraMotion, 2_000), shot.DurationSeconds, Bounded(shot.Narration, 8_000), Bounded(shot.Dialogue, 8_000), Bounded(shot.VisualContinuityNotes, 4_000), Bounded(shot.CinematographyJson, 20_000), LatestComplexity(shot));
+    private static MovieProductionComplexityProfile? LatestComplexity(MovieShot shot) => shot.ProductionComplexityAssessments.OrderByDescending(item => item.Version).Select(item => JsonSerializer.Deserialize<MovieProductionComplexityProfile>(item.ProfileJson, MovieProductionComplexityValidator.JsonOptions)).FirstOrDefault(item => item is not null);
     private static string NormalizeTargetType(string? value) => string.IsNullOrWhiteSpace(value) ? DirectorContextTargetTypes.Project : value.Trim().ToLowerInvariant();
     private static string Bounded(string? value, int maxLength) => string.IsNullOrEmpty(value) || value.Length <= maxLength ? value ?? string.Empty : value[..maxLength];
 
@@ -396,6 +398,15 @@ public sealed class MovieDirectorService(
             : context.Context.Scenes.SelectMany(item => item.Shots).FirstOrDefault();
         if (shot is null) throw new DirectorValidationException("Select a shot before creating a Director proposal.");
         if (request.BudgetLimitUsd is < 0) throw new DirectorValidationException("Budget limit cannot be negative.");
+        MovieProductionComplexityProfile? proposedComplexity = null;
+        if (request.ProductionComplexity is not null)
+        {
+            request.ProductionComplexity.Source ??= MovieProductionComplexitySources.DirectorProposal;
+            var complexityValidation = MovieProductionComplexityValidator.Validate(request.ProductionComplexity);
+            if (!complexityValidation.IsValid || complexityValidation.Profile is null)
+                throw new DirectorValidationException($"The proposed production complexity profile is invalid: {string.Join(" ", complexityValidation.Findings.Select(item => item.Message))}");
+            proposedComplexity = complexityValidation.Profile;
+        }
 
         var recommendation = qualityPlanner.Recommend(new DirectorShotPlanningRequest(
             shot.Id, request.Importance, request.Complexity, request.BudgetSensitivity,
@@ -416,7 +427,7 @@ public sealed class MovieDirectorService(
         {
             Id = Guid.NewGuid(), WorkspaceId = movie.WorkspaceId, MovieProjectId = movie.Id, DirectorProposalId = proposal.Id,
             ActionType = DirectorActionTypes.GenerateShot, Status = DirectorActionStatuses.PendingApproval, ApprovalRequired = true,
-            PayloadJson = JsonSerializer.Serialize(new DirectorGenerateShotPayload(shot.Id, recommendation.QualityLevel, shot.DurationSeconds ?? 60, recommendation.EstimatedCostUsd)), CreatedAt = now,
+            PayloadJson = JsonSerializer.Serialize(new DirectorGenerateShotPayload(shot.Id, recommendation.QualityLevel, shot.DurationSeconds ?? 60, recommendation.EstimatedCostUsd, proposedComplexity)), CreatedAt = now,
         };
         proposal.Actions.Add(action);
         db.DirectorProposals.Add(proposal);
@@ -436,7 +447,7 @@ public sealed class MovieDirectorService(
             SafeDetailsJson = JsonSerializer.Serialize(new { qualityLevel = recommendation.QualityLevel, estimatedCostUsd = recommendation.EstimatedCostUsd }), CreatedAt = now,
         });
         await db.SaveChangesAsync(cancellationToken);
-        return new DirectorProposalResponse(ToDto(proposal, rationale, [new DirectorPlanItemDto(shot.Id, shot.Sequence, shot.Description, recommendation)]), context.Context with { ContextVersion = directorContext.ContextVersion });
+        return new DirectorProposalResponse(ToDto(proposal, rationale, [new DirectorPlanItemDto(shot.Id, shot.Sequence, shot.Description, recommendation, proposedComplexity)]), context.Context with { ContextVersion = directorContext.ContextVersion });
     }
 
     private async Task<DirectorProposalResponse?> CreateShotPlanningProposalAsync(Guid userId, MovieProject movie, DirectorProposalRequest request, CancellationToken cancellationToken)

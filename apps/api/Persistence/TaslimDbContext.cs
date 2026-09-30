@@ -91,6 +91,7 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
     public DbSet<MovieProductionVersion> MovieProductionVersions => Set<MovieProductionVersion>();
     public DbSet<MovieProductionVersionAsset> MovieProductionVersionAssets => Set<MovieProductionVersionAsset>();
     public DbSet<MovieProductionStageTransition> MovieProductionStageTransitions => Set<MovieProductionStageTransition>();
+    public DbSet<MovieProductionComplexityAssessment> MovieProductionComplexityAssessments => Set<MovieProductionComplexityAssessment>();
     public DbSet<MovieTeamMember> MovieTeamMembers => Set<MovieTeamMember>();
     public DbSet<MovieTeamMemberPermission> MovieTeamMemberPermissions => Set<MovieTeamMemberPermission>();
     public DbSet<MovieComment> MovieComments => Set<MovieComment>();
@@ -529,6 +530,17 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasOne(item => item.Scene).WithMany(item => item.Shots).HasForeignKey(item => item.MovieSceneId).OnDelete(DeleteBehavior.Cascade);
             entity.HasOne(item => item.SelectedTake).WithMany().HasForeignKey(item => item.SelectedTakeId).OnDelete(DeleteBehavior.SetNull);
             entity.HasOne(item => item.FinalTake).WithMany().HasForeignKey(item => item.FinalTakeId).OnDelete(DeleteBehavior.SetNull);
+        });
+        builder.Entity<MovieProductionComplexityAssessment>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.Source).HasMaxLength(40).IsRequired();
+            entity.Property(item => item.ProfileJson).HasMaxLength(30_000).IsRequired();
+            entity.Property(item => item.OverallBand).HasMaxLength(20).IsRequired();
+            entity.Property(item => item.CreatedByUserId).IsRequired();
+            entity.HasIndex(item => new { item.MovieShotId, item.Version }).IsUnique();
+            entity.HasIndex(item => new { item.MovieShotId, item.CreatedAt });
+            entity.HasOne(item => item.MovieShot).WithMany(item => item.ProductionComplexityAssessments).HasForeignKey(item => item.MovieShotId).OnDelete(DeleteBehavior.Cascade);
         });
         builder.Entity<MovieTake>(entity =>
         {

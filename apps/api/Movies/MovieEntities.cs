@@ -585,6 +585,7 @@ public sealed class MovieShot
     public ICollection<MovieProductionVersion> ProductionVersions { get; set; } = [];
     public ICollection<MovieProductionStageTransition> ProductionTransitions { get; set; } = [];
     public ICollection<MovieRegenerationRequest> RegenerationRequests { get; set; } = [];
+    public ICollection<MovieProductionComplexityAssessment> ProductionComplexityAssessments { get; set; } = [];
 }
 
 public sealed class MovieClip
@@ -764,7 +765,7 @@ public sealed record MovieGuideSectionDto(string Type, string ContentJson);
 public sealed record MovieGuideRevisionDto(Guid Id, int RevisionNumber, string Status, IReadOnlyList<MovieGuideSectionDto> Sections, Guid CreatedByUserId, DateTime CreatedAt, DateTime? LockedAt, Guid? LockedByUserId);
 public sealed record MovieDirectorContextDto(Guid MovieProjectId, Guid MovieGuideId, bool IsAuthoritative, int RevisionNumber, DateTime? LockedAt, IReadOnlyList<MovieGuideSectionDto> Sections);
 public sealed record MovieSceneDto(Guid Id, int Sequence, string Title, string Summary, int? DurationSeconds, string? ContinuityNotes, string? Narration, string? Dialogue, IReadOnlyList<MovieShotDto> Shots, IReadOnlyList<MovieClipDto> Clips);
-public sealed record MovieShotDto(Guid Id, int Sequence, string Description, string? Purpose, string? Subjects, IReadOnlyList<Guid> SubjectCharacterIds, string? LocationSet, int? DurationSeconds, string? ProductionRequirements, string? ContinuityReferences, string? CameraAndFraming, string? CameraMotion, string? CinematographyJson, string? CinematographySummary, string? Narration, string? Dialogue, string? VisualContinuityNotes, string Status, string PlanState, MovieShotReadinessDto Readiness, string ProductionStage, IReadOnlyList<MovieClipDto> Clips, IReadOnlyList<MovieProductionVersionDto> ProductionVersions, IReadOnlyList<MovieV2TakeDto> Takes, MovieShotProductionContractDto? ProductionContract = null);
+public sealed record MovieShotDto(Guid Id, int Sequence, string Description, string? Purpose, string? Subjects, IReadOnlyList<Guid> SubjectCharacterIds, string? LocationSet, int? DurationSeconds, string? ProductionRequirements, string? ContinuityReferences, string? CameraAndFraming, string? CameraMotion, string? CinematographyJson, string? CinematographySummary, string? Narration, string? Dialogue, string? VisualContinuityNotes, string Status, string PlanState, MovieShotReadinessDto Readiness, string ProductionStage, IReadOnlyList<MovieClipDto> Clips, IReadOnlyList<MovieProductionVersionDto> ProductionVersions, IReadOnlyList<MovieV2TakeDto> Takes, MovieShotProductionContractDto? ProductionContract = null, MovieProductionComplexityAssessmentDto? ProductionComplexity = null);
 public sealed record MovieCharacterStateDto(Guid Id, string Key, string? Label, string? Wardrobe, string? AgeOrTimeState, string? Appearance, string? InjuryOrCondition, string? LocationOrStoryState, string? ContinuityNotes, DateTime CreatedAt, DateTime UpdatedAt);
 public sealed record MovieCharacterRelationshipDto(Guid Id, Guid RelatedCharacterId, string RelatedCharacterName, string RelationshipType, string? Notes);
 public sealed record MovieCharacterContinuityLockDto(Guid Id, string FieldKey, string LockedValue, Guid? CharacterStateId, DateTime ApprovedAt);

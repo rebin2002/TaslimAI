@@ -214,7 +214,7 @@ public sealed record DirectorGuideContext(
     string? CinematographyBibleJson = null, IReadOnlyList<DirectorGuideSectionContext>? LockedSections = null);
 public sealed record DirectorStoryContext(Guid RevisionId, int RevisionNumber, string Premise, string Logline, string Synopsis, string Treatment, string Authorship);
 public sealed record DirectorSceneContext(Guid Id, int Sequence, string Title, string Summary, int? DurationSeconds, string? ContinuityNotes, IReadOnlyList<DirectorShotContext> Shots);
-public sealed record DirectorShotContext(Guid Id, int Sequence, string Description, string? CameraAndFraming, string? CameraMotion, int? DurationSeconds, string? Narration, string? Dialogue, string? VisualContinuityNotes, string? CinematographyJson = null);
+public sealed record DirectorShotContext(Guid Id, int Sequence, string Description, string? CameraAndFraming, string? CameraMotion, int? DurationSeconds, string? Narration, string? Dialogue, string? VisualContinuityNotes, string? CinematographyJson = null, MovieProductionComplexityProfile? ProductionComplexity = null);
 public sealed record DirectorCharacterContext(string Name, string Description, string? Appearance, string? ContinuityNotes, IReadOnlyList<DirectorLockedFactContext>? LockedFacts = null, Guid? Id = null, IReadOnlyList<DirectorCharacterStateContext>? States = null);
 public sealed record DirectorCharacterStateContext(Guid Id, string Key, string? Label, string? Wardrobe, string? AgeOrTimeState, string? Appearance, string? InjuryOrCondition, string? LocationOrStoryState, string? ContinuityNotes, IReadOnlyList<DirectorLockedFactContext>? LockedFacts = null);
 public sealed record DirectorLocationContext(string Name, string Description, string? VisualContinuityNotes, Guid? Id = null);
@@ -360,11 +360,12 @@ public sealed class DirectorProposalRequest
     public int Importance { get; set; } = 50;
     public int Complexity { get; set; } = 50;
     public int BudgetSensitivity { get; set; } = 50;
+    public MovieProductionComplexityProfileRequest? ProductionComplexity { get; set; }
 }
 
 public sealed class DirectorContextTargetRequest { public string? TargetType { get; set; } public Guid? TargetId { get; set; } }
 
-public sealed record DirectorPlanItemDto(Guid ShotId, int Sequence, string Description, DirectorQualityRecommendation Recommendation);
+public sealed record DirectorPlanItemDto(Guid ShotId, int Sequence, string Description, DirectorQualityRecommendation Recommendation, MovieProductionComplexityProfile? ProductionComplexity = null);
 public sealed record DirectorActionDto(Guid Id, Guid ProposalId, string ActionType, string Status, bool ApprovalRequired, string? FailureCode, DateTime CreatedAt, DateTime? ApprovedAt, DateTime? StartedAt, DateTime? CompletedAt, IReadOnlyList<DirectorActionResultDto> Results);
 public sealed record DirectorActionResultDto(Guid Id, string Status, string SafeMessage, string? ResultJson, DateTime CreatedAt);
 public sealed record DirectorProposalDto(Guid Id, Guid MovieProjectId, string Status, string Title, string Summary, IReadOnlyList<string> Rationale, IReadOnlyList<DirectorPlanItemDto> Plan, IReadOnlyList<DirectorActionDto> Actions, DateTime CreatedAt, DateTime? ApprovedAt, DirectorStoryReviewDto? StoryReview = null, DirectorScenePlanReviewDto? ScenePlan = null, IReadOnlyList<DirectorShotProposalDto>? ShotPlan = null, DirectorShotPlanReviewDto? ShotPlanReview = null);
@@ -372,7 +373,7 @@ public sealed record DirectorProposalResponse(DirectorProposalDto Proposal, Dire
 public sealed record DirectorHistoryDto(Guid Id, string EventType, string? SafeDetailsJson, DateTime CreatedAt);
 public sealed record DirectorActionExecutionResponse(DirectorActionDto Action, DirectorActionResultDto Result);
 
-public sealed record DirectorGenerateShotPayload(Guid ShotId, string QualityLevel, int DurationSeconds, decimal? EstimatedCostUsd);
+public sealed record DirectorGenerateShotPayload(Guid ShotId, string QualityLevel, int DurationSeconds, decimal? EstimatedCostUsd, MovieProductionComplexityProfile? ProductionComplexity = null);
 
 public static class DirectorJson
 {
