@@ -766,7 +766,7 @@ public sealed record MovieGuideSectionDto(string Type, string ContentJson);
 public sealed record MovieGuideRevisionDto(Guid Id, int RevisionNumber, string Status, IReadOnlyList<MovieGuideSectionDto> Sections, Guid CreatedByUserId, DateTime CreatedAt, DateTime? LockedAt, Guid? LockedByUserId);
 public sealed record MovieDirectorContextDto(Guid MovieProjectId, Guid MovieGuideId, bool IsAuthoritative, int RevisionNumber, DateTime? LockedAt, IReadOnlyList<MovieGuideSectionDto> Sections);
 public sealed record MovieSceneDto(Guid Id, int Sequence, string Title, string Summary, int? DurationSeconds, string? ContinuityNotes, string? Narration, string? Dialogue, IReadOnlyList<MovieShotDto> Shots, IReadOnlyList<MovieClipDto> Clips);
-public sealed record MovieShotDto(Guid Id, int Sequence, string Description, string? Purpose, string? Subjects, IReadOnlyList<Guid> SubjectCharacterIds, string? LocationSet, int? DurationSeconds, string? ProductionRequirements, string? ContinuityReferences, string? CameraAndFraming, string? CameraMotion, string? CinematographyJson, string? CinematographySummary, string? Narration, string? Dialogue, string? VisualContinuityNotes, string Status, string PlanState, MovieShotReadinessDto Readiness, string ProductionStage, IReadOnlyList<MovieClipDto> Clips, IReadOnlyList<MovieProductionVersionDto> ProductionVersions, IReadOnlyList<MovieV2TakeDto> Takes, MovieShotProductionContractDto? ProductionContract = null, MovieProductionComplexityAssessmentDto? ProductionComplexity = null, MovieShotQualityRequirementsDto? QualityRequirements = null, MovieAdaptiveResolutionDirectorInputDto? AdaptiveResolutionDirectorInput = null);
+public sealed record MovieShotDto(Guid Id, int Sequence, string Description, string? Purpose, string? Subjects, IReadOnlyList<Guid> SubjectCharacterIds, string? LocationSet, int? DurationSeconds, string? ProductionRequirements, string? ContinuityReferences, string? CameraAndFraming, string? CameraMotion, string? CinematographyJson, string? CinematographySummary, string? Narration, string? Dialogue, string? VisualContinuityNotes, string Status, string PlanState, MovieShotReadinessDto Readiness, string ProductionStage, IReadOnlyList<MovieClipDto> Clips, IReadOnlyList<MovieProductionVersionDto> ProductionVersions, IReadOnlyList<MovieV2TakeDto> Takes, MovieShotProductionContractDto? ProductionContract = null, MovieProductionComplexityAssessmentDto? ProductionComplexity = null, MovieShotQualityRequirementsDto? QualityRequirements = null, MovieAdaptiveResolutionDirectorInputDto? AdaptiveResolutionDirectorInput = null, CinematographyShotPlan? CinematographyPlan = null);
 public sealed record MovieCharacterStateDto(Guid Id, string Key, string? Label, string? Wardrobe, string? AgeOrTimeState, string? Appearance, string? InjuryOrCondition, string? LocationOrStoryState, string? ContinuityNotes, DateTime CreatedAt, DateTime UpdatedAt);
 public sealed record MovieCharacterRelationshipDto(Guid Id, Guid RelatedCharacterId, string RelatedCharacterName, string RelationshipType, string? Notes);
 public sealed record MovieCharacterContinuityLockDto(Guid Id, string FieldKey, string LockedValue, Guid? CharacterStateId, DateTime ApprovedAt);
@@ -895,12 +895,17 @@ public sealed record MovieStudioGenerationRequest(
 
 public static class MovieStudioValidation
 {
+    public static readonly IReadOnlySet<string> SupportedAspectRatios = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "16:9", "9:16", "1:1", "4:5", "4:3",
+    };
+
     public static string? Validate(MovieStudioCreateRequest request)
     {
         if (string.IsNullOrWhiteSpace(request.Title) || request.Title.Trim().Length > 160) return "Add a movie title.";
         if (string.IsNullOrWhiteSpace(request.Description) || request.Description.Trim().Length > 8000) return "Describe the movie in 1–8,000 characters.";
         if (request.DurationSeconds is < 1 or > 3600) return "Movie duration must be between 1 second and 60 minutes.";
-        if (request.AspectRatio is not ("16:9" or "9:16" or "1:1" or "4:5" or "4:3")) return "Choose a supported aspect ratio.";
+        if (!SupportedAspectRatios.Contains(request.AspectRatio)) return "Choose a supported aspect ratio.";
         if (!LanguageCodes.Supported.Contains(request.Language)) return "Choose English, Arabic, or Kurdish.";
         if (request.Mode is not (MovieProjectModes.Quick or MovieProjectModes.Full)) return "Choose Quick Movie or Full Movie Project.";
         var cinematographyValidation = CinematographyIntentValidator.Validate(request.Cinematography);
