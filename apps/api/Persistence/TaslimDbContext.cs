@@ -523,6 +523,7 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.Property(item => item.Narration).HasMaxLength(8_000);
             entity.Property(item => item.Dialogue).HasMaxLength(8_000);
             entity.Property(item => item.VisualContinuityNotes).HasMaxLength(4_000);
+            entity.Property(item => item.ImportanceOverride).HasMaxLength(30);
             entity.Property(item => item.Status).HasMaxLength(30).HasDefaultValue(MovieShotStatuses.Planned).IsRequired();
             entity.HasIndex(item => item.SelectedTakeId);
             entity.HasIndex(item => item.FinalTakeId);
