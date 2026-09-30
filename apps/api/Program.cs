@@ -244,6 +244,7 @@ builder.Services.AddScoped<DirectorCreativeQualityPlanner>();
 builder.Services.AddScoped<MovieDirectorStoryAiService>();
 builder.Services.AddScoped<IMovieDirectorService, MovieDirectorService>();
 builder.Services.AddSingleton<IMovieResolutionPlanner, MovieResolutionPlanner>();
+builder.Services.AddScoped<IMovieShotExecutionService, MovieShotExecutionService>();
 builder.Services.Configure<MovieVideoOptions>(builder.Configuration.GetSection("MovieVideo"));
 builder.Services.Configure<DirectVideoProviderOptions>(builder.Configuration.GetSection("DirectVideoProviders"));
 builder.Services.AddScoped<MovieVideoExecutionStore>();

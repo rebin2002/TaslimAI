@@ -265,7 +265,12 @@ public sealed class MovieVideoGenerationJobHandler(
             input.ShotJson,
             input.SourceImageUri,
             input.ContinuationProviderJobId,
-            input.WorldContextJson);
+            input.WorldContextJson,
+            input.ReferencePackageJson,
+            input.SourceResolution,
+            input.MasterResolution,
+            input.ProcessingPath,
+            input.UpscalingRequested);
         var execution = await executions.GetOrCreateAsync(job, clip.Id, provider.Key, cancellationToken);
         var started = Stopwatch.GetTimestamp();
         progress.Report(5);
