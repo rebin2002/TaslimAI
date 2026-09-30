@@ -700,11 +700,27 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasKey(item => item.Id);
             entity.Property(item => item.Status).HasMaxLength(30).IsRequired();
             entity.Property(item => item.OutputFormat).HasMaxLength(20).IsRequired();
+            entity.Property(item => item.ResolutionProfile).HasMaxLength(40).IsRequired();
+            entity.Property(item => item.OutputWidth).IsRequired();
+            entity.Property(item => item.OutputHeight).IsRequired();
+            entity.Property(item => item.TimelineJson).HasMaxLength(100_000).IsRequired();
+            entity.Property(item => item.AudioMixJson).HasMaxLength(40_000).IsRequired();
+            entity.Property(item => item.CaptionsJson).HasMaxLength(4_000).IsRequired();
+            entity.Property(item => item.IdempotencyKey).HasMaxLength(80);
+            entity.Property(item => item.RequestFingerprint).HasMaxLength(64);
+            entity.Property(item => item.ProvenanceJson).HasMaxLength(20_000);
+            entity.Property(item => item.CheckpointJson).HasMaxLength(4_000);
+            entity.Property(item => item.ProgressPercent).IsRequired();
+            entity.Property(item => item.QcStatus).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.QcResultJson).HasMaxLength(20_000);
+            entity.Property(item => item.LastErrorCode).HasMaxLength(120);
             entity.Property(item => item.MetadataJson).HasMaxLength(20_000);
             entity.HasIndex(item => new { item.MovieProjectId, item.CreatedAt });
+            entity.HasIndex(item => new { item.MovieProjectId, item.IdempotencyKey }).IsUnique();
             entity.HasOne(item => item.MovieProject).WithMany(item => item.Assemblies).HasForeignKey(item => item.MovieProjectId).OnDelete(DeleteBehavior.Cascade);
             entity.HasOne(item => item.GenerationJob).WithMany().HasForeignKey(item => item.GenerationJobId).OnDelete(DeleteBehavior.SetNull);
             entity.HasOne(item => item.Asset).WithMany().HasForeignKey(item => item.AssetId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne(item => item.RequestedByUser).WithMany().HasForeignKey(item => item.RequestedByUserId).OnDelete(DeleteBehavior.Restrict);
         });
         builder.Entity<MovieTeamMember>(entity =>
         {

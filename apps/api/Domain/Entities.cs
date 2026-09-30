@@ -196,7 +196,16 @@ public static class GenerationJobErrorCodes
     public const string SocialOutputInvalid = "SOCIAL_OUTPUT_INVALID";
     public const string SocialStorageFailed = "SOCIAL_STORAGE_FAILED";
     public const string SocialCancelled = "SOCIAL_CANCELLED";
-public const string MovieProviderUnavailable = "MOVIE_PROVIDER_UNAVAILABLE";
+    public const string MovieProviderUnavailable = "MOVIE_PROVIDER_UNAVAILABLE";
+    public const string MovieAssemblyProviderUnavailable = "MOVIE_ASSEMBLY_EXECUTOR_UNAVAILABLE";
+    public const string MovieAssemblyQueueFailed = "MOVIE_ASSEMBLY_QUEUE_FAILED";
+    public const string MovieAssemblyTargetInvalid = "MOVIE_ASSEMBLY_TARGET_INVALID";
+    public const string MovieAssemblyInputInvalid = "MOVIE_ASSEMBLY_INPUT_INVALID";
+    public const string MovieAssemblySourceUnavailable = "MOVIE_ASSEMBLY_SOURCE_UNAVAILABLE";
+    public const string MovieAssemblyExecutionFailed = "MOVIE_ASSEMBLY_EXECUTION_FAILED";
+    public const string MovieAssemblyOutputInvalid = "MOVIE_ASSEMBLY_OUTPUT_INVALID";
+    public const string MovieAssemblyQcFailed = "MOVIE_ASSEMBLY_QC_FAILED";
+    public const string MovieAssemblyCancelled = "MOVIE_ASSEMBLY_CANCELLED";
     public const string MovieProviderTimeout = "MOVIE_PROVIDER_TIMEOUT";
     public const string MovieProviderUnsupportedRequest = "MOVIE_PROVIDER_UNSUPPORTED_REQUEST";
     public const string MovieCancelled = "MOVIE_CANCELLED";
