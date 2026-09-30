@@ -21,6 +21,7 @@ using Taslim.Api.Research;
 using Taslim.Api.Social;
 using Taslim.Api.Usage;
 using Taslim.Api.Voice;
+using Taslim.Api.Video;
 
 namespace Taslim.Api.Generation;
 
@@ -1201,6 +1202,15 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
         {
             return exception switch
             {
+                VideoGenerationAdapterExecutionException adapterException => adapterException.Category switch
+                {
+                    VideoGenerationFailureCategory.Unavailable or VideoGenerationFailureCategory.Authentication => GenerationJobErrorCodes.MovieProviderUnavailable,
+                    VideoGenerationFailureCategory.TimedOut => GenerationJobErrorCodes.MovieProviderTimeout,
+                    VideoGenerationFailureCategory.UnsupportedCapability or VideoGenerationFailureCategory.InvalidRequest => GenerationJobErrorCodes.MovieProviderUnsupportedRequest,
+                    VideoGenerationFailureCategory.Cancelled or VideoGenerationFailureCategory.StaleEvent => GenerationJobErrorCodes.MovieCancelled,
+                    VideoGenerationFailureCategory.ArtifactUnavailable or VideoGenerationFailureCategory.MalformedResponse => GenerationJobErrorCodes.MovieOutputInvalid,
+                    _ => GenerationJobErrorCodes.MovieGenerationFailed,
+                },
                 MovieProviderUnavailableException => GenerationJobErrorCodes.MovieProviderUnavailable,
                 MovieVideoProviderTimeoutException => GenerationJobErrorCodes.MovieProviderTimeout,
                 MovieVideoStaleWorkerException => GenerationJobErrorCodes.MovieCancelled,

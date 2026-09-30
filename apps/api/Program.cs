@@ -35,6 +35,7 @@ using Taslim.Api.Notifications;
 using Taslim.Api.Resilience;
 using Taslim.Api.Voice;
 using Taslim.Api.Upscaling;
+using Taslim.Api.Video;
 using FileSettings = Taslim.Api.Files.FileOptions;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -246,6 +247,9 @@ builder.Services.AddScoped<IMovieDirectorService, MovieDirectorService>();
 builder.Services.AddSingleton<IMovieResolutionPlanner, MovieResolutionPlanner>();
 builder.Services.Configure<MovieVideoOptions>(builder.Configuration.GetSection("MovieVideo"));
 builder.Services.Configure<DirectVideoProviderOptions>(builder.Configuration.GetSection("DirectVideoProviders"));
+builder.Services.Configure<VideoGenerationAdapterOptions>(builder.Configuration.GetSection("VideoGenerationAdapters"));
+builder.Services.AddSingleton<IVideoGenerationAdapter, UnavailableVideoGenerationAdapter>();
+builder.Services.AddSingleton<VideoGenerationAdapterExecutionService>();
 builder.Services.AddScoped<MovieVideoExecutionStore>();
 builder.Services.AddHttpClient<RunwayMovieVideoProvider>()
     .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
@@ -264,6 +268,7 @@ builder.Services.AddScoped<IDirectorActionExecutor, MovieDirectorActionExecutor>
 builder.Services.AddScoped<IDirectorActionExecutor, MovieDirectorStoryActionExecutor>();
 builder.Services.AddScoped<IActivityCenterService, ActivityCenterService>();
 builder.Services.AddSingleton<IGenerationJobHandler, SystemTestGenerationJobHandler>();
+builder.Services.AddScoped<IGenerationJobHandler, VideoGenerationAdapterJobHandler>();
 if (builder.Configuration.GetValue("GenerationJobs:WorkerEnabled", !builder.Environment.IsEnvironment("Testing")))
 {
     builder.Services.AddHostedService<GenerationJobWorker>();
