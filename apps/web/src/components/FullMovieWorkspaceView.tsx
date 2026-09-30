@@ -49,6 +49,7 @@ import { MovieWorldWorkspace } from "@/components/MovieWorldWorkspace";
 import { ShotDesigner, type ShotDesignerDraft } from "@/components/ShotDesigner";
 import { MovieDirectorPanel } from "@/components/MovieDirectorPanel";
 import { MovieProductionResolutionPanel } from "@/components/MovieProductionResolutionPanel";
+import { MovieProductionWorkspace } from "@/components/MovieProductionWorkspace";
 import { displayProductionStage, displayProductionStatus, type MovieResolutionTier } from "@/lib/movieProductionResolution";
 
 export const fullMovieModules = [
@@ -272,7 +273,7 @@ function FullMovieProjectWorkspace({ projectId, module }: { projectId: string; m
           {activeModule === "world" && <WorldModule projectId={fullProject.id} />}
           {activeModule === "scenes" && <ScenesModule projectId={fullProject.id} project={fullProject} presets={presets} savingShot={savingShot} onAddShot={addShot} selectedSceneId={selectedScene?.id ?? null} onSelectScene={setSelectedSceneId} onGenerate={generateScene} onPlanChange={applyShotPlan} />}
           {activeModule === "storyboard" && storyboard && <OperationalStoryboardModule storyboard={storyboard} onRefresh={() => void refreshStoryboard()} onError={setError} />}
-          {activeModule === "production" && <ProductionModule project={fullProject} completionPercent={completionPercent} onRefresh={refreshProject} />}
+          {activeModule === "production" && <MovieProductionWorkspace project={fullProject} completionPercent={completionPercent} onRefresh={refreshProject} />}
           {activeModule === "edit" && <EditModule project={fullProject} />}
           {activeModule === "audio" && <FutureModule icon={<AudioLines size={20} />} title="Audio is not connected yet" text="The sound stage is reserved for real narration, ambience, and music assets. Nothing is simulated here." />}
           {activeModule === "qc" && <FutureModule icon={<ShieldCheck size={20} />} title="QC is a future review gate" text="Continuity and delivery checks will appear once this project has a real cut to inspect." />}
