@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Taslim.Api.Contracts;
 using Taslim.Api.Movies;
@@ -33,6 +34,7 @@ public sealed class MovieDirectorContextTests : IClassFixture<TaslimApiFactory>
         await SendWithCsrf<MovieShotDto>(client, HttpMethod.Post, $"/api/movie-studio/scenes/{unrelatedScene.Id}/shots", new { description = "An empty garden in the rain." });
         var mara = await SendWithCsrf<MovieCharacterDto>(client, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/characters", new { name = "Mara", description = "The courier.", appearance = "Dark curls." });
         await SendWithCsrf<MovieCharacterDto>(client, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/characters", new { name = "Unused", description = "Never present in this target." });
+        await SendWithCsrf<MovieShotDto>(client, HttpMethod.Patch, $"/api/movie-studio/shots/{shot.Id}", new { description = "Mara holds the red notebook in a close shot.", subjects = "Mara", subjectCharacterIds = new[] { mara.Id }, cinematography = new { intent = "Intimate", presetId = "intimate-naturalism" } });
         await SendWithCsrf<MovieCharacterContinuityLockDto>(client, HttpMethod.Post, $"/api/movie-studio/characters/{mara.Id}/continuity-locks", new { fieldKey = "appearance", lockedValue = "Dark curls." });
         var location = await SendWithCsrf<MovieLocationDto>(client, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/locations", new { name = "Harbor warehouse", description = "A wet warehouse." });
         var unusedLocation = await SendWithCsrf<MovieLocationDto>(client, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/locations", new { name = "Unused garden", description = "Not relevant." });
@@ -51,6 +53,22 @@ public sealed class MovieDirectorContextTests : IClassFixture<TaslimApiFactory>
         var revisionId = story.CurrentRevisionId!.Value;
         await SendWithCsrf<MovieStoryRevisionDto>(client, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/story/revisions/{revisionId}/submit", null);
         await SendWithCsrf<MovieStoryRevisionDto>(client, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/story/revisions/{revisionId}/approve", null);
+        await SendWithCsrf<MovieStoryDto>(client, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/story/revisions", new
+        {
+            premise = "A proposed stranger enters the story.",
+            logline = "Candidate waits beyond the harbor.",
+            synopsis = "Candidate is an unapproved screenplay-only suggestion.",
+            treatment = "This draft must not become production canon.",
+            authorship = "AiSuggested",
+            scenes = new[] { new { sceneIdentifier = "DRAFT-1", movieSceneId = scene.Id, slugline = "EXT. HARBOR - NIGHT", synopsis = "Candidate waits beyond the harbor.", elements = new[] { new { elementType = "Action", content = "Candidate waits beyond the harbor.", characterName = "Candidate" } } } },
+        });
+        using (var mutateScope = factory.Services.CreateScope())
+        {
+            var db = mutateScope.ServiceProvider.GetRequiredService<Taslim.Api.Persistence.TaslimDbContext>();
+            var guide = await db.MovieContinuityGuides.SingleAsync(item => item.MovieProjectId == movie.Project.Id);
+            guide.VisualLanguage = "mutable legacy value must not enter locked context";
+            await db.SaveChangesAsync();
+        }
 
         using var scope = factory.Services.CreateScope();
         var assembler = scope.ServiceProvider.GetRequiredService<MovieDirectorContextAssembler>();
@@ -68,10 +86,13 @@ public sealed class MovieDirectorContextTests : IClassFixture<TaslimApiFactory>
         Assert.Single(first.Context.Scenes[0].Shots);
         Assert.Contains(first.Context.Characters, item => item.Id == mara.Id);
         Assert.DoesNotContain(first.Context.Characters, item => item.Name == "Unused");
+        Assert.DoesNotContain(first.Context.Characters, item => item.Name == "Candidate");
         Assert.DoesNotContain(first.Context.Locations, item => item.Id == unusedLocation.Id);
         Assert.Contains(first.Context.World!.Entities, item => item.Id == location.Id);
         Assert.Contains(first.Context.World.Locks, item => item.EntityId == location.Id && item.Strength == "hard");
         Assert.Contains(first.Context.Characters.Single(item => item.Id == mara.Id).LockedFacts!, item => item.FieldKey == "appearance" && item.LockedValue == "Dark curls.");
+        Assert.Equal("locked visual", first.Context.Guide.VisualLanguage);
+        Assert.DoesNotContain(first.Context.Guide.LockedSections!, item => item.Type == MovieGuideSectionTypes.AudioBible);
         Assert.Equal(revisionId, first.Context.ApprovedStory!.RevisionId);
         Assert.Contains("intimate-naturalism", first.Context.Scenes[0].Shots[0].CinematographyJson);
         Assert.True(first.Context.Budget!.CriticalFactsComplete);
@@ -107,7 +128,7 @@ public sealed class MovieDirectorContextTests : IClassFixture<TaslimApiFactory>
     }
 
     private static async Task<MovieStudioProjectResponse> CreateMovie(HttpClient client, Guid workspaceId, string title) =>
-        await SendWithCsrf<MovieStudioProjectResponse>(client, HttpMethod.Post, "/api/movie-studio/projects", new { workspaceId, mode = "Full", title, description = "A bounded context test movie.", durationSeconds = 60, aspectRatio = "16:9", style = "cinematic", language = "en" });
+        await SendWithCsrf<MovieStudioProjectResponse>(client, HttpMethod.Post, "/api/movie-studio/projects", new { workspaceId, mode = "Full", title, description = "A bounded context test movie.", durationSeconds = 60, aspectRatio = "16:9", style = "cinematic", language = "en", visualLanguage = "locked visual", soundAndNarration = "locked audio" });
 
     private static async Task<T> SendWithCsrf<T>(HttpClient client, HttpMethod method, string path, object? payload)
     {
