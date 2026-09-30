@@ -83,7 +83,7 @@ public static class GenerationJobTypes
     public const string PresentationGenerate = "presentation.generate";
     public const string ResearchGenerate = "research.generate";
     public const string SocialGenerate = "social.generate";
-public const string MovieQuickGenerate = "movie.quick.generate";
+    public const string MovieQuickGenerate = "movie.quick.generate";
     public const string MovieClipGenerate = "movie.clip.generate";
     public const string MovieAssembly = "movie.assembly";
 
@@ -91,8 +91,14 @@ public const string MovieQuickGenerate = "movie.quick.generate";
     {
         MovieQuickGenerate, MovieClipGenerate, MovieAssembly,
     };
-public const string MusicGenerate = "music.generate";
-public const string VoiceGenerate = "voice.generate";
+    public const string MusicGenerate = "music.generate";
+    public const string VoiceGenerate = "voice.generate";
+    public const string MovieDialogueVoiceGenerate = "movie.dialogue.voice.generate";
+
+    public static readonly IReadOnlySet<string> MovieDialogueVoiceTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        MovieDialogueVoiceGenerate,
+    };
 
     public static readonly IReadOnlySet<string> Supported = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
@@ -102,11 +108,12 @@ public const string VoiceGenerate = "voice.generate";
         PresentationGenerate,
         ResearchGenerate,
         SocialGenerate,
-MovieQuickGenerate,
+        MovieQuickGenerate,
         MovieClipGenerate,
         MovieAssembly,
-MusicGenerate,
-VoiceGenerate,
+        MusicGenerate,
+        VoiceGenerate,
+        MovieDialogueVoiceGenerate,
     };
 }
 
@@ -230,6 +237,11 @@ public const string MusicRequestInvalid = "MUSIC_REQUEST_INVALID";
     public const string VoiceOutputInvalid = "VOICE_OUTPUT_INVALID";
     public const string VoiceOutputStorageFailed = "VOICE_OUTPUT_STORAGE_FAILED";
     public const string VoiceCancelled = "VOICE_CANCELLED";
+    public const string MovieDialogueVoiceRequestInvalid = "MOVIE_DIALOGUE_VOICE_REQUEST_INVALID";
+    public const string MovieDialogueVoiceProviderUnavailable = "MOVIE_DIALOGUE_VOICE_PROVIDER_UNAVAILABLE";
+    public const string MovieDialogueVoiceOutputInvalid = "MOVIE_DIALOGUE_VOICE_OUTPUT_INVALID";
+    public const string MovieDialogueVoiceGenerationFailed = "MOVIE_DIALOGUE_VOICE_GENERATION_FAILED";
+    public const string MovieDialogueVoiceCancelled = "MOVIE_DIALOGUE_VOICE_CANCELLED";
 }
 
 public static class AssetTypes
