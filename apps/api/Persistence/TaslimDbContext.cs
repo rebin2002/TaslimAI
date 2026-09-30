@@ -83,10 +83,15 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
     public DbSet<MovieShot> MovieShots => Set<MovieShot>();
     public DbSet<MovieClip> MovieClips => Set<MovieClip>();
     public DbSet<MovieAssembly> MovieAssemblies => Set<MovieAssembly>();
+<<<<<<< HEAD
     public DbSet<MovieTimeline> MovieTimelines => Set<MovieTimeline>();
     public DbSet<MovieTimelineRevision> MovieTimelineRevisions => Set<MovieTimelineRevision>();
     public DbSet<MovieTimelineTrack> MovieTimelineTracks => Set<MovieTimelineTrack>();
     public DbSet<MovieTimelineItem> MovieTimelineItems => Set<MovieTimelineItem>();
+=======
+    public DbSet<MovieCaptionTrack> MovieCaptionTracks => Set<MovieCaptionTrack>();
+    public DbSet<MovieCaptionCue> MovieCaptionCues => Set<MovieCaptionCue>();
+>>>>>>> 8e8f41f (feat(movie): add caption and subtitle tracks)
     public DbSet<MovieTake> MovieTakes => Set<MovieTake>();
     public DbSet<MovieTakeApproval> MovieTakeApprovals => Set<MovieTakeApproval>();
     public DbSet<MovieDialogueLine> MovieDialogueLines => Set<MovieDialogueLine>();
@@ -834,6 +839,7 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasOne(item => item.GenerationJob).WithMany().HasForeignKey(item => item.GenerationJobId).OnDelete(DeleteBehavior.SetNull);
             entity.HasOne(item => item.Asset).WithMany().HasForeignKey(item => item.AssetId).OnDelete(DeleteBehavior.SetNull);
         });
+<<<<<<< HEAD
         builder.Entity<MovieTimeline>(entity =>
         {
             entity.HasKey(item => item.Id);
@@ -880,6 +886,35 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasOne(item => item.Track).WithMany(item => item.Items).HasForeignKey(item => item.MovieTimelineTrackId).OnDelete(DeleteBehavior.Cascade);
             entity.HasOne(item => item.SourceTake).WithMany().HasForeignKey(item => item.SourceTakeId).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne(item => item.SourceAsset).WithMany().HasForeignKey(item => item.SourceAssetId).OnDelete(DeleteBehavior.Restrict);
+=======
+        builder.Entity<MovieCaptionTrack>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.Name).HasMaxLength(160).IsRequired();
+            entity.Property(item => item.TrackType).HasMaxLength(20).IsRequired();
+            entity.Property(item => item.Language).HasMaxLength(35).IsRequired();
+            entity.Property(item => item.Status).HasMaxLength(20).IsRequired();
+            entity.Property(item => item.SourceFormat).HasMaxLength(10);
+            entity.Property(item => item.SourceFileName).HasMaxLength(255);
+            entity.HasIndex(item => new { item.MovieProjectId, item.Sequence }).IsUnique();
+            entity.HasIndex(item => new { item.MovieProjectId, item.Language, item.IsDefault });
+            entity.HasOne(item => item.MovieProject).WithMany(item => item.CaptionTracks).HasForeignKey(item => item.MovieProjectId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.MovieAssembly).WithMany(item => item.CaptionTracks).HasForeignKey(item => item.MovieAssemblyId).OnDelete(DeleteBehavior.SetNull);
+        });
+        builder.Entity<MovieCaptionCue>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.Text).HasMaxLength(10_000).IsRequired();
+            entity.Property(item => item.SpeakerName).HasMaxLength(160);
+            entity.HasIndex(item => new { item.MovieCaptionTrackId, item.Sequence }).IsUnique();
+            entity.HasIndex(item => new { item.MovieCaptionTrackId, item.StartMilliseconds, item.EndMilliseconds });
+            entity.HasIndex(item => item.SpeakerCharacterId);
+            entity.HasOne(item => item.MovieCaptionTrack).WithMany(item => item.Cues).HasForeignKey(item => item.MovieCaptionTrackId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.SpeakerCharacter).WithMany().HasForeignKey(item => item.SpeakerCharacterId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne(item => item.MovieScene).WithMany().HasForeignKey(item => item.MovieSceneId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne(item => item.MovieShot).WithMany().HasForeignKey(item => item.MovieShotId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne(item => item.MovieTake).WithMany().HasForeignKey(item => item.MovieTakeId).OnDelete(DeleteBehavior.SetNull);
+>>>>>>> 8e8f41f (feat(movie): add caption and subtitle tracks)
         });
         builder.Entity<MovieTeamMember>(entity =>
         {

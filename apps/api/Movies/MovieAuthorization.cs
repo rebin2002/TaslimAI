@@ -35,8 +35,13 @@ public static class MovieOperationalActions
     public const string FinalReviewDecision = "reviews.final.decide";
     public const string TeamManagement = "team.manage";
     public const string BudgetManagement = "budget.manage";
+<<<<<<< HEAD
     public const string SoundtrackEdit = "soundtrack.edit";
     public const string SoundtrackApproval = "soundtrack.approve";
+=======
+    public const string CaptionsView = "captions.view";
+    public const string CaptionsEdit = "captions.edit";
+>>>>>>> 8e8f41f (feat(movie): add caption and subtitle tracks)
 
 }
 
@@ -77,8 +82,13 @@ public static class MovieOperationalPolicies
             [MovieOperationalActions.FinalReviewDecision] = MoviePermissions.FinalApproval,
             [MovieOperationalActions.TeamManagement] = MoviePermissions.ManageTeam,
             [MovieOperationalActions.BudgetManagement] = MoviePermissions.ManageBudget,
+<<<<<<< HEAD
             [MovieOperationalActions.SoundtrackEdit] = MoviePermissions.Edit,
             [MovieOperationalActions.SoundtrackApproval] = MoviePermissions.Approve,
+=======
+            [MovieOperationalActions.CaptionsView] = MoviePermissions.View,
+            [MovieOperationalActions.CaptionsEdit] = MoviePermissions.Edit,
+>>>>>>> 8e8f41f (feat(movie): add caption and subtitle tracks)
         };
 
     public static string RequiredPermission(string action) =>
