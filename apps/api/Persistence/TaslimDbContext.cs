@@ -105,6 +105,11 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
     public DbSet<MovieSoundLibraryReference> MovieSoundLibraryReferences => Set<MovieSoundLibraryReference>();
     public DbSet<MovieSoundTrack> MovieSoundTracks => Set<MovieSoundTrack>();
     public DbSet<MovieSoundApproval> MovieSoundApprovals => Set<MovieSoundApproval>();
+    public DbSet<MovieSoundtrackCue> MovieSoundtrackCues => Set<MovieSoundtrackCue>();
+    public DbSet<MovieSoundtrackCueVersion> MovieSoundtrackCueVersions => Set<MovieSoundtrackCueVersion>();
+    public DbSet<MovieSoundtrackCueVersionReview> MovieSoundtrackCueVersionReviews => Set<MovieSoundtrackCueVersionReview>();
+    public DbSet<MovieSoundtrackAudioAssetProvenance> MovieSoundtrackAudioAssetProvenance => Set<MovieSoundtrackAudioAssetProvenance>();
+    public DbSet<MovieSoundtrackDuckingIntent> MovieSoundtrackDuckingIntents => Set<MovieSoundtrackDuckingIntent>();
     public DbSet<DirectorProjectContext> DirectorProjectContexts => Set<DirectorProjectContext>();
     public DbSet<DirectorProposal> DirectorProposals => Set<DirectorProposal>();
     public DbSet<DirectorAction> DirectorActions => Set<DirectorAction>();
@@ -232,6 +237,73 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.Property(item => item.Status).HasMaxLength(30).HasDefaultValue(MovieHierarchyStatuses.Planned).IsRequired();
             entity.HasIndex(item => new { item.MovieActId, item.Sequence }).IsUnique();
             entity.HasOne(item => item.MovieAct).WithMany(item => item.Sequences).HasForeignKey(item => item.MovieActId).OnDelete(DeleteBehavior.Cascade);
+        });
+        builder.Entity<MovieSoundtrackCue>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.Title).HasMaxLength(160).IsRequired();
+            entity.Property(item => item.NarrativeIntent).HasMaxLength(2_000);
+            entity.Property(item => item.Mood).HasMaxLength(80).IsRequired();
+            entity.Property(item => item.ApprovalState).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.ActStartSeconds).HasPrecision(12, 3).IsRequired();
+            entity.Property(item => item.SceneStartSeconds).HasPrecision(12, 3).IsRequired();
+            entity.Property(item => item.TimelineStartSeconds).HasPrecision(12, 3).IsRequired();
+            entity.Property(item => item.DurationSeconds).HasPrecision(12, 3).IsRequired();
+            entity.HasIndex(item => new { item.MovieProjectId, item.Sequence }).IsUnique();
+            entity.HasIndex(item => new { item.MovieProjectId, item.TimelineStartSeconds });
+            entity.HasIndex(item => new { item.MovieSceneId, item.SceneStartSeconds });
+            entity.HasOne(item => item.MovieProject).WithMany(item => item.SoundtrackCues).HasForeignKey(item => item.MovieProjectId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.MovieAct).WithMany(item => item.SoundtrackCues).HasForeignKey(item => item.MovieActId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(item => item.MovieScene).WithMany(item => item.SoundtrackCues).HasForeignKey(item => item.MovieSceneId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne<ApplicationUser>().WithMany().HasForeignKey(item => item.CreatedByUserId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<MovieSoundtrackCueVersion>().WithMany().HasForeignKey(item => item.ApprovedVersionId).OnDelete(DeleteBehavior.SetNull);
+        });
+        builder.Entity<MovieSoundtrackCueVersion>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.Label).HasMaxLength(160).IsRequired();
+            entity.Property(item => item.ArrangementIntent).HasMaxLength(4_000);
+            entity.Property(item => item.Mood).HasMaxLength(80).IsRequired();
+            entity.Property(item => item.ApprovalState).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.ReviewNote).HasMaxLength(4_000);
+            entity.HasIndex(item => new { item.MovieSoundtrackCueId, item.VersionNumber }).IsUnique();
+            entity.HasIndex(item => new { item.MovieSoundtrackCueId, item.ApprovalState });
+            entity.HasOne(item => item.Cue).WithMany(item => item.Versions).HasForeignKey(item => item.MovieSoundtrackCueId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.Asset).WithMany().HasForeignKey(item => item.AssetId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<ApplicationUser>().WithMany().HasForeignKey(item => item.CreatedByUserId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<ApplicationUser>().WithMany().HasForeignKey(item => item.ReviewedByUserId).OnDelete(DeleteBehavior.Restrict);
+        });
+        builder.Entity<MovieSoundtrackCueVersionReview>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.Decision).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.Comment).HasMaxLength(4_000);
+            entity.HasIndex(item => new { item.MovieSoundtrackCueVersionId, item.CreatedAt });
+            entity.HasOne(item => item.Version).WithMany(item => item.Reviews).HasForeignKey(item => item.MovieSoundtrackCueVersionId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.ReviewedByUser).WithMany().HasForeignKey(item => item.ReviewedByUserId).OnDelete(DeleteBehavior.Restrict);
+        });
+        builder.Entity<MovieSoundtrackAudioAssetProvenance>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.AssetType).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.MimeType).HasMaxLength(160).IsRequired();
+            entity.Property(item => item.AssetMetadataJson).HasMaxLength(4_000);
+            entity.HasIndex(item => item.MovieSoundtrackCueVersionId).IsUnique();
+            entity.HasIndex(item => item.AssetId);
+            entity.HasOne(item => item.CueVersion).WithOne(item => item.AudioAssetProvenance).HasForeignKey<MovieSoundtrackAudioAssetProvenance>(item => item.MovieSoundtrackCueVersionId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.Asset).WithMany().HasForeignKey(item => item.AssetId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(item => item.StoredFile).WithMany().HasForeignKey(item => item.StoredFileId).OnDelete(DeleteBehavior.Restrict);
+        });
+        builder.Entity<MovieSoundtrackDuckingIntent>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.TargetLane).HasMaxLength(40).IsRequired();
+            entity.Property(item => item.StartOffsetSeconds).HasPrecision(12, 3).IsRequired();
+            entity.Property(item => item.EndOffsetSeconds).HasPrecision(12, 3).IsRequired();
+            entity.Property(item => item.DuckDecibels).HasPrecision(8, 3).IsRequired();
+            entity.Property(item => item.Rationale).HasMaxLength(500);
+            entity.HasIndex(item => new { item.MovieSoundtrackCueId, item.StartOffsetSeconds });
+            entity.HasOne(item => item.Cue).WithMany(item => item.DuckingIntents).HasForeignKey(item => item.MovieSoundtrackCueId).OnDelete(DeleteBehavior.Cascade);
         });
 
         builder.Entity<MovieStory>(entity =>

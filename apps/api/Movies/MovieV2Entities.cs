@@ -19,6 +19,7 @@ public sealed class MovieAct
 
     public MovieProject MovieProject { get; set; } = null!;
     public ICollection<MovieSequence> Sequences { get; set; } = [];
+    public ICollection<MovieSoundtrackCue> SoundtrackCues { get; set; } = [];
 }
 
 public sealed class MovieSequence

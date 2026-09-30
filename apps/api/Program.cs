@@ -235,6 +235,8 @@ builder.Services.AddScoped<IMovieDialogueProductionService, MovieDialogueProduct
 builder.Services.AddScoped<MovieDialogueVoiceExecutionStore>();
 builder.Services.AddScoped<IMovieFinalMasteringService, MovieFinalMasteringService>();
 builder.Services.AddScoped<IMovieTakeUpscaleEligibilityService, MovieTakeUpscaleEligibilityService>();
+builder.Services.AddSingleton<IMovieSoundtrackMediaService, UnavailableMovieSoundtrackMediaService>();
+builder.Services.AddScoped<IMovieSoundtrackService, MovieSoundtrackService>();
 builder.Services.AddScoped<IMovieScenesService, MovieScenesService>();
 builder.Services.AddScoped<IMovieGuideService, MovieGuideService>();
 builder.Services.AddScoped<IMovieStoryService, MovieStoryService>();
