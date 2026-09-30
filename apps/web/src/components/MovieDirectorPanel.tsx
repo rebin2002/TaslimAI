@@ -133,7 +133,8 @@ export function MovieDirectorPanel({ project, activeModule, selectedScene, selec
   const proposalAction = actionForProposal(proposal?.proposal ?? null);
   const planItem = proposal?.proposal.plan[0] ?? null;
   const castRoomStoryAssistance = room === "Cast";
-  const canPropose = Boolean((selectedShot || castRoomStoryAssistance) && project.guide.lockedRevisionNumber && !working);
+  const sceneShotPlanning = room === "Scene" && Boolean(selectedScene);
+  const canPropose = Boolean((selectedShot || sceneShotPlanning || castRoomStoryAssistance) && project.guide.lockedRevisionNumber && !working);
 
   useEffect(() => {
     let mounted = true;
@@ -160,14 +161,25 @@ export function MovieDirectorPanel({ project, activeModule, selectedScene, selec
   }, [project.id]);
 
   async function createProposal() {
-    if (!selectedShot && !castRoomStoryAssistance) {
-      setError("Select or add a shot before creating a Director proposal.");
+    if (!selectedShot && !sceneShotPlanning && !castRoomStoryAssistance) {
+      setError("Select a scene or shot before creating a Director proposal.");
       return;
     }
     setWorking("proposal");
     setError("");
     try {
-      const next = await api.createMovieDirectorProposal(project.id, castRoomStoryAssistance && !selectedShot
+      const next = await api.createMovieDirectorProposal(project.id, sceneShotPlanning
+        ? {
+          shotPlanningAction: "propose_shots",
+          targetSceneId: selectedScene?.id,
+          requestedShotCount: 3,
+          goal: goal.trim() || "Plan the selected scene into production-ready shots.",
+          requestedQuality: autoDirector ? "Auto" : quality,
+          importance,
+          complexity,
+          budgetSensitivity,
+        }
+        : castRoomStoryAssistance && !selectedShot
         ? { storyAction: "develop_premise", goal: goal.trim() || "Review Story context for Cast continuity." }
         : {
           shotId: selectedShot?.id,
@@ -264,20 +276,20 @@ export function MovieDirectorPanel({ project, activeModule, selectedScene, selec
         <div className="movie-director-section-heading"><div><span className="movie-inspector-label">Proposal</span><strong>{proposal ? proposal.proposal.title : "Ask the Director for a plan"}</strong></div>{proposal && <span className={`movie-director-status is-${proposal.proposal.status.toLowerCase()}`}>{directorProposalStatusLabel(proposal.proposal.status)}</span>}</div>
         {proposal ? <>
           <p className="movie-director-summary">{proposal.proposal.summary}</p>
-          {planItem && <div className="movie-director-change"><span>Typed change</span><strong>{directorActionTypeLabel(proposalAction?.actionType ?? "")}</strong><p>Shot {planItem.sequence} · {planItem.description}</p><div className="movie-director-quality-line"><span>Quality</span><strong>{qualityLabel(planItem.recommendation.qualityLevel)}</strong><small>{planItem.recommendation.selectionMode === "Auto" ? "Recommended by Auto Director" : "Selected quality"}</small></div></div>}
+          {proposal.proposal.shotPlan?.length ? <div className="movie-director-change"><span>Production-ready shot plan</span><strong>{proposal.proposal.shotPlan.length} proposed shots</strong>{proposal.proposal.shotPlan.map((shot) => <details key={shot.shotNumber}><summary>Shot {shot.shotNumber} · {shot.estimatedDurationSeconds}s · {shot.shotSize}</summary><p><b>Purpose:</b> {shot.narrativePurpose}</p><p><b>Subject/action:</b> {shot.subject} — {shot.characterAction}</p><p><b>Camera:</b> {shot.framing}; {shot.cameraAngle}; {shot.cameraMovement}</p><p><b>Light/depth:</b> {shot.lightingIntent}; {shot.depthBackgroundIntent}</p><p><b>Continuity/audio:</b> {shot.continuityRequirements}; {shot.dialogueAudioDependency}</p><p><b>Props/VFX/notes:</b> {shot.importantProps.join(", ") || "None"}; {shot.vfxRequirements}; {shot.productionNotes}</p><small>Grounded in: {shot.groundingEvidence.join(" · ")}</small></details>)}</div> : planItem && <div className="movie-director-change"><span>Typed change</span><strong>{directorActionTypeLabel(proposalAction?.actionType ?? "")}</strong><p>Shot {planItem.sequence} · {planItem.description}</p><div className="movie-director-quality-line"><span>Quality</span><strong>{qualityLabel(planItem.recommendation.qualityLevel)}</strong><small>{planItem.recommendation.selectionMode === "Auto" ? "Recommended by Auto Director" : "Selected quality"}</small></div></div>}
           <div className="movie-director-rationale"><span>Why this plan</span>{proposal.proposal.rationale.map((reason) => <small key={reason}>{reason.replaceAll("_", " ")}</small>)}</div>
           <div className="movie-director-boundary"><Check size={13} /><span>Review → explicit approval → execute. No silent mutations.</span></div>
           {proposal.proposal.status === "PendingApproval" && <div className="movie-director-actions"><button type="button" className="movie-workspace-button is-primary" onClick={() => void approveProposal()} disabled={working !== null}><Check size={13} /> {working === "approve" ? "Approving…" : "Approve proposal"}</button><button type="button" className="movie-workspace-button is-quiet" onClick={() => void rejectProposal()} disabled={working !== null}><X size={13} /> Reject</button></div>}
-          {proposal.proposal.status === "Approved" && proposalAction?.status === "Ready" && <div className="movie-director-actions"><button type="button" className="movie-workspace-button is-primary" onClick={() => void executeAction()} disabled={working !== null}><Play size={13} /> {working === "execute" ? "Executing…" : "Execute ready action"}</button></div>}
+          {proposal.proposal.status === "Approved" && proposalAction?.status === "Ready" && <div className="movie-director-actions"><button type="button" className="movie-workspace-button is-primary" onClick={() => void executeAction()} disabled={working !== null}><Play size={13} /> {working === "execute" ? "Applying…" : proposal.proposal.shotPlan?.length ? "Apply shot plan" : "Execute ready action"}</button></div>}
           {proposalAction?.results.at(-1) && <div className={`movie-director-result is-${proposalAction.results.at(-1)?.status.toLowerCase()}`}><span>{proposalAction.results.at(-1)?.status === "Succeeded" ? <Check size={13} /> : <AlertTriangle size={13} />}</span><p>{proposalAction.results.at(-1)?.safeMessage}</p></div>}
         </> : <>
-          <p className="movie-director-summary">{castRoomStoryAssistance && !selectedShot ? "Turn the current Story context into a reviewable Cast continuity plan. No shot is required." : "Turn the current shot into a reviewable plan. The Director will explain the change, quality choice, and rationale before anything can run."}</p>
+          <p className="movie-director-summary">{sceneShotPlanning ? "Turn the selected scene into a grounded, production-ready shot plan. Apply is explicit and appends without replacing current shots." : castRoomStoryAssistance && !selectedShot ? "Turn the current Story context into a reviewable Cast continuity plan. No shot is required." : "Turn the current shot into a reviewable plan. The Director will explain the change, quality choice, and rationale before anything can run."}</p>
           <label className="movie-director-field"><span>Goal</span><input value={goal} onChange={(event) => setGoal(event.target.value)} maxLength={160} /></label>
           <div className="movie-director-mode"><div><span className="movie-inspector-label">Intelligent mode</span><strong>Auto Director</strong><small>Recommends one of the four quality levels.</small></div><button type="button" className={`movie-director-toggle ${autoDirector ? "is-on" : ""}`} aria-pressed={autoDirector} onClick={() => setAutoDirector((current) => !current)}><span /></button></div>
           <div className="movie-director-quality"><span className="movie-inspector-label">Quality</span><div>{qualityLevels.map((level) => <button type="button" key={level} className={!autoDirector && quality === level ? "is-selected" : ""} onClick={() => { setQuality(level); setAutoDirector(false); }}>{level}</button>)}</div><small>{autoDirector ? "Auto Director is active; quality remains Fast / Standard / Cinematic / Studio." : "Choose a quality level explicitly."}</small></div>
           <div className="movie-director-sliders"><Slider label="Importance" value={importance} onChange={setImportance} /><Slider label="Complexity" value={complexity} onChange={setComplexity} /><Slider label="Budget sensitivity" value={budgetSensitivity} onChange={setBudgetSensitivity} /></div>
           <button type="button" className="movie-workspace-button is-primary movie-director-propose" onClick={() => void createProposal()} disabled={!canPropose}>{working === "proposal" ? <><RotateCcw size={13} className="movie-director-spin" /> Preparing…</> : <><Send size={13} /> Create typed proposal</>}</button>
-          {!selectedShot && !castRoomStoryAssistance && <small className="movie-director-help">The Director needs a real shot target. Open Scenes, select a scene, and add a shot.</small>}
+          {!selectedShot && !sceneShotPlanning && !castRoomStoryAssistance && <small className="movie-director-help">The Director needs a real scene or shot target. Open Scenes and select a scene.</small>}
         </>}
       </section>
 

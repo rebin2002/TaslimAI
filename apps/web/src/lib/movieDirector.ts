@@ -25,6 +25,10 @@ export function directorActionTypeLabel(actionType: string) {
   switch (actionType) {
     case "generate_shot":
       return "Generate shot";
+    case "propose_shots":
+      return "Apply shot plan";
+    case "regenerate_shots":
+      return "Apply regenerated shot plan";
     default:
       return "Director action";
   }

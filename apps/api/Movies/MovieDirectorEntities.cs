@@ -349,6 +349,8 @@ public sealed class DirectorProposalRequest
     public string? ScenePlanAction { get; set; }
     public string? ScenePlanningAction { get; set; }
     public bool PlanScenes { get; set; }
+    public string? ShotPlanningAction { get; set; }
+    public int? RequestedShotCount { get; set; }
     public Guid? TargetSceneId { get; set; }
     public Guid? TargetElementId { get; set; }
     public string? SelectedPassage { get; set; }
@@ -365,7 +367,7 @@ public sealed class DirectorContextTargetRequest { public string? TargetType { g
 public sealed record DirectorPlanItemDto(Guid ShotId, int Sequence, string Description, DirectorQualityRecommendation Recommendation);
 public sealed record DirectorActionDto(Guid Id, Guid ProposalId, string ActionType, string Status, bool ApprovalRequired, string? FailureCode, DateTime CreatedAt, DateTime? ApprovedAt, DateTime? StartedAt, DateTime? CompletedAt, IReadOnlyList<DirectorActionResultDto> Results);
 public sealed record DirectorActionResultDto(Guid Id, string Status, string SafeMessage, string? ResultJson, DateTime CreatedAt);
-public sealed record DirectorProposalDto(Guid Id, Guid MovieProjectId, string Status, string Title, string Summary, IReadOnlyList<string> Rationale, IReadOnlyList<DirectorPlanItemDto> Plan, IReadOnlyList<DirectorActionDto> Actions, DateTime CreatedAt, DateTime? ApprovedAt, DirectorStoryReviewDto? StoryReview = null, DirectorScenePlanReviewDto? ScenePlan = null);
+public sealed record DirectorProposalDto(Guid Id, Guid MovieProjectId, string Status, string Title, string Summary, IReadOnlyList<string> Rationale, IReadOnlyList<DirectorPlanItemDto> Plan, IReadOnlyList<DirectorActionDto> Actions, DateTime CreatedAt, DateTime? ApprovedAt, DirectorStoryReviewDto? StoryReview = null, DirectorScenePlanReviewDto? ScenePlan = null, IReadOnlyList<DirectorShotProposalDto>? ShotPlan = null, DirectorShotPlanReviewDto? ShotPlanReview = null);
 public sealed record DirectorProposalResponse(DirectorProposalDto Proposal, DirectorContextDto Context, DirectorStoryBoundedContextDto? StoryContext = null);
 public sealed record DirectorHistoryDto(Guid Id, string EventType, string? SafeDetailsJson, DateTime CreatedAt);
 public sealed record DirectorActionExecutionResponse(DirectorActionDto Action, DirectorActionResultDto Result);
