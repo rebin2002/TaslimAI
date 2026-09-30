@@ -43,13 +43,10 @@ public sealed class MovieAuthorizationPolicyTests
             [MovieOperationalActions.FinalReviewDecision] = MoviePermissions.FinalApproval,
             [MovieOperationalActions.TeamManagement] = MoviePermissions.ManageTeam,
             [MovieOperationalActions.BudgetManagement] = MoviePermissions.ManageBudget,
-<<<<<<< HEAD
             [MovieOperationalActions.SoundtrackEdit] = MoviePermissions.Edit,
             [MovieOperationalActions.SoundtrackApproval] = MoviePermissions.Approve,
-=======
             [MovieOperationalActions.CaptionsView] = MoviePermissions.View,
             [MovieOperationalActions.CaptionsEdit] = MoviePermissions.Edit,
->>>>>>> 8e8f41f (feat(movie): add caption and subtitle tracks)
         };
 
         Assert.Equal(expected.Count, MovieOperationalPolicies.All().Count);

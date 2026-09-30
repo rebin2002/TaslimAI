@@ -249,11 +249,8 @@ public sealed class MovieProject
     public ICollection<MovieWorldUsage> WorldUsages { get; set; } = [];
     public ICollection<MovieClip> Clips { get; set; } = [];
     public ICollection<MovieAssembly> Assemblies { get; set; } = [];
-<<<<<<< HEAD
     public ICollection<MovieSoundtrackCue> SoundtrackCues { get; set; } = [];
-=======
     public ICollection<MovieCaptionTrack> CaptionTracks { get; set; } = [];
->>>>>>> 8e8f41f (feat(movie): add caption and subtitle tracks)
     public ICollection<MovieTeamMember> TeamMembers { get; set; } = [];
     public ICollection<MovieComment> Comments { get; set; } = [];
     public ICollection<MovieReview> Reviews { get; set; } = [];

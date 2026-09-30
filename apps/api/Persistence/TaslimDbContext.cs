@@ -83,15 +83,12 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
     public DbSet<MovieShot> MovieShots => Set<MovieShot>();
     public DbSet<MovieClip> MovieClips => Set<MovieClip>();
     public DbSet<MovieAssembly> MovieAssemblies => Set<MovieAssembly>();
-<<<<<<< HEAD
     public DbSet<MovieTimeline> MovieTimelines => Set<MovieTimeline>();
     public DbSet<MovieTimelineRevision> MovieTimelineRevisions => Set<MovieTimelineRevision>();
     public DbSet<MovieTimelineTrack> MovieTimelineTracks => Set<MovieTimelineTrack>();
     public DbSet<MovieTimelineItem> MovieTimelineItems => Set<MovieTimelineItem>();
-=======
     public DbSet<MovieCaptionTrack> MovieCaptionTracks => Set<MovieCaptionTrack>();
     public DbSet<MovieCaptionCue> MovieCaptionCues => Set<MovieCaptionCue>();
->>>>>>> 8e8f41f (feat(movie): add caption and subtitle tracks)
     public DbSet<MovieTake> MovieTakes => Set<MovieTake>();
     public DbSet<MovieTakeApproval> MovieTakeApprovals => Set<MovieTakeApproval>();
     public DbSet<MovieDialogueLine> MovieDialogueLines => Set<MovieDialogueLine>();
@@ -839,7 +836,6 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasOne(item => item.GenerationJob).WithMany().HasForeignKey(item => item.GenerationJobId).OnDelete(DeleteBehavior.SetNull);
             entity.HasOne(item => item.Asset).WithMany().HasForeignKey(item => item.AssetId).OnDelete(DeleteBehavior.SetNull);
         });
-<<<<<<< HEAD
         builder.Entity<MovieTimeline>(entity =>
         {
             entity.HasKey(item => item.Id);
@@ -886,7 +882,6 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasOne(item => item.Track).WithMany(item => item.Items).HasForeignKey(item => item.MovieTimelineTrackId).OnDelete(DeleteBehavior.Cascade);
             entity.HasOne(item => item.SourceTake).WithMany().HasForeignKey(item => item.SourceTakeId).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne(item => item.SourceAsset).WithMany().HasForeignKey(item => item.SourceAssetId).OnDelete(DeleteBehavior.Restrict);
-=======
         builder.Entity<MovieCaptionTrack>(entity =>
         {
             entity.HasKey(item => item.Id);
@@ -914,7 +909,6 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasOne(item => item.MovieScene).WithMany().HasForeignKey(item => item.MovieSceneId).OnDelete(DeleteBehavior.SetNull);
             entity.HasOne(item => item.MovieShot).WithMany().HasForeignKey(item => item.MovieShotId).OnDelete(DeleteBehavior.SetNull);
             entity.HasOne(item => item.MovieTake).WithMany().HasForeignKey(item => item.MovieTakeId).OnDelete(DeleteBehavior.SetNull);
->>>>>>> 8e8f41f (feat(movie): add caption and subtitle tracks)
         });
         builder.Entity<MovieTeamMember>(entity =>
         {
