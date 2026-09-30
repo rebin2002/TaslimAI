@@ -1067,6 +1067,7 @@ public sealed class GenerationJobWorker(
                         .SetProperty(track => track.Status, MovieSoundStatuses.ReadyForReview)
                         .SetProperty(track => track.AssetId, publication == null ? (Guid?)null : publication.Asset!.Id)
                         .SetProperty(track => track.UpdatedAt, DateTime.UtcNow), stoppingToken);
+            }
         }
         catch (MovieVideoStaleWorkerException)
         {

@@ -527,12 +527,3 @@ public static class MovieTimelineAuthority
         return next;
     }
 }
-
-public sealed class MovieTimelineValidationException(
-    string code,
-    string message,
-    IReadOnlyList<MovieTimelineValidationError> errors) : Exception(message)
-{
-    public string Code { get; } = code;
-    public IReadOnlyList<MovieTimelineValidationError> Errors { get; } = errors;
-}

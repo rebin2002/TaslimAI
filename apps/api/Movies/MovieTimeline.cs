@@ -117,9 +117,10 @@ public sealed class MovieTimelineItem
     public Asset? SourceAsset { get; set; }
 }
 
-public sealed class MovieTimelineValidationException(string code, string message) : Exception(message)
+public sealed class MovieTimelineValidationException(string code, string message, IReadOnlyList<MovieTimelineValidationError>? errors = null) : Exception(message)
 {
     public string Code { get; } = code;
+    public IReadOnlyList<MovieTimelineValidationError> Errors { get; } = errors ?? [];
 }
 
 internal static class MovieTimelineSourceRules

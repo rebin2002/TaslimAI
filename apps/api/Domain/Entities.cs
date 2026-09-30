@@ -104,7 +104,6 @@ public static class GenerationJobTypes
     {
         MovieSoundGenerate,
     };
-    };
 
     public static readonly IReadOnlySet<string> Supported = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
