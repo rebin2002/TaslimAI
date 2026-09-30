@@ -130,6 +130,8 @@ public static class GenerationJobErrorCodes
 {
     public const string TypeNotSupported = "JOB_TYPE_NOT_SUPPORTED";
     public const string Cancelled = "JOB_CANCELLED";
+    public const string Poisoned = "JOB_POISONED";
+    public const string RetryExhausted = Poisoned;
     public const string ExecutionFailed = "JOB_EXECUTION_FAILED";
     public const string NoBillableAsset = "GENERATION_NO_BILLABLE_ASSET";
     public const string NotCancellable = "JOB_NOT_CANCELLABLE";

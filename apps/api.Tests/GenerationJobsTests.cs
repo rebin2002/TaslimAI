@@ -254,6 +254,7 @@ public sealed class GenerationJobsTests : IClassFixture<GenerationJobsApiFactory
         using var client = factory.CreateClient();
         var auth = await Register(client, $"jobs-recovery-{Guid.NewGuid():N}@example.com");
         var id = Guid.NewGuid();
+        var originalToken = Guid.NewGuid();
         using (var scope = factory.Services.CreateScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
@@ -269,7 +270,7 @@ public sealed class GenerationJobsTests : IClassFixture<GenerationJobsApiFactory
                 CreatedAt = DateTime.UtcNow.AddMinutes(-1),
                 StartedAt = DateTime.UtcNow.AddMinutes(-1),
                 ClaimExpiresAt = DateTime.UtcNow.AddSeconds(-1),
-                ConcurrencyToken = Guid.NewGuid(),
+                ConcurrencyToken = originalToken,
             });
             await db.SaveChangesAsync();
         }
@@ -277,6 +278,93 @@ public sealed class GenerationJobsTests : IClassFixture<GenerationJobsApiFactory
         var terminal = await WaitForTerminal(client, id);
         Assert.Equal("Succeeded", terminal.Status);
         Assert.Equal(100, terminal.ProgressPercent);
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var recovered = await db.GenerationJobs.AsNoTracking().SingleAsync(item => item.Id == id);
+            Assert.Equal(1, recovered.RetryCount);
+            Assert.NotEqual(originalToken, recovered.ConcurrencyToken);
+        }
+    }
+
+    [Fact]
+    public async Task Expired_claim_at_retry_limit_becomes_poisoned_once_and_never_publishes()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, $"jobs-poison-{Guid.NewGuid():N}@example.com");
+        var id = Guid.NewGuid();
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.GenerationJobs.Add(new GenerationJob
+            {
+                Id = id,
+                WorkspaceId = auth.PersonalWorkspace.Id,
+                CreatedByUserId = auth.User.Id,
+                JobType = GenerationJobTypes.SystemTest,
+                Status = GenerationJobStatus.Running,
+                InputJson = "{}",
+                RetryCount = 3,
+                CreatedAt = DateTime.UtcNow.AddMinutes(-1),
+                StartedAt = DateTime.UtcNow.AddMinutes(-1),
+                ClaimExpiresAt = DateTime.UtcNow.AddSeconds(-1),
+                ConcurrencyToken = Guid.NewGuid(),
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var terminal = await WaitForTerminal(client, id);
+        Assert.Equal("Failed", terminal.Status);
+        Assert.Equal(GenerationJobErrorCodes.Poisoned, terminal.ErrorCode);
+        Assert.Equal("The generation could not be recovered safely. Please try again.", terminal.ErrorMessage);
+        Assert.Empty(terminal.Outputs);
+        await Task.Delay(100);
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            Assert.False(await db.Assets.AsNoTracking().AnyAsync(item => item.SourceGenerationJobId == id));
+            Assert.False(await db.GenerationJobOutputs.AsNoTracking().AnyAsync(item => item.GenerationJobId == id));
+            var usage = await db.UsageTransactions.AsNoTracking().SingleAsync(item => item.RequestId == $"generation:{id:N}");
+            Assert.Equal(UsageTransactionStatus.Failed, usage.Status);
+            Assert.Equal(GenerationJobErrorCodes.Poisoned, usage.FailureCode);
+            Assert.Equal(0m, usage.ChargedAmount);
+        }
+    }
+
+    [Fact]
+    public async Task Expired_claim_with_cancellation_requested_is_cancelled_instead_of_requeued()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, $"jobs-recovery-cancel-{Guid.NewGuid():N}@example.com");
+        var id = Guid.NewGuid();
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.GenerationJobs.Add(new GenerationJob
+            {
+                Id = id,
+                WorkspaceId = auth.PersonalWorkspace.Id,
+                CreatedByUserId = auth.User.Id,
+                JobType = GenerationJobTypes.SystemTest,
+                Status = GenerationJobStatus.Running,
+                InputJson = "{}",
+                CancellationRequested = true,
+                CreatedAt = DateTime.UtcNow.AddMinutes(-1),
+                StartedAt = DateTime.UtcNow.AddMinutes(-1),
+                ClaimExpiresAt = DateTime.UtcNow.AddSeconds(-1),
+                ConcurrencyToken = Guid.NewGuid(),
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var terminal = await WaitForTerminal(client, id);
+        Assert.Equal("Cancelled", terminal.Status);
+        Assert.Equal(GenerationJobErrorCodes.Cancelled, terminal.ErrorCode);
+        using var finalScope = factory.Services.CreateScope();
+        var finalDb = finalScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var usage = await finalDb.UsageTransactions.AsNoTracking().SingleAsync(item => item.RequestId == $"generation:{id:N}");
+        Assert.Equal(UsageTransactionStatus.Cancelled, usage.Status);
+        Assert.Equal(0m, usage.ChargedAmount);
     }
 
     [Fact]
