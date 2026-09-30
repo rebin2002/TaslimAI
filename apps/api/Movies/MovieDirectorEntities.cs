@@ -63,6 +63,7 @@ public static class DirectorHistoryEventTypes
     public const string ProposalCreated = "proposal_created";
     public const string ProposalApproved = "proposal_approved";
     public const string ProposalRejected = "proposal_rejected";
+    public const string ProposalExpired = "proposal_expired";
     public const string ActionReady = "action_ready";
     public const string ActionStarted = "action_started";
     public const string ActionSucceeded = "action_succeeded";
@@ -111,6 +112,8 @@ public sealed class DirectorProposal
     public Guid MovieProjectId { get; set; }
     public Guid DirectorProjectContextId { get; set; }
     public Guid CreatedByUserId { get; set; }
+    public int ContextVersion { get; set; }
+    public string ContextSnapshotHash { get; set; } = string.Empty;
     public string Status { get; set; } = DirectorProposalStatuses.PendingApproval;
     public string Title { get; set; } = string.Empty;
     public string Summary { get; set; } = string.Empty;
@@ -347,6 +350,7 @@ public sealed class DirectorStoryCreativeException(string code, string message) 
     public string Code { get; } = code;
 }
 public sealed class DirectorActionNotApprovedException() : Exception("The Director action requires explicit user approval.");
+public sealed class DirectorProposalStaleException() : Exception("The Director proposal is stale. Create a new proposal from the current movie planning context.");
 public sealed class DirectorActionExecutionException(string code, string message) : Exception(message)
 {
     public string Code { get; } = code;

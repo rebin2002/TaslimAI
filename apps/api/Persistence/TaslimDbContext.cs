@@ -810,6 +810,7 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
         builder.Entity<DirectorProposal>(entity =>
         {
             entity.HasKey(item => item.Id);
+            entity.Property(item => item.ContextSnapshotHash).HasMaxLength(64).IsRequired();
             entity.Property(item => item.Status).HasMaxLength(30).IsRequired();
             entity.Property(item => item.Title).HasMaxLength(160).IsRequired();
             entity.Property(item => item.Summary).HasMaxLength(4_000).IsRequired();
