@@ -43,6 +43,8 @@ public sealed class MovieAuthorizationPolicyTests
             [MovieOperationalActions.FinalReviewDecision] = MoviePermissions.FinalApproval,
             [MovieOperationalActions.TeamManagement] = MoviePermissions.ManageTeam,
             [MovieOperationalActions.BudgetManagement] = MoviePermissions.ManageBudget,
+            [MovieOperationalActions.SoundtrackEdit] = MoviePermissions.Edit,
+            [MovieOperationalActions.SoundtrackApproval] = MoviePermissions.Approve,
         };
 
         Assert.Equal(expected.Count, MovieOperationalPolicies.All().Count);

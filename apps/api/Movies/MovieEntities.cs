@@ -249,6 +249,7 @@ public sealed class MovieProject
     public ICollection<MovieWorldUsage> WorldUsages { get; set; } = [];
     public ICollection<MovieClip> Clips { get; set; } = [];
     public ICollection<MovieAssembly> Assemblies { get; set; } = [];
+    public ICollection<MovieSoundtrackCue> SoundtrackCues { get; set; } = [];
     public ICollection<MovieTeamMember> TeamMembers { get; set; } = [];
     public ICollection<MovieComment> Comments { get; set; } = [];
     public ICollection<MovieReview> Reviews { get; set; } = [];
@@ -319,6 +320,7 @@ public sealed class MovieScene
     public MovieSequence? MovieSequence { get; set; }
     public ICollection<MovieShot> Shots { get; set; } = [];
     public ICollection<MovieClip> Clips { get; set; } = [];
+    public ICollection<MovieSoundtrackCue> SoundtrackCues { get; set; } = [];
 }
 
 public sealed class MovieCharacter
