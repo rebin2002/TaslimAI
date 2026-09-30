@@ -134,6 +134,8 @@ public sealed class GenerationJobUsageService(IUsageLedgerService ledger) : IGen
                                     ? UsageFeature.Music
                                     : string.Equals(job.JobType, GenerationJobTypes.SocialGenerate, StringComparison.OrdinalIgnoreCase)
                                         ? UsageFeature.Social
+                                        : GenerationJobTypes.MovieSoundTypes.Contains(job.JobType)
+                                            ? UsageFeature.Movie
                                         : GenerationJobTypes.MovieTypes.Contains(job.JobType)
                                             ? UsageFeature.Movie
                                             : UsageFeature.Generation,
@@ -191,6 +193,8 @@ public sealed class GenerationJobService(
             throw new GenerationJobValidationException("PROJECT_NOT_IN_WORKSPACE", "The selected project is not in this workspace.");
         if (GenerationJobTypes.MovieTypes.Contains(request.JobType.Trim()))
             await ValidateMovieJobTargetAsync(userId, request, cancellationToken);
+        if (GenerationJobTypes.MovieSoundTypes.Contains(request.JobType.Trim()))
+            await ValidateMovieSoundJobTargetAsync(userId, request, cancellationToken);
 
         try
         {
@@ -409,6 +413,25 @@ public sealed class GenerationJobService(
             throw new GenerationJobForbiddenException();
     }
 
+    private async Task ValidateMovieSoundJobTargetAsync(Guid userId, CreateGenerationJobRequest request, CancellationToken cancellationToken)
+    {
+        MovieSoundGenerationInput? input;
+        try { input = JsonSerializer.Deserialize<MovieSoundGenerationInput>(request.InputJson); }
+        catch (JsonException) { input = null; }
+        if (input is null || input.MovieProjectId == Guid.Empty || input.MovieSoundTrackId == Guid.Empty)
+            throw new GenerationJobValidationException(GenerationJobErrorCodes.MovieSoundRequestInvalid, "The movie sound target is invalid.");
+
+        var track = await db.MovieSoundTracks
+            .Include(item => item.MovieProject)
+            .FirstOrDefaultAsync(item => item.Id == input.MovieSoundTrackId, cancellationToken);
+        if (track is null || track.MovieProjectId != input.MovieProjectId || track.MovieProject.WorkspaceId != request.WorkspaceId
+            || track.MovieSceneId != input.MovieSceneId || track.MovieShotId != input.MovieShotId
+            || track.GenerationJobId is not null || request.ProjectId != track.MovieProject.ProjectId)
+            throw new GenerationJobValidationException(GenerationJobErrorCodes.MovieSoundRequestInvalid, "The movie sound target is no longer available.");
+        if (track.CreatedByUserId != userId && (movieCollaboration is null || !await movieCollaboration.HasPermissionAsync(userId, track.MovieProjectId, MoviePermissions.Generate, cancellationToken)))
+            throw new GenerationJobForbiddenException();
+    }
+
     public async Task<GenerationJob?> GetAsync(Guid userId, Guid jobId, CancellationToken cancellationToken = default)
     {
         var job = await db.GenerationJobs.AsNoTracking().Include(item => item.Outputs).FirstOrDefaultAsync(item => item.Id == jobId, cancellationToken);
@@ -453,6 +476,9 @@ public sealed class GenerationJobService(
             if (GenerationJobTypes.MovieTypes.Contains(job.JobType))
                 await db.MovieClips.Where(clip => clip.GenerationJobId == job.Id)
                     .ExecuteUpdateAsync(setters => setters.SetProperty(clip => clip.Status, MovieClipStatuses.Cancelled).SetProperty(clip => clip.UpdatedAt, now), cancellationToken);
+            if (GenerationJobTypes.MovieSoundTypes.Contains(job.JobType))
+                await db.MovieSoundTracks.Where(track => track.GenerationJobId == job.Id)
+                    .ExecuteUpdateAsync(setters => setters.SetProperty(track => track.Status, MovieSoundStatuses.Cancelled).SetProperty(track => track.UpdatedAt, now), cancellationToken);
             await CancelUsageAsync(job, CancellationCode(job), cancellationToken);
             return GenerationJobCancelResult.Cancelled;
         }
@@ -472,6 +498,8 @@ public sealed class GenerationJobService(
     private static string CancellationCode(GenerationJob job) =>
         GenerationJobTypes.MovieTypes.Contains(job.JobType)
             ? GenerationJobErrorCodes.MovieCancelled
+            : GenerationJobTypes.MovieSoundTypes.Contains(job.JobType)
+                ? GenerationJobErrorCodes.MovieSoundCancelled
             : string.Equals(job.JobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase)
             ? GenerationJobErrorCodes.ImageCancelled
             : string.Equals(job.JobType, GenerationJobTypes.DocumentGenerate, StringComparison.OrdinalIgnoreCase)
@@ -767,6 +795,15 @@ public sealed class GenerationJobWorker(
             {
                 var publication = publications.FirstOrDefault(item => item.Asset is not null);
                 await movieExecutions.MarkReadyAsync(current.Id, claimedJob.ConcurrencyToken, publication?.Asset?.Id, publication?.CreatedFile?.Id, null, publication?.Output.MetadataJson, stoppingToken);
+            }
+            if (GenerationJobTypes.MovieSoundTypes.Contains(claimedJob.JobType))
+            {
+                var publication = publications.FirstOrDefault(item => item.Asset is not null);
+                await db.MovieSoundTracks.Where(track => track.GenerationJobId == claimedJob.Id)
+                    .ExecuteUpdateAsync(setters => setters
+                        .SetProperty(track => track.Status, MovieSoundStatuses.ReadyForReview)
+                        .SetProperty(track => track.AssetId, publication == null ? (Guid?)null : publication.Asset!.Id)
+                        .SetProperty(track => track.UpdatedAt, DateTime.UtcNow), stoppingToken);
             }
         }
         catch (MovieVideoStaleWorkerException)
@@ -1075,6 +1112,9 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
             await finalization.RollbackAsync(cancellationToken);
             return;
         }
+        if (GenerationJobTypes.MovieSoundTypes.Contains(job.JobType))
+            await db.MovieSoundTracks.Where(track => track.GenerationJobId == job.Id)
+                .ExecuteUpdateAsync(setters => setters.SetProperty(track => track.Status, MovieSoundStatuses.Cancelled).SetProperty(track => track.UpdatedAt, now), cancellationToken);
         var transaction = await usage.BeginAsync(job, cancellationToken: cancellationToken);
         await usage.CancelAsync(transaction, CancellationCode(job), cancellationToken);
         await finalization.CommitAsync(cancellationToken);
@@ -1096,6 +1136,9 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
             await finalization.RollbackAsync(cancellationToken);
             return;
         }
+        if (GenerationJobTypes.MovieSoundTypes.Contains(job.JobType))
+            await db.MovieSoundTracks.Where(track => track.GenerationJobId == job.Id)
+                .ExecuteUpdateAsync(setters => setters.SetProperty(track => track.Status, MovieSoundStatuses.Failed).SetProperty(track => track.UpdatedAt, now), cancellationToken);
         var transaction = await usage.BeginAsync(job, cancellationToken: cancellationToken);
         await usage.FailAsync(transaction, code, providerUsage, cancellationToken);
         await finalization.CommitAsync(cancellationToken);
@@ -1104,6 +1147,8 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
     private static string CancellationCode(GenerationJob job) =>
         GenerationJobTypes.MovieTypes.Contains(job.JobType)
             ? GenerationJobErrorCodes.MovieCancelled
+            : GenerationJobTypes.MovieSoundTypes.Contains(job.JobType)
+                ? GenerationJobErrorCodes.MovieSoundCancelled
             : string.Equals(job.JobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase)
             ? GenerationJobErrorCodes.ImageCancelled
             : string.Equals(job.JobType, GenerationJobTypes.DocumentGenerate, StringComparison.OrdinalIgnoreCase)
@@ -1132,6 +1177,7 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
             if (string.Equals(jobType, GenerationJobTypes.PresentationGenerate, StringComparison.OrdinalIgnoreCase)) return GenerationJobErrorCodes.PresentationOutputInvalid;
             if (string.Equals(jobType, GenerationJobTypes.ResearchGenerate, StringComparison.OrdinalIgnoreCase)) return GenerationJobErrorCodes.ResearchOutputInvalid;
             if (string.Equals(jobType, GenerationJobTypes.SocialGenerate, StringComparison.OrdinalIgnoreCase)) return GenerationJobErrorCodes.SocialOutputInvalid;
+            if (GenerationJobTypes.MovieSoundTypes.Contains(jobType)) return GenerationJobErrorCodes.MovieSoundOutputInvalid;
             if (GenerationJobTypes.MovieTypes.Contains(jobType)) return GenerationJobErrorCodes.MovieOutputInvalid;
             if (string.Equals(jobType, GenerationJobTypes.MusicGenerate, StringComparison.OrdinalIgnoreCase)) return GenerationJobErrorCodes.MusicOutputInvalid;
             if (string.Equals(jobType, GenerationJobTypes.VoiceGenerate, StringComparison.OrdinalIgnoreCase)) return GenerationJobErrorCodes.VoiceOutputInvalid;
@@ -1195,6 +1241,17 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
                 FileStorageUnavailableException or FileStorageOperationException or FileUploadValidationException => GenerationJobErrorCodes.SocialStorageFailed,
                 AiProviderUnavailableException or AiProviderTimeoutException => GenerationJobErrorCodes.SocialProviderUnavailable,
                 _ => GenerationJobErrorCodes.SocialGenerationFailed,
+            };
+        }
+        if (GenerationJobTypes.MovieSoundTypes.Contains(jobType))
+        {
+            return exception switch
+            {
+                MovieSoundRequestValidationException validation => validation.Code,
+                MovieSoundProviderUnavailableException => GenerationJobErrorCodes.MovieSoundProviderUnavailable,
+                MovieSoundOutputInvalidException => GenerationJobErrorCodes.MovieSoundOutputInvalid,
+                FileStorageUnavailableException or FileStorageOperationException or FileUploadValidationException => GenerationJobErrorCodes.MovieSoundOutputStorageFailed,
+                _ => GenerationJobErrorCodes.MovieSoundGenerationFailed,
             };
         }
         if (GenerationJobTypes.MovieTypes.Contains(jobType))
@@ -1319,6 +1376,11 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
         GenerationJobErrorCodes.MovieOutputStorageFailed => "The movie clip was generated but could not be saved. Your movie plan was saved.",
         GenerationJobErrorCodes.MovieCancelled => "The movie generation was cancelled.",
         GenerationJobErrorCodes.MovieGenerationFailed => "The movie could not be generated. Your movie plan was saved.",
+        GenerationJobErrorCodes.MovieSoundProviderUnavailable => "Movie sound generation is temporarily unavailable. Your sound cue was saved.",
+        GenerationJobErrorCodes.MovieSoundOutputInvalid => "The generated sound was invalid. Your sound cue was saved.",
+        GenerationJobErrorCodes.MovieSoundOutputStorageFailed => "The sound was generated but could not be saved. Your sound cue was saved.",
+        GenerationJobErrorCodes.MovieSoundCancelled => "The movie sound generation was cancelled.",
+        GenerationJobErrorCodes.MovieSoundGenerationFailed => "The movie sound could not be generated. Your sound cue was saved.",
         GenerationJobErrorCodes.MusicProviderUnavailable or GenerationJobErrorCodes.MusicProviderTimeout => "Music generation is temporarily unavailable. Please try again later.",
         GenerationJobErrorCodes.MusicProviderRateLimited => "Music generation is temporarily busy. Please try again later.",
         GenerationJobErrorCodes.MusicPromptRejected => "This music request could not be completed. Try a different description.",
