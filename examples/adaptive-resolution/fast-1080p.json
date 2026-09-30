@@ -1,0 +1,72 @@
+{
+  "request": {
+    "targetMasterResolution": "1080p",
+    "projectQualityTier": "Fast",
+    "shotImportance": 15,
+    "durationSeconds": 4,
+    "motionComplexity": 10,
+    "cameraComplexity": 10,
+    "faceImportance": 0,
+    "handBodyComplexity": 0,
+    "fineDetailImportance": 10,
+    "continuitySensitivity": 15,
+    "environmentComplexity": 10,
+    "vfxComplexity": 0,
+    "textSignageSensitivity": 0,
+    "lipSyncDependency": 0,
+    "upscaleSuitability": 95,
+    "requiredQualityDimensions": [
+      { "dimension": "temporal_stability", "importance": 50 }
+    ],
+    "speedPreference": 90,
+    "costConstraints": {
+      "preferLowerCost": true,
+      "allowQualityEscalation": true
+    }
+  },
+  "representativeOutput": {
+    "contractVersion": 1,
+    "recommendedSourceResolution": "480p",
+    "intendedUpscaleTarget": "1080p",
+    "processingPath": "upscale",
+    "qualityRequirement": {
+      "projectQualityTier": "Fast",
+      "requiredDimensions": [
+        { "dimension": "temporal_stability", "importance": 50 }
+      ],
+      "minimumConfidence": 0.55
+    },
+    "qualityConfidence": 0.78,
+    "qcEscalationRequired": false,
+    "escalation": {
+      "required": false,
+      "trigger": "",
+      "escalateToSourceResolution": null,
+      "reasonCodes": []
+    },
+    "reasonCodes": ["cost_preferred", "upscale_selected"],
+    "alternatives": [
+      {
+        "sourceResolution": "720p",
+        "upscaleTarget": "1080p",
+        "path": "upscale",
+        "qualityConfidence": 0.82,
+        "tradeoff": "higher_quality_headroom",
+        "reasonCodes": ["high_shot_importance"]
+      }
+    ],
+    "userOverride": {
+      "requested": false,
+      "applied": false,
+      "sourceResolution": null,
+      "upscaleTarget": null,
+      "path": null,
+      "statusCode": null
+    },
+    "costEvaluation": {
+      "evaluated": false,
+      "constraintSatisfied": null,
+      "reasonCode": "cost_data_not_available"
+    }
+  }
+}
