@@ -119,7 +119,7 @@ export function MovieDirectorPanel({ project, activeModule, selectedScene, selec
   const [history, setHistory] = useState<DirectorHistoryEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [historyOpen, setHistoryOpen] = useState(false);
-  const [working, setWorking] = useState<"proposal" | "approve" | "reject" | "execute" | "lock" | null>(null);
+  const [working, setWorking] = useState<"proposal" | "regenerate" | "approve" | "reject" | "execute" | "lock" | null>(null);
   const [error, setError] = useState("");
   const [goal, setGoal] = useState("Prepare the current shot for review");
   const [autoDirector, setAutoDirector] = useState(true);
@@ -246,6 +246,32 @@ export function MovieDirectorPanel({ project, activeModule, selectedScene, selec
     }
   }
 
+  // Review → explicit approval → execute remains the server boundary; the product language is Apply.
+
+  async function regenerateProposal() {
+    if (!selectedShot || working) return;
+    setWorking("regenerate");
+    setError("");
+    try {
+      const next = await api.createMovieDirectorProposal(project.id, {
+        shotId: selectedShot.id,
+        goal: goal.trim() || null,
+        requestedQuality: autoDirector ? "Auto" : quality,
+        budgetLimitUsd: null,
+        importance,
+        complexity,
+        budgetSensitivity,
+      });
+      setProposal(next);
+      if (typeof window !== "undefined") window.sessionStorage.setItem(`taslim:movie-director:proposal:${project.id}`, next.proposal.id);
+      setHistory(await api.getMovieDirectorHistory(project.id));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "A new Director proposal could not be created.");
+    } finally {
+      setWorking(null);
+    }
+  }
+
   async function lockGuide() {
     setWorking("lock");
     setError("");
@@ -278,9 +304,10 @@ export function MovieDirectorPanel({ project, activeModule, selectedScene, selec
           <p className="movie-director-summary">{proposal.proposal.summary}</p>
           {proposal.proposal.shotPlan?.length ? <div className="movie-director-change"><span>Production-ready shot plan</span><strong>{proposal.proposal.shotPlan.length} proposed shots</strong>{proposal.proposal.shotPlan.map((shot) => <details key={shot.shotNumber}><summary>Shot {shot.shotNumber} · {shot.estimatedDurationSeconds}s · {shot.shotSize}</summary><p><b>Purpose:</b> {shot.narrativePurpose}</p><p><b>Subject/action:</b> {shot.subject} — {shot.characterAction}</p><p><b>Camera:</b> {shot.framing}; {shot.cameraAngle}; {shot.cameraMovement}</p><p><b>Light/depth:</b> {shot.lightingIntent}; {shot.depthBackgroundIntent}</p><p><b>Continuity/audio:</b> {shot.continuityRequirements}; {shot.dialogueAudioDependency}</p><p><b>Props/VFX/notes:</b> {shot.importantProps.join(", ") || "None"}; {shot.vfxRequirements}; {shot.productionNotes}</p><small>Grounded in: {shot.groundingEvidence.join(" · ")}</small></details>)}</div> : planItem && <div className="movie-director-change"><span>Typed change</span><strong>{directorActionTypeLabel(proposalAction?.actionType ?? "")}</strong><p>Shot {planItem.sequence} · {planItem.description}</p><div className="movie-director-quality-line"><span>Quality</span><strong>{qualityLabel(planItem.recommendation.qualityLevel)}</strong><small>{planItem.recommendation.selectionMode === "Auto" ? "Recommended by Auto Director" : "Selected quality"}</small></div></div>}
           <div className="movie-director-rationale"><span>Why this plan</span>{proposal.proposal.rationale.map((reason) => <small key={reason}>{reason.replaceAll("_", " ")}</small>)}</div>
-          <div className="movie-director-boundary"><Check size={13} /><span>Review → explicit approval → execute. No silent mutations.</span></div>
+          <div className="movie-director-boundary"><Check size={13} /><span>Review → explicit approval → apply. No silent mutations.</span></div>
           {proposal.proposal.status === "PendingApproval" && <div className="movie-director-actions"><button type="button" className="movie-workspace-button is-primary" onClick={() => void approveProposal()} disabled={working !== null}><Check size={13} /> {working === "approve" ? "Approving…" : "Approve proposal"}</button><button type="button" className="movie-workspace-button is-quiet" onClick={() => void rejectProposal()} disabled={working !== null}><X size={13} /> Reject</button></div>}
           {proposal.proposal.status === "Approved" && proposalAction?.status === "Ready" && <div className="movie-director-actions"><button type="button" className="movie-workspace-button is-primary" onClick={() => void executeAction()} disabled={working !== null}><Play size={13} /> {working === "execute" ? "Applying…" : proposal.proposal.shotPlan?.length ? "Apply shot plan" : "Execute ready action"}</button></div>}
+          {selectedShot && <button type="button" className="movie-text-action movie-director-regenerate" onClick={() => void regenerateProposal()} disabled={working !== null}><RotateCcw size={12} /> {working === "regenerate" ? "Regenerating…" : "Regenerate proposal"}</button>}
           {proposalAction?.results.at(-1) && <div className={`movie-director-result is-${proposalAction.results.at(-1)?.status.toLowerCase()}`}><span>{proposalAction.results.at(-1)?.status === "Succeeded" ? <Check size={13} /> : <AlertTriangle size={13} />}</span><p>{proposalAction.results.at(-1)?.safeMessage}</p></div>}
         </> : <>
           <p className="movie-director-summary">{sceneShotPlanning ? "Turn the selected scene into a grounded, production-ready shot plan. Apply is explicit and appends without replacing current shots." : castRoomStoryAssistance && !selectedShot ? "Turn the current Story context into a reviewable Cast continuity plan. No shot is required." : "Turn the current shot into a reviewable plan. The Director will explain the change, quality choice, and rationale before anything can run."}</p>

@@ -2371,3 +2371,46 @@ body { background: var(--canvas); }
 @media (max-width: 520px) { .movie-scenes-empty-state { display: flex; align-items: flex-start; flex-direction: column; }.movie-scenes-empty-source { align-self: stretch; }.movie-scene-command-actions, .movie-scene-empty-actions { flex-direction: column; }.movie-scene-command-actions .movie-workspace-button, .movie-scene-empty-actions .movie-workspace-button { width: 100%; }.movie-scene-legend-items { display: grid; grid-template-columns: 1fr 1fr; }.movie-scenes-add-form { grid-template-columns: 1fr; }.movie-scenes-form-actions { grid-column: auto; }.movie-scene-list-actions .movie-text-action { margin-inline-start: 0; } }
 [dir="rtl"] .movie-scene-list-actions { padding-inline: 47px 10px; }
 [dir="rtl"] .movie-scene-list-main svg { transform: rotate(180deg); }
+/* Movie Shot Editor UX — essential shot facts first, advanced production detail on demand. */
+.movie-shot-plan-card.is-selected { border-color: rgba(85,209,193,.54); background: linear-gradient(135deg, rgba(85,209,193,.08), rgba(7,23,36,.58)); box-shadow: 0 0 0 1px rgba(85,209,193,.08); }
+.movie-shot-plan-card-select { display: grid; grid-template-columns: 26px minmax(0,1fr) auto; align-items: start; width: 100%; gap: 8px; padding: 0; color: inherit; border: 0; background: transparent; text-align: start; }
+.movie-shot-plan-card-select:hover .movie-shot-plan-card-copy strong { color: #8de2d4; }
+.movie-shot-plan-card-copy { display: flex; flex-direction: column; min-width: 0; }
+.movie-shot-plan-card-copy strong { overflow: hidden; color: #e5f1f4; font-size: 10px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+.movie-shot-plan-card-copy small { display: block; margin-top: 4px; color: #708d9e; font-size: 8px; }
+.movie-shot-editor { display: flex; flex-direction: column; gap: 17px; margin-top: 4px; padding: 17px; border: 1px solid rgba(85,209,193,.25); border-radius: 10px; background: linear-gradient(145deg, rgba(7,29,40,.9), rgba(5,19,31,.58)); }
+.movie-shot-editor-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+.movie-shot-editor-heading h4 { margin: 6px 0 4px; color: #eef7f8; font-size: 17px; letter-spacing: -.035em; }
+.movie-shot-editor-heading p { margin: 0; color: #7895a7; font-size: 9px; line-height: 1.5; }
+.movie-shot-editor-status { flex: 0 0 auto; padding: 5px 7px; color: #8ed9ce; border: 1px solid rgba(85,209,193,.24); border-radius: 5px; background: rgba(85,209,193,.07); font-size: 7px; font-weight: 900; letter-spacing: .08em; text-transform: uppercase; }
+.movie-shot-core-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 13px 15px; }
+.movie-shot-core-grid label, .movie-shot-form-grid label { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.movie-shot-core-grid label > span, .movie-shot-form-grid label > span { color: #819eaf; font-size: 8px; font-weight: 900; letter-spacing: .08em; text-transform: uppercase; }
+.movie-shot-core-grid .movie-shot-core-wide { grid-column: 1 / -1; }
+.movie-shot-core-grid input, .movie-shot-core-grid textarea, .movie-shot-editor .movie-shot-form-grid input, .movie-shot-editor .movie-shot-form-grid textarea { width: 100%; min-width: 0; padding: 9px 10px; color: #e2eff3; border: 1px solid rgba(143,176,204,.17); border-radius: 6px; outline: 0; background: rgba(3,16,26,.46); font: inherit; font-size: 10px; line-height: 1.45; resize: vertical; }
+.movie-shot-core-grid input::placeholder, .movie-shot-core-grid textarea::placeholder { color: #617f94; }
+.movie-shot-core-grid input:focus, .movie-shot-core-grid textarea:focus, .movie-shot-editor .movie-shot-form-grid input:focus, .movie-shot-editor .movie-shot-form-grid textarea:focus { border-color: rgba(85,209,193,.7); box-shadow: 0 0 0 2px rgba(85,209,193,.08); }
+.movie-shot-input-with-suffix { display: flex; align-items: center; gap: 7px; }
+.movie-shot-input-with-suffix input { min-width: 0; }
+.movie-shot-input-with-suffix em { color: #6f8d9f; font-size: 9px; font-style: normal; }
+.movie-shot-advanced-sections { display: grid; gap: 7px; }
+.movie-shot-advanced-sections details { border: 1px solid rgba(143,176,204,.14); border-radius: 7px; background: rgba(3,16,26,.3); }
+.movie-shot-advanced-sections details[open] { border-color: rgba(85,209,193,.25); background: rgba(5,25,35,.43); }
+.movie-shot-advanced-sections summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 12px; color: #d9ebef; cursor: pointer; list-style: none; }
+.movie-shot-advanced-sections summary::-webkit-details-marker { display: none; }
+.movie-shot-advanced-sections summary > span { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.movie-shot-advanced-sections summary strong { color: #d9ebef; font-size: 10px; }
+.movie-shot-advanced-sections summary small { color: #718ea0; font-size: 8px; line-height: 1.35; }
+.movie-shot-advanced-sections summary svg { flex: 0 0 auto; color: #7897a7; transition: transform .18s var(--ease-out); }
+.movie-shot-advanced-sections details[open] summary svg { transform: rotate(90deg); color: var(--movie-teal); }
+.movie-shot-advanced-sections details > .movie-shot-form-grid { padding: 0 12px 12px; }
+.movie-shot-editor-hint { margin: 0; padding: 0 12px 12px; color: #6e8b9d; font-size: 8px; line-height: 1.5; }
+.movie-shot-advanced-sections .movie-shot-wide { grid-column: 1 / -1; }
+.movie-shot-editor .movie-shot-form-actions { align-items: center; justify-content: flex-start; margin-top: 0; padding-top: 0; }
+.movie-shot-editor .movie-shot-form-actions .movie-workspace-button { min-height: 34px; }
+.movie-shot-plan-card .movie-shot-plan-facts { margin-inline-start: 34px; }
+.movie-shot-plan-card .movie-shot-card-actions { margin-inline-start: 34px; }
+@media (max-width: 720px) { .movie-shot-core-grid { grid-template-columns: 1fr; }.movie-shot-core-grid .movie-shot-core-wide { grid-column: auto; }.movie-shot-editor-heading { flex-direction: column; }.movie-shot-editor-status { align-self: flex-start; }.movie-shot-plan-card .movie-shot-plan-facts, .movie-shot-plan-card .movie-shot-card-actions { margin-inline-start: 0; } }
+@media (max-width: 520px) { .movie-shot-editor { padding: 13px; }.movie-shot-plan-card-select { grid-template-columns: 26px minmax(0,1fr); }.movie-shot-plan-card-select .movie-shot-readiness { grid-column: 2; justify-self: start; }.movie-shot-editor .movie-shot-form-actions { align-items: stretch; flex-direction: column; }.movie-shot-editor .movie-shot-form-actions .movie-workspace-button { width: 100%; } }
+[dir="rtl"] .movie-shot-advanced-sections summary svg { transform: scaleX(-1); }
+[dir="rtl"] .movie-shot-advanced-sections details[open] summary svg { transform: rotate(90deg) scaleX(-1); }
