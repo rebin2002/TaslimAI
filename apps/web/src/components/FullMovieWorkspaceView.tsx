@@ -163,6 +163,14 @@ function FullMovieProjectWorkspace({ projectId, module }: { projectId: string; m
     }).finally(() => {
       if (mounted) setLoading(false);
     });
+    if (activeModule === "storyboard") {
+      void api.getMovieProject(projectId).then((fullProject) => {
+        if (!mounted) return;
+        setProject(fullProject);
+        setSelectedSceneId(fullProject.scenes[0]?.id ?? null);
+        setSelectedShotId(fullProject.scenes[0]?.shots[0]?.id ?? null);
+      }).catch(() => undefined);
+    }
     void api.getCinematographyPresets().then((catalog) => { if (mounted) setPresets(catalog); }).catch(() => undefined);
     return () => { mounted = false; };
   }, [activeModule, projectId]);

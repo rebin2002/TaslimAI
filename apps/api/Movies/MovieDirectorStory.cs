@@ -152,7 +152,8 @@ public sealed record DirectorStoryActionPayload(
     IReadOnlyList<DirectorStoryFindingDto>? GroundedFindings = null,
     string QualityLevel = DirectorQualityLevels.Fast,
     string AiCoreTier = "Fast",
-    decimal? EstimatedCostUsd = null);
+    decimal? EstimatedCostUsd = null,
+    string? ContextRoom = null);
 
 public sealed record DirectorStoryApplyResult(
     bool Applied,

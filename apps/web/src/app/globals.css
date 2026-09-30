@@ -2414,3 +2414,11 @@ body { background: var(--canvas); }
 @media (max-width: 520px) { .movie-shot-editor { padding: 13px; }.movie-shot-plan-card-select { grid-template-columns: 26px minmax(0,1fr); }.movie-shot-plan-card-select .movie-shot-readiness { grid-column: 2; justify-self: start; }.movie-shot-editor .movie-shot-form-actions { align-items: stretch; flex-direction: column; }.movie-shot-editor .movie-shot-form-actions .movie-workspace-button { width: 100%; } }
 [dir="rtl"] .movie-shot-advanced-sections summary svg { transform: scaleX(-1); }
 [dir="rtl"] .movie-shot-advanced-sections details[open] summary svg { transform: rotate(90deg) scaleX(-1); }
+.movie-shot-plan-card-head { width: 100%; padding: 0; color: inherit; border: 0; background: transparent; font: inherit; text-align: left; cursor: pointer; }
+.movie-shot-plan-card-head:disabled { cursor: default; }
+.movie-director-field select { min-width: 0; padding: 8px 9px; color: #e7f3f6; border: 1px solid rgba(143,176,204,.17); border-radius: 6px; outline: 0; background: rgba(3,16,26,.45); font: inherit; font-size: 9px; }
+.movie-director-field select:focus { border-color: var(--movie-teal); }
+.movie-director-prerequisites { display: flex; flex-direction: column; gap: 5px; margin-top: 12px; padding: 9px; border: 1px solid rgba(226,181,108,.16); border-radius: 6px; background: rgba(226,181,108,.045); }
+.movie-director-prerequisites small { color: #8aa4b1; font-size: 8px; line-height: 1.4; }
+.movie-director-prerequisites small.is-satisfied { color: var(--movie-teal); }
+.movie-director-prerequisites small.is-missing { color: #e2b56c; }

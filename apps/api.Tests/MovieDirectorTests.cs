@@ -8,6 +8,53 @@ namespace Taslim.Api.Tests;
 public sealed class MovieDirectorTests
 {
     [Fact]
+    public void Scene_room_exposes_scene_planning_and_ready_shot_planning_actions()
+    {
+        var sceneId = Guid.NewGuid();
+        var shotId = Guid.NewGuid();
+        var target = new DirectorContextTargetDto(DirectorContextTargetTypes.Scene, sceneId, null, sceneId, null, null, null);
+        var scene = new DirectorSceneContext(sceneId, 1, "Harbor", "Mara enters.", 30, null,
+        [new DirectorShotContext(shotId, 1, "Mara enters the harbor.", null, null, 5, null, null, null)]);
+
+        var context = DirectorRoomAwareness.Build(DirectorRoomTypes.Scene, true, sceneId, shotId, target, [scene], null);
+
+        Assert.Equal(DirectorRoomTypes.Scene, context.Room);
+        Assert.Equal([DirectorActionTypes.ScenePlanning, DirectorActionTypes.ShotPlanning], context.ValidActions);
+        Assert.True(context.AvailablePrerequisites.Single(item => item.Key == "guide_locked").Satisfied);
+        Assert.Equal(sceneId, context.SelectedSceneId);
+        Assert.Equal(shotId, context.SelectedShotId);
+    }
+
+    [Fact]
+    public void Cast_room_remains_project_scoped_even_if_a_shot_is_selected()
+    {
+        var projectId = Guid.NewGuid();
+        var sceneId = Guid.NewGuid();
+        var shotId = Guid.NewGuid();
+        var target = new DirectorContextTargetDto(DirectorContextTargetTypes.Project, projectId, null, null, null, null, null);
+        var scene = new DirectorSceneContext(sceneId, 1, "Harbor", "Mara enters.", 30, null,
+        [new DirectorShotContext(shotId, 1, "Mara enters the harbor.", null, null, 5, null, null, null)]);
+
+        var context = DirectorRoomAwareness.Build(DirectorRoomTypes.Cast, true, sceneId, shotId, target, [scene], null);
+
+        Assert.Equal([DirectorActionTypes.StoryAssistance], context.ValidActions);
+        Assert.Equal(DirectorContextTargetTypes.Project, context.AppropriateTarget!.Type);
+    }
+
+    [Fact]
+    public async Task Production_readiness_executor_never_calls_a_media_provider()
+    {
+        var action = new DirectorAction { Id = Guid.NewGuid(), ActionType = DirectorActionTypes.ProductionReadiness, PayloadJson = System.Text.Json.JsonSerializer.Serialize(new DirectorRoomActionPayload(DirectorRoomTypes.Production, DirectorActionTypes.ProductionReadiness, Guid.NewGuid(), Guid.NewGuid()), DirectorJson.Options) };
+        var executor = new MovieDirectorPlanningActionExecutor(DirectorActionTypes.ProductionReadiness);
+
+        var result = await executor.ExecuteAsync(action);
+
+        Assert.True(result.Succeeded);
+        Assert.Contains("no media provider was called", result.SafeMessage, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("providerCalled", result.ResultJson, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Auto_director_selects_studio_for_important_complex_shot()
     {
         var planner = new DirectorQualityPlanner(new FixedCostEstimator(2m));
