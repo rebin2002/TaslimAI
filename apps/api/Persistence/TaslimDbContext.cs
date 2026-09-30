@@ -91,6 +91,7 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
     public DbSet<MovieProductionVersion> MovieProductionVersions => Set<MovieProductionVersion>();
     public DbSet<MovieProductionVersionAsset> MovieProductionVersionAssets => Set<MovieProductionVersionAsset>();
     public DbSet<MovieProductionStageTransition> MovieProductionStageTransitions => Set<MovieProductionStageTransition>();
+    public DbSet<MovieProductionCheckpoint> MovieProductionCheckpoints => Set<MovieProductionCheckpoint>();
     public DbSet<MovieTeamMember> MovieTeamMembers => Set<MovieTeamMember>();
     public DbSet<MovieTeamMemberPermission> MovieTeamMemberPermissions => Set<MovieTeamMemberPermission>();
     public DbSet<MovieComment> MovieComments => Set<MovieComment>();
@@ -641,6 +642,16 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasOne(item => item.SourceVersion).WithMany().HasForeignKey(item => item.SourceVersionId).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne(item => item.GenerationJob).WithMany().HasForeignKey(item => item.GenerationJobId).OnDelete(DeleteBehavior.SetNull);
             entity.HasOne(item => item.ActorUser).WithMany().HasForeignKey(item => item.ActorUserId).OnDelete(DeleteBehavior.Restrict);
+        });
+        builder.Entity<MovieProductionCheckpoint>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.State).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.SnapshotHash).HasMaxLength(64).IsRequired();
+            entity.HasIndex(item => item.MovieProjectId).IsUnique();
+            entity.HasIndex(item => new { item.MovieProjectId, item.ObservedAt });
+            entity.HasOne(item => item.MovieProject).WithMany().HasForeignKey(item => item.MovieProjectId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne<ApplicationUser>().WithMany().HasForeignKey(item => item.LastRecoveredByUserId).OnDelete(DeleteBehavior.SetNull);
         });
         builder.Entity<MovieClip>(entity =>
         {

@@ -43,7 +43,7 @@ import {
   Workflow,
   X,
 } from "lucide-react";
-import { api, type Asset, type CinematographyPreset, type DirectorProposal, type DirectorStoryAction, type MovieCast, type MovieCharacter, type MovieCharacterState, type MovieOverview, type MovieProductionReviewInput, type MovieProductionVersion, type MovieProject, type MovieTake, type MovieProjectShell, type MovieScene, type MovieSceneShotPlan, type MovieSceneWorkspace, type MovieScenesWorkspace, type MovieScreenplayElementType, type MovieShot, type MovieShotPlanningInput, type MovieStoryboardCandidate, type MovieStoryboardProject, type MovieStoryboardScene, type MovieStoryboardShot, type MovieStory, type MovieStoryRevision, type MovieStoryRevisionInput } from "@/lib/api";
+import { api, type Asset, type CinematographyPreset, type DirectorProposal, type DirectorStoryAction, type MovieCast, type MovieCharacter, type MovieCharacterState, type MovieOverview, type MovieProductionCheckpoint, type MovieProductionReviewInput, type MovieProductionVersion, type MovieProject, type MovieTake, type MovieProjectShell, type MovieScene, type MovieSceneShotPlan, type MovieSceneWorkspace, type MovieScenesWorkspace, type MovieScreenplayElementType, type MovieShot, type MovieShotPlanningInput, type MovieStoryboardCandidate, type MovieStoryboardProject, type MovieStoryboardScene, type MovieStoryboardShot, type MovieStory, type MovieStoryRevision, type MovieStoryRevisionInput } from "@/lib/api";
 import { assetFileUrl } from "@/lib/apiBase";
 import { MovieWorldWorkspace } from "@/components/MovieWorldWorkspace";
 import { ShotDesigner, type ShotDesignerDraft } from "@/components/ShotDesigner";
@@ -978,6 +978,9 @@ function cinematographyText(shot: MovieStoryboardShot) {
 function ProductionModule({ project, completionPercent, onRefresh }: { project: MovieProject; completionPercent: number; onRefresh: () => Promise<void> }) {
   const [busyKey, setBusyKey] = useState("");
   const [actionError, setActionError] = useState("");
+  const [checkpoint, setCheckpoint] = useState<MovieProductionCheckpoint | null>(null);
+  const [checkpointError, setCheckpointError] = useState("");
+  const [recoveringJobId, setRecoveringJobId] = useState<string | null>(null);
   const shots = project.scenes.flatMap((scene) => scene.shots.map((shot) => ({ scene, shot }))).sort((a, b) => a.scene.sequence - b.scene.sequence || a.shot.sequence - b.shot.sequence);
   const versions = shots.flatMap(({ shot }) => shot.productionVersions ?? []);
   const takes = shots.flatMap(({ shot }) => shot.takes ?? []);
@@ -986,6 +989,16 @@ function ProductionModule({ project, completionPercent, onRefresh }: { project: 
   const inFlight = versions.filter((version) => ["Pending", "Queued", "Running"].includes(version.execution?.status ?? "")).length;
   const failed = versions.filter((version) => version.execution?.status === "Failed").length;
   const [selectedTier, setSelectedTier] = useState<MovieResolutionTier>(failed > 0 ? "Draft" : selectedTake ? "Master" : ready > 0 ? "Upgrade" : "Draft");
+  const loadCheckpoint = useCallback(async () => {
+    try {
+      setCheckpointError("");
+      setCheckpoint(await api.getMovieProductionCheckpoint(project.id));
+    } catch (cause) {
+      setCheckpointError(cause instanceof Error ? cause.message : "The production checkpoint could not be loaded.");
+    }
+  }, [project.id]);
+
+  useEffect(() => { void loadCheckpoint(); }, [loadCheckpoint]);
 
   async function action(key: string, work: () => Promise<unknown>) {
     setBusyKey(key);
@@ -993,6 +1006,7 @@ function ProductionModule({ project, completionPercent, onRefresh }: { project: 
     try {
       await work();
       await onRefresh();
+      await loadCheckpoint();
     } catch (cause) {
       setActionError(cause instanceof Error ? cause.message : "The production action could not be completed.");
     } finally {
@@ -1000,11 +1014,30 @@ function ProductionModule({ project, completionPercent, onRefresh }: { project: 
     }
   }
 
+  async function recover(jobId: string) {
+    setRecoveringJobId(jobId);
+    setActionError("");
+    try {
+      const result = await api.recoverMovieProduction(project.id, jobId);
+      setCheckpoint(result.checkpoint);
+      await onRefresh();
+      await loadCheckpoint();
+    } catch (cause) {
+      setActionError(cause instanceof Error ? cause.message : "The interrupted production pass could not be recovered.");
+      await loadCheckpoint();
+    } finally {
+      setRecoveringJobId(null);
+    }
+  }
+
+  const progressPercent = checkpoint?.progressPercent ?? completionPercent;
+
   return <div className="movie-module-stack">
     <section className="movie-production-hero">
-      <div><span className="movie-workspace-kicker">Production desk</span><h3>{completionPercent}% of the current plan is ready to review</h3><p>Move from source intent to a selected take without losing the story, continuity, or a clear quality decision.</p></div>
-      <div className="movie-production-ring"><strong>{completionPercent}%</strong><span>ready</span></div>
+      <div><span className="movie-workspace-kicker">Production desk</span><h3>{progressPercent}% of the current plan is ready to review</h3><p>Move from source intent to a selected take without losing the story, continuity, or a clear quality decision.</p></div>
+      <div className="movie-production-ring"><strong>{progressPercent}%</strong><span>ready</span></div>
     </section>
+    {checkpoint ? <ProductionCheckpointSummary checkpoint={checkpoint} recoveringJobId={recoveringJobId} onRecover={(jobId) => void recover(jobId)} /> : <section className="movie-production-recovery"><span className="movie-workspace-kicker">Durable checkpoint</span><p>{checkpointError || "Reading the latest persisted production state…"}</p></section>}
     <MovieProductionResolutionPanel project={project} shotCount={shots.length} reviewableTakeCount={ready} selectedTake={selectedTake} failedPassCount={failed} selectedTier={selectedTier} onTierChange={setSelectedTier} />
     <div className="movie-metric-row"><Metric label="Scenes" value={project.scenes.length} /><Metric label="Available takes" value={takes.length} /><Metric label="Ready to review" value={ready} /><Metric label="Needs attention" value={failed} /></div>
     {actionError && <div className="movie-workspace-error-inline" role="alert"><XCircleIcon /> {actionError}</div>}
@@ -1014,6 +1047,16 @@ function ProductionModule({ project, completionPercent, onRefresh }: { project: 
     </section>
     <ModuleIntro icon={<ShieldCheck size={18} />} title="No footage is invented" text="This workspace only shows persisted work. Planning a finish is safe; a real output appears only after a deliberate, reviewable production step." />
   </div>;
+}
+
+function ProductionCheckpointSummary({ checkpoint, recoveringJobId, onRecover }: { checkpoint: MovieProductionCheckpoint; recoveringJobId: string | null; onRecover: (jobId: string) => void }) {
+  const blockedItems = checkpoint.items.filter((item) => item.state === "Blocked").slice(0, 6);
+  return <section className="movie-production-recovery" aria-label="Production checkpoint">
+    <div className="movie-production-recovery-heading"><div><span className="movie-workspace-kicker">Durable checkpoint · v{checkpoint.version}</span><h3>{checkpoint.state === "Recoverable" ? "Production can resume safely" : checkpoint.state === "Blocked" ? "Production is waiting on dependencies" : checkpoint.state === "Complete" ? "All planned shots are complete" : "Production state is saved"}</h3><p>Progress is derived from persisted shot, version, take, and job states. Retrying the same interruption reuses the existing recovery operation.</p></div><span className={`movie-stage-pill is-${checkpoint.state.toLowerCase()}`}>{checkpoint.state}</span></div>
+    <div className="movie-production-recovery-metrics"><span><strong>{checkpoint.completedShots}</strong> complete</span><span><strong>{checkpoint.runningShots}</strong> running</span><span><strong>{checkpoint.blockedShots}</strong> blocked</span><span><strong>{checkpoint.recoverableShots}</strong> recoverable</span></div>
+    {checkpoint.recoveryActions.length > 0 && <div className="movie-production-recovery-actions"><div><span className="movie-production-subhead">Interrupted passes</span><small>Only failed or cancelled passes without a published output are offered.</small></div>{checkpoint.recoveryActions.map((action) => <div className="movie-production-recovery-action" key={action.actionId}><div><strong>{action.label}</strong><p>{action.reason}</p></div><button type="button" className="movie-workspace-button is-secondary" disabled={Boolean(recoveringJobId)} onClick={() => onRecover(action.actionId)}>{recoveringJobId === action.actionId ? "Resuming…" : "Resume safely"}</button></div>)}</div>}
+    {blockedItems.length > 0 && <div className="movie-production-blocked-list"><span className="movie-production-subhead">Blocked dependencies</span>{blockedItems.map((item) => <div key={item.shotId}><strong>{item.label}</strong><span>{item.blockedReason}</span><em>{item.nextAction}</em></div>)}</div>}
+  </section>;
 }
 
 function ProductionShotGroup({ sceneTitle, sceneSequence, shot, busyKey, onAction }: { sceneTitle: string; sceneSequence: number; shot: MovieShot; busyKey: string; onAction: (key: string, work: () => Promise<unknown>) => Promise<void> }) {
@@ -1059,7 +1102,7 @@ function ProductionVersionCard({ version, shot, busyKey, onAction }: { version: 
 
 function ProductionExecutionSummary({ execution }: { execution: NonNullable<MovieProductionVersion["execution"]> }) {
   const failures = execution.attempts.filter((attempt) => attempt.failureCode || attempt.qualityControlRejected);
-  return <div className="movie-production-execution"><div><span>Progress</span><strong>{execution.status === "Succeeded" ? "Ready" : execution.status === "Failed" ? "Needs attention" : `${execution.progressPercent}%`}</strong></div><div><span>Quality check</span><strong>{execution.qualityControlStatus || "Pending"}</strong></div><div><span>Pass history</span><strong>{execution.attemptCount} recorded</strong></div>{(execution.errorCode || failures.length > 0) && <div className="movie-production-failure-detail"><span>Escalation</span><strong>Review this pass before continuing</strong>{execution.errorMessage && <small>{execution.errorMessage}</small>}</div>}</div>;
+  return <div className="movie-production-execution"><div><span>Progress</span><strong>{execution.status === "Succeeded" ? "Ready" : execution.status === "Failed" ? "Needs attention" : `${execution.progressPercent}%`}</strong></div><div><span>Quality check</span><strong>{execution.qualityControlStatus || "Pending"}</strong></div><div><span>Pass history</span><strong>{execution.attemptCount} recorded</strong></div>{(execution.errorCode || failures.length > 0) && <div className="movie-production-failure-detail"><span>Escalation</span><strong>Review this pass before continuing</strong>{execution.errorMessage && <small>Additional details are available in the production record.</small>}</div>}</div>;
 }
 
 function MovieTakeCard({ take, shot, busyKey, onAction }: { take: MovieTake; shot: MovieShot; busyKey: string; onAction: (key: string, work: () => Promise<unknown>) => Promise<void> }) {
