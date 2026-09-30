@@ -748,7 +748,12 @@ public sealed record MovieGenerationInput(
     Guid? SourceProductionVersionId = null,
     string? ChangedInputsJson = null,
     string? SelectiveActionType = null,
-    string? SelectiveReason = null);
+    string? SelectiveReason = null,
+    string? SourceResolution = null,
+    string? TargetResolution = null,
+    string? ProcessingPath = null,
+    string? QualityTier = null,
+    string? ContinuitySnapshotHash = null);
 
 public sealed record MovieProviderReadinessDto(bool Ready, IReadOnlyList<string> SupportedOperations);
 

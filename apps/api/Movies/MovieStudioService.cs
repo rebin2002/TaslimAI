@@ -56,7 +56,7 @@ public interface IMovieStudioService
     Task<MovieProviderReadinessDto> ProviderReadinessAsync();
 }
 
-public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessService access, MovieCollaborationAccess collaboration, IGenerationJobService jobs, IMovieVideoProvider provider, IMovieCharacterContinuityService continuity, MovieWorldContinuityProjector worldContinuity, IMovieGenerationCostEstimator movieCostEstimator, IGenerationCostGuardrailService costGuardrails) : IMovieStudioService
+public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessService access, MovieCollaborationAccess collaboration, IGenerationJobService jobs, IMovieVideoProvider provider, IMovieCharacterContinuityService continuity, MovieWorldContinuityProjector worldContinuity, IMovieGenerationCostEstimator movieCostEstimator, IGenerationCostGuardrailService costGuardrails, IMovieProductionGenerationOrchestrator productionOrchestrator) : IMovieStudioService
 {
     public async Task<MovieStudioProjectResponse?> CreateAsync(Guid userId, MovieStudioCreateRequest request, CancellationToken cancellationToken, string? idempotencyKey = null)
     {
@@ -812,40 +812,19 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
 
     public async Task<MovieProductionRenderResponse?> QueueProductionRenderAsync(Guid userId, Guid shotId, MovieProductionRenderRequest request, CancellationToken cancellationToken, string? idempotencyKey = null)
     {
-        var shot = await db.MovieShots
-            .Include(item => item.Scene).ThenInclude(item => item.MovieProject).ThenInclude(item => item.Guide)
-            .Include(item => item.ProductionVersions)
-            .FirstOrDefaultAsync(item => item.Id == shotId, cancellationToken);
-        if (shot is null || !await collaboration.HasPermissionAsync(userId, shot.Scene.MovieProjectId, MoviePermissions.Generate, cancellationToken)) return null;
-        var source = await db.MovieProductionVersions.FirstOrDefaultAsync(item => item.Id == request.SourceVersionId && item.MovieShotId == shotId, cancellationToken);
-        var workflowError = MovieProductionWorkflow.ValidateVersionCreation(MovieProductionStages.ProductionRender, source);
-        if (workflowError is not null) throw new MovieProductionValidationException("PRODUCTION_RENDER_INVALID", workflowError);
-
-        if (!string.IsNullOrWhiteSpace(idempotencyKey))
-        {
-            var existing = await db.MovieProductionVersions
-                .AsNoTracking()
-                .Include(item => item.AssetReferences)
-                .Include(item => item.GenerationJob).ThenInclude(job => job!.ProviderAttempts)
-                .Include(item => item.GenerationJob).ThenInclude(job => job!.Assets)
-                .FirstOrDefaultAsync(item => item.MovieShotId == shotId && item.Stage == MovieProductionStages.ProductionRender && item.GenerationJob != null && item.GenerationJob.CreatedByUserId == userId && item.GenerationJob.IdempotencyKey == idempotencyKey, cancellationToken);
-            var existingClip = existing?.GenerationJobId is Guid existingJobId ? await db.MovieClips.FirstOrDefaultAsync(item => item.GenerationJobId == existingJobId && item.MovieShotId == shotId, cancellationToken) : null;
-            if (existing?.GenerationJob is not null && existingClip is not null)
-                return new MovieProductionRenderResponse(ToDto(existing), GenerationJobContractMapper.ToDto(existing.GenerationJob), existingClip.Id, await GetAsync(userId, shot.Scene.MovieProjectId, cancellationToken) ?? throw new InvalidOperationException("Movie project disappeared."));
-        }
-
-        var queued = await QueueClipAsync(userId, shot.Scene.MovieProject, shot.Scene, shot, new MovieStudioGenerationRequest(request.Title), cancellationToken, idempotencyKey);
-        var version = await CreateProductionVersionAsync(userId, shotId, new MovieProductionVersionRequest
-        {
-            Stage = MovieProductionStages.ProductionRender,
-            SourceVersionId = source!.Id,
-            GenerationJobId = queued.Job.Id,
-            Label = request.Label,
-            CompositionJson = source.CompositionJson,
-            StageProvenanceJson = JsonSerializer.Serialize(new { sourceVersionId = source.Id, action = "production_render" }),
-        }, cancellationToken);
-        if (version is null) return null;
-        return new MovieProductionRenderResponse(version, queued.Job, queued.ClipId, queued.Project);
+        var queued = await productionOrchestrator.QueueApprovedAsync(userId, new MovieProductionGenerationRequest(
+            shotId,
+            request.SourceVersionId,
+            request.Label,
+            request.Title,
+            request.TargetResolution ?? MovieResolutionTiers.P1080,
+            request.QualityTier ?? DirectorQualityLevels.Standard,
+            request.ConfirmationAccepted,
+            idempotencyKey), cancellationToken);
+        if (queued is null) return null;
+        var project = await GetAsync(userId, queued.Clip.MovieProjectId, cancellationToken);
+        if (project is null) throw new InvalidOperationException("Movie project disappeared.");
+        return new MovieProductionRenderResponse(ToDto(queued.Version), GenerationJobContractMapper.ToDto(queued.Job), queued.Clip.Id, project);
     }
 
     public async Task<MovieV2TakeDto?> CreateTakeFromProductionAsync(Guid userId, Guid versionId, MovieProductionTakeRequest request, CancellationToken cancellationToken)
