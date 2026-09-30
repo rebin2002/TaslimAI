@@ -12,7 +12,7 @@ namespace Taslim.Api.Controllers;
 [ApiController]
 [Authorize]
 [Route("api/movie-studio")]
-public sealed class MovieStudioController(IMovieStudioService movies, IMovieGuideService guides, IMovieStoryService stories, IMovieStoryCastService storyCast, IMovieCharacterContinuityService continuity, IMovieWorldContinuityService worldContinuity, MovieAuthorizationService authorization) : ControllerBase
+public sealed class MovieStudioController(IMovieStudioService movies, IMovieGuideService guides, IMovieStoryService stories, IMovieStoryCastService storyCast, IMovieCharacterContinuityService continuity, IMovieWorldContinuityService worldContinuity, IMovieTimelineService timeline, MovieAuthorizationService authorization) : ControllerBase
 {
     [HttpGet("cinematography/presets")]
     public IActionResult CinematographyPresets() => Ok(CinematographyPresetCatalog.All);
@@ -40,6 +40,61 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieGuid
     {
         var result = await movies.GetAsync(GetUserId(), id, cancellationToken);
         return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result);
+    }
+
+    [HttpGet("projects/{id:guid}/timeline")]
+    public async Task<IActionResult> GetTimeline(Guid id, CancellationToken cancellationToken)
+    {
+        var result = await timeline.GetAsync(GetUserId(), id, cancellationToken);
+        return result is null ? ApiResults.Error(this, 404, "MOVIE_TIMELINE_NOT_FOUND", "Movie timeline not found.") : Ok(result);
+    }
+
+    [HttpPost("projects/{id:guid}/timeline/revisions")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> CreateTimelineRevision(Guid id, MovieTimelineRevisionRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await timeline.CreateRevisionAsync(GetUserId(), id, request, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result);
+        }
+        catch (MovieTimelineValidationException exception) { return ApiResults.Error(this, exception.Code == MovieTimelineErrors.Locked ? 409 : 400, exception.Code, exception.Message); }
+    }
+
+    [HttpPost("timeline/revisions/{revisionId:guid}/tracks")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> AddTimelineTrack(Guid revisionId, MovieTimelineTrackRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await timeline.AddTrackAsync(GetUserId(), revisionId, request, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_TIMELINE_REVISION_NOT_FOUND", "Movie timeline revision not found.") : Ok(result);
+        }
+        catch (MovieTimelineValidationException exception) { return ApiResults.Error(this, exception.Code == MovieTimelineErrors.Locked ? 409 : 400, exception.Code, exception.Message); }
+    }
+
+    [HttpPost("timeline/tracks/{trackId:guid}/items")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> AddTimelineItem(Guid trackId, MovieTimelineItemRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await timeline.AddItemAsync(GetUserId(), trackId, request, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_TIMELINE_TRACK_NOT_FOUND", "Movie timeline track not found.") : Ok(result);
+        }
+        catch (MovieTimelineValidationException exception) { return ApiResults.Error(this, exception.Code == MovieTimelineErrors.Locked ? 409 : 400, exception.Code, exception.Message); }
+    }
+
+    [HttpPost("timeline/revisions/{revisionId:guid}/lock")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> LockTimelineRevision(Guid revisionId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await timeline.LockRevisionAsync(GetUserId(), revisionId, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_TIMELINE_REVISION_NOT_FOUND", "Movie timeline revision not found.") : Ok(result);
+        }
+        catch (MovieTimelineValidationException exception) { return ApiResults.Error(this, exception.Code == MovieTimelineErrors.Locked ? 409 : 400, exception.Code, exception.Message); }
     }
 
     [HttpGet("projects/{id:guid}/capabilities")]
