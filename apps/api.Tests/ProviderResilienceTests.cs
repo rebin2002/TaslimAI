@@ -72,6 +72,105 @@ public sealed class ProviderResilienceTests
     }
 
     [Fact]
+    public async Task Network_exceptions_are_classified_as_transient_and_retried_with_the_shared_policy()
+    {
+        var store = new FakeResilienceStore();
+        var provider = new TestProvider("network", call => call < 2
+            ? throw new HttpRequestException("private network detail")
+            : Task.FromResult("ok"));
+
+        var result = await Create(store, retries: 1).ExecuteAsync(JobId, Token, "image.generate", "request-network", "input", [provider]);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(2, provider.Calls);
+        Assert.Equal(ProviderAttemptResultCategory.TransientFailure, store.Attempts[0].Category);
+        Assert.Equal("PROVIDER_NETWORK_FAILURE", store.Attempts[0].ErrorCode);
+    }
+
+    [Fact]
+    public async Task Validation_failure_is_not_fallback_eligible()
+    {
+        var store = new FakeResilienceStore();
+        var primary = new TestProvider("primary", _ => throw new ProviderResilienceException(ProviderAttemptResultCategory.ValidationRejected, "VALIDATION"));
+        var fallback = new TestProvider("fallback", _ => Task.FromResult("must-not-run"));
+
+        var result = await Create(store).ExecuteAsync(JobId, Token, "movie.generate", "request-validation", "input", [primary, fallback]);
+
+        Assert.Equal(ProviderAttemptResultCategory.ValidationRejected, result.Category);
+        Assert.Equal(1, primary.Calls);
+        Assert.Equal(0, fallback.Calls);
+    }
+
+    [Fact]
+    public async Task Routing_skips_providers_that_miss_quality_cost_or_idempotency_requirements()
+    {
+        var store = new FakeResilienceStore();
+        var primary = new TestProvider(
+            "primary",
+            _ => Task.FromResult("must-not-run"),
+            new ProviderRoutingProfile(QualityRank: 5, EstimatedCostUsd: 10m, SupportsIdempotency: false));
+        var fallback = new TestProvider(
+            "fallback",
+            _ => Task.FromResult("safe-result"),
+            new ProviderRoutingProfile(QualityRank: 2, EstimatedCostUsd: 1m, SupportsIdempotency: true));
+
+        var result = await Create(store).ExecuteAsync(
+            JobId,
+            Token,
+            new ProviderRouteRequirements("movie.generate", MinimumQualityRank: 1, MaxEstimatedCostUsd: 2m),
+            "request-route",
+            "input",
+            [primary, fallback]);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal("fallback", result.ProviderKey);
+        Assert.Equal(0, primary.Calls);
+        Assert.Equal(1, fallback.Calls);
+        Assert.False(store.Attempts.Single(item => item.ProviderKey == "fallback").IsFallback);
+    }
+
+    [Fact]
+    public async Task Cost_limit_rejection_does_not_call_an_expensive_provider()
+    {
+        var store = new FakeResilienceStore();
+        var provider = new TestProvider(
+            "expensive",
+            _ => Task.FromResult("must-not-run"),
+            new ProviderRoutingProfile(QualityRank: 2, EstimatedCostUsd: 6m));
+
+        var result = await Create(store).ExecuteAsync(
+            JobId,
+            Token,
+            new ProviderRouteRequirements("image.generate", MaxEstimatedCostUsd: 2m),
+            "request-cost",
+            "input",
+            [provider]);
+
+        Assert.Equal(ProviderAttemptResultCategory.CostGuardRejected, result.Category);
+        Assert.Equal(0, provider.Calls);
+        Assert.Equal("COST_LIMIT_EXCEEDED", result.ErrorCode);
+    }
+
+    [Fact]
+    public async Task Provider_reported_cost_is_checked_before_accepting_the_result()
+    {
+        var store = new FakeResilienceStore();
+        var provider = new TestProvider("reported-cost", _ => Task.FromResult("must-not-accept"), reportedCostUsd: 6m);
+
+        var result = await Create(store).ExecuteAsync(
+            JobId,
+            Token,
+            new ProviderRouteRequirements("image.generate", MaxEstimatedCostUsd: 2m),
+            "request-reported-cost",
+            "input",
+            [provider]);
+
+        Assert.Equal(ProviderAttemptResultCategory.CostGuardRejected, result.Category);
+        Assert.Equal(1, provider.Calls);
+        Assert.Equal(ProviderAttemptResultCategory.CostGuardRejected, Assert.Single(store.Attempts).Category);
+    }
+
+    [Fact]
     public async Task Circuit_opens_after_threshold_and_recovers_with_a_single_probe()
     {
         var store = new FakeResilienceStore { FailureThreshold = 2 };
@@ -84,6 +183,7 @@ public sealed class ProviderResilienceTests
         Assert.Equal(ProviderAttemptResultCategory.TransientFailure, second.Category);
         Assert.Equal(ProviderAttemptResultCategory.CircuitOpen, third.Category);
         Assert.Equal(2, provider.Calls);
+        Assert.Contains(store.Attempts, item => item.Category == ProviderAttemptResultCategory.CircuitOpen);
 
         store.AdvanceCircuitWindow();
         var recovering = new TestProvider("primary", _ => Task.FromResult<string>("recovered"));
@@ -177,15 +277,18 @@ public sealed class ProviderResilienceTests
             ProviderTimeoutSeconds = 1,
         }), store.Time, NullLogger<ProviderResilienceOrchestrator>.Instance);
 
-    private sealed class TestProvider(string key, Func<int, Task<string>> behavior) : IResilientProvider<string, string>
+    private sealed class TestProvider(string key, Func<int, Task<string>> behavior, ProviderRoutingProfile? routingProfile = null, decimal? reportedCostUsd = null) : IResilientProvider<string, string>, IProviderRoutingProfile<string>
     {
         public string Key { get; } = key;
         public int Calls { get; private set; }
+        private ProviderRoutingProfile RoutingProfile { get; } = routingProfile ?? ProviderRoutingProfile.Default;
+        private decimal? ReportedCostUsd { get; } = reportedCostUsd;
         public bool CanHandle(string capability, string input) => true;
+        public ProviderRoutingProfile GetRoutingProfile(string capability, string input) => RoutingProfile;
         public async Task<ProviderExecutionSuccess<string>> ExecuteAsync(ProviderExecutionContext context, string input, CancellationToken cancellationToken)
         {
             Calls++;
-            return new ProviderExecutionSuccess<string>(await behavior(Calls));
+            return new ProviderExecutionSuccess<string>(await behavior(Calls), ReportedCostUsd);
         }
     }
 
@@ -200,7 +303,7 @@ public sealed class ProviderResilienceTests
     {
         private readonly Dictionary<string, (ProviderCircuitState State, int Failures, DateTimeOffset OpenUntil)> circuits = new();
         private readonly Dictionary<string, ProviderFinalizationClaimResult> finalizations = new();
-        public List<(string ProviderKey, bool IsRetry, bool IsFallback, ProviderAttemptResultCategory Category)> Attempts { get; } = [];
+        public List<(string ProviderKey, bool IsRetry, bool IsFallback, ProviderAttemptResultCategory Category, string? ErrorCode)> Attempts { get; } = [];
         public ManualTimeProvider Time { get; } = new();
         public bool StaleWorker { get; set; }
         public bool CancellationRequested { get; set; }
@@ -231,7 +334,7 @@ public sealed class ProviderResilienceTests
         }
         public Task CompleteAttemptAsync(ProviderAttemptRecord attempt, ProviderAttemptResultCategory result, string? errorCode, long latencyMs, decimal? estimatedCostUsd, DateTime completedAt, CancellationToken cancellationToken = default)
         {
-            Attempts.Add((attempt.ProviderKey, attempt.IsRetry, attempt.IsFallback, result));
+            Attempts.Add((attempt.ProviderKey, attempt.IsRetry, attempt.IsFallback, result, errorCode));
             return Task.CompletedTask;
         }
         public Task<ProviderCircuitAdmission> TryAcquireCircuitAsync(string providerKey, string capability, DateTime now, TimeSpan probeLease, CancellationToken cancellationToken = default)

@@ -6,6 +6,7 @@ using Microsoft.Extensions.Options;
 using Taslim.Api.Ai;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
+using Taslim.Api.Files;
 
 namespace Taslim.Api.Movies;
 
@@ -16,7 +17,8 @@ namespace Taslim.Api.Movies;
 public sealed class RunwayMovieVideoProvider(
     HttpClient httpClient,
     IOptions<MovieVideoOptions> options,
-    ILogger<RunwayMovieVideoProvider> logger) : IMovieVideoProvider
+    ILogger<RunwayMovieVideoProvider> logger,
+    IProviderUrlPolicy urlPolicy) : IMovieVideoProvider
 {
     private const string RunwayVersion = "2024-11-06";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
@@ -39,6 +41,8 @@ public sealed class RunwayMovieVideoProvider(
     public async Task<MovieVideoSubmission> SubmitAsync(MovieVideoGenerationRequest request, CancellationToken cancellationToken)
     {
         EnsureAvailable();
+        if (Uri.TryCreate(request.SourceImageUri, UriKind.Absolute, out var sourceUri) && sourceUri.Scheme == Uri.UriSchemeHttps)
+            await urlPolicy.EnsureSafeAsync(sourceUri, cancellationToken);
         var payload = BuildPayload(request, out var endpoint);
         var response = await SendJsonWithRetryAsync(HttpMethod.Post, endpoint, payload, cancellationToken);
         var task = Deserialize<RunwayTaskResponse>(response) ?? throw Failure();
@@ -78,6 +82,8 @@ public sealed class RunwayMovieVideoProvider(
             || !Uri.TryCreate(metadata.OutputUrl, UriKind.Absolute, out var outputUri)
             || outputUri.Scheme != Uri.UriSchemeHttps)
             throw new MovieVideoProviderOutputException();
+        try { await urlPolicy.EnsureSafeAsync(outputUri, cancellationToken); }
+        catch (InvalidDataException) { throw new MovieVideoProviderOutputException(); }
 
         var contentType = NormalizeVideoContentType(metadata.ContentType, outputUri);
         var fileName = NormalizeFileName(metadata.FileName, outputUri);

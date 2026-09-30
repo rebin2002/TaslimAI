@@ -47,7 +47,7 @@ public sealed class AdminUsageService(TaslimDbContext db) : IAdminUsageService
             CancelledCount = group.Count(item => item.Status == UsageTransactionStatus.Cancelled),
             RefundedCount = group.Count(item => item.Status == UsageTransactionStatus.Refunded),
             TotalProviderCostUsd = group.Sum(item => (double)item.ProviderCostUsd),
-            TotalCustomerChargesUsd = group.Sum(item => (double)item.ChargedAmount),
+            TotalCustomerChargesUsd = group.Sum(item => (double)(item.ChargedAmount - item.ReversedAmount)),
             PendingEstimatedProviderCostUsd = group.Sum(item => item.Status == UsageTransactionStatus.Pending ? (double)(item.EstimatedProviderCostUsd ?? 0m) : 0d),
             AnomalousCount = group.Count(item => item.IsAnomalous),
         }).SingleOrDefaultAsync(cancellationToken);
@@ -71,22 +71,22 @@ public sealed class AdminUsageService(TaslimDbContext db) : IAdminUsageService
     {
         var featureRows = await query.GroupBy(item => item.Feature).Select(group => new
         {
-            Feature = group.Key,
+Feature = group.Key,
             TransactionCount = group.Count(),
             SuccessfulCount = group.Count(item => item.Status == UsageTransactionStatus.Completed),
             FailedCount = group.Count(item => item.Status == UsageTransactionStatus.Failed),
             CancelledCount = group.Count(item => item.Status == UsageTransactionStatus.Cancelled),
             ProviderCostUsd = group.Sum(item => (double)item.ProviderCostUsd),
-            CustomerChargesUsd = group.Sum(item => (double)item.ChargedAmount),
+            CustomerChargesUsd = group.Sum(item => (double)(item.ChargedAmount - item.ReversedAmount)),
         }).ToListAsync(cancellationToken);
         var byFeature = featureRows.Select(item => new AdminUsageFeatureBreakdownDto(item.Feature.ToString(), item.TransactionCount, item.SuccessfulCount, item.FailedCount, item.CancelledCount, (decimal)item.ProviderCostUsd, (decimal)item.CustomerChargesUsd)).OrderByDescending(item => item.ProviderCostUsd).ToArray();
 
         var dayRows = await query.GroupBy(item => item.CreatedAt.Date).Select(group => new
         {
-            DayUtc = group.Key,
+DayUtc = group.Key,
             TransactionCount = group.Count(),
             ProviderCostUsd = group.Sum(item => (double)item.ProviderCostUsd),
-            CustomerChargesUsd = group.Sum(item => (double)item.ChargedAmount),
+            CustomerChargesUsd = group.Sum(item => (double)(item.ChargedAmount - item.ReversedAmount)),
         }).ToListAsync(cancellationToken);
         var byDay = dayRows.Select(item => new AdminUsageDailyBreakdownDto(item.DayUtc, item.TransactionCount, (decimal)item.ProviderCostUsd, (decimal)item.CustomerChargesUsd)).OrderBy(item => item.DayUtc).ToArray();
 
@@ -99,7 +99,7 @@ public sealed class AdminUsageService(TaslimDbContext db) : IAdminUsageService
                                        WorkspaceName = grouped.Key.Name,
                                        TransactionCount = grouped.Count(),
                                        ProviderCostUsd = grouped.Sum(item => (double)item.ProviderCostUsd),
-                                       CustomerChargesUsd = grouped.Sum(item => (double)item.ChargedAmount),
+                                       CustomerChargesUsd = grouped.Sum(item => (double)(item.ChargedAmount - item.ReversedAmount)),
                                    }).ToListAsync(cancellationToken);
         var byWorkspace = workspaceRows.Select(item => new AdminUsageWorkspaceBreakdownDto(item.WorkspaceId, item.WorkspaceName, item.TransactionCount, (decimal)item.ProviderCostUsd, (decimal)item.CustomerChargesUsd)).OrderByDescending(item => item.ProviderCostUsd).Take(20).ToArray();
 
@@ -113,7 +113,7 @@ public sealed class AdminUsageService(TaslimDbContext db) : IAdminUsageService
                                   grouped.Key.DisplayName,
                                   TransactionCount = grouped.Count(),
                                   ProviderCostUsd = grouped.Sum(item => (double)item.ProviderCostUsd),
-                                  CustomerChargesUsd = grouped.Sum(item => (double)item.ChargedAmount),
+                                  CustomerChargesUsd = grouped.Sum(item => (double)(item.ChargedAmount - item.ReversedAmount)),
                               }).ToListAsync(cancellationToken);
         var byUser = userRows.Select(item => new AdminUsageUserBreakdownDto(item.UserId, item.Email, item.DisplayName, item.TransactionCount, (decimal)item.ProviderCostUsd, (decimal)item.CustomerChargesUsd)).OrderByDescending(item => item.ProviderCostUsd).Take(20).ToArray();
 
@@ -125,7 +125,7 @@ public sealed class AdminUsageService(TaslimDbContext db) : IAdminUsageService
             FailedCount = group.Count(item => item.Status == UsageTransactionStatus.Failed),
             CancelledCount = group.Count(item => item.Status == UsageTransactionStatus.Cancelled),
             ProviderCostUsd = group.Sum(item => (double)item.ProviderCostUsd),
-            CustomerChargesUsd = group.Sum(item => (double)item.ChargedAmount),
+            CustomerChargesUsd = group.Sum(item => (double)(item.ChargedAmount - item.ReversedAmount)),
         }).ToListAsync(cancellationToken);
         var byStatus = statusRows.Select(item => new AdminUsageStatusBreakdownDto(item.Status.ToString(), item.TransactionCount, item.SuccessfulCount, item.FailedCount, item.CancelledCount, (decimal)item.ProviderCostUsd, (decimal)item.CustomerChargesUsd)).OrderBy(item => item.Status).ToArray();
 
@@ -173,7 +173,7 @@ public sealed class AdminUsageService(TaslimDbContext db) : IAdminUsageService
         transaction.EstimatedProviderCostUsd,
         transaction.ProviderCostUsd,
         transaction.ProviderCostKnown,
-        transaction.ChargedAmount,
+        transaction.ChargedAmount - transaction.ReversedAmount,
         transaction.Currency,
         transaction.CostBasis,
         transaction.PricingVersion,

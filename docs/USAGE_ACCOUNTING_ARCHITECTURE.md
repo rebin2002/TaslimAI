@@ -6,9 +6,11 @@ Batch 3.9 extends Taslim's existing `UsageTransaction` ledger into a provider-co
 
 ## Ledger model
 
-Each transaction is linked to a workspace and user and may be linked to a project, conversation, or `GenerationJob`. The ledger records the Taslim feature, provider and model identifiers, measured token quantities, image input/output quantities, provider latency, provider cost, customer charge, currency, cost basis, failure code, refund time, and a historical pricing snapshot. Provider and model fields are internal operational data; they are not included in normal workspace usage responses.
+Each transaction is linked to a workspace and user and may be linked to a project, conversation, or `GenerationJob`. The ledger records the Taslim feature, provider and model identifiers, measured token quantities, image input/output quantities, provider latency, provider cost, customer charge, currency, cost basis, failure code, refund time, and a historical pricing snapshot. `ReservedAt` marks the reservation created from the server-side estimate, `ActualRecordedAt` marks when provider usage/cost was recorded, and `BillableAt`/`IsBillable` mark a successful, publishable completion. Provider and model fields are internal operational data; they are not included in normal workspace usage responses.
 
-The transaction state machine is `Pending → Completed`, `Pending → Failed`, `Pending → Cancelled`, and `Completed → Refunded`. Idempotent requests reuse the existing workspace/request/feature uniqueness key. Completed and refunded transactions are terminal for normal completion/failure updates. A cancellation always records zero customer charge, and a refund records the refund timestamp.
+The transaction state machine is `Pending → Completed`, `Pending → Failed`, `Pending → Cancelled`, and `Completed → Refunded`. Idempotent requests reuse the existing workspace/request/feature uniqueness key. Generation transactions never reopen after a terminal state. A cancellation or failure always records zero customer charge and clears billable eligibility; provider cost may still be retained as an internal actual-cost fact. Generation workers must publish at least one server-side asset before completion, so a provider response with no asset cannot become billable.
+
+Refunds and billing corrections are append-only `UsageTransactionAdjustment` rows. Each adjustment has a workspace-scoped idempotency key, type (`Refund` or `Reversal`), positive reversed amount, bounded reason, and creation time. The original `ChargedAmount` is never erased; `ReversedAmount` and the computed `NetChargedAmount` provide the settlement view. Repeating the same refund key returns the original adjustment, while a different adjustment cannot over-reverse the original charge.
 
 ## Pricing snapshots and cost formulas
 
@@ -22,7 +24,7 @@ The Images API response exposes ordinary `usage.input_tokens` and `usage.output_
 
 `UsageCostControl` provides a preflight extension point for single-operation, daily-workspace, and monthly-workspace ceilings. It also provides anomaly flags for a single expensive transaction, a daily workspace threshold, or repeated failures in a configured window. Guardrails are explicitly disabled in the committed development and production configuration, so Batch 3.9 does not unexpectedly block existing production workflows. An operator can enable them through `UsageControls` after selecting appropriate limits.
 
-Preflight estimates are stored on the pending ledger transaction. A completed operation replaces the estimate with measured provider cost and retains the pricing snapshot. Safety failures return stable, generic error codes and do not expose provider credentials, prompts, or raw exception details.
+Preflight estimates are stored on the pending ledger transaction. A completed operation records measured provider cost and retains the pricing snapshot. Public movie-generation request fields cannot supply provider-cost estimates; movie estimates are computed from server-side provider configuration and normalized duration. Safety failures return stable, generic error codes and do not expose provider credentials, prompts, or raw exception details.
 
 ## Authorization and privacy
 
@@ -46,7 +48,7 @@ All report queries accept bounded UTC date ranges and optional feature, status, 
 
 ## Migration and operations
 
-`AddUsageAccountingFoundation` and `AddUsageCostBasis` are additive. They preserve the existing `DataProtectionKeys`, Generation Jobs, Assets, Stored Files, Identity, and usage tables and add nullable provenance/metadata columns, bounded internal JSON fields, indexes for report filters, the optional Generation Job foreign key, and the nullable cost-basis field. The migrations must be applied through the existing production advisory-lock migration runner. No Redis, queue broker, or new billing provider is required.
+`AddUsageAccountingFoundation`, `AddUsageCostBasis`, and `AddGenerationUsageAdjustments` are additive. The latest migration adds reservation/actual/billable timestamps, billable eligibility, reversal totals, and the append-only `UsageTransactionAdjustments` table with workspace/idempotency uniqueness and positive-amount protection. They preserve the existing `DataProtectionKeys`, Generation Jobs, Assets, Stored Files, Identity, and usage tables. The migrations must be applied through the existing production advisory-lock migration runner. No Redis, queue broker, or new billing provider is required.
 
 ## Future extensions
 

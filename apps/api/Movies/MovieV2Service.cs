@@ -35,7 +35,7 @@ public sealed class MovieV2Service(TaslimDbContext db, WorkspaceAccessService ac
     {
         var movie = await db.MovieProjects.AsNoTracking()
             .FirstOrDefaultAsync(item => item.Id == movieProjectId, cancellationToken);
-        if (movie is null || !await access.IsMemberAsync(userId, movie.WorkspaceId, cancellationToken)) return null;
+        if (movie is null || !await HasPermissionAsync(userId, movieProjectId, MoviePermissions.View, movie.WorkspaceId, cancellationToken)) return null;
 
         var story = await db.MovieStories.AsNoTracking()
             .Where(item => item.MovieProjectId == movieProjectId)
@@ -121,7 +121,7 @@ public sealed class MovieV2Service(TaslimDbContext db, WorkspaceAccessService ac
 
     public async Task<MovieV2ActDto?> AddActAsync(Guid userId, Guid movieProjectId, MovieV2ActRequest request, CancellationToken cancellationToken)
     {
-        var movie = await AuthorizedMovieAsync(userId, movieProjectId, cancellationToken);
+        var movie = await AuthorizedMovieAsync(userId, movieProjectId, cancellationToken, MoviePermissions.Edit);
         ValidateText(request.Title, 160, "Act title");
         if (movie is null) return null;
         var now = DateTime.UtcNow;
@@ -134,7 +134,7 @@ public sealed class MovieV2Service(TaslimDbContext db, WorkspaceAccessService ac
     public async Task<MovieV2SequenceDto?> AddSequenceAsync(Guid userId, Guid actId, MovieV2SequenceRequest request, CancellationToken cancellationToken)
     {
         var act = await db.MovieActs.Include(item => item.MovieProject).FirstOrDefaultAsync(item => item.Id == actId, cancellationToken);
-        if (act is null || !await access.IsMemberAsync(userId, act.MovieProject.WorkspaceId, cancellationToken)) return null;
+        if (act is null || !await HasPermissionAsync(userId, act.MovieProjectId, MoviePermissions.Edit, act.MovieProject.WorkspaceId, cancellationToken)) return null;
         ValidateText(request.Title, 160, "Sequence title");
         var now = DateTime.UtcNow;
         var sequence = new MovieSequence { Id = Guid.NewGuid(), MovieActId = actId, Sequence = await NextSequenceAsync(db.MovieSequences.Where(item => item.MovieActId == actId)), Title = request.Title.Trim(), Summary = Clean(request.Summary), CreatedAt = now, UpdatedAt = now };
@@ -146,7 +146,7 @@ public sealed class MovieV2Service(TaslimDbContext db, WorkspaceAccessService ac
     public async Task<MovieV2SceneDto?> AddSceneAsync(Guid userId, Guid sequenceId, MovieV2SceneRequest request, CancellationToken cancellationToken)
     {
         var sequence = await db.MovieSequences.Include(item => item.MovieAct).ThenInclude(item => item.MovieProject).FirstOrDefaultAsync(item => item.Id == sequenceId, cancellationToken);
-        if (sequence is null || !await access.IsMemberAsync(userId, sequence.MovieAct.MovieProject.WorkspaceId, cancellationToken)) return null;
+        if (sequence is null || !await HasPermissionAsync(userId, sequence.MovieAct.MovieProjectId, MoviePermissions.Edit, sequence.MovieAct.MovieProject.WorkspaceId, cancellationToken)) return null;
         ValidateText(request.Title, 160, "Scene title");
         ValidateText(request.Summary, 8_000, "Scene summary");
         var now = DateTime.UtcNow;
@@ -162,15 +162,39 @@ public sealed class MovieV2Service(TaslimDbContext db, WorkspaceAccessService ac
         if (shot is null || !await HasPermissionAsync(userId, shot.Scene.MovieProjectId, MoviePermissions.Edit, shot.Scene.MovieProject.WorkspaceId, cancellationToken)) return null;
         ValidateQuality(request.QualityLevel);
         if (request.Notes?.Length > 4_000) throw new MovieV2ValidationException("Take notes must be 4,000 characters or fewer.");
-        if (request.MovieClipId.HasValue && !await db.MovieClips.AnyAsync(item => item.Id == request.MovieClipId && item.MovieProjectId == shot.Scene.MovieProjectId && item.MovieShotId == shotId, cancellationToken))
+        var clip = request.MovieClipId.HasValue
+            ? await db.MovieClips.AsNoTracking().FirstOrDefaultAsync(item => item.Id == request.MovieClipId && item.MovieProjectId == shot.Scene.MovieProjectId && item.MovieShotId == shotId, cancellationToken)
+            : null;
+        if (request.MovieClipId.HasValue && clip is null)
             throw new MovieV2ValidationException("The selected clip does not belong to this shot.");
-        if (request.GenerationJobId.HasValue && !await db.GenerationJobs.AnyAsync(item => item.Id == request.GenerationJobId && item.WorkspaceId == shot.Scene.MovieProject.WorkspaceId, cancellationToken))
-            throw new MovieV2ValidationException("The selected generation job does not belong to this workspace.");
-        if (request.AssetId.HasValue && !await db.Assets.AnyAsync(item => item.Id == request.AssetId && item.WorkspaceId == shot.Scene.MovieProject.WorkspaceId, cancellationToken))
-            throw new MovieV2ValidationException("The selected asset does not belong to this workspace.");
+        var selectedJobId = request.GenerationJobId ?? clip?.GenerationJobId;
+        var job = selectedJobId.HasValue
+            ? await db.GenerationJobs.AsNoTracking().FirstOrDefaultAsync(item => item.Id == selectedJobId && item.WorkspaceId == shot.Scene.MovieProject.WorkspaceId, cancellationToken)
+            : null;
+        if (selectedJobId.HasValue && (job is null || !GenerationJobTypes.MovieTypes.Contains(job.JobType)))
+            throw new MovieV2ValidationException("The selected generation job is not a Movie job in this workspace.");
+        if (clip is not null && clip.GenerationJobId != job?.Id)
+            throw new MovieV2ValidationException("The selected clip and generation job do not describe the same render.");
+        if (job is not null && shot.Scene.MovieProject.ProjectId.HasValue && job.ProjectId != shot.Scene.MovieProject.ProjectId)
+            throw new MovieV2ValidationException("The selected generation job does not belong to this movie project.");
+        if (request.AssetId.HasValue)
+        {
+            var asset = await db.Assets.AsNoTracking().FirstOrDefaultAsync(item => item.Id == request.AssetId && item.WorkspaceId == shot.Scene.MovieProject.WorkspaceId, cancellationToken);
+            if (asset is null) throw new MovieV2ValidationException("The selected asset does not belong to this workspace.");
+            if (clip is not null && clip.AssetId != asset.Id)
+                throw new MovieV2ValidationException("The selected asset is not the output of the selected clip.");
+            if (job is not null && asset.SourceGenerationJobId != job.Id)
+                throw new MovieV2ValidationException("The selected asset is not the output of the selected generation job.");
+        }
+        var linkedJobStatus = job?.Status;
+        var takeStatus = request.AssetId.HasValue && linkedJobStatus == GenerationJobStatus.Succeeded
+            ? MovieTakeStatuses.Succeeded
+            : linkedJobStatus is GenerationJobStatus.Pending or GenerationJobStatus.Queued or GenerationJobStatus.Running
+                ? MovieTakeStatuses.Queued
+                : MovieTakeStatuses.Planned;
         var version = (await db.MovieTakes.Where(item => item.MovieShotId == shotId).MaxAsync(item => (int?)item.VersionNumber, cancellationToken) ?? 0) + 1;
         var now = DateTime.UtcNow;
-        var take = new MovieTake { Id = Guid.NewGuid(), MovieShotId = shotId, VersionNumber = version, Label = string.IsNullOrWhiteSpace(request.Label) ? $"Take {version}" : request.Label.Trim(), QualityLevel = request.QualityLevel.Trim(), AutoDirectorEnabled = request.AutoDirectorEnabled, MovieClipId = request.MovieClipId, GenerationJobId = request.GenerationJobId, AssetId = request.AssetId, Notes = Clean(request.Notes), CreatedAt = now, UpdatedAt = now };
+        var take = new MovieTake { Id = Guid.NewGuid(), MovieShotId = shotId, VersionNumber = version, Label = string.IsNullOrWhiteSpace(request.Label) ? $"Take {version}" : request.Label.Trim(), Status = takeStatus, QualityLevel = request.QualityLevel.Trim(), AutoDirectorEnabled = request.AutoDirectorEnabled, MovieClipId = clip?.Id, GenerationJobId = job?.Id, AssetId = request.AssetId, StatusChangedAt = now, StatusChangedByUserId = userId, Notes = Clean(request.Notes), CreatedAt = now, UpdatedAt = now };
         db.MovieTakes.Add(take);
         await db.SaveChangesAsync(cancellationToken);
         return ToDto(take);
@@ -178,7 +202,7 @@ public sealed class MovieV2Service(TaslimDbContext db, WorkspaceAccessService ac
 
     public async Task<MovieV2HierarchyDto?> UpdateSettingsAsync(Guid userId, Guid movieProjectId, MovieV2SettingsRequest request, CancellationToken cancellationToken)
     {
-        var movie = await AuthorizedMovieAsync(userId, movieProjectId, cancellationToken);
+        var movie = await AuthorizedMovieAsync(userId, movieProjectId, cancellationToken, MoviePermissions.Edit);
         if (movie is null) return null;
         if (request.ProductionStatus is not null) ValidateStatus(request.ProductionStatus, MovieProductionStatuses.Supported, "production status");
         if (request.QualityLevel is not null) ValidateQuality(request.QualityLevel);
@@ -208,31 +232,31 @@ public sealed class MovieV2Service(TaslimDbContext db, WorkspaceAccessService ac
         {
             case "act":
                 var act = await db.MovieActs.Include(item => item.MovieProject).FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
-                await EnsureAuthorizedAsync(act?.MovieProject.WorkspaceId, userId, cancellationToken);
+                await EnsureAuthorizedAsync(act?.MovieProject.WorkspaceId, userId, cancellationToken, act?.MovieProjectId, MoviePermissions.Edit);
                 ValidateStatus(status, MovieHierarchyStatuses.Supported, "act status");
                 act!.Status = status.Trim(); act.StatusChangedAt = now; act.StatusChangedByUserId = userId; act.ArchivedAt = IsArchived(status) ? now : null; act.ArchivedByUserId = IsArchived(status) ? userId : null; act.UpdatedAt = now;
                 break;
             case "sequence":
                 var sequence = await db.MovieSequences.Include(item => item.MovieAct).ThenInclude(item => item.MovieProject).FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
-                await EnsureAuthorizedAsync(sequence?.MovieAct.MovieProject.WorkspaceId, userId, cancellationToken);
+                await EnsureAuthorizedAsync(sequence?.MovieAct.MovieProject.WorkspaceId, userId, cancellationToken, sequence?.MovieAct.MovieProjectId, MoviePermissions.Edit);
                 ValidateStatus(status, MovieHierarchyStatuses.Supported, "sequence status");
                 sequence!.Status = status.Trim(); sequence.StatusChangedAt = now; sequence.StatusChangedByUserId = userId; sequence.ArchivedAt = IsArchived(status) ? now : null; sequence.ArchivedByUserId = IsArchived(status) ? userId : null; sequence.UpdatedAt = now;
                 break;
             case "scene":
                 var scene = await db.MovieScenes.Include(item => item.MovieProject).FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
-                await EnsureAuthorizedAsync(scene?.MovieProject.WorkspaceId, userId, cancellationToken);
+                await EnsureAuthorizedAsync(scene?.MovieProject.WorkspaceId, userId, cancellationToken, scene?.MovieProjectId, MoviePermissions.Edit);
                 ValidateStatus(status, MovieHierarchyStatuses.Supported, "scene status");
                 scene!.Status = status.Trim(); scene.ArchivedAt = IsArchived(status) ? now : null; scene.UpdatedAt = now;
                 break;
             case "shot":
                 var shot = await db.MovieShots.Include(item => item.Scene).ThenInclude(item => item.MovieProject).FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
-                await EnsureAuthorizedAsync(shot?.Scene.MovieProject.WorkspaceId, userId, cancellationToken);
+                await EnsureAuthorizedAsync(shot?.Scene.MovieProject.WorkspaceId, userId, cancellationToken, shot?.Scene.MovieProjectId, MoviePermissions.Edit);
                 ValidateStatus(status, MovieShotStatuses.Supported, "shot status");
                 shot!.Status = status.Trim(); shot.ArchivedAt = IsArchived(status) ? now : null; shot.UpdatedAt = now;
                 break;
             case "take":
                 var take = await db.MovieTakes.Include(item => item.MovieShot).ThenInclude(item => item.Scene).ThenInclude(item => item.MovieProject).FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
-                await EnsureAuthorizedAsync(take?.MovieShot.Scene.MovieProject.WorkspaceId, userId, cancellationToken);
+                await EnsureAuthorizedAsync(take?.MovieShot.Scene.MovieProject.WorkspaceId, userId, cancellationToken, take?.MovieShot.Scene.MovieProjectId, MoviePermissions.Edit);
                 ValidateStatus(status, MovieTakeStatuses.Supported, "take status");
                 take!.Status = status.Trim(); take.StatusChangedAt = now; take.StatusChangedByUserId = userId; take.ArchivedAt = IsArchived(status) ? now : null; take.ArchivedByUserId = IsArchived(status) ? userId : null; take.UpdatedAt = now;
                 break;
@@ -245,16 +269,32 @@ public sealed class MovieV2Service(TaslimDbContext db, WorkspaceAccessService ac
     {
         var take = await db.MovieTakes.Include(item => item.MovieShot).ThenInclude(item => item.Scene).ThenInclude(item => item.MovieProject).FirstOrDefaultAsync(item => item.Id == takeId, cancellationToken);
         await EnsureAuthorizedAsync(take?.MovieShot.Scene.MovieProject.WorkspaceId, userId, cancellationToken, take?.MovieShot.Scene.MovieProjectId, finalize ? MoviePermissions.FinalApproval : MoviePermissions.Approve);
-        if (take!.Status is MovieTakeStatuses.Archived or MovieTakeStatuses.Rejected) throw new MovieV2ValidationException("Only an active, non-rejected take can be selected.");
+        if (take!.Status is MovieTakeStatuses.Archived or MovieTakeStatuses.Superseded or MovieTakeStatuses.LegacyArchived or MovieTakeStatuses.Failed or MovieTakeStatuses.Cancelled or MovieTakeStatuses.Rejected)
+            throw new MovieV2ValidationException("Only an active, successful take can be selected.");
         var now = DateTime.UtcNow;
         var shot = take.MovieShot;
         var previous = await db.MovieTakes.Where(item => item.MovieShotId == shot.Id && item.Id != takeId && (finalize ? item.FinalizedAt != null : item.SelectedAt != null)).ToListAsync(cancellationToken);
-        foreach (var item in previous) { if (finalize) item.FinalizedAt = null; else item.SelectedAt = null; item.UpdatedAt = now; }
+        foreach (var item in previous)
+        {
+            if (finalize) item.FinalizedAt = null; else item.SelectedAt = null;
+            item.Status = MovieTakeStatuses.Superseded;
+            item.StatusChangedAt = now;
+            item.StatusChangedByUserId = userId;
+            item.UpdatedAt = now;
+        }
         if (finalize)
         {
-            if (take.Status != MovieTakeStatuses.Approved) throw new MovieV2ValidationException("A take must be approved before it can be finalized.");
+            if (take.Status is not (MovieTakeStatuses.Approved or MovieTakeStatuses.Selected))
+                throw new MovieV2ValidationException("A take must be approved before it can be finalized.");
             var previousSelected = await db.MovieTakes.Where(item => item.MovieShotId == shot.Id && item.Id != takeId && item.SelectedAt != null).ToListAsync(cancellationToken);
-            foreach (var item in previousSelected) { item.SelectedAt = null; item.UpdatedAt = now; }
+            foreach (var item in previousSelected)
+            {
+                item.SelectedAt = null;
+                item.Status = MovieTakeStatuses.Superseded;
+                item.StatusChangedAt = now;
+                item.StatusChangedByUserId = userId;
+                item.UpdatedAt = now;
+            }
             shot.SelectedTakeId = take.Id;
             shot.FinalTakeId = take.Id;
             take.SelectedAt = take.SelectedAt ?? now;
@@ -263,6 +303,9 @@ public sealed class MovieV2Service(TaslimDbContext db, WorkspaceAccessService ac
             take.FinalizedByUserId = userId;
         }
         else { shot.SelectedTakeId = take.Id; take.SelectedAt = now; take.SelectedByUserId = userId; }
+        take.Status = MovieTakeStatuses.Selected;
+        take.StatusChangedAt = now;
+        take.StatusChangedByUserId = userId;
         shot.UpdatedAt = now; take.UpdatedAt = now;
         await db.SaveChangesAsync(cancellationToken);
     }
@@ -289,25 +332,25 @@ public sealed class MovieV2Service(TaslimDbContext db, WorkspaceAccessService ac
         switch (entity.ToLowerInvariant())
         {
             case "act":
-                var act = await db.MovieActs.Include(item => item.MovieProject).FirstOrDefaultAsync(item => item.Id == id, cancellationToken); await EnsureAuthorizedAsync(act?.MovieProject.WorkspaceId, userId, cancellationToken); var acts = await db.MovieActs.Where(item => item.MovieProjectId == act!.MovieProjectId).OrderBy(item => item.Sequence).ToListAsync(cancellationToken); await MoveAsync(acts, act!, sequence, now, (item, position) => item.Sequence = position, (item, changedAt) => item.UpdatedAt = changedAt, cancellationToken); break;
+                var act = await db.MovieActs.Include(item => item.MovieProject).FirstOrDefaultAsync(item => item.Id == id, cancellationToken); await EnsureAuthorizedAsync(act?.MovieProject.WorkspaceId, userId, cancellationToken, act?.MovieProjectId, MoviePermissions.Edit); var acts = await db.MovieActs.Where(item => item.MovieProjectId == act!.MovieProjectId).OrderBy(item => item.Sequence).ToListAsync(cancellationToken); await MoveAsync(acts, act!, sequence, now, (item, position) => item.Sequence = position, (item, changedAt) => item.UpdatedAt = changedAt, cancellationToken); break;
             case "sequence":
-                var seq = await db.MovieSequences.Include(item => item.MovieAct).ThenInclude(item => item.MovieProject).FirstOrDefaultAsync(item => item.Id == id, cancellationToken); await EnsureAuthorizedAsync(seq?.MovieAct.MovieProject.WorkspaceId, userId, cancellationToken); var seqs = await db.MovieSequences.Where(item => item.MovieActId == seq!.MovieActId).OrderBy(item => item.Sequence).ToListAsync(cancellationToken); await MoveAsync(seqs, seq!, sequence, now, (item, position) => item.Sequence = position, (item, changedAt) => item.UpdatedAt = changedAt, cancellationToken); break;
+                var seq = await db.MovieSequences.Include(item => item.MovieAct).ThenInclude(item => item.MovieProject).FirstOrDefaultAsync(item => item.Id == id, cancellationToken); await EnsureAuthorizedAsync(seq?.MovieAct.MovieProject.WorkspaceId, userId, cancellationToken, seq?.MovieAct.MovieProjectId, MoviePermissions.Edit); var seqs = await db.MovieSequences.Where(item => item.MovieActId == seq!.MovieActId).OrderBy(item => item.Sequence).ToListAsync(cancellationToken); await MoveAsync(seqs, seq!, sequence, now, (item, position) => item.Sequence = position, (item, changedAt) => item.UpdatedAt = changedAt, cancellationToken); break;
             case "scene":
-                var scene = await db.MovieScenes.Include(item => item.MovieProject).FirstOrDefaultAsync(item => item.Id == id, cancellationToken); await EnsureAuthorizedAsync(scene?.MovieProject.WorkspaceId, userId, cancellationToken); var scenes = await db.MovieScenes.Where(item => item.MovieSequenceId == scene!.MovieSequenceId).OrderBy(item => item.Sequence).ToListAsync(cancellationToken); await MoveAsync(scenes, scene!, sequence, now, (item, position) => item.Sequence = position, (item, changedAt) => item.UpdatedAt = changedAt, cancellationToken); break;
+                var scene = await db.MovieScenes.Include(item => item.MovieProject).FirstOrDefaultAsync(item => item.Id == id, cancellationToken); await EnsureAuthorizedAsync(scene?.MovieProject.WorkspaceId, userId, cancellationToken, scene?.MovieProjectId, MoviePermissions.Edit); var scenes = await db.MovieScenes.Where(item => item.MovieSequenceId == scene!.MovieSequenceId).OrderBy(item => item.Sequence).ToListAsync(cancellationToken); await MoveAsync(scenes, scene!, sequence, now, (item, position) => item.Sequence = position, (item, changedAt) => item.UpdatedAt = changedAt, cancellationToken); break;
             case "shot":
-                var shot = await db.MovieShots.Include(item => item.Scene).ThenInclude(item => item.MovieProject).FirstOrDefaultAsync(item => item.Id == id, cancellationToken); await EnsureAuthorizedAsync(shot?.Scene.MovieProject.WorkspaceId, userId, cancellationToken); var shots = await db.MovieShots.Where(item => item.MovieSceneId == shot!.MovieSceneId).OrderBy(item => item.Sequence).ToListAsync(cancellationToken); await MoveAsync(shots, shot!, sequence, now, (item, position) => item.Sequence = position, (item, changedAt) => item.UpdatedAt = changedAt, cancellationToken); break;
+                var shot = await db.MovieShots.Include(item => item.Scene).ThenInclude(item => item.MovieProject).FirstOrDefaultAsync(item => item.Id == id, cancellationToken); await EnsureAuthorizedAsync(shot?.Scene.MovieProject.WorkspaceId, userId, cancellationToken, shot?.Scene.MovieProjectId, MoviePermissions.Edit); var shots = await db.MovieShots.Where(item => item.MovieSceneId == shot!.MovieSceneId).OrderBy(item => item.Sequence).ToListAsync(cancellationToken); await MoveAsync(shots, shot!, sequence, now, (item, position) => item.Sequence = position, (item, changedAt) => item.UpdatedAt = changedAt, cancellationToken); break;
             case "take":
-                var take = await db.MovieTakes.Include(item => item.MovieShot).ThenInclude(item => item.Scene).ThenInclude(item => item.MovieProject).FirstOrDefaultAsync(item => item.Id == id, cancellationToken); await EnsureAuthorizedAsync(take?.MovieShot.Scene.MovieProject.WorkspaceId, userId, cancellationToken); var takes = await db.MovieTakes.Where(item => item.MovieShotId == take!.MovieShotId).OrderBy(item => item.VersionNumber).ToListAsync(cancellationToken); await MoveAsync(takes, take!, sequence, now, (item, position) => item.VersionNumber = position, (item, changedAt) => item.UpdatedAt = changedAt, cancellationToken); break;
+                var take = await db.MovieTakes.Include(item => item.MovieShot).ThenInclude(item => item.Scene).ThenInclude(item => item.MovieProject).FirstOrDefaultAsync(item => item.Id == id, cancellationToken); await EnsureAuthorizedAsync(take?.MovieShot.Scene.MovieProject.WorkspaceId, userId, cancellationToken, take?.MovieShot.Scene.MovieProjectId, MoviePermissions.Edit); var takes = await db.MovieTakes.Where(item => item.MovieShotId == take!.MovieShotId).OrderBy(item => item.VersionNumber).ToListAsync(cancellationToken); await MoveAsync(takes, take!, sequence, now, (item, position) => item.VersionNumber = position, (item, changedAt) => item.UpdatedAt = changedAt, cancellationToken); break;
             default: throw new MovieV2ValidationException("Unsupported hierarchy entity.");
         }
         await db.SaveChangesAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
     }
 
-    private async Task<MovieProject?> AuthorizedMovieAsync(Guid userId, Guid id, CancellationToken cancellationToken)
+    private async Task<MovieProject?> AuthorizedMovieAsync(Guid userId, Guid id, CancellationToken cancellationToken, string permission = MoviePermissions.View)
     {
         var movie = await db.MovieProjects.FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
-        return movie is null || !await access.IsMemberAsync(userId, movie.WorkspaceId, cancellationToken) ? null : movie;
+        return movie is null || !await HasPermissionAsync(userId, movie.Id, permission, movie.WorkspaceId, cancellationToken) ? null : movie;
     }
 
     private IQueryable<MovieProject> HierarchyQuery() => db.MovieProjects.AsNoTracking()
@@ -398,7 +441,7 @@ public sealed class MovieV2Service(TaslimDbContext db, WorkspaceAccessService ac
     private static MovieV2SequenceDto ToDto(MovieSequence sequence, IReadOnlyList<MovieV2SceneDto> scenes) => new(sequence.Id, sequence.Sequence, sequence.Title, sequence.Summary, sequence.Status, sequence.ArchivedAt, sequence.CreatedAt, sequence.UpdatedAt, scenes);
     private static MovieV2SceneDto ToDto(MovieScene scene, IReadOnlyList<MovieV2ShotDto> shots) => new(scene.Id, scene.Sequence, scene.Title, scene.Summary, scene.Status, scene.MovieSequenceId, scene.ArchivedAt, scene.CreatedAt, scene.UpdatedAt, shots);
     private static MovieV2ShotDto ToDto(MovieShot shot, IReadOnlyList<MovieV2TakeDto> takes) => new(shot.Id, shot.Sequence, shot.Description, shot.Status, shot.SelectedTakeId, shot.FinalTakeId, shot.ArchivedAt, shot.CreatedAt, shot.UpdatedAt, takes.OrderBy(item => item.VersionNumber).ToArray());
-    private static MovieV2TakeDto ToDto(MovieTake take) => new(take.Id, take.MovieShotId, take.VersionNumber, take.Label, take.Status, take.QualityLevel, take.AutoDirectorEnabled, take.MovieClipId, take.GenerationJobId, take.MovieProductionVersionId, take.AssetId, take.Notes, take.SelectedAt, take.FinalizedAt, take.CreatedAt, take.UpdatedAt, take.Approvals.OrderByDescending(item => item.CreatedAt).Select(item => new MovieV2TakeApprovalDto(item.Id, item.UserId, item.Decision, item.Comment, item.CreatedAt)).ToArray(), MovieProductionProjection.ToExecution(take.GenerationJob));
+    private static MovieV2TakeDto ToDto(MovieTake take) => new(take.Id, take.MovieShotId, take.VersionNumber, take.Label, take.Status, take.QualityLevel, take.AutoDirectorEnabled, take.MovieClipId, take.GenerationJobId, take.MovieProductionVersionId, take.AssetId, take.Notes, take.SelectedAt, take.FinalizedAt, take.CreatedAt, take.UpdatedAt, take.Approvals.OrderByDescending(item => item.CreatedAt).Select(item => new MovieV2TakeApprovalDto(item.Id, item.UserId, item.Decision, item.Comment, item.CreatedAt)).ToArray(), MovieProductionProjection.ToExecution(take.GenerationJob), take.RetryOfTakeId);
     private static MovieV2ActDto ToDto(MovieAct act) => ToDto(act, act.Sequences.OrderBy(item => item.Sequence).Select(item => ToDto(item, item.Scenes.OrderBy(scene => scene.Sequence).Select(scene => ToDto(scene, scene.Shots.OrderBy(shot => shot.Sequence).Select(shot => ToDto(shot, shot.Takes.Select(ToDto).ToArray())).ToArray())).ToArray())).ToArray());
 }
 

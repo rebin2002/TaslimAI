@@ -8,12 +8,14 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using System.Security.Claims;
 using Taslim.Api.Ai;
 using Taslim.Api.Activity;
 using Taslim.Api.Assets;
 using Taslim.Api.Authorization;
 using Taslim.Api.Billing;
+using Taslim.Api.Benchmarking;
 using Taslim.Api.Domain;
 using Taslim.Api.Documents;
 using Taslim.Api.Presentations;
@@ -32,6 +34,7 @@ using Taslim.Api.Payments;
 using Taslim.Api.Notifications;
 using Taslim.Api.Resilience;
 using Taslim.Api.Voice;
+using Taslim.Api.Upscaling;
 using FileSettings = Taslim.Api.Files.FileOptions;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -180,24 +183,38 @@ builder.Services.AddScoped<IAssetService, AssetService>();
 builder.Services.AddScoped<IGeneratedAssetPublisher, GeneratedAssetPublisher>();
 builder.Services.Configure<GenerationQualityControlOptions>(builder.Configuration.GetSection("GenerationQualityControl"));
 builder.Services.AddScoped<IGenerationQualityControl, GenerationQualityControlService>();
+builder.Services.Configure<MovieProductionQualityControlOptions>(builder.Configuration.GetSection("MovieProductionQualityControl"));
+builder.Services.AddSingleton<IMovieProductionQualityControl, MovieProductionQualityControlService>();
 builder.Services.AddScoped<IUsageLedgerService, UsageLedgerService>();
 builder.Services.AddSingleton<IUsageChargingService, SafeUsageChargingService>();
 builder.Services.Configure<UsageControlOptions>(builder.Configuration.GetSection("UsageControls"));
 builder.Services.AddScoped<IUsageCostControl, UsageCostControl>();
 builder.Services.Configure<GenerationCostPricingOptions>(builder.Configuration.GetSection("GenerationCostPricing"));
 builder.Services.AddSingleton<IGenerationCostEstimator, GenerationCostEstimator>();
+builder.Services.Configure<MovieGenerationCostEstimatorOptions>(builder.Configuration.GetSection("MovieGenerationCostEstimator"));
+builder.Services.AddScoped<IMovieGenerationCostEstimator, MovieGenerationCostEstimator>();
 builder.Services.Configure<GenerationBudgetOptions>(builder.Configuration.GetSection("GenerationBudget"));
 builder.Services.AddScoped<IGenerationBudgetService, GenerationBudgetService>();
+builder.Services.AddScoped<IGenerationCostGuardrailService, GenerationCostGuardrailService>();
 builder.Services.AddScoped<IAdminUsageService, AdminUsageService>();
 builder.Services.AddScoped<IAdminOperationsService, AdminOperationsService>();
 builder.Services.AddScoped<ProviderHealthService>();
+builder.Services.AddOptions<ProviderCapabilityRegistryOptions>()
+    .Bind(builder.Configuration.GetSection("ProviderCapabilities"))
+    .ValidateOnStart();
+builder.Services.AddSingleton<IValidateOptions<ProviderCapabilityRegistryOptions>, ProviderCapabilityRegistryOptionsValidator>();
+builder.Services.AddSingleton<IProviderCapabilityRegistry, ProviderCapabilityRegistry>();
 builder.Services.Configure<GenerationJobOptions>(builder.Configuration.GetSection("GenerationJobs"));
 builder.Services.Configure<ProviderResilienceOptions>(builder.Configuration.GetSection("ProviderResilience"));
 builder.Services.AddScoped<IGenerationJobQueue, DatabaseGenerationJobQueue>();
 builder.Services.AddScoped<IGenerationJobUsageService, GenerationJobUsageService>();
 builder.Services.AddScoped<IGenerationJobService, GenerationJobService>();
+builder.Services.Configure<UpscalingJobOptions>(builder.Configuration.GetSection("UpscalingJobs"));
+builder.Services.AddScoped<IUpscalingJobService, UpscalingJobService>();
+builder.Services.AddSingleton<IUpscalingProvider, UnavailableUpscalingProvider>();
 builder.Services.AddScoped<IProviderResilienceStore, EfProviderResilienceStore>();
 builder.Services.AddScoped<IProviderResilienceOrchestrator, ProviderResilienceOrchestrator>();
+builder.Services.AddScoped<IProviderBenchmarkService, ProviderBenchmarkService>();
 builder.Services.AddSingleton<IProviderCostGuard, AllowAllProviderCostGuard>();
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddScoped<NotificationService>();
@@ -209,6 +226,8 @@ builder.Services.AddScoped<IMovieCharacterContinuityService, MovieCharacterConti
 builder.Services.AddScoped<MovieWorldContinuityProjector>();
 builder.Services.AddScoped<IMovieWorldContinuityService, MovieWorldContinuityService>();
 builder.Services.AddScoped<IMovieV2Service, MovieV2Service>();
+builder.Services.AddScoped<IMovieFinalMasteringService, MovieFinalMasteringService>();
+builder.Services.AddScoped<IMovieTakeUpscaleEligibilityService, MovieTakeUpscaleEligibilityService>();
 builder.Services.AddScoped<IMovieScenesService, MovieScenesService>();
 builder.Services.AddScoped<IMovieGuideService, MovieGuideService>();
 builder.Services.AddScoped<IMovieStoryService, MovieStoryService>();
@@ -224,15 +243,22 @@ builder.Services.AddScoped<IDirectorCreativeCostEstimator, DirectorCreativeCostE
 builder.Services.AddScoped<DirectorCreativeQualityPlanner>();
 builder.Services.AddScoped<MovieDirectorStoryAiService>();
 builder.Services.AddScoped<IMovieDirectorService, MovieDirectorService>();
+builder.Services.AddSingleton<IMovieResolutionPlanner, MovieResolutionPlanner>();
 builder.Services.Configure<MovieVideoOptions>(builder.Configuration.GetSection("MovieVideo"));
+builder.Services.Configure<DirectVideoProviderOptions>(builder.Configuration.GetSection("DirectVideoProviders"));
 builder.Services.AddScoped<MovieVideoExecutionStore>();
-builder.Services.AddHttpClient<RunwayMovieVideoProvider>();
+builder.Services.AddHttpClient<RunwayMovieVideoProvider>()
+    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
+builder.Services.AddHttpClient<ManusMovieVideoProvider>();
 builder.Services.AddSingleton<IMovieVideoProvider>(services =>
 {
     var options = services.GetRequiredService<Microsoft.Extensions.Options.IOptions<MovieVideoOptions>>().Value;
-    return options.Enabled && string.Equals(options.ProviderKey, "runway", StringComparison.OrdinalIgnoreCase)
-        ? services.GetRequiredService<RunwayMovieVideoProvider>()
-        : new UnavailableMovieVideoProvider();
+    if (!options.Enabled) return new UnavailableMovieVideoProvider();
+    if (string.Equals(options.ProviderKey, "runway", StringComparison.OrdinalIgnoreCase))
+        return services.GetRequiredService<RunwayMovieVideoProvider>();
+    if (string.Equals(options.ProviderKey, "manus", StringComparison.OrdinalIgnoreCase) && options.Manus.Enabled)
+        return services.GetRequiredService<ManusMovieVideoProvider>();
+    return new UnavailableMovieVideoProvider();
 });
 builder.Services.AddScoped<IDirectorActionExecutor, MovieDirectorActionExecutor>();
 builder.Services.AddScoped<IDirectorActionExecutor, MovieDirectorStoryActionExecutor>();

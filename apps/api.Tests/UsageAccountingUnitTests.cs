@@ -246,6 +246,89 @@ public sealed class UsageAccountingUnitTests
         Assert.Equal("USER_INTERNAL_SAFETY_CEILING_EXCEEDED", userDecision.RejectionCode);
     }
 
+    [Fact]
+    public async Task Failed_generation_with_known_provider_cost_is_never_billable()
+    {
+        await using var connection = new SqliteConnection("DataSource=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connection).Options;
+        await using var db = new TaslimDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+        var ledger = CreateLedger(db, KnownChatPricing());
+        var (workspaceId, userId) = await AddOwnerAsync(db, "failed-billable@example.com");
+        var transaction = new UsageTransaction
+        {
+            Id = Guid.NewGuid(), WorkspaceId = workspaceId, UserId = userId, RequestId = "failed-billable",
+            Feature = UsageFeature.Generation, Provider = "pending", Model = "pending", EstimatedProviderCostUsd = 0.02m,
+            ReservedAt = DateTime.UtcNow, CreatedAt = DateTime.UtcNow,
+        };
+        db.UsageTransactions.Add(transaction);
+        await db.SaveChangesAsync();
+
+        await ledger.FailAsync(transaction, "PROVIDER_FAILED", new AiUsageMetadata("openai", "gpt-5.6-terra", 10, null, 20, null, null, 1, "failed", false));
+
+        Assert.Equal(UsageTransactionStatus.Failed, transaction.Status);
+        Assert.True(transaction.ProviderCostKnown);
+        Assert.Equal(0.00026m, transaction.ProviderCostUsd);
+        Assert.False(transaction.IsBillable);
+        Assert.Null(transaction.BillableAt);
+        Assert.Equal(0m, transaction.ChargedAmount);
+        Assert.Equal(0m, transaction.NetChargedAmount);
+    }
+
+    [Fact]
+    public async Task Refund_is_append_only_and_idempotent_without_erasing_original_charge()
+    {
+        await using var connection = new SqliteConnection("DataSource=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connection).Options;
+        await using var db = new TaslimDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+        var ledger = CreateLedger(db, new ConfigurationBuilder().Build());
+        var (workspaceId, userId) = await AddOwnerAsync(db, "refund@example.com");
+        var transaction = new UsageTransaction
+        {
+            Id = Guid.NewGuid(), WorkspaceId = workspaceId, UserId = userId, RequestId = "refund-source",
+            Feature = UsageFeature.Generation, Provider = "provider", Model = "model", Status = UsageTransactionStatus.Completed,
+            ChargedAmount = 1.25m, IsBillable = true, BillableAt = DateTime.UtcNow, CreatedAt = DateTime.UtcNow,
+        };
+        db.UsageTransactions.Add(transaction);
+        await db.SaveChangesAsync();
+
+        var first = await ledger.RefundAsync(transaction);
+        var second = await ledger.RefundAsync(transaction);
+
+        Assert.NotNull(first);
+        Assert.NotNull(second);
+        Assert.Equal(first!.Adjustment.Id, second!.Adjustment.Id);
+        Assert.False(second.Created);
+        Assert.Equal(UsageTransactionAdjustmentType.Refund, first.Adjustment.Type);
+        Assert.Equal(1.25m, first.Adjustment.AmountUsd);
+        Assert.Equal(1.25m, transaction.ChargedAmount);
+        Assert.Equal(1.25m, transaction.ReversedAmount);
+        Assert.Equal(0m, transaction.NetChargedAmount);
+        Assert.Equal(UsageTransactionStatus.Refunded, transaction.Status);
+        Assert.False(transaction.IsBillable);
+        Assert.Equal(1, await db.UsageTransactionAdjustments.CountAsync());
+    }
+
+    private static UsageLedgerService CreateLedger(TaslimDbContext db, IConfiguration pricing) => new(
+        db,
+        new AiCostCalculator(new AiModelCatalog(pricing)),
+        new SafeUsageChargingService(),
+        new UsageCostControl(db, Options.Create(new UsageControlOptions()), NullLogger<UsageCostControl>.Instance),
+        NullLogger<UsageLedgerService>.Instance);
+
+    private static async Task<(Guid WorkspaceId, Guid UserId)> AddOwnerAsync(TaslimDbContext db, string email)
+    {
+        var workspaceId = Guid.NewGuid();
+        var userId = Guid.NewGuid();
+        db.Workspaces.Add(new Workspace { Id = workspaceId, Name = "Test", Slug = $"test-{workspaceId:N}", Type = WorkspaceType.Personal, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow });
+        db.Users.Add(new ApplicationUser { Id = userId, UserName = email, NormalizedUserName = email.ToUpperInvariant(), Email = email, NormalizedEmail = email.ToUpperInvariant(), DisplayName = "Test", CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow });
+        await db.SaveChangesAsync();
+        return (workspaceId, userId);
+    }
+
     private static IConfiguration KnownChatPricing() => new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
     {
         ["Ai:Models:gpt-5.6-terra:ProviderKey"] = "openai",

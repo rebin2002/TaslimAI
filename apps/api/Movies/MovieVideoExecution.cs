@@ -27,6 +27,22 @@ public sealed class MovieVideoOptions
     public int RetryMaxDelaySeconds { get; set; } = 30;
     public int ClaimLeaseMinutes { get; set; } = 15;
     public long MaxOutputBytes { get; set; } = 250 * 1024 * 1024;
+    public ManusMovieVideoOptions Manus { get; set; } = new();
+}
+
+/// <summary>
+/// Manus API settings are bound only on the API process. They are never part
+/// of movie request/result DTOs or sent to the browser.
+/// </summary>
+public sealed class ManusMovieVideoOptions
+{
+    public bool Enabled { get; set; }
+    public string ApiBaseUrl { get; set; } = "https://api.manus.ai/";
+    public string ApiKey { get; set; } = string.Empty;
+    public string AgentProfile { get; set; } = "standard";
+    public decimal? CreditUsdPerCredit { get; set; }
+    public int MaxPromptCharacters { get; set; } = 12_000;
+    public int MaxTaskMessages { get; set; } = 50;
 }
 
 public static class MovieVideoExecutionStatuses
@@ -97,6 +113,28 @@ public sealed class MovieVideoExecutionStore(TaslimDbContext db, IOptions<MovieV
         if (renewed == 0) throw new MovieVideoStaleWorkerException();
     }
 
+    public async Task MarkRunningAsync(Guid jobId, Guid concurrencyToken, CancellationToken cancellationToken)
+    {
+        var now = DateTime.UtcNow;
+        var running = await db.MovieTakes
+            .Where(item => item.GenerationJobId == jobId
+                && (item.Status == MovieTakeStatuses.Planned || item.Status == MovieTakeStatuses.Queued || item.Status == MovieTakeStatuses.Generating || item.Status == MovieTakeStatuses.LegacyDraft || item.Status == MovieTakeStatuses.LegacyGenerating)
+                && db.GenerationJobs.Any(job => job.Id == jobId && job.Status == GenerationJobStatus.Running && job.ConcurrencyToken == concurrencyToken))
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(item => item.Status, MovieTakeStatuses.Running)
+                .SetProperty(item => item.StatusChangedAt, now)
+                .SetProperty(item => item.UpdatedAt, now), cancellationToken);
+        if (running > 0)
+        {
+            await db.MovieClips
+                .Where(item => item.GenerationJobId == jobId
+                    && db.GenerationJobs.Any(job => job.Id == jobId && job.Status == GenerationJobStatus.Running && job.ConcurrencyToken == concurrencyToken))
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(item => item.Status, MovieClipStatuses.Generating)
+                    .SetProperty(item => item.UpdatedAt, now), cancellationToken);
+        }
+    }
+
     public async Task PersistSubmittedAsync(MovieVideoProviderExecution execution, Guid concurrencyToken, string providerJobId, CancellationToken cancellationToken)
     {
         execution.ProviderJobId = providerJobId;
@@ -152,7 +190,10 @@ public sealed class MovieVideoExecutionStore(TaslimDbContext db, IOptions<MovieV
             .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.Status, executionStatus).SetProperty(item => item.LastErrorCode, code).SetProperty(item => item.CompletedAt, now).SetProperty(item => item.UpdatedAt, now), cancellationToken);
         await db.MovieClips.Where(item => item.GenerationJobId == jobId && db.GenerationJobs.Any(job => job.Id == jobId && job.Status == GenerationJobStatus.Running && job.ConcurrencyToken == concurrencyToken))
             .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.Status, MovieClipStatuses.Failed).SetProperty(item => item.UpdatedAt, now), cancellationToken);
-        await db.MovieTakes.Where(item => item.GenerationJobId == jobId).ExecuteUpdateAsync(setters => setters.SetProperty(item => item.Status, MovieTakeStatuses.Failed).SetProperty(item => item.UpdatedAt, now), cancellationToken);
+        await db.MovieTakes.Where(item => item.GenerationJobId == jobId).ExecuteUpdateAsync(setters => setters
+            .SetProperty(item => item.Status, MovieTakeStatuses.Failed)
+            .SetProperty(item => item.StatusChangedAt, now)
+            .SetProperty(item => item.UpdatedAt, now), cancellationToken);
     }
 
     public async Task MarkCancelledAsync(Guid jobId, Guid concurrencyToken, CancellationToken cancellationToken)
@@ -162,7 +203,10 @@ public sealed class MovieVideoExecutionStore(TaslimDbContext db, IOptions<MovieV
             .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.Status, MovieVideoExecutionStatuses.Cancelled).SetProperty(item => item.CompletedAt, now).SetProperty(item => item.UpdatedAt, now), cancellationToken);
         await db.MovieClips.Where(item => item.GenerationJobId == jobId && db.GenerationJobs.Any(job => job.Id == jobId && job.Status == GenerationJobStatus.Running && job.ConcurrencyToken == concurrencyToken))
             .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.Status, MovieClipStatuses.Cancelled).SetProperty(item => item.UpdatedAt, now), cancellationToken);
-        await db.MovieTakes.Where(item => item.GenerationJobId == jobId).ExecuteUpdateAsync(setters => setters.SetProperty(item => item.Status, MovieTakeStatuses.Archived).SetProperty(item => item.UpdatedAt, now), cancellationToken);
+        await db.MovieTakes.Where(item => item.GenerationJobId == jobId).ExecuteUpdateAsync(setters => setters
+            .SetProperty(item => item.Status, MovieTakeStatuses.Cancelled)
+            .SetProperty(item => item.StatusChangedAt, now)
+            .SetProperty(item => item.UpdatedAt, now), cancellationToken);
     }
 
     public async Task MarkReadyAsync(Guid jobId, Guid concurrencyToken, Guid? assetId, Guid? storedFileId, int? durationSeconds, string? metadataJson, CancellationToken cancellationToken)
@@ -172,8 +216,15 @@ public sealed class MovieVideoExecutionStore(TaslimDbContext db, IOptions<MovieV
             .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.Status, MovieVideoExecutionStatuses.Completed).SetProperty(item => item.ProgressPercent, 100).SetProperty(item => item.CompletedAt, now).SetProperty(item => item.UpdatedAt, now), cancellationToken);
         await db.MovieClips.Where(item => item.GenerationJobId == jobId && db.GenerationJobs.Any(job => job.Id == jobId && job.Status == GenerationJobStatus.Succeeded && job.ConcurrencyToken == concurrencyToken))
             .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.Status, MovieClipStatuses.Ready).SetProperty(item => item.AssetId, assetId).SetProperty(item => item.StoredFileId, storedFileId).SetProperty(item => item.DurationSeconds, item => durationSeconds ?? item.DurationSeconds).SetProperty(item => item.MetadataJson, metadataJson).SetProperty(item => item.UpdatedAt, now), cancellationToken);
-        await db.MovieTakes.Where(item => item.GenerationJobId == jobId).ExecuteUpdateAsync(setters => setters.SetProperty(item => item.Status, MovieTakeStatuses.Ready).SetProperty(item => item.AssetId, assetId).SetProperty(item => item.UpdatedAt, now), cancellationToken);
-        await db.MovieProductionVersions.Where(item => item.GenerationJobId == jobId).ExecuteUpdateAsync(setters => setters.SetProperty(item => item.AssetId, assetId).SetProperty(item => item.UpdatedAt, now), cancellationToken);
+        if (assetId.HasValue)
+        {
+            await db.MovieTakes.Where(item => item.GenerationJobId == jobId).ExecuteUpdateAsync(setters => setters
+                .SetProperty(item => item.Status, MovieTakeStatuses.Succeeded)
+                .SetProperty(item => item.StatusChangedAt, now)
+                .SetProperty(item => item.AssetId, assetId)
+                .SetProperty(item => item.UpdatedAt, now), cancellationToken);
+            await db.MovieProductionVersions.Where(item => item.GenerationJobId == jobId).ExecuteUpdateAsync(setters => setters.SetProperty(item => item.AssetId, assetId).SetProperty(item => item.UpdatedAt, now), cancellationToken);
+        }
     }
 }
 

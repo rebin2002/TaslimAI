@@ -2,9 +2,11 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
 using Microsoft.AspNetCore.DataProtection.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
+using Taslim.Api.Benchmarking;
 using Taslim.Api.Domain;
 using Taslim.Api.Movies;
 using Taslim.Api.Notifications;
+using Taslim.Api.Upscaling;
 
 namespace Taslim.Api.Persistence;
 
@@ -17,12 +19,17 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
     public DbSet<Conversation> Conversations => Set<Conversation>();
     public DbSet<ChatMessage> ChatMessages => Set<ChatMessage>();
     public DbSet<UsageTransaction> UsageTransactions => Set<UsageTransaction>();
+    public DbSet<UsageTransactionAdjustment> UsageTransactionAdjustments => Set<UsageTransactionAdjustment>();
     public DbSet<PersonalMemory> PersonalMemories => Set<PersonalMemory>();
     public DbSet<StoredFile> StoredFiles => Set<StoredFile>();
     public DbSet<ChatMessageAttachment> ChatMessageAttachments => Set<ChatMessageAttachment>();
     public DbSet<GenerationJob> GenerationJobs => Set<GenerationJob>();
     public DbSet<GenerationJobOutput> GenerationJobOutputs => Set<GenerationJobOutput>();
     public DbSet<GenerationProviderAttempt> GenerationProviderAttempts => Set<GenerationProviderAttempt>();
+    public DbSet<UpscalingJob> UpscalingJobs => Set<UpscalingJob>();
+    public DbSet<UpscalingAttempt> UpscalingAttempts => Set<UpscalingAttempt>();
+    public DbSet<UpscalingQualityHandoff> UpscalingQualityHandoffs => Set<UpscalingQualityHandoff>();
+    public DbSet<ProviderCapabilityPricing> ProviderCapabilityPricings => Set<ProviderCapabilityPricing>();
     public DbSet<ProviderCircuit> ProviderCircuits => Set<ProviderCircuit>();
     public DbSet<ProviderExecutionFinalization> ProviderExecutionFinalizations => Set<ProviderExecutionFinalization>();
     public DbSet<ActivityReadState> ActivityReadStates => Set<ActivityReadState>();
@@ -31,6 +38,10 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
     public DbSet<AssetRepresentation> AssetRepresentations => Set<AssetRepresentation>();
     public DbSet<ResearchSource> ResearchSources => Set<ResearchSource>();
     public DbSet<ResearchEvidence> ResearchEvidence => Set<ResearchEvidence>();
+    public DbSet<ProviderBenchmarkRun> ProviderBenchmarkRuns => Set<ProviderBenchmarkRun>();
+    public DbSet<ProviderBenchmarkScenario> ProviderBenchmarkScenarios => Set<ProviderBenchmarkScenario>();
+    public DbSet<ProviderBenchmarkMeasurement> ProviderBenchmarkMeasurements => Set<ProviderBenchmarkMeasurement>();
+    public DbSet<ProviderBenchmarkEvidence> ProviderBenchmarkEvidence => Set<ProviderBenchmarkEvidence>();
         public DbSet<Plan> Plans => Set<Plan>();
         public DbSet<Subscription> Subscriptions => Set<Subscription>();
         public DbSet<BillingPeriod> BillingPeriods => Set<BillingPeriod>();
@@ -73,8 +84,10 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
     public DbSet<MovieAssembly> MovieAssemblies => Set<MovieAssembly>();
     public DbSet<MovieTake> MovieTakes => Set<MovieTake>();
     public DbSet<MovieTakeApproval> MovieTakeApprovals => Set<MovieTakeApproval>();
+    public DbSet<MovieTakeUpscaleAudit> MovieTakeUpscaleAudits => Set<MovieTakeUpscaleAudit>();
     public DbSet<MovieRegenerationRequest> MovieRegenerationRequests => Set<MovieRegenerationRequest>();
     public DbSet<MovieVideoProviderExecution> MovieVideoProviderExecutions => Set<MovieVideoProviderExecution>();
+    public DbSet<MovieFinalMaster> MovieFinalMasters => Set<MovieFinalMaster>();
     public DbSet<MovieProductionVersion> MovieProductionVersions => Set<MovieProductionVersion>();
     public DbSet<MovieProductionVersionAsset> MovieProductionVersionAssets => Set<MovieProductionVersionAsset>();
     public DbSet<MovieProductionStageTransition> MovieProductionStageTransitions => Set<MovieProductionStageTransition>();
@@ -536,6 +549,22 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasOne(item => item.MovieTake).WithMany(item => item.Approvals).HasForeignKey(item => item.MovieTakeId).OnDelete(DeleteBehavior.Cascade);
             entity.HasOne(item => item.User).WithMany().HasForeignKey(item => item.UserId).OnDelete(DeleteBehavior.Restrict);
         });
+        builder.Entity<MovieTakeUpscaleAudit>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.TargetMasterResolution).HasMaxLength(20).IsRequired();
+            entity.Property(item => item.SourceResolution).HasMaxLength(20);
+            entity.Property(item => item.Status).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.EligibilityCode).HasMaxLength(60).IsRequired();
+            entity.Property(item => item.OutcomeNote).HasMaxLength(500);
+            entity.Property(item => item.WasSelected).IsRequired();
+            entity.Property(item => item.WasFinal).IsRequired();
+            entity.HasIndex(item => new { item.MovieTakeId, item.CreatedAt });
+            entity.HasIndex(item => new { item.MovieProjectId, item.CreatedAt });
+            entity.HasOne(item => item.MovieTake).WithMany(item => item.UpscaleAudits).HasForeignKey(item => item.MovieTakeId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.MovieProject).WithMany().HasForeignKey(item => item.MovieProjectId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.RequestedByUser).WithMany().HasForeignKey(item => item.RequestedByUserId).OnDelete(DeleteBehavior.Restrict);
+        });
         builder.Entity<MovieRegenerationRequest>(entity =>
         {
             entity.HasKey(item => item.Id);
@@ -642,6 +671,29 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasIndex(item => item.MovieClipId);
             entity.HasOne(item => item.GenerationJob).WithMany().HasForeignKey(item => item.GenerationJobId).OnDelete(DeleteBehavior.Cascade);
             entity.HasOne(item => item.MovieClip).WithMany().HasForeignKey(item => item.MovieClipId).OnDelete(DeleteBehavior.Cascade);
+        });
+        builder.Entity<MovieFinalMaster>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.TargetProfile).HasMaxLength(40).IsRequired();
+            entity.Property(item => item.State).HasMaxLength(40).IsRequired();
+            entity.Property(item => item.StateReason).HasMaxLength(2_000);
+            entity.Property(item => item.QcStatus).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.QcResultJson).HasMaxLength(20_000);
+            entity.Property(item => item.ProvenanceJson).HasMaxLength(20_000);
+            entity.HasIndex(item => new { item.MovieShotId, item.RequestedAt });
+            entity.HasIndex(item => new { item.SourceTakeId, item.TargetProfile, item.SupersededByMasterId });
+            entity.HasIndex(item => item.SourceAssetId);
+            entity.HasIndex(item => item.OutputAssetId);
+            entity.HasOne(item => item.MovieProject).WithMany().HasForeignKey(item => item.MovieProjectId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.MovieShot).WithMany().HasForeignKey(item => item.MovieShotId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.SourceTake).WithMany().HasForeignKey(item => item.SourceTakeId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(item => item.SourceMovieClip).WithMany().HasForeignKey(item => item.SourceMovieClipId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne(item => item.SourceAsset).WithMany().HasForeignKey(item => item.SourceAssetId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne(item => item.OutputAsset).WithMany().HasForeignKey(item => item.OutputAssetId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne(item => item.GenerationJob).WithMany().HasForeignKey(item => item.GenerationJobId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne(item => item.SupersedesMaster).WithMany().HasForeignKey(item => item.SupersedesMasterId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(item => item.RequestedByUser).WithMany().HasForeignKey(item => item.RequestedByUserId).OnDelete(DeleteBehavior.Restrict);
         });
         builder.Entity<MovieAssembly>(entity =>
         {
@@ -850,12 +902,69 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasIndex(job => new { job.WorkspaceId, job.CreatedAt });
             entity.HasIndex(job => new { job.WorkspaceId, job.Status, job.CreatedAt });
             entity.HasIndex(job => job.ProjectId);
+            entity.HasIndex(job => job.RetryOfJobId);
             entity.HasIndex(job => new { job.CreatedByUserId, job.IdempotencyKey }).IsUnique().HasFilter("\"IdempotencyKey\" IS NOT NULL");
             entity.HasOne(job => job.Workspace).WithMany().HasForeignKey(job => job.WorkspaceId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(job => job.RetryOfJob).WithMany(job => job.Retries).HasForeignKey(job => job.RetryOfJobId).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne(job => job.Project).WithMany().HasForeignKey(job => job.ProjectId).OnDelete(DeleteBehavior.SetNull);
             entity.HasOne(job => job.CreatedByUser).WithMany().HasForeignKey(job => job.CreatedByUserId).OnDelete(DeleteBehavior.Restrict);
         });
 
+        builder.Entity<UpscalingJob>(entity =>
+        {
+            entity.HasKey(job => job.Id);
+            entity.Property(job => job.TargetResolution).HasMaxLength(20).IsRequired();
+            entity.Property(job => job.Status).HasConversion<string>().HasMaxLength(40).IsRequired();
+            entity.Property(job => job.Title).HasMaxLength(160);
+            entity.Property(job => job.IdempotencyKey).HasMaxLength(80);
+            entity.Property(job => job.RequestFingerprint).HasMaxLength(64).IsRequired();
+            entity.Property(job => job.SourceProvenanceJson).HasMaxLength(20_000).IsRequired();
+            entity.Property(job => job.OutputProvenanceJson).HasMaxLength(20_000);
+            entity.Property(job => job.LastErrorCode).HasMaxLength(100);
+            entity.Property(job => job.LastErrorMessage).HasMaxLength(1_000);
+            entity.Property(job => job.ProgressPercent).IsRequired();
+            entity.Property(job => job.RetryCount).IsRequired();
+            entity.Property(job => job.MaxRetryCount).IsRequired();
+            entity.ToTable("UpscalingJobs", table => table.HasCheckConstraint("CK_UpscalingJobs_ProgressPercent", "\"ProgressPercent\" BETWEEN 0 AND 100"));
+            entity.HasIndex(job => new { job.WorkspaceId, job.CreatedAt });
+            entity.HasIndex(job => new { job.WorkspaceId, job.Status, job.CreatedAt });
+            entity.HasIndex(job => new { job.WorkspaceId, job.TargetResolution, job.CreatedAt });
+            entity.HasIndex(job => new { job.CreatedByUserId, job.IdempotencyKey }).IsUnique().HasFilter("\"IdempotencyKey\" IS NOT NULL");
+            entity.HasIndex(job => job.SourceAssetId);
+            entity.HasIndex(job => job.OutputAssetId);
+            entity.HasOne(job => job.Workspace).WithMany().HasForeignKey(job => job.WorkspaceId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(job => job.Project).WithMany().HasForeignKey(job => job.ProjectId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne(job => job.CreatedByUser).WithMany().HasForeignKey(job => job.CreatedByUserId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(job => job.SourceAsset).WithMany().HasForeignKey(job => job.SourceAssetId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(job => job.OutputAsset).WithMany().HasForeignKey(job => job.OutputAssetId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne(job => job.CurrentAttempt).WithMany().HasForeignKey(job => job.CurrentAttemptId).OnDelete(DeleteBehavior.SetNull);
+        });
+        builder.Entity<UpscalingAttempt>(entity =>
+        {
+            entity.HasKey(attempt => attempt.Id);
+            entity.Property(attempt => attempt.AttemptNumber).IsRequired();
+            entity.Property(attempt => attempt.IdempotencyKey).HasMaxLength(180).IsRequired();
+            entity.Property(attempt => attempt.Status).HasConversion<string>().HasMaxLength(40).IsRequired();
+            entity.Property(attempt => attempt.ExecutionReference).HasMaxLength(240);
+            entity.Property(attempt => attempt.FailureCode).HasMaxLength(100);
+            entity.Property(attempt => attempt.SafeMetadataJson).HasMaxLength(8_000);
+            entity.HasIndex(attempt => new { attempt.UpscalingJobId, attempt.AttemptNumber }).IsUnique();
+            entity.HasIndex(attempt => new { attempt.UpscalingJobId, attempt.IdempotencyKey });
+            entity.HasOne(attempt => attempt.UpscalingJob).WithMany(job => job.Attempts).HasForeignKey(attempt => attempt.UpscalingJobId).OnDelete(DeleteBehavior.Cascade);
+        });
+        builder.Entity<UpscalingQualityHandoff>(entity =>
+        {
+            entity.HasKey(handoff => handoff.Id);
+            entity.Property(handoff => handoff.TargetResolution).HasMaxLength(20).IsRequired();
+            entity.Property(handoff => handoff.Status).HasConversion<string>().HasMaxLength(30).IsRequired();
+            entity.Property(handoff => handoff.ReviewNote).HasMaxLength(2_000);
+            entity.HasIndex(handoff => new { handoff.UpscalingJobId, handoff.CreatedAt });
+            entity.HasIndex(handoff => new { handoff.OutputAssetId, handoff.Status });
+            entity.HasOne(handoff => handoff.UpscalingJob).WithMany(job => job.QualityHandoffs).HasForeignKey(handoff => handoff.UpscalingJobId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(handoff => handoff.SourceAsset).WithMany().HasForeignKey(handoff => handoff.SourceAssetId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(handoff => handoff.OutputAsset).WithMany().HasForeignKey(handoff => handoff.OutputAssetId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(handoff => handoff.ReviewedByUser).WithMany().HasForeignKey(handoff => handoff.ReviewedByUserId).OnDelete(DeleteBehavior.Restrict);
+        });
         builder.Entity<GenerationProviderAttempt>(entity =>
         {
             entity.HasKey(attempt => attempt.Id);
@@ -885,6 +994,122 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
                 .WithMany(job => job.ProviderAttempts)
                 .HasForeignKey(attempt => attempt.GenerationJobId)
                 .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<ProviderBenchmarkRun>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.RunKey).HasMaxLength(180).IsRequired();
+            entity.Property(item => item.BenchmarkDefinition).HasMaxLength(160).IsRequired();
+            entity.Property(item => item.FixtureManifestHash).HasMaxLength(128);
+            entity.Property(item => item.HarnessVersion).HasMaxLength(80);
+            entity.Property(item => item.EnvironmentFingerprint).HasMaxLength(240);
+            entity.Property(item => item.ProvenanceJson).HasMaxLength(20_000);
+            entity.Property(item => item.Status).HasConversion<string>().HasMaxLength(30).IsRequired();
+            entity.Property(item => item.CompletionCode).HasMaxLength(100);
+            entity.Property(item => item.CreatedAt).IsRequired();
+            entity.Property(item => item.StartedAt).IsRequired();
+            entity.HasIndex(item => item.RunKey).IsUnique();
+            entity.HasIndex(item => new { item.Status, item.CreatedAt });
+        });
+
+        builder.Entity<ProviderBenchmarkScenario>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.ScenarioKey).HasMaxLength(160).IsRequired();
+            entity.Property(item => item.FixtureRevision).HasMaxLength(80).IsRequired();
+            entity.Property(item => item.CharacteristicsHash).HasMaxLength(128).IsRequired();
+            entity.Property(item => item.ShotType).HasMaxLength(80).IsRequired();
+            entity.Property(item => item.CameraMotion).HasMaxLength(120);
+            entity.Property(item => item.AspectRatio).HasMaxLength(30);
+            entity.Property(item => item.TargetResolution).HasMaxLength(40);
+            entity.Property(item => item.CharacteristicsJson).HasMaxLength(40_000);
+            entity.Property(item => item.FixtureProvenanceJson).HasMaxLength(20_000);
+            entity.Property(item => item.CreatedAt).IsRequired();
+            entity.Property(item => item.UpdatedAt).IsRequired();
+            entity.HasIndex(item => new { item.ProviderBenchmarkRunId, item.ScenarioKey }).IsUnique();
+            entity.HasIndex(item => new { item.CharacteristicsHash, item.ShotType });
+            entity.HasOne(item => item.Run)
+                .WithMany(item => item.Scenarios)
+                .HasForeignKey(item => item.ProviderBenchmarkRunId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<ProviderBenchmarkMeasurement>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.MeasurementKey).HasMaxLength(180).IsRequired();
+            entity.Property(item => item.ProviderKey).HasMaxLength(80).IsRequired();
+            entity.Property(item => item.ModelKey).HasMaxLength(160).IsRequired();
+            entity.Property(item => item.Status).HasConversion<string>().HasMaxLength(30).IsRequired();
+            entity.Property(item => item.ErrorCode).HasMaxLength(100);
+            entity.Property(item => item.EstimatedCostUsd).HasPrecision(18, 8);
+            entity.Property(item => item.ActualCostUsd).HasPrecision(18, 8);
+            entity.Property(item => item.QualityScore).HasPrecision(5, 2);
+            entity.Property(item => item.ContinuityScore).HasPrecision(5, 2);
+            entity.Property(item => item.TemporalStabilityScore).HasPrecision(5, 2);
+            entity.Property(item => item.PromptAdherenceScore).HasPrecision(5, 2);
+            entity.Property(item => item.Currency).HasMaxLength(3).IsRequired();
+            entity.Property(item => item.MetricsJson).HasMaxLength(40_000);
+            entity.Property(item => item.ProvenanceJson).HasMaxLength(20_000);
+            entity.Property(item => item.StartedAt).IsRequired();
+            entity.Property(item => item.RecordedAt).IsRequired();
+            entity.HasIndex(item => new { item.ProviderBenchmarkRunId, item.MeasurementKey }).IsUnique();
+            entity.HasIndex(item => new { item.ProviderBenchmarkScenarioId, item.ProviderKey, item.ModelKey });
+            entity.HasIndex(item => new { item.ProviderKey, item.ModelKey, item.RecordedAt });
+            entity.HasOne(item => item.Run)
+                .WithMany()
+                .HasForeignKey(item => item.ProviderBenchmarkRunId)
+                .OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.Scenario)
+                .WithMany(item => item.Measurements)
+                .HasForeignKey(item => item.ProviderBenchmarkScenarioId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<ProviderBenchmarkEvidence>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.EvidenceKey).HasMaxLength(180).IsRequired();
+            entity.Property(item => item.EvidenceType).HasMaxLength(60).IsRequired();
+            entity.Property(item => item.Source).HasMaxLength(160).IsRequired();
+            entity.Property(item => item.Reference).HasMaxLength(600);
+            entity.Property(item => item.ContentHash).HasMaxLength(128);
+            entity.Property(item => item.PayloadJson).HasMaxLength(40_000);
+            entity.Property(item => item.ProvenanceJson).HasMaxLength(20_000);
+            entity.Property(item => item.CapturedAt).IsRequired();
+            entity.Property(item => item.CreatedAt).IsRequired();
+            entity.HasIndex(item => new { item.ProviderBenchmarkMeasurementId, item.EvidenceKey }).IsUnique();
+            entity.HasIndex(item => new { item.EvidenceType, item.CapturedAt });
+            entity.HasOne(item => item.Measurement)
+                .WithMany(item => item.Evidence)
+                .HasForeignKey(item => item.ProviderBenchmarkMeasurementId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<ProviderCapabilityPricing>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.CapabilityKey).HasMaxLength(80).IsRequired();
+            entity.Property(item => item.ProviderKey).HasMaxLength(80).IsRequired();
+            entity.Property(item => item.ModelKey).HasMaxLength(160).IsRequired();
+            entity.Property(item => item.SourceResolution).HasMaxLength(20).IsRequired();
+            entity.Property(item => item.TargetResolution).HasMaxLength(20).IsRequired();
+            entity.Property(item => item.QualityTier).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.ProcessingPath).HasMaxLength(60).IsRequired();
+            entity.Property(item => item.BasePriceUsdPerSecondMin).HasPrecision(18, 8);
+            entity.Property(item => item.BasePriceUsdPerSecondMax).HasPrecision(18, 8);
+            entity.Property(item => item.BasePriceUsdFixedMin).HasPrecision(18, 8);
+            entity.Property(item => item.BasePriceUsdFixedMax).HasPrecision(18, 8);
+            entity.Property(item => item.UpscalePriceUsdPerSecondMin).HasPrecision(18, 8);
+            entity.Property(item => item.UpscalePriceUsdPerSecondMax).HasPrecision(18, 8);
+            entity.Property(item => item.UpscalePriceUsdFixedMin).HasPrecision(18, 8);
+            entity.Property(item => item.UpscalePriceUsdFixedMax).HasPrecision(18, 8);
+            entity.Property(item => item.Currency).HasMaxLength(3).IsRequired();
+            entity.Property(item => item.PricingVersion).HasMaxLength(100).IsRequired();
+            entity.Property(item => item.Source).HasMaxLength(500).IsRequired();
+            entity.HasIndex(item => new { item.CapabilityKey, item.IsActive, item.ProviderKey, item.ModelKey });
+            entity.HasIndex(item => new { item.SourceResolution, item.TargetResolution, item.QualityTier, item.ProcessingPath });
         });
 
         builder.Entity<GenerationJobOutput>(entity =>
@@ -1097,8 +1322,10 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.Property(transaction => transaction.CostBasis).HasMaxLength(20);
             entity.Property(transaction => transaction.ProviderCostUsd).HasPrecision(18, 8).IsRequired();
             entity.Property(transaction => transaction.ChargedAmount).HasPrecision(18, 8).IsRequired();
+            entity.Property(transaction => transaction.ReversedAmount).HasPrecision(18, 8).IsRequired();
             entity.Property(transaction => transaction.EstimatedProviderCostUsd).HasPrecision(18, 8);
             entity.Property(transaction => transaction.ProviderCostKnown).IsRequired();
+            entity.Property(transaction => transaction.IsBillable).IsRequired();
             entity.Property(transaction => transaction.PricingVersion).HasMaxLength(100);
             entity.Property(transaction => transaction.PricingSnapshotJson).HasMaxLength(8_000);
             entity.Property(transaction => transaction.CostEstimateJson).HasMaxLength(8_000);
@@ -1119,6 +1346,21 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasOne<Project>().WithMany().HasForeignKey(transaction => transaction.ProjectId).OnDelete(DeleteBehavior.SetNull);
             entity.HasOne<Conversation>().WithMany().HasForeignKey(transaction => transaction.ConversationId).OnDelete(DeleteBehavior.SetNull);
             entity.HasOne(transaction => transaction.GenerationJob).WithMany().HasForeignKey(transaction => transaction.GenerationJobId).OnDelete(DeleteBehavior.SetNull);
+        });
+        builder.Entity<UsageTransactionAdjustment>(entity =>
+        {
+            entity.HasKey(adjustment => adjustment.Id);
+            entity.Property(adjustment => adjustment.Type).HasConversion<string>().HasMaxLength(20).IsRequired();
+            entity.Property(adjustment => adjustment.AmountUsd).HasPrecision(18, 8).IsRequired();
+            entity.Property(adjustment => adjustment.Currency).HasMaxLength(3).IsRequired();
+            entity.Property(adjustment => adjustment.IdempotencyKey).HasMaxLength(180).IsRequired();
+            entity.Property(adjustment => adjustment.Reason).HasMaxLength(500).IsRequired();
+            entity.Property(adjustment => adjustment.CreatedAt).IsRequired();
+            entity.HasIndex(adjustment => new { adjustment.WorkspaceId, adjustment.IdempotencyKey }).IsUnique();
+            entity.HasIndex(adjustment => adjustment.UsageTransactionId);
+            entity.HasOne(adjustment => adjustment.Workspace).WithMany().HasForeignKey(adjustment => adjustment.WorkspaceId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(adjustment => adjustment.UsageTransaction).WithMany(transaction => transaction.Adjustments).HasForeignKey(adjustment => adjustment.UsageTransactionId).OnDelete(DeleteBehavior.Restrict);
+            entity.ToTable("UsageTransactionAdjustments", table => table.HasCheckConstraint("CK_UsageTransactionAdjustments_PositiveAmount", "\"AmountUsd\" > 0"));
         });
         builder.Entity<Plan>(entity =>
         {

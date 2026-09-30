@@ -1,4 +1,6 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
+using Microsoft.AspNetCore.Mvc.ModelBinding;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
 
@@ -353,7 +355,8 @@ public static class MovieProductionProjection
         take.Approvals.OrderByDescending(item => item.CreatedAt)
             .Select(item => new MovieV2TakeApprovalDto(item.Id, item.UserId, item.Decision, item.Comment, item.CreatedAt))
             .ToArray(),
-        ToExecution(take.GenerationJob));
+        ToExecution(take.GenerationJob),
+        take.RetryOfTakeId);
 
     public static MovieProductionExecutionDto? ToExecution(GenerationJob? job)
     {
@@ -434,6 +437,7 @@ public sealed class MovieProductionRenderRequest
     public Guid SourceVersionId { get; set; }
     public string? Label { get; set; }
     public string? Title { get; set; }
+    [JsonIgnore, BindNever]
     public decimal? EstimatedProviderCostUsd { get; set; }
 }
 

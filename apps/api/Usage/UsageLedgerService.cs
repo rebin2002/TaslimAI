@@ -129,6 +129,8 @@ public sealed class UsageCostControl(
     }
 }
 
+public sealed record UsageAdjustmentResult(UsageTransactionAdjustment Adjustment, bool Created);
+
 public interface IUsageLedgerService
 {
     Task<UsageTransaction> GetOrCreatePendingAsync(
@@ -146,7 +148,8 @@ public interface IUsageLedgerService
     Task CompleteAsync(UsageTransaction transaction, AiUsageMetadata usage, CancellationToken cancellationToken = default);
     Task FailAsync(UsageTransaction transaction, string failureCode, AiUsageMetadata? usage = null, CancellationToken cancellationToken = default);
     Task CancelAsync(UsageTransaction transaction, string cancellationCode, CancellationToken cancellationToken = default);
-    Task RefundAsync(UsageTransaction transaction, CancellationToken cancellationToken = default);
+    Task<UsageAdjustmentResult?> RefundAsync(UsageTransaction transaction, CancellationToken cancellationToken = default);
+    Task<UsageAdjustmentResult?> ReverseAsync(UsageTransaction transaction, string idempotencyKey, string reason, CancellationToken cancellationToken = default);
 }
 
 public sealed class UsageLedgerService(
@@ -173,23 +176,23 @@ public sealed class UsageLedgerService(
             cancellationToken);
         if (existing is not null)
         {
-            if (existing.GenerationJobId.HasValue && (existing.Status is UsageTransactionStatus.Failed or UsageTransactionStatus.Cancelled))
-            {
-                var jobStatus = await db.GenerationJobs.AsNoTracking()
-                    .Where(job => job.Id == existing.GenerationJobId.Value)
-                    .Select(job => job.Status)
-                    .SingleOrDefaultAsync(cancellationToken);
-                if (jobStatus is GenerationJobStatus.Failed or GenerationJobStatus.Cancelled or GenerationJobStatus.Succeeded)
-                    return existing;
-            }
+            // A generation transaction is permanently tied to its job idempotency key.
+            // Never reopen a terminal generation after a retry or duplicate worker delivery.
+            if (existing.GenerationJobId.HasValue && existing.Status is (UsageTransactionStatus.Failed or UsageTransactionStatus.Cancelled or UsageTransactionStatus.Completed or UsageTransactionStatus.Refunded))
+                return existing;
             if (existing.Status is UsageTransactionStatus.Failed or UsageTransactionStatus.Cancelled)
             {
                 existing.Status = UsageTransactionStatus.Pending;
                 existing.ProviderCostUsd = 0m;
                 existing.ProviderCostKnown = false;
                 existing.ChargedAmount = 0m;
+                existing.ReversedAmount = 0m;
+                existing.IsBillable = false;
                 existing.EstimatedProviderCostUsd = estimatedProviderCostUsd;
                 existing.CostEstimateJson = costEstimateJson;
+                existing.ReservedAt = DateTime.UtcNow;
+                existing.ActualRecordedAt = null;
+                existing.BillableAt = null;
                 existing.CompletedAt = null;
                 existing.RefundedAt = null;
                 existing.FailureCode = null;
@@ -224,9 +227,12 @@ public sealed class UsageLedgerService(
             ProviderCostUsd = 0m,
             ProviderCostKnown = false,
             ChargedAmount = 0m,
+            ReversedAmount = 0m,
+            IsBillable = false,
             ChargedUnit = UsageChargeUnit.Usd,
             Currency = UsageCurrencies.Usd,
             CreatedAt = DateTime.UtcNow,
+            ReservedAt = DateTime.UtcNow,
         };
         db.UsageTransactions.Add(transaction);
         try
@@ -248,6 +254,7 @@ public sealed class UsageLedgerService(
     public async Task CompleteAsync(UsageTransaction transaction, AiUsageMetadata usage, CancellationToken cancellationToken = default)
     {
         if (transaction.Status is UsageTransactionStatus.Completed or UsageTransactionStatus.Refunded or UsageTransactionStatus.Failed or UsageTransactionStatus.Cancelled) return;
+        var now = DateTime.UtcNow;
         var providerCost = costCalculator.Calculate(usage);
         var snapshot = string.IsNullOrWhiteSpace(usage.PricingSnapshotJson) ? costCalculator.GetPricingSnapshot(usage)?.ToJson() : usage.PricingSnapshotJson;
         transaction.Provider = usage.ProviderKey;
@@ -262,6 +269,8 @@ public sealed class UsageLedgerService(
         transaction.ProviderCostUsd = providerCost ?? 0m;
         transaction.ProviderCostKnown = providerCost.HasValue;
         transaction.ChargedAmount = chargingService.CalculateCustomerCharge(transaction);
+        transaction.ReversedAmount = 0m;
+        transaction.IsBillable = true;
         transaction.Currency = string.IsNullOrWhiteSpace(usage.Currency) ? transaction.Currency : usage.Currency.Trim().ToUpperInvariant();
         transaction.CostBasis = string.IsNullOrWhiteSpace(usage.CostBasis)
             ? usage.ActualCost.HasValue ? UsageCostBasis.Actual : providerCost.HasValue ? UsageCostBasis.Estimated : UsageCostBasis.Unknown
@@ -272,7 +281,9 @@ public sealed class UsageLedgerService(
             ? JsonSerializer.Serialize(new { amountUsd = usage.EstimatedCost, pricingVersion = usage.PricingVersion })
             : transaction.CostEstimateJson;
         transaction.SafeMetadataJson = usage.SafeMetadataJson;
-        transaction.CompletedAt = DateTime.UtcNow;
+        transaction.ActualRecordedAt = now;
+        transaction.BillableAt = now;
+        transaction.CompletedAt = now;
         transaction.FailureCode = null;
         await costControl.MarkAnomalyAsync(transaction, cancellationToken);
         await db.SaveChangesAsync(cancellationToken);
@@ -282,11 +293,15 @@ public sealed class UsageLedgerService(
     public async Task FailAsync(UsageTransaction transaction, string failureCode, AiUsageMetadata? usage = null, CancellationToken cancellationToken = default)
     {
         if (transaction.Status is UsageTransactionStatus.Completed or UsageTransactionStatus.Refunded or UsageTransactionStatus.Failed or UsageTransactionStatus.Cancelled) return;
+        var now = DateTime.UtcNow;
         transaction.Status = UsageTransactionStatus.Failed;
         var providerCost = usage is null ? null : costCalculator.Calculate(usage);
         transaction.ProviderCostUsd = providerCost ?? 0m;
         transaction.ProviderCostKnown = providerCost.HasValue;
         transaction.ChargedAmount = 0m;
+        transaction.ReversedAmount = 0m;
+        transaction.IsBillable = false;
+        transaction.BillableAt = null;
         transaction.InputTokens = usage?.InputTokens;
         transaction.CachedInputTokens = usage?.CachedInputTokens;
         transaction.OutputTokens = usage?.OutputTokens;
@@ -303,7 +318,9 @@ public sealed class UsageLedgerService(
         transaction.PricingSnapshotJson = string.IsNullOrWhiteSpace(usage?.PricingSnapshotJson) ? transaction.PricingSnapshotJson : usage.PricingSnapshotJson;
         transaction.SafeMetadataJson = usage?.SafeMetadataJson ?? transaction.SafeMetadataJson;
         transaction.FailureCode = failureCode;
+        transaction.ActualRecordedAt = usage is null ? null : now;
         transaction.CompletedAt = null;
+        transaction.RefundedAt = null;
         await costControl.MarkAnomalyAsync(transaction, cancellationToken);
         await db.SaveChangesAsync(cancellationToken);
         logger.LogInformation("Usage transaction failed. TransactionId={TransactionId}; Feature={Feature}; FailureCode={FailureCode}; ProviderCostUsd={ProviderCostUsd}", transaction.Id, transaction.Feature, failureCode, transaction.ProviderCostUsd);
@@ -316,20 +333,75 @@ public sealed class UsageLedgerService(
         transaction.ProviderCostUsd = 0m;
         transaction.ProviderCostKnown = false;
         transaction.ChargedAmount = 0m;
+        transaction.ReversedAmount = 0m;
+        transaction.IsBillable = false;
+        transaction.BillableAt = null;
+        transaction.ActualRecordedAt = null;
         transaction.FailureCode = cancellationCode;
         transaction.CompletedAt = null;
         await db.SaveChangesAsync(cancellationToken);
         logger.LogInformation("Usage transaction cancelled. TransactionId={TransactionId}; Feature={Feature}; FailureCode={FailureCode}", transaction.Id, transaction.Feature, cancellationCode);
     }
 
-    public async Task RefundAsync(UsageTransaction transaction, CancellationToken cancellationToken = default)
+    public Task<UsageAdjustmentResult?> RefundAsync(UsageTransaction transaction, CancellationToken cancellationToken = default) =>
+        AddAdjustmentAsync(transaction, UsageTransactionAdjustmentType.Refund, $"usage:{transaction.Id:N}:refund", "Usage transaction refund", cancellationToken);
+
+    public Task<UsageAdjustmentResult?> ReverseAsync(UsageTransaction transaction, string idempotencyKey, string reason, CancellationToken cancellationToken = default) =>
+        AddAdjustmentAsync(transaction, UsageTransactionAdjustmentType.Reversal, idempotencyKey, reason, cancellationToken);
+
+    private async Task<UsageAdjustmentResult?> AddAdjustmentAsync(
+        UsageTransaction transaction,
+        UsageTransactionAdjustmentType type,
+        string idempotencyKey,
+        string reason,
+        CancellationToken cancellationToken)
     {
-        if (transaction.Status != UsageTransactionStatus.Completed) return;
+        var normalizedKey = string.IsNullOrWhiteSpace(idempotencyKey) ? throw new ArgumentException("An adjustment idempotency key is required.", nameof(idempotencyKey)) : idempotencyKey.Trim();
+        if (normalizedKey.Length > 180) throw new ArgumentException("The adjustment idempotency key is too long.", nameof(idempotencyKey));
+        var normalizedReason = string.IsNullOrWhiteSpace(reason) ? "Usage transaction adjustment" : reason.Trim();
+        if (normalizedReason.Length > 500) throw new ArgumentException("The adjustment reason is too long.", nameof(reason));
+        var existing = await db.UsageTransactionAdjustments.SingleOrDefaultAsync(item => item.WorkspaceId == transaction.WorkspaceId && item.IdempotencyKey == normalizedKey, cancellationToken);
+        if (existing is not null)
+        {
+            if (existing.UsageTransactionId != transaction.Id) throw new InvalidOperationException("The adjustment idempotency key belongs to a different usage transaction.");
+            return new UsageAdjustmentResult(existing, false);
+        }
+        if (transaction.Status != UsageTransactionStatus.Completed || !transaction.IsBillable) return null;
+        var remaining = Math.Round(transaction.ChargedAmount - transaction.ReversedAmount, 8, MidpointRounding.AwayFromZero);
+        if (remaining <= 0m) return null;
+        var now = DateTime.UtcNow;
+        var adjustment = new UsageTransactionAdjustment
+        {
+            Id = Guid.NewGuid(),
+            WorkspaceId = transaction.WorkspaceId,
+            UsageTransactionId = transaction.Id,
+            Type = type,
+            AmountUsd = remaining,
+            Currency = transaction.Currency,
+            IdempotencyKey = normalizedKey,
+            Reason = normalizedReason,
+            CreatedAt = now,
+        };
+        transaction.ReversedAmount += remaining;
         transaction.Status = UsageTransactionStatus.Refunded;
-        transaction.ChargedAmount = 0m;
-        transaction.RefundedAt = DateTime.UtcNow;
-        await db.SaveChangesAsync(cancellationToken);
-        logger.LogInformation("Usage transaction refunded. TransactionId={TransactionId}; Feature={Feature}", transaction.Id, transaction.Feature);
+        transaction.IsBillable = false;
+        transaction.RefundedAt = now;
+        db.UsageTransactionAdjustments.Add(adjustment);
+        try
+        {
+            await db.SaveChangesAsync(cancellationToken);
+            logger.LogInformation("Usage transaction adjustment recorded. TransactionId={TransactionId}; Type={Type}; AmountUsd={AmountUsd}", transaction.Id, type, remaining);
+            return new UsageAdjustmentResult(adjustment, true);
+        }
+        catch (DbUpdateException)
+        {
+            db.Entry(adjustment).State = EntityState.Detached;
+            db.Entry(transaction).State = EntityState.Unchanged;
+            var concurrent = await db.UsageTransactionAdjustments.SingleOrDefaultAsync(item => item.WorkspaceId == transaction.WorkspaceId && item.IdempotencyKey == normalizedKey, cancellationToken);
+            if (concurrent is null) throw;
+            if (concurrent.UsageTransactionId != transaction.Id) throw new InvalidOperationException("The adjustment idempotency key belongs to a different usage transaction.");
+            return new UsageAdjustmentResult(concurrent, false);
+        }
     }
 }
 

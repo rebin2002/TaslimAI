@@ -27,7 +27,8 @@ public sealed record MovieV2TakeDto(
     DateTime CreatedAt,
     DateTime UpdatedAt,
     IReadOnlyList<MovieV2TakeApprovalDto> Approvals,
-    MovieProductionExecutionDto? Execution = null);
+    MovieProductionExecutionDto? Execution = null,
+    Guid? RetryOfTakeId = null);
 
 public sealed record MovieV2ShotDto(
     Guid Id,

@@ -1,5 +1,6 @@
 using System.ComponentModel.DataAnnotations;
 using System.Text.Json.Serialization;
+using Microsoft.AspNetCore.Mvc.ModelBinding;
 using Taslim.Api.Domain;
 using Taslim.Api.Usage;
 
@@ -21,11 +22,71 @@ public sealed class CreateGenerationJobRequest
     [Required, StringLength(100_000)]
     public string InputJson { get; set; } = "{}";
 
-    [JsonIgnore]
+    [JsonIgnore, BindNever]
     public decimal? EstimatedProviderCostUsd { get; set; }
 
-    [JsonIgnore]
+    [JsonIgnore, BindNever]
     public GenerationCostEstimate? InternalCostEstimate { get; set; }
+
+    [JsonIgnore, BindNever]
+    public string? InternalCostEstimateJson { get; set; }
+    [JsonIgnore]
+    public bool ConfirmationAccepted { get; set; }
+}
+
+public static class GenerationCostEstimateStatuses
+{
+    public const string Known = "known";
+    public const string Unknown = "unknown";
+}
+
+public sealed record GenerationCostWarningDto(string Code, string Severity, string Message);
+
+public sealed record GenerationCostCapDto(
+    string Scope,
+    decimal? LimitUsd,
+    decimal UsedUsd,
+    bool UsageKnown,
+    decimal? RemainingUsd,
+    bool WouldExceed);
+
+/// <summary>
+/// User-safe generation economics. It deliberately contains no provider, model, prompt,
+/// pricing-source, credential, or raw upstream fields.
+/// </summary>
+public sealed record GenerationCostPreviewDto(
+    string EstimateStatus,
+    decimal? EstimatedProviderCostUsd,
+    bool EstimatedProviderCostKnown,
+    string Currency,
+    string? UnknownReason,
+    bool Warning,
+    bool ConfirmationRequired,
+    bool CanProceed,
+    GenerationCostCapDto? WorkspaceCap,
+    GenerationCostCapDto? UserCap,
+    GenerationCostCapDto? ProjectCap,
+    IReadOnlyList<GenerationCostWarningDto> Warnings);
+
+public static class GenerationCostPreviewMapper
+{
+    public static GenerationCostPreviewDto ToDto(GenerationCostPreflightResult result) => new(
+        result.Estimate.IsKnown && result.Estimate.AmountUsd.HasValue ? GenerationCostEstimateStatuses.Known : GenerationCostEstimateStatuses.Unknown,
+        result.Estimate.IsKnown ? result.Estimate.AmountUsd : null,
+        result.Estimate.IsKnown && result.Estimate.AmountUsd.HasValue,
+        string.IsNullOrWhiteSpace(result.Estimate.Currency) ? UsageCurrencies.Usd : result.Estimate.Currency,
+        result.Estimate.UnknownReason,
+        result.Warnings.Count > 0,
+        result.ConfirmationRequired,
+        result.CanProceed,
+        ToCapDto(result.WorkspaceCap),
+        ToCapDto(result.UserCap),
+        ToCapDto(result.ProjectCap),
+        result.Warnings.Select(item => new GenerationCostWarningDto(item.Code, item.Severity, item.Message)).ToArray());
+
+    private static GenerationCostCapDto? ToCapDto(GenerationCostCapState? cap) => cap is null
+        ? null
+        : new(cap.Scope, cap.LimitUsd, cap.UsedUsd, cap.UsageKnown, cap.RemainingUsd, cap.WouldExceed);
 }
 
 public sealed record GenerationJobOutputDto(
@@ -53,7 +114,9 @@ public sealed record GenerationJobDto(
     DateTime? CompletedAt,
     DateTime? FailedAt,
     DateTime? CancelledAt,
-    IReadOnlyList<GenerationJobOutputDto> Outputs);
+    IReadOnlyList<GenerationJobOutputDto> Outputs,
+    Guid? RetryOfJobId = null,
+    int RetryCount = 0);
 
 public sealed record GenerationJobListDto(
     IReadOnlyList<GenerationJobDto> Items,
@@ -92,5 +155,7 @@ public static class GenerationJobContractMapper
         job.CancelledAt,
         job.Outputs.OrderBy(output => output.CreatedAt)
             .Select(output => new GenerationJobOutputDto(output.Id, output.OutputType, output.StoredFileId, output.MetadataJson, output.CreatedAt))
-            .ToArray());
+            .ToArray(),
+        job.RetryOfJobId,
+        job.RetryCount);
 }
