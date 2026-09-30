@@ -609,6 +609,7 @@ public sealed class MovieClip
     public GenerationJob? GenerationJob { get; set; }
     public Asset? Asset { get; set; }
     public StoredFile? StoredFile { get; set; }
+    public ICollection<MovieDialogueLine> DialogueLines { get; set; } = [];
 }
 
 public sealed class MovieAssembly

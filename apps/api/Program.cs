@@ -230,6 +230,8 @@ builder.Services.AddScoped<MovieWorldContinuityProjector>();
 builder.Services.AddScoped<IMovieWorldContinuityService, MovieWorldContinuityService>();
 builder.Services.AddScoped<IMovieProductionReferencePackageService, MovieProductionReferencePackageService>();
 builder.Services.AddScoped<IMovieV2Service, MovieV2Service>();
+builder.Services.AddScoped<IMovieDialogueProductionService, MovieDialogueProductionService>();
+builder.Services.AddScoped<MovieDialogueVoiceExecutionStore>();
 builder.Services.AddScoped<IMovieFinalMasteringService, MovieFinalMasteringService>();
 builder.Services.AddScoped<IMovieTakeUpscaleEligibilityService, MovieTakeUpscaleEligibilityService>();
 builder.Services.AddScoped<IMovieScenesService, MovieScenesService>();
@@ -250,6 +252,7 @@ builder.Services.AddScoped<IMovieDirectorService, MovieDirectorService>();
 builder.Services.AddSingleton<IMovieResolutionPlanner, MovieResolutionPlanner>();
 builder.Services.AddScoped<IMovieShotExecutionService, MovieShotExecutionService>();
 builder.Services.Configure<MovieVideoOptions>(builder.Configuration.GetSection("MovieVideo"));
+builder.Services.Configure<MovieDialogueVoiceOptions>(builder.Configuration.GetSection("MovieDialogueVoice"));
 builder.Services.Configure<DirectVideoProviderOptions>(builder.Configuration.GetSection("DirectVideoProviders"));
 builder.Services.Configure<VideoGenerationAdapterOptions>(builder.Configuration.GetSection("VideoGenerationAdapters"));
 builder.Services.AddSingleton<IVideoGenerationAdapter, UnavailableVideoGenerationAdapter>();
@@ -302,6 +305,7 @@ builder.Services.AddSingleton<IImagePromptBuilder, TaslimImagePromptBuilder>();
 builder.Services.AddSingleton<IImageGenerationProvider>(services => services.GetRequiredService<OpenAiImageGenerationProvider>());
 builder.Services.AddSingleton<IGenerationJobHandler, ImageGenerationJobHandler>();
 builder.Services.AddScoped<IGenerationJobHandler, MovieVideoGenerationJobHandler>();
+builder.Services.AddScoped<IGenerationJobHandler, MovieDialogueVoiceGenerationJobHandler>();
 builder.Services.AddSingleton<IDocumentPromptBuilder, DocumentPromptBuilder>();
 builder.Services.AddScoped<IDocumentGenerationProvider, AiDocumentGenerationProvider>();
 builder.Services.AddSingleton<IDocumentRenderer, DocumentRenderer>();
@@ -332,6 +336,13 @@ builder.Services.AddSingleton<IVoiceGenerationProvider, UnconfiguredVoiceGenerat
 builder.Services.AddSingleton<IVoiceGenerationProvider>(services => services.GetRequiredService<OpenAiVoiceGenerationProvider>());
 builder.Services.AddSingleton<IVoiceGenerationProvider>(services => services.GetRequiredService<AzureSpeechVoiceGenerationProvider>());
 builder.Services.AddScoped<IGenerationJobHandler, VoiceGenerationJobHandler>();
+builder.Services.AddSingleton<IMovieDialogueVoiceProvider>(services =>
+{
+    var options = services.GetRequiredService<Microsoft.Extensions.Options.IOptions<MovieDialogueVoiceOptions>>().Value;
+    if (!options.Enabled) return new UnavailableMovieDialogueVoiceProvider();
+    if (string.Equals(options.ProviderKey, "fake", StringComparison.OrdinalIgnoreCase)) return new DeterministicMovieDialogueVoiceProvider();
+    return new UnavailableMovieDialogueVoiceProvider();
+});
 builder.Services.AddScoped<FileValidationService>();
 builder.Services.AddSingleton<IFileContentExtractor, FileContentExtractor>();
 builder.Services.AddScoped<FileProcessingService>();
