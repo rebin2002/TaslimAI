@@ -224,6 +224,7 @@ builder.Services.AddScoped<INotificationService>(services => services.GetRequire
 builder.Services.AddScoped<INotificationEventWriter>(services => services.GetRequiredService<NotificationService>());
 builder.Services.AddScoped<IMovieStudioService, MovieStudioService>();
 builder.Services.AddScoped<IMovieProductionGenerationOrchestrator, MovieProductionGenerationOrchestrator>();
+builder.Services.AddScoped<IMovieSoundService, MovieSoundService>();
 builder.Services.AddScoped<IMovieStoryCastService, MovieStoryCastService>();
 builder.Services.AddScoped<IMovieCharacterContinuityService, MovieCharacterContinuityService>();
 builder.Services.AddScoped<MovieWorldContinuityProjector>();
@@ -287,6 +288,7 @@ builder.Services.Configure<PresentationGenerationOptions>(builder.Configuration.
 builder.Services.Configure<ResearchGenerationOptions>(builder.Configuration.GetSection("ResearchGeneration"));
 builder.Services.Configure<SocialGenerationOptions>(builder.Configuration.GetSection("SocialGeneration"));
 builder.Services.Configure<MusicGenerationOptions>(builder.Configuration.GetSection("MusicGeneration"));
+builder.Services.Configure<MovieSoundOptions>(builder.Configuration.GetSection("MovieSoundGeneration"));
 builder.Services.Configure<VoiceGenerationOptions>(builder.Configuration.GetSection("VoiceGeneration"));
 builder.Services.AddSingleton<AiModelCatalog>();
 builder.Services.AddSingleton<IAiCostCalculator, AiCostCalculator>();
@@ -331,6 +333,14 @@ builder.Services.AddSingleton<IMusicGenerationProvider>(services => services.Get
 builder.Services.AddHttpClient<StableAudioMusicGenerationProvider>();
 builder.Services.AddSingleton<IMusicGenerationProvider>(services => services.GetRequiredService<StableAudioMusicGenerationProvider>());
 builder.Services.AddScoped<IGenerationJobHandler, MusicGenerationJobHandler>();
+builder.Services.AddSingleton<IMovieSoundProvider>(services =>
+{
+    var options = services.GetRequiredService<IOptions<MovieSoundOptions>>().Value;
+    if (options.Enabled && string.Equals(options.ProviderKey, "fake", StringComparison.OrdinalIgnoreCase))
+        return new FakeMovieSoundProvider();
+    return new UnavailableMovieSoundProvider();
+});
+builder.Services.AddScoped<IGenerationJobHandler, MovieSoundGenerationJobHandler>();
 builder.Services.AddSingleton<IVoiceGenerationProvider>(services => services.GetRequiredService<OpenAiVoiceGenerationProvider>());
 builder.Services.AddSingleton<IVoiceGenerationProvider, UnconfiguredVoiceGenerationProvider>();
 builder.Services.AddSingleton<IVoiceGenerationProvider>(services => services.GetRequiredService<OpenAiVoiceGenerationProvider>());

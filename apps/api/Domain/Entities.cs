@@ -94,10 +94,16 @@ public static class GenerationJobTypes
     public const string MusicGenerate = "music.generate";
     public const string VoiceGenerate = "voice.generate";
     public const string MovieDialogueVoiceGenerate = "movie.dialogue.voice.generate";
+    public const string MovieSoundGenerate = "movie.sound.generate";
 
     public static readonly IReadOnlySet<string> MovieDialogueVoiceTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
         MovieDialogueVoiceGenerate,
+    };
+    public static readonly IReadOnlySet<string> MovieSoundTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        MovieSoundGenerate,
+    };
     };
 
     public static readonly IReadOnlySet<string> Supported = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -114,6 +120,7 @@ public static class GenerationJobTypes
         MusicGenerate,
         VoiceGenerate,
         MovieDialogueVoiceGenerate,
+        MovieSoundGenerate,
     };
 }
 
@@ -227,6 +234,17 @@ public const string MusicRequestInvalid = "MUSIC_REQUEST_INVALID";
     public const string MusicOutputInvalid = "MUSIC_OUTPUT_INVALID";
     public const string MusicOutputStorageFailed = "MUSIC_OUTPUT_STORAGE_FAILED";
     public const string MusicCancelled = "MUSIC_CANCELLED";
+    public const string MovieSoundRequestInvalid = "MOVIE_SOUND_REQUEST_INVALID";
+    public const string MovieSoundCueInvalid = "MOVIE_SOUND_CUE_INVALID";
+    public const string MovieSoundKindInvalid = "MOVIE_SOUND_KIND_INVALID";
+    public const string MovieSoundLayerInvalid = "MOVIE_SOUND_LAYER_INVALID";
+    public const string MovieSoundAssetInvalid = "MOVIE_SOUND_ASSET_INVALID";
+    public const string MovieSoundNotReady = "MOVIE_SOUND_NOT_READY";
+    public const string MovieSoundProviderUnavailable = "MOVIE_SOUND_PROVIDER_UNAVAILABLE";
+    public const string MovieSoundOutputInvalid = "MOVIE_SOUND_OUTPUT_INVALID";
+    public const string MovieSoundOutputStorageFailed = "MOVIE_SOUND_OUTPUT_STORAGE_FAILED";
+    public const string MovieSoundGenerationFailed = "MOVIE_SOUND_GENERATION_FAILED";
+    public const string MovieSoundCancelled = "MOVIE_SOUND_CANCELLED";
 	public const string VoiceRequestInvalid = "VOICE_REQUEST_INVALID";
 	    public const string VoiceProviderUnavailable = "VOICE_PROVIDER_UNAVAILABLE";
 	    public const string VoiceProviderAuthentication = "VOICE_PROVIDER_AUTHENTICATION_FAILED";
