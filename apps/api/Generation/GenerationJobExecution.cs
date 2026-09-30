@@ -32,6 +32,7 @@ public sealed class GenerationJobOptions
     public int ClaimRecoveryIntervalMilliseconds { get; set; } = 30000;
     public int ClaimLeaseMinutes { get; set; } = 30;
     public int LeaseRenewalIntervalMilliseconds { get; set; } = 60000;
+    public int MaxAutomaticRetries { get; set; } = 3;
 }
 
 public sealed class GenerationJobPollingSchedule(GenerationJobOptions options)
@@ -505,6 +506,7 @@ public sealed class GenerationJobWorker(
     IOptions<GenerationJobOptions> options,
     ILogger<GenerationJobWorker> logger) : BackgroundService
 {
+    private const string PoisonJobMessage = "The generation could not be recovered safely. Please try again.";
     private readonly GenerationJobOptions settings = options.Value;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -523,10 +525,12 @@ public sealed class GenerationJobWorker(
                 using var scope = scopeFactory.CreateScope();
                 var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
                 var notifications = scope.ServiceProvider.GetRequiredService<INotificationEventWriter>();
+                var usage = scope.ServiceProvider.GetRequiredService<IGenerationJobUsageService>();
+                var movieExecutions = scope.ServiceProvider.GetRequiredService<MovieVideoExecutionStore>();
                 var now = DateTime.UtcNow;
                 if (schedule.RecoveryDue(now))
                 {
-                    await RecoverExpiredClaimsAsync(db, notifications, stoppingToken);
+                    await RecoverExpiredClaimsAsync(db, usage, movieExecutions, notifications, stoppingToken);
                     schedule.ScheduleNextRecovery(now);
                 }
                 var job = await ClaimAsync(db, stoppingToken);
@@ -549,29 +553,112 @@ public sealed class GenerationJobWorker(
         }
     }
 
-    private async Task RecoverExpiredClaimsAsync(TaslimDbContext db, INotificationEventWriter notifications, CancellationToken cancellationToken)
+    private async Task RecoverExpiredClaimsAsync(
+        TaslimDbContext db,
+        IGenerationJobUsageService usage,
+        MovieVideoExecutionStore movieExecutions,
+        INotificationEventWriter notifications,
+        CancellationToken cancellationToken)
     {
         var now = DateTime.UtcNow;
-        var recoveryToken = Guid.NewGuid();
-        var recoveredJobIds = await db.GenerationJobs.AsNoTracking()
+        var expiredClaims = await db.GenerationJobs.AsNoTracking()
             .Where(job => job.Status == GenerationJobStatus.Running && job.ClaimExpiresAt.HasValue && job.ClaimExpiresAt < now)
-            .Select(job => job.Id)
+            .OrderBy(job => job.ClaimExpiresAt)
+            .ThenBy(job => job.CreatedAt)
+            .Select(job => new { job.Id, job.ConcurrencyToken })
             .ToListAsync(cancellationToken);
-        if (recoveredJobIds.Count == 0) return;
-        await db.GenerationJobs
-            .Where(job => job.Status == GenerationJobStatus.Running && job.ClaimExpiresAt.HasValue && job.ClaimExpiresAt < now)
-            .ExecuteUpdateAsync(setters => setters
-                .SetProperty(job => job.Status, GenerationJobStatus.Queued)
-                .SetProperty(job => job.QueuedAt, now)
-                .SetProperty(job => job.StartedAt, (DateTime?)null)
-                .SetProperty(job => job.ClaimExpiresAt, (DateTime?)null)
-                .SetProperty(job => job.CancellationRequested, false)
-                .SetProperty(job => job.RetryCount, job => job.RetryCount + 1)
-                .SetProperty(job => job.ConcurrencyToken, recoveryToken), cancellationToken);
-        foreach (var jobId in recoveredJobIds)
+
+        foreach (var expired in expiredClaims)
         {
-            logger.LogWarning("Expired generation lease recovered. JobId={JobId}; RetryReason={RetryReason}", jobId, "lease_expired");
-            await TryNotifyAsync(() => notifications.CreateGenerationAttentionAsync(jobId, cancellationToken), jobId);
+            var job = await db.GenerationJobs.AsNoTracking().FirstOrDefaultAsync(item => item.Id == expired.Id, cancellationToken);
+            if (job is null || job.Status != GenerationJobStatus.Running || job.ConcurrencyToken != expired.ConcurrencyToken
+                || job.ClaimExpiresAt is null || job.ClaimExpiresAt >= now)
+                continue;
+
+            if (job.CancellationRequested)
+            {
+                var cancellationTerminalToken = Guid.NewGuid();
+                await using var cancellationFinalization = await db.Database.BeginTransactionAsync(cancellationToken);
+                await movieExecutions.MarkCancelledAsync(job.Id, expired.ConcurrencyToken, cancellationToken);
+                var cancelled = await db.GenerationJobs
+                    .Where(item => item.Id == job.Id
+                        && item.Status == GenerationJobStatus.Running
+                        && item.ConcurrencyToken == expired.ConcurrencyToken
+                        && item.CancellationRequested
+                        && item.ClaimExpiresAt.HasValue
+                        && item.ClaimExpiresAt < now)
+                    .ExecuteUpdateAsync(setters => setters
+                        .SetProperty(item => item.Status, GenerationJobStatus.Cancelled)
+                        .SetProperty(item => item.ErrorCode, CancellationCode(job))
+                        .SetProperty(item => item.ErrorMessage, "The job was cancelled.")
+                        .SetProperty(item => item.CancelledAt, now)
+                        .SetProperty(item => item.ClaimExpiresAt, (DateTime?)null)
+                        .SetProperty(item => item.ConcurrencyToken, cancellationTerminalToken), cancellationToken);
+                if (cancelled == 0)
+                {
+                    await cancellationFinalization.RollbackAsync(cancellationToken);
+                    continue;
+                }
+                var transaction = await usage.BeginAsync(job, cancellationToken: cancellationToken);
+                await usage.CancelAsync(transaction, CancellationCode(job), cancellationToken);
+                await cancellationFinalization.CommitAsync(cancellationToken);
+                logger.LogInformation("Expired cancelled generation lease finalized. JobId={JobId}; RetryReason={RetryReason}", job.Id, "cancellation_requested");
+                continue;
+            }
+
+            var maxAutomaticRetries = Math.Max(0, settings.MaxAutomaticRetries);
+            if (job.RetryCount < maxAutomaticRetries)
+            {
+                var recoveryToken = Guid.NewGuid();
+                var recovered = await db.GenerationJobs
+                    .Where(item => item.Id == job.Id
+                        && item.Status == GenerationJobStatus.Running
+                        && item.ConcurrencyToken == expired.ConcurrencyToken
+                        && !item.CancellationRequested
+                        && item.ClaimExpiresAt.HasValue
+                        && item.ClaimExpiresAt < now)
+                    .ExecuteUpdateAsync(setters => setters
+                        .SetProperty(item => item.Status, GenerationJobStatus.Queued)
+                        .SetProperty(item => item.QueuedAt, now)
+                        .SetProperty(item => item.StartedAt, (DateTime?)null)
+                        .SetProperty(item => item.ClaimExpiresAt, (DateTime?)null)
+                        .SetProperty(item => item.RetryCount, item => item.RetryCount + 1)
+                        .SetProperty(item => item.ConcurrencyToken, recoveryToken), cancellationToken);
+                if (recovered == 0) continue;
+                logger.LogWarning("Expired generation lease recovered. JobId={JobId}; RetryReason={RetryReason}; RetryCount={RetryCount}; MaxAutomaticRetries={MaxAutomaticRetries}",
+                    job.Id, "lease_expired", job.RetryCount + 1, maxAutomaticRetries);
+                await TryNotifyAsync(() => notifications.CreateGenerationAttentionAsync(job.Id, cancellationToken), job.Id);
+                continue;
+            }
+
+            var poisonTerminalToken = Guid.NewGuid();
+            await using var poisonFinalization = await db.Database.BeginTransactionAsync(cancellationToken);
+            await movieExecutions.MarkFailedAsync(job.Id, expired.ConcurrencyToken, GenerationJobErrorCodes.Poisoned, cancellationToken);
+            var poisoned = await db.GenerationJobs
+                .Where(item => item.Id == job.Id
+                    && item.Status == GenerationJobStatus.Running
+                    && item.ConcurrencyToken == expired.ConcurrencyToken
+                    && !item.CancellationRequested
+                    && item.ClaimExpiresAt.HasValue
+                    && item.ClaimExpiresAt < now)
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(item => item.Status, GenerationJobStatus.Failed)
+                    .SetProperty(item => item.ErrorCode, GenerationJobErrorCodes.Poisoned)
+                    .SetProperty(item => item.ErrorMessage, PoisonJobMessage)
+                    .SetProperty(item => item.FailedAt, now)
+                    .SetProperty(item => item.ClaimExpiresAt, (DateTime?)null)
+                    .SetProperty(item => item.ConcurrencyToken, poisonTerminalToken), cancellationToken);
+            if (poisoned == 0)
+            {
+                await poisonFinalization.RollbackAsync(cancellationToken);
+                continue;
+            }
+            var poisonUsage = await usage.BeginAsync(job, cancellationToken: cancellationToken);
+            await usage.FailAsync(poisonUsage, GenerationJobErrorCodes.Poisoned, cancellationToken: cancellationToken);
+            await poisonFinalization.CommitAsync(cancellationToken);
+            logger.LogError("Generation job moved to poison terminal state after bounded lease recovery. JobId={JobId}; RetryCount={RetryCount}; MaxAutomaticRetries={MaxAutomaticRetries}",
+                job.Id, job.RetryCount, maxAutomaticRetries);
+            await TryNotifyAsync(() => notifications.CreateGenerationFailedAsync(job.Id, cancellationToken), job.Id);
         }
     }
 
@@ -580,7 +667,11 @@ public sealed class GenerationJobWorker(
         var isSqlite = db.Database.ProviderName?.Contains("Sqlite", StringComparison.OrdinalIgnoreCase) == true;
         if (isSqlite)
         {
-            var candidate = await db.GenerationJobs.AsNoTracking().FirstOrDefaultAsync(item => item.Status == GenerationJobStatus.Queued, cancellationToken);
+            var candidate = await db.GenerationJobs.AsNoTracking()
+                .Where(item => item.Status == GenerationJobStatus.Queued)
+                .OrderBy(item => item.QueuedAt)
+                .ThenBy(item => item.CreatedAt)
+                .FirstOrDefaultAsync(cancellationToken);
             if (candidate is null) return null;
             var startedAt = DateTime.UtcNow;
             var claimExpiresAt = startedAt.AddMinutes(Math.Max(2, settings.ClaimLeaseMinutes));
@@ -926,34 +1017,47 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
 
     private async Task MonitorCancellationAndLeaseAsync(Guid jobId, Guid concurrencyToken, CancellationTokenSource cancellation, CancellationToken stoppingToken)
     {
-        var nextRenewalAt = DateTime.UtcNow;
-        while (!stoppingToken.IsCancellationRequested && !cancellation.IsCancellationRequested)
+        try
         {
-            using var scope = scopeFactory.CreateScope();
-            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
-            var now = DateTime.UtcNow;
-            var current = await db.GenerationJobs.AsNoTracking().Where(job => job.Id == jobId).Select(job => new { job.Status, job.ConcurrencyToken, job.CancellationRequested, job.RequestId }).FirstOrDefaultAsync(stoppingToken);
-            if (current is null || current.Status != GenerationJobStatus.Running || current.ConcurrencyToken != concurrencyToken || current.CancellationRequested)
+            var nextRenewalAt = DateTime.UtcNow;
+            while (!stoppingToken.IsCancellationRequested && !cancellation.IsCancellationRequested)
             {
-                logger.LogWarning("Generation job lease or cancellation state changed during execution. JobId={JobId}; RequestId={RequestId}; Status={Status}; CancellationRequested={CancellationRequested}", jobId, current?.RequestId, current?.Status, current?.CancellationRequested);
-                cancellation.Cancel();
-                return;
-            }
-
-            if (now >= nextRenewalAt)
-            {
-                var renewed = await db.GenerationJobs
-                    .Where(job => job.Id == jobId && job.Status == GenerationJobStatus.Running && job.ConcurrencyToken == concurrencyToken)
-                    .ExecuteUpdateAsync(setters => setters.SetProperty(job => job.ClaimExpiresAt, now.AddMinutes(Math.Max(2, settings.ClaimLeaseMinutes))), stoppingToken);
-                if (renewed == 0)
+                using var scope = scopeFactory.CreateScope();
+                var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+                var now = DateTime.UtcNow;
+                var current = await db.GenerationJobs.AsNoTracking().Where(job => job.Id == jobId).Select(job => new { job.Status, job.ConcurrencyToken, job.CancellationRequested, job.RequestId }).FirstOrDefaultAsync(stoppingToken);
+                if (current is null || current.Status != GenerationJobStatus.Running || current.ConcurrencyToken != concurrencyToken || current.CancellationRequested)
                 {
-                    logger.LogWarning("Generation job lease renewal lost. JobId={JobId}; RequestId={RequestId}", jobId, current.RequestId);
+                    logger.LogWarning("Generation job lease or cancellation state changed during execution. JobId={JobId}; RequestId={RequestId}; Status={Status}; CancellationRequested={CancellationRequested}", jobId, current?.RequestId, current?.Status, current?.CancellationRequested);
                     cancellation.Cancel();
                     return;
                 }
-                nextRenewalAt = now.AddMilliseconds(Math.Max(1000, settings.LeaseRenewalIntervalMilliseconds));
+
+                if (now >= nextRenewalAt)
+                {
+                    var claimExpiresAt = now.AddMinutes(Math.Max(2, settings.ClaimLeaseMinutes));
+                    var renewed = await db.GenerationJobs
+                        .Where(job => job.Id == jobId && job.Status == GenerationJobStatus.Running && job.ConcurrencyToken == concurrencyToken)
+                        .ExecuteUpdateAsync(setters => setters.SetProperty(job => job.ClaimExpiresAt, claimExpiresAt), stoppingToken);
+                    if (renewed == 0)
+                    {
+                        logger.LogWarning("Generation job lease renewal lost. JobId={JobId}; RequestId={RequestId}", jobId, current.RequestId);
+                        cancellation.Cancel();
+                        return;
+                    }
+                    logger.LogDebug("Generation job heartbeat renewed. JobId={JobId}; RequestId={RequestId}; ClaimExpiresAt={ClaimExpiresAt}", jobId, current.RequestId, claimExpiresAt);
+                    nextRenewalAt = now.AddMilliseconds(Math.Max(1000, settings.LeaseRenewalIntervalMilliseconds));
+                }
+                await Task.Delay(TimeSpan.FromMilliseconds(Math.Max(10, settings.CancellationPollMilliseconds)), stoppingToken);
             }
-            await Task.Delay(settings.CancellationPollMilliseconds, stoppingToken);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested || cancellation.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            logger.LogWarning(exception, "Generation job heartbeat monitor stopped safely. JobId={JobId}", jobId);
+            cancellation.Cancel();
         }
     }
 
@@ -1267,6 +1371,7 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
 
     private static string FailureMessage(string code) => code switch
     {
+        GenerationJobErrorCodes.Poisoned => "The generation could not be recovered safely. Please try again.",
         GenerationJobErrorCodes.NoBillableAsset => "The generation completed without a publishable asset. Please try again.",
         GenerationJobErrorCodes.ImageProviderUnavailable => "Image generation is temporarily unavailable. Please try again later.",
         GenerationJobErrorCodes.ImageRequestInvalid => "Please check the image request and try again.",

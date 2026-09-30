@@ -268,7 +268,7 @@ public sealed class MovieFinalMasteringService(TaslimDbContext db, MovieCollabor
             if (root.TryGetProperty("dimensions", out var dimensions) && TryReadDimensions(dimensions, out resolution)) return resolution;
             if (root.TryGetProperty("resolution", out var value) && value.ValueKind == JsonValueKind.String)
             {
-                var parts = value.GetString()!.Split(['x', 'X', '×'], StringSplitOptions.TrimEntries);
+                var parts = value.GetString()!.Split(new[] { 'x', 'X', '×' }, StringSplitOptions.TrimEntries);
                 if (parts.Length == 2 && int.TryParse(parts[0], out var width) && int.TryParse(parts[1], out var height) && width > 0 && height > 0)
                     return new SourceResolution(width, height);
             }
