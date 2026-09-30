@@ -71,6 +71,23 @@ describe("Full Movie workspace foundation", () => {
     expect(workspaceSource).toContain("api.reorderMovieEntity(\"scenes\"");
   });
 
+  it("keeps the Scenes empty state action-led and honest about provenance", () => {
+    expect(workspaceSource).toContain("Plan my scenes");
+    expect(workspaceSource).toContain("Create manually");
+    expect(workspaceSource).toContain("movie-scenes-empty-state");
+    expect(workspaceSource).toContain("Applied / current");
+    expect(workspaceSource).toContain("Manually edited");
+    expect(workspaceSource).toContain("AI-suggested");
+    expect(workspaceSource).toContain("sceneMatchesFilter");
+    expect(workspaceSource).toContain("api.updateMovieScene(sceneId, input)");
+  });
+
+  it("keeps scene decisions behind explicit Director review boundaries", () => {
+    expect(workspaceSource).toContain("Review it, approve or reject it, then execute explicitly");
+    expect(workspaceSource).toContain("Generate / regenerate");
+    expect(workspaceSource).toContain("No local-only scene record is created");
+  });
+
   it("keeps shot planning scene-scoped, explainable, and non-generating", () => {
     expect(workspaceSource).toContain("api.getMovieSceneShotPlan(scene.id)");
     expect(workspaceSource).toContain("api.addMovieShot(scene.id, input)");
