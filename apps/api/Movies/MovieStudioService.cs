@@ -531,7 +531,13 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         if (durationValidation is not null) throw new MovieStudioValidationException(durationValidation);
         var cinematographyValidation = CinematographyIntentValidator.Validate(request.Cinematography);
         if (cinematographyValidation is not null) throw new MovieStudioValidationException(cinematographyValidation);
-        var productionContractValidation = MovieShotProductionContractValidation.Validate(request.DurationSeconds, request.NarrativeImportance, request.ProductionComplexity, request.QualityRequirements, request.ContinuitySensitivity, request.UpscaleSuitability, request.TargetOutputRequirements);
+        var narrativeImportance = MovieShotProductionContractSerialization.NormalizeChoice(request.NarrativeImportance) ?? MovieShotNarrativeImportance.Supporting;
+        var productionComplexity = request.ProductionComplexity ?? new MovieShotComplexityProfile(MovieShotComplexityLevels.Low, [], "Defaulted for a provider-neutral planning shot.");
+        var qualityRequirements = request.QualityRequirements ?? new MovieShotQualityRequirements(MovieQualityLevels.Fast, ["Shot intent is explicit and reviewable."], "Defaulted for a provider-neutral planning shot.");
+        var continuitySensitivity = MovieShotProductionContractSerialization.NormalizeChoice(request.ContinuitySensitivity) ?? MovieShotContinuitySensitivities.Low;
+        var upscaleSuitability = MovieShotProductionContractSerialization.NormalizeChoice(request.UpscaleSuitability) ?? MovieShotUpscaleSuitabilities.Preferred;
+        var targetOutputRequirements = request.TargetOutputRequirements ?? new MovieShotTargetOutputRequirements(scene.MovieProject.AspectRatio);
+        var productionContractValidation = MovieShotProductionContractValidation.Validate(request.DurationSeconds, narrativeImportance, productionComplexity, qualityRequirements, continuitySensitivity, upscaleSuitability, targetOutputRequirements);
         if (productionContractValidation is not null) throw new MovieStudioValidationException(productionContractValidation);
         await ValidateSubjectCharacterIdsAsync(request.SubjectCharacterIds, scene.MovieProjectId, cancellationToken);
         var now = DateTime.UtcNow;
@@ -540,19 +546,19 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
             Id = Guid.NewGuid(), MovieSceneId = sceneId, Sequence = await db.MovieShots.CountAsync(item => item.MovieSceneId == sceneId, cancellationToken) + 1,
             Description = request.Description.Trim(), Purpose = ShotText(request.Purpose, 2_000), Subjects = ShotText(request.Subjects, 4_000),
             SubjectCharacterIdsJson = MovieShotReadiness.SerializeSubjectCharacterIds(request.SubjectCharacterIds), LocationSet = ShotText(request.LocationSet, 2_000),
-            NarrativeImportance = MovieShotProductionContractSerialization.NormalizeChoice(request.NarrativeImportance),
-            ProductionComplexityJson = MovieShotProductionContractSerialization.ToJson(request.ProductionComplexity),
-            QualityRequirementsJson = MovieShotProductionContractSerialization.ToJson(request.QualityRequirements),
-            ContinuitySensitivity = MovieShotProductionContractSerialization.NormalizeChoice(request.ContinuitySensitivity),
-            UpscaleSuitability = MovieShotProductionContractSerialization.NormalizeChoice(request.UpscaleSuitability),
-            TargetOutputRequirementsJson = MovieShotProductionContractSerialization.ToJson(request.TargetOutputRequirements),
+            NarrativeImportance = narrativeImportance,
+            ProductionComplexityJson = MovieShotProductionContractSerialization.ToJson(productionComplexity),
+            QualityRequirementsJson = MovieShotProductionContractSerialization.ToJson(qualityRequirements),
+            ContinuitySensitivity = continuitySensitivity,
+            UpscaleSuitability = upscaleSuitability,
+            TargetOutputRequirementsJson = MovieShotProductionContractSerialization.ToJson(targetOutputRequirements),
             ProductionRequirements = ShotText(request.ProductionRequirements, 4_000), ContinuityReferences = ShotText(request.ContinuityReferences, 4_000),
             CameraAndFraming = MovieStudioHelpers.Clean(request.CameraAndFraming), CameraMotion = MovieStudioHelpers.Clean(request.CameraMotion),
             CinematographyJson = CinematographyIntentValidator.ToJson(request.Cinematography), DurationSeconds = request.DurationSeconds,
             Narration = MovieStudioHelpers.Clean(request.Narration), Dialogue = MovieStudioHelpers.Clean(request.Dialogue), VisualContinuityNotes = MovieStudioHelpers.Clean(request.VisualContinuityNotes),
             CreatedAt = now, UpdatedAt = now,
         };
-        shot.QualityRequirementsJson = SerializeQualityProfile(shot, QualityPlanningContext(scene.MovieProject, scene, shot), request.QualityRequirements);
+        shot.QualityRequirementsJson = SerializeQualityProfile(shot, QualityPlanningContext(scene.MovieProject, scene, shot), qualityRequirements);
         db.MovieShots.Add(shot);
         await db.SaveChangesAsync(cancellationToken);
         return ToDto(shot, []);

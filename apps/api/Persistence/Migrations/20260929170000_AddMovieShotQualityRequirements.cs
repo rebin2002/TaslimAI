@@ -12,18 +12,27 @@ public partial class AddMovieShotQualityRequirements : Migration
 {
     protected override void Up(MigrationBuilder migrationBuilder)
     {
-        migrationBuilder.AddColumn<string>(
+        migrationBuilder.AlterColumn<string>(
             name: "QualityRequirementsJson",
             table: "MovieShots",
             type: "character varying(24000)",
             maxLength: 24000,
-            nullable: true);
+            nullable: true,
+            oldClrType: typeof(string),
+            oldType: "character varying(20000)",
+            oldMaxLength: 20000);
     }
 
     protected override void Down(MigrationBuilder migrationBuilder)
     {
-        migrationBuilder.DropColumn(
+        migrationBuilder.AlterColumn<string>(
             name: "QualityRequirementsJson",
-            table: "MovieShots");
+            table: "MovieShots",
+            type: "character varying(20000)",
+            maxLength: 20000,
+            nullable: true,
+            oldClrType: typeof(string),
+            oldType: "character varying(24000)",
+            oldMaxLength: 24000);
     }
 }

@@ -882,17 +882,24 @@ public sealed class MovieDirectorService(
     private static DirectorContextTargetRequest BuildContextTarget(DirectorProposalRequest request)
     {
         var selectedShotId = request.SelectedShotId ?? request.ShotId;
+        var requestedTargetType = request.ContextTargetType?.Trim().ToLowerInvariant();
         var targetType = request.RoomAction?.Trim().ToLowerInvariant() == DirectorActionTypes.ScenePlanning
             ? DirectorContextTargetTypes.Scene
-            : request.ContextTargetType
+            : requestedTargetType
                 ?? (selectedShotId.HasValue ? DirectorContextTargetTypes.Shot : request.SelectedSceneId.HasValue ? DirectorContextTargetTypes.Scene : DirectorContextTargetTypes.Project);
+        var room = request.ContextRoom;
+        if (!string.IsNullOrWhiteSpace(requestedTargetType) && !DirectorContextTargetTypes.Supported.Contains(targetType))
+        {
+            room ??= requestedTargetType;
+            targetType = DirectorContextTargetTypes.Project;
+        }
         return new DirectorContextTargetRequest
         {
             TargetType = targetType,
             TargetId = targetType == DirectorContextTargetTypes.Scene && request.SelectedSceneId.HasValue
                 ? request.SelectedSceneId
                 : request.ContextTargetId ?? selectedShotId ?? request.SelectedSceneId,
-            Room = request.ContextRoom,
+            Room = room,
             SelectedSceneId = request.SelectedSceneId,
             SelectedShotId = selectedShotId,
         };
