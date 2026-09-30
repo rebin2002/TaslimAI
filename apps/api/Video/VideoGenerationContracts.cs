@@ -173,6 +173,7 @@ public enum VideoGenerationErrorCode
     Cancelled,
     ArtifactUnavailable,
     MalformedResponse,
+    StaleEvent,
     InternalFailure,
 }
 
@@ -187,6 +188,9 @@ public sealed record VideoGenerationError(
 
     public static VideoGenerationError InvalidRequest(string message = "The video request is invalid.") =>
         new(VideoGenerationErrorCode.InvalidRequest, false, message);
+
+    public static VideoGenerationError ArtifactUnavailable(string message = "The video artifact is not available.") =>
+        new(VideoGenerationErrorCode.ArtifactUnavailable, false, message);
 }
 
 public sealed class VideoGenerationAdapterException(VideoGenerationError error)
@@ -266,7 +270,7 @@ public sealed record VideoUsageEvidence(
     IReadOnlyList<VideoUsageMeasure>? Measures = null,
     string? PricingVersion = null)
 {
-    public IReadOnlyList<VideoUsageMeasure> NormalizedMeasures { get; } =
+    public IReadOnlyList<VideoUsageMeasure> NormalizedMeasures =>
         new ReadOnlyCollection<VideoUsageMeasure>((Measures ?? []).ToList());
 }
 
