@@ -151,6 +151,7 @@ public static class MovieAssemblyStatuses
     public const string Assembling = "Assembling";
     public const string Ready = "Ready";
     public const string Failed = "Failed";
+    public const string Cancelled = "Cancelled";
 }
 
 public static class MovieGuideSectionTypes
@@ -623,13 +624,31 @@ public sealed class MovieAssembly
     public Guid? AssetId { get; set; }
     public string Status { get; set; } = MovieAssemblyStatuses.Planned;
     public string OutputFormat { get; set; } = "mp4";
+    public string ResolutionProfile { get; set; } = MovieFinalAssemblyProfiles.Uhd4K;
+    public int OutputWidth { get; set; }
+    public int OutputHeight { get; set; }
+    public string TimelineJson { get; set; } = "[]";
+    public string AudioMixJson { get; set; } = "[]";
+    public string CaptionsJson { get; set; } = "{}";
+    public string? IdempotencyKey { get; set; }
+    public string? RequestFingerprint { get; set; }
+    public string? ProvenanceJson { get; set; }
+    public string? CheckpointJson { get; set; }
+    public int AttemptCount { get; set; }
+    public int ProgressPercent { get; set; }
+    public string QcStatus { get; set; } = MovieFinalAssemblyQcStatuses.NotRun;
+    public string? QcResultJson { get; set; }
+    public string? LastErrorCode { get; set; }
     public string? MetadataJson { get; set; }
     public DateTime CreatedAt { get; set; }
+    public DateTime UpdatedAt { get; set; }
     public DateTime? CompletedAt { get; set; }
+    public Guid? RequestedByUserId { get; set; }
     public MovieProject MovieProject { get; set; } = null!;
     public GenerationJob? GenerationJob { get; set; }
     public Asset? Asset { get; set; }
     public ICollection<MovieCaptionTrack> CaptionTracks { get; set; } = [];
+    public ApplicationUser RequestedByUser { get; set; } = null!;
 }
 
 public enum MovieVideoProviderJobStatus

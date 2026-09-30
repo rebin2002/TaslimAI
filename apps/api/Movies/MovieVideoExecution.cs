@@ -237,7 +237,9 @@ public sealed class MovieVideoGenerationJobHandler(
 {
     private readonly MovieVideoOptions settings = options.Value;
 
-    public bool CanHandle(string jobType) => GenerationJobTypes.MovieTypes.Contains(jobType);
+    public bool CanHandle(string jobType) =>
+        string.Equals(jobType, GenerationJobTypes.MovieQuickGenerate, StringComparison.OrdinalIgnoreCase)
+        || string.Equals(jobType, GenerationJobTypes.MovieClipGenerate, StringComparison.OrdinalIgnoreCase);
 
     public async Task<GenerationHandlerResult> ExecuteAsync(GenerationJob job, IProgress<int> progress, CancellationToken cancellationToken)
     {

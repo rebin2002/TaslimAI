@@ -235,6 +235,16 @@ builder.Services.AddScoped<IMovieDialogueProductionService, MovieDialogueProduct
 builder.Services.AddScoped<MovieDialogueVoiceExecutionStore>();
 builder.Services.AddScoped<IMovieTimelineService, MovieTimelineService>();
 builder.Services.AddScoped<IMovieFinalMasteringService, MovieFinalMasteringService>();
+builder.Services.AddScoped<IMovieFinalAssemblyService, MovieFinalAssemblyService>();
+builder.Services.Configure<MovieFinalAssemblyOptions>(builder.Configuration.GetSection("MovieFinalAssembly"));
+builder.Services.AddScoped<MovieFinalAssemblyExecutionStore>();
+builder.Services.AddSingleton<MovieFinalAssemblyQualityControl>();
+builder.Services.AddSingleton<FfmpegMovieFinalAssemblyExecutor>();
+builder.Services.AddSingleton<IMovieFinalAssemblyExecutor>(services =>
+{
+    var options = services.GetRequiredService<IOptions<MovieFinalAssemblyOptions>>().Value;
+    return options.Enabled ? services.GetRequiredService<FfmpegMovieFinalAssemblyExecutor>() : new UnavailableMovieFinalAssemblyExecutor();
+});
 builder.Services.AddScoped<IMovieTakeUpscaleEligibilityService, MovieTakeUpscaleEligibilityService>();
 builder.Services.AddSingleton<IMovieSoundtrackMediaService, UnavailableMovieSoundtrackMediaService>();
 builder.Services.AddScoped<IMovieSoundtrackService, MovieSoundtrackService>();
@@ -314,6 +324,7 @@ builder.Services.AddSingleton<IImageGenerationProvider>(services => services.Get
 builder.Services.AddSingleton<IGenerationJobHandler, ImageGenerationJobHandler>();
 builder.Services.AddScoped<IGenerationJobHandler, MovieVideoGenerationJobHandler>();
 builder.Services.AddScoped<IGenerationJobHandler, MovieDialogueVoiceGenerationJobHandler>();
+builder.Services.AddScoped<IGenerationJobHandler, MovieFinalAssemblyJobHandler>();
 builder.Services.AddSingleton<IDocumentPromptBuilder, DocumentPromptBuilder>();
 builder.Services.AddScoped<IDocumentGenerationProvider, AiDocumentGenerationProvider>();
 builder.Services.AddSingleton<IDocumentRenderer, DocumentRenderer>();
