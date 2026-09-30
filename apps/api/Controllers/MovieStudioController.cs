@@ -427,6 +427,35 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieGuid
         catch (MovieProductionValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
     }
 
+    [HttpPost("shots/{shotId:guid}/production/keyframe")]
+    [ValidateAntiForgeryToken]
+    [EnableRateLimiting(RateLimiting.Generation)]
+    public async Task<IActionResult> GenerateKeyframe(Guid shotId, MovieKeyframeGenerationRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await movies.QueueKeyframeGenerationAsync(GetUserId(), shotId, request, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_SHOT_NOT_FOUND", "Movie shot not found.") : Accepted(result);
+        }
+        catch (MovieCollaborationForbiddenException) { return Forbid(); }
+        catch (GenerationJobForbiddenException) { return Forbid(); }
+        catch (GenerationJobValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
+        catch (MovieProductionValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
+    }
+
+    [HttpPost("production/versions/{versionId:guid}/select-keyframe")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> SelectKeyframe(Guid versionId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await movies.SelectKeyframeAsync(GetUserId(), versionId, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_PRODUCTION_VERSION_NOT_FOUND", "Production version not found.") : Ok(result);
+        }
+        catch (MovieCollaborationForbiddenException) { return Forbid(); }
+        catch (MovieProductionValidationException exception) { return ApiResults.Error(this, 409, exception.Code, exception.Message); }
+    }
+
     [HttpPost("production/versions/{versionId:guid}/review")]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> ReviewProductionVersion(Guid versionId, MovieProductionReviewRequest request, CancellationToken cancellationToken)

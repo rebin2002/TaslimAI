@@ -30,13 +30,13 @@ Movie-specific tables are additive and live beside the existing Projects, Assets
 | `MovieClip` | Provider output and continuity attachment | Project, Scene, Shot, Generation Job, Asset, Stored File |
 | `MovieAssembly` | Future final-assembly record | Project, Generation Job, Asset |
 
-The EF-generated migration `20260923153752_AddMovieStudioFoundation` creates the planning tables. The additive migration `20260924012646_AddMovieVideoProviderExecution` adds continuity snapshots, scene clip links, and the durable provider execution table. `20260926101042_AddMovieStoryboardProductionFunnel` adds the approval-gated production records and backfills existing shots to `ShotPlan`. The additive `AddMovieProductionKeyframeReferences` migration stores bounded continuity and cinematography reference JSON on each production version. Existing private storage remains the boundary for actual media files: `StoredFile` carries the storage key and provider, while `Asset` is the user-facing library record.
+The EF-generated migration `20260923153752_AddMovieStudioFoundation` creates the planning tables. The additive migration `20260924012646_AddMovieVideoProviderExecution` adds continuity snapshots, scene clip links, and the durable provider execution table. `20260926101042_AddMovieStoryboardProductionFunnel` adds the approval-gated production records and backfills existing shots to `ShotPlan`. The additive `AddMovieProductionKeyframeReferences` migration stores bounded continuity and cinematography reference JSON on each production version. `20260930122615_AddMovieKeyframeSelectionAndLocks` adds immutable approval-lock metadata and the shot-level selected-keyframe pointer. Existing private storage remains the boundary for actual media files: `StoredFile` carries the storage key and provider, while `Asset` is the user-facing library record.
 
 The schema does not store public provider URLs as final assets. Provider identifiers and metadata are retained as nullable fields so a configured provider can be reconciled with Taslim-owned private storage later.
 
 ## Generation jobs and usage accounting
 
-Movie operations use the existing durable `GenerationJob` queue. The supported job types are `movie.quick.generate`, `movie.clip.generate`, and `movie.assembly`; the production funnel does not add a provider, router, retry, or cost system. Storyboard and keyframe versions may optionally link an existing shared `image.generate` job and one or more existing `Asset` records, but creating a candidate is persistence-only. The API rejects unrelated job types and cross-project job links. Explicit scene/shot generation routes continue to create `movie.clip.generate` jobs that retain their scene/shot links and continuity snapshot. Assembly remains a reserved future stage.
+Movie operations use the existing durable `GenerationJob` queue. The supported job types are `movie.quick.generate`, `movie.clip.generate`, `movie.assembly`, and the shared `image.generate` seam for keyframes. The production funnel does not add a provider, router, retry, or cost system. The generic version endpoint remains persistence-only; the dedicated keyframe command queues a bounded shared image job linked to a reserved production-version identity. Tests replace the image adapter with a deterministic fake and no real image provider is enabled. The API rejects unrelated job types and cross-project job links. Explicit scene/shot generation routes continue to create `movie.clip.generate` jobs that retain their scene/shot links and continuity snapshot. Assembly remains a reserved future stage.
 
 The canonical shot state machine is:
 
@@ -48,7 +48,7 @@ ShotPlan
   → ProductionRender → SelectedFinalTake
 ```
 
-Only pending versions can be approved or rejected, and the caller needs the movie `Approve` permission to review. A keyframe requires an approved storyboard source; motion preview requires an approved keyframe; production render requires an approved motion preview. Rejection retains the version and reason without advancing the shot. `RegenerationMetadataJson` records selective regeneration intent, while `StageProvenanceJson`, role-tagged Asset references, optional first/last-frame Asset IDs/notes, immutable continuity snapshot references, shot cinematography references, and immutable transition rows preserve how a version was produced.
+Only pending versions can be approved or rejected, and the caller needs the movie `Approve` permission to review. Approval records an immutable lock timestamp and actor; regeneration creates a new version and never edits or deletes a locked artifact. A keyframe requires an approved storyboard source; motion preview requires an approved keyframe; production render requires an approved motion preview. An approved keyframe can be selected through the shot-level pointer, with a durable selection transition. Rejection retains the version and reason without advancing the shot. `RegenerationMetadataJson` records selective regeneration intent, while `StageProvenanceJson`, role-tagged Asset references, optional first/last-frame Asset IDs/notes, immutable continuity snapshot references, shot cinematography references, and immutable transition rows preserve how a version was produced.
 
 `GenerationJobUsageService` maps every movie job type to `UsageFeature.Movie`. This preserves the repository's existing feature naming convention and allows pending, failed, cancelled, and completed transactions to appear in existing usage reporting without a new accounting subsystem.
 
@@ -89,7 +89,9 @@ All endpoints require authentication and workspace membership. Mutating endpoint
 | `POST /api/movie-studio/scenes/{sceneId}/shots` | Add an ordered shot with narration/dialogue and continuity fields |
 | `GET /api/movie-studio/shots/{shotId}/production` | Read current production stage, versions, and immutable transitions |
 | `POST /api/movie-studio/shots/{shotId}/production/versions` | Persist a storyboard/keyframe/motion/render candidate with optional first/last-frame, Asset, and validated shared-queue GenerationJob links; capture continuity/cinematography references |
+| `POST /api/movie-studio/shots/{shotId}/production/keyframe` | Queue a keyframe from an approved storyboard through the provider-neutral shared image seam; preserve the source, continuity snapshot, provenance, and version history |
 | `POST /api/movie-studio/production/versions/{versionId}/review` | Approve or reject a pending candidate and advance the state machine when approved |
+| `POST /api/movie-studio/production/versions/{versionId}/select-keyframe` | Select an approved, locked keyframe for the shot without mutating prior versions |
 | `POST /api/movie-studio/projects/{id}/scenes/{sceneId}/generate` | Queue a provider-neutral scene clip job |
 | `POST /api/movie-studio/shots/{shotId}/generate` | Queue a provider-neutral shot clip job |
 
