@@ -179,8 +179,12 @@ public sealed class MovieV2Service(TaslimDbContext db, WorkspaceAccessService ac
             throw new MovieV2ValidationException("The selected generation job does not belong to this movie project.");
         if (request.AssetId.HasValue)
         {
-            var asset = await db.Assets.AsNoTracking().FirstOrDefaultAsync(item => item.Id == request.AssetId && item.WorkspaceId == shot.Scene.MovieProject.WorkspaceId, cancellationToken);
+            var asset = await db.Assets.AsNoTracking().Include(item => item.StoredFile).FirstOrDefaultAsync(item => item.Id == request.AssetId && item.WorkspaceId == shot.Scene.MovieProject.WorkspaceId, cancellationToken);
             if (asset is null) throw new MovieV2ValidationException("The selected asset does not belong to this workspace.");
+            if (asset.Status != AssetStatus.Active || asset.ProjectId.HasValue && asset.ProjectId != shot.Scene.MovieProject.ProjectId)
+                throw new MovieV2ValidationException("The selected asset is not active in this movie project.");
+            if (asset.StoredFileId.HasValue && asset.StoredFile?.Status != StoredFileStatus.Ready)
+                throw new MovieV2ValidationException("The selected asset file is not ready.");
             if (clip is not null && clip.AssetId != asset.Id)
                 throw new MovieV2ValidationException("The selected asset is not the output of the selected clip.");
             if (job is not null && asset.SourceGenerationJobId != job.Id)

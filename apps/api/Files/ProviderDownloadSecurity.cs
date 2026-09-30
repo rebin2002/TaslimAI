@@ -13,6 +13,7 @@ public sealed class ProviderUrlPolicy : IProviderUrlPolicy
     public async Task EnsureSafeAsync(Uri uri, CancellationToken cancellationToken = default)
     {
         if (!uri.IsAbsoluteUri || !string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
+            || uri.Port is not (-1 or 443)
             || !string.IsNullOrEmpty(uri.UserInfo) || string.IsNullOrWhiteSpace(uri.Host))
             throw new InvalidDataException("Provider download URL is not safe.");
 

@@ -82,6 +82,14 @@ public sealed class GeneratedMediaSecurityTests
         await Assert.ThrowsAsync<InvalidDataException>(() => policy.EnsureSafeAsync(new Uri("http://example.com/media.mp3")));
     }
 
+    [Fact]
+    public async Task Provider_url_policy_rejects_non_default_https_ports()
+    {
+        var policy = new ProviderUrlPolicy();
+
+        await Assert.ThrowsAsync<InvalidDataException>(() => policy.EnsureSafeAsync(new Uri("https://example.com:8443/media.mp3")));
+    }
+
     private static void AddEntry(ZipArchive archive, string name, string content)
     {
         using var writer = new StreamWriter(archive.CreateEntry(name).Open(), Encoding.UTF8, 1024, leaveOpen: false);

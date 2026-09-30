@@ -80,6 +80,16 @@ public sealed class GenerationJobsTests : IClassFixture<GenerationJobsApiFactory
     }
 
     [Fact]
+    public void Public_generation_json_cannot_supply_server_trusted_cost_fields()
+    {
+        var request = JsonSerializer.Deserialize<CreateGenerationJobRequest>("{\"workspaceId\":\"00000000-0000-0000-0000-000000000001\",\"jobType\":\"system.test\",\"inputJson\":\"{}\",\"estimatedProviderCostUsd\":999,\"internalCostEstimate\":{\"isKnown\":true,\"amountUsd\":999}}", new JsonSerializerOptions(JsonSerializerDefaults.Web));
+
+        Assert.NotNull(request);
+        Assert.Null(request!.EstimatedProviderCostUsd);
+        Assert.Null(request.InternalCostEstimate);
+    }
+
+    [Fact]
     public async Task System_test_job_reaches_success_with_progress_result_output_and_zero_usage()
     {
         using var client = factory.CreateClient();
