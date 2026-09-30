@@ -2314,3 +2314,38 @@ body { background: var(--canvas); }
 @media (max-width: 900px) { .movie-resolution-decision-grid { grid-template-columns: 1fr; }.movie-resolution-decision p { max-width: 620px; } }
 @media (max-width: 720px) { .movie-resolution-heading { flex-direction: column; }.movie-resolution-safe-state { align-self: flex-start; }.movie-resolution-intent-grid, .movie-resolution-options, .movie-resolution-footer { grid-template-columns: 1fr; }.movie-resolution-option { min-height: 126px; }.movie-resolution-decision-grid { grid-template-columns: 1fr; } }
 @media (max-width: 520px) { .movie-resolution-panel { padding: 15px; }.movie-resolution-intent-card p { white-space: normal; }.movie-resolution-option { min-height: 0; }.movie-resolution-option-meta { margin-top: 5px; }.movie-resolution-footer { gap: 0; } }
+
+/* Wave 4 movie operations & observability — internal admin surface. */
+.admin-operations-page { max-width: 1240px; padding-bottom: 76px; }
+.operations-section { margin-top: 26px; }
+.operations-section-heading { display: flex; align-items: end; justify-content: space-between; gap: 16px; margin-bottom: 13px; }
+.operations-section-heading h2 { margin: 5px 0 0; color: var(--navy-900); font-size: 1.15rem; letter-spacing: -.035em; }
+.operations-section-heading > span { color: var(--muted); font-size: .72rem; text-align: end; }
+.operations-signal-grid, .operations-two-column, .operations-three-column { display: grid; gap: 14px; }
+.operations-signal-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.operations-two-column { grid-template-columns: repeat(2, minmax(0, 1fr)); margin-top: 14px; }
+.operations-three-column { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.operations-card { min-width: 0; padding: 18px; }
+.operations-card h3 { margin: 0 0 14px; color: var(--navy-900); font-size: .9rem; letter-spacing: -.02em; }
+.operations-card > svg { margin-bottom: 9px; color: var(--teal); }
+.operations-signal { display: flex; min-width: 0; flex-direction: column; gap: 7px; padding: 15px; }
+.operations-signal span { color: var(--muted); font-size: .72rem; }
+.operations-signal strong { color: var(--navy-900); font-size: 1.35rem; letter-spacing: -.045em; }
+.operations-signal-wide { grid-column: span 1; }
+.operations-metric-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 16px; margin: 0; }
+.operations-metric-grid div { min-width: 0; }
+.operations-metric-grid dt { color: var(--muted); font-size: .68rem; }
+.operations-metric-grid dd { margin: 4px 0 0; color: var(--navy-900); font-size: .83rem; font-weight: 750; overflow-wrap: anywhere; }
+.operations-count-list { display: grid; gap: 8px; }
+.operations-count-list > div { display: flex; justify-content: space-between; gap: 12px; padding-bottom: 7px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: .75rem; }
+.operations-count-list > div:last-child { border-bottom: 0; padding-bottom: 0; }
+.operations-count-list strong { color: var(--navy-900); }
+.operations-detail-list { display: flex; flex-direction: column; gap: 7px; }
+.operations-detail-list > div { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; padding: 10px; border: 1px solid #edf1f4; border-radius: 8px; background: #fbfcfd; }
+.operations-detail-list > div > span { display: flex; min-width: 0; flex-direction: column; gap: 4px; }
+.operations-detail-list strong { overflow: hidden; color: var(--navy-900); font-size: .75rem; text-overflow: ellipsis; white-space: nowrap; }
+.operations-detail-list small { color: var(--muted); font-size: .67rem; overflow-wrap: anywhere; }
+.operations-detail-list b { flex: 0 0 auto; color: var(--teal); font-size: .7rem; }
+.operations-empty { margin: 0; color: var(--muted); font-size: .75rem; line-height: 1.6; }
+@media (max-width: 900px) { .operations-three-column { grid-template-columns: 1fr; }.operations-signal-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 620px) { .operations-section-heading { align-items: flex-start; flex-direction: column; }.operations-section-heading > span { text-align: start; }.operations-two-column, .operations-signal-grid { grid-template-columns: 1fr; }.operations-metric-grid { grid-template-columns: 1fr; }.operations-detail-list > div { align-items: flex-start; flex-direction: column; }.operations-detail-list .secondary-button { width: 100%; justify-content: center; } }

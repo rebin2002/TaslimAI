@@ -15,6 +15,7 @@ using Taslim.Api.Images;
 using Taslim.Api.Music;
 using Taslim.Api.Movies;
 using Taslim.Api.Notifications;
+using Taslim.Api.Operations;
 using Taslim.Api.Persistence;
 using Taslim.Api.Presentations;
 using Taslim.Api.Research;
@@ -28,12 +29,14 @@ namespace Taslim.Api.Generation;
 public sealed class GenerationJobOptions
 {
     public int WorkerConcurrency { get; set; } = 1;
+    public bool WorkerEnabled { get; set; } = true;
     public int PollIntervalMilliseconds { get; set; } = 1000;
     public int CancellationPollMilliseconds { get; set; } = 100;
     public int ClaimRecoveryIntervalMilliseconds { get; set; } = 30000;
     public int ClaimLeaseMinutes { get; set; } = 30;
     public int LeaseRenewalIntervalMilliseconds { get; set; } = 60000;
     public int MaxAutomaticRetries { get; set; } = 3;
+    public int HeartbeatStaleAfterSeconds { get; set; } = 120;
 }
 
 public sealed class GenerationJobPollingSchedule(GenerationJobOptions options)
@@ -657,16 +660,19 @@ public sealed class GenerationJobWorker(
 {
     private const string PoisonJobMessage = "The generation could not be recovered safely. Please try again.";
     private readonly GenerationJobOptions settings = options.Value;
+    private readonly string instanceId = Guid.NewGuid().ToString("N");
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        var workers = Enumerable.Range(0, Math.Max(1, settings.WorkerConcurrency)).Select(_ => RunWorkerAsync(stoppingToken));
+        var workers = Enumerable.Range(0, Math.Max(1, settings.WorkerConcurrency)).Select(index => RunWorkerAsync(index, stoppingToken));
         await Task.WhenAll(workers);
     }
 
-    private async Task RunWorkerAsync(CancellationToken stoppingToken)
+    private async Task RunWorkerAsync(int workerIndex, CancellationToken stoppingToken)
     {
         var schedule = new GenerationJobPollingSchedule(settings);
+        var workerId = $"{instanceId}:{workerIndex}";
+        var consecutiveFailures = 0;
         while (!stoppingToken.IsCancellationRequested)
         {
             try
@@ -677,6 +683,7 @@ public sealed class GenerationJobWorker(
                 var usage = scope.ServiceProvider.GetRequiredService<IGenerationJobUsageService>();
                 var movieExecutions = scope.ServiceProvider.GetRequiredService<MovieVideoExecutionStore>();
                 var now = DateTime.UtcNow;
+                await TouchWorkerHeartbeatSafelyAsync(db, workerId, workerIndex, null, null, consecutiveFailures, now, stoppingToken);
                 if (schedule.RecoveryDue(now))
                 {
                     await RecoverExpiredClaimsAsync(db, usage, movieExecutions, notifications, stoppingToken);
@@ -688,14 +695,18 @@ public sealed class GenerationJobWorker(
                     await Task.Delay(schedule.IdleDelay, stoppingToken);
                     continue;
                 }
+                consecutiveFailures = 0;
+                await TouchWorkerHeartbeatSafelyAsync(db, workerId, workerIndex, job.Id, now, consecutiveFailures, now, stoppingToken);
                 logger.LogInformation(
                     "Generation job claimed. JobId={JobId}; WorkspaceId={WorkspaceId}; JobType={JobType}; RequestId={RequestId}; RetryCount={RetryCount}; ClaimExpiresAt={ClaimExpiresAt}",
                     job.Id, job.WorkspaceId, job.JobType, job.RequestId, job.RetryCount, job.ClaimExpiresAt);
-                await ExecuteJobAsync(job, stoppingToken);
+                await ExecuteJobAsync(job, workerId, workerIndex, stoppingToken);
+                await TouchWorkerHeartbeatSafelyAsync(db, workerId, workerIndex, null, now, consecutiveFailures, DateTime.UtcNow, stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
             catch (Exception exception)
             {
+                consecutiveFailures = Math.Min(consecutiveFailures + 1, 1000);
                 logger.LogError(exception, "Generation job worker iteration failed safely.");
                 await Task.Delay(schedule.IdleDelay, stoppingToken);
             }
@@ -851,7 +862,7 @@ public sealed class GenerationJobWorker(
         return job;
     }
 
-    private async Task ExecuteJobAsync(GenerationJob claimedJob, CancellationToken stoppingToken)
+    private async Task ExecuteJobAsync(GenerationJob claimedJob, string workerId, int workerIndex, CancellationToken stoppingToken)
     {
         using var scope = scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
@@ -864,7 +875,7 @@ public sealed class GenerationJobWorker(
         var dialogueExecutions = scope.ServiceProvider.GetRequiredService<MovieDialogueVoiceExecutionStore>();
         var assemblyExecutions = scope.ServiceProvider.GetRequiredService<MovieFinalAssemblyExecutionStore>();
         using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
-        var monitor = MonitorCancellationAndLeaseAsync(claimedJob.Id, claimedJob.ConcurrencyToken, cancellation, stoppingToken);
+        var monitor = MonitorCancellationAndLeaseAsync(claimedJob.Id, claimedJob.ConcurrencyToken, workerId, workerIndex, cancellation, stoppingToken);
         var publications = new List<PreparedGenerationOutput>();
         var publicationCommitted = false;
         AiUsageMetadata? providerUsage = null;
@@ -1233,22 +1244,34 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
         }
     }
 
-    private async Task MonitorCancellationAndLeaseAsync(Guid jobId, Guid concurrencyToken, CancellationTokenSource cancellation, CancellationToken stoppingToken)
+    private async Task MonitorCancellationAndLeaseAsync(Guid jobId, Guid concurrencyToken, string workerId, int workerIndex, CancellationTokenSource cancellation, CancellationToken stoppingToken)
     {
+        var nextRenewalAt = DateTime.UtcNow;
+        var nextHeartbeatAt = DateTime.UtcNow;
         try
         {
-            var nextRenewalAt = DateTime.UtcNow;
             while (!stoppingToken.IsCancellationRequested && !cancellation.IsCancellationRequested)
             {
                 using var scope = scopeFactory.CreateScope();
                 var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
                 var now = DateTime.UtcNow;
-                var current = await db.GenerationJobs.AsNoTracking().Where(job => job.Id == jobId).Select(job => new { job.Status, job.ConcurrencyToken, job.CancellationRequested, job.RequestId }).FirstOrDefaultAsync(stoppingToken);
+                var current = await db.GenerationJobs.AsNoTracking()
+                    .Where(job => job.Id == jobId)
+                    .Select(job => new { job.Status, job.ConcurrencyToken, job.CancellationRequested, job.RequestId })
+                    .FirstOrDefaultAsync(stoppingToken);
                 if (current is null || current.Status != GenerationJobStatus.Running || current.ConcurrencyToken != concurrencyToken || current.CancellationRequested)
                 {
-                    logger.LogWarning("Generation job lease or cancellation state changed during execution. JobId={JobId}; RequestId={RequestId}; Status={Status}; CancellationRequested={CancellationRequested}", jobId, current?.RequestId, current?.Status, current?.CancellationRequested);
+                    logger.LogWarning(
+                        "Generation job lease or cancellation state changed during execution. JobId={JobId}; RequestId={RequestId}; Status={Status}; CancellationRequested={CancellationRequested}",
+                        jobId, current?.RequestId, current?.Status, current?.CancellationRequested);
                     cancellation.Cancel();
                     return;
+                }
+
+                if (now >= nextHeartbeatAt)
+                {
+                    await TouchWorkerHeartbeatSafelyAsync(db, workerId, workerIndex, jobId, null, 0, now, stoppingToken);
+                    nextHeartbeatAt = now.AddSeconds(Math.Clamp(settings.HeartbeatStaleAfterSeconds / 2, 15, 60));
                 }
 
                 if (now >= nextRenewalAt)
@@ -1277,6 +1300,61 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
             logger.LogWarning(exception, "Generation job heartbeat monitor stopped safely. JobId={JobId}", jobId);
             cancellation.Cancel();
         }
+    }
+
+    private async Task TouchWorkerHeartbeatSafelyAsync(
+        TaslimDbContext db,
+        string workerId,
+        int workerIndex,
+        Guid? activeJobId,
+        DateTime? claimedAt,
+        int consecutiveFailures,
+        DateTime now,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await TouchWorkerHeartbeatAsync(db, workerId, workerIndex, activeJobId, claimedAt, consecutiveFailures, now, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+        catch (Exception exception)
+        {
+            logger.LogWarning(exception, "Generation worker heartbeat was skipped safely. WorkerId={WorkerId}", workerId);
+        }
+    }
+
+    private async Task TouchWorkerHeartbeatAsync(
+        TaslimDbContext db,
+        string workerId,
+        int workerIndex,
+        Guid? activeJobId,
+        DateTime? claimedAt,
+        int consecutiveFailures,
+        DateTime now,
+        CancellationToken cancellationToken)
+    {
+        var heartbeat = await db.GenerationWorkerHeartbeats.SingleOrDefaultAsync(item => item.WorkerId == workerId, cancellationToken);
+        if (heartbeat is null)
+        {
+            heartbeat = new GenerationWorkerHeartbeat
+            {
+                Id = Guid.NewGuid(),
+                WorkerId = workerId,
+                InstanceId = instanceId,
+                WorkerIndex = workerIndex,
+                WorkerConcurrency = Math.Max(1, settings.WorkerConcurrency),
+                Status = GenerationWorkerStatuses.Running,
+                StartedAt = now,
+            };
+            db.GenerationWorkerHeartbeats.Add(heartbeat);
+        }
+        heartbeat.Status = GenerationWorkerStatuses.Running;
+        heartbeat.LastSeenAt = now;
+        heartbeat.ActiveJobId = activeJobId;
+        heartbeat.ConsecutiveIterationFailures = consecutiveFailures;
+        if (claimedAt.HasValue) heartbeat.LastClaimedAt = claimedAt;
+        if (!activeJobId.HasValue) heartbeat.LastCompletedAt = now;
+        await db.SaveChangesAsync(cancellationToken);
     }
 
     private async Task<int> UpdateProgressAsync(Guid jobId, Guid concurrencyToken, int progress, CancellationToken cancellationToken)

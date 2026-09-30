@@ -6,6 +6,7 @@ using Taslim.Api.Benchmarking;
 using Taslim.Api.Domain;
 using Taslim.Api.Movies;
 using Taslim.Api.Notifications;
+using Taslim.Api.Operations;
 using Taslim.Api.Upscaling;
 
 namespace Taslim.Api.Persistence;
@@ -43,6 +44,8 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
     public DbSet<ProviderBenchmarkScenario> ProviderBenchmarkScenarios => Set<ProviderBenchmarkScenario>();
     public DbSet<ProviderBenchmarkMeasurement> ProviderBenchmarkMeasurements => Set<ProviderBenchmarkMeasurement>();
     public DbSet<ProviderBenchmarkEvidence> ProviderBenchmarkEvidence => Set<ProviderBenchmarkEvidence>();
+    public DbSet<GenerationWorkerHeartbeat> GenerationWorkerHeartbeats => Set<GenerationWorkerHeartbeat>();
+    public DbSet<AdminOperationAuditEvent> AdminOperationAuditEvents => Set<AdminOperationAuditEvent>();
         public DbSet<Plan> Plans => Set<Plan>();
         public DbSet<Subscription> Subscriptions => Set<Subscription>();
         public DbSet<BillingPeriod> BillingPeriods => Set<BillingPeriod>();
@@ -226,6 +229,29 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasOne(item => item.Workspace).WithMany().HasForeignKey(item => item.WorkspaceId).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne(item => item.Project).WithMany().HasForeignKey(item => item.ProjectId).OnDelete(DeleteBehavior.SetNull);
             entity.HasOne(item => item.CreatedByUser).WithMany().HasForeignKey(item => item.CreatedByUserId).OnDelete(DeleteBehavior.Restrict);
+        });
+        builder.Entity<GenerationWorkerHeartbeat>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.WorkerId).HasMaxLength(160).IsRequired();
+            entity.Property(item => item.InstanceId).HasMaxLength(80).IsRequired();
+            entity.Property(item => item.Status).HasMaxLength(20).IsRequired();
+            entity.HasIndex(item => item.WorkerId).IsUnique();
+            entity.HasIndex(item => item.LastSeenAt);
+        });
+        builder.Entity<AdminOperationAuditEvent>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.Action).HasMaxLength(80).IsRequired();
+            entity.Property(item => item.TargetType).HasMaxLength(80).IsRequired();
+            entity.Property(item => item.Outcome).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.Reason).HasMaxLength(500);
+            entity.Property(item => item.RequestId).HasMaxLength(128);
+            entity.Property(item => item.BeforeState).HasMaxLength(500);
+            entity.Property(item => item.AfterState).HasMaxLength(500);
+            entity.HasIndex(item => new { item.CreatedAt, item.Action });
+            entity.HasIndex(item => new { item.TargetType, item.TargetId, item.CreatedAt });
+            entity.HasOne<ApplicationUser>().WithMany().HasForeignKey(item => item.ActorUserId).OnDelete(DeleteBehavior.Restrict);
         });
         builder.Entity<MovieAct>(entity =>
         {

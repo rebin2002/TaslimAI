@@ -7,6 +7,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
+using Taslim.Api.Operations;
 using Taslim.Api.Persistence;
 using Xunit;
 
@@ -194,6 +195,117 @@ public sealed class AdminOperationsTests : IClassFixture<TaslimApiFactory>
         var updated = await client.GetFromJsonAsync<AuthResponse>("/api/auth/me");
         Assert.NotNull(updated);
         Assert.True(updated!.User.IsAdmin);
+    }
+
+    [Fact]
+    public async Task Movie_operations_report_queue_age_retries_qc_ingestion_accounting_and_workers_without_private_payloads()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Movie Operations Administrator");
+        await AddAdminRole(auth.User.Email);
+        var now = DateTime.UtcNow;
+        var queuedJobId = Guid.NewGuid();
+        var failedJobId = Guid.NewGuid();
+        var completedJobId = Guid.NewGuid();
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.GenerationJobs.AddRange(
+                new GenerationJob
+                {
+                    Id = queuedJobId, WorkspaceId = auth.PersonalWorkspace.Id, CreatedByUserId = auth.User.Id,
+                    JobType = GenerationJobTypes.MovieClipGenerate, Status = GenerationJobStatus.Queued,
+                    InputJson = "{\"prompt\":\"private movie prompt\"}", CreatedAt = now.AddMinutes(-8), QueuedAt = now.AddMinutes(-7), RetryCount = 2,
+                    ConcurrencyToken = Guid.NewGuid(),
+                },
+                new GenerationJob
+                {
+                    Id = failedJobId, WorkspaceId = auth.PersonalWorkspace.Id, CreatedByUserId = auth.User.Id,
+                    JobType = GenerationJobTypes.MovieClipGenerate, Status = GenerationJobStatus.Failed,
+                    InputJson = "{\"prompt\":\"another private prompt\"}", ErrorCode = GenerationJobErrorCodes.MovieProviderUnavailable,
+                    ErrorMessage = "provider payload must never be returned", CreatedAt = now.AddMinutes(-6), FailedAt = now.AddMinutes(-5), RetryCount = 1,
+                    ConcurrencyToken = Guid.NewGuid(),
+                },
+                new GenerationJob
+                {
+                    Id = completedJobId, WorkspaceId = auth.PersonalWorkspace.Id, CreatedByUserId = auth.User.Id,
+                    JobType = GenerationJobTypes.MovieQuickGenerate, Status = GenerationJobStatus.Succeeded,
+                    InputJson = "{}", CreatedAt = now.AddMinutes(-4), CompletedAt = now.AddMinutes(-3),
+                    ConcurrencyToken = Guid.NewGuid(),
+                });
+            db.UsageTransactions.Add(new UsageTransaction
+            {
+                Id = Guid.NewGuid(), WorkspaceId = auth.PersonalWorkspace.Id, UserId = auth.User.Id, GenerationJobId = completedJobId,
+                RequestId = "movie-ops-accounting", Feature = UsageFeature.Movie, Provider = "internal", Model = "internal",
+                Status = UsageTransactionStatus.Completed, EstimatedProviderCostUsd = 2.25m, ProviderCostUsd = 1.75m,
+                ChargedAmount = 0m, Currency = "USD", CostBasis = UsageCostBasis.Actual, CreatedAt = now.AddMinutes(-3), CompletedAt = now.AddMinutes(-3),
+            });
+            db.GenerationWorkerHeartbeats.Add(new GenerationWorkerHeartbeat
+            {
+                Id = Guid.NewGuid(), WorkerId = "test-worker-0", InstanceId = "test-instance", WorkerIndex = 0, WorkerConcurrency = 1,
+                Status = GenerationWorkerStatuses.Running, StartedAt = now.AddHours(-1), LastSeenAt = now, ActiveJobId = queuedJobId,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var response = await client.GetAsync($"/api/admin/operations/dashboard?fromUtc={Uri.EscapeDataString(now.AddDays(-1).ToString("O"))}&toUtc={Uri.EscapeDataString(now.AddDays(1).ToString("O"))}");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var json = await response.Content.ReadAsStringAsync();
+        var dashboard = JsonSerializer.Deserialize<AdminOperationsDashboardDto>(json, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        Assert.NotNull(dashboard);
+        Assert.True(dashboard!.Movie.MovieJobCountInRange >= 3);
+        Assert.True(dashboard.Movie.OldestQueueAgeSeconds >= 7 * 60);
+        Assert.True(dashboard.Movie.TotalRetryCount >= 3);
+        Assert.True(dashboard.Movie.ProviderDisabledFailureCount >= 1);
+        Assert.True(dashboard.Movie.MissingAccountingEvidenceCount >= 1);
+        Assert.True(dashboard.Movie.CompletedJobsWithoutAssetCount >= 1);
+        Assert.Contains(dashboard.Workers.Workers, worker => worker.WorkerId == "test-worker-0" && !worker.IsStale);
+        Assert.Equal("disabled", dashboard.Movie.ProviderStatus);
+        Assert.DoesNotContain("private movie prompt", json);
+        Assert.DoesNotContain("provider payload must never be returned", json);
+        Assert.DoesNotContain("InputJson", json);
+    }
+
+    [Fact]
+    public async Task Admin_can_recover_only_an_expired_movie_lease_and_the_action_is_audited()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Movie Recovery Administrator");
+        await AddAdminRole(auth.User.Email);
+        var jobId = Guid.NewGuid();
+        var now = DateTime.UtcNow;
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.GenerationJobs.Add(new GenerationJob
+            {
+                Id = jobId, WorkspaceId = auth.PersonalWorkspace.Id, CreatedByUserId = auth.User.Id,
+                JobType = GenerationJobTypes.MovieClipGenerate, Status = GenerationJobStatus.Running, InputJson = "{}",
+                CreatedAt = now.AddMinutes(-30), StartedAt = now.AddMinutes(-20), ClaimExpiresAt = now.AddMinutes(-5), RetryCount = 3,
+                ConcurrencyToken = Guid.NewGuid(),
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var response = await SendWithCsrf(client, HttpMethod.Post, $"/api/admin/operations/jobs/{jobId}/recover", new { reason = "Worker lease expired during the disabled-provider acceptance test." });
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var recovery = await response.Content.ReadFromJsonAsync<AdminJobRecoveryResult>();
+        Assert.NotNull(recovery);
+        Assert.Equal(jobId, recovery!.JobId);
+        Assert.Equal(GenerationJobStatus.Queued, recovery.Status);
+        Assert.Equal(4, recovery.RetryCount);
+
+        using var verifyScope = factory.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var job = await verifyDb.GenerationJobs.SingleAsync(item => item.Id == jobId);
+        Assert.Equal(GenerationJobStatus.Queued, job.Status);
+        Assert.Null(job.ClaimExpiresAt);
+        var audit = await verifyDb.AdminOperationAuditEvents.SingleAsync(item => item.TargetId == jobId);
+        Assert.Equal(AdminOperationActions.RecoverExpiredGenerationJob, audit.Action);
+        Assert.Equal(AdminOperationOutcomes.Succeeded, audit.Outcome);
+        Assert.Equal("status=Running;retryCount=3", audit.BeforeState);
+        Assert.Equal("status=Queued;retryCount=4", audit.AfterState);
+        Assert.DoesNotContain("prompt", audit.Reason!, StringComparison.OrdinalIgnoreCase);
     }
 
     private async Task<AuthResponse> Register(HttpClient client, string displayName)
