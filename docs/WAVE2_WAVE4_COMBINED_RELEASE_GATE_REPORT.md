@@ -42,6 +42,34 @@ Results:
 - Final branch remained `integration/movie-wave2-wave4-combined`.
 - No main merge and no deployment occurred.
 
+### Exact integrated source tips
+
+Every required remote tip matched its expected prefix and was verified as an ancestor of the combined code candidate `af666d9caffdd8a2dda0df65712b388f28f4daac`:
+
+| Wave 2 branch | Exact SHA |
+|---|---|
+| `parallel/movie-wave2-scene-planning` | `0837804a4f30f8c134269da428f828ba6df4f265` |
+| `parallel/movie-wave2-shot-planning` | `d41ad3efcc6182706aa595a3b23b9e9e0fd2a2ff` |
+| `parallel/movie-wave2-shot-contract` | `cfd880c7d1ae2401a06b794d6c6bd886761728a9` |
+| `parallel/movie-wave2-complexity` | `3b9c281f1c3d3101d2de4cbf8886620a21bd1ba0` |
+| `parallel/movie-wave2-shot-importance` | `1d5b728ef2674f30ecfd411edcf1f544ac226031` |
+| `parallel/movie-wave2-quality-profile` | `db07e455b6d2186d469bd3c5d2489915e0555ca2` |
+| `parallel/movie-wave2-duration-budget` | `1987df8d8712511a6c4517c3a31800fefb466e9c` |
+| `parallel/movie-wave2-continuity` | `6efd7fa478ace91c7f647e2ea00695e49afd99c3` |
+| `parallel/movie-wave2-cinematography` | `1a59daddd1e7ae54d956e25e032b5e3475eab907` |
+| `parallel/movie-wave2-scenes-ux` | `e1385367cc026da4a87ecb7f36d8de0a7bda017a` |
+| `parallel/movie-wave2-shot-editor-ux` | `5610e813264cce11ecd35c2a74c8778bcf2d0f48` |
+| `parallel/movie-wave2-room-awareness` | `7c67e2a489f8e494791a13ff2e695054cd15ac6f` |
+| `parallel/movie-wave2-story-scene-grounding` | `a9d44548bd0782d136901abc048693ff2e5fe761` |
+| `parallel/movie-wave2-production-grounding` | `3fc200456d9b7d4244ade6c239567ca9c6ced9a9` |
+| `parallel/movie-wave2-security` | `7095b49a36084e6b9681a736049d708002942f1c` |
+| `parallel/movie-wave2-output-validation` | `bcaaa5f3066a8fc6208c3a69b0a24d107ff2efd7` |
+| `parallel/movie-wave2-placeholder-audit` | `82391a71ab4011e01adc42acfa084f2b4a8308f5` |
+| `parallel/movie-wave2-last-seed-e2e` | `41ce96da25ef761ace9a2a60fb47d38732f62d08` |
+| `parallel/movie-wave2-resolution-contract` | `d97bbed1313a81cda3a1956dfd89795b2bda6e24` |
+| `parallel/movie-wave2-integration-prep` | `b77eb15e50c677bf8f34e352f1f5172e8849649e` |
+| `integration/movie-production-engine-wave4` | `702fe3e9b1711c38b769b38ef3864f9728f31b19` |
+
 ## Integration fixes verified
 
 The final combined gate found and corrected four integration defects:
