@@ -511,7 +511,7 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.Property(item => item.LocationSet).HasMaxLength(2_000);
             entity.Property(item => item.NarrativeImportance).HasMaxLength(20);
             entity.Property(item => item.ProductionComplexityJson).HasMaxLength(20_000);
-            entity.Property(item => item.QualityRequirementsJson).HasMaxLength(20_000);
+            entity.Property(item => item.QualityRequirementsJson).HasMaxLength(24_000);
             entity.Property(item => item.ContinuitySensitivity).HasMaxLength(20);
             entity.Property(item => item.UpscaleSuitability).HasMaxLength(20);
             entity.Property(item => item.TargetOutputRequirementsJson).HasMaxLength(20_000);

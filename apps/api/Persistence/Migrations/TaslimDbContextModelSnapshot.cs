@@ -5071,9 +5071,6 @@ namespace Taslim.Api.Persistence.Migrations
                         .HasMaxLength(40)
                         .HasColumnType("character varying(40)");
 
-                    b.Property<string>("QualityRequirementsJson")
-                        .HasMaxLength(20000)
-                        .HasColumnType("character varying(20000)");
 
                     b.Property<string>("Purpose")
                         .HasMaxLength(2000)
@@ -5114,6 +5111,10 @@ namespace Taslim.Api.Persistence.Migrations
                     b.Property<string>("VisualContinuityNotes")
                         .HasMaxLength(4000)
                         .HasColumnType("character varying(4000)");
+
+                    b.Property<string>("QualityRequirementsJson")
+                        .HasMaxLength(24000)
+                        .HasColumnType("character varying(24000)");
 
                     b.HasKey("Id");
 
