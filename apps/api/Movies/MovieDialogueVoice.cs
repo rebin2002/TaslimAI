@@ -486,7 +486,7 @@ public sealed class MovieDialogueProductionService(
         line.Status = MovieDialogueLineStatuses.Queued;
         line.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(cancellationToken);
-        return new MovieDialogueTakeResponse(ToDto(await QueryLine().SingleAsync(item => item.Id == line.Id, cancellationToken)).Takes.Single(item => item.Id == take.Id), GenerationJobContractMapper.ToDto(job));
+        return new MovieDialogueTakeResponse(ToDto(await QueryLine().SingleAsync(item => item.Id == line.Id, cancellationToken)).Takes.Single(item => item.Id == take.Id), GenerationJobContractMapper.ToMovieDto(job));
     }
 
     public async Task<MovieDialogueLineDto?> ApproveTakeAsync(Guid userId, Guid takeId, MovieDialogueTakeApprovalRequest request, CancellationToken cancellationToken)

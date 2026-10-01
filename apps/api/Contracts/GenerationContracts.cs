@@ -158,4 +158,32 @@ public static class GenerationJobContractMapper
             .ToArray(),
         job.RetryOfJobId,
         job.RetryCount);
+
+    public static GenerationJobDto ToMovieDto(GenerationJob job) => new(
+        job.Id,
+        job.WorkspaceId,
+        job.ProjectId,
+        job.JobType,
+        job.Status.ToString(),
+        job.Title,
+        job.ProgressPercent,
+        null,
+        job.ErrorCode,
+        SafeMovieErrorMessage(job.ErrorCode),
+        job.CancellationRequested,
+        job.CreatedAt,
+        job.QueuedAt,
+        job.StartedAt,
+        job.CompletedAt,
+        job.FailedAt,
+        job.CancelledAt,
+        job.Outputs.OrderBy(output => output.CreatedAt)
+            .Select(output => new GenerationJobOutputDto(output.Id, output.OutputType, output.StoredFileId, null, output.CreatedAt))
+            .ToArray(),
+        job.RetryOfJobId,
+        job.RetryCount);
+
+    private static string? SafeMovieErrorMessage(string? errorCode) => string.IsNullOrWhiteSpace(errorCode)
+        ? null
+        : "The movie generation operation did not complete.";
 }
