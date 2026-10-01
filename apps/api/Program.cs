@@ -239,6 +239,7 @@ builder.Services.AddScoped<MovieWorldContinuityProjector>();
 builder.Services.AddScoped<IMovieWorldContinuityService, MovieWorldContinuityService>();
 builder.Services.AddScoped<IMovieProductionContinuityService, MovieProductionContinuityService>();
 builder.Services.AddScoped<IMovieProductionReferencePackageService, MovieProductionReferencePackageService>();
+builder.Services.AddScoped<IMovieReferenceReadinessService, MovieReferenceReadinessService>();
 builder.Services.AddScoped<IMovieV2Service, MovieV2Service>();
 builder.Services.AddScoped<IMovieDialogueProductionService, MovieDialogueProductionService>();
 builder.Services.AddScoped<MovieDialogueVoiceExecutionStore>();

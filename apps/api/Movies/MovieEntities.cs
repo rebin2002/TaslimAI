@@ -932,7 +932,9 @@ public sealed record MovieStudioGenerationRequest(
     string? ProcessingPath = null,
     int RetryAttempts = 0,
     bool UpscalingRequested = false,
-    int UpscalePasses = 0);
+    int UpscalePasses = 0,
+    bool AllowReferenceReadinessOverride = false,
+    string? ReferenceReadinessOverrideReason = null);
 
 public static class MovieStudioValidation
 {

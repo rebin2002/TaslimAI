@@ -59,7 +59,7 @@ public interface IMovieStudioService
     Task<MovieProviderReadinessDto> ProviderReadinessAsync();
 }
 
-public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessService access, MovieCollaborationAccess collaboration, IGenerationJobService jobs, IMovieVideoProvider provider, IMovieCharacterContinuityService continuity, MovieWorldContinuityProjector worldContinuity, IMovieGenerationCostEstimator movieCostEstimator, IGenerationCostGuardrailService costGuardrails, IMovieProductionGenerationOrchestrator productionOrchestrator) : IMovieStudioService
+public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessService access, MovieCollaborationAccess collaboration, IGenerationJobService jobs, IMovieVideoProvider provider, IMovieCharacterContinuityService continuity, MovieWorldContinuityProjector worldContinuity, IMovieGenerationCostEstimator movieCostEstimator, IGenerationCostGuardrailService costGuardrails, IMovieProductionGenerationOrchestrator productionOrchestrator, IMovieReferenceReadinessService referenceReadiness) : IMovieStudioService
 {
     public async Task<MovieStudioProjectResponse?> CreateAsync(Guid userId, MovieStudioCreateRequest request, CancellationToken cancellationToken, string? idempotencyKey = null)
     {
@@ -923,7 +923,9 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
             request.TargetResolution ?? MovieResolutionTiers.P1080,
             request.QualityTier ?? DirectorQualityLevels.Standard,
             request.ConfirmationAccepted,
-            idempotencyKey), cancellationToken);
+            idempotencyKey,
+            request.AllowReferenceReadinessOverride,
+            request.ReferenceReadinessOverrideReason), cancellationToken);
         if (queued is null) return null;
         var project = await GetAsync(userId, queued.Clip.MovieProjectId, cancellationToken);
         if (project is null) throw new InvalidOperationException("Movie project disappeared.");
@@ -1217,6 +1219,13 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         if (shot is null || !await collaboration.HasPermissionAsync(userId, shot.Scene.MovieProjectId, MoviePermissions.Generate, cancellationToken)) return null;
         var readiness = MovieShotReadiness.Evaluate(shot);
         if (!readiness.Ready) throw new MovieStudioValidationException($"Shot is not ready for generation. {readiness.Summary}");
+        await referenceReadiness.EnsureCanGenerateAsync(
+            userId,
+            shot.Id,
+            request.AllowReferenceReadinessOverride,
+            request.ReferenceReadinessOverrideReason,
+            MovieReferenceReadinessOverrideSources.LegacyShotGeneration,
+            cancellationToken);
         return await QueueClipAsync(userId, shot.Scene.MovieProject, shot.Scene, shot, request, cancellationToken, idempotencyKey);
     }
 
