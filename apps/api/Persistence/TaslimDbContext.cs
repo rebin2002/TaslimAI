@@ -59,6 +59,9 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
         public DbSet<SubscriptionLifecycleEvent> SubscriptionLifecycleEvents => Set<SubscriptionLifecycleEvent>();
         public DbSet<PaymentReconciliationRecord> PaymentReconciliationRecords => Set<PaymentReconciliationRecord>();
         public DbSet<MovieProject> MovieProjects => Set<MovieProject>();
+    public DbSet<MovieProductionKit> MovieProductionKits => Set<MovieProductionKit>();
+    public DbSet<MovieProductionKitRevision> MovieProductionKitRevisions => Set<MovieProductionKitRevision>();
+    public DbSet<MovieProductionKitReference> MovieProductionKitReferences => Set<MovieProductionKitReference>();
     public DbSet<MovieAct> MovieActs => Set<MovieAct>();
     public DbSet<MovieSequence> MovieSequences => Set<MovieSequence>();
     public DbSet<MovieStory> MovieStories => Set<MovieStory>();
@@ -253,6 +256,47 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasIndex(item => new { item.CreatedAt, item.Action });
             entity.HasIndex(item => new { item.TargetType, item.TargetId, item.CreatedAt });
             entity.HasOne<ApplicationUser>().WithMany().HasForeignKey(item => item.ActorUserId).OnDelete(DeleteBehavior.Restrict);
+        });
+        builder.Entity<MovieProductionKit>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.CurrentRevisionNumber).IsRequired();
+            entity.Property(item => item.LockedRevisionNumber);
+            entity.Property(item => item.CreatedAt).IsRequired();
+            entity.Property(item => item.UpdatedAt).IsRequired();
+            entity.HasIndex(item => item.MovieProjectId).IsUnique();
+            entity.HasIndex(item => new { item.MovieProjectId, item.UpdatedAt });
+            entity.HasOne(item => item.MovieProject).WithOne().HasForeignKey<MovieProductionKit>(item => item.MovieProjectId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.LockedByUser).WithMany().HasForeignKey(item => item.LockedByUserId).OnDelete(DeleteBehavior.Restrict);
+        });
+        builder.Entity<MovieProductionKitRevision>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.Status).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.SourceGuideHash).HasMaxLength(64).IsRequired();
+            entity.Property(item => item.Notes).HasMaxLength(4_000);
+            entity.Property(item => item.ReviewNote).HasMaxLength(4_000);
+            entity.Property(item => item.RevisionHash).HasMaxLength(64).IsRequired();
+            entity.HasIndex(item => new { item.MovieProductionKitId, item.RevisionNumber }).IsUnique();
+            entity.HasIndex(item => new { item.MovieProductionKitId, item.Status });
+            entity.HasOne(item => item.Kit).WithMany(item => item.Revisions).HasForeignKey(item => item.MovieProductionKitId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.SourceGuideRevision).WithMany().HasForeignKey(item => item.SourceGuideRevisionId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(item => item.CreatedByUser).WithMany().HasForeignKey(item => item.CreatedByUserId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(item => item.ReviewedByUser).WithMany().HasForeignKey(item => item.ReviewedByUserId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(item => item.LockedByUser).WithMany().HasForeignKey(item => item.LockedByUserId).OnDelete(DeleteBehavior.Restrict);
+        });
+        builder.Entity<MovieProductionKitReference>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.ReferenceType).HasMaxLength(40).IsRequired();
+            entity.Property(item => item.Label).HasMaxLength(300);
+            entity.Property(item => item.Role).HasMaxLength(160);
+            entity.Property(item => item.SourceHash).HasMaxLength(64).IsRequired();
+            entity.Property(item => item.ProvenanceJson).HasMaxLength(4_000).IsRequired();
+            entity.HasIndex(item => new { item.MovieProductionKitRevisionId, item.SortOrder });
+            entity.HasIndex(item => new { item.ReferenceType, item.SourceId });
+            entity.HasIndex(item => new { item.MovieProductionKitRevisionId, item.ReferenceType, item.SourceId, item.SourceRevision }).IsUnique();
+            entity.HasOne(item => item.Revision).WithMany(item => item.References).HasForeignKey(item => item.MovieProductionKitRevisionId).OnDelete(DeleteBehavior.Cascade);
         });
         builder.Entity<MovieAct>(entity =>
         {
