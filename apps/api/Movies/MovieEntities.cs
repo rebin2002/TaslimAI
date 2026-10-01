@@ -244,6 +244,7 @@ public sealed class MovieProject
     public ICollection<MovieLocation> Locations { get; set; } = [];
     public ICollection<MovieSet> Sets { get; set; } = [];
     public ICollection<MovieProp> Props { get; set; } = [];
+    public ICollection<MoviePropBible> PropBibles { get; set; } = [];
     public ICollection<MovieWorldReference> WorldReferences { get; set; } = [];
     public ICollection<MovieContinuityFact> ContinuityFacts { get; set; } = [];
     public ICollection<MovieContinuityLock> ContinuityLocks { get; set; } = [];
@@ -472,6 +473,7 @@ public sealed class MovieProp
     public DateTime UpdatedAt { get; set; }
     public MovieProject MovieProject { get; set; } = null!;
     public Asset? ReferenceAsset { get; set; }
+    public MoviePropBible? PropBible { get; set; }
 }
 
 public sealed class MovieWorldReference
