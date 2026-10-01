@@ -21,6 +21,8 @@ export function directorRoomForModule(module: string): DirectorRoom {
       return "Storyboard";
     case "production":
       return "Production";
+    case "selects":
+      return "Production";
     case "scenes":
       return "Scene";
     default:
