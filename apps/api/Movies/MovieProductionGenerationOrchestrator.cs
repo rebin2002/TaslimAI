@@ -74,7 +74,9 @@ public sealed record MovieProductionGenerationRequest(
     string TargetResolution = MovieResolutionTiers.P1080,
     string QualityTier = DirectorQualityLevels.Standard,
     bool ConfirmationAccepted = false,
-    string? IdempotencyKey = null);
+    string? IdempotencyKey = null,
+    bool AllowReferenceReadinessOverride = false,
+    string? ReferenceReadinessOverrideReason = null);
 
 /// <summary>
 /// This result is internal to the movie service boundary. It carries the canonical
@@ -111,7 +113,8 @@ public sealed class MovieProductionGenerationOrchestrator(
     IMovieVideoProvider provider,
     IMovieGenerationCostEstimator costEstimator,
     IGenerationCostGuardrailService costGuardrails,
-    IMovieProductionPreflightService productionPreflight) : IMovieProductionGenerationOrchestrator
+    IMovieProductionPreflightService productionPreflight,
+    IMovieReferenceReadinessService referenceReadiness) : IMovieProductionGenerationOrchestrator
 {
     public async Task<MovieProductionOrchestrationResult?> QueueApprovedAsync(
         Guid userId,
@@ -152,6 +155,14 @@ public sealed class MovieProductionGenerationOrchestrator(
             throw new MovieProductionValidationException(
                 preflightResult.RejectionCode ?? "PRODUCTION_PREFLIGHT_REQUIRED",
                 preflightResult.RejectionMessage ?? preflightResult.Summary);
+
+        await referenceReadiness.EnsureCanGenerateAsync(
+            userId,
+            shot.Id,
+            request.AllowReferenceReadinessOverride,
+            request.ReferenceReadinessOverrideReason,
+            MovieReferenceReadinessOverrideSources.ProductionRender,
+            cancellationToken);
 
         var plan = BuildPlan(shot, request);
         var durationSeconds = Math.Clamp(shot.DurationSeconds ?? shot.Scene.DurationSeconds ?? Math.Min(shot.Scene.MovieProject.DurationSeconds, 60), 1, 3600);

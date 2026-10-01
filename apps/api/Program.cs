@@ -247,6 +247,7 @@ builder.Services.AddScoped<IMovieProductionReferencePackageService, MovieProduct
 builder.Services.AddScoped<IMovieProductionPreflightService, MovieProductionPreflightService>();
 builder.Services.AddSingleton<IMovieRecurringPropDetector, DeterministicMovieRecurringPropDetector>();
 builder.Services.AddScoped<IMoviePropBibleService, MoviePropBibleService>();
+builder.Services.AddScoped<IMovieReferenceReadinessService, MovieReferenceReadinessService>();
 builder.Services.AddScoped<IMovieV2Service, MovieV2Service>();
 builder.Services.AddScoped<IMovieDialogueProductionService, MovieDialogueProductionService>();
 builder.Services.AddScoped<MovieDialogueVoiceExecutionStore>();

@@ -12,7 +12,7 @@ namespace Taslim.Api.Controllers;
 [ApiController]
 [Authorize]
 [Route("api/movie-studio")]
-public sealed class MovieStudioController(IMovieStudioService movies, IMovieProductionComplexityService complexity, IMovieDurationBudgetService durationBudgets, IMovieGuideService guides, IMovieStoryService stories, IMovieStoryCastService storyCast, IMovieCharacterContinuityService continuity, IMovieWorldContinuityService worldContinuity, IMovieProductionContinuityService productionContinuity, IMovieProductionReferencePackageService productionReferences, IMovieProductionPreflightService productionPreflight, IMovieTimelineService timeline, IMovieTakeSelectService takeSelects, IMovieShotExecutionService shotExecution, MovieAuthorizationService authorization, MovieShotImportanceService shotImportance, IMovieCinematographyPlanningService cinematographyPlanning, IMovieCharacterProductionSheetService productionSheets, IMovieLocationGeographySheetService geographySheets, IMoviePropBibleService propBible) : ControllerBase
+public sealed class MovieStudioController(IMovieStudioService movies, IMovieProductionComplexityService complexity, IMovieDurationBudgetService durationBudgets, IMovieGuideService guides, IMovieStoryService stories, IMovieStoryCastService storyCast, IMovieCharacterContinuityService continuity, IMovieWorldContinuityService worldContinuity, IMovieProductionContinuityService productionContinuity, IMovieProductionReferencePackageService productionReferences, IMovieProductionPreflightService productionPreflight, IMovieTimelineService timeline, IMovieTakeSelectService takeSelects, IMovieShotExecutionService shotExecution, MovieAuthorizationService authorization, MovieShotImportanceService shotImportance, IMovieCinematographyPlanningService cinematographyPlanning, IMovieCharacterProductionSheetService productionSheets, IMovieLocationGeographySheetService geographySheets, IMoviePropBibleService propBible, IMovieReferenceReadinessService referenceReadiness) : ControllerBase
 {
     [HttpGet("cinematography/presets")]
     public IActionResult CinematographyPresets() => Ok(CinematographyPresetCatalog.All);
@@ -807,6 +807,25 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
         catch (MovieProductionReferenceException exception) { return ApiResults.Error(this, 400, "MOVIE_PRODUCTION_REFERENCES_INVALID", exception.Message); }
     }
 
+    [HttpGet("shots/{shotId:guid}/reference-readiness")]
+    public async Task<IActionResult> GetReferenceReadiness(Guid shotId, CancellationToken cancellationToken)
+    {
+        var result = await referenceReadiness.GetAsync(GetUserId(), shotId, cancellationToken);
+        return result is null ? ApiResults.Error(this, 404, "MOVIE_SHOT_NOT_FOUND", "Movie shot not found.") : Ok(result);
+    }
+
+    [HttpPost("shots/{shotId:guid}/reference-readiness/override")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> OverrideReferenceReadiness(Guid shotId, MovieReferenceReadinessOverrideRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await referenceReadiness.RecordOverrideAsync(GetUserId(), shotId, request, MovieReferenceReadinessOverrideSources.ProductionRender, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_SHOT_NOT_FOUND", "Movie shot not found.") : Ok(result);
+        }
+        catch (MovieReferenceReadinessException exception) { return ApiResults.Error(this, 409, exception.Code, exception.Message); }
+    }
+
     [HttpGet("shots/{shotId:guid}/production")]
     public async Task<IActionResult> GetShotProduction(Guid shotId, CancellationToken cancellationToken)
     {
@@ -899,6 +918,7 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
             return result is null ? ApiResults.Error(this, 404, "MOVIE_SHOT_NOT_FOUND", "Movie shot not found.") : Accepted(result);
         }
         catch (MovieProductionValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
+        catch (MovieReferenceReadinessException exception) { return ApiResults.Error(this, 409, exception.Code, exception.Message); }
     }
 
     [HttpPost("shots/{shotId:guid}/production/execute")]
@@ -912,6 +932,7 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
             return result is null ? ApiResults.Error(this, 404, "MOVIE_SHOT_NOT_FOUND", "Movie shot not found.") : Accepted(result);
         }
         catch (MovieShotExecutionValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
+        catch (MovieReferenceReadinessException exception) { return ApiResults.Error(this, 409, exception.Code, exception.Message); }
         catch (GenerationJobForbiddenException) { return Forbid(); }
         catch (GenerationJobValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
     }
@@ -982,6 +1003,7 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
             return result is null ? ApiResults.Error(this, 404, "MOVIE_SHOT_NOT_FOUND", "Movie shot not found.") : Accepted(result);
         }
         catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_SHOT_NOT_READY", exception.Message); }
+        catch (MovieReferenceReadinessException exception) { return ApiResults.Error(this, 409, exception.Code, exception.Message); }
     }
 
     [HttpGet("projects/{movieProjectId:guid}/story")]

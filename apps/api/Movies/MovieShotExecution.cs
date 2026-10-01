@@ -23,6 +23,8 @@ public sealed class MovieShotExecutionRequest
     public string MasterResolution { get; set; } = MovieResolutionTiers.P1080;
     public string ProcessingPath { get; set; } = MovieResolutionPathKinds.Native;
     public int TakeCount { get; set; } = 1;
+    public bool AllowReferenceReadinessOverride { get; set; }
+    public string? ReferenceReadinessOverrideReason { get; set; }
 }
 
 public sealed record MovieShotExecutionResolutionDto(
@@ -70,7 +72,8 @@ public sealed class MovieShotExecutionService(
     IMovieVideoProvider provider,
     IMovieCharacterContinuityService continuity,
     MovieWorldContinuityProjector worldContinuity,
-    IMovieGenerationCostEstimator costEstimator) : IMovieShotExecutionService
+    IMovieGenerationCostEstimator costEstimator,
+    IMovieReferenceReadinessService referenceReadiness) : IMovieShotExecutionService
 {
     private const int MaximumTakes = 8;
     private const int MaximumReferencePackageCharacters = 50_000;
@@ -102,6 +105,13 @@ public sealed class MovieShotExecutionService(
             throw new MovieShotExecutionValidationException("SHOT_EXECUTION_DURATION_INVALID", "The shot must have a duration between 1 second and 60 minutes before production can start.");
         if (string.IsNullOrWhiteSpace(shot.Scene.MovieProject.AspectRatio))
             throw new MovieShotExecutionValidationException("SHOT_EXECUTION_ASPECT_INVALID", "The movie aspect ratio is required before production can start.");
+        await referenceReadiness.EnsureCanGenerateAsync(
+            userId,
+            shot.Id,
+            request.AllowReferenceReadinessOverride,
+            request.ReferenceReadinessOverrideReason,
+            MovieReferenceReadinessOverrideSources.ShotExecution,
+            cancellationToken);
         var qualityLevel = request.QualityLevel?.Trim() ?? string.Empty;
         if (!MovieQualityLevels.Supported.Contains(qualityLevel))
             throw new MovieShotExecutionValidationException("SHOT_EXECUTION_QUALITY_INVALID", "Choose a supported quality level.");
