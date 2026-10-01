@@ -1320,6 +1320,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         .Include(item => item.Characters).ThenInclude(character => character.ReferenceAssets)
         .Include(item => item.Characters).ThenInclude(character => character.Relationships).ThenInclude(relationship => relationship.RelatedCharacter)
         .Include(item => item.Characters).ThenInclude(character => character.ContinuityLocks)
+        .Include(item => item.Characters).ThenInclude(character => character.ProductionSheet).ThenInclude(sheet => sheet!.Versions).ThenInclude(version => version.Looks)
         .Include(item => item.Locations)
         .Include(item => item.Sets).ThenInclude(item => item.Variations)
         .Include(item => item.Props)
@@ -1333,7 +1334,8 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         .Include(item => item.States).ThenInclude(state => state.ContinuityLocks)
         .Include(item => item.ReferenceAssets)
         .Include(item => item.Relationships).ThenInclude(relationship => relationship.RelatedCharacter)
-        .Include(item => item.ContinuityLocks);
+        .Include(item => item.ContinuityLocks)
+        .Include(item => item.ProductionSheet).ThenInclude(sheet => sheet!.Versions).ThenInclude(version => version.Looks);
 
     private IQueryable<MovieScene> PlanningQuery() => db.MovieScenes.AsNoTracking()
         .Include(item => item.Shots).ThenInclude(shot => shot.Clips)
@@ -1572,7 +1574,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         var coverage = scene.DurationSeconds is > 0 ? Math.Min(100, (int)Math.Round(totalDuration * 100d / scene.DurationSeconds.Value)) : 0;
         return new MovieSceneShotPlanDto(scene.Id, scene.Sequence, scene.Title, scene.Summary, scene.DurationSeconds, scene.Status, shots.Length, active.Length, active.Count(item => MovieShotReadiness.Evaluate(item).Ready), totalDuration, coverage, shots);
     }
-    private static MovieCharacterDto ToDto(MovieCharacter character) => new(character.Id, character.Name, character.Role, character.Description, character.Appearance, character.PhysicalDescription, character.Wardrobe, character.VoiceReference, character.PersonalityAndStoryNotes, character.VoiceAndPerformance, character.ContinuityNotes, character.ReferenceAssetId, character.ReferenceAssets.OrderBy(item => item.SortOrder).Select(item => item.AssetId).ToArray(), character.States.OrderBy(item => item.CreatedAt).Select(ToDto).ToArray(), character.Relationships.OrderBy(item => item.CreatedAt).Select(item => new MovieCharacterRelationshipDto(item.Id, item.RelatedCharacterId, item.RelatedCharacter?.Name ?? string.Empty, item.RelationshipType, item.Notes)).ToArray(), character.ContinuityLocks.Where(item => item.MovieCharacterStateId is null).OrderBy(item => item.ApprovedAt).Select(ToDto).Concat(character.States.SelectMany(item => item.ContinuityLocks).OrderBy(item => item.ApprovedAt).Select(ToDto)).ToArray());
+    private static MovieCharacterDto ToDto(MovieCharacter character) => new(character.Id, character.Name, character.Role, character.Description, character.Appearance, character.PhysicalDescription, character.Wardrobe, character.VoiceReference, character.PersonalityAndStoryNotes, character.VoiceAndPerformance, character.ContinuityNotes, character.ReferenceAssetId, character.ReferenceAssets.OrderBy(item => item.SortOrder).Select(item => item.AssetId).ToArray(), character.States.OrderBy(item => item.CreatedAt).Select(ToDto).ToArray(), character.Relationships.OrderBy(item => item.CreatedAt).Select(item => new MovieCharacterRelationshipDto(item.Id, item.RelatedCharacterId, item.RelatedCharacter?.Name ?? string.Empty, item.RelationshipType, item.Notes)).ToArray(), character.ContinuityLocks.Where(item => item.MovieCharacterStateId is null).OrderBy(item => item.ApprovedAt).Select(ToDto).Concat(character.States.SelectMany(item => item.ContinuityLocks).OrderBy(item => item.ApprovedAt).Select(ToDto)).ToArray(), character.ProductionSheet is null ? null : MovieCharacterProductionSheetMapper.ToDto(character.ProductionSheet));
     private static MovieCharacterStateDto ToDto(MovieCharacterState state) => new(state.Id, state.Key, state.Label, state.Wardrobe, state.AgeOrTimeState, state.Appearance, state.InjuryOrCondition, state.LocationOrStoryState, state.ContinuityNotes, state.CreatedAt, state.UpdatedAt);
     private static MovieCharacterContinuityLockDto ToDto(MovieCharacterContinuityLock lockEntity) => new(lockEntity.Id, lockEntity.FieldKey, lockEntity.LockedValue, lockEntity.MovieCharacterStateId, lockEntity.ApprovedAt);
     private static MovieLocationDto ToDto(MovieLocation location) => new(location.Id, location.Name, location.Description, location.VisualContinuityNotes, location.ReferenceAssetId);

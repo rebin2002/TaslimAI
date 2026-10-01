@@ -234,7 +234,8 @@ builder.Services.AddScoped<IMovieProductionGenerationOrchestrator, MovieProducti
 builder.Services.AddScoped<IMovieSoundService, MovieSoundService>();
 builder.Services.AddScoped<IMovieProductionCheckpointService, MovieProductionCheckpointService>();
 builder.Services.AddScoped<IMovieStoryCastService, MovieStoryCastService>();
-builder.Services.AddScoped<IMovieCharacterContinuityService, MovieCharacterContinuityService>();
+    builder.Services.AddScoped<IMovieCharacterContinuityService, MovieCharacterContinuityService>();
+    builder.Services.AddScoped<IMovieCharacterProductionSheetService, MovieCharacterProductionSheetService>();
 builder.Services.AddScoped<MovieWorldContinuityProjector>();
 builder.Services.AddScoped<IMovieWorldContinuityService, MovieWorldContinuityService>();
 builder.Services.AddScoped<IMovieProductionContinuityService, MovieProductionContinuityService>();

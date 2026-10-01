@@ -348,6 +348,7 @@ public sealed class MovieCharacter
     public ICollection<MovieCharacterReferenceAsset> ReferenceAssets { get; set; } = [];
     public ICollection<MovieCharacterRelationship> Relationships { get; set; } = [];
     public ICollection<MovieCharacterContinuityLock> ContinuityLocks { get; set; } = [];
+    public MovieCharacterProductionSheet? ProductionSheet { get; set; }
 }
 
 public sealed class MovieCharacterState
@@ -811,7 +812,7 @@ public sealed record MovieShotDto(Guid Id, int Sequence, string Description, str
 public sealed record MovieCharacterStateDto(Guid Id, string Key, string? Label, string? Wardrobe, string? AgeOrTimeState, string? Appearance, string? InjuryOrCondition, string? LocationOrStoryState, string? ContinuityNotes, DateTime CreatedAt, DateTime UpdatedAt);
 public sealed record MovieCharacterRelationshipDto(Guid Id, Guid RelatedCharacterId, string RelatedCharacterName, string RelationshipType, string? Notes);
 public sealed record MovieCharacterContinuityLockDto(Guid Id, string FieldKey, string LockedValue, Guid? CharacterStateId, DateTime ApprovedAt);
-public sealed record MovieCharacterDto(Guid Id, string Name, string? Role, string Description, string? Appearance, string? PhysicalDescription, string? Wardrobe, string? VoiceReference, string? PersonalityAndStoryNotes, string? VoiceAndPerformance, string? ContinuityNotes, Guid? ReferenceAssetId, IReadOnlyList<Guid> ReferenceAssetIds, IReadOnlyList<MovieCharacterStateDto> States, IReadOnlyList<MovieCharacterRelationshipDto> Relationships, IReadOnlyList<MovieCharacterContinuityLockDto> ContinuityLocks);
+public sealed record MovieCharacterDto(Guid Id, string Name, string? Role, string Description, string? Appearance, string? PhysicalDescription, string? Wardrobe, string? VoiceReference, string? PersonalityAndStoryNotes, string? VoiceAndPerformance, string? ContinuityNotes, Guid? ReferenceAssetId, IReadOnlyList<Guid> ReferenceAssetIds, IReadOnlyList<MovieCharacterStateDto> States, IReadOnlyList<MovieCharacterRelationshipDto> Relationships, IReadOnlyList<MovieCharacterContinuityLockDto> ContinuityLocks, MovieCharacterProductionSheetDto? ProductionSheet = null);
 public sealed record MovieCastProjectDto(Guid Id, Guid WorkspaceId, Guid? ProjectId, string Mode, string Status, string Title, string Description, int DurationSeconds, string AspectRatio, string Style, string Language, DateTime CreatedAt, DateTime UpdatedAt);
 public sealed record MovieCastCharacterDto(Guid Id, string Name, string? Role, string Description, string? Appearance, Guid? ReferenceAssetId, IReadOnlyList<Guid> ReferenceAssetIds, int ReferenceAssetCount, int StateCount, MovieCharacterStateDto? LatestState, int RelationshipCount, IReadOnlyList<string> RelationshipTypes, int LockedFactCount, IReadOnlyList<string> LockedFieldKeys, DateTime UpdatedAt);
 public sealed record MovieCastDto(MovieCastProjectDto Project, IReadOnlyList<MovieCastCharacterDto> Characters);
