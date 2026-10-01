@@ -12,7 +12,7 @@ namespace Taslim.Api.Controllers;
 [ApiController]
 [Authorize]
 [Route("api/movie-studio")]
-public sealed class MovieStudioController(IMovieStudioService movies, IMovieProductionComplexityService complexity, IMovieDurationBudgetService durationBudgets, IMovieGuideService guides, IMovieStoryService stories, IMovieStoryCastService storyCast, IMovieCharacterContinuityService continuity, IMovieWorldContinuityService worldContinuity, IMovieProductionContinuityService productionContinuity, IMovieProductionReferencePackageService productionReferences, IMovieProductionPreflightService productionPreflight, IMovieTimelineService timeline, IMovieTakeSelectService takeSelects, IMovieShotExecutionService shotExecution, MovieAuthorizationService authorization, MovieShotImportanceService shotImportance, IMovieCinematographyPlanningService cinematographyPlanning, IMovieCharacterProductionSheetService productionSheets, IMovieLocationGeographySheetService geographySheets) : ControllerBase
+public sealed class MovieStudioController(IMovieStudioService movies, IMovieProductionComplexityService complexity, IMovieDurationBudgetService durationBudgets, IMovieGuideService guides, IMovieStoryService stories, IMovieStoryCastService storyCast, IMovieCharacterContinuityService continuity, IMovieWorldContinuityService worldContinuity, IMovieProductionContinuityService productionContinuity, IMovieProductionReferencePackageService productionReferences, IMovieProductionPreflightService productionPreflight, IMovieTimelineService timeline, IMovieTakeSelectService takeSelects, IMovieShotExecutionService shotExecution, MovieAuthorizationService authorization, MovieShotImportanceService shotImportance, IMovieCinematographyPlanningService cinematographyPlanning, IMovieCharacterProductionSheetService productionSheets, IMovieLocationGeographySheetService geographySheets, IMoviePropBibleService propBible) : ControllerBase
 {
     [HttpGet("cinematography/presets")]
     public IActionResult CinematographyPresets() => Ok(CinematographyPresetCatalog.All);
@@ -491,6 +491,109 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
     {
         try { var result = await movies.AddPropAsync(GetUserId(), id, request, cancellationToken); return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result); }
         catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_PROP_INVALID", exception.Message); }
+    }
+
+    [HttpGet("projects/{id:guid}/prop-bible")]
+    public async Task<IActionResult> GetPropBible(Guid id, CancellationToken cancellationToken)
+    {
+        var result = await propBible.GetProjectAsync(GetUserId(), id, cancellationToken);
+        return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result);
+    }
+
+    [HttpGet("projects/{id:guid}/prop-bible/recurring-detection")]
+    [HttpGet("projects/{id:guid}/prop-bible/recurring-props")]
+    public async Task<IActionResult> DetectRecurringProps(Guid id, CancellationToken cancellationToken)
+    {
+        var result = await propBible.DetectRecurringAsync(GetUserId(), id, cancellationToken);
+        return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result);
+    }
+
+    [HttpGet("props/{propId:guid}/production-sheet")]
+    [HttpGet("props/{propId:guid}/prop-bible")]
+    public async Task<IActionResult> GetPropProductionSheet(Guid propId, CancellationToken cancellationToken)
+    {
+        var result = await propBible.GetPropAsync(GetUserId(), propId, cancellationToken);
+        return result is null ? ApiResults.Error(this, 404, "MOVIE_PROP_NOT_FOUND", "Movie prop not found.") : Ok(result);
+    }
+
+    [HttpPut("props/{propId:guid}/production-sheet")]
+    [HttpPut("props/{propId:guid}/prop-bible")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> SavePropProductionSheet(Guid propId, MoviePropBibleRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await propBible.UpsertAsync(GetUserId(), propId, request, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_PROP_NOT_FOUND", "Movie prop not found.") : Ok(result);
+        }
+        catch (MoviePropBibleLockedException exception) { return ApiResults.Error(this, 409, "MOVIE_PROP_BIBLE_LOCKED", exception.Message); }
+        catch (MoviePropBibleValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_PROP_BIBLE_INVALID", exception.Message); }
+    }
+
+    [HttpPost("props/{propId:guid}/production-sheet/references")]
+    [HttpPost("props/{propId:guid}/prop-bible/references")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> AddPropBibleReference(Guid propId, MoviePropBibleReferenceRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await propBible.AddReferenceAsync(GetUserId(), propId, request, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_PROP_NOT_FOUND", "Movie prop not found.") : Ok(result);
+        }
+        catch (MoviePropBibleLockedException exception) { return ApiResults.Error(this, 409, "MOVIE_PROP_BIBLE_LOCKED", exception.Message); }
+        catch (MoviePropBibleValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_PROP_BIBLE_INVALID", exception.Message); }
+    }
+
+    [HttpPost("props/{propId:guid}/production-sheet/variants")]
+    [HttpPost("props/{propId:guid}/prop-bible/variants")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> AddPropBibleVariant(Guid propId, MoviePropBibleVariantRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await propBible.AddVariantAsync(GetUserId(), propId, request, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_PROP_NOT_FOUND", "Movie prop not found.") : Ok(result);
+        }
+        catch (MoviePropBibleLockedException exception) { return ApiResults.Error(this, 409, "MOVIE_PROP_BIBLE_LOCKED", exception.Message); }
+        catch (MoviePropBibleValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_PROP_BIBLE_INVALID", exception.Message); }
+    }
+
+    [HttpPost("props/{propId:guid}/production-sheet/versions")]
+    [HttpPost("props/{propId:guid}/prop-bible/versions")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> CreatePropBibleVersion(Guid propId, MoviePropBibleVersionRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await propBible.CreateVersionAsync(GetUserId(), propId, request, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_PROP_NOT_FOUND", "Movie prop not found.") : Ok(result);
+        }
+        catch (MoviePropBibleValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_PROP_BIBLE_INVALID", exception.Message); }
+    }
+
+    [HttpPost("prop-bible/versions/{versionId:guid}/review")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> ReviewPropBibleVersion(Guid versionId, MoviePropBibleReviewRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await propBible.ReviewVersionAsync(GetUserId(), versionId, request, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_PROP_BIBLE_VERSION_NOT_FOUND", "Prop Bible version not found.") : Ok(result);
+        }
+        catch (MoviePropBibleLockedException exception) { return ApiResults.Error(this, 409, "MOVIE_PROP_BIBLE_LOCKED", exception.Message); }
+        catch (MoviePropBibleValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_PROP_BIBLE_INVALID", exception.Message); }
+    }
+
+    [HttpPost("prop-bible/versions/{versionId:guid}/lock")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> LockPropBibleVersion(Guid versionId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await propBible.LockVersionAsync(GetUserId(), versionId, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_PROP_BIBLE_VERSION_NOT_FOUND", "Prop Bible version not found.") : Ok(result);
+        }
+        catch (MoviePropBibleValidationException exception) { return ApiResults.Error(this, 409, "MOVIE_PROP_BIBLE_INVALID", exception.Message); }
     }
 
     [HttpPost("projects/{id:guid}/world-references")]
