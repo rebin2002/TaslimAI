@@ -23,6 +23,8 @@ public static class MovieOperationalActions
     public const string ProductionReview = "production.review";
     public const string TakeCreate = "take.create";
     public const string TakeSelect = "take.select";
+    public const string TakeSelectEdit = "take.select.edit";
+    public const string TakeSelectApproval = "take.select.approve";
     public const string TakeApproval = "take.approve";
     public const string TakeFinalization = "take.finalize";
     public const string TakeUpscale = "take.upscale";
@@ -67,6 +69,8 @@ public static class MovieOperationalPolicies
             [MovieOperationalActions.ProductionReview] = MoviePermissions.Approve,
             [MovieOperationalActions.TakeCreate] = MoviePermissions.Edit,
             [MovieOperationalActions.TakeSelect] = MoviePermissions.Edit,
+            [MovieOperationalActions.TakeSelectEdit] = MoviePermissions.Edit,
+            [MovieOperationalActions.TakeSelectApproval] = MoviePermissions.Approve,
             [MovieOperationalActions.TakeApproval] = MoviePermissions.Approve,
             [MovieOperationalActions.TakeFinalization] = MoviePermissions.FinalApproval,
             [MovieOperationalActions.TakeUpscale] = MoviePermissions.Generate,

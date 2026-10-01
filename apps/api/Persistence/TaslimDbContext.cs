@@ -97,6 +97,7 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
     public DbSet<MovieCaptionCue> MovieCaptionCues => Set<MovieCaptionCue>();
     public DbSet<MovieTake> MovieTakes => Set<MovieTake>();
     public DbSet<MovieTakeApproval> MovieTakeApprovals => Set<MovieTakeApproval>();
+    public DbSet<MovieTakeSelect> MovieTakeSelects => Set<MovieTakeSelect>();
     public DbSet<MovieDialogueLine> MovieDialogueLines => Set<MovieDialogueLine>();
     public DbSet<MovieDialogueTake> MovieDialogueTakes => Set<MovieDialogueTake>();
     public DbSet<MovieDialogueTakeApproval> MovieDialogueTakeApprovals => Set<MovieDialogueTakeApproval>();
@@ -726,6 +727,25 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasOne(item => item.MovieTake).WithMany(item => item.Approvals).HasForeignKey(item => item.MovieTakeId).OnDelete(DeleteBehavior.Cascade);
             entity.HasOne(item => item.User).WithMany().HasForeignKey(item => item.UserId).OnDelete(DeleteBehavior.Restrict);
         });
+        builder.Entity<MovieTakeSelect>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.Label).HasMaxLength(160).IsRequired();
+            entity.Property(item => item.Status).HasMaxLength(30).HasDefaultValue(MovieTakeSelectStatuses.Draft).IsRequired();
+            entity.Property(item => item.Notes).HasMaxLength(4_000);
+            entity.Property(item => item.ProvenanceJson).HasMaxLength(20_000).IsRequired();
+            entity.Property(item => item.ReviewNote).HasMaxLength(4_000);
+            entity.HasIndex(item => new { item.MovieTakeId, item.SelectNumber }).IsUnique();
+            entity.HasIndex(item => new { item.MovieTakeId, item.Status });
+            entity.HasIndex(item => item.CreatedByUserId);
+            entity.ToTable("MovieTakeSelects", table =>
+            {
+                table.HasCheckConstraint("CK_MovieTakeSelects_Range", "\"StartMilliseconds\" >= 0 AND \"EndMilliseconds\" > \"StartMilliseconds\"");
+            });
+            entity.HasOne(item => item.MovieTake).WithMany(item => item.Selects).HasForeignKey(item => item.MovieTakeId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.CreatedByUser).WithMany().HasForeignKey(item => item.CreatedByUserId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(item => item.ReviewedByUser).WithMany().HasForeignKey(item => item.ReviewedByUserId).OnDelete(DeleteBehavior.SetNull);
+        });
         builder.Entity<MovieDialogueLine>(entity =>
         {
             entity.HasKey(item => item.Id);
@@ -989,6 +1009,7 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.Property(item => item.MetadataJson).HasMaxLength(20_000);
             entity.HasIndex(item => new { item.MovieTimelineTrackId, item.Sequence }).IsUnique();
             entity.HasIndex(item => item.SourceTakeId);
+            entity.HasIndex(item => item.SourceSelectId);
             entity.HasIndex(item => item.SourceAssetId);
             entity.ToTable("MovieTimelineItems", table =>
             {
@@ -997,6 +1018,7 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             });
             entity.HasOne(item => item.Track).WithMany(item => item.Items).HasForeignKey(item => item.MovieTimelineTrackId).OnDelete(DeleteBehavior.Cascade);
             entity.HasOne(item => item.SourceTake).WithMany().HasForeignKey(item => item.SourceTakeId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(item => item.SourceSelect).WithMany(item => item.TimelineItems).HasForeignKey(item => item.SourceSelectId).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne(item => item.SourceAsset).WithMany().HasForeignKey(item => item.SourceAssetId).OnDelete(DeleteBehavior.Restrict);
         });
         builder.Entity<MovieCaptionTrack>(entity =>

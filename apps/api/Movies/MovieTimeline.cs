@@ -102,6 +102,7 @@ public sealed class MovieTimelineItem
     public int Sequence { get; set; }
     public string Kind { get; set; } = MovieTimelineItemKinds.Gap;
     public Guid? SourceTakeId { get; set; }
+    public Guid? SourceSelectId { get; set; }
     public Guid? SourceAssetId { get; set; }
     public int TimelineInMilliseconds { get; set; }
     public int TimelineOutMilliseconds { get; set; }
@@ -114,6 +115,7 @@ public sealed class MovieTimelineItem
     public DateTime UpdatedAt { get; set; }
     public MovieTimelineTrack Track { get; set; } = null!;
     public MovieTake? SourceTake { get; set; }
+    public MovieTakeSelect? SourceSelect { get; set; }
     public Asset? SourceAsset { get; set; }
 }
 

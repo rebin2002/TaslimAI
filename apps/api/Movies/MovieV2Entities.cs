@@ -76,6 +76,7 @@ public sealed class MovieTake
     public MovieProductionVersion? MovieProductionVersion { get; set; }
     public Asset? Asset { get; set; }
     public ICollection<MovieTakeApproval> Approvals { get; set; } = [];
+    public ICollection<MovieTakeSelect> Selects { get; set; } = [];
     public ICollection<MovieTakeUpscaleAudit> UpscaleAudits { get; set; } = [];
 }
 
