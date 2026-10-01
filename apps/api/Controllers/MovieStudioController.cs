@@ -12,7 +12,7 @@ namespace Taslim.Api.Controllers;
 [ApiController]
 [Authorize]
 [Route("api/movie-studio")]
-public sealed class MovieStudioController(IMovieStudioService movies, IMovieProductionComplexityService complexity, IMovieDurationBudgetService durationBudgets, IMovieGuideService guides, IMovieStoryService stories, IMovieStoryCastService storyCast, IMovieCharacterContinuityService continuity, IMovieWorldContinuityService worldContinuity, IMovieProductionContinuityService productionContinuity, IMovieProductionReferencePackageService productionReferences, IMovieTimelineService timeline, IMovieShotExecutionService shotExecution, MovieAuthorizationService authorization, MovieShotImportanceService shotImportance, IMovieCinematographyPlanningService cinematographyPlanning) : ControllerBase
+public sealed class MovieStudioController(IMovieStudioService movies, IMovieProductionComplexityService complexity, IMovieDurationBudgetService durationBudgets, IMovieGuideService guides, IMovieStoryService stories, IMovieStoryCastService storyCast, IMovieCharacterContinuityService continuity, IMovieWorldContinuityService worldContinuity, IMovieProductionContinuityService productionContinuity, IMovieProductionReferencePackageService productionReferences, IMovieTimelineService timeline, IMovieTakeSelectService takeSelects, IMovieShotExecutionService shotExecution, MovieAuthorizationService authorization, MovieShotImportanceService shotImportance, IMovieCinematographyPlanningService cinematographyPlanning) : ControllerBase
 {
     [HttpGet("cinematography/presets")]
     public IActionResult CinematographyPresets() => Ok(CinematographyPresetCatalog.All);
@@ -56,6 +56,37 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
     {
         var result = await timeline.GetAsync(GetUserId(), id, cancellationToken);
         return result is null ? ApiResults.Error(this, 404, "MOVIE_TIMELINE_NOT_FOUND", "Movie timeline not found.") : Ok(result);
+    }
+
+    [HttpGet("projects/{movieProjectId:guid}/takes/{takeId:guid}/selects")]
+    public async Task<IActionResult> GetTakeSelects(Guid movieProjectId, Guid takeId, CancellationToken cancellationToken)
+    {
+        var result = await takeSelects.ListAsync(GetUserId(), movieProjectId, takeId, cancellationToken);
+        return result is null ? ApiResults.Error(this, 404, "MOVIE_TAKE_SELECTS_NOT_FOUND", "Movie take or selects not found.") : Ok(result);
+    }
+
+    [HttpPost("projects/{movieProjectId:guid}/takes/{takeId:guid}/selects")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> CreateTakeSelect(Guid movieProjectId, Guid takeId, MovieTakeSelectRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await takeSelects.CreateAsync(GetUserId(), movieProjectId, takeId, request, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_TAKE_NOT_FOUND", "Movie take not found.") : Ok(result);
+        }
+        catch (MovieTakeSelectValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
+    }
+
+    [HttpPost("projects/{movieProjectId:guid}/takes/{takeId:guid}/selects/{selectId:guid}/review")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> ReviewTakeSelect(Guid movieProjectId, Guid takeId, Guid selectId, MovieTakeSelectReviewRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await takeSelects.ReviewAsync(GetUserId(), movieProjectId, takeId, selectId, request, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_TAKE_SELECT_NOT_FOUND", "Movie take select not found.") : Ok(result);
+        }
+        catch (MovieTakeSelectValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
     }
 
     [HttpPost("projects/{id:guid}/timeline/revisions")]
