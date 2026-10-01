@@ -52,6 +52,7 @@ import { MovieDirectorPanel } from "@/components/MovieDirectorPanel";
 import { MovieProductionResolutionPanel } from "@/components/MovieProductionResolutionPanel";
 import { MovieProductionWorkspace } from "@/components/MovieProductionWorkspace";
 import { ProductionKitWorkspace } from "@/components/ProductionKitWorkspace";
+import { MovieSelectsWorkspace } from "@/components/MovieSelectsWorkspace";
 import { displayProductionStage, displayProductionStatus, type MovieResolutionTier } from "@/lib/movieProductionResolution";
 
 export const fullMovieModules = [
@@ -63,6 +64,7 @@ export const fullMovieModules = [
   { slug: "scenes", label: "Scenes", icon: Clapperboard },
   { slug: "storyboard", label: "Storyboard", icon: Layers3 },
   { slug: "production", label: "Production", icon: Workflow },
+  { slug: "selects", label: "Selects", icon: ListChecks },
   { slug: "edit", label: "Edit", icon: PencilRuler },
   { slug: "audio", label: "Audio", icon: AudioLines },
   { slug: "qc", label: "QC", icon: ShieldCheck },
@@ -89,6 +91,7 @@ const moduleCopy: Record<ModuleSlug, ModuleCopy> = {
   scenes: { eyebrow: "Scene plan", title: "Build the film in scenes", description: "Order the story, keep the intent visible, and make the next production step obvious." },
   storyboard: { eyebrow: "Visual plan", title: "See the cut before the cut", description: "A filmstrip for the scenes you have planned and the footage you have actually generated." },
   production: { eyebrow: "Production desk", title: "Move from plan to footage", description: "Track what is planned, what is in progress, and what is ready for review." },
+  selects: { eyebrow: "Selects / salvage", title: "Keep the good seconds", description: "Review generated takes as raw footage, salvage bounded ranges, and hand only deliberate inserts into the canonical timeline." },
   edit: { eyebrow: "Edit room", title: "A timeline waiting for footage", description: "The edit surface is reserved for real clips and real editorial decisions." },
   audio: { eyebrow: "Sound stage", title: "Audio belongs to the picture", description: "Keep narration, ambience, and music direction close to the cut they support." },
   qc: { eyebrow: "Review gate", title: "Quality control, when there is a cut", description: "A deliberate review surface for continuity, pacing, and delivery readiness." },
@@ -300,6 +303,7 @@ function FullMovieProjectWorkspace({ projectId, module }: { projectId: string; m
           {activeModule === "scenes" && <ScenesModule projectId={fullProject.id} project={fullProject} presets={presets} savingShot={savingShot} onAddShot={addShot} selectedSceneId={selectedScene?.id ?? null} selectedShotId={selectedShotId} onSelectScene={(sceneId) => { setSelectedSceneId(sceneId); setSelectedShotId(null); }} onSelectShot={setSelectedShotId} onGenerate={generateScene} onPlanChange={applyShotPlan} />}
           {activeModule === "storyboard" && storyboard && <OperationalStoryboardModule storyboard={storyboard} onRefresh={() => void refreshStoryboard()} onError={setError} />}
           {activeModule === "production" && <MovieProductionWorkspace project={fullProject} completionPercent={completionPercent} cost={overview?.cost} onRefresh={refreshProject} />}
+          {activeModule === "selects" && <MovieSelectsWorkspace project={fullProject} />}
           {activeModule === "edit" && <EditModule project={fullProject} />}
           {activeModule === "audio" && <FutureModule icon={<AudioLines size={20} />} title="Audio is not connected yet" text="The sound stage is reserved for real narration, ambience, and music assets. Nothing is simulated here." />}
           {activeModule === "qc" && <FutureModule icon={<ShieldCheck size={20} />} title="QC is a future review gate" text="Continuity and delivery checks will appear once this project has a real cut to inspect." />}
