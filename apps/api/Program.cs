@@ -187,6 +187,8 @@ builder.Services.Configure<GenerationQualityControlOptions>(builder.Configuratio
 builder.Services.AddScoped<IGenerationQualityControl, GenerationQualityControlService>();
 builder.Services.Configure<MovieProductionQualityControlOptions>(builder.Configuration.GetSection("MovieProductionQualityControl"));
 builder.Services.AddSingleton<IMovieProductionQualityControl, MovieProductionQualityControlService>();
+builder.Services.Configure<MovieSelectsQualityControlOptions>(builder.Configuration.GetSection("MovieSelectsQualityControl"));
+builder.Services.AddSingleton<IMovieSelectsQualityControl, MovieSelectsQualityControlService>();
 builder.Services.AddScoped<IUsageLedgerService, UsageLedgerService>();
 builder.Services.AddSingleton<IUsageChargingService, SafeUsageChargingService>();
 builder.Services.Configure<UsageControlOptions>(builder.Configuration.GetSection("UsageControls"));
