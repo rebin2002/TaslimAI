@@ -929,6 +929,7 @@ export const api = {
   approveMovieCharacterProductionSheet: (sheetId: string) => request<MovieCharacterProductionSheet>(`/api/movie-studio/production-sheets/${sheetId}/approve`, { method: "POST" }, true),
   lockMovieCharacterProductionSheet: (sheetId: string) => request<MovieCharacterProductionSheet>(`/api/movie-studio/production-sheets/${sheetId}/lock`, { method: "POST" }, true),
   unlockMovieCharacterProductionSheet: (sheetId: string) => request<MovieCharacterProductionSheet>(`/api/movie-studio/production-sheets/${sheetId}/unlock`, { method: "POST" }, true),
+  addMovieContinuityLock: (id: string, input: { entityType: string; entityId?: string | null; fieldName: string; lockedValue: string; strength?: string | null; reason?: string | null }) => request<MovieContinuityLock>(`/api/movie-studio/projects/${id}/continuity-locks`, { method: "POST", body: JSON.stringify(input) }, true),
   addMovieShot: (sceneId: string, input: MovieShotPlanningInput) => request<MovieShot>(`/api/movie-studio/scenes/${sceneId}/shots`, { method: "POST", body: JSON.stringify(input) }, true),
   getMovieSceneShotPlan: (sceneId: string) => request<MovieSceneShotPlan>(`/api/movie-studio/scenes/${sceneId}/shots`),
   getMovieShotPlanning: (shotId: string) => request<MovieShot>(`/api/movie-studio/shots/${shotId}`),
