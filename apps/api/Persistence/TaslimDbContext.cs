@@ -81,6 +81,8 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
     public DbSet<MovieCharacterProductionSheetVersion> MovieCharacterProductionSheetVersions => Set<MovieCharacterProductionSheetVersion>();
     public DbSet<MovieCharacterProductionSheetLook> MovieCharacterProductionSheetLooks => Set<MovieCharacterProductionSheetLook>();
     public DbSet<MovieLocation> MovieLocations => Set<MovieLocation>();
+    public DbSet<MovieLocationGeographySheet> MovieLocationGeographySheets => Set<MovieLocationGeographySheet>();
+    public DbSet<MovieLocationGeographyVariant> MovieLocationGeographyVariants => Set<MovieLocationGeographyVariant>();
     public DbSet<MovieSet> MovieSets => Set<MovieSet>();
     public DbSet<MovieSetVariation> MovieSetVariations => Set<MovieSetVariation>();
     public DbSet<MovieProp> MovieProps => Set<MovieProp>();
@@ -605,6 +607,45 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasIndex(item => item.MovieProjectId);
             entity.HasOne(item => item.MovieProject).WithMany(item => item.Locations).HasForeignKey(item => item.MovieProjectId).OnDelete(DeleteBehavior.Cascade);
             entity.HasOne(item => item.ReferenceAsset).WithMany().HasForeignKey(item => item.ReferenceAssetId).OnDelete(DeleteBehavior.SetNull);
+        });
+        builder.Entity<MovieLocationGeographySheet>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.Status).HasMaxLength(20).IsRequired();
+            entity.Property(item => item.EstablishingReferenceNotes).HasMaxLength(2_000);
+            entity.Property(item => item.WideThreeQuarterReferenceNotes).HasMaxLength(2_000);
+            entity.Property(item => item.EntrancesExitsJson).HasMaxLength(MovieLocationGeographyLimits.MaxSheetJsonLength).IsRequired();
+            entity.Property(item => item.WindowsJson).HasMaxLength(MovieLocationGeographyLimits.MaxSheetJsonLength).IsRequired();
+            entity.Property(item => item.PathsJson).HasMaxLength(MovieLocationGeographyLimits.MaxSheetJsonLength).IsRequired();
+            entity.Property(item => item.MajorObjectsJson).HasMaxLength(MovieLocationGeographyLimits.MaxSheetJsonLength).IsRequired();
+            entity.Property(item => item.LightSourcesJson).HasMaxLength(MovieLocationGeographyLimits.MaxSheetJsonLength).IsRequired();
+            entity.Property(item => item.OrientationAnchorsJson).HasMaxLength(MovieLocationGeographyLimits.MaxSheetJsonLength).IsRequired();
+            entity.Property(item => item.WorldBibleJson).HasMaxLength(MovieLocationGeographyLimits.MaxSheetJsonLength);
+            entity.Property(item => item.VisualBibleJson).HasMaxLength(MovieLocationGeographyLimits.MaxSheetJsonLength);
+            entity.Property(item => item.ContinuitySnapshotHash).HasMaxLength(64);
+            entity.HasIndex(item => item.MovieLocationId).IsUnique();
+            entity.HasIndex(item => new { item.Status, item.UpdatedAt });
+            entity.HasOne(item => item.Location).WithOne(item => item.GeographySheet).HasForeignKey<MovieLocationGeographySheet>(item => item.MovieLocationId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.EstablishingReferenceAsset).WithMany().HasForeignKey(item => item.EstablishingReferenceAssetId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne(item => item.WideThreeQuarterReferenceAsset).WithMany().HasForeignKey(item => item.WideThreeQuarterReferenceAssetId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne(item => item.ApprovedByUser).WithMany().HasForeignKey(item => item.ApprovedByUserId).OnDelete(DeleteBehavior.Restrict);
+        });
+        builder.Entity<MovieLocationGeographyVariant>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.Name).HasMaxLength(160).IsRequired();
+            entity.Property(item => item.Status).HasMaxLength(20).IsRequired();
+            entity.Property(item => item.Description).HasMaxLength(2_000);
+            entity.Property(item => item.TimeOfDay).HasMaxLength(80);
+            entity.Property(item => item.Weather).HasMaxLength(160);
+            entity.Property(item => item.Lighting).HasMaxLength(2_000);
+            entity.Property(item => item.ColorPalette).HasMaxLength(1_000);
+            entity.Property(item => item.ContinuityNotes).HasMaxLength(2_000);
+            entity.HasIndex(item => new { item.MovieLocationGeographySheetId, item.VersionNumber }).IsUnique();
+            entity.HasIndex(item => new { item.MovieLocationGeographySheetId, item.Status });
+            entity.HasOne(item => item.Sheet).WithMany(item => item.Variants).HasForeignKey(item => item.MovieLocationGeographySheetId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.ReferenceAsset).WithMany().HasForeignKey(item => item.ReferenceAssetId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne(item => item.ApprovedByUser).WithMany().HasForeignKey(item => item.ApprovedByUserId).OnDelete(DeleteBehavior.Restrict);
         });
         builder.Entity<MovieSet>(entity =>
         {

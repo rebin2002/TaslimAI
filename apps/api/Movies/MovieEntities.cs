@@ -419,6 +419,62 @@ public sealed class MovieLocation
     public DateTime UpdatedAt { get; set; }
     public MovieProject MovieProject { get; set; } = null!;
     public Asset? ReferenceAsset { get; set; }
+    public MovieLocationGeographySheet? GeographySheet { get; set; }
+}
+
+public sealed class MovieLocationGeographySheet
+{
+    public Guid Id { get; set; }
+    public Guid MovieLocationId { get; set; }
+    public int VersionNumber { get; set; } = 1;
+    public string Status { get; set; } = MovieLocationGeographySheetStatuses.Draft;
+    public Guid? EstablishingReferenceAssetId { get; set; }
+    public string? EstablishingReferenceNotes { get; set; }
+    public Guid? WideThreeQuarterReferenceAssetId { get; set; }
+    public string? WideThreeQuarterReferenceNotes { get; set; }
+    public string EntrancesExitsJson { get; set; } = "[]";
+    public string WindowsJson { get; set; } = "[]";
+    public string PathsJson { get; set; } = "[]";
+    public string MajorObjectsJson { get; set; } = "[]";
+    public string LightSourcesJson { get; set; } = "[]";
+    public string OrientationAnchorsJson { get; set; } = "[]";
+    public int GuideRevisionNumber { get; set; }
+    public string? WorldBibleJson { get; set; }
+    public string? VisualBibleJson { get; set; }
+    public string? ContinuitySnapshotHash { get; set; }
+    public DateTime CreatedAt { get; set; }
+    public DateTime UpdatedAt { get; set; }
+    public DateTime? ApprovedAt { get; set; }
+    public Guid? ApprovedByUserId { get; set; }
+    public MovieLocation Location { get; set; } = null!;
+    public Asset? EstablishingReferenceAsset { get; set; }
+    public Asset? WideThreeQuarterReferenceAsset { get; set; }
+    public ApplicationUser? ApprovedByUser { get; set; }
+    public ICollection<MovieLocationGeographyVariant> Variants { get; set; } = [];
+}
+
+public sealed class MovieLocationGeographyVariant
+{
+    public Guid Id { get; set; }
+    public Guid MovieLocationGeographySheetId { get; set; }
+    public int VersionNumber { get; set; }
+    public string Name { get; set; } = string.Empty;
+    public string Status { get; set; } = MovieLocationGeographyVariantStatuses.Draft;
+    public string? Description { get; set; }
+    public string? TimeOfDay { get; set; }
+    public string? Weather { get; set; }
+    public string? Lighting { get; set; }
+    public string? ColorPalette { get; set; }
+    public Guid? ReferenceAssetId { get; set; }
+    public string? ContinuityNotes { get; set; }
+    public int GuideRevisionNumber { get; set; }
+    public DateTime CreatedAt { get; set; }
+    public DateTime UpdatedAt { get; set; }
+    public DateTime? ApprovedAt { get; set; }
+    public Guid? ApprovedByUserId { get; set; }
+    public MovieLocationGeographySheet Sheet { get; set; } = null!;
+    public Asset? ReferenceAsset { get; set; }
+    public ApplicationUser? ApprovedByUser { get; set; }
 }
 
 public sealed class MovieSet
@@ -817,7 +873,7 @@ public sealed record MovieCastProjectDto(Guid Id, Guid WorkspaceId, Guid? Projec
 public sealed record MovieCastCharacterDto(Guid Id, string Name, string? Role, string Description, string? Appearance, Guid? ReferenceAssetId, IReadOnlyList<Guid> ReferenceAssetIds, int ReferenceAssetCount, int StateCount, MovieCharacterStateDto? LatestState, int RelationshipCount, IReadOnlyList<string> RelationshipTypes, int LockedFactCount, IReadOnlyList<string> LockedFieldKeys, DateTime UpdatedAt);
 public sealed record MovieCastDto(MovieCastProjectDto Project, IReadOnlyList<MovieCastCharacterDto> Characters);
 public sealed record MovieCharacterDetailDto(MovieCastProjectDto Project, MovieCharacterDto Character);
-public sealed record MovieLocationDto(Guid Id, string Name, string Description, string? VisualContinuityNotes, Guid? ReferenceAssetId);
+public sealed record MovieLocationDto(Guid Id, string Name, string Description, string? VisualContinuityNotes, Guid? ReferenceAssetId, MovieLocationGeographySheetDto? GeographySheet = null);
 public sealed record MovieSetVariationDto(Guid Id, Guid MovieSetId, string Name, string? VisualDescription, string? TimeOfDay, string? Weather, string? Lighting, string? ContinuityNotes, Guid? ReferenceAssetId, bool IsDefault);
 public sealed record MovieSetDto(Guid Id, Guid? MovieLocationId, string Name, string Description, string EnvironmentType, string? VisualDescription, string? TimeOfDay, string? Weather, string? ContinuityNotes, Guid? ReferenceAssetId, IReadOnlyList<MovieSetVariationDto> Variations);
 public sealed record MoviePropDto(Guid Id, string Name, string Description, string? Category, string? ContinuityNotes, Guid? ReferenceAssetId);

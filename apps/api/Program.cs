@@ -228,6 +228,7 @@ builder.Services.AddScoped<NotificationService>();
 builder.Services.AddScoped<INotificationService>(services => services.GetRequiredService<NotificationService>());
 builder.Services.AddScoped<INotificationEventWriter>(services => services.GetRequiredService<NotificationService>());
 builder.Services.AddScoped<IMovieStudioService, MovieStudioService>();
+builder.Services.AddScoped<IMovieLocationGeographySheetService, MovieLocationGeographySheetService>();
 builder.Services.AddScoped<IMovieProductionComplexityService, MovieProductionComplexityService>();
 builder.Services.AddScoped<MovieShotImportanceClassifier>();
 builder.Services.AddScoped<MovieShotImportanceService>();

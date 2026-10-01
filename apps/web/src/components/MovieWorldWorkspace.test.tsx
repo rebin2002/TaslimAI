@@ -28,4 +28,15 @@ describe("Movie World workspace", () => {
     expect(apiSource).toContain("updateMovieSet");
     expect(apiSource).toContain("updateMovieProp");
   });
+
+  it("surfaces location geography sheets before motion generation", () => {
+    expect(source).toContain("Location geography sheet");
+    expect(source).toContain("Establishing reference");
+    expect(source).toContain("Wide 3/4 spatial reference");
+    expect(source).toContain("Entrances / exits");
+    expect(source).toContain("Orientation anchors");
+    expect(source).toContain("Approve sheet");
+    expect(apiSource).toContain("upsertMovieLocationGeographySheet");
+    expect(apiSource).toContain("approveMovieLocationGeographyVariant");
+  });
 });
