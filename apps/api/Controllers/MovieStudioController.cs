@@ -12,7 +12,7 @@ namespace Taslim.Api.Controllers;
 [ApiController]
 [Authorize]
 [Route("api/movie-studio")]
-public sealed class MovieStudioController(IMovieStudioService movies, IMovieProductionComplexityService complexity, IMovieDurationBudgetService durationBudgets, IMovieGuideService guides, IMovieStoryService stories, IMovieStoryCastService storyCast, IMovieCharacterContinuityService continuity, IMovieWorldContinuityService worldContinuity, IMovieProductionContinuityService productionContinuity, IMovieProductionReferencePackageService productionReferences, IMovieTimelineService timeline, IMovieShotExecutionService shotExecution, MovieAuthorizationService authorization, MovieShotImportanceService shotImportance, IMovieCinematographyPlanningService cinematographyPlanning) : ControllerBase
+public sealed class MovieStudioController(IMovieStudioService movies, IMovieProductionComplexityService complexity, IMovieDurationBudgetService durationBudgets, IMovieGuideService guides, IMovieStoryService stories, IMovieStoryCastService storyCast, IMovieCharacterContinuityService continuity, IMovieWorldContinuityService worldContinuity, IMovieProductionContinuityService productionContinuity, IMovieProductionReferencePackageService productionReferences, IMovieProductionPreflightService productionPreflight, IMovieTimelineService timeline, IMovieShotExecutionService shotExecution, MovieAuthorizationService authorization, MovieShotImportanceService shotImportance, IMovieCinematographyPlanningService cinematographyPlanning) : ControllerBase
 {
     [HttpGet("cinematography/presets")]
     public IActionResult CinematographyPresets() => Ok(CinematographyPresetCatalog.All);
@@ -544,6 +544,27 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
             var result = await productionReferences.GetForShotAsync(GetUserId(), shotId, cancellationToken);
             return result is null ? ApiResults.Error(this, 404, "MOVIE_SHOT_NOT_FOUND", "Movie shot not found.") : Ok(result);
         }
+        catch (MovieProductionReferenceException exception) { return ApiResults.Error(this, 400, "MOVIE_PRODUCTION_REFERENCES_INVALID", exception.Message); }
+    }
+
+    [HttpGet("shots/{shotId:guid}/production/preflight")]
+    public async Task<IActionResult> GetProductionPreflight(
+        Guid shotId,
+        [FromQuery] Guid? sourceVersionId,
+        [FromQuery] string? targetResolution,
+        [FromQuery] string? qualityTier,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await productionPreflight.EvaluateAsync(
+                GetUserId(),
+                shotId,
+                new MovieProductionPreflightRequest(sourceVersionId, targetResolution, qualityTier),
+                cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_SHOT_NOT_FOUND", "Movie shot not found.") : Ok(result);
+        }
+        catch (MovieProductionValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
         catch (MovieProductionReferenceException exception) { return ApiResults.Error(this, 400, "MOVIE_PRODUCTION_REFERENCES_INVALID", exception.Message); }
     }
 
