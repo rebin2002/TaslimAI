@@ -1904,6 +1904,14 @@ body { background: var(--canvas); }
 .movie-cost-readout span { display: block; color: #6c8a9d; font-size: 8px; line-height: 1.4; }
 .movie-cost-readout strong { display: block; margin-top: 8px; color: #e8f3f5; font-size: 13px; overflow-wrap: anywhere; }
 .movie-command-note { margin: 13px 0 0; color: #718fa0; font-size: 9px; line-height: 1.5; }
+.movie-budget-director-card { border-color: rgba(85,209,193,.3); background: linear-gradient(120deg, rgba(14,42,61,.68), rgba(7,23,36,.58)); }
+.movie-budget-compare { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; padding-top: 15px; }
+.movie-budget-compare > div, .movie-budget-savings { min-width: 0; padding: 12px; border: 1px solid rgba(143,176,204,.13); border-radius: 7px; background: rgba(14,42,61,.3); }
+.movie-budget-compare span, .movie-budget-savings span { display: block; color: #6c8a9d; font-size: 8px; line-height: 1.4; }
+.movie-budget-compare strong, .movie-budget-savings strong { display: block; margin-top: 8px; color: #e8f3f5; font-size: 13px; overflow-wrap: anywhere; }
+.movie-budget-compare small, .movie-budget-savings small { display: block; margin-top: 6px; color: #7896a7; font-size: 8px; line-height: 1.45; }
+.movie-budget-savings { margin-top: 9px; border-color: rgba(85,209,193,.24); background: rgba(85,209,193,.07); }
+.movie-budget-savings strong { color: #dffaf5; }
 .movie-warning-list, .movie-activity-list { display: flex; flex-direction: column; gap: 0; padding-top: 4px; }
 .movie-warning-row { display: flex; align-items: flex-start; gap: 9px; padding: 12px 0; border-bottom: 1px solid rgba(143,176,204,.1); }
 .movie-warning-row svg { flex: 0 0 auto; margin-top: 1px; color: #e1b66d; }

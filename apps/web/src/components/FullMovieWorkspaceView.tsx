@@ -43,7 +43,7 @@ import {
   Workflow,
   X,
 } from "lucide-react";
-import { api, type Asset, type CinematographyPreset, type DirectorProposal, type DirectorStoryAction, type MovieCast, type MovieCharacter, type MovieCharacterState, type MovieOverview, type MovieProductionCheckpoint, type MovieProductionReviewInput, type MovieProductionVersion, type MovieProject, type MovieTake, type MovieProjectShell, type MovieScene, type MovieSceneShotPlan, type MovieSceneWorkspace, type MovieScenesWorkspace, type MovieScreenplayElementType, type MovieShot, type MovieShotPlanningInput, type MovieStoryboardCandidate, type MovieStoryboardProject, type MovieStoryboardScene, type MovieStoryboardShot, type MovieStory, type MovieStoryRevision, type MovieStoryRevisionInput } from "@/lib/api";
+import { api, type Asset, type CinematographyPreset, type DirectorProposal, type DirectorStoryAction, type MovieBudgetDirectorEstimate, type MovieCast, type MovieCharacter, type MovieCharacterState, type MovieOverview, type MovieProductionCheckpoint, type MovieProductionReviewInput, type MovieProductionVersion, type MovieProject, type MovieTake, type MovieProjectShell, type MovieScene, type MovieSceneShotPlan, type MovieSceneWorkspace, type MovieScenesWorkspace, type MovieScreenplayElementType, type MovieShot, type MovieShotPlanningInput, type MovieStoryboardCandidate, type MovieStoryboardProject, type MovieStoryboardScene, type MovieStoryboardShot, type MovieStory, type MovieStoryRevision, type MovieStoryRevisionInput } from "@/lib/api";
 import { assetFileUrl } from "@/lib/apiBase";
 import { MovieWorldWorkspace } from "@/components/MovieWorldWorkspace";
 import { ShotDesigner, type ShotDesignerDraft } from "@/components/ShotDesigner";
@@ -128,6 +128,7 @@ function FullMovieProjectWorkspace({ projectId, module }: { projectId: string; m
   const activeModule = moduleFromSlug(module);
   const [project, setProject] = useState<MovieProject | null>(null);
   const [overview, setOverview] = useState<MovieOverview | null>(null);
+  const [budgetEstimate, setBudgetEstimate] = useState<MovieBudgetDirectorEstimate | null>(null);
   const [projectShell, setProjectShell] = useState<MovieProjectShell | null>(null);
   const [storyboard, setStoryboard] = useState<MovieStoryboardProject | null>(null);
   const [loading, setLoading] = useState(true);
@@ -164,6 +165,9 @@ function FullMovieProjectWorkspace({ projectId, module }: { projectId: string; m
     }).finally(() => {
       if (mounted) setLoading(false);
     });
+    if (activeModule === "overview") {
+      void api.getMovieBudgetDirector(projectId).then((result) => { if (mounted) setBudgetEstimate(result); }).catch(() => undefined);
+    }
     if (activeModule === "storyboard") {
       void api.getMovieProject(projectId).then((fullProject) => {
         if (!mounted) return;
@@ -279,7 +283,7 @@ function FullMovieProjectWorkspace({ projectId, module }: { projectId: string; m
 
         <main className="movie-workspace-main">
           <div className="movie-module-heading"><div><span className="movie-workspace-kicker">{copy.eyebrow}</span><h2>{copy.title}</h2><p>{copy.description}</p></div><span className="movie-module-index">{String(fullMovieModules.findIndex((item) => item.slug === activeModule) + 1).padStart(2, "0")} / 12</span></div>
-          {activeModule === "overview" && overview && <OverviewModule overview={overview} outputAssetId={outputAssetId} />}
+          {activeModule === "overview" && overview && <OverviewModule overview={overview} budgetEstimate={budgetEstimate} outputAssetId={outputAssetId} />}
           {activeModule === "story" && <StoryModule projectId={workspace.id} guideLocked={projectShell?.lockedGuideRevisionNumber != null} />}
           {activeModule === "cast" && <CastModule projectId={workspace.id} />}
           {activeModule === "world" && <WorldModule projectId={fullProject.id} />}
@@ -300,7 +304,7 @@ function FullMovieProjectWorkspace({ projectId, module }: { projectId: string; m
   );
 }
 
-function OverviewModule({ overview, outputAssetId }: { overview: MovieOverview; outputAssetId: string | null }) {
+function OverviewModule({ overview, budgetEstimate, outputAssetId }: { overview: MovieOverview; budgetEstimate: MovieBudgetDirectorEstimate | null; outputAssetId: string | null }) {
   const project = overview.project;
   const action = overview.nextActions[0];
   const progressItems = [
@@ -340,12 +344,18 @@ function OverviewModule({ overview, outputAssetId }: { overview: MovieOverview; 
       <section className="movie-command-section"><CommandSectionTitle eyebrow="Production economics" title={overview.cost.isKnown ? "Recorded estimate" : "No estimate recorded yet"} detail="Planning view" /><div className="movie-cost-readout"><div><span>Recorded estimate</span><strong>{formatCost(overview.cost.recordedProviderCostUsd, overview.cost.currency)}</strong></div><div><span>Estimated remaining</span><strong>{formatCost(overview.cost.estimatedRemainingProviderCostUsd, overview.cost.currency)}</strong></div></div><p className="movie-command-note">{overview.cost.note ?? "Estimates are shown for planning only and do not activate charging."}</p></section>
     </div>
 
+    <BudgetDirectorCard estimate={budgetEstimate} />
+
     <div className="movie-command-grid movie-command-grid-bottom"><section className="movie-command-section"><CommandSectionTitle eyebrow="Warnings & blockers" title={overview.warnings.length ? `${overview.warnings.length} signals need attention` : "No active warnings"} detail="Continuity and production" />{overview.warnings.length ? <div className="movie-warning-list">{overview.warnings.map((warning) => <div className={`movie-warning-row is-${warning.severity}`} key={warning.key}><CircleAlert size={14} /><div><strong>{warning.label}</strong><p>{warning.detail}</p></div></div>)}</div> : <HonestEmpty text="No unresolved warnings have been recorded for this project." />}</section><section className="movie-command-section"><CommandSectionTitle eyebrow="Recent activity" title="Meaningful changes" detail="Latest persisted records" />{overview.recentActivity.length ? <div className="movie-activity-list">{overview.recentActivity.map((item) => <div className="movie-activity-row" key={item.key}><Clock3 size={14} /><div><strong>{item.label}</strong><span>{item.detail}</span></div><time dateTime={item.occurredAt}>{formatRelativeDate(item.occurredAt)}</time></div>)}</div> : <HonestEmpty text="Activity will appear after a project record changes." />}</section></div>
 
     {outputAssetId ? <section className="movie-generated-surface movie-command-output"><div className="movie-surface-heading"><div><span className="movie-workspace-kicker">Latest output</span><h3>Reviewable project output</h3></div><span className="movie-surface-status"><span className="is-ready" /> Ready</span></div><div className="movie-generated-video"><video src={assetFileUrl(outputAssetId, true)} controls preload="metadata" aria-label={project.title} /><div className="movie-generated-video-caption"><Play size={14} /> {project.title}</div></div></section> : <section className="movie-command-empty"><Film size={20} /><div><span className="movie-workspace-kicker">Latest output</span><h3>No output yet</h3><p>No generated footage yet. The plan is visible above; real output will appear here when the persisted production workflow creates one.</p></div></section>}
   </div>;
 }
 
+function BudgetDirectorCard({ estimate }: { estimate: MovieBudgetDirectorEstimate | null }) {
+  const savings = estimate?.savings ?? null;
+  return <section className="movie-command-section movie-budget-director-card"><CommandSectionTitle eyebrow="Budget Director" title="Spend less before you finish" detail="Estimate only" /><p className="movie-command-note">Lock references, review low-cost drafts, salvage usable ranges, and reserve mastering for selected takes.</p>{estimate && savings ? <><div className="movie-budget-compare"><div><span>Naive high-cost path</span><strong>{formatRange(estimate.naivePath.minimumAmountUsd, estimate.naivePath.maximumAmountUsd, estimate.currency)}</strong><small>{estimate.naivePath.generationUnits} generation units</small></div><div><span>Optimized path</span><strong>{formatRange(estimate.optimizedPath.minimumAmountUsd, estimate.optimizedPath.maximumAmountUsd, estimate.currency)}</strong><small>{estimate.optimizedPath.generationUnits} generation units</small></div></div><div className="movie-budget-savings"><span>Estimated avoided cost</span><strong>{savings.maximumAmountUsd === null ? "Unavailable" : formatRange(savings.minimumAmountUsd, savings.maximumAmountUsd, estimate.currency)}</strong><small>{savings.maximumPercent === null ? "Complete pricing is required" : `${savings.minimumPercent}–${savings.maximumPercent}% range · ${savings.basis}`}</small></div><p className="movie-command-note">{savings.actualSavingsAvailable ? `Actual savings: ${formatCost(savings.actualSavingsUsd, estimate.currency)}` : "Actual savings are not claimed. Completed ledger evidence is required."}</p></> : <p className="movie-command-note">Budget preview is loading. No generation or charge starts from this view.</p>}</section>;
+}
 function CommandSectionTitle({ eyebrow, title, detail }: { eyebrow: string; title: string; detail: string }) { return <div className="movie-command-section-title"><div><span className="movie-workspace-kicker">{eyebrow}</span><h3>{title}</h3></div><small>{detail}</small></div>; }
 function CommandMetric({ label, value, detail, icon }: { label: string; value: number; detail: string; icon: ReactNode }) { return <div className="movie-command-metric"><span className="movie-command-metric-icon">{icon}</span><div><span>{label}</span><strong>{value}</strong><small>{detail}</small></div></div>; }
 function ProgressLine({ label, stage }: { label: string; stage: MovieOverview["progress"]["storyboard"] }) { return <div className="movie-progress-line"><div><span>{label}</span><strong>{stage.percent === null ? "Not started" : `${stage.percent}%`}</strong></div><div className="movie-progress-track"><span style={{ width: `${stage.percent ?? 0}%` }} /></div><small>{stage.total === 0 ? "No persisted shot plan" : `${stage.completed} of ${stage.total} complete`}</small></div>; }
@@ -354,6 +364,7 @@ function HonestEmpty({ text }: { text: string }) { return <div className="movie-
 function formatStatus(value: string) { return value.replace(/([a-z])([A-Z])/g, "$1 $2"); }
 function formatPercent(value: number | null) { return value === null ? "—" : `${value}%`; }
 function formatCost(value: number | null, currency: string) { return value === null ? "Not available" : `${currency} ${value.toFixed(2)}`; }
+function formatRange(minimum: number | null, maximum: number | null, currency: string) { return minimum === null || maximum === null ? "Not available" : minimum === maximum ? `${currency} ${maximum.toFixed(2)}` : `${currency} ${minimum.toFixed(2)}–${maximum.toFixed(2)}`; }
 function formatRelativeDate(value: string) { const date = new Date(value); return Number.isNaN(date.getTime()) ? "Recently" : date.toLocaleDateString(undefined, { month: "short", day: "numeric" }); }
 
 
