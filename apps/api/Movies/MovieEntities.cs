@@ -151,6 +151,7 @@ public static class MovieAssemblyStatuses
     public const string Assembling = "Assembling";
     public const string Ready = "Ready";
     public const string Failed = "Failed";
+    public const string Cancelled = "Cancelled";
 }
 
 public static class MovieGuideSectionTypes
@@ -249,6 +250,8 @@ public sealed class MovieProject
     public ICollection<MovieWorldUsage> WorldUsages { get; set; } = [];
     public ICollection<MovieClip> Clips { get; set; } = [];
     public ICollection<MovieAssembly> Assemblies { get; set; } = [];
+    public ICollection<MovieSoundtrackCue> SoundtrackCues { get; set; } = [];
+    public ICollection<MovieCaptionTrack> CaptionTracks { get; set; } = [];
     public ICollection<MovieTeamMember> TeamMembers { get; set; } = [];
     public ICollection<MovieComment> Comments { get; set; } = [];
     public ICollection<MovieReview> Reviews { get; set; } = [];
@@ -319,6 +322,7 @@ public sealed class MovieScene
     public MovieSequence? MovieSequence { get; set; }
     public ICollection<MovieShot> Shots { get; set; } = [];
     public ICollection<MovieClip> Clips { get; set; } = [];
+    public ICollection<MovieSoundtrackCue> SoundtrackCues { get; set; } = [];
 }
 
 public sealed class MovieCharacter
@@ -551,6 +555,7 @@ public sealed class MovieShot
     public Guid MovieSceneId { get; set; }
     public Guid? SelectedTakeId { get; set; }
     public Guid? FinalTakeId { get; set; }
+    public Guid? SelectedKeyframeVersionId { get; set; }
     public int Sequence { get; set; }
     public string ProductionStage { get; set; } = MovieProductionStages.ShotPlan;
     public string Description { get; set; } = string.Empty;
@@ -558,6 +563,12 @@ public sealed class MovieShot
     public string? Subjects { get; set; }
     public string? SubjectCharacterIdsJson { get; set; }
     public string? LocationSet { get; set; }
+    public string? NarrativeImportance { get; set; }
+    public string? ProductionComplexityJson { get; set; }
+    public string? QualityRequirementsJson { get; set; }
+    public string? ContinuitySensitivity { get; set; }
+    public string? UpscaleSuitability { get; set; }
+    public string? TargetOutputRequirementsJson { get; set; }
     public string? ProductionRequirements { get; set; }
     public string? ContinuityReferences { get; set; }
     public string? CameraAndFraming { get; set; }
@@ -567,6 +578,7 @@ public sealed class MovieShot
     public string? Narration { get; set; }
     public string? Dialogue { get; set; }
     public string? VisualContinuityNotes { get; set; }
+    public string? ImportanceOverride { get; set; }
     public string Status { get; set; } = MovieShotStatuses.Planned;
     public DateTime? ArchivedAt { get; set; }
     public DateTime CreatedAt { get; set; }
@@ -574,11 +586,13 @@ public sealed class MovieShot
     public MovieScene Scene { get; set; } = null!;
     public MovieTake? SelectedTake { get; set; }
     public MovieTake? FinalTake { get; set; }
+    public MovieProductionVersion? SelectedKeyframeVersion { get; set; }
     public ICollection<MovieTake> Takes { get; set; } = [];
     public ICollection<MovieClip> Clips { get; set; } = [];
     public ICollection<MovieProductionVersion> ProductionVersions { get; set; } = [];
     public ICollection<MovieProductionStageTransition> ProductionTransitions { get; set; } = [];
     public ICollection<MovieRegenerationRequest> RegenerationRequests { get; set; } = [];
+    public ICollection<MovieProductionComplexityAssessment> ProductionComplexityAssessments { get; set; } = [];
 }
 
 public sealed class MovieClip
@@ -607,6 +621,7 @@ public sealed class MovieClip
     public GenerationJob? GenerationJob { get; set; }
     public Asset? Asset { get; set; }
     public StoredFile? StoredFile { get; set; }
+    public ICollection<MovieDialogueLine> DialogueLines { get; set; } = [];
 }
 
 public sealed class MovieAssembly
@@ -617,12 +632,31 @@ public sealed class MovieAssembly
     public Guid? AssetId { get; set; }
     public string Status { get; set; } = MovieAssemblyStatuses.Planned;
     public string OutputFormat { get; set; } = "mp4";
+    public string ResolutionProfile { get; set; } = MovieFinalAssemblyProfiles.Uhd4K;
+    public int OutputWidth { get; set; }
+    public int OutputHeight { get; set; }
+    public string TimelineJson { get; set; } = "[]";
+    public string AudioMixJson { get; set; } = "[]";
+    public string CaptionsJson { get; set; } = "{}";
+    public string? IdempotencyKey { get; set; }
+    public string? RequestFingerprint { get; set; }
+    public string? ProvenanceJson { get; set; }
+    public string? CheckpointJson { get; set; }
+    public int AttemptCount { get; set; }
+    public int ProgressPercent { get; set; }
+    public string QcStatus { get; set; } = MovieFinalAssemblyQcStatuses.NotRun;
+    public string? QcResultJson { get; set; }
+    public string? LastErrorCode { get; set; }
     public string? MetadataJson { get; set; }
     public DateTime CreatedAt { get; set; }
+    public DateTime UpdatedAt { get; set; }
     public DateTime? CompletedAt { get; set; }
+    public Guid? RequestedByUserId { get; set; }
     public MovieProject MovieProject { get; set; } = null!;
     public GenerationJob? GenerationJob { get; set; }
     public Asset? Asset { get; set; }
+    public ICollection<MovieCaptionTrack> CaptionTracks { get; set; } = [];
+    public ApplicationUser RequestedByUser { get; set; } = null!;
 }
 
 public enum MovieVideoProviderJobStatus
@@ -653,7 +687,12 @@ public sealed record MovieVideoGenerationRequest(
     string? ShotJson,
     string? SourceImageUri = null,
     string? ContinuationProviderJobId = null,
-    string? WorldContextJson = null);
+    string? WorldContextJson = null,
+    string? ReferencePackageJson = null,
+    string? SourceResolution = null,
+    string? MasterResolution = null,
+    string? ProcessingPath = null,
+    bool UpscalingRequested = false);
 
 public sealed record MovieVideoSubmission(string ProviderJobId);
 public sealed record MovieVideoProviderStatus(
@@ -748,7 +787,17 @@ public sealed record MovieGenerationInput(
     Guid? SourceProductionVersionId = null,
     string? ChangedInputsJson = null,
     string? SelectiveActionType = null,
-    string? SelectiveReason = null);
+    string? SelectiveReason = null,
+    string? SourceResolution = null,
+    string? TargetResolution = null,
+    string? ProcessingPath = null,
+    string? QualityTier = null,
+    string? ContinuitySnapshotHash = null,
+    string? ReferencePackageJson = null,
+    string? MasterResolution = null,
+    bool UpscalingRequested = false,
+    int? TakeNumber = null,
+    int? TakeCount = null);
 
 public sealed record MovieProviderReadinessDto(bool Ready, IReadOnlyList<string> SupportedOperations);
 
@@ -758,7 +807,7 @@ public sealed record MovieGuideSectionDto(string Type, string ContentJson);
 public sealed record MovieGuideRevisionDto(Guid Id, int RevisionNumber, string Status, IReadOnlyList<MovieGuideSectionDto> Sections, Guid CreatedByUserId, DateTime CreatedAt, DateTime? LockedAt, Guid? LockedByUserId);
 public sealed record MovieDirectorContextDto(Guid MovieProjectId, Guid MovieGuideId, bool IsAuthoritative, int RevisionNumber, DateTime? LockedAt, IReadOnlyList<MovieGuideSectionDto> Sections);
 public sealed record MovieSceneDto(Guid Id, int Sequence, string Title, string Summary, int? DurationSeconds, string? ContinuityNotes, string? Narration, string? Dialogue, IReadOnlyList<MovieShotDto> Shots, IReadOnlyList<MovieClipDto> Clips);
-public sealed record MovieShotDto(Guid Id, int Sequence, string Description, string? Purpose, string? Subjects, IReadOnlyList<Guid> SubjectCharacterIds, string? LocationSet, int? DurationSeconds, string? ProductionRequirements, string? ContinuityReferences, string? CameraAndFraming, string? CameraMotion, string? CinematographyJson, string? CinematographySummary, string? Narration, string? Dialogue, string? VisualContinuityNotes, string Status, string PlanState, MovieShotReadinessDto Readiness, string ProductionStage, IReadOnlyList<MovieClipDto> Clips, IReadOnlyList<MovieProductionVersionDto> ProductionVersions, IReadOnlyList<MovieV2TakeDto> Takes);
+public sealed record MovieShotDto(Guid Id, int Sequence, string Description, string? Purpose, string? Subjects, IReadOnlyList<Guid> SubjectCharacterIds, string? LocationSet, int? DurationSeconds, string? ProductionRequirements, string? ContinuityReferences, string? CameraAndFraming, string? CameraMotion, string? CinematographyJson, string? CinematographySummary, string? Narration, string? Dialogue, string? VisualContinuityNotes, string Status, string PlanState, MovieShotReadinessDto Readiness, string ProductionStage, IReadOnlyList<MovieClipDto> Clips, IReadOnlyList<MovieProductionVersionDto> ProductionVersions, IReadOnlyList<MovieV2TakeDto> Takes, MovieShotProductionContractDto? ProductionContract = null, MovieProductionComplexityAssessmentDto? ProductionComplexity = null, MovieShotQualityRequirementsDto? QualityRequirements = null, MovieAdaptiveResolutionDirectorInputDto? AdaptiveResolutionDirectorInput = null, CinematographyShotPlan? CinematographyPlan = null, Guid? SelectedKeyframeVersionId = null);
 public sealed record MovieCharacterStateDto(Guid Id, string Key, string? Label, string? Wardrobe, string? AgeOrTimeState, string? Appearance, string? InjuryOrCondition, string? LocationOrStoryState, string? ContinuityNotes, DateTime CreatedAt, DateTime UpdatedAt);
 public sealed record MovieCharacterRelationshipDto(Guid Id, Guid RelatedCharacterId, string RelatedCharacterName, string RelationshipType, string? Notes);
 public sealed record MovieCharacterContinuityLockDto(Guid Id, string FieldKey, string LockedValue, Guid? CharacterStateId, DateTime ApprovedAt);
@@ -871,7 +920,7 @@ public sealed class MovieGuideLockRequest
 {
     public int? RevisionNumber { get; set; }
 }
-public sealed record MovieStudioShotRequest(string Description, string? CameraAndFraming, string? CameraMotion, int? DurationSeconds, string? Narration, string? Dialogue, string? VisualContinuityNotes, CinematographyIntentSelection? Cinematography = null, string? Purpose = null, string? Subjects = null, string? LocationSet = null, string? ProductionRequirements = null, string? ContinuityReferences = null, IReadOnlyList<Guid>? SubjectCharacterIds = null);
+public sealed record MovieStudioShotRequest(string Description, string? CameraAndFraming, string? CameraMotion, int? DurationSeconds, string? Narration, string? Dialogue, string? VisualContinuityNotes, CinematographyIntentSelection? Cinematography = null, string? Purpose = null, string? Subjects = null, string? LocationSet = null, string? ProductionRequirements = null, string? ContinuityReferences = null, IReadOnlyList<Guid>? SubjectCharacterIds = null, string? NarrativeImportance = null, MovieShotComplexityProfile? ProductionComplexity = null, MovieShotQualityRequirements? QualityRequirements = null, string? ContinuitySensitivity = null, string? UpscaleSuitability = null, MovieShotTargetOutputRequirements? TargetOutputRequirements = null);
 public sealed record MovieStudioGuideRequest(string? VisualLanguage, string? CameraLanguage, string? ColorAndLighting, string? SoundAndNarration, string? ContinuityRules, CinematographyIntentSelection? Cinematography = null);
 public sealed record MovieStudioGenerationRequest(
     string? Title = null,
@@ -887,12 +936,17 @@ public sealed record MovieStudioGenerationRequest(
 
 public static class MovieStudioValidation
 {
+    public static readonly IReadOnlySet<string> SupportedAspectRatios = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "16:9", "9:16", "1:1", "4:5", "4:3",
+    };
+
     public static string? Validate(MovieStudioCreateRequest request)
     {
         if (string.IsNullOrWhiteSpace(request.Title) || request.Title.Trim().Length > 160) return "Add a movie title.";
         if (string.IsNullOrWhiteSpace(request.Description) || request.Description.Trim().Length > 8000) return "Describe the movie in 1–8,000 characters.";
         if (request.DurationSeconds is < 1 or > 3600) return "Movie duration must be between 1 second and 60 minutes.";
-        if (request.AspectRatio is not ("16:9" or "9:16" or "1:1" or "4:5" or "4:3")) return "Choose a supported aspect ratio.";
+        if (!SupportedAspectRatios.Contains(request.AspectRatio)) return "Choose a supported aspect ratio.";
         if (!LanguageCodes.Supported.Contains(request.Language)) return "Choose English, Arabic, or Kurdish.";
         if (request.Mode is not (MovieProjectModes.Quick or MovieProjectModes.Full)) return "Choose Quick Movie or Full Movie Project.";
         var cinematographyValidation = CinematographyIntentValidator.Validate(request.Cinematography);

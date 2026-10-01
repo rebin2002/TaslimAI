@@ -87,6 +87,7 @@ public static class MovieTakeUpscaleEligibilityEvaluator
         MovieTakeStatuses.Ready,
         MovieTakeStatuses.ReviewRequired,
         MovieTakeStatuses.Approved,
+        MovieTakeStatuses.Selected,
     };
 
     public static MovieTakeUpscaleEligibilityDecision Evaluate(MovieTake take, MovieShot shot, string? targetMasterResolution)

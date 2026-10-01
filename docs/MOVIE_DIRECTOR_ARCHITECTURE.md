@@ -44,6 +44,19 @@ Context snapshots are versioned and SHA-256 hashed. Payloads and rationale are b
 
 The serialized snapshot has a deterministic `100,000`-byte maximum and a separate optional-material budget. Locked Guide sections, Cast locks, World locks, and continuity facts are critical inputs: they are never silently truncated; an over-budget critical set fails with `DIRECTOR_CONTEXT_BUDGET_EXCEEDED`. Snapshot provenance identifies source kind, entity/revision, lock state, and priority. `AssembledAt` is excluded from identity by using a stable snapshot timestamp, so identical source state produces the same SHA-256 hash. Assembly duration is recorded in the safe Director history event for performance instrumentation.
 
+### Wave 2 production-room awareness
+
+The same Director receives a room-aware context contract rather than a new agent or persona. `RoomContext` carries the current room, selected scene, selected shot when relevant, available prerequisites, valid actions, and the appropriate target. The proposal service validates that action matrix server-side before persisting a proposal.
+
+| Room | Appropriate target | Valid Director actions | Boundary |
+| --- | --- | --- | --- |
+| Cast | Project | `story_assistance` | Remains project-scoped; it never requires a selected shot. |
+| Scenes | Selected scene, or selected shot for shot planning | `scene_planning`, `shot_planning` | Planning only; no media provider call. |
+| Storyboard | Selected scene or shot | `storyboard_preparation` | Prepares context from the Shot Plan; does not generate media. |
+| Production | Selected shot, scene, or project readiness target | `production_readiness` | Readiness/context only; provider generation remains disabled. |
+
+Room-planning actions retain the normal proposal → explicit approval → execute boundary. Their executor records a safe result and explicitly reports that no provider was called and no production records were silently changed.
+
 ## Shared Wave 5 boundaries
 
 The Director does **not** add providers, provider enablement, spending, billing, a fifth quality tier, or autonomous execution. It reuses existing routing and accounting infrastructure:

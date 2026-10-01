@@ -91,7 +91,8 @@ public sealed record ImageGenerationInput(
     string? TextInImage,
     Guid? ProjectId,
     Guid? ReferenceFileId,
-    Guid? GenerationJobId = null);
+    Guid? GenerationJobId = null,
+    Guid? ProductionVersionId = null);
 
 public static class ImageGenerationContractMapper
 {

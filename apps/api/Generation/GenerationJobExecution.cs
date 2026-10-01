@@ -15,23 +15,28 @@ using Taslim.Api.Images;
 using Taslim.Api.Music;
 using Taslim.Api.Movies;
 using Taslim.Api.Notifications;
+using Taslim.Api.Operations;
 using Taslim.Api.Persistence;
 using Taslim.Api.Presentations;
 using Taslim.Api.Research;
 using Taslim.Api.Social;
 using Taslim.Api.Usage;
 using Taslim.Api.Voice;
+using Taslim.Api.Video;
 
 namespace Taslim.Api.Generation;
 
 public sealed class GenerationJobOptions
 {
     public int WorkerConcurrency { get; set; } = 1;
+    public bool WorkerEnabled { get; set; } = true;
     public int PollIntervalMilliseconds { get; set; } = 1000;
     public int CancellationPollMilliseconds { get; set; } = 100;
     public int ClaimRecoveryIntervalMilliseconds { get; set; } = 30000;
     public int ClaimLeaseMinutes { get; set; } = 30;
     public int LeaseRenewalIntervalMilliseconds { get; set; } = 60000;
+    public int MaxAutomaticRetries { get; set; } = 3;
+    public int HeartbeatStaleAfterSeconds { get; set; } = 120;
 }
 
 public sealed class GenerationJobPollingSchedule(GenerationJobOptions options)
@@ -128,12 +133,15 @@ public sealed class GenerationJobUsageService(IUsageLedgerService ledger) : IGen
                         ? UsageFeature.Presentation
                         : string.Equals(job.JobType, GenerationJobTypes.ResearchGenerate, StringComparison.OrdinalIgnoreCase)
                             ? UsageFeature.Research
-                            : string.Equals(job.JobType, GenerationJobTypes.VoiceGenerate, StringComparison.OrdinalIgnoreCase)
-                                ? UsageFeature.Voice
-                                : string.Equals(job.JobType, GenerationJobTypes.MusicGenerate, StringComparison.OrdinalIgnoreCase)
+                            : (string.Equals(job.JobType, GenerationJobTypes.VoiceGenerate, StringComparison.OrdinalIgnoreCase)
+                                || GenerationJobTypes.MovieDialogueVoiceTypes.Contains(job.JobType))
+                                    ? UsageFeature.Voice
+                                    : string.Equals(job.JobType, GenerationJobTypes.MusicGenerate, StringComparison.OrdinalIgnoreCase)
                                     ? UsageFeature.Music
                                     : string.Equals(job.JobType, GenerationJobTypes.SocialGenerate, StringComparison.OrdinalIgnoreCase)
                                         ? UsageFeature.Social
+                                        : GenerationJobTypes.MovieSoundTypes.Contains(job.JobType)
+                                            ? UsageFeature.Movie
                                         : GenerationJobTypes.MovieTypes.Contains(job.JobType)
                                             ? UsageFeature.Movie
                                             : UsageFeature.Generation,
@@ -190,7 +198,11 @@ public sealed class GenerationJobService(
         if (request.ProjectId.HasValue && !await db.Projects.AnyAsync(project => project.Id == request.ProjectId && project.WorkspaceId == request.WorkspaceId, cancellationToken))
             throw new GenerationJobValidationException("PROJECT_NOT_IN_WORKSPACE", "The selected project is not in this workspace.");
         if (GenerationJobTypes.MovieTypes.Contains(request.JobType.Trim()))
-            await ValidateMovieJobTargetAsync(userId, request, cancellationToken);
+            await ValidateMovieJobTargetAsync(userId, request, cancellationToken, retryOfJobId);
+        else if (GenerationJobTypes.MovieDialogueVoiceTypes.Contains(request.JobType.Trim()))
+            await ValidateMovieDialogueVoiceJobTargetAsync(userId, request, cancellationToken);
+        else if (GenerationJobTypes.MovieSoundTypes.Contains(request.JobType.Trim()))
+            await ValidateMovieSoundJobTargetAsync(userId, request, cancellationToken);
 
         try
         {
@@ -301,19 +313,88 @@ public sealed class GenerationJobService(
         if (string.IsNullOrWhiteSpace(idempotencyKey))
             throw new GenerationJobValidationException("RETRY_IDEMPOTENCY_REQUIRED", "A retry idempotency key is required.");
 
-        var retry = await CreateAsync(userId, new CreateGenerationJobRequest
+        var retryInputJson = source.InputJson;
+        MovieDialogueTake? pendingDialogueTake = null;
+        if (GenerationJobTypes.MovieDialogueVoiceTypes.Contains(source.JobType))
         {
-            WorkspaceId = source.WorkspaceId,
-            ProjectId = source.ProjectId,
-            JobType = source.JobType,
-            Title = source.Title,
-            InputJson = source.InputJson,
-            EstimatedProviderCostUsd = source.EstimatedProviderCostUsd,
-            InternalCostEstimate = ParseCostEstimate(source.CostEstimateJson),
-        }, cancellationToken, idempotencyKey, requestId, jobId);
+            MovieDialogueVoiceInput? dialogueInput;
+            try { dialogueInput = JsonSerializer.Deserialize<MovieDialogueVoiceInput>(source.InputJson); }
+            catch (JsonException) { dialogueInput = null; }
+            var previousTake = dialogueInput is null
+                ? null
+                : await db.MovieDialogueTakes.SingleOrDefaultAsync(item => item.Id == dialogueInput.MovieDialogueTakeId && item.GenerationJobId == source.Id, cancellationToken);
+            if (dialogueInput is null || previousTake is null)
+                throw new GenerationJobValidationException(GenerationJobErrorCodes.MovieDialogueVoiceRequestInvalid, "The dialogue retry source is no longer available.");
+            var now = DateTime.UtcNow;
+            pendingDialogueTake = new MovieDialogueTake
+            {
+                Id = Guid.NewGuid(), MovieDialogueLineId = previousTake.MovieDialogueLineId, MovieClipId = previousTake.MovieClipId,
+                VersionNumber = (await db.MovieDialogueTakes.Where(item => item.MovieDialogueLineId == previousTake.MovieDialogueLineId).MaxAsync(item => (int?)item.VersionNumber, cancellationToken) ?? 0) + 1,
+                Label = $"Retry {previousTake.VersionNumber + 1}", Status = MovieDialogueTakeStatuses.Planned, CreatedAt = now, UpdatedAt = now,
+            };
+            db.MovieDialogueTakes.Add(pendingDialogueTake);
+            await db.SaveChangesAsync(cancellationToken);
+            retryInputJson = JsonSerializer.Serialize(dialogueInput with { MovieDialogueTakeId = pendingDialogueTake.Id });
+        }
+        GenerationJob retry;
+        try
+        {
+            retry = await CreateAsync(userId, new CreateGenerationJobRequest
+            {
+                WorkspaceId = source.WorkspaceId,
+                ProjectId = source.ProjectId,
+                JobType = source.JobType,
+                Title = source.Title,
+                InputJson = retryInputJson,
+                EstimatedProviderCostUsd = source.EstimatedProviderCostUsd,
+                InternalCostEstimate = ParseCostEstimate(source.CostEstimateJson),
+            }, cancellationToken, idempotencyKey, requestId, jobId);
+        }
+        catch
+        {
+            if (pendingDialogueTake is not null)
+            {
+                db.MovieDialogueTakes.Remove(pendingDialogueTake);
+                await db.SaveChangesAsync(CancellationToken.None);
+            }
+            throw;
+        }
+        if (pendingDialogueTake is not null)
+        {
+            pendingDialogueTake.GenerationJobId = retry.Id;
+            pendingDialogueTake.Status = MovieDialogueTakeStatuses.Queued;
+            pendingDialogueTake.UpdatedAt = DateTime.UtcNow;
+            await db.MovieDialogueLines.Where(item => item.Id == pendingDialogueTake.MovieDialogueLineId)
+                .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.Status, MovieDialogueLineStatuses.Queued).SetProperty(item => item.UpdatedAt, DateTime.UtcNow), cancellationToken);
+            await db.SaveChangesAsync(cancellationToken);
+        }
 
         if (GenerationJobTypes.MovieTypes.Contains(source.JobType))
         {
+            if (string.Equals(source.JobType, GenerationJobTypes.MovieAssembly, StringComparison.OrdinalIgnoreCase))
+            {
+                MovieFinalAssemblyInput? assemblyInput;
+                try { assemblyInput = JsonSerializer.Deserialize<MovieFinalAssemblyInput>(source.InputJson); }
+                catch (JsonException) { assemblyInput = null; }
+                if (assemblyInput is not null)
+                {
+                    var assembly = await db.MovieAssemblies.FirstOrDefaultAsync(item => item.Id == assemblyInput.AssemblyId && item.MovieProjectId == assemblyInput.MovieProjectId, cancellationToken);
+                    if (assembly is not null)
+                    {
+                        assembly.GenerationJobId = retry.Id;
+                        assembly.AssetId = null;
+                        assembly.Status = MovieAssemblyStatuses.Queued;
+                        assembly.QcStatus = MovieFinalAssemblyQcStatuses.NotRun;
+                        assembly.QcResultJson = null;
+                        assembly.LastErrorCode = null;
+                        assembly.ProgressPercent = 0;
+                        assembly.CheckpointJson = JsonSerializer.Serialize(new { phase = "retry_resume", progressPercent = 0 });
+                        assembly.UpdatedAt = DateTime.UtcNow;
+                        await db.SaveChangesAsync(cancellationToken);
+                    }
+                }
+                return retry;
+            }
             MovieGenerationInput? input;
             try { input = JsonSerializer.Deserialize<MovieGenerationInput>(source.InputJson); }
             catch (JsonException) { input = null; }
@@ -385,9 +466,29 @@ public sealed class GenerationJobService(
         catch (JsonException) { return null; }
     }
 
-    private async Task ValidateMovieJobTargetAsync(Guid userId, CreateGenerationJobRequest request, CancellationToken cancellationToken)
+    private async Task ValidateMovieJobTargetAsync(Guid userId, CreateGenerationJobRequest request, CancellationToken cancellationToken, Guid? retryOfJobId = null)
     {
+        var isAssembly = string.Equals(request.JobType.Trim(), GenerationJobTypes.MovieAssembly, StringComparison.OrdinalIgnoreCase);
         var isQuickMovie = string.Equals(request.JobType.Trim(), GenerationJobTypes.MovieQuickGenerate, StringComparison.OrdinalIgnoreCase);
+        if (isAssembly)
+        {
+            MovieFinalAssemblyInput? assemblyInput;
+            try { assemblyInput = JsonSerializer.Deserialize<MovieFinalAssemblyInput>(request.InputJson); }
+            catch (JsonException) { assemblyInput = null; }
+            var assembly = assemblyInput is null
+                ? null
+                : await db.MovieAssemblies.Include(item => item.MovieProject).FirstOrDefaultAsync(item => item.Id == assemblyInput.AssemblyId, cancellationToken);
+            if (assemblyInput is null || assemblyInput.MovieProjectId == Guid.Empty || assemblyInput.AssemblyId == Guid.Empty || assembly is null
+                || assembly.MovieProjectId != assemblyInput.MovieProjectId
+                || assembly.MovieProject.WorkspaceId != request.WorkspaceId
+                || request.ProjectId != assembly.MovieProject.ProjectId
+                || (assembly.GenerationJobId is not null && !retryOfJobId.HasValue)
+                || !string.Equals(assembly.IdempotencyKey, assemblyInput.IdempotencyKey, StringComparison.Ordinal))
+                throw new GenerationJobValidationException("MOVIE_ASSEMBLY_TARGET_INVALID", "The final assembly target is invalid or already claimed.");
+            if (assembly.MovieProject.CreatedByUserId != userId && (movieCollaboration is null || !await movieCollaboration.HasPermissionAsync(userId, assembly.MovieProjectId, MoviePermissions.FinalApproval, cancellationToken)))
+                throw new GenerationJobForbiddenException();
+            return;
+        }
         if (!isQuickMovie && !string.Equals(request.JobType.Trim(), GenerationJobTypes.MovieClipGenerate, StringComparison.OrdinalIgnoreCase))
             throw new GenerationJobValidationException("MOVIE_JOB_TARGET_INVALID", "Movie jobs must be created through a validated movie clip target.");
 
@@ -406,6 +507,42 @@ public sealed class GenerationJobService(
             || request.ProjectId != clip.MovieProject.ProjectId || clip.GenerationJobId is not null)
             throw new GenerationJobValidationException("MOVIE_JOB_TARGET_INVALID", "The movie job target does not belong to the selected project or is no longer available.");
         if (clip.MovieProject.CreatedByUserId != userId && (movieCollaboration is null || !await movieCollaboration.HasPermissionAsync(userId, clip.MovieProjectId, MoviePermissions.Generate, cancellationToken)))
+            throw new GenerationJobForbiddenException();
+    }
+
+    private async Task ValidateMovieDialogueVoiceJobTargetAsync(Guid userId, CreateGenerationJobRequest request, CancellationToken cancellationToken)
+    {
+        MovieDialogueVoiceInput? input;
+        try { input = JsonSerializer.Deserialize<MovieDialogueVoiceInput>(request.InputJson); }
+        catch (JsonException) { input = null; }
+        if (input is null || input.MovieProjectId == Guid.Empty || input.MovieClipId == Guid.Empty || input.MovieDialogueLineId == Guid.Empty || input.MovieDialogueTakeId == Guid.Empty)
+            throw new GenerationJobValidationException(GenerationJobErrorCodes.MovieDialogueVoiceRequestInvalid, "The dialogue voice target is invalid.");
+        var clip = await db.MovieClips.Include(item => item.MovieProject).SingleOrDefaultAsync(item => item.Id == input.MovieClipId, cancellationToken);
+        var line = await db.MovieDialogueLines.SingleOrDefaultAsync(item => item.Id == input.MovieDialogueLineId && item.MovieClipId == input.MovieClipId, cancellationToken);
+        var take = await db.MovieDialogueTakes.SingleOrDefaultAsync(item => item.Id == input.MovieDialogueTakeId && item.MovieDialogueLineId == input.MovieDialogueLineId, cancellationToken);
+        if (clip is null || line is null || take is null || clip.MovieProjectId != input.MovieProjectId || clip.MovieProject.WorkspaceId != request.WorkspaceId
+            || request.ProjectId != clip.MovieProject.ProjectId || take.GenerationJobId is not null || take.Status != MovieDialogueTakeStatuses.Planned)
+            throw new GenerationJobValidationException(GenerationJobErrorCodes.MovieDialogueVoiceRequestInvalid, "The dialogue voice target is no longer available.");
+        if (clip.MovieProject.CreatedByUserId != userId && (movieCollaboration is null || !await movieCollaboration.HasPermissionAsync(userId, clip.MovieProjectId, MoviePermissions.Generate, cancellationToken)))
+            throw new GenerationJobForbiddenException();
+    }
+
+    private async Task ValidateMovieSoundJobTargetAsync(Guid userId, CreateGenerationJobRequest request, CancellationToken cancellationToken)
+    {
+        MovieSoundGenerationInput? input;
+        try { input = JsonSerializer.Deserialize<MovieSoundGenerationInput>(request.InputJson); }
+        catch (JsonException) { input = null; }
+        if (input is null || input.MovieProjectId == Guid.Empty || input.MovieSoundTrackId == Guid.Empty)
+            throw new GenerationJobValidationException(GenerationJobErrorCodes.MovieSoundRequestInvalid, "The movie sound target is invalid.");
+
+        var track = await db.MovieSoundTracks
+            .Include(item => item.MovieProject)
+            .FirstOrDefaultAsync(item => item.Id == input.MovieSoundTrackId, cancellationToken);
+        if (track is null || track.MovieProjectId != input.MovieProjectId || track.MovieProject.WorkspaceId != request.WorkspaceId
+            || track.MovieSceneId != input.MovieSceneId || track.MovieShotId != input.MovieShotId
+            || track.GenerationJobId is not null || request.ProjectId != track.MovieProject.ProjectId)
+            throw new GenerationJobValidationException(GenerationJobErrorCodes.MovieSoundRequestInvalid, "The movie sound target is no longer available.");
+        if (track.CreatedByUserId != userId && (movieCollaboration is null || !await movieCollaboration.HasPermissionAsync(userId, track.MovieProjectId, MoviePermissions.Generate, cancellationToken)))
             throw new GenerationJobForbiddenException();
     }
 
@@ -451,8 +588,20 @@ public sealed class GenerationJobService(
         if (immediate > 0)
         {
             if (GenerationJobTypes.MovieTypes.Contains(job.JobType))
-                await db.MovieClips.Where(clip => clip.GenerationJobId == job.Id)
-                    .ExecuteUpdateAsync(setters => setters.SetProperty(clip => clip.Status, MovieClipStatuses.Cancelled).SetProperty(clip => clip.UpdatedAt, now), cancellationToken);
+            {
+                if (string.Equals(job.JobType, GenerationJobTypes.MovieAssembly, StringComparison.OrdinalIgnoreCase))
+                    await db.MovieAssemblies.Where(item => item.GenerationJobId == job.Id)
+                        .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.Status, MovieAssemblyStatuses.Cancelled).SetProperty(item => item.LastErrorCode, GenerationJobErrorCodes.MovieAssemblyCancelled).SetProperty(item => item.UpdatedAt, now), cancellationToken);
+                else
+                    await db.MovieClips.Where(clip => clip.GenerationJobId == job.Id)
+                        .ExecuteUpdateAsync(setters => setters.SetProperty(clip => clip.Status, MovieClipStatuses.Cancelled).SetProperty(clip => clip.UpdatedAt, now), cancellationToken);
+            }
+            if (GenerationJobTypes.MovieDialogueVoiceTypes.Contains(job.JobType))
+                await db.MovieDialogueTakes.Where(take => take.GenerationJobId == job.Id)
+                    .ExecuteUpdateAsync(setters => setters.SetProperty(take => take.Status, MovieDialogueTakeStatuses.Cancelled).SetProperty(take => take.UpdatedAt, now), cancellationToken);
+            if (GenerationJobTypes.MovieSoundTypes.Contains(job.JobType))
+                await db.MovieSoundTracks.Where(track => track.GenerationJobId == job.Id)
+                    .ExecuteUpdateAsync(setters => setters.SetProperty(track => track.Status, MovieSoundStatuses.Cancelled).SetProperty(track => track.UpdatedAt, now), cancellationToken);
             await CancelUsageAsync(job, CancellationCode(job), cancellationToken);
             return GenerationJobCancelResult.Cancelled;
         }
@@ -470,8 +619,12 @@ public sealed class GenerationJobService(
     }
 
     private static string CancellationCode(GenerationJob job) =>
-        GenerationJobTypes.MovieTypes.Contains(job.JobType)
+        GenerationJobTypes.MovieDialogueVoiceTypes.Contains(job.JobType)
+            ? GenerationJobErrorCodes.MovieDialogueVoiceCancelled
+            : GenerationJobTypes.MovieTypes.Contains(job.JobType)
             ? GenerationJobErrorCodes.MovieCancelled
+            : GenerationJobTypes.MovieSoundTypes.Contains(job.JobType)
+                ? GenerationJobErrorCodes.MovieSoundCancelled
             : string.Equals(job.JobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase)
             ? GenerationJobErrorCodes.ImageCancelled
             : string.Equals(job.JobType, GenerationJobTypes.DocumentGenerate, StringComparison.OrdinalIgnoreCase)
@@ -505,17 +658,21 @@ public sealed class GenerationJobWorker(
     IOptions<GenerationJobOptions> options,
     ILogger<GenerationJobWorker> logger) : BackgroundService
 {
+    private const string PoisonJobMessage = "The generation could not be recovered safely. Please try again.";
     private readonly GenerationJobOptions settings = options.Value;
+    private readonly string instanceId = Guid.NewGuid().ToString("N");
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        var workers = Enumerable.Range(0, Math.Max(1, settings.WorkerConcurrency)).Select(_ => RunWorkerAsync(stoppingToken));
+        var workers = Enumerable.Range(0, Math.Max(1, settings.WorkerConcurrency)).Select(index => RunWorkerAsync(index, stoppingToken));
         await Task.WhenAll(workers);
     }
 
-    private async Task RunWorkerAsync(CancellationToken stoppingToken)
+    private async Task RunWorkerAsync(int workerIndex, CancellationToken stoppingToken)
     {
         var schedule = new GenerationJobPollingSchedule(settings);
+        var workerId = $"{instanceId}:{workerIndex}";
+        var consecutiveFailures = 0;
         while (!stoppingToken.IsCancellationRequested)
         {
             try
@@ -523,10 +680,13 @@ public sealed class GenerationJobWorker(
                 using var scope = scopeFactory.CreateScope();
                 var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
                 var notifications = scope.ServiceProvider.GetRequiredService<INotificationEventWriter>();
+                var usage = scope.ServiceProvider.GetRequiredService<IGenerationJobUsageService>();
+                var movieExecutions = scope.ServiceProvider.GetRequiredService<MovieVideoExecutionStore>();
                 var now = DateTime.UtcNow;
+                await TouchWorkerHeartbeatSafelyAsync(db, workerId, workerIndex, null, null, consecutiveFailures, now, stoppingToken);
                 if (schedule.RecoveryDue(now))
                 {
-                    await RecoverExpiredClaimsAsync(db, notifications, stoppingToken);
+                    await RecoverExpiredClaimsAsync(db, usage, movieExecutions, notifications, stoppingToken);
                     schedule.ScheduleNextRecovery(now);
                 }
                 var job = await ClaimAsync(db, stoppingToken);
@@ -535,43 +695,130 @@ public sealed class GenerationJobWorker(
                     await Task.Delay(schedule.IdleDelay, stoppingToken);
                     continue;
                 }
+                consecutiveFailures = 0;
+                await TouchWorkerHeartbeatSafelyAsync(db, workerId, workerIndex, job.Id, now, consecutiveFailures, now, stoppingToken);
                 logger.LogInformation(
                     "Generation job claimed. JobId={JobId}; WorkspaceId={WorkspaceId}; JobType={JobType}; RequestId={RequestId}; RetryCount={RetryCount}; ClaimExpiresAt={ClaimExpiresAt}",
                     job.Id, job.WorkspaceId, job.JobType, job.RequestId, job.RetryCount, job.ClaimExpiresAt);
-                await ExecuteJobAsync(job, stoppingToken);
+                await ExecuteJobAsync(job, workerId, workerIndex, stoppingToken);
+                await TouchWorkerHeartbeatSafelyAsync(db, workerId, workerIndex, null, now, consecutiveFailures, DateTime.UtcNow, stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
             catch (Exception exception)
             {
+                consecutiveFailures = Math.Min(consecutiveFailures + 1, 1000);
                 logger.LogError(exception, "Generation job worker iteration failed safely.");
                 await Task.Delay(schedule.IdleDelay, stoppingToken);
             }
         }
     }
 
-    private async Task RecoverExpiredClaimsAsync(TaslimDbContext db, INotificationEventWriter notifications, CancellationToken cancellationToken)
+    private async Task RecoverExpiredClaimsAsync(
+        TaslimDbContext db,
+        IGenerationJobUsageService usage,
+        MovieVideoExecutionStore movieExecutions,
+        INotificationEventWriter notifications,
+        CancellationToken cancellationToken)
     {
         var now = DateTime.UtcNow;
-        var recoveryToken = Guid.NewGuid();
-        var recoveredJobIds = await db.GenerationJobs.AsNoTracking()
+        var expiredClaims = await db.GenerationJobs.AsNoTracking()
             .Where(job => job.Status == GenerationJobStatus.Running && job.ClaimExpiresAt.HasValue && job.ClaimExpiresAt < now)
-            .Select(job => job.Id)
+            .OrderBy(job => job.ClaimExpiresAt)
+            .ThenBy(job => job.CreatedAt)
+            .Select(job => new { job.Id, job.ConcurrencyToken })
             .ToListAsync(cancellationToken);
-        if (recoveredJobIds.Count == 0) return;
-        await db.GenerationJobs
-            .Where(job => job.Status == GenerationJobStatus.Running && job.ClaimExpiresAt.HasValue && job.ClaimExpiresAt < now)
-            .ExecuteUpdateAsync(setters => setters
-                .SetProperty(job => job.Status, GenerationJobStatus.Queued)
-                .SetProperty(job => job.QueuedAt, now)
-                .SetProperty(job => job.StartedAt, (DateTime?)null)
-                .SetProperty(job => job.ClaimExpiresAt, (DateTime?)null)
-                .SetProperty(job => job.CancellationRequested, false)
-                .SetProperty(job => job.RetryCount, job => job.RetryCount + 1)
-                .SetProperty(job => job.ConcurrencyToken, recoveryToken), cancellationToken);
-        foreach (var jobId in recoveredJobIds)
+
+        foreach (var expired in expiredClaims)
         {
-            logger.LogWarning("Expired generation lease recovered. JobId={JobId}; RetryReason={RetryReason}", jobId, "lease_expired");
-            await TryNotifyAsync(() => notifications.CreateGenerationAttentionAsync(jobId, cancellationToken), jobId);
+            var job = await db.GenerationJobs.AsNoTracking().FirstOrDefaultAsync(item => item.Id == expired.Id, cancellationToken);
+            if (job is null || job.Status != GenerationJobStatus.Running || job.ConcurrencyToken != expired.ConcurrencyToken
+                || job.ClaimExpiresAt is null || job.ClaimExpiresAt >= now)
+                continue;
+
+            if (job.CancellationRequested)
+            {
+                var cancellationTerminalToken = Guid.NewGuid();
+                await using var cancellationFinalization = await db.Database.BeginTransactionAsync(cancellationToken);
+                await movieExecutions.MarkCancelledAsync(job.Id, expired.ConcurrencyToken, cancellationToken);
+                var cancelled = await db.GenerationJobs
+                    .Where(item => item.Id == job.Id
+                        && item.Status == GenerationJobStatus.Running
+                        && item.ConcurrencyToken == expired.ConcurrencyToken
+                        && item.CancellationRequested
+                        && item.ClaimExpiresAt.HasValue
+                        && item.ClaimExpiresAt < now)
+                    .ExecuteUpdateAsync(setters => setters
+                        .SetProperty(item => item.Status, GenerationJobStatus.Cancelled)
+                        .SetProperty(item => item.ErrorCode, CancellationCode(job))
+                        .SetProperty(item => item.ErrorMessage, "The job was cancelled.")
+                        .SetProperty(item => item.CancelledAt, now)
+                        .SetProperty(item => item.ClaimExpiresAt, (DateTime?)null)
+                        .SetProperty(item => item.ConcurrencyToken, cancellationTerminalToken), cancellationToken);
+                if (cancelled == 0)
+                {
+                    await cancellationFinalization.RollbackAsync(cancellationToken);
+                    continue;
+                }
+                var transaction = await usage.BeginAsync(job, cancellationToken: cancellationToken);
+                await usage.CancelAsync(transaction, CancellationCode(job), cancellationToken);
+                await cancellationFinalization.CommitAsync(cancellationToken);
+                logger.LogInformation("Expired cancelled generation lease finalized. JobId={JobId}; RetryReason={RetryReason}", job.Id, "cancellation_requested");
+                continue;
+            }
+
+            var maxAutomaticRetries = Math.Max(0, settings.MaxAutomaticRetries);
+            if (job.RetryCount < maxAutomaticRetries)
+            {
+                var recoveryToken = Guid.NewGuid();
+                var recovered = await db.GenerationJobs
+                    .Where(item => item.Id == job.Id
+                        && item.Status == GenerationJobStatus.Running
+                        && item.ConcurrencyToken == expired.ConcurrencyToken
+                        && !item.CancellationRequested
+                        && item.ClaimExpiresAt.HasValue
+                        && item.ClaimExpiresAt < now)
+                    .ExecuteUpdateAsync(setters => setters
+                        .SetProperty(item => item.Status, GenerationJobStatus.Queued)
+                        .SetProperty(item => item.QueuedAt, now)
+                        .SetProperty(item => item.StartedAt, (DateTime?)null)
+                        .SetProperty(item => item.ClaimExpiresAt, (DateTime?)null)
+                        .SetProperty(item => item.RetryCount, item => item.RetryCount + 1)
+                        .SetProperty(item => item.ConcurrencyToken, recoveryToken), cancellationToken);
+                if (recovered == 0) continue;
+                logger.LogWarning("Expired generation lease recovered. JobId={JobId}; RetryReason={RetryReason}; RetryCount={RetryCount}; MaxAutomaticRetries={MaxAutomaticRetries}",
+                    job.Id, "lease_expired", job.RetryCount + 1, maxAutomaticRetries);
+                await TryNotifyAsync(() => notifications.CreateGenerationAttentionAsync(job.Id, cancellationToken), job.Id);
+                continue;
+            }
+
+            var poisonTerminalToken = Guid.NewGuid();
+            await using var poisonFinalization = await db.Database.BeginTransactionAsync(cancellationToken);
+            await movieExecutions.MarkFailedAsync(job.Id, expired.ConcurrencyToken, GenerationJobErrorCodes.Poisoned, cancellationToken);
+            var poisoned = await db.GenerationJobs
+                .Where(item => item.Id == job.Id
+                    && item.Status == GenerationJobStatus.Running
+                    && item.ConcurrencyToken == expired.ConcurrencyToken
+                    && !item.CancellationRequested
+                    && item.ClaimExpiresAt.HasValue
+                    && item.ClaimExpiresAt < now)
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(item => item.Status, GenerationJobStatus.Failed)
+                    .SetProperty(item => item.ErrorCode, GenerationJobErrorCodes.Poisoned)
+                    .SetProperty(item => item.ErrorMessage, PoisonJobMessage)
+                    .SetProperty(item => item.FailedAt, now)
+                    .SetProperty(item => item.ClaimExpiresAt, (DateTime?)null)
+                    .SetProperty(item => item.ConcurrencyToken, poisonTerminalToken), cancellationToken);
+            if (poisoned == 0)
+            {
+                await poisonFinalization.RollbackAsync(cancellationToken);
+                continue;
+            }
+            var poisonUsage = await usage.BeginAsync(job, cancellationToken: cancellationToken);
+            await usage.FailAsync(poisonUsage, GenerationJobErrorCodes.Poisoned, cancellationToken: cancellationToken);
+            await poisonFinalization.CommitAsync(cancellationToken);
+            logger.LogError("Generation job moved to poison terminal state after bounded lease recovery. JobId={JobId}; RetryCount={RetryCount}; MaxAutomaticRetries={MaxAutomaticRetries}",
+                job.Id, job.RetryCount, maxAutomaticRetries);
+            await TryNotifyAsync(() => notifications.CreateGenerationFailedAsync(job.Id, cancellationToken), job.Id);
         }
     }
 
@@ -580,7 +827,11 @@ public sealed class GenerationJobWorker(
         var isSqlite = db.Database.ProviderName?.Contains("Sqlite", StringComparison.OrdinalIgnoreCase) == true;
         if (isSqlite)
         {
-            var candidate = await db.GenerationJobs.AsNoTracking().FirstOrDefaultAsync(item => item.Status == GenerationJobStatus.Queued, cancellationToken);
+            var candidate = await db.GenerationJobs.AsNoTracking()
+                .Where(item => item.Status == GenerationJobStatus.Queued)
+                .OrderBy(item => item.QueuedAt)
+                .ThenBy(item => item.CreatedAt)
+                .FirstOrDefaultAsync(cancellationToken);
             if (candidate is null) return null;
             var startedAt = DateTime.UtcNow;
             var claimExpiresAt = startedAt.AddMinutes(Math.Max(2, settings.ClaimLeaseMinutes));
@@ -611,7 +862,7 @@ public sealed class GenerationJobWorker(
         return job;
     }
 
-    private async Task ExecuteJobAsync(GenerationJob claimedJob, CancellationToken stoppingToken)
+    private async Task ExecuteJobAsync(GenerationJob claimedJob, string workerId, int workerIndex, CancellationToken stoppingToken)
     {
         using var scope = scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
@@ -619,9 +870,12 @@ public sealed class GenerationJobWorker(
         var usage = scope.ServiceProvider.GetRequiredService<IGenerationJobUsageService>();
         var budget = scope.ServiceProvider.GetRequiredService<IGenerationBudgetService>();
         var publisher = scope.ServiceProvider.GetRequiredService<IGeneratedAssetPublisher>();
+        var retentionHook = scope.ServiceProvider.GetRequiredService<IGeneratedMediaRetentionHook>();
         var movieExecutions = scope.ServiceProvider.GetRequiredService<MovieVideoExecutionStore>();
+        var dialogueExecutions = scope.ServiceProvider.GetRequiredService<MovieDialogueVoiceExecutionStore>();
+        var assemblyExecutions = scope.ServiceProvider.GetRequiredService<MovieFinalAssemblyExecutionStore>();
         using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
-        var monitor = MonitorCancellationAndLeaseAsync(claimedJob.Id, claimedJob.ConcurrencyToken, cancellation, stoppingToken);
+        var monitor = MonitorCancellationAndLeaseAsync(claimedJob.Id, claimedJob.ConcurrencyToken, workerId, workerIndex, cancellation, stoppingToken);
         var publications = new List<PreparedGenerationOutput>();
         var publicationCommitted = false;
         AiUsageMetadata? providerUsage = null;
@@ -640,8 +894,12 @@ public sealed class GenerationJobWorker(
                 await TryNotifyAsync(() => notifications.CreateGenerationFailedAsync(claimedJob.Id, stoppingToken), claimedJob.Id);
                 return;
             }
-            if (GenerationJobTypes.MovieTypes.Contains(claimedJob.JobType))
+            if (string.Equals(claimedJob.JobType, GenerationJobTypes.MovieAssembly, StringComparison.OrdinalIgnoreCase))
+                await assemblyExecutions.MarkRunningAsync(claimedJob.Id, claimedJob.ConcurrencyToken, stoppingToken);
+            else if (GenerationJobTypes.MovieTypes.Contains(claimedJob.JobType))
                 await movieExecutions.MarkRunningAsync(claimedJob.Id, claimedJob.ConcurrencyToken, stoppingToken);
+            if (GenerationJobTypes.MovieDialogueVoiceTypes.Contains(claimedJob.JobType))
+                await dialogueExecutions.MarkRunningAsync(claimedJob.Id, claimedJob.ConcurrencyToken, stoppingToken);
             var estimate = claimedJob.EstimatedProviderCostKnown == true && claimedJob.EstimatedProviderCostUsd.HasValue
                 ? new GenerationCostEstimate(true, claimedJob.EstimatedProviderCostUsd, UsageCurrencies.Usd, null, null, null, [])
                 : GenerationCostEstimate.Unknown("job_estimate_missing");
@@ -649,7 +907,7 @@ public sealed class GenerationJobWorker(
             var progress = new SerializedProgress(value => UpdateProgressSafelyAsync(claimedJob.Id, claimedJob.ConcurrencyToken, value, stoppingToken));
             var result = await handler.ExecuteAsync(claimedJob, progress, cancellation.Token);
             await progress.DrainAsync();
-            if (GenerationJobTypes.MovieTypes.Contains(claimedJob.JobType)
+            if ((GenerationJobTypes.MovieTypes.Contains(claimedJob.JobType) || GenerationJobTypes.MovieDialogueVoiceTypes.Contains(claimedJob.JobType))
                 && !result.Outputs.Any(output => output.Asset is not null
                     && (output.StoredFileId.HasValue || output.FileArtifact is not null || output.StreamArtifact is not null)))
                 throw new MovieVideoProviderOutputException();
@@ -727,6 +985,7 @@ public sealed class GenerationJobWorker(
                         {
                             db.GenerationJobOutputs.Add(publication.Output);
                             if (publication.Asset is not null) db.Assets.Add(publication.Asset);
+                            if (publication.Provenance is not null) db.GeneratedMediaProvenance.Add(publication.Provenance);
                         }
                         await usage.CompleteAsync(await usage.BeginAsync(current, cancellationToken: stoppingToken), result.Usage ?? new AiUsageMetadata("system", "unknown", null, null, null, 0m, 0m, 0, "completed", true), hasBillableAsset: true, cancellationToken: stoppingToken);
                         await completionTransaction.CommitAsync(stoppingToken);
@@ -756,6 +1015,25 @@ public sealed class GenerationJobWorker(
                 return;
             }
             publicationCommitted = true;
+            foreach (var publication in publications.Where(item => item.Provenance is not null))
+            {
+                try
+                {
+                    var provenance = publication.Provenance!;
+                    await retentionHook.OnStoredAsync(new GeneratedMediaRetentionContext(
+                        provenance.WorkspaceId,
+                        provenance.StoredFileId,
+                        provenance.GenerationJobId,
+                        provenance.AssetId,
+                        provenance.MovieTakeId,
+                        provenance.RetainUntil,
+                        "generation_succeeded"), stoppingToken);
+                }
+                catch (Exception exception)
+                {
+                    logger.LogWarning(exception, "Generated media retention registration was skipped safely. JobId={JobId}", claimedJob.Id);
+                }
+            }
             if (providerAttempt is not null)
                 await budget.CompleteAttemptAsync(providerAttempt, result.Usage?.ActualCost, result.Usage?.ActualCost.HasValue == true, GenerationProviderAttemptStatus.Succeeded, cancellationToken: stoppingToken);
             logger.LogInformation(
@@ -766,7 +1044,29 @@ public sealed class GenerationJobWorker(
             if (GenerationJobTypes.MovieTypes.Contains(claimedJob.JobType))
             {
                 var publication = publications.FirstOrDefault(item => item.Asset is not null);
-                await movieExecutions.MarkReadyAsync(current.Id, claimedJob.ConcurrencyToken, publication?.Asset?.Id, publication?.CreatedFile?.Id, null, publication?.Output.MetadataJson, stoppingToken);
+                if (string.Equals(claimedJob.JobType, GenerationJobTypes.MovieAssembly, StringComparison.OrdinalIgnoreCase))
+                {
+                    if (publication?.Asset is not null)
+                        await assemblyExecutions.MarkReadyAsync(current.Id, claimedJob.ConcurrencyToken, publication.Asset.Id, publication.Output.MetadataJson, JsonSerializer.Serialize(new { contract = MovieFinalAssemblyQualityControl.ContractVersion, status = MovieFinalAssemblyQcStatuses.Passed }), stoppingToken);
+                }
+                else
+                {
+                    await movieExecutions.MarkReadyAsync(current.Id, claimedJob.ConcurrencyToken, publication?.Asset?.Id, publication?.CreatedFile?.Id, null, publication?.Output.MetadataJson, stoppingToken);
+                }
+            }
+            if (GenerationJobTypes.MovieDialogueVoiceTypes.Contains(claimedJob.JobType))
+            {
+                var publication = publications.FirstOrDefault(item => item.Asset is not null);
+                await dialogueExecutions.MarkReadyAsync(current.Id, claimedJob.ConcurrencyToken, publication?.Asset?.Id, publication?.CreatedFile?.Id, null, publication?.Output.MetadataJson, result.Usage?.SafeMetadataJson, stoppingToken);
+            }
+            if (GenerationJobTypes.MovieSoundTypes.Contains(claimedJob.JobType))
+            {
+                var publication = publications.FirstOrDefault(item => item.Asset is not null);
+                await db.MovieSoundTracks.Where(track => track.GenerationJobId == claimedJob.Id)
+                    .ExecuteUpdateAsync(setters => setters
+                        .SetProperty(track => track.Status, MovieSoundStatuses.ReadyForReview)
+                        .SetProperty(track => track.AssetId, publication == null ? (Guid?)null : publication.Asset!.Id)
+                        .SetProperty(track => track.UpdatedAt, DateTime.UtcNow), stoppingToken);
             }
         }
         catch (MovieVideoStaleWorkerException)
@@ -780,7 +1080,14 @@ public sealed class GenerationJobWorker(
             if (!publicationCommitted)
                 foreach (var publication in publications) await publisher.DiscardAsync(publication, CancellationToken.None);
             if (GenerationJobTypes.MovieTypes.Contains(claimedJob.JobType))
-                await movieExecutions.MarkCancelledAsync(claimedJob.Id, claimedJob.ConcurrencyToken, CancellationToken.None);
+            {
+                if (string.Equals(claimedJob.JobType, GenerationJobTypes.MovieAssembly, StringComparison.OrdinalIgnoreCase))
+                    await assemblyExecutions.MarkCancelledAsync(claimedJob.Id, claimedJob.ConcurrencyToken, CancellationToken.None);
+                else
+                    await movieExecutions.MarkCancelledAsync(claimedJob.Id, claimedJob.ConcurrencyToken, CancellationToken.None);
+            }
+            if (GenerationJobTypes.MovieDialogueVoiceTypes.Contains(claimedJob.JobType))
+                await dialogueExecutions.MarkCancelledAsync(claimedJob.Id, CancellationToken.None);
             await CancelRunningAsync(db, usage, claimedJob, claimedJob.ConcurrencyToken, stoppingToken);
         }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
@@ -788,7 +1095,14 @@ public sealed class GenerationJobWorker(
             if (!publicationCommitted)
                 foreach (var publication in publications) await publisher.DiscardAsync(publication, CancellationToken.None);
             if (GenerationJobTypes.MovieTypes.Contains(claimedJob.JobType))
-await movieExecutions.MarkCancelledAsync(claimedJob.Id, claimedJob.ConcurrencyToken, CancellationToken.None);
+            {
+                if (string.Equals(claimedJob.JobType, GenerationJobTypes.MovieAssembly, StringComparison.OrdinalIgnoreCase))
+                    await assemblyExecutions.MarkCancelledAsync(claimedJob.Id, claimedJob.ConcurrencyToken, CancellationToken.None);
+                else
+                    await movieExecutions.MarkCancelledAsync(claimedJob.Id, claimedJob.ConcurrencyToken, CancellationToken.None);
+            }
+            if (GenerationJobTypes.MovieDialogueVoiceTypes.Contains(claimedJob.JobType))
+                await dialogueExecutions.MarkCancelledAsync(claimedJob.Id, CancellationToken.None);
             if (providerAttempt is not null)
                 await budget.CompleteAttemptAsync(providerAttempt, null, false, GenerationProviderAttemptStatus.Cancelled, GenerationJobErrorCodes.Cancelled, CancellationToken.None);
             await CancelRunningAsync(db, usage, claimedJob, claimedJob.ConcurrencyToken, stoppingToken);
@@ -802,7 +1116,14 @@ await movieExecutions.MarkCancelledAsync(claimedJob.Id, claimedJob.ConcurrencyTo
                 foreach (var publication in publications) await publisher.DiscardAsync(publication, CancellationToken.None);
             var failureCode = MapFailureCode(exception, claimedJob.JobType);
             if (GenerationJobTypes.MovieTypes.Contains(claimedJob.JobType))
-                await movieExecutions.MarkFailedAsync(claimedJob.Id, claimedJob.ConcurrencyToken, failureCode, CancellationToken.None);
+            {
+                if (string.Equals(claimedJob.JobType, GenerationJobTypes.MovieAssembly, StringComparison.OrdinalIgnoreCase))
+                    await assemblyExecutions.MarkFailedAsync(claimedJob.Id, claimedJob.ConcurrencyToken, failureCode, CancellationToken.None);
+                else
+                    await movieExecutions.MarkFailedAsync(claimedJob.Id, claimedJob.ConcurrencyToken, failureCode, CancellationToken.None);
+            }
+            if (GenerationJobTypes.MovieDialogueVoiceTypes.Contains(claimedJob.JobType))
+                await dialogueExecutions.MarkFailedAsync(claimedJob.Id, failureCode, CancellationToken.None);
             var failureUsage = providerUsage ?? (exception as DocumentGenerationStageException)?.Usage;
             failureUsage ??= (exception as PresentationGenerationStageException)?.Usage;
             failureUsage ??= (exception as ResearchGenerationStageException)?.Usage;
@@ -924,37 +1245,117 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
         }
     }
 
-    private async Task MonitorCancellationAndLeaseAsync(Guid jobId, Guid concurrencyToken, CancellationTokenSource cancellation, CancellationToken stoppingToken)
+    private async Task MonitorCancellationAndLeaseAsync(Guid jobId, Guid concurrencyToken, string workerId, int workerIndex, CancellationTokenSource cancellation, CancellationToken stoppingToken)
     {
         var nextRenewalAt = DateTime.UtcNow;
-        while (!stoppingToken.IsCancellationRequested && !cancellation.IsCancellationRequested)
+        var nextHeartbeatAt = DateTime.UtcNow;
+        try
         {
-            using var scope = scopeFactory.CreateScope();
-            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
-            var now = DateTime.UtcNow;
-            var current = await db.GenerationJobs.AsNoTracking().Where(job => job.Id == jobId).Select(job => new { job.Status, job.ConcurrencyToken, job.CancellationRequested, job.RequestId }).FirstOrDefaultAsync(stoppingToken);
-            if (current is null || current.Status != GenerationJobStatus.Running || current.ConcurrencyToken != concurrencyToken || current.CancellationRequested)
+            while (!stoppingToken.IsCancellationRequested && !cancellation.IsCancellationRequested)
             {
-                logger.LogWarning("Generation job lease or cancellation state changed during execution. JobId={JobId}; RequestId={RequestId}; Status={Status}; CancellationRequested={CancellationRequested}", jobId, current?.RequestId, current?.Status, current?.CancellationRequested);
-                cancellation.Cancel();
-                return;
-            }
-
-            if (now >= nextRenewalAt)
-            {
-                var renewed = await db.GenerationJobs
-                    .Where(job => job.Id == jobId && job.Status == GenerationJobStatus.Running && job.ConcurrencyToken == concurrencyToken)
-                    .ExecuteUpdateAsync(setters => setters.SetProperty(job => job.ClaimExpiresAt, now.AddMinutes(Math.Max(2, settings.ClaimLeaseMinutes))), stoppingToken);
-                if (renewed == 0)
+                using var scope = scopeFactory.CreateScope();
+                var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+                var now = DateTime.UtcNow;
+                var current = await db.GenerationJobs.AsNoTracking()
+                    .Where(job => job.Id == jobId)
+                    .Select(job => new { job.Status, job.ConcurrencyToken, job.CancellationRequested, job.RequestId })
+                    .FirstOrDefaultAsync(stoppingToken);
+                if (current is null || current.Status != GenerationJobStatus.Running || current.ConcurrencyToken != concurrencyToken || current.CancellationRequested)
                 {
-                    logger.LogWarning("Generation job lease renewal lost. JobId={JobId}; RequestId={RequestId}", jobId, current.RequestId);
+                    logger.LogWarning(
+                        "Generation job lease or cancellation state changed during execution. JobId={JobId}; RequestId={RequestId}; Status={Status}; CancellationRequested={CancellationRequested}",
+                        jobId, current?.RequestId, current?.Status, current?.CancellationRequested);
                     cancellation.Cancel();
                     return;
                 }
-                nextRenewalAt = now.AddMilliseconds(Math.Max(1000, settings.LeaseRenewalIntervalMilliseconds));
+
+                if (now >= nextHeartbeatAt)
+                {
+                    await TouchWorkerHeartbeatSafelyAsync(db, workerId, workerIndex, jobId, null, 0, now, stoppingToken);
+                    nextHeartbeatAt = now.AddSeconds(Math.Clamp(settings.HeartbeatStaleAfterSeconds / 2, 15, 60));
+                }
+
+                if (now >= nextRenewalAt)
+                {
+                    var claimExpiresAt = now.AddMinutes(Math.Max(2, settings.ClaimLeaseMinutes));
+                    var renewed = await db.GenerationJobs
+                        .Where(job => job.Id == jobId && job.Status == GenerationJobStatus.Running && job.ConcurrencyToken == concurrencyToken)
+                        .ExecuteUpdateAsync(setters => setters.SetProperty(job => job.ClaimExpiresAt, claimExpiresAt), stoppingToken);
+                    if (renewed == 0)
+                    {
+                        logger.LogWarning("Generation job lease renewal lost. JobId={JobId}; RequestId={RequestId}", jobId, current.RequestId);
+                        cancellation.Cancel();
+                        return;
+                    }
+                    logger.LogDebug("Generation job heartbeat renewed. JobId={JobId}; RequestId={RequestId}; ClaimExpiresAt={ClaimExpiresAt}", jobId, current.RequestId, claimExpiresAt);
+                    nextRenewalAt = now.AddMilliseconds(Math.Max(1000, settings.LeaseRenewalIntervalMilliseconds));
+                }
+                await Task.Delay(TimeSpan.FromMilliseconds(Math.Max(10, settings.CancellationPollMilliseconds)), stoppingToken);
             }
-            await Task.Delay(settings.CancellationPollMilliseconds, stoppingToken);
         }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested || cancellation.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            logger.LogWarning(exception, "Generation job heartbeat monitor stopped safely. JobId={JobId}", jobId);
+            cancellation.Cancel();
+        }
+    }
+
+    private async Task TouchWorkerHeartbeatSafelyAsync(
+        TaslimDbContext db,
+        string workerId,
+        int workerIndex,
+        Guid? activeJobId,
+        DateTime? claimedAt,
+        int consecutiveFailures,
+        DateTime now,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await TouchWorkerHeartbeatAsync(db, workerId, workerIndex, activeJobId, claimedAt, consecutiveFailures, now, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+        catch (Exception exception)
+        {
+            logger.LogWarning(exception, "Generation worker heartbeat was skipped safely. WorkerId={WorkerId}", workerId);
+        }
+    }
+
+    private async Task TouchWorkerHeartbeatAsync(
+        TaslimDbContext db,
+        string workerId,
+        int workerIndex,
+        Guid? activeJobId,
+        DateTime? claimedAt,
+        int consecutiveFailures,
+        DateTime now,
+        CancellationToken cancellationToken)
+    {
+        var heartbeat = await db.GenerationWorkerHeartbeats.SingleOrDefaultAsync(item => item.WorkerId == workerId, cancellationToken);
+        if (heartbeat is null)
+        {
+            heartbeat = new GenerationWorkerHeartbeat
+            {
+                Id = Guid.NewGuid(),
+                WorkerId = workerId,
+                InstanceId = instanceId,
+                WorkerIndex = workerIndex,
+                WorkerConcurrency = Math.Max(1, settings.WorkerConcurrency),
+                Status = GenerationWorkerStatuses.Running,
+                StartedAt = now,
+            };
+            db.GenerationWorkerHeartbeats.Add(heartbeat);
+        }
+        heartbeat.Status = GenerationWorkerStatuses.Running;
+        heartbeat.LastSeenAt = now;
+        heartbeat.ActiveJobId = activeJobId;
+        heartbeat.ConsecutiveIterationFailures = consecutiveFailures;
+        if (claimedAt.HasValue) heartbeat.LastClaimedAt = claimedAt;
+        if (!activeJobId.HasValue) heartbeat.LastCompletedAt = now;
+        await db.SaveChangesAsync(cancellationToken);
     }
 
     private async Task<int> UpdateProgressAsync(Guid jobId, Guid concurrencyToken, int progress, CancellationToken cancellationToken)
@@ -1075,6 +1476,16 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
             await finalization.RollbackAsync(cancellationToken);
             return;
         }
+        if (GenerationJobTypes.MovieDialogueVoiceTypes.Contains(job.JobType))
+        {
+            await db.MovieDialogueTakes.Where(take => take.GenerationJobId == job.Id)
+                .ExecuteUpdateAsync(setters => setters.SetProperty(take => take.Status, MovieDialogueTakeStatuses.Cancelled).SetProperty(take => take.UpdatedAt, now), cancellationToken);
+            await db.MovieDialogueLines.Where(line => line.Takes.Any(take => take.GenerationJobId == job.Id))
+                .ExecuteUpdateAsync(setters => setters.SetProperty(line => line.Status, MovieDialogueLineStatuses.Draft).SetProperty(line => line.UpdatedAt, now), cancellationToken);
+        }
+        if (GenerationJobTypes.MovieSoundTypes.Contains(job.JobType))
+            await db.MovieSoundTracks.Where(track => track.GenerationJobId == job.Id)
+                .ExecuteUpdateAsync(setters => setters.SetProperty(track => track.Status, MovieSoundStatuses.Cancelled).SetProperty(track => track.UpdatedAt, now), cancellationToken);
         var transaction = await usage.BeginAsync(job, cancellationToken: cancellationToken);
         await usage.CancelAsync(transaction, CancellationCode(job), cancellationToken);
         await finalization.CommitAsync(cancellationToken);
@@ -1096,14 +1507,21 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
             await finalization.RollbackAsync(cancellationToken);
             return;
         }
+        if (GenerationJobTypes.MovieSoundTypes.Contains(job.JobType))
+            await db.MovieSoundTracks.Where(track => track.GenerationJobId == job.Id)
+                .ExecuteUpdateAsync(setters => setters.SetProperty(track => track.Status, MovieSoundStatuses.Failed).SetProperty(track => track.UpdatedAt, now), cancellationToken);
         var transaction = await usage.BeginAsync(job, cancellationToken: cancellationToken);
         await usage.FailAsync(transaction, code, providerUsage, cancellationToken);
         await finalization.CommitAsync(cancellationToken);
     }
 
     private static string CancellationCode(GenerationJob job) =>
-        GenerationJobTypes.MovieTypes.Contains(job.JobType)
+        GenerationJobTypes.MovieDialogueVoiceTypes.Contains(job.JobType)
+            ? GenerationJobErrorCodes.MovieDialogueVoiceCancelled
+            : GenerationJobTypes.MovieTypes.Contains(job.JobType)
             ? GenerationJobErrorCodes.MovieCancelled
+            : GenerationJobTypes.MovieSoundTypes.Contains(job.JobType)
+                ? GenerationJobErrorCodes.MovieSoundCancelled
             : string.Equals(job.JobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase)
             ? GenerationJobErrorCodes.ImageCancelled
             : string.Equals(job.JobType, GenerationJobTypes.DocumentGenerate, StringComparison.OrdinalIgnoreCase)
@@ -1132,6 +1550,7 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
             if (string.Equals(jobType, GenerationJobTypes.PresentationGenerate, StringComparison.OrdinalIgnoreCase)) return GenerationJobErrorCodes.PresentationOutputInvalid;
             if (string.Equals(jobType, GenerationJobTypes.ResearchGenerate, StringComparison.OrdinalIgnoreCase)) return GenerationJobErrorCodes.ResearchOutputInvalid;
             if (string.Equals(jobType, GenerationJobTypes.SocialGenerate, StringComparison.OrdinalIgnoreCase)) return GenerationJobErrorCodes.SocialOutputInvalid;
+            if (GenerationJobTypes.MovieSoundTypes.Contains(jobType)) return GenerationJobErrorCodes.MovieSoundOutputInvalid;
             if (GenerationJobTypes.MovieTypes.Contains(jobType)) return GenerationJobErrorCodes.MovieOutputInvalid;
             if (string.Equals(jobType, GenerationJobTypes.MusicGenerate, StringComparison.OrdinalIgnoreCase)) return GenerationJobErrorCodes.MusicOutputInvalid;
             if (string.Equals(jobType, GenerationJobTypes.VoiceGenerate, StringComparison.OrdinalIgnoreCase)) return GenerationJobErrorCodes.VoiceOutputInvalid;
@@ -1197,10 +1616,44 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
                 _ => GenerationJobErrorCodes.SocialGenerationFailed,
             };
         }
+        if (GenerationJobTypes.MovieDialogueVoiceTypes.Contains(jobType))
+        {
+            return exception switch
+            {
+                MovieDialogueVoiceRequestValidationException validation => validation.Code,
+                MovieDialogueVoiceProviderUnavailableException => GenerationJobErrorCodes.MovieDialogueVoiceProviderUnavailable,
+                MovieDialogueVoiceOutputInvalidException => GenerationJobErrorCodes.MovieDialogueVoiceOutputInvalid,
+                FileStorageUnavailableException or FileStorageOperationException or FileUploadValidationException => GenerationJobErrorCodes.VoiceOutputStorageFailed,
+                _ => GenerationJobErrorCodes.MovieDialogueVoiceGenerationFailed,
+            };
+        }
+        if (GenerationJobTypes.MovieSoundTypes.Contains(jobType))
+        {
+            return exception switch
+            {
+                MovieSoundRequestValidationException validation => validation.Code,
+                MovieSoundProviderUnavailableException => GenerationJobErrorCodes.MovieSoundProviderUnavailable,
+                MovieSoundOutputInvalidException => GenerationJobErrorCodes.MovieSoundOutputInvalid,
+                FileStorageUnavailableException or FileStorageOperationException or FileUploadValidationException => GenerationJobErrorCodes.MovieSoundOutputStorageFailed,
+                _ => GenerationJobErrorCodes.MovieSoundGenerationFailed,
+            };
+        }
         if (GenerationJobTypes.MovieTypes.Contains(jobType))
         {
             return exception switch
             {
+                MovieFinalAssemblyUnavailableException => GenerationJobErrorCodes.MovieAssemblyProviderUnavailable,
+                MovieFinalAssemblyQualityControlException => GenerationJobErrorCodes.MovieAssemblyQcFailed,
+                MovieFinalAssemblyExecutionException assemblyException => assemblyException.Code,
+                VideoGenerationAdapterExecutionException adapterException => adapterException.Category switch
+                {
+                    VideoGenerationFailureCategory.Unavailable or VideoGenerationFailureCategory.Authentication => GenerationJobErrorCodes.MovieProviderUnavailable,
+                    VideoGenerationFailureCategory.TimedOut => GenerationJobErrorCodes.MovieProviderTimeout,
+                    VideoGenerationFailureCategory.UnsupportedCapability or VideoGenerationFailureCategory.InvalidRequest => GenerationJobErrorCodes.MovieProviderUnsupportedRequest,
+                    VideoGenerationFailureCategory.Cancelled or VideoGenerationFailureCategory.StaleEvent => GenerationJobErrorCodes.MovieCancelled,
+                    VideoGenerationFailureCategory.ArtifactUnavailable or VideoGenerationFailureCategory.MalformedResponse => GenerationJobErrorCodes.MovieOutputInvalid,
+                    _ => GenerationJobErrorCodes.MovieGenerationFailed,
+                },
                 MovieProviderUnavailableException => GenerationJobErrorCodes.MovieProviderUnavailable,
                 MovieVideoProviderTimeoutException => GenerationJobErrorCodes.MovieProviderTimeout,
                 MovieVideoStaleWorkerException => GenerationJobErrorCodes.MovieCancelled,
@@ -1267,6 +1720,7 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
 
     private static string FailureMessage(string code) => code switch
     {
+        GenerationJobErrorCodes.Poisoned => "The generation could not be recovered safely. Please try again.",
         GenerationJobErrorCodes.NoBillableAsset => "The generation completed without a publishable asset. Please try again.",
         GenerationJobErrorCodes.ImageProviderUnavailable => "Image generation is temporarily unavailable. Please try again later.",
         GenerationJobErrorCodes.ImageRequestInvalid => "Please check the image request and try again.",
@@ -1312,6 +1766,11 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
         GenerationJobErrorCodes.SocialOutputInvalid => "The generated social content was invalid. Please try again.",
         GenerationJobErrorCodes.SocialStorageFailed => "The social content was generated but could not be saved. Please try again.",
         GenerationJobErrorCodes.SocialCancelled => "The social content generation was cancelled.",
+        GenerationJobErrorCodes.MovieDialogueVoiceProviderUnavailable => "Dialogue voice generation is not available yet. Your movie dialogue plan was saved.",
+        GenerationJobErrorCodes.MovieDialogueVoiceRequestInvalid => "Please check the dialogue speaker, language, text, and timing.",
+        GenerationJobErrorCodes.MovieDialogueVoiceOutputInvalid => "The dialogue voice result was invalid. Please try again.",
+        GenerationJobErrorCodes.MovieDialogueVoiceGenerationFailed => "The dialogue voice take could not be generated. Your movie dialogue plan was saved.",
+        GenerationJobErrorCodes.MovieDialogueVoiceCancelled => "The dialogue voice take was cancelled.",
         GenerationJobErrorCodes.MovieProviderUnavailable => "Movie generation is not available yet because no video provider is configured. Your movie plan was saved.",
         GenerationJobErrorCodes.MovieProviderTimeout => "Movie generation took too long to finish. Your movie plan was saved.",
         GenerationJobErrorCodes.MovieProviderUnsupportedRequest => "This movie request is not supported by the configured video provider. Your movie plan was saved.",
@@ -1319,6 +1778,11 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
         GenerationJobErrorCodes.MovieOutputStorageFailed => "The movie clip was generated but could not be saved. Your movie plan was saved.",
         GenerationJobErrorCodes.MovieCancelled => "The movie generation was cancelled.",
         GenerationJobErrorCodes.MovieGenerationFailed => "The movie could not be generated. Your movie plan was saved.",
+        GenerationJobErrorCodes.MovieSoundProviderUnavailable => "Movie sound generation is temporarily unavailable. Your sound cue was saved.",
+        GenerationJobErrorCodes.MovieSoundOutputInvalid => "The generated sound was invalid. Your sound cue was saved.",
+        GenerationJobErrorCodes.MovieSoundOutputStorageFailed => "The sound was generated but could not be saved. Your sound cue was saved.",
+        GenerationJobErrorCodes.MovieSoundCancelled => "The movie sound generation was cancelled.",
+        GenerationJobErrorCodes.MovieSoundGenerationFailed => "The movie sound could not be generated. Your sound cue was saved.",
         GenerationJobErrorCodes.MusicProviderUnavailable or GenerationJobErrorCodes.MusicProviderTimeout => "Music generation is temporarily unavailable. Please try again later.",
         GenerationJobErrorCodes.MusicProviderRateLimited => "Music generation is temporarily busy. Please try again later.",
         GenerationJobErrorCodes.MusicPromptRejected => "This music request could not be completed. Try a different description.",

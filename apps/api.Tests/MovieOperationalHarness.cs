@@ -97,8 +97,35 @@ public static class MovieOperationalFixtures
     public static async Task<MovieOperationalFixture> CreateFullMovieAsync(
         HttpClient client,
         MovieOperationalDiagnostics? diagnostics = null,
-        string title = "Operational E2E Feature")
+        string title = "Operational E2E Feature",
+        bool lastSeedStory = false,
+        int? sceneDurationSeconds = null)
     {
+        var storyPremise = lastSeedStory
+            ? "A young farmer must protect the last seed through drought until the first rain."
+            : "A courier must deliver a message before dawn.";
+        var storyLogline = lastSeedStory
+            ? "When the dry village loses hope, a young farmer chooses to protect one last seed until rain returns."
+            : "When the city goes dark, a reluctant courier crosses a hostile district to deliver one message.";
+        var storySynopsis = lastSeedStory
+            ? "The young farmer carries the grandfather's last seed across a dry village and chooses hope over surrender."
+            : "The courier discovers that the message is connected to a missing sibling.";
+        var storyTreatment = lastSeedStory
+            ? "The drought tests the farmer's resolve; the last seed survives long enough for the first rain."
+            : "The route becomes a moral test and ends in a public choice.";
+        var storySlugline = lastSeedStory ? "EXT. DRY VILLAGE FIELD - DUSK" : "EXT. HARBOR WAREHOUSE - BLUE HOUR";
+        var storySceneSynopsis = lastSeedStory ? "The farmer protects the last seed as the first rain arrives." : "The courier arrives as the lights fail.";
+        var storyAction = lastSeedStory ? "The young farmer closes a hand around the last seed as dust gives way to rain." : "The last streetlamp flickers out.";
+        var storyDialogue = lastSeedStory ? "We can still begin." : "We have one hour.";
+        var storyCharacter = lastSeedStory ? "YOUNG FARMER" : "MARA";
+        var characterName = lastSeedStory ? "Young Farmer" : "Mara";
+        var characterRole = lastSeedStory ? "Farmer" : "Courier";
+        var locationName = lastSeedStory ? "Dry Village" : "Old Harbor";
+        var locationDescription = lastSeedStory ? "A drought-struck village whose fields wait for rain." : "A repeatable waterfront location under repair.";
+        var setName = lastSeedStory ? "Old Tree Field" : "Harbor Warehouse";
+        var setDescription = lastSeedStory ? "A dry field beneath an old tree." : "A practical warehouse interior.";
+        var propName = lastSeedStory ? "Last Seed" : "Brass Compass";
+        var propDescription = lastSeedStory ? "The grandfather's final seed, kept safe for the first rain." : "A worn brass compass with a cracked glass face.";
         var owner = await RegisterAsync(client, "Movie Operational Owner", diagnostics);
         var project = await PostAsync<MovieStudioProjectResponse>(client, "/api/movie-studio/projects", new
         {
@@ -127,11 +154,18 @@ public static class MovieOperationalFixtures
             title = "The Arrival",
             summary = "The courier reaches the harbor.",
         }, diagnostics);
-        var scene = await PostAsync<MovieV2SceneDto>(client, $"/api/movie-studio/sequences/{sequence.Id}/scenes", new
-        {
-            title = "Blue Hour Harbor",
-            summary = "The courier enters the rain-soaked warehouse.",
-        }, diagnostics);
+        var scene = sceneDurationSeconds.HasValue
+            ? ToV2Scene(await PostAsync<MovieSceneDto>(client, $"/api/movie-studio/projects/{project.Project.Id}/scenes", new
+            {
+                title = lastSeedStory ? "Dry Village Field" : "Blue Hour Harbor",
+                summary = lastSeedStory ? "The farmer protects the last seed as the first rain arrives." : "The courier enters the rain-soaked warehouse.",
+                durationSeconds = sceneDurationSeconds,
+            }, diagnostics))
+            : await PostAsync<MovieV2SceneDto>(client, $"/api/movie-studio/sequences/{sequence.Id}/scenes", new
+            {
+                title = "Blue Hour Harbor",
+                summary = "The courier enters the rain-soaked warehouse.",
+            }, diagnostics);
         var shot = await PostAsync<MovieShotDto>(client, $"/api/movie-studio/scenes/{scene.Id}/shots", new
         {
             description = "A slow push toward the compass on a crate.",
@@ -141,7 +175,7 @@ public static class MovieOperationalFixtures
             productionRequirements = "Wet practical surface and readable compass face.",
             cameraAndFraming = "24mm wide, subject left",
             cameraMotion = "slow push",
-            durationSeconds = 5,
+            durationSeconds = sceneDurationSeconds ?? 5,
             visualContinuityNotes = "Keep the red practical in frame.",
             cinematography = new
             {
@@ -161,26 +195,26 @@ public static class MovieOperationalFixtures
 
         var story = await PostAsync<MovieStoryDto>(client, $"/api/movie-studio/projects/{project.Project.Id}/story/revisions", new
         {
-            premise = "A courier must deliver a message before dawn.",
-            logline = "When the city goes dark, a reluctant courier crosses a hostile district to deliver one message.",
-            synopsis = "The courier discovers that the message is connected to a missing sibling.",
-            treatment = "The route becomes a moral test and ends in a public choice.",
+            premise = storyPremise,
+            logline = storyLogline,
+            synopsis = storySynopsis,
+            treatment = storyTreatment,
             authorship = MovieStoryAuthorship.Human,
             changeSummary = "Operational human story pass",
             scenes = new[]
             {
                 new
                 {
-                    sceneIdentifier = "ACT-1-SEQUENCE-1-SCENE-1",
+                    sceneIdentifier = lastSeedStory ? "ACT-1-SEQUENCE-1-SCENE-1-LAST-SEED" : "ACT-1-SEQUENCE-1-SCENE-1",
                     actNumber = 1,
                     sequenceNumber = 1,
                     movieSceneId = scene.Id,
-                    slugline = "EXT. HARBOR WAREHOUSE - BLUE HOUR",
-                    synopsis = "The courier arrives as the lights fail.",
+                    slugline = storySlugline,
+                    synopsis = storySceneSynopsis,
                     elements = new object[]
                     {
-                        new { elementType = MovieScreenplayElementTypes.Action, content = "The last streetlamp flickers out." },
-                        new { elementType = MovieScreenplayElementTypes.Dialogue, content = "We have one hour.", characterName = "MARA", parenthetical = "quietly" },
+                        new { elementType = MovieScreenplayElementTypes.Action, content = storyAction },
+                        new { elementType = MovieScreenplayElementTypes.Dialogue, content = storyDialogue, characterName = storyCharacter, parenthetical = "quietly" },
                     },
                 },
             },
@@ -190,29 +224,29 @@ public static class MovieOperationalFixtures
 
         var character = await PostAsync<MovieCharacterDto>(client, $"/api/movie-studio/projects/{project.Project.Id}/characters", new
         {
-            name = "Mara",
-            role = "Courier",
-            description = "A guarded courier who refuses to abandon the message.",
-            appearance = "Short dark hair and a weathered navy coat.",
-            wardrobe = "Navy coat, brass compass, worn boots.",
-            voiceAndPerformance = "Quiet, deliberate, increasingly urgent.",
-            continuityNotes = "Compass stays in the left hand.",
+            name = characterName,
+            role = characterRole,
+            description = lastSeedStory ? "A determined farmer who refuses to surrender the last seed." : "A guarded courier who refuses to abandon the message.",
+            appearance = lastSeedStory ? "Sun-worn face, dust-covered hands, and a faded work shirt." : "Short dark hair and a weathered navy coat.",
+            wardrobe = lastSeedStory ? "Faded work shirt, field boots, and the grandfather's cloth pouch." : "Navy coat, brass compass, worn boots.",
+            voiceAndPerformance = lastSeedStory ? "Quiet, deliberate, protective, and increasingly hopeful." : "Quiet, deliberate, increasingly urgent.",
+            continuityNotes = lastSeedStory ? "The last seed remains in the left hand until planted." : "Compass stays in the left hand.",
         }, diagnostics);
         var location = await PostAsync<MovieLocationDto>(client, $"/api/movie-studio/projects/{project.Project.Id}/locations", new
         {
-            name = "Old Harbor",
-            description = "A repeatable waterfront location under repair.",
-            visualContinuityNotes = "Rust-red cranes remain on the east horizon.",
+            name = locationName,
+            description = locationDescription,
+            visualContinuityNotes = lastSeedStory ? "Ochre dust, the old tree, and the first rain remain visible references." : "Rust-red cranes remain on the east horizon.",
         }, diagnostics);
         var set = await PostAsync<MovieSetDto>(client, $"/api/movie-studio/projects/{project.Project.Id}/sets", new
         {
-            name = "Harbor Warehouse",
-            description = "A practical warehouse interior.",
+            name = setName,
+            description = setDescription,
             environmentType = "practical",
             movieLocationId = location.Id,
-            visualDescription = "Wet concrete and sodium spill.",
-            timeOfDay = "blue hour",
-            weather = "light rain",
+            visualDescription = lastSeedStory ? "Cracked earth, an old tree, and a narrow strip of green." : "Wet concrete and sodium spill.",
+            timeOfDay = lastSeedStory ? "dusk" : "blue hour",
+            weather = lastSeedStory ? "dry heat turning to first rain" : "light rain",
         }, diagnostics);
         var setVariation = await PostAsync<MovieSetVariationDto>(client, $"/api/movie-studio/sets/{set.Id}/variations", new
         {
@@ -224,10 +258,10 @@ public static class MovieOperationalFixtures
         }, diagnostics);
         var prop = await PostAsync<MoviePropDto>(client, $"/api/movie-studio/projects/{project.Project.Id}/props", new
         {
-            name = "Brass Compass",
-            description = "A worn brass compass with a cracked glass face.",
-            category = "hero prop",
-            continuityNotes = "The crack faces camera in close shots.",
+            name = propName,
+            description = propDescription,
+            category = lastSeedStory ? "hero prop" : "hero prop",
+            continuityNotes = lastSeedStory ? "The seed remains dry and visible before the rain." : "The crack faces camera in close shots.",
         }, diagnostics);
         _ = await PostAsync<MovieWorldUsageDto>(client, $"/api/movie-studio/scenes/{scene.Id}/world-usage", new
         {
@@ -307,6 +341,18 @@ public static class MovieOperationalFixtures
         Assert.True(response.IsSuccessStatusCode, $"GET {path} failed with {(int)response.StatusCode}: {body}");
         return JsonSerializer.Deserialize<T>(body, JsonOptions)!;
     }
+
+    private static MovieV2SceneDto ToV2Scene(MovieSceneDto scene) => new(
+        scene.Id,
+        scene.Sequence,
+        scene.Title,
+        scene.Summary,
+        "Planned",
+        null,
+        null,
+        DateTime.UtcNow,
+        DateTime.UtcNow,
+        []);
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 }
@@ -548,7 +594,7 @@ public sealed class MovieOperationalE2ETests : IClassFixture<MovieOperationalApi
     }
 
     [Fact]
-    public async Task Quick_movie_remains_a_small_persisted_plan_without_full_movie_approval_records()
+    public async Task Quick_movie_saves_only_the_brief_until_the_user_creates_a_scene_and_shot()
     {
         using var client = factory.CreateClient();
         var diagnostics = new MovieOperationalDiagnostics();
@@ -566,15 +612,23 @@ public sealed class MovieOperationalE2ETests : IClassFixture<MovieOperationalApi
         }, diagnostics);
         Assert.Equal(MovieProjectModes.Quick, quick.Project.Mode);
         Assert.Null(quick.Job);
-        Assert.Single(quick.Project.Scenes);
-        Assert.Single(quick.Project.Scenes[0].Shots);
+        Assert.Empty(quick.Project.Scenes);
         Assert.Empty(quick.Project.Characters);
         Assert.Empty(quick.Project.World.Locations);
         Assert.Empty(quick.Project.World.Sets);
         Assert.Empty(quick.Project.World.Props);
-        Assert.Equal(MovieProductionStages.ShotPlan, quick.Project.Scenes[0].Shots[0].ProductionStage);
-        Assert.Empty(quick.Project.Scenes[0].Shots[0].ProductionVersions);
         Assert.Empty(quick.Project.Clips);
+
+        var scene = await MovieOperationalFixtures.PostAsync<MovieSceneDto>(client,
+            $"/api/movie-studio/projects/{quick.Project.Id}/scenes",
+            new { title = "Human-authored scene", summary = "A scene entered by the user." }, diagnostics);
+        var shot = await MovieOperationalFixtures.PostAsync<MovieShotDto>(client,
+            $"/api/movie-studio/scenes/{scene.Id}/shots",
+            new { description = "A human-authored shot plan." }, diagnostics);
+        Assert.Equal("Human-authored scene", scene.Title);
+        Assert.Equal("A human-authored shot plan.", shot.Description);
+        Assert.Equal(MovieProductionStages.ShotPlan, shot.ProductionStage);
+        Assert.Empty(shot.ProductionVersions);
         Assert.All(diagnostics.Samples, sample => Assert.InRange(sample.StatusCode, 200, 299));
         output.WriteLine(diagnostics.Summary());
     }

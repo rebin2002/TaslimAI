@@ -67,6 +67,9 @@ public sealed class MovieProductionVersion
     public Guid? ContinuitySnapshotId { get; set; }
     public int? ContinuitySnapshotVersion { get; set; }
     public string? ContinuitySnapshotHash { get; set; }
+    public bool IsLocked { get; set; }
+    public DateTime? LockedAt { get; set; }
+    public Guid? LockedByUserId { get; set; }
     public Guid CreatedByUserId { get; set; }
     public Guid? ReviewedByUserId { get; set; }
     public DateTime CreatedAt { get; set; }
@@ -81,6 +84,7 @@ public sealed class MovieProductionVersion
     public Asset? LastFrameAsset { get; set; }
     public ApplicationUser CreatedByUser { get; set; } = null!;
     public ApplicationUser? ReviewedByUser { get; set; }
+    public ApplicationUser? LockedByUser { get; set; }
     public ICollection<MovieProductionVersionAsset> AssetReferences { get; set; } = [];
     public ICollection<MovieProductionStageTransition> Transitions { get; set; } = [];
 }
@@ -212,7 +216,11 @@ public sealed record MovieProductionVersionDto(
     DateTime UpdatedAt,
     DateTime? ReviewedAt,
     IReadOnlyList<MovieProductionAssetReferenceDto> AssetReferences,
-    MovieProductionExecutionDto? Execution = null);
+    MovieProductionExecutionDto? Execution = null,
+    bool IsLocked = false,
+    DateTime? LockedAt = null,
+    Guid? LockedByUserId = null,
+    bool IsSelected = false);
 public sealed record MovieProductionStageTransitionDto(
     Guid Id,
     Guid MovieShotId,
@@ -233,7 +241,8 @@ public sealed record MovieShotProductionDto(
     IReadOnlyList<MovieProductionStageTransitionDto> Transitions,
     MovieWorldContinuitySnapshotDto? WorldContinuity = null,
     IReadOnlyList<MovieV2TakeDto> Takes = null!,
-    IReadOnlyList<MovieRegenerationRequestDto> RegenerationRequests = null!);
+    IReadOnlyList<MovieRegenerationRequestDto> RegenerationRequests = null!,
+    MovieShotProductionContractDto? ProductionContract = null, Guid? SelectedKeyframeVersionId = null);
 
 public sealed record MovieStoryboardCandidateDto(
     Guid Id,
@@ -402,6 +411,8 @@ public static class MovieProductionProjection
 
 public sealed class MovieProductionVersionRequest
 {
+    [JsonIgnore, BindNever]
+    public Guid? VersionId { get; set; }
     public string Stage { get; set; } = MovieProductionStages.StoryboardCandidate;
     public string? Label { get; set; }
     public string CompositionJson { get; set; } = "{}";
@@ -424,6 +435,22 @@ public sealed class MovieProductionReviewRequest
     public string? MetadataJson { get; set; }
 }
 
+public sealed class MovieKeyframeGenerationRequest
+{
+    public Guid SourceStoryboardVersionId { get; set; }
+    public string? Label { get; set; }
+    public string? CompositionJson { get; set; }
+    public string? RegenerationMetadataJson { get; set; }
+}
+
+public sealed record MovieKeyframeGenerationResponse(MovieProductionVersionDto Version, GenerationJobDto Job);
+
+public sealed record MovieKeyframeImageGenerationInput(
+    Guid ProductionVersionId,
+    Guid MovieProjectId,
+    Guid MovieShotId,
+    Guid SourceStoryboardVersionId);
+
 public sealed class MovieProductionMotionPreviewRequest
 {
     public Guid SourceVersionId { get; set; }
@@ -437,6 +464,9 @@ public sealed class MovieProductionRenderRequest
     public Guid SourceVersionId { get; set; }
     public string? Label { get; set; }
     public string? Title { get; set; }
+    public string? TargetResolution { get; set; }
+    public string? QualityTier { get; set; }
+    public bool ConfirmationAccepted { get; set; }
     [JsonIgnore, BindNever]
     public decimal? EstimatedProviderCostUsd { get; set; }
 }

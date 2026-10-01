@@ -35,6 +35,7 @@ using Taslim.Api.Notifications;
 using Taslim.Api.Resilience;
 using Taslim.Api.Voice;
 using Taslim.Api.Upscaling;
+using Taslim.Api.Video;
 using FileSettings = Taslim.Api.Files.FileOptions;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -181,6 +182,7 @@ builder.Services.AddScoped<IPaymentReconciliationService, PaymentReconciliationS
 builder.Services.AddSingleton<IPaymentProvider, UnconfiguredPaymentProvider>();
 builder.Services.AddScoped<IAssetService, AssetService>();
 builder.Services.AddScoped<IGeneratedAssetPublisher, GeneratedAssetPublisher>();
+builder.Services.AddSingleton<IGeneratedMediaRetentionHook, NoopGeneratedMediaRetentionHook>();
 builder.Services.Configure<GenerationQualityControlOptions>(builder.Configuration.GetSection("GenerationQualityControl"));
 builder.Services.AddScoped<IGenerationQualityControl, GenerationQualityControlService>();
 builder.Services.Configure<MovieProductionQualityControlOptions>(builder.Configuration.GetSection("MovieProductionQualityControl"));
@@ -205,6 +207,8 @@ builder.Services.AddOptions<ProviderCapabilityRegistryOptions>()
 builder.Services.AddSingleton<IValidateOptions<ProviderCapabilityRegistryOptions>, ProviderCapabilityRegistryOptionsValidator>();
 builder.Services.AddSingleton<IProviderCapabilityRegistry, ProviderCapabilityRegistry>();
 builder.Services.Configure<GenerationJobOptions>(builder.Configuration.GetSection("GenerationJobs"));
+builder.Services.PostConfigure<GenerationJobOptions>(options =>
+    options.WorkerEnabled = builder.Configuration.GetValue("GenerationJobs:WorkerEnabled", !builder.Environment.IsEnvironment("Testing")));
 builder.Services.Configure<ProviderResilienceOptions>(builder.Configuration.GetSection("ProviderResilience"));
 builder.Services.AddScoped<IGenerationJobQueue, DatabaseGenerationJobQueue>();
 builder.Services.AddScoped<IGenerationJobUsageService, GenerationJobUsageService>();
@@ -221,31 +225,73 @@ builder.Services.AddScoped<NotificationService>();
 builder.Services.AddScoped<INotificationService>(services => services.GetRequiredService<NotificationService>());
 builder.Services.AddScoped<INotificationEventWriter>(services => services.GetRequiredService<NotificationService>());
 builder.Services.AddScoped<IMovieStudioService, MovieStudioService>();
+builder.Services.AddScoped<IMovieProductionComplexityService, MovieProductionComplexityService>();
+builder.Services.AddScoped<MovieShotImportanceClassifier>();
+builder.Services.AddScoped<MovieShotImportanceService>();
+builder.Services.AddScoped<IMovieDurationBudgetService, MovieDurationBudgetService>();
+builder.Services.AddScoped<IMovieCinematographyPlanningService, MovieCinematographyPlanningService>();
+builder.Services.AddScoped<IMovieProductionGenerationOrchestrator, MovieProductionGenerationOrchestrator>();
+builder.Services.AddScoped<IMovieSoundService, MovieSoundService>();
+builder.Services.AddScoped<IMovieProductionCheckpointService, MovieProductionCheckpointService>();
 builder.Services.AddScoped<IMovieStoryCastService, MovieStoryCastService>();
 builder.Services.AddScoped<IMovieCharacterContinuityService, MovieCharacterContinuityService>();
 builder.Services.AddScoped<MovieWorldContinuityProjector>();
 builder.Services.AddScoped<IMovieWorldContinuityService, MovieWorldContinuityService>();
+builder.Services.AddScoped<IMovieProductionContinuityService, MovieProductionContinuityService>();
+builder.Services.AddScoped<IMovieProductionReferencePackageService, MovieProductionReferencePackageService>();
 builder.Services.AddScoped<IMovieV2Service, MovieV2Service>();
+builder.Services.AddScoped<IMovieDialogueProductionService, MovieDialogueProductionService>();
+builder.Services.AddScoped<MovieDialogueVoiceExecutionStore>();
+builder.Services.AddScoped<IMovieTimelineService, MovieTimelineService>();
 builder.Services.AddScoped<IMovieFinalMasteringService, MovieFinalMasteringService>();
+builder.Services.AddScoped<IMovieFinalAssemblyService, MovieFinalAssemblyService>();
+builder.Services.Configure<MovieFinalAssemblyOptions>(builder.Configuration.GetSection("MovieFinalAssembly"));
+builder.Services.AddScoped<MovieFinalAssemblyExecutionStore>();
+builder.Services.AddSingleton<MovieFinalAssemblyQualityControl>();
+builder.Services.AddSingleton<FfmpegMovieFinalAssemblyExecutor>();
+builder.Services.AddSingleton<IMovieFinalAssemblyExecutor>(services =>
+{
+    var options = services.GetRequiredService<IOptions<MovieFinalAssemblyOptions>>().Value;
+    return options.Enabled ? services.GetRequiredService<FfmpegMovieFinalAssemblyExecutor>() : new UnavailableMovieFinalAssemblyExecutor();
+});
 builder.Services.AddScoped<IMovieTakeUpscaleEligibilityService, MovieTakeUpscaleEligibilityService>();
+builder.Services.AddSingleton<IMovieSoundtrackMediaService, UnavailableMovieSoundtrackMediaService>();
+builder.Services.AddScoped<IMovieSoundtrackService, MovieSoundtrackService>();
 builder.Services.AddScoped<IMovieScenesService, MovieScenesService>();
 builder.Services.AddScoped<IMovieGuideService, MovieGuideService>();
 builder.Services.AddScoped<IMovieStoryService, MovieStoryService>();
 builder.Services.AddScoped<IMovieCollaborationService, MovieCollaborationService>();
+builder.Services.AddScoped<MovieStoryScenePlanningContextAssembler>();
+builder.Services.AddSingleton<IMovieCaptionFormatAdapter, SrtMovieCaptionFormatAdapter>();
+builder.Services.AddSingleton<IMovieCaptionFormatAdapter, WebVttMovieCaptionFormatAdapter>();
+builder.Services.AddScoped<IMovieCaptionService, MovieCaptionService>();
 builder.Services.AddScoped<MovieDirectorContextAssembler>();
 builder.Services.AddScoped<IDirectorCostEstimator, MovieDirectorCostEstimator>();
 builder.Services.Configure<MovieDirectorCreativeOutputValidationOptions>(builder.Configuration.GetSection("MovieDirectorCreativeValidation"));
 builder.Services.AddScoped<IMovieDirectorCreativeOutputValidator, MovieDirectorCreativeOutputValidator>();
+builder.Services.Configure<MovieWave2CreativeOutputValidationOptions>(builder.Configuration.GetSection("MovieWave2CreativeValidation"));
+builder.Services.AddScoped<IMovieWave2CreativeOutputValidator>(services => new MovieWave2CreativeOutputValidator(
+    services.GetRequiredService<Microsoft.Extensions.Options.IOptions<MovieWave2CreativeOutputValidationOptions>>().Value));
 builder.Services.AddScoped<DirectorQualityPlanner>();
 builder.Services.AddScoped<IMovieSynopsisDevelopmentService, AiMovieSynopsisDevelopmentService>();
 builder.Services.AddScoped<DirectorStoryProposalPlanner>();
 builder.Services.AddScoped<IDirectorCreativeCostEstimator, DirectorCreativeCostEstimator>();
 builder.Services.AddScoped<DirectorCreativeQualityPlanner>();
 builder.Services.AddScoped<MovieDirectorStoryAiService>();
+builder.Services.Configure<MovieDirectorScenePlanningOptions>(builder.Configuration.GetSection("MovieDirectorScenePlanning"));
+builder.Services.AddScoped<IMovieDirectorScenePlanValidator, MovieDirectorScenePlanValidator>();
+builder.Services.AddScoped<MovieDirectorScenePlanningAiService>();
+builder.Services.AddScoped<MovieShotPlanningContextAssembler>();
+builder.Services.AddScoped<MovieShotPlanningAiService>();
 builder.Services.AddScoped<IMovieDirectorService, MovieDirectorService>();
 builder.Services.AddSingleton<IMovieResolutionPlanner, MovieResolutionPlanner>();
+builder.Services.AddScoped<IMovieShotExecutionService, MovieShotExecutionService>();
 builder.Services.Configure<MovieVideoOptions>(builder.Configuration.GetSection("MovieVideo"));
+builder.Services.Configure<MovieDialogueVoiceOptions>(builder.Configuration.GetSection("MovieDialogueVoice"));
 builder.Services.Configure<DirectVideoProviderOptions>(builder.Configuration.GetSection("DirectVideoProviders"));
+builder.Services.Configure<VideoGenerationAdapterOptions>(builder.Configuration.GetSection("VideoGenerationAdapters"));
+builder.Services.AddSingleton<IVideoGenerationAdapter, UnavailableVideoGenerationAdapter>();
+builder.Services.AddSingleton<VideoGenerationAdapterExecutionService>();
 builder.Services.AddScoped<MovieVideoExecutionStore>();
 builder.Services.AddHttpClient<RunwayMovieVideoProvider>()
     .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
@@ -262,8 +308,17 @@ builder.Services.AddSingleton<IMovieVideoProvider>(services =>
 });
 builder.Services.AddScoped<IDirectorActionExecutor, MovieDirectorActionExecutor>();
 builder.Services.AddScoped<IDirectorActionExecutor, MovieDirectorStoryActionExecutor>();
+builder.Services.AddScoped<IDirectorActionExecutor, MovieDirectorScenePlanActionExecutor>();
+builder.Services.AddScoped<IDirectorActionExecutor, MovieShotPlanningActionExecutor>();
+builder.Services.AddScoped<IDirectorActionExecutor, MovieShotPlanningRegenerationActionExecutor>();
+builder.Services.AddScoped<IDirectorActionExecutor>(_ => new MovieDirectorPlanningActionExecutor(DirectorActionTypes.ScenePlanning));
+builder.Services.AddScoped<IDirectorActionExecutor>(_ => new MovieDirectorPlanningActionExecutor(DirectorActionTypes.ShotPlanning));
+builder.Services.AddScoped<IDirectorActionExecutor>(_ => new MovieDirectorPlanningActionExecutor(DirectorActionTypes.StoryboardPreparation));
+builder.Services.AddScoped<IDirectorActionExecutor>(_ => new MovieDirectorPlanningActionExecutor(DirectorActionTypes.ProductionReadiness));
+builder.Services.AddScoped<IDirectorActionExecutor>(_ => new MovieDirectorPlanningActionExecutor(DirectorActionTypes.ProjectReadiness));
 builder.Services.AddScoped<IActivityCenterService, ActivityCenterService>();
 builder.Services.AddSingleton<IGenerationJobHandler, SystemTestGenerationJobHandler>();
+builder.Services.AddScoped<IGenerationJobHandler, VideoGenerationAdapterJobHandler>();
 if (builder.Configuration.GetValue("GenerationJobs:WorkerEnabled", !builder.Environment.IsEnvironment("Testing")))
 {
     builder.Services.AddHostedService<GenerationJobWorker>();
@@ -275,6 +330,7 @@ builder.Services.Configure<PresentationGenerationOptions>(builder.Configuration.
 builder.Services.Configure<ResearchGenerationOptions>(builder.Configuration.GetSection("ResearchGeneration"));
 builder.Services.Configure<SocialGenerationOptions>(builder.Configuration.GetSection("SocialGeneration"));
 builder.Services.Configure<MusicGenerationOptions>(builder.Configuration.GetSection("MusicGeneration"));
+builder.Services.Configure<MovieSoundOptions>(builder.Configuration.GetSection("MovieSoundGeneration"));
 builder.Services.Configure<VoiceGenerationOptions>(builder.Configuration.GetSection("VoiceGeneration"));
 builder.Services.AddSingleton<AiModelCatalog>();
 builder.Services.AddSingleton<IAiCostCalculator, AiCostCalculator>();
@@ -293,6 +349,8 @@ builder.Services.AddSingleton<IImagePromptBuilder, TaslimImagePromptBuilder>();
 builder.Services.AddSingleton<IImageGenerationProvider>(services => services.GetRequiredService<OpenAiImageGenerationProvider>());
 builder.Services.AddSingleton<IGenerationJobHandler, ImageGenerationJobHandler>();
 builder.Services.AddScoped<IGenerationJobHandler, MovieVideoGenerationJobHandler>();
+builder.Services.AddScoped<IGenerationJobHandler, MovieDialogueVoiceGenerationJobHandler>();
+builder.Services.AddScoped<IGenerationJobHandler, MovieFinalAssemblyJobHandler>();
 builder.Services.AddSingleton<IDocumentPromptBuilder, DocumentPromptBuilder>();
 builder.Services.AddScoped<IDocumentGenerationProvider, AiDocumentGenerationProvider>();
 builder.Services.AddSingleton<IDocumentRenderer, DocumentRenderer>();
@@ -318,11 +376,26 @@ builder.Services.AddSingleton<IMusicGenerationProvider>(services => services.Get
 builder.Services.AddHttpClient<StableAudioMusicGenerationProvider>();
 builder.Services.AddSingleton<IMusicGenerationProvider>(services => services.GetRequiredService<StableAudioMusicGenerationProvider>());
 builder.Services.AddScoped<IGenerationJobHandler, MusicGenerationJobHandler>();
+builder.Services.AddSingleton<IMovieSoundProvider>(services =>
+{
+    var options = services.GetRequiredService<IOptions<MovieSoundOptions>>().Value;
+    if (options.Enabled && string.Equals(options.ProviderKey, "fake", StringComparison.OrdinalIgnoreCase))
+        return new FakeMovieSoundProvider();
+    return new UnavailableMovieSoundProvider();
+});
+builder.Services.AddScoped<IGenerationJobHandler, MovieSoundGenerationJobHandler>();
 builder.Services.AddSingleton<IVoiceGenerationProvider>(services => services.GetRequiredService<OpenAiVoiceGenerationProvider>());
 builder.Services.AddSingleton<IVoiceGenerationProvider, UnconfiguredVoiceGenerationProvider>();
 builder.Services.AddSingleton<IVoiceGenerationProvider>(services => services.GetRequiredService<OpenAiVoiceGenerationProvider>());
 builder.Services.AddSingleton<IVoiceGenerationProvider>(services => services.GetRequiredService<AzureSpeechVoiceGenerationProvider>());
 builder.Services.AddScoped<IGenerationJobHandler, VoiceGenerationJobHandler>();
+builder.Services.AddSingleton<IMovieDialogueVoiceProvider>(services =>
+{
+    var options = services.GetRequiredService<Microsoft.Extensions.Options.IOptions<MovieDialogueVoiceOptions>>().Value;
+    if (!options.Enabled) return new UnavailableMovieDialogueVoiceProvider();
+    if (string.Equals(options.ProviderKey, "fake", StringComparison.OrdinalIgnoreCase)) return new DeterministicMovieDialogueVoiceProvider();
+    return new UnavailableMovieDialogueVoiceProvider();
+});
 builder.Services.AddScoped<FileValidationService>();
 builder.Services.AddSingleton<IFileContentExtractor, FileContentExtractor>();
 builder.Services.AddScoped<FileProcessingService>();

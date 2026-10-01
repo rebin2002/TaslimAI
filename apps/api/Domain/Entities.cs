@@ -83,7 +83,7 @@ public static class GenerationJobTypes
     public const string PresentationGenerate = "presentation.generate";
     public const string ResearchGenerate = "research.generate";
     public const string SocialGenerate = "social.generate";
-public const string MovieQuickGenerate = "movie.quick.generate";
+    public const string MovieQuickGenerate = "movie.quick.generate";
     public const string MovieClipGenerate = "movie.clip.generate";
     public const string MovieAssembly = "movie.assembly";
 
@@ -91,8 +91,19 @@ public const string MovieQuickGenerate = "movie.quick.generate";
     {
         MovieQuickGenerate, MovieClipGenerate, MovieAssembly,
     };
-public const string MusicGenerate = "music.generate";
-public const string VoiceGenerate = "voice.generate";
+    public const string MusicGenerate = "music.generate";
+    public const string VoiceGenerate = "voice.generate";
+    public const string MovieDialogueVoiceGenerate = "movie.dialogue.voice.generate";
+    public const string MovieSoundGenerate = "movie.sound.generate";
+
+    public static readonly IReadOnlySet<string> MovieDialogueVoiceTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        MovieDialogueVoiceGenerate,
+    };
+    public static readonly IReadOnlySet<string> MovieSoundTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        MovieSoundGenerate,
+    };
 
     public static readonly IReadOnlySet<string> Supported = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
@@ -102,11 +113,13 @@ public const string VoiceGenerate = "voice.generate";
         PresentationGenerate,
         ResearchGenerate,
         SocialGenerate,
-MovieQuickGenerate,
+        MovieQuickGenerate,
         MovieClipGenerate,
         MovieAssembly,
-MusicGenerate,
-VoiceGenerate,
+        MusicGenerate,
+        VoiceGenerate,
+        MovieDialogueVoiceGenerate,
+        MovieSoundGenerate,
     };
 }
 
@@ -130,6 +143,8 @@ public static class GenerationJobErrorCodes
 {
     public const string TypeNotSupported = "JOB_TYPE_NOT_SUPPORTED";
     public const string Cancelled = "JOB_CANCELLED";
+    public const string Poisoned = "JOB_POISONED";
+    public const string RetryExhausted = Poisoned;
     public const string ExecutionFailed = "JOB_EXECUTION_FAILED";
     public const string NoBillableAsset = "GENERATION_NO_BILLABLE_ASSET";
     public const string NotCancellable = "JOB_NOT_CANCELLABLE";
@@ -196,7 +211,16 @@ public static class GenerationJobErrorCodes
     public const string SocialOutputInvalid = "SOCIAL_OUTPUT_INVALID";
     public const string SocialStorageFailed = "SOCIAL_STORAGE_FAILED";
     public const string SocialCancelled = "SOCIAL_CANCELLED";
-public const string MovieProviderUnavailable = "MOVIE_PROVIDER_UNAVAILABLE";
+    public const string MovieProviderUnavailable = "MOVIE_PROVIDER_UNAVAILABLE";
+    public const string MovieAssemblyProviderUnavailable = "MOVIE_ASSEMBLY_EXECUTOR_UNAVAILABLE";
+    public const string MovieAssemblyQueueFailed = "MOVIE_ASSEMBLY_QUEUE_FAILED";
+    public const string MovieAssemblyTargetInvalid = "MOVIE_ASSEMBLY_TARGET_INVALID";
+    public const string MovieAssemblyInputInvalid = "MOVIE_ASSEMBLY_INPUT_INVALID";
+    public const string MovieAssemblySourceUnavailable = "MOVIE_ASSEMBLY_SOURCE_UNAVAILABLE";
+    public const string MovieAssemblyExecutionFailed = "MOVIE_ASSEMBLY_EXECUTION_FAILED";
+    public const string MovieAssemblyOutputInvalid = "MOVIE_ASSEMBLY_OUTPUT_INVALID";
+    public const string MovieAssemblyQcFailed = "MOVIE_ASSEMBLY_QC_FAILED";
+    public const string MovieAssemblyCancelled = "MOVIE_ASSEMBLY_CANCELLED";
     public const string MovieProviderTimeout = "MOVIE_PROVIDER_TIMEOUT";
     public const string MovieProviderUnsupportedRequest = "MOVIE_PROVIDER_UNSUPPORTED_REQUEST";
     public const string MovieCancelled = "MOVIE_CANCELLED";
@@ -218,6 +242,17 @@ public const string MusicRequestInvalid = "MUSIC_REQUEST_INVALID";
     public const string MusicOutputInvalid = "MUSIC_OUTPUT_INVALID";
     public const string MusicOutputStorageFailed = "MUSIC_OUTPUT_STORAGE_FAILED";
     public const string MusicCancelled = "MUSIC_CANCELLED";
+    public const string MovieSoundRequestInvalid = "MOVIE_SOUND_REQUEST_INVALID";
+    public const string MovieSoundCueInvalid = "MOVIE_SOUND_CUE_INVALID";
+    public const string MovieSoundKindInvalid = "MOVIE_SOUND_KIND_INVALID";
+    public const string MovieSoundLayerInvalid = "MOVIE_SOUND_LAYER_INVALID";
+    public const string MovieSoundAssetInvalid = "MOVIE_SOUND_ASSET_INVALID";
+    public const string MovieSoundNotReady = "MOVIE_SOUND_NOT_READY";
+    public const string MovieSoundProviderUnavailable = "MOVIE_SOUND_PROVIDER_UNAVAILABLE";
+    public const string MovieSoundOutputInvalid = "MOVIE_SOUND_OUTPUT_INVALID";
+    public const string MovieSoundOutputStorageFailed = "MOVIE_SOUND_OUTPUT_STORAGE_FAILED";
+    public const string MovieSoundGenerationFailed = "MOVIE_SOUND_GENERATION_FAILED";
+    public const string MovieSoundCancelled = "MOVIE_SOUND_CANCELLED";
 	public const string VoiceRequestInvalid = "VOICE_REQUEST_INVALID";
 	    public const string VoiceProviderUnavailable = "VOICE_PROVIDER_UNAVAILABLE";
 	    public const string VoiceProviderAuthentication = "VOICE_PROVIDER_AUTHENTICATION_FAILED";
@@ -230,6 +265,11 @@ public const string MusicRequestInvalid = "MUSIC_REQUEST_INVALID";
     public const string VoiceOutputInvalid = "VOICE_OUTPUT_INVALID";
     public const string VoiceOutputStorageFailed = "VOICE_OUTPUT_STORAGE_FAILED";
     public const string VoiceCancelled = "VOICE_CANCELLED";
+    public const string MovieDialogueVoiceRequestInvalid = "MOVIE_DIALOGUE_VOICE_REQUEST_INVALID";
+    public const string MovieDialogueVoiceProviderUnavailable = "MOVIE_DIALOGUE_VOICE_PROVIDER_UNAVAILABLE";
+    public const string MovieDialogueVoiceOutputInvalid = "MOVIE_DIALOGUE_VOICE_OUTPUT_INVALID";
+    public const string MovieDialogueVoiceGenerationFailed = "MOVIE_DIALOGUE_VOICE_GENERATION_FAILED";
+    public const string MovieDialogueVoiceCancelled = "MOVIE_DIALOGUE_VOICE_CANCELLED";
 }
 
 public static class AssetTypes
@@ -540,6 +580,13 @@ public sealed class StoredFile
     public string? ExtractedText { get; set; }
     public int? ExtractedTextLength { get; set; }
     public string? MetadataJson { get; set; }
+    public string? ContentHashSha256 { get; set; }
+    public string? ContainerFormat { get; set; }
+    public int? Width { get; set; }
+    public int? Height { get; set; }
+    public double? DurationSeconds { get; set; }
+    public DateTime? RetainUntil { get; set; }
+    public DateTime? DeletedAt { get; set; }
 
     public Workspace Workspace { get; set; } = null!;
     public ApplicationUser User { get; set; } = null!;
@@ -549,6 +596,7 @@ public sealed class StoredFile
     public ICollection<GenerationJobOutput> GenerationJobOutputs { get; set; } = [];
     public ICollection<Asset> Assets { get; set; } = [];
     public ICollection<AssetRepresentation> AssetRepresentations { get; set; } = [];
+    public ICollection<GeneratedMediaProvenance> GeneratedMediaProvenance { get; set; } = [];
 }
 
 public sealed class GenerationJob
@@ -592,6 +640,7 @@ public sealed class GenerationJob
     public ApplicationUser CreatedByUser { get; set; } = null!;
     public ICollection<GenerationJobOutput> Outputs { get; set; } = [];
     public ICollection<Asset> Assets { get; set; } = [];
+    public ICollection<GeneratedMediaProvenance> GeneratedMediaProvenance { get; set; } = [];
     public ICollection<ResearchSource> ResearchSources { get; set; } = [];
     public ICollection<GenerationProviderAttempt> ProviderAttempts { get; set; } = [];
 }
@@ -712,6 +761,7 @@ public sealed class Asset
     public StoredFile? StoredFile { get; set; }
     public GenerationJob? SourceGenerationJob { get; set; }
     public ICollection<AssetRepresentation> Representations { get; set; } = [];
+    public ICollection<GeneratedMediaProvenance> GeneratedMediaProvenance { get; set; } = [];
 }
 
 public sealed class AssetRepresentation
@@ -727,6 +777,32 @@ public sealed class AssetRepresentation
 
     public Asset Asset { get; set; } = null!;
     public StoredFile StoredFile { get; set; } = null!;
+}
+
+public sealed class GeneratedMediaProvenance
+{
+    public Guid Id { get; set; }
+    public Guid WorkspaceId { get; set; }
+    public Guid StoredFileId { get; set; }
+    public Guid GenerationJobId { get; set; }
+    public Guid? AssetId { get; set; }
+    public Guid? MovieTakeId { get; set; }
+    public Guid? MovieClipId { get; set; }
+    public string OutputType { get; set; } = string.Empty;
+    public string IngestionKey { get; set; } = string.Empty;
+    public string ContentHashSha256 { get; set; } = string.Empty;
+    public string? ParentContentHashSha256 { get; set; }
+    public string ChainHashSha256 { get; set; } = string.Empty;
+    public string? SafeMetadataJson { get; set; }
+    public DateTime CreatedAt { get; set; }
+    public DateTime? RetainUntil { get; set; }
+    public DateTime? CleanedAt { get; set; }
+    public string? CleanupReason { get; set; }
+
+    public Workspace Workspace { get; set; } = null!;
+    public StoredFile StoredFile { get; set; } = null!;
+    public GenerationJob GenerationJob { get; set; } = null!;
+    public Asset? Asset { get; set; }
 }
 
 public sealed class GenerationJobOutput

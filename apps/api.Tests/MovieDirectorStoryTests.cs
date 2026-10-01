@@ -6,6 +6,7 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.EntityFrameworkCore;
 using Taslim.Api.Contracts;
 using Taslim.Api.Movies;
 using Xunit;
@@ -75,9 +76,60 @@ public sealed class MovieDirectorStoryTests : IClassFixture<MovieDirectorStoryAp
         var rejected = await SendWithCsrf<DirectorProposalDto>(client, HttpMethod.Post, $"/api/movie-director/proposals/{proposal.Proposal.Id}/reject", null);
         Assert.Equal(DirectorProposalStatuses.Rejected, rejected.Status);
         Assert.Equal(DirectorActionStatuses.Cancelled, rejected.Actions[0].Status);
+        using (var executeRejected = await SendWithCsrf(client, HttpMethod.Post, $"/api/movie-director/actions/{proposal.Proposal.Actions[0].Id}/execute", null))
+        {
+            Assert.Equal(HttpStatusCode.Conflict, executeRejected.StatusCode);
+            Assert.Contains("DIRECTOR_APPROVAL_REQUIRED", await executeRejected.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        }
         var storyAfter = await client.GetFromJsonAsync<MovieStoryDto>($"/api/movie-studio/projects/{movie.Project.Id}/story");
         Assert.Equal(storyBefore.CurrentRevisionId, storyAfter!.CurrentRevisionId);
         Assert.Single(storyAfter.Revisions);
+    }
+
+    [Fact]
+    public async Task Stale_shot_proposal_is_rejected_before_approval()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Stale Director Owner");
+        var movie = await CreateMovie(client, auth.PersonalWorkspace.Id);
+        await LockGuide(client, movie.Project.Id);
+        var scene = await SendWithCsrf<MovieSceneDto>(client, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/scenes", new { title = "Stale scene", summary = "A scene that changes after planning." });
+        var shot = await SendWithCsrf<MovieShotDto>(client, HttpMethod.Post, $"/api/movie-studio/scenes/{scene.Id}/shots", new { description = "Original shot plan." });
+        var proposal = await SendWithCsrf<DirectorProposalResponse>(client, HttpMethod.Post, $"/api/movie-director/projects/{movie.Project.Id}/proposals", new { shotId = shot.Id });
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<Taslim.Api.Persistence.TaslimDbContext>();
+            var persistedShot = await db.MovieShots.SingleAsync(item => item.Id == shot.Id);
+            persistedShot.Description = "Changed after the proposal was assembled.";
+            persistedShot.UpdatedAt = DateTime.UtcNow;
+            await db.SaveChangesAsync();
+        }
+
+        using var approval = await SendWithCsrf(client, HttpMethod.Post, $"/api/movie-director/proposals/{proposal.Proposal.Id}/approve", null);
+        Assert.Equal(HttpStatusCode.Conflict, approval.StatusCode);
+        Assert.Contains("DIRECTOR_PROPOSAL_STALE", await approval.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        using var verifyScope = factory.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<Taslim.Api.Persistence.TaslimDbContext>();
+        var persistedProposal = await verifyDb.DirectorProposals.Include(item => item.Actions).SingleAsync(item => item.Id == proposal.Proposal.Id);
+        Assert.Equal(DirectorProposalStatuses.Expired, persistedProposal.Status);
+        Assert.Equal(DirectorActionStatuses.Cancelled, persistedProposal.Actions.Single().Status);
+    }
+
+    [Fact]
+    public async Task Malformed_story_target_is_rejected_without_mutating_story()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Malformed Target Owner");
+        var movie = await CreateMovie(client, auth.PersonalWorkspace.Id);
+        await LockGuide(client, movie.Project.Id);
+        using var response = await SendWithCsrf(client, HttpMethod.Post, $"/api/movie-director/projects/{movie.Project.Id}/proposals", new
+        {
+            storyAction = DirectorStoryActionTypes.ImproveLogline,
+            targetSceneId = Guid.NewGuid(),
+        });
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains("DIRECTOR_CONTEXT_TARGET_INVALID", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
     }
 
     [Fact]

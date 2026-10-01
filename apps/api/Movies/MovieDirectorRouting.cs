@@ -11,6 +11,7 @@ namespace Taslim.Api.Movies;
 /// </summary>
 public static class DirectorCreativeTaskTypes
 {
+    public const string PlanScenes = DirectorScenePlanActionTypes.PlanScenes;
     public const string DevelopPremise = DirectorStoryActionTypes.DevelopPremise;
     public const string ImproveLogline = DirectorStoryActionTypes.ImproveLogline;
     public const string ExpandSynopsis = DirectorStoryActionTypes.ExpandSynopsis;
@@ -20,12 +21,14 @@ public static class DirectorCreativeTaskTypes
     public const string ImproveDialogue = DirectorStoryActionTypes.ImproveDialogue;
     public const string TightenPacing = DirectorStoryActionTypes.TightenPacing;
     public const string IdentifyInconsistencies = DirectorStoryActionTypes.IdentifyInconsistencies;
+    public const string PlanShots = "plan_shots";
 
     public static readonly IReadOnlySet<string> All = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
+        PlanScenes,
         DevelopPremise, ImproveLogline, ExpandSynopsis, CreateOrRefineTreatment,
         ProposeScreenplayScene, RewriteSelectedPassage, ImproveDialogue, TightenPacing,
-        IdentifyInconsistencies,
+        IdentifyInconsistencies, PlanShots,
     };
 }
 
@@ -149,6 +152,7 @@ public static class DirectorCreativeRoutingProfiles
 {
     public static (int ComplexityBias, int OutputTokens) For(string taskType) => taskType.Trim().ToLowerInvariant() switch
     {
+        DirectorCreativeTaskTypes.PlanScenes => (20, 3_600),
         DirectorCreativeTaskTypes.DevelopPremise => (-20, 700),
         DirectorCreativeTaskTypes.ImproveLogline => (-20, 700),
         DirectorCreativeTaskTypes.TightenPacing => (-10, 900),
@@ -158,6 +162,7 @@ public static class DirectorCreativeRoutingProfiles
         DirectorCreativeTaskTypes.RewriteSelectedPassage => (5, 1_800),
         DirectorCreativeTaskTypes.ProposeScreenplayScene => (15, 2_400),
         DirectorCreativeTaskTypes.CreateOrRefineTreatment => (25, 3_200),
+        DirectorCreativeTaskTypes.PlanShots => (25, 4_200),
         _ => (0, 1_000),
     };
 }

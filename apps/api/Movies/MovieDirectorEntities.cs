@@ -45,6 +45,16 @@ public static class DirectorActionTypes
 {
     public const string GenerateShot = "generate_shot";
     public const string StoryAssistance = "story_assistance";
+    public const string ScenePlanning = "scene_planning";
+    public const string ShotPlanning = "shot_planning";
+    public const string StoryboardPreparation = "storyboard_preparation";
+    public const string ProductionReadiness = "production_readiness";
+    public const string ProjectReadiness = "project_readiness";
+
+    public static readonly IReadOnlySet<string> RoomPlanning = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        ScenePlanning, ShotPlanning, StoryboardPreparation, ProductionReadiness, ProjectReadiness,
+    };
 }
 
 public static class DirectorHistoryEventTypes
@@ -53,6 +63,7 @@ public static class DirectorHistoryEventTypes
     public const string ProposalCreated = "proposal_created";
     public const string ProposalApproved = "proposal_approved";
     public const string ProposalRejected = "proposal_rejected";
+    public const string ProposalExpired = "proposal_expired";
     public const string ActionReady = "action_ready";
     public const string ActionStarted = "action_started";
     public const string ActionSucceeded = "action_succeeded";
@@ -101,6 +112,8 @@ public sealed class DirectorProposal
     public Guid MovieProjectId { get; set; }
     public Guid DirectorProjectContextId { get; set; }
     public Guid CreatedByUserId { get; set; }
+    public int ContextVersion { get; set; }
+    public string ContextSnapshotHash { get; set; } = string.Empty;
     public string Status { get; set; } = DirectorProposalStatuses.PendingApproval;
     public string Title { get; set; } = string.Empty;
     public string Summary { get; set; } = string.Empty;
@@ -200,7 +213,7 @@ public sealed record DirectorContextDto(
     DirectorStoryContext? ApprovedStory = null,
     DirectorContinuityContext? Continuity = null,
     MovieWorldContinuitySnapshotDto? WorldContinuity = null,
-    DirectorContextTargetDto? Target = null, DirectorWorldContext? World = null, DirectorProductionContext? Production = null, DirectorCollaborationContext? Collaboration = null, DirectorContextBudgetDto? Budget = null, IReadOnlyList<DirectorContextSourceDto>? Provenance = null);
+    DirectorContextTargetDto? Target = null, DirectorWorldContext? World = null, DirectorProductionContext? Production = null, DirectorCollaborationContext? Collaboration = null, DirectorContextBudgetDto? Budget = null, IReadOnlyList<DirectorContextSourceDto>? Provenance = null, DirectorRoomContext? RoomContext = null);
 
 public sealed record DirectorGuideContext(
     string VisualLanguage,
@@ -222,6 +235,8 @@ public sealed record DirectorContinuityContext(Guid? MovieSceneId, Guid? MovieSh
 public sealed record DirectorGuideSectionContext(string Type, string ContentJson);
 public sealed record DirectorLockedFactContext(string FieldKey, string LockedValue, Guid? StateId = null, Guid? LockId = null);
 public sealed record DirectorContextTargetDto(string Type, Guid Id, Guid? StoryRevisionId, Guid? SceneId, Guid? ShotId, Guid? ProductionVersionId, Guid? TakeId);
+public sealed record DirectorPrerequisiteContext(string Key, string Label, bool Satisfied, string Detail);
+public sealed record DirectorRoomContext(string Room, Guid? SelectedSceneId, Guid? SelectedShotId, IReadOnlyList<DirectorPrerequisiteContext> AvailablePrerequisites, IReadOnlyList<string> ValidActions, DirectorContextTargetDto? AppropriateTarget);
 public sealed record DirectorContextSourceDto(string Kind, Guid Id, string Revision, bool IsLocked, string Priority);
 public sealed record DirectorContextBudgetDto(int MaxBytes, int UsedBytes, int CriticalBytes, int OptionalBytes, bool CriticalFactsComplete, bool OptionalMaterialTrimmed = false);
 public sealed record DirectorWorldContext(IReadOnlyList<DirectorWorldEntityContext> Entities, IReadOnlyList<DirectorContinuityFactContext> Facts, IReadOnlyList<DirectorContinuityLockContext> Locks, IReadOnlyList<MovieWorldContinuityWarning>? Warnings = null);
@@ -229,6 +244,7 @@ public sealed record DirectorWorldEntityContext(Guid Id, string EntityType, stri
 public sealed record DirectorContinuityFactContext(Guid Id, string ScopeType, Guid? ScopeId, string FactKey, string FactValue, string? Notes, bool IsLocked);
 public sealed record DirectorContinuityLockContext(Guid Id, string EntityType, Guid? EntityId, string FieldName, string LockedValue, string Strength, string? Reason);
 public sealed record DirectorProductionContext(Guid? ShotId, string? ShotProductionStage, Guid? ProductionVersionId, string? Stage, string? Status, string? CompositionJson, Guid? TakeId, string? TakeStatus, string? TakeQualityLevel);
+public sealed record DirectorRoomActionPayload(string Room, string ActionType, Guid? SceneId, Guid? ShotId);
 public sealed record DirectorCollaborationContext(IReadOnlyList<DirectorReviewContext> Reviews, IReadOnlyList<DirectorAssignmentContext> Assignments, IReadOnlyList<DirectorCommentContext> Comments);
 public sealed record DirectorReviewContext(Guid Id, string TargetType, Guid TargetId, string Status, bool IsFinal, string? DecisionNote);
 public sealed record DirectorAssignmentContext(Guid Id, string TargetType, Guid TargetId, string Status, string Title);
@@ -334,6 +350,7 @@ public sealed class DirectorStoryCreativeException(string code, string message) 
     public string Code { get; } = code;
 }
 public sealed class DirectorActionNotApprovedException() : Exception("The Director action requires explicit user approval.");
+public sealed class DirectorProposalStaleException() : Exception("The Director proposal is stale. Create a new proposal from the current movie planning context.");
 public sealed class DirectorActionExecutionException(string code, string message) : Exception(message)
 {
     public string Code { get; } = code;
@@ -344,7 +361,16 @@ public sealed class DirectorProposalRequest
     public Guid? ShotId { get; set; }
     public string? ContextTargetType { get; set; }
     public Guid? ContextTargetId { get; set; }
+    public string? ContextRoom { get; set; }
+    public string? RoomAction { get; set; }
+    public Guid? SelectedSceneId { get; set; }
+    public Guid? SelectedShotId { get; set; }
     public string? StoryAction { get; set; }
+    public string? ScenePlanAction { get; set; }
+    public string? ScenePlanningAction { get; set; }
+    public bool PlanScenes { get; set; }
+    public string? ShotPlanningAction { get; set; }
+    public int? RequestedShotCount { get; set; }
     public Guid? TargetSceneId { get; set; }
     public Guid? TargetElementId { get; set; }
     public string? SelectedPassage { get; set; }
@@ -356,12 +382,19 @@ public sealed class DirectorProposalRequest
     public int BudgetSensitivity { get; set; } = 50;
 }
 
-public sealed class DirectorContextTargetRequest { public string? TargetType { get; set; } public Guid? TargetId { get; set; } }
+public sealed class DirectorContextTargetRequest
+{
+    public string? TargetType { get; set; }
+    public Guid? TargetId { get; set; }
+    public string? Room { get; set; }
+    public Guid? SelectedSceneId { get; set; }
+    public Guid? SelectedShotId { get; set; }
+}
 
 public sealed record DirectorPlanItemDto(Guid ShotId, int Sequence, string Description, DirectorQualityRecommendation Recommendation);
 public sealed record DirectorActionDto(Guid Id, Guid ProposalId, string ActionType, string Status, bool ApprovalRequired, string? FailureCode, DateTime CreatedAt, DateTime? ApprovedAt, DateTime? StartedAt, DateTime? CompletedAt, IReadOnlyList<DirectorActionResultDto> Results);
 public sealed record DirectorActionResultDto(Guid Id, string Status, string SafeMessage, string? ResultJson, DateTime CreatedAt);
-public sealed record DirectorProposalDto(Guid Id, Guid MovieProjectId, string Status, string Title, string Summary, IReadOnlyList<string> Rationale, IReadOnlyList<DirectorPlanItemDto> Plan, IReadOnlyList<DirectorActionDto> Actions, DateTime CreatedAt, DateTime? ApprovedAt, DirectorStoryReviewDto? StoryReview = null);
+public sealed record DirectorProposalDto(Guid Id, Guid MovieProjectId, string Status, string Title, string Summary, IReadOnlyList<string> Rationale, IReadOnlyList<DirectorPlanItemDto> Plan, IReadOnlyList<DirectorActionDto> Actions, DateTime CreatedAt, DateTime? ApprovedAt, DirectorStoryReviewDto? StoryReview = null, DirectorScenePlanReviewDto? ScenePlan = null, IReadOnlyList<DirectorShotProposalDto>? ShotPlan = null, DirectorShotPlanReviewDto? ShotPlanReview = null);
 public sealed record DirectorProposalResponse(DirectorProposalDto Proposal, DirectorContextDto Context, DirectorStoryBoundedContextDto? StoryContext = null);
 public sealed record DirectorHistoryDto(Guid Id, string EventType, string? SafeDetailsJson, DateTime CreatedAt);
 public sealed record DirectorActionExecutionResponse(DirectorActionDto Action, DirectorActionResultDto Result);

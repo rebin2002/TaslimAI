@@ -1,0 +1,90 @@
+{
+  "request": {
+    "targetMasterResolution": "4k",
+    "projectQualityTier": "Studio",
+    "shotImportance": 95,
+    "durationSeconds": 12,
+    "motionComplexity": 88,
+    "cameraComplexity": 82,
+    "faceImportance": 95,
+    "handBodyComplexity": 90,
+    "fineDetailImportance": 94,
+    "continuitySensitivity": 92,
+    "environmentComplexity": 80,
+    "vfxComplexity": 86,
+    "textSignageSensitivity": 78,
+    "lipSyncDependency": 80,
+    "upscaleSuitability": 40,
+    "requiredQualityDimensions": [
+      { "dimension": "face_identity", "importance": 100 },
+      { "dimension": "anatomy", "importance": 95 },
+      { "dimension": "continuity", "importance": 90 },
+      { "dimension": "text_legibility", "importance": 85 }
+    ],
+    "speedPreference": 25,
+    "costConstraints": {
+      "preferLowerCost": false,
+      "maxEstimatedCostUsd": 20,
+      "allowQualityEscalation": true
+    }
+  },
+  "representativeOutput": {
+    "contractVersion": 1,
+    "recommendedSourceResolution": "1440p",
+    "intendedUpscaleTarget": "4k",
+    "processingPath": "native_high_quality_then_4k_master",
+    "qualityRequirement": {
+      "projectQualityTier": "Studio",
+      "requiredDimensions": [
+        { "dimension": "face_identity", "importance": 100 },
+        { "dimension": "anatomy", "importance": 95 },
+        { "dimension": "continuity", "importance": 90 },
+        { "dimension": "text_legibility", "importance": 85 }
+      ],
+      "minimumConfidence": 0.85
+    },
+    "qualityConfidence": 0.7,
+    "qcEscalationRequired": true,
+    "escalation": {
+      "required": true,
+      "trigger": "quality_confidence_below_requirement",
+      "escalateToSourceResolution": "2160p",
+      "reasonCodes": ["quality_confidence_below_requirement"]
+    },
+    "reasonCodes": [
+      "high_shot_importance",
+      "high_motion_complexity",
+      "face_sensitive",
+      "anatomy_sensitive",
+      "continuity_sensitive",
+      "vfx_complex",
+      "text_signage_sensitive",
+      "lip_sync_dependent",
+      "native_high_quality_mastering",
+      "quality_confidence_below_requirement"
+    ],
+    "alternatives": [
+      {
+        "sourceResolution": "2160p",
+        "upscaleTarget": "4k",
+        "path": "native",
+        "qualityConfidence": 0.82,
+        "tradeoff": "native_4k_quality",
+        "reasonCodes": ["native_source_selected"]
+      }
+    ],
+    "userOverride": {
+      "requested": false,
+      "applied": false,
+      "sourceResolution": null,
+      "upscaleTarget": null,
+      "path": null,
+      "statusCode": null
+    },
+    "costEvaluation": {
+      "evaluated": false,
+      "constraintSatisfied": null,
+      "reasonCode": "cost_data_not_available"
+    }
+  }
+}

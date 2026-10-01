@@ -237,7 +237,9 @@ public sealed class MovieVideoGenerationJobHandler(
 {
     private readonly MovieVideoOptions settings = options.Value;
 
-    public bool CanHandle(string jobType) => GenerationJobTypes.MovieTypes.Contains(jobType);
+    public bool CanHandle(string jobType) =>
+        string.Equals(jobType, GenerationJobTypes.MovieQuickGenerate, StringComparison.OrdinalIgnoreCase)
+        || string.Equals(jobType, GenerationJobTypes.MovieClipGenerate, StringComparison.OrdinalIgnoreCase);
 
     public async Task<GenerationHandlerResult> ExecuteAsync(GenerationJob job, IProgress<int> progress, CancellationToken cancellationToken)
     {
@@ -265,7 +267,12 @@ public sealed class MovieVideoGenerationJobHandler(
             input.ShotJson,
             input.SourceImageUri,
             input.ContinuationProviderJobId,
-            input.WorldContextJson);
+            input.WorldContextJson,
+            input.ReferencePackageJson,
+            input.SourceResolution,
+            input.MasterResolution,
+            input.ProcessingPath,
+            input.UpscalingRequested);
         var execution = await executions.GetOrCreateAsync(job, clip.Id, provider.Key, cancellationToken);
         var started = Stopwatch.GetTimestamp();
         progress.Report(5);

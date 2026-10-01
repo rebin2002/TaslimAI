@@ -1,0 +1,109 @@
+{
+  "schemaVersion": 1,
+  "branch": "parallel/movie-wave4-integration-prep",
+  "base": "4142f533b4c2474586f18aee12025295c56a549d",
+  "scope": "Wave 4 integration preparation and deterministic acceptance over the verified Wave 3 base; no merge of other branches, deployment, provider enablement, customer charging, or paid generation.",
+  "safetyDefaults": {
+    "customerChargingEnabled": false,
+    "movieVideoEnabledInCommittedDefaults": false,
+    "realMovieProviders": false,
+    "realAudioProviders": false,
+    "normalUserProviderMetadata": false,
+    "testAdapters": "test-host dependency injection only",
+    "exportExecution": "provider-neutral hand-off only; no GenerationJob, Asset publication, or charge"
+  },
+  "baseVerification": {
+    "requiredRelease": "4142f533b4c2474586f18aee12025295c56a549d",
+    "requiredReleaseIsAncestorOfOriginMain": true,
+    "otherBranchesMerged": false
+  },
+  "canonicalDependencies": [
+    { "surface": "Movie V2 project/shot/take hierarchy", "statusOnBase": "implemented", "reuse": "MovieProject, MovieShot, MovieTake, SelectedTakeId, FinalTakeId, reload DTOs" },
+    { "surface": "production stages and approved keyframe", "statusOnBase": "implemented", "reuse": "MovieProductionWorkflow, MovieProductionVersion, stage transitions, provenance JSON" },
+    { "surface": "selected-take-only upgrade audit", "statusOnBase": "implemented", "reuse": "MovieTakeUpscaleEligibilityService and MovieTakeUpscaleAudit; selected status accepted by this branch" },
+    { "surface": "final mastering hand-off", "statusOnBase": "implemented", "reuse": "MovieFinalMasteringService; request remains AwaitingProvider or Blocked and never fabricates output" },
+    { "surface": "generation lifecycle and usage ledger", "statusOnBase": "implemented", "reuse": "GenerationJobService, GenerationJobWorker, UsageTransaction, zero charge on Failed/Cancelled" },
+    { "surface": "voice and music job contracts", "statusOnBase": "implemented", "reuse": "existing provider-neutral HTTP job contracts with test-only fake adapters" },
+    { "surface": "SFX persistence and provider boundary", "statusOnBase": "not present", "handling": "test-only disabled/fake reference in the acceptance graph; no production SFX contract invented" },
+    { "surface": "caption persistence and timing", "statusOnBase": "not present", "handling": "provider-neutral timeline seam validates caption text without publishing an asset" },
+    { "surface": "timeline persistence and export executor", "statusOnBase": "not present", "handling": "migration-free MovieWave4ExportSeam validates the future hand-off only" }
+  ],
+  "features": [
+    {
+      "id": "project-shot-approved-keyframe",
+      "status": "accepted",
+      "dependsOn": ["movie-v2-hierarchy", "production-version-lifecycle"],
+      "invariants": ["shot plan precedes storyboard", "storyboard approval precedes keyframe", "approved keyframe retains stage provenance", "no provider/model/prompt fields in normal-user DTOs"],
+      "validation": ["MovieWave4IntegrationE2ETests.Complete_wave4_flow_reloads_provenance_and_stops_at_provider_neutral_export_handoff"]
+    },
+    {
+      "id": "multiple-takes-selection",
+      "status": "accepted",
+      "dependsOn": ["movie-v2-hierarchy"],
+      "invariants": ["takes remain distinct", "selection and finalization are explicit", "reload returns SelectedTakeId and FinalTakeId", "alternate take is never implicitly upgraded"],
+      "validation": ["Wave 3 E2E regression", "Wave 4 deterministic E2E"]
+    },
+    {
+      "id": "selected-take-only-upgrade",
+      "status": "accepted",
+      "dependsOn": ["multiple-takes-selection", "selected-take-upscale-audit"],
+      "invariants": ["unselected candidate is blocked", "selected/final take is eligible when its canonical status is Selected", "request creates an audit hand-off only", "request creates no GenerationJob"],
+      "validation": ["MovieWave4IntegrationSeamTests", "MovieWave4IntegrationE2ETests"]
+    },
+    {
+      "id": "voice-sfx-music-captions",
+      "status": "partial-seam",
+      "dependsOn": ["existing voice job", "existing music job"],
+      "invariants": ["voice/music use fake adapters in tests", "SFX remains disabled/fake and unpersisted", "captions carry text but no fabricated media Asset", "failed audio work has zero charge"],
+      "validation": ["Wave 4 deterministic E2E recovery test", "Wave 4 timeline seam tests"]
+    },
+    {
+      "id": "timeline",
+      "status": "migration-free-seam",
+      "dependsOn": ["video source", "audio track assets", "caption text"],
+      "invariants": ["track order and provenance hash are deterministic", "same-track items cannot overlap", "non-caption items require an asset", "timeline contains no provider/model/prompt metadata"],
+      "validation": ["MovieWave4IntegrationSeamTests"]
+    },
+    {
+      "id": "final-export-seam",
+      "status": "migration-free-seam",
+      "dependsOn": ["approved keyframe", "selected final take", "validated timeline"],
+      "invariants": ["selected take must equal final take", "video item must reference selected take", "future executor receives a hand-off hash", "no export GenerationJob, Asset, or charge is created"],
+      "validation": ["MovieWave4IntegrationSeamTests", "MovieWave4IntegrationE2Tests"]
+    },
+    {
+      "id": "reload-provenance",
+      "status": "accepted",
+      "dependsOn": ["production versions", "Movie V2 hierarchy", "final mastering hand-off"],
+      "invariants": ["approved keyframe provenance survives reload", "selected/final pointers survive reload", "final master retains source take and provenance", "no partial export output appears"],
+      "validation": ["MovieWave4IntegrationE2ETests"]
+    },
+    {
+      "id": "failure-recovery-zero-charge",
+      "status": "accepted",
+      "dependsOn": ["generation worker", "usage ledger", "retry lineage"],
+      "invariants": ["failed job publishes no output Asset or GenerationJobOutput", "failed UsageTransaction has ChargedAmount=0", "retry retains RetryOfJobId", "successful retry may publish only after validated output"],
+      "validation": ["MovieWave4IntegrationE2Tests.Failed_audio_work_recovers_by_retry_without_charge_or_partial_asset", "existing GenerationJobFailureTests"]
+    }
+  ],
+  "migrationPlan": {
+    "requiredForThisBranch": false,
+    "newMigrations": [],
+    "futureWave4Rule": "Do not add SFX, captions, timeline, or export tables independently. First reconcile the final domain model, then generate one composed EF migration and snapshot from the complete model.",
+    "checksBeforeFuturePersistence": ["pending-model-changes", "fresh PostgreSQL", "upgrade PostgreSQL", "foreign-key ownership", "delete behavior", "migration history", "asset publication boundary"]
+  },
+  "gate": {
+    "commands": {
+      "apiBuild": "dotnet build apps/api/Taslim.Api.csproj",
+      "wave4Tests": "dotnet test apps/api.Tests/Taslim.Api.Tests.csproj --no-restore --filter FullyQualifiedName~MovieWave4",
+      "wave3Regression": "dotnet test apps/api.Tests/Taslim.Api.Tests.csproj --no-restore --filter FullyQualifiedName~MovieWave3Integration",
+      "apiTests": "dotnet test apps/api.Tests/Taslim.Api.Tests.csproj --no-restore",
+      "frontendTests": "npm test --workspace @taslim/web",
+      "typescript": "npx tsc --noEmit -p apps/web/tsconfig.json",
+      "eslint": "npm run lint --workspace @taslim/web",
+      "productionBuild": "NEXT_PUBLIC_API_URL=https://api.example.test npm run build --workspace @taslim/web"
+    },
+    "requiredSafety": ["base SHA audit", "conflict-marker audit", "git diff --check", "production MovieVideo disabled", "customer charging disabled", "tracked-secret filename audit", "no deployment or paid generation"],
+    "optional": ["RUN_DB_MIGRATIONS=1 with disposable fresh and upgrade PostgreSQL URLs", "RUN_BROWSER_E2E=1 with disposable API/web environment"]
+  }
+}
