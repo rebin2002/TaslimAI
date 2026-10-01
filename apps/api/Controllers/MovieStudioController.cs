@@ -12,7 +12,7 @@ namespace Taslim.Api.Controllers;
 [ApiController]
 [Authorize]
 [Route("api/movie-studio")]
-public sealed class MovieStudioController(IMovieStudioService movies, IMovieProductionComplexityService complexity, IMovieDurationBudgetService durationBudgets, IMovieGuideService guides, IMovieStoryService stories, IMovieStoryCastService storyCast, IMovieCharacterContinuityService continuity, IMovieWorldContinuityService worldContinuity, IMovieProductionContinuityService productionContinuity, IMovieProductionReferencePackageService productionReferences, IMovieProductionPreflightService productionPreflight, IMovieTimelineService timeline, IMovieTakeSelectService takeSelects, IMovieShotExecutionService shotExecution, MovieAuthorizationService authorization, MovieShotImportanceService shotImportance, IMovieCinematographyPlanningService cinematographyPlanning, IMovieCharacterProductionSheetService productionSheets, IMovieLocationGeographySheetService geographySheets, IMoviePropBibleService propBible, IMovieReferenceReadinessService referenceReadiness) : ControllerBase
+public sealed class MovieStudioController(IMovieStudioService movies, IMovieProductionComplexityService complexity, IMovieDurationBudgetService durationBudgets, IMovieGuideService guides, IMovieStoryService stories, IMovieStoryCastService storyCast, IMovieCharacterContinuityService continuity, IMovieWorldContinuityService worldContinuity, IMovieProductionContinuityService productionContinuity, IMovieProductionReferencePackageService productionReferences, IMovieProductionPreflightService productionPreflight, IMovieTimelineService timeline, IMovieTakeSelectService takeSelects, IMovieShotExecutionService shotExecution, MovieAuthorizationService authorization, MovieShotImportanceService shotImportance, IMovieCinematographyPlanningService cinematographyPlanning, IMovieCharacterProductionSheetService productionSheets, IMovieLocationGeographySheetService geographySheets, IMoviePropBibleService propBible, IMovieReferenceReadinessService referenceReadiness, IMovieMissingInsertPlannerService insertPlanner) : ControllerBase
 {
     [HttpGet("cinematography/presets")]
     public IActionResult CinematographyPresets() => Ok(CinematographyPresetCatalog.All);
@@ -87,6 +87,17 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
             return result is null ? ApiResults.Error(this, 404, "MOVIE_TAKE_SELECT_NOT_FOUND", "Movie take select not found.") : Ok(result);
         }
         catch (MovieTakeSelectValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
+    }
+
+    [HttpGet("projects/{id:guid}/insert-planner")]
+    public async Task<IActionResult> GetMissingInsertPlan(Guid id, [FromQuery] Guid? revisionId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await insertPlanner.GetAsync(GetUserId(), id, revisionId, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result);
+        }
+        catch (MovieMissingInsertPlannerException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
     }
 
     [HttpPost("projects/{id:guid}/timeline/revisions")]
