@@ -307,6 +307,7 @@ builder.Services.AddSingleton<IMovieVideoProvider>(services =>
     return new UnavailableMovieVideoProvider();
 });
 builder.Services.AddScoped<IDirectorActionExecutor, MovieDirectorActionExecutor>();
+builder.Services.AddScoped<IDirectorActionExecutor, MovieDirectorEditRepairAudioActionExecutor>();
 builder.Services.AddScoped<IDirectorActionExecutor, MovieDirectorStoryActionExecutor>();
 builder.Services.AddScoped<IDirectorActionExecutor, MovieDirectorScenePlanActionExecutor>();
 builder.Services.AddScoped<IDirectorActionExecutor, MovieShotPlanningActionExecutor>();

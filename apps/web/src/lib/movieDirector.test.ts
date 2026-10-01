@@ -19,6 +19,7 @@ describe("movie Director surface contracts", () => {
     expect(directorActionTypeLabel("scene_planning")).toBe("Plan scene");
     expect(directorActionTypeLabel("storyboard_preparation")).toBe("Prepare storyboard context");
     expect(directorActionTypeLabel("production_readiness")).toBe("Review production readiness");
+    expect(directorActionTypeLabel("edit_repair_audio")).toBe("Plan audio bridges");
   });
 
   it("makes Scenes room planning available at scene level and shot planning conditional on a ready shot", () => {
