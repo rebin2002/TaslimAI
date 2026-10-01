@@ -14,9 +14,11 @@ public static class CinematographyPlanningValues
     public static readonly IReadOnlySet<string> CameraMovements = Values("locked_off", "pan", "tilt", "push_in", "pull_out", "dolly", "track", "orbit", "crane", "handheld", "whip_pan");
     public static readonly IReadOnlySet<string> CompositionIntents = Values("establish", "isolate", "connect", "contrast", "reveal", "disorient", "follow_action", "balance", "negative_space", "symmetry");
     public static readonly IReadOnlySet<string> LensLookIntents = Values("neutral", "wide_expansive", "compressed_telephoto", "portrait_natural", "distorted", "soft_dreamlike", "macro_detail", "documentary");
+    public static readonly IReadOnlySet<string> FocalLengthIntents = Values("ultra_wide", "wide", "normal", "portrait", "telephoto", "macro", "anamorphic");
     public static readonly IReadOnlySet<string> Depths = Values("flat_graphic", "shallow", "layered", "deep");
     public static readonly IReadOnlySet<string> FocusIntents = Values("subject_locked", "rack_focus", "deep_focus", "soft_focus", "selective", "pull_focus");
     public static readonly IReadOnlySet<string> LightingIntents = Values("naturalistic", "soft_motivated", "high_contrast", "low_key", "high_key", "silhouette", "backlit", "practical_driven", "color_contrast");
+    public static readonly IReadOnlySet<string> ExposureLooks = Values("balanced_cinematic", "natural_exposure", "underexposed_moody", "overexposed_ethereal", "high_key_clean", "low_key_contrast", "silhouette_protected", "warm_filmic", "cool_muted");
     public static readonly IReadOnlySet<string> SubjectEmphases = Values("primary_subject", "face", "eyes", "gesture", "relationship", "environment", "object", "movement");
     public static readonly IReadOnlySet<string> VisualTransitionIntents = Values("none", "cut", "match_cut", "dissolve", "whip_pan_transition", "graphic_match", "hold", "reveal_transition");
 
@@ -49,7 +51,13 @@ public sealed record CinematographyShotPlan(
     IReadOnlyList<CinematographyGroundingReference>? Grounding = null,
     int? LockedGuideRevisionNumber = null,
     string? Intent = null,
-    string? PresetId = null);
+    string? PresetId = null,
+    string? FocalLengthIntent = null,
+    string? ExposureLook = null,
+    IReadOnlyList<string>? ContinuityConstraints = null,
+    string? ProfileSource = null,
+    IReadOnlyList<string>? UserOverrideFields = null,
+    IReadOnlyList<string>? LockedCanonFields = null);
 
 public sealed record CinematographyPlanningContext(
     string AspectRatio,
@@ -67,13 +75,15 @@ public sealed record CinematographyPlanningResult(
     CinematographyShotPlan Plan,
     bool GuideGrounded,
     bool CanonPreserved,
-    IReadOnlyList<string> AppliedCanonFields);
+    IReadOnlyList<string> AppliedCanonFields,
+    CinematographyOverrideAudit? OverrideAudit = null);
 
 public sealed class MovieCinematographyPlanRequest
 {
     public string? CharacterEmotionalPurpose { get; set; }
     public string? CreativeNotes { get; set; }
     public CinematographyShotPlan? Overrides { get; set; }
+    public CinematographyCameraProfileOverride? CameraProfile { get; set; }
 }
 
 public sealed record MovieCinematographyPlanResponse(
@@ -85,7 +95,9 @@ public sealed record MovieCinematographyPlanResponse(
     bool CanonPreserved,
     int? LockedGuideRevisionNumber,
     IReadOnlyList<string> AppliedCanonFields,
-    CinematographyShotPlan Plan);
+    CinematographyShotPlan Plan,
+    CinematographyOverrideAudit? OverrideAudit = null,
+    MovieCameraProfileDto? CameraProfile = null);
 
 public sealed record CinematographyPlanningValueCatalog(
     IReadOnlyList<string> ShotSizes,
@@ -95,19 +107,22 @@ public sealed record CinematographyPlanningValueCatalog(
     IReadOnlyList<string> CameraMovements,
     IReadOnlyList<string> CompositionIntents,
     IReadOnlyList<string> LensLookIntents,
+    IReadOnlyList<string> FocalLengthIntents,
     IReadOnlyList<string> Depths,
     IReadOnlyList<string> FocusIntents,
     IReadOnlyList<string> LightingIntents,
     IReadOnlyList<string> SubjectEmphases,
-    IReadOnlyList<string> VisualTransitionIntents)
+    IReadOnlyList<string> VisualTransitionIntents,
+    IReadOnlyList<string> ExposureLooks)
 {
     public static CinematographyPlanningValueCatalog Current => new(
         Sorted(CinematographyPlanningValues.ShotSizes), Sorted(CinematographyPlanningValues.Framings),
         Sorted(CinematographyPlanningValues.CameraAngles), Sorted(CinematographyPlanningValues.CameraPositions),
         Sorted(CinematographyPlanningValues.CameraMovements), Sorted(CinematographyPlanningValues.CompositionIntents),
-        Sorted(CinematographyPlanningValues.LensLookIntents), Sorted(CinematographyPlanningValues.Depths),
+        Sorted(CinematographyPlanningValues.LensLookIntents), Sorted(CinematographyPlanningValues.FocalLengthIntents), Sorted(CinematographyPlanningValues.Depths),
         Sorted(CinematographyPlanningValues.FocusIntents), Sorted(CinematographyPlanningValues.LightingIntents),
-        Sorted(CinematographyPlanningValues.SubjectEmphases), Sorted(CinematographyPlanningValues.VisualTransitionIntents));
+        Sorted(CinematographyPlanningValues.SubjectEmphases), Sorted(CinematographyPlanningValues.VisualTransitionIntents),
+        Sorted(CinematographyPlanningValues.ExposureLooks));
 
     private static IReadOnlyList<string> Sorted(IEnumerable<string> values) => values.OrderBy(value => value, StringComparer.Ordinal).ToArray();
 }
@@ -117,6 +132,9 @@ public static class CinematographyShotPlanValidator
     private const int MaxCreativeNotesLength = 4_000;
     private const int MaxGroundingReferences = 24;
     private const int MaxGroundingEvidenceLength = 800;
+    private const int MaxContinuityConstraints = 24;
+    private const int MaxContinuityConstraintLength = 800;
+    private const int MaxProvenanceFields = 24;
 
     public static string? Validate(CinematographyShotPlan? plan)
     {
@@ -128,9 +146,11 @@ public static class CinematographyShotPlanValidator
             !CinematographyPlanningValues.CameraMovements.Contains(plan.CameraMovement) ||
             !CinematographyPlanningValues.CompositionIntents.Contains(plan.CompositionIntent) ||
             !CinematographyPlanningValues.LensLookIntents.Contains(plan.LensLookIntent) ||
+            (plan.FocalLengthIntent is not null && !CinematographyPlanningValues.FocalLengthIntents.Contains(plan.FocalLengthIntent)) ||
             !CinematographyPlanningValues.Depths.Contains(plan.Depth) ||
             !CinematographyPlanningValues.FocusIntents.Contains(plan.FocusIntent) ||
             !CinematographyPlanningValues.LightingIntents.Contains(plan.LightingIntent) ||
+            (plan.ExposureLook is not null && !CinematographyPlanningValues.ExposureLooks.Contains(plan.ExposureLook)) ||
             !CinematographyPlanningValues.SubjectEmphases.Contains(plan.SubjectEmphasis) ||
             !CinematographyPlanningValues.VisualTransitionIntents.Contains(plan.VisualTransitionIntent))
             return "Every cinematography plan field must use a supported structured value.";
@@ -142,6 +162,12 @@ public static class CinematographyShotPlanValidator
                 string.IsNullOrWhiteSpace(item.Source) || item.Source.Trim().Length > 80 ||
                 string.IsNullOrWhiteSpace(item.Evidence) || item.Evidence.Trim().Length > MaxGroundingEvidenceLength))
             return "Cinematography grounding references are invalid.";
+        if (plan.ContinuityConstraints is { Count: > MaxContinuityConstraints })
+            return "Camera Profile continuity constraints are limited to 24 items.";
+        if (plan.ContinuityConstraints is not null && plan.ContinuityConstraints.Any(item => string.IsNullOrWhiteSpace(item) || item.Trim().Length > MaxContinuityConstraintLength))
+            return "Camera Profile continuity constraints are invalid.";
+        if (plan.UserOverrideFields is { Count: > MaxProvenanceFields } || plan.LockedCanonFields is { Count: > MaxProvenanceFields })
+            return "Camera Profile provenance is limited to 24 fields.";
         if (plan.Intent is not null && !CinematographyIntent.Supported.Contains(plan.Intent.Trim()))
             return "Cinematography intent is not supported.";
         return null;
@@ -158,9 +184,11 @@ public static class CinematographyShotPlanValidator
             CameraMovement = NormalizeValue(plan.CameraMovement),
             CompositionIntent = NormalizeValue(plan.CompositionIntent),
             LensLookIntent = NormalizeValue(plan.LensLookIntent),
+            FocalLengthIntent = NormalizeOptionalValue(plan.FocalLengthIntent),
             Depth = NormalizeValue(plan.Depth),
             FocusIntent = NormalizeValue(plan.FocusIntent),
             LightingIntent = NormalizeValue(plan.LightingIntent),
+            ExposureLook = NormalizeOptionalValue(plan.ExposureLook),
             SubjectEmphasis = NormalizeValue(plan.SubjectEmphasis),
             VisualTransitionIntent = NormalizeValue(plan.VisualTransitionIntent),
             CreativeNotes = Clean(plan.CreativeNotes, MaxCreativeNotesLength),
@@ -169,6 +197,10 @@ public static class CinematographyShotPlanValidator
                 .ToArray(),
             Intent = string.IsNullOrWhiteSpace(plan.Intent) ? null : plan.Intent.Trim().ToLowerInvariant(),
             PresetId = Clean(plan.PresetId, 120),
+            ContinuityConstraints = plan.ContinuityConstraints?.Where(item => !string.IsNullOrWhiteSpace(item)).Select(item => item.Trim()[..Math.Min(item.Trim().Length, MaxContinuityConstraintLength)]).Distinct(StringComparer.OrdinalIgnoreCase).Take(MaxContinuityConstraints).ToArray(),
+            ProfileSource = Clean(plan.ProfileSource, 40),
+            UserOverrideFields = NormalizeFields(plan.UserOverrideFields),
+            LockedCanonFields = NormalizeFields(plan.LockedCanonFields),
         };
         return normalized;
     }
@@ -188,12 +220,14 @@ public static class CinematographyShotPlanValidator
     }
 
     private static string NormalizeValue(string value) => value.Trim().ToLowerInvariant();
+    private static string? NormalizeOptionalValue(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim().ToLowerInvariant();
+    private static IReadOnlyList<string>? NormalizeFields(IReadOnlyList<string>? fields) => fields?.Where(item => !string.IsNullOrWhiteSpace(item)).Select(item => item.Trim()).Distinct(StringComparer.Ordinal).Take(MaxProvenanceFields).ToArray();
     private static string? Clean(string? value, int maximum) => string.IsNullOrWhiteSpace(value) ? null : value.Trim()[..Math.Min(value.Trim().Length, maximum)];
 }
 
 public static class MovieCinematographyPlanner
 {
-    public static CinematographyPlanningResult Plan(CinematographyPlanningContext context, CinematographyShotPlan? requestedOverrides = null, string? creativeNotes = null)
+    public static CinematographyPlanningResult Plan(CinematographyPlanningContext context, CinematographyShotPlan? requestedOverrides = null, string? creativeNotes = null, CinematographyCameraProfileOverride? cameraProfile = null)
     {
         if (string.IsNullOrWhiteSpace(context.AspectRatio) || !MovieStudioValidation.SupportedAspectRatios.Contains(context.AspectRatio.Trim()))
             throw new MovieStudioValidationException("A supported movie aspect ratio is required for cinematography planning.");
@@ -215,16 +249,31 @@ public static class MovieCinematographyPlanner
             Pick(text, ("rack_focus", "shifts notices reveal"), ("pull_focus", "attention turns"), ("deep_focus", "geography environment"), ("selective", "face eyes emotion"), ("subject_locked", "subject dialogue")),
             Pick(Join(context.GuideCinematographyBible, text), ("silhouette", "silhouette backlit"), ("low_key", "night dread shadow"), ("high_key", "bright joy"), ("color_contrast", "color neon"), ("backlit", "dawn sunset backlight"), ("soft_motivated", "window soft gentle"), ("naturalistic", "day available")),
             Pick(emotional, ("eyes", "eyes watch sees"), ("face", "face expression emotion"), ("gesture", "hand touch gesture"), ("relationship", "together between connection"), ("movement", "runs chases crosses"), ("environment", "place landscape room"), ("primary_subject", "subject character")),
-            Pick(context.PreviousShot, ("match_cut", "match same movement same shape"), ("dissolve", "memory dream"), ("hold", "still wait"), ("reveal_transition", "reveal"), ("cut", "")));
+            Pick(context.PreviousShot, ("match_cut", "match same movement same shape"), ("dissolve", "memory dream"), ("hold", "still wait"), ("reveal_transition", "reveal"), ("cut", ""))) with
+        {
+            FocalLengthIntent = Pick(text, ("macro", "macro detail eyes object"), ("telephoto", "surveillance distant compressed"), ("portrait", "face eyes intimate confession"), ("ultra_wide", "extreme wide scale"), ("wide", "wide landscape environment"), ("normal", "dialogue conversation")),
+            ExposureLook = Pick(Join(context.GuideCinematographyBible, text), ("underexposed_moody", "underexposed moody"), ("overexposed_ethereal", "overexposed ethereal dream"), ("high_key_clean", "high key bright clean"), ("low_key_contrast", "low key contrast"), ("warm_filmic", "warm filmic"), ("cool_muted", "cool muted"), ("natural_exposure", "natural available"), ("balanced_cinematic", "")),
+            ContinuityConstraints = context.ContinuityConstraints.Where(value => !string.IsNullOrWhiteSpace(value)).ToArray(),
+        };
 
+        var requestedFields = OverrideFields(requestedOverrides, cameraProfile);
         if (requestedOverrides is not null)
             candidate = ApplyOverrides(candidate, requestedOverrides);
+        if (cameraProfile is not null)
+        {
+            var profileValidation = CinematographyCameraProfileContract.Validate(cameraProfile);
+            if (profileValidation is not null) throw new MovieStudioValidationException(profileValidation);
+            candidate = ApplyCameraProfileOverride(candidate, cameraProfile);
+        }
         var applied = new List<string>();
         var canon = context.LockedCanon;
+        var blockedByCanon = canon is null ? [] : requestedFields.Where(field => OverrideValue(requestedOverrides, cameraProfile, field) is string requested && CanonValue(canon, field) is string locked && !string.Equals(requested, locked, StringComparison.OrdinalIgnoreCase)).ToArray();
         if (canon is not null)
             candidate = ApplyCanon(candidate, canon, applied);
 
         var grounding = BuildGrounding(context, applied.Count > 0);
+        var appliedOverrides = requestedFields.Except(blockedByCanon, StringComparer.Ordinal).ToArray();
+        var source = appliedOverrides.Length > 0 ? MovieCameraProfileSources.UserOverride : canon is not null ? MovieCameraProfileSources.MovieGuide : MovieCameraProfileSources.Planner;
         var plan = CinematographyShotPlanValidator.Normalize(candidate with
         {
             CreativeNotes = Clean(creativeNotes ?? requestedOverrides?.CreativeNotes ?? candidate.CreativeNotes),
@@ -232,10 +281,14 @@ public static class MovieCinematographyPlanner
             LockedGuideRevisionNumber = context.LockedGuideRevisionNumber,
             Intent = canon?.Intent ?? candidate.Intent,
             PresetId = canon?.PresetId ?? candidate.PresetId,
+            ProfileSource = source,
+            UserOverrideFields = appliedOverrides,
+            LockedCanonFields = applied,
         });
         var validation = CinematographyShotPlanValidator.Validate(plan);
         if (validation is not null) throw new MovieStudioValidationException(validation);
-        return new CinematographyPlanningResult(plan, !string.IsNullOrWhiteSpace(context.GuideCinematographyBible), canon is null || applied.Count >= 0, applied);
+        var audit = requestedFields.Count == 0 ? null : new CinematographyOverrideAudit(true, requestedFields, appliedOverrides, blockedByCanon, context.LockedGuideRevisionNumber);
+        return new CinematographyPlanningResult(plan, !string.IsNullOrWhiteSpace(context.GuideCinematographyBible), true, applied, audit);
     }
 
     private static CinematographyShotPlan ApplyCanon(CinematographyShotPlan candidate, CinematographyShotPlan canon, ICollection<string> applied)
@@ -248,11 +301,18 @@ public static class MovieCinematographyPlanner
         result = Keep(result, canon.CameraMovement, nameof(CinematographyShotPlan.CameraMovement), applied, (item, value) => item with { CameraMovement = value });
         result = Keep(result, canon.CompositionIntent, nameof(CinematographyShotPlan.CompositionIntent), applied, (item, value) => item with { CompositionIntent = value });
         result = Keep(result, canon.LensLookIntent, nameof(CinematographyShotPlan.LensLookIntent), applied, (item, value) => item with { LensLookIntent = value });
+        result = Keep(result, canon.FocalLengthIntent, nameof(CinematographyShotPlan.FocalLengthIntent), applied, (item, value) => item with { FocalLengthIntent = value });
         result = Keep(result, canon.Depth, nameof(CinematographyShotPlan.Depth), applied, (item, value) => item with { Depth = value });
         result = Keep(result, canon.FocusIntent, nameof(CinematographyShotPlan.FocusIntent), applied, (item, value) => item with { FocusIntent = value });
         result = Keep(result, canon.LightingIntent, nameof(CinematographyShotPlan.LightingIntent), applied, (item, value) => item with { LightingIntent = value });
+        result = Keep(result, canon.ExposureLook, nameof(CinematographyShotPlan.ExposureLook), applied, (item, value) => item with { ExposureLook = value });
         result = Keep(result, canon.SubjectEmphasis, nameof(CinematographyShotPlan.SubjectEmphasis), applied, (item, value) => item with { SubjectEmphasis = value });
         result = Keep(result, canon.VisualTransitionIntent, nameof(CinematographyShotPlan.VisualTransitionIntent), applied, (item, value) => item with { VisualTransitionIntent = value });
+        if (canon.ContinuityConstraints is { Count: > 0 })
+        {
+            applied.Add(nameof(CinematographyShotPlan.ContinuityConstraints));
+            result = result with { ContinuityConstraints = canon.ContinuityConstraints };
+        }
         return result with { CreativeNotes = canon.CreativeNotes ?? result.CreativeNotes };
     }
 
@@ -272,14 +332,84 @@ public static class MovieCinematographyPlanner
         CameraMovement = string.IsNullOrWhiteSpace(overrides.CameraMovement) ? candidate.CameraMovement : overrides.CameraMovement,
         CompositionIntent = string.IsNullOrWhiteSpace(overrides.CompositionIntent) ? candidate.CompositionIntent : overrides.CompositionIntent,
         LensLookIntent = string.IsNullOrWhiteSpace(overrides.LensLookIntent) ? candidate.LensLookIntent : overrides.LensLookIntent,
+        FocalLengthIntent = string.IsNullOrWhiteSpace(overrides.FocalLengthIntent) ? candidate.FocalLengthIntent : overrides.FocalLengthIntent,
         Depth = string.IsNullOrWhiteSpace(overrides.Depth) ? candidate.Depth : overrides.Depth,
         FocusIntent = string.IsNullOrWhiteSpace(overrides.FocusIntent) ? candidate.FocusIntent : overrides.FocusIntent,
         LightingIntent = string.IsNullOrWhiteSpace(overrides.LightingIntent) ? candidate.LightingIntent : overrides.LightingIntent,
+        ExposureLook = string.IsNullOrWhiteSpace(overrides.ExposureLook) ? candidate.ExposureLook : overrides.ExposureLook,
         SubjectEmphasis = string.IsNullOrWhiteSpace(overrides.SubjectEmphasis) ? candidate.SubjectEmphasis : overrides.SubjectEmphasis,
         VisualTransitionIntent = string.IsNullOrWhiteSpace(overrides.VisualTransitionIntent) ? candidate.VisualTransitionIntent : overrides.VisualTransitionIntent,
+        ContinuityConstraints = overrides.ContinuityConstraints is { Count: > 0 } ? overrides.ContinuityConstraints : candidate.ContinuityConstraints,
         CreativeNotes = overrides.CreativeNotes ?? candidate.CreativeNotes,
         Intent = overrides.Intent ?? candidate.Intent,
         PresetId = overrides.PresetId ?? candidate.PresetId,
+    };
+
+    private static CinematographyShotPlan ApplyCameraProfileOverride(CinematographyShotPlan candidate, CinematographyCameraProfileOverride profile) => candidate with
+    {
+        ShotSize = Choose(profile.ShotSize, candidate.ShotSize),
+        CameraAngle = Choose(profile.CameraAngle, candidate.CameraAngle),
+        CameraMovement = Choose(profile.CameraMovement, candidate.CameraMovement),
+        FocalLengthIntent = Choose(profile.FocalLengthIntent, candidate.FocalLengthIntent ?? "normal"),
+        LensLookIntent = Choose(profile.LensIntent, candidate.LensLookIntent),
+        Depth = Choose(profile.DepthOfField, candidate.Depth),
+        LightingIntent = Choose(profile.LightingIntent, candidate.LightingIntent),
+        ExposureLook = Choose(profile.ExposureLook, candidate.ExposureLook ?? "balanced_cinematic"),
+        ContinuityConstraints = profile.ContinuityConstraints is { Count: > 0 } ? profile.ContinuityConstraints : candidate.ContinuityConstraints,
+    };
+
+    private static string Choose(string? requested, string fallback) => string.IsNullOrWhiteSpace(requested) ? fallback : requested;
+
+    private static IReadOnlyList<string> OverrideFields(CinematographyShotPlan? overrides, CinematographyCameraProfileOverride? profile) =>
+        CinematographyCameraProfileContract.RequestedFields(profile).Concat(PlanOverrideFields(overrides)).Distinct(StringComparer.Ordinal).ToArray();
+
+    private static IReadOnlyList<string> PlanOverrideFields(CinematographyShotPlan? overrides)
+    {
+        if (overrides is null) return [];
+        return new[]
+        {
+            (nameof(CinematographyShotPlan.ShotSize), overrides.ShotSize), (nameof(CinematographyShotPlan.Framing), overrides.Framing),
+            (nameof(CinematographyShotPlan.CameraAngle), overrides.CameraAngle), (nameof(CinematographyShotPlan.CameraPosition), overrides.CameraPosition),
+            (nameof(CinematographyShotPlan.CameraMovement), overrides.CameraMovement), (nameof(CinematographyShotPlan.CompositionIntent), overrides.CompositionIntent),
+            (nameof(CinematographyShotPlan.LensLookIntent), overrides.LensLookIntent), (nameof(CinematographyShotPlan.FocalLengthIntent), overrides.FocalLengthIntent),
+            (nameof(CinematographyShotPlan.Depth), overrides.Depth), (nameof(CinematographyShotPlan.FocusIntent), overrides.FocusIntent),
+            (nameof(CinematographyShotPlan.LightingIntent), overrides.LightingIntent), (nameof(CinematographyShotPlan.ExposureLook), overrides.ExposureLook),
+            (nameof(CinematographyShotPlan.SubjectEmphasis), overrides.SubjectEmphasis), (nameof(CinematographyShotPlan.VisualTransitionIntent), overrides.VisualTransitionIntent),
+            (nameof(CinematographyShotPlan.ContinuityConstraints), overrides.ContinuityConstraints is { Count: > 0 } ? "set" : null),
+        }.Where(item => !string.IsNullOrWhiteSpace(item.Item2)).Select(item => item.Item1).ToArray();
+    }
+
+    private static string? OverrideValue(CinematographyShotPlan? plan, CinematographyCameraProfileOverride? profile, string field) => field switch
+    {
+        nameof(CinematographyShotPlan.ShotSize) => profile?.ShotSize ?? plan?.ShotSize,
+        nameof(CinematographyShotPlan.Framing) => plan?.Framing,
+        nameof(CinematographyShotPlan.CameraAngle) => profile?.CameraAngle ?? plan?.CameraAngle,
+        nameof(CinematographyShotPlan.CameraPosition) => plan?.CameraPosition,
+        nameof(CinematographyShotPlan.CameraMovement) => profile?.CameraMovement ?? plan?.CameraMovement,
+        nameof(CinematographyShotPlan.CompositionIntent) => plan?.CompositionIntent,
+        nameof(CinematographyShotPlan.LensLookIntent) => profile?.LensIntent ?? plan?.LensLookIntent,
+        nameof(CinematographyShotPlan.FocalLengthIntent) => profile?.FocalLengthIntent ?? plan?.FocalLengthIntent,
+        nameof(CinematographyShotPlan.Depth) => profile?.DepthOfField ?? plan?.Depth,
+        nameof(CinematographyShotPlan.FocusIntent) => plan?.FocusIntent,
+        nameof(CinematographyShotPlan.LightingIntent) => profile?.LightingIntent ?? plan?.LightingIntent,
+        nameof(CinematographyShotPlan.ExposureLook) => profile?.ExposureLook ?? plan?.ExposureLook,
+        nameof(CinematographyShotPlan.SubjectEmphasis) => plan?.SubjectEmphasis,
+        nameof(CinematographyShotPlan.VisualTransitionIntent) => plan?.VisualTransitionIntent,
+        nameof(CinematographyShotPlan.ContinuityConstraints) => profile?.ContinuityConstraints is { Count: > 0 } ? string.Join("|", profile.ContinuityConstraints) : plan?.ContinuityConstraints is { Count: > 0 } ? string.Join("|", plan.ContinuityConstraints) : null,
+        _ => null,
+    };
+
+    private static string? CanonValue(CinematographyShotPlan canon, string field) => field switch
+    {
+        nameof(CinematographyShotPlan.ShotSize) => canon.ShotSize, nameof(CinematographyShotPlan.Framing) => canon.Framing,
+        nameof(CinematographyShotPlan.CameraAngle) => canon.CameraAngle, nameof(CinematographyShotPlan.CameraPosition) => canon.CameraPosition,
+        nameof(CinematographyShotPlan.CameraMovement) => canon.CameraMovement, nameof(CinematographyShotPlan.CompositionIntent) => canon.CompositionIntent,
+        nameof(CinematographyShotPlan.LensLookIntent) => canon.LensLookIntent, nameof(CinematographyShotPlan.FocalLengthIntent) => canon.FocalLengthIntent,
+        nameof(CinematographyShotPlan.Depth) => canon.Depth, nameof(CinematographyShotPlan.FocusIntent) => canon.FocusIntent,
+        nameof(CinematographyShotPlan.LightingIntent) => canon.LightingIntent, nameof(CinematographyShotPlan.ExposureLook) => canon.ExposureLook,
+        nameof(CinematographyShotPlan.SubjectEmphasis) => canon.SubjectEmphasis, nameof(CinematographyShotPlan.VisualTransitionIntent) => canon.VisualTransitionIntent,
+        nameof(CinematographyShotPlan.ContinuityConstraints) => canon.ContinuityConstraints is { Count: > 0 } ? string.Join("|", canon.ContinuityConstraints) : null,
+        _ => null,
     };
 
     private static IReadOnlyList<CinematographyGroundingReference> BuildGrounding(CinematographyPlanningContext context, bool canonApplied)
@@ -360,11 +490,11 @@ public sealed class MovieCinematographyPlanningService(TaslimDbContext db, Movie
             guide.LockedRevisionNumber,
             continuity.Concat(new[] { movie.Guide.ContinuityRules, shot.ContinuityReferences }).Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => value!).ToArray(),
             previousShot);
-        var result = MovieCinematographyPlanner.Plan(context, request.Overrides, request.CreativeNotes);
+        var result = MovieCinematographyPlanner.Plan(context, request.Overrides, request.CreativeNotes, request.CameraProfile);
         shot.CinematographyJson = CinematographyShotPlanValidator.ToJson(result.Plan);
         shot.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(cancellationToken);
-        return new MovieCinematographyPlanResponse(movie.Id, shot.MovieSceneId, shot.Id, movie.AspectRatio, result.GuideGrounded, result.CanonPreserved, guide.LockedRevisionNumber, result.AppliedCanonFields, result.Plan);
+        return new MovieCinematographyPlanResponse(movie.Id, shot.MovieSceneId, shot.Id, movie.AspectRatio, result.GuideGrounded, result.CanonPreserved, guide.LockedRevisionNumber, result.AppliedCanonFields, result.Plan, result.OverrideAudit, CinematographyCameraProfileContract.FromPlan(result.Plan));
     }
 
     private static CinematographyShotPlan? ReadLockedCanon(CinematographyIntentSelection? legacy, string? lockedBibleJson)
@@ -384,6 +514,8 @@ public sealed class MovieCinematographyPlanningService(TaslimDbContext db, Movie
         return canon is null ? null : canon with { Intent = legacy.Intent, PresetId = legacy.PresetId, CreativeNotes = legacy.Notes };
 
         static CinematographyShotPlan Canon(string shotSize, string framing, string angle, string position, string movement, string composition, string lens, string depth, string focus, string lighting, string subject, string transition) =>
-            new(shotSize, framing, angle, position, movement, composition, lens, depth, focus, lighting, subject, transition);
+            new(shotSize, framing, angle, position, movement, composition, lens, depth, focus, lighting, subject, transition,
+                FocalLengthIntent: lens switch { "wide_expansive" => "wide", "compressed_telephoto" => "telephoto", "portrait_natural" => "portrait", _ => "normal" },
+                ExposureLook: lighting switch { "backlit" => "silhouette_protected", "low_key" => "low_key_contrast", "high_contrast" => "balanced_cinematic", _ => "natural_exposure" });
     }
 }

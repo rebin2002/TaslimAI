@@ -1562,7 +1562,11 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         var profile = MovieShotQualityRequirementsPlanner.TryParse(shot.QualityRequirementsJson, out var stored) && stored is not null
             ? stored
             : MovieShotQualityRequirementsPlanner.PlanWithAvailableContext(shot);
-        return new MovieShotDto(shot.Id, shot.Sequence, shot.Description, shot.Purpose, shot.Subjects, MovieShotReadiness.ParseSubjectCharacterIds(shot.SubjectCharacterIdsJson), shot.LocationSet, shot.DurationSeconds, shot.ProductionRequirements, shot.ContinuityReferences, shot.CameraAndFraming, shot.CameraMotion, shot.CinematographyJson, MovieShotReadiness.CinematographySummary(shot), shot.Narration, shot.Dialogue, shot.VisualContinuityNotes, shot.Status, MovieShotReadiness.PlanState(shot), MovieShotReadiness.Evaluate(shot), shot.ProductionStage, clips, shot.ProductionVersions.OrderByDescending(item => item.VersionNumber).Select(item => ToDto(item)).ToArray(), shot.Takes.OrderBy(item => item.VersionNumber).Select(MovieProductionProjection.ToTakeDto).ToArray(), MovieShotProductionContractProjection.FromShot(shot), shot.ProductionComplexityAssessments.OrderByDescending(item => item.Version).Select(MovieProductionComplexityProjection.ToDto).FirstOrDefault(), profile.QualityRequirements, profile.AdaptiveResolutionDirectorInput, CinematographyShotPlanValidator.FromJson(shot.CinematographyJson), shot.SelectedKeyframeVersionId);
+        var cinematographyPlan = CinematographyShotPlanValidator.FromJson(shot.CinematographyJson);
+        var cameraProfile = cinematographyPlan is not null
+            ? CinematographyCameraProfileContract.FromPlan(cinematographyPlan)
+            : CinematographyCameraProfileContract.FromLegacy(CinematographyIntentValidator.FromJson(shot.CinematographyJson));
+        return new MovieShotDto(shot.Id, shot.Sequence, shot.Description, shot.Purpose, shot.Subjects, MovieShotReadiness.ParseSubjectCharacterIds(shot.SubjectCharacterIdsJson), shot.LocationSet, shot.DurationSeconds, shot.ProductionRequirements, shot.ContinuityReferences, shot.CameraAndFraming, shot.CameraMotion, shot.CinematographyJson, MovieShotReadiness.CinematographySummary(shot), shot.Narration, shot.Dialogue, shot.VisualContinuityNotes, shot.Status, MovieShotReadiness.PlanState(shot), MovieShotReadiness.Evaluate(shot), shot.ProductionStage, clips, shot.ProductionVersions.OrderByDescending(item => item.VersionNumber).Select(item => ToDto(item)).ToArray(), shot.Takes.OrderBy(item => item.VersionNumber).Select(MovieProductionProjection.ToTakeDto).ToArray(), MovieShotProductionContractProjection.FromShot(shot), shot.ProductionComplexityAssessments.OrderByDescending(item => item.Version).Select(MovieProductionComplexityProjection.ToDto).FirstOrDefault(), profile.QualityRequirements, profile.AdaptiveResolutionDirectorInput, CinematographyShotPlanValidator.FromJson(shot.CinematographyJson), shot.SelectedKeyframeVersionId, cameraProfile);
     }
     private static MovieSceneShotPlanDto ToShotPlanDto(MovieScene scene)
     {
@@ -1636,7 +1640,11 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
     private static MovieCinematographySummaryDto CinematographySummary(MovieShot shot)
     {
         var selection = CinematographyIntentValidator.FromJson(shot.CinematographyJson);
-        return new MovieCinematographySummaryDto(shot.CameraAndFraming, shot.CameraMotion, selection?.Intent, selection?.ShotSize, selection?.FocalLength, selection?.CameraAngle, selection?.Lighting, selection?.PaletteLook, selection?.CompositionNotes);
+        var plan = CinematographyShotPlanValidator.FromJson(shot.CinematographyJson);
+        var cameraProfile = plan is not null
+            ? CinematographyCameraProfileContract.FromPlan(plan)
+            : CinematographyCameraProfileContract.FromLegacy(selection);
+        return new MovieCinematographySummaryDto(shot.CameraAndFraming, shot.CameraMotion, selection?.Intent ?? plan?.Intent, selection?.ShotSize ?? plan?.ShotSize, selection?.FocalLength ?? plan?.FocalLengthIntent, selection?.CameraAngle ?? plan?.CameraAngle, selection?.Lighting ?? plan?.LightingIntent, selection?.PaletteLook, selection?.CompositionNotes, cameraProfile);
     }
     private async Task<string> ContinuitySnapshotReferenceAsync(Guid movieProjectId, Guid sceneId, Guid shotId, CancellationToken cancellationToken)
     {

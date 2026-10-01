@@ -467,6 +467,18 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
         catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_CINEMATOGRAPHY_PLAN_INVALID", exception.Message); }
     }
 
+    [HttpPost("shots/{shotId:guid}/camera-profile")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> PlanCameraProfile(Guid shotId, MovieCinematographyPlanRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await cinematographyPlanning.PlanAsync(GetUserId(), shotId, request, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_SHOT_NOT_FOUND", "Movie shot not found.") : Ok(result);
+        }
+        catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_CAMERA_PROFILE_INVALID", exception.Message); }
+    }
+
     [HttpPost("shots/{shotId:guid}/reorder")]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> ReorderShot(Guid shotId, MovieShotReorderRequest request, CancellationToken cancellationToken)
