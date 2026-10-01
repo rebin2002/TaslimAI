@@ -28,6 +28,7 @@ import {
   ListChecks,
   LockKeyhole,
   Map,
+  Package,
   PencilRuler,
   Plus,
   Play,
@@ -50,10 +51,12 @@ import { ShotDesigner, type ShotDesignerDraft } from "@/components/ShotDesigner"
 import { MovieDirectorPanel } from "@/components/MovieDirectorPanel";
 import { MovieProductionResolutionPanel } from "@/components/MovieProductionResolutionPanel";
 import { MovieProductionWorkspace } from "@/components/MovieProductionWorkspace";
+import { ProductionKitWorkspace } from "@/components/ProductionKitWorkspace";
 import { displayProductionStage, displayProductionStatus, type MovieResolutionTier } from "@/lib/movieProductionResolution";
 
 export const fullMovieModules = [
   { slug: "overview", label: "Overview", icon: Gauge },
+  { slug: "production-kit", label: "Production Kit", icon: Package },
   { slug: "story", label: "Story", icon: BookOpen },
   { slug: "cast", label: "Cast", icon: Users },
   { slug: "world", label: "World", icon: Map },
@@ -79,6 +82,7 @@ type ModuleCopy = {
 
 const moduleCopy: Record<ModuleSlug, ModuleCopy> = {
   overview: { eyebrow: "Project command", title: "A clear view of the film", description: "Keep the creative intent, story spine, and generated work in one calm production surface." },
+  "production-kit": { eyebrow: "Reference control", title: "Production Kit", description: "Lock the characters, locations, and props that every shot needs to recognize." },
   story: { eyebrow: "Story room", title: "Shape the story before the shots", description: "The brief is the source of truth for every scene, character, and future generation." },
   cast: { eyebrow: "Continuity desk", title: "Cast and performance", description: "Keep character identity and performance notes ready for the scenes that depend on them." },
   world: { eyebrow: "World building", title: "Locations with memory", description: "Capture the visual rules that make every location feel like the same world." },
@@ -278,8 +282,9 @@ function FullMovieProjectWorkspace({ projectId, module }: { projectId: string; m
         </nav>
 
         <main className="movie-workspace-main">
-          <div className="movie-module-heading"><div><span className="movie-workspace-kicker">{copy.eyebrow}</span><h2>{copy.title}</h2><p>{copy.description}</p></div><span className="movie-module-index">{String(fullMovieModules.findIndex((item) => item.slug === activeModule) + 1).padStart(2, "0")} / 12</span></div>
+          <div className="movie-module-heading"><div><span className="movie-workspace-kicker">{copy.eyebrow}</span><h2>{copy.title}</h2><p>{copy.description}</p></div><span className="movie-module-index">{String(fullMovieModules.findIndex((item) => item.slug === activeModule) + 1).padStart(2, "0")} / {fullMovieModules.length}</span></div>
           {activeModule === "overview" && overview && <OverviewModule overview={overview} outputAssetId={outputAssetId} />}
+          {activeModule === "production-kit" && <ProductionKitWorkspace projectId={fullProject.id} />}
           {activeModule === "story" && <StoryModule projectId={workspace.id} guideLocked={projectShell?.lockedGuideRevisionNumber != null} />}
           {activeModule === "cast" && <CastModule projectId={workspace.id} />}
           {activeModule === "world" && <WorldModule projectId={fullProject.id} />}
