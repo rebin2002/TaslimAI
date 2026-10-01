@@ -1,5 +1,4 @@
 "use client";
-/* eslint-disable react-hooks/set-state-in-effect -- timeline read model synchronizes with the active movie project. */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
@@ -59,7 +58,7 @@ export function MovieSelectsWorkspace({ project }: { project: MovieProject }) {
   }, [project.id]);
 
   useEffect(() => {
-    void loadTimeline();
+    void Promise.resolve().then(() => loadTimeline());
   }, [loadTimeline]);
 
   const subclips = useMemo(() => buildMovieSubclips(project), [project]);
@@ -147,7 +146,7 @@ export function MovieSelectsWorkspace({ project }: { project: MovieProject }) {
     <section className="movie-selects-review" aria-labelledby="movie-selects-review-title">
       <div className="movie-selects-section-heading"><div><span className="movie-workspace-kicker">Salvage Director · review queue</span><h3 id="movie-selects-review-title">Find a smaller fix than a new scene.</h3><p>Each card points to one persisted take and one bounded source range. Review stays grounded in the project record.</p></div><button type="button" className="movie-workspace-button is-quiet" onClick={() => void loadTimeline()}><RefreshCw size={13} /> Refresh timeline</button></div>
       <div className="movie-selects-filters" role="tablist" aria-label="Filter select recommendations">{filters.map((item) => <button key={item.id} type="button" role="tab" aria-selected={filter === item.id} className={filter === item.id ? "is-active" : ""} onClick={() => setFilter(item.id)}>{item.label}<span>{filterCount(recommendations, item.id)}</span></button>)}</div>
-      {visibleRecommendations.length ? <div className="movie-selects-list">{visibleRecommendations.map((recommendation) => <SalvageRecommendationCard key={recommendation.id} recommendation={recommendation} range={rangeFor(recommendation.subclip, rangeOverrides)} onRangeChange={(key, value) => updateRange(recommendation.subclip.id, key, value)} onDecision={(decision) => decide(recommendation, decision)} onPropose={() => { setProposalId(recommendation.id); setTimelinePosition(timeline?.currentRevision?.durationMilliseconds ?? 0); setMessage(""); }} proposing={proposalId === recommendation.id} />)}</div> : <SelectsEmptyState hasTakes={subclips.length > 0} filter={filter} />}
+      {visibleRecommendations.length ? <div className="movie-selects-list">{visibleRecommendations.map((recommendation) => <SalvageRecommendationCard key={recommendation.id} recommendation={recommendation} range={rangeFor(recommendation.subclip, rangeOverrides)} onRangeChange={(key, value) => updateRange(recommendation.subclip.id, key, value)} onDecision={(decision) => decide(recommendation, decision)} onPropose={() => { setProposalId(recommendation.id); setTimelinePosition(timeline?.currentRevision?.durationMilliseconds ?? 0); setMessage(""); }} proposing={proposalId === recommendation.id} />)}</div> : <SelectsEmptyState hasTakes={subclips.length > 0} />}
     </section>
 
     {selectedRecommendation && selectedRange && <InsertProposalPanel recommendation={selectedRecommendation} range={selectedRange} timelinePosition={timelinePosition} onTimelinePositionChange={setTimelinePosition} onApply={() => void applyInsert()} busy={busy} canWrite={proposalCanWrite} />}
@@ -204,6 +203,6 @@ function SelectsMetric({ label, value, detail }: { label: string; value: number;
   return <div className="movie-selects-metric"><span>{label}</span><strong>{value}</strong><small>{detail}</small></div>;
 }
 
-function SelectsEmptyState({ hasTakes, filter }: { hasTakes: boolean; filter: SelectsFilter }) {
+function SelectsEmptyState({ hasTakes }: { hasTakes: boolean }) {
   return <div className="movie-selects-empty"><ListVideo size={20} /><strong>{hasTakes ? "No recommendations match this view" : "No reviewable takes yet"}</strong><p>{hasTakes ? "Try another filter or return to All usable takes." : "A Selects card appears after a real render has produced a private take with a usable duration. Nothing is fabricated here."}</p></div>;
 }
