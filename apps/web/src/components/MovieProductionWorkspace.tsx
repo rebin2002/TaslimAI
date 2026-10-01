@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState, type ReactNode } from "react";
+import { useMemo, useState } from "react";
 import {
   AlertTriangle,
   Check,
@@ -16,13 +16,13 @@ import {
   Play,
   RefreshCw,
   ShieldCheck,
-  Sparkles,
   TimerReset,
   WandSparkles,
   X,
 } from "lucide-react";
-import { api, type MovieProductionVersion, type MovieProject, type MovieTake } from "@/lib/api";
+import { api, type MovieOverviewCost, type MovieProductionVersion, type MovieProject, type MovieTake } from "@/lib/api";
 import { assetFileUrl } from "@/lib/apiBase";
+import { MovieBudgetReadinessPanel } from "@/components/MovieBudgetReadinessPanel";
 import {
   buildMovieProductionWorkspaceModel,
   matchesProductionFilter,
@@ -67,7 +67,20 @@ function createApiAdapter(): MovieProductionWorkspaceAdapter {
   };
 }
 
-export function MovieProductionWorkspace({ project, completionPercent, onRefresh, adapter = createApiAdapter() }: { project: MovieProject; completionPercent: number; onRefresh: () => Promise<void>; adapter?: MovieProductionWorkspaceAdapter }) {
+type PendingProductionConfirmation = { key: string; work: () => Promise<unknown>; title: string; detail: string };
+
+function isExpensiveProductionAction(key: string) {
+  return /:(keyframe|motion|render|retry|master)(?:$|-)/.test(key);
+}
+
+function confirmationCopy(key: string) {
+  if (key.includes(":master")) return { title: "Confirm the master hand-off", detail: "This keeps the selected take as the hand-off point for a higher-finish step." };
+  if (key.includes(":render") || key.includes(":retry")) return { title: "Confirm this production pass", detail: "Review the budget and readiness panel before starting another pass. Only the affected shot will be sent forward." };
+  if (key.includes(":keyframe")) return { title: "Confirm the source frame", detail: "This prepares a new visual reference from the approved plan. Review the result before moving on." };
+  return { title: "Confirm the motion check", detail: "This creates a reviewable motion pass from the approved source frame." };
+}
+
+export function MovieProductionWorkspace({ project, completionPercent, onRefresh, cost = null, adapter = createApiAdapter() }: { project: MovieProject; completionPercent: number; onRefresh: () => Promise<void>; cost?: MovieOverviewCost | null; adapter?: MovieProductionWorkspaceAdapter }) {
   const model = useMemo(() => buildMovieProductionWorkspaceModel(project), [project]);
   const displayProgress = model.shots.length ? model.progressPercent : completionPercent;
   const [filter, setFilter] = useState<ProductionWorkspaceFilter>("all");
@@ -75,9 +88,10 @@ export function MovieProductionWorkspace({ project, completionPercent, onRefresh
   const [busyKey, setBusyKey] = useState("");
   const [error, setError] = useState("");
   const [lastAction, setLastAction] = useState<(() => Promise<void>) | null>(null);
+  const [confirmation, setConfirmation] = useState<PendingProductionConfirmation | null>(null);
   const visibleShots = model.shots.filter((item) => matchesProductionFilter(item, filter));
 
-  async function runAction(key: string, work: () => Promise<unknown>) {
+  async function executeAction(key: string, work: () => Promise<unknown>) {
     setBusyKey(key);
     setError("");
     setLastAction(() => async () => { await runAction(key, work); });
@@ -89,6 +103,15 @@ export function MovieProductionWorkspace({ project, completionPercent, onRefresh
     } finally {
       setBusyKey("");
     }
+  }
+
+  async function runAction(key: string, work: () => Promise<unknown>) {
+    if (isExpensiveProductionAction(key)) {
+      const copy = confirmationCopy(key);
+      setConfirmation({ key, work, ...copy });
+      return;
+    }
+    await executeAction(key, work);
   }
 
   return <div className="movie-production-workspace" data-testid="movie-production-workspace">
@@ -103,12 +126,8 @@ export function MovieProductionWorkspace({ project, completionPercent, onRefresh
 
     <ProductionStageRail currentStage={model.currentStage} counts={model.counts} />
 
-    <section className="movie-production-tier-bar" aria-labelledby="production-tier-title">
-      <div><span className="movie-workspace-kicker">Finish direction</span><h3 id="production-tier-title">Choose the level of finish</h3><p>These choices guide the workspace only. No media service or charge starts from this selection.</p></div>
-      <div className="movie-production-tier-options" role="group" aria-label="Finish level">
-        {(["Draft", "Upgrade", "Master"] as MovieResolutionTier[]).map((tier) => <button key={tier} type="button" className={selectedTier === tier ? "is-selected" : ""} aria-pressed={selectedTier === tier} disabled={tier === "Master" && model.counts.selectedTakes === 0} onClick={() => setSelectedTier(tier)}><TierIcon tier={tier} /><span><strong>{tier}</strong><small>{tier === "Draft" ? "Check rhythm and framing" : tier === "Upgrade" ? "Review a working cut" : "Carry a selected take forward"}</small></span>{selectedTier === tier && <Check size={14} aria-hidden="true" />}</button>)}
-      </div>
-    </section>
+    <MovieBudgetReadinessPanel project={project} workspace={model} cost={cost} selectedTier={selectedTier} onTierChange={setSelectedTier} />
+    {confirmation && <section className="movie-production-confirmation" role="dialog" aria-modal="false" aria-labelledby="movie-production-confirmation-title"><div className="movie-budget-readiness-icon"><AlertTriangle size={16} /></div><div><span className="movie-workspace-kicker">Review before continuing</span><h3 id="movie-production-confirmation-title">{confirmation.title}</h3><p>{confirmation.detail} Nothing is charged from this planning surface.</p><div className="movie-production-confirmation-actions"><button type="button" className="movie-workspace-button is-primary" onClick={() => { const pending = confirmation; setConfirmation(null); void executeAction(pending.key, pending.work); }}>Continue</button><button type="button" className="movie-workspace-button is-secondary" onClick={() => setConfirmation(null)}>Not now</button></div></div></section>}
 
     <div className="movie-production-summary-grid" aria-label="Production summary">
       <SummaryMetric label="Shot plan" value={`${model.counts.shotPlanReady}/${model.counts.shots}`} detail="approved intent" />
@@ -194,4 +213,3 @@ function ProductionEmptyState({ filter, hasShots }: { filter: ProductionWorkspac
 function ReadinessBadge({ readiness, label }: { readiness: ProductionReadiness; label: string }) { return <span className={`movie-production-readiness-badge is-${readiness}`}>{readiness === "ready" ? <Check size={12} /> : readiness === "needs-review" ? <CircleAlert size={12} /> : readiness === "blocked" ? <X size={12} /> : <LoaderCircle size={12} />} {label}</span>; }
 function StageCard({ label, state, tone }: { label: string; state: string; tone: "ready" | "review" | "next" | "blocked" }) { return <div className={`movie-production-stage-card is-${tone}`}><span>{label}</span><strong>{state}</strong></div>; }
 function SummaryMetric({ label, value, detail }: { label: string; value: string; detail: string }) { return <div className="movie-production-summary-metric"><span>{label}</span><strong>{value}</strong><small>{detail}</small></div>; }
-function TierIcon({ tier }: { tier: MovieResolutionTier }): ReactNode { return tier === "Draft" ? <Film size={15} /> : tier === "Upgrade" ? <Sparkles size={15} /> : <Flag size={15} />; }

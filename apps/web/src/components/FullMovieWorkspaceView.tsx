@@ -173,6 +173,11 @@ function FullMovieProjectWorkspace({ projectId, module }: { projectId: string; m
       }).catch(() => undefined);
     }
     void api.getCinematographyPresets().then((catalog) => { if (mounted) setPresets(catalog); }).catch(() => undefined);
+    if (activeModule === "production") {
+      void api.getMovieOverview(projectId).then((result) => { if (mounted) setOverview(result); }).catch(() => undefined);
+    } else if (activeModule !== "overview") {
+      setOverview(null);
+    }
     return () => { mounted = false; };
   }, [activeModule, projectId]);
 
@@ -285,7 +290,7 @@ function FullMovieProjectWorkspace({ projectId, module }: { projectId: string; m
           {activeModule === "world" && <WorldModule projectId={fullProject.id} />}
           {activeModule === "scenes" && <ScenesModule projectId={fullProject.id} project={fullProject} presets={presets} savingShot={savingShot} onAddShot={addShot} selectedSceneId={selectedScene?.id ?? null} selectedShotId={selectedShotId} onSelectScene={(sceneId) => { setSelectedSceneId(sceneId); setSelectedShotId(null); }} onSelectShot={setSelectedShotId} onGenerate={generateScene} onPlanChange={applyShotPlan} />}
           {activeModule === "storyboard" && storyboard && <OperationalStoryboardModule storyboard={storyboard} onRefresh={() => void refreshStoryboard()} onError={setError} />}
-          {activeModule === "production" && <MovieProductionWorkspace project={fullProject} completionPercent={completionPercent} onRefresh={refreshProject} />}
+          {activeModule === "production" && <MovieProductionWorkspace project={fullProject} completionPercent={completionPercent} cost={overview?.cost} onRefresh={refreshProject} />}
           {activeModule === "edit" && <EditModule project={fullProject} />}
           {activeModule === "audio" && <FutureModule icon={<AudioLines size={20} />} title="Audio is not connected yet" text="The sound stage is reserved for real narration, ambience, and music assets. Nothing is simulated here." />}
           {activeModule === "qc" && <FutureModule icon={<ShieldCheck size={20} />} title="QC is a future review gate" text="Continuity and delivery checks will appear once this project has a real cut to inspect." />}
