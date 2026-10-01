@@ -1,0 +1,168 @@
+{
+  "schemaVersion": 1,
+  "wave": "Movie Studio Wave 5 — Production Intelligence & Cost-Efficient Filmmaking",
+  "branch": "parallel/movie-wave5-integration-prep",
+  "base": "d87ee7fc60c92d4b6a64d37762cdb21418652e07",
+  "scope": "Integration preparation only. No Wave5 provider branch or integration branch is merged, deployed, enabled, or charged by this branch.",
+  "sourceBasis": "The Last Seed acceptance plus the filmmaking workflow principles: lock references before expensive generation, treat takes as raw footage, salvage usable ranges before regenerating, generate minimal inserts, preserve continuity and screen direction, and draft cheaply before selected-only mastering.",
+  "safetyDefaults": {
+    "customerChargingEnabled": false,
+    "movieVideoEnabledInCommittedDefaults": false,
+    "realMovieProviders": false,
+    "realAudioProviders": false,
+    "testAdapters": "deterministic test-host dependency injection only",
+    "normalUserProviderMetadata": false,
+    "deployment": false,
+    "migrations": "none added; future feature branches must compose one additive migration after final model reconciliation"
+  },
+  "sourceBranches": [
+    { "branch": "origin/parallel/wave5-cost-guardrails", "sha": "3ad710a326122772555276f1a5f620e45bb8ac87", "role": "generation budget and cost preflight guardrails", "merged": false },
+    { "branch": "origin/parallel/wave5-generation-qc", "sha": "4c57bef1682659e49c76985be1fb314332c05e7a", "role": "generation output quality-control foundation", "merged": false },
+    { "branch": "origin/parallel/wave5-image-provider-hardening", "sha": "ad93d342e45fb356885e9bd5684735ef768271d0", "role": "image provider execution hardening", "merged": false },
+    { "branch": "origin/parallel/wave5-media-security", "sha": "036121eb0f1db9ed9e4410c24212b5e1aa73d416", "role": "generated media download and storage validation", "merged": false },
+    { "branch": "origin/parallel/wave5-movie-provider", "sha": "f6ed0fc8eb1e51ce06760e02df76771743f52018", "role": "disabled movie provider adapter", "merged": false },
+    { "branch": "origin/parallel/wave5-music-provider", "sha": "cb84f23ed0294bf9dfcd6de06c17ea5566ceb645", "role": "disabled music provider adapter", "merged": false },
+    { "branch": "origin/parallel/wave5-provider-admin-ops", "sha": "b9206bf9f5f8bea6d9007d8b4c4db247b0a85d25", "role": "provider operations control plane", "merged": false },
+    { "branch": "origin/parallel/wave5-provider-resilience", "sha": "13b6ca788e8b53af14441d53a4e12831cbbab981", "role": "provider resilience and fallback foundation", "merged": false },
+    { "branch": "origin/parallel/wave5-provider-testing", "sha": "0394df8535d59cdb8f7f70c9d2d61d243786c70e", "role": "deterministic provider contract tests", "merged": false },
+    { "branch": "origin/parallel/wave5-voice-provider", "sha": "53123a7b26b9d72743875ddbe19b1ff11956ca0f", "role": "disabled voice provider adapter", "merged": false },
+    { "branch": "origin/integration/wave5-provider-generation", "sha": "ee2dabe9f5ca28462d2ab094938f03fcb396399e", "role": "unreviewed provider-generation integration candidate; map only", "merged": false }
+  ],
+  "currentBaseOwners": [
+    { "surface": "Production Kit references", "owner": "apps/api/Movies/MovieProductionReferences.cs", "contract": "GET /api/movie-studio/shots/{shotId}/production-references", "status": "implemented" },
+    { "surface": "Shot readiness and execution preflight", "owner": "MovieShotReadiness plus MovieShotExecutionService", "contract": "GET shot planning plus POST /shots/{shotId}/production/execute", "status": "implemented" },
+    { "surface": "Multiple raw takes", "owner": "MovieShotExecutionService and MovieV2Service", "contract": "takeCount bounded batch, persisted MovieTake rows, explicit approval/selection/finalization", "status": "implemented" },
+    { "surface": "Selected-only upgrade and mastering", "owner": "MovieTakeUpscaleEligibilityService and MovieFinalMasteringService", "contract": "POST take upscale and POST take final-mastering", "status": "implemented; provider-neutral hand-off" },
+    { "surface": "Canonical timeline/audio/export", "owner": "MovieTimelineService, MovieWave4ExportSeam, final assembly contracts", "contract": "timeline revisions plus provider-neutral export hand-off", "status": "implemented or migration-free seam" },
+    { "surface": "Persistence/reload and accounting", "owner": "EF Movie graph, GenerationJob worker, Usage Ledger", "contract": "hierarchy/project/timeline reload and zero-charge assertions", "status": "implemented" }
+  ],
+  "wave5IntegrationSeam": {
+    "file": "apps/api/Movies/MovieWave5IntegrationSeam.cs",
+    "contractVersion": "movie-production-intelligence.v1",
+    "status": "migration-free provider-neutral seam",
+    "decisions": [
+      "preflight requires a non-empty Production Kit hash, locked references, ready shot, provider readiness, and draft budget allowance",
+      "usable segment ranges are selected before regeneration",
+      "uncovered time produces minimal insert proposals rather than whole-scene regeneration",
+      "continuity checks require a shared locked anchor and screen direction",
+      "budget optimization selects an economical draft source and reserves upgrade/mastering for the selected take",
+      "unknown cost remains unknown and is never interpreted as a customer charge"
+    ],
+    "explicitNonGoals": [
+      "no new API route",
+      "no persistence entity or migration",
+      "no provider/model/prompt selection",
+      "no media mutation or pixel-level editing",
+      "no automatic approval, take selection, regeneration confirmation, or export execution"
+    ]
+  },
+  "features": [
+    {
+      "id": "production-kit-reference-lock",
+      "status": "accepted",
+      "dependsOn": ["guide-lock", "cast-world-continuity", "approved-keyframe"],
+      "invariants": ["bounded package hash is stable across reload", "guide is locked", "character/location/prop/keyframe references are present", "reference provenance remains server-owned"],
+      "validation": ["MovieWave5IntegrationE2ETests", "MovieProductionReferencesTests"]
+    },
+    {
+      "id": "shot-preflight",
+      "status": "accepted plus seam",
+      "dependsOn": ["production-kit-reference-lock", "shot-readiness", "provider-readiness", "budget-guardrail"],
+      "invariants": ["not-ready shots cannot enter execution", "approved keyframe and reference package are consumed", "provider-off safety remains honest", "preflight is not a charge"],
+      "validation": ["MovieWave5IntegrationContract preflight", "MovieWave5IntegrationE2ETests", "MovieWave5SafetyE2ETests"]
+    },
+    {
+      "id": "multiple-takes-and-segment-selects",
+      "status": "accepted for takes; Wave5 segment selection seam",
+      "dependsOn": ["shot-preflight"],
+      "invariants": ["take batch is idempotent", "takes remain distinct", "no take is implicitly selected", "segment selection can reference multiple take IDs"],
+      "validation": ["MovieShotExecutionApiTests", "MovieWave5IntegrationE2ETests"]
+    },
+    {
+      "id": "salvage-before-regenerate",
+      "status": "migration-free seam",
+      "dependsOn": ["multiple-takes-and-segment-selects", "continuity"],
+      "invariants": ["usable ranges are preserved first", "complete coverage creates no regeneration proposal", "unstable ranges are excluded", "the decision is deterministic"],
+      "validation": ["MovieWave5IntegrationContract", "MovieWave5IntegrationE2ETests"]
+    },
+    {
+      "id": "minimal-insert-proposal",
+      "status": "migration-free seam",
+      "dependsOn": ["salvage-before-regenerate", "screen-direction-continuity"],
+      "invariants": ["only uncovered ranges become inserts", "insert is smaller than the target scene", "insert carries continuity and screen-direction anchors", "no full-scene regeneration is implied"],
+      "validation": ["MovieWave5IntegrationE2ETests"]
+    },
+    {
+      "id": "continuity-and-screen-direction",
+      "status": "accepted seam over current continuity snapshots",
+      "dependsOn": ["cast-world-continuity", "production-kit-reference-lock"],
+      "invariants": ["character/location/prop anchor is shared", "screen direction is preserved", "a conflicting range fails closed", "no creative fallback is invented"],
+      "validation": ["MovieProductionContinuityTests", "MovieWorldContinuityTests", "MovieWave5IntegrationE2ETests"]
+    },
+    {
+      "id": "budget-optimization",
+      "status": "accepted seam over current resolution planning and cost guardrails",
+      "dependsOn": ["shot-preflight", "multiple-takes-and-segment-selects"],
+      "invariants": ["draft-first path may use 720p source for 2160p target", "upgrade is selected-take-only", "unknown cost remains unknown", "estimate is not a charge"],
+      "validation": ["MovieWave3IntegrationE2ETests", "MovieGenerationCostEstimatorTests", "MovieWave5IntegrationE2ETests"]
+    },
+    {
+      "id": "selected-only-upgrade-master",
+      "status": "accepted",
+      "dependsOn": ["multiple-takes-and-segment-selects", "budget-optimization"],
+      "invariants": ["unselected candidate is blocked", "selected take creates an auditable pending upgrade", "master references selected take", "no output is claimed before provider/QC completion"],
+      "validation": ["MovieTakeUpscaleEligibilityTests", "MovieFinalMasteringTests", "MovieWave5IntegrationE2ETests"]
+    },
+    {
+      "id": "timeline-audio-export",
+      "status": "accepted",
+      "dependsOn": ["selected-only-upgrade-master", "voice-and-music-contracts", "captions"],
+      "invariants": ["timeline references selected take and audio assets", "timeline reload preserves the revision", "export hand-off hash is deterministic", "no export Asset or charge is fabricated"],
+      "validation": ["MovieTimelineTests", "MovieWave4IntegrationSeamTests", "MovieWave5IntegrationE2ETests"]
+    },
+    {
+      "id": "provider-off-zero-charge",
+      "status": "accepted",
+      "dependsOn": [],
+      "invariants": ["Movie provider readiness is false in safety host", "failed job has no output Asset", "failed usage charge is zero", "workspace customer charged amount remains zero"],
+      "validation": ["MovieWave5SafetyE2ETests", "production configuration audit"]
+    }
+  ],
+  "acceptance": {
+    "test": "apps/api.Tests/MovieWave5IntegrationE2ETests.cs",
+    "journey": [
+      "Create The Last Seed Full Movie fixture with locked Guide/Cast/World records",
+      "Approve storyboard and keyframe, then reload the bounded Production Kit",
+      "Run readiness/preflight and queue three independent economical source takes",
+      "Select usable ranges across takes and prove no regeneration is needed when coverage is complete",
+      "Create one minimal insert proposal for an uncovered tail and reject a screen-direction conflict",
+      "Approve/select/finalize exactly one take; block an alternate upgrade and accept selected-only upgrade/master hand-off",
+      "Generate deterministic voice and music test assets, persist/reload canonical timeline, and evaluate provider-neutral export",
+      "Assert provenance, no user-facing provider/model/prompt metadata, zero customer charge, and no fabricated export output",
+      "Run a separate provider-off Last Seed path and assert failed job, no Asset/output, and zero charge"
+    ],
+    "determinism": ["fixed narrative strings", "test-host fake adapters only", "bounded polling", "stable package/provenance hashes", "no network generation or paid provider"],
+    "requiredAssertions": ["Production Kit references/readiness", "shot preflight", "multiple takes", "segment selects", "salvage-before-regenerate", "minimal insert", "continuity/screen direction", "budget optimization", "selected-only upgrade/master", "timeline/audio/export", "persistence/reload", "provider-off/zero-charge"]
+  },
+  "migrationPlan": {
+    "requiredForThisBranch": false,
+    "newMigrations": [],
+    "futureRule": "If final Wave5 feature branches persist segment selections, salvage decisions, insert proposals, or budget decisions, compose one additive EF migration and regenerate the final snapshot after all model conflicts are reconciled. Never hand-edit migration history.",
+    "checks": ["dotnet ef migrations has-pending-model-changes", "fresh PostgreSQL migration", "base-to-integrated PostgreSQL upgrade", "foreign-key ownership", "reload fixtures and migration history"]
+  },
+  "gate": {
+    "safeCommand": "./scripts/movie-wave5-integration-gate.sh",
+    "commands": {
+      "baseVerification": "git merge-base --is-ancestor d87ee7fc60c92d4b6a64d37762cdb21418652e07 HEAD",
+      "wave5Acceptance": "dotnet test apps/api.Tests/Taslim.Api.Tests.csproj --no-restore --filter FullyQualifiedName~MovieWave5Integration",
+      "apiBuild": "dotnet build apps/api/Taslim.Api.csproj --no-restore",
+      "apiRegression": "dotnet test apps/api.Tests/Taslim.Api.Tests.csproj --no-restore",
+      "frontendTests": "npm test --workspace @taslim/web",
+      "typescript": "npx tsc --noEmit -p apps/web/tsconfig.json",
+      "productionBuild": "NEXT_PUBLIC_API_URL=https://api.example.test npm run build --workspace @taslim/web",
+      "efModelConsistency": "dotnet ef migrations has-pending-model-changes --project apps/api --startup-project apps/api"
+    },
+    "optional": ["RUN_FULL_API=1", "RUN_FRONTEND=1", "RUN_DB_MIGRATIONS=1 with disposable fresh and upgrade PostgreSQL URLs", "RUN_BROWSER_E2E=1 with disposable API/web services"],
+    "requiredSafety": ["base SHA audit", "dedicated branch audit", "git diff --check", "conflict-marker audit", "tracked-secret filename audit", "MovieVideo disabled in committed defaults", "Billing.CustomerChargingEnabled false", "no deployment", "no paid/external generation"]
+  }
+}
