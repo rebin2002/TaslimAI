@@ -101,5 +101,27 @@
 .movie-world-save { color: #071421; background: #55d1c1; }
 .movie-world-save:disabled { opacity: .55; cursor: wait; }
 .movie-world-editor-badge { display: inline-flex; align-items: center; gap: 5px; color: #f0c475; font-size: 8px; }
+.movie-world-geography { display: grid; gap: 13px; margin-top: 25px; padding-top: 19px; border-top: 1px solid rgba(143,176,204,.13); }
+.movie-world-geography .movie-world-card-head h5 { margin-top: 5px; }
+.movie-world-status { color: #f0c475; font-size: 9px; font-weight: 800; text-transform: uppercase; }
+.movie-world-status.is-approved { color: #55d1c1; }
+.movie-world-geography-reference-grid, .movie-world-geography-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.movie-world-geography-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.movie-world-geography-reference-grid label, .movie-world-geography-field { display: grid; gap: 6px; min-width: 0; }
+.movie-world-geography-reference-grid label > span, .movie-world-geography-field > span { display: inline-flex; align-items: center; gap: 5px; color: #92adbc; font-size: 9px; font-weight: 800; }
+.movie-world-geography-reference-grid select, .movie-world-geography-reference-grid textarea, .movie-world-geography-field textarea { min-width: 0; padding: 8px; color: #dceef0; border: 1px solid rgba(143,176,204,.16); border-radius: 5px; outline: 0; background: rgba(0,0,0,.14); font-size: 9px; }
+.movie-world-geography-reference-grid textarea, .movie-world-geography-field textarea { min-height: 47px; resize: vertical; line-height: 1.45; }
+.movie-world-geography-reference-grid select option { color: #172639; }
+.movie-world-geography-reference-grid select:focus, .movie-world-geography-reference-grid textarea:focus, .movie-world-geography-field textarea:focus { border-color: #55d1c1; }
+.movie-world-geography-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding-top: 4px; }
+.movie-world-geography-actions small { flex: 1; color: #718e9e; font-size: 8px; }
+.movie-world-bible { padding: 9px 10px; color: #9bded7; border: 1px solid rgba(85,209,193,.18); border-radius: 7px; background: rgba(85,209,193,.05); font-size: 9px; }
+.movie-world-bible small { display: block; margin-top: 6px; color: #7899a2; line-height: 1.45; }
+.movie-world-variants { display: grid; gap: 8px; padding-top: 13px; border-top: 1px solid rgba(143,176,204,.1); }
+.movie-world-variant-list { display: grid; gap: 6px; }
+.movie-world-variant-list > div { display: flex; align-items: center; gap: 8px; padding: 8px 9px; border-left: 2px solid rgba(143,176,204,.2); background: rgba(143,176,204,.04); }
+.movie-world-variant-list > div span { flex: 1; color: #c7dce2; font-size: 10px; font-weight: 800; }
+.movie-world-variant-list > div em { color: #55d1c1; font-size: 8px; font-style: normal; text-transform: uppercase; }
+.movie-world-variant-list > div button { padding: 4px 6px; color: #9dded8; border: 1px solid rgba(85,209,193,.25); border-radius: 4px; background: rgba(85,209,193,.08); font-size: 8px; font-weight: 800; }
 @media (max-width: 900px) { .movie-world-layout, .movie-world-bottom-grid { grid-template-columns: 1fr; } .movie-world-inspector { min-height: 0; } }
-@media (max-width: 620px) { .movie-world-hero { align-items: flex-start; flex-direction: column; padding: 18px; } .movie-world-signal { grid-template-columns: auto auto; } .movie-world-room-nav { grid-template-columns: 1fr; } .movie-world-reference-grid, .movie-world-note-grid, .movie-world-field-grid, .movie-world-reference-form { grid-template-columns: 1fr; } .movie-world-card-actions { align-items: flex-end; flex-direction: column; } .movie-world-collection, .movie-world-inspector, .movie-world-support-card { padding: 15px; } }
+@media (max-width: 620px) { .movie-world-hero { align-items: flex-start; flex-direction: column; padding: 18px; } .movie-world-signal { grid-template-columns: auto auto; } .movie-world-room-nav { grid-template-columns: 1fr; } .movie-world-reference-grid, .movie-world-note-grid, .movie-world-field-grid, .movie-world-reference-form, .movie-world-geography-reference-grid, .movie-world-geography-grid { grid-template-columns: 1fr; } .movie-world-card-actions { align-items: flex-end; flex-direction: column; } .movie-world-collection, .movie-world-inspector, .movie-world-support-card { padding: 15px; } .movie-world-geography-actions { align-items: flex-start; flex-direction: column; } }

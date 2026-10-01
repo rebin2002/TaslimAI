@@ -12,7 +12,7 @@ namespace Taslim.Api.Controllers;
 [ApiController]
 [Authorize]
 [Route("api/movie-studio")]
-public sealed class MovieStudioController(IMovieStudioService movies, IMovieProductionComplexityService complexity, IMovieDurationBudgetService durationBudgets, IMovieGuideService guides, IMovieStoryService stories, IMovieStoryCastService storyCast, IMovieCharacterContinuityService continuity, IMovieWorldContinuityService worldContinuity, IMovieProductionContinuityService productionContinuity, IMovieProductionReferencePackageService productionReferences, IMovieTimelineService timeline, IMovieShotExecutionService shotExecution, MovieAuthorizationService authorization, MovieShotImportanceService shotImportance, IMovieCinematographyPlanningService cinematographyPlanning) : ControllerBase
+public sealed class MovieStudioController(IMovieStudioService movies, IMovieProductionComplexityService complexity, IMovieDurationBudgetService durationBudgets, IMovieGuideService guides, IMovieStoryService stories, IMovieStoryCastService storyCast, IMovieCharacterContinuityService continuity, IMovieWorldContinuityService worldContinuity, IMovieProductionContinuityService productionContinuity, IMovieProductionReferencePackageService productionReferences, IMovieTimelineService timeline, IMovieShotExecutionService shotExecution, MovieAuthorizationService authorization, MovieShotImportanceService shotImportance, IMovieCinematographyPlanningService cinematographyPlanning, IMovieLocationGeographySheetService geographySheets) : ControllerBase
 {
     [HttpGet("cinematography/presets")]
     public IActionResult CinematographyPresets() => Ok(CinematographyPresetCatalog.All);
@@ -331,6 +331,58 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
         try { var result = await movies.UpdateLocationAsync(GetUserId(), locationId, request, cancellationToken); return result is null ? ApiResults.Error(this, 404, "MOVIE_LOCATION_NOT_FOUND", "Movie location not found.") : Ok(result); }
         catch (MovieStudioContinuityLockException exception) { return ApiResults.Error(this, 409, "MOVIE_WORLD_CONTINUITY_LOCKED", exception.Message); }
         catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_LOCATION_INVALID", exception.Message); }
+    }
+
+    [HttpGet("locations/{locationId:guid}/geography-sheet")]
+    public async Task<IActionResult> GetLocationGeographySheet(Guid locationId, CancellationToken cancellationToken)
+    {
+        var result = await geographySheets.GetAsync(GetUserId(), locationId, cancellationToken);
+        return result is null ? ApiResults.Error(this, 404, "MOVIE_LOCATION_GEOGRAPHY_SHEET_NOT_FOUND", "Location geography sheet not found.") : Ok(result);
+    }
+
+    [HttpPut("locations/{locationId:guid}/geography-sheet")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> UpsertLocationGeographySheet(Guid locationId, MovieLocationGeographySheetRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await geographySheets.UpsertAsync(GetUserId(), locationId, request, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_LOCATION_NOT_FOUND", "Movie location not found.") : Ok(result);
+        }
+        catch (MovieLocationGeographySheetLockedException exception) { return ApiResults.Error(this, 409, "MOVIE_LOCATION_GEOGRAPHY_SHEET_LOCKED", exception.Message); }
+        catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_LOCATION_GEOGRAPHY_SHEET_INVALID", exception.Message); }
+    }
+
+    [HttpPost("locations/{locationId:guid}/geography-sheet/variants")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> AddLocationGeographyVariant(Guid locationId, MovieLocationGeographyVariantRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await geographySheets.AddVariantAsync(GetUserId(), locationId, request, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_LOCATION_NOT_FOUND", "Movie location not found.") : Ok(result);
+        }
+        catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_LOCATION_GEOGRAPHY_VARIANT_INVALID", exception.Message); }
+    }
+
+    [HttpPost("locations/{locationId:guid}/geography-sheet/approve")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> ApproveLocationGeographySheet(Guid locationId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await geographySheets.ApproveSheetAsync(GetUserId(), locationId, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_LOCATION_GEOGRAPHY_SHEET_NOT_FOUND", "Location geography sheet not found.") : Ok(result);
+        }
+        catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_LOCATION_GEOGRAPHY_SHEET_INVALID", exception.Message); }
+    }
+
+    [HttpPost("location-geography-variants/{variantId:guid}/approve")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> ApproveLocationGeographyVariant(Guid variantId, CancellationToken cancellationToken)
+    {
+        var result = await geographySheets.ApproveVariantAsync(GetUserId(), variantId, cancellationToken);
+        return result is null ? ApiResults.Error(this, 404, "MOVIE_LOCATION_GEOGRAPHY_VARIANT_NOT_FOUND", "Location geography variant not found.") : Ok(result);
     }
 
     [HttpPost("projects/{id:guid}/sets")]

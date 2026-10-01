@@ -150,7 +150,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         var movie = await db.MovieProjects.AsNoTracking().FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
         if (movie is null || !await collaboration.HasPermissionAsync(userId, id, MoviePermissions.View, cancellationToken)) return null;
 
-        var locations = await db.MovieLocations.AsNoTracking().Where(item => item.MovieProjectId == id).OrderBy(item => item.CreatedAt).ToArrayAsync(cancellationToken);
+        var locations = await db.MovieLocations.AsNoTracking().Where(item => item.MovieProjectId == id).Include(item => item.GeographySheet).ThenInclude(item => item!.Variants).OrderBy(item => item.CreatedAt).ToArrayAsync(cancellationToken);
         var sets = await db.MovieSets.AsNoTracking().Where(item => item.MovieProjectId == id).Include(item => item.Variations).OrderBy(item => item.CreatedAt).ToArrayAsync(cancellationToken);
         var props = await db.MovieProps.AsNoTracking().Where(item => item.MovieProjectId == id).OrderBy(item => item.CreatedAt).ToArrayAsync(cancellationToken);
         var references = await db.MovieWorldReferences.AsNoTracking().Where(item => item.MovieProjectId == id).OrderBy(item => item.CreatedAt).ToArrayAsync(cancellationToken);
@@ -164,7 +164,17 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         foreach (var item in props) names[(MovieWorldEntityTypes.Prop, item.Id)] = item.Name;
         var usageDetails = usages.Select(item => new MovieWorldUsageDetailDto(item.Id, item.MovieSceneId, item.MovieShotId, item.MovieScene.Sequence, item.MovieScene.Title, item.MovieShot?.Sequence, item.MovieShot?.Description, item.EntityType, item.EntityId, names.GetValueOrDefault((item.EntityType, item.EntityId), "World record"), item.Role)).ToArray();
 
-        var assetIds = locations.Select(item => item.ReferenceAssetId).Concat(sets.Select(item => item.ReferenceAssetId)).Concat(sets.SelectMany(item => item.Variations.Select(variation => variation.ReferenceAssetId))).Concat(props.Select(item => item.ReferenceAssetId)).Concat(references.Select(item => item.AssetId)).Where(item => item.HasValue).Select(item => item!.Value).Distinct().ToArray();
+        var geographyAssetIds = locations.SelectMany(item => item.GeographySheet is null ? [] : new Guid?[]
+        {
+            item.GeographySheet.EstablishingReferenceAssetId, item.GeographySheet.WideThreeQuarterReferenceAssetId,
+        }.Concat(MovieLocationGeographySheetSerialization.ReadOpenings(item.GeographySheet.EntrancesExitsJson).Select(entry => entry.ReferenceAssetId))
+         .Concat(MovieLocationGeographySheetSerialization.ReadOpenings(item.GeographySheet.WindowsJson).Select(entry => entry.ReferenceAssetId))
+         .Concat(MovieLocationGeographySheetSerialization.ReadPaths(item.GeographySheet.PathsJson).Select(entry => entry.ReferenceAssetId))
+         .Concat(MovieLocationGeographySheetSerialization.ReadEntries(item.GeographySheet.MajorObjectsJson).Select(entry => entry.ReferenceAssetId))
+         .Concat(MovieLocationGeographySheetSerialization.ReadEntries(item.GeographySheet.LightSourcesJson).Select(entry => entry.ReferenceAssetId))
+         .Concat(MovieLocationGeographySheetSerialization.ReadEntries(item.GeographySheet.OrientationAnchorsJson).Select(entry => entry.ReferenceAssetId))
+         .Concat(item.GeographySheet.Variants.Select(variant => variant.ReferenceAssetId)));
+        var assetIds = locations.Select(item => item.ReferenceAssetId).Concat(geographyAssetIds).Concat(sets.Select(item => item.ReferenceAssetId)).Concat(sets.SelectMany(item => item.Variations.Select(variation => variation.ReferenceAssetId))).Concat(props.Select(item => item.ReferenceAssetId)).Concat(references.Select(item => item.AssetId)).Where(item => item.HasValue).Select(item => item!.Value).Distinct().ToArray();
         var assets = assetIds.Length == 0
             ? Array.Empty<MovieWorldAssetDto>()
             : await db.Assets.AsNoTracking().Where(item => item.WorkspaceId == movie.WorkspaceId && assetIds.Contains(item.Id)).OrderBy(item => item.Name).Select(item => new MovieWorldAssetDto(item.Id, item.Name, item.AssetType, item.MimeType, item.StoredFileId.HasValue, item.StoredFileId.HasValue && (item.MimeType != null && (item.MimeType.StartsWith("image/") || item.MimeType.StartsWith("audio/") || item.MimeType.StartsWith("video/"))))).ToArrayAsync(cancellationToken);
@@ -1320,7 +1330,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         .Include(item => item.Characters).ThenInclude(character => character.ReferenceAssets)
         .Include(item => item.Characters).ThenInclude(character => character.Relationships).ThenInclude(relationship => relationship.RelatedCharacter)
         .Include(item => item.Characters).ThenInclude(character => character.ContinuityLocks)
-        .Include(item => item.Locations)
+        .Include(item => item.Locations).ThenInclude(item => item.GeographySheet).ThenInclude(item => item!.Variants)
         .Include(item => item.Sets).ThenInclude(item => item.Variations)
         .Include(item => item.Props)
         .Include(item => item.WorldReferences)
@@ -1575,7 +1585,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
     private static MovieCharacterDto ToDto(MovieCharacter character) => new(character.Id, character.Name, character.Role, character.Description, character.Appearance, character.PhysicalDescription, character.Wardrobe, character.VoiceReference, character.PersonalityAndStoryNotes, character.VoiceAndPerformance, character.ContinuityNotes, character.ReferenceAssetId, character.ReferenceAssets.OrderBy(item => item.SortOrder).Select(item => item.AssetId).ToArray(), character.States.OrderBy(item => item.CreatedAt).Select(ToDto).ToArray(), character.Relationships.OrderBy(item => item.CreatedAt).Select(item => new MovieCharacterRelationshipDto(item.Id, item.RelatedCharacterId, item.RelatedCharacter?.Name ?? string.Empty, item.RelationshipType, item.Notes)).ToArray(), character.ContinuityLocks.Where(item => item.MovieCharacterStateId is null).OrderBy(item => item.ApprovedAt).Select(ToDto).Concat(character.States.SelectMany(item => item.ContinuityLocks).OrderBy(item => item.ApprovedAt).Select(ToDto)).ToArray());
     private static MovieCharacterStateDto ToDto(MovieCharacterState state) => new(state.Id, state.Key, state.Label, state.Wardrobe, state.AgeOrTimeState, state.Appearance, state.InjuryOrCondition, state.LocationOrStoryState, state.ContinuityNotes, state.CreatedAt, state.UpdatedAt);
     private static MovieCharacterContinuityLockDto ToDto(MovieCharacterContinuityLock lockEntity) => new(lockEntity.Id, lockEntity.FieldKey, lockEntity.LockedValue, lockEntity.MovieCharacterStateId, lockEntity.ApprovedAt);
-    private static MovieLocationDto ToDto(MovieLocation location) => new(location.Id, location.Name, location.Description, location.VisualContinuityNotes, location.ReferenceAssetId);
+    private static MovieLocationDto ToDto(MovieLocation location) => new(location.Id, location.Name, location.Description, location.VisualContinuityNotes, location.ReferenceAssetId, location.GeographySheet is null ? null : MovieLocationGeographySheetMapper.ToDto(location.GeographySheet));
     private static MovieSetDto ToDto(MovieSet item) => new(item.Id, item.MovieLocationId, item.Name, item.Description, item.EnvironmentType, item.VisualDescription, item.TimeOfDay, item.Weather, item.ContinuityNotes, item.ReferenceAssetId, item.Variations.OrderBy(variation => variation.CreatedAt).Select(ToDto).ToArray());
     private static MovieSetVariationDto ToDto(MovieSetVariation item) => new(item.Id, item.MovieSetId, item.Name, item.VisualDescription, item.TimeOfDay, item.Weather, item.Lighting, item.ContinuityNotes, item.ReferenceAssetId, item.IsDefault);
     private static MoviePropDto ToDto(MovieProp item) => new(item.Id, item.Name, item.Description, item.Category, item.ContinuityNotes, item.ReferenceAssetId);
