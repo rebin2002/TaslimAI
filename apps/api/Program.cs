@@ -259,6 +259,7 @@ builder.Services.AddSingleton<IMovieSoundtrackMediaService, UnavailableMovieSoun
 builder.Services.AddScoped<IMovieSoundtrackService, MovieSoundtrackService>();
 builder.Services.AddScoped<IMovieScenesService, MovieScenesService>();
 builder.Services.AddScoped<IMovieGuideService, MovieGuideService>();
+builder.Services.AddScoped<IMovieProductionKitService, MovieProductionKitService>();
 builder.Services.AddScoped<IMovieStoryService, MovieStoryService>();
 builder.Services.AddScoped<IMovieCollaborationService, MovieCollaborationService>();
 builder.Services.AddScoped<MovieStoryScenePlanningContextAssembler>();
