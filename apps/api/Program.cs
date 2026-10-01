@@ -267,6 +267,7 @@ builder.Services.AddSingleton<IMovieCaptionFormatAdapter, WebVttMovieCaptionForm
 builder.Services.AddScoped<IMovieCaptionService, MovieCaptionService>();
 builder.Services.AddScoped<MovieDirectorContextAssembler>();
 builder.Services.AddScoped<IDirectorCostEstimator, MovieDirectorCostEstimator>();
+builder.Services.AddSingleton<IMovieSalvageDirector, MovieSalvageDirector>();
 builder.Services.Configure<MovieDirectorCreativeOutputValidationOptions>(builder.Configuration.GetSection("MovieDirectorCreativeValidation"));
 builder.Services.AddScoped<IMovieDirectorCreativeOutputValidator, MovieDirectorCreativeOutputValidator>();
 builder.Services.Configure<MovieWave2CreativeOutputValidationOptions>(builder.Configuration.GetSection("MovieWave2CreativeValidation"));

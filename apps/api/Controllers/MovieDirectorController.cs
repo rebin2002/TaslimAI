@@ -9,8 +9,17 @@ namespace Taslim.Api.Controllers;
 [ApiController]
 [Authorize]
 [Route("api/movie-director")]
-public sealed class MovieDirectorController(IMovieDirectorService director) : ControllerBase
+public sealed class MovieDirectorController(IMovieDirectorService director, IMovieSalvageDirector salvage) : ControllerBase
 {
+    [HttpPost("salvage-plan")]
+    [ValidateAntiForgeryToken]
+    public IActionResult CreateSalvagePlan(MovieSalvageDirectorRequest request)
+    {
+        try { return Ok(salvage.Plan(request)); }
+        catch (ArgumentNullException exception) { return ApiResults.Error(this, 400, "MOVIE_SALVAGE_REQUEST_INVALID", exception.Message); }
+        catch (ArgumentException exception) { return ApiResults.Error(this, 400, "MOVIE_SALVAGE_REQUEST_INVALID", exception.Message); }
+    }
+
     [HttpPost("projects/{movieProjectId:guid}/proposals")]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> CreateProposal(Guid movieProjectId, DirectorProposalRequest request, CancellationToken cancellationToken)
