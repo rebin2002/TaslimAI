@@ -106,6 +106,10 @@ public static class DirectorStoryFindingCategories
     public const string Chronology = "chronology";
     public const string ScreenplayFact = "screenplay_fact";
     public const string Coverage = "coverage";
+    public const string ScreenDirectionAxis = "screen_direction_axis";
+    public const string ScreenDirectionEntranceExit = "screen_direction_entrance_exit";
+    public const string ScreenDirectionEyeline = "screen_direction_eyeline";
+    public const string ScreenDirectionGeography = "screen_direction_geography";
 }
 public sealed record DirectorStoryEvidenceDto(string Source, string? SourceType, Guid? SourceId, string? Revision, string Excerpt);
 public sealed record DirectorStoryFindingTargetDto(string TargetType, Guid? TargetId, string? Label);

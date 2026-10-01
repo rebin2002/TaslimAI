@@ -631,6 +631,7 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.Property(item => item.ContinuityReferences).HasMaxLength(4_000);
             entity.Property(item => item.CameraAndFraming).HasMaxLength(2_000);
             entity.Property(item => item.CameraMotion).HasMaxLength(2_000);
+            entity.Property(item => item.ScreenDirectionJson).HasMaxLength(8_000);
             entity.Property(item => item.CinematographyJson).HasMaxLength(20_000);
             entity.Property(item => item.Narration).HasMaxLength(8_000);
             entity.Property(item => item.Dialogue).HasMaxLength(8_000);
