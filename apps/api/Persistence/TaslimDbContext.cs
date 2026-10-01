@@ -77,6 +77,9 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
     public DbSet<MovieCharacterRelationship> MovieCharacterRelationships => Set<MovieCharacterRelationship>();
     public DbSet<MovieCharacterContinuityLock> MovieCharacterContinuityLocks => Set<MovieCharacterContinuityLock>();
     public DbSet<MovieCharacterContinuitySnapshot> MovieCharacterContinuitySnapshots => Set<MovieCharacterContinuitySnapshot>();
+    public DbSet<MovieCharacterProductionSheet> MovieCharacterProductionSheets => Set<MovieCharacterProductionSheet>();
+    public DbSet<MovieCharacterProductionSheetVersion> MovieCharacterProductionSheetVersions => Set<MovieCharacterProductionSheetVersion>();
+    public DbSet<MovieCharacterProductionSheetLook> MovieCharacterProductionSheetLooks => Set<MovieCharacterProductionSheetLook>();
     public DbSet<MovieLocation> MovieLocations => Set<MovieLocation>();
     public DbSet<MovieSet> MovieSets => Set<MovieSet>();
     public DbSet<MovieSetVariation> MovieSetVariations => Set<MovieSetVariation>();
@@ -495,6 +498,47 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.Property(item => item.ContinuityNotes).HasMaxLength(4_000);
             entity.HasIndex(item => item.MovieProjectId);
             entity.HasOne(item => item.MovieProject).WithMany(item => item.Characters).HasForeignKey(item => item.MovieProjectId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.ReferenceAsset).WithMany().HasForeignKey(item => item.ReferenceAssetId).OnDelete(DeleteBehavior.SetNull);
+        });
+        builder.Entity<MovieCharacterProductionSheet>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.Status).HasMaxLength(30).IsRequired();
+            entity.HasIndex(item => item.MovieCharacterId).IsUnique();
+            entity.HasIndex(item => new { item.MovieCharacterId, item.UpdatedAt });
+            entity.HasOne(item => item.Character).WithOne(item => item.ProductionSheet).HasForeignKey<MovieCharacterProductionSheet>(item => item.MovieCharacterId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.ApprovedByUser).WithMany().HasForeignKey(item => item.ApprovedByUserId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne(item => item.LockedByUser).WithMany().HasForeignKey(item => item.LockedByUserId).OnDelete(DeleteBehavior.SetNull);
+        });
+        builder.Entity<MovieCharacterProductionSheetVersion>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.Status).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.ProvenanceJson).HasMaxLength(20_000).IsRequired();
+            entity.Property(item => item.ProvenanceHash).HasMaxLength(64).IsRequired();
+            entity.HasIndex(item => new { item.MovieCharacterProductionSheetId, item.VersionNumber }).IsUnique();
+            entity.HasIndex(item => item.CanonicalIdentityFaceAssetId);
+            entity.HasOne(item => item.Sheet).WithMany(item => item.Versions).HasForeignKey(item => item.MovieCharacterProductionSheetId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.CanonicalIdentityFaceAsset).WithMany().HasForeignKey(item => item.CanonicalIdentityFaceAssetId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne(item => item.BodyReferenceAsset).WithMany().HasForeignKey(item => item.BodyReferenceAssetId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne(item => item.FrontReferenceAsset).WithMany().HasForeignKey(item => item.FrontReferenceAssetId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne(item => item.SideReferenceAsset).WithMany().HasForeignKey(item => item.SideReferenceAssetId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne(item => item.BackReferenceAsset).WithMany().HasForeignKey(item => item.BackReferenceAssetId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne(item => item.CreatedByUser).WithMany().HasForeignKey(item => item.CreatedByUserId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(item => item.ApprovedByUser).WithMany().HasForeignKey(item => item.ApprovedByUserId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne(item => item.LockedByUser).WithMany().HasForeignKey(item => item.LockedByUserId).OnDelete(DeleteBehavior.SetNull);
+        });
+        builder.Entity<MovieCharacterProductionSheetLook>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.Key).HasMaxLength(120).IsRequired();
+            entity.Property(item => item.Name).HasMaxLength(160).IsRequired();
+            entity.Property(item => item.Wardrobe).HasMaxLength(4_000);
+            entity.Property(item => item.Appearance).HasMaxLength(4_000);
+            entity.Property(item => item.ReferenceNotes).HasMaxLength(4_000);
+            entity.HasIndex(item => new { item.MovieCharacterProductionSheetVersionId, item.Key }).IsUnique();
+            entity.HasIndex(item => item.ReferenceAssetId);
+            entity.HasOne(item => item.Version).WithMany(item => item.Looks).HasForeignKey(item => item.MovieCharacterProductionSheetVersionId).OnDelete(DeleteBehavior.Cascade);
             entity.HasOne(item => item.ReferenceAsset).WithMany().HasForeignKey(item => item.ReferenceAssetId).OnDelete(DeleteBehavior.SetNull);
         });
         builder.Entity<MovieCharacterState>(entity =>

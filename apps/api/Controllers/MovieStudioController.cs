@@ -12,7 +12,7 @@ namespace Taslim.Api.Controllers;
 [ApiController]
 [Authorize]
 [Route("api/movie-studio")]
-public sealed class MovieStudioController(IMovieStudioService movies, IMovieProductionComplexityService complexity, IMovieDurationBudgetService durationBudgets, IMovieGuideService guides, IMovieStoryService stories, IMovieStoryCastService storyCast, IMovieCharacterContinuityService continuity, IMovieWorldContinuityService worldContinuity, IMovieProductionContinuityService productionContinuity, IMovieProductionReferencePackageService productionReferences, IMovieProductionPreflightService productionPreflight, IMovieTimelineService timeline, IMovieTakeSelectService takeSelects, IMovieShotExecutionService shotExecution, MovieAuthorizationService authorization, MovieShotImportanceService shotImportance, IMovieCinematographyPlanningService cinematographyPlanning) : ControllerBase
+public sealed class MovieStudioController(IMovieStudioService movies, IMovieProductionComplexityService complexity, IMovieDurationBudgetService durationBudgets, IMovieGuideService guides, IMovieStoryService stories, IMovieStoryCastService storyCast, IMovieCharacterContinuityService continuity, IMovieWorldContinuityService worldContinuity, IMovieProductionContinuityService productionContinuity, IMovieProductionReferencePackageService productionReferences, IMovieProductionPreflightService productionPreflight, IMovieTimelineService timeline, IMovieTakeSelectService takeSelects, IMovieShotExecutionService shotExecution, MovieAuthorizationService authorization, MovieShotImportanceService shotImportance, IMovieCinematographyPlanningService cinematographyPlanning, IMovieCharacterProductionSheetService productionSheets) : ControllerBase
 {
     [HttpGet("cinematography/presets")]
     public IActionResult CinematographyPresets() => Ok(CinematographyPresetCatalog.All);
@@ -169,6 +169,59 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
     {
         var result = await movies.GetCharacterDetailAsync(GetUserId(), characterId, cancellationToken);
         return result is null ? ApiResults.Error(this, 404, "MOVIE_CHARACTER_NOT_FOUND", "Movie character not found.") : Ok(result);
+    }
+
+    [HttpGet("characters/{characterId:guid}/production-sheet")]
+    public async Task<IActionResult> GetProductionSheet(Guid characterId, CancellationToken cancellationToken)
+    {
+        var result = await productionSheets.GetAsync(GetUserId(), characterId, cancellationToken);
+        return result is null ? ApiResults.Error(this, 404, "MOVIE_CHARACTER_PRODUCTION_SHEET_NOT_FOUND", "Character production sheet not found.") : Ok(result);
+    }
+
+    [HttpPut("characters/{characterId:guid}/production-sheet")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> SaveProductionSheet(Guid characterId, MovieCharacterProductionSheetRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await productionSheets.SaveDraftAsync(GetUserId(), characterId, request, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_CHARACTER_NOT_FOUND", "Movie character not found.") : Ok(result);
+        }
+        catch (MovieCharacterProductionSheetValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
+        catch (MovieCharacterProductionSheetLockedException exception) { return ApiResults.Error(this, 409, "MOVIE_CHARACTER_PRODUCTION_SHEET_LOCKED", exception.Message); }
+    }
+
+    [HttpPost("production-sheets/{sheetId:guid}/approve")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> ApproveProductionSheet(Guid sheetId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await productionSheets.ApproveAsync(GetUserId(), sheetId, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_CHARACTER_PRODUCTION_SHEET_NOT_FOUND", "Character production sheet not found.") : Ok(result);
+        }
+        catch (MovieCharacterProductionSheetValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
+        catch (MovieCharacterProductionSheetLockedException exception) { return ApiResults.Error(this, 409, "MOVIE_CHARACTER_PRODUCTION_SHEET_LOCKED", exception.Message); }
+    }
+
+    [HttpPost("production-sheets/{sheetId:guid}/lock")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> LockProductionSheet(Guid sheetId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await productionSheets.LockAsync(GetUserId(), sheetId, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_CHARACTER_PRODUCTION_SHEET_NOT_FOUND", "Character production sheet not found.") : Ok(result);
+        }
+        catch (MovieCharacterProductionSheetValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
+    }
+
+    [HttpPost("production-sheets/{sheetId:guid}/unlock")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> UnlockProductionSheet(Guid sheetId, CancellationToken cancellationToken)
+    {
+        var result = await productionSheets.UnlockAsync(GetUserId(), sheetId, cancellationToken);
+        return result is null ? ApiResults.Error(this, 404, "MOVIE_CHARACTER_PRODUCTION_SHEET_NOT_FOUND", "Character production sheet not found.") : Ok(result);
     }
 
     [HttpGet("projects/{id:guid}/world")]
