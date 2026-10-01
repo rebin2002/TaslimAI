@@ -389,7 +389,7 @@ public static class MovieProductionProjection
             attempts.Length,
             qualityControlStatus,
             job.ErrorCode,
-            job.ErrorMessage,
+            string.IsNullOrWhiteSpace(job.ErrorCode) ? null : "The movie generation operation did not complete.",
             asset?.Id,
             asset?.AssetType,
             attempts.Select(item => new MovieProductionProviderAttemptDto(

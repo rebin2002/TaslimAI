@@ -77,6 +77,44 @@ public sealed class MovieStudioV2Tests
     }
 
     [Fact]
+    public async Task Direct_take_status_mutation_cannot_forge_approval_or_selection()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        var (userId, _, shotId) = await SeedAsync(db);
+        var service = new MovieV2Service(db, new WorkspaceAccessService(db));
+        var take = await service.AddTakeAsync(userId, shotId, new MovieV2TakeRequest(), CancellationToken.None);
+
+        var takeId = take!.Id;
+        await Assert.ThrowsAsync<MovieV2ValidationException>(() => service.SetStatusAsync(userId, "take", takeId, MovieTakeStatuses.Approved, CancellationToken.None));
+        var persisted = await db.MovieTakes.SingleAsync(item => item.Id == takeId);
+        Assert.Equal(MovieTakeStatuses.Planned, persisted.Status);
+        Assert.Null((await db.MovieShots.SingleAsync(item => item.Id == shotId)).SelectedTakeId);
+    }
+
+    [Fact]
+    public void Movie_job_projection_redacts_provider_and_upstream_payloads()
+    {
+        var job = new GenerationJob
+        {
+            Id = Guid.NewGuid(), WorkspaceId = Guid.NewGuid(), JobType = GenerationJobTypes.MovieClipGenerate,
+            Provider = "secret-provider", ProviderModel = "secret-model", ResultJson = "secret prompt and provider payload",
+            ErrorCode = "MOVIE_GENERATION_FAILED", ErrorMessage = "upstream secret", CreatedAt = DateTime.UtcNow,
+        };
+
+        var dto = GenerationJobContractMapper.ToMovieDto(job);
+        var json = JsonSerializer.Serialize(dto, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+
+        Assert.Null(dto.ResultJson);
+        Assert.Equal("The movie generation operation did not complete.", dto.ErrorMessage);
+        Assert.DoesNotContain("secret-provider", json, StringComparison.Ordinal);
+        Assert.DoesNotContain("secret-model", json, StringComparison.Ordinal);
+        Assert.DoesNotContain("upstream secret", json, StringComparison.Ordinal);
+        Assert.DoesNotContain("secret prompt", json, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Non_member_cannot_read_or_mutate_movie_hierarchy()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");

@@ -209,8 +209,8 @@ public sealed class MovieFinalAssemblyService(
                 take.MovieClip?.ContinuitySnapshotHash));
         }
 
-        var audioInputs = await NormalizeAudioInputsAsync(movie.WorkspaceId, request.AudioMixInputs ?? [], cancellationToken);
-        var captionAsset = await ValidateCaptionAssetAsync(movie.WorkspaceId, captions, cancellationToken);
+        var audioInputs = await NormalizeAudioInputsAsync(movie.WorkspaceId, movie.ProjectId, request.AudioMixInputs ?? [], cancellationToken);
+        var captionAsset = await ValidateCaptionAssetAsync(movie.WorkspaceId, movie.ProjectId, captions, cancellationToken);
         var expectedDuration = Math.Max(1, movie.DurationSeconds);
         var canonicalPayload = new
         {
@@ -323,7 +323,7 @@ public sealed class MovieFinalAssemblyService(
         return ToDto(assembly);
     }
 
-    private async Task<IReadOnlyList<MovieAssemblyAudioMixInput>> NormalizeAudioInputsAsync(Guid workspaceId, IReadOnlyList<MovieAssemblyAudioMixInputRequest> requests, CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<MovieAssemblyAudioMixInput>> NormalizeAudioInputsAsync(Guid workspaceId, Guid? projectId, IReadOnlyList<MovieAssemblyAudioMixInputRequest> requests, CancellationToken cancellationToken)
     {
         if (requests.Count > 64) throw new MovieFinalAssemblyValidationException("ASSEMBLY_AUDIO_MIX_INVALID", "A final mix can contain at most 64 audio inputs.");
         var ids = requests.Select(item => item.AssetId).ToArray();
@@ -336,6 +336,8 @@ public sealed class MovieFinalAssemblyService(
         foreach (var request in requests)
         {
             if (!assets.TryGetValue(request.AssetId, out var asset)
+                || asset.Status != AssetStatus.Active
+                || asset.ProjectId.HasValue && asset.ProjectId != projectId
                 || (!string.Equals(asset.AssetType, AssetTypes.Audio, StringComparison.OrdinalIgnoreCase) && !string.Equals(asset.AssetType, AssetTypes.Music, StringComparison.OrdinalIgnoreCase))
                 || asset.StoredFile?.Status != StoredFileStatus.Ready)
                 throw new MovieFinalAssemblyValidationException("ASSEMBLY_AUDIO_SOURCE_UNAVAILABLE", "Every audio mix input must be a ready audio asset in the movie workspace.");
@@ -348,13 +350,13 @@ public sealed class MovieFinalAssemblyService(
         return normalized;
     }
 
-    private async Task<Asset?> ValidateCaptionAssetAsync(Guid workspaceId, MovieAssemblyCaptions captions, CancellationToken cancellationToken)
+    private async Task<Asset?> ValidateCaptionAssetAsync(Guid workspaceId, Guid? projectId, MovieAssemblyCaptions captions, CancellationToken cancellationToken)
     {
         if (captions.Mode == MovieAssemblyCaptionModes.None) return null;
         if (!captions.AssetId.HasValue) throw new MovieFinalAssemblyValidationException("ASSEMBLY_CAPTIONS_SOURCE_REQUIRED", "A captions asset is required for the selected captions mode.");
         var asset = await db.Assets.AsNoTracking().Include(item => item.StoredFile)
             .FirstOrDefaultAsync(item => item.Id == captions.AssetId && item.WorkspaceId == workspaceId, cancellationToken);
-        if (asset is null || asset.StoredFile?.Status != StoredFileStatus.Ready || !string.Equals(asset.AssetType, AssetTypes.File, StringComparison.OrdinalIgnoreCase))
+        if (asset is null || asset.Status != AssetStatus.Active || asset.ProjectId.HasValue && asset.ProjectId != projectId || asset.StoredFile?.Status != StoredFileStatus.Ready || !string.Equals(asset.AssetType, AssetTypes.File, StringComparison.OrdinalIgnoreCase))
             throw new MovieFinalAssemblyValidationException("ASSEMBLY_CAPTIONS_SOURCE_UNAVAILABLE", "The captions asset is not available in the movie workspace.");
         return asset;
     }
@@ -413,7 +415,7 @@ public sealed class MovieFinalAssemblyService(
             assembly.CreatedAt,
             assembly.UpdatedAt,
             assembly.CompletedAt,
-            job is null ? null : GenerationJobContractMapper.ToDto(job));
+            job is null ? null : GenerationJobContractMapper.ToMovieDto(job));
         return dto;
     }
 
@@ -751,7 +753,9 @@ public sealed class MovieFinalAssemblyJobHandler(
     {
         var captionIds = input.Captions.AssetId is Guid captionAssetId ? new[] { captionAssetId } : Array.Empty<Guid>();
         var ids = input.Timeline.Select(item => item.AssetId).Concat(input.AudioMixInputs.Select(item => item.AssetId)).Concat(captionIds).Distinct().ToArray();
-        var files = await db.Assets.AsNoTracking().Include(item => item.StoredFile).Where(item => ids.Contains(item.Id) && item.WorkspaceId == workspaceId).ToDictionaryAsync(item => item.Id, cancellationToken);
+        var files = await db.Assets.AsNoTracking().Include(item => item.StoredFile)
+            .Where(item => ids.Contains(item.Id) && item.WorkspaceId == workspaceId && item.Status == AssetStatus.Active && (!item.ProjectId.HasValue || item.ProjectId == input.MovieProjectId))
+            .ToDictionaryAsync(item => item.Id, cancellationToken);
         if (files.Count != ids.Length) throw new MovieFinalAssemblyExecutionException(GenerationJobErrorCodes.MovieAssemblySourceUnavailable);
         var directory = Path.Combine(Path.GetTempPath(), "taslim-final-assembly-inputs", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(directory);

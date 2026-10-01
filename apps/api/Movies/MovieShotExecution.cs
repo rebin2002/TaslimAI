@@ -105,6 +105,8 @@ public sealed class MovieShotExecutionService(
         var qualityLevel = request.QualityLevel?.Trim() ?? string.Empty;
         if (!MovieQualityLevels.Supported.Contains(qualityLevel))
             throw new MovieShotExecutionValidationException("SHOT_EXECUTION_QUALITY_INVALID", "Choose a supported quality level.");
+        if (request.Title?.Trim().Length > 160 || request.Label?.Trim().Length > 160)
+            throw new MovieShotExecutionValidationException("SHOT_EXECUTION_LABEL_TOO_LARGE", "Execution title and label must be 160 characters or fewer.");
         var resolution = NormalizeResolutionPlan(request);
         var referencePackageJson = BuildReferencePackage(keyframe);
         if (referencePackageJson.Length > MaximumReferencePackageCharacters)
@@ -254,7 +256,7 @@ public sealed class MovieShotExecutionService(
         {
             var job = take.GenerationJob ?? throw new InvalidOperationException("A shot execution take must reference its generation job.");
             var total = takes.Count;
-            return new MovieShotExecutionCandidateDto(take.Id, take.MovieClipId!.Value, job.Id, position + 1, total, take.Status, GenerationJobContractMapper.ToDto(job));
+            return new MovieShotExecutionCandidateDto(take.Id, take.MovieClipId!.Value, job.Id, position + 1, total, take.Status, GenerationJobContractMapper.ToMovieDto(job));
         }).ToArray();
         return new MovieShotExecutionResponse(shot.Id, keyframeVersionId, durationSeconds, shot.Scene.MovieProject.AspectRatio, resolution, candidates);
     }

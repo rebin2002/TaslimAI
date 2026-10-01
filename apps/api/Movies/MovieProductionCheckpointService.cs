@@ -91,7 +91,7 @@ public sealed class MovieProductionCheckpointService(
         if (versions.Count > 0) await db.SaveChangesAsync(cancellationToken);
 
         var checkpoint = await BuildAndPersistAsync(movie, cancellationToken, now, userId);
-        return new MovieProductionRecoveryResponse(checkpoint, GenerationJobContractMapper.ToDto(retry));
+        return new MovieProductionRecoveryResponse(checkpoint, GenerationJobContractMapper.ToMovieDto(retry));
     }
 
     private async Task<MovieProductionCheckpointDto> BuildAndPersistAsync(MovieProject movie, CancellationToken cancellationToken, DateTime? recoveredAt = null, Guid? recoveredByUserId = null)
