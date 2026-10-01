@@ -12,7 +12,7 @@ namespace Taslim.Api.Controllers;
 [ApiController]
 [Authorize]
 [Route("api/movie-studio")]
-public sealed class MovieStudioController(IMovieStudioService movies, IMovieProductionComplexityService complexity, IMovieDurationBudgetService durationBudgets, IMovieGuideService guides, IMovieStoryService stories, IMovieStoryCastService storyCast, IMovieCharacterContinuityService continuity, IMovieWorldContinuityService worldContinuity, IMovieProductionContinuityService productionContinuity, IMovieProductionReferencePackageService productionReferences, IMovieTimelineService timeline, IMovieShotExecutionService shotExecution, MovieAuthorizationService authorization, MovieShotImportanceService shotImportance, IMovieCinematographyPlanningService cinematographyPlanning) : ControllerBase
+public sealed class MovieStudioController(IMovieStudioService movies, IMovieProductionComplexityService complexity, IMovieDurationBudgetService durationBudgets, IMovieGuideService guides, IMovieStoryService stories, IMovieStoryCastService storyCast, IMovieCharacterContinuityService continuity, IMovieWorldContinuityService worldContinuity, IMovieProductionContinuityService productionContinuity, IMovieProductionReferencePackageService productionReferences, IMovieTimelineService timeline, IMovieMissingInsertPlannerService insertPlanner, IMovieShotExecutionService shotExecution, MovieAuthorizationService authorization, MovieShotImportanceService shotImportance, IMovieCinematographyPlanningService cinematographyPlanning) : ControllerBase
 {
     [HttpGet("cinematography/presets")]
     public IActionResult CinematographyPresets() => Ok(CinematographyPresetCatalog.All);
@@ -56,6 +56,17 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
     {
         var result = await timeline.GetAsync(GetUserId(), id, cancellationToken);
         return result is null ? ApiResults.Error(this, 404, "MOVIE_TIMELINE_NOT_FOUND", "Movie timeline not found.") : Ok(result);
+    }
+
+    [HttpGet("projects/{id:guid}/insert-planner")]
+    public async Task<IActionResult> GetMissingInsertPlan(Guid id, [FromQuery] Guid? revisionId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await insertPlanner.GetAsync(GetUserId(), id, revisionId, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result);
+        }
+        catch (MovieMissingInsertPlannerException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
     }
 
     [HttpPost("projects/{id:guid}/timeline/revisions")]

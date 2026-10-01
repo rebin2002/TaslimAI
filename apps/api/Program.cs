@@ -243,6 +243,7 @@ builder.Services.AddScoped<IMovieV2Service, MovieV2Service>();
 builder.Services.AddScoped<IMovieDialogueProductionService, MovieDialogueProductionService>();
 builder.Services.AddScoped<MovieDialogueVoiceExecutionStore>();
 builder.Services.AddScoped<IMovieTimelineService, MovieTimelineService>();
+builder.Services.AddScoped<IMovieMissingInsertPlannerService, MovieMissingInsertPlannerService>();
 builder.Services.AddScoped<IMovieFinalMasteringService, MovieFinalMasteringService>();
 builder.Services.AddScoped<IMovieFinalAssemblyService, MovieFinalAssemblyService>();
 builder.Services.Configure<MovieFinalAssemblyOptions>(builder.Configuration.GetSection("MovieFinalAssembly"));
