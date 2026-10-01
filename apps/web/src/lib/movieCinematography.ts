@@ -21,6 +21,7 @@ export const CINEMATOGRAPHY_CONTROL_KEYS = [
   "cameraMovement",
   "frameRateIntent",
   "lighting",
+  "exposureLook",
   "paletteLook",
   "compositionNotes",
 ] as const;
@@ -54,6 +55,7 @@ export function selectionFromPreset(
     cameraMovement: preset.cameraMovement,
     frameRateIntent: preset.frameRateIntent,
     lighting: preset.lighting,
+    exposureLook: previous.exposureLook ?? null,
     paletteLook: preset.paletteLook,
     compositionNotes: preset.compositionNotes,
   };
@@ -74,6 +76,7 @@ export function emptyCinematographySelection(
     cameraMovement: null,
     frameRateIntent: null,
     lighting: null,
+    exposureLook: null,
     paletteLook: null,
     compositionNotes: null,
   };

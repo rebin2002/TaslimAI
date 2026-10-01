@@ -165,7 +165,9 @@ public sealed record CinematographyIntentSelection(
     string? FrameRateIntent = null,
     string? Lighting = null,
     string? PaletteLook = null,
-    string? CompositionNotes = null);
+    string? CompositionNotes = null,
+    string? ExposureLook = null,
+    IReadOnlyList<string>? ContinuityConstraints = null);
 
 public static class CinematographyIntentValidator
 {
@@ -192,9 +194,11 @@ public static class CinematographyIntentValidator
             {
                 selection.ShotSize, selection.FocalLength, selection.LensIntent, selection.ApertureDepthOfField,
                 selection.CameraAngle, selection.CameraMovement, selection.FrameRateIntent, selection.Lighting,
-                selection.PaletteLook, selection.CompositionNotes,
+                selection.PaletteLook, selection.CompositionNotes, selection.ExposureLook,
             }.Any(value => value?.Trim().Length > MaxFieldLength))
             return "Cinematography control notes must be 600 characters or fewer.";
+        if (selection.ContinuityConstraints is { Count: > 24 } || selection.ContinuityConstraints?.Any(item => string.IsNullOrWhiteSpace(item) || item.Trim().Length > 800) == true)
+            return "Cinematography continuity constraints are invalid.";
         return null;
     }
 
@@ -221,7 +225,9 @@ public static class CinematographyIntentValidator
             Clean(selection.FrameRateIntent ?? preset?.FrameRateIntent, MaxFieldLength),
             Clean(selection.Lighting ?? preset?.Lighting, MaxFieldLength),
             Clean(selection.PaletteLook ?? preset?.PaletteLook, MaxFieldLength),
-            Clean(selection.CompositionNotes ?? preset?.CompositionNotes, MaxFieldLength));
+            Clean(selection.CompositionNotes ?? preset?.CompositionNotes, MaxFieldLength),
+            Clean(selection.ExposureLook, MaxFieldLength),
+            selection.ContinuityConstraints?.Where(item => !string.IsNullOrWhiteSpace(item)).Select(item => item.Trim()[..Math.Min(item.Trim().Length, 800)]).Distinct(StringComparer.OrdinalIgnoreCase).Take(24).ToArray());
     }
 
     public static string ToJson(CinematographyIntentSelection? selection) =>

@@ -71,4 +71,41 @@ public sealed class MovieCinematographyPlanningTests
         Assert.Contains(result.Plan.Grounding!, item => item.Source == "cinematography_bible" && item.Locked);
         Assert.Contains(result.Plan.Grounding!, item => item.Source == "continuity" && item.Locked);
     }
+
+    [Fact]
+    public void Camera_profile_is_structured_and_explicit_overrides_are_audited_against_locked_canon()
+    {
+        var lockedCanon = new CinematographyShotPlan(
+            "close_up", "single", "eye_level", "front", "locked_off", "isolate", "portrait_natural", "shallow", "selective", "soft_motivated", "eyes", "hold",
+            FocalLengthIntent: "portrait", ExposureLook: "warm_filmic", ContinuityConstraints: ["Keep the listener's eyeline open."]);
+        var context = new CinematographyPlanningContext(
+            "16:9", "A quiet confession.", "INT. ROOM — NIGHT", "The character looks up.", "Vulnerable truth.",
+            "Portrait-forward, warm, restrained camera.", lockedCanon, 4, ["Keep the listener's eyeline open."], null);
+
+        var result = MovieCinematographyPlanner.Plan(context, cameraProfile: new CinematographyCameraProfileOverride
+        {
+            FocalLengthIntent = "telephoto",
+            ExposureLook = "cool_muted",
+            CameraMovement = "crane",
+        });
+
+        Assert.Equal("portrait", result.Plan.FocalLengthIntent);
+        Assert.Equal("warm_filmic", result.Plan.ExposureLook);
+        Assert.Equal("locked_off", result.Plan.CameraMovement);
+        Assert.Equal(["Keep the listener's eyeline open."], result.Plan.ContinuityConstraints);
+        Assert.Contains(nameof(CinematographyShotPlan.FocalLengthIntent), result.OverrideAudit!.BlockedByLockedCanonFields);
+        Assert.Contains(nameof(CinematographyShotPlan.ExposureLook), result.OverrideAudit.BlockedByLockedCanonFields);
+        Assert.Contains(nameof(CinematographyShotPlan.CameraMovement), result.OverrideAudit.BlockedByLockedCanonFields);
+        Assert.Equal(MovieCameraProfileSources.MovieGuide, CinematographyCameraProfileContract.FromPlan(result.Plan).Source);
+    }
+
+    [Fact]
+    public void Camera_profile_rejects_provider_like_exposure_values()
+    {
+        var plan = new CinematographyShotPlan(
+            "medium", "single", "eye_level", "front", "locked_off", "establish", "neutral", "layered", "subject_locked", "naturalistic", "primary_subject", "cut",
+            ExposureLook: "provider_magic");
+
+        Assert.Equal("Every cinematography plan field must use a supported structured value.", CinematographyShotPlanValidator.Validate(plan));
+    }
 }

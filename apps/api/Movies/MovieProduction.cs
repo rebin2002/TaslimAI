@@ -275,7 +275,8 @@ public sealed record MovieCinematographySummaryDto(
     string? CameraAngle,
     string? Lighting,
     string? PaletteLook,
-    string? CompositionNotes);
+    string? CompositionNotes,
+    MovieCameraProfileDto? CameraProfile = null);
 
 public sealed record MovieStoryboardShotDto(
     Guid Id,

@@ -36,6 +36,7 @@ const controlLabels: Record<CinematographyControlKey, string> = {
   cameraMovement: "Camera movement",
   frameRateIntent: "Frame rate",
   lighting: "Lighting",
+  exposureLook: "Exposure / look",
   paletteLook: "Palette / look",
   compositionNotes: "Composition",
 };
@@ -353,6 +354,26 @@ export function ShotDesigner({
               </label>
             ))}
           </div>
+          <label className="movie-shot-field movie-shot-wide">
+            <span>Continuity constraints</span>
+            <textarea
+              value={(draft.cinematography.continuityConstraints ?? []).join("\n")}
+              onChange={(event) =>
+                setDraft((current) => ({
+                  ...current,
+                  cinematography: {
+                    ...current.cinematography,
+                    continuityConstraints: event.target.value
+                      .split("\n")
+                      .map((item) => item.trim())
+                      .filter(Boolean),
+                  },
+                }))
+              }
+              rows={3}
+              placeholder="One locked continuity rule per line"
+            />
+          </label>
           <CapabilityTruth selection={draft.cinematography} />
         </div>
       )}
