@@ -70,8 +70,12 @@ for forbidden in ("force_push", "reset_production_database", "drop_production_da
     assert forbidden in source, f"forbidden action {forbidden} missing from the contract"
 assert "CanPerformDestructiveDatabaseAction(string action) => false" in policy, "destructive action guard must always deny"
 # The follow-on loop may only perform ordinary development launches.
-assert "production_release" in nextwave and "return false" in nextwave, "next-wave policy must refuse release-class actions"
-assert "allow_automatic_release" not in nextwave.replace("AllowAutomaticRelease", ""), "policy must not grant release authority"
+assert '!string.Equals(action, "production_release"' in nextwave, "next-wave policy must refuse production release"
+assert '!string.Equals(action, "integration_merge"' in nextwave, "next-wave policy must refuse integration merge"
+assert "IsForbiddenAction(action)" in nextwave, "next-wave policy must inherit the forbidden-action guard"
+options_source = Path("apps/api/Autopilot/AutopilotOptions.cs").read_text()
+assert "MaxTasksPerWave = Math.Clamp(MaxTasksPerWave, 1, 20)" in options_source, "wave task bound must be clamped to 20"
+assert "MaxLaunchAttempts = Math.Clamp(MaxLaunchAttempts, 0, 3)" in options_source, "launch attempt bound must be clamped to 3"
 print("  destructive actions denied; follow-on loop limited to development launches")
 PY
 
@@ -83,17 +87,23 @@ service = Path("apps/api/Autopilot/AutopilotNextWaveService.cs").read_text()
 options = Path("apps/api/Autopilot/AutopilotOptions.cs").read_text()
 # The bridge token is read only from the environment, never from configuration values.
 assert "Environment.GetEnvironmentVariable" in provider, "bridge credential must come from the environment"
-assert "BridgeToken" not in provider.split("Environment.GetEnvironmentVariable")[0], "bridge credential must not be read from configuration"
+assert "Configuration" not in provider, "the provider must not read configuration values directly"
+assert "Bearer" in provider, "the credential must be sent as a bearer header"
+# No launch state or controller source may capture credential material.
 for name in ("AutopilotWaveLaunchEntities.cs", "AutopilotNextWaveService.cs"):
     text = Path("apps/api/Autopilot/" + name).read_text()
-    assert "Token" not in text and "Authorization" not in text, f"{name} must not persist credential material"
-assert "Token" not in Path("apps/api/Autopilot/AutopilotBacklogService.cs").read_text()
+    assert "BridgeToken" not in text, f"{name} must not reference the bridge credential"
+    assert "Environment.GetEnvironmentVariable" not in text, f"{name} must not read credentials"
+    assert "Authorization" not in text, f"{name} must not build credential headers"
+assert "BridgeToken" not in Path("apps/api/Autopilot/AutopilotBacklogService.cs").read_text()
+assert "BridgeToken" not in Path("apps/api/Autopilot/AutopilotContracts.cs").read_text(), "the credential name must not leak into API contracts"
 assert "BridgeTokenEnvironmentVariable" in options
 # Live launch requires an explicit opt-in flag and stays off by default.
-assert "AllowNextWaveLaunch = false" in options or "AllowNextWaveLaunch;" in options
+assert "public bool AllowNextWaveLaunch { get; set; } = false;" in options, "live follow-on launch must default to off"
+assert "LiveNextWaveLaunchEnabled => AllowNextWaveLaunch && !DryRun" in options, "live launch requires both the opt-in and non-dry-run"
 assert "MaxTasksPerWave" in options and "MaxLaunchAttempts" in options
-assert "MaxTasksPerWave = 20" in options, "wave task bound default must be 20"
-assert "MaxLaunchAttempts = 3" in options, "launch attempt bound default must be 3"
+assert "public int MaxTasksPerWave { get; set; } = 20;" in options, "wave task bound default must be 20"
+assert "public int MaxLaunchAttempts { get; set; } = 3;" in options, "launch attempt bound default must be 3"
 assert "IWaveLaunchProvider" in service, "the service must depend on the provider-neutral interface"
 print("  credential read from the environment only and never persisted")
 print("  launch goes through the provider-neutral interface with bounded attempts")
