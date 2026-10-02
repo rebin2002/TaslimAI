@@ -5,6 +5,7 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, ArrowUpRight, CheckCircle2, Image as ImageIcon, LockKeyhole, MapPinned, Package, ShieldCheck, Sparkles, UsersRound } from "lucide-react";
+import { useLocale } from "@/components/LocaleProvider";
 import { api, type MovieCast, type MovieCharacter, type MovieProp, type MovieWorldWorkspace } from "@/lib/api";
 import { assetFileUrl } from "@/lib/apiBase";
 
@@ -80,6 +81,7 @@ function recordIcon(room: KitRoom) {
 }
 
 export function ProductionKitWorkspace({ projectId }: { projectId: string }) {
+  const { t } = useLocale();
   const [cast, setCast] = useState<MovieCast | null>(null);
   const [world, setWorld] = useState<MovieWorldWorkspace | null>(null);
   const [characterDetail, setCharacterDetail] = useState<MovieCharacter | null>(null);
@@ -206,7 +208,7 @@ export function ProductionKitWorkspace({ projectId }: { projectId: string }) {
   if (!world || !cast) return <div className="movie-kit-empty"><ShieldCheck size={22} /><strong>Production Kit unavailable</strong><p>{error || "The project references could not be loaded."}</p></div>;
 
   return <div className="movie-module-stack movie-kit-room">
-    <section className="movie-kit-hero"><div><span className="movie-workspace-kicker">Production Kit · reference control</span><h3>Lock the world before the camera rolls.</h3><p>Characters, locations, and props stay in one simple handoff. Approve the identity once, attach only the references production needs, and carry continuity forward.</p></div><div className="movie-kit-hero-stat"><strong>{counts.ready}/{counts.total || 0}</strong><span>ready for production</span></div></section>
+    <section className="movie-kit-hero"><div><span className="movie-workspace-kicker">{t("movieModule.production-kit.eyebrow")}</span><h3>{t("movieModule.production-kit.title")}</h3><p>{t("movieModule.production-kit.description")}</p></div><div className="movie-kit-hero-stat"><strong>{counts.ready}/{counts.total || 0}</strong><span>ready for production</span></div></section>
     <section className="movie-kit-readiness" aria-label="Production Kit readiness"><div className="movie-kit-readiness-heading"><div><span className="movie-workspace-kicker">Readiness</span><h4>Reference coverage at a glance</h4></div><span>{counts.total ? `${Math.round((counts.ready / counts.total) * 100)}% complete` : "No records yet"}</span></div><div className="movie-kit-progress"><span style={{ width: `${counts.total ? (counts.ready / counts.total) * 100 : 0}%` }} /></div><div className="movie-kit-readiness-stats"><span><strong>{counts.references}</strong> referenced</span><span><strong>{counts.approvals}</strong> approved</span><span className={counts.missing ? "is-alert" : ""}><strong>{counts.missing}</strong> missing reference</span></div></section>
     <div className="movie-kit-layout">
       <aside className="movie-kit-index"><div className="movie-kit-index-heading"><div><span className="movie-workspace-kicker">Production map</span><h4>Three anchor rooms</h4></div><Sparkles size={16} /></div><div className="movie-kit-room-tabs" role="tablist" aria-label="Production Kit rooms">{rooms.map((item) => { const Icon = item.icon; const items = buildKitRecords(item.id, cast, world); return <button key={item.id} type="button" role="tab" aria-selected={room === item.id} className={room === item.id ? "is-active" : ""} onClick={() => void selectRoom(item.id)}><Icon size={15} /><span><strong>{item.label}</strong><small>{item.hint}</small></span><em>{items.length}</em></button>; })}</div><div className="movie-kit-index-list">{records.length ? records.map((record, index) => { const Icon = recordIcon(record.room); return <button type="button" key={record.id} className={`movie-kit-record ${selected?.id === record.id ? "is-selected" : ""}`} onClick={() => void selectRecord(record.id)}><span className="movie-kit-record-number">{String(index + 1).padStart(2, "0")}</span><span className="movie-kit-record-icon"><Icon size={14} /></span><span className="movie-kit-record-copy"><strong>{record.name}</strong><small>{record.role || "Identity record"}</small></span><span className={`movie-kit-state-dot is-${record.state}`} aria-label={stateLabel(record.state)} /></button>; }) : <div className="movie-kit-list-empty"><Package size={18} /><strong>No {room} yet</strong><p>Open the full {room} room to add the first record.</p></div>}</div><Link className="movie-kit-open-room" href={`/create/movie/${projectId}/${room === "characters" ? "cast" : "world"}`}>Open full {room} room <ArrowUpRight size={13} /></Link></aside>

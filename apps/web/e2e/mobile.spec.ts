@@ -25,4 +25,22 @@ test.describe("mobile navigation", () => {
       await expect(page.locator("main")).toBeVisible();
     }
   });
+
+  test("keeps the Full Movie module bodies usable at 390×844", async ({ authenticatedPage: page }) => {
+    test.setTimeout(180_000);
+    await page.goto("/create/movie");
+    await page.getByRole("button", { name: /full movie/i }).first().click();
+    await page.getByLabel("Movie title").fill("Mobile Movie Workspace");
+    await page.getByLabel("Describe your movie").fill("A responsive module coverage project.");
+    await page.getByRole("button", { name: /create full project/i }).click();
+    await expect(page).toHaveURL(/\/create\/movie\/[0-9a-f-]+\/overview$/i);
+    const projectId = page.url().match(/\/create\/movie\/([0-9a-f-]+)\/overview$/i)?.[1];
+    expect(projectId).toBeTruthy();
+    for (const roomSlug of ["overview", "production-kit", "story", "cast", "world", "scenes", "storyboard", "production", "selects", "edit", "audio", "qc", "exports", "team"]) {
+      await page.goto(`/create/movie/${projectId}/${roomSlug}`);
+      await expect(page.locator("main")).toBeVisible({ timeout: 30_000 });
+      const overflow = await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 2);
+      expect(overflow, `${roomSlug} must not overflow horizontally on mobile`).toBe(true);
+    }
+  });
 });

@@ -317,7 +317,7 @@ public sealed class MovieShotExecutionService(
         foreach (var reference in keyframe.AssetReferences.OrderBy(item => item.Role).ThenBy(item => item.AssetId))
             AddReference(references, reference.AssetId, reference.Role);
         return JsonSerializer.Serialize(new MovieShotExecutionReferencePackage(
-            1,
+            2,
             keyframe.Id,
             keyframe.CompositionJson,
             keyframe.ContinuitySnapshotReferenceJson,
@@ -381,6 +381,7 @@ public sealed class MovieShotExecutionService(
         shot.Narration,
         shot.Dialogue,
         shot.VisualContinuityNotes,
+        screenDirection = MovieScreenDirectionPlanCodec.FromJson(shot.ScreenDirectionJson),
     });
 
     private sealed record MovieShotExecutionAssetReference(Guid AssetId, string Role);
@@ -392,7 +393,8 @@ public sealed class MovieShotExecutionService(
         string? CinematographyReferenceJson,
         string? FirstFrameNotes,
         string? LastFrameNotes,
-        IReadOnlyList<MovieShotExecutionAssetReference> References);
+        IReadOnlyList<MovieShotExecutionAssetReference> References,
+        string? ScreenDirectionJson = null);
 }
 
 public sealed class MovieShotExecutionValidationException(string code, string message) : Exception(message)

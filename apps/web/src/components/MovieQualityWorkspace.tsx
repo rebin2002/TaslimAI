@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AlertTriangle, CheckCircle2, Clock3, RefreshCw, ShieldCheck, ShieldX, X } from "lucide-react";
+import { useLocale } from "@/components/LocaleProvider";
 import {
   api,
   type MovieFinalAssembly,
@@ -17,6 +18,7 @@ import {
  * each final assembly.
  */
 export function MovieQualityWorkspace({ project }: { project: MovieProject }) {
+  const { t } = useLocale();
   const [checkpoint, setCheckpoint] = useState<MovieProductionCheckpoint | null>(null);
   const [continuity, setContinuity] = useState<MovieProductionContinuityReview | null>(null);
   const [assemblies, setAssemblies] = useState<MovieFinalAssembly[]>([]);
@@ -64,7 +66,7 @@ export function MovieQualityWorkspace({ project }: { project: MovieProject }) {
     <div className="movie-qc-workspace" data-testid="movie-qc-workspace">
       <section className="movie-qc-command" aria-labelledby="movie-qc-title">
         <div>
-          <span className="movie-workspace-kicker">Quality control · delivery gate</span>
+          <span className="movie-workspace-kicker">{t("movieModule.qc.eyebrow")} · delivery gate</span>
           <h3 id="movie-qc-title">Check before you deliver.</h3>
           <p>
             QC is a review gate over persisted evidence: production checkpoints, continuity findings and the

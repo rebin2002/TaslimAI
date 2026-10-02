@@ -15,6 +15,7 @@ import {
   Sparkles,
   X,
 } from "lucide-react";
+import { useLocale } from "@/components/LocaleProvider";
 import { api, type MovieProject, type MovieTakeSelectRecord, type MovieTimeline } from "@/lib/api";
 import { assetFileUrl } from "@/lib/apiBase";
 import {
@@ -43,6 +44,7 @@ const filters: Array<{ id: SelectsFilter; label: string }> = [
  * timeline insert then references that approved select.
  */
 export function MovieSelectsWorkspace({ project }: { project: MovieProject }) {
+  const { t } = useLocale();
   const [timeline, setTimeline] = useState<MovieTimeline | null>(null);
   const [filter, setFilter] = useState<SelectsFilter>("all");
   const [decisions, setDecisions] = useState<Record<string, SalvageDecision>>({});
@@ -210,7 +212,7 @@ export function MovieSelectsWorkspace({ project }: { project: MovieProject }) {
       <div>
         <span className="movie-workspace-kicker">Selects / subclips</span>
         <h3 id="movie-selects-title">Keep the good seconds.</h3>
-        <p>Review generated takes as raw footage. Salvage a usable range first, persist it as a reviewed select, carry the QC evidence with it, and only add a small insert to the canonical timeline when the decision is deliberate.</p>
+        <p>{t("movieModule.selects.description").split(".")[0]}. Salvage a usable range first, persist it as a reviewed select, carry the QC evidence with it, and only add a small insert to the canonical timeline when the decision is deliberate.</p>
       </div>
       <div className="movie-selects-command-mark"><ListVideo size={23} /><span>NON-DESTRUCTIVE</span></div>
     </section>

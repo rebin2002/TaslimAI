@@ -20,6 +20,7 @@ import {
   WandSparkles,
   X,
 } from "lucide-react";
+import { useLocale } from "@/components/LocaleProvider";
 import { api, type MovieOverviewCost, type MovieProductionVersion, type MovieProject, type MovieTake } from "@/lib/api";
 import { assetFileUrl } from "@/lib/apiBase";
 import { MovieBudgetReadinessPanel } from "@/components/MovieBudgetReadinessPanel";
@@ -81,6 +82,7 @@ function confirmationCopy(key: string) {
 }
 
 export function MovieProductionWorkspace({ project, completionPercent, onRefresh, cost = null, adapter = createApiAdapter() }: { project: MovieProject; completionPercent: number; onRefresh: () => Promise<void>; cost?: MovieOverviewCost | null; adapter?: MovieProductionWorkspaceAdapter }) {
+  const { t } = useLocale();
   const model = useMemo(() => buildMovieProductionWorkspaceModel(project), [project]);
   const displayProgress = model.shots.length ? model.progressPercent : completionPercent;
   const [filter, setFilter] = useState<ProductionWorkspaceFilter>("all");
@@ -117,7 +119,7 @@ export function MovieProductionWorkspace({ project, completionPercent, onRefresh
   return <div className="movie-production-workspace" data-testid="movie-production-workspace">
     <section className="movie-production-command" aria-labelledby="production-command-title">
       <div className="movie-production-command-copy">
-        <div className="movie-production-command-eyebrow"><span className="movie-workspace-kicker">Production workspace</span><span className="movie-production-private"><LockKeyhole size={12} /> Private plan</span></div>
+        <div className="movie-production-command-eyebrow"><span className="movie-workspace-kicker">{t("movieModule.production.eyebrow")}</span><span className="movie-production-private"><LockKeyhole size={12} /> Private plan</span></div>
         <h3 id="production-command-title">From approved shot plan to a timeline-ready cut.</h3>
         <p>Work one shot at a time. Source frames, candidate takes, review decisions, and finish intent stay connected to the approved plan.</p>
       </div>
@@ -139,7 +141,7 @@ export function MovieProductionWorkspace({ project, completionPercent, onRefresh
     {error && <div className="movie-production-recovery" role="alert"><CircleAlert size={16} /><div><strong>We kept your plan safe.</strong><span>{error}</span></div><div className="movie-production-recovery-actions">{lastAction && <button type="button" onClick={() => void lastAction()} disabled={Boolean(busyKey)}><RefreshCw size={13} /> Retry last action</button>}<button type="button" onClick={() => void onRefresh()} disabled={Boolean(busyKey)}><RefreshCw size={13} /> Reload workspace</button></div></div>}
 
     <section className="movie-production-shot-workspace" aria-labelledby="production-shot-list-title">
-      <div className="movie-production-section-heading"><div><span className="movie-workspace-kicker">Shot review</span><h3 id="production-shot-list-title">Make the next decision obvious</h3><p>Implementation details stay behind the stage labels; you only see what needs your review next.</p></div><span className="movie-production-filter-count">{visibleShots.length} of {model.counts.shots} shots</span></div>
+      <div className="movie-production-section-heading"><div><span className="movie-workspace-kicker">Shot review</span><h3 id="production-shot-list-title">{t("movieModule.production.title")}</h3><p>Implementation details stay behind the stage labels; you only see what needs your review next.</p></div><span className="movie-production-filter-count">{visibleShots.length} of {model.counts.shots} shots</span></div>
       <div className="movie-production-filters" role="tablist" aria-label="Filter shots">{filters.map((item) => <button key={item.id} type="button" role="tab" aria-selected={filter === item.id} className={filter === item.id ? "is-active" : ""} onClick={() => setFilter(item.id)}>{item.label}{item.id === "needs-review" && model.counts.needsReview > 0 && <span>{model.counts.needsReview}</span>}{item.id === "ready" && model.counts.readyForTimeline > 0 && <span>{model.counts.readyForTimeline}</span>}</button>)}</div>
       {visibleShots.length ? <div className="movie-production-shot-list">{visibleShots.map((item) => <ProductionShotCard key={item.shot.id} item={item} busyKey={busyKey} selectedTier={selectedTier} adapter={adapter} onAction={runAction} />)}</div> : <ProductionEmptyState filter={filter} hasShots={model.counts.shots > 0} />}
     </section>

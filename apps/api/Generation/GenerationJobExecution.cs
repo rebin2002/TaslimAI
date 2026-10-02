@@ -862,6 +862,17 @@ public sealed class GenerationJobWorker(
         return job;
     }
 
+    private static int? ReadDurationMilliseconds(string? metadataJson)
+    {
+        if (string.IsNullOrWhiteSpace(metadataJson)) return null;
+        try
+        {
+            using var document = JsonDocument.Parse(metadataJson);
+            return document.RootElement.TryGetProperty("durationMilliseconds", out var value) && value.TryGetInt32(out var duration) && duration > 0 ? duration : null;
+        }
+        catch (JsonException) { return null; }
+    }
+
     private async Task ExecuteJobAsync(GenerationJob claimedJob, string workerId, int workerIndex, CancellationToken stoppingToken)
     {
         using var scope = scopeFactory.CreateScope();
@@ -1057,7 +1068,7 @@ public sealed class GenerationJobWorker(
             if (GenerationJobTypes.MovieDialogueVoiceTypes.Contains(claimedJob.JobType))
             {
                 var publication = publications.FirstOrDefault(item => item.Asset is not null);
-                await dialogueExecutions.MarkReadyAsync(current.Id, claimedJob.ConcurrencyToken, publication?.Asset?.Id, publication?.CreatedFile?.Id, null, publication?.Output.MetadataJson, result.Usage?.SafeMetadataJson, stoppingToken);
+                await dialogueExecutions.MarkReadyAsync(current.Id, claimedJob.ConcurrencyToken, publication?.Asset?.Id, publication?.CreatedFile?.Id, ReadDurationMilliseconds(publication?.Output.MetadataJson), publication?.Output.MetadataJson, result.Usage?.SafeMetadataJson, stoppingToken);
             }
             if (GenerationJobTypes.MovieSoundTypes.Contains(claimedJob.JobType))
             {

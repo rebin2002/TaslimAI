@@ -620,14 +620,16 @@ public sealed class FfmpegMovieFinalAssemblyExecutor(IOptions<MovieFinalAssembly
             if (!info.Exists || info.Length <= 0 || info.Length > Math.Min(2L * 1024 * 1024 * 1024, Math.Max(1, settings.MaxOutputBytes))) throw new MovieFinalAssemblyExecutionException("ASSEMBLY_OUTPUT_INVALID");
             progress.Report(90);
             var hash = await ComputeSha256Async(outputPath, cancellationToken);
-            var duration = Math.Max(1, request.Contract.ExpectedDurationSeconds);
+            var duration = await MeasureDurationSecondsAsync(outputPath, cancellationToken);
+            if (duration is null or <= 0)
+                throw new MovieFinalAssemblyExecutionException("ASSEMBLY_OUTPUT_MEASUREMENT_UNAVAILABLE");
             return new(
                 "master.mp4",
                 "video/mp4",
                 info.Length,
                 _ => Task.FromResult<Stream>(new DeleteOnDisposeFileStream(outputPath, directory)),
                 new MovieResolution(request.Contract.Profile.Width, request.Contract.Profile.Height),
-                duration,
+                duration.Value,
                 hash,
                 JsonSerializer.Serialize(new { width = request.Contract.Profile.Width, height = request.Contract.Profile.Height, durationSeconds = duration, outputSha256 = hash, elapsedMilliseconds = (long)Stopwatch.GetElapsedTime(start).TotalMilliseconds }));
         }
@@ -635,6 +637,36 @@ public sealed class FfmpegMovieFinalAssemblyExecutor(IOptions<MovieFinalAssembly
         {
             TryDelete(directory);
             throw;
+        }
+    }
+
+    private async Task<int?> MeasureDurationSecondsAsync(string outputPath, CancellationToken cancellationToken)
+    {
+        var ffprobe = Path.IsPathRooted(settings.FfmpegPath)
+            ? Path.Combine(Path.GetDirectoryName(settings.FfmpegPath) ?? string.Empty, "ffprobe")
+            : "ffprobe";
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = ffprobe, UseShellExecute = false, CreateNoWindow = true,
+            RedirectStandardOutput = true, RedirectStandardError = true,
+        };
+        startInfo.ArgumentList.Add("-v"); startInfo.ArgumentList.Add("error");
+        startInfo.ArgumentList.Add("-show_entries"); startInfo.ArgumentList.Add("format=duration");
+        startInfo.ArgumentList.Add("-of"); startInfo.ArgumentList.Add("default=noprint_wrappers=1:nokey=1");
+        startInfo.ArgumentList.Add(outputPath);
+        try
+        {
+            using var process = new Process { StartInfo = startInfo };
+            if (!process.Start()) return null;
+            var output = await process.StandardOutput.ReadToEndAsync(cancellationToken);
+            await process.WaitForExitAsync(cancellationToken).WaitAsync(TimeSpan.FromSeconds(Math.Clamp(settings.ProcessTimeoutSeconds, 1, 86_400)), cancellationToken);
+            return process.ExitCode == 0 && decimal.TryParse(output.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds) && seconds > 0m
+                ? Math.Max(1, (int)Math.Round(seconds, MidpointRounding.AwayFromZero))
+                : null;
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            return null;
         }
     }
 

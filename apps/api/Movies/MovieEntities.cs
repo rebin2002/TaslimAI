@@ -752,7 +752,11 @@ public sealed record MovieVideoGenerationRequest(
     string? SourceResolution = null,
     string? MasterResolution = null,
     string? ProcessingPath = null,
-    bool UpscalingRequested = false);
+    bool UpscalingRequested = false,
+    string? FirstFrameImageUri = null,
+    string? LastFrameImageUri = null,
+    IReadOnlyList<MovieVideoReferenceImage>? ReferenceImages = null);
+public sealed record MovieVideoReferenceImage(string Uri, string? Role = null);
 
 public sealed record MovieVideoSubmission(string ProviderJobId);
 public sealed record MovieVideoProviderStatus(
@@ -857,7 +861,10 @@ public sealed record MovieGenerationInput(
     string? MasterResolution = null,
     bool UpscalingRequested = false,
     int? TakeNumber = null,
-    int? TakeCount = null);
+    int? TakeCount = null,
+    string? FirstFrameImageUri = null,
+    string? LastFrameImageUri = null,
+    IReadOnlyList<MovieVideoReferenceImage>? ReferenceImages = null);
 
 public sealed record MovieProviderReadinessDto(bool Ready, IReadOnlyList<string> SupportedOperations);
 
