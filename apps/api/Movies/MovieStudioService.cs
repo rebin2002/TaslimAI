@@ -1539,6 +1539,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
             shot.VisualContinuityNotes, productionContract = MovieShotProductionContractProjection.FromShot(shot),
             qualityRequirements = profile.QualityRequirements,
             adaptiveResolutionDirectorInput = profile.AdaptiveResolutionDirectorInput,
+            screenDirection = MovieScreenDirectionPlanCodec.FromJson(shot.ScreenDirectionJson),
         });
     }
 

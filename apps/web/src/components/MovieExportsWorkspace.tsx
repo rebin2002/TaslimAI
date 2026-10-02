@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AlertTriangle, CheckCircle2, Clock3, Download, Film, RefreshCw, ShieldCheck, X } from "lucide-react";
+import { useLocale } from "@/components/LocaleProvider";
 import { api, type MovieFinalAssembly, type MovieProject } from "@/lib/api";
 
 const profiles = [
@@ -17,6 +18,7 @@ const terminalStatuses = new Set(["Ready", "Failed", "Cancelled"]);
  * value shown here comes from the persisted final assembly record.
  */
 export function MovieExportsWorkspace({ project }: { project: MovieProject }) {
+  const { t } = useLocale();
   const [assemblies, setAssemblies] = useState<MovieFinalAssembly[]>([]);
   const [profile, setProfile] = useState("hd-1080p");
   const [busy, setBusy] = useState(false);
@@ -84,7 +86,7 @@ export function MovieExportsWorkspace({ project }: { project: MovieProject }) {
     <div className="movie-exports-workspace" data-testid="movie-exports-workspace">
       <section className="movie-exports-command" aria-labelledby="movie-exports-title">
         <div>
-          <span className="movie-workspace-kicker">Exports · final assembly</span>
+          <span className="movie-workspace-kicker">{t("movieModule.exports.eyebrow")} · final assembly</span>
           <h3 id="movie-exports-title">Deliver one real master.</h3>
           <p>
             Final assembly reads the takes that are already approved, selected and finalized in this project, encodes

@@ -72,6 +72,10 @@ public sealed class MovieShotExecutionApiTests : IClassFixture<GenerationJobsNoW
         Assert.Equal("source_to_master", input.RootElement.GetProperty("ProcessingPath").GetString());
         Assert.False(input.RootElement.GetProperty("UpscalingRequested").GetBoolean());
         Assert.Contains(keyframe.Id.ToString(), input.RootElement.GetProperty("ReferencePackageJson").GetString());
+        using var shotSnapshot = JsonDocument.Parse(input.RootElement.GetProperty("ShotJson").GetString()!);
+        Assert.Equal("hallway-a", shotSnapshot.RootElement.GetProperty("screenDirection").GetProperty("Axis").GetString());
+        using var referencePackage = JsonDocument.Parse(input.RootElement.GetProperty("ReferencePackageJson").GetString()!);
+        Assert.Equal(2, referencePackage.RootElement.GetProperty("SchemaVersion").GetInt32());
     }
 
     [Fact]
@@ -156,7 +160,11 @@ public sealed class MovieShotExecutionApiTests : IClassFixture<GenerationJobsNoW
             language = "en",
         });
         var scene = await SendWithCsrf<MovieSceneDto>(client, HttpMethod.Post, $"/api/movie-studio/projects/{project.Project.Id}/scenes", new { title = "Scene", summary = "Execution scene." });
-        var shot = await SendWithCsrf<MovieShotDto>(client, HttpMethod.Post, $"/api/movie-studio/scenes/{scene.Id}/shots", new { description = "The production shot.", durationSeconds });
+        var shot = await SendWithCsrf<MovieShotDto>(client, HttpMethod.Post, $"/api/movie-studio/scenes/{scene.Id}/shots", new
+        {
+            description = "The production shot.", durationSeconds,
+            screenDirection = new { axis = "hallway-a", orientation = "side_a", entranceDirection = "screen_left", exitDirection = "screen_right" },
+        });
         return (project, shot);
     }
 

@@ -334,16 +334,15 @@ builder.Services.AddScoped<MovieVideoExecutionStore>();
 builder.Services.AddHttpClient<RunwayMovieVideoProvider>()
     .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
 builder.Services.AddHttpClient<ManusMovieVideoProvider>();
-builder.Services.AddSingleton<IMovieVideoProvider>(services =>
+builder.Services.AddSingleton<MovieVideoProviderRegistry>();
+builder.Services.AddSingleton<IMovieVideoProvider>(services => services.GetRequiredService<MovieVideoProviderRegistry>());
+builder.Services.AddHttpClient<DirectVideoHttpAdapter>((services, client) =>
 {
-    var options = services.GetRequiredService<Microsoft.Extensions.Options.IOptions<MovieVideoOptions>>().Value;
-    if (!options.Enabled) return new UnavailableMovieVideoProvider();
-    if (string.Equals(options.ProviderKey, "runway", StringComparison.OrdinalIgnoreCase))
-        return services.GetRequiredService<RunwayMovieVideoProvider>();
-    if (string.Equals(options.ProviderKey, "manus", StringComparison.OrdinalIgnoreCase) && options.Manus.Enabled)
-        return services.GetRequiredService<ManusMovieVideoProvider>();
-    return new UnavailableMovieVideoProvider();
+    var configuration = services.GetRequiredService<Microsoft.Extensions.Options.IOptions<DirectVideoProviderOptions>>().Value.ToConfiguration();
+    if (configuration.ApiBaseUri is not null) client.BaseAddress = configuration.ApiBaseUri;
+    client.Timeout = TimeSpan.FromSeconds(configuration.RequestTimeoutSeconds);
 });
+builder.Services.AddSingleton<IDirectVideoProviderAdapter>(services => services.GetRequiredService<DirectVideoHttpAdapter>());
 builder.Services.AddScoped<IDirectorActionExecutor, MovieDirectorActionExecutor>();
 builder.Services.AddScoped<IDirectorActionExecutor, MovieDirectorEditRepairAudioActionExecutor>();
 builder.Services.AddScoped<IDirectorActionExecutor, MovieDirectorStoryActionExecutor>();

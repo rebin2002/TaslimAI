@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { AlertTriangle, CheckCircle2, Clock3, MessageSquare, RefreshCw, ShieldCheck, UserCheck, Users, X } from "lucide-react";
+import { useLocale } from "@/components/LocaleProvider";
 import { api, type MovieCollaboration, type MovieProject } from "@/lib/api";
 
 const projectTarget = "MovieProject";
@@ -12,6 +13,7 @@ const projectTarget = "MovieProject";
  * actually granted to the signed-in user, not a client-side guess.
  */
 export function MovieTeamWorkspace({ project }: { project: MovieProject }) {
+  const { t } = useLocale();
   const [collaboration, setCollaboration] = useState<MovieCollaboration | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -80,7 +82,7 @@ export function MovieTeamWorkspace({ project }: { project: MovieProject }) {
     <div className="movie-team-workspace" data-testid="movie-team-workspace">
       <section className="movie-team-command" aria-labelledby="movie-team-title">
         <div>
-          <span className="movie-workspace-kicker">Team · review and sign-off</span>
+          <span className="movie-workspace-kicker">{t("movieModule.team.eyebrow")} · review and sign-off</span>
           <h3 id="movie-team-title">One project, clear ownership.</h3>
           <p>
             Project roles, review requests, notes and assignments are persisted server-side. The permissions shown here
@@ -197,7 +199,7 @@ export function MovieTeamWorkspace({ project }: { project: MovieProject }) {
               onClick={() => void submitComment()}
               disabled={!canComment || busy || commentBody.trim().length === 0}
             >
-              {busy ? "Saving…" : "Save note"}
+              {busy ? "Saving…" : `${t("movieDeep.save")} note`}
             </button>
             {!canComment && <span>Your current role does not include the Comment capability.</span>}
           </div>
