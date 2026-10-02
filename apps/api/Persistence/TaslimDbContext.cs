@@ -1168,6 +1168,7 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.Property(item => item.Status).HasMaxLength(30).IsRequired();
             entity.Property(item => item.Label).HasMaxLength(160);
             entity.Property(item => item.ChangeSummary).HasMaxLength(2_000);
+            entity.Property(item => item.CanonicalTimelineJson).HasMaxLength(1_000_000);
             entity.HasIndex(item => new { item.MovieTimelineId, item.RevisionNumber }).IsUnique();
             entity.HasIndex(item => new { item.MovieTimelineId, item.Status });
             entity.HasOne(item => item.Timeline).WithMany(item => item.Revisions).HasForeignKey(item => item.MovieTimelineId).OnDelete(DeleteBehavior.Cascade);
