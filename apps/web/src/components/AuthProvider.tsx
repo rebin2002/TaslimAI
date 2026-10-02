@@ -43,7 +43,8 @@ export function AuthProvider({ children }: Readonly<{ children: React.ReactNode 
   useEffect(() => {
     if (session?.user.preferredLanguage && !sessionLocaleInitialized.current) {
       sessionLocaleInitialized.current = true;
-      setLocale(session.user.preferredLanguage);
+      const savedLocale = window.localStorage.getItem("taslim-locale");
+      if (!savedLocale) setLocale(session.user.preferredLanguage);
     }
   }, [session?.user.preferredLanguage, setLocale]);
 
