@@ -12,7 +12,7 @@ using Taslim.Api.Persistence;
 namespace Taslim.Api.Persistence.Migrations
 {
     [DbContext(typeof(TaslimDbContext))]
-    [Migration("20261002211017_AddMovieTimelineCanonicalTransitions")]
+    [Migration("20261002212503_AddMovieTimelineCanonicalTransitions")]
     partial class AddMovieTimelineCanonicalTransitions
     {
         /// <inheritdoc />
@@ -8609,6 +8609,10 @@ namespace Taslim.Api.Persistence.Migrations
 
                     b.Property<Guid?>("BaseRevisionId")
                         .HasColumnType("uuid");
+
+                    b.Property<string>("CanonicalTimelineJson")
+                        .HasMaxLength(1000000)
+                        .HasColumnType("character varying(1000000)");
 
                     b.Property<string>("ChangeSummary")
                         .HasMaxLength(2000)

@@ -8607,6 +8607,10 @@ namespace Taslim.Api.Persistence.Migrations
                     b.Property<Guid?>("BaseRevisionId")
                         .HasColumnType("uuid");
 
+                    b.Property<string>("CanonicalTimelineJson")
+                        .HasMaxLength(1000000)
+                        .HasColumnType("character varying(1000000)");
+
                     b.Property<string>("ChangeSummary")
                         .HasMaxLength(2000)
                         .HasColumnType("character varying(2000)");
