@@ -217,15 +217,49 @@ public sealed class AutopilotPolicyTests
         paidProviders["Autopilot:PaidProvidersEnabled"] = "true";
         Assert.Throws<InvalidOperationException>(() => ProductionConfigurationValidator.Validate(BuildConfiguration(paidProviders), environment));
 
-        var unsigned = SafeProductionConfiguration();
-        unsigned["Autopilot:Enabled"] = "true";
-        unsigned["Autopilot:DryRun"] = "false";
-        // No signing secret is configured for the test host environment variable.
-        Assert.Throws<InvalidOperationException>(() => ProductionConfigurationValidator.Validate(BuildConfiguration(unsigned), environment));
+        // An enabled controller never boots without the server-side signing secret,
+        // whether it is simulating (Stage 1) or live (Stage 2).
+        Assert.Throws<InvalidOperationException>(() => ProductionConfigurationValidator.Validate(BuildConfiguration(EnabledConfiguration(dryRun: true)), environment));
+        Assert.Throws<InvalidOperationException>(() => ProductionConfigurationValidator.Validate(BuildConfiguration(EnabledConfiguration(dryRun: false)), environment));
 
-        var dryRunLive = SafeProductionConfiguration();
-        dryRunLive["Autopilot:Enabled"] = "true";
-        Assert.Throws<InvalidOperationException>(() => ProductionConfigurationValidator.Validate(BuildConfiguration(dryRunLive), environment));
+        WithSigningSecret(() =>
+        {
+            // Signature verification can never be relaxed while the controller is enabled.
+            var unsigned = EnabledConfiguration(dryRun: true);
+            unsigned["Autopilot:RequireSignedEvents"] = "false";
+            Assert.Throws<InvalidOperationException>(() => ProductionConfigurationValidator.Validate(BuildConfiguration(unsigned), environment));
+
+            // Paid capabilities stay refused in every staged posture.
+            var stagedCharging = EnabledConfiguration(dryRun: true);
+            stagedCharging["Autopilot:ChargingEnabled"] = "true";
+            Assert.Throws<InvalidOperationException>(() => ProductionConfigurationValidator.Validate(BuildConfiguration(stagedCharging), environment));
+
+            var stagedPaidProviders = EnabledConfiguration(dryRun: true);
+            stagedPaidProviders["Autopilot:PaidProvidersEnabled"] = "true";
+            Assert.Throws<InvalidOperationException>(() => ProductionConfigurationValidator.Validate(BuildConfiguration(stagedPaidProviders), environment));
+        });
+    }
+
+    [Fact]
+    public void Production_configuration_allows_staged_dry_run_activation()
+    {
+        var environment = new StubEnvironment("Production");
+
+        // Stage 0: the shipped dark posture boots without any signing secret.
+        ProductionConfigurationValidator.Validate(BuildConfiguration(SafeProductionConfiguration()), environment);
+
+        WithSigningSecret(() =>
+        {
+            // Stage 1: enabled and simulating. This supervised dry-run posture is the
+            // intended next activation stage and must boot in production.
+            ProductionConfigurationValidator.Validate(BuildConfiguration(EnabledConfiguration(dryRun: true)), environment);
+
+            // An omitted DryRun value falls back to the safe simulating posture.
+            ProductionConfigurationValidator.Validate(BuildConfiguration(EnabledConfiguration(dryRun: null)), environment);
+
+            // Stage 2: live execution stays reachable, but only by setting DryRun=false explicitly.
+            ProductionConfigurationValidator.Validate(BuildConfiguration(EnabledConfiguration(dryRun: false)), environment);
+        });
     }
 
     private static IConfiguration BuildConfiguration(Dictionary<string, string?> values) =>
@@ -292,6 +326,35 @@ public sealed class AutopilotPolicyTests
         ["Autopilot:Enabled"] = "false",
         ["Autopilot:RequireSignedEvents"] = "true",
     };
+
+    /// <summary>
+    /// Dedicated variable name so tests never read or write the real production
+    /// secret name, and so the "secret absent" case stays deterministic.
+    /// </summary>
+    private const string TestSigningSecretVariable = "AUTOPILOT_TEST_SIGNING_SECRET";
+
+    private static Dictionary<string, string?> EnabledConfiguration(bool? dryRun)
+    {
+        var values = SafeProductionConfiguration();
+        values["Autopilot:Enabled"] = "true";
+        values["Autopilot:RequireSignedEvents"] = "true";
+        values["Autopilot:SigningSecretEnvironmentVariable"] = TestSigningSecretVariable;
+        if (dryRun is not null) values["Autopilot:DryRun"] = dryRun.Value ? "true" : "false";
+        return values;
+    }
+
+    private static void WithSigningSecret(Action assertion)
+    {
+        Environment.SetEnvironmentVariable(TestSigningSecretVariable, "test-only-value");
+        try
+        {
+            assertion();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(TestSigningSecretVariable, null);
+        }
+    }
 
     private sealed class StubEnvironment(string environmentName) : IHostEnvironment
     {

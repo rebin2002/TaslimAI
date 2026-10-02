@@ -52,7 +52,7 @@ events and to re-drive a wave whose completion evidence never arrived.
 
 ## 3. Data model
 
-All tables are created by the migration `20261002094422_AddAutopilotControllerFoundation`.
+All tables are created by the migration `20261002100839_AddAutopilotControllerFoundation`.
 
 | Table | Purpose | Key constraints |
 | --- | --- | --- |
@@ -230,7 +230,9 @@ one wave.
 | `Autopilot:MaxWatchdogReconciliations` | `24` | Bound on watchdog retries per event |
 
 `ProductionConfigurationValidator` refuses to start production when charging or paid providers are enabled, when
-signed events are disabled, when a live controller is left in dry-run, or when the signing secret is absent.
+signed events are disabled, or when the signing secret is absent while the controller is enabled. The staged
+dry-run posture (`Enabled=true` with `DryRun=true`) is permitted; live execution requires `DryRun=false`
+explicitly.
 
 ## 18. Completion signal contract
 
@@ -280,6 +282,7 @@ HTTP delivery uses `POST /api/autopilot/events` with headers `X-Autopilot-Signat
 | Restart recovery | `Restart_recovery_requeues_an_inflight_event_and_reaches_terminal_state` |
 | Lock contention | `Lock_contention_prevents_duplicate_processing_of_the_same_wave`, `Exclusive_lock_rejects_a_second_live_holder` |
 | Safety stops | `Immutable_base_and_candidate_shas_cannot_be_repointed`, `Destructive_operations_are_never_permitted`, `Production_configuration_refuses_unsafe_autopilot_settings`, `Kill_switch_and_pause_stop_all_orchestration` |
+| Staged activation | `Production_configuration_allows_staged_dry_run_activation`, `Production_configuration_refuses_unsafe_autopilot_settings` |
 | Auditable log | `Audit_trail_records_reason_status_attempt_task_ids_branch_and_sha` |
 | Exposure rules | `Consoles_expose_only_product_safe_state` |
 | Endpoint wiring | `AutopilotEndpointTests` |

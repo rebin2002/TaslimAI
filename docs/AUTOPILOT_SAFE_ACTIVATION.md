@@ -20,7 +20,9 @@ authorizes a wave launch or a production release; those remain human decisions.
 | `Autopilot:MaxConcurrency` | `20` | Bounded fan-out |
 
 Production startup refuses to proceed if charging or paid providers are enabled, if signed events are disabled,
-if a live controller is left in dry-run, or if the signing secret is missing.
+or if the signing secret is missing while the controller is enabled. The Stage 1 posture (`Enabled=true` with
+`DryRun=true`) is a supported production configuration; live execution additionally requires `DryRun=false` to be
+set explicitly.
 
 ## 2. What is automatic vs. human-required
 
@@ -68,7 +70,7 @@ which always returns `false`.
    client build).
 3. The bridge sends `X-Autopilot-Source`, `X-Autopilot-Event-Id`, `X-Autopilot-Event-Type`,
    `X-Autopilot-Timestamp`, and `X-Autopilot-Signature` (`sha256=<hex HMAC of "{timestamp}.{payload}">`).
-4. The migration `20261002094422_AddAutopilotControllerFoundation` is applied.
+4. The migration `20261002100839_AddAutopilotControllerFoundation` is applied.
 5. The administrator role (`TaslimAdministrator`) exists for the operator who will watch the console.
 
 ## 4. Staged activation
@@ -84,6 +86,11 @@ appears.
 Set `Autopilot:Enabled=true` and keep `Autopilot:DryRun=true`. Every gate is evaluated and every decision is
 audited, but the handoff and smoke are simulated. Use this to confirm that waves complete, gates pass or fail for
 the expected reasons, and retries behave.
+
+This posture boots in production: `ProductionConfigurationValidator` requires signed events and the server-side
+signing secret while the controller is enabled, and it permits `DryRun=true`. Nothing external is executed in this
+stage — charging, paid providers, automatic integration merge, and automatic release all remain off, and the
+release handoff is recorded but never carried out.
 
 Watch:
 * `GET /api/admin/autopilot/overview`
