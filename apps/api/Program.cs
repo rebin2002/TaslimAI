@@ -10,6 +10,7 @@ using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using System.Security.Claims;
+using Taslim.Api.Autopilot;
 using Taslim.Api.Ai;
 using Taslim.Api.Activity;
 using Taslim.Api.Assets;
@@ -224,6 +225,12 @@ builder.Services.AddScoped<IProviderResilienceOrchestrator, ProviderResilienceOr
 builder.Services.AddScoped<IProviderBenchmarkService, ProviderBenchmarkService>();
 builder.Services.AddSingleton<IProviderCostGuard, AllowAllProviderCostGuard>();
 builder.Services.AddSingleton(TimeProvider.System);
+builder.Services.Configure<AutopilotWatchdogOptions>(builder.Configuration.GetSection("Autopilot"));
+builder.Services.AddScoped<IAutopilotControllerService, AutopilotControllerService>();
+if (builder.Configuration.GetValue("Autopilot:Enabled", false))
+{
+    builder.Services.AddHostedService<AutopilotWatchdog>();
+}
 builder.Services.AddScoped<NotificationService>();
 builder.Services.AddScoped<INotificationService>(services => services.GetRequiredService<NotificationService>());
 builder.Services.AddScoped<INotificationEventWriter>(services => services.GetRequiredService<NotificationService>());

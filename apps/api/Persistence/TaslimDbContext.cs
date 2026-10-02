@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
 using Microsoft.AspNetCore.DataProtection.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
+using Taslim.Api.Autopilot;
 using Taslim.Api.Benchmarking;
 using Taslim.Api.Domain;
 using Taslim.Api.Movies;
@@ -46,6 +47,13 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
     public DbSet<ProviderBenchmarkEvidence> ProviderBenchmarkEvidence => Set<ProviderBenchmarkEvidence>();
     public DbSet<GenerationWorkerHeartbeat> GenerationWorkerHeartbeats => Set<GenerationWorkerHeartbeat>();
     public DbSet<AdminOperationAuditEvent> AdminOperationAuditEvents => Set<AdminOperationAuditEvent>();
+    public DbSet<AutopilotWave> AutopilotWaves => Set<AutopilotWave>();
+    public DbSet<AutopilotTask> AutopilotTasks => Set<AutopilotTask>();
+    public DbSet<AutopilotRun> AutopilotRuns => Set<AutopilotRun>();
+    public DbSet<AutopilotEvent> AutopilotEvents => Set<AutopilotEvent>();
+    public DbSet<AutopilotGate> AutopilotGates => Set<AutopilotGate>();
+    public DbSet<AutopilotLock> AutopilotLocks => Set<AutopilotLock>();
+    public DbSet<AutopilotAuditEntry> AutopilotAuditEntries => Set<AutopilotAuditEntry>();
         public DbSet<Plan> Plans => Set<Plan>();
         public DbSet<Subscription> Subscriptions => Set<Subscription>();
         public DbSet<BillingPeriod> BillingPeriods => Set<BillingPeriod>();
@@ -267,6 +275,100 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasIndex(item => new { item.CreatedAt, item.Action });
             entity.HasIndex(item => new { item.TargetType, item.TargetId, item.CreatedAt });
             entity.HasOne<ApplicationUser>().WithMany().HasForeignKey(item => item.ActorUserId).OnDelete(DeleteBehavior.Restrict);
+        });
+        builder.Entity<AutopilotWave>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.Status).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.ProductionBaseSha).HasMaxLength(40).IsRequired();
+            entity.Property(item => item.IntegrationBranch).HasMaxLength(160).IsRequired();
+            entity.Property(item => item.IntegrationCandidateSha).HasMaxLength(40);
+            entity.Property(item => item.DeployedRevision).HasMaxLength(40);
+            entity.Property(item => item.DecisionReason).HasMaxLength(40);
+            entity.Property(item => item.DecisionNote).HasMaxLength(500);
+            entity.Property(item => item.LastErrorCode).HasMaxLength(100);
+            entity.Property(item => item.LaunchIdempotencyKey).HasMaxLength(100);
+            entity.Property(item => item.LaunchFingerprint).HasMaxLength(64);
+            entity.HasIndex(item => item.WaveNumber).IsUnique();
+            entity.HasIndex(item => item.LaunchIdempotencyKey).IsUnique();
+            entity.HasIndex(item => new { item.Status, item.UpdatedAt });
+        });
+        builder.Entity<AutopilotTask>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.TaskKey).HasMaxLength(100).IsRequired();
+            entity.Property(item => item.Title).HasMaxLength(200).IsRequired();
+            entity.Property(item => item.BranchName).HasMaxLength(160).IsRequired();
+            entity.Property(item => item.BaseSha).HasMaxLength(40).IsRequired();
+            entity.Property(item => item.HeadSha).HasMaxLength(40);
+            entity.Property(item => item.Status).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.LastFailureKind).HasMaxLength(40);
+            entity.Property(item => item.LastFailureCode).HasMaxLength(100);
+            entity.Property(item => item.DecisionReason).HasMaxLength(40);
+            entity.HasIndex(item => new { item.WaveId, item.TaskKey }).IsUnique();
+            entity.HasIndex(item => new { item.WaveId, item.Status });
+            entity.HasOne(item => item.Wave).WithMany(item => item.Tasks).HasForeignKey(item => item.WaveId).OnDelete(DeleteBehavior.Cascade);
+        });
+        builder.Entity<AutopilotRun>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.Kind).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.Status).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.BranchName).HasMaxLength(160).IsRequired();
+            entity.Property(item => item.BaseSha).HasMaxLength(40).IsRequired();
+            entity.Property(item => item.HeadSha).HasMaxLength(40);
+            entity.Property(item => item.FailureCode).HasMaxLength(100);
+            entity.HasIndex(item => new { item.WaveId, item.Kind, item.StartedAt });
+            entity.HasIndex(item => new { item.TaskId, item.Status });
+            entity.HasOne(item => item.Wave).WithMany(item => item.Runs).HasForeignKey(item => item.WaveId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.Task).WithMany(item => item.Runs).HasForeignKey(item => item.TaskId).OnDelete(DeleteBehavior.SetNull);
+        });
+        builder.Entity<AutopilotEvent>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.EventId).HasMaxLength(160).IsRequired();
+            entity.Property(item => item.EventType).HasMaxLength(40).IsRequired();
+            entity.Property(item => item.BranchName).HasMaxLength(160).IsRequired();
+            entity.Property(item => item.BaseSha).HasMaxLength(40).IsRequired();
+            entity.Property(item => item.HeadSha).HasMaxLength(40);
+            entity.Property(item => item.FailureKind).HasMaxLength(40);
+            entity.Property(item => item.FailureCode).HasMaxLength(100);
+            entity.Property(item => item.PayloadHash).HasMaxLength(64);
+            entity.Property(item => item.IgnoredReason).HasMaxLength(100);
+            entity.HasIndex(item => item.EventId).IsUnique();
+            entity.HasIndex(item => new { item.WaveId, item.CreatedAt });
+            entity.HasOne(item => item.Wave).WithMany(item => item.Events).HasForeignKey(item => item.WaveId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.Task).WithMany(item => item.Events).HasForeignKey(item => item.TaskId).OnDelete(DeleteBehavior.SetNull);
+        });
+        builder.Entity<AutopilotGate>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.GateType).HasMaxLength(40).IsRequired();
+            entity.Property(item => item.Status).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.CandidateSha).HasMaxLength(40);
+            entity.Property(item => item.Checksum).HasMaxLength(40);
+            entity.Property(item => item.FailureCode).HasMaxLength(100);
+            entity.HasIndex(item => new { item.WaveId, item.GateType }).IsUnique();
+            entity.HasOne(item => item.Wave).WithMany(item => item.Gates).HasForeignKey(item => item.WaveId).OnDelete(DeleteBehavior.Cascade);
+        });
+        builder.Entity<AutopilotLock>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.ResourceKey).HasMaxLength(200).IsRequired();
+            entity.Property(item => item.OwnerId).HasMaxLength(80).IsRequired();
+            entity.HasIndex(item => item.ResourceKey).IsUnique();
+            entity.HasIndex(item => item.LeaseUntil);
+        });
+        builder.Entity<AutopilotAuditEntry>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.Action).HasMaxLength(100).IsRequired();
+            entity.Property(item => item.Outcome).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.Details).HasMaxLength(500).IsRequired();
+            entity.Property(item => item.EventId).HasMaxLength(160);
+            entity.HasIndex(item => new { item.WaveId, item.CreatedAt });
+            entity.HasIndex(item => item.EventId);
+            entity.HasOne(item => item.Wave).WithMany(item => item.AuditEntries).HasForeignKey(item => item.WaveId).OnDelete(DeleteBehavior.Cascade);
         });
         builder.Entity<MovieProductionKit>(entity =>
         {
