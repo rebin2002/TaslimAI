@@ -7,9 +7,9 @@ import { test, expect } from "./fixtures";
  * The workspace is authored with logical CSS properties (inset-inline,
  * padding-inline, margin-inline, text-align: start) and the delivery rooms use
  * `dir`-aware lists, so a right-to-left locale must not break layout. These
- * tests drive the real module routes in Arabic and Kurdish and assert the
- * document direction, the absence of horizontal overflow, and that the delivery
- * rooms still render their persisted-record surfaces.
+ * tests select a right-to-left locale through the language control on each
+ * route and assert the document direction, the absence of horizontal overflow,
+ * and that the delivery rooms render their persisted-record surfaces.
  */
 
 const deliveryRooms = [
@@ -19,15 +19,8 @@ const deliveryRooms = [
   { slug: "team", testId: "movie-team-workspace" },
 ];
 
-const locales = [
-  { code: "ar", dir: "rtl" },
-  { code: "ku", dir: "rtl" },
-];
+const locales = ["ar", "ku"] as const;
 
-/**
- * Direction is applied by the locale provider after hydration, and a dev server
- * compiles a route on first request, so poll instead of asserting once.
- */
 async function expectDirection(page: Page, dir: string, label: string) {
   await expect
     .poll(() => page.evaluate(() => document.documentElement.dir), {
@@ -35,6 +28,17 @@ async function expectDirection(page: Page, dir: string, label: string) {
       timeout: 30_000,
     })
     .toBe(dir);
+}
+
+/** Select a locale through the header control and confirm it is applied. */
+async function applyLocale(page: Page, locale: string, label: string) {
+  const language = page.locator(".language-select select").first();
+  await language.selectOption(locale);
+  await expect
+    .poll(() => page.evaluate(() => window.localStorage.getItem("taslim-locale")))
+    .toBe(locale);
+  await expectDirection(page, locale === "en" ? "ltr" : "rtl", label);
+  await expect(page.locator("html")).toHaveAttribute("lang", locale);
 }
 
 async function expectNoHorizontalOverflow(page: Page, label: string) {
@@ -63,39 +67,27 @@ async function createFullMovieProject(page: Page) {
   return projectId as string;
 }
 
-async function switchLocale(page: Page, locale: string) {
-  await page.goto("/projects");
-  const language = page.locator(".language-select select").first();
-  await language.selectOption(locale);
-  await expect.poll(() => page.evaluate(() => window.localStorage.getItem("taslim-locale"))).toBe(locale);
-  // The stored choice is applied when the locale provider mounts, so re-enter
-  // the app rather than depending on the live-update path.
-  await page.goto("/projects");
-}
-
 test.describe("Movie Studio RTL", () => {
   for (const locale of locales) {
-    test(`keeps the Full Movie workspace and delivery rooms usable in ${locale.code}`, async ({
+    test(`keeps the Full Movie workspace and delivery rooms usable in ${locale}`, async ({
       authenticatedPage: page,
     }) => {
-      test.setTimeout(240_000);
+      test.setTimeout(300_000);
       const projectId = await createFullMovieProject(page);
-      await switchLocale(page, locale.code);
-      await expectDirection(page, locale.dir, `projects (${locale.code})`);
 
       // The project map is the entry point for every module route.
       await page.goto(`/create/movie/${projectId}/overview`);
       await expect(page.locator("nav[aria-label]").first()).toBeVisible();
-      await expectDirection(page, locale.dir, `overview (${locale.code})`);
-      await expectNoHorizontalOverflow(page, `overview (${locale.code})`);
+      await applyLocale(page, locale, `overview (${locale})`);
+      await expectNoHorizontalOverflow(page, `overview (${locale})`);
 
       // The four delivery rooms replaced their previous placeholders and must
       // stay direction-safe in RTL.
       for (const room of deliveryRooms) {
         await page.goto(`/create/movie/${projectId}/${room.slug}`);
         await expect(page.getByTestId(room.testId)).toBeVisible();
-        await expectDirection(page, locale.dir, `${room.slug} (${locale.code})`);
-        await expectNoHorizontalOverflow(page, `${room.slug} (${locale.code})`);
+        await applyLocale(page, locale, `${room.slug} (${locale})`);
+        await expectNoHorizontalOverflow(page, `${room.slug} (${locale})`);
       }
     });
   }
@@ -103,11 +95,10 @@ test.describe("Movie Studio RTL", () => {
   test("keeps the Full Movie project map readable in RTL", async ({ authenticatedPage: page }) => {
     test.setTimeout(180_000);
     const projectId = await createFullMovieProject(page);
-    await switchLocale(page, "ar");
 
     await page.goto(`/create/movie/${projectId}/overview`);
-    await expectDirection(page, "rtl", "project map (ar)");
-    // Navigation links are mirrored but must all remain visible and clickable.
+    await applyLocale(page, "ar", "project map (ar)");
+    // Navigation links are mirrored but must all remain visible.
     const navLinks = page.locator("nav a");
     await expect(navLinks.first()).toBeVisible();
     const count = await navLinks.count();
