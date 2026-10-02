@@ -13,6 +13,7 @@ using System.Security.Claims;
 using Taslim.Api.Ai;
 using Taslim.Api.Activity;
 using Taslim.Api.Assets;
+using Taslim.Api.Autopilot;
 using Taslim.Api.Authorization;
 using Taslim.Api.Billing;
 using Taslim.Api.Benchmarking;
@@ -224,6 +225,19 @@ builder.Services.AddScoped<IProviderResilienceOrchestrator, ProviderResilienceOr
 builder.Services.AddScoped<IProviderBenchmarkService, ProviderBenchmarkService>();
 builder.Services.AddSingleton<IProviderCostGuard, AllowAllProviderCostGuard>();
 builder.Services.AddSingleton(TimeProvider.System);
+builder.Services.Configure<AutopilotOptions>(builder.Configuration.GetSection("Autopilot"));
+builder.Services.PostConfigure<AutopilotOptions>(options => options.Normalize());
+builder.Services.AddSingleton(services => services.GetRequiredService<Microsoft.Extensions.Options.IOptions<AutopilotOptions>>().Value);
+builder.Services.AddScoped<IAutopilotEventAuthenticator, AutopilotEventAuthenticator>();
+builder.Services.AddScoped<IAutopilotAuditLog, EfAutopilotAuditLog>();
+builder.Services.AddScoped<IAutopilotEventIntake, AutopilotEventIntake>();
+builder.Services.AddScoped<IAutopilotLockService, EfAutopilotLockService>();
+builder.Services.AddScoped<IAutopilotOrchestrator, AutopilotOrchestrator>();
+builder.Services.AddScoped<AutopilotConsoleService>();
+if (builder.Configuration.GetValue("Autopilot:WatchdogEnabled", !builder.Environment.IsEnvironment("Testing")))
+{
+    builder.Services.AddHostedService<AutopilotWatchdogService>();
+}
 builder.Services.AddScoped<NotificationService>();
 builder.Services.AddScoped<INotificationService>(services => services.GetRequiredService<NotificationService>());
 builder.Services.AddScoped<INotificationEventWriter>(services => services.GetRequiredService<NotificationService>());
