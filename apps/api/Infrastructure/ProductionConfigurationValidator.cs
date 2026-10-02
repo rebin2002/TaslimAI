@@ -49,6 +49,27 @@ public static class ProductionConfigurationValidator
             RequireValue(configuration["Ai:OpenAI:ApiKey"], "Ai:OpenAI:ApiKey");
             RequireHttpsUri(configuration["Ai:OpenAI:BaseUrl"], "Ai:OpenAI:BaseUrl");
         }
+
+        // Autopilot safety invariants. These can only be relaxed through an
+        // explicit, reviewed human decision; production never starts with paid
+        // capabilities enabled, and an enabled controller always requires
+        // signed events plus a server-side signing secret.
+        if (configuration.GetValue("Autopilot:ChargingEnabled", false))
+            throw new InvalidOperationException("Autopilot charging must remain disabled until a human decision approves it.");
+        if (configuration.GetValue("Autopilot:PaidProvidersEnabled", false))
+            throw new InvalidOperationException("Autopilot paid providers must remain disabled until a human decision approves them.");
+
+        if (configuration.GetValue("Autopilot:Enabled", false))
+        {
+            if (!configuration.GetValue("Autopilot:RequireSignedEvents", true))
+                throw new InvalidOperationException("Autopilot:RequireSignedEvents must stay enabled in production.");
+            if (configuration.GetValue("Autopilot:DryRun", true))
+                throw new InvalidOperationException("Autopilot live activation requires Autopilot:DryRun to be explicitly set to false.");
+
+            var signingSecretVariable = configuration["Autopilot:SigningSecretEnvironmentVariable"] ?? "AUTOPILOT_WEBHOOK_SECRET";
+            if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(signingSecretVariable)))
+                throw new InvalidOperationException($"Autopilot requires the server-side signing secret environment variable {signingSecretVariable}.");
+        }
     }
 
     private static void RequireValue(string? value, string key)
