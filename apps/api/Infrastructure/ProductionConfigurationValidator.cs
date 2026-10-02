@@ -72,6 +72,23 @@ public static class ProductionConfigurationValidator
             if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(signingSecretVariable)))
                 throw new InvalidOperationException($"Autopilot requires the server-side signing secret environment variable {signingSecretVariable}.");
         }
+
+        // Live follow-on wave launch is a separate, explicit capability. It is never
+        // enabled implicitly: it must be requested and it must have both a bridge
+        // endpoint and a server-side bridge credential available. The hard bounds are
+        // re-asserted here so an unsafe bound can never reach production.
+        if (configuration.GetValue("Autopilot:AllowNextWaveLaunch", false)
+            && !configuration.GetValue("Autopilot:DryRun", true))
+        {
+            RequireHttpsUri(configuration["Autopilot:BridgeBaseUrl"], "Autopilot:BridgeBaseUrl");
+            var bridgeTokenVariable = configuration["Autopilot:BridgeTokenEnvironmentVariable"] ?? "TASLIM_BRIDGE_TOKEN";
+            if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(bridgeTokenVariable)))
+                throw new InvalidOperationException($"Autopilot live next-wave launch requires the server-side bridge credential environment variable {bridgeTokenVariable}.");
+            if (configuration.GetValue("Autopilot:MaxTasksPerWave", 20) > 20)
+                throw new InvalidOperationException("Autopilot:MaxTasksPerWave must not exceed 20.");
+            if (configuration.GetValue("Autopilot:MaxLaunchAttempts", 3) > 3)
+                throw new InvalidOperationException("Autopilot:MaxLaunchAttempts must not exceed 3.");
+        }
     }
 
     private static void RequireValue(string? value, string key)

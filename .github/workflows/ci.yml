@@ -122,3 +122,37 @@ jobs:
             apps/web/test-results
             /tmp/taslim-api.log
           if-no-files-found: ignore
+
+  autopilot-gate:
+    name: Autopilot next-wave gate
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: taslim
+          POSTGRES_PASSWORD: change-me
+          POSTGRES_DB: taslim_fresh
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U taslim -d taslim_fresh"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+      - run: dotnet tool restore
+      - run: dotnet restore apps/api.Tests/Taslim.Api.Tests.csproj
+      - name: Run the bounded next-wave launch gate
+        env:
+          RUN_DB_MIGRATIONS: "1"
+          FRESH_DATABASE_URL: Host=localhost;Port=5432;Database=taslim_fresh;Username=taslim;Password=change-me
+          ConnectionStrings__Postgres: Host=localhost;Port=5432;Database=taslim_fresh;Username=taslim;Password=change-me
+          Database__ApplyMigrations: "false"
+        run: bash scripts/autopilot-next-wave-gate.sh

@@ -72,6 +72,65 @@ public sealed class AutopilotOptions
     /// <summary>Terminal bound on the number of watchdog reconciliations for a single run.</summary>
     public int MaxWatchdogReconciliations { get; set; } = 24;
 
+    // -----------------------------------------------------------------------
+    // Follow-on ("next wave") development launch. Every live capability below is
+    // off by default: the controller may plan a follow-on wave only from a
+    // pre-approved backlog, and only when an operator has explicitly enabled it.
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Enables launching a follow-on development wave once a wave is gate-green.
+    /// Defaults to false: the controller records eligibility only.
+    /// </summary>
+    public bool AllowNextWaveLaunch { get; set; } = false;
+
+    /// <summary>
+    /// Allows the follow-on development wave to start while the human
+    /// production-release decision for the source wave is still pending. When
+    /// false, a wave parked at <c>handoff_pending_human</c> does not start the
+    /// next development batch. Defaults to false.
+    /// </summary>
+    public bool AllowNextWaveLaunchWhenReleasePending { get; set; } = false;
+
+    /// <summary>Hard bound on the number of tasks in one follow-on wave. Never more than 20.</summary>
+    public int MaxTasksPerWave { get; set; } = 20;
+
+    /// <summary>Hard bound on launch attempts for one planned task. Never more than 3.</summary>
+    public int MaxLaunchAttempts { get; set; } = 3;
+
+    /// <summary>Bound on launch batches examined per cycle.</summary>
+    public int MaxLaunchBatchesPerCycle { get; set; } = 20;
+
+    /// <summary>Bound on launched tasks polled per reconciliation cycle.</summary>
+    public int MaxLaunchReconciliations { get; set; } = 20;
+
+    /// <summary>Terminal bound on polling reconciliations for one launched task.</summary>
+    public int MaxLaunchReconciles { get; set; } = 24;
+
+    /// <summary>
+    /// Minutes to wait before the polling fallback considers a signed completion
+    /// event missing. Signed events always remain the preferred path.
+    /// </summary>
+    public int PollingFallbackAfterMinutes { get; set; } = 30;
+
+    /// <summary>Base backoff between polling reconciliations of a launched task.</summary>
+    public int LaunchReconcileBackoffSeconds { get; set; } = 300;
+
+    /// <summary>Server-side bridge base URL (HTTPS). Empty means no launch provider is configured.</summary>
+    public string BridgeBaseUrl { get; set; } = string.Empty;
+
+    /// <summary>Server-side only: name of the environment variable holding the bridge bearer token.</summary>
+    public string BridgeTokenEnvironmentVariable { get; set; } = "TASLIM_BRIDGE_TOKEN";
+
+    /// <summary>Bridge task-creation path. Defaults to the existing bridge contract.</summary>
+    public string BridgeCreateTaskPath { get; set; } = "/v1/tasks";
+
+    /// <summary>Bridge task-read path template. <c>{taskId}</c> is substituted with the escaped task id.</summary>
+    public string BridgeGetTaskPathTemplate { get; set; } = "/v1/tasks/{taskId}";
+
+    /// <summary>Bounded timeout for a single bridge call.</summary>
+    public int BridgeTimeoutSeconds { get; set; } = 30;
+
     public void Normalize()
     {
         MaxConcurrency = Math.Clamp(MaxConcurrency, 1, 20);
@@ -84,6 +143,30 @@ public sealed class AutopilotOptions
         SignatureToleranceSeconds = Math.Clamp(SignatureToleranceSeconds, 30, 3600);
         MaxEventPayloadCharacters = Math.Clamp(MaxEventPayloadCharacters, 256, 1_000_000);
         MaxWatchdogReconciliations = Math.Clamp(MaxWatchdogReconciliations, 1, 500);
+        MaxTasksPerWave = Math.Clamp(MaxTasksPerWave, 1, 20);
+        MaxLaunchAttempts = Math.Clamp(MaxLaunchAttempts, 0, 3);
+        MaxLaunchBatchesPerCycle = Math.Clamp(MaxLaunchBatchesPerCycle, 1, 20);
+        MaxLaunchReconciliations = Math.Clamp(MaxLaunchReconciliations, 1, 50);
+        MaxLaunchReconciles = Math.Clamp(MaxLaunchReconciles, 1, 100);
+        PollingFallbackAfterMinutes = Math.Clamp(PollingFallbackAfterMinutes, 5, 1440);
+        LaunchReconcileBackoffSeconds = Math.Clamp(LaunchReconcileBackoffSeconds, 30, 86400);
+        BridgeTimeoutSeconds = Math.Clamp(BridgeTimeoutSeconds, 5, 120);
+        BridgeBaseUrl = (BridgeBaseUrl ?? string.Empty).Trim();
+        BridgeTokenEnvironmentVariable = string.IsNullOrWhiteSpace(BridgeTokenEnvironmentVariable)
+            ? "TASLIM_BRIDGE_TOKEN"
+            : BridgeTokenEnvironmentVariable.Trim();
+        BridgeCreateTaskPath = NormalizePath(BridgeCreateTaskPath, "/v1/tasks");
+        BridgeGetTaskPathTemplate = NormalizePath(BridgeGetTaskPathTemplate, "/v1/tasks/{taskId}");
         SimulationMode = DryRun;
+    }
+
+    /// <summary>True when a live follow-on launch is permitted by configuration.</summary>
+    public bool LiveNextWaveLaunchEnabled => AllowNextWaveLaunch && !DryRun;
+
+    private static string NormalizePath(string? value, string fallback)
+    {
+        var candidate = (value ?? string.Empty).Trim();
+        if (candidate.Length == 0 || !candidate.StartsWith('/')) return fallback;
+        return candidate;
     }
 }

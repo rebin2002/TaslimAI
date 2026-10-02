@@ -55,6 +55,9 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
     public DbSet<AutopilotLock> AutopilotLocks => Set<AutopilotLock>();
     public DbSet<AutopilotAuditEvent> AutopilotAuditEvents => Set<AutopilotAuditEvent>();
     public DbSet<AutopilotControlState> AutopilotControlStates => Set<AutopilotControlState>();
+    public DbSet<AutopilotWaveLaunchBatch> AutopilotWaveLaunchBatches => Set<AutopilotWaveLaunchBatch>();
+    public DbSet<AutopilotWaveLaunchTask> AutopilotWaveLaunchTasks => Set<AutopilotWaveLaunchTask>();
+    public DbSet<AutopilotBacklogItem> AutopilotBacklogItems => Set<AutopilotBacklogItem>();
         public DbSet<Plan> Plans => Set<Plan>();
         public DbSet<Subscription> Subscriptions => Set<Subscription>();
         public DbSet<BillingPeriod> BillingPeriods => Set<BillingPeriod>();
@@ -2263,6 +2266,57 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.Property(item => item.LastReason).HasMaxLength(400);
             entity.Property(item => item.LastActor).HasMaxLength(80);
             entity.HasIndex(item => item.ControlKey).IsUnique();
+        });
+        builder.Entity<AutopilotWaveLaunchBatch>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.SourceWaveKey).HasMaxLength(120).IsRequired();
+            entity.Property(item => item.WaveKey).HasMaxLength(120).IsRequired();
+            entity.Property(item => item.Status).HasMaxLength(40).IsRequired();
+            entity.Property(item => item.ReasonCode).HasMaxLength(120);
+            entity.Property(item => item.LastStatusDetail).HasMaxLength(600);
+            entity.Property(item => item.HumanDecisionRequired).HasMaxLength(60);
+            entity.Property(item => item.BaseSha).HasMaxLength(64).IsRequired();
+            entity.Property(item => item.Branch).HasMaxLength(300).IsRequired();
+            entity.Property(item => item.PlanFingerprint).HasMaxLength(80).IsRequired();
+            // One follow-on wave per source run and wave key: a duplicate completion
+            // event or a replay can never launch a second batch for the same wave.
+            entity.HasIndex(item => new { item.SourceRunId, item.WaveKey }).IsUnique();
+            entity.HasIndex(item => new { item.Status, item.UpdatedAt });
+            entity.HasOne<AutopilotRun>().WithMany().HasForeignKey(item => item.SourceRunId).OnDelete(DeleteBehavior.Restrict);
+        });
+        builder.Entity<AutopilotWaveLaunchTask>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.SourceWaveKey).HasMaxLength(120).IsRequired();
+            entity.Property(item => item.WaveKey).HasMaxLength(120).IsRequired();
+            entity.Property(item => item.TaskKey).HasMaxLength(200).IsRequired();
+            entity.Property(item => item.Title).HasMaxLength(300).IsRequired();
+            entity.Property(item => item.BacklogItemKey).HasMaxLength(120).IsRequired();
+            entity.Property(item => item.ExternalTaskId).HasMaxLength(200);
+            entity.Property(item => item.ExternalRef).HasMaxLength(120);
+            entity.Property(item => item.Status).HasMaxLength(40).IsRequired();
+            entity.Property(item => item.ReasonCode).HasMaxLength(120);
+            entity.Property(item => item.LastStatusDetail).HasMaxLength(600);
+            entity.Property(item => item.Branch).HasMaxLength(300);
+            entity.Property(item => item.BaseSha).HasMaxLength(64);
+            entity.HasIndex(item => new { item.BatchId, item.TaskKey }).IsUnique();
+            entity.HasIndex(item => item.ExternalTaskId).IsUnique().HasFilter("\"ExternalTaskId\" IS NOT NULL");
+            entity.HasIndex(item => new { item.Status, item.NextReconcileAt });
+            entity.HasOne<AutopilotWaveLaunchBatch>().WithMany().HasForeignKey(item => item.BatchId).OnDelete(DeleteBehavior.Cascade);
+        });
+        builder.Entity<AutopilotBacklogItem>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.ItemKey).HasMaxLength(120).IsRequired();
+            entity.Property(item => item.Title).HasMaxLength(300).IsRequired();
+            entity.Property(item => item.AcceptanceSummary).HasMaxLength(2000);
+            entity.Property(item => item.Kind).HasMaxLength(40).IsRequired();
+            entity.Property(item => item.ApprovedBy).HasMaxLength(80);
+            entity.Property(item => item.ApprovalNote).HasMaxLength(400);
+            entity.Property(item => item.ConsumedByWaveKey).HasMaxLength(120);
+            entity.HasIndex(item => item.ItemKey).IsUnique();
+            entity.HasIndex(item => new { item.Approved, item.Kind, item.ConsumedByWaveKey });
         });
     }
 }
