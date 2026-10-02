@@ -53,6 +53,10 @@ import { displayProductionStage, displayProductionStatus, type MovieResolutionTi
 import { MovieProductionWorkspace } from "@/components/MovieProductionWorkspace";
 import { ProductionKitWorkspace } from "@/components/ProductionKitWorkspace";
 import { MovieSelectsWorkspace } from "@/components/MovieSelectsWorkspace";
+import { MovieAudioWorkspace } from "@/components/MovieAudioWorkspace";
+import { MovieQualityWorkspace } from "@/components/MovieQualityWorkspace";
+import { MovieExportsWorkspace } from "@/components/MovieExportsWorkspace";
+import { MovieTeamWorkspace } from "@/components/MovieTeamWorkspace";
 
 export const fullMovieModules = [
   { slug: "overview", label: "Overview", icon: Gauge },
@@ -70,8 +74,6 @@ export const fullMovieModules = [
   { slug: "exports", label: "Exports", icon: Play },
   { slug: "team", label: "Team", icon: Users },
 ] as const;
-
-const futureModules = new Set<ModuleSlug>(["audio", "qc", "exports", "team"]);
 
 type ModuleSlug = (typeof fullMovieModules)[number]["slug"];
 
@@ -93,9 +95,9 @@ const moduleCopy: Record<ModuleSlug, ModuleCopy> = {
   selects: { eyebrow: "Selects / salvage", title: "Keep the good seconds", description: "Review generated takes as raw footage, salvage bounded ranges, and hand only deliberate inserts into the canonical timeline." },
   edit: { eyebrow: "Edit room", title: "A timeline waiting for footage", description: "The edit surface is reserved for real clips and real editorial decisions." },
   audio: { eyebrow: "Sound stage", title: "Audio belongs to the picture", description: "Keep narration, ambience, and music direction close to the cut they support." },
-  qc: { eyebrow: "Review gate", title: "Quality control, when there is a cut", description: "A deliberate review surface for continuity, pacing, and delivery readiness." },
-  exports: { eyebrow: "Delivery desk", title: "Exports without surprises", description: "Prepare final delivery formats only when the project has a real, reviewable output." },
-  team: { eyebrow: "Collaboration", title: "A shared production room", description: "The project is ready for roles and review permissions when the collaboration layer arrives." },
+  qc: { eyebrow: "Review gate", title: "Quality control over real evidence", description: "Production checkpoints, continuity findings, and the deterministic quality gate recorded on every assembled master." },
+  exports: { eyebrow: "Delivery desk", title: "Export a real master", description: "Assemble the approved, selected takes into one durable private master and download it." },
+  team: { eyebrow: "Collaboration", title: "A shared production room", description: "Project roles, review requests, notes, and assignments — all authorized server-side." },
 };
 
 function moduleFromSlug(slug: string | undefined): ModuleSlug {
@@ -123,7 +125,7 @@ export function FullMovieWorkspaceView({ projectId, module }: { projectId: strin
 }
 
 function WorldOnlyWorkspace({ projectId }: { projectId: string }) {
-  return <div className="movie-studio-page movie-full-workspace"><header className="movie-workspace-header"><Link href={`/create/movie/${projectId}/overview`} className="movie-workspace-back"><ArrowLeft size={14} /> Movie Studio</Link><div className="movie-workspace-heading"><div><span className="movie-workspace-kicker">Focused production read model</span><h2>World room</h2><p>Locations, sets, props, references, usage, and continuity — without loading the complete project graph.</p></div><div className="movie-workspace-meta"><span>World V2</span><span>Asset-backed</span></div></div></header><nav className="movie-workspace-nav" aria-label="Full Movie Project navigation"><div className="movie-workspace-nav-label">Project map</div><div className="movie-workspace-nav-links">{fullMovieModules.map((item) => <Link key={item.slug} href={`/create/movie/${projectId}/${item.slug}`} className={item.slug === "world" ? "is-active" : ""}>{item.label}{futureModules.has(item.slug) && <span aria-hidden="true">Soon</span>}</Link>)}</div></nav><main className="movie-world-only-main movie-workspace-main"><MovieWorldWorkspace projectId={projectId} /></main></div>;
+  return <div className="movie-studio-page movie-full-workspace"><header className="movie-workspace-header"><Link href={`/create/movie/${projectId}/overview`} className="movie-workspace-back"><ArrowLeft size={14} /> Movie Studio</Link><div className="movie-workspace-heading"><div><span className="movie-workspace-kicker">Focused production read model</span><h2>World room</h2><p>Locations, sets, props, references, usage, and continuity — without loading the complete project graph.</p></div><div className="movie-workspace-meta"><span>World V2</span><span>Asset-backed</span></div></div></header><nav className="movie-workspace-nav" aria-label="Full Movie Project navigation"><div className="movie-workspace-nav-label">Project map</div><div className="movie-workspace-nav-links">{fullMovieModules.map((item) => <Link key={item.slug} href={`/create/movie/${projectId}/${item.slug}`} className={item.slug === "world" ? "is-active" : ""}>{item.label}</Link>)}</div></nav><main className="movie-world-only-main movie-workspace-main"><MovieWorldWorkspace projectId={projectId} /></main></div>;
 }
 
 function FullMovieProjectWorkspace({ projectId, module }: { projectId: string; module: string }) {
@@ -250,7 +252,7 @@ function FullMovieProjectWorkspace({ projectId, module }: { projectId: string; m
             {fullMovieModules.map((item) => {
               const Icon = item.icon;
               const href = `/create/movie/${workspace.id}/${item.slug}`;
-              const isFuture = futureModules.has(item.slug); return <Link key={item.slug} href={href} aria-label={item.label} className={`movie-workspace-nav-item ${activeModule === item.slug ? "is-active" : ""}`} aria-current={activeModule === item.slug ? "page" : undefined} data-module-state={isFuture ? "foundation" : "operational"}><Icon size={15} /><span>{item.label}</span>{isFuture && <span className="movie-nav-state" aria-hidden="true">Soon</span>}{activeModule === item.slug && <ChevronRight size={13} />}</Link>;
+              return <Link key={item.slug} href={href} aria-label={item.label} className={`movie-workspace-nav-item ${activeModule === item.slug ? "is-active" : ""}`} aria-current={activeModule === item.slug ? "page" : undefined} data-module-state="operational"><Icon size={15} /><span>{item.label}</span>{activeModule === item.slug && <ChevronRight size={13} />}</Link>;
             })}
           </div>
           <div className="movie-workspace-nav-foot"><span className="movie-live-dot" /> <span>Plan saved locally to this project</span></div>
@@ -268,10 +270,10 @@ function FullMovieProjectWorkspace({ projectId, module }: { projectId: string; m
           {activeModule === "production" && <MovieProductionWorkspace project={fullProject} completionPercent={completionPercent} cost={overview?.cost} onRefresh={refreshProject} />}
           {activeModule === "selects" && <MovieSelectsWorkspace project={fullProject} />}
           {activeModule === "edit" && <EditModule project={fullProject} />}
-          {activeModule === "audio" && <FutureModule icon={<AudioLines size={20} />} title="Audio is not connected yet" text="The sound stage is reserved for real narration, ambience, and music assets. Nothing is simulated here." />}
-          {activeModule === "qc" && <FutureModule icon={<ShieldCheck size={20} />} title="QC is a future review gate" text="Continuity and delivery checks will appear once this project has a real cut to inspect." />}
-          {activeModule === "exports" && <FutureModule icon={<Play size={20} />} title="Exports are not available yet" text="Final packaging stays unavailable until there is a reviewable project output." />}
-          {activeModule === "team" && <FutureModule icon={<Users size={20} />} title="Team controls are not connected yet" text="This route is reserved for shared roles, review notes, and permissions. No access controls are implied by this shell." />}
+          {activeModule === "audio" && <MovieAudioWorkspace project={fullProject} />}
+          {activeModule === "qc" && <MovieQualityWorkspace project={fullProject} />}
+          {activeModule === "exports" && <MovieExportsWorkspace project={fullProject} />}
+          {activeModule === "team" && <MovieTeamWorkspace project={fullProject} />}
           {error && <div className="movie-workspace-error-inline" role="alert"><AlertCircle size={15} aria-hidden="true" /><span>{error}</span><button type="button" onClick={() => void loadProject()}><RefreshCw size={12} /> Retry</button></div>}
         </main>
 
@@ -1240,9 +1242,6 @@ function EditModule({ project }: { project: MovieProject }) {
   return <div className="movie-module-stack"><section className="movie-workspace-section"><div className="movie-section-head"><div><span className="movie-workspace-kicker">Editorial timeline</span><h3>Timeline foundation</h3></div><span className="movie-section-count">{project.scenes.length ? `${project.scenes.length} scene blocks` : "No scene blocks"}</span></div>{project.scenes.length ? <div className="movie-timeline"><div className="movie-timeline-ruler"><span>00:00</span><span>00:30</span><span>01:00</span><span>01:30</span></div><div className="movie-timeline-track">{project.scenes.map((scene, index) => <div key={scene.id} className={`movie-timeline-block ${readyClipForScene(scene) ? "is-ready" : ""}`} style={{ width: `${Math.max(13, Math.min(34, (scene.durationSeconds ?? 12) / 2.2))}%`, marginInlineStart: index ? "2%" : 0 }}><span>{String(scene.sequence).padStart(2, "0")}</span><strong>{scene.title}</strong></div>)}</div><div className="movie-timeline-note"><PencilRuler size={15} /><span>Editing controls will appear when there is a real sequence to revise.</span></div></div> : <EmptyGeneratedStage title="No footage to edit" text="A timeline will be built from real scene clips, not simulated blocks." />}</section></div>;
 }
 
-function FutureModule({ icon, title, text }: { icon: ReactNode; title: string; text: string }) {
-  return <div className="movie-module-stack"><section className="movie-future-module"><div className="movie-future-icon">{icon}</div><span className="movie-workspace-kicker">Foundation surface</span><h3>{title}</h3><p>{text}</p><div className="movie-future-rule"><span /> <small>Not available in this foundation</small> <span /></div></section></div>;
-}
 
 function RecordLine({ label, value }: { label: string; value: string | null | undefined }) {
   return <div className="movie-record-line"><span>{label}</span><p>{value || "Not set yet"}</p></div>;

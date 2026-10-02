@@ -182,6 +182,7 @@ export function buildSalvageTimelineRevision(
   timeline: MovieTimeline | null,
   proposal: SalvageInsertProposal,
   recommendation: SalvageRecommendation,
+  movieTakeSelectId?: string,
 ): MovieTimelineRevisionRequest {
   const current = timeline?.currentRevision;
   const tracks = (current?.tracks ?? []).map((track) => ({
@@ -218,6 +219,7 @@ export function buildSalvageTimelineRevision(
     metadataJson: JSON.stringify({
       source: "salvage-director",
       recommendationId: recommendation.id,
+      movieTakeSelectId: movieTakeSelectId ?? null,
       qcIssueCodes: recommendation.subclip.issues.map((issue) => issue.code),
     }),
   });

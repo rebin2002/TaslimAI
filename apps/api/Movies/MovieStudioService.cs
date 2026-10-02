@@ -1303,6 +1303,20 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                 request.UpscalePasses),
             provider.Key,
             cancellationToken: cancellationToken);
+        // This legacy scene/shot path previously queued paid generation without any
+        // cost decision. It now applies the same shared guardrail as the production
+        // orchestrator so an unavailable or unconfirmed estimate never queues a job.
+        var costPreflight = await costGuardrails.EvaluateAsync(
+            userId,
+            movie.WorkspaceId,
+            movie.ProjectId,
+            estimate.ToGenerationCostEstimate(),
+            request.ConfirmationAccepted,
+            cancellationToken);
+        if (!costPreflight.CanProceed)
+            throw new MovieStudioCostGuardException(
+                costPreflight.RejectionCode ?? "GENERATION_CONFIRMATION_REQUIRED",
+                costPreflight.RejectionMessage ?? "Confirm the generation cost before queueing this clip.");
         var now = DateTime.UtcNow;
         var clip = new MovieClip
         {
@@ -1795,6 +1809,14 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
 }
 
 public sealed class MovieStudioValidationException(string message) : Exception(message);
+/// <summary>
+/// Raised when the shared generation cost guardrail refuses to queue a paid movie
+/// operation. The code is provider-neutral and never exposes provider/model details.
+/// </summary>
+public sealed class MovieStudioCostGuardException(string code, string message) : Exception(message)
+{
+    public string Code { get; } = code;
+}
 public sealed class MovieStudioContinuityLockException(string fieldKey) : Exception($"The approved continuity lock for '{fieldKey}' cannot be changed.");
 public static class CharacterFieldKeys
 {
