@@ -55,6 +55,7 @@ public sealed class MovieStudioShotUpdateRequest
     public string? ContinuitySensitivity { get; set; }
     public string? UpscaleSuitability { get; set; }
     public MovieShotTargetOutputRequirements? TargetOutputRequirements { get; set; }
+    public MovieScreenDirectionPlan? ScreenDirection { get; set; }
     public string? Status { get; set; }
 }
 

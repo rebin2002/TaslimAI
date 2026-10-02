@@ -12,7 +12,7 @@ namespace Taslim.Api.Controllers;
 [ApiController]
 [Authorize]
 [Route("api/movie-studio")]
-public sealed class MovieStudioController(IMovieStudioService movies, IMovieProductionComplexityService complexity, IMovieDurationBudgetService durationBudgets, IMovieGuideService guides, IMovieStoryService stories, IMovieStoryCastService storyCast, IMovieCharacterContinuityService continuity, IMovieWorldContinuityService worldContinuity, IMovieProductionContinuityService productionContinuity, IMovieProductionReferencePackageService productionReferences, IMovieTimelineService timeline, IMovieShotExecutionService shotExecution, MovieAuthorizationService authorization, MovieShotImportanceService shotImportance, IMovieCinematographyPlanningService cinematographyPlanning) : ControllerBase
+public sealed class MovieStudioController(IMovieStudioService movies, IMovieProductionComplexityService complexity, IMovieDurationBudgetService durationBudgets, IMovieGuideService guides, IMovieStoryService stories, IMovieStoryCastService storyCast, IMovieCharacterContinuityService continuity, IMovieWorldContinuityService worldContinuity, IMovieProductionContinuityService productionContinuity, IMovieProductionReferencePackageService productionReferences, IMovieProductionPreflightService productionPreflight, IMovieTimelineService timeline, IMovieTakeSelectService takeSelects, IMovieShotExecutionService shotExecution, MovieAuthorizationService authorization, MovieShotImportanceService shotImportance, IMovieCinematographyPlanningService cinematographyPlanning, IMovieCharacterProductionSheetService productionSheets, IMovieLocationGeographySheetService geographySheets, IMoviePropBibleService propBible, IMovieReferenceReadinessService referenceReadiness, IMovieMissingInsertPlannerService insertPlanner) : ControllerBase
 {
     [HttpGet("cinematography/presets")]
     public IActionResult CinematographyPresets() => Ok(CinematographyPresetCatalog.All);
@@ -56,6 +56,48 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
     {
         var result = await timeline.GetAsync(GetUserId(), id, cancellationToken);
         return result is null ? ApiResults.Error(this, 404, "MOVIE_TIMELINE_NOT_FOUND", "Movie timeline not found.") : Ok(result);
+    }
+
+    [HttpGet("projects/{movieProjectId:guid}/takes/{takeId:guid}/selects")]
+    public async Task<IActionResult> GetTakeSelects(Guid movieProjectId, Guid takeId, CancellationToken cancellationToken)
+    {
+        var result = await takeSelects.ListAsync(GetUserId(), movieProjectId, takeId, cancellationToken);
+        return result is null ? ApiResults.Error(this, 404, "MOVIE_TAKE_SELECTS_NOT_FOUND", "Movie take or selects not found.") : Ok(result);
+    }
+
+    [HttpPost("projects/{movieProjectId:guid}/takes/{takeId:guid}/selects")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> CreateTakeSelect(Guid movieProjectId, Guid takeId, MovieTakeSelectRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await takeSelects.CreateAsync(GetUserId(), movieProjectId, takeId, request, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_TAKE_NOT_FOUND", "Movie take not found.") : Ok(result);
+        }
+        catch (MovieTakeSelectValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
+    }
+
+    [HttpPost("projects/{movieProjectId:guid}/takes/{takeId:guid}/selects/{selectId:guid}/review")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> ReviewTakeSelect(Guid movieProjectId, Guid takeId, Guid selectId, MovieTakeSelectReviewRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await takeSelects.ReviewAsync(GetUserId(), movieProjectId, takeId, selectId, request, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_TAKE_SELECT_NOT_FOUND", "Movie take select not found.") : Ok(result);
+        }
+        catch (MovieTakeSelectValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
+    }
+
+    [HttpGet("projects/{id:guid}/insert-planner")]
+    public async Task<IActionResult> GetMissingInsertPlan(Guid id, [FromQuery] Guid? revisionId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await insertPlanner.GetAsync(GetUserId(), id, revisionId, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result);
+        }
+        catch (MovieMissingInsertPlannerException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
     }
 
     [HttpPost("projects/{id:guid}/timeline/revisions")]
@@ -138,6 +180,59 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
     {
         var result = await movies.GetCharacterDetailAsync(GetUserId(), characterId, cancellationToken);
         return result is null ? ApiResults.Error(this, 404, "MOVIE_CHARACTER_NOT_FOUND", "Movie character not found.") : Ok(result);
+    }
+
+    [HttpGet("characters/{characterId:guid}/production-sheet")]
+    public async Task<IActionResult> GetProductionSheet(Guid characterId, CancellationToken cancellationToken)
+    {
+        var result = await productionSheets.GetAsync(GetUserId(), characterId, cancellationToken);
+        return result is null ? ApiResults.Error(this, 404, "MOVIE_CHARACTER_PRODUCTION_SHEET_NOT_FOUND", "Character production sheet not found.") : Ok(result);
+    }
+
+    [HttpPut("characters/{characterId:guid}/production-sheet")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> SaveProductionSheet(Guid characterId, MovieCharacterProductionSheetRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await productionSheets.SaveDraftAsync(GetUserId(), characterId, request, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_CHARACTER_NOT_FOUND", "Movie character not found.") : Ok(result);
+        }
+        catch (MovieCharacterProductionSheetValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
+        catch (MovieCharacterProductionSheetLockedException exception) { return ApiResults.Error(this, 409, "MOVIE_CHARACTER_PRODUCTION_SHEET_LOCKED", exception.Message); }
+    }
+
+    [HttpPost("production-sheets/{sheetId:guid}/approve")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> ApproveProductionSheet(Guid sheetId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await productionSheets.ApproveAsync(GetUserId(), sheetId, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_CHARACTER_PRODUCTION_SHEET_NOT_FOUND", "Character production sheet not found.") : Ok(result);
+        }
+        catch (MovieCharacterProductionSheetValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
+        catch (MovieCharacterProductionSheetLockedException exception) { return ApiResults.Error(this, 409, "MOVIE_CHARACTER_PRODUCTION_SHEET_LOCKED", exception.Message); }
+    }
+
+    [HttpPost("production-sheets/{sheetId:guid}/lock")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> LockProductionSheet(Guid sheetId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await productionSheets.LockAsync(GetUserId(), sheetId, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_CHARACTER_PRODUCTION_SHEET_NOT_FOUND", "Character production sheet not found.") : Ok(result);
+        }
+        catch (MovieCharacterProductionSheetValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
+    }
+
+    [HttpPost("production-sheets/{sheetId:guid}/unlock")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> UnlockProductionSheet(Guid sheetId, CancellationToken cancellationToken)
+    {
+        var result = await productionSheets.UnlockAsync(GetUserId(), sheetId, cancellationToken);
+        return result is null ? ApiResults.Error(this, 404, "MOVIE_CHARACTER_PRODUCTION_SHEET_NOT_FOUND", "Character production sheet not found.") : Ok(result);
     }
 
     [HttpGet("projects/{id:guid}/world")]
@@ -333,6 +428,58 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
         catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_LOCATION_INVALID", exception.Message); }
     }
 
+    [HttpGet("locations/{locationId:guid}/geography-sheet")]
+    public async Task<IActionResult> GetLocationGeographySheet(Guid locationId, CancellationToken cancellationToken)
+    {
+        var result = await geographySheets.GetAsync(GetUserId(), locationId, cancellationToken);
+        return result is null ? ApiResults.Error(this, 404, "MOVIE_LOCATION_GEOGRAPHY_SHEET_NOT_FOUND", "Location geography sheet not found.") : Ok(result);
+    }
+
+    [HttpPut("locations/{locationId:guid}/geography-sheet")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> UpsertLocationGeographySheet(Guid locationId, MovieLocationGeographySheetRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await geographySheets.UpsertAsync(GetUserId(), locationId, request, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_LOCATION_NOT_FOUND", "Movie location not found.") : Ok(result);
+        }
+        catch (MovieLocationGeographySheetLockedException exception) { return ApiResults.Error(this, 409, "MOVIE_LOCATION_GEOGRAPHY_SHEET_LOCKED", exception.Message); }
+        catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_LOCATION_GEOGRAPHY_SHEET_INVALID", exception.Message); }
+    }
+
+    [HttpPost("locations/{locationId:guid}/geography-sheet/variants")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> AddLocationGeographyVariant(Guid locationId, MovieLocationGeographyVariantRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await geographySheets.AddVariantAsync(GetUserId(), locationId, request, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_LOCATION_NOT_FOUND", "Movie location not found.") : Ok(result);
+        }
+        catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_LOCATION_GEOGRAPHY_VARIANT_INVALID", exception.Message); }
+    }
+
+    [HttpPost("locations/{locationId:guid}/geography-sheet/approve")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> ApproveLocationGeographySheet(Guid locationId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await geographySheets.ApproveSheetAsync(GetUserId(), locationId, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_LOCATION_GEOGRAPHY_SHEET_NOT_FOUND", "Location geography sheet not found.") : Ok(result);
+        }
+        catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_LOCATION_GEOGRAPHY_SHEET_INVALID", exception.Message); }
+    }
+
+    [HttpPost("location-geography-variants/{variantId:guid}/approve")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> ApproveLocationGeographyVariant(Guid variantId, CancellationToken cancellationToken)
+    {
+        var result = await geographySheets.ApproveVariantAsync(GetUserId(), variantId, cancellationToken);
+        return result is null ? ApiResults.Error(this, 404, "MOVIE_LOCATION_GEOGRAPHY_VARIANT_NOT_FOUND", "Location geography variant not found.") : Ok(result);
+    }
+
     [HttpPost("projects/{id:guid}/sets")]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> AddSet(Guid id, MovieStudioSetRequest request, CancellationToken cancellationToken)
@@ -355,6 +502,109 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
     {
         try { var result = await movies.AddPropAsync(GetUserId(), id, request, cancellationToken); return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result); }
         catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_PROP_INVALID", exception.Message); }
+    }
+
+    [HttpGet("projects/{id:guid}/prop-bible")]
+    public async Task<IActionResult> GetPropBible(Guid id, CancellationToken cancellationToken)
+    {
+        var result = await propBible.GetProjectAsync(GetUserId(), id, cancellationToken);
+        return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result);
+    }
+
+    [HttpGet("projects/{id:guid}/prop-bible/recurring-detection")]
+    [HttpGet("projects/{id:guid}/prop-bible/recurring-props")]
+    public async Task<IActionResult> DetectRecurringProps(Guid id, CancellationToken cancellationToken)
+    {
+        var result = await propBible.DetectRecurringAsync(GetUserId(), id, cancellationToken);
+        return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result);
+    }
+
+    [HttpGet("props/{propId:guid}/production-sheet")]
+    [HttpGet("props/{propId:guid}/prop-bible")]
+    public async Task<IActionResult> GetPropProductionSheet(Guid propId, CancellationToken cancellationToken)
+    {
+        var result = await propBible.GetPropAsync(GetUserId(), propId, cancellationToken);
+        return result is null ? ApiResults.Error(this, 404, "MOVIE_PROP_NOT_FOUND", "Movie prop not found.") : Ok(result);
+    }
+
+    [HttpPut("props/{propId:guid}/production-sheet")]
+    [HttpPut("props/{propId:guid}/prop-bible")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> SavePropProductionSheet(Guid propId, MoviePropBibleRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await propBible.UpsertAsync(GetUserId(), propId, request, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_PROP_NOT_FOUND", "Movie prop not found.") : Ok(result);
+        }
+        catch (MoviePropBibleLockedException exception) { return ApiResults.Error(this, 409, "MOVIE_PROP_BIBLE_LOCKED", exception.Message); }
+        catch (MoviePropBibleValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_PROP_BIBLE_INVALID", exception.Message); }
+    }
+
+    [HttpPost("props/{propId:guid}/production-sheet/references")]
+    [HttpPost("props/{propId:guid}/prop-bible/references")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> AddPropBibleReference(Guid propId, MoviePropBibleReferenceRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await propBible.AddReferenceAsync(GetUserId(), propId, request, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_PROP_NOT_FOUND", "Movie prop not found.") : Ok(result);
+        }
+        catch (MoviePropBibleLockedException exception) { return ApiResults.Error(this, 409, "MOVIE_PROP_BIBLE_LOCKED", exception.Message); }
+        catch (MoviePropBibleValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_PROP_BIBLE_INVALID", exception.Message); }
+    }
+
+    [HttpPost("props/{propId:guid}/production-sheet/variants")]
+    [HttpPost("props/{propId:guid}/prop-bible/variants")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> AddPropBibleVariant(Guid propId, MoviePropBibleVariantRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await propBible.AddVariantAsync(GetUserId(), propId, request, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_PROP_NOT_FOUND", "Movie prop not found.") : Ok(result);
+        }
+        catch (MoviePropBibleLockedException exception) { return ApiResults.Error(this, 409, "MOVIE_PROP_BIBLE_LOCKED", exception.Message); }
+        catch (MoviePropBibleValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_PROP_BIBLE_INVALID", exception.Message); }
+    }
+
+    [HttpPost("props/{propId:guid}/production-sheet/versions")]
+    [HttpPost("props/{propId:guid}/prop-bible/versions")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> CreatePropBibleVersion(Guid propId, MoviePropBibleVersionRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await propBible.CreateVersionAsync(GetUserId(), propId, request, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_PROP_NOT_FOUND", "Movie prop not found.") : Ok(result);
+        }
+        catch (MoviePropBibleValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_PROP_BIBLE_INVALID", exception.Message); }
+    }
+
+    [HttpPost("prop-bible/versions/{versionId:guid}/review")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> ReviewPropBibleVersion(Guid versionId, MoviePropBibleReviewRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await propBible.ReviewVersionAsync(GetUserId(), versionId, request, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_PROP_BIBLE_VERSION_NOT_FOUND", "Prop Bible version not found.") : Ok(result);
+        }
+        catch (MoviePropBibleLockedException exception) { return ApiResults.Error(this, 409, "MOVIE_PROP_BIBLE_LOCKED", exception.Message); }
+        catch (MoviePropBibleValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_PROP_BIBLE_INVALID", exception.Message); }
+    }
+
+    [HttpPost("prop-bible/versions/{versionId:guid}/lock")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> LockPropBibleVersion(Guid versionId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await propBible.LockVersionAsync(GetUserId(), versionId, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_PROP_BIBLE_VERSION_NOT_FOUND", "Prop Bible version not found.") : Ok(result);
+        }
+        catch (MoviePropBibleValidationException exception) { return ApiResults.Error(this, 409, "MOVIE_PROP_BIBLE_INVALID", exception.Message); }
     }
 
     [HttpPost("projects/{id:guid}/world-references")]
@@ -467,6 +717,18 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
         catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_CINEMATOGRAPHY_PLAN_INVALID", exception.Message); }
     }
 
+    [HttpPost("shots/{shotId:guid}/camera-profile")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> PlanCameraProfile(Guid shotId, MovieCinematographyPlanRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await cinematographyPlanning.PlanAsync(GetUserId(), shotId, request, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_SHOT_NOT_FOUND", "Movie shot not found.") : Ok(result);
+        }
+        catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_CAMERA_PROFILE_INVALID", exception.Message); }
+    }
+
     [HttpPost("shots/{shotId:guid}/reorder")]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> ReorderShot(Guid shotId, MovieShotReorderRequest request, CancellationToken cancellationToken)
@@ -545,6 +807,46 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
             return result is null ? ApiResults.Error(this, 404, "MOVIE_SHOT_NOT_FOUND", "Movie shot not found.") : Ok(result);
         }
         catch (MovieProductionReferenceException exception) { return ApiResults.Error(this, 400, "MOVIE_PRODUCTION_REFERENCES_INVALID", exception.Message); }
+    }
+
+    [HttpGet("shots/{shotId:guid}/production/preflight")]
+    public async Task<IActionResult> GetProductionPreflight(
+        Guid shotId,
+        [FromQuery] Guid? sourceVersionId,
+        [FromQuery] string? targetResolution,
+        [FromQuery] string? qualityTier,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await productionPreflight.EvaluateAsync(
+                GetUserId(),
+                shotId,
+                new MovieProductionPreflightRequest(sourceVersionId, targetResolution, qualityTier),
+                cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_SHOT_NOT_FOUND", "Movie shot not found.") : Ok(result);
+        }
+        catch (MovieProductionValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
+        catch (MovieProductionReferenceException exception) { return ApiResults.Error(this, 400, "MOVIE_PRODUCTION_REFERENCES_INVALID", exception.Message); }
+    }
+
+    [HttpGet("shots/{shotId:guid}/reference-readiness")]
+    public async Task<IActionResult> GetReferenceReadiness(Guid shotId, CancellationToken cancellationToken)
+    {
+        var result = await referenceReadiness.GetAsync(GetUserId(), shotId, cancellationToken);
+        return result is null ? ApiResults.Error(this, 404, "MOVIE_SHOT_NOT_FOUND", "Movie shot not found.") : Ok(result);
+    }
+
+    [HttpPost("shots/{shotId:guid}/reference-readiness/override")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> OverrideReferenceReadiness(Guid shotId, MovieReferenceReadinessOverrideRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await referenceReadiness.RecordOverrideAsync(GetUserId(), shotId, request, MovieReferenceReadinessOverrideSources.ProductionRender, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_SHOT_NOT_FOUND", "Movie shot not found.") : Ok(result);
+        }
+        catch (MovieReferenceReadinessException exception) { return ApiResults.Error(this, 409, exception.Code, exception.Message); }
     }
 
     [HttpGet("shots/{shotId:guid}/production")]
@@ -639,6 +941,7 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
             return result is null ? ApiResults.Error(this, 404, "MOVIE_SHOT_NOT_FOUND", "Movie shot not found.") : Accepted(result);
         }
         catch (MovieProductionValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
+        catch (MovieReferenceReadinessException exception) { return ApiResults.Error(this, 409, exception.Code, exception.Message); }
     }
 
     [HttpPost("shots/{shotId:guid}/production/execute")]
@@ -652,6 +955,7 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
             return result is null ? ApiResults.Error(this, 404, "MOVIE_SHOT_NOT_FOUND", "Movie shot not found.") : Accepted(result);
         }
         catch (MovieShotExecutionValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
+        catch (MovieReferenceReadinessException exception) { return ApiResults.Error(this, 409, exception.Code, exception.Message); }
         catch (GenerationJobForbiddenException) { return Forbid(); }
         catch (GenerationJobValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
     }
@@ -722,6 +1026,7 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
             return result is null ? ApiResults.Error(this, 404, "MOVIE_SHOT_NOT_FOUND", "Movie shot not found.") : Accepted(result);
         }
         catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_SHOT_NOT_READY", exception.Message); }
+        catch (MovieReferenceReadinessException exception) { return ApiResults.Error(this, 409, exception.Code, exception.Message); }
     }
 
     [HttpGet("projects/{movieProjectId:guid}/story")]

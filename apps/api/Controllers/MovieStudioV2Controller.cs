@@ -5,13 +5,14 @@ using Taslim.Api.Contracts;
 using Taslim.Api.Generation;
 using Taslim.Api.Infrastructure;
 using Taslim.Api.Movies;
+using Taslim.Api.Usage;
 
 namespace Taslim.Api.Controllers;
 
 [ApiController]
 [Authorize]
 [Route("api/movie-studio")]
-public sealed class MovieStudioV2Controller(IMovieV2Service movies, IMovieScenesService scenes, IMovieFinalMasteringService mastering, IMovieTakeUpscaleEligibilityService upscaleEligibility, IMovieProductionCheckpointService checkpoints) : ControllerBase
+public sealed class MovieStudioV2Controller(IMovieV2Service movies, IMovieScenesService scenes, IMovieFinalMasteringService mastering, IMovieTakeUpscaleEligibilityService upscaleEligibility, IMovieProductionCheckpointService checkpoints, IMovieBudgetDirectorService budgetDirector) : ControllerBase
 {
     [HttpGet("projects/{id:guid}/hierarchy")]
     public async Task<IActionResult> Hierarchy(Guid id, CancellationToken cancellationToken) => await Execute(async () =>
@@ -24,6 +25,21 @@ public sealed class MovieStudioV2Controller(IMovieV2Service movies, IMovieScenes
     public async Task<IActionResult> Overview(Guid id, CancellationToken cancellationToken) => await Execute(async () =>
     {
         var result = await movies.GetOverviewAsync(UserId(), id, cancellationToken);
+        return result is null ? NotFoundResult("MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result);
+    });
+
+    [HttpGet("projects/{id:guid}/budget-director")]
+    public async Task<IActionResult> BudgetDirector(Guid id, CancellationToken cancellationToken) => await Execute(async () =>
+    {
+        var result = await budgetDirector.EstimateProjectAsync(UserId(), id, cancellationToken);
+        return result is null ? NotFoundResult("MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result);
+    });
+
+    [HttpPost("projects/{id:guid}/budget-director/preview")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> BudgetDirectorPreview(Guid id, MovieBudgetDirectorRequest request, CancellationToken cancellationToken) => await Execute(async () =>
+    {
+        var result = await budgetDirector.EstimateProjectAsync(UserId(), id, request, cancellationToken);
         return result is null ? NotFoundResult("MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result);
     });
 
@@ -188,6 +204,7 @@ public sealed class MovieStudioV2Controller(IMovieV2Service movies, IMovieScenes
     {
         try { return await action(); }
         catch (MovieV2ValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_V2_REQUEST_INVALID", exception.Message); }
+        catch (MovieBudgetDirectorValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
         catch (MovieScenesWorkflowException exception) { return ApiResults.Error(this, 409, exception.Code, exception.Message); }
         catch (MovieFinalMasteringValidationException exception) { return ApiResults.Error(this, 409, exception.Code, exception.Message); }
         catch (MovieProductionRecoveryException exception) { return ApiResults.Error(this, 409, exception.Code, exception.Message); }

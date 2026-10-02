@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Taslim.Api.Contracts;
 using Taslim.Api.Infrastructure;
 using Taslim.Api.Movies;
 
@@ -9,8 +10,17 @@ namespace Taslim.Api.Controllers;
 [ApiController]
 [Authorize]
 [Route("api/movie-director")]
-public sealed class MovieDirectorController(IMovieDirectorService director) : ControllerBase
+public sealed class MovieDirectorController(IMovieDirectorService director, IMovieSalvageDirector salvage, MovieAuthorizationService authorization) : ControllerBase
 {
+    [HttpPost("salvage-plan")]
+    [ValidateAntiForgeryToken]
+    public IActionResult CreateSalvagePlan(MovieSalvageDirectorRequest request)
+    {
+        try { return Ok(salvage.Plan(request)); }
+        catch (ArgumentNullException exception) { return ApiResults.Error(this, 400, "MOVIE_SALVAGE_REQUEST_INVALID", exception.Message); }
+        catch (ArgumentException exception) { return ApiResults.Error(this, 400, "MOVIE_SALVAGE_REQUEST_INVALID", exception.Message); }
+    }
+
     [HttpPost("projects/{movieProjectId:guid}/proposals")]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> CreateProposal(Guid movieProjectId, DirectorProposalRequest request, CancellationToken cancellationToken)
@@ -28,6 +38,21 @@ public sealed class MovieDirectorController(IMovieDirectorService director) : Co
         catch (DirectorContextTargetException exception) { return ApiResults.Error(this, 400, "DIRECTOR_CONTEXT_TARGET_INVALID", exception.Message); }
         catch (DirectorContextBudgetException exception) { return ApiResults.Error(this, 413, "DIRECTOR_CONTEXT_BUDGET_EXCEEDED", exception.Message); }
         catch (DirectorSynopsisGenerationException exception) { return ApiResults.Error(this, 503, "DIRECTOR_SYNOPSIS_UNAVAILABLE", exception.Message); }
+    }
+
+    [HttpPost("projects/{movieProjectId:guid}/intercut-proposals")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> CreateIntercutProposal(Guid movieProjectId, MovieIntercutPlanRequest request, CancellationToken cancellationToken)
+    {
+        if (!await authorization.CanAsync(GetUserId(), movieProjectId, MovieOperationalActions.DirectorProposalCreate, cancellationToken))
+            return Forbid();
+        try
+        {
+            // Intercut planning is deliberately a pure proposal seam. It does not create a
+            // timeline revision, enqueue a job, publish media, or charge usage.
+            return Ok(MovieIntercutPlanner.Build(movieProjectId, request));
+        }
+        catch (MovieIntercutPlanningException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
     }
 
     [HttpGet("proposals/{proposalId:guid}")]

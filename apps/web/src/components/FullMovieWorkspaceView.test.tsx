@@ -15,6 +15,13 @@ describe("Full Movie workspace foundation", () => {
     expect(positions).toEqual([...positions].sort((a, b) => a - b));
   });
 
+  it("makes Production Kit a durable reference-first workspace route", () => {
+    expect(workspaceSource).toContain('slug: "production-kit"');
+    expect(workspaceSource).toContain('label: "Production Kit"');
+    expect(workspaceSource).toContain("<ProductionKitWorkspace projectId={fullProject.id} />");
+    expect(workspaceSource).toContain("Reference control");
+  });
+
   it("uses durable project routes and marks future surfaces honestly", () => {
     expect(workspaceSource).toContain("/create/movie/${workspace.id}/${item.slug}");
     expect(workspaceSource).toContain("Foundation surface");

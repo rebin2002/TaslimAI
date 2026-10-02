@@ -44,7 +44,8 @@ public sealed record MovieWorldContinuityLocationSnapshot(
     string Name,
     string Description,
     string? VisualContinuityNotes,
-    Guid? ReferenceAssetId);
+    Guid? ReferenceAssetId,
+    MovieLocationGeographySheetDto? GeographySheet = null);
 
 public sealed record MovieWorldContinuityVariationSnapshot(
     Guid Id,
@@ -207,6 +208,12 @@ public sealed class MovieWorldContinuityProjector(TaslimDbContext db)
                 .OrderBy(item => item.Id)
                 .Take(MovieWorldContinuityLimits.MaxLocations)
                 .ToListAsync(cancellationToken);
+        var geographySheets = locationIds.Length == 0
+            ? []
+            : await db.MovieLocationGeographySheets.AsNoTracking()
+                .Include(item => item.Variants)
+                .Where(item => locationIds.Contains(item.MovieLocationId))
+                .ToListAsync(cancellationToken);
         var props = propIds.Length == 0
             ? []
             : await db.MovieProps.AsNoTracking()
@@ -249,7 +256,7 @@ public sealed class MovieWorldContinuityProjector(TaslimDbContext db)
             .Take(MovieWorldContinuityLimits.MaxLocks)
             .ToListAsync(cancellationToken);
 
-        var locationSnapshots = locations.Select(item => new MovieWorldContinuityLocationSnapshot(item.Id, item.Name, item.Description, item.VisualContinuityNotes, item.ReferenceAssetId)).ToArray();
+        var locationSnapshots = locations.Select(item => new MovieWorldContinuityLocationSnapshot(item.Id, item.Name, item.Description, item.VisualContinuityNotes, item.ReferenceAssetId, geographySheets.Where(sheet => sheet.MovieLocationId == item.Id).Select(MovieLocationGeographySheetMapper.ToDto).FirstOrDefault())).ToArray();
         var setSnapshots = sets.Select(item => new MovieWorldContinuitySetSnapshot(
             item.Id, item.MovieLocationId, item.Name, item.Description, item.EnvironmentType, item.VisualDescription,
             item.TimeOfDay, item.Weather, item.ContinuityNotes, item.ReferenceAssetId,

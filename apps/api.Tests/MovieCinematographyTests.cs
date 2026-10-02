@@ -146,11 +146,15 @@ public sealed class MovieCinematographyTests : IClassFixture<GenerationJobsNoWor
         Assert.Equal(locked.Revision.RevisionNumber, planned.LockedGuideRevisionNumber);
         Assert.Contains("ShotSize", planned.AppliedCanonFields);
         Assert.Equal("close_up", planned.Plan.ShotSize);
+        Assert.NotNull(planned.CameraProfile);
+        Assert.Equal("portrait", planned.CameraProfile!.FocalIntent);
+        Assert.Equal(MovieCameraProfileSources.MovieGuide, planned.CameraProfile.Source);
         Assert.Contains(planned.Plan.Grounding!, item => item.Source == "cinematography_bible" && item.Locked);
 
         var reloaded = await client.GetFromJsonAsync<MovieShotDto>($"/api/movie-studio/shots/{shot.Id}");
         Assert.NotNull(reloaded?.CinematographyPlan);
         Assert.Equal("close_up", reloaded!.CinematographyPlan!.ShotSize);
+        Assert.Equal("portrait", reloaded.CameraProfile!.FocalIntent);
     }
 
     private static async Task<AuthResponse> Register(HttpClient client, string displayName) =>

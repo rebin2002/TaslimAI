@@ -12,7 +12,8 @@ public sealed record MovieProductionContinuityReviewDto(
     Guid? ShotId,
     bool ReviewOnly,
     DateTime AssembledAt,
-    IReadOnlyList<DirectorStoryFindingDto> Findings);
+    IReadOnlyList<DirectorStoryFindingDto> Findings,
+    IReadOnlyList<MovieScreenDirectionRecommendationDto>? ScreenDirectionRecommendations = null);
 
 public sealed record MovieProductionContinuitySceneContext(
     Guid Id,
@@ -38,7 +39,8 @@ public sealed record MovieProductionContinuityShotContext(
     string? CameraMotion,
     string? Narration,
     string? Dialogue,
-    string? VisualContinuityNotes);
+    string? VisualContinuityNotes,
+    MovieScreenDirectionPlan? ScreenDirection = null);
 
 public sealed record MovieProductionContinuityCharacterContext(
     Guid Id,
@@ -168,8 +170,8 @@ public sealed class MovieProductionContinuityService(
             movie.Id, reviewSceneId, requestedShotId, guide,
             scenes.Select(ToSceneContext).ToArray(), characters.Select(ToCharacterContext).ToArray(), world, usages,
             world?.Warnings ?? [], storyLinks.Select(item => (item.SceneId, item.MovieSceneId, item.SequenceNumber, item.SceneIdentifier, item.Slugline)).ToArray(), DateTime.UtcNow);
-        var findings = MovieProductionContinuityAnalyzer.Analyze(context);
-        return new MovieProductionContinuityReviewDto(movie.Id, context.SceneId, context.ShotId, true, context.AssembledAt, findings);
+        var analysis = MovieProductionContinuityAnalyzer.AnalyzeWithRecommendations(context);
+        return new MovieProductionContinuityReviewDto(movie.Id, context.SceneId, context.ShotId, true, context.AssembledAt, analysis.Findings, analysis.ScreenDirectionRecommendations);
     }
 
     private static MovieProductionContinuitySceneContext ToSceneContext(MovieScene scene) => new(
@@ -180,7 +182,7 @@ public sealed class MovieProductionContinuityService(
         shot.Id, shot.Sequence, Limit(shot.Description, 8_000), Limit(shot.Purpose, 2_000), Limit(shot.Subjects, 4_000),
         MovieShotReadiness.ParseSubjectCharacterIds(shot.SubjectCharacterIdsJson), Limit(shot.LocationSet, 2_000), Limit(shot.ProductionRequirements, 4_000),
         Limit(shot.ContinuityReferences, 4_000), Limit(shot.CameraAndFraming, 2_000), Limit(shot.CameraMotion, 2_000), Limit(shot.Narration, 8_000),
-        Limit(shot.Dialogue, 8_000), Limit(shot.VisualContinuityNotes, 4_000));
+        Limit(shot.Dialogue, 8_000), Limit(shot.VisualContinuityNotes, 4_000), MovieScreenDirectionPlanCodec.FromJson(shot.ScreenDirectionJson));
 
     private static MovieProductionContinuityCharacterContext ToCharacterContext(MovieCharacter character) => new(
         character.Id, Limit(character.Name, 160), Limit(character.Description, 4_000), Limit(character.Appearance, 2_000), Limit(character.Wardrobe, 2_000),
@@ -201,7 +203,12 @@ public static class MovieProductionContinuityLimits
     public const int MaxStoryLinks = 96;
     public const int MaxGuideSection = 20_000;
     public const int MaxFindings = 192;
+    public const int MaxRecommendations = 96;
 }
+
+public sealed record MovieProductionContinuityAnalysisResult(
+    IReadOnlyList<DirectorStoryFindingDto> Findings,
+    IReadOnlyList<MovieScreenDirectionRecommendationDto> ScreenDirectionRecommendations);
 
 public static class MovieProductionContinuityAnalyzer
 {
@@ -216,7 +223,9 @@ public static class MovieProductionContinuityAnalyzer
         ("rain", "sunny"), ("storm", "clear"), ("snow", "sunny"),
     ];
 
-    public static IReadOnlyList<DirectorStoryFindingDto> Analyze(MovieProductionContinuityContext context)
+    public static IReadOnlyList<DirectorStoryFindingDto> Analyze(MovieProductionContinuityContext context) => AnalyzeWithRecommendations(context).Findings;
+
+    public static MovieProductionContinuityAnalysisResult AnalyzeWithRecommendations(MovieProductionContinuityContext context)
     {
         var findings = new List<DirectorStoryFindingDto>();
         AnalyzeChronology(context, findings);
@@ -230,7 +239,11 @@ public static class MovieProductionContinuityAnalyzer
             }
         }
         AnalyzeWorldWarnings(context, findings);
-        return findings.GroupBy(FindingKey, StringComparer.Ordinal).Select(item => item.First()).Take(MovieProductionContinuityLimits.MaxFindings).ToArray();
+        var screenDirection = MovieScreenDirectionAnalyzer.Analyze(context);
+        findings.AddRange(screenDirection.Findings);
+        return new MovieProductionContinuityAnalysisResult(
+            findings.GroupBy(FindingKey, StringComparer.Ordinal).Select(item => item.First()).Take(MovieProductionContinuityLimits.MaxFindings).ToArray(),
+            screenDirection.Recommendations);
     }
 
     private static void AnalyzePlan(MovieProductionContinuityContext context, MovieProductionContinuitySceneContext scene, MovieProductionContinuityShotContext? shot, string planText, ICollection<DirectorStoryFindingDto> findings)

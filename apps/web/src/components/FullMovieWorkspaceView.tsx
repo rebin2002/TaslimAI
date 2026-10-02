@@ -1,6 +1,5 @@
 "use client";
 /* eslint-disable @next/next/no-img-element -- storyboard previews use authenticated Asset URLs. */
-/* eslint-disable react-hooks/set-state-in-effect -- module loaders synchronize persisted read models. */
 /* eslint-disable react-hooks/exhaustive-deps -- loader callbacks intentionally follow module/project identity. */
 
 import Link from "next/link";
@@ -28,6 +27,7 @@ import {
   ListChecks,
   LockKeyhole,
   Map,
+  Package,
   PencilRuler,
   Plus,
   Play,
@@ -43,23 +43,27 @@ import {
   Workflow,
   X,
 } from "lucide-react";
-import { api, type Asset, type CinematographyPreset, type DirectorProposal, type DirectorStoryAction, type MovieCast, type MovieCharacter, type MovieCharacterState, type MovieOverview, type MovieProductionCheckpoint, type MovieProductionReviewInput, type MovieProductionVersion, type MovieProject, type MovieTake, type MovieProjectShell, type MovieScene, type MovieSceneShotPlan, type MovieSceneWorkspace, type MovieScenesWorkspace, type MovieScreenplayElementType, type MovieShot, type MovieShotPlanningInput, type MovieStoryboardCandidate, type MovieStoryboardProject, type MovieStoryboardScene, type MovieStoryboardShot, type MovieStory, type MovieStoryRevision, type MovieStoryRevisionInput } from "@/lib/api";
+import { api, type Asset, type CinematographyPreset, type DirectorProposal, type DirectorStoryAction, type MovieBudgetDirectorEstimate, type MovieCast, type MovieCharacter, type MovieCharacterProductionSheetInput, type MovieCharacterState, type MovieOverview, type MovieProductionCheckpoint, type MovieProductionVersion, type MovieProject, type MovieTake, type MovieProjectShell, type MovieScene, type MovieSceneShotPlan, type MovieSceneWorkspace, type MovieScenesWorkspace, type MovieScreenplayElementType, type MovieShot, type MovieShotPlanningInput, type MovieStoryboardCandidate, type MovieStoryboardProject, type MovieStoryboardScene, type MovieStoryboardShot, type MovieStory, type MovieStoryRevision, type MovieStoryRevisionInput } from "@/lib/api";
 import { assetFileUrl } from "@/lib/apiBase";
 import { MovieWorldWorkspace } from "@/components/MovieWorldWorkspace";
 import { ShotDesigner, type ShotDesignerDraft } from "@/components/ShotDesigner";
 import { MovieDirectorPanel } from "@/components/MovieDirectorPanel";
 import { MovieProductionResolutionPanel } from "@/components/MovieProductionResolutionPanel";
-import { MovieProductionWorkspace } from "@/components/MovieProductionWorkspace";
 import { displayProductionStage, displayProductionStatus, type MovieResolutionTier } from "@/lib/movieProductionResolution";
+import { MovieProductionWorkspace } from "@/components/MovieProductionWorkspace";
+import { ProductionKitWorkspace } from "@/components/ProductionKitWorkspace";
+import { MovieSelectsWorkspace } from "@/components/MovieSelectsWorkspace";
 
 export const fullMovieModules = [
   { slug: "overview", label: "Overview", icon: Gauge },
+  { slug: "production-kit", label: "Production Kit", icon: Package },
   { slug: "story", label: "Story", icon: BookOpen },
   { slug: "cast", label: "Cast", icon: Users },
   { slug: "world", label: "World", icon: Map },
   { slug: "scenes", label: "Scenes", icon: Clapperboard },
   { slug: "storyboard", label: "Storyboard", icon: Layers3 },
   { slug: "production", label: "Production", icon: Workflow },
+  { slug: "selects", label: "Selects", icon: ListChecks },
   { slug: "edit", label: "Edit", icon: PencilRuler },
   { slug: "audio", label: "Audio", icon: AudioLines },
   { slug: "qc", label: "QC", icon: ShieldCheck },
@@ -79,12 +83,14 @@ type ModuleCopy = {
 
 const moduleCopy: Record<ModuleSlug, ModuleCopy> = {
   overview: { eyebrow: "Project command", title: "A clear view of the film", description: "Keep the creative intent, story spine, and generated work in one calm production surface." },
+  "production-kit": { eyebrow: "Reference control", title: "Production Kit", description: "Lock the characters, locations, and props that every shot needs to recognize." },
   story: { eyebrow: "Story room", title: "Shape the story before the shots", description: "The brief is the source of truth for every scene, character, and future generation." },
   cast: { eyebrow: "Continuity desk", title: "Cast and performance", description: "Keep character identity and performance notes ready for the scenes that depend on them." },
   world: { eyebrow: "World building", title: "Locations with memory", description: "Capture the visual rules that make every location feel like the same world." },
   scenes: { eyebrow: "Scene plan", title: "Build the film in scenes", description: "Order the story, keep the intent visible, and make the next production step obvious." },
   storyboard: { eyebrow: "Visual plan", title: "See the cut before the cut", description: "A filmstrip for the scenes you have planned and the footage you have actually generated." },
   production: { eyebrow: "Production desk", title: "Move from plan to footage", description: "Track what is planned, what is in progress, and what is ready for review." },
+  selects: { eyebrow: "Selects / salvage", title: "Keep the good seconds", description: "Review generated takes as raw footage, salvage bounded ranges, and hand only deliberate inserts into the canonical timeline." },
   edit: { eyebrow: "Edit room", title: "A timeline waiting for footage", description: "The edit surface is reserved for real clips and real editorial decisions." },
   audio: { eyebrow: "Sound stage", title: "Audio belongs to the picture", description: "Keep narration, ambience, and music direction close to the cut they support." },
   qc: { eyebrow: "Review gate", title: "Quality control, when there is a cut", description: "A deliberate review surface for continuity, pacing, and delivery readiness." },
@@ -102,10 +108,6 @@ function hasReadyAsset(status: string, assetId: string | null) {
 
 function readyClipForScene(scene: MovieScene) {
   return scene.clips.find((clip) => hasReadyAsset(clip.status, clip.assetId));
-}
-
-function latestProductionVersion(shot: MovieShot) {
-  return [...shot.productionVersions].sort((left, right) => right.versionNumber - left.versionNumber)[0] ?? null;
 }
 
 function formatDuration(seconds: number | null | undefined) {
@@ -128,14 +130,13 @@ function FullMovieProjectWorkspace({ projectId, module }: { projectId: string; m
   const activeModule = moduleFromSlug(module);
   const [project, setProject] = useState<MovieProject | null>(null);
   const [overview, setOverview] = useState<MovieOverview | null>(null);
+  const [budgetEstimate, setBudgetEstimate] = useState<MovieBudgetDirectorEstimate | null>(null);
   const [projectShell, setProjectShell] = useState<MovieProjectShell | null>(null);
   const [storyboard, setStoryboard] = useState<MovieStoryboardProject | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [selectedSceneId, setSelectedSceneId] = useState<string | null>(null);
   const [selectedShotId, setSelectedShotId] = useState<string | null>(null);
-  const [newScene, setNewScene] = useState({ title: "", summary: "" });
-  const [addingScene, setAddingScene] = useState(false);
   const [presets, setPresets] = useState<CinematographyPreset[]>([]);
   const [savingShot, setSavingShot] = useState(false);
 
@@ -164,6 +165,9 @@ function FullMovieProjectWorkspace({ projectId, module }: { projectId: string; m
     }).finally(() => {
       if (mounted) setLoading(false);
     });
+    if (activeModule === "overview") {
+      void api.getMovieBudgetDirector(projectId).then((result) => { if (mounted) setBudgetEstimate(result); }).catch(() => undefined);
+    }
     if (activeModule === "storyboard") {
       void api.getMovieProject(projectId).then((fullProject) => {
         if (!mounted) return;
@@ -173,6 +177,9 @@ function FullMovieProjectWorkspace({ projectId, module }: { projectId: string; m
       }).catch(() => undefined);
     }
     void api.getCinematographyPresets().then((catalog) => { if (mounted) setPresets(catalog); }).catch(() => undefined);
+    if (activeModule === "production") {
+      void api.getMovieOverview(projectId).then((result) => { if (mounted) setOverview(result); }).catch(() => undefined);
+    }
     return () => { mounted = false; };
   }, [activeModule, projectId]);
 
@@ -182,22 +189,6 @@ function FullMovieProjectWorkspace({ projectId, module }: { projectId: string; m
   const outputAssetId = overview?.latestOutputAssetId ?? project?.assemblies.find((assembly) => hasReadyAsset(assembly.status, assembly.assetId))?.assetId ?? readyClips[0]?.assetId ?? null;
   const completionPercent = overview?.progress.production.percent ?? (project ? Math.min(100, Math.round(((project.scenes.length ? readyClips.length : 0) / Math.max(project.scenes.length, 1)) * 100)) : 0);
   const copy = moduleCopy[activeModule];
-
-  async function addScene() {
-    if (!project || !newScene.title.trim() || !newScene.summary.trim()) return;
-    setAddingScene(true);
-    setError("");
-    try {
-      const scene = await api.addMovieScene(project.id, { title: newScene.title.trim(), summary: newScene.summary.trim() });
-      setProject((current) => current ? { ...current, scenes: [...current.scenes, scene] } : current);
-      setSelectedSceneId(scene.id);
-      setNewScene({ title: "", summary: "" });
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "The scene could not be saved.");
-    } finally {
-      setAddingScene(false);
-    }
-  }
 
   async function addShot(sceneId: string, draft: ShotDesignerDraft): Promise<boolean> {
     if (!project) return false;
@@ -213,18 +204,6 @@ function FullMovieProjectWorkspace({ projectId, module }: { projectId: string; m
   function applyShotPlan(plan: MovieSceneShotPlan) {
     setProject((current) => current ? { ...current, scenes: current.scenes.map((scene) => scene.id === plan.sceneId ? { ...scene, shots: plan.shots } : scene) } : current);
     setSelectedShotId((current) => plan.shots.some((shot) => shot.id === current) ? current : plan.shots[0]?.id ?? null);
-  }
-
-  async function reviewProductionVersion(versionId: string, input: MovieProductionReviewInput) {
-    setError("");
-    try { await api.reviewMovieProductionVersion(versionId, input); setProject(await api.getMovieProject(projectId)); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : "The production review could not be saved."); }
-  }
-
-  async function createProductionVersion(shotId: string, input: { stage: "ProductionKeyframe"; sourceVersionId: string; compositionJson: string; firstFrameNotes?: string | null; lastFrameNotes?: string | null }) {
-    setError("");
-    try { await api.createMovieProductionVersion(shotId, input); setProject(await api.getMovieProject(projectId)); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : "The keyframe plan could not be saved."); }
   }
 
   async function refreshProject() { const result = await api.getMovieProject(projectId); setProject(result); }
@@ -278,14 +257,16 @@ function FullMovieProjectWorkspace({ projectId, module }: { projectId: string; m
         </nav>
 
         <main className="movie-workspace-main">
-          <div className="movie-module-heading"><div><span className="movie-workspace-kicker">{copy.eyebrow}</span><h2>{copy.title}</h2><p>{copy.description}</p></div><span className="movie-module-index">{String(fullMovieModules.findIndex((item) => item.slug === activeModule) + 1).padStart(2, "0")} / 12</span></div>
-          {activeModule === "overview" && overview && <OverviewModule overview={overview} outputAssetId={outputAssetId} />}
+          <div className="movie-module-heading"><div><span className="movie-workspace-kicker">{copy.eyebrow}</span><h2>{copy.title}</h2><p>{copy.description}</p></div><span className="movie-module-index">{String(fullMovieModules.findIndex((item) => item.slug === activeModule) + 1).padStart(2, "0")} / {fullMovieModules.length}</span></div>
+          {activeModule === "overview" && overview && <OverviewModule overview={overview} budgetEstimate={budgetEstimate} outputAssetId={outputAssetId} />}
+          {activeModule === "production-kit" && <ProductionKitWorkspace projectId={fullProject.id} />}
           {activeModule === "story" && <StoryModule projectId={workspace.id} guideLocked={projectShell?.lockedGuideRevisionNumber != null} />}
           {activeModule === "cast" && <CastModule projectId={workspace.id} />}
           {activeModule === "world" && <WorldModule projectId={fullProject.id} />}
           {activeModule === "scenes" && <ScenesModule projectId={fullProject.id} project={fullProject} presets={presets} savingShot={savingShot} onAddShot={addShot} selectedSceneId={selectedScene?.id ?? null} selectedShotId={selectedShotId} onSelectScene={(sceneId) => { setSelectedSceneId(sceneId); setSelectedShotId(null); }} onSelectShot={setSelectedShotId} onGenerate={generateScene} onPlanChange={applyShotPlan} />}
           {activeModule === "storyboard" && storyboard && <OperationalStoryboardModule storyboard={storyboard} onRefresh={() => void refreshStoryboard()} onError={setError} />}
-          {activeModule === "production" && <MovieProductionWorkspace project={fullProject} completionPercent={completionPercent} onRefresh={refreshProject} />}
+          {activeModule === "production" && <MovieProductionWorkspace project={fullProject} completionPercent={completionPercent} cost={overview?.cost} onRefresh={refreshProject} />}
+          {activeModule === "selects" && <MovieSelectsWorkspace project={fullProject} />}
           {activeModule === "edit" && <EditModule project={fullProject} />}
           {activeModule === "audio" && <FutureModule icon={<AudioLines size={20} />} title="Audio is not connected yet" text="The sound stage is reserved for real narration, ambience, and music assets. Nothing is simulated here." />}
           {activeModule === "qc" && <FutureModule icon={<ShieldCheck size={20} />} title="QC is a future review gate" text="Continuity and delivery checks will appear once this project has a real cut to inspect." />}
@@ -300,7 +281,7 @@ function FullMovieProjectWorkspace({ projectId, module }: { projectId: string; m
   );
 }
 
-function OverviewModule({ overview, outputAssetId }: { overview: MovieOverview; outputAssetId: string | null }) {
+function OverviewModule({ overview, budgetEstimate, outputAssetId }: { overview: MovieOverview; budgetEstimate: MovieBudgetDirectorEstimate | null; outputAssetId: string | null }) {
   const project = overview.project;
   const action = overview.nextActions[0];
   const progressItems = [
@@ -340,12 +321,18 @@ function OverviewModule({ overview, outputAssetId }: { overview: MovieOverview; 
       <section className="movie-command-section"><CommandSectionTitle eyebrow="Production economics" title={overview.cost.isKnown ? "Recorded estimate" : "No estimate recorded yet"} detail="Planning view" /><div className="movie-cost-readout"><div><span>Recorded estimate</span><strong>{formatCost(overview.cost.recordedProviderCostUsd, overview.cost.currency)}</strong></div><div><span>Estimated remaining</span><strong>{formatCost(overview.cost.estimatedRemainingProviderCostUsd, overview.cost.currency)}</strong></div></div><p className="movie-command-note">{overview.cost.note ?? "Estimates are shown for planning only and do not activate charging."}</p></section>
     </div>
 
+    <BudgetDirectorCard estimate={budgetEstimate} />
+
     <div className="movie-command-grid movie-command-grid-bottom"><section className="movie-command-section"><CommandSectionTitle eyebrow="Warnings & blockers" title={overview.warnings.length ? `${overview.warnings.length} signals need attention` : "No active warnings"} detail="Continuity and production" />{overview.warnings.length ? <div className="movie-warning-list">{overview.warnings.map((warning) => <div className={`movie-warning-row is-${warning.severity}`} key={warning.key}><CircleAlert size={14} /><div><strong>{warning.label}</strong><p>{warning.detail}</p></div></div>)}</div> : <HonestEmpty text="No unresolved warnings have been recorded for this project." />}</section><section className="movie-command-section"><CommandSectionTitle eyebrow="Recent activity" title="Meaningful changes" detail="Latest persisted records" />{overview.recentActivity.length ? <div className="movie-activity-list">{overview.recentActivity.map((item) => <div className="movie-activity-row" key={item.key}><Clock3 size={14} /><div><strong>{item.label}</strong><span>{item.detail}</span></div><time dateTime={item.occurredAt}>{formatRelativeDate(item.occurredAt)}</time></div>)}</div> : <HonestEmpty text="Activity will appear after a project record changes." />}</section></div>
 
     {outputAssetId ? <section className="movie-generated-surface movie-command-output"><div className="movie-surface-heading"><div><span className="movie-workspace-kicker">Latest output</span><h3>Reviewable project output</h3></div><span className="movie-surface-status"><span className="is-ready" /> Ready</span></div><div className="movie-generated-video"><video src={assetFileUrl(outputAssetId, true)} controls preload="metadata" aria-label={project.title} /><div className="movie-generated-video-caption"><Play size={14} /> {project.title}</div></div></section> : <section className="movie-command-empty"><Film size={20} /><div><span className="movie-workspace-kicker">Latest output</span><h3>No output yet</h3><p>No generated footage yet. The plan is visible above; real output will appear here when the persisted production workflow creates one.</p></div></section>}
   </div>;
 }
 
+function BudgetDirectorCard({ estimate }: { estimate: MovieBudgetDirectorEstimate | null }) {
+  const savings = estimate?.savings ?? null;
+  return <section className="movie-command-section movie-budget-director-card"><CommandSectionTitle eyebrow="Budget Director" title="Spend less before you finish" detail="Estimate only" /><p className="movie-command-note">Lock references, review low-cost drafts, salvage usable ranges, and reserve mastering for selected takes.</p>{estimate && savings ? <><div className="movie-budget-compare"><div><span>Naive high-cost path</span><strong>{formatRange(estimate.naivePath.minimumAmountUsd, estimate.naivePath.maximumAmountUsd, estimate.currency)}</strong><small>{estimate.naivePath.generationUnits} generation units</small></div><div><span>Optimized path</span><strong>{formatRange(estimate.optimizedPath.minimumAmountUsd, estimate.optimizedPath.maximumAmountUsd, estimate.currency)}</strong><small>{estimate.optimizedPath.generationUnits} generation units</small></div></div><div className="movie-budget-savings"><span>Estimated avoided cost</span><strong>{savings.maximumAmountUsd === null ? "Unavailable" : formatRange(savings.minimumAmountUsd, savings.maximumAmountUsd, estimate.currency)}</strong><small>{savings.maximumPercent === null ? "Complete pricing is required" : `${savings.minimumPercent}–${savings.maximumPercent}% range · ${savings.basis}`}</small></div><p className="movie-command-note">{savings.actualSavingsAvailable ? `Actual savings: ${formatCost(savings.actualSavingsUsd, estimate.currency)}` : "Actual savings are not claimed. Completed ledger evidence is required."}</p></> : <p className="movie-command-note">Budget preview is loading. No generation or charge starts from this view.</p>}</section>;
+}
 function CommandSectionTitle({ eyebrow, title, detail }: { eyebrow: string; title: string; detail: string }) { return <div className="movie-command-section-title"><div><span className="movie-workspace-kicker">{eyebrow}</span><h3>{title}</h3></div><small>{detail}</small></div>; }
 function CommandMetric({ label, value, detail, icon }: { label: string; value: number; detail: string; icon: ReactNode }) { return <div className="movie-command-metric"><span className="movie-command-metric-icon">{icon}</span><div><span>{label}</span><strong>{value}</strong><small>{detail}</small></div></div>; }
 function ProgressLine({ label, stage }: { label: string; stage: MovieOverview["progress"]["storyboard"] }) { return <div className="movie-progress-line"><div><span>{label}</span><strong>{stage.percent === null ? "Not started" : `${stage.percent}%`}</strong></div><div className="movie-progress-track"><span style={{ width: `${stage.percent ?? 0}%` }} /></div><small>{stage.total === 0 ? "No persisted shot plan" : `${stage.completed} of ${stage.total} complete`}</small></div>; }
@@ -354,6 +341,7 @@ function HonestEmpty({ text }: { text: string }) { return <div className="movie-
 function formatStatus(value: string) { return value.replace(/([a-z])([A-Z])/g, "$1 $2"); }
 function formatPercent(value: number | null) { return value === null ? "—" : `${value}%`; }
 function formatCost(value: number | null, currency: string) { return value === null ? "Not available" : `${currency} ${value.toFixed(2)}`; }
+function formatRange(minimum: number | null, maximum: number | null, currency: string) { return minimum === null || maximum === null ? "Not available" : minimum === maximum ? `${currency} ${maximum.toFixed(2)}` : `${currency} ${minimum.toFixed(2)}–${maximum.toFixed(2)}`; }
 function formatRelativeDate(value: string) { const date = new Date(value); return Number.isNaN(date.getTime()) ? "Recently" : date.toLocaleDateString(undefined, { month: "short", day: "numeric" }); }
 
 
@@ -675,10 +663,12 @@ function ScreenplayEditor({ draft, editable, onUpdateDraft, onUpdateScene, onUpd
   return <div className="movie-screenplay-editor" id="story-editor-screenplay" tabIndex={-1} aria-label="Screenplay editor"><div className="movie-screenplay-toolbar"><span>{draft.scenes.length} scenes</span><span>Structured pages</span><label>Authorship<select aria-label="Revision authorship" value={draft.authorship} onChange={(event) => onUpdateDraft({ authorship: event.target.value as MovieStoryRevisionInput["authorship"] })} disabled={!editable}><option value="Human">Human</option><option value="HumanEdited">Human edited</option><option value="AiSuggested">AI suggested</option></select></label></div>{draft.scenes.length ? draft.scenes.map((scene, sceneIndex) => <article className="movie-screenplay-scene" key={`${scene.sceneIdentifier}-${sceneIndex}`}><header><span className="movie-screenplay-scene-number">{String(sceneIndex + 1).padStart(2, "0")}</span><div><input aria-label={`Scene ${sceneIndex + 1} identifier`} value={scene.sceneIdentifier} onChange={(event) => onUpdateScene(sceneIndex, { sceneIdentifier: event.target.value })} disabled={!editable} /><input className="movie-screenplay-slugline" aria-label={`Scene ${sceneIndex + 1} heading`} value={scene.slugline} onChange={(event) => onUpdateScene(sceneIndex, { slugline: event.target.value })} disabled={!editable} /></div><span className="movie-screenplay-scene-meta">Act {scene.actNumber ?? "—"} · Seq {scene.sequenceNumber ?? "—"}</span></header><textarea className="movie-screenplay-scene-note" aria-label={`Scene ${sceneIndex + 1} synopsis`} value={scene.synopsis ?? ""} onChange={(event) => onUpdateScene(sceneIndex, { synopsis: event.target.value })} disabled={!editable} placeholder="Scene intention / beat" />{scene.elements.map((element, elementIndex) => <div className={`movie-screenplay-element is-${element.elementType.toLowerCase()}`} key={`${scene.sceneIdentifier}-${elementIndex}`}><select aria-label={`Scene ${sceneIndex + 1} element ${elementIndex + 1} type`} value={element.elementType} onChange={(event) => onUpdateElement(sceneIndex, elementIndex, { elementType: event.target.value as MovieScreenplayElementType })} disabled={!editable}>{screenplayElementTypes.map((type) => <option key={type} value={type}>{type}</option>)}</select>{element.elementType === "Dialogue" && <input aria-label={`Scene ${sceneIndex + 1} element ${elementIndex + 1} character`} value={element.characterName ?? ""} onChange={(event) => onUpdateElement(sceneIndex, elementIndex, { characterName: event.target.value })} disabled={!editable} placeholder="CHARACTER" />}{element.elementType === "Dialogue" && <input aria-label={`Scene ${sceneIndex + 1} element ${elementIndex + 1} parenthetical`} value={element.parenthetical ?? ""} onChange={(event) => onUpdateElement(sceneIndex, elementIndex, { parenthetical: event.target.value })} disabled={!editable} placeholder="(parenthetical)" />}{element.elementType === "Transition" ? <input aria-label={`Scene ${sceneIndex + 1} transition`} value={element.content} onChange={(event) => onUpdateElement(sceneIndex, elementIndex, { content: event.target.value })} disabled={!editable} placeholder="CUT TO:" /> : <textarea aria-label={`Scene ${sceneIndex + 1} element ${elementIndex + 1} content`} value={element.content} onChange={(event) => onUpdateElement(sceneIndex, elementIndex, { content: event.target.value })} disabled={!editable} placeholder={element.elementType === "Action" ? "Describe what we see and hear…" : "Write the page…"} />}{editable && <button type="button" aria-label="Remove screenplay element" onClick={() => onUpdateScene(sceneIndex, { elements: scene.elements.filter((_, index) => index !== elementIndex) })}><Trash2 size={13} /></button>}</div>)}<div className="movie-screenplay-scene-actions">{editable && <button type="button" className="movie-text-action" onClick={() => onUpdateScene(sceneIndex, { elements: [...scene.elements, { elementType: "Action", content: "", characterName: null, parenthetical: null }] })}><Plus size={12} /> Add element</button>}</div></article>) : <div className="movie-screenplay-empty"><BookOpen size={20} /><strong>Your first scene starts the pages.</strong><p>Use typed screenplay blocks instead of flattening the script into a generic document.</p></div>}{editable && <button type="button" className="movie-add-screenplay-scene" onClick={onAddScene}><Plus size={14} /> Add scene</button>}</div>;
 }
 
-type CharacterDraft = Omit<MovieCharacter, "id" | "states" | "relationships" | "continuityLocks">;
+type CharacterDraft = Omit<MovieCharacter, "id" | "states" | "relationships" | "continuityLocks" | "productionSheet">;
 type StateDraft = Omit<MovieCharacterState, "id" | "createdAt" | "updatedAt"> & { key: string };
+type ProductionSheetDraft = MovieCharacterProductionSheetInput;
 const emptyCharacterDraft: CharacterDraft = { name: "", role: "", description: "", appearance: "", physicalDescription: "", wardrobe: "", voiceReference: "", personalityAndStoryNotes: "", voiceAndPerformance: "", continuityNotes: "", referenceAssetId: null, referenceAssetIds: [] };
 const emptyStateDraft: StateDraft = { key: "", label: "", wardrobe: "", ageOrTimeState: "", appearance: "", injuryOrCondition: "", locationOrStoryState: "", continuityNotes: "" };
+const emptyProductionSheetDraft: ProductionSheetDraft = { canonicalIdentityFaceAssetId: null, bodyReferenceAssetId: null, frontReferenceAssetId: null, sideReferenceAssetId: null, backReferenceAssetId: null, looks: [], provenanceNote: "" };
 
 function CastModule({ projectId }: { projectId: string }) {
   const [cast, setCast] = useState<MovieCast | null>(null);
@@ -686,12 +676,14 @@ function CastModule({ projectId }: { projectId: string }) {
   const [detail, setDetail] = useState<MovieCharacter | null>(null);
   const [assets, setAssets] = useState<Asset[]>([]);
   const [draft, setDraft] = useState<CharacterDraft>(emptyCharacterDraft);
+  const [productionSheetDraft, setProductionSheetDraft] = useState<ProductionSheetDraft>(emptyProductionSheetDraft);
   const [stateDraft, setStateDraft] = useState<StateDraft>(emptyStateDraft);
   const [editingStateId, setEditingStateId] = useState<string | null>(null);
   const [relationship, setRelationship] = useState({ relatedCharacterId: "", relationshipType: "", notes: "" });
   const [lock, setLock] = useState({ fieldKey: "appearance", lockedValue: "", characterStateId: "" });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [productionSheetSaving, setProductionSheetSaving] = useState(false);
   const [error, setError] = useState("");
 
   async function loadCast(nextSelectedId?: string | null) {
@@ -703,9 +695,11 @@ function CastModule({ projectId }: { projectId: string }) {
       const loaded = await api.getMovieCharacterDetail(nextId);
       setDetail(loaded.character);
       setDraft(draftFromCharacter(loaded.character));
+      setProductionSheetDraft(draftFromProductionSheet(loaded.character));
     } else {
       setDetail(null);
       setDraft(emptyCharacterDraft);
+      setProductionSheetDraft(emptyProductionSheetDraft);
     }
   }
 
@@ -715,7 +709,8 @@ function CastModule({ projectId }: { projectId: string }) {
       if (!mounted) return;
       setCast(result);
       setSelectedId(result.characters[0]?.id ?? null);
-      if (result.characters[0]) return api.getMovieCharacterDetail(result.characters[0].id).then((loaded) => { if (mounted) { setDetail(loaded.character); setDraft(draftFromCharacter(loaded.character)); } });
+      if (result.characters[0]) return api.getMovieCharacterDetail(result.characters[0].id).then((loaded) => { if (mounted) { setDetail(loaded.character); setDraft(draftFromCharacter(loaded.character)); setProductionSheetDraft(draftFromProductionSheet(loaded.character)); } });
+      setProductionSheetDraft(emptyProductionSheetDraft);
       return undefined;
     }).catch((cause) => { if (mounted) setError(cause instanceof Error ? cause.message : "The cast room could not be loaded."); }).finally(() => { if (mounted) setLoading(false); });
     return () => { mounted = false; };
@@ -725,10 +720,9 @@ function CastModule({ projectId }: { projectId: string }) {
     if (!cast) return;
     void api.listAssets(cast.project.workspaceId, { assetType: "image", status: "Active", pageSize: 24 }).then((result) => setAssets(result.items)).catch(() => setAssets([]));
   }, [cast]);
-
   async function selectCharacter(id: string) {
     setError("");
-    try { const loaded = await api.getMovieCharacterDetail(id); setSelectedId(id); setDetail(loaded.character); setDraft(draftFromCharacter(loaded.character)); setStateDraft(emptyStateDraft); setEditingStateId(null); } catch (cause) { setError(cause instanceof Error ? cause.message : "The character could not be loaded."); }
+    try { const loaded = await api.getMovieCharacterDetail(id); setSelectedId(id); setDetail(loaded.character); setDraft(draftFromCharacter(loaded.character)); setProductionSheetDraft(draftFromProductionSheet(loaded.character)); setStateDraft(emptyStateDraft); setEditingStateId(null); } catch (cause) { setError(cause instanceof Error ? cause.message : "The character could not be loaded."); }
   }
   async function saveCharacter() {
     if (!draft.name.trim() || !draft.description.trim()) return;
@@ -758,6 +752,17 @@ function CastModule({ projectId }: { projectId: string }) {
     setSaving(true); setError("");
     try { await api.lockMovieCharacterFact(detail.id, { fieldKey: lock.fieldKey, lockedValue: lock.lockedValue, characterStateId: lock.characterStateId || null }); setLock({ ...lock, lockedValue: "" }); const loaded = await api.getMovieCharacterDetail(detail.id); setDetail(loaded.character); await loadCast(detail.id); } catch (cause) { setError(cause instanceof Error ? cause.message : "The continuity fact could not be locked."); } finally { setSaving(false); }
   }
+  async function saveProductionSheet() {
+    if (!detail) return;
+    setProductionSheetSaving(true); setError("");
+    try { await api.saveMovieCharacterProductionSheet(detail.id, productionSheetDraft); await loadCast(detail.id); } catch (cause) { setError(cause instanceof Error ? cause.message : "The production sheet could not be saved."); } finally { setProductionSheetSaving(false); }
+  }
+  async function updateProductionSheetStatus(action: "approve" | "lock" | "unlock") {
+    const sheetId = detail?.productionSheet?.id;
+    if (!sheetId || !detail) return;
+    setProductionSheetSaving(true); setError("");
+    try { if (action === "approve") await api.approveMovieCharacterProductionSheet(sheetId); else if (action === "lock") await api.lockMovieCharacterProductionSheet(sheetId); else await api.unlockMovieCharacterProductionSheet(sheetId); await loadCast(detail.id); } catch (cause) { setError(cause instanceof Error ? cause.message : "The production sheet status could not be changed."); } finally { setProductionSheetSaving(false); }
+  }
   function toggleAsset(assetId: string) { setDraft((current) => { const ids = current.referenceAssetIds.includes(assetId) ? current.referenceAssetIds.filter((id) => id !== assetId) : [...current.referenceAssetIds, assetId]; return { ...current, referenceAssetIds: ids, referenceAssetId: ids[0] ?? null }; }); }
   if (loading) return <div className="movie-workspace-section movie-cast-loading"><span className="loading-spinner" /><span>Loading cast records…</span></div>;
   if (!cast) return <EmptyModule title="Cast room unavailable" text={error || "The cast read model is not available in this workspace."} />;
@@ -766,16 +771,23 @@ function CastModule({ projectId }: { projectId: string }) {
   return <div className="movie-module-stack movie-cast-room">
     <section className="movie-cast-hero"><div><span className="movie-workspace-kicker">Character cards · {cast.characters.length} records</span><h3>Durable identities for the film</h3><p>Reference assets stay in the shared Asset library. Empty imagery stays empty until a real asset is attached.</p></div><div className="movie-cast-hero-stat"><strong>{cast.characters.filter((item) => item.referenceAssetCount > 0).length}</strong><span>with references</span></div></section>
     <div className="movie-cast-layout"><section className="movie-cast-index movie-workspace-section"><div className="movie-section-head"><div><span className="movie-workspace-kicker">Cast index</span><h3>{cast.characters.length ? "Choose a character" : "No cast records yet"}</h3></div><span className="movie-section-count">{cast.characters.length} total</span></div>{cast.characters.length ? <div className="movie-cast-card-grid">{cast.characters.map((item) => <button key={item.id} type="button" className={`movie-cast-card ${selectedId === item.id ? "is-selected" : ""}`} onClick={() => void selectCharacter(item.id)}><CharacterAssetPreview assetId={item.referenceAssetId} name={item.name} /><span className="movie-record-index">{item.role || "Role not set"}</span><strong>{item.name}</strong><small>{item.description}</small><div className="movie-cast-card-meta"><span>{item.stateCount} state{item.stateCount === 1 ? "" : "s"}</span><span>{item.lockedFactCount ? <><LockKeyhole size={11} /> {item.lockedFactCount} locked</> : "No locks"}</span></div><div className="movie-cast-current-state"><span>Current state</span><strong>{item.latestState?.label || item.latestState?.key || "No state set"}</strong></div>{item.relationshipTypes.length > 0 && <em>{item.relationshipTypes.join(" · ")}</em>}</button>)}</div> : <EmptyModule title="No cast records yet" text="Create the first character card when the story has a person worth keeping consistent. No face or reference is fabricated here." />}</section>
-      <section className="movie-cast-editor movie-workspace-section"><div className="movie-section-head"><div><span className="movie-workspace-kicker">Character card</span><h3>{detail?.name || "Create a character"}</h3></div>{detail && <span className="movie-section-count">{detail.continuityLocks.length} locked facts</span>}</div><CharacterEditor draft={draft} lockedFields={lockedCardFields} onChange={setDraft} onSave={() => void saveCharacter()} saving={saving} assets={assets} onToggleAsset={toggleAsset} /><StateEditor detail={detail} draft={stateDraft} lockedFields={lockedStateFields} editingStateId={editingStateId} onChange={setStateDraft} onEdit={(state) => { setEditingStateId(state.id); setStateDraft(state); }} onSave={() => void saveState()} saving={saving} /><CastSecondaryEditors detail={detail} cast={cast} relationship={relationship} onRelationshipChange={setRelationship} onSaveRelationship={() => void saveRelationship()} lock={lock} onLockChange={setLock} onSaveLock={() => void saveLock()} saving={saving} /></section></div>
+      <section className="movie-cast-editor movie-workspace-section"><div className="movie-section-head"><div><span className="movie-workspace-kicker">Character card</span><h3>{detail?.name || "Create a character"}</h3></div>{detail && <span className="movie-section-count">{detail.continuityLocks.length} locked facts</span>}</div><CharacterEditor draft={draft} lockedFields={lockedCardFields} onChange={setDraft} onSave={() => void saveCharacter()} saving={saving} assets={assets} onToggleAsset={toggleAsset} />{detail && <ProductionSheetEditor detail={detail} draft={productionSheetDraft} onChange={setProductionSheetDraft} assets={assets} saving={productionSheetSaving} onSave={() => void saveProductionSheet()} onStatusChange={(action) => void updateProductionSheetStatus(action)} />}<StateEditor detail={detail} draft={stateDraft} lockedFields={lockedStateFields} editingStateId={editingStateId} onChange={setStateDraft} onEdit={(state) => { setEditingStateId(state.id); setStateDraft(state); }} onSave={() => void saveState()} saving={saving} /><CastSecondaryEditors detail={detail} cast={cast} relationship={relationship} onRelationshipChange={setRelationship} onSaveRelationship={() => void saveRelationship()} lock={lock} onLockChange={setLock} onSaveLock={() => void saveLock()} saving={saving} /></section></div>
     {error && <div className="movie-workspace-error-inline"><XCircleIcon /> {error}</div>}
   </div>;
 }
 
 function draftFromCharacter(character: MovieCharacter): CharacterDraft { return { name: character.name, role: character.role, description: character.description, appearance: character.appearance, physicalDescription: character.physicalDescription, wardrobe: character.wardrobe, voiceReference: character.voiceReference, personalityAndStoryNotes: character.personalityAndStoryNotes, voiceAndPerformance: character.voiceAndPerformance, continuityNotes: character.continuityNotes, referenceAssetId: character.referenceAssetId, referenceAssetIds: character.referenceAssetIds }; }
+function draftFromProductionSheet(character: MovieCharacter | null): ProductionSheetDraft { const version = character?.productionSheet?.currentVersion; return version ? { canonicalIdentityFaceAssetId: version.canonicalIdentityFaceAssetId, bodyReferenceAssetId: version.bodyReferenceAssetId, frontReferenceAssetId: version.frontReferenceAssetId, sideReferenceAssetId: version.sideReferenceAssetId, backReferenceAssetId: version.backReferenceAssetId, looks: version.looks.map((look) => ({ key: look.key, name: look.name, wardrobe: look.wardrobe, appearance: look.appearance, referenceNotes: look.referenceNotes, referenceAssetId: look.referenceAssetId })), provenanceNote: "" } : emptyProductionSheetDraft; }
 function CharacterAssetPreview({ assetId, name }: { assetId: string | null; name: string }) { return <div className="movie-cast-card-art">{assetId ? <img src={assetFileUrl(assetId, true)} alt={`${name} reference`} loading="lazy" /> : <><ImageIcon size={24} /><span>No reference asset</span></>}</div>; }
 function CharacterEditor({ draft, lockedFields, onChange, onSave, saving, assets, onToggleAsset }: { draft: CharacterDraft; lockedFields: Set<string>; onChange: (draft: CharacterDraft) => void; onSave: () => void; saving: boolean; assets: Asset[]; onToggleAsset: (id: string) => void }) {
   const field = (key: keyof CharacterDraft, label: string, multiline = true) => <label className={`movie-cast-field ${multiline ? "is-wide" : ""}`}><span>{label}{lockedFields.has(key) && <LockKeyhole size={11} />}</span>{multiline ? <textarea value={String(draft[key] ?? "")} disabled={lockedFields.has(key)} onChange={(event) => onChange({ ...draft, [key]: event.target.value })} /> : <input value={String(draft[key] ?? "")} disabled={lockedFields.has(key)} onChange={(event) => onChange({ ...draft, [key]: event.target.value })} />}</label>;
   return <div className="movie-cast-editor-body"><div className="movie-cast-form-grid">{field("name", "Name", false)}{field("role", "Role / importance", false)}{field("description", "Story function / description")}{field("appearance", "Appearance")}{field("physicalDescription", "Physical description")}{field("wardrobe", "Wardrobe / reference direction")}{field("personalityAndStoryNotes", "Personality / story notes")}{field("voiceReference", "Voice reference")}{field("voiceAndPerformance", "Performance notes")}{field("continuityNotes", "Continuity notes")}</div><div className="movie-cast-asset-picker"><div className="movie-section-head"><div><span className="movie-workspace-kicker">Reference assets</span><h3>Shared Asset library</h3></div><span className="movie-section-count">{draft.referenceAssetIds.length} selected</span></div>{assets.length ? <div className="movie-cast-asset-grid">{assets.map((asset) => <button type="button" key={asset.id} className={`movie-cast-asset ${draft.referenceAssetIds.includes(asset.id) ? "is-selected" : ""}`} onClick={() => onToggleAsset(asset.id)}><img src={assetFileUrl(asset.id, true)} alt={asset.name} loading="lazy" /><span>{asset.name}</span></button>)}</div> : <p className="movie-cast-muted">No active image assets are available in this workspace. Add one in Assets, then return here.</p>}</div><div className="movie-cast-save-row"><p>Locked fields stay read-only here; an approved value is never silently overwritten.</p><button type="button" className="movie-workspace-button is-primary" onClick={onSave} disabled={saving || !draft.name.trim() || !draft.description.trim()}><Save size={14} /> {saving ? "Saving…" : "Save character card"}</button></div></div>;
+}
+
+function ProductionSheetEditor({ detail, draft, onChange, assets, saving, onSave, onStatusChange }: { detail: MovieCharacter; draft: ProductionSheetDraft; onChange: (draft: ProductionSheetDraft) => void; assets: Asset[]; saving: boolean; onSave: () => void; onStatusChange: (action: "approve" | "lock" | "unlock") => void }) {
+  const sheet = detail.productionSheet;
+  const slot = (key: keyof ProductionSheetDraft, label: string) => <label className="movie-cast-field"><span>{label}</span><select value={String(draft[key] ?? "")} disabled={saving || sheet?.status === "Locked"} onChange={(event) => onChange({ ...draft, [key]: event.target.value || null })}><option value="">Not assigned</option>{assets.map((asset) => <option key={asset.id} value={asset.id}>{asset.name}</option>)}</select></label>;
+  return <section className="movie-cast-subsection movie-production-sheet"><div className="movie-section-head"><div><span className="movie-workspace-kicker">Identity consistency</span><h3>Character production sheet</h3></div><span className={`movie-production-sheet-status is-${(sheet?.status ?? "draft").toLowerCase()}`}>{sheet?.status ?? "Draft"} {sheet ? `· v${sheet.currentVersionNumber}` : ""}</span></div><p className="movie-cast-muted">One canonical identity face stays separate from distinct body, front, side, and back references. Duplicate slot assets are rejected by the API.</p><div className="movie-cast-form-grid">{slot("canonicalIdentityFaceAssetId", "Canonical identity face")}{slot("bodyReferenceAssetId", "Body reference")}{slot("frontReferenceAssetId", "Front reference")}{slot("sideReferenceAssetId", "Side reference")}{slot("backReferenceAssetId", "Back reference")}</div><div className="movie-production-sheet-looks"><div className="movie-section-head"><div><span className="movie-workspace-kicker">Wardrobe / look variants</span><h4>{draft.looks.length} saved in this version</h4></div><button type="button" className="movie-workspace-button" disabled={saving || sheet?.status === "Locked"} onClick={() => onChange({ ...draft, looks: [...draft.looks, { key: `look-${draft.looks.length + 1}`, name: "", wardrobe: "", appearance: "", referenceNotes: "", referenceAssetId: null }] })}><Plus size={13} /> Add look</button></div>{draft.looks.map((look, index) => <div className="movie-production-sheet-look" key={`${look.key}-${index}`}><input value={look.key} aria-label={`Look ${index + 1} key`} disabled={saving || sheet?.status === "Locked"} onChange={(event) => onChange({ ...draft, looks: draft.looks.map((item, itemIndex) => itemIndex === index ? { ...item, key: event.target.value } : item) })} placeholder="look key" /><input value={look.name} aria-label={`Look ${index + 1} name`} disabled={saving || sheet?.status === "Locked"} onChange={(event) => onChange({ ...draft, looks: draft.looks.map((item, itemIndex) => itemIndex === index ? { ...item, name: event.target.value } : item) })} placeholder="Look name" /><input value={look.wardrobe ?? ""} aria-label={`Look ${index + 1} wardrobe`} disabled={saving || sheet?.status === "Locked"} onChange={(event) => onChange({ ...draft, looks: draft.looks.map((item, itemIndex) => itemIndex === index ? { ...item, wardrobe: event.target.value } : item) })} placeholder="Wardrobe continuity" /><select value={look.referenceAssetId ?? ""} disabled={saving || sheet?.status === "Locked"} onChange={(event) => onChange({ ...draft, looks: draft.looks.map((item, itemIndex) => itemIndex === index ? { ...item, referenceAssetId: event.target.value || null } : item) })}><option value="">No look asset</option>{assets.map((asset) => <option key={asset.id} value={asset.id}>{asset.name}</option>)}</select><button type="button" className="movie-text-action" disabled={saving || sheet?.status === "Locked"} onClick={() => onChange({ ...draft, looks: draft.looks.filter((_, itemIndex) => itemIndex !== index) })}>Remove</button></div>)}</div><div className="movie-cast-save-row"><p>{sheet?.currentVersion ? <>Provenance hash <code>{sheet.currentVersion.provenanceHash.slice(0, 12)}…</code> · {sheet.currentVersion.status}</> : "Save a draft before approval."}</p><div className="movie-production-sheet-actions"><button type="button" className="movie-workspace-button is-primary" disabled={saving || sheet?.status === "Locked"} onClick={onSave}><Save size={13} /> Save version</button>{sheet?.status === "Draft" && <button type="button" className="movie-workspace-button" disabled={saving} onClick={() => onStatusChange("approve")}>Approve</button>}{sheet?.status === "Approved" && <button type="button" className="movie-workspace-button" disabled={saving} onClick={() => onStatusChange("lock")}><LockKeyhole size={13} /> Lock</button>}{sheet?.status === "Locked" && <button type="button" className="movie-workspace-button" disabled={saving} onClick={() => onStatusChange("unlock")}>Unlock for revision</button>}</div></div></section>;
 }
 
 function StateEditor({ detail, draft, lockedFields, editingStateId, onChange, onEdit, onSave, saving }: { detail: MovieCharacter | null; draft: StateDraft; lockedFields: Set<string>; editingStateId: string | null; onChange: (draft: StateDraft) => void; onEdit: (state: MovieCharacterState) => void; onSave: () => void; saving: boolean }) {
@@ -855,7 +867,7 @@ function ScenesModule({ projectId, project, presets, savingShot, onAddShot, sele
     setLoading(true);
     try { setWorkspace(await api.getMovieScenesWorkspace(projectId)); } catch (cause) { setError(cause instanceof Error ? cause.message : "The Scenes room could not be loaded."); } finally { setLoading(false); }
   };
-  useEffect(() => { void refresh(); }, [projectId]);
+  useEffect(() => { void Promise.resolve().then(() => refresh()); }, [projectId]);
   useEffect(() => { if (!selectedSceneId && selectedScene) onSelectScene(selectedScene.id); }, [selectedScene, selectedSceneId, onSelectScene]);
   useEffect(() => { if (manualComposerOpen) window.setTimeout(() => manualComposerRef.current?.querySelector<HTMLInputElement>('input[name="scene-title"]')?.focus(), 0); }, [manualComposerOpen]);
 
@@ -913,7 +925,7 @@ function ScenesModule({ projectId, project, presets, savingShot, onAddShot, sele
     {workspace.screenplayApprovalState !== "Approved" && <div className="movie-scenes-callout"><BookOpen size={15} /><span>{workspace.screenplayApprovalState === "NotAvailable" ? "No approved screenplay is linked yet. Manual production scene creation remains available." : `Screenplay status: ${workspace.screenplayApprovalState}. Approve a revision before mapping it.`}</span></div>}
     {hasScenes && <section className="movie-scene-legend" aria-label="Scene status legend"><div><span className="movie-workspace-kicker">Read the plan</span><strong>Provenance stays visible</strong></div><p>Badges are derived from persisted screenplay links and scene status. AI-suggested appears only when the API records that provenance.</p><div className="movie-scene-legend-items"><span className="movie-scene-provenance is-proposed">Proposed</span><span className="movie-scene-provenance is-approved">Approved</span><span className="movie-scene-provenance is-applied">Applied / current</span><span className="movie-scene-provenance is-manual">Manually edited</span></div></section>}
     {hasScenes && <div className="movie-scene-filter-bar" role="toolbar" aria-label="Filter scenes"><span className="movie-inspector-label">Show</span>{([['all', 'All scenes'], ['proposed', 'Proposed'], ['approved', 'Approved'], ['applied', 'Applied / current'], ['manual', 'Manual']] as Array<[SceneFilter, string]>).map(([value, label]) => <button type="button" key={value} className={filter === value ? "is-active" : ""} aria-pressed={filter === value} onClick={() => setFilter(value)}>{label}<span>{value === "all" ? allScenes.length : allScenes.filter((scene) => sceneMatchesFilter(scene, value)).length}</span></button>)}</div>}
-    <div className="movie-scene-workspace movie-scenes-hierarchy-layout" data-scene-shot-count={sceneShotCount}><section className="movie-workspace-section movie-scene-list-panel"><div className="movie-section-head"><div><span className="movie-workspace-kicker">Canonical hierarchy</span><h3>{filter === "all" ? "Acts, sequences, scenes" : `${filter[0].toUpperCase()}${filter.slice(1)} scenes`}</h3></div><span className="movie-section-count">{visibleScenes.length} shown</span></div>{workspace.acts.length && visibleScenes.length ? workspace.acts.map((act) => <SceneAct key={act.id} act={act} selectedSceneId={selectedScene?.id ?? null} visibleSceneIds={new Set(visibleScenes.map((scene) => scene.id))} onSelect={onSelectScene} onGenerate={onGenerate} onReorder={reorderScene} />) : <EmptyModule title={hasScenes ? "No scenes match this view" : "No production hierarchy yet"} text={hasScenes ? "Try another provenance filter." : "Plan from an approved screenplay or create a scene below."} />}</section><section className="movie-workspace-section movie-scene-inspector"><span className="movie-workspace-kicker">Scene inspector</span>{selectedScene ? <><ScenesInspector scene={selectedScene} editing={editingSceneId === selectedScene.id} saving={savingScene} onEdit={() => setEditingSceneId(selectedScene.id)} onCancel={() => setEditingSceneId(null)} onSave={(input) => updateScene(selectedScene.id, input)} /><ShotPlanBoard scene={selectedScene} selectedShotId={selectedShotId} onSelectShot={onSelectShot} onPlanChange={onPlanChange} />{project.scenes.find((item) => item.id === selectedScene.id) && <SceneShotDesigner scene={project.scenes.find((item) => item.id === selectedScene.id)!} guide={project.guide} presets={presets} saving={savingShot} onAddShot={onAddShot} />}</> : <EmptyModule title="Select a scene" text="The inspector will show screenplay source, continuity, world records, and shot readiness." />}</section></div>
+    <div className="movie-scene-workspace movie-scenes-hierarchy-layout" data-scene-shot-count={sceneShotCount}><section className="movie-workspace-section movie-scene-list-panel"><div className="movie-section-head"><div><span className="movie-workspace-kicker">Canonical hierarchy</span><h3>{filter === "all" ? "Acts, sequences, scenes" : `${filter[0].toUpperCase()}${filter.slice(1)} scenes`}</h3></div><span className="movie-section-count">{visibleScenes.length} shown</span></div>{workspace.acts.length && visibleScenes.length ? workspace.acts.map((act) => <SceneAct key={act.id} act={act} selectedSceneId={selectedScene?.id ?? null} visibleSceneIds={new Set(visibleScenes.map((scene) => scene.id))} onSelect={onSelectScene} onGenerate={onGenerate} onReorder={reorderScene} />) : <EmptyModule title={hasScenes ? "No scenes match this view" : "No production hierarchy yet"} text={hasScenes ? "Try another provenance filter." : "Plan from an approved screenplay or create a scene below."} />}</section><section className="movie-workspace-section movie-scene-inspector"><span className="movie-workspace-kicker">Scene inspector</span>{selectedScene ? <><ScenesInspector key={selectedScene.id} scene={selectedScene} editing={editingSceneId === selectedScene.id} saving={savingScene} onEdit={() => setEditingSceneId(selectedScene.id)} onCancel={() => setEditingSceneId(null)} onSave={(input) => updateScene(selectedScene.id, input)} /><ShotPlanBoard key={selectedScene.id} scene={selectedScene} selectedShotId={selectedShotId} onSelectShot={onSelectShot} onPlanChange={onPlanChange} />{project.scenes.find((item) => item.id === selectedScene.id) && <SceneShotDesigner scene={project.scenes.find((item) => item.id === selectedScene.id)!} guide={project.guide} presets={presets} saving={savingShot} onAddShot={onAddShot} />}</> : <EmptyModule title="Select a scene" text="The inspector will show screenplay source, continuity, world records, and shot readiness." />}</section></div>
     {(!hasScenes || manualComposerOpen) && <form ref={manualComposerRef} className="movie-add-scene-modern movie-scenes-add-form" onSubmit={(event) => { event.preventDefault(); void addScene(); }}><div><span className="movie-workspace-kicker">Manual production scene</span><h3>{hasScenes ? "Add a scene to the current plan" : "Create your first scene"}</h3><p>Manual scenes stay clearly marked and can be edited later when the scene workflow API is connected.</p></div><label><span className="sr-only">Scene title</span><input name="scene-title" value={newScene.title} onChange={(event) => setNewScene({ ...newScene, title: event.target.value })} placeholder="Scene title" /></label><label><span className="sr-only">Scene purpose</span><input value={newScene.summary} onChange={(event) => setNewScene({ ...newScene, summary: event.target.value })} placeholder="One-line scene intent" /></label><label><span className="sr-only">Sequence</span><select value={newScene.sequenceId} onChange={(event) => setNewScene({ ...newScene, sequenceId: event.target.value })}><option value="">First sequence</option>{sequences.map((sequence) => <option key={sequence.id} value={sequence.id}>{sequence.sequence}. {sequence.title}</option>)}</select></label><div className="movie-scenes-form-actions"><button className="movie-workspace-button is-primary" type="submit" disabled={addingScene || !newScene.title.trim() || !newScene.summary.trim()}>{addingScene ? "Saving…" : <><Save size={13} /> Add scene</>}</button>{hasScenes && <button type="button" className="movie-workspace-button is-quiet" onClick={() => setManualComposerOpen(false)}>Close</button>}</div></form>}
     {error && <div className="movie-workspace-error-inline" role="alert"><XCircleIcon /> <span>{error}</span><button type="button" onClick={() => setError("")}><X size={12} /> Dismiss</button></div>}
   </div>;
@@ -928,7 +940,6 @@ function SceneWorkspaceItem({ scene, isSelected, canMoveUp, canMoveDown, onSelec
 }
 function ScenesInspector({ scene, editing, saving, onEdit, onCancel, onSave }: { scene: MovieSceneWorkspace; editing: boolean; saving: boolean; onEdit: () => void; onCancel: () => void; onSave: (input: SceneEditInput) => Promise<void> }) {
   const [draft, setDraft] = useState<SceneEditInput>({ title: scene.title, summary: scene.description, durationSeconds: scene.durationSeconds, continuityNotes: scene.continuityWarnings.join("\n") });
-  useEffect(() => { setDraft({ title: scene.title, summary: scene.description, durationSeconds: scene.durationSeconds, continuityNotes: scene.continuityWarnings.join("\n") }); }, [scene.id, scene.title, scene.description, scene.durationSeconds, scene.continuityWarnings]);
   const provenance = sceneProvenance(scene);
   return <div className="movie-inspector-content">{editing ? <form className="movie-scene-edit-form" onSubmit={(event) => { event.preventDefault(); void onSave({ ...draft, title: draft.title.trim(), summary: draft.summary.trim() }); }}><label><span>Scene title</span><input value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} /></label><label><span>Scene intent / summary</span><textarea value={draft.summary} onChange={(event) => setDraft({ ...draft, summary: event.target.value })} /></label><label><span>Continuity notes</span><textarea value={draft.continuityNotes ?? ""} onChange={(event) => setDraft({ ...draft, continuityNotes: event.target.value })} /></label><div className="movie-scene-edit-actions"><button type="submit" className="movie-workspace-button is-primary" disabled={saving || !draft.title.trim() || !draft.summary.trim()}>{saving ? "Saving…" : <><Save size={13} /> Save edit</>}</button><button type="button" className="movie-workspace-button is-quiet" onClick={onCancel}>Cancel</button></div><p className="movie-scene-edit-note">This saves through the scene update contract when available. No local-only scene record is created.</p></form> : <><div className="movie-scenes-inspector-topline"><SceneProvenanceBadges scene={scene} /><span className="movie-scene-state">{scene.productionStatus}</span></div><div className="movie-scenes-inspector-heading"><div><h3>{scene.title}</h3><p>{scene.description}</p></div><button type="button" className="movie-text-action" onClick={onEdit}><PencilRuler size={12} /> Edit</button></div><div className="movie-inspector-facts"><span><strong>{scene.shotCount ?? 0}</strong> shots</span><span><strong>{scene.storyPosition}</strong> position</span></div><div className="movie-scenes-detail-grid"><RecordLine label="Slug / source" value={scene.slug} /><RecordLine label="Purpose" value={scene.purpose} /><RecordLine label="Characters" value={scene.characters.join(", ") || null} /><RecordLine label="Location" value={scene.locations.map((item) => item.name).join(", ") || null} /><RecordLine label="Set" value={scene.sets.map((item) => item.name).join(", ") || null} /><RecordLine label="Screenplay" value={scene.screenplaySource ? `${scene.screenplaySource}${scene.screenplayRevisionNumber ? ` · revision ${scene.screenplayRevisionNumber}` : ""}` : null} /></div>{scene.screenplaySynopsis && <div className="movie-scenes-source-note"><BookOpen size={14} /><p>{scene.screenplaySynopsis}</p></div>}{scene.continuityWarnings.length ? <div className="movie-scenes-warning-list"><span className="movie-inspector-label">Continuity warnings</span>{scene.continuityWarnings.map((warning) => <p key={warning}>{warning}</p>)}</div> : <div className="movie-scenes-clear-signal"><ShieldCheck size={14} /> No persisted continuity warnings</div>}<div className="movie-scenes-review-boundary"><Sparkles size={14} /><div><strong>{provenance.isApplied ? "Applied to the current production map" : "Scene proposal boundary"}</strong><p>Use the Director panel for a grounded proposal. Review it, approve or reject it, then execute explicitly; this room never silently applies AI changes.</p></div></div></>}</div>;
 }
@@ -982,8 +993,6 @@ function ShotPlanBoard({ scene, selectedShotId, onSelectShot, onPlanChange }: { 
 
   useEffect(() => {
     let active = true;
-    setPlan(null);
-    setEditingId(null);
     void api.getMovieSceneShotPlan(scene.id).then((result) => { if (active) setPlan(result); }).catch((cause) => { if (active) setError(cause instanceof Error ? cause.message : "Shot plan could not be loaded."); });
     return () => { active = false; };
   }, [scene.id]);
@@ -1025,10 +1034,6 @@ function ShotPlanCard({ shot, index, count, selected, onSelect, onEdit, onMove, 
 
 function SceneShotDesigner({ scene, guide, presets, saving, onAddShot }: { scene: MovieScene; guide: MovieProject["guide"]; presets: CinematographyPreset[]; saving: boolean; onAddShot: (sceneId: string, draft: ShotDesignerDraft) => Promise<boolean> }) {
   return <ShotDesigner scene={scene} guide={guide} presets={presets} saving={saving} onAddShot={(draft) => onAddShot(scene.id, draft)} />;
-}
-
-function StoryboardFoundationModule({ project }: { project: MovieProject }) {
-  return <div className="movie-module-stack"><section className="movie-workspace-section"><div className="movie-section-head"><div><span className="movie-workspace-kicker">Filmstrip</span><h3>Scenes, not placeholders</h3></div><span className="movie-section-count">{project.scenes.length} frames planned</span></div>{project.scenes.length ? <div className="movie-filmstrip">{project.scenes.map((scene) => { const clip = readyClipForScene(scene); return <article className="movie-filmstrip-card" key={scene.id}>{clip?.assetId ? <video src={assetFileUrl(clip.assetId, true)} preload="metadata" muted aria-label={scene.title} /> : <div className="movie-filmstrip-placeholder"><Film size={19} /><span>No footage</span></div>}<div><span>{String(scene.sequence).padStart(2, "0")}</span><strong>{scene.title}</strong><small>{formatDuration(scene.durationSeconds)}</small></div></article>; })}</div> : <EmptyGeneratedStage title="Your storyboard is empty" text="Planned scenes will become the first visual pass here." />}</section><ModuleIntro icon={<Layers3 size={18} />} title="Storyboard foundation" text="This surface is ready for real frames. It will not manufacture thumbnails for scenes that have no generated footage." /></div>;
 }
 
 function OperationalStoryboardModule({ storyboard, onRefresh, onError }: { storyboard: MovieStoryboardProject; onRefresh: () => void; onError: (message: string) => void }) {
@@ -1095,7 +1100,8 @@ function cinematographyText(shot: MovieStoryboardShot) {
   return values.length ? values.join(" · ") : "No cinematography intent recorded.";
 }
 
-function ProductionModule({ project, completionPercent, onRefresh }: { project: MovieProject; completionPercent: number; onRefresh: () => Promise<void> }) {
+
+export function ProductionModule({ project, completionPercent, onRefresh }: { project: MovieProject; completionPercent: number; onRefresh: () => Promise<void> }) {
   const [busyKey, setBusyKey] = useState("");
   const [actionError, setActionError] = useState("");
   const [checkpoint, setCheckpoint] = useState<MovieProductionCheckpoint | null>(null);
@@ -1109,14 +1115,12 @@ function ProductionModule({ project, completionPercent, onRefresh }: { project: 
   const inFlight = versions.filter((version) => ["Pending", "Queued", "Running"].includes(version.execution?.status ?? "")).length;
   const failed = versions.filter((version) => version.execution?.status === "Failed").length;
   const [selectedTier, setSelectedTier] = useState<MovieResolutionTier>(failed > 0 ? "Draft" : selectedTake ? "Master" : ready > 0 ? "Upgrade" : "Draft");
-  const loadCheckpoint = useCallback(async () => {
-    try {
-      setCheckpointError("");
-      setCheckpoint(await api.getMovieProductionCheckpoint(project.id));
-    } catch (cause) {
-      setCheckpointError(cause instanceof Error ? cause.message : "The production checkpoint could not be loaded.");
-    }
-  }, [project.id]);
+  const loadCheckpoint = useCallback(() => api.getMovieProductionCheckpoint(project.id).then((result) => {
+    setCheckpointError("");
+    setCheckpoint(result);
+  }).catch((cause) => {
+    setCheckpointError(cause instanceof Error ? cause.message : "The production checkpoint could not be loaded.");
+  }), [project.id]);
 
   useEffect(() => { void loadCheckpoint(); }, [loadCheckpoint]);
 
@@ -1238,10 +1242,6 @@ function EditModule({ project }: { project: MovieProject }) {
 
 function FutureModule({ icon, title, text }: { icon: ReactNode; title: string; text: string }) {
   return <div className="movie-module-stack"><section className="movie-future-module"><div className="movie-future-icon">{icon}</div><span className="movie-workspace-kicker">Foundation surface</span><h3>{title}</h3><p>{text}</p><div className="movie-future-rule"><span /> <small>Not available in this foundation</small> <span /></div></section></div>;
-}
-
-function ContinuityItem({ label, value }: { label: string; value: string | null | undefined }) {
-  return <div className="movie-continuity-item"><span>{label}</span><p>{value || "Not set yet"}</p></div>;
 }
 
 function RecordLine({ label, value }: { label: string; value: string | null | undefined }) {

@@ -23,6 +23,7 @@ public sealed class MovieTimelineItemRequest
 {
     public string Kind { get; set; } = MovieTimelineItemKinds.Gap;
     public Guid? SourceTakeId { get; set; }
+    public Guid? SourceSelectId { get; set; }
     public Guid? SourceAssetId { get; set; }
     public int TimelineInMilliseconds { get; set; }
     public int? TimelineOutMilliseconds { get; set; }
@@ -43,6 +44,7 @@ public sealed record MovieTimelineItemDto(
     int Sequence,
     string Kind,
     Guid? SourceTakeId,
+    Guid? SourceSelectId,
     Guid? SourceAssetId,
     int TimelineInMilliseconds,
     int TimelineOutMilliseconds,

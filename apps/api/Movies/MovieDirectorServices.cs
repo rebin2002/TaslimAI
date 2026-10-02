@@ -567,6 +567,11 @@ public sealed class MovieDirectorService(
     {
         var movie = await db.MovieProjects.AsNoTracking().Include(item => item.Guide).FirstOrDefaultAsync(item => item.Id == movieProjectId, cancellationToken);
         if (movie is null || !await authorization.CanAsync(userId, movieProjectId, MovieOperationalActions.DirectorProposalCreate, cancellationToken)) return null;
+        if (request.PlanEditRepairAudio || !string.IsNullOrWhiteSpace(request.EditRepairAudioAction))
+        {
+            if (movie.Guide.LockedRevisionNumber is null) throw new DirectorValidationException("Lock the Movie Guide before creating an audio edit-repair proposal.");
+            return await CreateEditRepairAudioProposalAsync(userId, movie, request, cancellationToken);
+        }
         if (request.PlanScenes || DirectorScenePlanActionTypes.IsSupported(request.ScenePlanAction) || DirectorScenePlanActionTypes.IsSupported(request.ScenePlanningAction))
         {
             if (movie.Guide.LockedRevisionNumber is null) throw new DirectorValidationException("Lock the Movie Guide before creating a scene-plan proposal.");
@@ -635,6 +640,61 @@ public sealed class MovieDirectorService(
         });
         await db.SaveChangesAsync(cancellationToken);
         return new DirectorProposalResponse(ToDto(proposal, rationale, [new DirectorPlanItemDto(shot.Id, shot.Sequence, shot.Description, recommendation)]), context.Context with { ContextVersion = directorContext.ContextVersion });
+    }
+
+    private async Task<DirectorProposalResponse?> CreateEditRepairAudioProposalAsync(Guid userId, MovieProject movie, DirectorProposalRequest request, CancellationToken cancellationToken)
+    {
+        if (request.CanonicalTimeline is null)
+            throw new DirectorValidationException("Provide the current canonical timeline before planning audio edit repair.");
+        var action = DirectorEditRepairAudioActionTypes.Normalize(request.EditRepairAudioAction);
+        if (string.IsNullOrWhiteSpace(action)) action = DirectorEditRepairAudioActionTypes.PlanAudioBridges;
+        var plan = MovieDirectorEditRepairAudioPlanner.Plan(request.CanonicalTimeline, request.AudioCapabilities);
+        MovieDirectorEditRepairAudioPlanner.ValidatePlan(plan);
+        var serializedPayload = JsonSerializer.Serialize(new DirectorEditRepairAudioActionPayload(action, plan), DirectorJson.Options);
+        if (serializedPayload.Length > 19_000)
+            throw new DirectorValidationException("The audio edit-repair plan exceeds the bounded Director action payload.");
+
+        var assembled = await assembler.AssembleAsync(userId, movie.Id, BuildContextTarget(request), cancellationToken);
+        if (assembled is null) return null;
+        var now = DateTime.UtcNow;
+        var directorContext = await GetOrCreateContextAsync(movie, assembled, cancellationToken);
+        var rationale = new List<string>
+        {
+            "canonical_timeline_version_checked",
+            "existing_approved_audio_only",
+            "bridge_ranges_are_advisory",
+            "explicit_user_override_required",
+        };
+        if (plan.UnresolvedNeeds.Count > 0) rationale.Add("unresolved_audio_needs_present");
+        var proposal = new DirectorProposal
+        {
+            Id = Guid.NewGuid(), WorkspaceId = movie.WorkspaceId, MovieProjectId = movie.Id, DirectorProjectContextId = directorContext.Id,
+            CreatedByUserId = userId, ContextVersion = directorContext.ContextVersion, ContextSnapshotHash = directorContext.SnapshotHash,
+            Status = DirectorProposalStatuses.PendingApproval,
+            Title = string.IsNullOrWhiteSpace(request.Goal) ? "Repair audio bridges" : request.Goal.Trim(),
+            Summary = $"Review {plan.Recommendations.Count} provider-free audio bridge recommendation(s) against canonical timeline v{plan.TimelineVersion}.",
+            RationaleJson = JsonSerializer.Serialize(rationale), CreatedAt = now,
+        };
+        proposal.Actions.Add(new DirectorAction
+        {
+            Id = Guid.NewGuid(), WorkspaceId = movie.WorkspaceId, MovieProjectId = movie.Id, DirectorProposalId = proposal.Id,
+            ActionType = DirectorActionTypes.EditRepairAudio, Status = DirectorActionStatuses.PendingApproval, ApprovalRequired = true,
+            PayloadJson = serializedPayload, CreatedAt = now,
+        });
+        db.DirectorProposals.Add(proposal);
+        db.DirectorHistoryEvents.Add(new DirectorHistoryEvent
+        {
+            Id = Guid.NewGuid(), WorkspaceId = movie.WorkspaceId, DirectorProposalId = proposal.Id, EventType = DirectorHistoryEventTypes.ContextAssembled,
+            SafeDetailsJson = JsonSerializer.Serialize(new { contextVersion = directorContext.ContextVersion, snapshotHash = request.CanonicalTimeline is null ? null : plan.CanonicalTimelineFingerprint, timelineVersion = plan.TimelineVersion, providerCalled = false }), CreatedAt = now,
+        });
+        db.DirectorHistoryEvents.Add(new DirectorHistoryEvent
+        {
+            Id = Guid.NewGuid(), WorkspaceId = movie.WorkspaceId, DirectorProposalId = proposal.Id, EventType = DirectorHistoryEventTypes.ProposalCreated,
+            SafeDetailsJson = JsonSerializer.Serialize(new { action, recommendationCount = plan.Recommendations.Count, unresolvedCount = plan.UnresolvedNeeds.Count, providerCalled = false, canonicalTimelineMutated = false }), CreatedAt = now,
+        });
+        await db.SaveChangesAsync(cancellationToken);
+        var review = new DirectorEditRepairAudioReviewDto(action, plan.TimelineId, plan.TimelineVersion, plan.CanonicalTimelineFingerprint, plan.Recommendations, plan.UnresolvedNeeds, plan.RequiresUserOverride, false, false);
+        return new DirectorProposalResponse(ToDto(proposal, rationale, [], editRepairAudio: review), assembled.Context with { ContextVersion = directorContext.ContextVersion });
     }
 
     private async Task<DirectorProposalResponse?> CreateScenePlanProposalAsync(Guid userId, MovieProject movie, DirectorProposalRequest request, CancellationToken cancellationToken)
@@ -741,12 +801,14 @@ public sealed class MovieDirectorService(
         {
             await EnsureProposalCurrentAsync(action.Proposal, userId, cancellationToken);
         }
-        catch (DirectorProposalStaleException) when (action.ActionType is DirectorActionTypes.ScenePlanning or DirectorActionTypes.ShotPlanning or DirectorShotPlanningActionTypes.ProposeShots or DirectorShotPlanningActionTypes.RegenerateShots)
+        catch (DirectorProposalStaleException) when (action.ActionType is DirectorActionTypes.ScenePlanning or DirectorActionTypes.ShotPlanning or DirectorShotPlanningActionTypes.ProposeShots or DirectorShotPlanningActionTypes.RegenerateShots or DirectorActionTypes.EditRepairAudio)
         {
             action.Status = DirectorActionStatuses.Failed;
-            action.FailureCode = action.ActionType is DirectorShotPlanningActionTypes.ProposeShots or DirectorShotPlanningActionTypes.RegenerateShots
-                ? DirectorShotPlanningFailureCodes.Stale
-                : "DIRECTOR_SCENE_PLAN_STALE";
+            action.FailureCode = action.ActionType == DirectorActionTypes.EditRepairAudio
+                ? "DIRECTOR_EDIT_REPAIR_AUDIO_STALE"
+                : action.ActionType is DirectorShotPlanningActionTypes.ProposeShots or DirectorShotPlanningActionTypes.RegenerateShots
+                    ? DirectorShotPlanningFailureCodes.Stale
+                    : "DIRECTOR_SCENE_PLAN_STALE";
             action.CompletedAt = DateTime.UtcNow;
             var staleResult = new DirectorActionResult { Id = Guid.NewGuid(), DirectorActionId = action.Id, Status = action.Status, SafeMessage = "The Director proposal is stale. Create a new proposal from the current movie planning context.", ResultJson = null, CreatedAt = DateTime.UtcNow };
             action.Results.Add(staleResult);
@@ -964,14 +1026,15 @@ public sealed class MovieDirectorService(
 
     private IQueryable<DirectorProposal> QueryProposal() => db.DirectorProposals.AsNoTracking().Include(item => item.Actions).ThenInclude(item => item.Results).Include(item => item.MovieProject);
 
-    private static DirectorProposalDto ToDto(DirectorProposal proposal, IReadOnlyList<string>? rationale = null, IReadOnlyList<DirectorPlanItemDto>? plan = null, DirectorStoryReviewDto? storyReview = null, DirectorScenePlanReviewDto? scenePlan = null, IReadOnlyList<DirectorShotProposalDto>? shotPlan = null, DirectorShotPlanReviewDto? shotPlanReview = null)
+    private static DirectorProposalDto ToDto(DirectorProposal proposal, IReadOnlyList<string>? rationale = null, IReadOnlyList<DirectorPlanItemDto>? plan = null, DirectorStoryReviewDto? storyReview = null, DirectorScenePlanReviewDto? scenePlan = null, IReadOnlyList<DirectorShotProposalDto>? shotPlan = null, DirectorShotPlanReviewDto? shotPlanReview = null, DirectorEditRepairAudioReviewDto? editRepairAudio = null)
     {
         var actions = proposal.Actions.OrderBy(item => item.CreatedAt).ToArray();
         var shotAction = actions.FirstOrDefault(item => string.Equals(item.ActionType, DirectorShotPlanningActionTypes.ProposeShots, StringComparison.OrdinalIgnoreCase) || string.Equals(item.ActionType, DirectorShotPlanningActionTypes.RegenerateShots, StringComparison.OrdinalIgnoreCase));
         var payload = shotAction is null ? null : ReadShotPlanningPayload(shotAction);
         var resolvedShotPlan = shotPlan ?? payload?.Shots;
         var resolvedShotReview = shotPlanReview ?? (payload is null ? null : new DirectorShotPlanReviewDto(payload.MovieSceneId, string.Empty, payload.ContextHash, payload.SceneDurationSeconds, payload.ExistingActiveDurationSeconds, payload.Shots.Sum(item => item.EstimatedDurationSeconds), payload.SceneDurationSeconds is null || payload.ExistingActiveDurationSeconds + payload.Shots.Sum(item => item.EstimatedDurationSeconds) <= payload.SceneDurationSeconds, payload.IsRegeneration));
-        return new(proposal.Id, proposal.MovieProjectId, proposal.Status, proposal.Title, proposal.Summary, rationale ?? ParseRationale(proposal.RationaleJson), plan ?? [], actions.Select(ToDto).ToArray(), proposal.CreatedAt, proposal.ApprovedAt, storyReview ?? actions.Select(ReadStoryReview).FirstOrDefault(item => item is not null), scenePlan ?? actions.Select(ReadScenePlanReview).FirstOrDefault(item => item is not null), resolvedShotPlan, resolvedShotReview);
+        var resolvedEditRepairAudio = editRepairAudio ?? actions.Select(ReadEditRepairAudioReview).FirstOrDefault(item => item is not null);
+        return new(proposal.Id, proposal.MovieProjectId, proposal.Status, proposal.Title, proposal.Summary, rationale ?? ParseRationale(proposal.RationaleJson), plan ?? [], actions.Select(ToDto).ToArray(), proposal.CreatedAt, proposal.ApprovedAt, storyReview ?? actions.Select(ReadStoryReview).FirstOrDefault(item => item is not null), scenePlan ?? actions.Select(ReadScenePlanReview).FirstOrDefault(item => item is not null), resolvedShotPlan, resolvedShotReview, resolvedEditRepairAudio);
     }
     private static DirectorActionDto ToDto(DirectorAction action) => new(action.Id, action.DirectorProposalId, action.ActionType, action.Status, action.ApprovalRequired, action.FailureCode, action.CreatedAt, action.ApprovedAt, action.StartedAt, action.CompletedAt, action.Results.OrderBy(item => item.CreatedAt).Select(ToDto).ToArray());
     private static DirectorActionResultDto ToDto(DirectorActionResult result) => new(result.Id, result.Status, result.SafeMessage, result.ResultJson, result.CreatedAt);
@@ -979,6 +1042,16 @@ public sealed class MovieDirectorService(
     private static DirectorStoryActionPayload? ReadStoryPayload(DirectorAction action) { try { return JsonSerializer.Deserialize<DirectorStoryActionPayload>(action.PayloadJson, DirectorJson.Options); } catch (JsonException) { return null; } }
     private static DirectorShotPlanningPayload? ReadShotPlanningPayload(DirectorAction action) { try { return JsonSerializer.Deserialize<DirectorShotPlanningPayload>(action.PayloadJson, DirectorJson.Options); } catch (JsonException) { return null; } }
     private static DirectorRoomActionPayload? ReadRoomPayload(DirectorAction action) { try { return JsonSerializer.Deserialize<DirectorRoomActionPayload>(action.PayloadJson, DirectorJson.Options); } catch (JsonException) { return null; } }
+    private static DirectorEditRepairAudioReviewDto? ReadEditRepairAudioReview(DirectorAction action)
+    {
+        if (!string.Equals(action.ActionType, DirectorActionTypes.EditRepairAudio, StringComparison.OrdinalIgnoreCase)) return null;
+        try
+        {
+            var payload = JsonSerializer.Deserialize<DirectorEditRepairAudioActionPayload>(action.PayloadJson, DirectorJson.Options);
+            return payload is null ? null : new DirectorEditRepairAudioReviewDto(payload.Action, payload.Plan.TimelineId, payload.Plan.TimelineVersion, payload.Plan.CanonicalTimelineFingerprint, payload.Plan.Recommendations, payload.Plan.UnresolvedNeeds, payload.Plan.RequiresUserOverride, false, false);
+        }
+        catch (JsonException) { return null; }
+    }
     private static string? RoomForPlanningAction(string actionType) => actionType switch
     {
         DirectorActionTypes.ScenePlanning or DirectorActionTypes.ShotPlanning => DirectorRoomTypes.Scene,

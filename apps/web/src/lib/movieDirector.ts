@@ -21,6 +21,8 @@ export function directorRoomForModule(module: string): DirectorRoom {
       return "Storyboard";
     case "production":
       return "Production";
+    case "selects":
+      return "Production";
     case "scenes":
       return "Scene";
     default:
@@ -48,6 +50,8 @@ export function directorActionTypeLabel(actionType: string) {
       return "Review production readiness";
     case "project_readiness":
       return "Review project readiness";
+    case "edit_repair_audio":
+      return "Plan audio bridges";
     default:
       return "Director action";
   }

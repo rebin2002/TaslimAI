@@ -72,7 +72,9 @@ public sealed class MovieTimelineService(TaslimDbContext db, MovieCollaborationA
         }
         else
         {
-            await AddRequestedTracksAsync(revision, request.Tracks, movie.WorkspaceId, movieProjectId, now, cancellationToken);
+            if (request.Tracks.Count > 64 || request.Tracks.Sum(item => item.Items.Count) > MovieTimelineContract.MaxClips)
+                throw Invalid("A timeline revision is limited to 64 tracks and 10,000 items.");
+            await AddRequestedTracksAsync(revision, request.Tracks, movie.WorkspaceId, movie.ProjectId, movieProjectId, now, cancellationToken);
             revision.DurationMilliseconds = CalculateDuration(revision);
         }
 
@@ -127,7 +129,7 @@ public sealed class MovieTimelineService(TaslimDbContext db, MovieCollaborationA
         EnsureDraft(track.Revision);
         var movie = await db.MovieProjects.AsNoTracking().FirstAsync(item => item.Id == track.Revision.Timeline.MovieProjectId, cancellationToken);
         var now = DateTime.UtcNow;
-        var materialized = await MaterializeItemAsync(track.Revision, track, request, movie.WorkspaceId, now, cancellationToken);
+        var materialized = await MaterializeItemAsync(track.Revision, track, request, movie.WorkspaceId, movie.ProjectId, now, cancellationToken);
         ValidateNoOverlaps(track.Items.Append(materialized));
         track.Items.Add(materialized);
         track.UpdatedAt = now;
@@ -161,6 +163,7 @@ public sealed class MovieTimelineService(TaslimDbContext db, MovieCollaborationA
         MovieTimelineRevision revision,
         IReadOnlyList<MovieTimelineTrackRequest> requests,
         Guid workspaceId,
+        Guid? projectId,
         Guid movieProjectId,
         DateTime now,
         CancellationToken cancellationToken)
@@ -181,7 +184,7 @@ public sealed class MovieTimelineService(TaslimDbContext db, MovieCollaborationA
             revision.Tracks.Add(track);
             foreach (var itemRequest in request.Items)
             {
-                var item = await MaterializeItemAsync(revision, track, itemRequest, workspaceId, now, cancellationToken);
+                var item = await MaterializeItemAsync(revision, track, itemRequest, workspaceId, projectId, now, cancellationToken);
                 track.Items.Add(item);
             }
             ValidateNoOverlaps(track.Items);
@@ -193,6 +196,7 @@ public sealed class MovieTimelineService(TaslimDbContext db, MovieCollaborationA
         MovieTimelineTrack track,
         MovieTimelineItemRequest request,
         Guid workspaceId,
+        Guid? projectId,
         DateTime now,
         CancellationToken cancellationToken)
     {
@@ -200,48 +204,82 @@ public sealed class MovieTimelineService(TaslimDbContext db, MovieCollaborationA
         ValidateKindForTrack(kind, track.Kind);
         ValidateBounded(request.Label, 160, "Timeline item label");
         ValidateMetadata(request.MetadataJson);
-        if (request.TimelineInMilliseconds < 0) throw Invalid("Timeline in-point cannot be negative.");
-        if (request.SourceInMilliseconds is < 0 || request.SourceOutMilliseconds is < 0)
+        if (request.TimelineInMilliseconds < 0 || request.TimelineInMilliseconds > 86_400_000 || request.TimelineOutMilliseconds is > 86_400_000)
+            throw Invalid("Timeline points must be within the supported 24-hour range.");
+        if (request.SourceInMilliseconds is < 0 or > 86_400_000 || request.SourceOutMilliseconds is < 0 or > 86_400_000)
             throw Invalid("Source in/out points cannot be negative.");
         if (kind == MovieTimelineItemKinds.Gap)
         {
-            if (request.SourceTakeId.HasValue || request.SourceAssetId.HasValue || request.SourceInMilliseconds.HasValue || request.SourceOutMilliseconds.HasValue)
+            if (request.SourceTakeId.HasValue || request.SourceSelectId.HasValue || request.SourceAssetId.HasValue || request.SourceInMilliseconds.HasValue || request.SourceOutMilliseconds.HasValue)
                 throw Invalid("A gap cannot reference a source take or asset.");
             if (!request.TimelineOutMilliseconds.HasValue || request.TimelineOutMilliseconds.Value <= request.TimelineInMilliseconds)
                 throw Invalid("A gap requires a positive timeline in/out range.");
         }
 
         Guid? sourceTakeId = null;
+        Guid? sourceSelectId = null;
         Guid? sourceAssetId = null;
         int? sourceIn = null;
         int? sourceOut = null;
         var sourceDuration = 0;
         if (kind == MovieTimelineItemKinds.VisualTake)
         {
-            if (!request.SourceTakeId.HasValue) throw SourceInvalid("A visual timeline item must reference a selected take.");
-            var take = await db.MovieTakes
-                .Include(item => item.MovieShot).ThenInclude(item => item.Scene)
-                .Include(item => item.Asset)
-                .Include(item => item.MovieClip).ThenInclude(item => item!.Asset)
-                .FirstOrDefaultAsync(item => item.Id == request.SourceTakeId.Value, cancellationToken);
+            if (request.SourceSelectId.HasValue && request.SourceAssetId.HasValue)
+                throw SourceInvalid("A visual timeline item cannot combine a select and an independent source asset.");
+
+            MovieTake? take;
+            MovieTakeSelect? select = null;
+            if (request.SourceSelectId.HasValue)
+            {
+                select = await db.MovieTakeSelects
+                    .Include(item => item.MovieTake).ThenInclude(item => item.MovieShot).ThenInclude(item => item.Scene)
+                    .Include(item => item.MovieTake).ThenInclude(item => item.Asset)
+                    .Include(item => item.MovieTake).ThenInclude(item => item.MovieClip).ThenInclude(item => item!.Asset)
+                    .FirstOrDefaultAsync(item => item.Id == request.SourceSelectId.Value, cancellationToken);
+                take = select?.MovieTake;
+                if (select is null || take is null || select.Status != MovieTakeSelectStatuses.Approved
+                    || (request.SourceTakeId.HasValue && request.SourceTakeId.Value != take.Id))
+                    throw SourceInvalid("The timeline select must be an approved select belonging to the referenced take.");
+            }
+            else
+            {
+                if (!request.SourceTakeId.HasValue) throw SourceInvalid("A visual timeline item must reference a selected take.");
+                take = await db.MovieTakes
+                    .Include(item => item.MovieShot).ThenInclude(item => item.Scene)
+                    .Include(item => item.Asset)
+                    .Include(item => item.MovieClip).ThenInclude(item => item!.Asset)
+                    .FirstOrDefaultAsync(item => item.Id == request.SourceTakeId.Value, cancellationToken);
+            }
+
             if (take is null || take.MovieShot.Scene.MovieProjectId != revision.Timeline.MovieProjectId)
                 throw SourceInvalid("The selected take does not belong to this movie project.");
             if (!(take.SelectedAt.HasValue || take.MovieShot.SelectedTakeId == take.Id || take.MovieShot.FinalTakeId == take.Id)
                 || take.Status is not (MovieTakeStatuses.Approved or MovieTakeStatuses.Selected))
                 throw SourceInvalid("Only an approved selected or finalized take can be placed on the timeline.");
             var asset = take.Asset ?? take.MovieClip?.Asset;
-            if (asset is null || asset.WorkspaceId != workspaceId || !MovieTimelineSourceRules.IsApprovedAsset(asset)
+            if (asset is null || asset.WorkspaceId != workspaceId || asset.ProjectId.HasValue && asset.ProjectId != projectId || !MovieTimelineSourceRules.IsApprovedAsset(asset)
                 || !string.Equals(asset.AssetType, AssetTypes.Video, StringComparison.OrdinalIgnoreCase))
                 throw SourceInvalid("The selected take must have an approved active video asset.");
             sourceTakeId = take.Id;
+            sourceSelectId = select?.Id;
             sourceAssetId = asset.Id;
             sourceDuration = await ResolveTakeDurationAsync(take, asset, cancellationToken);
+
+            if (select is not null)
+            {
+                if ((request.SourceInMilliseconds.HasValue && request.SourceInMilliseconds.Value != select.StartMilliseconds)
+                    || (request.SourceOutMilliseconds.HasValue && request.SourceOutMilliseconds.Value != select.EndMilliseconds))
+                    throw Invalid("A timeline select uses its persisted trim boundaries.");
+                sourceIn = select.StartMilliseconds;
+                sourceOut = select.EndMilliseconds;
+            }
         }
         else if (kind is MovieTimelineItemKinds.AudioAsset or MovieTimelineItemKinds.CaptionAsset)
         {
+            if (request.SourceSelectId.HasValue) throw SourceInvalid("Only visual timeline items can reference a take select.");
             if (!request.SourceAssetId.HasValue) throw SourceInvalid("An audio or caption timeline item must reference an asset.");
             var asset = await db.Assets.FirstOrDefaultAsync(item => item.Id == request.SourceAssetId.Value && item.WorkspaceId == workspaceId, cancellationToken);
-            if (asset is null || !MovieTimelineSourceRules.IsApprovedAsset(asset)) throw SourceInvalid("The source asset must be active and approved.");
+            if (asset is null || asset.ProjectId.HasValue && asset.ProjectId != projectId || !MovieTimelineSourceRules.IsApprovedAsset(asset)) throw SourceInvalid("The source asset must be active and approved in this movie project.");
             if (kind == MovieTimelineItemKinds.AudioAsset && !MovieTimelineSourceRules.IsAudioAsset(asset))
                 throw SourceInvalid("The source asset is not an approved audio asset.");
             if (kind == MovieTimelineItemKinds.CaptionAsset && !MovieTimelineSourceRules.IsCaptionAsset(asset))
@@ -250,7 +288,7 @@ public sealed class MovieTimelineService(TaslimDbContext db, MovieCollaborationA
             sourceDuration = MovieTimelineSourceRules.TryReadDurationMilliseconds(asset, out var assetDuration) ? assetDuration : 0;
         }
 
-        if (kind != MovieTimelineItemKinds.Gap)
+        if (kind != MovieTimelineItemKinds.Gap && sourceIn is null)
         {
             sourceIn = request.SourceInMilliseconds ?? 0;
             sourceOut = request.SourceOutMilliseconds ?? (sourceDuration > 0 ? sourceDuration : null);
@@ -268,8 +306,8 @@ public sealed class MovieTimelineService(TaslimDbContext db, MovieCollaborationA
             throw Invalid("Timeline in/out points must match the trimmed source duration.");
         return new MovieTimelineItem
         {
-            Id = Guid.NewGuid(), MovieTimelineTrackId = track.Id, Sequence = track.Items.Count + 1,
-            Kind = kind, SourceTakeId = sourceTakeId, SourceAssetId = sourceAssetId,
+                Id = Guid.NewGuid(), MovieTimelineTrackId = track.Id, Sequence = track.Items.Count + 1,
+            Kind = kind, SourceTakeId = sourceTakeId, SourceSelectId = sourceSelectId, SourceAssetId = sourceAssetId,
             TimelineInMilliseconds = request.TimelineInMilliseconds, TimelineOutMilliseconds = timelineOut,
             SourceInMilliseconds = sourceIn, SourceOutMilliseconds = sourceOut, DurationMilliseconds = duration,
             Label = Clean(request.Label), MetadataJson = request.MetadataJson?.Trim(), CreatedAt = now, UpdatedAt = now,
@@ -333,7 +371,7 @@ public sealed class MovieTimelineService(TaslimDbContext db, MovieCollaborationA
             track.Items.Add(new MovieTimelineItem
             {
                 Id = Guid.NewGuid(), MovieTimelineTrackId = track.Id, Sequence = sourceItem.Sequence,
-                Kind = sourceItem.Kind, SourceTakeId = sourceItem.SourceTakeId, SourceAssetId = sourceItem.SourceAssetId,
+                Kind = sourceItem.Kind, SourceTakeId = sourceItem.SourceTakeId, SourceSelectId = sourceItem.SourceSelectId, SourceAssetId = sourceItem.SourceAssetId,
                 TimelineInMilliseconds = sourceItem.TimelineInMilliseconds, TimelineOutMilliseconds = sourceItem.TimelineOutMilliseconds,
                 SourceInMilliseconds = sourceItem.SourceInMilliseconds, SourceOutMilliseconds = sourceItem.SourceOutMilliseconds,
                 DurationMilliseconds = sourceItem.DurationMilliseconds, Label = sourceItem.Label, MetadataJson = sourceItem.MetadataJson,
@@ -373,7 +411,7 @@ public sealed class MovieTimelineService(TaslimDbContext db, MovieCollaborationA
         track.Items.OrderBy(item => item.TimelineInMilliseconds).ThenBy(item => item.Sequence).Select(ToDto).ToArray());
 
     private static MovieTimelineItemDto ToDto(MovieTimelineItem item) => new(
-        item.Id, item.Sequence, item.Kind, item.SourceTakeId, item.SourceAssetId, item.TimelineInMilliseconds,
+        item.Id, item.Sequence, item.Kind, item.SourceTakeId, item.SourceSelectId, item.SourceAssetId, item.TimelineInMilliseconds,
         item.TimelineOutMilliseconds, item.SourceInMilliseconds, item.SourceOutMilliseconds, item.DurationMilliseconds,
         item.Label, item.MetadataJson, item.Kind == MovieTimelineItemKinds.Gap);
 

@@ -74,7 +74,9 @@ public sealed record MovieProductionGenerationRequest(
     string TargetResolution = MovieResolutionTiers.P1080,
     string QualityTier = DirectorQualityLevels.Standard,
     bool ConfirmationAccepted = false,
-    string? IdempotencyKey = null);
+    string? IdempotencyKey = null,
+    bool AllowReferenceReadinessOverride = false,
+    string? ReferenceReadinessOverrideReason = null);
 
 /// <summary>
 /// This result is internal to the movie service boundary. It carries the canonical
@@ -110,7 +112,9 @@ public sealed class MovieProductionGenerationOrchestrator(
     IMovieCharacterContinuityService continuity,
     IMovieVideoProvider provider,
     IMovieGenerationCostEstimator costEstimator,
-    IGenerationCostGuardrailService costGuardrails) : IMovieProductionGenerationOrchestrator
+    IGenerationCostGuardrailService costGuardrails,
+    IMovieProductionPreflightService productionPreflight,
+    IMovieReferenceReadinessService referenceReadiness) : IMovieProductionGenerationOrchestrator
 {
     public async Task<MovieProductionOrchestrationResult?> QueueApprovedAsync(
         Guid userId,
@@ -135,6 +139,30 @@ public sealed class MovieProductionGenerationOrchestrator(
         var workflowError = MovieProductionWorkflow.ValidateVersionCreation(MovieProductionStages.ProductionRender, source);
         if (workflowError is not null)
             throw new MovieProductionValidationException("PRODUCTION_RENDER_INVALID", workflowError);
+
+        var preflightResult = await productionPreflight.EvaluateAsync(
+            userId,
+            request.MovieShotId,
+            new MovieProductionPreflightRequest(
+                request.ApprovedSourceVersionId,
+                request.TargetResolution,
+                request.QualityTier,
+                request.ConfirmationAccepted),
+            cancellationToken);
+        if (preflightResult is null)
+            return null;
+        if (!preflightResult.CanProceed)
+            throw new MovieProductionValidationException(
+                preflightResult.RejectionCode ?? "PRODUCTION_PREFLIGHT_REQUIRED",
+                preflightResult.RejectionMessage ?? preflightResult.Summary);
+
+        await referenceReadiness.EnsureCanGenerateAsync(
+            userId,
+            shot.Id,
+            request.AllowReferenceReadinessOverride,
+            request.ReferenceReadinessOverrideReason,
+            MovieReferenceReadinessOverrideSources.ProductionRender,
+            cancellationToken);
 
         var plan = BuildPlan(shot, request);
         var durationSeconds = Math.Clamp(shot.DurationSeconds ?? shot.Scene.DurationSeconds ?? Math.Min(shot.Scene.MovieProject.DurationSeconds, 60), 1, 3600);
@@ -348,26 +376,8 @@ public sealed class MovieProductionGenerationOrchestrator(
 
     private static ProductionPlan BuildPlan(MovieShot shot, MovieProductionGenerationRequest request)
     {
-        var target = request.TargetResolution?.Trim();
-        if (!MovieResolutionTiers.TryGet(target, out var targetTier))
-            throw new MovieProductionValidationException("PRODUCTION_TARGET_RESOLUTION_INVALID", "Choose a supported production resolution.");
-        var quality = DirectorQualityLevels.QualityTiers.FirstOrDefault(item => string.Equals(item, request.QualityTier?.Trim(), StringComparison.OrdinalIgnoreCase));
-        if (quality is null)
-            throw new MovieProductionValidationException("PRODUCTION_QUALITY_INVALID", "Choose a supported production quality level.");
-        var director = new AdaptiveResolution.AdaptiveResolutionDirector();
-        var recommendation = director.Recommend(new AdaptiveResolutionDirectorRequest
-        {
-            MasterTargetResolution = targetTier.Code,
-            QualityTier = quality,
-            DurationSeconds = Math.Clamp(shot.DurationSeconds ?? 1, 1, 3600),
-            Importance = string.IsNullOrWhiteSpace(shot.Purpose) ? 50 : 70,
-            MotionComplexity = string.IsNullOrWhiteSpace(shot.CameraMotion) ? 35 : 65,
-            CameraComplexity = string.IsNullOrWhiteSpace(shot.CameraAndFraming) ? 35 : 60,
-            ContinuitySensitivity = string.IsNullOrWhiteSpace(shot.ContinuityReferences) ? 40 : 75,
-            RequiredQualityDimensions = [],
-            Constraints = new AdaptiveResolutionWave3Constraints(false, null, true),
-        });
-        return new(recommendation.SourceResolution, recommendation.MasterTargetResolution, recommendation.PipelinePath, quality);
+        var plan = MovieProductionAdaptivePlanBuilder.Build(shot, request.TargetResolution, request.QualityTier);
+        return new(plan.SourceResolution, plan.TargetResolution, plan.ProcessingPath, plan.QualityTier);
     }
 
     private async Task ReconcileFastTerminalAsync(MovieClip clip, Guid jobId, CancellationToken cancellationToken)

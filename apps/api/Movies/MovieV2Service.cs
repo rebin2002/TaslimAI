@@ -161,6 +161,7 @@ public sealed class MovieV2Service(TaslimDbContext db, WorkspaceAccessService ac
         var shot = await db.MovieShots.Include(item => item.Scene).ThenInclude(item => item.MovieProject).FirstOrDefaultAsync(item => item.Id == shotId, cancellationToken);
         if (shot is null || !await HasPermissionAsync(userId, shot.Scene.MovieProjectId, MoviePermissions.Edit, shot.Scene.MovieProject.WorkspaceId, cancellationToken)) return null;
         ValidateQuality(request.QualityLevel);
+        ValidateText(request.Label, 160, "Take label", required: false);
         if (request.Notes?.Length > 4_000) throw new MovieV2ValidationException("Take notes must be 4,000 characters or fewer.");
         var clip = request.MovieClipId.HasValue
             ? await db.MovieClips.AsNoTracking().FirstOrDefaultAsync(item => item.Id == request.MovieClipId && item.MovieProjectId == shot.Scene.MovieProjectId && item.MovieShotId == shotId, cancellationToken)
@@ -177,6 +178,12 @@ public sealed class MovieV2Service(TaslimDbContext db, WorkspaceAccessService ac
             throw new MovieV2ValidationException("The selected clip and generation job do not describe the same render.");
         if (job is not null && shot.Scene.MovieProject.ProjectId.HasValue && job.ProjectId != shot.Scene.MovieProject.ProjectId)
             throw new MovieV2ValidationException("The selected generation job does not belong to this movie project.");
+        if (job is not null)
+        {
+            var jobClip = await db.MovieClips.AsNoTracking().FirstOrDefaultAsync(item => item.GenerationJobId == job.Id && item.MovieProjectId == shot.Scene.MovieProjectId && item.MovieShotId == shotId, cancellationToken);
+            if (jobClip is null) throw new MovieV2ValidationException("The selected generation job is not the render for this shot.");
+            clip ??= jobClip;
+        }
         if (request.AssetId.HasValue)
         {
             var asset = await db.Assets.AsNoTracking().Include(item => item.StoredFile).FirstOrDefaultAsync(item => item.Id == request.AssetId && item.WorkspaceId == shot.Scene.MovieProject.WorkspaceId, cancellationToken);
@@ -262,6 +269,8 @@ public sealed class MovieV2Service(TaslimDbContext db, WorkspaceAccessService ac
                 var take = await db.MovieTakes.Include(item => item.MovieShot).ThenInclude(item => item.Scene).ThenInclude(item => item.MovieProject).FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
                 await EnsureAuthorizedAsync(take?.MovieShot.Scene.MovieProject.WorkspaceId, userId, cancellationToken, take?.MovieShot.Scene.MovieProjectId, MoviePermissions.Edit);
                 ValidateStatus(status, MovieTakeStatuses.Supported, "take status");
+                if (status.Trim() is MovieTakeStatuses.Approved or MovieTakeStatuses.Selected or MovieTakeStatuses.Succeeded or MovieTakeStatuses.Rejected or MovieTakeStatuses.Superseded)
+                    throw new MovieV2ValidationException("Approval, selection, and generated take states are controlled by their dedicated workflow commands.");
                 take!.Status = status.Trim(); take.StatusChangedAt = now; take.StatusChangedByUserId = userId; take.ArchivedAt = IsArchived(status) ? now : null; take.ArchivedByUserId = IsArchived(status) ? userId : null; take.UpdatedAt = now;
                 break;
             default: throw new MovieV2ValidationException("Unsupported hierarchy entity.");
@@ -271,12 +280,20 @@ public sealed class MovieV2Service(TaslimDbContext db, WorkspaceAccessService ac
 
     public async Task SelectTakeAsync(Guid userId, Guid takeId, bool finalize, CancellationToken cancellationToken)
     {
-        var take = await db.MovieTakes.Include(item => item.MovieShot).ThenInclude(item => item.Scene).ThenInclude(item => item.MovieProject).FirstOrDefaultAsync(item => item.Id == takeId, cancellationToken);
+        var take = await db.MovieTakes.Include(item => item.MovieShot).ThenInclude(item => item.Scene).ThenInclude(item => item.MovieProject).Include(item => item.GenerationJob).FirstOrDefaultAsync(item => item.Id == takeId, cancellationToken);
         await EnsureAuthorizedAsync(take?.MovieShot.Scene.MovieProject.WorkspaceId, userId, cancellationToken, take?.MovieShot.Scene.MovieProjectId, finalize ? MoviePermissions.FinalApproval : MoviePermissions.Approve);
         if (take!.Status is MovieTakeStatuses.Archived or MovieTakeStatuses.Superseded or MovieTakeStatuses.LegacyArchived or MovieTakeStatuses.Failed or MovieTakeStatuses.Cancelled or MovieTakeStatuses.Rejected)
             throw new MovieV2ValidationException("Only an active, successful take can be selected.");
         var now = DateTime.UtcNow;
         var shot = take.MovieShot;
+        if (take.GenerationJob is not null && take.GenerationJob.Status != GenerationJobStatus.Succeeded)
+            throw new MovieV2ValidationException("A generated take must finish successfully before it can be selected.");
+        if (take.GenerationJob is not null && take.AssetId.HasValue)
+        {
+            var selectedAsset = await db.Assets.AsNoTracking().Include(item => item.StoredFile).FirstOrDefaultAsync(item => item.Id == take.AssetId && item.WorkspaceId == take.MovieShot.Scene.MovieProject.WorkspaceId, cancellationToken);
+            if (selectedAsset is null || selectedAsset.Status != AssetStatus.Active || selectedAsset.ProjectId.HasValue && selectedAsset.ProjectId != take.MovieShot.Scene.MovieProject.ProjectId || selectedAsset.StoredFileId.HasValue && selectedAsset.StoredFile?.Status != StoredFileStatus.Ready)
+                throw new MovieV2ValidationException("A generated take must reference an active, ready asset before it can be selected.");
+        }
         var previous = await db.MovieTakes.Where(item => item.MovieShotId == shot.Id && item.Id != takeId && (finalize ? item.FinalizedAt != null : item.SelectedAt != null)).ToListAsync(cancellationToken);
         foreach (var item in previous)
         {
@@ -366,7 +383,7 @@ public sealed class MovieV2Service(TaslimDbContext db, WorkspaceAccessService ac
     private static bool IsArchived(string status) => string.Equals(status, MovieHierarchyStatuses.Archived, StringComparison.OrdinalIgnoreCase) || string.Equals(status, MovieShotStatuses.Archived, StringComparison.OrdinalIgnoreCase) || string.Equals(status, MovieTakeStatuses.Archived, StringComparison.OrdinalIgnoreCase);
     private static void ValidateQuality(string value) => ValidateStatus(value, MovieQualityLevels.Supported, "quality level");
     private static void ValidateStatus(string value, IReadOnlySet<string> supported, string field) { if (string.IsNullOrWhiteSpace(value) || !supported.Contains(value.Trim())) throw new MovieV2ValidationException($"Choose a supported {field}."); }
-    private static void ValidateText(string value, int maxLength, string field) { if (string.IsNullOrWhiteSpace(value) || value.Trim().Length > maxLength) throw new MovieV2ValidationException($"{field} is required and must be {maxLength} characters or fewer."); }
+    private static void ValidateText(string? value, int maxLength, string field, bool required = true) { if ((required && string.IsNullOrWhiteSpace(value)) || value?.Trim().Length > maxLength) throw new MovieV2ValidationException(required ? $"{field} is required and must be {maxLength} characters or fewer." : $"{field} must be {maxLength} characters or fewer."); }
     private async Task<bool> HasPermissionAsync(Guid userId, Guid movieProjectId, string permission, Guid workspaceId, CancellationToken cancellationToken) => collaboration is null ? await access.IsMemberAsync(userId, workspaceId, cancellationToken) : await collaboration.HasPermissionAsync(userId, movieProjectId, permission, cancellationToken);
     private async Task EnsureAuthorizedAsync(Guid? workspaceId, Guid userId, CancellationToken cancellationToken, Guid? movieProjectId = null, string? permission = null) { if (!workspaceId.HasValue || (movieProjectId.HasValue && permission is not null ? !await HasPermissionAsync(userId, movieProjectId.Value, permission, workspaceId.Value, cancellationToken) : !await access.IsMemberAsync(userId, workspaceId.Value, cancellationToken))) throw new MovieV2NotFoundException(); }
 

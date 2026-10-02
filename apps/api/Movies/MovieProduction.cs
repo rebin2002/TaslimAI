@@ -275,7 +275,8 @@ public sealed record MovieCinematographySummaryDto(
     string? CameraAngle,
     string? Lighting,
     string? PaletteLook,
-    string? CompositionNotes);
+    string? CompositionNotes,
+    MovieCameraProfileDto? CameraProfile = null);
 
 public sealed record MovieStoryboardShotDto(
     Guid Id,
@@ -389,7 +390,7 @@ public static class MovieProductionProjection
             attempts.Length,
             qualityControlStatus,
             job.ErrorCode,
-            job.ErrorMessage,
+            string.IsNullOrWhiteSpace(job.ErrorCode) ? null : "The movie generation operation did not complete.",
             asset?.Id,
             asset?.AssetType,
             attempts.Select(item => new MovieProductionProviderAttemptDto(
@@ -467,6 +468,8 @@ public sealed class MovieProductionRenderRequest
     public string? TargetResolution { get; set; }
     public string? QualityTier { get; set; }
     public bool ConfirmationAccepted { get; set; }
+    public bool AllowReferenceReadinessOverride { get; set; }
+    public string? ReferenceReadinessOverrideReason { get; set; }
     [JsonIgnore, BindNever]
     public decimal? EstimatedProviderCostUsd { get; set; }
 }
