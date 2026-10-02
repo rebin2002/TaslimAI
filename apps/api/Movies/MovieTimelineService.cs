@@ -14,6 +14,7 @@ public interface IMovieTimelineService
     Task<MovieTimelineTrackDto?> AddTrackAsync(Guid userId, Guid revisionId, MovieTimelineTrackRequest request, CancellationToken cancellationToken);
     Task<MovieTimelineItemDto?> AddItemAsync(Guid userId, Guid trackId, MovieTimelineItemRequest request, CancellationToken cancellationToken);
     Task<MovieTimelineRevisionDto?> LockRevisionAsync(Guid userId, Guid revisionId, CancellationToken cancellationToken);
+    Task<MovieTimelineRevisionDto?> ApplyTransitionEditAsync(Guid userId, Guid movieProjectId, MovieTimelineTransitionEditRequest request, CancellationToken cancellationToken);
 }
 
 public sealed class MovieTimelineService(TaslimDbContext db, MovieCollaborationAccess collaboration) : IMovieTimelineService
@@ -59,7 +60,7 @@ public sealed class MovieTimelineService(TaslimDbContext db, MovieCollaborationA
         {
             Id = Guid.NewGuid(), MovieTimelineId = timeline.Id, RevisionNumber = timeline.CurrentRevisionNumber + 1,
             BaseRevisionId = baseRevision?.Id, Status = MovieTimelineRevisionStatuses.Draft,
-            Label = Clean(request.Label), ChangeSummary = Clean(request.ChangeSummary),
+            Label = Clean(request.Label), ChangeSummary = Clean(request.ChangeSummary), CanonicalTimelineJson = Clean(request.CanonicalTimelineJson),
             CreatedByUserId = userId, CreatedAt = now, UpdatedAt = now, Timeline = timeline,
         };
 
@@ -92,6 +93,38 @@ public sealed class MovieTimelineService(TaslimDbContext db, MovieCollaborationA
         timeline.UpdatedAt = now;
         await db.SaveChangesAsync(cancellationToken);
 
+        return ToDto(await QueryRevision().SingleAsync(item => item.Id == revision.Id, cancellationToken));
+    }
+
+    public async Task<MovieTimelineRevisionDto?> ApplyTransitionEditAsync(Guid userId, Guid movieProjectId, MovieTimelineTransitionEditRequest request, CancellationToken cancellationToken)
+    {
+        var timeline = await db.MovieTimelines
+            .Include(item => item.Revisions).ThenInclude(item => item.Tracks).ThenInclude(item => item.Items)
+            .FirstOrDefaultAsync(item => item.MovieProjectId == movieProjectId, cancellationToken);
+        if (timeline is null || !await collaboration.HasPermissionAsync(userId, movieProjectId, MoviePermissions.Edit, cancellationToken)) return null;
+        var baseRevision = request.BaseRevisionId.HasValue
+            ? timeline.Revisions.FirstOrDefault(item => item.Id == request.BaseRevisionId.Value)
+            : timeline.Revisions.FirstOrDefault(item => item.Id == timeline.CurrentRevisionId);
+        if (baseRevision is null) throw Invalid("The base timeline revision does not belong to this movie project.");
+        if (string.IsNullOrWhiteSpace(baseRevision.CanonicalTimelineJson)) throw Invalid("This timeline revision has no canonical transition snapshot to edit.");
+        MovieCanonicalTimelineContract canonical;
+        try { canonical = JsonSerializer.Deserialize<MovieCanonicalTimelineContract>(baseRevision.CanonicalTimelineJson, new JsonSerializerOptions(JsonSerializerDefaults.Web)) ?? throw new JsonException(); }
+        catch (JsonException) { throw Invalid("The canonical transition snapshot is invalid."); }
+        var next = MovieTimelineAuthority.ApplyUserOverride(canonical, request.Decision);
+        var now = DateTime.UtcNow;
+        var revision = new MovieTimelineRevision
+        {
+            Id = Guid.NewGuid(), MovieTimelineId = timeline.Id, RevisionNumber = timeline.CurrentRevisionNumber + 1,
+            BaseRevisionId = baseRevision.Id, Status = MovieTimelineRevisionStatuses.Draft,
+            Label = "Transition edit", ChangeSummary = "User-applied transition edit",
+            CanonicalTimelineJson = JsonSerializer.Serialize(next, new JsonSerializerOptions(JsonSerializerDefaults.Web)),
+            DurationMilliseconds = baseRevision.DurationMilliseconds, CreatedByUserId = userId, CreatedAt = now, UpdatedAt = now, Timeline = timeline,
+        };
+        foreach (var sourceTrack in baseRevision.Tracks.OrderBy(item => item.TrackNumber)) CloneTrack(revision, sourceTrack, now);
+        foreach (var previous in timeline.Revisions.Where(item => item.Status == MovieTimelineRevisionStatuses.Draft)) previous.Status = MovieTimelineRevisionStatuses.Superseded;
+        db.MovieTimelineRevisions.Add(revision);
+        timeline.CurrentRevisionNumber = revision.RevisionNumber; timeline.CurrentRevisionId = revision.Id; timeline.UpdatedAt = now;
+        await db.SaveChangesAsync(cancellationToken);
         return ToDto(await QueryRevision().SingleAsync(item => item.Id == revision.Id, cancellationToken));
     }
 
