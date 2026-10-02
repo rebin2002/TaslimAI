@@ -49,6 +49,12 @@ events and to re-drive a wave whose completion evidence never arrived.
 | Administrator console projection | `apps/api/Autopilot/AutopilotConsoleService.cs` |
 | Bridge intake endpoint | `apps/api/Controllers/AutopilotIntakeController.cs` |
 | Administrator console endpoint | `apps/api/Controllers/AutopilotConsoleController.cs` |
+| Provider-neutral wave-launch contracts | `apps/api/Autopilot/AutopilotWaveLaunchContracts.cs` |
+| Manus Bridge wave-launch provider | `apps/api/Autopilot/ManusBridgeWaveLaunchProvider.cs` |
+| Next-wave planning, launch, bounded polling | `apps/api/Autopilot/AutopilotNextWaveService.cs` |
+| Next-wave eligibility and bounds | `apps/api/Autopilot/AutopilotNextWavePolicy.cs` |
+| Launch/backlog entities | `apps/api/Autopilot/AutopilotWaveLaunchEntities.cs` |
+| Backlog administration | `apps/api/Autopilot/AutopilotBacklogService.cs` |
 
 ## 3. Data model
 
@@ -64,6 +70,9 @@ All tables are created by the migration `20261002100839_AddAutopilotControllerFo
 | `AutopilotLocks` | Exclusive, fenced distributed lock | unique `ResourceKey`, `FencingToken` |
 | `AutopilotAuditEvents` | Append-only decision log | indexed by `(CreatedAt, Action)` and `(WaveKey, CreatedAt)` |
 | `AutopilotControlStates` | Single-row kill switch / pause state | unique `ControlKey` |
+| `AutopilotWaveLaunchBatches` | One follow-on wave launch per source wave | unique `(SourceRunId, WaveKey)` |
+| `AutopilotWaveLaunchTasks` | Per-task external identity, attempts, and reconciliation state | unique `(BatchId, TaskKey)`, unique `ExternalTaskId` when present |
+| `AutopilotBacklogItems` | Human-approved unit of work | unique `ItemKey`, indexed `(Approved, Kind, ConsumedByWaveKey)` |
 
 ## 4. States
 
@@ -289,7 +298,21 @@ HTTP delivery uses `POST /api/autopilot/events` with headers `X-Autopilot-Signat
 
 ## 20. Deliberately out of scope
 
-* Launching Wave6 (or any wave) — the controller records launch eligibility only.
-* Deploying to production, merging to main, or touching production data.
+The following remain out of scope at every setting:
+
+* Deploying to production, merging to main without a human, or touching production data.
 * Enabling charging, paid providers, or any external generation provider.
 * Executing destructive database operations (never implemented at any setting).
+* Fabricating gate evidence: polling-derived completions carry no checks and can only escalate.
+
+## 21. Next-wave launch (the previously missing execution loop)
+
+The foundation stopped at `next_wave_eligible`. The follow-on execution loop now turns that
+eligibility into a bounded, restart-safe launch of the next development batch through a
+provider-neutral `IWaveLaunchProvider`, and reconciles launched work by bounded polling when a
+signed completion event is missed. It never performs a release, a merge, a destructive operation,
+or any paid action, and it selects work only from the pre-approved backlog.
+
+See [AUTOPILOT_NEXT_WAVE_LAUNCH.md](AUTOPILOT_NEXT_WAVE_LAUNCH.md) for the eligibility rules, the
+hard bounds, the polling-fallback safety analysis, the required production variables, and the
+controlled activation flags.

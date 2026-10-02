@@ -34,7 +34,36 @@ public static class AutopilotIntakeOutcomes
 public interface IAutopilotEventIntake
 {
     Task<AutopilotIntakeResult> SubmitAsync(AutopilotIntakeRequest request, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Submits a controller-internal, in-process completion signal derived from
+    /// bounded polling of a launched task. This path is deliberately separate
+    /// from the HTTP intake: it is never reachable from an HTTP request, it
+    /// cannot supply a signature, and it is recorded as unsigned and
+    /// unverified. A poll-derived signal never carries gate evidence, so it can
+    /// only ever escalate to a human and can never fabricate a green gate.
+    /// </summary>
+    Task<AutopilotIntakeResult> SubmitInternalAsync(AutopilotInternalSignalRequest request, CancellationToken cancellationToken = default);
 }
+
+/// <summary>Controller-internal sources permitted to derive a completion signal.</summary>
+public static class AutopilotInternalSignalSources
+{
+    /// <summary>Bounded polling fallback for missed webhooks and restarts.</summary>
+    public const string Polling = "autopilot-poll";
+
+    public static readonly IReadOnlySet<string> Allowed = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        Polling,
+    };
+}
+
+public sealed record AutopilotInternalSignalRequest(
+    string SourceSystem,
+    string ExternalEventId,
+    string EventType,
+    AutopilotCompletionSignal Signal,
+    string ReasonCode);
 
 public sealed class AutopilotEventIntake(
     TaslimDbContext db,
@@ -218,8 +247,125 @@ public sealed class AutopilotEventIntake(
         return new AutopilotIntakeResult(AutopilotIntakeOutcomes.Accepted, intakeEvent.Id, null);
     }
 
+    public async Task<AutopilotIntakeResult> SubmitInternalAsync(AutopilotInternalSignalRequest request, CancellationToken cancellationToken = default)
+    {
+        var now = timeProvider.GetUtcNow().UtcDateTime;
+        var source = (request.SourceSystem ?? string.Empty).Trim();
+        var externalId = (request.ExternalEventId ?? string.Empty).Trim();
+        var eventType = (request.EventType ?? string.Empty).Trim();
+
+        // Only a known controller-internal source may derive a completion signal.
+        if (source.Length == 0
+            || !AutopilotInternalSignalSources.Allowed.Contains(source)
+            || externalId.Length == 0
+            || !AutopilotEventTypes.Supported.Contains(eventType)
+            || string.IsNullOrWhiteSpace(request.ReasonCode))
+        {
+            await audit.RecordAsync(AutopilotAuditFactory.Create(
+                AutopilotAuditActions.EventRejected,
+                AutopilotAuditOutcomes.Blocked,
+                reason: "internal_signal_source_not_permitted",
+                statusDetail: Bounded(source, 60),
+                dryRun: options.DryRun), cancellationToken);
+            return new AutopilotIntakeResult(AutopilotIntakeOutcomes.RejectedInvalid, null, "internal_signal_source_not_permitted");
+        }
+
+        var signal = request.Signal;
+        if (signal is null || string.IsNullOrWhiteSpace(signal.WaveKey) || string.IsNullOrWhiteSpace(signal.TaskId))
+        {
+            await audit.RecordAsync(AutopilotAuditFactory.Create(
+                AutopilotAuditActions.EventRejected,
+                AutopilotAuditOutcomes.Blocked,
+                reason: "internal_signal_incomplete",
+                waveKey: signal?.WaveKey,
+                taskId: signal?.TaskId,
+                dryRun: options.DryRun), cancellationToken);
+            return new AutopilotIntakeResult(AutopilotIntakeOutcomes.RejectedInvalid, null, "internal_signal_incomplete");
+        }
+
+        var payload = JsonSerializer.Serialize(signal);
+        if (payload.Length > Math.Max(256, options.MaxEventPayloadCharacters))
+            return new AutopilotIntakeResult(AutopilotIntakeOutcomes.RejectedInvalid, null, "payload_too_large");
+
+        var payloadHash = authenticator.ComputePayloadHash(payload);
+        var idempotencyKey = BuildIdempotencyKey(source, externalId);
+
+        var existing = await db.AutopilotEvents.AsNoTracking()
+            .FirstOrDefaultAsync(item => item.SourceSystem == source && item.ExternalEventId == externalId, cancellationToken);
+        if (existing is not null)
+        {
+            // A repeated poll of the same terminal state is acknowledged and never re-applied.
+            return new AutopilotIntakeResult(
+                string.Equals(existing.PayloadHash, payloadHash, StringComparison.Ordinal)
+                    ? AutopilotIntakeOutcomes.Duplicate
+                    : AutopilotIntakeOutcomes.PayloadConflict,
+                existing.Id,
+                "internal_signal_already_recorded");
+        }
+
+        var shaConflict = await DetectShaConflictAsync(signal, cancellationToken);
+        if (shaConflict is not null)
+            return new AutopilotIntakeResult(AutopilotIntakeOutcomes.ShaConflict, null, shaConflict);
+
+        var intakeEvent = new AutopilotEvent
+        {
+            Id = Guid.NewGuid(),
+            EventType = eventType,
+            SourceSystem = source,
+            ExternalEventId = externalId,
+            IdempotencyKey = idempotencyKey,
+            PayloadHash = payloadHash,
+            Status = AutopilotEventStatuses.Queued,
+            SignatureVerified = false,
+            ReplayProtected = false,
+            Reason = request.ReasonCode,
+            WaveKey = signal.WaveKey,
+            TaskId = signal.TaskId,
+            Branch = signal.Branch,
+            BaseSha = signal.BaseSha,
+            CandidateSha = signal.CandidateSha,
+            Attempt = Math.Max(0, signal.Attempt ?? 0),
+            ReceivedAt = now,
+            QueuedAt = now,
+            ConcurrencyToken = Guid.NewGuid(),
+            SignalJson = payload,
+        };
+
+        db.AutopilotEvents.Add(intakeEvent);
+        try
+        {
+            await db.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateException)
+        {
+            db.Entry(intakeEvent).State = EntityState.Detached;
+            var winner = await db.AutopilotEvents.AsNoTracking()
+                .FirstOrDefaultAsync(item => item.SourceSystem == source && item.ExternalEventId == externalId, cancellationToken);
+            if (winner is null) throw;
+            return new AutopilotIntakeResult(AutopilotIntakeOutcomes.Duplicate, winner.Id, "concurrent_internal_signal");
+        }
+
+        await audit.RecordAsync(AutopilotAuditFactory.Create(
+            AutopilotAuditActions.EventReceived,
+            AutopilotAuditOutcomes.Recorded,
+            reason: request.ReasonCode,
+            statusDetail: "internal_polling_fallback_unsigned",
+            waveKey: signal.WaveKey,
+            taskId: signal.TaskId,
+            targetId: intakeEvent.Id,
+            dryRun: options.DryRun), cancellationToken);
+
+        return new AutopilotIntakeResult(AutopilotIntakeOutcomes.Accepted, intakeEvent.Id, null);
+    }
+
     public static string BuildIdempotencyKey(string sourceSystem, string externalEventId) =>
         $"autopilot:{sourceSystem.Trim().ToLowerInvariant()}:{externalEventId.Trim()}";
+
+    private static string Bounded(string? value, int max)
+    {
+        var candidate = value ?? string.Empty;
+        return candidate.Length <= max ? candidate : candidate[..max];
+    }
 
     private async Task<string?> DetectShaConflictAsync(AutopilotCompletionSignal signal, CancellationToken cancellationToken)
     {

@@ -647,7 +647,16 @@ public sealed class AutopilotControllerTests
         }
 
         private AutopilotOrchestrator CreateOrchestrator(TaslimDbContext db) =>
-            new(db, new EfAutopilotLockService(db, Options), Options, TimeProvider.System, NullLogger<AutopilotOrchestrator>.Instance);
+            new(db, new EfAutopilotLockService(db, Options), CreateNextWaveService(db), Options, TimeProvider.System, NullLogger<AutopilotOrchestrator>.Instance);
+
+        private AutopilotNextWaveService CreateNextWaveService(TaslimDbContext db) =>
+            new(
+                db,
+                Options,
+                new NullWaveLaunchProvider(),
+                new AutopilotEventIntake(db, new AutopilotEventAuthenticator(Options), new EfAutopilotAuditLog(db), Options, TimeProvider.System),
+                TimeProvider.System,
+                NullLogger<AutopilotNextWaveService>.Instance);
 
         public void Dispose()
         {

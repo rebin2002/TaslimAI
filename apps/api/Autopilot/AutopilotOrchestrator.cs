@@ -62,6 +62,7 @@ public interface IAutopilotOrchestrator
 public sealed class AutopilotOrchestrator(
     TaslimDbContext db,
     IAutopilotLockService locks,
+    IAutopilotNextWaveService nextWaves,
     AutopilotOptions options,
     TimeProvider timeProvider,
     ILogger<AutopilotOrchestrator> logger) : IAutopilotOrchestrator
@@ -203,12 +204,23 @@ public sealed class AutopilotOrchestrator(
         context.EventsProcessed = recovered;
         context.Reason = reason;
 
+        // Bounded follow-on wave pass: launch what a gate-green wave is entitled to
+        // launch, then reconcile anything already launched (missed webhooks and
+        // restarts). Both steps are bounded and respect the kill switch.
+        MergeNextWave(context, await nextWaves.TryLaunchNextWavesAsync(cancellationToken));
+        MergeNextWave(context, await nextWaves.ReconcileLaunchesAsync(cancellationToken));
+
         var processedCycle = await ProcessPendingEventsAsync(cancellationToken);
         context.Outcome = recovered > 0 || processedCycle.EventsProcessed > 0 ? "reconciled" : "no_reconciliation_needed";
         foreach (var action in processedCycle.PlannedActions) context.PlannedActions.Add(action);
         foreach (var id in processedCycle.AuditedEventIds) context.AuditedEventIds.Add(id);
         context.EventsProcessed += processedCycle.EventsProcessed;
         return context.ToResult(settings);
+    }
+
+    private static void MergeNextWave(AutopilotCycleContext context, AutopilotNextWaveCycleResult result)
+    {
+        foreach (var action in result.PlannedActions) context.PlannedActions.Add(action);
     }
 
     public async Task<AutopilotControlSnapshot> GetControlAsync(CancellationToken cancellationToken = default)
@@ -800,6 +812,8 @@ public sealed class AutopilotOrchestrator(
                 targetId: run.Id,
                 dryRun: true));
             await EvaluateNextWaveEligibilityAsync(run, context, cancellationToken);
+            await FlushAsync(context, cancellationToken);
+            MergeNextWave(context, await nextWaves.TryLaunchNextWavesAsync(cancellationToken));
             return;
         }
 
@@ -846,6 +860,10 @@ public sealed class AutopilotOrchestrator(
                 dryRun: false));
         }
 
+        // The production release stays a human decision; the next *development*
+        // batch may still start when the operator has explicitly allowed it.
+        await FlushAsync(context, cancellationToken);
+        MergeNextWave(context, await nextWaves.TryLaunchNextWavesAsync(cancellationToken));
     }
 
     private async Task EvaluateNextWaveEligibilityAsync(AutopilotRun run, AutopilotCycleContext context, CancellationToken cancellationToken)
