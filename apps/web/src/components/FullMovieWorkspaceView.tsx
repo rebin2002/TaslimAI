@@ -57,48 +57,28 @@ import { MovieAudioWorkspace } from "@/components/MovieAudioWorkspace";
 import { MovieQualityWorkspace } from "@/components/MovieQualityWorkspace";
 import { MovieExportsWorkspace } from "@/components/MovieExportsWorkspace";
 import { MovieTeamWorkspace } from "@/components/MovieTeamWorkspace";
+import { useLocale } from "@/components/LocaleProvider";
 
 export const fullMovieModules = [
-  { slug: "overview", label: "Overview", icon: Gauge },
-  { slug: "production-kit", label: "Production Kit", icon: Package },
-  { slug: "story", label: "Story", icon: BookOpen },
-  { slug: "cast", label: "Cast", icon: Users },
-  { slug: "world", label: "World", icon: Map },
-  { slug: "scenes", label: "Scenes", icon: Clapperboard },
-  { slug: "storyboard", label: "Storyboard", icon: Layers3 },
-  { slug: "production", label: "Production", icon: Workflow },
-  { slug: "selects", label: "Selects", icon: ListChecks },
-  { slug: "edit", label: "Edit", icon: PencilRuler },
-  { slug: "audio", label: "Audio", icon: AudioLines },
-  { slug: "qc", label: "QC", icon: ShieldCheck },
-  { slug: "exports", label: "Exports", icon: Play },
-  { slug: "team", label: "Team", icon: Users },
+  { slug: "overview", icon: Gauge },
+  { slug: "production-kit", icon: Package },
+  { slug: "story", icon: BookOpen },
+  { slug: "cast", icon: Users },
+  { slug: "world", icon: Map },
+  { slug: "scenes", icon: Clapperboard },
+  { slug: "storyboard", icon: Layers3 },
+  { slug: "production", icon: Workflow },
+  { slug: "selects", icon: ListChecks },
+  { slug: "edit", icon: PencilRuler },
+  { slug: "audio", icon: AudioLines },
+  { slug: "qc", icon: ShieldCheck },
+  { slug: "exports", icon: Play },
+  { slug: "team", icon: Users },
 ] as const;
 
 type ModuleSlug = (typeof fullMovieModules)[number]["slug"];
 
-type ModuleCopy = {
-  eyebrow: string;
-  title: string;
-  description: string;
-};
 
-const moduleCopy: Record<ModuleSlug, ModuleCopy> = {
-  overview: { eyebrow: "Project command", title: "A clear view of the film", description: "Keep the creative intent, story spine, and generated work in one calm production surface." },
-  "production-kit": { eyebrow: "Reference control", title: "Production Kit", description: "Lock the characters, locations, and props that every shot needs to recognize." },
-  story: { eyebrow: "Story room", title: "Shape the story before the shots", description: "The brief is the source of truth for every scene, character, and future generation." },
-  cast: { eyebrow: "Continuity desk", title: "Cast and performance", description: "Keep character identity and performance notes ready for the scenes that depend on them." },
-  world: { eyebrow: "World building", title: "Locations with memory", description: "Capture the visual rules that make every location feel like the same world." },
-  scenes: { eyebrow: "Scene plan", title: "Build the film in scenes", description: "Order the story, keep the intent visible, and make the next production step obvious." },
-  storyboard: { eyebrow: "Visual plan", title: "See the cut before the cut", description: "A filmstrip for the scenes you have planned and the footage you have actually generated." },
-  production: { eyebrow: "Production desk", title: "Move from plan to footage", description: "Track what is planned, what is in progress, and what is ready for review." },
-  selects: { eyebrow: "Selects / salvage", title: "Keep the good seconds", description: "Review generated takes as raw footage, salvage bounded ranges, and hand only deliberate inserts into the canonical timeline." },
-  edit: { eyebrow: "Edit room", title: "A timeline waiting for footage", description: "The edit surface is reserved for real clips and real editorial decisions." },
-  audio: { eyebrow: "Sound stage", title: "Audio belongs to the picture", description: "Keep narration, ambience, and music direction close to the cut they support." },
-  qc: { eyebrow: "Review gate", title: "Quality control over real evidence", description: "Production checkpoints, continuity findings, and the deterministic quality gate recorded on every assembled master." },
-  exports: { eyebrow: "Delivery desk", title: "Export a real master", description: "Assemble the approved, selected takes into one durable private master and download it." },
-  team: { eyebrow: "Collaboration", title: "A shared production room", description: "Project roles, review requests, notes, and assignments — all authorized server-side." },
-};
 
 function moduleFromSlug(slug: string | undefined): ModuleSlug {
   return fullMovieModules.some((item) => item.slug === slug) ? slug as ModuleSlug : "overview";
@@ -125,10 +105,12 @@ export function FullMovieWorkspaceView({ projectId, module }: { projectId: strin
 }
 
 function WorldOnlyWorkspace({ projectId }: { projectId: string }) {
-  return <div className="movie-studio-page movie-full-workspace"><header className="movie-workspace-header"><Link href={`/create/movie/${projectId}/overview`} className="movie-workspace-back"><ArrowLeft size={14} /> Movie Studio</Link><div className="movie-workspace-heading"><div><span className="movie-workspace-kicker">Focused production read model</span><h2>World room</h2><p>Locations, sets, props, references, usage, and continuity — without loading the complete project graph.</p></div><div className="movie-workspace-meta"><span>World V2</span><span>Asset-backed</span></div></div></header><nav className="movie-workspace-nav" aria-label="Full Movie Project navigation"><div className="movie-workspace-nav-label">Project map</div><div className="movie-workspace-nav-links">{fullMovieModules.map((item) => <Link key={item.slug} href={`/create/movie/${projectId}/${item.slug}`} className={item.slug === "world" ? "is-active" : ""}>{item.label}</Link>)}</div></nav><main className="movie-world-only-main movie-workspace-main"><MovieWorldWorkspace projectId={projectId} /></main></div>;
+  const { t } = useLocale();
+  return <div className="movie-studio-page movie-full-workspace"><header className="movie-workspace-header"><Link href={`/create/movie/${projectId}/overview`} className="movie-workspace-back"><ArrowLeft size={14} /> {t("movieShell.back")}</Link><div className="movie-workspace-heading"><div><span className="movie-workspace-kicker">{t("movieShell.worldEyebrow")}</span><h2>{t("movieShell.worldTitle")}</h2><p>{t("movieShell.worldText")}</p></div><div className="movie-workspace-meta"><span>{t("movieShell.worldMetaOne")}</span><span>{t("movieShell.worldMetaTwo")}</span></div></div></header><nav className="movie-workspace-nav" aria-label={t("movieShell.navAria")}><div className="movie-workspace-nav-label">{t("movieShell.projectMap")}</div><div className="movie-workspace-nav-links">{fullMovieModules.map((item) => <Link key={item.slug} href={`/create/movie/${projectId}/${item.slug}`} className={item.slug === "world" ? "is-active" : ""}>{t(`movieModule.${item.slug}.label`)}</Link>)}</div></nav><main className="movie-world-only-main movie-workspace-main"><MovieWorldWorkspace projectId={projectId} /></main></div>;
 }
 
 function FullMovieProjectWorkspace({ projectId, module }: { projectId: string; module: string }) {
+  const { t } = useLocale();
   const activeModule = moduleFromSlug(module);
   const [project, setProject] = useState<MovieProject | null>(null);
   const [overview, setOverview] = useState<MovieOverview | null>(null);
@@ -190,7 +172,11 @@ function FullMovieProjectWorkspace({ projectId, module }: { projectId: string; m
   const readyClips = project?.clips.filter((clip) => hasReadyAsset(clip.status, clip.assetId)) ?? [];
   const outputAssetId = overview?.latestOutputAssetId ?? project?.assemblies.find((assembly) => hasReadyAsset(assembly.status, assembly.assetId))?.assetId ?? readyClips[0]?.assetId ?? null;
   const completionPercent = overview?.progress.production.percent ?? (project ? Math.min(100, Math.round(((project.scenes.length ? readyClips.length : 0) / Math.max(project.scenes.length, 1)) * 100)) : 0);
-  const copy = moduleCopy[activeModule];
+  const copy = {
+    eyebrow: t(`movieModule.${activeModule}.eyebrow`),
+    title: t(`movieModule.${activeModule}.title`),
+    description: t(`movieModule.${activeModule}.description`),
+  };
 
   async function addShot(sceneId: string, draft: ShotDesignerDraft): Promise<boolean> {
     if (!project) return false;
@@ -229,7 +215,7 @@ function FullMovieProjectWorkspace({ projectId, module }: { projectId: string; m
   if (loading) return <WorkspaceSkeleton />;
   const workspace = overview?.project ?? project ?? projectShell ?? storyboard;
   const fullProject = project as MovieProject;
-  if (!workspace || (activeModule !== "overview" && activeModule !== "story" && activeModule !== "storyboard" && !project)) return <div className="movie-studio-page movie-full-workspace"><div className="movie-workspace-error" role="alert"><XCircleIcon /><h1>Workspace unavailable</h1><p>{error || "This movie project is not available in the current workspace."}</p><div className="movie-workspace-error-actions"><button type="button" className="movie-workspace-button is-primary" onClick={() => void loadProject()}><RefreshCw size={14} /> Try again</button><Link href="/create/movie" className="movie-workspace-button is-secondary"><ArrowLeft size={14} /> Back to Movie Studio</Link></div></div></div>;
+  if (!workspace || (activeModule !== "overview" && activeModule !== "story" && activeModule !== "storyboard" && !project)) return <div className="movie-studio-page movie-full-workspace"><div className="movie-workspace-error" role="alert"><XCircleIcon /><h1>{t("movieShell.unavailableTitle")}</h1><p>{error || t("movieShell.unavailableText")}</p><div className="movie-workspace-error-actions"><button type="button" className="movie-workspace-button is-primary" onClick={() => void loadProject()}><RefreshCw size={14} /> {t("movieShell.tryAgain")}</button><Link href="/create/movie" className="movie-workspace-button is-secondary"><ArrowLeft size={14} /> {t("movieShell.backToStudio")}</Link></div></div></div>;
 
   return (
     <div className="movie-studio-page movie-full-workspace">
@@ -252,7 +238,7 @@ function FullMovieProjectWorkspace({ projectId, module }: { projectId: string; m
             {fullMovieModules.map((item) => {
               const Icon = item.icon;
               const href = `/create/movie/${workspace.id}/${item.slug}`;
-              return <Link key={item.slug} href={href} aria-label={item.label} className={`movie-workspace-nav-item ${activeModule === item.slug ? "is-active" : ""}`} aria-current={activeModule === item.slug ? "page" : undefined} data-module-state="operational"><Icon size={15} /><span>{item.label}</span>{activeModule === item.slug && <ChevronRight size={13} />}</Link>;
+              return <Link key={item.slug} href={href} aria-label={t(`movieModule.${item.slug}.label`)} className={`movie-workspace-nav-item ${activeModule === item.slug ? "is-active" : ""}`} aria-current={activeModule === item.slug ? "page" : undefined} data-module-state="operational"><Icon size={15} /><span>{t(`movieModule.${item.slug}.label`)}</span>{activeModule === item.slug && <ChevronRight size={13} />}</Link>;
             })}
           </div>
           <div className="movie-workspace-nav-foot"><span className="movie-live-dot" /> <span>Plan saved locally to this project</span></div>
@@ -1255,7 +1241,7 @@ function EmptyGeneratedStage({ title = "No generated footage yet", text = "The p
   return <div className="movie-generated-empty"><div className="movie-empty-orbit"><Film size={25} /></div><h4>{title}</h4><p>{text}</p></div>;
 }
 
-function WorkspaceSkeleton() { return <div className="movie-studio-page movie-full-workspace" aria-busy="true" aria-label="Loading movie workspace"><div className="movie-workspace-skeleton-header"><span className="movie-skeleton-line is-short" /><span className="movie-skeleton-line is-title" /><span className="movie-skeleton-line is-copy" /></div><div className="movie-workspace-skeleton-layout"><div className="movie-workspace-skeleton-nav">{Array.from({ length: 8 }, (_, index) => <span className="movie-skeleton-line" key={index} />)}</div><div className="movie-workspace-skeleton-main"><span className="movie-skeleton-line is-kicker" /><span className="movie-skeleton-line is-heading" /><span className="movie-skeleton-line is-copy" /><div className="movie-skeleton-stage" /><div className="movie-skeleton-rows"><span /><span /><span /></div></div><div className="movie-workspace-skeleton-inspector"><span className="movie-skeleton-line is-short" /><span className="movie-skeleton-line" /><span className="movie-skeleton-line is-copy" /><span className="movie-skeleton-line" /></div></div></div>; }
+function WorkspaceSkeleton() { const { t } = useLocale(); return <div className="movie-studio-page movie-full-workspace" aria-busy="true" aria-label={t("movieShell.loading")}><div className="movie-workspace-skeleton-header"><span className="movie-skeleton-line is-short" /><span className="movie-skeleton-line is-title" /><span className="movie-skeleton-line is-copy" /></div><div className="movie-workspace-skeleton-layout"><div className="movie-workspace-skeleton-nav">{Array.from({ length: 8 }, (_, index) => <span className="movie-skeleton-line" key={index} />)}</div><div className="movie-workspace-skeleton-main"><span className="movie-skeleton-line is-kicker" /><span className="movie-skeleton-line is-heading" /><span className="movie-skeleton-line is-copy" /><div className="movie-skeleton-stage" /><div className="movie-skeleton-rows"><span /><span /><span /></div></div><div className="movie-workspace-skeleton-inspector"><span className="movie-skeleton-line is-short" /><span className="movie-skeleton-line" /><span className="movie-skeleton-line is-copy" /><span className="movie-skeleton-line" /></div></div></div>; }
 
 function EmptyModule({ title = "Nothing here yet", text }: { title?: string; text: string }) {
   return <div className="movie-module-empty"><Film size={17} /><strong>{title}</strong><p>{text}</p></div>;
