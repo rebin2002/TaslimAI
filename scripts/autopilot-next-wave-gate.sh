@@ -13,7 +13,12 @@ fi
 printf '%s\n' "[next-wave] verifying base and branch"
 CURRENT_BRANCH="$(git branch --show-current)"
 if [[ -z "$CURRENT_BRANCH" ]]; then CURRENT_BRANCH="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME:-}}"; fi
-test "$CURRENT_BRANCH" = "$EXPECTED_BRANCH"
+# The gate runs on the feature branch, and again on main after the merge where
+# the base commit must still be an ancestor of the merged history.
+if [[ "$CURRENT_BRANCH" != "$EXPECTED_BRANCH" && "$CURRENT_BRANCH" != "main" ]]; then
+  echo "unexpected branch: ${CURRENT_BRANCH:-<none>}" >&2
+  exit 1
+fi
 git merge-base --is-ancestor "$BASE_SHA" HEAD
 printf '  base ancestor: %s\n' "$BASE_SHA"
 printf '  branch: %s\n' "$CURRENT_BRANCH"
