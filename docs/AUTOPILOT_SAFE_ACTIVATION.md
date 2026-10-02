@@ -18,6 +18,9 @@ authorizes a wave launch or a production release; those remain human decisions.
 | `Autopilot:AllowAutomaticRelease` | `false` | Releasing needs a human |
 | `Autopilot:RequireSignedEvents` | `true` | Unsigned intake is rejected |
 | `Autopilot:MaxConcurrency` | `20` | Bounded fan-out |
+| `Autopilot:AllowNextWaveLaunch` | `false` | Follow-on development waves are not launched until requested |
+| `Autopilot:MaxTasksPerWave` | `20` | Hard bound on a follow-on wave |
+| `Autopilot:MaxLaunchAttempts` | `3` | Hard bound on launch attempts per task |
 
 Production startup refuses to proceed if charging or paid providers are enabled, if signed events are disabled,
 or if the signing secret is missing while the controller is enabled. The Stage 1 posture (`Enabled=true` with
@@ -38,6 +41,10 @@ set explicitly.
 | Preparing a release handoff record | Always, but the handoff is not executed in dry-run |
 | Watchdog reconciliation of missed events | Bounded by `MaxWatchdogReconciliations` |
 | Recording next-wave eligibility | Always; the wave is never launched by the controller |
+| Planning the next development wave from the approved backlog | Only when `AllowNextWaveLaunch` is set; work is never invented |
+| Dry-run simulation of a next-wave launch | Always in dry-run; no external call and nothing consumed |
+| Live launching of the next development wave | Live mode, `AllowNextWaveLaunch=true`, configured bridge, approved backlog |
+| Bounded polling reconciliation of launched tasks | Bounded per task; can only escalate to a human, never pass a gate |
 
 ### Requires a human decision
 
@@ -52,6 +59,7 @@ set explicitly.
 | `production_release` | Any live production release |
 | `integration_merge` | Merging the wave candidate into main |
 | `repair_escalation` | A retry-exhausted ordinary failure, or a blocking class that is not auto-repairable |
+| `backlog_required` | No approved ordinary development work exists for the next wave |
 
 ### Never performed, at any setting
 
@@ -72,6 +80,9 @@ which always returns `false`.
    `X-Autopilot-Timestamp`, and `X-Autopilot-Signature` (`sha256=<hex HMAC of "{timestamp}.{payload}">`).
 4. The migration `20261002100839_AddAutopilotControllerFoundation` is applied.
 5. The administrator role (`TaslimAdministrator`) exists for the operator who will watch the console.
+6. For live follow-on launches, the migration `20261002134838_AddAutopilotNextWaveLaunchAndBacklog` is applied,
+   `Autopilot:BridgeBaseUrl` points at the HTTPS bridge, and the bridge credential environment variable
+   (default `TASLIM_BRIDGE_TOKEN`) is set server-side.
 
 ## 4. Staged activation
 
@@ -107,6 +118,28 @@ and park at `handoff_pending_human` with `production_release` required. A human 
 
 `Autopilot:AllowAutomaticRelease=true` is a deliberate, separately reviewed decision. Charging and paid providers
 remain off regardless.
+
+### Stage 2b — autonomous development batches (next-wave launch)
+
+Set `Autopilot:AllowNextWaveLaunch=true` to let the controller start the next development batch from the
+pre-approved backlog once a wave is gate-green. In dry-run this only simulates the launch. Live launch
+additionally requires `Autopilot:DryRun=false`, a configured bridge, and the server-side bridge credential;
+production refuses to boot without them. `AllowAutomaticRelease` can stay `false`: development continues while
+each release remains a human decision. Prefer keeping `AllowNextWaveLaunchWhenReleasePending=false` until the
+release cadence is understood. See [AUTOPILOT_NEXT_WAVE_LAUNCH.md](AUTOPILOT_NEXT_WAVE_LAUNCH.md).
+
+Watch:
+* `GET /api/admin/autopilot/next-waves`
+* `GET /api/admin/autopilot/backlog`
+
+Approve work explicitly (a reason is mandatory):
+
+```bash
+curl -X POST https://<api>/api/admin/autopilot/backlog \
+  -H 'Content-Type: application/json' -H "X-CSRF-TOKEN: <token>" \
+  --cookie 'taslim.auth=<session>' \
+  -d '{"itemKey":"bl-42","title":"Add workspace audit export","kind":"development","approved":true,"priority":10,"reason":"approved at the planning review"}'
+```
 
 ## 5. Kill switch, pause, and resume
 
@@ -165,6 +198,10 @@ The response reports how many events were examined, processed, and skipped.
 | Retry storm | Lower `Autopilot:MaxTaskAttempts`, raise `RetryBaseDelaySeconds`, or engage the kill switch |
 | Wrong SHA recorded | It cannot be changed: the run's SHA is immutable by design. Start a new wave key |
 | Signing failures | Verify the secret environment variable and the bridge clock skew (default tolerance 300 s) |
+| Batch blocked with `backlog_required` | Approve ordinary development items; the loop resumes automatically |
+| Batch blocked with `release_pending_human` | Decide the source release, or explicitly allow development to continue |
+| Batch blocked with `provider_not_configured` | Set the bridge URL and credential, then redeploy |
+| Batch `failed` with `launch_attempts_exhausted` | Inspect the bridge; raise `MaxLaunchAttempts` (≤3) to permit new attempts |
 
 ## 9. Deactivation
 

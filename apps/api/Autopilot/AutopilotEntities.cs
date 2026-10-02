@@ -400,6 +400,14 @@ public static class AutopilotAuditActions
     public const string ReleaseHandoffPrepared = "release.handoff_prepared";
     public const string ProductionSmoke = "release.production_smoke";
     public const string NextWaveEligibility = "wave.next_eligibility";
+    public const string NextWavePlanSelected = "next_wave.plan_selected";
+    public const string NextWaveLaunchAttempted = "next_wave.launch_attempted";
+    public const string NextWaveLaunched = "next_wave.launched";
+    public const string NextWaveLaunchSimulated = "next_wave.launch_simulated";
+    public const string NextWaveLaunchBlocked = "next_wave.launch_blocked";
+    public const string NextWaveLaunchFailed = "next_wave.launch_failed";
+    public const string NextWaveReconciled = "next_wave.reconciled";
+    public const string BacklogItemChanged = "backlog.item_changed";
     public const string LockContended = "lock.contended";
     public const string LockAcquired = "lock.acquired";
     public const string WatchdogReconciled = "watchdog.reconciled";

@@ -16,7 +16,8 @@ namespace Taslim.Api.Controllers;
 [Route("api/admin/autopilot")]
 public sealed class AutopilotConsoleController(
     IAutopilotOrchestrator orchestrator,
-    AutopilotConsoleService console) : ControllerBase
+    AutopilotConsoleService console,
+    AutopilotBacklogService backlog) : ControllerBase
 {
     [HttpGet("overview")]
     public async Task<ActionResult<AutopilotOverviewDto>> Overview(
@@ -48,6 +49,42 @@ public sealed class AutopilotConsoleController(
             neverAutomatic = console.ForbiddenOperations(),
             automaticRepair = new[] { AutopilotFailureClasses.Ordinary, AutopilotFailureClasses.Infrastructure },
         });
+
+    /// <summary>Follow-on wave launches, including blocked batches and their exact reason.</summary>
+    [HttpGet("next-waves")]
+    public async Task<ActionResult<IReadOnlyList<AutopilotWaveLaunchBatchDto>>> NextWaves(
+        [FromQuery] string? sourceWaveKey,
+        [FromQuery] int limit = 20,
+        CancellationToken cancellationToken = default) =>
+        Ok(await console.ListLaunchesAsync(sourceWaveKey, limit, cancellationToken));
+
+    /// <summary>Pre-approved backlog. Only approved development items are ever selected.</summary>
+    [HttpGet("backlog")]
+    public async Task<ActionResult<IReadOnlyList<AutopilotBacklogItemDto>>> Backlog(
+        [FromQuery] int limit = 100,
+        CancellationToken cancellationToken = default) =>
+        Ok(await console.ListBacklogAsync(limit, cancellationToken));
+
+    /// <summary>
+    /// Creates or updates a backlog item. Approval is an explicit human decision
+    /// and requires a reason; the controller itself can only consume approved work.
+    /// </summary>
+    [HttpPost("backlog")]
+    public async Task<ActionResult<AutopilotBacklogItemDto>> UpsertBacklog(
+        [FromBody] AutopilotBacklogItemRequest request,
+        CancellationToken cancellationToken)
+    {
+        var actorValue = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+        Guid? actorUserId = Guid.TryParse(actorValue, out var parsed) ? parsed : null;
+        if (string.IsNullOrWhiteSpace(request.Reason))
+            return BadRequest(new { error = new { code = "AUTOPILOT_REASON_REQUIRED", message = "A reason is required to change the backlog." } });
+
+        var result = await backlog.UpsertAsync(request, actorUserId, cancellationToken);
+        if (!result.Succeeded)
+            return BadRequest(new { error = new { code = "AUTOPILOT_BACKLOG_REJECTED", message = result.Reason } });
+
+        return Ok(result.Item);
+    }
 
     [HttpPost("control")]
     public async Task<ActionResult<AutopilotControlDto>> Control(

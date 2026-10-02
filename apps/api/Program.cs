@@ -234,6 +234,17 @@ builder.Services.AddScoped<IAutopilotEventIntake, AutopilotEventIntake>();
 builder.Services.AddScoped<IAutopilotLockService, EfAutopilotLockService>();
 builder.Services.AddScoped<IAutopilotOrchestrator, AutopilotOrchestrator>();
 builder.Services.AddScoped<AutopilotConsoleService>();
+builder.Services.AddScoped<AutopilotBacklogService>();
+// Provider-neutral wave launch. The controller depends only on IWaveLaunchProvider;
+// the Taslim Manus Bridge implementation talks to the already-deployed bridge API and
+// is only selected when a bridge base URL is configured. Without it, the fallback
+// provider never performs an external call and live launch stays blocked.
+builder.Services.AddHttpClient<ManusBridgeWaveLaunchProvider>();
+builder.Services.AddScoped<IWaveLaunchProvider>(services =>
+    string.IsNullOrWhiteSpace(services.GetRequiredService<AutopilotOptions>().BridgeBaseUrl)
+        ? new NullWaveLaunchProvider()
+        : services.GetRequiredService<ManusBridgeWaveLaunchProvider>());
+builder.Services.AddScoped<IAutopilotNextWaveService, AutopilotNextWaveService>();
 if (builder.Configuration.GetValue("Autopilot:WatchdogEnabled", !builder.Environment.IsEnvironment("Testing")))
 {
     builder.Services.AddHostedService<AutopilotWatchdogService>();

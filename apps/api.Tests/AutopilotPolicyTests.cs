@@ -266,6 +266,58 @@ public sealed class AutopilotPolicyTests
         new ConfigurationBuilder().AddInMemoryCollection(values).Build();
 
     [Fact]
+    public void Production_configuration_refuses_live_next_wave_launch_without_bridge_configuration()
+    {
+        const string bridgeTokenVariable = "AUTOPILOT_TEST_BRIDGE_TOKEN";
+        var environment = new StubEnvironment("Production");
+
+        Dictionary<string, string?> LiveLaunch(bool bridgeUrl, int? maxTasks, int? maxAttempts)
+        {
+            var values = EnabledConfiguration(dryRun: false);
+            values["Autopilot:AllowNextWaveLaunch"] = "true";
+            values["Autopilot:BridgeTokenEnvironmentVariable"] = bridgeTokenVariable;
+            if (bridgeUrl) values["Autopilot:BridgeBaseUrl"] = "https://bridge.example.test";
+            if (maxTasks is not null) values["Autopilot:MaxTasksPerWave"] = maxTasks.Value.ToString();
+            if (maxAttempts is not null) values["Autopilot:MaxLaunchAttempts"] = maxAttempts.Value.ToString();
+            return values;
+        }
+
+        WithSigningSecret(() =>
+        {
+            // Requesting live next-wave launch without a bridge endpoint is refused, so a
+            // production deployment can never enable the feature without the bridge.
+            Environment.SetEnvironmentVariable(bridgeTokenVariable, "test-only-value");
+            try
+            {
+                Assert.Throws<InvalidOperationException>(() =>
+                    ProductionConfigurationValidator.Validate(BuildConfiguration(LiveLaunch(bridgeUrl: false, null, null)), environment));
+
+                // A bridge endpoint without a server-side credential is refused too.
+                Environment.SetEnvironmentVariable(bridgeTokenVariable, null);
+                Assert.Throws<InvalidOperationException>(() =>
+                    ProductionConfigurationValidator.Validate(BuildConfiguration(LiveLaunch(bridgeUrl: true, null, null)), environment));
+
+                // With both configured the posture boots, but only inside the hard bounds.
+                Environment.SetEnvironmentVariable(bridgeTokenVariable, "test-only-value");
+                ProductionConfigurationValidator.Validate(BuildConfiguration(LiveLaunch(bridgeUrl: true, null, null)), environment);
+                Assert.Throws<InvalidOperationException>(() =>
+                    ProductionConfigurationValidator.Validate(BuildConfiguration(LiveLaunch(bridgeUrl: true, maxTasks: 21, null)), environment));
+                Assert.Throws<InvalidOperationException>(() =>
+                    ProductionConfigurationValidator.Validate(BuildConfiguration(LiveLaunch(bridgeUrl: true, null, maxAttempts: 4)), environment));
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(bridgeTokenVariable, null);
+            }
+
+            // Simulated next-wave launches never require a bridge.
+            var simulated = EnabledConfiguration(dryRun: true);
+            simulated["Autopilot:AllowNextWaveLaunch"] = "true";
+            ProductionConfigurationValidator.Validate(BuildConfiguration(simulated), environment);
+        });
+    }
+
+    [Fact]
     public void Signature_verification_rejects_missing_and_replayed_events()
     {
         var options = new AutopilotOptions { RequireSignedEvents = true, SignatureToleranceSeconds = 300 };

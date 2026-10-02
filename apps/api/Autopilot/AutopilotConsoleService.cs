@@ -37,6 +37,8 @@ public sealed class AutopilotConsoleService(TaslimDbContext db)
                 .FirstOrDefaultAsync(item => item.RunId == run.Id, cancellationToken);
 
         var audit = await QueryAuditAsync(run?.WaveKey, 50, cancellationToken);
+        var launches = await ListLaunchesAsync(run?.WaveKey, 5, cancellationToken);
+        var backlog = await ListBacklogAsync(20, cancellationToken);
 
         return new AutopilotOverviewDto(
             MapControl(control),
@@ -44,8 +46,47 @@ public sealed class AutopilotConsoleService(TaslimDbContext db)
             tasks.Select(MapTask).ToList(),
             gates.Select(MapGate).ToList(),
             handoff is null ? null : MapHandoff(handoff),
-            audit);
+            audit,
+            launches,
+            backlog);
     }
+
+    /// <summary>Follow-on wave launches. Provider-neutral and safe to expose.</summary>
+    public async Task<IReadOnlyList<AutopilotWaveLaunchBatchDto>> ListLaunchesAsync(
+        string? sourceWaveKey,
+        int limit,
+        CancellationToken cancellationToken = default)
+    {
+        var query = db.AutopilotWaveLaunchBatches.AsNoTracking();
+        if (!string.IsNullOrWhiteSpace(sourceWaveKey))
+            query = query.Where(item => item.SourceWaveKey == sourceWaveKey);
+
+        var batches = await query
+            .OrderByDescending(item => item.UpdatedAt)
+            .Take(Math.Clamp(limit, 1, 50))
+            .ToListAsync(cancellationToken);
+
+        if (batches.Count == 0) return [];
+
+        var batchIds = batches.Select(item => item.Id).ToList();
+        var launchTasks = await db.AutopilotWaveLaunchTasks.AsNoTracking()
+            .Where(item => batchIds.Contains(item.BatchId))
+            .OrderBy(item => item.TaskKey)
+            .ToListAsync(cancellationToken);
+
+        return batches
+            .Select(batch => MapLaunchBatch(batch, launchTasks.Where(task => task.BatchId == batch.Id).ToList()))
+            .ToList();
+    }
+
+    public async Task<IReadOnlyList<AutopilotBacklogItemDto>> ListBacklogAsync(int limit, CancellationToken cancellationToken = default) =>
+        (await db.AutopilotBacklogItems.AsNoTracking()
+            .OrderBy(item => item.Priority)
+            .ThenBy(item => item.CreatedAt)
+            .Take(Math.Clamp(limit, 1, 500))
+            .ToListAsync(cancellationToken))
+        .Select(AutopilotBacklogService.Map)
+        .ToList();
 
     public async Task<IReadOnlyList<AutopilotEventDto>> ListEventsAsync(int limit, CancellationToken cancellationToken = default) =>
         (await db.AutopilotEvents.AsNoTracking()
@@ -113,6 +154,18 @@ public sealed class AutopilotConsoleService(TaslimDbContext db)
     private static AutopilotHandoffDto MapHandoff(AutopilotReleaseHandoff handoff) => new(
         handoff.Status, handoff.Branch, handoff.CandidateSha, handoff.DryRun,
         handoff.SmokeStatus, handoff.LastStatusDetail, handoff.UpdatedAt);
+
+    private static AutopilotWaveLaunchBatchDto MapLaunchBatch(AutopilotWaveLaunchBatch batch, IReadOnlyList<AutopilotWaveLaunchTask> tasks) => new(
+        batch.Id, batch.SourceWaveKey, batch.WaveKey, batch.Status, batch.ReasonCode,
+        batch.HumanDecisionRequired, batch.BaseSha, batch.Branch, batch.DryRun,
+        batch.TaskCount, batch.LaunchedTaskCount, batch.LaunchAttempt, batch.MaxLaunchAttempts,
+        batch.CreatedAt, batch.UpdatedAt, batch.LaunchedAt,
+        tasks.Select(MapLaunchTask).ToList());
+
+    private static AutopilotWaveLaunchTaskDto MapLaunchTask(AutopilotWaveLaunchTask task) => new(
+        task.Id, task.TaskKey, task.Title, task.BacklogItemKey, task.Status, task.ReasonCode,
+        task.ExternalTaskId, task.LaunchAttempt, task.MaxLaunchAttempts, task.ReconcileCount,
+        task.NextReconcileAt, task.UpdatedAt);
 
     private static IReadOnlyList<string> ParseChecks(string? json)
     {

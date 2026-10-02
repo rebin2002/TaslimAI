@@ -141,10 +141,14 @@ public static class AutopilotHumanDecisions
     public const string IntegrationMerge = "integration_merge";
     public const string RepairEscalation = "repair_escalation";
 
+    /// <summary>No approved development work exists: a human must supply or approve the backlog.</summary>
+    public const string BacklogRequired = "backlog_required";
+
     public static readonly IReadOnlyList<string> All =
     [
         Pricing, DestructiveSchema, SecurityAmbiguity, ProductDirection,
         EnableCharging, EnablePaidProviders, ProductionRelease, IntegrationMerge, RepairEscalation,
+        BacklogRequired,
     ];
 }
 
@@ -265,7 +269,9 @@ public sealed record AutopilotOverviewDto(
     IReadOnlyList<AutopilotTaskDto> Tasks,
     IReadOnlyList<AutopilotGateDto> Gates,
     AutopilotHandoffDto? Handoff,
-    IReadOnlyList<AutopilotAuditDto> RecentAudit);
+    IReadOnlyList<AutopilotAuditDto> RecentAudit,
+    IReadOnlyList<AutopilotWaveLaunchBatchDto> NextWaveLaunches,
+    IReadOnlyList<AutopilotBacklogItemDto> Backlog);
 
 /// <summary>Result of one controller cycle; safe to expose and to log.</summary>
 public sealed record AutopilotCycleResult(
