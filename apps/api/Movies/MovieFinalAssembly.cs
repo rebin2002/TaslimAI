@@ -293,7 +293,12 @@ public sealed class MovieFinalAssemblyService(
                 ProjectId = movie.ProjectId,
                 JobType = GenerationJobTypes.MovieAssembly,
                 Title = $"{movie.Title} master export",
-                InputJson = JsonSerializer.Serialize(input, JsonOptions),
+                // Movie generation job payloads use the default System.Text.Json contract.
+                // Every worker-side reader (GenerationJobExecution target validation and
+                // MovieFinalAssemblyJobHandler) deserializes with default options, so the
+                // producer must match. Serializing with web options here previously produced
+                // camelCase payloads that read back as Guid.Empty and rejected every assembly.
+                InputJson = JsonSerializer.Serialize(input),
                 EstimatedProviderCostUsd = 0m,
                 InternalCostEstimate = new GenerationCostEstimate(true, 0m, UsageCurrencies.Usd, null, null, null, []),
             }, cancellationToken, normalizedIdempotencyKey);
@@ -721,7 +726,14 @@ public sealed class MovieFinalAssemblyJobHandler(
         }
         if (!executor.IsAvailable) throw new MovieFinalAssemblyUnavailableException();
         await executions.TouchCheckpointAsync(assembly.Id, job.Id, job.ConcurrencyToken, "materializing_sources", 10, cancellationToken);
-        var sourcePaths = await MaterializeSourcesAsync(job.WorkspaceId, input, cancellationToken);
+        // A Full Movie project owns a separate root Project record, and every generated
+        // movie asset is scoped to that root project rather than to the MovieProject id.
+        // Resolve the root project so approved sources can actually be materialized.
+        var rootProjectId = await db.MovieProjects.AsNoTracking()
+            .Where(item => item.Id == input.MovieProjectId)
+            .Select(item => item.ProjectId)
+            .FirstOrDefaultAsync(cancellationToken);
+        var sourcePaths = await MaterializeSourcesAsync(job.WorkspaceId, rootProjectId, input, cancellationToken);
         try
         {
             await executions.TouchCheckpointAsync(assembly.Id, job.Id, job.ConcurrencyToken, "rendering", 20, cancellationToken);
@@ -749,12 +761,12 @@ public sealed class MovieFinalAssemblyJobHandler(
         }
     }
 
-    private async Task<IReadOnlyDictionary<Guid, string>> MaterializeSourcesAsync(Guid workspaceId, MovieFinalAssemblyInput input, CancellationToken cancellationToken)
+    private async Task<IReadOnlyDictionary<Guid, string>> MaterializeSourcesAsync(Guid workspaceId, Guid? rootProjectId, MovieFinalAssemblyInput input, CancellationToken cancellationToken)
     {
         var captionIds = input.Captions.AssetId is Guid captionAssetId ? new[] { captionAssetId } : Array.Empty<Guid>();
         var ids = input.Timeline.Select(item => item.AssetId).Concat(input.AudioMixInputs.Select(item => item.AssetId)).Concat(captionIds).Distinct().ToArray();
         var files = await db.Assets.AsNoTracking().Include(item => item.StoredFile)
-            .Where(item => ids.Contains(item.Id) && item.WorkspaceId == workspaceId && item.Status == AssetStatus.Active && (!item.ProjectId.HasValue || item.ProjectId == input.MovieProjectId))
+            .Where(item => ids.Contains(item.Id) && item.WorkspaceId == workspaceId && item.Status == AssetStatus.Active && (!item.ProjectId.HasValue || item.ProjectId == rootProjectId))
             .ToDictionaryAsync(item => item.Id, cancellationToken);
         if (files.Count != ids.Length) throw new MovieFinalAssemblyExecutionException(GenerationJobErrorCodes.MovieAssemblySourceUnavailable);
         var directory = Path.Combine(Path.GetTempPath(), "taslim-final-assembly-inputs", Guid.NewGuid().ToString("N"));

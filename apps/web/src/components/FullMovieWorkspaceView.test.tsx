@@ -5,11 +5,16 @@ const workspaceSource = readFileSync(new URL("./FullMovieWorkspaceView.tsx", imp
 const shotDesignerSource = readFileSync(new URL("./ShotDesigner.tsx", import.meta.url), "utf8");
 const createSource = readFileSync(new URL("./MovieStudioView.tsx", import.meta.url), "utf8");
 const directorSource = readFileSync(new URL("./MovieDirectorPanel.tsx", import.meta.url), "utf8");
+const selectsSource = readFileSync(new URL("./MovieSelectsWorkspace.tsx", import.meta.url), "utf8");
+const salvageSource = readFileSync(new URL("../lib/movieSalvage.ts", import.meta.url), "utf8");
+const i18nSource = readFileSync(new URL("../lib/i18n.ts", import.meta.url), "utf8");
 
 describe("Full Movie workspace foundation", () => {
   it("keeps the requested restrained production map in order", () => {
-    const labels = ["Overview", "Story", "Cast", "World", "Scenes", "Storyboard", "Production", "Edit", "Audio", "QC", "Exports", "Team"];
-    const positions = labels.map((label) => workspaceSource.indexOf(`label: "${label}"`));
+    // Visible labels are resolved from i18n, so the module map is asserted on
+    // the stable slugs and the copy is asserted where it now lives.
+    const slugs = ["overview", "story", "cast", "world", "scenes", "storyboard", "production", "edit", "audio", "qc", "exports", "team"];
+    const positions = slugs.map((slug) => workspaceSource.indexOf(`slug: "${slug}"`));
 
     expect(positions.every((position) => position >= 0)).toBe(true);
     expect(positions).toEqual([...positions].sort((a, b) => a - b));
@@ -17,16 +22,16 @@ describe("Full Movie workspace foundation", () => {
 
   it("makes Production Kit a durable reference-first workspace route", () => {
     expect(workspaceSource).toContain('slug: "production-kit"');
-    expect(workspaceSource).toContain('label: "Production Kit"');
     expect(workspaceSource).toContain("<ProductionKitWorkspace projectId={fullProject.id} />");
-    expect(workspaceSource).toContain("Reference control");
+    expect(workspaceSource).toContain("movieModule.${item.slug}.label");
+    expect(i18nSource).toContain('"movieModule.production-kit.eyebrow": "Reference control"');
   });
 
-  it("uses durable project routes and marks future surfaces honestly", () => {
+  it("uses durable project routes and exposes operational delivery surfaces", () => {
     expect(workspaceSource).toContain("/create/movie/${workspace.id}/${item.slug}");
-    expect(workspaceSource).toContain("Foundation surface");
     expect(workspaceSource).toContain("No generated footage yet");
-    expect(workspaceSource).toContain("Team controls are not connected yet");
+    expect(workspaceSource).toContain("<MovieAudioWorkspace project={fullProject} />");
+    expect(workspaceSource).toContain("<MovieExportsWorkspace project={fullProject} />");
   });
 
   it("uses the bounded overview read model instead of loading the full graph", () => {
@@ -194,10 +199,27 @@ describe("Full Movie workspace foundation", () => {
   it("keeps loading and failure states useful without fabricating project content", () => {
     expect(workspaceSource).toContain("WorkspaceSkeleton");
     expect(workspaceSource).toContain('aria-busy="true"');
-    expect(workspaceSource).toContain("Try again");
+    expect(workspaceSource).toContain("movieShell.tryAgain");
     expect(workspaceSource).toContain('role="alert"');
-    expect(workspaceSource).toContain('aria-label={item.label}');
-    expect(workspaceSource).toContain('data-module-state={isFuture ? "foundation" : "operational"}');
+    expect(workspaceSource).toContain('aria-label={t(`movieModule.${item.slug}.label`)}');
+    expect(workspaceSource).toContain('data-module-state="operational"');
+  });
+
+  it("delivers the audio, QC, exports and team rooms as operational modules", () => {
+    // The four delivery rooms replaced their previous "Soon" placeholders.
+    expect(workspaceSource).toContain("<MovieAudioWorkspace project={fullProject} />");
+    expect(workspaceSource).toContain("<MovieQualityWorkspace project={fullProject} />");
+    expect(workspaceSource).toContain("<MovieExportsWorkspace project={fullProject} />");
+    expect(workspaceSource).toContain("<MovieTeamWorkspace project={fullProject} />");
+    expect(workspaceSource).not.toContain("futureModules");
+    expect(workspaceSource).not.toContain("FutureModule");
+  });
+
+  it("appends the persisted bounded select to the exported master timeline", () => {
+    expect(salvageSource).toContain("movieTakeSelectId");
+    expect(selectsSource).toContain("api.createMovieTakeSelect");
+    expect(selectsSource).toContain("api.reviewMovieTakeSelect");
+    expect(selectsSource).not.toContain("Accept recommendation");
   });
 
 });

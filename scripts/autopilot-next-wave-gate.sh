@@ -11,17 +11,27 @@ if ! command -v dotnet >/dev/null 2>&1 && [[ -x "$HOME/.dotnet/dotnet" ]]; then
 fi
 
 printf '%s\n' "[next-wave] verifying base and branch"
-CURRENT_BRANCH="$(git branch --show-current)"
-if [[ -z "$CURRENT_BRANCH" ]]; then CURRENT_BRANCH="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME:-}}"; fi
 # The gate runs on the feature branch, and again on main after the merge where
 # the base commit must still be an ancestor of the merged history.
-if [[ "$CURRENT_BRANCH" != "$EXPECTED_BRANCH" && "$CURRENT_BRANCH" != "main" ]]; then
-  echo "unexpected branch: ${CURRENT_BRANCH:-<none>}" >&2
-  exit 1
-fi
+#
+# GitHub checks out a *detached* merge ref for pull_request workflows, so the
+# branch name is resolved from the GITHUB_* context in that case. The accepted
+# contexts are defined and regression-tested in scripts/lib/next-wave-refs.sh;
+# every safety invariant below still runs against the revision under review.
+# shellcheck source=scripts/lib/next-wave-refs.sh
+. "$ROOT_DIR/scripts/lib/next-wave-refs.sh"
+CURRENT_BRANCH="$(git branch --show-current)"
+if [[ -z "$CURRENT_BRANCH" ]]; then CURRENT_BRANCH="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME:-}}"; fi
+next_wave_classify_ref \
+  "${GITHUB_EVENT_NAME:-}" \
+  "${GITHUB_REF:-}" \
+  "${GITHUB_BASE_REF:-}" \
+  "${GITHUB_HEAD_REF:-}" \
+  "$CURRENT_BRANCH" \
+  "$EXPECTED_BRANCH" \
+  "main"
 git merge-base --is-ancestor "$BASE_SHA" HEAD
 printf '  base ancestor: %s\n' "$BASE_SHA"
-printf '  branch: %s\n' "$CURRENT_BRANCH"
 
 printf '%s\n' "[next-wave] repository hygiene"
 git diff --check

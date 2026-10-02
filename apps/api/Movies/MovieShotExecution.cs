@@ -25,6 +25,12 @@ public sealed class MovieShotExecutionRequest
     public int TakeCount { get; set; } = 1;
     public bool AllowReferenceReadinessOverride { get; set; }
     public string? ReferenceReadinessOverrideReason { get; set; }
+    /// <summary>
+    /// Paid generation is fail-closed: the server evaluates the shared cost
+    /// guardrail before queueing and requires an explicit confirmation for an
+    /// expensive or unestimable request.
+    /// </summary>
+    public bool ConfirmationAccepted { get; set; }
 }
 
 public sealed record MovieShotExecutionResolutionDto(
@@ -73,7 +79,8 @@ public sealed class MovieShotExecutionService(
     IMovieCharacterContinuityService continuity,
     MovieWorldContinuityProjector worldContinuity,
     IMovieGenerationCostEstimator costEstimator,
-    IMovieReferenceReadinessService referenceReadiness) : IMovieShotExecutionService
+    IMovieReferenceReadinessService referenceReadiness,
+    IGenerationCostGuardrailService costGuardrails) : IMovieShotExecutionService
 {
     private const int MaximumTakes = 8;
     private const int MaximumReferencePackageCharacters = 50_000;
@@ -152,6 +159,17 @@ public sealed class MovieShotExecutionService(
                 UpscalePasses: 0),
             provider.Key,
             cancellationToken: cancellationToken);
+        var costPreflight = await costGuardrails.EvaluateAsync(
+            userId,
+            movie.WorkspaceId,
+            movie.ProjectId,
+            estimate.ToGenerationCostEstimate(),
+            request.ConfirmationAccepted,
+            cancellationToken);
+        if (!costPreflight.CanProceed)
+            throw new MovieShotExecutionValidationException(
+                costPreflight.RejectionCode ?? "GENERATION_CONFIRMATION_REQUIRED",
+                costPreflight.RejectionMessage ?? "Confirm the generation cost before queueing these takes.");
         var continuitySnapshot = await continuity.BuildSnapshotForTargetAsync(movie.Id, shot.Scene.Id, shot.Id, true, cancellationToken);
         var worldSnapshot = await worldContinuity.ProjectAsync(movie.Id, shot.Scene.Id, shot.Id, cancellationToken);
         var now = DateTime.UtcNow;

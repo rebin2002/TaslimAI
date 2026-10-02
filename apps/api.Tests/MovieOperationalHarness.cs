@@ -22,7 +22,7 @@ namespace Taslim.Api.Tests;
 /// asset publication path; only IMovieVideoProvider is replaced with a
 /// deterministic in-memory adapter.
 /// </summary>
-public sealed class MovieOperationalApiFactory : GenerationJobsApiFactory
+public class MovieOperationalApiFactory : GenerationJobsApiFactory
 {
     public FakeProviderScenarioCatalog Scenarios { get; } = new();
     public FakeProviderCallLog Calls { get; } = new();

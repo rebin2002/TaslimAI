@@ -149,6 +149,8 @@ jobs:
           dotnet-version: ${{ env.DOTNET_VERSION }}
       - run: dotnet tool restore
       - run: dotnet restore apps/api.Tests/Taslim.Api.Tests.csproj
+      - name: Verify next-wave gate ref resolution
+        run: bash scripts/next-wave-refs.test.sh
       - name: Run the bounded next-wave launch gate
         env:
           RUN_DB_MIGRATIONS: "1"

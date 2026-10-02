@@ -25,7 +25,7 @@ export default defineConfig({
     {
       name: "chromium",
       use: { ...devices["Desktop Chrome"] },
-      testIgnore: /(?:mobile|rtl)\.spec\.ts/,
+      testIgnore: /(?:mobile|rtl)[^/]*\.spec\.ts/,
     },
     {
       name: "mobile-chromium",
@@ -41,7 +41,7 @@ export default defineConfig({
         ...devices["Desktop Chrome"],
         locale: "ar",
       },
-      testMatch: /rtl\.spec\.ts/,
+      testMatch: /rtl[^/]*\.spec\.ts/,
     },
   ],
   webServer: process.env.E2E_WEB_URL

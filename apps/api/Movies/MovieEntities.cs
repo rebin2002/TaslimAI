@@ -994,7 +994,12 @@ public sealed record MovieStudioGenerationRequest(
     bool UpscalingRequested = false,
     int UpscalePasses = 0,
     bool AllowReferenceReadinessOverride = false,
-    string? ReferenceReadinessOverrideReason = null);
+    string? ReferenceReadinessOverrideReason = null,
+    // Movie generation is a paid operation. The server evaluates the same cost
+    // guardrail as the production orchestrator and refuses to queue when the
+    // estimate is unavailable or an expensive estimate was not confirmed.
+    bool ConfirmationAccepted = false);
+
 
 public static class MovieStudioValidation
 {

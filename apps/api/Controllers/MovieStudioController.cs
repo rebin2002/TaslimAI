@@ -1011,8 +1011,14 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
     [EnableRateLimiting(RateLimiting.ExpensiveAi)]
     public async Task<IActionResult> GenerateScene(Guid id, Guid sceneId, MovieStudioGenerationRequest request, CancellationToken cancellationToken)
     {
-        var result = await movies.GenerateSceneAsync(GetUserId(), id, sceneId, request, cancellationToken, Request.Headers["Idempotency-Key"].FirstOrDefault());
-        return result is null ? ApiResults.Error(this, 404, "MOVIE_SCENE_NOT_FOUND", "Movie scene not found.") : Accepted(result);
+        try
+        {
+            var result = await movies.GenerateSceneAsync(GetUserId(), id, sceneId, request, cancellationToken, Request.Headers["Idempotency-Key"].FirstOrDefault());
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_SCENE_NOT_FOUND", "Movie scene not found.") : Accepted(result);
+        }
+        catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_SCENE_NOT_READY", exception.Message); }
+        catch (MovieReferenceReadinessException exception) { return ApiResults.Error(this, 409, exception.Code, exception.Message); }
+        catch (MovieStudioCostGuardException exception) { return ApiResults.Error(this, 402, exception.Code, exception.Message); }
     }
 
     [HttpPost("shots/{shotId:guid}/generate")]
@@ -1027,6 +1033,7 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
         }
         catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_SHOT_NOT_READY", exception.Message); }
         catch (MovieReferenceReadinessException exception) { return ApiResults.Error(this, 409, exception.Code, exception.Message); }
+        catch (MovieStudioCostGuardException exception) { return ApiResults.Error(this, 402, exception.Code, exception.Message); }
     }
 
     [HttpGet("projects/{movieProjectId:guid}/story")]

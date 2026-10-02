@@ -841,6 +841,254 @@ const movieWorkspaceRequests = new Map<string, Promise<MovieProject>>;
 function normalizeMovieWorkspaceProject(project: MovieWorkspaceProject): MovieProject { return { ...project, guide: { ...project.guide }, scenes: project.scenes.map((scene) => ({ ...scene, shots: [], clips: scene.clips.map((clip) => ({ ...clip, generationJobId: null, metadataJson: null, continuitySnapshotJson: null })) })), characters: project.characters.map((character) => ({ ...character, physicalDescription: null, wardrobe: null, voiceReference: null, personalityAndStoryNotes: null, referenceAssetId: null, referenceAssetIds: [], states: [], relationships: [], continuityLocks: [] })), locations: project.locations.map((location) => ({ ...location, referenceAssetId: null })), clips: project.clips.map((clip) => ({ ...clip, generationJobId: null, metadataJson: null, continuitySnapshotJson: null })), assemblies: project.assemblies.map((assembly) => ({ ...assembly, generationJobId: null, outputFormat: "mp4", metadataJson: null })), world: { locations: (project.world?.locations ?? project.locations).map((location) => ({ ...location, referenceAssetId: null })), sets: [], props: [], references: [], usages: [], facts: [], locks: [] } }; }
 function clearMovieWorkspaceRequests() { movieWorkspaceRequests.clear(); }
 
+export type MovieFinalAssembly = {
+  id: string;
+  movieProjectId: string;
+  generationJobId: string | null;
+  outputAssetId: string | null;
+  status: string;
+  resolutionProfile: string;
+  outputWidth: number;
+  outputHeight: number;
+  timelineItemCount: number;
+  sourceTakeIds: string[];
+  audioMixInputCount: number;
+  captionsMode: string;
+  qcStatus: string;
+  qcResultJson: string | null;
+  provenanceJson: string | null;
+  progressPercent: number;
+  attemptCount: number;
+  canResume: boolean;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+  job: GenerationJob | null;
+};
+export type MovieSoundApproval = { id: string; reviewerUserId: string; decision: string; comment: string | null; createdAt: string };
+export type MovieSoundTrack = {
+  id: string;
+  movieProjectId: string;
+  movieSceneId: string | null;
+  movieShotId: string | null;
+  assetId: string | null;
+  generationJobId: string | null;
+  libraryReferenceId: string | null;
+  kind: string;
+  layer: string;
+  name: string;
+  description: string;
+  startMilliseconds: number;
+  endMilliseconds: number;
+  fadeInMilliseconds: number;
+  fadeOutMilliseconds: number;
+  gainDb: number;
+  status: string;
+  sourceKind: string;
+  createdAt: string;
+  updatedAt: string;
+  approvedAt: string | null;
+  approvals: MovieSoundApproval[];
+};
+export type MovieSoundTrackList = { targetId: string; targetType: string; tracks: MovieSoundTrack[] };
+export type MovieSoundLibraryReference = {
+  id: string;
+  movieProjectId: string;
+  assetId: string;
+  label: string;
+  assetName: string;
+  mimeType: string | null;
+  canPreview: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+export type MovieSoundLibrary = { movieProjectId: string; references: MovieSoundLibraryReference[] };
+export type MovieSoundTrackInput = {
+  kind: string;
+  layer: string;
+  name: string;
+  description: string;
+  startMilliseconds: number;
+  endMilliseconds: number;
+  fadeInMilliseconds?: number;
+  fadeOutMilliseconds?: number;
+  gainDb?: number;
+  assetId?: string | null;
+  libraryReferenceId?: string | null;
+  generate?: boolean;
+  additionalInstructions?: string | null;
+};
+export type MovieSoundtrackDuckingIntent = {
+  id: string;
+  targetLane: string;
+  startOffsetSeconds: number;
+  endOffsetSeconds: number;
+  duckDecibels: number;
+  attackMilliseconds: number;
+  releaseMilliseconds: number;
+  rationale: string | null;
+};
+export type MovieSoundtrackDuckingIntentInput = {
+  targetLane: string;
+  startOffsetSeconds: number;
+  endOffsetSeconds: number;
+  duckDecibels: number;
+  attackMilliseconds?: number;
+  releaseMilliseconds?: number;
+  rationale?: string | null;
+};
+export type MovieSoundtrackCueVersion = {
+  id: string;
+  versionNumber: number;
+  label: string;
+  arrangementIntent: string | null;
+  mood: string;
+  intensity: number;
+  assetId: string | null;
+  approvalState: string;
+  reviewNote: string | null;
+  createdByUserId: string;
+  reviewedByUserId: string | null;
+  reviewedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  audioAssetProvenance: { assetId: string; storedFileId: string; assetType: string; mimeType: string; sizeBytes: number } | null;
+  reviews: { id: string; decision: string }[];
+};
+export type MovieSoundtrackCue = {
+  id: string;
+  movieProjectId: string;
+  movieActId: string;
+  movieSceneId: string;
+  sequence: number;
+  title: string;
+  narrativeIntent: string | null;
+  mood: string;
+  intensity: number;
+  actStartSeconds: number;
+  sceneStartSeconds: number;
+  timelineStartSeconds: number;
+  durationSeconds: number;
+  approvalState: string;
+  approvedVersionId: string | null;
+  createdAt: string;
+  updatedAt: string;
+  duckingIntents: MovieSoundtrackDuckingIntent[];
+  versions: MovieSoundtrackCueVersion[];
+};
+export type MovieSoundtrackCueInput = {
+  movieSceneId: string;
+  movieActId?: string | null;
+  title: string;
+  narrativeIntent?: string | null;
+  mood: string;
+  intensity: number;
+  actStartSeconds: number;
+  sceneStartSeconds: number;
+  timelineStartSeconds: number;
+  durationSeconds: number;
+  duckingIntents?: MovieSoundtrackDuckingIntentInput[] | null;
+};
+export type MovieSoundtrack = { movieProjectId: string; mediaServiceAvailable: boolean; cues: MovieSoundtrackCue[] };
+export type MovieCaptionCue = {
+  id: string;
+  movieCaptionTrackId: string;
+  sequence: number;
+  startTimecode: string;
+  endTimecode: string;
+  startMilliseconds: number;
+  endMilliseconds: number;
+  text: string;
+  speakerCharacterId: string | null;
+  speakerName: string | null;
+  movieSceneId: string | null;
+  movieShotId: string | null;
+  movieTakeId: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+export type MovieCaptionTrack = {
+  id: string;
+  movieProjectId: string;
+  movieAssemblyId: string | null;
+  sequence: number;
+  name: string;
+  trackType: string;
+  language: string;
+  isRtl: boolean;
+  isDefault: boolean;
+  status: string;
+  sourceFormat: string | null;
+  sourceFileName: string | null;
+  createdAt: string;
+  updatedAt: string;
+  cues: MovieCaptionCue[];
+};
+export type MovieCaptionTimeline = {
+  movieProjectId: string;
+  trackCount: number;
+  cues: { trackId: string; trackName: string; language: string; isRtl: boolean; trackType: string; cue: MovieCaptionCue }[];
+};
+export type MovieDialogueTake = {
+  id: string;
+  movieDialogueLineId: string;
+  versionNumber: number;
+  label: string;
+  status: string;
+  generationJobId: string | null;
+  assetId: string | null;
+  storedFileId: string | null;
+  durationMilliseconds: number | null;
+  metadataJson: string | null;
+  createdAt: string;
+  updatedAt: string;
+  approvedAt: string | null;
+  selectedAt: string | null;
+  approvals: { id: string; userId: string; decision: string; comment: string | null; createdAt: string }[];
+};
+export type MovieDialogueLine = {
+  id: string;
+  movieClipId: string;
+  movieCharacterId: string | null;
+  selectedTakeId: string | null;
+  sequence: number;
+  speakerName: string;
+  language: string;
+  text: string;
+  startMilliseconds: number;
+  endMilliseconds: number;
+  deliveryNotes: string | null;
+  status: string;
+  createdAt: string;
+  updatedAt: string;
+  takes: MovieDialogueTake[];
+};
+export type MovieDialogueClip = { movieClipId: string; movieProjectId: string; lines: MovieDialogueLine[] };
+export type MovieTakeSelectRecord = {
+  id: string;
+  movieTakeId: string;
+  selectNumber: number;
+  label: string;
+  status: string;
+  startMilliseconds: number;
+  endMilliseconds: number;
+  durationMilliseconds: number;
+  notes: string | null;
+  provenanceJson: string;
+  createdByUserId: string;
+  createdAt: string;
+  updatedAt: string;
+  reviewedByUserId: string | null;
+  reviewedAt: string | null;
+  reviewNote: string | null;
+};
+export type MovieTeamMember = { id: string; userId: string; displayName: string; role: string; isProjectOwner: boolean; permissions: string[]; createdAt: string; updatedAt: string };
+export type MovieComment = { id: string; targetType: string; targetId: string; authorUserId: string; authorDisplayName: string; body: string; parentCommentId: string | null; mentions: { userId: string; displayName: string }[]; createdAt: string; updatedAt: string; resolvedAt: string | null };
+export type MovieReview = { id: string; targetType: string; targetId: string; requestedByUserId: string; requestedByDisplayName: string; reviewerUserId: string; reviewerDisplayName: string; isFinal: boolean; status: string; requestNote: string | null; decisionNote: string | null; createdAt: string; reviewedAt: string | null };
+export type MovieAssignment = { id: string; targetType: string; targetId: string; assigneeUserId: string; assigneeDisplayName: string; assignedByUserId: string; assignedByDisplayName: string; title: string; description: string | null; status: string; dueAt: string | null; createdAt: string; updatedAt: string; completedAt: string | null };
+export type MovieProductionCredit = { id: string; userId: string; displayName: string; role: string; creditName: string | null; sortOrder: number; createdAt: string };
+export type MovieCollaboration = { movieProjectId: string; team: MovieTeamMember[]; comments: MovieComment[]; reviews: MovieReview[]; assignments: MovieAssignment[]; credits: MovieProductionCredit[]; currentUserPermissions: string[] };
+
 export const api = {
   me: () => request<AuthResponse>("/api/auth/me"),
   passwordPolicy: () => request<PasswordPolicy>("/api/auth/password-policy"),
@@ -1059,4 +1307,51 @@ export const api = {
     return requestForm<StoredFile>(`/api/workspaces/${workspaceId}/files`, form, true);
   },
   deleteFile: (fileId: string) => request<void>(`/api/files/${fileId}`, { method: "DELETE" }, true),
+  // Final assembly and master export.
+  queueMovieFinalAssembly: (projectId: string, input: { resolutionProfile?: string; timeline?: { takeId: string; inPointSeconds?: number; outPointSeconds?: number }[]; captions?: { mode?: string; assetId?: string | null; language?: string } }, idempotencyKey = requestId()) => request<MovieFinalAssembly>(`/api/movie-studio/projects/${projectId}/final-assembly`, generationInit({ method: "POST", body: JSON.stringify(input) }, idempotencyKey), true),
+  getMovieFinalAssembly: (assemblyId: string) => request<MovieFinalAssembly>(`/api/movie-studio/final-assemblies/${assemblyId}`),
+  movieFinalAssemblyDownloadUrl: (assemblyId: string) => `${API_URL}/api/movie-studio/final-assemblies/${assemblyId}/download`,
+  // Sound library and per-target sound tracks.
+  getMovieSoundLibrary: (projectId: string) => request<MovieSoundLibrary>(`/api/movie-sound/projects/${projectId}/library`),
+  addMovieSoundLibraryReference: (projectId: string, input: { assetId: string; label?: string | null }) => request<MovieSoundLibrary>(`/api/movie-sound/projects/${projectId}/library`, { method: "POST", body: JSON.stringify(input) }, true),
+  getMovieSceneSoundTracks: (sceneId: string) => request<MovieSoundTrackList>(`/api/movie-sound/scenes/${sceneId}/tracks`),
+  getMovieShotSoundTracks: (shotId: string) => request<MovieSoundTrackList>(`/api/movie-sound/shots/${shotId}/tracks`),
+  createMovieSceneSoundTrack: (sceneId: string, input: MovieSoundTrackInput) => request<MovieSoundTrack>(`/api/movie-sound/scenes/${sceneId}/tracks`, { method: "POST", body: JSON.stringify(input) }, true),
+  createMovieShotSoundTrack: (shotId: string, input: MovieSoundTrackInput) => request<MovieSoundTrack>(`/api/movie-sound/shots/${shotId}/tracks`, { method: "POST", body: JSON.stringify(input) }, true),
+  getMovieSoundTrack: (trackId: string) => request<MovieSoundTrack>(`/api/movie-sound/tracks/${trackId}`),
+  reviewMovieSoundTrack: (trackId: string, input: { approve: boolean; comment?: string | null }) => request<MovieSoundTrack>(`/api/movie-sound/tracks/${trackId}/review`, { method: "POST", body: JSON.stringify(input) }, true),
+  // Soundtrack cues and versions.
+  getMovieSoundtrack: (projectId: string) => request<MovieSoundtrack>(`/api/movie-studio/projects/${projectId}/soundtrack`),
+  createMovieSoundtrackCue: (projectId: string, input: MovieSoundtrackCueInput) => request<MovieSoundtrackCue>(`/api/movie-studio/projects/${projectId}/soundtrack/cues`, { method: "POST", body: JSON.stringify(input) }, true),
+  getMovieSoundtrackCue: (cueId: string) => request<MovieSoundtrackCue>(`/api/movie-studio/soundtrack/cues/${cueId}`),
+  updateMovieSoundtrackCue: (cueId: string, input: Partial<MovieSoundtrackCueInput>) => request<MovieSoundtrackCue>(`/api/movie-studio/soundtrack/cues/${cueId}`, { method: "PATCH", body: JSON.stringify(input) }, true),
+  createMovieSoundtrackCueVersion: (cueId: string, input: { label: string; arrangementIntent?: string | null; mood?: string | null; intensity?: number | null; assetId?: string | null }) => request<MovieSoundtrackCue>(`/api/movie-studio/soundtrack/cues/${cueId}/versions`, { method: "POST", body: JSON.stringify(input) }, true),
+  reviewMovieSoundtrackVersion: (versionId: string, input: { decision: string; comment?: string | null }) => request<MovieSoundtrackCue>(`/api/movie-studio/soundtrack/versions/${versionId}/review`, { method: "POST", body: JSON.stringify(input) }, true),
+  // Captions.
+  getMovieCaptionTracks: (projectId: string) => request<MovieCaptionTrack[]>(`/api/movie-studio/projects/${projectId}/caption-tracks`),
+  getMovieCaptionTimeline: (projectId: string) => request<MovieCaptionTimeline>(`/api/movie-studio/projects/${projectId}/caption-timeline`),
+  getMovieCaptionTrack: (trackId: string) => request<MovieCaptionTrack>(`/api/movie-studio/caption-tracks/${trackId}`),
+  createMovieCaptionTrack: (projectId: string, input: { name: string; trackType?: string; language?: string; isRtl?: boolean; isDefault?: boolean }) => request<MovieCaptionTrack>(`/api/movie-studio/projects/${projectId}/caption-tracks`, { method: "POST", body: JSON.stringify(input) }, true),
+  addMovieCaptionCue: (trackId: string, input: { startTimecode: string; endTimecode: string; text: string; speakerName?: string | null }) => request<MovieCaptionCue>(`/api/movie-studio/caption-tracks/${trackId}/cues`, { method: "POST", body: JSON.stringify(input) }, true),
+  updateMovieCaptionCue: (cueId: string, input: { startTimecode: string; endTimecode: string; text: string; speakerName?: string | null }) => request<MovieCaptionCue>(`/api/movie-studio/caption-cues/${cueId}`, { method: "PATCH", body: JSON.stringify(input) }, true),
+  deleteMovieCaptionCue: (cueId: string) => request<void>(`/api/movie-studio/caption-cues/${cueId}`, { method: "DELETE" }, true),
+  movieCaptionExportUrl: (trackId: string, format = "srt") => `${API_URL}/api/movie-studio/caption-tracks/${trackId}/export?format=${encodeURIComponent(format)}`,
+  // Dialogue lines and takes.
+  getMovieClipDialogue: (clipId: string) => request<MovieDialogueClip>(`/api/movie-studio/clips/${clipId}/dialogue`),
+  addMovieDialogueLine: (clipId: string, input: { movieCharacterId?: string | null; speakerName: string; language?: string; text: string; startMilliseconds: number; endMilliseconds: number; deliveryNotes?: string | null }) => request<MovieDialogueLine>(`/api/movie-studio/clips/${clipId}/dialogue`, { method: "POST", body: JSON.stringify(input) }, true),
+  queueMovieDialogueTake: (lineId: string, input: { label?: string | null; voiceStyle?: string | null }, idempotencyKey = requestId()) => request<{ take: MovieDialogueTake; job: GenerationJob }>(`/api/movie-studio/dialogue/${lineId}/takes`, generationInit({ method: "POST", body: JSON.stringify(input) }, idempotencyKey), true),
+  approveMovieDialogueTake: (takeId: string, input: { decision: "Approved" | "Rejected"; comment?: string | null }) => request<MovieDialogueLine>(`/api/movie-studio/dialogue/takes/${takeId}/approval`, { method: "POST", body: JSON.stringify(input) }, true),
+  selectMovieDialogueTake: (takeId: string) => request<MovieDialogueLine>(`/api/movie-studio/dialogue/takes/${takeId}/select`, { method: "POST" }, true),
+  // Bounded take selects.
+  getMovieTakeSelects: (projectId: string, takeId: string) => request<MovieTakeSelectRecord[]>(`/api/movie-studio/projects/${projectId}/takes/${takeId}/selects`),
+  createMovieTakeSelect: (projectId: string, takeId: string, input: { label: string; startMilliseconds: number; endMilliseconds: number; notes?: string | null }) => request<MovieTakeSelectRecord>(`/api/movie-studio/projects/${projectId}/takes/${takeId}/selects`, { method: "POST", body: JSON.stringify(input) }, true),
+  reviewMovieTakeSelect: (projectId: string, takeId: string, selectId: string, input: { decision: "Approved" | "Rejected"; comment?: string | null }) => request<MovieTakeSelectRecord>(`/api/movie-studio/projects/${projectId}/takes/${takeId}/selects/${selectId}/review`, { method: "POST", body: JSON.stringify(input) }, true),
+  // Collaboration, review and credits.
+  getMovieCollaboration: (projectId: string) => request<MovieCollaboration>(`/api/movie-studio/projects/${projectId}/collaboration`),
+  addMovieTeamMember: (projectId: string, input: { userId: string; role: string; permissions?: string[] | null }) => request<MovieCollaboration>(`/api/movie-studio/projects/${projectId}/collaboration/team`, { method: "POST", body: JSON.stringify(input) }, true),
+  removeMovieTeamMember: (projectId: string, memberId: string) => request<MovieCollaboration>(`/api/movie-studio/projects/${projectId}/collaboration/team/${memberId}`, { method: "DELETE" }, true),
+  addMovieComment: (projectId: string, input: { targetType: string; targetId: string; body: string; parentCommentId?: string | null; mentionedUserIds?: string[] | null }) => request<MovieCollaboration>(`/api/movie-studio/projects/${projectId}/collaboration/comments`, { method: "POST", body: JSON.stringify(input) }, true),
+  resolveMovieComment: (projectId: string, commentId: string) => request<MovieCollaboration>(`/api/movie-studio/projects/${projectId}/collaboration/comments/${commentId}/resolve`, { method: "POST" }, true),
+  requestMovieReview: (projectId: string, input: { targetType: string; targetId: string; reviewerUserId: string; isFinal: boolean; requestNote?: string | null }) => request<MovieCollaboration>(`/api/movie-studio/projects/${projectId}/collaboration/reviews`, { method: "POST", body: JSON.stringify(input) }, true),
+  decideMovieReview: (projectId: string, reviewId: string, input: { status: string; decisionNote?: string | null }) => request<MovieCollaboration>(`/api/movie-studio/projects/${projectId}/collaboration/reviews/${reviewId}/decision`, { method: "POST", body: JSON.stringify(input) }, true),
 };
