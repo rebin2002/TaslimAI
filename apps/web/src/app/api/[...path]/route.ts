@@ -9,6 +9,18 @@ type RouteContext = { params: Promise<{ path: string[] }> };
 
 const bodyMethods = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
+function splitCombinedSetCookieHeader(value: string): string[] {
+  return value.split(/,(?=\s*[^;,=\s]+=[^;,]*)/).map(cookie => cookie.trim()).filter(Boolean);
+}
+
+function getSetCookieHeaders(headers: Headers): string[] {
+  const headersWithSetCookie = headers as Headers & { getSetCookie?: () => string[] };
+  const setCookies = headersWithSetCookie.getSetCookie?.call(headersWithSetCookie);
+  if (setCookies && setCookies.length > 0) return setCookies;
+  const combined = headers.get("set-cookie");
+  return combined ? splitCombinedSetCookieHeader(combined) : [];
+}
+
 async function readBoundedBody(request: Request): Promise<ArrayBuffer | Response> {
   const declaredLength = request.headers.get("content-length");
   if (declaredLength && Number.isFinite(Number(declaredLength)) && Number(declaredLength) > MAX_PROXY_BODY_BYTES)
@@ -83,14 +95,10 @@ async function forward(request: Request, context: RouteContext): Promise<Respons
   responseHeaders.delete("content-encoding");
   responseHeaders.delete("transfer-encoding");
 
-  const getSetCookie = (responseHeaders as Headers & { getSetCookie?: () => string[] }).getSetCookie;
-  const setCookies = getSetCookie?.call(responseHeaders) ?? [];
+  const setCookies = getSetCookieHeaders(responseHeaders);
   responseHeaders.delete("set-cookie");
   if (setCookies.length > 0) {
     for (const cookie of setCookies) responseHeaders.append("set-cookie", cookie);
-  } else {
-    const setCookie = upstream.headers.get("set-cookie");
-    if (setCookie) responseHeaders.append("set-cookie", setCookie);
   }
 
   return new Response(upstream.body, {
