@@ -5,6 +5,7 @@ import type {
   MovieProject,
   MovieTake,
 } from "@/lib/api";
+import type { MovieRenderIntent } from "@/lib/movieProductionResolution";
 
 export type ProductionWorkspaceFilter = "all" | "needs-review" | "ready" | "blocked";
 export type ProductionReadiness = "blocked" | "needs-review" | "in-progress" | "ready";
@@ -206,7 +207,7 @@ export type MovieProductionWorkspaceAdapter = {
   createKeyframe: (shotId: string, sourceVersionId: string, compositionJson: string) => Promise<unknown>;
   reviewVersion: (versionId: string, input: MovieProductionReviewInput) => Promise<unknown>;
   createMotionPreview: (shotId: string, sourceVersionId: string) => Promise<unknown>;
-  queueRender: (shotId: string, sourceVersionId: string, retry: boolean) => Promise<unknown>;
+  queueRender: (shotId: string, sourceVersionId: string, retry: boolean, intent?: MovieRenderIntent) => Promise<unknown>;
   createTake: (versionId: string) => Promise<unknown>;
   approveTake: (takeId: string) => Promise<unknown>;
   selectTake: (takeId: string) => Promise<unknown>;

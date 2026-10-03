@@ -1,4 +1,5 @@
 export type MovieResolutionTier = "Draft" | "Upgrade" | "Master";
+export type MovieRenderIntent = { targetResolution: "480p" | "720p" | "1080p" | "1440p" | "2160p"; qualityTier: "Fast" | "Standard" | "Cinematic" | "Studio" };
 
 export type MovieResolutionPlanInput = {
   durationSeconds: number;
@@ -51,6 +52,14 @@ const tierDetails: Record<MovieResolutionTier, Omit<MovieResolutionTierPlan, "es
 };
 
 export const movieResolutionTiers: MovieResolutionTier[] = ["Draft", "Upgrade", "Master"];
+/** UI intent mapped to the server-side adaptive-resolution contract. */
+export function productionIntentForTier(tier: MovieResolutionTier): MovieRenderIntent {
+  switch (tier) {
+    case "Master": return { targetResolution: "2160p", qualityTier: "Studio" };
+    case "Upgrade": return { targetResolution: "1080p", qualityTier: "Cinematic" };
+    default: return { targetResolution: "480p", qualityTier: "Fast" };
+  }
+}
 
 export function buildMovieResolutionPlan(input: MovieResolutionPlanInput): MovieResolutionPlan {
   const estimateAvailable = input.estimateAvailable === true;

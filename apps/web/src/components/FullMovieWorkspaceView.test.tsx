@@ -68,7 +68,7 @@ describe("Full Movie workspace foundation", () => {
     expect(workspaceSource).toContain("sectionForDirectorApply");
     expect(workspaceSource).toContain("setFocusAfterDirectorApply(changedSection)");
     expect(workspaceSource).toContain("story-editor-${focusAfterDirectorApply.toLowerCase()}");
-    expect(workspaceSource).toContain('aria-label="Story sections"');
+    expect(workspaceSource).toContain('movieDeep.storySections');
     expect(workspaceSource).toContain('aria-controls={`story-editor-${item.toLowerCase()}`}');
     expect(workspaceSource).toContain('id={`story-editor-${key}`}');
     expect(workspaceSource).not.toContain('if (!auto) setSection("Screenplay")');
@@ -77,7 +77,7 @@ describe("Full Movie workspace foundation", () => {
   it("makes Scenes the explicit screenplay-to-production bridge", () => {
     expect(workspaceSource).toContain("api.getMovieScenesWorkspace(projectId)");
     expect(workspaceSource).toContain("api.breakDownMovieScreenplay(projectId)");
-    expect(workspaceSource).toContain("Screenplay → production scenes → shots");
+    expect(workspaceSource).toContain('movieDeep.sceneReview');
     expect(workspaceSource).toContain("Acts, sequences, scenes");
     expect(workspaceSource).toContain("Existing scenes and shots are never silently replaced");
     expect(workspaceSource).toContain("api.reorderMovieEntity(\"scenes\"");
@@ -118,7 +118,7 @@ describe("Full Movie workspace foundation", () => {
   });
 
   it("keeps Story assistance behind a visible proposal review and apply boundary", () => {
-    expect(workspaceSource).toContain("Director assistance");
+    expect(workspaceSource).toContain("movieDeep.directorAssistance");
     expect(workspaceSource).toContain("Create proposal");
     expect(workspaceSource).toContain("Existing content");
     expect(workspaceSource).toContain("Proposed content");

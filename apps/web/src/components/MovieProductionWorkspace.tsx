@@ -33,7 +33,7 @@ import {
   type ProductionWorkspaceShot,
   type ProductionWorkspaceStage,
 } from "@/lib/movieProductionWorkspace";
-import { type MovieResolutionTier } from "@/lib/movieProductionResolution";
+import { productionIntentForTier, type MovieResolutionTier } from "@/lib/movieProductionResolution";
 
 const filters: Array<{ id: ProductionWorkspaceFilter; label: string }> = [
   { id: "all", label: "All shots" },
@@ -59,7 +59,7 @@ function createApiAdapter(): MovieProductionWorkspaceAdapter {
     createKeyframe: (shotId, sourceVersionId, compositionJson) => api.createMovieProductionVersion(shotId, { stage: "ProductionKeyframe", sourceVersionId, compositionJson, label: "Source frame" }),
     reviewVersion: (versionId, input) => api.reviewMovieProductionVersion(versionId, input),
     createMotionPreview: (shotId, sourceVersionId) => api.createMovieMotionPreview(shotId, { sourceVersionId, label: "Motion check" }),
-    queueRender: (shotId, sourceVersionId, retry) => api.queueMovieProductionRender(shotId, { sourceVersionId, label: retry ? "Master retry" : "Master pass" }),
+    queueRender: (shotId, sourceVersionId, retry, intent) => { const renderIntent = intent ?? productionIntentForTier("Master"); return api.queueMovieProductionRender(shotId, { sourceVersionId, targetResolution: renderIntent.targetResolution, qualityTier: renderIntent.qualityTier, label: retry ? "Master retry" : "Master pass" }); },
     createTake: (versionId) => api.createMovieTakeFromProduction(versionId, { label: "Master take" }),
     approveTake: (takeId) => api.approveMovieTake(takeId, { decision: "Approved", comment: "Take approved in Production." }),
     selectTake: (takeId) => api.selectMovieTake(takeId),
@@ -190,7 +190,7 @@ function ProductionShotCard({ item, busyKey, selectedTier, adapter, onAction, on
       {item.pendingKeyframe && <button type="button" className="movie-workspace-button is-primary" disabled={Boolean(busyKey)} onClick={() => void onAction(`${shot.id}:approve-keyframe`, () => adapter.reviewVersion(item.pendingKeyframe!.id, { approve: true, reason: "Source frame approved in Production." }))}>{isBusy("approve-keyframe") ? "Saving…" : "Approve source frame"}</button>}
       {item.keyframe && !item.motion && <button type="button" className="movie-workspace-button is-secondary" disabled={Boolean(busyKey)} onClick={() => void onAction(`${shot.id}:motion`, () => adapter.createMotionPreview(shot.id, item.keyframe!.id))}><Play size={14} /> Create motion check</button>}
       {item.motion?.status === "PendingApproval" && <button type="button" className="movie-workspace-button is-primary" disabled={Boolean(busyKey)} onClick={() => void onAction(`${shot.id}:approve-motion`, () => adapter.reviewVersion(item.motion!.id, { approve: true, reason: "Motion check approved in Production." }))}>{isBusy("approve-motion") ? "Saving…" : "Approve motion check"}</button>}
-      {item.motion?.status === "Approved" && (!item.render || renderFailed) && <button type="button" className="movie-workspace-button is-secondary" disabled={Boolean(busyKey)} onClick={() => void onAction(`${shot.id}:render`, () => adapter.queueRender(shot.id, item.motion!.id, Boolean(item.render && renderFailed)))}><WandSparkles size={14} /> {renderFailed ? "Retry master pass" : "Create master pass"}</button>}
+      {item.motion?.status === "Approved" && (!item.render || renderFailed) && <button type="button" className="movie-workspace-button is-secondary" disabled={Boolean(busyKey)} onClick={() => void onAction(`${shot.id}:render`, () => adapter.queueRender(shot.id, item.motion!.id, Boolean(item.render && renderFailed), productionIntentForTier(selectedTier)))}><WandSparkles size={14} /> {renderFailed ? "Retry master pass" : "Create master pass"}</button>}
       {canCreateTake && <button type="button" className="movie-workspace-button is-primary" disabled={Boolean(busyKey)} onClick={() => void onAction(`${shot.id}:take`, () => adapter.createTake(item.render!.id))}><CheckCircle2 size={14} /> Save as take</button>}
       {selectedTier === "Master" && item.selectedTake && <button type="button" className="movie-workspace-button is-finish" disabled={Boolean(busyKey) || !masterAllowed} onClick={() => void onAction(`${shot.id}:master`, () => adapter.requestMaster(item.selectedTake!.id))}><Flag size={14} /> Record master hand-off</button>}
       {renderFailed && <><button type="button" className="movie-workspace-button is-secondary" disabled={Boolean(busyKey)} onClick={() => void onAction(`${shot.id}:regenerate`, onRegenerate)}><RefreshCw size={14} /> Regenerate failed pass</button><span className="movie-production-inline-recovery"><AlertTriangle size={13} /> Review the pass note before retrying.</span></>}
