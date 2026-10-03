@@ -14,7 +14,7 @@ public interface IMovieTimelineService
     Task<MovieTimelineTrackDto?> AddTrackAsync(Guid userId, Guid revisionId, MovieTimelineTrackRequest request, CancellationToken cancellationToken);
     Task<MovieTimelineItemDto?> AddItemAsync(Guid userId, Guid trackId, MovieTimelineItemRequest request, CancellationToken cancellationToken);
     Task<MovieTimelineRevisionDto?> LockRevisionAsync(Guid userId, Guid revisionId, CancellationToken cancellationToken);
-    Task<MovieTimelineRevisionDto?> ApplyTransitionEditAsync(Guid userId, Guid movieProjectId, MovieTimelineTransitionEditRequest request, CancellationToken cancellationToken);
+    Task<MovieTimelineRevisionDto?> ApplyTransitionEditAsync(Guid userId, Guid movieProjectId, Taslim.Api.Contracts.MovieTimelineTransitionEditRequest request, CancellationToken cancellationToken);
 }
 
 public sealed class MovieTimelineService(TaslimDbContext db, MovieCollaborationAccess collaboration) : IMovieTimelineService
@@ -96,7 +96,7 @@ public sealed class MovieTimelineService(TaslimDbContext db, MovieCollaborationA
         return ToDto(await QueryRevision().SingleAsync(item => item.Id == revision.Id, cancellationToken));
     }
 
-    public async Task<MovieTimelineRevisionDto?> ApplyTransitionEditAsync(Guid userId, Guid movieProjectId, MovieTimelineTransitionEditRequest request, CancellationToken cancellationToken)
+    public async Task<MovieTimelineRevisionDto?> ApplyTransitionEditAsync(Guid userId, Guid movieProjectId, Taslim.Api.Contracts.MovieTimelineTransitionEditRequest request, CancellationToken cancellationToken)
     {
         var timeline = await db.MovieTimelines
             .Include(item => item.Revisions).ThenInclude(item => item.Tracks).ThenInclude(item => item.Items)
