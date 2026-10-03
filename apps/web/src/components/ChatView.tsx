@@ -72,34 +72,35 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
 
   const selectedProject = useMemo(() => projects.find((project) => project.id === (selected?.projectId ?? selectedProjectId)) ?? null, [projects, selected?.projectId, selectedProjectId]);
 
-  const loadConversations = useCallback(async () => {
+  const loadConversations = useCallback(async (signal?: AbortSignal) => {
     if (!workspace) return;
-    const items = await api.listConversations(workspace.id);
-    setConversations(items);
-    return items;
+    return api.listConversations(workspace.id, "Active", signal);
   }, [workspace]);
 
   useEffect(() => {
     if (!workspace) return;
     let active = true;
-    void api.listProjects(workspace.id, "Active")
+    const controller = new AbortController();
+    void api.listProjects(workspace.id, "Active", controller.signal)
       .then((items) => { if (active) setProjects(items); })
-      .catch(() => { if (active) setProjects([]); });
-    return () => { active = false; };
+      .catch((caught) => { if (active && !isAbortError(caught)) setProjects([]); });
+    return () => { active = false; controller.abort(); };
   }, [workspace]);
 
   useEffect(() => {
     let active = true;
+    const controller = new AbortController();
     // Loading persisted conversation state is an external synchronization.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoading(true);
     setError("");
     void (async () => {
       try {
-        const items = await loadConversations();
+        const items = await loadConversations(controller.signal);
         if (!active) return;
+        setConversations(items ?? []);
         if (conversationId) {
-          const [conversation, history] = await Promise.all([api.getConversation(conversationId), api.getMessages(conversationId)]);
+          const [conversation, history] = await Promise.all([api.getConversation(conversationId, controller.signal), api.getMessages(conversationId, controller.signal)]);
           if (!active) return;
           setSelected(conversation);
           setSelectedProjectId(conversation.projectId ?? "");
@@ -111,12 +112,12 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
           setMessages([]);
         }
       } catch (caught) {
-        if (active) setError(caught instanceof ApiError && caught.status === 404 ? t("chat.notFound") : t("chat.loadError"));
+        if (active && !isAbortError(caught)) setError(caught instanceof ApiError && caught.status === 404 ? t("chat.notFound") : t("chat.loadError"));
       } finally {
         if (active) setLoading(false);
       }
     })();
-    return () => { active = false; };
+    return () => { active = false; controller.abort(); };
   }, [conversationId, loadConversations, requestedProjectId, t]);
 
   useEffect(() => {

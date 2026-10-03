@@ -72,4 +72,30 @@ test.describe("chat journeys", () => {
     await expect(errorAlert).toBeVisible({ timeout: 15_000 });
     await expect(errorAlert).not.toContainText(/stack|exception|api key|secret/i);
   });
+
+  test("cancels in-flight conversation reads when Chat unmounts during navigation", async ({ authenticatedPage: page }) => {
+    test.setTimeout(30_000);
+    const auth = await apiJson<{ personalWorkspace: { id: string } }>(page.request, "GET", "/api/auth/me");
+    const conversation = await apiJson<{ id: string }>(page.request, "POST", `/api/workspaces/${auth.personalWorkspace.id}/conversations`, { title: "E2E Cancelled Chat Read" });
+    let delayedRequestSeen = false;
+    let delayedRequestFailed = false;
+    const conversationUrl = `/api/conversations/${conversation.id}`;
+    page.on("requestfailed", (request) => {
+      if (request.url().includes(conversationUrl)) delayedRequestFailed = true;
+    });
+    await page.route(`**/api/conversations/${conversation.id}`, async (route) => {
+      delayedRequestSeen = true;
+      await new Promise((resolve) => setTimeout(resolve, 5_000));
+      try {
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(conversation) });
+      } catch {
+        // The expected route-transition abort closes this intercepted request.
+      }
+    });
+    await page.goto(`/chat/${conversation.id}`);
+    await expect.poll(() => delayedRequestSeen, { timeout: 10_000 }).toBe(true);
+    await page.getByRole("link", { name: /^projects$/i }).first().click();
+    await expect(page).toHaveURL(/\/projects$/);
+    await expect.poll(() => delayedRequestFailed, { timeout: 5_000 }).toBe(true);
+  });
 });
