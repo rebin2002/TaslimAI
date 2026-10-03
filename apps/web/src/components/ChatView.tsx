@@ -6,7 +6,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
 import { ApiError, api, type ChatMessage, type Conversation, type Project, type StoredFile } from "@/lib/api";
-import { applyChatStreamEvent, createChatStreamState, stopChatStream } from "@/lib/chatStreamState";
+import { applyChatStreamEvent, createChatStreamState, failChatStream, stopChatStream } from "@/lib/chatStreamState";
 import { claimSubmission, conversationPath, createChatRequestId, createSubmission, isAbortError, releaseSubmission, shouldReplaceConversationUrl, studioTransitionPath } from "@/lib/chatLifecycle";
 import { ProtectedPage } from "@/components/ProtectedPage";
 import { ChatMessageContent } from "@/components/ChatMessageContent";
@@ -227,6 +227,7 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
     setError("");
     setRetryRequest(null);
     setGenerating(true);
+    let streamState = createChatStreamState(messages);
     try {
       let conversation = selected;
       if (!conversation) {
@@ -236,7 +237,6 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
         setConversations(current => [conversation!, ...current]);
       }
       activeRetryRef.current = { conversationId: conversation.id, content: text, requestId: id, attachmentIds };
-      let streamState = createChatStreamState(messages);
       await api.streamMessage(conversation.id, text, streamEvent => {
         streamState = applyStreamEvent(streamEvent, streamState);
         updateConversationFromStream(streamEvent);
@@ -253,6 +253,8 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
       }
       setGenerating(false);
     } catch (caught) {
+      streamState = failChatStream(streamState);
+      setMessages(streamState.messages);
       if (isAbortError(caught)) {
         if (activeRetryRef.current) setRetryRequest(activeRetryRef.current);
         setError(t("chat.cancelled"));
@@ -275,14 +277,16 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
     setError("");
     setRetryRequest(null);
     setGenerating(true);
+    let streamState = createChatStreamState(messages);
     try {
-      let streamState = createChatStreamState(messages);
       await api.regenerateMessage(selected.id, message.id, streamEvent => {
         streamState = applyStreamEvent(streamEvent, streamState);
         updateConversationFromStream(streamEvent);
         if (streamEvent.type === "message.failed") setError(t("chat.regenerateError"));
       }, createChatRequestId(), controller.signal);
     } catch (caught) {
+      streamState = failChatStream(streamState);
+      setMessages(streamState.messages);
       if (isAbortError(caught)) {
         setError(t("chat.cancelled"));
       } else {
