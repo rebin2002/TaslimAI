@@ -150,6 +150,76 @@ public sealed class AssetTests : IClassFixture<GenerationJobsApiFactory>
         Assert.Equal("PROJECT_NOT_IN_WORKSPACE", body.GetProperty("error").GetProperty("code").GetString());
     }
 
+    [Fact]
+    public async Task Asset_download_rejects_a_primary_file_from_another_workspace()
+    {
+        using var owner = factory.CreateClient();
+        var ownerAuth = await Register(owner, "Primary File Owner");
+        var ownerJob = await CreateJob(owner, ownerAuth.PersonalWorkspace.Id, null, "Primary asset");
+        await WaitForTerminal(owner, ownerJob.Id);
+        var ownerAssets = await owner.GetFromJsonAsync<AssetListDto>($"/api/assets?workspaceId={ownerAuth.PersonalWorkspace.Id}");
+        var ownerAsset = Assert.Single(ownerAssets!.Items);
+
+        using var other = factory.CreateClient();
+        var otherAuth = await Register(other, "Foreign File Owner");
+        var otherJob = await CreateJob(other, otherAuth.PersonalWorkspace.Id, null, "Foreign asset");
+        await WaitForTerminal(other, otherJob.Id);
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var ownerEntity = await db.Assets.SingleAsync(item => item.Id == ownerAsset.Id);
+            var foreignEntity = await db.Assets.SingleAsync(item => item.SourceGenerationJobId == otherJob.Id);
+            ownerEntity.StoredFileId = foreignEntity.StoredFileId;
+            await db.SaveChangesAsync();
+        }
+
+        var download = await owner.GetAsync($"/api/assets/{ownerAsset.Id}/download");
+        Assert.Equal(HttpStatusCode.Conflict, download.StatusCode);
+        Assert.DoesNotContain("system.test", await download.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task Asset_representation_download_rejects_a_file_from_another_workspace()
+    {
+        using var owner = factory.CreateClient();
+        var ownerAuth = await Register(owner, "Representation Owner");
+        var ownerJob = await CreateJob(owner, ownerAuth.PersonalWorkspace.Id, null, "Representation asset");
+        await WaitForTerminal(owner, ownerJob.Id);
+        var ownerAssets = await owner.GetFromJsonAsync<AssetListDto>($"/api/assets?workspaceId={ownerAuth.PersonalWorkspace.Id}");
+        var ownerAsset = Assert.Single(ownerAssets!.Items);
+
+        using var other = factory.CreateClient();
+        var otherAuth = await Register(other, "Foreign Representation Owner");
+        var otherJob = await CreateJob(other, otherAuth.PersonalWorkspace.Id, null, "Foreign representation");
+        await WaitForTerminal(other, otherJob.Id);
+
+        Guid representationId;
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var foreignEntity = await db.Assets.Include(item => item.StoredFile).SingleAsync(item => item.SourceGenerationJobId == otherJob.Id);
+            var representation = new AssetRepresentation
+            {
+                Id = Guid.NewGuid(),
+                AssetId = ownerAsset.Id,
+                StoredFileId = foreignEntity.StoredFileId!.Value,
+                RepresentationType = "foreign",
+                FileName = "foreign.json",
+                ContentType = "application/json",
+                SizeBytes = foreignEntity.StoredFile!.SizeBytes,
+                CreatedAt = DateTime.UtcNow,
+            };
+            db.AssetRepresentations.Add(representation);
+            await db.SaveChangesAsync();
+            representationId = representation.Id;
+        }
+
+        var download = await owner.GetAsync($"/api/assets/{ownerAsset.Id}/representations/{representationId}/download");
+        Assert.Equal(HttpStatusCode.Conflict, download.StatusCode);
+        Assert.DoesNotContain("system.test", await download.Content.ReadAsStringAsync());
+    }
+
     private static async Task<AuthResponse> Register(HttpClient client, string displayName)
     {
         var response = await SendWithCsrf(client, HttpMethod.Post, "/api/auth/register", new { displayName, email = $"asset-{Guid.NewGuid():N}@example.com", password = "StrongPassword!123", preferredLanguage = "en" });
