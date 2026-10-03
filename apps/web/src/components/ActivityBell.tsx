@@ -154,7 +154,7 @@ export function NotificationBell({ unreadCount }: Readonly<{ unreadCount: number
       <Bell size={18} aria-hidden="true" />
       {badgeCount > 0 && <span className="notification-badge" aria-hidden="true">{badgeCount > 99 ? "99+" : badgeCount}</span>}
     </button>
-    {open && <section id={panelId} className="notification-panel" role="dialog" aria-modal="false" aria-labelledby={panelTitleId}>
+    {open && <section id={panelId} className="notification-panel" role="dialog" aria-modal="false" aria-label={t("notification.panelLabel")}>
       <div className="notification-panel-heading"><div><p className="section-eyebrow">{t("notification.eyebrow")}</p><h2 id={panelTitleId}>{t("notification.title")}</h2></div><button type="button" className="notification-mark-all" onClick={() => void markAllRead()} disabled={!result?.unreadCount || workingId === "all"} aria-busy={workingId === "all"}><CheckCheck size={14} aria-hidden="true" /> {t("notification.markAllRead")}</button></div>
       {panelError && <p className="notification-panel-error" role="alert">{panelError}</p>}
       {loading ? <div className="notification-panel-state" role="status" aria-live="polite"><LoaderCircle className="activity-spin" size={20} aria-hidden="true" /> {t("notification.loading")}</div> : !result?.items.length ? <div className="notification-panel-state"><Bell size={20} aria-hidden="true" /><span>{t("notification.empty")}</span></div> : <div className="notification-panel-list" role="list" aria-label={t("notification.title")}>{result.items.map((item) => <NotificationRow key={item.id} item={item} locale={locale} t={t} working={workingId === item.id} onRead={() => void markRead(item)} onNavigate={() => { if (!item.isRead) void markRead(item); setOpen(false); }} />)}</div>}
