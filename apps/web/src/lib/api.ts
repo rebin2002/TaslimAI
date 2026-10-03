@@ -744,6 +744,7 @@ export type AssetFilters = { projectId?: string; assetType?: AssetType; status?:
 export type AssetInput = { name: string; description?: string | null; projectId?: string | null };
 
 let csrfToken: string | null = null;
+let csrfRequest: Promise<string> | null = null;
 
 function requestId() {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
@@ -757,11 +758,21 @@ function generationInit(init: RequestInit, idempotencyKey: string): RequestInit 
 
 async function csrf(forceRefresh = false) {
   if (csrfToken && !forceRefresh) return csrfToken;
-  const response = await fetch(`${API_URL}/api/auth/csrf`, { credentials: "include", cache: "no-store" });
-  if (!response.ok) throw new Error("CSRF token unavailable");
-  const body = await response.json() as { token: string };
-  csrfToken = body.token;
-  return csrfToken;
+  if (csrfRequest && !forceRefresh) return csrfRequest;
+  const request = (async () => {
+    const response = await fetch(`${API_URL}/api/auth/csrf`, { credentials: "include", cache: "no-store" });
+    if (!response.ok) throw new Error("CSRF token unavailable");
+    const body = await response.json().catch(() => null) as { token?: unknown } | null;
+    if (!body || typeof body.token !== "string" || body.token.length === 0) throw new Error("CSRF token unavailable");
+    csrfToken = body.token;
+    return body.token;
+  })();
+  if (!forceRefresh) csrfRequest = request;
+  try {
+    return await request;
+  } finally {
+    if (!forceRefresh && csrfRequest === request) csrfRequest = null;
+  }
 }
 
 type ErrorBody = { error?: { code?: string; message?: string; fields?: Record<string, string[]> } };
