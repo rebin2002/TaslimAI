@@ -312,6 +312,52 @@ public sealed class UsageAccountingUnitTests
         Assert.Equal(1, await db.UsageTransactionAdjustments.CountAsync());
     }
 
+    [Fact]
+    public async Task Distinct_adjustment_keys_cannot_create_two_full_refunds_for_one_transaction()
+    {
+        const string connectionString = "Data Source=usage-adjustment-race;Mode=Memory;Cache=Shared";
+        await using var anchor = new SqliteConnection(connectionString);
+        await anchor.OpenAsync();
+        await using (var setupDb = new TaslimDbContext(new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(anchor).Options))
+        {
+            await setupDb.Database.EnsureCreatedAsync();
+            var (workspaceId, userId) = await AddOwnerAsync(setupDb, "refund-race@example.com");
+            setupDb.UsageTransactions.Add(new UsageTransaction
+            {
+                Id = Guid.NewGuid(), WorkspaceId = workspaceId, UserId = userId, RequestId = "refund-race",
+                Feature = UsageFeature.Generation, Provider = "provider", Model = "model", Status = UsageTransactionStatus.Completed,
+                ChargedAmount = 1.25m, IsBillable = true, BillableAt = DateTime.UtcNow, CreatedAt = DateTime.UtcNow,
+            });
+            await setupDb.SaveChangesAsync();
+        }
+
+        await using var firstConnection = new SqliteConnection(connectionString);
+        await using var secondConnection = new SqliteConnection(connectionString);
+        await firstConnection.OpenAsync();
+        await secondConnection.OpenAsync();
+        await using var firstDb = new TaslimDbContext(new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(firstConnection).Options);
+        await using var secondDb = new TaslimDbContext(new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(secondConnection).Options);
+        var firstTransaction = await firstDb.UsageTransactions.SingleAsync();
+        var secondTransaction = await secondDb.UsageTransactions.SingleAsync();
+
+        var first = await CreateLedger(firstDb, new ConfigurationBuilder().Build()).ReverseAsync(firstTransaction, "refund:race:first", "First refund attempt");
+        var second = await CreateLedger(secondDb, new ConfigurationBuilder().Build()).ReverseAsync(secondTransaction, "refund:race:second", "Retry refund attempt");
+
+        await using var verifyConnection = new SqliteConnection(connectionString);
+        await verifyConnection.OpenAsync();
+        await using var verifyDb = new TaslimDbContext(new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(verifyConnection).Options);
+        var adjustments = await verifyDb.UsageTransactionAdjustments.ToListAsync();
+        var transaction = await verifyDb.UsageTransactions.SingleAsync();
+        Assert.NotNull(first);
+        Assert.NotNull(second);
+        Assert.True(first!.Created);
+        Assert.False(second!.Created);
+        Assert.Equal(first.Adjustment.Id, second.Adjustment.Id);
+        Assert.Single(adjustments);
+        Assert.Equal(1.25m, adjustments[0].AmountUsd);
+        Assert.Equal(1.25m, transaction.ReversedAmount);
+    }
+
     private static UsageLedgerService CreateLedger(TaslimDbContext db, IConfiguration pricing) => new(
         db,
         new AiCostCalculator(new AiModelCatalog(pricing)),

@@ -398,8 +398,17 @@ public sealed class UsageLedgerService(
             db.Entry(adjustment).State = EntityState.Detached;
             db.Entry(transaction).State = EntityState.Unchanged;
             var concurrent = await db.UsageTransactionAdjustments.SingleOrDefaultAsync(item => item.WorkspaceId == transaction.WorkspaceId && item.IdempotencyKey == normalizedKey, cancellationToken);
+            if (concurrent is not null)
+            {
+                if (concurrent.UsageTransactionId != transaction.Id) throw new InvalidOperationException("The adjustment idempotency key belongs to a different usage transaction.");
+                return new UsageAdjustmentResult(concurrent, false);
+            }
+
+            // The transaction-level unique index is the concurrency guard for
+            // different retry keys. Replay the winning full adjustment rather
+            // than leaking a second audit row or surfacing a transient conflict.
+            concurrent = await db.UsageTransactionAdjustments.SingleOrDefaultAsync(item => item.WorkspaceId == transaction.WorkspaceId && item.UsageTransactionId == transaction.Id, cancellationToken);
             if (concurrent is null) throw;
-            if (concurrent.UsageTransactionId != transaction.Id) throw new InvalidOperationException("The adjustment idempotency key belongs to a different usage transaction.");
             return new UsageAdjustmentResult(concurrent, false);
         }
     }

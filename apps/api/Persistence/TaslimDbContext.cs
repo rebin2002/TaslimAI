@@ -1966,7 +1966,10 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.Property(adjustment => adjustment.Reason).HasMaxLength(500).IsRequired();
             entity.Property(adjustment => adjustment.CreatedAt).IsRequired();
             entity.HasIndex(adjustment => new { adjustment.WorkspaceId, adjustment.IdempotencyKey }).IsUnique();
-            entity.HasIndex(adjustment => adjustment.UsageTransactionId);
+            // Refunds and reversals always consume the full remaining charge.
+            // A unique transaction link prevents concurrent retries with different
+            // idempotency keys from creating multiple full adjustments.
+            entity.HasIndex(adjustment => adjustment.UsageTransactionId).IsUnique();
             entity.HasOne(adjustment => adjustment.Workspace).WithMany().HasForeignKey(adjustment => adjustment.WorkspaceId).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne(adjustment => adjustment.UsageTransaction).WithMany(transaction => transaction.Adjustments).HasForeignKey(adjustment => adjustment.UsageTransactionId).OnDelete(DeleteBehavior.Restrict);
             entity.ToTable("UsageTransactionAdjustments", table => table.HasCheckConstraint("CK_UsageTransactionAdjustments_PositiveAmount", "\"AmountUsd\" > 0"));
