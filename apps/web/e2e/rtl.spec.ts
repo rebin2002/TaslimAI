@@ -18,5 +18,18 @@ test.describe("RTL smoke", () => {
     await expect(page.locator(":focus")).toBeVisible();
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 2);
     expect(overflow).toBe(true);
+
+    await page.route("**/api/notifications/unread-count*", async (route) => {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ unreadCount: 0 }) });
+    });
+    await page.route("**/api/notifications?*", async (route) => {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ items: [], page: 1, pageSize: 50, totalCount: 0, totalPages: 0, unreadCount: 0 }) });
+    });
+    await page.goto("/notifications");
+    await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+    await expect(page.locator(".notification-page")).toBeVisible();
+    const notificationOverflow = await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 2);
+    expect(notificationOverflow).toBe(true);
+    await expect(page.getByRole("button", { name: /تحديد الكل كمقروء|هەمووی وەک خوێندراو دیاری بکە/i })).toBeDisabled();
   });
 });

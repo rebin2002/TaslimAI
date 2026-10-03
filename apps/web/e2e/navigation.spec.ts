@@ -48,4 +48,50 @@ test.describe("workspace navigation and protected views", () => {
     await page.getByRole("button", { name: /mark as read/i }).click();
     await expect(page.locator(".notification-new-label")).toHaveCount(0);
   });
+
+  test("opens the notification popover from the keyboard and restores focus on Escape", async ({ authenticatedPage: page }) => {
+    const notification = {
+      id: "00000000-0000-0000-0000-000000000003",
+      workspaceId: "00000000-0000-0000-0000-000000000004",
+      projectId: null,
+      generationJobId: null,
+      assetId: null,
+      type: "generation.completed",
+      resourceTitle: "E2E keyboard notification",
+      createdAt: new Date().toISOString(),
+      readAt: null,
+      isRead: false,
+      destination: "/activity",
+    };
+    let unread = true;
+    await page.route("**/api/notifications/unread-count*", async (route) => {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ unreadCount: unread ? 1 : 0 }) });
+    });
+    await page.route("**/api/notifications?*", async (route) => {
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({ items: [{ ...notification, isRead: !unread, readAt: unread ? null : new Date().toISOString() }], page: 1, pageSize: 6, totalCount: 1, totalPages: 1, unreadCount: unread ? 1 : 0 }),
+      });
+    });
+    await page.route("**/api/notifications/*/read", async (route) => {
+      unread = false;
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ read: true }) });
+    });
+    await page.goto("/projects");
+
+    const bell = page.getByRole("button", { name: /notifications/i }).first();
+    await expect(bell).toHaveAttribute("aria-expanded", "false");
+    await expect(bell).toHaveAttribute("aria-haspopup", "dialog");
+    await bell.focus();
+    await page.keyboard.press("Enter");
+    const panel = page.getByRole("dialog", { name: /notifications panel/i });
+    await expect(panel).toBeVisible();
+    await expect(panel.getByRole("button", { name: /mark as read.*E2E keyboard notification/i })).toBeVisible();
+    await panel.getByRole("button", { name: /mark as read.*E2E keyboard notification/i }).click();
+    await expect(bell).toHaveAccessibleName("Notifications");
+    await expect(panel.getByRole("button", { name: /mark as read/i })).toHaveCount(0);
+    await page.keyboard.press("Escape");
+    await expect(panel).toBeHidden();
+    await expect(bell).toBeFocused();
+  });
 });
