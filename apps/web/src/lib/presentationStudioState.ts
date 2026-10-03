@@ -19,6 +19,16 @@ export function presentationStudioState(job: GenerationJob | null, result: Prese
 }
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null; }
 function nonEmptyString(value: unknown): value is string { return typeof value === "string" && value.trim().length > 0; }
+function normalizedRepresentationType(type: string | null, fileName: string, contentType: string): string | null {
+  const candidates = [type, fileName.split(".").pop() ?? null, contentType].filter((value): value is string => !!value).map((value) => value.trim().toLowerCase());
+  for (const candidate of candidates) {
+    if (candidate === "pptx" || candidate === "application/vnd.openxmlformats-officedocument.presentationml.presentation") return "pptx";
+    if (candidate === "pdf" || candidate === "application/pdf") return "pdf";
+    if (candidate === "docx" || candidate === "application/vnd.openxmlformats-officedocument.wordprocessingml.document") return "docx";
+  }
+  const fallback = candidates[0];
+  return fallback && /^[a-z0-9][a-z0-9._-]{0,29}$/.test(fallback) ? fallback : null;
+}
 function parseBlocks(value: unknown): NonNullable<NonNullable<PresentationJobResult["previewSlides"]>[number]["blocks"]> {
   if (!Array.isArray(value)) return [];
   return value.flatMap((block) => {
@@ -33,7 +43,11 @@ function parseBlocks(value: unknown): NonNullable<NonNullable<PresentationJobRes
 }
 function parseRepresentations(value: unknown): NonNullable<PresentationJobResult["representations"]> {
   if (!Array.isArray(value)) return [];
-  return value.flatMap((representation) => isRecord(representation) && nonEmptyString(representation.id) && nonEmptyString(representation.type) && nonEmptyString(representation.fileName) && nonEmptyString(representation.contentType) ? [{ id: representation.id, type: representation.type, fileName: representation.fileName, contentType: representation.contentType }] : []);
+  return value.flatMap((representation) => {
+    if (!isRecord(representation) || !nonEmptyString(representation.id) || !nonEmptyString(representation.fileName) || !nonEmptyString(representation.contentType)) return [];
+    const type = normalizedRepresentationType(typeof representation.type === "string" ? representation.type : null, representation.fileName, representation.contentType);
+    return type ? [{ id: representation.id, type, fileName: representation.fileName, contentType: representation.contentType }] : [];
+  });
 }
 export function parsePresentationJobResult(job: GenerationJob | null): PresentationJobResult | null {
   if (!job?.resultJson) return null;
