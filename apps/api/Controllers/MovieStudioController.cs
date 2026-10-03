@@ -57,15 +57,15 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
         var result = await timeline.GetAsync(GetUserId(), id, cancellationToken);
         return result is null ? ApiResults.Error(this, 404, "MOVIE_TIMELINE_NOT_FOUND", "Movie timeline not found.") : Ok(result);
     }
-    [HttpGet("projects/{id:guid}/timeline/transitions")]
+    [HttpGet("projects/{id:guid}/timeline/transition-edits")]
     public async Task<IActionResult> GetTimelineTransitions(Guid id, CancellationToken cancellationToken)
     {
         var result = await transitionEdits.GetLatestAsync(GetUserId(), id, cancellationToken);
         return result is null ? ApiResults.Error(this, 404, "MOVIE_TIMELINE_TRANSITIONS_NOT_FOUND", "No persisted timeline transition edit was found.") : Ok(result);
     }
-    [HttpPost("projects/{id:guid}/timeline/transitions")]
+    [HttpPost("projects/{id:guid}/timeline/transition-edits")]
     [ValidateAntiForgeryToken]
-    public async Task<IActionResult> ApplyTimelineTransition(Guid id, MovieTimelineTransitionEditRequest request, CancellationToken cancellationToken)
+    public async Task<IActionResult> ApplyTimelineTransition(Guid id, Taslim.Api.Movies.MovieTimelineTransitionEditRequest request, CancellationToken cancellationToken)
     {
         try
         {
@@ -134,7 +134,7 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
 
     [HttpPost("projects/{id:guid}/timeline/transitions")]
     [ValidateAntiForgeryToken]
-    public async Task<IActionResult> ApplyTimelineTransitionEdit(Guid id, MovieTimelineTransitionEditRequest request, CancellationToken cancellationToken)
+    public async Task<IActionResult> ApplyTimelineTransitionEdit(Guid id, Taslim.Api.Contracts.MovieTimelineTransitionEditRequest request, CancellationToken cancellationToken)
     {
         try
         {
