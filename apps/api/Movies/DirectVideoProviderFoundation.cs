@@ -71,6 +71,9 @@ public sealed class DirectVideoProviderOptions
     public string ModelKey { get; set; } = "unconfigured";
     public string ApiBaseUrl { get; set; } = string.Empty;
     public string ApiKey { get; set; } = string.Empty;
+    public string SubmitPath { get; set; } = "video/generations";
+    public string StatusPathTemplate { get; set; } = "video/generations/{id}";
+    public string CancelPathTemplate { get; set; } = "video/generations/{id}/cancel";
     public int RequestTimeoutSeconds { get; set; } = 120;
     public int HealthProbeTimeoutSeconds { get; set; } = 5;
     public int MaxTransientRetries { get; set; } = 2;

@@ -58,10 +58,19 @@ public sealed class MovieSoundtrackController(IMovieSoundtrackService soundtrack
         return result is null ? NotFoundResult("MOVIE_SOUNDTRACK_VERSION_NOT_FOUND", "Soundtrack cue version not found.") : Ok(result);
     });
 
+    [HttpPost("soundtrack/versions/{versionId:guid}/submit")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> SubmitMedia(Guid versionId, CancellationToken cancellationToken) => await Execute(async () =>
+    {
+        var result = await soundtrack.SubmitMediaAsync(UserId(), versionId, cancellationToken);
+        return result is null ? NotFoundResult("MOVIE_SOUNDTRACK_VERSION_NOT_FOUND", "Soundtrack cue version not found.") : Accepted(result);
+    });
+
     private async Task<IActionResult> Execute(Func<Task<IActionResult>> action)
     {
         try { return await action(); }
         catch (MovieSoundtrackValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
+        catch (MovieSoundtrackMediaUnavailableException exception) { return ApiResults.Error(this, 503, "MOVIE_SOUNDTRACK_MEDIA_UNAVAILABLE", exception.Message); }
         catch (MovieCollaborationForbiddenException) { return Forbid(); }
     }
 

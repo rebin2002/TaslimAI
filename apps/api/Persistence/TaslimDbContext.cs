@@ -114,6 +114,7 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
     public DbSet<MovieTimelineRevision> MovieTimelineRevisions => Set<MovieTimelineRevision>();
     public DbSet<MovieTimelineTrack> MovieTimelineTracks => Set<MovieTimelineTrack>();
     public DbSet<MovieTimelineItem> MovieTimelineItems => Set<MovieTimelineItem>();
+    public DbSet<MovieTimelineTransitionEdit> MovieTimelineTransitionEdits => Set<MovieTimelineTransitionEdit>();
     public DbSet<MovieCaptionTrack> MovieCaptionTracks => Set<MovieCaptionTrack>();
     public DbSet<MovieCaptionCue> MovieCaptionCues => Set<MovieCaptionCue>();
     public DbSet<MovieTake> MovieTakes => Set<MovieTake>();
@@ -1200,6 +1201,18 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasOne(item => item.SourceTake).WithMany().HasForeignKey(item => item.SourceTakeId).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne(item => item.SourceSelect).WithMany(item => item.TimelineItems).HasForeignKey(item => item.SourceSelectId).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne(item => item.SourceAsset).WithMany().HasForeignKey(item => item.SourceAssetId).OnDelete(DeleteBehavior.Restrict);
+        });
+        builder.Entity<MovieTimelineTransitionEdit>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.Action).HasMaxLength(20).IsRequired();
+            entity.Property(item => item.DecisionJson).HasMaxLength(40_000).IsRequired();
+            entity.Property(item => item.ResultTimelineJson).HasMaxLength(100_000).IsRequired();
+            entity.HasIndex(item => new { item.MovieProjectId, item.ResultTimelineVersion });
+            entity.HasIndex(item => new { item.MovieTimelineId, item.DecisionId }).IsUnique();
+            entity.HasOne(item => item.Timeline).WithMany().HasForeignKey(item => item.MovieTimelineId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.MovieProject).WithMany().HasForeignKey(item => item.MovieProjectId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.CreatedByUser).WithMany().HasForeignKey(item => item.CreatedByUserId).OnDelete(DeleteBehavior.Restrict);
         });
         builder.Entity<MovieCaptionTrack>(entity =>
         {

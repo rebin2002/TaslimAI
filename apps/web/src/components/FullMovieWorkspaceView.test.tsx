@@ -112,7 +112,8 @@ describe("Full Movie workspace foundation", () => {
   it("keeps Quick Movie on a separate compact result path", () => {
     expect(createSource).toContain('mode === "Full"');
     expect(createSource).toContain('router.push(`/create/movie/${result.project.id}/overview`)');
-    expect(createSource).toContain("Quick Movie stays intentionally small");
+    expect(createSource).toContain("movieBody.quick.quickNote");
+    expect(i18nSource).toContain("movieBody.quick.quickNote");
     expect(createSource).toContain("function QuickMovieResult");
   });
 

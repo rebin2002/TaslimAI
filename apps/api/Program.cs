@@ -276,7 +276,8 @@ builder.Services.AddScoped<IMovieReferenceReadinessService, MovieReferenceReadin
 builder.Services.AddScoped<IMovieV2Service, MovieV2Service>();
 builder.Services.AddScoped<IMovieDialogueProductionService, MovieDialogueProductionService>();
 builder.Services.AddScoped<MovieDialogueVoiceExecutionStore>();
-    builder.Services.AddScoped<IMovieTimelineService, MovieTimelineService>();
+builder.Services.AddScoped<IMovieTimelineService, MovieTimelineService>();
+builder.Services.AddScoped<IMovieTimelineTransitionService, MovieTimelineTransitionService>();
 builder.Services.AddScoped<IMovieTakeSelectService, MovieTakeSelectService>();
     builder.Services.AddScoped<IMovieFinalMasteringService, MovieFinalMasteringService>();
 builder.Services.AddScoped<IMovieMissingInsertPlannerService, MovieMissingInsertPlannerService>();
@@ -327,6 +328,8 @@ builder.Services.AddScoped<IMovieShotExecutionService, MovieShotExecutionService
 builder.Services.Configure<MovieVideoOptions>(builder.Configuration.GetSection("MovieVideo"));
 builder.Services.Configure<MovieDialogueVoiceOptions>(builder.Configuration.GetSection("MovieDialogueVoice"));
 builder.Services.Configure<DirectVideoProviderOptions>(builder.Configuration.GetSection("DirectVideoProviders"));
+builder.Services.AddHttpClient<DirectVideoHttpProviderAdapter>()
+    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
 builder.Services.Configure<VideoGenerationAdapterOptions>(builder.Configuration.GetSection("VideoGenerationAdapters"));
 builder.Services.AddSingleton<IVideoGenerationAdapter, UnavailableVideoGenerationAdapter>();
 builder.Services.AddSingleton<VideoGenerationAdapterExecutionService>();
@@ -334,15 +337,18 @@ builder.Services.AddScoped<MovieVideoExecutionStore>();
 builder.Services.AddHttpClient<RunwayMovieVideoProvider>()
     .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
 builder.Services.AddHttpClient<ManusMovieVideoProvider>();
+builder.Services.AddSingleton<RunwayMovieVideoProvider>();
+builder.Services.AddSingleton<ManusMovieVideoProvider>();
+builder.Services.AddSingleton<IMovieVideoProviderRegistry>(services => new MovieVideoProviderRegistry(
+[
+    services.GetRequiredService<RunwayMovieVideoProvider>(),
+    services.GetRequiredService<ManusMovieVideoProvider>(),
+]));
 builder.Services.AddSingleton<IMovieVideoProvider>(services =>
 {
     var options = services.GetRequiredService<Microsoft.Extensions.Options.IOptions<MovieVideoOptions>>().Value;
     if (!options.Enabled) return new UnavailableMovieVideoProvider();
-    if (string.Equals(options.ProviderKey, "runway", StringComparison.OrdinalIgnoreCase))
-        return services.GetRequiredService<RunwayMovieVideoProvider>();
-    if (string.Equals(options.ProviderKey, "manus", StringComparison.OrdinalIgnoreCase) && options.Manus.Enabled)
-        return services.GetRequiredService<ManusMovieVideoProvider>();
-    return new UnavailableMovieVideoProvider();
+    return services.GetRequiredService<IMovieVideoProviderRegistry>().Resolve(options.ProviderKey);
 });
 builder.Services.AddScoped<IDirectorActionExecutor, MovieDirectorActionExecutor>();
 builder.Services.AddScoped<IDirectorActionExecutor, MovieDirectorEditRepairAudioActionExecutor>();

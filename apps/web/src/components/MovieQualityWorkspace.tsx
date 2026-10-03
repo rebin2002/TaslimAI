@@ -9,6 +9,7 @@ import {
   type MovieProductionContinuityReview,
   type MovieProject,
 } from "@/lib/api";
+import { useLocale } from "@/components/LocaleProvider";
 
 /**
  * The review gate that stands between an in-progress production and a delivered
@@ -17,6 +18,7 @@ import {
  * each final assembly.
  */
 export function MovieQualityWorkspace({ project }: { project: MovieProject }) {
+  const { t } = useLocale();
   const [checkpoint, setCheckpoint] = useState<MovieProductionCheckpoint | null>(null);
   const [continuity, setContinuity] = useState<MovieProductionContinuityReview | null>(null);
   const [assemblies, setAssemblies] = useState<MovieFinalAssembly[]>([]);
@@ -64,21 +66,17 @@ export function MovieQualityWorkspace({ project }: { project: MovieProject }) {
     <div className="movie-qc-workspace" data-testid="movie-qc-workspace">
       <section className="movie-qc-command" aria-labelledby="movie-qc-title">
         <div>
-          <span className="movie-workspace-kicker">Quality control · delivery gate</span>
-          <h3 id="movie-qc-title">Check before you deliver.</h3>
-          <p>
-            QC is a review gate over persisted evidence: production checkpoints, continuity findings and the
-            deterministic quality result recorded on the assembled master. Nothing here is simulated—if a check has no
-            evidence, it is reported as unverified.
-          </p>
+          <span className="movie-workspace-kicker">{t("movieQc.commandEyebrow")}</span>
+          <h3 id="movie-qc-title">{t("movieQc.commandTitle")}</h3>
+          <p>{t("movieQc.commandText")}</p>
         </div>
         <div className="movie-qc-command-mark">
           <ShieldCheck size={23} />
-          <span>REVIEW GATE</span>
+          <span>{t("movieQc.reviewGate")}</span>
         </div>
       </section>
 
-      <section className="movie-qc-summary" aria-label="Quality summary">
+      <section className="movie-qc-summary" aria-label={t("movieQc.summary")}>
         <QcMetric label="Shots" value={shots.length} detail="in the cut" />
         <QcMetric label="Selected takes" value={shots.length - unselectedShots.length} detail="carried forward" />
         <QcMetric label="Blocking findings" value={blockingFindings.length} detail="continuity errors" />
@@ -96,7 +94,7 @@ export function MovieQualityWorkspace({ project }: { project: MovieProject }) {
           </span>
         </div>
         <button type="button" className="movie-workspace-button is-quiet" onClick={() => void load()}>
-          <RefreshCw size={13} /> Re-run checks
+          <RefreshCw size={13} /> {t("movieQc.rerun")}
         </button>
       </section>
 

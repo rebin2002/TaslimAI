@@ -55,6 +55,7 @@ public sealed class MovieFinalAssemblyRequest
     public string ResolutionProfile { get; set; } = MovieFinalAssemblyProfiles.Uhd4K;
     public IReadOnlyList<MovieAssemblyTimelineItemRequest> Timeline { get; set; } = [];
     public IReadOnlyList<MovieAssemblyAudioMixInputRequest> AudioMixInputs { get; set; } = [];
+    public bool IncludeApprovedSoundtrackCues { get; set; }
     public MovieAssemblyCaptionsRequest Captions { get; set; } = new();
 }
 
@@ -114,7 +115,8 @@ public sealed record MovieFinalAssemblyInput(
     MovieAssemblyCaptions Captions,
     string RequestFingerprint,
     string IdempotencyKey,
-    int ExpectedDurationSeconds);
+    int ExpectedDurationSeconds,
+    IReadOnlyList<MovieTimelineTransitionContract>? Transitions = null);
 
 public sealed record MovieFinalAssemblyDto(
     Guid Id,
@@ -149,7 +151,8 @@ public interface IMovieFinalAssemblyService
 public sealed class MovieFinalAssemblyService(
     TaslimDbContext db,
     MovieCollaborationAccess collaboration,
-    IGenerationJobService jobs) : IMovieFinalAssemblyService
+    IGenerationJobService jobs,
+    IMovieTimelineTransitionService transitionEdits) : IMovieFinalAssemblyService
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = false };
 
@@ -209,8 +212,16 @@ public sealed class MovieFinalAssemblyService(
                 take.MovieClip?.ContinuitySnapshotHash));
         }
 
-        var audioInputs = await NormalizeAudioInputsAsync(movie.WorkspaceId, movie.ProjectId, request.AudioMixInputs ?? [], cancellationToken);
+        var requestedAudioInputs = request.AudioMixInputs ?? [];
+        if (request.IncludeApprovedSoundtrackCues)
+        {
+            var explicitAssetIds = requestedAudioInputs.Select(item => item.AssetId).ToHashSet();
+            var projected = await ProjectApprovedSoundtrackInputsAsync(movieProjectId, explicitAssetIds, cancellationToken);
+            requestedAudioInputs = requestedAudioInputs.Concat(projected).ToArray();
+        }
+        var audioInputs = await NormalizeAudioInputsAsync(movie.WorkspaceId, movie.ProjectId, requestedAudioInputs, cancellationToken);
         var captionAsset = await ValidateCaptionAssetAsync(movie.WorkspaceId, movie.ProjectId, captions, cancellationToken);
+        var persistedTransitions = (await transitionEdits.GetLatestAsync(userId, movieProjectId, cancellationToken))?.Timeline.Transitions ?? [];
         var expectedDuration = Math.Max(1, movie.DurationSeconds);
         var canonicalPayload = new
         {
@@ -218,7 +229,9 @@ public sealed class MovieFinalAssemblyService(
             movieProjectId,
             profile = profile.Key,
             timeline = canonicalTimeline,
+            transitions = persistedTransitions,
             audioMixInputs = audioInputs,
+            includeApprovedSoundtrackCues = request.IncludeApprovedSoundtrackCues,
             captions,
             expectedDuration,
         };
@@ -258,6 +271,8 @@ public sealed class MovieFinalAssemblyService(
                 sourceTakeIds = canonicalTimeline.Select(item => item.TakeId).ToArray(),
                 sourceAssetIds = canonicalTimeline.Select(item => item.AssetId).ToArray(),
                 audioAssetIds = audioInputs.Select(item => item.AssetId).ToArray(),
+                includeApprovedSoundtrackCues = request.IncludeApprovedSoundtrackCues,
+                transitions = persistedTransitions,
                 captionsAssetId = captionAsset?.Id,
                 resolutionProfile = profile.Key,
                 outputWidth = profile.Width,
@@ -284,7 +299,8 @@ public sealed class MovieFinalAssemblyService(
             captions,
             fingerprint,
             normalizedIdempotencyKey,
-            expectedDuration);
+            expectedDuration,
+            persistedTransitions);
         try
         {
             var job = await jobs.CreateAsync(userId, new CreateGenerationJobRequest
@@ -353,6 +369,29 @@ public sealed class MovieFinalAssemblyService(
             normalized.Add(new(request.AssetId, role, request.GainDb, request.StartTimeSeconds, request.EndTimeSeconds, request.Required));
         }
         return normalized;
+    }
+
+    private async Task<IReadOnlyList<MovieAssemblyAudioMixInputRequest>> ProjectApprovedSoundtrackInputsAsync(Guid movieProjectId, IReadOnlySet<Guid> explicitAssetIds, CancellationToken cancellationToken)
+    {
+        var cues = await db.MovieSoundtrackCues.AsNoTracking()
+            .Include(item => item.Versions)
+            .Where(item => item.MovieProjectId == movieProjectId && item.ApprovalState == MovieSoundtrackApprovalStates.Approved && item.ApprovedVersionId.HasValue)
+            .OrderBy(item => item.TimelineStartSeconds)
+            .ThenBy(item => item.Sequence)
+            .ToListAsync(cancellationToken);
+        return cues
+            .Select(cue => (cue, version: cue.Versions.FirstOrDefault(version => version.Id == cue.ApprovedVersionId && version.AssetId.HasValue)))
+            .Where(item => item.version?.AssetId is Guid assetId && !explicitAssetIds.Contains(assetId))
+            .Select(item => new MovieAssemblyAudioMixInputRequest
+            {
+                AssetId = item.version!.AssetId!.Value,
+                Role = "music",
+                GainDb = 0m,
+                StartTimeSeconds = item.cue.TimelineStartSeconds,
+                EndTimeSeconds = item.cue.TimelineStartSeconds + item.cue.DurationSeconds,
+                Required = true,
+            })
+            .ToArray();
     }
 
     private async Task<Asset?> ValidateCaptionAssetAsync(Guid workspaceId, Guid? projectId, MovieAssemblyCaptions captions, CancellationToken cancellationToken)
@@ -473,6 +512,7 @@ public sealed class MovieFinalAssemblyQualityControl
         var findings = new List<string>();
         if (output.Resolution.Width != input.Profile.Width || output.Resolution.Height != input.Profile.Height) findings.Add("MOVIE_ASSEMBLY_QC_RESOLUTION_MISMATCH");
         if (output.SizeBytes <= 0) findings.Add("MOVIE_ASSEMBLY_QC_OUTPUT_EMPTY");
+        if (!output.DurationMeasured) findings.Add("MOVIE_ASSEMBLY_QC_DURATION_UNMEASURED");
         if (output.DurationSeconds <= 0) findings.Add("MOVIE_ASSEMBLY_QC_DURATION_INVALID");
         if (output.DurationSeconds > Math.Max(1, input.ExpectedDurationSeconds) + 5) findings.Add("MOVIE_ASSEMBLY_QC_DURATION_EXCEEDED");
         return new(ContractVersion, findings.Count == 0 ? MovieFinalAssemblyQcStatuses.Passed : MovieFinalAssemblyQcStatuses.Failed, findings, output.Resolution.Width, output.Resolution.Height, output.DurationSeconds, output.OutputSha256);
@@ -491,7 +531,8 @@ public sealed record MovieFinalAssemblyExecutionResult(
     MovieResolution Resolution,
     int DurationSeconds,
     string? OutputSha256,
-    string? MetadataJson = null);
+    string? MetadataJson = null,
+    bool DurationMeasured = true);
 
 public interface IMovieFinalAssemblyExecutor
 {
@@ -511,6 +552,7 @@ public sealed class MovieFinalAssemblyOptions
 {
     public bool Enabled { get; set; }
     public string FfmpegPath { get; set; } = "ffmpeg";
+    public string FfprobePath { get; set; } = "ffprobe";
     public long MaxOutputBytes { get; set; } = 2L * 1024 * 1024 * 1024;
     public int ProcessTimeoutSeconds { get; set; } = 3_600;
 }
@@ -620,7 +662,7 @@ public sealed class FfmpegMovieFinalAssemblyExecutor(IOptions<MovieFinalAssembly
             if (!info.Exists || info.Length <= 0 || info.Length > Math.Min(2L * 1024 * 1024 * 1024, Math.Max(1, settings.MaxOutputBytes))) throw new MovieFinalAssemblyExecutionException("ASSEMBLY_OUTPUT_INVALID");
             progress.Report(90);
             var hash = await ComputeSha256Async(outputPath, cancellationToken);
-            var duration = Math.Max(1, request.Contract.ExpectedDurationSeconds);
+            var duration = await MeasureDurationAsync(outputPath, cancellationToken);
             return new(
                 "master.mp4",
                 "video/mp4",
@@ -629,7 +671,8 @@ public sealed class FfmpegMovieFinalAssemblyExecutor(IOptions<MovieFinalAssembly
                 new MovieResolution(request.Contract.Profile.Width, request.Contract.Profile.Height),
                 duration,
                 hash,
-                JsonSerializer.Serialize(new { width = request.Contract.Profile.Width, height = request.Contract.Profile.Height, durationSeconds = duration, outputSha256 = hash, elapsedMilliseconds = (long)Stopwatch.GetElapsedTime(start).TotalMilliseconds }));
+                JsonSerializer.Serialize(new { width = request.Contract.Profile.Width, height = request.Contract.Profile.Height, durationSeconds = duration, durationMeasured = true, outputSha256 = hash, elapsedMilliseconds = (long)Stopwatch.GetElapsedTime(start).TotalMilliseconds }),
+                true);
         }
         catch
         {
@@ -642,6 +685,35 @@ public sealed class FfmpegMovieFinalAssemblyExecutor(IOptions<MovieFinalAssembly
     {
         await using var stream = File.OpenRead(path);
         return Convert.ToHexString(await SHA256.HashDataAsync(stream, cancellationToken)).ToLowerInvariant();
+    }
+
+    private async Task<int> MeasureDurationAsync(string path, CancellationToken cancellationToken)
+    {
+        if (Path.IsPathRooted(settings.FfprobePath) && !File.Exists(settings.FfprobePath))
+            throw new MovieFinalAssemblyExecutionException("ASSEMBLY_DURATION_MEASUREMENT_FAILED");
+        if (string.IsNullOrWhiteSpace(settings.FfprobePath))
+            throw new MovieFinalAssemblyExecutionException("ASSEMBLY_DURATION_MEASUREMENT_FAILED");
+
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = settings.FfprobePath,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardError = true,
+            RedirectStandardOutput = true,
+        };
+        foreach (var argument in new[] { "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", path })
+            startInfo.ArgumentList.Add(argument);
+        using var process = new Process { StartInfo = startInfo };
+        if (!process.Start()) throw new MovieFinalAssemblyExecutionException("ASSEMBLY_DURATION_MEASUREMENT_FAILED");
+        var outputTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
+        var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
+        await process.WaitForExitAsync(cancellationToken).WaitAsync(TimeSpan.FromSeconds(Math.Clamp(settings.ProcessTimeoutSeconds, 1, 86_400)), cancellationToken);
+        var output = (await outputTask).Trim();
+        _ = await errorTask;
+        if (process.ExitCode != 0 || !decimal.TryParse(output, NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds) || seconds <= 0m || seconds > int.MaxValue)
+            throw new MovieFinalAssemblyExecutionException("ASSEMBLY_DURATION_MEASUREMENT_FAILED");
+        return Math.Max(1, checked((int)Math.Round(seconds, MidpointRounding.AwayFromZero)));
     }
 
     private static void TryDelete(string directory)
