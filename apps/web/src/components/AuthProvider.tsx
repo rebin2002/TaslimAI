@@ -4,6 +4,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { useRouter } from "next/navigation";
 import { api, type AuthResponse, type LoginInput, type OnboardingInput, type ProfileInput, type RegisterInput, type User } from "@/lib/api";
 import { useLocale } from "@/components/LocaleProvider";
+import { locales, type Locale } from "@/lib/i18n";
 
 type AuthContextValue = {
   user: User | null;
@@ -70,7 +71,12 @@ export function AuthProvider({ children }: Readonly<{ children: React.ReactNode 
   const updateProfile = useCallback(async (input: ProfileInput) => {
     const next = await api.updateProfile(input);
     setSession(next);
-  }, []);
+    // The profile endpoint persists the interface language. Apply the same
+    // choice immediately so Account does not require a reload to switch the
+    // document language and direction.
+    const nextLocale = input.preferredLanguage as Locale;
+    if (locales.includes(nextLocale)) setLocale(nextLocale);
+  }, [setLocale]);
 
   const completeOnboarding = useCallback(async (input: OnboardingInput) => {
     const next = await api.completeOnboarding(input);

@@ -37,4 +37,20 @@ test.describe("authentication and onboarding", () => {
     await expect(page.getByRole("link", { name: /assets/i }).first()).toBeVisible();
     await expect(page.getByRole("link", { name: /chat/i }).first()).toBeVisible();
   });
+
+  test("applies a saved account interface language immediately and after reload", async ({ authenticatedPage: page }) => {
+    await page.goto("/account");
+    const interfaceLanguage = page.locator(".account-profile-card select").first();
+    await expect(interfaceLanguage).toHaveValue("en");
+
+    await interfaceLanguage.selectOption("ar");
+    await page.getByRole("button", { name: /save changes/i }).click();
+
+    await expect(page.locator("html")).toHaveAttribute("lang", "ar");
+    await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+    await page.reload();
+    await expect(page.locator(".account-profile-card select").first()).toHaveValue("ar");
+    await expect(page.locator("html")).toHaveAttribute("lang", "ar");
+    await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+  });
 });
