@@ -7,6 +7,7 @@ export function safeMarkdownHref(href: string | undefined): string | undefined {
   if (!href) return undefined;
   const value = href.trim();
   if (!value) return undefined;
+  if (value.startsWith("//")) return undefined;
   if (value.startsWith("/") || value.startsWith("./") || value.startsWith("../") || value.startsWith("#")) return value;
 
   try {
@@ -17,12 +18,21 @@ export function safeMarkdownHref(href: string | undefined): string | undefined {
   }
 }
 
+export function isExternalMarkdownHref(href: string): boolean {
+  try {
+    return ["http:", "https:", "mailto:"].includes(new URL(href).protocol);
+  } catch {
+    return false;
+  }
+}
+
 const components: Components = {
   a: ({ node, href, children, ...props }) => {
     void node;
     const safeHref = safeMarkdownHref(href);
     if (!safeHref) return <span {...props}>{children}</span>;
-    return <a {...props} href={safeHref} target="_blank" rel="noopener noreferrer nofollow">{children}</a>;
+    const external = isExternalMarkdownHref(safeHref);
+    return <a {...props} href={safeHref} target={external ? "_blank" : undefined} rel={external ? "noopener noreferrer nofollow" : undefined}>{children}</a>;
   },
   table: ({ node, children, ...props }) => {
     void node;
