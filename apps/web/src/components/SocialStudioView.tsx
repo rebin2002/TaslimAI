@@ -2,12 +2,12 @@
 
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Check, CheckCircle2, Copy, FileText, Image as ImageIcon, LoaderCircle, RefreshCw, Share2, ShieldCheck, Sparkles, WandSparkles, XCircle } from "lucide-react";
 import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
-import { api, type Asset, type GenerationJob, type Project, type SocialJobResult, type SocialPost, type StoredFile } from "@/lib/api";
-import { canCancelSocialJob, displaySocialProgress, formatSocialPostForCopy, isSocialAssetSelectable, isSocialSourceReady, nextSocialPollDelay, normalizeSocialPreviewPlatform, parseSocialJobResult, shouldPollSocialJob, socialStudioState, type SocialPreviewPlatform } from "@/lib/socialStudioState";
+import { ApiError, api, type Asset, type GenerationJob, type Project, type SocialJobResult, type SocialPost, type StoredFile } from "@/lib/api";
+import { canCancelSocialJob, clearSocialActiveJobId, displaySocialProgress, formatSocialPostForCopy, isSocialAssetSelectable, isSocialSourceReady, nextSocialPollDelay, normalizeSocialPreviewPlatform, parseSocialJobResult, persistSocialActiveJobId, readSocialActiveJobId, shouldPollSocialJob, socialStudioState, type SocialPreviewPlatform } from "@/lib/socialStudioState";
 
 const extensions = [".pdf", ".docx", ".txt", ".md", ".csv", ".xlsx"];
 type Language = "auto" | "en" | "ar" | "ku";
@@ -119,6 +119,7 @@ export function SocialStudioView() {
   const [pollRetry, setPollRetry] = useState(0);
   const [error, setError] = useState("");
   const [copyState, setCopyState] = useState("");
+  const restoreJobId = useRef<string | null>(null);
 
   const loadInputs = useCallback(async () => {
     if (!workspace) return;
@@ -134,6 +135,26 @@ export function SocialStudioView() {
   // Synchronize authenticated workspace choices into the form.
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void loadInputs(); }, [loadInputs]);
+  useEffect(() => {
+    if (!workspace || current) return;
+    const storedJobId = readSocialActiveJobId(workspace.id);
+    if (!storedJobId) return;
+    restoreJobId.current = storedJobId;
+    let active = true;
+    void api.getGenerationJob(storedJobId).then((job) => {
+      if (!active || restoreJobId.current !== storedJobId) return;
+      if (job.workspaceId !== workspace.id || job.jobType.toLowerCase() !== "social.generate") {
+        clearSocialActiveJobId(workspace.id);
+        return;
+      }
+      setCurrent(job);
+      setPollRetry(0);
+    }).catch((cause) => {
+      if (!active || restoreJobId.current !== storedJobId) return;
+      if (cause instanceof ApiError && (cause.status === 403 || cause.status === 404)) clearSocialActiveJobId(workspace.id);
+    });
+    return () => { active = false; };
+  }, [workspace, current]);
   useEffect(() => {
     if (!current || !shouldPollSocialJob(current)) return;
     const jobId = current.id;
@@ -156,10 +177,11 @@ export function SocialStudioView() {
   async function create(event: React.FormEvent) {
     event.preventDefault();
     if (!workspace || prompt.trim().length < 3) { setError(t("social.required")); return; }
+    restoreJobId.current = null;
     setWorking(true); setError(""); setCopyState("");
     try {
       const job = await api.createSocialGenerationJob({ workspaceId: workspace.id, projectId: projectId || null, prompt: prompt.trim(), socialType, platform, tone, language, audience: audience.trim() || null, brandVoice: brandVoice.trim() || null, callToAction: callToAction.trim() || null, includeHashtags, includeEmojis, generateVariants, assetIds: selectedAssets, attachmentIds: selectedFiles });
-      setCurrent(job); setPollRetry(0);
+      persistSocialActiveJobId(workspace.id, job.id); setCurrent(job); setPollRetry(0);
     } catch { setError(t("social.createError")); } finally { setWorking(false); }
   }
   async function cancel() {
@@ -171,7 +193,7 @@ export function SocialStudioView() {
     try { await navigator.clipboard.writeText(formatSocialPostForCopy(post)); setCopyState(String(post.order)); window.setTimeout(() => setCopyState(""), 1800); }
     catch { setError(t("social.copyError")); }
   }
-  function createAnother() { setCurrent(null); setError(""); setCopyState(""); setPollRetry(0); }
+  function createAnother() { restoreJobId.current = null; if (workspace) clearSocialActiveJobId(workspace.id); setCurrent(null); setError(""); setCopyState(""); setPollRetry(0); }
 
   const result = parseSocialJobResult(current);
   const state = socialStudioState(current, result);
