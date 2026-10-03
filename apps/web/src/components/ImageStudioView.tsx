@@ -24,7 +24,7 @@ import { AssetDetail, type AssetDetailLabels } from "@/components/AssetDetail";
 import { useLocale } from "@/components/LocaleProvider";
 import { useSearchParams } from "next/navigation";
 import { api, type Asset, type GenerationJob, type ImageGenerationInput, type Project } from "@/lib/api";
-import { canCancelImageJob, parseImageJobResult } from "@/lib/imageStudioState";
+import { canCancelImageJob, nextImagePollDelay, parseImageJobResult, shouldPollImageJob } from "@/lib/imageStudioState";
 
 const styles = ["auto", "photorealistic", "product", "illustration", "3d", "minimal", "poster", "social_media"] as const;
 const aspects = ["square", "portrait", "landscape"] as const;
@@ -61,6 +61,7 @@ export function ImageStudioView() {
   const [textInImage, setTextInImage] = useState("");
   const [projectId, setProjectId] = useState(() => searchParams.get("projectId") ?? "");
   const [current, setCurrent] = useState<GenerationJob | null>(null);
+  const [pollRetry, setPollRetry] = useState(0);
   const [working, setWorking] = useState(false);
   const [loadingProjects, setLoadingProjects] = useState(true);
   const [loadingRecent, setLoadingRecent] = useState(true);
@@ -99,18 +100,25 @@ export function ImageStudioView() {
   useEffect(() => { void loadRecent(); }, [loadRecent]);
 
   useEffect(() => {
-    if (!current || current.status === "Succeeded" || current.status === "Failed" || current.status === "Cancelled") return;
+    if (!current || !shouldPollImageJob(current)) return;
     let active = true;
     const timer = window.setTimeout(async () => {
       try {
         const next = await api.getGenerationJob(current.id);
-        if (active) setCurrent(next);
+        if (active) {
+          setCurrent(next);
+          setPollRetry(0);
+          setError("");
+        }
       } catch (caught) {
-        if (active) setError(caught instanceof Error ? caught.message : t("image.pollError"));
+        if (active) {
+          setPollRetry((attempt) => attempt + 1);
+          setError(caught instanceof Error ? caught.message : t("image.pollError"));
+        }
       }
-    }, 650);
+    }, nextImagePollDelay(current, pollRetry) ?? 650);
     return () => { active = false; window.clearTimeout(timer); };
-  }, [current, t]);
+  }, [current, pollRetry, t]);
 
   async function startGeneration() {
     if (!workspace || description.trim().length < 3) {
@@ -119,6 +127,7 @@ export function ImageStudioView() {
     }
     setWorking(true);
     setError("");
+    setPollRetry(0);
     const input: ImageGenerationInput = {
       workspaceId: workspace.id,
       projectId: projectId || null,

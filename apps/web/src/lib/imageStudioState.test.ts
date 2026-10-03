@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { GenerationJob } from "./api";
-import { canCancelImageJob, isImageJob, parseImageJobResult, safeImageJobView } from "./imageStudioState";
+import { canCancelImageJob, isImageJob, isImageTerminal, nextImagePollDelay, parseImageJobResult, safeImageJobView, shouldPollImageJob } from "./imageStudioState";
 
 function job(overrides: Partial<GenerationJob> = {}): GenerationJob {
   return {
@@ -16,6 +16,17 @@ describe("image studio state", () => {
     expect(canCancelImageJob(job({ status: "Queued" }))).toBe(true);
     expect(canCancelImageJob(job({ status: "Succeeded" }))).toBe(false);
     expect(canCancelImageJob(job({ cancellationRequested: true }))).toBe(false);
+  });
+
+  it("retries transient polling failures with bounded backoff and stops at terminal states", () => {
+    expect(isImageTerminal(job({ status: "Running" }))).toBe(false);
+    expect(shouldPollImageJob(job({ status: "Running" }))).toBe(true);
+    expect(nextImagePollDelay(job({ status: "Running" }), 0)).toBe(650);
+    expect(nextImagePollDelay(job({ status: "Running" }), 2)).toBe(1_950);
+    expect(nextImagePollDelay(job({ status: "Running" }), 99)).toBe(2_800);
+    expect(isImageTerminal(job({ status: "Succeeded" }))).toBe(true);
+    expect(shouldPollImageJob(job({ status: "Succeeded" }))).toBe(false);
+    expect(nextImagePollDelay(job({ status: "Succeeded" }), 0)).toBeNull();
   });
 
   it("parses only the safe Asset result fields", () => {
