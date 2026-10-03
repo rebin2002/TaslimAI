@@ -138,6 +138,11 @@ button { border: 0; cursor: pointer; }
 [dir="rtl"] .image-button-arrow { margin-inline-start: 0; margin-inline-end: auto; }
 [dir="rtl"] .image-success-canvas, [dir="rtl"] .image-recent-item { text-align: start; }
 
+.image-studio-page :is(a, button, input, select, textarea, summary):focus-visible { outline: 2px solid #8de0d1; outline-offset: 3px; }
+@media (prefers-reduced-motion: reduce) {
+  .image-studio-page *, .image-studio-page *::before, .image-studio-page *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; transition-duration: 0.01ms !important; }
+}
+
 /* Batch 3.3 usage ledger view — additive styles only. */
 .usage-page { padding-bottom: 70px; }
 .usage-header { padding-top: 42px; }
