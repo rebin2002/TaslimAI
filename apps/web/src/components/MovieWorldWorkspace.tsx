@@ -182,7 +182,7 @@ function GeographySheetPanel({
 function GeographyField({
   icon, label, value, onChange, placeholder, disabled }: { icon: React.ReactNode; label: string; value: string; onChange: (value: string) => void; placeholder: string; disabled?: boolean }) { return <label className="movie-world-geography-field"><span>{icon} {label}</span><textarea value={value} onChange={(event) => onChange(event.target.value)} placeholder={`${placeholder} · one per line · use | for detail`} disabled={disabled} /></label>; }
 function Note({
-  label, value }: { label: string; value?: string | null }) { return <div><span>{label}</span><p>{value || "Not set yet"}</p></div>; }
+  label, value }: { label: string; value?: string | null }) { const { t } = useLocale(); return <div><span>{label}</span><p>{value || t("movie.notSet")}</p></div>; }
 function AssetChip({
   asset,
 }: { asset: MovieWorldAsset }) { return <div className="movie-world-asset-chip"><ImageIcon size={14} aria-hidden="true" /><span><small>Reference asset</small><strong>{asset.name}</strong></span><Link href={`/assets?search=${encodeURIComponent(asset.name)}`}><ArrowUpRight size={13} /></Link></div>; }
