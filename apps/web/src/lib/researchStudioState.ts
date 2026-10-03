@@ -43,6 +43,9 @@ export function parseResearchJobResult(job: GenerationJob | null): ResearchJobRe
   if (!job?.resultJson) return null;
   try { return parseResult(JSON.parse(job.resultJson)); } catch { return null; }
 }
-export function mergeResearchSources(result: ResearchJobResult | null, sources: ResearchSource[]) { return result ? { ...result, sources, sourceCount: sources.length } : result; }
+export function mergeResearchSources(result: ResearchJobResult | null, sources: ResearchSource[]) {
+  if (!result || sources.length === 0) return result;
+  return { ...result, sources, sourceCount: sources.length };
+}
 export function isResearchSourceReady(file: { extension: string; status: string; textExtractionStatus: string }) { return [".pdf", ".docx", ".txt", ".md", ".csv", ".xlsx"].includes(file.extension.toLowerCase()) && file.status === "Ready" && file.textExtractionStatus === "Ready"; }
 export function isSafeExternalUrl(value: string | null) { if (!value) return false; try { const url = new URL(value); return url.protocol === "https:" || url.protocol === "http:"; } catch { return false; } }
