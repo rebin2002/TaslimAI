@@ -18,6 +18,22 @@ const deliveryRooms = [
   { slug: "exports", testId: "movie-exports-workspace" },
   { slug: "team", testId: "movie-team-workspace" },
 ];
+const deepModules = [
+  "overview",
+  "production-kit",
+  "story",
+  "cast",
+  "world",
+  "scenes",
+  "storyboard",
+  "production",
+  "selects",
+  "edit",
+  "audio",
+  "qc",
+  "exports",
+  "team",
+] as const;
 
 const locales = ["ar", "ku"] as const;
 
@@ -108,4 +124,18 @@ test.describe("Movie Studio RTL", () => {
     }
     await expectNoHorizontalOverflow(page, "project map (ar)");
   });
+
+  for (const locale of locales) {
+    test(`covers every deep module body without RTL overflow in ${locale}`, async ({ authenticatedPage: page }) => {
+      test.setTimeout(300_000);
+      const projectId = await createFullMovieProject(page);
+      for (const slug of deepModules) {
+        await page.goto(`/create/movie/${projectId}/${slug}`);
+        await expect(page.locator("main.movie-workspace-main")).toBeVisible({ timeout: 30_000 });
+        await applyLocale(page, locale, `${slug} (${locale})`);
+        await expectNoHorizontalOverflow(page, `${slug} (${locale})`);
+        await expect(page.locator("main.movie-workspace-main")).toBeVisible();
+      }
+    });
+  }
 });

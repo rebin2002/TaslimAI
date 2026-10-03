@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { api, type AuthResponse, type LoginInput, type OnboardingInput, type ProfileInput, type RegisterInput, type User } from "@/lib/api";
 import { useLocale } from "@/components/LocaleProvider";
@@ -24,6 +24,7 @@ export function AuthProvider({ children }: Readonly<{ children: React.ReactNode 
   const [loading, setLoading] = useState(true);
   const { setLocale } = useLocale();
   const router = useRouter();
+  const sessionLocaleInitialized = useRef(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -39,7 +40,13 @@ export function AuthProvider({ children }: Readonly<{ children: React.ReactNode 
   // The refresh synchronizes React state with the server session after mount.
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void refresh(); }, [refresh]);
-  useEffect(() => { if (session?.user.preferredLanguage) setLocale(session.user.preferredLanguage); }, [session?.user.preferredLanguage, setLocale]);
+  useEffect(() => {
+    if (session?.user.preferredLanguage && !sessionLocaleInitialized.current) {
+      sessionLocaleInitialized.current = true;
+      const savedLocale = window.localStorage.getItem("taslim-locale");
+      if (!savedLocale) setLocale(session.user.preferredLanguage);
+    }
+  }, [session?.user.preferredLanguage, setLocale]);
 
   const signIn = useCallback(async (input: LoginInput) => {
     const next = await api.login(input);
@@ -56,6 +63,7 @@ export function AuthProvider({ children }: Readonly<{ children: React.ReactNode 
   const signOut = useCallback(async () => {
     await api.logout();
     setSession(null);
+    sessionLocaleInitialized.current = false;
     router.push("/");
   }, [router]);
 

@@ -132,6 +132,18 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
         catch (MovieTimelineValidationException exception) { return ApiResults.Error(this, exception.Code == MovieTimelineErrors.Locked ? 409 : 400, exception.Code, exception.Message); }
     }
 
+    [HttpPost("projects/{id:guid}/timeline/transitions")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> ApplyTimelineTransitionEdit(Guid id, MovieTimelineTransitionEditRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await timeline.ApplyTransitionEditAsync(GetUserId(), id, request, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_TIMELINE_NOT_FOUND", "Movie timeline not found.") : Ok(result);
+        }
+        catch (MovieTimelineValidationException exception) { return ApiResults.Error(this, exception.Code == MovieTimelineErrors.Locked ? 409 : 400, exception.Code, exception.Message); }
+    }
+
     [HttpPost("timeline/revisions/{revisionId:guid}/tracks")]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> AddTimelineTrack(Guid revisionId, MovieTimelineTrackRequest request, CancellationToken cancellationToken)

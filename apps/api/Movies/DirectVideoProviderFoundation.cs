@@ -170,7 +170,11 @@ public sealed record DirectVideoRequest(
     bool UpscaleRequested,
     string? SourceImageUri,
     string? ContinuationProviderJobId,
-    string? ContinuityContextJson);
+    string? ContinuityContextJson,
+    string? FirstFrameImageUri = null,
+    string? LastFrameImageUri = null,
+    IReadOnlyList<DirectVideoReferenceImage>? ReferenceImages = null);
+public sealed record DirectVideoReferenceImage(string Uri, string? Role = null);
 
 public sealed record DirectVideoSubmission(string ProviderJobId);
 
@@ -257,7 +261,11 @@ public static class DirectVideoRequestNormalizer
         if (!capabilities.SupportsResolution(resolution))
             throw new DirectVideoRequestNormalizationException(DirectVideoErrorCodes.CapabilityUnsupported);
 
-        if (!string.IsNullOrWhiteSpace(request.SourceImageUri) && !capabilities.SupportsReferenceImage)
+        var hasReferenceInput = !string.IsNullOrWhiteSpace(request.SourceImageUri)
+            || !string.IsNullOrWhiteSpace(request.FirstFrameImageUri)
+            || !string.IsNullOrWhiteSpace(request.LastFrameImageUri)
+            || request.ReferenceImages is { Count: > 0 };
+        if (hasReferenceInput && !capabilities.SupportsReferenceImage)
             throw new DirectVideoRequestNormalizationException(DirectVideoErrorCodes.CapabilityUnsupported);
         if (!string.IsNullOrWhiteSpace(request.ContinuationProviderJobId) && !capabilities.SupportsContinuation)
             throw new DirectVideoRequestNormalizationException(DirectVideoErrorCodes.CapabilityUnsupported);
@@ -272,6 +280,9 @@ public static class DirectVideoRequestNormalizer
             throw new DirectVideoRequestNormalizationException(DirectVideoErrorCodes.RequestInvalid);
 
         var sourceImageUri = NormalizeMediaUri(request.SourceImageUri);
+        var firstFrameImageUri = NormalizeMediaUri(request.FirstFrameImageUri);
+        var lastFrameImageUri = NormalizeMediaUri(request.LastFrameImageUri);
+        var referenceImages = NormalizeReferences(request.ReferenceImages, 16);
         var continuationId = NormalizeBounded(request.ContinuationProviderJobId, 240);
         var contextJson = BuildContinuityContext(request, 24_000);
         return new DirectVideoRequest(
@@ -286,7 +297,10 @@ public static class DirectVideoRequestNormalizer
             upscaleRequested,
             sourceImageUri,
             continuationId,
-            contextJson);
+            contextJson,
+            firstFrameImageUri,
+            lastFrameImageUri,
+            referenceImages);
     }
 
     private static string NormalizeResolution(string? value) => string.IsNullOrWhiteSpace(value)
@@ -347,6 +361,15 @@ public static class DirectVideoRequestNormalizer
         return trimmed;
     }
 
+    private static IReadOnlyList<DirectVideoReferenceImage>? NormalizeReferences(IReadOnlyList<MovieVideoReferenceImage>? values, int maxCount)
+    {
+        if (values is null || values.Count == 0) return null;
+        if (values.Count > maxCount) throw new DirectVideoRequestNormalizationException(DirectVideoErrorCodes.RequestInvalid);
+        var normalized = values.Select(item => new DirectVideoReferenceImage(
+            NormalizeMediaUri(item.Uri) ?? throw new DirectVideoRequestNormalizationException(DirectVideoErrorCodes.RequestInvalid),
+            string.IsNullOrWhiteSpace(item.Role) ? null : item.Role.Trim()[..Math.Min(item.Role.Trim().Length, 80)])).ToArray();
+        return normalized.Length == 0 ? null : normalized;
+    }
     private static string? NormalizeBounded(string? value, int maxLength)
     {
         if (string.IsNullOrWhiteSpace(value)) return null;

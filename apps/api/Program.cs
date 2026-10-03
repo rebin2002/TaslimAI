@@ -350,6 +350,13 @@ builder.Services.AddSingleton<IMovieVideoProvider>(services =>
     if (!options.Enabled) return new UnavailableMovieVideoProvider();
     return services.GetRequiredService<IMovieVideoProviderRegistry>().Resolve(options.ProviderKey);
 });
+builder.Services.AddHttpClient<DirectVideoHttpAdapter>((services, client) =>
+{
+    var configuration = services.GetRequiredService<Microsoft.Extensions.Options.IOptions<DirectVideoProviderOptions>>().Value.ToConfiguration();
+    if (configuration.ApiBaseUri is not null) client.BaseAddress = configuration.ApiBaseUri;
+    client.Timeout = TimeSpan.FromSeconds(configuration.RequestTimeoutSeconds);
+});
+builder.Services.AddSingleton<IDirectVideoProviderAdapter>(services => services.GetRequiredService<DirectVideoHttpAdapter>());
 builder.Services.AddScoped<IDirectorActionExecutor, MovieDirectorActionExecutor>();
 builder.Services.AddScoped<IDirectorActionExecutor, MovieDirectorEditRepairAudioActionExecutor>();
 builder.Services.AddScoped<IDirectorActionExecutor, MovieDirectorStoryActionExecutor>();

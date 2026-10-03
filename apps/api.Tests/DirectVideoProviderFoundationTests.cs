@@ -77,6 +77,26 @@ public sealed class DirectVideoProviderFoundationTests
     }
 
     [Fact]
+    public void Request_normalization_preserves_frame_roles_and_reference_images()
+    {
+        var request = Request() with
+        {
+            FirstFrameImageUri = "https://assets.invalid/first.png",
+            LastFrameImageUri = "https://assets.invalid/last.png",
+            ReferenceImages =
+            [
+                new MovieVideoReferenceImage("https://assets.invalid/character.png", "character"),
+                new MovieVideoReferenceImage("https://assets.invalid/wardrobe.png", "wardrobe"),
+            ],
+        };
+        var normalized = DirectVideoRequestNormalizer.Normalize(request, Capabilities());
+        Assert.Equal("https://assets.invalid/first.png", normalized.FirstFrameImageUri);
+        Assert.Equal("https://assets.invalid/last.png", normalized.LastFrameImageUri);
+        Assert.Equal("character", normalized.ReferenceImages![0].Role);
+        Assert.Equal("wardrobe", normalized.ReferenceImages[1].Role);
+    }
+
+    [Fact]
     public void Result_normalization_maps_states_clamps_progress_and_discards_unsafe_metadata()
     {
         var queued = DirectVideoResultNormalizer.NormalizeStatus(new DirectVideoProviderStatusResponse("processing", 175));

@@ -8,6 +8,13 @@ public sealed class MovieTimelineRevisionRequest
     public string? Label { get; set; }
     public string? ChangeSummary { get; set; }
     public IReadOnlyList<MovieTimelineTrackRequest>? Tracks { get; set; }
+    public string? CanonicalTimelineJson { get; set; }
+}
+
+public sealed class MovieTimelineTransitionEditRequest
+{
+    public Guid? BaseRevisionId { get; set; }
+    public MovieTimelineEditDecisionContract Decision { get; set; } = null!;
 }
 
 public sealed class MovieTimelineTrackRequest
@@ -76,7 +83,8 @@ public sealed record MovieTimelineRevisionDto(
     DateTime UpdatedAt,
     DateTime? LockedAt,
     Guid? LockedByUserId,
-    IReadOnlyList<MovieTimelineTrackDto> Tracks);
+    IReadOnlyList<MovieTimelineTrackDto> Tracks,
+    string? CanonicalTimelineJson = null);
 
 public sealed record MovieTimelineDto(
     Guid Id,

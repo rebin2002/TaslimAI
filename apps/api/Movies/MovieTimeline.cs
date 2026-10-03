@@ -69,6 +69,7 @@ public sealed class MovieTimelineRevision
     public string Status { get; set; } = MovieTimelineRevisionStatuses.Draft;
     public string? Label { get; set; }
     public string? ChangeSummary { get; set; }
+    public string? CanonicalTimelineJson { get; set; }
     public int DurationMilliseconds { get; set; }
     public Guid CreatedByUserId { get; set; }
     public DateTime CreatedAt { get; set; }

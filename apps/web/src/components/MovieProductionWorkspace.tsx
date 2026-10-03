@@ -20,6 +20,7 @@ import {
   WandSparkles,
   X,
 } from "lucide-react";
+import { useLocale } from "@/components/LocaleProvider";
 import { api, type MovieOverviewCost, type MovieProductionVersion, type MovieProject, type MovieTake } from "@/lib/api";
 import { assetFileUrl } from "@/lib/apiBase";
 import { MovieBudgetReadinessPanel } from "@/components/MovieBudgetReadinessPanel";
@@ -70,17 +71,19 @@ function createApiAdapter(): MovieProductionWorkspaceAdapter {
 type PendingProductionConfirmation = { key: string; work: () => Promise<unknown>; title: string; detail: string };
 
 function isExpensiveProductionAction(key: string) {
-  return /:(keyframe|motion|render|retry|master)(?:$|-)/.test(key);
+  return /:(keyframe|motion|render|retry|master|regenerate)(?:$|-)/.test(key);
 }
 
 function confirmationCopy(key: string) {
   if (key.includes(":master")) return { title: "Confirm the master hand-off", detail: "This keeps the selected take as the hand-off point for a higher-finish step." };
   if (key.includes(":render") || key.includes(":retry")) return { title: "Confirm this production pass", detail: "Review the budget and readiness panel before starting another pass. Only the affected shot will be sent forward." };
+  if (key.includes(":regenerate")) return { title: "Confirm selective regeneration", detail: "Only this shot will be regenerated from its latest approved production source. Review the budget and readiness panel before continuing." };
   if (key.includes(":keyframe")) return { title: "Confirm the source frame", detail: "This prepares a new visual reference from the approved plan. Review the result before moving on." };
   return { title: "Confirm the motion check", detail: "This creates a reviewable motion pass from the approved source frame." };
 }
 
 export function MovieProductionWorkspace({ project, completionPercent, onRefresh, cost = null, adapter = createApiAdapter() }: { project: MovieProject; completionPercent: number; onRefresh: () => Promise<void>; cost?: MovieOverviewCost | null; adapter?: MovieProductionWorkspaceAdapter }) {
+  const { t } = useLocale();
   const model = useMemo(() => buildMovieProductionWorkspaceModel(project), [project]);
   const displayProgress = model.shots.length ? model.progressPercent : completionPercent;
   const [filter, setFilter] = useState<ProductionWorkspaceFilter>("all");
@@ -90,6 +93,16 @@ export function MovieProductionWorkspace({ project, completionPercent, onRefresh
   const [lastAction, setLastAction] = useState<(() => Promise<void>) | null>(null);
   const [confirmation, setConfirmation] = useState<PendingProductionConfirmation | null>(null);
   const visibleShots = model.shots.filter((item) => matchesProductionFilter(item, filter));
+  const regenerateShot = (item: ProductionWorkspaceShot) => async () => {
+    const sourceVersion = item.motion ?? item.keyframe ?? item.render;
+    const response = await api.createMovieRegenerationRequest(item.shot.id, {
+      actionType: "production_render", requestedStage: "ProductionRender",
+      reason: "Recover the failed production render from the latest approved source.",
+      sourceVersionId: sourceVersion?.id ?? null, changedInputsJson: JSON.stringify({ recovery: "production_render", sourceVersionId: sourceVersion?.id ?? null }),
+      compositionJson: sourceVersion?.compositionJson ?? "{}",
+    });
+    await api.confirmMovieRegeneration(response.request.id, true);
+  };
 
   async function executeAction(key: string, work: () => Promise<unknown>) {
     setBusyKey(key);
@@ -117,7 +130,7 @@ export function MovieProductionWorkspace({ project, completionPercent, onRefresh
   return <div className="movie-production-workspace" data-testid="movie-production-workspace">
     <section className="movie-production-command" aria-labelledby="production-command-title">
       <div className="movie-production-command-copy">
-        <div className="movie-production-command-eyebrow"><span className="movie-workspace-kicker">Production workspace</span><span className="movie-production-private"><LockKeyhole size={12} /> Private plan</span></div>
+        <div className="movie-production-command-eyebrow"><span className="movie-workspace-kicker">{t("movieModule.production.eyebrow")}</span><span className="movie-production-private"><LockKeyhole size={12} /> Private plan</span></div>
         <h3 id="production-command-title">From approved shot plan to a timeline-ready cut.</h3>
         <p>Work one shot at a time. Source frames, candidate takes, review decisions, and finish intent stay connected to the approved plan.</p>
       </div>
@@ -139,9 +152,9 @@ export function MovieProductionWorkspace({ project, completionPercent, onRefresh
     {error && <div className="movie-production-recovery" role="alert"><CircleAlert size={16} /><div><strong>We kept your plan safe.</strong><span>{error}</span></div><div className="movie-production-recovery-actions">{lastAction && <button type="button" onClick={() => void lastAction()} disabled={Boolean(busyKey)}><RefreshCw size={13} /> Retry last action</button>}<button type="button" onClick={() => void onRefresh()} disabled={Boolean(busyKey)}><RefreshCw size={13} /> Reload workspace</button></div></div>}
 
     <section className="movie-production-shot-workspace" aria-labelledby="production-shot-list-title">
-      <div className="movie-production-section-heading"><div><span className="movie-workspace-kicker">Shot review</span><h3 id="production-shot-list-title">Make the next decision obvious</h3><p>Implementation details stay behind the stage labels; you only see what needs your review next.</p></div><span className="movie-production-filter-count">{visibleShots.length} of {model.counts.shots} shots</span></div>
+      <div className="movie-production-section-heading"><div><span className="movie-workspace-kicker">Shot review</span><h3 id="production-shot-list-title">{t("movieModule.production.title")}</h3><p>Implementation details stay behind the stage labels; you only see what needs your review next.</p></div><span className="movie-production-filter-count">{visibleShots.length} of {model.counts.shots} shots</span></div>
       <div className="movie-production-filters" role="tablist" aria-label="Filter shots">{filters.map((item) => <button key={item.id} type="button" role="tab" aria-selected={filter === item.id} className={filter === item.id ? "is-active" : ""} onClick={() => setFilter(item.id)}>{item.label}{item.id === "needs-review" && model.counts.needsReview > 0 && <span>{model.counts.needsReview}</span>}{item.id === "ready" && model.counts.readyForTimeline > 0 && <span>{model.counts.readyForTimeline}</span>}</button>)}</div>
-      {visibleShots.length ? <div className="movie-production-shot-list">{visibleShots.map((item) => <ProductionShotCard key={item.shot.id} item={item} busyKey={busyKey} selectedTier={selectedTier} adapter={adapter} onAction={runAction} />)}</div> : <ProductionEmptyState filter={filter} hasShots={model.counts.shots > 0} />}
+      {visibleShots.length ? <div className="movie-production-shot-list">{visibleShots.map((item) => <ProductionShotCard key={item.shot.id} item={item} busyKey={busyKey} selectedTier={selectedTier} adapter={adapter} onAction={runAction} onRegenerate={regenerateShot(item)} />)}</div> : <ProductionEmptyState filter={filter} hasShots={model.counts.shots > 0} />}
     </section>
 
     <TimelineReadiness model={model} />
@@ -154,7 +167,7 @@ function ProductionStageRail({ currentStage, counts }: { currentStage: Productio
   return <nav className="movie-production-stage-rail" aria-label="Production stages">{stageRail.map((stage, index) => { const complete = index < activeIndex || (stage.id === "timeline" && counts.readyForTimeline > 0 && counts.readyForTimeline === counts.shots); const active = index === activeIndex; return <div className={`movie-production-stage-step ${complete ? "is-complete" : ""} ${active ? "is-active" : ""}`} key={stage.id} aria-current={active ? "step" : undefined}><span className="movie-production-stage-index">{complete ? <Check size={13} /> : String(index + 1).padStart(2, "0")}</span><div><strong>{stage.label}</strong><small>{stage.detail}</small></div>{index < stageRail.length - 1 && <ChevronRight size={13} className="movie-production-stage-arrow" aria-hidden="true" />}</div>; })}</nav>;
 }
 
-function ProductionShotCard({ item, busyKey, selectedTier, adapter, onAction }: { item: ProductionWorkspaceShot; busyKey: string; selectedTier: MovieResolutionTier; adapter: MovieProductionWorkspaceAdapter; onAction: (key: string, work: () => Promise<unknown>) => Promise<void> }) {
+function ProductionShotCard({ item, busyKey, selectedTier, adapter, onAction, onRegenerate }: { item: ProductionWorkspaceShot; busyKey: string; selectedTier: MovieResolutionTier; adapter: MovieProductionWorkspaceAdapter; onAction: (key: string, work: () => Promise<unknown>) => Promise<void>; onRegenerate: () => Promise<void> }) {
   const { shot } = item;
   const sourceStoryboard = item.storyboard;
   const isBusy = (action: string) => busyKey === `${shot.id}:${action}`;
@@ -180,7 +193,7 @@ function ProductionShotCard({ item, busyKey, selectedTier, adapter, onAction }: 
       {item.motion?.status === "Approved" && (!item.render || renderFailed) && <button type="button" className="movie-workspace-button is-secondary" disabled={Boolean(busyKey)} onClick={() => void onAction(`${shot.id}:render`, () => adapter.queueRender(shot.id, item.motion!.id, Boolean(item.render && renderFailed)))}><WandSparkles size={14} /> {renderFailed ? "Retry master pass" : "Create master pass"}</button>}
       {canCreateTake && <button type="button" className="movie-workspace-button is-primary" disabled={Boolean(busyKey)} onClick={() => void onAction(`${shot.id}:take`, () => adapter.createTake(item.render!.id))}><CheckCircle2 size={14} /> Save as take</button>}
       {selectedTier === "Master" && item.selectedTake && <button type="button" className="movie-workspace-button is-finish" disabled={Boolean(busyKey) || !masterAllowed} onClick={() => void onAction(`${shot.id}:master`, () => adapter.requestMaster(item.selectedTake!.id))}><Flag size={14} /> Record master hand-off</button>}
-      {renderFailed && <span className="movie-production-inline-recovery"><AlertTriangle size={13} /> Review the pass note before retrying.</span>}
+      {renderFailed && <><button type="button" className="movie-workspace-button is-secondary" disabled={Boolean(busyKey)} onClick={() => void onAction(`${shot.id}:regenerate`, onRegenerate)}><RefreshCw size={14} /> Regenerate failed pass</button><span className="movie-production-inline-recovery"><AlertTriangle size={13} /> Review the pass note before retrying.</span></>}
     </div>
     {item.versions.length > 0 && <details className="movie-production-history"><summary><TimerReset size={14} /> Show saved pass history <span>{item.versions.length}</span></summary><div>{item.versions.map((version) => <ProductionHistoryRow key={version.id} version={version} />)}</div></details>}
     <div className="movie-production-take-review"><div className="movie-production-take-heading"><div><span className="movie-workspace-kicker">Candidate takes</span><h5>Review, approve, then select one</h5></div><span>{item.takes.length} saved</span></div>{item.takes.length ? item.takes.map((take) => <CandidateTakeRow key={take.id} take={take} busyKey={busyKey} adapter={adapter} onAction={onAction} shotId={shot.id} />) : <div className="movie-production-subtle-empty"><Film size={15} /><span>A candidate take appears only after a real pass is saved. Nothing is simulated.</span></div>}</div>
