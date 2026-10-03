@@ -21,7 +21,7 @@ describe("Movie World workspace", () => {
   });
 
   it("makes locks visible and preserves a conflict response instead of overwriting facts", () => {
-    expect(source).toContain("Locked facts stay protected");
+    expect(source).toContain('movieDeep.lockedFacts');
     expect(source).toContain('movieBody.world.activeLocks');
     expect(source).toContain("The World record could not be saved.");
     expect(apiSource).toContain("updateMovieLocation");

@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { buildMovieResolutionPlan, displayProductionStage, displayProductionStatus } from "./movieProductionResolution";
+import { buildMovieResolutionPlan, displayProductionStage, displayProductionStatus, productionIntentForTier } from "./movieProductionResolution";
 
 describe("movie production resolution planning", () => {
+  it("maps finish intent to the provider-neutral render contract", () => {
+    expect(productionIntentForTier("Draft")).toEqual({ targetResolution: "480p", qualityTier: "Fast" });
+    expect(productionIntentForTier("Upgrade")).toEqual({ targetResolution: "1080p", qualityTier: "Cinematic" });
+    expect(productionIntentForTier("Master")).toEqual({ targetResolution: "2160p", qualityTier: "Studio" });
+  });
   it("starts a clean project in Draft and keeps estimate honest without a render path", () => {
     const plan = buildMovieResolutionPlan({ durationSeconds: 30, shotCount: 2, reviewableTakeCount: 0, selectedTakeCount: 0, failedPassCount: 0 });
     expect(plan.recommended).toBe("Draft");

@@ -19,8 +19,8 @@ describe("Production Kit workspace", () => {
     expect(source).toContain('id: "locations"');
     expect(source).toContain('id: "props"');
     expect(source).toContain("Needs reference");
-    expect(source).toContain("Approve identity");
-    expect(source).toContain("Open Asset Library");
+    expect(source).toContain("movieBody.kit.approveIdentity");
+    expect(source).toContain("movieBody.world.openLibrary");
     expect(source).not.toContain("providerName");
     expect(source).not.toContain("modelName");
     expect(source).not.toContain("promptName");
