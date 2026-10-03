@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ChatMessage, ChatStreamEvent } from "./api";
-import { applyChatStreamEvent, createChatStreamState, reduceChatStream, stopChatStream } from "./chatStreamState";
+import { applyChatStreamEvent, createChatStreamState, failChatStream, reduceChatStream, stopChatStream } from "./chatStreamState";
 
 function message(id: string, role: ChatMessage["role"], content: string, status: ChatMessage["status"]): ChatMessage {
   return { id, conversationId: "conversation-1", role, content, status, createdAt: "2026-01-01T00:00:00Z", sequence: role === "User" ? 1 : 2 };
@@ -72,6 +72,16 @@ describe("Chat stream state", () => {
     let state = reduceChatStream(createChatStreamState(), event("message.started", { userMessage: user, assistantMessage: assistant }));
     state = reduceChatStream(state, event("message.delta", { messageId: "assistant-1", delta: "partial" }));
     state = stopChatStream(state);
+
+    expect(state.messages.find(item => item.id === "assistant-1")).toMatchObject({ content: "partial", status: "Failed" });
+    expect(state.generating).toBe(false);
+    expect(state.terminal).toBe("failed");
+  });
+
+  it("closes a partial assistant when the transport fails before a terminal event", () => {
+    let state = reduceChatStream(createChatStreamState(), event("message.started", { userMessage: user, assistantMessage: assistant }));
+    state = reduceChatStream(state, event("message.delta", { messageId: "assistant-1", delta: "partial" }));
+    state = failChatStream(state);
 
     expect(state.messages.find(item => item.id === "assistant-1")).toMatchObject({ content: "partial", status: "Failed" });
     expect(state.generating).toBe(false);
