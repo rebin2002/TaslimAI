@@ -3,10 +3,12 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Options;
 using Taslim.Api.Contracts;
 using Taslim.Api.Persistence;
 using Xunit;
@@ -94,6 +96,37 @@ public sealed class IdentityProjectsTests : IClassFixture<TaslimApiFactory>
         var login = await Login(anonymous, email, "StrongPassword!123");
         Assert.Equal(HttpStatusCode.OK, login.StatusCode);
         await Logout(anonymous);
+    }
+
+    [Fact]
+    public async Task Changing_password_invalidates_other_application_sessions()
+    {
+        var stampOptions = factory.Services.GetRequiredService<IOptions<SecurityStampValidatorOptions>>().Value;
+        var originalValidationInterval = stampOptions.ValidationInterval;
+        stampOptions.ValidationInterval = TimeSpan.Zero;
+        try
+        {
+            using var currentSession = factory.CreateClient();
+            var email = $"password-session-{Guid.NewGuid():N}@example.com";
+            await Register(currentSession, "Password Session Owner", email);
+
+            using var otherSession = factory.CreateClient();
+            Assert.Equal(HttpStatusCode.OK, (await Login(otherSession, email, "StrongPassword!123")).StatusCode);
+            Assert.Equal(HttpStatusCode.OK, (await otherSession.GetAsync("/api/auth/me")).StatusCode);
+
+            var changed = await SendWithCsrf(currentSession, HttpMethod.Post, "/api/auth/password", new
+            {
+                currentPassword = "StrongPassword!123",
+                newPassword = "EvenStronger!123",
+            });
+            Assert.Equal(HttpStatusCode.OK, changed.StatusCode);
+
+            Assert.Equal(HttpStatusCode.Unauthorized, (await otherSession.GetAsync("/api/auth/me")).StatusCode);
+        }
+        finally
+        {
+            stampOptions.ValidationInterval = originalValidationInterval;
+        }
     }
 
     [Fact]

@@ -136,6 +136,12 @@ builder.Services.ConfigureApplicationCookie(options =>
     };
     options.Events.OnValidatePrincipal = async context =>
     {
+        // Keep Identity's built-in security-stamp validation when adding the
+        // per-request active-user check below. Password changes and explicit
+        // stamp revocations must invalidate previously issued cookies.
+        await SecurityStampValidator.ValidatePrincipalAsync(context);
+        if (context.Principal is null) return;
+
         var userId = context.Principal?.FindFirstValue(ClaimTypes.NameIdentifier);
         if (!Guid.TryParse(userId, out var parsedUserId))
         {
