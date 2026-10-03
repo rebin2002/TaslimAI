@@ -307,6 +307,7 @@ public sealed class IdentityProjectsTests : IClassFixture<TaslimApiFactory>
             preferredLanguage = "en"
         });
         Assert.Equal(HttpStatusCode.OK, registration.StatusCode);
+        AssertCsrfCookieExpired(registration);
         var auth = await registration.Content.ReadFromJsonAsync<AuthResponse>();
         Assert.NotNull(auth);
 
@@ -334,6 +335,7 @@ public sealed class IdentityProjectsTests : IClassFixture<TaslimApiFactory>
         var loginToken = await GetCsrf(client);
         var login = await SendWithToken(client, HttpMethod.Post, "/api/auth/login", loginToken, new { email, password = "StrongPassword!123" });
         Assert.Equal(HttpStatusCode.OK, login.StatusCode);
+        AssertCsrfCookieExpired(login);
         var authenticatedToken = await GetCsrf(client);
 
         var first = await SendWithToken<ProjectDto>(client, HttpMethod.Post, $"/api/workspaces/{auth.PersonalWorkspace.Id}/projects", authenticatedToken, new { name = "Lifecycle One", description = "1", type = "Business" });
@@ -353,12 +355,24 @@ public sealed class IdentityProjectsTests : IClassFixture<TaslimApiFactory>
     private async Task<HttpResponseMessage> Login(HttpClient client, string email, string password) =>
         await SendWithCsrf(client, HttpMethod.Post, "/api/auth/login", new { email, password });
 
-    private static async Task Logout(HttpClient client)
+    private static async Task<HttpResponseMessage> Logout(HttpClient client)
     {
         var token = await GetCsrf(client);
         using var request = new HttpRequestMessage(HttpMethod.Post, "/api/auth/logout");
         request.Headers.Add("X-CSRF-TOKEN", token);
-        Assert.Equal(HttpStatusCode.OK, (await client.SendAsync(request)).StatusCode);
+        var response = await client.SendAsync(request);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        AssertCsrfCookieExpired(response);
+        return response;
+    }
+
+    private static void AssertCsrfCookieExpired(HttpResponseMessage response)
+    {
+        Assert.True(response.Headers.TryGetValues("Set-Cookie", out var setCookies));
+        Assert.Contains(setCookies, cookie =>
+            cookie.StartsWith("taslim.csrf=", StringComparison.OrdinalIgnoreCase)
+            && (cookie.Contains("max-age=0", StringComparison.OrdinalIgnoreCase)
+                || cookie.Contains("expires=Thu, 01 Jan 1970", StringComparison.OrdinalIgnoreCase)));
     }
 
     private static async Task<T> SendWithCsrf<T>(HttpClient client, HttpMethod method, string path, object? payload)

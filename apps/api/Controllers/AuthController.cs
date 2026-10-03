@@ -110,6 +110,7 @@ public sealed class AuthController(
         await transaction.CommitAsync(cancellationToken);
 
         await signInManager.SignInAsync(user, isPersistent: true);
+        ExpireCsrfCookie();
         return Ok(new AuthResponse(await ToUserDtoAsync(user, workspace.Id), ToWorkspaceDto(workspace, WorkspaceRole.Owner)));
     }
 
@@ -148,6 +149,7 @@ public sealed class AuthController(
             return ApiResults.Error(this, StatusCodes.Status500InternalServerError, "ACCOUNT_SETUP_INCOMPLETE", "Your account setup is incomplete. Please contact support.");
 
         logger.LogInformation("Login validation succeeded. TraceId={TraceId}", HttpContext.TraceIdentifier);
+        ExpireCsrfCookie();
         return Ok(new AuthResponse(await ToUserDtoAsync(user, workspace.Id), ToWorkspaceDto(workspace, WorkspaceRole.Owner)));
     }
 
@@ -170,6 +172,7 @@ public sealed class AuthController(
     public async Task<IActionResult> Logout()
     {
         await signInManager.SignOutAsync();
+        ExpireCsrfCookie();
         return Ok(new { success = true });
     }
 
@@ -265,6 +268,22 @@ public sealed class AuthController(
             .Where(workspace => workspace.Type == WorkspaceType.Personal && workspace.Members.Any(member => member.UserId == userId && member.Role == WorkspaceRole.Owner))
             .OrderBy(workspace => workspace.CreatedAt)
             .FirstOrDefaultAsync(cancellationToken);
+
+    private void ExpireCsrfCookie()
+    {
+        // Authentication changes the user binding of antiforgery request tokens.
+        // Expire the browser's old cookie in the same response so concurrent
+        // login/logout responses cannot leave a stale token available for a
+        // later state-changing request. The client obtains a fresh pair from
+        // GET /api/auth/csrf after applying this response.
+        Response.Cookies.Delete("taslim.csrf", new CookieOptions
+        {
+            Path = "/",
+            Secure = HttpContext.Request.IsHttps,
+            SameSite = HttpContext.Request.IsHttps ? SameSiteMode.None : SameSiteMode.Lax,
+        });
+        Response.Headers.CacheControl = "no-store";
+    }
 
     private static bool IsSupportedLanguage(string? language) => string.IsNullOrWhiteSpace(language) || LanguageCodes.Supported.Contains(language);
     private static string[] ToPasswordFieldErrors(IEnumerable<IdentityError> errors) => errors
