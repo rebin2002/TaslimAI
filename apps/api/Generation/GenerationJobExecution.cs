@@ -277,7 +277,11 @@ public sealed class GenerationJobService(
             CreatedAt = now,
         };
         db.GenerationJobs.Add(job);
-        var transaction = normalizedKey is null ? null : await db.Database.BeginTransactionAsync(cancellationToken);
+        // Keep the job row, usage reservation, and queue transition in one
+        // transaction even when the caller did not provide an idempotency key.
+        // Otherwise a transient queue/database failure can strand a Pending job
+        // with a live usage record that no worker will ever claim.
+        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
         try
         {
             await db.SaveChangesAsync(cancellationToken);
@@ -285,22 +289,18 @@ public sealed class GenerationJobService(
             await queue.EnqueueAsync(job.Id, cancellationToken);
             job.Status = GenerationJobStatus.Queued;
             job.QueuedAt = DateTime.UtcNow;
-            if (transaction is not null) await transaction.CommitAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
             return job;
         }
         catch (DbUpdateException) when (normalizedKey is not null)
         {
-            if (transaction is not null) await transaction.RollbackAsync(CancellationToken.None);
+            await transaction.RollbackAsync(CancellationToken.None);
             db.Entry(job).State = EntityState.Detached;
             var existing = await db.GenerationJobs.AsNoTracking().FirstOrDefaultAsync(item => item.CreatedByUserId == userId && item.IdempotencyKey == normalizedKey, cancellationToken);
             if (existing is null) throw;
             if (!string.Equals(existing.RequestFingerprint, requestFingerprint, StringComparison.Ordinal))
                 throw new GenerationJobValidationException("IDEMPOTENCY_KEY_REUSED", "This idempotency key was already used for a different generation request.");
             return existing;
-        }
-        finally
-        {
-            if (transaction is not null) await transaction.DisposeAsync();
         }
     }
 

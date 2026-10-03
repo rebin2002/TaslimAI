@@ -37,13 +37,21 @@ public sealed class BillingAccountService(TaslimDbContext db, IBillingProvisioni
             .ThenByDescending(item => item.Id)
             .Take(100)
             .ToListAsync(cancellationToken);
+        // The UI history is intentionally capped, but balances are not. Using
+        // the capped history for accounting silently made an active entitlement
+        // look empty after its ledger grew past 100 entries.
+        var balanceByEntitlement = await db.CreditLedgerEntries.AsNoTracking()
+            .Where(item => item.WorkspaceId == workspaceId && (!item.CreditEntitlementId.HasValue || entitlementIds.Contains(item.CreditEntitlementId.Value)))
+            .GroupBy(item => item.CreditEntitlementId)
+            .Select(group => new { EntitlementId = group.Key, Amount = group.Sum(item => item.Amount) })
+            .ToListAsync(cancellationToken);
         var includedIds = entitlements.Where(item => item.Type == CreditEntitlementType.IncludedMonthly).Select(item => item.Id).ToHashSet();
         var purchasedIds = entitlements.Where(item => item.Type == CreditEntitlementType.Purchased).Select(item => item.Id).ToHashSet();
         var adjustmentIds = entitlements.Where(item => item.Type == CreditEntitlementType.AdministrativeCorrection).Select(item => item.Id).ToHashSet();
-        var includedRemaining = entries.Where(item => item.CreditEntitlementId.HasValue && includedIds.Contains(item.CreditEntitlementId.Value)).Sum(item => item.Amount);
-        var purchasedRemaining = entries.Where(item => item.CreditEntitlementId.HasValue && purchasedIds.Contains(item.CreditEntitlementId.Value)).Sum(item => item.Amount);
-        var adjustmentBalance = entries.Where(item => item.CreditEntitlementId.HasValue && adjustmentIds.Contains(item.CreditEntitlementId.Value)).Sum(item => item.Amount);
-        var unallocatedMovements = entries.Where(item => !item.CreditEntitlementId.HasValue).Sum(item => item.Amount);
+        var includedRemaining = balanceByEntitlement.Where(item => item.EntitlementId.HasValue && includedIds.Contains(item.EntitlementId.Value)).Sum(item => item.Amount);
+        var purchasedRemaining = balanceByEntitlement.Where(item => item.EntitlementId.HasValue && purchasedIds.Contains(item.EntitlementId.Value)).Sum(item => item.Amount);
+        var adjustmentBalance = balanceByEntitlement.Where(item => item.EntitlementId.HasValue && adjustmentIds.Contains(item.EntitlementId.Value)).Sum(item => item.Amount);
+        var unallocatedMovements = balanceByEntitlement.Where(item => !item.EntitlementId.HasValue).Sum(item => item.Amount);
         var plans = await db.Plans.AsNoTracking()
             .Where(item => item.IsActive)
             .OrderBy(item => item.SortOrder)

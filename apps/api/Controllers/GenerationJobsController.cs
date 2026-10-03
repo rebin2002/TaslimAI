@@ -46,6 +46,7 @@ public sealed class GenerationJobsController(IGenerationJobService jobs) : Contr
                 ? ApiResults.Error(this, 404, GenerationJobErrorCodes.NotFound, "Job not found.")
                 : Accepted(GenerationJobContractMapper.ToDto(job));
         }
+        catch (GenerationJobForbiddenException) { return Forbid(); }
         catch (GenerationJobValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
     }
 
