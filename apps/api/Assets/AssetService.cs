@@ -113,11 +113,11 @@ public sealed class AssetService(TaslimDbContext db, WorkspaceAccessService acce
             var representation = asset.Representations.FirstOrDefault(item => item.Id == representationId.Value);
             if (representation is null) return null;
             var representationFile = await db.StoredFiles.AsNoTracking().FirstOrDefaultAsync(file => file.Id == representation.StoredFileId, cancellationToken);
-            if (representationFile is null || representationFile.Status != StoredFileStatus.Ready)
+            if (representationFile is not { Status: StoredFileStatus.Ready } || representationFile.WorkspaceId != asset.WorkspaceId)
                 throw new AssetValidationException("ASSET_FILE_UNAVAILABLE", "This document format is not available.");
             return new AssetDownload(asset, representationFile, representation.FileName, representation.ContentType);
         }
-        if (asset.StoredFile is null || asset.StoredFile.Status != StoredFileStatus.Ready)
+        if (asset.StoredFile is not { Status: StoredFileStatus.Ready } || asset.StoredFile.WorkspaceId != asset.WorkspaceId)
             throw new AssetValidationException("ASSET_FILE_UNAVAILABLE", "This asset does not have an available file.");
         return new AssetDownload(asset, asset.StoredFile, asset.StoredFile.OriginalFileName, asset.StoredFile.ContentType);
     }
