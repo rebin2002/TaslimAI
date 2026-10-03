@@ -407,7 +407,7 @@ public sealed class MovieProviderFakeFinalizationE2ETests : IClassFixture<MovieP
         Assert.Contains(reloadedTransition.Timeline.Transitions, item => item.Id == transitionId);
 
         // Final assembly consumes both selected takes, the persisted transition,
-        // the explicit dialogue asset, and the approved soundtrack projection.
+        // the explicit dialogue asset, and the automatically projected soundtrack cue.
         var assembly = await MovieOperationalFixtures.PostAsync<MovieFinalAssemblyDto>(
             client,
             $"/api/movie-studio/projects/{projectId}/final-assembly",
@@ -430,22 +430,8 @@ public sealed class MovieProviderFakeFinalizationE2ETests : IClassFixture<MovieP
                         endTimeSeconds = 1.2m,
                         required = true,
                     },
-                    new
-                    {
-                        assetId = musicAssetId,
-                        role = "music",
-                        gainDb = -6m,
-                        startTimeSeconds = 0m,
-                        endTimeSeconds = 5m,
-                        required = true,
-                    },
                 },
-                // The production soundtrack projection query currently orders by
-                // decimal cue timing, which SQLite cannot translate. The approved
-                // cue and its private asset are still exercised through the same
-                // final mix contract explicitly, keeping this provider-fake test
-                // portable across the repository's disposable SQLite host.
-                includeApprovedSoundtrackCues = false,
+                includeApprovedSoundtrackCues = true,
             },
             idempotencyKey: "movie-fake-final-assembly-1");
         Assert.Equal(MovieAssemblyStatuses.Queued, assembly.Status);

@@ -376,10 +376,10 @@ public sealed class MovieFinalAssemblyService(
         var cues = await db.MovieSoundtrackCues.AsNoTracking()
             .Include(item => item.Versions)
             .Where(item => item.MovieProjectId == movieProjectId && item.ApprovalState == MovieSoundtrackApprovalStates.Approved && item.ApprovedVersionId.HasValue)
-            .OrderBy(item => item.TimelineStartSeconds)
-            .ThenBy(item => item.Sequence)
             .ToListAsync(cancellationToken);
         return cues
+            .OrderBy(item => item.TimelineStartSeconds)
+            .ThenBy(item => item.Sequence)
             .Select(cue => (cue, version: cue.Versions.FirstOrDefault(version => version.Id == cue.ApprovedVersionId && version.AssetId.HasValue)))
             .Where(item => item.version?.AssetId is Guid assetId && !explicitAssetIds.Contains(assetId))
             .Select(item => new MovieAssemblyAudioMixInputRequest
