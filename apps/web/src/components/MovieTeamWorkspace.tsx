@@ -2,8 +2,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { AlertTriangle, CheckCircle2, Clock3, MessageSquare, RefreshCw, ShieldCheck, UserCheck, Users, X } from "lucide-react";
-import { useLocale } from "@/components/LocaleProvider";
 import { api, type MovieCollaboration, type MovieProject } from "@/lib/api";
+import { useLocale } from "@/components/LocaleProvider";
 
 const projectTarget = "MovieProject";
 
@@ -82,20 +82,17 @@ export function MovieTeamWorkspace({ project }: { project: MovieProject }) {
     <div className="movie-team-workspace" data-testid="movie-team-workspace">
       <section className="movie-team-command" aria-labelledby="movie-team-title">
         <div>
-          <span className="movie-workspace-kicker">{t("movieModule.team.eyebrow")} · review and sign-off</span>
-          <h3 id="movie-team-title">One project, clear ownership.</h3>
-          <p>
-            Project roles, review requests, notes and assignments are persisted server-side. The permissions shown here
-            are the ones this workspace actually granted—client-side capability is never treated as authority.
-          </p>
+          <span className="movie-workspace-kicker">{t("movieTeam.commandEyebrow")}</span>
+          <h3 id="movie-team-title">{t("movieTeam.commandTitle")}</h3>
+          <p>{t("movieTeam.commandText")}</p>
         </div>
         <div className="movie-team-command-mark">
           <Users size={23} />
-          <span>SERVER-AUTHORIZED</span>
+          <span>{t("movieTeam.serverAuthorized")}</span>
         </div>
       </section>
 
-      <section className="movie-team-summary" aria-label="Collaboration summary">
+      <section className="movie-team-summary" aria-label={t("movieTeam.summary")}>
         <TeamMetric label="Members" value={team.length} detail="with project access" />
         <TeamMetric label="Open notes" value={openComments.length} detail={`${comments.length} total`} />
         <TeamMetric label="Reviews" value={reviews.length} detail={`${pendingReviews.length} awaiting decision`} />
@@ -135,12 +132,12 @@ export function MovieTeamWorkspace({ project }: { project: MovieProject }) {
       <section className="movie-team-section" aria-labelledby="movie-team-members-title">
         <div className="movie-team-section-heading">
           <div>
-            <span className="movie-workspace-kicker">Members</span>
+            <span className="movie-workspace-kicker">{t("movieTeam.members")}</span>
             <h3 id="movie-team-members-title">Who can act on this movie.</h3>
             <p>Membership and role changes are enforced by the API, not by this view.</p>
           </div>
           <button type="button" className="movie-workspace-button is-quiet" onClick={() => void load()}>
-            <RefreshCw size={13} /> Refresh
+            <RefreshCw size={13} /> {t("movieTeam.refresh")}
           </button>
         </div>
         {loading ? (
@@ -199,7 +196,7 @@ export function MovieTeamWorkspace({ project }: { project: MovieProject }) {
               onClick={() => void submitComment()}
               disabled={!canComment || busy || commentBody.trim().length === 0}
             >
-              {busy ? "Saving…" : `${t("movieDeep.save")} note`}
+              {busy ? "Saving…" : "Save note"}
             </button>
             {!canComment && <span>Your current role does not include the Comment capability.</span>}
           </div>

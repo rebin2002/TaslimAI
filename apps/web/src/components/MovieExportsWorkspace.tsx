@@ -2,8 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AlertTriangle, CheckCircle2, Clock3, Download, Film, RefreshCw, ShieldCheck, X } from "lucide-react";
-import { useLocale } from "@/components/LocaleProvider";
 import { api, type MovieFinalAssembly, type MovieProject } from "@/lib/api";
+import { useLocale } from "@/components/LocaleProvider";
 
 const profiles = [
   { id: "hd-1080p", label: "HD 1080p", detail: "1920 × 1080 · fastest delivery" },
@@ -21,6 +21,7 @@ export function MovieExportsWorkspace({ project }: { project: MovieProject }) {
   const { t } = useLocale();
   const [assemblies, setAssemblies] = useState<MovieFinalAssembly[]>([]);
   const [profile, setProfile] = useState("hd-1080p");
+  const [includeApprovedSoundtrackCues, setIncludeApprovedSoundtrackCues] = useState(false);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState("");
@@ -72,7 +73,7 @@ export function MovieExportsWorkspace({ project }: { project: MovieProject }) {
     setError("");
     setMessage("");
     try {
-      const created = await api.queueMovieFinalAssembly(project.id, { resolutionProfile: profile });
+      const created = await api.queueMovieFinalAssembly(project.id, { resolutionProfile: profile, includeApprovedSoundtrackCues });
       setAssemblies((current) => [created, ...current]);
       setMessage("Final assembly queued. The master is produced from the approved, selected takes already in this project.");
     } catch (cause) {
@@ -86,21 +87,17 @@ export function MovieExportsWorkspace({ project }: { project: MovieProject }) {
     <div className="movie-exports-workspace" data-testid="movie-exports-workspace">
       <section className="movie-exports-command" aria-labelledby="movie-exports-title">
         <div>
-          <span className="movie-workspace-kicker">{t("movieModule.exports.eyebrow")} · final assembly</span>
-          <h3 id="movie-exports-title">Deliver one real master.</h3>
-          <p>
-            Final assembly reads the takes that are already approved, selected and finalized in this project, encodes
-            a single private master, runs deterministic output checks, and publishes a downloadable asset. Nothing is
-            fabricated when the project is not ready.
-          </p>
+          <span className="movie-workspace-kicker">{t("movieExports.commandEyebrow")}</span>
+          <h3 id="movie-exports-title">{t("movieExports.commandTitle")}</h3>
+          <p>{t("movieExports.commandText")}</p>
         </div>
         <div className="movie-exports-command-mark">
           <Download size={23} />
-          <span>PRIVATE MASTER</span>
+          <span>{t("movieExports.privateMaster")}</span>
         </div>
       </section>
 
-      <section className="movie-exports-summary" aria-label="Export readiness">
+      <section className="movie-exports-summary" aria-label={t("movieExports.readiness")}>
         <ExportMetric label="Shots" value={shots.length} detail="in this project" />
         <ExportMetric label="Takes" value={takes.length} detail="generated footage" />
         <ExportMetric label="Selected" value={selected.length} detail="carried to the master" />
@@ -146,7 +143,7 @@ export function MovieExportsWorkspace({ project }: { project: MovieProject }) {
             </p>
           </div>
           <button type="button" className="movie-workspace-button is-quiet" onClick={() => void load()}>
-            <RefreshCw size={13} /> Refresh
+            <RefreshCw size={13} /> {t("movieExports.refresh")}
           </button>
         </div>
         <div className="movie-exports-profiles" role="radiogroup" aria-label="Delivery profile">
@@ -165,13 +162,17 @@ export function MovieExportsWorkspace({ project }: { project: MovieProject }) {
           ))}
         </div>
         <div className="movie-exports-actions">
+          <label className="movie-exports-soundtrack-toggle">
+            <input type="checkbox" checked={includeApprovedSoundtrackCues} onChange={(event) => setIncludeApprovedSoundtrackCues(event.target.checked)} />
+            <span><strong>{t("movieBody.audio.approvedCues")}</strong><small>{t("movieBody.audio.approvedCuesHint")}</small></span>
+          </label>
           <button
             type="button"
             className="movie-workspace-button is-primary"
             onClick={() => void queue()}
             disabled={busy || !readyToAssemble}
           >
-            {busy ? "Queueing export…" : "Assemble and export master"}
+            {busy ? t("movieExports.queue") : t("movieExports.assemble")}
           </button>
           {!readyToAssemble && <span>Select and finalize a take first. The server re-checks every source before encoding.</span>}
         </div>

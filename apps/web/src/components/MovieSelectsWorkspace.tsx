@@ -15,9 +15,9 @@ import {
   Sparkles,
   X,
 } from "lucide-react";
-import { useLocale } from "@/components/LocaleProvider";
 import { api, type MovieProject, type MovieTakeSelectRecord, type MovieTimeline } from "@/lib/api";
 import { assetFileUrl } from "@/lib/apiBase";
+import { useLocale } from "@/components/LocaleProvider";
 import {
   buildMovieSubclips,
   buildSalvageRecommendations,
@@ -210,9 +210,9 @@ export function MovieSelectsWorkspace({ project }: { project: MovieProject }) {
   return <div className="movie-selects-workspace" data-testid="movie-selects-workspace">
     <section className="movie-selects-command" aria-labelledby="movie-selects-title">
       <div>
-        <span className="movie-workspace-kicker">Selects / subclips</span>
-        <h3 id="movie-selects-title">Keep the good seconds.</h3>
-        <p>{t("movieModule.selects.description").split(".")[0]}. Salvage a usable range first, persist it as a reviewed select, carry the QC evidence with it, and only add a small insert to the canonical timeline when the decision is deliberate.</p>
+        <span className="movie-workspace-kicker">{t("movieBody.selects.salvage")}</span>
+        <h3 id="movie-selects-title">{t("movieBody.selects.keepSeconds")}</h3>
+        <p>Review generated takes as raw footage. Salvage a usable range first, persist it as a reviewed select, carry the QC evidence with it, and only add a small insert to the canonical timeline when the decision is deliberate.</p>
       </div>
       <div className="movie-selects-command-mark"><ListVideo size={23} /><span>NON-DESTRUCTIVE</span></div>
     </section>
@@ -230,7 +230,7 @@ export function MovieSelectsWorkspace({ project }: { project: MovieProject }) {
     {error && <div className="movie-selects-notice is-error" role="alert"><AlertTriangle size={15} /><span>{error}</span><button type="button" onClick={() => setError("")} aria-label="Dismiss error"><X size={13} /></button></div>}
 
     <section className="movie-selects-review" aria-labelledby="movie-selects-review-title">
-      <div className="movie-selects-section-heading"><div><span className="movie-workspace-kicker">Salvage Director · review queue</span><h3 id="movie-selects-review-title">Find a smaller fix than a new scene.</h3><p>Each card points to one persisted take and one bounded source range. Review stays grounded in the project record.</p></div><button type="button" className="movie-workspace-button is-quiet" onClick={() => void reload()}><RefreshCw size={13} /> Refresh</button></div>
+      <div className="movie-selects-section-heading"><div><span className="movie-workspace-kicker">Salvage Director · review queue</span><h3 id="movie-selects-review-title">Find a smaller fix than a new scene.</h3><p>Each card points to one persisted take and one bounded source range. Review stays grounded in the project record.</p></div><button type="button" className="movie-workspace-button is-quiet" onClick={() => void reload()}><RefreshCw size={13} /> {t("movieBody.refresh")}</button></div>
       <div className="movie-selects-filters" role="tablist" aria-label="Filter select recommendations">{filters.map((item) => <button key={item.id} type="button" role="tab" aria-selected={filter === item.id} className={filter === item.id ? "is-active" : ""} onClick={() => setFilter(item.id)}>{item.label}<span>{filterCount(recommendations, item.id, selectsByTake)}</span></button>)}</div>
       {visibleRecommendations.length ? <div className="movie-selects-list">{visibleRecommendations.map((recommendation) => <SalvageRecommendationCard key={recommendation.id} recommendation={recommendation} range={rangeFor(recommendation.subclip, rangeOverrides)} selects={selectsByTake[recommendation.subclip.takeId] ?? []} onRangeChange={(key, value) => updateRange(recommendation.subclip.id, key, value)} onDecision={(decision) => void decide(recommendation, decision)} onPropose={() => { setProposalId(recommendation.id); setTimelinePosition(timeline?.currentRevision?.durationMilliseconds ?? 0); setMessage(""); }} proposing={proposalId === recommendation.id} busy={busy} />)}</div> : <SelectsEmptyState hasTakes={subclips.length > 0} />}
     </section>

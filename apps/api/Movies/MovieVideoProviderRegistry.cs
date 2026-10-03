@@ -1,31 +1,48 @@
-using Microsoft.Extensions.Options;
 namespace Taslim.Api.Movies;
 
-/// <summary>Keyed provider selection for movie generation. Unknown keys never fall back to a paid provider.</summary>
-public sealed class MovieVideoProviderRegistry(
-    RunwayMovieVideoProvider runway,
-    ManusMovieVideoProvider manus,
-    IOptions<MovieVideoOptions> options) : IMovieVideoProvider
+/// <summary>
+/// Resolves Movie Studio video providers by their server-side key. Selection is
+/// deliberately separate from provider construction so adding a provider does
+/// not expand a conditional branch in application composition.
+/// </summary>
+public interface IMovieVideoProviderRegistry
 {
-    private readonly IReadOnlyDictionary<string, IMovieVideoProvider> providers =
-        new Dictionary<string, IMovieVideoProvider>(StringComparer.OrdinalIgnoreCase)
+    IReadOnlyCollection<string> Keys { get; }
+    IMovieVideoProvider Resolve(string? providerKey);
+}
+
+public sealed class MovieVideoProviderRegistry : IMovieVideoProviderRegistry
+{
+    private readonly IReadOnlyDictionary<string, IMovieVideoProvider> providers;
+    private readonly IMovieVideoProvider unavailable = new UnavailableMovieVideoProvider();
+
+    public MovieVideoProviderRegistry(IEnumerable<IMovieVideoProvider> providers)
+    {
+        ArgumentNullException.ThrowIfNull(providers);
+        var indexed = new Dictionary<string, IMovieVideoProvider>(StringComparer.OrdinalIgnoreCase);
+        foreach (var provider in providers)
         {
-            ["runway"] = runway,
-            ["manus"] = manus,
-        };
-    private readonly MovieVideoOptions settings = options.Value;
+            ArgumentNullException.ThrowIfNull(provider);
+            if (string.IsNullOrWhiteSpace(provider.Key))
+                throw new InvalidOperationException("Movie video providers must declare a non-empty key.");
+            if (!indexed.TryAdd(provider.Key.Trim(), provider))
+                throw new InvalidOperationException($"Movie video provider key '{provider.Key}' is registered more than once.");
+        }
 
-    private IMovieVideoProvider Selected =>
-        settings.Enabled && providers.TryGetValue(settings.ProviderKey?.Trim() ?? string.Empty, out var candidate)
-            && candidate.IsAvailable
-            ? candidate
-            : new UnavailableMovieVideoProvider();
+        this.providers = indexed;
+        Keys = indexed.Keys.OrderBy(key => key, StringComparer.OrdinalIgnoreCase).ToArray();
+    }
 
-    public string Key => Selected.Key;
-    public bool IsAvailable => Selected.IsAvailable;
-    public IReadOnlyCollection<string> SupportedOperations => Selected.SupportedOperations;
-    public Task<MovieVideoSubmission> SubmitAsync(MovieVideoGenerationRequest request, CancellationToken cancellationToken) => Selected.SubmitAsync(request, cancellationToken);
-    public Task<MovieVideoProviderStatus> GetStatusAsync(string providerJobId, CancellationToken cancellationToken) => Selected.GetStatusAsync(providerJobId, cancellationToken);
-    public Task<MovieVideoProviderOutput> RetrieveAsync(string providerJobId, MovieVideoProviderStatus status, CancellationToken cancellationToken) => Selected.RetrieveAsync(providerJobId, status, cancellationToken);
-    public Task CancelAsync(string providerJobId, CancellationToken cancellationToken) => Selected.CancelAsync(providerJobId, cancellationToken);
+    public IReadOnlyCollection<string> Keys { get; }
+
+    public IMovieVideoProvider Resolve(string? providerKey)
+    {
+        if (string.IsNullOrWhiteSpace(providerKey) || !providers.TryGetValue(providerKey.Trim(), out var provider))
+            return unavailable;
+
+        // A configured key is not enough. Every adapter owns its credential,
+        // endpoint, and capability checks; unavailable adapters must remain the
+        // result until all of those checks pass.
+        return provider.IsAvailable ? provider : unavailable;
+    }
 }

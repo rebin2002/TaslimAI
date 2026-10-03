@@ -12,7 +12,7 @@ namespace Taslim.Api.Controllers;
 [ApiController]
 [Authorize]
 [Route("api/movie-studio")]
-public sealed class MovieStudioController(IMovieStudioService movies, IMovieProductionComplexityService complexity, IMovieDurationBudgetService durationBudgets, IMovieGuideService guides, IMovieStoryService stories, IMovieStoryCastService storyCast, IMovieCharacterContinuityService continuity, IMovieWorldContinuityService worldContinuity, IMovieProductionContinuityService productionContinuity, IMovieProductionReferencePackageService productionReferences, IMovieProductionPreflightService productionPreflight, IMovieTimelineService timeline, IMovieTakeSelectService takeSelects, IMovieShotExecutionService shotExecution, MovieAuthorizationService authorization, MovieShotImportanceService shotImportance, IMovieCinematographyPlanningService cinematographyPlanning, IMovieCharacterProductionSheetService productionSheets, IMovieLocationGeographySheetService geographySheets, IMoviePropBibleService propBible, IMovieReferenceReadinessService referenceReadiness, IMovieMissingInsertPlannerService insertPlanner) : ControllerBase
+public sealed class MovieStudioController(IMovieStudioService movies, IMovieProductionComplexityService complexity, IMovieDurationBudgetService durationBudgets, IMovieGuideService guides, IMovieStoryService stories, IMovieStoryCastService storyCast, IMovieCharacterContinuityService continuity, IMovieWorldContinuityService worldContinuity, IMovieProductionContinuityService productionContinuity, IMovieProductionReferencePackageService productionReferences, IMovieProductionPreflightService productionPreflight, IMovieTimelineService timeline, IMovieTimelineTransitionService transitionEdits, IMovieTakeSelectService takeSelects, IMovieShotExecutionService shotExecution, MovieAuthorizationService authorization, MovieShotImportanceService shotImportance, IMovieCinematographyPlanningService cinematographyPlanning, IMovieCharacterProductionSheetService productionSheets, IMovieLocationGeographySheetService geographySheets, IMoviePropBibleService propBible, IMovieReferenceReadinessService referenceReadiness, IMovieMissingInsertPlannerService insertPlanner) : ControllerBase
 {
     [HttpGet("cinematography/presets")]
     public IActionResult CinematographyPresets() => Ok(CinematographyPresetCatalog.All);
@@ -56,6 +56,26 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
     {
         var result = await timeline.GetAsync(GetUserId(), id, cancellationToken);
         return result is null ? ApiResults.Error(this, 404, "MOVIE_TIMELINE_NOT_FOUND", "Movie timeline not found.") : Ok(result);
+    }
+    [HttpGet("projects/{id:guid}/timeline/transition-edits")]
+    public async Task<IActionResult> GetTimelineTransitions(Guid id, CancellationToken cancellationToken)
+    {
+        var result = await transitionEdits.GetLatestAsync(GetUserId(), id, cancellationToken);
+        return result is null ? ApiResults.Error(this, 404, "MOVIE_TIMELINE_TRANSITIONS_NOT_FOUND", "No persisted timeline transition edit was found.") : Ok(result);
+    }
+    [HttpPost("projects/{id:guid}/timeline/transition-edits")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> ApplyTimelineTransition(Guid id, Taslim.Api.Movies.MovieTimelineTransitionEditRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await transitionEdits.ApplyAsync(GetUserId(), id, request, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_TIMELINE_NOT_FOUND", "Movie timeline not found.") : Ok(result);
+        }
+        catch (MovieTimelineValidationException exception)
+        {
+            return ApiResults.Error(this, exception.Code == MovieTimelineValidationCodes.TimelineVersionConflict ? 409 : 400, exception.Code, exception.Message);
+        }
     }
 
     [HttpGet("projects/{movieProjectId:guid}/takes/{takeId:guid}/selects")]
@@ -114,7 +134,7 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
 
     [HttpPost("projects/{id:guid}/timeline/transitions")]
     [ValidateAntiForgeryToken]
-    public async Task<IActionResult> ApplyTimelineTransitionEdit(Guid id, MovieTimelineTransitionEditRequest request, CancellationToken cancellationToken)
+    public async Task<IActionResult> ApplyTimelineTransitionEdit(Guid id, Taslim.Api.Contracts.MovieTimelineTransitionEditRequest request, CancellationToken cancellationToken)
     {
         try
         {

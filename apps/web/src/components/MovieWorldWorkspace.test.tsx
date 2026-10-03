@@ -13,16 +13,16 @@ describe("Movie World workspace", () => {
   });
 
   it("surfaces visual references through the unified Asset Library", () => {
-    expect(source).toContain("Reference library");
-    expect(source).toContain("Open Asset Library");
-    expect(source).toContain("Reference Asset");
-    expect(source).toContain("Register reference");
+    expect(source).toContain('movieBody.world.referenceLibrary');
+    expect(source).toContain('movieBody.world.openLibrary');
+    expect(source).toContain('movieBody.world.referenceAsset');
+    expect(source).toContain('movieBody.world.registered');
     expect(apiSource).toContain("getMovieWorld");
   });
 
   it("makes locks visible and preserves a conflict response instead of overwriting facts", () => {
     expect(source).toContain("Locked facts stay protected");
-    expect(source).toContain("active locks");
+    expect(source).toContain('movieBody.world.activeLocks');
     expect(source).toContain("The World record could not be saved.");
     expect(apiSource).toContain("updateMovieLocation");
     expect(apiSource).toContain("updateMovieSet");

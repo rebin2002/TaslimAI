@@ -164,6 +164,7 @@ public interface IMovieSoundtrackService
     Task<MovieSoundtrackCueDto?> UpdateCueAsync(Guid userId, Guid cueId, MovieSoundtrackCueUpdateRequest request, CancellationToken cancellationToken);
     Task<MovieSoundtrackCueDto?> CreateVersionAsync(Guid userId, Guid cueId, MovieSoundtrackCueVersionRequest request, CancellationToken cancellationToken);
     Task<MovieSoundtrackCueDto?> ReviewVersionAsync(Guid userId, Guid versionId, MovieSoundtrackCueVersionReviewRequest request, CancellationToken cancellationToken);
+    Task<MovieSoundtrackMediaSubmission?> SubmitMediaAsync(Guid userId, Guid versionId, CancellationToken cancellationToken);
 }
 
 public sealed class MovieSoundtrackService(
@@ -299,6 +300,26 @@ public sealed class MovieSoundtrackService(
         db.MovieSoundtrackCueVersionReviews.Add(new MovieSoundtrackCueVersionReview { Id = Guid.NewGuid(), MovieSoundtrackCueVersionId = version.Id, Decision = version.ApprovalState, Comment = version.ReviewNote, ReviewedByUserId = userId, CreatedAt = now });
         await db.SaveChangesAsync(cancellationToken);
         return await LoadCueDtoAsync(version.MovieSoundtrackCueId, cancellationToken);
+    }
+
+    public async Task<MovieSoundtrackMediaSubmission?> SubmitMediaAsync(Guid userId, Guid versionId, CancellationToken cancellationToken)
+    {
+        var version = await db.MovieSoundtrackCueVersions
+            .Include(item => item.Cue)
+            .FirstOrDefaultAsync(item => item.Id == versionId, cancellationToken);
+        if (version is null) return null;
+        await authorization.RequireAsync(userId, version.Cue.MovieProjectId, MovieOperationalActions.SoundtrackEdit, cancellationToken);
+        if (!MovieSoundtrackApprovalStates.Reviewable.Contains(version.ApprovalState))
+            throw new MovieSoundtrackValidationException("MOVIE_SOUNDTRACK_VERSION_NOT_SUBMITTABLE", "Only draft or in-review cue versions can be submitted to a media provider.");
+        return await mediaService.SubmitAsync(new MovieSoundtrackMediaRequest(
+            version.Cue.MovieProjectId,
+            version.Cue.Id,
+            version.Id,
+            version.Label,
+            version.Mood,
+            version.Intensity,
+            version.Cue.DurationSeconds,
+            version.ArrangementIntent), cancellationToken);
     }
 
     public async Task<MovieSoundtrackCueDto?> GetCueAsync(Guid userId, Guid cueId, CancellationToken cancellationToken)

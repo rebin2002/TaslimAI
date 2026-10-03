@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AlertTriangle, AudioLines, CheckCircle2, Clock3, Download, Music4, RefreshCw, ShieldAlert, Subtitles, X } from "lucide-react";
-import { useLocale } from "@/components/LocaleProvider";
 import {
   api,
   type MovieCaptionTrack,
@@ -12,6 +11,7 @@ import {
   type MovieSoundtrack,
   type MovieSoundtrackCue,
 } from "@/lib/api";
+import { useLocale } from "@/components/LocaleProvider";
 
 /**
  * The sound stage. Everything rendered here is a persisted record: the project
@@ -79,19 +79,17 @@ export function MovieAudioWorkspace({ project }: { project: MovieProject }) {
     <div className="movie-audio-workspace" data-testid="movie-audio-workspace">
       <section className="movie-audio-command" aria-labelledby="movie-audio-title">
         <div>
-          <span className="movie-workspace-kicker">{t("movieModule.audio.eyebrow")}</span>
-          <h3 id="movie-audio-title">{t("movieModule.audio.title")}</h3>
-          <p>
-            {t("movieModule.audio.description")}
-          </p>
+          <span className="movie-workspace-kicker">{t("movieAudio.commandEyebrow")}</span>
+          <h3 id="movie-audio-title">{t("movieAudio.commandTitle")}</h3>
+          <p>{t("movieAudio.commandText")}</p>
         </div>
         <div className="movie-audio-command-mark">
           <AudioLines size={23} />
-          <span>PERSISTED AUDIO</span>
+          <span>{t("movieAudio.persisted")}</span>
         </div>
       </section>
 
-      <section className="movie-audio-summary" aria-label="Audio summary">
+      <section className="movie-audio-summary" aria-label={t("movieAudio.summary")}>
         <AudioMetric label="Library" value={library?.references.length ?? 0} detail="approved references" />
         <AudioMetric label="Sound cues" value={tracks.length} detail={`${approved} approved`} />
         <AudioMetric label="Score cues" value={cues.length} detail={`${approvedCues} approved`} />
@@ -130,23 +128,23 @@ export function MovieAudioWorkspace({ project }: { project: MovieProject }) {
       <section className="movie-audio-section" aria-labelledby="movie-audio-tracks-title">
         <div className="movie-audio-section-heading">
           <div>
-            <span className="movie-workspace-kicker">Sound tracks</span>
-            <h3 id="movie-audio-tracks-title">Scene and shot audio.</h3>
-            <p>Timing is stored in milliseconds with real fade and gain values.</p>
+            <span className="movie-workspace-kicker">{t("movieAudio.tracks")}</span>
+            <h3 id="movie-audio-tracks-title">{t("movieAudio.tracksTitle")}</h3>
+            <p>{t("movieAudio.tracksText")}</p>
           </div>
           <button type="button" className="movie-workspace-button is-quiet" onClick={() => void load()}>
-            <RefreshCw size={13} /> Refresh
+            <RefreshCw size={13} /> {t("movieAudio.refresh")}
           </button>
         </div>
         {loading ? (
           <div className="movie-audio-empty">
             <Clock3 size={18} />
-            <span>{t("movieDeep.loading")}</span>
+            <span>{t("movieAudio.loading")}</span>
           </div>
         ) : tracks.length === 0 ? (
           <div className="movie-audio-empty">
             <AudioLines size={20} />
-            <strong>{t("movieDeep.noRecords")}</strong>
+            <strong>No sound tracks yet</strong>
             <p>
               Sound tracks appear after a real cue is created for a scene or shot. Nothing is generated or simulated
               here.
