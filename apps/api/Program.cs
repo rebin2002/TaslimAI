@@ -292,6 +292,8 @@ builder.Services.AddSingleton<IMovieFinalAssemblyExecutor>(services =>
     return options.Enabled ? services.GetRequiredService<FfmpegMovieFinalAssemblyExecutor>() : new UnavailableMovieFinalAssemblyExecutor();
 });
 builder.Services.AddScoped<IMovieTakeUpscaleEligibilityService, MovieTakeUpscaleEligibilityService>();
+// Soundtrack media remains unavailable until a durable media-generation worker can
+// publish provider output through the normal StoredFile/Asset boundary.
 builder.Services.AddSingleton<IMovieSoundtrackMediaService, UnavailableMovieSoundtrackMediaService>();
 builder.Services.AddScoped<IMovieSoundtrackService, MovieSoundtrackService>();
 builder.Services.AddScoped<IMovieScenesService, MovieScenesService>();
@@ -391,7 +393,6 @@ builder.Services.AddHttpClient<OpenAiProvider>();
 builder.Services.AddHttpClient<OpenAiImageGenerationProvider>();
 builder.Services.AddHttpClient<OpenAiVoiceGenerationProvider>();
 builder.Services.AddHttpClient<OpenAiResearchSearchProvider>();
-builder.Services.AddHttpClient<OpenAiVoiceGenerationProvider>();
 builder.Services.AddHttpClient<AzureSpeechVoiceGenerationProvider>();
 builder.Services.AddSingleton<IAiModelRouter, AiModelRouter>();
 builder.Services.AddSingleton<IAiProvider, MockAiProvider>();
@@ -438,7 +439,6 @@ builder.Services.AddSingleton<IMovieSoundProvider>(services =>
 builder.Services.AddScoped<IGenerationJobHandler, MovieSoundGenerationJobHandler>();
 builder.Services.AddSingleton<IVoiceGenerationProvider>(services => services.GetRequiredService<OpenAiVoiceGenerationProvider>());
 builder.Services.AddSingleton<IVoiceGenerationProvider, UnconfiguredVoiceGenerationProvider>();
-builder.Services.AddSingleton<IVoiceGenerationProvider>(services => services.GetRequiredService<OpenAiVoiceGenerationProvider>());
 builder.Services.AddSingleton<IVoiceGenerationProvider>(services => services.GetRequiredService<AzureSpeechVoiceGenerationProvider>());
 builder.Services.AddScoped<IGenerationJobHandler, VoiceGenerationJobHandler>();
 builder.Services.AddSingleton<IMovieDialogueVoiceProvider>(services =>
@@ -448,6 +448,14 @@ builder.Services.AddSingleton<IMovieDialogueVoiceProvider>(services =>
     if (string.Equals(options.ProviderKey, "fake", StringComparison.OrdinalIgnoreCase)) return new DeterministicMovieDialogueVoiceProvider();
     return new UnavailableMovieDialogueVoiceProvider();
 });
+builder.Services.AddSingleton<IMovieDialogueVoiceProvider>(services => new MovieDialogueVoiceProviderAdapter(
+    services.GetRequiredService<OpenAiVoiceGenerationProvider>(),
+    services.GetRequiredService<IOptions<MovieDialogueVoiceOptions>>(),
+    services.GetRequiredService<IOptions<VoiceGenerationOptions>>()));
+builder.Services.AddSingleton<IMovieDialogueVoiceProvider>(services => new MovieDialogueVoiceProviderAdapter(
+    services.GetRequiredService<AzureSpeechVoiceGenerationProvider>(),
+    services.GetRequiredService<IOptions<MovieDialogueVoiceOptions>>(),
+    services.GetRequiredService<IOptions<VoiceGenerationOptions>>()));
 builder.Services.AddScoped<FileValidationService>();
 builder.Services.AddSingleton<IFileContentExtractor, FileContentExtractor>();
 builder.Services.AddScoped<FileProcessingService>();

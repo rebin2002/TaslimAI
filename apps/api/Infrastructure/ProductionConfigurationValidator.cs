@@ -50,6 +50,14 @@ public static class ProductionConfigurationValidator
             RequireHttpsUri(configuration["Ai:OpenAI:BaseUrl"], "Ai:OpenAI:BaseUrl");
         }
 
+        ValidateMovieVideo(configuration);
+        ValidateDirectVideo(configuration);
+        ValidateVoice(configuration);
+        ValidateMovieDialogueVoice(configuration);
+        ValidateMusic(configuration);
+        if (configuration.GetValue("MovieSoundGeneration:Enabled", false))
+            throw new InvalidOperationException("Production MovieSoundGeneration has no approved provider-neutral SFX adapter and must remain disabled.");
+
         // Autopilot safety invariants. These can only be relaxed through an
         // explicit, reviewed human decision; production never starts with paid
         // capabilities enabled, and an enabled controller always requires
@@ -101,5 +109,99 @@ public static class ProductionConfigurationValidator
         RequireValue(value, key);
         if (!Uri.TryCreate(value, UriKind.Absolute, out var uri) || !string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException($"Production configuration {key} must be an HTTPS URL.");
+    }
+
+    private static void ValidateMovieVideo(IConfiguration configuration)
+    {
+        if (!configuration.GetValue("MovieVideo:Enabled", false)) return;
+        var provider = configuration["MovieVideo:ProviderKey"]?.Trim().ToLowerInvariant();
+        if (provider is not ("runway" or "manus"))
+            throw new InvalidOperationException("Production MovieVideo:ProviderKey must be runway or manus when MovieVideo is enabled.");
+        if (provider == "runway")
+        {
+            RequireHttpsUri(configuration["MovieVideo:ApiBaseUrl"], "MovieVideo:ApiBaseUrl");
+            RequireValue(configuration["MovieVideo:Model"], "MovieVideo:Model");
+            RequireValue(configuration["MovieVideo:ApiKey"], "MovieVideo:ApiKey");
+            return;
+        }
+
+        if (!configuration.GetValue("MovieVideo:Manus:Enabled", false))
+            throw new InvalidOperationException("Production MovieVideo:Manus:Enabled must be true when the Manus provider is selected.");
+        RequireHttpsUri(configuration["MovieVideo:Manus:ApiBaseUrl"], "MovieVideo:Manus:ApiBaseUrl");
+        RequireValue(configuration["MovieVideo:Manus:ApiKey"], "MovieVideo:Manus:ApiKey");
+        RequireValue(configuration["MovieVideo:Manus:AgentProfile"], "MovieVideo:Manus:AgentProfile");
+    }
+
+    private static void ValidateDirectVideo(IConfiguration configuration)
+    {
+        if (!configuration.GetValue("DirectVideoProviders:Enabled", false)) return;
+        RequireValue(configuration["DirectVideoProviders:ProviderKey"], "DirectVideoProviders:ProviderKey");
+        RequireValue(configuration["DirectVideoProviders:ModelKey"], "DirectVideoProviders:ModelKey");
+        RequireHttpsUri(configuration["DirectVideoProviders:ApiBaseUrl"], "DirectVideoProviders:ApiBaseUrl");
+        RequireValue(configuration["DirectVideoProviders:ApiKey"], "DirectVideoProviders:ApiKey");
+    }
+
+    private static void ValidateVoice(IConfiguration configuration)
+    {
+        if (!configuration.GetValue("VoiceGeneration:Enabled", false)) return;
+        var provider = configuration["VoiceGeneration:ProviderKey"]?.Trim().ToLowerInvariant();
+        RequireValue(configuration["VoiceGeneration:Model"], "VoiceGeneration:Model");
+        if (provider == "openai")
+        {
+            if (!configuration.GetValue("Ai:OpenAI:Enabled", false))
+                throw new InvalidOperationException("Ai:OpenAI:Enabled must be true when OpenAI voice is selected.");
+            RequireValue(configuration["Ai:OpenAI:ApiKey"], "Ai:OpenAI:ApiKey");
+            RequireHttpsUri(configuration["Ai:OpenAI:BaseUrl"], "Ai:OpenAI:BaseUrl");
+            return;
+        }
+        if (provider == "azure-speech")
+        {
+            if (!configuration.GetValue("VoiceGeneration:AzureSpeech:Enabled", false))
+                throw new InvalidOperationException("VoiceGeneration:AzureSpeech:Enabled must be true when Azure Speech is selected.");
+            RequireValue(configuration["VoiceGeneration:AzureSpeech:ApiKey"], "VoiceGeneration:AzureSpeech:ApiKey");
+            var endpoint = configuration["VoiceGeneration:AzureSpeech:Endpoint"];
+            var region = configuration["VoiceGeneration:AzureSpeech:Region"];
+            if (string.IsNullOrWhiteSpace(endpoint) && string.IsNullOrWhiteSpace(region))
+                throw new InvalidOperationException("Azure Speech production configuration requires a region or HTTPS endpoint.");
+            if (!string.IsNullOrWhiteSpace(endpoint)) RequireHttpsUri(endpoint, "VoiceGeneration:AzureSpeech:Endpoint");
+            if (!string.IsNullOrWhiteSpace(region) && (region.Contains('/') || region.Contains(':')))
+                throw new InvalidOperationException("VoiceGeneration:AzureSpeech:Region is invalid.");
+            return;
+        }
+        throw new InvalidOperationException("Production VoiceGeneration:ProviderKey must be openai or azure-speech when voice generation is enabled.");
+    }
+
+    private static void ValidateMovieDialogueVoice(IConfiguration configuration)
+    {
+        if (!configuration.GetValue("MovieDialogueVoice:Enabled", false)) return;
+        var movieProvider = configuration["MovieDialogueVoice:ProviderKey"]?.Trim().ToLowerInvariant();
+        if (string.IsNullOrWhiteSpace(movieProvider) || movieProvider is "disabled" or "unconfigured" or "fake")
+            throw new InvalidOperationException("Production MovieDialogueVoice:ProviderKey must select an approved configured voice provider.");
+        if (!configuration.GetValue("VoiceGeneration:Enabled", false)
+            || !string.Equals(movieProvider, configuration["VoiceGeneration:ProviderKey"]?.Trim(), StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("MovieDialogueVoice must select the same enabled provider as VoiceGeneration.");
+        ValidateVoice(configuration);
+    }
+
+    private static void ValidateMusic(IConfiguration configuration)
+    {
+        if (!configuration.GetValue("MusicGeneration:Enabled", false)) return;
+        var provider = configuration["MusicGeneration:ProviderKey"]?.Trim().ToLowerInvariant();
+        RequireValue(configuration["MusicGeneration:Model"], "MusicGeneration:Model");
+        if (provider == "mubert")
+        {
+            RequireHttpsUri(configuration["MusicGeneration:MubertApiBaseUrl"], "MusicGeneration:MubertApiBaseUrl");
+            RequireValue(configuration["MusicGeneration:MubertCustomerId"], "MusicGeneration:MubertCustomerId");
+            RequireValue(configuration["MusicGeneration:MubertAccessToken"], "MusicGeneration:MubertAccessToken");
+            return;
+        }
+        if (provider == "stable-audio")
+        {
+            RequireHttpsUri(configuration["MusicGeneration:StableAudioApiBaseUrl"], "MusicGeneration:StableAudioApiBaseUrl");
+            RequireValue(configuration["MusicGeneration:StableAudioApiKey"], "MusicGeneration:StableAudioApiKey");
+            RequireValue(configuration["MusicGeneration:StableAudioModel"], "MusicGeneration:StableAudioModel");
+            return;
+        }
+        throw new InvalidOperationException("Production MusicGeneration:ProviderKey must be mubert or stable-audio when music generation is enabled.");
     }
 }

@@ -44,8 +44,8 @@ No code gap found in this area.
 | Keyframe → motion → render → take | OK | `MovieProductionWorkspace`, `MovieProductionGenerationOrchestrator` |
 | Character continuity snapshots | OK | `IMovieCharacterContinuityService` builds hashed/versioned snapshots |
 | World continuity projection | OK | `MovieWorldContinuityProjector` |
-| Screen direction in the shot snapshot | **OPEN (code)** | `MovieScreenDirectionPlan` exists on the shot but is not part of `ShotSnapshot` |
-| First/last-frame + reference images to the provider | **OPEN (code)** | present in the reference package, not normalized into the provider-neutral request |
+| Screen direction in the shot snapshot | **FIXED** | `ShotSnapshot` carries the persisted screen-direction projection |
+| First/last-frame + reference images to the provider | **FIXED** | `MovieVideoGenerationRequest` and the provider-neutral normalizer carry first/last/reference inputs |
 
 ## 4. Video generation and provider seams
 
@@ -53,20 +53,20 @@ No code gap found in this area.
 |---|---|---|
 | Runway provider seam | OK (seam) | `RunwayMovieVideoProvider` — activation needs a credential only |
 | Manus provider seam | OK (seam) | `ManusMovieVideoProvider` — activation needs a credential only |
-| Provider selection | **OPEN (code)** | selection is a hard-coded branch in `Program.cs` rather than a keyed registry |
-| Direct video adapters | **OPEN (code)** | the direct-request foundation has no concrete production adapter |
+| Provider selection | **FIXED** | `IMovieVideoProviderRegistry` resolves the configured key and falls back unavailable |
+| Direct video adapters | **OPEN (provider contract)** | the generic `IVideoGenerationAdapter` path is optional and separate from Movie's canonical provider path; no verified vendor contract is available for a Movie bridge |
 
 ## 5. Dialogue, voice, music, SFX, audio
 
 | Area | Status | Notes |
 |---|---|---|
 | Dialogue lines, takes, timing, approval, selection | OK | `MovieDialogueVoice` |
-| Dialogue take duration durability | **OPEN (code)** | `MarkReadyAsync(durationMilliseconds: null)` discards the provider duration |
-| Movie dialogue production provider | **OPEN (credential)** | only fake/unavailable adapters; generic OpenAI/Azure TTS exist for Voice Studio |
-| Movie SFX/ambience provider | **OPEN (credential)** | only fake/unavailable adapters |
+| Dialogue take duration durability | **FIXED** | the provider result duration is persisted by `MovieDialogueVoiceExecutionStore.MarkReadyAsync` |
+| Movie dialogue production provider | **FIXED (credential/config gate)** | `MovieDialogueVoiceProviderAdapter` reuses the existing generic `IVoiceGenerationProvider` result and usage contract; Movie and generic voice execution remain disabled by default |
+| Movie SFX/ambience provider | **OPEN (provider contract)** | generic music generation is not a legitimate SFX/ambience contract; no provider-neutral SFX endpoint or output semantics are verified |
 | Soundtrack cue/version/ducking metadata | OK | `MovieSoundtrack` |
-| Soundtrack media submission | **OPEN (business)** | `IMovieSoundtrackMediaService.SubmitAsync` is never called |
-| Soundtrack → final assembly audio mix | **OPEN (business)** | no automatic projection of approved cues into `AudioMixInputs` |
+| Soundtrack media submission | **OPEN (code/provider contract)** | `SubmitMediaAsync` now calls the seam, but the registered service remains unavailable because the seam has no durable generation-job, output publication, or provider-operation status contract |
+| Soundtrack → final assembly audio mix | **FIXED** | approved cue assets can be projected into `AudioMixInputs` when requested |
 | Captions | OK | authored/imported/exported, timeline-linked |
 
 ## 6. Timeline, editing, selects, QC, recovery
@@ -94,7 +94,7 @@ No code gap found in this area.
 | FFmpeg executor + deterministic output QC | OK | `FfmpegMovieFinalAssemblyExecutor` |
 | Durable private master + provenance | OK | published through the normal asset publication path |
 | **Authenticated master download** | **FIXED** | added `GET /api/movie-studio/final-assemblies/{id}/download` |
-| Assembly duration measurement | **OPEN (code)** | QC compares against the expected duration, not a measured one |
+| Assembly duration measurement | **FIXED** | ffprobe-derived duration is persisted and used by assembly QC |
 
 ## 8. Usage, cost controls, security
 
@@ -114,8 +114,8 @@ No code gap found in this area.
 | Area | Status | Notes |
 |---|---|---|
 | Locale coverage for movie keys | **FIXED** | the 28 missing `movie.*` keys were translated; `en`/`ar`/`ku` now hold an identical key set |
-| Full Movie workspace localization | **OPEN (code)** | the component tree renders hard-coded English strings; the new delivery rooms follow the same convention and need a `t()` sweep plus new keys |
-| RTL layout | **OPEN (code)** | no movie-specific RTL browser coverage; the new rooms use logical CSS properties (`inset-inline`, `padding-inline`, `text-align: start`) but are not yet exercised by an RTL Playwright run |
+| Full Movie workspace localization | **FIXED** | Movie localization keys and the delivery-room surfaces have `en`/`ar`/`ku` coverage |
+| RTL layout | **FIXED (code)** | movie layout uses logical properties and locale direction; real-browser RTL validation remains an E2E gate |
 
 ## 10. Production end-to-end
 
