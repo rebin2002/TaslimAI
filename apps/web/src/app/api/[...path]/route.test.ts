@@ -32,6 +32,23 @@ describe("same-origin API proxy", () => {
     vi.unstubAllGlobals();
   });
 
+  it("forwards each Set-Cookie value separately when authentication rotates multiple cookies", async () => {
+    const upstream = new Response(JSON.stringify({ success: true }), { status: 200 });
+    upstream.headers.append("set-cookie", "taslim.auth=session-cookie; Path=/; HttpOnly; Secure; SameSite=None");
+    upstream.headers.append("set-cookie", "taslim.csrf=; Path=/; Max-Age=0; Secure; SameSite=None");
+    const fetchMock = vi.fn().mockResolvedValue(upstream);
+    vi.stubGlobal("fetch", fetchMock);
+    const request = new Request("http://localhost:3000/api/auth/login", { method: "POST", body: "{}" });
+    const response = await POST(request, context(["auth", "login"]));
+    const responseHeaders = response.headers as Headers & { getSetCookie?: () => string[] };
+    const cookies = responseHeaders.getSetCookie?.call(responseHeaders) ?? [];
+    expect(cookies).toEqual([
+      "taslim.auth=session-cookie; Path=/; HttpOnly; Secure; SameSite=None",
+      "taslim.csrf=; Path=/; Max-Age=0; Secure; SameSite=None",
+    ]);
+    vi.unstubAllGlobals();
+  });
+
   it("forwards login body, CSRF header, credentials cookie, and query string", async () => {
     const upstream = new Response(JSON.stringify({ ok: true }), { status: 200 });
     const fetchMock = vi.fn().mockResolvedValue(upstream);
