@@ -152,6 +152,49 @@ public sealed class DocumentGenerationTests : IClassFixture<DocumentGenerationAp
     }
 
     [Fact]
+    public async Task Document_job_cannot_process_another_workspace_members_private_file()
+    {
+        using var owner = factory.CreateClient();
+        var ownerAuth = await Register(owner);
+        var upload = await Upload(owner, ownerAuth.PersonalWorkspace.Id, "private-notes.txt", "Private source content.");
+        var source = (await upload.Content.ReadFromJsonAsync<StoredFileDto>())!;
+
+        using var member = factory.CreateClient();
+        var memberAuth = await Register(member);
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.WorkspaceMembers.Add(new WorkspaceMember
+            {
+                Id = Guid.NewGuid(),
+                WorkspaceId = ownerAuth.PersonalWorkspace.Id,
+                UserId = memberAuth.User.Id,
+                Role = WorkspaceRole.Member,
+                JoinedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var response = await SendWithCsrf(member, HttpMethod.Post, "/api/document-generation/jobs", new
+        {
+            workspaceId = ownerAuth.PersonalWorkspace.Id,
+            title = "Unauthorized source attempt",
+            prompt = "Create a short document.",
+            attachmentIds = new[] { source.Id },
+            outputFormat = "pdf",
+        });
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        var created = (await response.Content.ReadFromJsonAsync<CreateDocumentGenerationResponse>())!;
+        var terminal = await WaitForTerminal(member, created.Job.Id);
+
+        Assert.Equal(GenerationJobStatus.Failed.ToString(), terminal.Status);
+        Assert.Equal(GenerationJobErrorCodes.DocumentAttachmentUnavailable, terminal.ErrorCode);
+        using var verification = factory.Services.CreateScope();
+        var verificationDb = verification.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.False(await verificationDb.Assets.AsNoTracking().AnyAsync(item => item.SourceGenerationJobId == created.Job.Id));
+    }
+
+    [Fact]
     public async Task Document_representation_download_is_authenticated_and_safe()
     {
         using var owner = factory.CreateClient();
