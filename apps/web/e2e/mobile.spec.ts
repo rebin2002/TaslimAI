@@ -26,6 +26,21 @@ test.describe("mobile navigation", () => {
     }
   });
 
+  test("keeps the notification center readable and actionable on a narrow screen", async ({ authenticatedPage: page }) => {
+    await page.route("**/api/notifications/unread-count*", async (route) => {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ unreadCount: 0 }) });
+    });
+    await page.route("**/api/notifications?*", async (route) => {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ items: [], page: 1, pageSize: 50, totalCount: 0, totalPages: 0, unreadCount: 0 }) });
+    });
+    await page.goto("/notifications");
+    await expect(page.getByRole("heading", { name: "Notifications", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: /mark all read/i })).toBeDisabled();
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 2);
+    expect(overflow).toBe(true);
+    await expect(page.locator(".notification-center-links > *")).toHaveCount(2);
+  });
+
   test("keeps the Full Movie module bodies usable at 390×844", async ({ authenticatedPage: page }) => {
     test.setTimeout(180_000);
     await page.goto("/create/movie");
