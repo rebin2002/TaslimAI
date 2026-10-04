@@ -181,4 +181,69 @@ test.describe("chat journeys", () => {
     await expect(page).toHaveURL(/\/projects$/);
     await expect.poll(() => delayedRequestFailed, { timeout: 5_000 }).toBe(true);
   });
+
+  test("does not apply late stream events after switching conversations", async ({ authenticatedPage: page }) => {
+    test.setTimeout(30_000);
+    const auth = await apiJson<{ personalWorkspace: { id: string } }>(page.request, "GET", "/api/auth/me");
+    const oldConversation = await apiJson<{ id: string }>(page.request, "POST", `/api/workspaces/${auth.personalWorkspace.id}/conversations`, { title: "E2E Old Stream" });
+    const newConversation = await apiJson<{ id: string }>(page.request, "POST", `/api/workspaces/${auth.personalWorkspace.id}/conversations`, { title: "E2E New Conversation" });
+    let streamStarted = false;
+    const oldUserMessage = {
+      id: "00000000-0000-0000-0000-000000000101",
+      conversationId: oldConversation.id,
+      role: "User",
+      content: "old request",
+      status: "Completed",
+      createdAt: new Date().toISOString(),
+      sequence: 1,
+    };
+    const oldAssistantMessage = {
+      id: "00000000-0000-0000-0000-000000000102",
+      conversationId: oldConversation.id,
+      role: "Assistant",
+      content: "late old SSE response",
+      status: "Completed",
+      createdAt: new Date().toISOString(),
+      sequence: 2,
+    };
+    await page.route(`**/api/conversations/${oldConversation.id}/messages/stream`, async (route) => {
+      streamStarted = true;
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      try {
+        await route.fulfill({
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+          body: [
+            "event: message.started",
+            `data: ${JSON.stringify({ userMessage: oldUserMessage, assistantMessage: { ...oldAssistantMessage, content: "" }, conversation: oldConversation })}`,
+            "",
+            "event: message.delta",
+            `data: ${JSON.stringify({ messageId: oldAssistantMessage.id, delta: oldAssistantMessage.content })}`,
+            "",
+            "event: message.completed",
+            `data: ${JSON.stringify({ userMessage: oldUserMessage, assistantMessage: oldAssistantMessage, conversation: oldConversation })}`,
+            "",
+          ].join("\n"),
+        });
+      } catch {
+        // A route transition may abort the intercepted request before the late event is delivered.
+      }
+    });
+
+    // Seed a real browser history entry. Back is handled by Next's router and
+    // keeps the Chat component mounted while the conversation param changes.
+    await page.goto(`/chat/${newConversation.id}`);
+    await page.goto(`/chat/${oldConversation.id}`);
+    await expect(page.getByRole("heading", { name: "E2E Old Stream" })).toBeVisible();
+    await page.getByLabel("Message Taslim...").fill("start old stream");
+    await page.getByRole("button", { name: /send message/i }).click();
+    await expect.poll(() => streamStarted, { timeout: 10_000 }).toBe(true);
+
+    await page.goBack();
+    await expect(page).toHaveURL(new RegExp(`/chat/${newConversation.id}$`));
+    await expect(page.getByRole("heading", { name: "E2E New Conversation" })).toBeVisible({ timeout: 10_000 });
+    await page.waitForTimeout(1_500);
+    await expect(page.getByText("late old SSE response")).toHaveCount(0);
+    await expect(page.getByRole("heading", { name: "E2E New Conversation" })).toBeVisible();
+  });
 });
