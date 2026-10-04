@@ -147,16 +147,16 @@ test.describe("chat journeys", () => {
       }
     });
 
+    // Seed a real browser history entry. Back is handled by Next's router and
+    // keeps the Chat component mounted while the conversation param changes.
+    await page.goto(`/chat/${newConversation.id}`);
     await page.goto(`/chat/${oldConversation.id}`);
     await expect(page.getByRole("heading", { name: "E2E Old Stream" })).toBeVisible();
     await page.getByLabel("Message Taslim...").fill("start old stream");
     await page.getByRole("button", { name: /send message/i }).click();
     await expect.poll(() => streamStarted, { timeout: 10_000 }).toBe(true);
 
-    await page.evaluate((path) => {
-      window.history.pushState(window.history.state, "", path);
-      window.dispatchEvent(new PopStateEvent("popstate"));
-    }, `/chat/${newConversation.id}`);
+    await page.goBack();
     await expect(page).toHaveURL(new RegExp(`/chat/${newConversation.id}$`));
     await expect(page.getByRole("heading", { name: "E2E New Conversation" })).toBeVisible({ timeout: 10_000 });
     await page.waitForTimeout(1_500);
