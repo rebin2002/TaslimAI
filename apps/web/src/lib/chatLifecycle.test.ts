@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   claimSubmission,
   conversationPath,
+  createRegenerateRetryRequest,
+  createSendRetryRequest,
   createSubmission,
   isAbortError,
   releaseSubmission,
@@ -29,6 +31,15 @@ describe("chat submission lifecycle", () => {
     expect(retry.requestId).toBe(first.requestId);
     expect(retry.content).toBe(first.content);
     expect(retry.conversationId).toBe("conversation-1");
+  });
+
+  it("keeps normal sends and regenerations as separate idempotent retry operations", () => {
+    const sendRetry = createSendRetryRequest("conversation-1", "hello", "send-request-1", ["file-1"]);
+    const regenerateRetry = createRegenerateRetryRequest("conversation-1", "assistant-1", "regenerate-request-1");
+
+    expect(sendRetry).toEqual({ kind: "send", conversationId: "conversation-1", content: "hello", requestId: "send-request-1", attachmentIds: ["file-1"] });
+    expect(regenerateRetry).toEqual({ kind: "regenerate", conversationId: "conversation-1", messageId: "assistant-1", requestId: "regenerate-request-1" });
+    expect(regenerateRetry).not.toHaveProperty("content");
   });
 
   it("replaces the URL only when a new conversation receives its final stream result", () => {

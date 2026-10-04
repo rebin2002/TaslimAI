@@ -10,6 +10,31 @@ export function releaseSubmission(lock: MutableBooleanRef) {
   lock.current = false;
 }
 
+export type SendRetryRequest = {
+  kind: "send";
+  conversationId: string;
+  content: string;
+  requestId: string;
+  attachmentIds: string[];
+};
+
+export type RegenerateRetryRequest = {
+  kind: "regenerate";
+  conversationId: string;
+  messageId: string;
+  requestId: string;
+};
+
+export type ChatRetryRequest = SendRetryRequest | RegenerateRetryRequest;
+
+export function createSendRetryRequest(conversationId: string, content: string, requestId: string, attachmentIds: string[]): SendRetryRequest {
+  return { kind: "send", conversationId, content, requestId, attachmentIds };
+}
+
+export function createRegenerateRetryRequest(conversationId: string, messageId: string, requestId: string): RegenerateRetryRequest {
+  return { kind: "regenerate", conversationId, messageId, requestId };
+}
+
 export function createChatRequestId() {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
