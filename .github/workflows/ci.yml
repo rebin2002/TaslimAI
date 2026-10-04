@@ -23,6 +23,8 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
       - run: npm ci
+      - name: Audit production npm dependencies
+        run: npm audit --omit=dev --audit-level=high
       - run: npm test --workspace @taslim/web
       - run: npm run lint --workspace @taslim/web
       - run: npx tsc --noEmit -p apps/web/tsconfig.json
