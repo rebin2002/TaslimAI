@@ -125,6 +125,7 @@ jobs:
 
   autopilot-gate:
     name: Autopilot next-wave gate
+    if: ${{ github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/feature/taslim-autopilot-next-wave' }}
     runs-on: ubuntu-latest
     services:
       postgres:
