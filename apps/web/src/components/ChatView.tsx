@@ -7,6 +7,7 @@ import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
 import { ApiError, api, type ChatMessage, type Conversation, type Project, type StoredFile } from "@/lib/api";
 import { applyChatStreamEvent, createChatStreamState, failChatStream, stopChatStream } from "@/lib/chatStreamState";
+import { beginChatStreamSession, invalidateChatStreamSessions, isCurrentChatStreamSession } from "@/lib/chatStreamSession";
 import { claimSubmission, conversationPath, createChatRequestId, createSubmission, isAbortError, releaseSubmission, shouldReplaceConversationUrl, studioTransitionPath } from "@/lib/chatLifecycle";
 import { ProtectedPage } from "@/components/ProtectedPage";
 import { ChatMessageContent } from "@/components/ChatMessageContent";
@@ -69,6 +70,13 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const streamAbortRef = useRef<AbortController | null>(null);
   const activeRetryRef = useRef<RetryRequest | null>(null);
+  const streamGenerationRef = useRef(0);
+  const cancelActiveStream = useCallback(() => {
+    invalidateChatStreamSessions(streamGenerationRef);
+    streamAbortRef.current?.abort();
+    streamAbortRef.current = null;
+    activeRetryRef.current = null;
+  }, []);
 
   const selectedProject = useMemo(() => projects.find((project) => project.id === (selected?.projectId ?? selectedProjectId)) ?? null, [projects, selected?.projectId, selectedProjectId]);
 
@@ -88,12 +96,18 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
   }, [workspace]);
 
   useEffect(() => {
+    cancelActiveStream();
+    // A route transition owns the visible state from this point forward.
     let active = true;
+    queueMicrotask(() => {
+      if (!active) return;
+      setGenerating(false);
+      setRetryRequest(null);
+      setLoading(true);
+      setError("");
+    });
     const controller = new AbortController();
     // Loading persisted conversation state is an external synchronization.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setLoading(true);
-    setError("");
     void (async () => {
       try {
         const items = await loadConversations(controller.signal);
@@ -118,13 +132,13 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
       }
     })();
     return () => { active = false; controller.abort(); };
-  }, [conversationId, loadConversations, requestedProjectId, t]);
+  }, [cancelActiveStream, conversationId, loadConversations, requestedProjectId, t]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: generating ? "auto" : "smooth", block: "end" });
   }, [messages, generating]);
 
-  useEffect(() => () => streamAbortRef.current?.abort(), []);
+  useEffect(() => () => cancelActiveStream(), [cancelActiveStream]);
 
   const filteredConversations = useMemo(() => {
     const query = search.trim().toLowerCase();
@@ -224,6 +238,8 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
     const attachmentIds = submission.attachmentIds;
     let activeConversationId = submission.conversationId;
     const controller = new AbortController();
+    const streamSession = beginChatStreamSession(streamGenerationRef);
+    const isCurrentStream = () => isCurrentChatStreamSession(streamGenerationRef, streamSession);
     streamAbortRef.current = controller;
     setError("");
     setRetryRequest(null);
@@ -233,12 +249,15 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
       let conversation = selected;
       if (!conversation) {
         conversation = await api.createConversation(workspace.id, { projectId: selectedProjectId || undefined });
+        if (!isCurrentStream()) return;
         activeConversationId = conversation.id;
         setSelected(conversation);
         setConversations(current => [conversation!, ...current]);
       }
+      if (!isCurrentStream()) return;
       activeRetryRef.current = { conversationId: conversation.id, content: text, requestId: id, attachmentIds };
       await api.streamMessage(conversation.id, text, streamEvent => {
+        if (!isCurrentStream()) return;
         streamState = applyStreamEvent(streamEvent, streamState);
         updateConversationFromStream(streamEvent);
         if (streamEvent.type === "message.completed") {
@@ -249,11 +268,13 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
           setError(streamEvent.data.code === "CONVERSATION_ARCHIVED" ? t("chat.archivedError") : t("chat.generationError"));
         }
       }, id, attachmentIds, controller.signal);
+      if (!isCurrentStream()) return;
       if (conversation && shouldReplaceConversationUrl(conversationId, conversation.id)) {
         window.history.replaceState(window.history.state, "", conversationPath(conversation.id));
       }
       setGenerating(false);
     } catch (caught) {
+      if (!isCurrentStream()) return;
       streamState = failChatStream(streamState);
       setMessages(streamState.messages);
       if (isAbortError(caught)) {
@@ -265,8 +286,10 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
       }
       setGenerating(false);
     } finally {
-      streamAbortRef.current = null;
-      activeRetryRef.current = null;
+      if (isCurrentStream()) {
+        streamAbortRef.current = null;
+        activeRetryRef.current = null;
+      }
       releaseSubmission(sendingRef);
     }
   }
@@ -274,6 +297,8 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
   async function regenerate(message: ChatMessage) {
     if (!selected || !canRegenerate(message) || !claimSubmission(sendingRef)) return;
     const controller = new AbortController();
+    const streamSession = beginChatStreamSession(streamGenerationRef);
+    const isCurrentStream = () => isCurrentChatStreamSession(streamGenerationRef, streamSession);
     streamAbortRef.current = controller;
     setError("");
     setRetryRequest(null);
@@ -281,11 +306,13 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
     let streamState = createChatStreamState(messages);
     try {
       await api.regenerateMessage(selected.id, message.id, streamEvent => {
+        if (!isCurrentStream()) return;
         streamState = applyStreamEvent(streamEvent, streamState);
         updateConversationFromStream(streamEvent);
         if (streamEvent.type === "message.failed") setError(t("chat.regenerateError"));
       }, createChatRequestId(), controller.signal);
     } catch (caught) {
+      if (!isCurrentStream()) return;
       streamState = failChatStream(streamState);
       setMessages(streamState.messages);
       if (isAbortError(caught)) {
@@ -294,8 +321,10 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
         setError(t("chat.regenerateError"));
       }
     } finally {
-      setGenerating(false);
-      streamAbortRef.current = null;
+      if (isCurrentStream()) {
+        setGenerating(false);
+        streamAbortRef.current = null;
+      }
       releaseSubmission(sendingRef);
     }
   }
