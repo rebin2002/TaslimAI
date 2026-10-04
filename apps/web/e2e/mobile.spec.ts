@@ -44,7 +44,7 @@ test.describe("mobile navigation", () => {
   test("keeps the Full Movie module bodies usable at 390×844", async ({ authenticatedPage: page }) => {
     test.setTimeout(180_000);
     await page.goto("/create/movie");
-    await page.getByRole("button", { name: /full movie/i }).first().click();
+    await page.getByRole("tab", { name: /full movie/i }).first().click();
     await page.getByLabel("Movie title").fill("Mobile Movie Workspace");
     await page.getByLabel("Describe your movie").fill("A responsive module coverage project.");
     await page.getByRole("button", { name: /create full project/i }).click();

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Check, Clapperboard, Download, Film, Sparkles, WandSparkles, XCircle } from "lucide-react";
@@ -12,6 +12,16 @@ import { assetFileUrl } from "@/lib/apiBase";
 const aspects = ["16:9", "9:16", "1:1", "4:5", "4:3"];
 const styles = ["cinematic", "documentary", "animation", "commercial", "experimental"];
 type MovieMode = "Quick" | "Full";
+const movieModes: readonly MovieMode[] = ["Quick", "Full"];
+
+export function nextMovieMode(currentMode: MovieMode, key: string): MovieMode | null {
+  const currentIndex = movieModes.indexOf(currentMode);
+  if (key === "Home") return movieModes[0];
+  if (key === "End") return movieModes[movieModes.length - 1];
+  if (key === "ArrowRight" || key === "ArrowDown") return movieModes[(currentIndex + 1) % movieModes.length];
+  if (key === "ArrowLeft" || key === "ArrowUp") return movieModes[(currentIndex - 1 + movieModes.length) % movieModes.length];
+  return null;
+}
 
 type QuickStatus = "empty" | "preparing" | "queued" | "generating" | "completed" | "failed";
 
@@ -35,6 +45,7 @@ export function MovieStudioView() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [mode, setMode] = useState<MovieMode>("Quick");
+  const modeTabRefs = useRef<Record<MovieMode, HTMLButtonElement | null>>({ Quick: null, Full: null });
   const [projects, setProjects] = useState<Project[]>([]);
   const [provider, setProvider] = useState<MovieProviderReadiness | null>(null);
   const [saved, setSaved] = useState<MovieProject | null>(null);
@@ -42,6 +53,14 @@ export function MovieStudioView() {
   const [error, setError] = useState("");
   const [working, setWorking] = useState(false);
   const [form, setForm] = useState({ title: "", description: "", durationSeconds: 30, aspectRatio: "16:9", style: "cinematic", language: "en", projectId: searchParams.get("projectId") ?? "", additionalInstructions: "", visualLanguage: "", cameraLanguage: "", colorAndLighting: "", soundAndNarration: "", continuityRules: "" });
+
+  function handleModeKeyDown(event: KeyboardEvent<HTMLButtonElement>, currentMode: MovieMode) {
+    const nextMode = nextMovieMode(currentMode, event.key);
+    if (!nextMode) return;
+    event.preventDefault();
+    setMode(nextMode);
+    modeTabRefs.current[nextMode]?.focus();
+  }
 
   useEffect(() => {
     if (!workspace) return;
@@ -110,7 +129,7 @@ export function MovieStudioView() {
   return <div className="movie-studio-page movie-create-page">
     <header className="movie-studio-header"><div className="movie-studio-header-copy"><div className="movie-breadcrumb"><span>01</span><span className="movie-breadcrumb-line" />{t("movie.eyebrow")}</div><h1>{t("movie.title")}</h1><p>{t("movie.subtitle")}</p></div><div className="movie-header-emblem" aria-hidden="true"><Film size={23} /><span>STORY / MOTION</span></div></header>
     <form className="movie-creation-layout" onSubmit={createMovie}>
-      <section className="movie-brief-card"><div className="movie-card-topline"><span>{t("movie.workspaceEyebrow")}</span><Link href="/projects">{t("movieBody.openProjects")}</Link></div><div className="movie-mode-switch" role="tablist" aria-label={t("movie.workflowLabel")}><button type="button" className={mode === "Quick" ? "is-active" : ""} onClick={() => setMode("Quick")}><WandSparkles size={17} /><span><strong>{t("movie.quick")}</strong><small>{t("movieBody.quick.oneBrief")}</small></span><Check size={14} className="movie-mode-check" /></button><button type="button" className={mode === "Full" ? "is-active" : ""} onClick={() => setMode("Full")}><Clapperboard size={17} /><span><strong>{t("movie.full")}</strong><small>{t("movieBody.quick.planProduction")}</small></span><Check size={14} className="movie-mode-check" /></button></div>
+      <section className="movie-brief-card" id="movie-brief-panel" role="tabpanel" aria-labelledby={`movie-mode-tab-${mode.toLowerCase()}`}><div className="movie-card-topline"><span>{t("movie.workspaceEyebrow")}</span><Link href="/projects">{t("movieBody.openProjects")}</Link></div><div className="movie-mode-switch" role="tablist" aria-label={t("movie.workflowLabel")}><button id="movie-mode-tab-quick" type="button" role="tab" aria-selected={mode === "Quick"} aria-controls="movie-brief-panel" tabIndex={mode === "Quick" ? 0 : -1} ref={(element) => { modeTabRefs.current.Quick = element; }} className={mode === "Quick" ? "is-active" : ""} onClick={() => setMode("Quick")} onKeyDown={(event) => handleModeKeyDown(event, "Quick")}><WandSparkles size={17} /><span><strong>{t("movie.quick")}</strong><small>{t("movieBody.quick.oneBrief")}</small></span><Check size={14} className="movie-mode-check" /></button><button id="movie-mode-tab-full" type="button" role="tab" aria-selected={mode === "Full"} aria-controls="movie-brief-panel" tabIndex={mode === "Full" ? 0 : -1} ref={(element) => { modeTabRefs.current.Full = element; }} className={mode === "Full" ? "is-active" : ""} onClick={() => setMode("Full")} onKeyDown={(event) => handleModeKeyDown(event, "Full")}><Clapperboard size={17} /><span><strong>{t("movie.full")}</strong><small>{t("movieBody.quick.planProduction")}</small></span><Check size={14} className="movie-mode-check" /></button></div>
         <div className="movie-section-heading"><span className="movie-step-index">01</span><div><p className="section-eyebrow">{t("movie.briefEyebrow")}</p><h2>{mode === "Quick" ? t("movieBody.quick.focused") : t("movieBody.quick.startPlan")}</h2></div></div>
         <label className="movie-field"><span>{t("movie.titleLabel")}</span><input value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} placeholder={t("movie.titlePlaceholder")} maxLength={160} required /></label>
         <label className="movie-field movie-field-large"><span>{t("movie.descriptionLabel")}</span><textarea value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} placeholder={t("movie.descriptionPlaceholder")} rows={6} maxLength={8000} required /><small>{form.description.length}/8000</small></label>

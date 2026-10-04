@@ -106,7 +106,7 @@ test.describe("Final integrated Last Seed acceptance", () => {
     test.setTimeout(180_000);
 
     await page.goto("/create/movie");
-    await page.getByRole("button", { name: /full movie/i }).first().click();
+    await page.getByRole("tab", { name: /full movie/i }).first().click();
     await page.getByLabel("Movie title").fill(TITLE);
     await page.getByLabel("Describe your movie").fill(BRIEF);
     await page.getByLabel("Duration").fill("30");
@@ -340,7 +340,7 @@ test.describe("Final integrated Last Seed acceptance", () => {
     expect(usage.customerChargedAmount).toBe(0);
 
     await page.goto("/create/movie");
-    await expect(page.getByRole("button", { name: /quick movie/i }).first()).toBeVisible();
+    await expect(page.getByRole("tab", { name: /quick movie/i }).first()).toBeVisible();
     await expect(page.getByText("One brief, one output")).toBeVisible();
   });
 });
