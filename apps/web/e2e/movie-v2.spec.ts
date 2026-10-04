@@ -6,7 +6,7 @@ test.describe("Movie Studio V2 browser smoke", () => {
     await page.goto("/create/movie");
     await expect(page.getByRole("heading", { name: /movie studio/i })).toBeVisible();
 
-    await page.getByRole("button", { name: /full movie/i }).first().click();
+    await page.getByRole("tab", { name: /full movie/i }).first().click();
     await page.getByLabel("Movie title").fill("E2E Movie V2 Workspace");
     await page.getByLabel("Describe your movie").fill("A deterministic Full Movie workspace smoke project.");
     await page.getByRole("button", { name: /create full project/i }).click();
@@ -49,7 +49,7 @@ test.describe("Movie Studio V2 browser smoke", () => {
     await expect(page.getByText("No generated footage yet")).toBeVisible();
 
     await page.goto("/create/movie");
-    await expect(page.getByRole("button", { name: /quick movie/i }).first()).toBeVisible();
+    await expect(page.getByRole("tab", { name: /quick movie/i }).first()).toBeVisible();
     await expect(page.getByText("One brief, one output")).toBeVisible();
     await expect(page.getByText(/Quick Movie stays intentionally small/i)).toBeVisible();
     await expect(page).not.toHaveURL(/\/create\/movie\/[0-9a-f-]+\/overview$/i);
@@ -58,7 +58,7 @@ test.describe("Movie Studio V2 browser smoke", () => {
   test("creates an empty Story Director proposal for the same MovieProject after the guide is locked", async ({ authenticatedPage: page }) => {
     test.setTimeout(120_000);
     await page.goto("/create/movie");
-    await page.getByRole("button", { name: /full movie/i }).first().click();
+    await page.getByRole("tab", { name: /full movie/i }).first().click();
     await page.getByLabel("Movie title").fill("E2E Empty Story Director");
     await page.getByLabel("Describe your movie").fill("A deterministic premise about a choice and its consequence.");
     await page.getByRole("button", { name: /create full project/i }).click();
