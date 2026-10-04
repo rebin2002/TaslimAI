@@ -28,7 +28,7 @@ public sealed class HealthEndpointTests : IClassFixture<TaslimApiFactory>
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Equal("no-store", response.Headers.CacheControl?.ToString());
-        Assert.Contains("no-cache", response.Headers.Pragma);
+        Assert.Equal("no-cache", response.Headers.Pragma.ToString());
         Assert.True(response.Headers.TryGetValues("X-Request-ID", out var requestIds));
         var requestId = Assert.Single(requestIds);
 
@@ -48,7 +48,7 @@ public sealed class HealthEndpointTests : IClassFixture<TaslimApiFactory>
 
         Assert.Contains(response.StatusCode, new[] { HttpStatusCode.OK, HttpStatusCode.ServiceUnavailable });
         Assert.Equal("no-store", response.Headers.CacheControl?.ToString());
-        Assert.Contains("no-cache", response.Headers.Pragma);
+        Assert.Equal("no-cache", response.Headers.Pragma.ToString());
         Assert.DoesNotContain("password", rawBody, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("Host=", rawBody, StringComparison.OrdinalIgnoreCase);
 
