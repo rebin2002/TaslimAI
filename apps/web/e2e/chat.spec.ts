@@ -126,6 +126,36 @@ test.describe("chat journeys", () => {
     await expect(errorAlert).not.toContainText(/stack|exception|api key|secret/i);
   });
 
+  test("retries a failed regeneration without adding a duplicate user message", async ({ authenticatedPage: page }) => {
+    const auth = await apiJson<{ personalWorkspace: { id: string } }>(page.request, "GET", "/api/auth/me");
+    const conversation = await apiJson<{ id: string }>(page.request, "POST", `/api/workspaces/${auth.personalWorkspace.id}/conversations`, { title: "E2E Regeneration Retry" });
+    const initial = await apiJson<{ conversation: Record<string, unknown>; userMessage: Record<string, unknown>; assistantMessage: Record<string, unknown> }>(page.request, "POST", `/api/conversations/${conversation.id}/messages`, { content: "Give me a safe test response." });
+    let attempts = 0;
+    let firstRequestId: string | undefined;
+    let secondRequestId: string | undefined;
+    await page.route(`**/api/conversations/${conversation.id}/messages/*/regenerate`, async (route) => {
+      attempts += 1;
+      const payload = route.request().postDataJSON() as { requestId?: string };
+      if (attempts === 1) firstRequestId = payload.requestId;
+      else secondRequestId = payload.requestId;
+      const assistantMessage = { ...initial.assistantMessage, id: "regenerated-assistant-1", status: "Pending", content: "" };
+      const terminalAssistant = { ...assistantMessage, status: "Completed", content: "Recovered regeneration response." };
+      const body = attempts === 1
+        ? `event: message.started\ndata: ${JSON.stringify({ conversation: initial.conversation, userMessage: initial.userMessage, assistantMessage })}\n\nevent: message.failed\ndata: ${JSON.stringify({ code: "AI_GENERATION_FAILED", message: "safe failure" })}\n\n`
+        : `event: message.started\ndata: ${JSON.stringify({ conversation: initial.conversation, userMessage: initial.userMessage, assistantMessage })}\n\nevent: message.completed\ndata: ${JSON.stringify({ conversation: initial.conversation, userMessage: initial.userMessage, assistantMessage: terminalAssistant })}\n\n`;
+      await route.fulfill({ status: 200, contentType: "text/event-stream", body });
+    });
+    await page.goto(`/chat/${conversation.id}`);
+    await expect(page.getByRole("heading", { name: "E2E Regeneration Retry" })).toBeVisible();
+    await page.getByRole("button", { name: /regenerate/i }).click();
+    await expect(page.locator(".chat-inline-error")).toBeVisible();
+    await page.getByRole("button", { name: /^retry$/i }).first().click();
+    await expect(page.getByText("Recovered regeneration response.")).toBeVisible();
+    await expect(page.getByText("Give me a safe test response.")).toHaveCount(1);
+    expect(firstRequestId).toBeTruthy();
+    expect(secondRequestId).toBe(firstRequestId);
+  });
+
   test("cancels in-flight conversation reads when Chat unmounts during navigation", async ({ authenticatedPage: page }) => {
     test.setTimeout(30_000);
     const auth = await apiJson<{ personalWorkspace: { id: string } }>(page.request, "GET", "/api/auth/me");

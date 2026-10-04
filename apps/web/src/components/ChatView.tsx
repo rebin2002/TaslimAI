@@ -7,13 +7,12 @@ import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
 import { ApiError, api, type ChatMessage, type Conversation, type Project, type StoredFile } from "@/lib/api";
 import { applyChatStreamEvent, createChatStreamState, failChatStream, stopChatStream } from "@/lib/chatStreamState";
-import { claimSubmission, conversationPath, createChatRequestId, createSubmission, isAbortError, releaseSubmission, shouldReplaceConversationUrl, studioTransitionPath } from "@/lib/chatLifecycle";
+import { claimSubmission, conversationPath, createChatRequestId, createRegenerateRetryRequest, createSendRetryRequest, createSubmission, isAbortError, releaseSubmission, shouldReplaceConversationUrl, studioTransitionPath, type ChatRetryRequest, type RegenerateRetryRequest, type SendRetryRequest } from "@/lib/chatLifecycle";
 import { ProtectedPage } from "@/components/ProtectedPage";
 import { ChatMessageContent } from "@/components/ChatMessageContent";
 
 type ChatViewProps = { conversationId?: string };
 type ConversationGroup = { label: string; items: Conversation[] };
-type RetryRequest = { conversationId: string; content: string; requestId: string; attachmentIds: string[] };
 type UploadProgress = { complete: number; total: number; fileName: string } | null;
 type Creator = "document" | "presentation" | "research" | "image" | "social";
 
@@ -59,7 +58,7 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
   const [error, setError] = useState("");
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState("");
-  const [retryRequest, setRetryRequest] = useState<RetryRequest | null>(null);
+  const [retryRequest, setRetryRequest] = useState<ChatRetryRequest | null>(null);
   const [attachments, setAttachments] = useState<StoredFile[]>([]);
   const [uploadProgress, setUploadProgress] = useState<UploadProgress>(null);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
@@ -68,7 +67,7 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
   const sendingRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const streamAbortRef = useRef<AbortController | null>(null);
-  const activeRetryRef = useRef<RetryRequest | null>(null);
+  const activeRetryRef = useRef<ChatRetryRequest | null>(null);
 
   const selectedProject = useMemo(() => projects.find((project) => project.id === (selected?.projectId ?? selectedProjectId)) ?? null, [projects, selected?.projectId, selectedProjectId]);
 
@@ -214,7 +213,7 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
     }
   }
 
-  async function send(event?: FormEvent | KeyboardEvent, retry?: RetryRequest) {
+  async function send(event?: FormEvent | KeyboardEvent, retry?: SendRetryRequest) {
     event?.preventDefault();
     const text = retry?.content ?? content.trim();
     if (!text || generating || uploadProgress || text.length > 20000 || !workspace) return;
@@ -237,7 +236,8 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
         setSelected(conversation);
         setConversations(current => [conversation!, ...current]);
       }
-      activeRetryRef.current = { conversationId: conversation.id, content: text, requestId: id, attachmentIds };
+      const retryable = createSendRetryRequest(conversation.id, text, id, attachmentIds);
+      activeRetryRef.current = retryable;
       await api.streamMessage(conversation.id, text, streamEvent => {
         streamState = applyStreamEvent(streamEvent, streamState);
         updateConversationFromStream(streamEvent);
@@ -245,7 +245,7 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
           setContent("");
           setAttachments([]);
         } else if (streamEvent.type === "message.failed") {
-          setRetryRequest({ conversationId: conversation!.id, content: text, requestId: id, attachmentIds });
+          setRetryRequest(retryable);
           setError(streamEvent.data.code === "CONVERSATION_ARCHIVED" ? t("chat.archivedError") : t("chat.generationError"));
         }
       }, id, attachmentIds, controller.signal);
@@ -260,7 +260,7 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
         if (activeRetryRef.current) setRetryRequest(activeRetryRef.current);
         setError(t("chat.cancelled"));
       } else {
-        if (activeConversationId) setRetryRequest({ conversationId: activeConversationId, content: text, requestId: id, attachmentIds });
+        if (activeConversationId) setRetryRequest(createSendRetryRequest(activeConversationId, text, id, attachmentIds));
         setError(caught instanceof ApiError && caught.code === "CONVERSATION_ARCHIVED" ? t("chat.archivedError") : t("chat.generationError"));
       }
       setGenerating(false);
@@ -271,10 +271,13 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
     }
   }
 
-  async function regenerate(message: ChatMessage) {
-    if (!selected || !canRegenerate(message) || !claimSubmission(sendingRef)) return;
+  async function regenerate(message: ChatMessage, retry?: RegenerateRetryRequest) {
+    const isValidRetry = retry && selected && retry.conversationId === selected.id && retry.messageId === message.id;
+    if (!selected || (!isValidRetry && !canRegenerate(message)) || !claimSubmission(sendingRef)) return;
     const controller = new AbortController();
+    const retryable = createRegenerateRetryRequest(selected.id, message.id, retry?.requestId ?? createChatRequestId());
     streamAbortRef.current = controller;
+    activeRetryRef.current = retryable;
     setError("");
     setRetryRequest(null);
     setGenerating(true);
@@ -283,14 +286,19 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
       await api.regenerateMessage(selected.id, message.id, streamEvent => {
         streamState = applyStreamEvent(streamEvent, streamState);
         updateConversationFromStream(streamEvent);
-        if (streamEvent.type === "message.failed") setError(t("chat.regenerateError"));
-      }, createChatRequestId(), controller.signal);
+        if (streamEvent.type === "message.failed") {
+          setRetryRequest(retryable);
+          setError(t("chat.regenerateError"));
+        }
+      }, retryable.requestId, controller.signal);
     } catch (caught) {
       streamState = failChatStream(streamState);
       setMessages(streamState.messages);
       if (isAbortError(caught)) {
+        setRetryRequest(retryable);
         setError(t("chat.cancelled"));
       } else {
+        setRetryRequest(retryable);
         setError(t("chat.regenerateError"));
       }
     } finally {
@@ -298,6 +306,17 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
       streamAbortRef.current = null;
       releaseSubmission(sendingRef);
     }
+  }
+
+  async function retryFailed() {
+    const retry = retryRequest;
+    if (!retry || generating) return;
+    if (retry.kind === "send") {
+      await send(undefined, retry);
+      return;
+    }
+    const sourceMessage = messages.find((message) => message.id === retry.messageId);
+    if (sourceMessage) await regenerate(sourceMessage, retry);
   }
 
   function stopGeneration() {
@@ -373,9 +392,9 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
       </div>
       {!selected && <div className="chat-project-selector"><label htmlFor="chat-project">{t("chat.projectSelector")}</label><select id="chat-project" value={selectedProjectId} onChange={(event) => setSelectedProjectId(event.target.value)} disabled={loading}><option value="">{t("chat.noProject")}</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select><small>{t("chat.projectSelectorHint")}</small></div>}
       <div className="chat-messages" aria-live="polite">
-        {loading ? <div className="chat-empty"><span className="loading-spinner" /></div> : error && !selected ? <div className="chat-empty"><CircleMessage /><h3>{error}</h3><button type="button" className="secondary-button" onClick={startNewChat}>{t("chat.newChat")}</button></div> : messages.length === 0 ? <div className="chat-empty"><span className="chat-empty-icon"><Sparkles size={22} /></span><h3>{t("chat.emptyTitle")}</h3><p>{t("chat.emptyDescription")}</p></div> : <>{messages.map(message => <article className={`chat-message chat-message-${message.role.toLowerCase()} ${message.status === "Failed" ? "is-failed" : ""}`} key={message.id}><div className="chat-message-avatar">{message.role.toLowerCase() === "user" ? "T" : <Sparkles size={15} />}</div><div className="chat-message-copy"><span className="chat-message-role">{message.role.toLowerCase() === "user" ? t("chat.you") : t("chat.taslim")}</span><ChatMessageContent role={message.role} status={message.status} content={message.content} />{message.role === "Assistant" && message.content && <div className="chat-message-tools"><button type="button" onClick={() => void copyResponse(message)} aria-label={t("chat.copyResponse")}><Copy size={13} />{copiedMessageId === message.id ? t("chat.copied") : t("chat.copyResponse")}</button>{canRegenerate(message) && <button type="button" onClick={() => void regenerate(message)}><RefreshCw size={13} />{t("chat.regenerate")}</button>}</div>}{message.status === "Failed" && retryRequest && <button type="button" className="chat-retry-button" onClick={() => void send(undefined, retryRequest)} disabled={generating}><RefreshCw size={13} />{t("chat.retry")}</button>}{message.isTestResponse && <small className="chat-test-badge">{t("chat.testResponse")}</small>}</div></article>)}<div ref={messagesEndRef} /></>}
+        {loading ? <div className="chat-empty"><span className="loading-spinner" /></div> : error && !selected ? <div className="chat-empty"><CircleMessage /><h3>{error}</h3><button type="button" className="secondary-button" onClick={startNewChat}>{t("chat.newChat")}</button></div> : messages.length === 0 ? <div className="chat-empty"><span className="chat-empty-icon"><Sparkles size={22} /></span><h3>{t("chat.emptyTitle")}</h3><p>{t("chat.emptyDescription")}</p></div> : <>{messages.map(message => <article className={`chat-message chat-message-${message.role.toLowerCase()} ${message.status === "Failed" ? "is-failed" : ""}`} key={message.id}><div className="chat-message-avatar">{message.role.toLowerCase() === "user" ? "T" : <Sparkles size={15} />}</div><div className="chat-message-copy"><span className="chat-message-role">{message.role.toLowerCase() === "user" ? t("chat.you") : t("chat.taslim")}</span><ChatMessageContent role={message.role} status={message.status} content={message.content} />{message.role === "Assistant" && message.content && <div className="chat-message-tools"><button type="button" onClick={() => void copyResponse(message)} aria-label={t("chat.copyResponse")}><Copy size={13} />{copiedMessageId === message.id ? t("chat.copied") : t("chat.copyResponse")}</button>{canRegenerate(message) && <button type="button" onClick={() => void regenerate(message)}><RefreshCw size={13} />{t("chat.regenerate")}</button>}</div>}{message.status === "Failed" && retryRequest && <button type="button" className="chat-retry-button" onClick={() => void retryFailed()} disabled={generating}><RefreshCw size={13} />{t("chat.retry")}</button>}{message.isTestResponse && <small className="chat-test-badge">{t("chat.testResponse")}</small>}</div></article>)}<div ref={messagesEndRef} /></>}
       </div>
-      {error && selected && <div className="chat-inline-error" role="alert"><span>{error}</span><div>{retryRequest && <button type="button" className="chat-inline-retry" onClick={() => void send(undefined, retryRequest)} disabled={generating}>{t("chat.retry")}</button>}<button type="button" className="chat-inline-dismiss" onClick={() => { setError(""); setRetryRequest(null); }} aria-label={t("chat.dismissError")}><X size={14} /></button></div></div>}
+      {error && selected && <div className="chat-inline-error" role="alert"><span>{error}</span><div>{retryRequest && <button type="button" className="chat-inline-retry" onClick={() => void retryFailed()} disabled={generating}>{t("chat.retry")}</button>}<button type="button" className="chat-inline-dismiss" onClick={() => { setError(""); setRetryRequest(null); }} aria-label={t("chat.dismissError")}><X size={14} /></button></div></div>}
       <div className="chat-creator-handoff"><span>{t("chat.handoffHint")}</span><div>{creatorActions.map((creator) => { const Icon = creator.icon; return <button type="button" key={creator.id} onClick={() => openCreator(creator.id)}><Icon size={13} />{t(creator.label)}</button>; })}</div></div>
       <form className="chat-composer" onSubmit={send}>
         {attachments.length > 0 && <div className="chat-attachment-list" aria-label={t("chat.attachments")}><div className="chat-attachment-heading"><span>{t("chat.attachments")}</span><button type="button" onClick={() => void clearAttachments()} disabled={generating}>{t("chat.clearAttachments")}</button></div>{attachments.map(file => <span className="chat-attachment-chip" key={file.id}><Paperclip size={12} /><span><strong>{file.originalFileName}</strong><small>{formatFileSize(file.sizeBytes)}</small></span><button type="button" onClick={() => void removeAttachment(file)} aria-label={`${t("chat.removeAttachment")}: ${file.originalFileName}`} disabled={generating}><X size={12} /></button></span>)}</div>}
