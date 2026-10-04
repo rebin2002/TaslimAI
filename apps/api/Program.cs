@@ -523,14 +523,25 @@ app.UseAuthentication();
 app.UseRateLimiter();
 app.UseMiddleware<AntiforgeryValidationMiddleware>();
 app.UseAuthorization();
-app.MapGet("/health", (OperationalHealthService health, HttpContext context) => Results.Ok(health.Live(context.TraceIdentifier)))
+static void SetHealthResponseHeaders(HttpResponse response)
+{
+    response.Headers.CacheControl = "no-store";
+    response.Headers.Pragma = "no-cache";
+}
+static IResult LivenessEndpoint(OperationalHealthService health, HttpContext context)
+{
+    SetHealthResponseHeaders(context.Response);
+    return Results.Ok(health.Live(context.TraceIdentifier));
+}
+app.MapGet("/health", LivenessEndpoint)
     .WithName("Health")
     .WithTags("System");
-app.MapGet("/health/live", (OperationalHealthService health, HttpContext context) => Results.Ok(health.Live(context.TraceIdentifier)))
+app.MapGet("/health/live", LivenessEndpoint)
     .WithName("HealthLive")
     .WithTags("System");
 static async Task<IResult> ReadinessEndpoint(OperationalHealthService health, HttpContext context, CancellationToken cancellationToken)
 {
+    SetHealthResponseHeaders(context.Response);
     var result = await health.ReadinessAsync(context.TraceIdentifier, cancellationToken);
     return Results.Json(result.Response, statusCode: result.IsReady ? StatusCodes.Status200OK : StatusCodes.Status503ServiceUnavailable);
 }
