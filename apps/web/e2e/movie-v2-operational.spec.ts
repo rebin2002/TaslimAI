@@ -17,7 +17,7 @@ test.describe("Movie Studio V2 operational browser contracts", () => {
       page.getByRole("heading", { name: /movie studio/i }),
     ).toBeVisible();
     await page
-      .getByRole("button", { name: /full movie/i })
+      .getByRole("tab", { name: /full movie/i })
       .first()
       .click();
     await page.getByLabel("Movie title").fill("E2E Operational Full Movie");
@@ -121,7 +121,7 @@ test.describe("Movie Studio V2 operational browser contracts", () => {
 
     await page.goto("/create/movie");
     await expect(
-      page.getByRole("button", { name: /quick movie/i }).first(),
+      page.getByRole("tab", { name: /quick movie/i }).first(),
     ).toBeVisible();
     await expect(page.getByText("One brief, one output")).toBeVisible();
     await expect(

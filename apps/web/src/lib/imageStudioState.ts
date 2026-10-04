@@ -1,11 +1,26 @@
 import type { GenerationJob, ImageJobResult } from "./api";
 
+const terminalStatuses = new Set<GenerationJob["status"]>(["Succeeded", "Failed", "Cancelled"]);
+
 export function isImageJob(job: GenerationJob | null): boolean {
   return job?.jobType === "image.generate";
 }
 
+export function isImageTerminal(job: GenerationJob | null) {
+  return !!job && terminalStatuses.has(job.status);
+}
+
+export function shouldPollImageJob(job: GenerationJob | null) {
+  return !!job && !isImageTerminal(job);
+}
+
+export function nextImagePollDelay(job: GenerationJob | null, retryAttempt = 0) {
+  if (!shouldPollImageJob(job)) return null;
+  return Math.min(650 * Math.max(1, retryAttempt + 1), 2_800);
+}
+
 export function canCancelImageJob(job: GenerationJob | null): boolean {
-  return !!job && (job.status === "Pending" || job.status === "Queued" || job.status === "Running") && !job.cancellationRequested;
+  return !!job && !isImageTerminal(job) && !job.cancellationRequested;
 }
 
 export function parseImageJobResult(job: GenerationJob | null): ImageJobResult | null {

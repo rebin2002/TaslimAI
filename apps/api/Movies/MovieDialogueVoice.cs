@@ -161,7 +161,8 @@ public sealed record MovieDialogueVoiceProviderRequest(
     string Language,
     int StartMilliseconds,
     int EndMilliseconds,
-    string? DeliveryNotes);
+    string? DeliveryNotes,
+    Guid? MovieProjectId = null);
 
 public sealed record MovieDialogueVoiceProviderUsage(
     string ModelKey,
@@ -249,7 +250,7 @@ public sealed class MovieDialogueVoiceGenerationJobHandler(
         var started = DateTime.UtcNow;
         var generated = await provider.GenerateAsync(new MovieDialogueVoiceProviderRequest(
             input.MovieDialogueLineId, input.MovieClipId, input.MovieCharacterId, input.SpeakerName, input.Text, input.Language,
-            input.StartMilliseconds, input.EndMilliseconds, input.DeliveryNotes), cancellationToken);
+            input.StartMilliseconds, input.EndMilliseconds, input.DeliveryNotes, input.MovieProjectId), cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
         ValidateOutput(generated);
         progress.Report(85);

@@ -97,4 +97,38 @@ describe("api.login", () => {
     expect(failure.code).toBe("CSRF_VALIDATION_FAILED");
     expect(fetchMock).toHaveBeenCalledTimes(4);
   });
+
+  it("shares one in-flight CSRF bootstrap across concurrent mutations", async () => {
+    let releaseCsrf!: () => void;
+    const csrfReady = new Promise<void>((resolve) => { releaseCsrf = resolve; });
+    const fetchMock = vi.fn()
+      .mockImplementationOnce(async () => {
+        await csrfReady;
+        return csrfResponse("shared-token");
+      })
+      .mockResolvedValueOnce(response(authResponse))
+      .mockResolvedValueOnce(response({ success: true }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { api } = await import("./api");
+
+    const first = api.updateProfile({ displayName: "Owner", preferredLanguage: "en" });
+    const second = api.changePassword({ currentPassword: "StrongPassword!123", newPassword: "EvenStronger!123" });
+    await Promise.resolve();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    releaseCsrf();
+    await expect(Promise.all([first, second])).resolves.toEqual([authResponse, { success: true }]);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(new Headers(fetchMock.mock.calls[1][1].headers).get("X-CSRF-TOKEN")).toBe("shared-token");
+    expect(new Headers(fetchMock.mock.calls[2][1].headers).get("X-CSRF-TOKEN")).toBe("shared-token");
+  });
+
+  it("rejects a malformed CSRF response without sending an unsafe mutation", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(response({ token: 42 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { api } = await import("./api");
+
+    await expect(api.updateProfile({ displayName: "Owner", preferredLanguage: "en" })).rejects.toThrow("CSRF token unavailable");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][1].method ?? "GET").toBe("GET");
+  });
 });

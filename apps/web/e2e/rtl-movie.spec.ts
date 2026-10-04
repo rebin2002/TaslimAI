@@ -71,7 +71,7 @@ async function expectNoHorizontalOverflow(page: Page, label: string) {
 async function createFullMovieProject(page: Page) {
   await page.goto("/create/movie");
   await expect(page.getByRole("heading", { name: /movie studio/i })).toBeVisible();
-  await page.getByRole("button", { name: /full movie/i }).first().click();
+  await page.getByRole("tab", { name: /full movie/i }).first().click();
   await page.getByLabel("Movie title").fill("E2E RTL Full Movie");
   await page
     .getByLabel("Describe your movie")

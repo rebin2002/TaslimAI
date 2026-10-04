@@ -2,8 +2,28 @@ import type { Asset, GenerationJob, SocialJobResult, SocialPost, StoredFile } fr
 
 const terminalStatuses = new Set(["Succeeded", "Failed", "Cancelled"]);
 const socialPlatforms = new Set(["instagram", "facebook", "linkedin", "x", "tiktok", "multi"]);
+const activeJobStoragePrefix = "taslim:social-generation:";
 export type SocialStudioState = "compose" | "pending" | "queued" | "running" | "succeeded" | "completed-unavailable" | "failed" | "cancelled";
 export type SocialPreviewPlatform = "instagram" | "facebook" | "linkedin" | "x" | "tiktok" | "multi";
+
+export function socialActiveJobStorageKey(workspaceId: string) { return `${activeJobStoragePrefix}${workspaceId}`; }
+export function readSocialActiveJobId(workspaceId: string) {
+  if (typeof window === "undefined") return null;
+  try {
+    const jobId = window.sessionStorage.getItem(socialActiveJobStorageKey(workspaceId));
+    return jobId?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+export function persistSocialActiveJobId(workspaceId: string, jobId: string) {
+  if (typeof window === "undefined" || !jobId.trim()) return;
+  try { window.sessionStorage.setItem(socialActiveJobStorageKey(workspaceId), jobId); } catch { /* Storage may be unavailable. */ }
+}
+export function clearSocialActiveJobId(workspaceId: string) {
+  if (typeof window === "undefined") return;
+  try { window.sessionStorage.removeItem(socialActiveJobStorageKey(workspaceId)); } catch { /* Storage may be unavailable. */ }
+}
 
 export function isSocialTerminal(job: GenerationJob | null) { return !!job && terminalStatuses.has(job.status); }
 export function shouldPollSocialJob(job: GenerationJob | null) { return !!job && !isSocialTerminal(job); }

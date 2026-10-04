@@ -3,10 +3,12 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Options;
 using Taslim.Api.Contracts;
 using Taslim.Api.Persistence;
 using Xunit;
@@ -94,6 +96,37 @@ public sealed class IdentityProjectsTests : IClassFixture<TaslimApiFactory>
         var login = await Login(anonymous, email, "StrongPassword!123");
         Assert.Equal(HttpStatusCode.OK, login.StatusCode);
         await Logout(anonymous);
+    }
+
+    [Fact]
+    public async Task Changing_password_invalidates_other_application_sessions()
+    {
+        var stampOptions = factory.Services.GetRequiredService<IOptions<SecurityStampValidatorOptions>>().Value;
+        var originalValidationInterval = stampOptions.ValidationInterval;
+        stampOptions.ValidationInterval = TimeSpan.Zero;
+        try
+        {
+            using var currentSession = factory.CreateClient();
+            var email = $"password-session-{Guid.NewGuid():N}@example.com";
+            await Register(currentSession, "Password Session Owner", email);
+
+            using var otherSession = factory.CreateClient();
+            Assert.Equal(HttpStatusCode.OK, (await Login(otherSession, email, "StrongPassword!123")).StatusCode);
+            Assert.Equal(HttpStatusCode.OK, (await otherSession.GetAsync("/api/auth/me")).StatusCode);
+
+            var changed = await SendWithCsrf(currentSession, HttpMethod.Post, "/api/auth/password", new
+            {
+                currentPassword = "StrongPassword!123",
+                newPassword = "EvenStronger!123",
+            });
+            Assert.Equal(HttpStatusCode.OK, changed.StatusCode);
+
+            Assert.Equal(HttpStatusCode.Unauthorized, (await otherSession.GetAsync("/api/auth/me")).StatusCode);
+        }
+        finally
+        {
+            stampOptions.ValidationInterval = originalValidationInterval;
+        }
     }
 
     [Fact]
@@ -307,6 +340,7 @@ public sealed class IdentityProjectsTests : IClassFixture<TaslimApiFactory>
             preferredLanguage = "en"
         });
         Assert.Equal(HttpStatusCode.OK, registration.StatusCode);
+        AssertCsrfCookieExpired(registration);
         var auth = await registration.Content.ReadFromJsonAsync<AuthResponse>();
         Assert.NotNull(auth);
 
@@ -334,6 +368,7 @@ public sealed class IdentityProjectsTests : IClassFixture<TaslimApiFactory>
         var loginToken = await GetCsrf(client);
         var login = await SendWithToken(client, HttpMethod.Post, "/api/auth/login", loginToken, new { email, password = "StrongPassword!123" });
         Assert.Equal(HttpStatusCode.OK, login.StatusCode);
+        AssertCsrfCookieExpired(login);
         var authenticatedToken = await GetCsrf(client);
 
         var first = await SendWithToken<ProjectDto>(client, HttpMethod.Post, $"/api/workspaces/{auth.PersonalWorkspace.Id}/projects", authenticatedToken, new { name = "Lifecycle One", description = "1", type = "Business" });
@@ -353,12 +388,24 @@ public sealed class IdentityProjectsTests : IClassFixture<TaslimApiFactory>
     private async Task<HttpResponseMessage> Login(HttpClient client, string email, string password) =>
         await SendWithCsrf(client, HttpMethod.Post, "/api/auth/login", new { email, password });
 
-    private static async Task Logout(HttpClient client)
+    private static async Task<HttpResponseMessage> Logout(HttpClient client)
     {
         var token = await GetCsrf(client);
         using var request = new HttpRequestMessage(HttpMethod.Post, "/api/auth/logout");
         request.Headers.Add("X-CSRF-TOKEN", token);
-        Assert.Equal(HttpStatusCode.OK, (await client.SendAsync(request)).StatusCode);
+        var response = await client.SendAsync(request);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        AssertCsrfCookieExpired(response);
+        return response;
+    }
+
+    private static void AssertCsrfCookieExpired(HttpResponseMessage response)
+    {
+        Assert.True(response.Headers.TryGetValues("Set-Cookie", out var setCookies));
+        Assert.Contains(setCookies, cookie =>
+            cookie.StartsWith("taslim.csrf=", StringComparison.OrdinalIgnoreCase)
+            && (cookie.Contains("max-age=0", StringComparison.OrdinalIgnoreCase)
+                || cookie.Contains("expires=Thu, 01 Jan 1970", StringComparison.OrdinalIgnoreCase)));
     }
 
     private static async Task<T> SendWithCsrf<T>(HttpClient client, HttpMethod method, string path, object? payload)

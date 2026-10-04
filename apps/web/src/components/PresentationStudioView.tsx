@@ -47,7 +47,14 @@ function blockItems(block: SlideBlock) {
   return block.items?.filter(Boolean) ?? [];
 }
 
+function slideTypeLabel(type: string, t: (key: string, variables?: Record<string, string>) => string) {
+  const key = `presentation.slideType.${type}`;
+  const translated = t(key);
+  return translated === key ? type.replaceAll("_", " ") : translated;
+}
+
 function SlideArtwork({ slide, compact = false }: { slide: Slide; compact?: boolean }) {
+  const { t } = useLocale();
   const metrics = slide.blocks?.flatMap((block) => block.metrics ?? []).slice(0, 3) ?? [];
   const columns = slide.blocks?.flatMap((block) => block.columns ?? []).slice(0, 3) ?? [];
   const items = slide.blocks?.flatMap(blockItems).slice(0, 5) ?? [];
@@ -57,9 +64,9 @@ function SlideArtwork({ slide, compact = false }: { slide: Slide; compact?: bool
   return (
     <div className={`slide-artwork ${isTitle ? "is-title-slide" : ""} ${compact ? "is-compact" : ""}`} dir="auto">
       <div className="slide-artwork-glow" />
-      <div className="slide-artwork-topline"><span>TASLIM / {String(slide.order).padStart(2, "0")}</span><span>{slide.type.replaceAll("_", " ")}</span></div>
+      <div className="slide-artwork-topline"><span>TASLIM / {String(slide.order).padStart(2, "0")}</span><span>{slideTypeLabel(slide.type, t)}</span></div>
       <div className="slide-artwork-content">
-        <p className="slide-artwork-kicker">{isTitle ? "Presentation" : `Chapter ${String(slide.order).padStart(2, "0")}`}</p>
+        <p className="slide-artwork-kicker">{isTitle ? t("presentation.label") : t("presentation.chapter", { number: String(slide.order).padStart(2, "0") })}</p>
         <h3>{slide.title}</h3>
         {slide.subtitle && <p className="slide-artwork-subtitle">{slide.subtitle}</p>}
         {!compact && text && <p className="slide-artwork-text">{text}</p>}
@@ -73,28 +80,30 @@ function SlideArtwork({ slide, compact = false }: { slide: Slide; compact?: bool
 }
 
 function EmptySlideCanvas({ title, description }: { title: string; description: string }) {
+  const { t } = useLocale();
   return (
     <div className="slide-empty-canvas" dir="auto">
       <div className="slide-empty-grid" />
       <div className="slide-empty-copy">
         <span className="slide-empty-icon"><PresentationIcon size={22} /></span>
-        <p className="section-eyebrow">Presentation workspace</p>
+        <p className="section-eyebrow">{t("presentation.workspace")}</p>
         <h2>{title}</h2>
         <p>{description}</p>
       </div>
-      <span className="slide-empty-footer">16:9 canvas · ready when you are</span>
+      <span className="slide-empty-footer">{t("presentation.canvasReady")}</span>
     </div>
   );
 }
 
 function RecentPresentationCard({ asset }: { asset: Asset }) {
+  const { t } = useLocale();
   const imagePreview = asset.canPreview && asset.mimeType?.startsWith("image/");
   return (
     <a className="recent-presentation-card" href={assetFileUrl(asset.id, true)} target="_blank" rel="noreferrer">
       <div className="recent-presentation-thumb">
-        {imagePreview ? <div className="recent-presentation-image" style={{ backgroundImage: `url("${assetFileUrl(asset.id, true)}")` }} aria-label="Presentation preview" role="img" /> : <><Layers3 size={20} /><span>{asset.mimeType?.split("/").pop()?.toUpperCase() || "DECK"}</span></>}
+        {imagePreview ? <div className="recent-presentation-image" style={{ backgroundImage: `url("${assetFileUrl(asset.id, true)}")` }} aria-label={t("presentation.previewAlt")} role="img" /> : <><Layers3 size={20} /><span>{asset.mimeType?.split("/").pop()?.toUpperCase() || t("presentation.deck")}</span></>}
       </div>
-      <div className="recent-presentation-copy"><strong>{asset.name}</strong><span>{asset.projectName || "Workspace asset"}</span></div>
+      <div className="recent-presentation-copy"><strong>{asset.name}</strong><span>{asset.projectName || t("presentation.workspaceAsset")}</span></div>
       <ExternalLink size={14} />
     </a>
   );
@@ -182,7 +191,7 @@ export function PresentationStudioView() {
   const slides = result?.previewSlides ?? [];
   const selectedSlide = slides[activeSlide] ?? slides[0];
   const selectedSlideNumber = selectedSlide ? selectedSlide.order : activeSlide + 1;
-  const progressSteps = ["Brief", "Structure", "Slides"];
+  const progressSteps = [t("presentation.progress.brief"), t("presentation.progress.structure"), t("presentation.progress.slides")];
 
   function toggleFile(file: StoredFile) {
     if (!isPresentationSourceReady(file)) return;
@@ -289,9 +298,9 @@ export function PresentationStudioView() {
     {!current ? <>
       <form className="presentation-compose-workspace" onSubmit={(event) => void create(event)}>
         <section className="presentation-compose-stage">
-          <div className="presentation-stage-toolbar"><div><span className="stage-label">01 / STORYBOARD</span><strong>Build the story before the slides</strong></div><span className="stage-status"><LockKeyhole size={13} /> Private workspace</span></div>
-          <EmptySlideCanvas title={title.trim() || "Your presentation starts here"} description={description.trim() || "Add a topic and purpose to shape your first slide."} />
-          <div className="presentation-stage-caption"><span><Sparkles size={14} /> Slide-first creation</span><span>16:9</span></div>
+          <div className="presentation-stage-toolbar"><div><span className="stage-label">{t("presentation.stageLabel")}</span><strong>{t("presentation.stageTitle")}</strong></div><span className="stage-status"><LockKeyhole size={13} /> {t("presentation.privateWorkspace")}</span></div>
+          <EmptySlideCanvas title={title.trim() || t("presentation.canvasTitle")} description={description.trim() || t("presentation.canvasDescription")} />
+          <div className="presentation-stage-caption"><span><Sparkles size={14} /> {t("presentation.slideFirst")}</span><span>16:9</span></div>
         </section>
         <section className="account-card presentation-brief-card">
           <div className="card-title"><span className="card-title-icon teal"><Sparkles size={17} /></span><div><h2>{t("presentation.createTitle")}</h2><p>{t("presentation.createSubtitle")}</p></div></div>
@@ -308,16 +317,16 @@ export function PresentationStudioView() {
           <div className="presentation-checkboxes"><label className="presentation-checkbox"><input type="checkbox" checked={includeAgenda} onChange={(event) => setIncludeAgenda(event.target.checked)} /> <span>{t("presentation.includeAgenda")}</span></label><label className="presentation-checkbox"><input type="checkbox" checked={includeClosingNextSteps} onChange={(event) => setIncludeClosingNextSteps(event.target.checked)} /> <span>{t("presentation.includeClosing")}</span></label></div>
           <div className="presentation-source-heading"><div><h3><FolderOpen size={14} /> {t("presentation.sources")}</h3><p>{t("presentation.sourcesHint")}</p></div><strong>{selected.length}/5</strong></div>
           <div className="presentation-source-list">{loadingSources ? <p className="usage-empty">{t("presentation.loadingSources")}</p> : readyFiles.length === 0 ? <p className="usage-empty">{t("presentation.noSources")}</p> : readyFiles.map((file) => <label className={`presentation-source-option ${selected.includes(file.id) ? "is-selected" : ""}`} key={file.id}><input type="checkbox" checked={selected.includes(file.id)} onChange={() => toggleFile(file)} /><FileText size={16} /><span><strong>{file.originalFileName}</strong><small>{file.extension.toUpperCase()} · {Math.ceil(file.sizeBytes / 1024)} KB</small></span></label>)}</div>
-          {error && <div className="form-error"><XCircle size={15} /> {error}</div>}
+          {error && <div className="form-error" role="alert"><XCircle size={15} /> {error}</div>}
           <button className="primary-button presentation-create-button" type="submit" disabled={working || title.trim().length < 3 || description.trim().length < 3}><Sparkles size={16} /> {working ? t("presentation.working") : t("presentation.generate")} <ArrowRight size={15} /></button>
         </section>
       </form>
-      {recentPresentations.length > 0 && <section className="recent-presentations-section"><div className="recent-presentations-heading"><div><p className="section-eyebrow">Your library</p><h2>Recent presentations</h2></div><Link className="text-link" href="/assets?assetType=presentation">View all <ArrowRight size={14} /></Link></div><div className="recent-presentations-grid">{recentPresentations.map((asset) => <RecentPresentationCard asset={asset} key={asset.id} />)}</div></section>}
+      {recentPresentations.length > 0 && <section className="recent-presentations-section"><div className="recent-presentations-heading"><div><p className="section-eyebrow">{t("presentation.library")}</p><h2>{t("presentation.recentTitle")}</h2></div><Link className="text-link" href="/assets?assetType=presentation">{t("presentation.viewAll")} <ArrowRight size={14} /></Link></div><div className="recent-presentations-grid">{recentPresentations.map((asset) => <RecentPresentationCard asset={asset} key={asset.id} />)}</div></section>}
     </> : state === "failed" || state === "cancelled" ? <section className="account-card presentation-generation-state presentation-terminal-state" aria-live="polite"><XCircle size={28} /><p className="section-eyebrow">{t(`jobs.status${statusKey}`)}</p><h2>{current.errorMessage || t("presentation.failedSafe")}</h2><div className="presentation-result-actions"><button className="primary-button" onClick={createAnother}><RefreshCw size={15} /> {t("presentation.createAnother")}</button><Link className="secondary-button" href="/assets">{t("presentation.openAssets")}</Link></div></section> : state === "succeeded" && result?.assetId ? <section className="presentation-output-workspace" aria-live="polite">
-      <aside className="presentation-slide-navigator"><div className="slide-navigator-heading"><div><p className="section-eyebrow">Storyboard</p><strong>{slides.length || result.slideCount || 0} slides</strong></div><span>{selectedSlideNumber}/{slides.length || result.slideCount || 0}</span></div><div className="slide-thumbnail-list">{slides.map((slide, index) => <button className={`slide-thumbnail ${index === activeSlide ? "is-active" : ""}`} key={`${slide.order}-${slide.title}`} onClick={() => setActiveSlide(index)} type="button" aria-label={`Open slide ${slide.order}: ${slide.title}`}><SlideArtwork slide={slide} compact /><span className="slide-thumbnail-label"><b>{String(slide.order).padStart(2, "0")}</b><span>{slide.title}</span></span></button>)}</div></aside>
-      <section className="presentation-output-main"><div className="presentation-output-toolbar"><div><p className="section-eyebrow">{t("presentation.resultEyebrow")}</p><h2>{result.title || t("presentation.resultTitle")}</h2><span>{result.slideCount ? t("presentation.slideCount", { count: String(result.slideCount) }) : ""}{dateLabel ? ` · ${dateLabel}` : ""}</span></div><div className="presentation-output-actions">{result.representations?.filter((representation) => representation.type === "pptx").map((representation) => <button className="secondary-button" key={representation.id} type="button" onClick={() => void downloadRepresentation(representation.id, representation.fileName)} disabled={working}><Download size={15} /> PPTX</button>)}<Link className="secondary-button" href="/assets"><ExternalLink size={15} /> {t("presentation.openAssets")}</Link></div></div><div className="presentation-active-slide">{selectedSlide ? <SlideArtwork slide={selectedSlide} /> : <EmptySlideCanvas title={t("presentation.resultTitle")} description={t("presentation.completedLoadHint")} />}<button className="slide-nav-button slide-nav-prev" onClick={() => setActiveSlide((index) => Math.max(0, index - 1))} disabled={activeSlide === 0} aria-label="Previous slide"><ArrowLeft size={17} /></button><button className="slide-nav-button slide-nav-next" onClick={() => setActiveSlide((index) => Math.min(Math.max(0, slides.length - 1), index + 1))} disabled={activeSlide >= slides.length - 1} aria-label="Next slide"><ArrowRight size={17} /></button></div><div className="presentation-output-footer"><span><CheckCircle2 size={15} /> {t("presentation.savedToAssets")}</span><span>{t("presentation.safetyNote")}</span></div>{downloadError && <div className="form-error"><XCircle size={15} /> {downloadError}</div>}</section>
-      <aside className="presentation-output-rail"><div className="output-rail-card"><span className="output-rail-icon"><PresentationIcon size={17} /></span><p className="section-eyebrow">Selected slide</p><h3>{selectedSlide?.title || t("presentation.resultTitle")}</h3><p>{selectedSlide?.subtitle || "Review the generated slide content before sharing."}</p><div className="output-rail-meta"><span>{selectedSlide ? `Slide ${selectedSlide.order}` : "—"}</span><span>{selectedSlide?.type.replaceAll("_", " ") || "—"}</span></div></div><div className="output-rail-card output-rail-note"><LockKeyhole size={16} /><strong>Private by default</strong><p>Your presentation is saved to this workspace asset library. Nothing is published automatically.</p></div><button className="primary-button output-new-button" onClick={createAnother}><RefreshCw size={15} /> {t("presentation.createAnother")}</button></aside>
-    </section> : state === "completed-unavailable" ? <section className="account-card presentation-generation-state presentation-terminal-state"><RefreshCw size={28} /><p className="section-eyebrow">{t("jobs.statusSucceeded")}</p><h2>{t("presentation.completedLoadError")}</h2><p>{t("presentation.completedLoadHint")}</p><div className="presentation-result-actions"><button className="primary-button" onClick={() => void retryCompleted()} disabled={retryingCompleted}>{retryingCompleted ? t("presentation.working") : t("presentation.retry")}</button><Link className="secondary-button" href="/assets">{t("presentation.openAssets")}</Link></div></section> : <section className="presentation-progress-workspace" aria-live="polite"><div className="presentation-progress-canvas"><div className="presentation-progress-orb"><LoaderCircle size={30} /></div><p className="section-eyebrow">{t("presentation.progressEyebrow")}</p><h2>{t(`jobs.status${statusKey}`)}</h2><p>{t("presentation.progressText")}</p><div className="generation-progress-label"><span>{t("jobs.progress")}</span><strong>{progress}%</strong></div><div className="generation-progress-track"><span style={{ width: `${progress}%` }} /></div></div><div className="presentation-progress-steps">{progressSteps.map((step, index) => <div className={index <= (progress > 66 ? 2 : progress > 33 ? 1 : 0) ? "is-done" : ""} key={step}><span>{index + 1}</span><strong>{step}</strong></div>)}</div>{error && <div className="form-error"><XCircle size={15} /> {error}</div>}{canCancelPresentationJob(current) && <button className="secondary-button generation-cancel-button" onClick={() => void cancel()} disabled={working}><XCircle size={15} /> {t("presentation.cancel")}</button>}</section>}
+      <aside className="presentation-slide-navigator"><div className="slide-navigator-heading"><div><p className="section-eyebrow">{t("presentation.storyboard")}</p><strong>{t("presentation.slides", { count: String(slides.length || result.slideCount || 0) })}</strong></div><span>{selectedSlideNumber}/{slides.length || result.slideCount || 0}</span></div><div className="slide-thumbnail-list">{slides.map((slide, index) => <button className={`slide-thumbnail ${index === activeSlide ? "is-active" : ""}`} key={`${slide.order}-${slide.title}`} onClick={() => setActiveSlide(index)} type="button" aria-label={t("presentation.openSlide", { number: String(slide.order), title: slide.title })}><SlideArtwork slide={slide} compact /><span className="slide-thumbnail-label"><b>{String(slide.order).padStart(2, "0")}</b><span>{slide.title}</span></span></button>)}</div></aside>
+      <section className="presentation-output-main"><div className="presentation-output-toolbar"><div><p className="section-eyebrow">{t("presentation.resultEyebrow")}</p><h2>{result.title || t("presentation.resultTitle")}</h2><span>{result.slideCount ? t("presentation.slideCount", { count: String(result.slideCount) }) : ""}{dateLabel ? ` · ${dateLabel}` : ""}</span></div><div className="presentation-output-actions">{result.representations?.filter((representation) => representation.type === "pptx").map((representation) => <button className="secondary-button" key={representation.id} type="button" onClick={() => void downloadRepresentation(representation.id, representation.fileName)} disabled={working}><Download size={15} /> PPTX</button>)}<Link className="secondary-button" href="/assets"><ExternalLink size={15} /> {t("presentation.openAssets")}</Link></div></div><div className="presentation-active-slide">{selectedSlide ? <SlideArtwork slide={selectedSlide} /> : <EmptySlideCanvas title={t("presentation.resultTitle")} description={t("presentation.completedLoadHint")} />}<button className="slide-nav-button slide-nav-prev" onClick={() => setActiveSlide((index) => Math.max(0, index - 1))} disabled={activeSlide === 0} aria-label={t("presentation.previousSlide")}><ArrowLeft size={17} /></button><button className="slide-nav-button slide-nav-next" onClick={() => setActiveSlide((index) => Math.min(Math.max(0, slides.length - 1), index + 1))} disabled={activeSlide >= slides.length - 1} aria-label={t("presentation.nextSlide")}><ArrowRight size={17} /></button></div><div className="presentation-output-footer"><span><CheckCircle2 size={15} /> {t("presentation.savedToAssets")}</span><span>{t("presentation.safetyNote")}</span></div>{downloadError && <div className="form-error" role="alert"><XCircle size={15} /> {downloadError}</div>}</section>
+      <aside className="presentation-output-rail"><div className="output-rail-card"><span className="output-rail-icon"><PresentationIcon size={17} /></span><p className="section-eyebrow">{t("presentation.selectedSlide")}</p><h3>{selectedSlide?.title || t("presentation.resultTitle")}</h3><p>{selectedSlide?.subtitle || t("presentation.reviewSlide")}</p><div className="output-rail-meta"><span>{selectedSlide ? t("presentation.slide", { number: String(selectedSlide.order) }) : "—"}</span><span>{selectedSlide ? slideTypeLabel(selectedSlide.type, t) : "—"}</span></div></div><div className="output-rail-card output-rail-note"><LockKeyhole size={16} /><strong>{t("presentation.privateByDefault")}</strong><p>{t("presentation.privateNote")}</p></div><button className="primary-button output-new-button" onClick={createAnother}><RefreshCw size={15} /> {t("presentation.createAnother")}</button></aside>
+    </section> : state === "completed-unavailable" ? <section className="account-card presentation-generation-state presentation-terminal-state"><RefreshCw size={28} /><p className="section-eyebrow">{t("jobs.statusSucceeded")}</p><h2>{t("presentation.completedLoadError")}</h2><p>{t("presentation.completedLoadHint")}</p><div className="presentation-result-actions"><button className="primary-button" onClick={() => void retryCompleted()} disabled={retryingCompleted}>{retryingCompleted ? t("presentation.working") : t("presentation.retry")}</button><Link className="secondary-button" href="/assets">{t("presentation.openAssets")}</Link></div></section> : <section className="presentation-progress-workspace" aria-live="polite"><div className="presentation-progress-canvas"><div className="presentation-progress-orb"><LoaderCircle size={30} /></div><p className="section-eyebrow">{t("presentation.progressEyebrow")}</p><h2>{t(`jobs.status${statusKey}`)}</h2><p>{t("presentation.progressText")}</p><div className="generation-progress-label"><span>{t("jobs.progress")}</span><strong>{progress}%</strong></div><div className="generation-progress-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress} aria-label={t("jobs.progress")}><span style={{ width: `${progress}%` }} /></div></div><div className="presentation-progress-steps">{progressSteps.map((step, index) => <div className={index <= (progress > 66 ? 2 : progress > 33 ? 1 : 0) ? "is-done" : ""} key={step}><span>{index + 1}</span><strong>{step}</strong></div>)}</div>{error && <div className="form-error" role="alert"><XCircle size={15} /> {error}</div>}{canCancelPresentationJob(current) && <button className="secondary-button generation-cancel-button" onClick={() => void cancel()} disabled={working}><XCircle size={15} /> {t("presentation.cancel")}</button>}</section>}
     <p className="presentation-studio-footnote">{t("presentation.safetyNote")}</p>
   </div>;
 }
