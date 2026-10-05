@@ -1490,6 +1490,10 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasIndex(job => job.ProjectId);
             entity.HasIndex(job => job.RetryOfJobId);
             entity.HasIndex(job => new { job.CreatedByUserId, job.IdempotencyKey }).IsUnique().HasFilter("\"IdempotencyKey\" IS NOT NULL");
+            entity.HasIndex(job => new { job.WorkspaceId, job.CreatedByUserId, job.JobType })
+                .IsUnique()
+                .HasDatabaseName("IX_GenerationJobs_ImageActiveByUser")
+                .HasFilter("\"JobType\" = 'image.generate' AND \"RequestId\" LIKE 'image-studio:%' AND \"Status\" IN ('Pending', 'Queued', 'Running')");
             entity.HasOne(job => job.Workspace).WithMany().HasForeignKey(job => job.WorkspaceId).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne(job => job.RetryOfJob).WithMany(job => job.Retries).HasForeignKey(job => job.RetryOfJobId).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne(job => job.Project).WithMany().HasForeignKey(job => job.ProjectId).OnDelete(DeleteBehavior.SetNull);
