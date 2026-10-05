@@ -110,6 +110,23 @@ public sealed class DocumentGenerationUnitTests
     }
 
     [Fact]
+    public void Draft_validator_rejects_xml_unsafe_text_before_rendering()
+    {
+        var draft = new DocumentDraft
+        {
+            Title = "Report",
+            Summary = "Summary",
+            Sections = [new DocumentSection
+            {
+                Heading = "Overview",
+                Blocks = [new DocumentBlock { Type = DocumentBlockTypes.Paragraph, Text = "Safe prefix\u0001unsafe suffix" }],
+            }],
+        };
+
+        Assert.Throws<DocumentOutputValidationException>(() => DocumentDraftValidator.Validate(draft, new DocumentGenerationOptions()));
+    }
+
+    [Fact]
     public void Draft_validator_accepts_canonical_paragraph_list_and_table_blocks()
     {
         var draft = new DocumentDraft

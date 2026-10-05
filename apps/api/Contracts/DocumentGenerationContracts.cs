@@ -201,14 +201,16 @@ public static class DocumentDraftValidator
     public static void Validate(DocumentDraft draft, DocumentGenerationOptions options)
     {
         if (draft is null || string.IsNullOrWhiteSpace(draft.Title) || draft.Title.Length > 255
+            || HasUnsafeText(draft.Title)
             || draft.Sections is null || draft.Sections.Count < 1 || draft.Sections.Count > options.MaxSections
-            || draft.Summary is null || draft.Summary.Length > options.MaxSummaryCharacters)
+            || draft.Summary is null || draft.Summary.Length > options.MaxSummaryCharacters || HasUnsafeText(draft.Summary))
             throw new DocumentOutputValidationException();
 
         var blocks = 0;
         foreach (var section in draft.Sections)
         {
             if (section is null || string.IsNullOrWhiteSpace(section.Heading) || section.Heading.Length > options.MaxHeadingCharacters
+                || HasUnsafeText(section.Heading)
                 || section.Blocks is null || section.Blocks.Count == 0)
                 throw new DocumentOutputValidationException();
 
@@ -216,13 +218,13 @@ public static class DocumentDraftValidator
             foreach (var block in section.Blocks)
             {
                 if (block is null || string.IsNullOrWhiteSpace(block.Type) || !DocumentBlockTypes.Supported.Contains(block.Type)
-                    || (block.Text?.Length ?? 0) > options.MaxBlockCharacters
+                    || (block.Text?.Length ?? 0) > options.MaxBlockCharacters || HasUnsafeText(block.Text)
                     || block.Items is { Count: > 40 } || block.Rows is { Count: > 100 })
                     throw new DocumentOutputValidationException();
 
-                if (block.Items?.Any(item => string.IsNullOrWhiteSpace(item) || item.Length > options.MaxBlockCharacters) == true
+                if (block.Items?.Any(item => string.IsNullOrWhiteSpace(item) || item.Length > options.MaxBlockCharacters || HasUnsafeText(item)) == true
                     || block.Rows?.Any(row => row is null || row.Cells is null || row.Cells.Count is < 1 or > 8
-                        || row.Cells.Any(cell => cell is null || cell.Length > options.MaxBlockCharacters)) == true)
+                        || row.Cells.Any(cell => cell is null || cell.Length > options.MaxBlockCharacters || HasUnsafeText(cell))) == true)
                     throw new DocumentOutputValidationException();
 
                 switch (block.Type.ToLowerInvariant())
@@ -247,6 +249,20 @@ public static class DocumentDraftValidator
 
         if (blocks < 1 || blocks > options.MaxBlocks)
             throw new DocumentOutputValidationException();
+    }
+
+    private static bool HasUnsafeText(string? value)
+    {
+        if (value is null) return false;
+        for (var index = 0; index < value.Length; index++)
+        {
+            var character = value[index];
+            if (char.IsControl(character) && character is not '\t' and not '\n' and not '\r') return true;
+            if (character is '\uFFFE' or '\uFFFF') return true;
+            if (!char.IsSurrogate(character)) continue;
+            if (!char.IsHighSurrogate(character) || index + 1 >= value.Length || !char.IsLowSurrogate(value[++index])) return true;
+        }
+        return false;
     }
 }
 
