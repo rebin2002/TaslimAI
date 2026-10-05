@@ -5,6 +5,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
+using Taslim.Api.Infrastructure;
 using Taslim.Api.Persistence;
 using Xunit;
 
@@ -76,6 +77,21 @@ public sealed class ActivityCenterTests : IClassFixture<GenerationJobsNoWorkerFa
         Assert.DoesNotContain("model", json, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("storage", json, StringComparison.OrdinalIgnoreCase);
         Assert.Equal(created.Id, Guid.Parse(JsonDocument.Parse(json).RootElement.GetProperty("items")[0].GetProperty("jobId").GetString()!));
+    }
+
+    [Fact]
+    public async Task Activity_bounds_deep_page_values_without_offset_overflow()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, $"activity-page-{Guid.NewGuid():N}@example.com");
+
+        var response = await client.GetAsync($"/api/activity?workspaceId={auth.PersonalWorkspace.Id}&page={int.MaxValue}&pageSize={int.MaxValue}");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var list = (await response.Content.ReadFromJsonAsync<ActivityListDto>())!;
+        Assert.Equal(ApiPagination.MaxPage, list.Page);
+        Assert.Equal(ApiPagination.MaxPageSize, list.PageSize);
+        Assert.Empty(list.Items);
     }
 
     private static async Task<AuthResponse> Register(HttpClient client, string email)

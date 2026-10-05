@@ -6,6 +6,7 @@ using Microsoft.Extensions.Options;
 using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
+using Taslim.Api.Infrastructure;
 using Taslim.Api.Persistence;
 
 namespace Taslim.Api.Upscaling;
@@ -154,8 +155,8 @@ public sealed class UpscalingJobService(
     public async Task<UpscalingJobListDto?> ListAsync(Guid userId, UpscalingJobFilter filter, CancellationToken cancellationToken = default)
     {
         if (!await access.IsMemberAsync(userId, filter.WorkspaceId, cancellationToken)) return null;
-        var page = Math.Clamp(filter.Page, 1, 1_000_000);
-        var pageSize = Math.Clamp(filter.PageSize, 1, 100);
+        var page = ApiPagination.NormalizePage(filter.Page);
+        var pageSize = ApiPagination.NormalizePageSize(filter.PageSize);
         var query = db.UpscalingJobs.AsNoTracking().Where(job => job.WorkspaceId == filter.WorkspaceId);
         if (filter.Status.HasValue) query = query.Where(job => job.Status == filter.Status.Value);
         if (!string.IsNullOrWhiteSpace(filter.TargetResolution))
@@ -169,7 +170,7 @@ public sealed class UpscalingJobService(
             .Include(job => job.QualityHandoffs)
             .OrderByDescending(job => job.CreatedAt)
             .ThenBy(job => job.Id)
-            .Skip((page - 1) * pageSize)
+            .Skip(ApiPagination.GetOffset(page, pageSize))
             .Take(pageSize)
             .ToListAsync(cancellationToken);
         return new UpscalingJobListDto(jobs.Select(UpscalingContractMapper.ToDto).ToArray(), page, pageSize, totalCount, (int)Math.Ceiling(totalCount / (double)pageSize));

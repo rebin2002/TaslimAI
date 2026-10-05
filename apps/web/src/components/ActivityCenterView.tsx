@@ -1,4 +1,5 @@
 "use client";
+import { localeTag, type Locale } from "@/lib/i18n";
 
 import Link from "next/link";
 import { Activity, CheckCheck, ExternalLink, LoaderCircle, XCircle } from "lucide-react";
@@ -8,11 +9,9 @@ import { useLocale } from "@/components/LocaleProvider";
 import { api, type ActivityItem, type ActivityList } from "@/lib/api";
 import { activityStatuses, type ActivityStatusFilter } from "@/lib/activityCenter";
 
-const localeMap = { en: "en-US", ar: "ar", ku: "ku-Arab" } as const;
-
-function formatTime(value: string | null, locale: keyof typeof localeMap, fallback: string) {
+function formatTime(value: string | null, locale: Locale, fallback: string) {
   if (!value) return fallback;
-  return new Intl.DateTimeFormat(localeMap[locale], { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
+  return new Intl.DateTimeFormat(localeTag(locale), { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
 }
 
 export function ActivityCenterView() {
