@@ -98,7 +98,8 @@ public sealed class ResearchGenerationJobHandler(
             sourceCandidates.Add(candidate);
             evidenceCandidates.Add(new ResearchEvidenceCandidate(citationId, "uploaded source", Trim(file.ExtractedText!, settings.MaxEvidenceCharacters), null, null));
         }
-        sourceCandidates = sourceCandidates.Take(Math.Min(settings.MaxSourceCount, ResearchGenerationDefaults.MaxSources(input.Depth))).ToList();
+        var maxSourceCount = Math.Min(settings.MaxSourceCount, ResearchGenerationDefaults.MaxSources(input.Depth));
+        sourceCandidates = ResearchSourceSelection.Bound(sourceCandidates, maxSourceCount).ToList();
         if (sourceCandidates.Count == 0)
             throw new ResearchGenerationStageException(ResearchGenerationStages.Search, GenerationJobErrorCodes.ResearchSourceUnavailable, "No usable research sources were found.", usage);
         evidenceCandidates = evidenceProcessor.Normalize(sourceCandidates, evidenceCandidates, settings).ToList();
@@ -289,6 +290,20 @@ public sealed class ResearchGenerationJobHandler(
 
     private static int? AddNullable(int? left, int? right) => left.HasValue || right.HasValue ? (left ?? 0) + (right ?? 0) : null;
     private static string Trim(string value, int max) => value.Length <= max ? value : value[..Math.Max(1, max - 3)].TrimEnd() + "...";
+}
+
+internal static class ResearchSourceSelection
+{
+    public static IReadOnlyList<ResearchSourceCandidate> Bound(IReadOnlyList<ResearchSourceCandidate> candidates, int maximum)
+    {
+        var limit = Math.Max(0, maximum);
+        if (candidates.Count <= limit) return candidates;
+
+        var explicitSources = candidates.Where(source => source.StoredFileId.HasValue).Take(limit).ToArray();
+        var providerCapacity = limit - explicitSources.Length;
+        var providerSources = candidates.Where(source => !source.StoredFileId.HasValue).Take(providerCapacity).ToArray();
+        return providerSources.Concat(explicitSources).ToArray();
+    }
 }
 
 internal static class ResearchDocumentMapper
