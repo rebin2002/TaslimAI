@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   Check,
@@ -33,6 +33,7 @@ import {
   type ProductionWorkspaceShot,
   type ProductionWorkspaceStage,
 } from "@/lib/movieProductionWorkspace";
+import { hasActiveMovieProductionExecution, nextMovieProductionPollDelay } from "@/lib/movieProductionPolling";
 import { productionIntentForTier, type MovieResolutionTier } from "@/lib/movieProductionResolution";
 
 const filters: Array<{ id: ProductionWorkspaceFilter; label: string }> = [
@@ -86,13 +87,37 @@ export function MovieProductionWorkspace({ project, completionPercent, onRefresh
   const { t } = useLocale();
   const model = useMemo(() => buildMovieProductionWorkspaceModel(project), [project]);
   const displayProgress = model.shots.length ? model.progressPercent : completionPercent;
+  const hasActiveExecution = useMemo(() => hasActiveMovieProductionExecution(project), [project]);
   const [filter, setFilter] = useState<ProductionWorkspaceFilter>("all");
   const [selectedTier, setSelectedTier] = useState<MovieResolutionTier>(model.counts.selectedTakes > 0 ? "Master" : model.counts.candidates > 0 ? "Upgrade" : "Draft");
   const [busyKey, setBusyKey] = useState("");
   const [error, setError] = useState("");
+  const [refreshError, setRefreshError] = useState("");
+  const [pollRetry, setPollRetry] = useState(0);
   const [lastAction, setLastAction] = useState<(() => Promise<void>) | null>(null);
   const [confirmation, setConfirmation] = useState<PendingProductionConfirmation | null>(null);
+  const refreshRef = useRef(onRefresh);
   const visibleShots = model.shots.filter((item) => matchesProductionFilter(item, filter));
+
+  useEffect(() => { refreshRef.current = onRefresh; }, [onRefresh]);
+  useEffect(() => {
+    if (!hasActiveExecution) return;
+    let active = true;
+    const timer = window.setTimeout(async () => {
+      try {
+        await refreshRef.current();
+        if (!active) return;
+        setPollRetry(0);
+        setRefreshError("");
+      } catch {
+        if (!active) return;
+        setPollRetry((attempt) => attempt + 1);
+        setRefreshError("Production status could not be refreshed. Retrying automatically.");
+      }
+    }, nextMovieProductionPollDelay(hasActiveExecution, pollRetry) ?? 1_000);
+    return () => { active = false; window.clearTimeout(timer); };
+  }, [hasActiveExecution, pollRetry]);
+
   const regenerateShot = (item: ProductionWorkspaceShot) => async () => {
     const sourceVersion = item.motion ?? item.keyframe ?? item.render;
     const response = await api.createMovieRegenerationRequest(item.shot.id, {
@@ -111,6 +136,7 @@ export function MovieProductionWorkspace({ project, completionPercent, onRefresh
     try {
       await work();
       await onRefresh();
+      setRefreshError("");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "That production decision could not be saved.");
     } finally {
@@ -150,6 +176,7 @@ export function MovieProductionWorkspace({ project, completionPercent, onRefresh
     </div>
 
     {error && <div className="movie-production-recovery" role="alert"><CircleAlert size={16} /><div><strong>We kept your plan safe.</strong><span>{error}</span></div><div className="movie-production-recovery-actions">{lastAction && <button type="button" onClick={() => void lastAction()} disabled={Boolean(busyKey)}><RefreshCw size={13} /> Retry last action</button>}<button type="button" onClick={() => void onRefresh()} disabled={Boolean(busyKey)}><RefreshCw size={13} /> Reload workspace</button></div></div>}
+    {refreshError && <div className="movie-production-recovery" role="status"><RefreshCw size={16} /><div><strong>Live status is temporarily unavailable.</strong><span>{refreshError}</span></div><div className="movie-production-recovery-actions"><button type="button" onClick={() => void onRefresh()} disabled={Boolean(busyKey)}><RefreshCw size={13} /> Reload workspace</button></div></div>}
 
     <section className="movie-production-shot-workspace" aria-labelledby="production-shot-list-title">
       <div className="movie-production-section-heading"><div><span className="movie-workspace-kicker">Shot review</span><h3 id="production-shot-list-title">{t("movieModule.production.title")}</h3><p>Implementation details stay behind the stage labels; you only see what needs your review next.</p></div><span className="movie-production-filter-count">{visibleShots.length} of {model.counts.shots} shots</span></div>
