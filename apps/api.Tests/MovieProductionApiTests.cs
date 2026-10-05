@@ -197,6 +197,82 @@ public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWork
     }
 
     [Fact]
+    public async Task Production_rejects_another_members_private_unassigned_asset()
+    {
+        using var owner = factory.CreateClient();
+        var ownerAuth = await Register(owner);
+        var project = await SendWithCsrf<MovieStudioProjectResponse>(owner, HttpMethod.Post, "/api/movie-studio/projects", new
+        {
+            workspaceId = ownerAuth.PersonalWorkspace.Id,
+            mode = MovieProjectModes.Full,
+            title = "Private production asset",
+            description = "Production must not cross private asset boundaries.",
+            durationSeconds = 20,
+            aspectRatio = "16:9",
+            style = "cinematic",
+            language = "en",
+        });
+        var scene = await SendWithCsrf<MovieSceneDto>(owner, HttpMethod.Post, $"/api/movie-studio/projects/{project.Project.Id}/scenes", new { title = "Opening", summary = "A protected opening." });
+        var shot = await SendWithCsrf<MovieShotDto>(owner, HttpMethod.Post, $"/api/movie-studio/scenes/{scene.Id}/shots", new { description = "A private-reference shot." });
+
+        using var privateOwner = factory.CreateClient();
+        var privateOwnerAuth = await Register(privateOwner);
+        await AddWorkspaceMember(ownerAuth.PersonalWorkspace.Id, privateOwnerAuth.User.Id);
+        var privateFileId = Guid.NewGuid();
+        var privateAssetId = Guid.NewGuid();
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var now = DateTime.UtcNow;
+            db.StoredFiles.Add(new StoredFile
+            {
+                Id = privateFileId,
+                WorkspaceId = ownerAuth.PersonalWorkspace.Id,
+                UserId = privateOwnerAuth.User.Id,
+                OriginalFileName = "private-reference.png",
+                StoredFileName = "private-reference.png",
+                ContentType = "image/png",
+                Extension = ".png",
+                SizeBytes = 128,
+                StorageProvider = FileStorageProviders.Local,
+                StorageKey = $"test/{privateFileId:N}",
+                Status = StoredFileStatus.Ready,
+                CreatedAt = now,
+                ProcessedAt = now,
+                TextExtractionStatus = FileExtractionStatus.NotApplicable,
+            });
+            db.Assets.Add(new Asset
+            {
+                Id = privateAssetId,
+                WorkspaceId = ownerAuth.PersonalWorkspace.Id,
+                CreatedByUserId = privateOwnerAuth.User.Id,
+                StoredFileId = privateFileId,
+                Name = "Private reference",
+                AssetType = AssetTypes.Image,
+                MimeType = "image/png",
+                Status = AssetStatus.Active,
+                CreatedAt = now,
+                UpdatedAt = now,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var response = await SendWithCsrf(owner, HttpMethod.Post, $"/api/movie-studio/shots/{shot.Id}/production/versions", new
+        {
+            stage = MovieProductionStages.StoryboardCandidate,
+            label = "Should reject private reference",
+            compositionJson = "{}",
+            assetId = privateAssetId,
+        });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var error = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("PRODUCTION_ASSET_SCOPE_INVALID", error.GetProperty("error").GetProperty("code").GetString());
+        using var verification = factory.Services.CreateScope();
+        Assert.False(await verification.ServiceProvider.GetRequiredService<TaslimDbContext>().MovieProductionVersions.AnyAsync(item => item.MovieShotId == shot.Id));
+    }
+
+    [Fact]
     public async Task Production_mutations_require_movie_team_edit_and_approval_permissions()
     {
         using var owner = factory.CreateClient();

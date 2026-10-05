@@ -57,6 +57,7 @@ describe("Generation Jobs accessibility contract", () => {
     expect(html).toContain('aria-valuetext="100%"');
     expect(html).toContain('role="status"');
     expect(html).toContain('jobs.progressAnnouncement');
+    expect(html).toContain('id="generation-job-detail-job-1"');
     expect(html).toContain('role="alert"');
     expect(html).toContain('jobs.cancel');
   });
@@ -64,8 +65,12 @@ describe("Generation Jobs accessibility contract", () => {
   it("makes the selected recent job state available to keyboard and assistive-technology users", () => {
     const html = renderToStaticMarkup(<GenerationJobList jobs={[job, { ...job, id: "job-2", status: "Succeeded", progressPercent: 100, errorMessage: null }]} activeJobId="job-1" t={t} onSelect={vi.fn()} />);
 
+    expect(html).toContain('role="group"');
+    expect(html).toContain('aria-label="jobs.recent"');
     expect(html).toContain('aria-pressed="true"');
     expect(html).toContain('aria-pressed="false"');
+    expect(html).toContain('aria-controls="generation-job-detail-job-1"');
+    expect(html).not.toContain('aria-controls="generation-job-detail-job-2"');
     expect(html).toContain('aria-label="jobs.progressAnnouncement"');
     expect(html).toContain('>100%</small>');
   });

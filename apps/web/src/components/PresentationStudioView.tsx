@@ -36,6 +36,7 @@ import {
   persistPresentationActiveJobId,
   presentationStudioState,
   readPresentationActiveJobId,
+  shouldResetPresentationWorkspaceState,
   shouldPollPresentationJob,
 } from "@/lib/presentationStudioState";
 
@@ -142,28 +143,70 @@ export function PresentationStudioView() {
   const [error, setError] = useState("");
   const [downloadError, setDownloadError] = useState("");
   const restoreJobId = useRef<string | null>(null);
+  const observedWorkspaceId = useRef<string | null>(workspace?.id ?? null);
+  const workspaceGeneration = useRef(0);
 
   const loadSources = useCallback(async () => {
     if (!workspace) return;
+    const workspaceId = workspace.id;
+    const workspaceVersion = workspaceGeneration.current;
     setLoadingSources(true);
     try {
       const [active, archived, sourceFiles, assetResult] = await Promise.all([
-        api.listProjects(workspace.id, "Active"),
-        api.listProjects(workspace.id, "Archived"),
-        api.listFiles(workspace.id),
-        api.listAssets(workspace.id, { assetType: "presentation", sort: "recent", pageSize: 6 }),
+        api.listProjects(workspaceId, "Active"),
+        api.listProjects(workspaceId, "Archived"),
+        api.listFiles(workspaceId),
+        api.listAssets(workspaceId, { assetType: "presentation", sort: "recent", pageSize: 6 }),
       ]);
+      if (observedWorkspaceId.current !== workspaceId || workspaceGeneration.current !== workspaceVersion) return;
       setProjects([...active, ...archived]);
       setFiles(sourceFiles.filter((file) => extensions.includes(file.extension.toLowerCase())));
       setRecentPresentations(assetResult.items);
     } catch {
+      if (observedWorkspaceId.current !== workspaceId || workspaceGeneration.current !== workspaceVersion) return;
       setProjects([]);
       setFiles([]);
       setRecentPresentations([]);
     } finally {
-      setLoadingSources(false);
+      if (observedWorkspaceId.current === workspaceId && workspaceGeneration.current === workspaceVersion) setLoadingSources(false);
     }
   }, [workspace]);
+
+  // Workspace-scoped jobs, briefs, selections, and source lists must not survive an ownership boundary.
+  // The generation counter fences responses and actions that started in the previous workspace.
+  useEffect(() => {
+    const nextWorkspaceId = workspace?.id ?? null;
+    if (observedWorkspaceId.current === nextWorkspaceId) return;
+    const previousWorkspaceId = observedWorkspaceId.current;
+    observedWorkspaceId.current = nextWorkspaceId;
+    workspaceGeneration.current += 1;
+    restoreJobId.current = null;
+    if (previousWorkspaceId === null && nextWorkspaceId !== null && !shouldResetPresentationWorkspaceState(current, nextWorkspaceId)) return;
+    setCurrent(null);
+    setSelected([]);
+    setProjects([]);
+    setFiles([]);
+    setRecentPresentations([]);
+    setTitle("");
+    setDescription("");
+    setProjectId("");
+    setAudience("");
+    setBrandCompany("");
+    setAdditionalInstructions("");
+    setPresentationType("auto");
+    setLength("standard");
+    setTone("professional");
+    setLanguage("auto");
+    setIncludeAgenda(true);
+    setIncludeClosingNextSteps(true);
+    setActiveSlide(0);
+    setPollRetry(0);
+    setRetryingCompleted(false);
+    setWorking(false);
+    setLoadingSources(true);
+    setError("");
+    setDownloadError("");
+  }, [current, workspace?.id]);
 
   // Source loading synchronizes authenticated workspace data into local UI state.
   // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -173,9 +216,10 @@ export function PresentationStudioView() {
     const storedJobId = readPresentationActiveJobId(workspace.id);
     if (!storedJobId) return;
     restoreJobId.current = storedJobId;
+    const workspaceVersion = workspaceGeneration.current;
     let active = true;
     void api.getGenerationJob(storedJobId).then((job) => {
-      if (!active || restoreJobId.current !== storedJobId) return;
+      if (!active || workspaceGeneration.current !== workspaceVersion || restoreJobId.current !== storedJobId) return;
       if (!isRestorablePresentationJob(job, workspace.id)) {
         clearPresentationActiveJobId(workspace.id);
         return;
@@ -183,7 +227,7 @@ export function PresentationStudioView() {
       setCurrent(job);
       setPollRetry(0);
     }).catch((cause) => {
-      if (!active || restoreJobId.current !== storedJobId) return;
+      if (!active || workspaceGeneration.current !== workspaceVersion || restoreJobId.current !== storedJobId) return;
       if (cause instanceof ApiError && (cause.status === 403 || cause.status === 404)) clearPresentationActiveJobId(workspace.id);
     });
     return () => { active = false; };
@@ -191,16 +235,17 @@ export function PresentationStudioView() {
   useEffect(() => {
     if (!current || !shouldPollPresentationJob(current)) return;
     const jobId = current.id;
+    const workspaceVersion = workspaceGeneration.current;
     let active = true;
     const timer = window.setTimeout(async () => {
       try {
         const next = await api.getGenerationJob(jobId);
-        if (!active) return;
+        if (!active || workspaceGeneration.current !== workspaceVersion || current.id !== jobId) return;
         setCurrent(next);
         setPollRetry(0);
         setError("");
       } catch {
-        if (!active) return;
+        if (!active || workspaceGeneration.current !== workspaceVersion || current.id !== jobId) return;
         setPollRetry((attempt) => attempt + 1);
         setError(t("presentation.pollError"));
       }
@@ -233,10 +278,12 @@ export function PresentationStudioView() {
     setError("");
     setDownloadError("");
     restoreJobId.current = null;
-    clearPresentationActiveJobId(workspace.id);
+    const workspaceId = workspace.id;
+    const workspaceVersion = workspaceGeneration.current;
+    clearPresentationActiveJobId(workspaceId);
     try {
       const job = await api.createPresentationGenerationJob({
-        workspaceId: workspace.id,
+        workspaceId,
         projectId: projectId || null,
         title: title.trim(),
         description: description.trim(),
@@ -251,44 +298,60 @@ export function PresentationStudioView() {
         includeClosingNextSteps,
         attachmentIds: selected,
       });
-      persistPresentationActiveJobId(workspace.id, job.id);
+      if (workspaceGeneration.current !== workspaceVersion || observedWorkspaceId.current !== workspaceId) return;
+      persistPresentationActiveJobId(workspaceId, job.id);
       setCurrent(job);
       setActiveSlide(0);
       setPollRetry(0);
     } catch {
-      setError(t("presentation.createError"));
+      if (workspaceGeneration.current === workspaceVersion && observedWorkspaceId.current === workspaceId) setError(t("presentation.createError"));
     } finally {
-      setWorking(false);
+      if (workspaceGeneration.current === workspaceVersion && observedWorkspaceId.current === workspaceId) setWorking(false);
     }
   }
 
   async function cancel() {
     if (!current || !canCancelPresentationJob(current)) return;
+    const workspaceVersion = workspaceGeneration.current;
+    const jobId = current.id;
     setWorking(true);
     setError("");
     try {
-      await api.cancelGenerationJob(current.id);
-      setCurrent(await api.getGenerationJob(current.id));
+      await api.cancelGenerationJob(jobId);
+      const next = await api.getGenerationJob(jobId);
+      if (workspaceGeneration.current !== workspaceVersion || current.id !== jobId) return;
+      setCurrent(next);
     } catch {
-      setError(t("presentation.cancelError"));
+      if (workspaceGeneration.current === workspaceVersion && current.id === jobId) setError(t("presentation.cancelError"));
     } finally {
-      setWorking(false);
+      if (workspaceGeneration.current === workspaceVersion) setWorking(false);
     }
   }
 
   async function retryCompleted() {
     if (!current) return;
+    const workspaceVersion = workspaceGeneration.current;
+    const jobId = current.id;
     setRetryingCompleted(true);
     setError("");
-    try { setCurrent(await api.getGenerationJob(current.id)); } catch { setError(t("presentation.completedLoadError")); } finally { setRetryingCompleted(false); }
+    try {
+      const next = await api.getGenerationJob(jobId);
+      if (workspaceGeneration.current === workspaceVersion && current.id === jobId) setCurrent(next);
+    } catch {
+      if (workspaceGeneration.current === workspaceVersion && current.id === jobId) setError(t("presentation.completedLoadError"));
+    } finally {
+      if (workspaceGeneration.current === workspaceVersion) setRetryingCompleted(false);
+    }
   }
 
   async function downloadRepresentation(representationId: string, fileName: string) {
     if (!result?.assetId) return;
+    const workspaceVersion = workspaceGeneration.current;
     setWorking(true);
     setDownloadError("");
     try {
       const blob = await api.downloadAssetRepresentation(result.assetId, representationId);
+      if (workspaceGeneration.current !== workspaceVersion) return;
       const url = URL.createObjectURL(blob);
       const anchor = window.document.createElement("a");
       anchor.href = url;
@@ -296,9 +359,9 @@ export function PresentationStudioView() {
       anchor.click();
       window.setTimeout(() => URL.revokeObjectURL(url), 0);
     } catch {
-      setDownloadError(t("presentation.downloadError"));
+      if (workspaceGeneration.current === workspaceVersion) setDownloadError(t("presentation.downloadError"));
     } finally {
-      setWorking(false);
+      if (workspaceGeneration.current === workspaceVersion) setWorking(false);
     }
   }
 
@@ -326,7 +389,7 @@ export function PresentationStudioView() {
     </div>
 
     {!current ? <>
-      <form className="presentation-compose-workspace" onSubmit={(event) => void create(event)}>
+      <form className="presentation-compose-workspace" onSubmit={(event) => void create(event)} aria-busy={working}>
         <section className="presentation-compose-stage">
           <div className="presentation-stage-toolbar"><div><span className="stage-label">{t("presentation.stageLabel")}</span><strong>{t("presentation.stageTitle")}</strong></div><span className="stage-status"><LockKeyhole size={13} /> {t("presentation.privateWorkspace")}</span></div>
           <EmptySlideCanvas title={title.trim() || t("presentation.canvasTitle")} description={description.trim() || t("presentation.canvasDescription")} />
@@ -345,18 +408,18 @@ export function PresentationStudioView() {
           </div>
           <details className="presentation-advanced"><summary><Palette size={14} /> {t("presentation.advanced")} <ChevronDown size={14} /></summary><div className="presentation-advanced-grid"><label className="field"><span>{t("presentation.project")}</span><select value={projectId} onChange={(event) => setProjectId(event.target.value)} disabled={loadingSources}><option value="">{t("presentation.noProject")}</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label><label className="field"><span>{t("presentation.brandCompany")}</span><input value={brandCompany} onChange={(event) => setBrandCompany(event.target.value)} maxLength={160} placeholder={t("presentation.brandCompanyPlaceholder")} /></label><label className="field presentation-advanced-wide"><span>{t("presentation.additionalInstructions")}</span><textarea value={additionalInstructions} onChange={(event) => setAdditionalInstructions(event.target.value)} maxLength={3000} placeholder={t("presentation.additionalInstructionsPlaceholder")} /></label></div></details>
           <div className="presentation-checkboxes"><label className="presentation-checkbox"><input type="checkbox" checked={includeAgenda} onChange={(event) => setIncludeAgenda(event.target.checked)} /> <span>{t("presentation.includeAgenda")}</span></label><label className="presentation-checkbox"><input type="checkbox" checked={includeClosingNextSteps} onChange={(event) => setIncludeClosingNextSteps(event.target.checked)} /> <span>{t("presentation.includeClosing")}</span></label></div>
-          <div className="presentation-source-heading"><div><h3><FolderOpen size={14} /> {t("presentation.sources")}</h3><p>{t("presentation.sourcesHint")}</p></div><strong>{selected.length}/5</strong></div>
-          <div className="presentation-source-list">{loadingSources ? <p className="usage-empty">{t("presentation.loadingSources")}</p> : readyFiles.length === 0 ? <p className="usage-empty">{t("presentation.noSources")}</p> : readyFiles.map((file) => <label className={`presentation-source-option ${selected.includes(file.id) ? "is-selected" : ""}`} key={file.id}><input type="checkbox" checked={selected.includes(file.id)} onChange={() => toggleFile(file)} /><FileText size={16} /><span><strong>{file.originalFileName}</strong><small>{file.extension.toUpperCase()} · {Math.ceil(file.sizeBytes / 1024)} KB</small></span></label>)}</div>
+          <div className="presentation-source-heading"><div><h3 id="presentation-sources-heading"><FolderOpen size={14} /> {t("presentation.sources")}</h3><p>{t("presentation.sourcesHint")}</p></div><strong>{selected.length}/5</strong></div>
+          <div className="presentation-source-list" role="group" aria-labelledby="presentation-sources-heading" aria-busy={loadingSources}>{loadingSources ? <p className="usage-empty">{t("presentation.loadingSources")}</p> : readyFiles.length === 0 ? <p className="usage-empty">{t("presentation.noSources")}</p> : readyFiles.map((file) => <label className={`presentation-source-option ${selected.includes(file.id) ? "is-selected" : ""}`} key={file.id}><input type="checkbox" checked={selected.includes(file.id)} onChange={() => toggleFile(file)} /><FileText size={16} /><span><strong>{file.originalFileName}</strong><small>{file.extension.toUpperCase()} · {Math.ceil(file.sizeBytes / 1024)} KB</small></span></label>)}</div>
           {error && <div className="form-error" role="alert"><XCircle size={15} /> {error}</div>}
           <button className="primary-button presentation-create-button" type="submit" disabled={working || title.trim().length < 3 || description.trim().length < 3}><Sparkles size={16} /> {working ? t("presentation.working") : t("presentation.generate")} <ArrowRight size={15} /></button>
         </section>
       </form>
       {recentPresentations.length > 0 && <section className="recent-presentations-section"><div className="recent-presentations-heading"><div><p className="section-eyebrow">{t("presentation.library")}</p><h2>{t("presentation.recentTitle")}</h2></div><Link className="text-link" href="/assets?assetType=presentation">{t("presentation.viewAll")} <ArrowRight size={14} /></Link></div><div className="recent-presentations-grid">{recentPresentations.map((asset) => <RecentPresentationCard asset={asset} key={asset.id} />)}</div></section>}
-    </> : state === "failed" || state === "cancelled" ? <section className="account-card presentation-generation-state presentation-terminal-state" aria-live="polite"><XCircle size={28} /><p className="section-eyebrow">{t(`jobs.status${statusKey}`)}</p><h2>{current.errorMessage || t("presentation.failedSafe")}</h2><div className="presentation-result-actions"><button className="primary-button" onClick={createAnother}><RefreshCw size={15} /> {t("presentation.createAnother")}</button><Link className="secondary-button" href="/assets">{t("presentation.openAssets")}</Link></div></section> : state === "succeeded" && result?.assetId ? <section className="presentation-output-workspace" aria-live="polite">
-      <aside className="presentation-slide-navigator"><div className="slide-navigator-heading"><div><p className="section-eyebrow">{t("presentation.storyboard")}</p><strong>{t("presentation.slides", { count: String(slides.length || result.slideCount || 0) })}</strong></div><span>{selectedSlideNumber}/{slides.length || result.slideCount || 0}</span></div><div className="slide-thumbnail-list">{slides.map((slide, index) => <button className={`slide-thumbnail ${index === activeSlide ? "is-active" : ""}`} key={`${slide.order}-${slide.title}`} onClick={() => setActiveSlide(index)} type="button" aria-label={t("presentation.openSlide", { number: String(slide.order), title: slide.title })}><SlideArtwork slide={slide} compact /><span className="slide-thumbnail-label"><b>{String(slide.order).padStart(2, "0")}</b><span>{slide.title}</span></span></button>)}</div></aside>
-      <section className="presentation-output-main"><div className="presentation-output-toolbar"><div><p className="section-eyebrow">{t("presentation.resultEyebrow")}</p><h2>{result.title || t("presentation.resultTitle")}</h2><span>{result.slideCount ? t("presentation.slideCount", { count: String(result.slideCount) }) : ""}{dateLabel ? ` · ${dateLabel}` : ""}</span></div><div className="presentation-output-actions">{result.representations?.filter((representation) => representation.type === "pptx").map((representation) => <button className="secondary-button" key={representation.id} type="button" onClick={() => void downloadRepresentation(representation.id, representation.fileName)} disabled={working}><Download size={15} /> PPTX</button>)}<Link className="secondary-button" href="/assets"><ExternalLink size={15} /> {t("presentation.openAssets")}</Link></div></div><div className="presentation-active-slide">{selectedSlide ? <SlideArtwork slide={selectedSlide} /> : <EmptySlideCanvas title={t("presentation.resultTitle")} description={t("presentation.completedLoadHint")} />}<button className="slide-nav-button slide-nav-prev" onClick={() => setActiveSlide((index) => Math.max(0, index - 1))} disabled={activeSlide === 0} aria-label={t("presentation.previousSlide")}><ArrowLeft size={17} /></button><button className="slide-nav-button slide-nav-next" onClick={() => setActiveSlide((index) => Math.min(Math.max(0, slides.length - 1), index + 1))} disabled={activeSlide >= slides.length - 1} aria-label={t("presentation.nextSlide")}><ArrowRight size={17} /></button></div><div className="presentation-output-footer"><span><CheckCircle2 size={15} /> {t("presentation.savedToAssets")}</span><span>{t("presentation.safetyNote")}</span></div>{downloadError && <div className="form-error" role="alert"><XCircle size={15} /> {downloadError}</div>}</section>
+    </> : state === "failed" || state === "cancelled" ? <section className="account-card presentation-generation-state presentation-terminal-state" aria-live="polite"><XCircle size={28} /><p className="section-eyebrow">{t(`jobs.status${statusKey}`)}</p><h2>{current.errorMessage || t("presentation.failedSafe")}</h2><div className="presentation-result-actions"><button className="primary-button" onClick={createAnother}><RefreshCw size={15} /> {t("presentation.createAnother")}</button><Link className="secondary-button" href="/assets">{t("presentation.openAssets")}</Link></div></section> : state === "succeeded" && result ? <section className="presentation-output-workspace" aria-live="polite" aria-busy={working}>
+      <nav className="presentation-slide-navigator" aria-label={t("presentation.storyboard")}><div className="slide-navigator-heading"><div><p className="section-eyebrow">{t("presentation.storyboard")}</p><strong>{t("presentation.slides", { count: String(slides.length || result.slideCount || 0) })}</strong></div><span>{selectedSlideNumber}/{slides.length || result.slideCount || 0}</span></div><div className="slide-thumbnail-list">{slides.map((slide, index) => <button className={`slide-thumbnail ${index === activeSlide ? "is-active" : ""}`} key={`${slide.order}-${slide.title}`} onClick={() => setActiveSlide(index)} type="button" aria-current={index === activeSlide ? "true" : undefined} aria-label={t("presentation.openSlide", { number: String(slide.order), title: slide.title })}><SlideArtwork slide={slide} compact /><span className="slide-thumbnail-label"><b>{String(slide.order).padStart(2, "0")}</b><span>{slide.title}</span></span></button>)}</div></nav>
+      <section className="presentation-output-main"><div className="presentation-output-toolbar"><div><p className="section-eyebrow">{t("presentation.resultEyebrow")}</p><h2>{result.title || t("presentation.resultTitle")}</h2><span>{result.slideCount ? t("presentation.slideCount", { count: String(result.slideCount) }) : ""}{dateLabel ? ` · ${dateLabel}` : ""}</span></div><div className="presentation-output-actions">{result.representations?.filter((representation) => representation.type === "pptx").map((representation) => <button className="secondary-button" key={representation.id} type="button" onClick={() => void downloadRepresentation(representation.id, representation.fileName)} disabled={working} aria-busy={working}><Download size={15} /> PPTX</button>)}<Link className="secondary-button" href="/assets"><ExternalLink size={15} /> {t("presentation.openAssets")}</Link></div></div><div className="presentation-active-slide" role="region" aria-label={selectedSlide ? `${t("presentation.selectedSlide")}: ${selectedSlide.title}` : t("presentation.resultTitle")}><span className="sr-only" aria-live="polite">{selectedSlide ? `${t("presentation.selectedSlide")}: ${selectedSlide.title}` : t("presentation.resultTitle")}</span>{selectedSlide ? <SlideArtwork slide={selectedSlide} /> : <EmptySlideCanvas title={t("presentation.resultTitle")} description={t("presentation.completedLoadHint")} />}<button className="slide-nav-button slide-nav-prev" onClick={() => setActiveSlide((index) => Math.max(0, index - 1))} disabled={activeSlide === 0} aria-label={t("presentation.previousSlide")}><ArrowLeft size={17} /></button><button className="slide-nav-button slide-nav-next" onClick={() => setActiveSlide((index) => Math.min(Math.max(0, slides.length - 1), index + 1))} disabled={activeSlide >= slides.length - 1} aria-label={t("presentation.nextSlide")}><ArrowRight size={17} /></button></div><div className="presentation-output-footer"><span><CheckCircle2 size={15} /> {t("presentation.savedToAssets")}</span><span>{t("presentation.safetyNote")}</span></div>{downloadError && <div className="form-error" role="alert"><XCircle size={15} /> {downloadError}</div>}</section>
       <aside className="presentation-output-rail"><div className="output-rail-card"><span className="output-rail-icon"><PresentationIcon size={17} /></span><p className="section-eyebrow">{t("presentation.selectedSlide")}</p><h3>{selectedSlide?.title || t("presentation.resultTitle")}</h3><p>{selectedSlide?.subtitle || t("presentation.reviewSlide")}</p><div className="output-rail-meta"><span>{selectedSlide ? t("presentation.slide", { number: String(selectedSlide.order) }) : "—"}</span><span>{selectedSlide ? slideTypeLabel(selectedSlide.type, t) : "—"}</span></div></div><div className="output-rail-card output-rail-note"><LockKeyhole size={16} /><strong>{t("presentation.privateByDefault")}</strong><p>{t("presentation.privateNote")}</p></div><button className="primary-button output-new-button" onClick={createAnother}><RefreshCw size={15} /> {t("presentation.createAnother")}</button></aside>
-    </section> : state === "completed-unavailable" ? <section className="account-card presentation-generation-state presentation-terminal-state"><RefreshCw size={28} /><p className="section-eyebrow">{t("jobs.statusSucceeded")}</p><h2>{t("presentation.completedLoadError")}</h2><p>{t("presentation.completedLoadHint")}</p><div className="presentation-result-actions"><button className="primary-button" onClick={() => void retryCompleted()} disabled={retryingCompleted}>{retryingCompleted ? t("presentation.working") : t("presentation.retry")}</button><Link className="secondary-button" href="/assets">{t("presentation.openAssets")}</Link></div></section> : <section className="presentation-progress-workspace" aria-live="polite"><div className="presentation-progress-canvas"><div className="presentation-progress-orb"><LoaderCircle size={30} /></div><p className="section-eyebrow">{t("presentation.progressEyebrow")}</p><h2>{t(`jobs.status${statusKey}`)}</h2><p>{t("presentation.progressText")}</p><div className="generation-progress-label"><span>{t("jobs.progress")}</span><strong>{progress}%</strong></div><div className="generation-progress-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress} aria-label={t("jobs.progress")}><span style={{ width: `${progress}%` }} /></div></div><div className="presentation-progress-steps">{progressSteps.map((step, index) => <div className={index <= (progress > 66 ? 2 : progress > 33 ? 1 : 0) ? "is-done" : ""} key={step}><span>{index + 1}</span><strong>{step}</strong></div>)}</div>{error && <div className="form-error" role="alert"><XCircle size={15} /> {error}</div>}{canCancelPresentationJob(current) && <button className="secondary-button generation-cancel-button" onClick={() => void cancel()} disabled={working}><XCircle size={15} /> {t("presentation.cancel")}</button>}</section>}
+    </section> : state === "completed-unavailable" ? <section className="account-card presentation-generation-state presentation-terminal-state" aria-live="polite"><RefreshCw size={28} /><p className="section-eyebrow">{t("jobs.statusSucceeded")}</p><h2>{t("presentation.completedLoadError")}</h2><p>{t("presentation.completedLoadHint")}</p><div className="presentation-result-actions"><button className="primary-button" onClick={() => void retryCompleted()} disabled={retryingCompleted}>{retryingCompleted ? t("presentation.working") : t("presentation.retry")}</button><Link className="secondary-button" href="/assets">{t("presentation.openAssets")}</Link></div></section> : <section className="presentation-progress-workspace" aria-live="polite" aria-busy="true"><div className="presentation-progress-canvas"><div className="presentation-progress-orb"><LoaderCircle size={30} /></div><p className="section-eyebrow">{t("presentation.progressEyebrow")}</p><h2>{t(`jobs.status${statusKey}`)}</h2><p>{t("presentation.progressText")}</p><div className="generation-progress-label"><span>{t("jobs.progress")}</span><strong>{progress}%</strong></div><div className="generation-progress-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress} aria-label={t("jobs.progress")}><span style={{ width: `${progress}%` }} /></div></div><div className="presentation-progress-steps">{progressSteps.map((step, index) => <div className={index <= (progress > 66 ? 2 : progress > 33 ? 1 : 0) ? "is-done" : ""} key={step}><span>{index + 1}</span><strong>{step}</strong></div>)}</div>{error && <div className="form-error" role="alert"><XCircle size={15} /> {error}</div>}{canCancelPresentationJob(current) && <button className="secondary-button generation-cancel-button" onClick={() => void cancel()} disabled={working}><XCircle size={15} /> {t("presentation.cancel")}</button>}</section>}
     <p className="presentation-studio-footnote">{t("presentation.safetyNote")}</p>
   </div>;
 }

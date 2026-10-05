@@ -9,6 +9,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Taslim.Api.Contracts;
+using Taslim.Api.Domain;
 using Taslim.Api.Persistence;
 using Xunit;
 
@@ -68,6 +69,56 @@ public sealed class IdentityProjectsTests : IClassFixture<TaslimApiFactory>
     }
 
     [Fact]
+    public async Task Workspace_list_is_bounded_and_deterministically_paginated()
+    {
+        using var client = factory.CreateClient();
+        var authResponse = await Register(client, "Workspace Pagination Owner", $"workspace-page-{Guid.NewGuid():N}@example.com");
+        var auth = await authResponse.Content.ReadFromJsonAsync<AuthResponse>();
+        Assert.NotNull(auth);
+
+        var now = DateTime.UtcNow;
+        var extraWorkspaces = Enumerable.Range(1, 3).Select(index => new Workspace
+        {
+            Id = Guid.NewGuid(),
+            Name = $"Bounded Workspace {index}",
+            Slug = $"bounded-workspace-{index}-{Guid.NewGuid():N}",
+            Type = WorkspaceType.Business,
+            CreatedAt = now,
+            UpdatedAt = now,
+        }).ToArray();
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.Workspaces.AddRange(extraWorkspaces);
+            db.WorkspaceMembers.AddRange(extraWorkspaces.Select(workspace => new WorkspaceMember
+            {
+                Id = Guid.NewGuid(),
+                WorkspaceId = workspace.Id,
+                UserId = auth!.User.Id,
+                Role = WorkspaceRole.Member,
+                JoinedAt = now,
+            }));
+            await db.SaveChangesAsync();
+        }
+
+        using var response = await client.GetAsync("/api/workspaces?page=2&pageSize=1");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var page = await response.Content.ReadFromJsonAsync<List<WorkspaceSummaryDto>>();
+        Assert.NotNull(page);
+        Assert.Single(page);
+        Assert.Equal("2", response.Headers.GetValues("X-Page").Single());
+        Assert.Equal("1", response.Headers.GetValues("X-Page-Size").Single());
+        Assert.Equal("4", response.Headers.GetValues("X-Total-Count").Single());
+        Assert.Equal("Bounded Workspace 2", page[0].Name);
+
+        using var cappedResponse = await client.GetAsync("/api/workspaces?page=0&pageSize=1000");
+        Assert.Equal(HttpStatusCode.OK, cappedResponse.StatusCode);
+        Assert.Equal("1", cappedResponse.Headers.GetValues("X-Page").Single());
+        Assert.Equal("100", cappedResponse.Headers.GetValues("X-Page-Size").Single());
+        Assert.Equal(4, (await cappedResponse.Content.ReadFromJsonAsync<List<WorkspaceSummaryDto>>())!.Count);
+    }
+
+    [Fact]
     public async Task Duplicate_email_and_wrong_password_fail_generically()
     {
         using var client = factory.CreateClient();
@@ -119,6 +170,25 @@ public sealed class IdentityProjectsTests : IClassFixture<TaslimApiFactory>
     }
 
     [Fact]
+    public async Task Revoking_other_sessions_invalidates_other_cookies_but_keeps_current_session()
+    {
+        using var currentSession = factory.CreateClient();
+        var email = $"revoke-sessions-{Guid.NewGuid():N}@example.com";
+        await Register(currentSession, "Session Revocation Owner", email);
+
+        using var otherSession = factory.CreateClient();
+        Assert.Equal(HttpStatusCode.OK, (await Login(otherSession, email, "StrongPassword!123")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await otherSession.GetAsync("/api/auth/me")).StatusCode);
+
+        var revoked = await SendWithCsrf(currentSession, HttpMethod.Post, "/api/auth/sessions/revoke", null);
+        Assert.Equal(HttpStatusCode.OK, revoked.StatusCode);
+        AssertCsrfCookieExpired(revoked);
+
+        Assert.Equal(HttpStatusCode.OK, (await currentSession.GetAsync("/api/auth/me")).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await otherSession.GetAsync("/api/auth/me")).StatusCode);
+    }
+
+    [Fact]
     public async Task Project_lifecycle_is_owned_by_workspace()
     {
         using var owner = factory.CreateClient();
@@ -137,6 +207,47 @@ public sealed class IdentityProjectsTests : IClassFixture<TaslimApiFactory>
         await SendWithCsrf<ProjectDto>(owner, HttpMethod.Post, $"/api/projects/{created.Id}/restore", null);
         var activeAgain = await owner.GetFromJsonAsync<List<ProjectDto>>($"/api/workspaces/{auth.PersonalWorkspace.Id}/projects?status=Active");
         Assert.Contains(activeAgain!, project => project.Id == created.Id);
+    }
+
+    [Fact]
+    public async Task Project_listing_bounds_pages_and_keeps_equal_timestamp_boundaries_stable()
+    {
+        using var owner = factory.CreateClient();
+        var ownerAuth = await Register(owner, "Project Pagination Owner", $"project-pagination-{Guid.NewGuid():N}@example.com");
+        var auth = await ownerAuth.Content.ReadFromJsonAsync<AuthResponse>();
+        Assert.NotNull(auth);
+
+        var first = await SendWithCsrf<ProjectDto>(owner, HttpMethod.Post, $"/api/workspaces/{auth.PersonalWorkspace.Id}/projects", new { name = "Pagination One", type = "Business" });
+        var second = await SendWithCsrf<ProjectDto>(owner, HttpMethod.Post, $"/api/workspaces/{auth.PersonalWorkspace.Id}/projects", new { name = "Pagination Two", type = "Business" });
+        var third = await SendWithCsrf<ProjectDto>(owner, HttpMethod.Post, $"/api/workspaces/{auth.PersonalWorkspace.Id}/projects", new { name = "Pagination Three", type = "Business" });
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var projects = await db.Projects.Where(project => project.WorkspaceId == auth.PersonalWorkspace.Id).ToListAsync();
+            var sameTimestamp = DateTime.UtcNow;
+            foreach (var project in projects) project.UpdatedAt = sameTimestamp;
+            await db.SaveChangesAsync();
+        }
+
+        var pageOne = await owner.GetFromJsonAsync<List<ProjectDto>>($"/api/workspaces/{auth.PersonalWorkspace.Id}/projects?status=Active&page=1&pageSize=2");
+        var pageTwo = await owner.GetFromJsonAsync<List<ProjectDto>>($"/api/workspaces/{auth.PersonalWorkspace.Id}/projects?status=Active&page=2&pageSize=2");
+        Assert.NotNull(pageOne);
+        Assert.NotNull(pageTwo);
+        Assert.Equal(2, pageOne!.Count);
+        Assert.Single(pageTwo!);
+        var combinedPages = pageOne.Concat(pageTwo!).Select(project => project.Id).ToArray();
+        Assert.Equal(3, combinedPages.Distinct().Count());
+        Assert.Contains(first.Id, combinedPages);
+        Assert.Contains(second.Id, combinedPages);
+        Assert.Contains(third.Id, combinedPages);
+
+        var repeatedPageOne = await owner.GetFromJsonAsync<List<ProjectDto>>($"/api/workspaces/{auth.PersonalWorkspace.Id}/projects?status=Active&page=1&pageSize=2");
+        Assert.Equal(pageOne.Select(project => project.Id), repeatedPageOne!.Select(project => project.Id));
+
+        var oversizedPage = await owner.GetAsync($"/api/workspaces/{auth.PersonalWorkspace.Id}/projects?status=Active&page={int.MaxValue}&pageSize={int.MaxValue}");
+        Assert.Equal(HttpStatusCode.OK, oversizedPage.StatusCode);
+        Assert.Empty(await oversizedPage.Content.ReadFromJsonAsync<List<ProjectDto>>() ?? []);
     }
 
     [Fact]
