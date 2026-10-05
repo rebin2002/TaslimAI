@@ -3,7 +3,7 @@
 /* eslint-disable react-hooks/exhaustive-deps -- loader callbacks intentionally follow module/project identity. */
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import {
   AlertCircle,
   AlertTriangle,
@@ -58,6 +58,7 @@ import { MovieQualityWorkspace } from "@/components/MovieQualityWorkspace";
 import { MovieExportsWorkspace } from "@/components/MovieExportsWorkspace";
 import { MovieTeamWorkspace } from "@/components/MovieTeamWorkspace";
 import { useLocale } from "@/components/LocaleProvider";
+import { buildMovieEditModel, clampMovieEditPlayhead, moveMovieEditSelection } from "@/lib/movieEditState";
 
 export const fullMovieModules = [
   { slug: "overview", icon: Gauge },
@@ -86,10 +87,6 @@ function moduleFromSlug(slug: string | undefined): ModuleSlug {
 
 function hasReadyAsset(status: string, assetId: string | null) {
   return Boolean(assetId) && ["Completed", "Succeeded", "Ready"].includes(status);
-}
-
-function readyClipForScene(scene: MovieScene) {
-  return scene.clips.find((clip) => hasReadyAsset(clip.status, clip.assetId));
 }
 
 function formatDuration(seconds: number | null | undefined) {
@@ -255,7 +252,7 @@ function FullMovieProjectWorkspace({ projectId, module }: { projectId: string; m
           {activeModule === "storyboard" && storyboard && <OperationalStoryboardModule storyboard={storyboard} onRefresh={() => void refreshStoryboard()} onError={setError} />}
           {activeModule === "production" && <MovieProductionWorkspace project={fullProject} completionPercent={completionPercent} cost={overview?.cost} onRefresh={refreshProject} />}
           {activeModule === "selects" && <MovieSelectsWorkspace project={fullProject} />}
-          {activeModule === "edit" && <EditModule project={fullProject} />}
+          {activeModule === "edit" && <EditModule project={fullProject} onRefresh={refreshProject} />}
           {activeModule === "audio" && <MovieAudioWorkspace project={fullProject} />}
           {activeModule === "qc" && <MovieQualityWorkspace project={fullProject} />}
           {activeModule === "exports" && <MovieExportsWorkspace project={fullProject} />}
@@ -1229,12 +1226,74 @@ function MovieTakeCard({ take, shot, busyKey, onAction }: { take: MovieTake; sho
   return <div className={`movie-take-card ${selected ? "is-selected" : ""} ${finalized ? "is-final" : ""}`}><div className="movie-take-copy"><span>Take v{take.versionNumber}</span><strong>{take.label}</strong><small>{displayProductionStatus(take.status)} · {take.qualityLevel}{selected ? " · Selected" : ""}{finalized ? " · Mastered" : ""}</small></div>{take.assetId ? <video className="movie-take-video" src={assetFileUrl(take.assetId, true)} controls preload="metadata" aria-label={take.label} /> : <div className="movie-production-preview-empty"><Film size={15} /><span>Private output pending</span></div>}<div className="movie-take-actions">{take.status !== "Approved" && take.status !== "Rejected" && <button type="button" className="movie-text-action" disabled={Boolean(busyKey)} onClick={() => void onAction(`${shot.id}:approve-take`, () => api.approveMovieTake(take.id, { decision: "Approved", comment: "Take approved in Production." }))}>{isBusy("approve-take") ? "Approving…" : "Approve take"}</button>}{!selected && <button type="button" className="movie-text-action" disabled={Boolean(busyKey) || take.status === "Rejected"} onClick={() => void onAction(`${shot.id}:select-take`, () => api.selectMovieTake(take.id))}>{isBusy("select-take") ? "Selecting…" : "Choose take"}</button>}{!finalized && <button type="button" className="movie-workspace-button is-primary" disabled={Boolean(busyKey) || take.status !== "Approved"} onClick={() => void onAction(`${shot.id}:finalize-take`, () => api.finalizeMovieTake(take.id))}>{isBusy("finalize-take") ? "Finishing…" : "Carry into master"}</button>}</div></div>;
 }
 
-function EditModule({ project }: { project: MovieProject }) {
-  const { t } = useLocale();
-  return <div className="movie-module-stack"><section className="movie-workspace-section"><div className="movie-section-head"><div><span className="movie-workspace-kicker">{t("movieBody.edit.timeline")}</span><h3>{t("movieBody.edit.waiting")}</h3></div><span className="movie-section-count">{project.scenes.length ? `${project.scenes.length} ${t("movieDeep.sceneBlocks")}` : t("movieDeep.noSceneBlocks")}</span></div>{project.scenes.length ? <div className="movie-timeline"><div className="movie-timeline-ruler"><span>00:00</span><span>00:30</span><span>01:00</span><span>01:30</span></div><div className="movie-timeline-track">{project.scenes.map((scene, index) => <div key={scene.id} className={`movie-timeline-block ${readyClipForScene(scene) ? "is-ready" : ""}`} style={{ width: `${Math.max(13, Math.min(34, (scene.durationSeconds ?? 12) / 2.2))}%`, marginInlineStart: index ? "2%" : 0 }}><span>{String(scene.sequence).padStart(2, "0")}</span><strong>{scene.title}</strong></div>)}</div><div className="movie-timeline-note"><PencilRuler size={15} /><span>{t("movieDeep.editSequence")}</span></div></div> : <EmptyGeneratedStage title={t("movieBody.edit.waiting")} text={t("movieDeep.timelineNeedsFootage")} />}</section></div>;
+function formatEditTime(seconds: number) {
+  const minutes = Math.floor(seconds / 60);
+  const remainder = Math.floor(seconds % 60);
+  return `${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`;
 }
 
+function EditModule({ project, onRefresh }: { project: MovieProject; onRefresh: () => Promise<void> }) {
+  const { t } = useLocale();
+  const model = useMemo(() => buildMovieEditModel(project), [project]);
+  const [selectedSceneId, setSelectedSceneId] = useState<string | null>(model.scenes[0]?.id ?? null);
+  const [playheadSeconds, setPlayheadSeconds] = useState(0);
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshError, setRefreshError] = useState("");
+  const selectedScene = model.scenes.find((scene) => scene.id === selectedSceneId) ?? model.scenes[0] ?? null;
+  const blockers = model.scenes.flatMap((scene) => scene.blockers.map((blocker) => `${scene.title}: ${blocker}`));
+  const timelineWidth = Math.max(model.durationSeconds, 1);
+  const boundedPlayheadSeconds = clampMovieEditPlayhead(playheadSeconds, model.durationSeconds);
 
+  function selectScene(sceneId: string) {
+    const scene = model.scenes.find((item) => item.id === sceneId);
+    if (!scene) return;
+    setSelectedSceneId(scene.id);
+    setPlayheadSeconds(scene.startSeconds);
+  }
+
+  function handleSceneKeyDown(event: KeyboardEvent<HTMLButtonElement>, sceneId: string) {
+    const nextSceneId = moveMovieEditSelection(model, sceneId, event.key);
+    if (!nextSceneId) return;
+    event.preventDefault();
+    selectScene(nextSceneId);
+    document.getElementById(`movie-edit-scene-${nextSceneId}`)?.focus();
+  }
+
+  async function refreshTimeline() {
+    setRefreshing(true);
+    setRefreshError("");
+    try {
+      await onRefresh();
+    } catch (cause) {
+      setRefreshError(cause instanceof Error ? cause.message : "The timeline could not be refreshed.");
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
+  return <div className="movie-module-stack movie-edit-module">
+    <section className="movie-workspace-section movie-edit-overview" aria-labelledby="movie-edit-title">
+      <div className="movie-section-head">
+        <div><span className="movie-workspace-kicker">{t("movieBody.edit.timeline")}</span><h3 id="movie-edit-title">{model.timelineReady ? "Timeline is ready for review" : "Build the edit from persisted scene state"}</h3><p>{model.scenes.length ? "Select a scene to inspect its duration, output status, and edit blockers. The timeline never implies readiness that the project has not recorded." : t("movieDeep.timelineNeedsFootage")}</p></div>
+        <div className="movie-edit-toolbar"><span className="movie-section-count">{model.readySceneCount}/{model.scenes.length} scenes reviewable</span><button type="button" className="movie-workspace-button is-quiet" onClick={() => void refreshTimeline()} disabled={refreshing}><RefreshCw size={13} className={refreshing ? "movie-director-spin" : undefined} /> {refreshing ? "Refreshing…" : "Refresh timeline"}</button></div>
+      </div>
+      <div className={`movie-edit-validation ${model.timelineReady ? "is-ready" : "is-blocked"}`} role={model.timelineReady ? "status" : "alert"} aria-live="polite">
+        <div><strong>{model.timelineReady ? "All scene outputs are reviewable." : `${model.blockedSceneCount + model.reviewSceneCount} scene${model.blockedSceneCount + model.reviewSceneCount === 1 ? " needs" : "s need"} attention.`}</strong><span>{model.timelineReady ? "The edit room is grounded in the current persisted project." : "Resolve the scene-level blockers before handing this sequence to an editor."}</span></div>
+        <span>{formatEditTime(model.durationSeconds)} total</span>
+      </div>
+      {refreshError && <div className="movie-edit-error" role="alert"><AlertCircle size={14} /><span>{refreshError}</span><button type="button" className="movie-text-action" onClick={() => void refreshTimeline()}>Retry</button></div>}
+    </section>
+
+    <section className="movie-workspace-section movie-edit-timeline-section" aria-labelledby="movie-edit-timeline-title">
+      <div className="movie-section-head"><div><span className="movie-workspace-kicker">Sequence editor</span><h3 id="movie-edit-timeline-title">{model.scenes.length ? "Scene timeline" : t("movieBody.edit.waiting")}</h3></div><span className="movie-section-count">{model.scenes.length ? `${model.scenes.length} scene blocks` : t("movieDeep.noSceneBlocks")}</span></div>
+      {model.scenes.length ? <><div className="movie-edit-ruler" aria-hidden="true"><span>00:00</span><span>{formatEditTime(model.durationSeconds / 2)}</span><span>{formatEditTime(model.durationSeconds)}</span></div><div className="movie-edit-track" role="listbox" aria-label="Movie scene timeline" aria-activedescendant={selectedScene ? `movie-edit-scene-${selectedScene.id}` : undefined}>{model.scenes.map((scene) => { const selected = scene.id === selectedScene?.id; return <button key={scene.id} id={`movie-edit-scene-${scene.id}`} type="button" role="option" aria-selected={selected} aria-label={`Scene ${scene.sequence}, ${scene.title}, ${scene.readiness === "ready" ? "reviewable" : scene.readiness === "needs-review" ? "needs review" : "blocked"}`} tabIndex={selected ? 0 : -1} className={`movie-edit-scene is-${scene.readiness} ${selected ? "is-selected" : ""}`} style={{ width: `${Math.max(9, (scene.durationSeconds / timelineWidth) * 100)}%` }} onClick={() => selectScene(scene.id)} onKeyDown={(event) => handleSceneKeyDown(event, scene.id)}><span>{String(scene.sequence).padStart(2, "0")}</span><strong>{scene.title}</strong><small>{formatEditTime(scene.durationSeconds)} · {scene.readiness === "ready" ? "Reviewable" : scene.readiness === "needs-review" ? "Needs review" : "Blocked"}</small></button>; })}</div><div className="movie-edit-playhead"><label htmlFor="movie-edit-playhead-range"><span>Playhead</span><strong>{formatEditTime(boundedPlayheadSeconds)}</strong></label><input id="movie-edit-playhead-range" type="range" min={0} max={model.durationSeconds} step={0.1} value={boundedPlayheadSeconds} onChange={(event) => setPlayheadSeconds(clampMovieEditPlayhead(Number(event.target.value), model.durationSeconds))} aria-valuetext={formatEditTime(boundedPlayheadSeconds)} disabled={model.durationSeconds === 0} /></div></> : <EmptyGeneratedStage title={t("movieBody.edit.waiting")} text={t("movieDeep.timelineNeedsFootage")} />}
+    </section>
+
+    {selectedScene && <section className="movie-edit-inspector" aria-labelledby="movie-edit-inspector-title"><div><span className="movie-workspace-kicker">Selected scene · {String(selectedScene.sequence).padStart(2, "0")}</span><h3 id="movie-edit-inspector-title">{selectedScene.title}</h3><p>{selectedScene.readiness === "ready" ? "This scene has a reviewable output and can be inspected in sequence." : "This scene remains visible in the edit map, but its persisted state is not ready for hand-off."}</p></div><div className={`movie-edit-status is-${selectedScene.readiness}`}><strong>{selectedScene.readiness === "ready" ? "Reviewable" : selectedScene.readiness === "needs-review" ? "Needs review" : "Blocked"}</strong><span>{formatEditTime(selectedScene.startSeconds)}–{formatEditTime(selectedScene.endSeconds)} · {selectedScene.clipStatus || "No output recorded"}</span></div>{selectedScene.blockers.length > 0 && <div className="movie-edit-blockers"><span className="movie-inspector-label">Validation blockers</span><ul>{selectedScene.blockers.map((blocker) => <li key={blocker}>{blocker}</li>)}</ul></div>}{!selectedScene.blockers.length && <div className="movie-edit-clear"><CheckCircle2 size={15} /><span>No scene-level blockers are recorded. Continue review from this selected block.</span></div>}</section>}
+
+    {blockers.length > 0 && <p className="movie-edit-footnote"><ShieldCheck size={13} /> {blockers.length} validation signal{blockers.length === 1 ? "" : "s"} remain visible in the edit map; no provider call or media mutation is performed here.</p>}
+  </div>;
+}
 function RecordLine({ label, value }: { label: string; value: string | null | undefined }) {
   return <div className="movie-record-line"><span>{label}</span><p>{value || "Not set yet"}</p></div>;
 }
