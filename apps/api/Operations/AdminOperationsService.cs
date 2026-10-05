@@ -74,6 +74,21 @@ public sealed class AdminOperationsService(
     {
         var normalizedReason = NormalizeReason(reason);
         var now = DateTime.UtcNow;
+        var normalizedRequestId = NormalizeRequestId(requestId);
+        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+
+        // The request correlation id is also the idempotency key for this
+        // protected recovery command. A client retry after a response timeout
+        // must replay the original result instead of being reported as a new
+        // conflict after the first recovery already committed.
+        var previous = await FindRecoveryAuditAsync(normalizedRequestId, jobId, cancellationToken);
+        if (previous is not null)
+        {
+            var replay = ReplayRecovery(previous, jobId);
+            await transaction.CommitAsync(cancellationToken);
+            return replay;
+        }
+
         var source = await db.GenerationJobs.AsNoTracking().FirstOrDefaultAsync(item => item.Id == jobId, cancellationToken);
         if (source is null) return null;
         if (!MovieJobTypes.Contains(source.JobType, StringComparer.Ordinal))
@@ -96,7 +111,20 @@ public sealed class AdminOperationsService(
                 .SetProperty(item => item.RetryCount, item => item.RetryCount + 1)
                 .SetProperty(item => item.ConcurrencyToken, recoveryToken), cancellationToken);
         if (updated == 0)
+        {
+            // A concurrent request with the same idempotency key may have won
+            // the conditional update while this request was waiting on the row.
+            // Replay its committed evidence when available; otherwise preserve
+            // the existing conflict contract for a genuinely stale recovery.
+            previous = await FindRecoveryAuditAsync(normalizedRequestId, jobId, cancellationToken);
+            if (previous is not null)
+            {
+                var replay = ReplayRecovery(previous, jobId);
+                await transaction.CommitAsync(cancellationToken);
+                return replay;
+            }
             throw new AdminOperationConflictException("JOB_RECOVERY_RACE", "The job changed before recovery could be applied.");
+        }
 
         db.AdminOperationAuditEvents.Add(new AdminOperationAuditEvent
         {
@@ -107,13 +135,44 @@ public sealed class AdminOperationsService(
             TargetId = jobId,
             Outcome = AdminOperationOutcomes.Succeeded,
             Reason = normalizedReason,
-            RequestId = NormalizeRequestId(requestId),
+            RequestId = normalizedRequestId,
             BeforeState = $"status={GenerationJobStatus.Running};retryCount={source.RetryCount}",
             AfterState = $"status={GenerationJobStatus.Queued};retryCount={source.RetryCount + 1}",
             CreatedAt = now,
         });
         await db.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
         return new AdminJobRecoveryResult(jobId, GenerationJobStatus.Queued, source.RetryCount + 1, now, AdminOperationActions.RecoverExpiredGenerationJob);
+    }
+
+    private Task<AdminOperationAuditEvent?> FindRecoveryAuditAsync(
+        string? requestId,
+        Guid jobId,
+        CancellationToken cancellationToken) =>
+        string.IsNullOrWhiteSpace(requestId)
+            ? Task.FromResult<AdminOperationAuditEvent?>(null)
+            : db.AdminOperationAuditEvents.AsNoTracking()
+                .Where(item => item.Action == AdminOperationActions.RecoverExpiredGenerationJob
+                    && item.TargetId == jobId
+                    && item.RequestId == requestId
+                    && item.Outcome == AdminOperationOutcomes.Succeeded)
+                .OrderBy(item => item.CreatedAt)
+                .FirstOrDefaultAsync(cancellationToken);
+
+    private static AdminJobRecoveryResult ReplayRecovery(AdminOperationAuditEvent audit, Guid jobId)
+    {
+        var retryCount = ParseRetryCount(audit.AfterState);
+        return new(jobId, GenerationJobStatus.Queued, retryCount, audit.CreatedAt, AdminOperationActions.RecoverExpiredGenerationJob);
+    }
+
+    private static int ParseRetryCount(string? afterState)
+    {
+        const string prefix = "status=Queued;retryCount=";
+        if (afterState?.StartsWith(prefix, StringComparison.Ordinal) != true
+            || !int.TryParse(afterState[prefix.Length..], out var retryCount)
+            || retryCount < 0)
+            throw new AdminOperationConflictException("RECOVERY_RESULT_INVALID", "The prior recovery result could not be replayed safely.");
+        return retryCount;
     }
 
     private async Task<AdminGenerationOverviewDto> BuildGenerationAsync((DateTime FromUtc, DateTime ToUtc) range, CancellationToken cancellationToken)
