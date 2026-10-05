@@ -143,6 +143,35 @@ public sealed class AccountSettingsTests : IClassFixture<TaslimApiFactory>
     }
 
     [Fact]
+    public async Task Password_change_attempts_are_rate_limited_per_account()
+    {
+        using var client = factory.CreateClient();
+        await Register(client, "Rate Limited Owner", $"password-rate-limit-{Guid.NewGuid():N}@example.com");
+
+        for (var attempt = 0; attempt < 5; attempt++)
+        {
+            var rejectedPassword = await SendWithCsrf(client, HttpMethod.Post, "/api/auth/password", new
+            {
+                currentPassword = "WrongPassword!123",
+                newPassword = "NewStrongPassword!123",
+            });
+
+            Assert.Equal(HttpStatusCode.BadRequest, rejectedPassword.StatusCode);
+        }
+
+        var limited = await SendWithCsrf(client, HttpMethod.Post, "/api/auth/password", new
+        {
+            currentPassword = "WrongPassword!123",
+            newPassword = "NewStrongPassword!123",
+        });
+
+        Assert.Equal(HttpStatusCode.TooManyRequests, limited.StatusCode);
+        Assert.Equal("60", limited.Headers.RetryAfter?.Delta?.TotalSeconds.ToString("0"));
+        var error = await limited.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("RATE_LIMITED", error.GetProperty("error").GetProperty("code").GetString());
+    }
+
+    [Fact]
     public async Task Unsupported_account_preferences_are_rejected_without_persisting_partial_changes()
     {
         using var client = factory.CreateClient();
@@ -167,6 +196,70 @@ public sealed class AccountSettingsTests : IClassFixture<TaslimApiFactory>
         Assert.True(current.User.IncludeSourceLinks);
     }
 
+    [Fact]
+    public async Task Whitespace_profile_values_are_rejected_without_persisting_partial_changes()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Whitespace Owner", $"settings-whitespace-{Guid.NewGuid():N}@example.com");
+
+        var invalid = await SendWithCsrf(client, HttpMethod.Patch, "/api/auth/profile", new
+        {
+            displayName = "   ",
+            preferredLanguage = "  ",
+            defaultGenerationLanguage = "\t",
+            timeZone = "UTC",
+            outputPreference = "balanced",
+            includeSourceLinks = false,
+        });
+
+        Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
+        var current = await client.GetFromJsonAsync<AuthResponse>("/api/auth/me");
+        Assert.NotNull(current);
+        Assert.Equal(auth.User.DisplayName, current!.User.DisplayName);
+        Assert.Equal("en", current.User.PreferredLanguage);
+        Assert.Equal("en", current.User.DefaultGenerationLanguage);
+        Assert.True(current.User.IncludeSourceLinks);
+    }
+
+    [Fact]
+    public async Task Registration_rejects_whitespace_names_and_normalizes_language_input()
+    {
+        using var anonymous = factory.CreateClient();
+        var invalid = await SendWithCsrf(anonymous, HttpMethod.Post, "/api/auth/register", new
+        {
+            displayName = "   ",
+            email = $"registration-whitespace-{Guid.NewGuid():N}@example.com",
+            password = "StrongPassword!123",
+            preferredLanguage = "en",
+        });
+        Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
+
+        using var normalized = factory.CreateClient();
+        var auth = await RegisterWithLanguage(normalized, "Normalized Owner", $"registration-normalized-{Guid.NewGuid():N}@example.com", " AR ");
+        Assert.Equal("ar", auth.User.PreferredLanguage);
+    }
+
+    [Fact]
+    public async Task Onboarding_rejects_whitespace_languages_without_marking_the_account_complete()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Onboarding Validation Owner", $"onboarding-whitespace-{Guid.NewGuid():N}@example.com");
+
+        var invalid = await SendWithCsrf(client, HttpMethod.Post, "/api/auth/onboarding/complete", new
+        {
+            preferredLanguage = " ",
+            defaultGenerationLanguage = "\t",
+            intent = "project",
+        });
+
+        Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
+        var current = await client.GetFromJsonAsync<AuthResponse>("/api/auth/me");
+        Assert.NotNull(current);
+        Assert.Equal(auth.User.Id, current!.User.Id);
+        Assert.Null(current.User.OnboardingCompletedAt);
+        Assert.Null(current.User.OnboardingIntent);
+    }
+
     private static async Task<AuthResponse> Register(HttpClient client, string displayName, string email)
     {
         var response = await SendWithCsrf(client, HttpMethod.Post, "/api/auth/register", new
@@ -175,6 +268,19 @@ public sealed class AccountSettingsTests : IClassFixture<TaslimApiFactory>
             email,
             password = "StrongPassword!123",
             preferredLanguage = "en",
+        });
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        return (await response.Content.ReadFromJsonAsync<AuthResponse>())!;
+    }
+
+    private static async Task<AuthResponse> RegisterWithLanguage(HttpClient client, string displayName, string email, string preferredLanguage)
+    {
+        var response = await SendWithCsrf(client, HttpMethod.Post, "/api/auth/register", new
+        {
+            displayName,
+            email,
+            password = "StrongPassword!123",
+            preferredLanguage,
         });
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         return (await response.Content.ReadFromJsonAsync<AuthResponse>())!;

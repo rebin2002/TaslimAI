@@ -1,5 +1,14 @@
 import type { NextConfig } from "next";
 
+const configuredApiOrigin = (() => {
+  try {
+    return new URL(process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5000").origin;
+  } catch {
+    return "http://localhost:5000";
+  }
+})();
+const connectSources = [...new Set(["'self'", "https:", "http://localhost:5000", configuredApiOrigin, "ws:", "wss:"])].join(" ");
+
 const securityHeaders = [
   { key: "X-Content-Type-Options", value: "nosniff" },
   { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
@@ -17,7 +26,7 @@ const securityHeaders = [
       "style-src 'self' 'unsafe-inline'",
       "img-src 'self' data: blob: https:",
       "font-src 'self' data: https:",
-      "connect-src 'self' https: http://localhost:5000 ws: wss:",
+      `connect-src ${connectSources}`,
     ].join("; "),
   },
 ];
