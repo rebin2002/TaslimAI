@@ -140,6 +140,47 @@ public sealed class IdentityProjectsTests : IClassFixture<TaslimApiFactory>
     }
 
     [Fact]
+    public async Task Project_listing_bounds_pages_and_keeps_equal_timestamp_boundaries_stable()
+    {
+        using var owner = factory.CreateClient();
+        var ownerAuth = await Register(owner, "Project Pagination Owner", $"project-pagination-{Guid.NewGuid():N}@example.com");
+        var auth = await ownerAuth.Content.ReadFromJsonAsync<AuthResponse>();
+        Assert.NotNull(auth);
+
+        var first = await SendWithCsrf<ProjectDto>(owner, HttpMethod.Post, $"/api/workspaces/{auth.PersonalWorkspace.Id}/projects", new { name = "Pagination One", type = "Business" });
+        var second = await SendWithCsrf<ProjectDto>(owner, HttpMethod.Post, $"/api/workspaces/{auth.PersonalWorkspace.Id}/projects", new { name = "Pagination Two", type = "Business" });
+        var third = await SendWithCsrf<ProjectDto>(owner, HttpMethod.Post, $"/api/workspaces/{auth.PersonalWorkspace.Id}/projects", new { name = "Pagination Three", type = "Business" });
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var projects = await db.Projects.Where(project => project.WorkspaceId == auth.PersonalWorkspace.Id).ToListAsync();
+            var sameTimestamp = DateTime.UtcNow;
+            foreach (var project in projects) project.UpdatedAt = sameTimestamp;
+            await db.SaveChangesAsync();
+        }
+
+        var pageOne = await owner.GetFromJsonAsync<List<ProjectDto>>($"/api/workspaces/{auth.PersonalWorkspace.Id}/projects?status=Active&page=1&pageSize=2");
+        var pageTwo = await owner.GetFromJsonAsync<List<ProjectDto>>($"/api/workspaces/{auth.PersonalWorkspace.Id}/projects?status=Active&page=2&pageSize=2");
+        Assert.NotNull(pageOne);
+        Assert.NotNull(pageTwo);
+        Assert.Equal(2, pageOne!.Count);
+        Assert.Single(pageTwo!);
+        var combinedPages = pageOne.Concat(pageTwo!).Select(project => project.Id).ToArray();
+        Assert.Equal(3, combinedPages.Distinct().Count());
+        Assert.Contains(first.Id, combinedPages);
+        Assert.Contains(second.Id, combinedPages);
+        Assert.Contains(third.Id, combinedPages);
+
+        var repeatedPageOne = await owner.GetFromJsonAsync<List<ProjectDto>>($"/api/workspaces/{auth.PersonalWorkspace.Id}/projects?status=Active&page=1&pageSize=2");
+        Assert.Equal(pageOne.Select(project => project.Id), repeatedPageOne!.Select(project => project.Id));
+
+        var oversizedPage = await owner.GetAsync($"/api/workspaces/{auth.PersonalWorkspace.Id}/projects?status=Active&page={int.MaxValue}&pageSize={int.MaxValue}");
+        Assert.Equal(HttpStatusCode.OK, oversizedPage.StatusCode);
+        Assert.Empty(await oversizedPage.Content.ReadFromJsonAsync<List<ProjectDto>>() ?? []);
+    }
+
+    [Fact]
     public async Task Project_overview_returns_project_resources_activity_and_user_conversations()
     {
         using var owner = factory.CreateClient();
