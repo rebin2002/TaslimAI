@@ -20,7 +20,7 @@ describe("application error recovery boundaries", () => {
     expect(html).not.toContain("digest-1");
   });
 
-  it("keeps the root-layout fallback dependency-free and redacted", () => {
+  it("keeps the provider-independent root fallback redacted", () => {
     const html = renderToStaticMarkup(
       <GlobalError error={Object.assign(new Error("private database detail"), { digest: "digest-2" })} reset={vi.fn()} />,
     );
@@ -31,5 +31,14 @@ describe("application error recovery boundaries", () => {
     expect(html).toContain('role="alert"');
     expect(html).not.toContain("private database detail");
     expect(html).not.toContain("digest-2");
+  });
+
+  it("emits canonical English root metadata during server recovery", () => {
+    const html = renderToStaticMarkup(
+      <GlobalError error={new Error("private root detail")} reset={vi.fn()} />,
+    );
+
+    expect(html).toContain('<html lang="en" dir="ltr">');
+    expect(html).toContain('<body dir="ltr"');
   });
 });
