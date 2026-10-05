@@ -44,6 +44,71 @@ public sealed class AutopilotControllerTests
     }
 
     [Fact]
+    public async Task Invalid_completion_outcome_is_rejected_without_creating_success_evidence()
+    {
+        using var host = new AutopilotTestHost();
+
+        var submission = await host.SubmitAsync("wave-invalid-outcome", "task-1", "not-a-real-outcome");
+
+        Assert.Equal(AutopilotIntakeOutcomes.RejectedInvalid, submission.Outcome);
+        Assert.Equal("outcome_invalid", submission.Reason);
+
+        using var db = host.CreateContext();
+        Assert.Empty(await db.AutopilotEvents.ToListAsync());
+        Assert.Empty(await db.AutopilotRuns.ToListAsync());
+        Assert.Empty(await db.AutopilotWaveTasks.ToListAsync());
+        Assert.Contains(await db.AutopilotAuditEvents.ToListAsync(), item =>
+            item.Action == AutopilotAuditActions.EventRejected
+            && item.Outcome == AutopilotAuditOutcomes.Blocked
+            && item.Reason == "outcome_invalid");
+    }
+
+    [Fact]
+    public async Task Persisted_invalid_completion_outcome_is_rejected_without_advancing_a_wave()
+    {
+        using var host = new AutopilotTestHost();
+        var eventId = Guid.NewGuid();
+
+        using (var db = host.CreateContext())
+        {
+            db.AutopilotEvents.Add(new AutopilotEvent
+            {
+                Id = eventId,
+                EventType = AutopilotEventTypes.WaveTaskCompleted,
+                SourceSystem = "legacy-bridge",
+                ExternalEventId = "legacy-invalid-outcome",
+                IdempotencyKey = "autopilot:legacy-bridge:legacy-invalid-outcome",
+                PayloadHash = "legacy",
+                Status = AutopilotEventStatuses.Queued,
+                WaveKey = "wave-persisted-invalid-outcome",
+                TaskId = "task-1",
+                ReceivedAt = DateTime.UtcNow,
+                QueuedAt = DateTime.UtcNow,
+                ConcurrencyToken = Guid.NewGuid(),
+                SignalJson = JsonSerializer.Serialize(new
+                {
+                    waveKey = "wave-persisted-invalid-outcome",
+                    taskId = "task-1",
+                    outcome = "not-a-real-outcome",
+                }),
+            });
+            await db.SaveChangesAsync();
+        }
+
+        await host.ProcessEventAsync(eventId);
+
+        using var verify = host.CreateContext();
+        var stored = await verify.AutopilotEvents.SingleAsync(item => item.Id == eventId);
+        Assert.Equal(AutopilotEventStatuses.RejectedInvalid, stored.Status);
+        Assert.Equal("outcome_invalid", stored.Reason);
+        Assert.Empty(await verify.AutopilotRuns.ToListAsync());
+        Assert.Empty(await verify.AutopilotWaveTasks.ToListAsync());
+        Assert.Contains(await verify.AutopilotAuditEvents.ToListAsync(), item =>
+            item.Action == AutopilotAuditActions.EventRejected
+            && item.Reason == "outcome_invalid");
+    }
+
+    [Fact]
     public async Task Partial_wave_stays_in_progress_and_only_advances_when_complete()
     {
         using var host = new AutopilotTestHost();
