@@ -28,9 +28,10 @@ export function GenerationJobDetail({ job, t, canCancel, working, onCancel }: Ge
   const status = t(`jobs.status${job.status}`);
   const progress = clampGenerationProgress(job.progressPercent);
   const detailTitleId = `generation-job-detail-title-${job.id}`;
+  const detailId = `generation-job-detail-${job.id}`;
 
   return (
-    <div className="generation-job-detail" aria-labelledby={detailTitleId}>
+    <div id={detailId} className="generation-job-detail" aria-labelledby={detailTitleId}>
       <h3 id={detailTitleId} className="sr-only">{title}</h3>
       <div className="generation-job-detail-header">
         <div><span className="field-hint">{t("jobs.jobId")}</span><code>{job.id}</code></div>
@@ -69,7 +70,7 @@ type GenerationJobListProps = Readonly<{
 
 export function GenerationJobList({ jobs, activeJobId, t, onSelect }: GenerationJobListProps) {
   return (
-    <div className="generation-job-list">
+    <div className="generation-job-list" role="group" aria-label={t("jobs.recent")}>
       {jobs.map((job) => {
         const title = job.title ?? t("jobs.testTitle");
         const status = t(`jobs.status${job.status}`);
@@ -81,6 +82,7 @@ export function GenerationJobList({ jobs, activeJobId, t, onSelect }: Generation
             key={job.id}
             onClick={() => onSelect(job)}
             aria-pressed={activeJobId === job.id}
+            aria-controls={activeJobId === job.id ? `generation-job-detail-${job.id}` : undefined}
             aria-label={t("jobs.progressAnnouncement", { title, status, progress: String(progress) })}
           >
             <span><strong>{title}</strong><small>{progress}%</small></span>
