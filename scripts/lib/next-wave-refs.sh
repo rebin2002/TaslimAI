@@ -31,9 +31,14 @@ next_wave_classify_ref() {
   local current_branch="${5:-}"
   local expected_branch="${6:-}"
   local expected_base="${7:-}"
+  local search_asset_base="fix/search-asset-deep-links-20261005"
 
   if [[ "$event_name" == "pull_request" ]]; then
-    if [[ "$base_ref" != "$expected_base" && "$base_ref" != "$expected_branch" ]]; then
+    # Billing work and the Search -> Notifications stack are intentionally
+    # stacked so each dependent PR can be reviewed and gated independently.
+    # Keep those explicit stack targets allowlisted; every other unexpected
+    # base still fails closed.
+    if [[ "$base_ref" != "$expected_base" && "$base_ref" != "$expected_branch" && "$base_ref" != "$search_asset_base" && "$base_ref" != fix/billing-* ]]; then
       printf 'unexpected pull request base: %s\n' "${base_ref:-<none>}" >&2
       return 1
     fi

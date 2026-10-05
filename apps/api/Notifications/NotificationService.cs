@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
+using Taslim.Api.Infrastructure;
 using Taslim.Api.Persistence;
 
 namespace Taslim.Api.Notifications;
@@ -19,8 +20,8 @@ public sealed class NotificationService(TaslimDbContext db, WorkspaceAccessServi
     public async Task<NotificationListDto?> ListAsync(Guid userId, NotificationFilter filter, CancellationToken cancellationToken = default)
     {
         if (!await access.IsMemberAsync(userId, filter.WorkspaceId, cancellationToken)) return null;
-        var page = Math.Max(filter.Page, 1);
-        var pageSize = Math.Clamp(filter.PageSize, 1, 100);
+        var page = ApiPagination.NormalizePage(filter.Page);
+        var pageSize = ApiPagination.NormalizePageSize(filter.PageSize);
         var query = db.Notifications.AsNoTracking().Where(item => item.UserId == userId && item.WorkspaceId == filter.WorkspaceId);
         if (filter.UnreadOnly) query = query.Where(item => item.ReadAt == null);
         var totalCount = await query.CountAsync(cancellationToken);
@@ -28,7 +29,7 @@ public sealed class NotificationService(TaslimDbContext db, WorkspaceAccessServi
             .Where(item => item.UserId == userId && item.WorkspaceId == filter.WorkspaceId && item.ReadAt == null)
             .CountAsync(cancellationToken);
         var notifications = await query.OrderByDescending(item => item.CreatedAt).ThenByDescending(item => item.Id)
-            .Skip((page - 1) * pageSize).Take(pageSize).ToListAsync(cancellationToken);
+            .Skip(ApiPagination.GetOffset(page, pageSize)).Take(pageSize).ToListAsync(cancellationToken);
         return new NotificationListDto(
             notifications.Select(ToDto).ToArray(),
             page,
@@ -114,7 +115,20 @@ public sealed class NotificationService(TaslimDbContext db, WorkspaceAccessServi
     {
         if (await db.Notifications.AnyAsync(item => item.DeduplicationKey == notification.DeduplicationKey && item.UserId == notification.UserId, cancellationToken)) return;
         db.Notifications.Add(notification);
-        await db.SaveChangesAsync(cancellationToken);
+        try
+        {
+            await db.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateException)
+        {
+            // The unique (UserId, DeduplicationKey) index is the concurrency
+            // boundary. Another worker may have inserted the same event after
+            // the check above; treat that winner as an idempotent success while
+            // preserving unrelated persistence failures.
+            db.Entry(notification).State = EntityState.Detached;
+            if (await db.Notifications.AsNoTracking().AnyAsync(item => item.DeduplicationKey == notification.DeduplicationKey && item.UserId == notification.UserId, cancellationToken)) return;
+            throw;
+        }
     }
 
     private static NotificationDto ToDto(Notification item) => new(
@@ -124,7 +138,7 @@ public sealed class NotificationService(TaslimDbContext db, WorkspaceAccessServi
 
     private static string Destination(Notification item) => item.Type switch
     {
-        NotificationTypes.GenerationCompleted when item.AssetId.HasValue => "/assets",
+        NotificationTypes.GenerationCompleted when item.AssetId.HasValue => $"/assets?assetId={item.AssetId.Value:N}&status=Active",
         NotificationTypes.GenerationCompleted when item.GenerationJobId.HasValue => $"/activity?jobId={item.GenerationJobId.Value:N}",
         NotificationTypes.GenerationAttention or NotificationTypes.GenerationFailed when item.GenerationJobId.HasValue => $"/activity?jobId={item.GenerationJobId.Value:N}",
         NotificationTypes.BillingPaymentFailed => "/account/billing",

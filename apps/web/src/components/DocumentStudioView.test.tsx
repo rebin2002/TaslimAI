@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { DocumentStudioView } from "./DocumentStudioView";
+import { DocumentPreviewTable, DocumentProgressMeter, DocumentStudioView } from "./DocumentStudioView";
 
 vi.mock("next/navigation", () => ({
   useSearchParams: () => new URLSearchParams(),
@@ -27,6 +27,26 @@ vi.mock("@/lib/api", () => ({
 }));
 
 describe("DocumentStudioView", () => {
+  it("exposes an announced, bounded progress meter for assistive technology", () => {
+    const html = renderToStaticMarkup(<DocumentProgressMeter progress={140} label="Progress" announcement="Report: running. 100% complete." />);
+
+    expect(html).toContain('role="status"');
+    expect(html).toContain('role="progressbar"');
+    expect(html).toContain('aria-valuenow="100"');
+    expect(html).toContain('aria-valuetext="100%"');
+    expect(html).toContain("Report: running. 100% complete.");
+  });
+
+  it("exposes generated table previews with row and cell semantics", () => {
+    const html = renderToStaticMarkup(<DocumentPreviewTable rows={[{ cells: ["Metric", "Value"] }, { cells: ["Revenue", "$10,000"] }]} label="Document preview" />);
+
+    expect(html).toContain('role="table"');
+    expect(html).toContain('aria-label="Document preview"');
+    expect(html).toContain('role="row"');
+    expect(html).toContain('role="cell"');
+    expect(html).toContain("$10,000");
+  });
+
   it("renders a compact guided compose workspace without provider details", () => {
     const html = renderToStaticMarkup(<DocumentStudioView />);
 
@@ -34,11 +54,28 @@ describe("DocumentStudioView", () => {
     expect(html).toContain("document-field-primary");
     expect(html).toContain("document-advanced");
     expect(html).toContain("document-recent-card");
+    expect(html).toContain('aria-labelledby="document-create-title"');
+    expect(html).toContain('aria-describedby="document-brief-count"');
+    expect(html).toContain('aria-labelledby="document-sources-title"');
+    expect(html).toContain('id="document-project"');
     expect(html).toContain("document.type");
     expect(html).toContain("document.language");
     expect(html).not.toContain("provider");
     expect(html).not.toContain("model");
     expect(html).not.toContain("resultJson");
+  });
+
+  it("renders localized DOCX, PDF, and both output-format choices", () => {
+    const html = renderToStaticMarkup(<DocumentStudioView />);
+
+    expect(html).toContain('id="document-output-format"');
+    expect(html).toContain("document.outputFormat");
+    expect(html).toContain('value="docx"');
+    expect(html).toContain('value="pdf"');
+    expect(html).toContain('value="both"');
+    expect(html).toContain("document.outputDocx");
+    expect(html).toContain("document.outputPdf");
+    expect(html).toContain("document.outputBoth");
   });
 
   it("keeps the empty source and recent-document states explicit", () => {
@@ -48,5 +85,6 @@ describe("DocumentStudioView", () => {
     expect(html).toContain("document.loading");
     expect(html).toContain("document.sources");
     expect(html).toContain("document.recentTitle");
+    expect(html).toContain('aria-live="polite"');
   });
 });

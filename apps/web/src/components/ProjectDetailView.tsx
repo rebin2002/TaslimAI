@@ -1,7 +1,8 @@
 "use client";
+import { localeTag } from "@/lib/i18n";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Activity, Archive, ArrowLeft, ArrowUpRight, BarChart3, CalendarDays, FileText, FolderOpen, LibraryBig, MessageSquare, Pencil, Plus, RotateCcw, Sparkles } from "lucide-react";
 import { useParams, useRouter } from "next/navigation";
 import { api, type Project, type ProjectInput, type ProjectOverview } from "@/lib/api";
@@ -26,18 +27,27 @@ export function ProjectDetailView() {
   const [loading, setLoading] = useState(true);
   const [formOpen, setFormOpen] = useState(false);
   const [error, setError] = useState("");
+  const [loadAttempt, setLoadAttempt] = useState(0);
+  const overviewRequest = useRef<{ key: string; promise: Promise<ProjectOverview> } | null>(null);
 
   useEffect(() => {
     let active = true;
+    const requestKey = `${params.projectId}:${loadAttempt}`;
+    const cachedRequest = overviewRequest.current?.key === requestKey ? overviewRequest.current.promise : null;
     // Loading remote project state is an external synchronization.
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setLoading(true);
-    void api.getProjectOverview(params.projectId)
+    setLoading(true); setError("");
+    const request = cachedRequest ?? api.getProjectOverview(params.projectId);
+    if (!cachedRequest) overviewRequest.current = { key: requestKey, promise: request };
+    void request
       .then((next) => { if (active) setOverview(next); })
       .catch((caught) => { if (active) setError(caught instanceof Error ? caught.message : t("projects.loadError")); })
-      .finally(() => { if (active) setLoading(false); });
+      .finally(() => {
+        if (overviewRequest.current?.promise === request) overviewRequest.current = null;
+        if (active) setLoading(false);
+      });
     return () => { active = false; };
-  }, [params.projectId, t]);
+  }, [loadAttempt, params.projectId, t]);
 
   function replaceProject(project: Project) {
     setOverview((current) => current ? { ...current, project } : current);
@@ -61,7 +71,7 @@ export function ProjectDetailView() {
   }
 
   if (loading) return <div className="loading-state"><span className="loading-spinner" /></div>;
-  if (error && !overview) return <div className="inline-error">{error || t("projects.notFound")}</div>;
+  if (error && !overview) return <div className="inline-error" role="alert"><span>{error || t("projects.notFound")}</span> <button type="button" className="text-button" onClick={() => setLoadAttempt((attempt) => attempt + 1)}>{t("error.retry")}</button></div>;
   if (!overview) return <div className="inline-error">{t("projects.notFound")}</div>;
 
   const { project, workspace, counts, conversations, recentActivity } = overview;
@@ -136,5 +146,5 @@ function OverviewStat({ icon, label, value }: { icon: React.ReactNode; label: st
 }
 
 function formatDate(value: string, locale: string) {
-  return new Intl.DateTimeFormat(locale, { dateStyle: "medium" }).format(new Date(value));
+  return new Intl.DateTimeFormat(localeTag(locale), { dateStyle: "medium" }).format(new Date(value));
 }

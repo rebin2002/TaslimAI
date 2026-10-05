@@ -13,16 +13,29 @@ namespace Taslim.Api.Controllers;
 [Authorize]
 public sealed class ProjectsController(TaslimDbContext db, WorkspaceAccessService access) : ControllerBase
 {
+    private const int MaxProjectListPage = 10_000;
+    private const int MaxProjectListPageSize = 100;
+
     [HttpGet("api/workspaces/{workspaceId:guid}/projects")]
-    public async Task<IActionResult> List(Guid workspaceId, [FromQuery] string? status, CancellationToken cancellationToken)
+    public async Task<IActionResult> List(
+        Guid workspaceId,
+        [FromQuery] string? status,
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 20,
+        CancellationToken cancellationToken = default)
     {
         var userId = GetUserId();
         if (!await access.IsMemberAsync(userId, workspaceId, cancellationToken)) return Forbid();
         var requestedStatus = string.Equals(status, ProjectStatuses.Archived, StringComparison.OrdinalIgnoreCase)
             ? ProjectStatuses.Archived : ProjectStatuses.Active;
+        page = Math.Clamp(page, 1, MaxProjectListPage);
+        pageSize = Math.Clamp(pageSize, 1, MaxProjectListPageSize);
         var projects = await db.Projects.AsNoTracking()
             .Where(project => project.WorkspaceId == workspaceId && project.Status == requestedStatus)
             .OrderByDescending(project => project.UpdatedAt)
+            .ThenByDescending(project => project.Id)
+            .Skip((page - 1) * pageSize)
+            .Take(pageSize)
             .Select(project => ToDto(project))
             .ToListAsync(cancellationToken);
         return Ok(projects);
@@ -73,7 +86,8 @@ public sealed class ProjectsController(TaslimDbContext db, WorkspaceAccessServic
         if (workspace is null) return ApiResults.Error(this, 404, "WORKSPACE_NOT_FOUND", "Workspace not found.");
 
         var files = db.StoredFiles.AsNoTracking()
-            .Where(file => file.ProjectId == projectId && file.WorkspaceId == project.WorkspaceId && file.Status != StoredFileStatus.Deleted);
+            .Where(file => file.ProjectId == projectId && file.WorkspaceId == project.WorkspaceId && file.Status != StoredFileStatus.Deleted)
+            .Where(file => file.ConversationId == null || file.UserId == userId);
         var assets = db.Assets.AsNoTracking()
             .Where(asset => asset.ProjectId == projectId && asset.WorkspaceId == project.WorkspaceId && asset.Status == AssetStatus.Active);
         var conversations = db.Conversations.AsNoTracking()

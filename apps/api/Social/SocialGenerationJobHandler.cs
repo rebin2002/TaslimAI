@@ -6,6 +6,7 @@ using Taslim.Api.Ai;
 using Taslim.Api.Assets;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
+using Taslim.Api.Files;
 using Taslim.Api.Generation;
 using Taslim.Api.Persistence;
 
@@ -38,8 +39,8 @@ public sealed class SocialGenerationJobHandler(
         }
         progress.Report(8);
 
-        var files = await LoadFilesAsync(input, job.WorkspaceId, cancellationToken);
-        var assets = await LoadAssetsAsync(input, job.WorkspaceId, cancellationToken);
+        var files = await LoadFilesAsync(input, job.WorkspaceId, job.CreatedByUserId, cancellationToken);
+        var assets = await LoadAssetsAsync(input, job.WorkspaceId, job.CreatedByUserId, cancellationToken);
         progress.Report(18);
 
         SocialProjectContext? project = null;
@@ -113,10 +114,13 @@ public sealed class SocialGenerationJobHandler(
         return new GenerationHandlerResult(result, [new GenerationHandlerOutput(GenerationJobOutputTypes.StoredFile, null, metadata, artifact, asset)], generated.Usage);
     }
 
-    private async Task<IReadOnlyList<StoredFile>> LoadFilesAsync(SocialGenerationInput input, Guid workspaceId, CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<StoredFile>> LoadFilesAsync(SocialGenerationInput input, Guid workspaceId, Guid userId, CancellationToken cancellationToken)
     {
         if (input.AttachmentIds.Count == 0) return [];
-        var files = await db.StoredFiles.AsNoTracking().Where(file => file.WorkspaceId == workspaceId && input.AttachmentIds.Contains(file.Id)).ToListAsync(cancellationToken);
+        var files = await db.StoredFiles.AsNoTracking()
+            .Where(file => file.WorkspaceId == workspaceId && input.AttachmentIds.Contains(file.Id))
+            .Where(StoredFileVisibility.ForWorkspaceMember(userId))
+            .ToListAsync(cancellationToken);
         if (files.Count != input.AttachmentIds.Count || files.Any(file => !SocialGenerationDefaults.AttachmentExtensions.Contains(file.Extension)) || files.Any(file => file.Status != StoredFileStatus.Ready))
             throw new SocialGenerationStageException(SocialGenerationStages.Context, GenerationJobErrorCodes.SocialContextUnavailable, "One or more selected source files are unavailable.");
         if (files.Any(file => file.TextExtractionStatus != FileExtractionStatus.Ready || string.IsNullOrWhiteSpace(file.ExtractedText)))
@@ -124,11 +128,23 @@ public sealed class SocialGenerationJobHandler(
         return input.AttachmentIds.Select(id => files.First(file => file.Id == id)).ToArray();
     }
 
-    private async Task<IReadOnlyList<Asset>> LoadAssetsAsync(SocialGenerationInput input, Guid workspaceId, CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<Asset>> LoadAssetsAsync(SocialGenerationInput input, Guid workspaceId, Guid userId, CancellationToken cancellationToken)
     {
         if (input.AssetIds.Count == 0) return [];
         var assets = await db.Assets.AsNoTracking().Include(asset => asset.StoredFile).Where(asset => asset.WorkspaceId == workspaceId && input.AssetIds.Contains(asset.Id)).ToListAsync(cancellationToken);
-        if (assets.Count != input.AssetIds.Count || assets.Any(asset => asset.Status != AssetStatus.Active))
+        if (assets.Count != input.AssetIds.Count || assets.Any(asset =>
+                asset.Status != AssetStatus.Active
+                || !SocialGenerationDefaults.SelectableAssetTypes.Contains(asset.AssetType)
+                || asset.StoredFileId is null
+                || asset.StoredFile is not { Status: StoredFileStatus.Ready }
+                || asset.StoredFile.WorkspaceId != workspaceId
+                // Project assets may be shared only when their backing file is
+                // also project-scoped. Personal and conversation-backed assets
+                // remain private to their creator.
+                || (asset.CreatedByUserId != userId && !asset.ProjectId.HasValue)
+                || (asset.CreatedByUserId != userId
+                    && (asset.StoredFile!.UserId != userId
+                        && (!asset.StoredFile.ProjectId.HasValue || asset.StoredFile.ConversationId.HasValue)))))
             throw new SocialGenerationStageException(SocialGenerationStages.Context, GenerationJobErrorCodes.SocialContextUnavailable, "One or more selected assets are unavailable.");
         return input.AssetIds.Select(id => assets.First(asset => asset.Id == id)).ToArray();
     }

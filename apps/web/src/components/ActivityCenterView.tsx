@@ -1,18 +1,18 @@
 "use client";
+import { localeTag, type Locale } from "@/lib/i18n";
 
 import Link from "next/link";
 import { Activity, CheckCheck, ExternalLink, LoaderCircle, XCircle } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
 import { api, type ActivityItem, type ActivityList } from "@/lib/api";
-import { activityStatuses, type ActivityStatusFilter } from "@/lib/activityCenter";
+import { activityStatuses, applyActivityRead, applyAllActivityRead, type ActivityStatusFilter } from "@/lib/activityCenter";
+import { isActivityRequestCurrent, startActivityRequest } from "@/lib/activityRequest";
 
-const localeMap = { en: "en-US", ar: "ar", ku: "ku-Arab" } as const;
-
-function formatTime(value: string | null, locale: keyof typeof localeMap, fallback: string) {
+function formatTime(value: string | null, locale: Locale, fallback: string) {
   if (!value) return fallback;
-  return new Intl.DateTimeFormat(localeMap[locale], { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
+  return new Intl.DateTimeFormat(localeTag(locale), { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
 }
 
 export function ActivityCenterView() {
@@ -23,24 +23,50 @@ export function ActivityCenterView() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [workingId, setWorkingId] = useState<string | null>(null);
+  const resultRef = useRef<ActivityList | null>(null);
+  const requestSequence = useRef(0);
+  const activeWorkspaceId = useRef(workspace?.id ?? null);
+  if (activeWorkspaceId.current !== (workspace?.id ?? null)) activeWorkspaceId.current = workspace?.id ?? null;
 
   const load = useCallback(async (quiet = false) => {
     if (!workspace) return;
+    const workspaceId = workspace.id;
+    const request = startActivityRequest(requestSequence.current, workspaceId, filter);
+    requestSequence.current = request.sequence;
     if (!quiet) setLoading(true);
     try {
-      const next = await api.listActivity(workspace.id, 1, 50, filter);
+      const next = await api.listActivity(workspaceId, 1, 50, filter);
+      if (!isActivityRequestCurrent(request, requestSequence.current, activeWorkspaceId.current, filter)) return;
+      resultRef.current = next;
       setResult(next);
       setError("");
     } catch (caught) {
-      if (!quiet) setError(caught instanceof Error ? caught.message : t("activity.loadError"));
+      if (isActivityRequestCurrent(request, requestSequence.current, activeWorkspaceId.current, filter) && !quiet) {
+        setError(caught instanceof Error ? caught.message : t("activity.loadError"));
+      }
     } finally {
-      if (!quiet) setLoading(false);
+      if (isActivityRequestCurrent(request, requestSequence.current, activeWorkspaceId.current, filter) && !quiet) setLoading(false);
     }
   }, [filter, t, workspace]);
 
+  useEffect(() => {
+    requestSequence.current += 1;
+    resultRef.current = null;
+    /* eslint-disable react-hooks/set-state-in-effect */
+    setResult(null);
+    setError("");
+    setWorkingId(null);
+    if (!activeWorkspaceId.current) setLoading(false);
+    /* eslint-enable react-hooks/set-state-in-effect */
+  }, [filter, workspace?.id]);
+
   // Synchronize the view with the activity API when the workspace or filter changes.
-  // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    // The loader synchronizes the component with the external activity API.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void load();
+    return () => { requestSequence.current += 1; };
+  }, [load]);
   useEffect(() => {
     if (!workspace) return;
     const timer = window.setInterval(() => { void load(true); }, 5000);
@@ -49,27 +75,47 @@ export function ActivityCenterView() {
 
   async function markRead(item: ActivityItem) {
     if (!workspace || item.isRead) return;
+    const workspaceId = workspace.id;
+    const request = startActivityRequest(requestSequence.current, workspaceId, filter);
+    requestSequence.current = request.sequence;
     setWorkingId(item.jobId);
     try {
-      await api.markActivityRead(workspace.id, item.jobId);
-      setResult((current) => current ? { ...current, unreadCount: Math.max(0, current.unreadCount - 1), items: current.items.map((entry) => entry.jobId === item.jobId ? { ...entry, isRead: true } : entry) } : current);
+      await api.markActivityRead(workspaceId, item.jobId);
+      if (!isActivityRequestCurrent(request, requestSequence.current, activeWorkspaceId.current, filter)) return;
+      const current = resultRef.current;
+      if (current) {
+        const update = applyActivityRead(current, item.jobId);
+        resultRef.current = update.next;
+        setResult(update.next);
+      }
+      setError("");
     } catch {
-      setError(t("activity.readError"));
+      if (isActivityRequestCurrent(request, requestSequence.current, activeWorkspaceId.current, filter)) setError(t("activity.readError"));
     } finally {
-      setWorkingId(null);
+      if (isActivityRequestCurrent(request, requestSequence.current, activeWorkspaceId.current, filter)) setWorkingId(null);
     }
   }
 
   async function markAllRead() {
     if (!workspace || !result?.unreadCount) return;
+    const workspaceId = workspace.id;
+    const request = startActivityRequest(requestSequence.current, workspaceId, filter);
+    requestSequence.current = request.sequence;
     setWorkingId("all");
     try {
-      await api.markAllActivityRead(workspace.id);
-      setResult((current) => current ? { ...current, unreadCount: 0, items: current.items.map((item) => ({ ...item, isRead: true })) } : current);
+      await api.markAllActivityRead(workspaceId);
+      if (!isActivityRequestCurrent(request, requestSequence.current, activeWorkspaceId.current, filter)) return;
+      const current = resultRef.current;
+      if (current) {
+        const update = applyAllActivityRead(current);
+        resultRef.current = update.next;
+        setResult(update.next);
+      }
+      setError("");
     } catch {
-      setError(t("activity.readError"));
+      if (isActivityRequestCurrent(request, requestSequence.current, activeWorkspaceId.current, filter)) setError(t("activity.readError"));
     } finally {
-      setWorkingId(null);
+      if (isActivityRequestCurrent(request, requestSequence.current, activeWorkspaceId.current, filter)) setWorkingId(null);
     }
   }
 

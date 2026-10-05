@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
+using Taslim.Api.Infrastructure;
 using Taslim.Api.Persistence;
 
 namespace Taslim.Api.Assets;
@@ -36,16 +37,17 @@ public sealed class AssetService(TaslimDbContext db, WorkspaceAccessService acce
 {
     public async Task<Asset?> GetAsync(Guid userId, Guid assetId, CancellationToken cancellationToken = default)
     {
-        var asset = await Query().FirstOrDefaultAsync(item => item.Id == assetId, cancellationToken);
+        var asset = await VisibleTo(Query(), userId).FirstOrDefaultAsync(item => item.Id == assetId, cancellationToken);
         return asset is not null && await access.IsMemberAsync(userId, asset.WorkspaceId, cancellationToken) ? asset : null;
     }
 
     public async Task<AssetListDto?> ListAsync(Guid userId, AssetFilter filter, CancellationToken cancellationToken = default)
     {
         if (!await access.IsMemberAsync(userId, filter.WorkspaceId, cancellationToken)) return null;
-        var page = Math.Clamp(filter.Page, 1, 1_000_000);
-        var pageSize = Math.Clamp(filter.PageSize, 1, 100);
-        var query = Query().Where(asset => asset.WorkspaceId == filter.WorkspaceId && asset.Status == (filter.Status ?? AssetStatus.Active));
+        var page = ApiPagination.NormalizePage(filter.Page);
+        var pageSize = ApiPagination.NormalizePageSize(filter.PageSize);
+        var query = VisibleTo(Query(), userId)
+            .Where(asset => asset.WorkspaceId == filter.WorkspaceId && asset.Status == (filter.Status ?? AssetStatus.Active));
         if (filter.ProjectId.HasValue) query = query.Where(asset => asset.ProjectId == filter.ProjectId.Value);
         if (!string.IsNullOrWhiteSpace(filter.AssetType))
         {
@@ -69,12 +71,12 @@ public sealed class AssetService(TaslimDbContext db, WorkspaceAccessService acce
         var ordered = sort switch
         {
             AssetSorts.Oldest => query.OrderBy(asset => asset.CreatedAt).ThenBy(asset => asset.Id),
-            AssetSorts.Name => query.OrderBy(asset => asset.Name).ThenByDescending(asset => asset.CreatedAt),
-            AssetSorts.Size => query.OrderByDescending(asset => asset.StoredFile == null ? 0 : asset.StoredFile.SizeBytes).ThenByDescending(asset => asset.CreatedAt),
+            AssetSorts.Name => query.OrderBy(asset => asset.Name).ThenByDescending(asset => asset.CreatedAt).ThenBy(asset => asset.Id),
+            AssetSorts.Size => query.OrderByDescending(asset => asset.StoredFile == null ? 0 : asset.StoredFile.SizeBytes).ThenByDescending(asset => asset.CreatedAt).ThenBy(asset => asset.Id),
             _ => query.OrderByDescending(asset => asset.CreatedAt).ThenBy(asset => asset.Id),
         };
         var items = await ordered
-            .Skip((page - 1) * pageSize)
+            .Skip(ApiPagination.GetOffset(page, pageSize))
             .Take(pageSize)
             .ToListAsync(cancellationToken);
         return new AssetListDto(items.Select(AssetContractMapper.ToDto).ToArray(), page, pageSize, totalCount, (int)Math.Ceiling(totalCount / (double)pageSize));
@@ -82,7 +84,7 @@ public sealed class AssetService(TaslimDbContext db, WorkspaceAccessService acce
 
     public async Task<Asset?> UpdateAsync(Guid userId, Guid assetId, UpdateAssetRequest request, CancellationToken cancellationToken = default)
     {
-        var asset = await Query(tracking: true).FirstOrDefaultAsync(item => item.Id == assetId, cancellationToken);
+        var asset = await VisibleTo(Query(tracking: true), userId).FirstOrDefaultAsync(item => item.Id == assetId, cancellationToken);
         if (asset is null || !await access.IsMemberAsync(userId, asset.WorkspaceId, cancellationToken)) return null;
         if (string.IsNullOrWhiteSpace(request.Name)) throw new AssetValidationException("ASSET_NAME_REQUIRED", "Asset name is required.");
         if (request.ProjectId.HasValue && !await db.Projects.AnyAsync(project => project.Id == request.ProjectId && project.WorkspaceId == asset.WorkspaceId, cancellationToken))
@@ -106,25 +108,28 @@ public sealed class AssetService(TaslimDbContext db, WorkspaceAccessService acce
 
     public async Task<AssetDownload?> GetDownloadAsync(Guid userId, Guid assetId, Guid? representationId = null, CancellationToken cancellationToken = default)
     {
-        var asset = await Query().Include(item => item.StoredFile).FirstOrDefaultAsync(item => item.Id == assetId, cancellationToken);
+        var asset = await VisibleTo(Query().Include(item => item.StoredFile), userId)
+            .FirstOrDefaultAsync(item => item.Id == assetId, cancellationToken);
         if (asset is null || !await access.IsMemberAsync(userId, asset.WorkspaceId, cancellationToken)) return null;
         if (representationId.HasValue)
         {
             var representation = asset.Representations.FirstOrDefault(item => item.Id == representationId.Value);
             if (representation is null) return null;
-            var representationFile = await db.StoredFiles.AsNoTracking().FirstOrDefaultAsync(file => file.Id == representation.StoredFileId, cancellationToken);
-            if (representationFile is not { Status: StoredFileStatus.Ready } || representationFile.WorkspaceId != asset.WorkspaceId)
+            var representationFile = await db.StoredFiles.AsNoTracking()
+                .Include(file => file.Project)
+                .FirstOrDefaultAsync(file => file.Id == representation.StoredFileId, cancellationToken);
+            if (representationFile is not { Status: StoredFileStatus.Ready } || !CanReadStoredFile(representationFile, userId, asset.WorkspaceId))
                 throw new AssetValidationException("ASSET_FILE_UNAVAILABLE", "This document format is not available.");
             return new AssetDownload(asset, representationFile, representation.FileName, representation.ContentType);
         }
-        if (asset.StoredFile is not { Status: StoredFileStatus.Ready } || asset.StoredFile.WorkspaceId != asset.WorkspaceId)
+        if (asset.StoredFile is not { Status: StoredFileStatus.Ready } || !CanReadStoredFile(asset.StoredFile, userId, asset.WorkspaceId))
             throw new AssetValidationException("ASSET_FILE_UNAVAILABLE", "This asset does not have an available file.");
         return new AssetDownload(asset, asset.StoredFile, asset.StoredFile.OriginalFileName, asset.StoredFile.ContentType);
     }
 
     private async Task<Asset?> SetStatusAsync(Guid userId, Guid assetId, AssetStatus status, CancellationToken cancellationToken)
     {
-        var asset = await Query(tracking: true).FirstOrDefaultAsync(item => item.Id == assetId, cancellationToken);
+        var asset = await VisibleTo(Query(tracking: true), userId).FirstOrDefaultAsync(item => item.Id == assetId, cancellationToken);
         if (asset is null || !await access.IsMemberAsync(userId, asset.WorkspaceId, cancellationToken)) return null;
         var now = DateTime.UtcNow;
         asset.Status = status;
@@ -139,9 +144,21 @@ public sealed class AssetService(TaslimDbContext db, WorkspaceAccessService acce
         var query = db.Assets
             .Include(asset => asset.Project)
             .Include(asset => asset.StoredFile)
+            .ThenInclude(file => file!.Project)
             .Include(asset => asset.SourceGenerationJob)
             .Include(asset => asset.Representations)
             .AsQueryable();
         return tracking ? query : query.AsNoTracking();
     }
+
+    private static IQueryable<Asset> VisibleTo(IQueryable<Asset> query, Guid userId) =>
+        query.Where(AssetVisibility.ForWorkspaceMember(userId));
+
+    private static bool CanReadStoredFile(StoredFile file, Guid userId, Guid workspaceId) =>
+        file.WorkspaceId == workspaceId
+        && (file.UserId == userId
+            || (file.ProjectId.HasValue
+                && !file.ConversationId.HasValue
+                && file.Project is not null
+                && file.Project.WorkspaceId == workspaceId));
 }
