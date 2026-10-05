@@ -30,12 +30,12 @@ describe("Movie World workspace", () => {
   });
 
   it("surfaces location geography sheets before motion generation", () => {
-    expect(source).toContain("Location geography sheet");
-    expect(source).toContain("Establishing reference");
-    expect(source).toContain("Wide 3/4 spatial reference");
-    expect(source).toContain("Entrances / exits");
-    expect(source).toContain("Orientation anchors");
-    expect(source).toContain("Approve sheet");
+    expect(source).toContain("geography.title");
+    expect(source).toContain("geography.establishingReference");
+    expect(source).toContain("geography.wideSpatialReference");
+    expect(source).toContain("geography.entrancesExits");
+    expect(source).toContain("geography.orientationAnchors");
+    expect(source).toContain("geography.approveSheet");
     expect(apiSource).toContain("upsertMovieLocationGeographySheet");
     expect(apiSource).toContain("approveMovieLocationGeographyVariant");
   });
