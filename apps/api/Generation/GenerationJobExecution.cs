@@ -790,7 +790,7 @@ public sealed class GenerationJobWorker(
                 if (recovered == 0) continue;
                 logger.LogWarning("Expired generation lease recovered. JobId={JobId}; RetryReason={RetryReason}; RetryCount={RetryCount}; MaxAutomaticRetries={MaxAutomaticRetries}",
                     job.Id, "lease_expired", job.RetryCount + 1, maxAutomaticRetries);
-                await TryNotifyAsync(() => notifications.CreateGenerationAttentionAsync(job.Id, cancellationToken), job.Id);
+                await TryNotifyAsync(() => notifications.CreateGenerationAttentionAsync(job.Id, cancellationToken), job.Id, cancellationToken);
                 continue;
             }
 
@@ -821,7 +821,7 @@ public sealed class GenerationJobWorker(
             await poisonFinalization.CommitAsync(cancellationToken);
             logger.LogError("Generation job moved to poison terminal state after bounded lease recovery. JobId={JobId}; RetryCount={RetryCount}; MaxAutomaticRetries={MaxAutomaticRetries}",
                 job.Id, job.RetryCount, maxAutomaticRetries);
-            await TryNotifyAsync(() => notifications.CreateGenerationFailedAsync(job.Id, cancellationToken), job.Id);
+            await TryNotifyAsync(() => notifications.CreateGenerationFailedAsync(job.Id, cancellationToken), job.Id, cancellationToken);
         }
     }
 
@@ -905,7 +905,7 @@ public sealed class GenerationJobWorker(
             if (handler is null)
             {
                 await FailAsync(db, usage, claimedJob, GenerationJobErrorCodes.TypeNotSupported, "This job type is not available.", null, claimedJob.ConcurrencyToken, stoppingToken);
-                await TryNotifyAsync(() => notifications.CreateGenerationFailedAsync(claimedJob.Id, stoppingToken), claimedJob.Id);
+                await TryNotifyAsync(() => notifications.CreateGenerationFailedAsync(claimedJob.Id, stoppingToken), claimedJob.Id, stoppingToken);
                 return;
             }
             if (string.Equals(claimedJob.JobType, GenerationJobTypes.MovieAssembly, StringComparison.OrdinalIgnoreCase))
@@ -1072,7 +1072,7 @@ public sealed class GenerationJobWorker(
                 "Generation job execution completed. JobId={JobId}; JobType={JobType}; RequestId={RequestId}; ProviderKey={ProviderKey}; ProviderModel={ProviderModel}; ElapsedMs={ElapsedMs}; UsageFinalized={UsageFinalized}",
                 claimedJob.Id, claimedJob.JobType, claimedJob.RequestId, result.Usage?.ProviderKey, result.Usage?.ModelKey,
                 (long)Stopwatch.GetElapsedTime(executionStarted).TotalMilliseconds, true);
-            await TryNotifyAsync(() => notifications.CreateGenerationCompletedAsync(claimedJob.Id, stoppingToken), claimedJob.Id);
+            await TryNotifyAsync(() => notifications.CreateGenerationCompletedAsync(claimedJob.Id, stoppingToken), claimedJob.Id, stoppingToken);
             if (GenerationJobTypes.MovieDialogueVoiceTypes.Contains(claimedJob.JobType))
             {
                 var publication = publications.FirstOrDefault(item => item.Asset is not null);
@@ -1258,7 +1258,7 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
             logger.LogInformation(
                 "Generation job failure finalized. JobId={JobId}; JobType={JobType}; RequestId={RequestId}; FailureCode={FailureCode}; UsageFinalized={UsageFinalized}",
                 claimedJob.Id, claimedJob.JobType, claimedJob.RequestId, failureCode, true);
-            await TryNotifyAsync(() => notifications.CreateGenerationFailedAsync(claimedJob.Id, stoppingToken), claimedJob.Id);
+            await TryNotifyAsync(() => notifications.CreateGenerationFailedAsync(claimedJob.Id, stoppingToken), claimedJob.Id, stoppingToken);
         }
         finally
         {
@@ -1401,15 +1401,21 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
         }
     }
 
-    private async Task TryNotifyAsync(Func<Task> action, Guid jobId)
+    private async Task TryNotifyAsync(Func<Task> action, Guid jobId, CancellationToken cancellationToken)
     {
         try
         {
-            await action();
+            if (await NotificationDeliveryRetry.TryExecuteAsync(action, cancellationToken: cancellationToken)) return;
+            logger.LogWarning("Generation notification delivery failed after bounded retries. JobId={JobId}; MaxAttempts={MaxAttempts}",
+                jobId, NotificationDeliveryRetry.DefaultMaxAttempts);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception exception)
         {
-            logger.LogWarning(exception, "Generation notification was skipped safely. JobId={JobId}", jobId);
+            logger.LogWarning(exception, "Generation notification delivery was skipped safely after retry handling. JobId={JobId}", jobId);
         }
     }
 

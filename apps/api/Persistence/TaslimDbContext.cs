@@ -2164,8 +2164,12 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.Property(entry => entry.CreatedAt).IsRequired();
             entity.HasIndex(entry => new { entry.WorkspaceId, entry.IdempotencyKey }).IsUnique();
             entity.HasIndex(entry => new { entry.WorkspaceId, entry.CreatedAt });
-            entity.HasIndex(entry => entry.UsageTransactionId);
-            entity.HasIndex(entry => entry.ReversesEntryId);
+            entity.HasIndex(entry => entry.UsageTransactionId)
+                .IsUnique()
+                .HasFilter("\"UsageTransactionId\" IS NOT NULL AND \"Type\" = 'Debit'");
+            entity.HasIndex(entry => entry.ReversesEntryId)
+                .IsUnique()
+                .HasFilter("\"ReversesEntryId\" IS NOT NULL");
             entity.HasOne(entry => entry.Workspace).WithMany().HasForeignKey(entry => entry.WorkspaceId).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne(entry => entry.CreditEntitlement).WithMany(entitlement => entitlement.LedgerEntries).HasForeignKey(entry => entry.CreditEntitlementId).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne(entry => entry.UsageTransaction).WithMany().HasForeignKey(entry => entry.UsageTransactionId).OnDelete(DeleteBehavior.SetNull);
