@@ -35,6 +35,10 @@ export function isRestorableImageJob(job: GenerationJob | null, workspaceId: str
   return !!job && job.workspaceId === workspaceId && isImageJob(job);
 }
 
+export function shouldResetImageWorkspaceState(job: GenerationJob | null, workspaceId: string | null): boolean {
+  return !!job && (!workspaceId || !isRestorableImageJob(job, workspaceId));
+}
+
 export function isImageTerminal(job: GenerationJob | null) {
   return !!job && terminalStatuses.has(job.status);
 }
