@@ -751,13 +751,12 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         {
             var productionProjectId = shot.Scene.MovieProject.ProjectId;
             var referencedAssets = await db.Assets.AsNoTracking()
+                .Include(item => item.StoredFile)
                 .Where(item => item.WorkspaceId == shot.Scene.MovieProject.WorkspaceId && assetIds.Keys.Contains(item.Id))
-                .Select(item => new { item.Id, item.ProjectId, item.Status, item.StoredFileId })
                 .ToListAsync(cancellationToken);
             if (referencedAssets.Count != assetIds.Count)
                 throw new MovieProductionValidationException("PRODUCTION_ASSET_NOT_FOUND", "Every referenced Asset must belong to the movie workspace.");
-            if (referencedAssets.Any(item => item.Status != AssetStatus.Active
-                || item.ProjectId.HasValue && item.ProjectId != productionProjectId))
+            if (referencedAssets.Any(item => !CanUseProductionAsset(item, userId, productionProjectId)))
                 throw new MovieProductionValidationException("PRODUCTION_ASSET_SCOPE_INVALID", "Referenced assets must be active and belong to this movie project or its workspace.");
             var storedFileIds = referencedAssets.Where(item => item.StoredFileId.HasValue).Select(item => item.StoredFileId!.Value).ToArray();
             if (storedFileIds.Length > 0 && await db.StoredFiles.AsNoTracking().CountAsync(item => storedFileIds.Contains(item.Id) && item.Status == StoredFileStatus.Ready, cancellationToken) != storedFileIds.Length)
@@ -1569,6 +1568,19 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
     {
         var character = await db.MovieCharacters.Include(item => item.MovieProject).FirstOrDefaultAsync(item => item.Id == characterId, cancellationToken);
         return character is null || !await collaboration.HasPermissionAsync(userId, character.MovieProjectId, MoviePermissions.Edit, cancellationToken) ? null : character;
+    }
+
+    private static bool CanUseProductionAsset(Asset asset, Guid userId, Guid? productionProjectId)
+    {
+        if (asset.Status != AssetStatus.Active || asset.ProjectId.HasValue && asset.ProjectId != productionProjectId) return false;
+        if (asset.CreatedByUserId == userId) return true;
+        if (!asset.ProjectId.HasValue) return false;
+        if (!asset.StoredFileId.HasValue) return true;
+
+        var file = asset.StoredFile;
+        return file is not null
+            && file.WorkspaceId == asset.WorkspaceId
+            && (file.UserId == userId || file.ProjectId.HasValue && !file.ConversationId.HasValue);
     }
 
     private async Task ValidateReferenceAssetsAsync(Guid workspaceId, Guid? projectId, IEnumerable<Guid> assetIds, CancellationToken cancellationToken)
