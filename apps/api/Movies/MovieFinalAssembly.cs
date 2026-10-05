@@ -797,17 +797,18 @@ public sealed class MovieFinalAssemblyJobHandler(
             throw new MovieFinalAssemblyExecutionException(GenerationJobErrorCodes.MovieAssemblyTargetInvalid);
         }
         if (!executor.IsAvailable) throw new MovieFinalAssemblyUnavailableException();
-        await executions.TouchCheckpointAsync(assembly.Id, job.Id, job.ConcurrencyToken, "materializing_sources", 10, cancellationToken);
-        // A Full Movie project owns a separate root Project record, and every generated
-        // movie asset is scoped to that root project rather than to the MovieProject id.
-        // Resolve the root project so approved sources can actually be materialized.
-        var rootProjectId = await db.MovieProjects.AsNoTracking()
-            .Where(item => item.Id == input.MovieProjectId)
-            .Select(item => item.ProjectId)
-            .FirstOrDefaultAsync(cancellationToken);
-        var sourcePaths = await MaterializeSourcesAsync(job.WorkspaceId, rootProjectId, input, cancellationToken);
+        IReadOnlyDictionary<Guid, string> sourcePaths = new Dictionary<Guid, string>();
         try
         {
+            await executions.TouchCheckpointAsync(assembly.Id, job.Id, job.ConcurrencyToken, "materializing_sources", 10, cancellationToken);
+            // A Full Movie project owns a separate root Project record, and every generated
+            // movie asset is scoped to that root project rather than to the MovieProject id.
+            // Resolve the root project so approved sources can actually be materialized.
+            var rootProjectId = await db.MovieProjects.AsNoTracking()
+                .Where(item => item.Id == input.MovieProjectId)
+                .Select(item => item.ProjectId)
+                .FirstOrDefaultAsync(cancellationToken);
+            sourcePaths = await MaterializeSourcesAsync(job.WorkspaceId, rootProjectId, input, cancellationToken);
             await executions.TouchCheckpointAsync(assembly.Id, job.Id, job.ConcurrencyToken, "rendering", 20, cancellationToken);
             var output = await executor.ExecuteAsync(new MovieFinalAssemblyExecutionRequest(input, sourcePaths), progress, cancellationToken);
             var qc = qualityControl.Evaluate(input, output);
