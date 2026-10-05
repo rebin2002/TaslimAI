@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { localeDirection, locales, translate } from "./i18n";
-import { onboardingWorkflowDefinitions, onboardingWorkflowFor, shouldShowOnboarding } from "./onboarding";
+import { onboardingFormDefaults, onboardingWorkflowDefinitions, onboardingWorkflowFor, shouldShowOnboarding } from "./onboarding";
 
 describe("onboarding workflows", () => {
   it("routes each suggested workflow to a concrete first-run feature", () => {
@@ -23,6 +23,14 @@ describe("onboarding workflows", () => {
     expect(shouldShowOnboarding({ onboardingCompletedAt: null })).toBe(true);
     expect(shouldShowOnboarding({ onboardingCompletedAt: "2026-09-24T12:00:00.000Z" })).toBe(false);
     expect(shouldShowOnboarding(null)).toBe(false);
+  });
+
+  it("initializes preferences from the hydrated account instead of the transient app locale", () => {
+    expect(onboardingFormDefaults({ displayName: "Arabic Owner", preferredLanguage: "ar", defaultGenerationLanguage: "ku" }, "en")).toEqual({
+      displayName: "Arabic Owner",
+      preferredLanguage: "ar",
+      defaultGenerationLanguage: "ku",
+    });
   });
 
   it("localizes first-run copy in every supported interface language with RTL for Arabic and Kurdish", () => {
