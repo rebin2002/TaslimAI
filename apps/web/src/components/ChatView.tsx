@@ -340,7 +340,9 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
         if (!isCurrentStream()) return;
         streamState = applyStreamEvent(streamEvent, streamState);
         updateConversationFromStream(streamEvent);
-        if (streamEvent.type === "message.failed") {
+        if (streamEvent.type === "message.completed") {
+          setStreamAnnouncement("completed");
+        } else if (streamEvent.type === "message.failed") {
           setStreamAnnouncement("failed");
           setRetryRequest(retryable);
           setError(t("chat.regenerateError"));

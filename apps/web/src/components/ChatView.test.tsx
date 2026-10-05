@@ -15,4 +15,10 @@ describe("Chat accessibility semantics", () => {
     expect(chatSource).toContain('<article dir="auto"');
     expect(chatSource).toContain('<textarea dir="auto"');
   });
+
+  it("announces successful regeneration completion instead of leaving generating status", () => {
+    const regenerationSource = chatSource.slice(chatSource.indexOf("async function regenerate"), chatSource.indexOf("async function retryFailed"));
+    expect(regenerationSource).toContain('streamEvent.type === "message.completed"');
+    expect(regenerationSource).toContain('setStreamAnnouncement("completed")');
+  });
 });
