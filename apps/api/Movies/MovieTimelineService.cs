@@ -19,8 +19,6 @@ public interface IMovieTimelineService
 
 public sealed class MovieTimelineService(TaslimDbContext db, MovieCollaborationAccess collaboration) : IMovieTimelineService
 {
-    private static readonly JsonSerializerOptions CanonicalJsonOptions = new(JsonSerializerDefaults.Web);
-
     public async Task<MovieTimelineDto?> GetAsync(Guid userId, Guid movieProjectId, CancellationToken cancellationToken)
     {
         var movie = await db.MovieProjects.AsNoTracking().FirstOrDefaultAsync(item => item.Id == movieProjectId, cancellationToken);
@@ -100,26 +98,10 @@ public sealed class MovieTimelineService(TaslimDbContext db, MovieCollaborationA
 
     public async Task<MovieTimelineRevisionDto?> ApplyTransitionEditAsync(Guid userId, Guid movieProjectId, Taslim.Api.Contracts.MovieTimelineTransitionEditRequest request, CancellationToken cancellationToken)
     {
-        ArgumentNullException.ThrowIfNull(request);
         var timeline = await db.MovieTimelines
             .Include(item => item.Revisions).ThenInclude(item => item.Tracks).ThenInclude(item => item.Items)
             .FirstOrDefaultAsync(item => item.MovieProjectId == movieProjectId, cancellationToken);
         if (timeline is null || !await collaboration.HasPermissionAsync(userId, movieProjectId, MoviePermissions.Edit, cancellationToken)) return null;
-        if (request.Decision is null) throw Invalid("A transition edit decision is required.");
-
-        var decisionJson = JsonSerializer.Serialize(request.Decision, CanonicalJsonOptions);
-        var existingEdit = await db.MovieTimelineTransitionEdits.AsNoTracking()
-            .FirstOrDefaultAsync(item => item.MovieTimelineId == timeline.Id && item.DecisionId == request.Decision.DecisionId, cancellationToken);
-        if (existingEdit is not null)
-        {
-            if (!string.Equals(existingEdit.DecisionJson, decisionJson, StringComparison.Ordinal))
-                throw Invalid("A transition decision id cannot be reused for different edit content.");
-            var existingRevision = timeline.Revisions.FirstOrDefault(item => string.Equals(item.CanonicalTimelineJson, existingEdit.ResultTimelineJson, StringComparison.Ordinal));
-            if (existingRevision is null)
-                throw Invalid("The persisted transition decision has no matching timeline revision.");
-            return ToDto(existingRevision);
-        }
-
         var baseRevision = request.BaseRevisionId.HasValue
             ? timeline.Revisions.FirstOrDefault(item => item.Id == request.BaseRevisionId.Value)
             : timeline.Revisions.FirstOrDefault(item => item.Id == timeline.CurrentRevisionId);
@@ -135,26 +117,12 @@ public sealed class MovieTimelineService(TaslimDbContext db, MovieCollaborationA
             Id = Guid.NewGuid(), MovieTimelineId = timeline.Id, RevisionNumber = timeline.CurrentRevisionNumber + 1,
             BaseRevisionId = baseRevision.Id, Status = MovieTimelineRevisionStatuses.Draft,
             Label = "Transition edit", ChangeSummary = "User-applied transition edit",
-            CanonicalTimelineJson = JsonSerializer.Serialize(next, CanonicalJsonOptions),
+            CanonicalTimelineJson = JsonSerializer.Serialize(next, new JsonSerializerOptions(JsonSerializerDefaults.Web)),
             DurationMilliseconds = baseRevision.DurationMilliseconds, CreatedByUserId = userId, CreatedAt = now, UpdatedAt = now, Timeline = timeline,
         };
         foreach (var sourceTrack in baseRevision.Tracks.OrderBy(item => item.TrackNumber)) CloneTrack(revision, sourceTrack, now);
         foreach (var previous in timeline.Revisions.Where(item => item.Status == MovieTimelineRevisionStatuses.Draft)) previous.Status = MovieTimelineRevisionStatuses.Superseded;
         db.MovieTimelineRevisions.Add(revision);
-        db.MovieTimelineTransitionEdits.Add(new MovieTimelineTransitionEdit
-        {
-            Id = Guid.NewGuid(),
-            MovieTimelineId = timeline.Id,
-            MovieProjectId = movieProjectId,
-            DecisionId = request.Decision.DecisionId,
-            BaseTimelineVersion = request.Decision.BaseTimelineVersion,
-            ResultTimelineVersion = next.Version,
-            Action = request.Decision.Action.Trim().ToLowerInvariant(),
-            DecisionJson = decisionJson,
-            ResultTimelineJson = JsonSerializer.Serialize(next, CanonicalJsonOptions),
-            CreatedByUserId = userId,
-            CreatedAt = now,
-        });
         timeline.CurrentRevisionNumber = revision.RevisionNumber; timeline.CurrentRevisionId = revision.Id; timeline.UpdatedAt = now;
         await db.SaveChangesAsync(cancellationToken);
         return ToDto(await QueryRevision().SingleAsync(item => item.Id == revision.Id, cancellationToken));
