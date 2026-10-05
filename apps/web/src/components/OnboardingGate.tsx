@@ -19,7 +19,8 @@ import {
 } from "lucide-react";
 import { useAuth } from "@/components/AuthProvider";
 import { localeNames, locales, useLocale } from "@/components/LocaleProvider";
-import { onboardingWorkflowDefinitions, shouldShowOnboarding, type OnboardingIntent } from "@/lib/onboarding";
+import type { User } from "@/lib/api";
+import { onboardingFormDefaults, onboardingWorkflowDefinitions, shouldShowOnboarding, type OnboardingIntent } from "@/lib/onboarding";
 import type { Locale } from "@/lib/i18n";
 import { useDialogAccessibility } from "@/lib/useDialogAccessibility";
 
@@ -35,13 +36,21 @@ const workflowIcons: Record<OnboardingIntent, LucideIcon> = {
 type OnboardingStep = "preferences" | "tour" | "workflow";
 
 export function OnboardingGate() {
-  const { user, completeOnboarding } = useAuth();
+  const { user } = useAuth();
+
+  if (!user || !shouldShowOnboarding(user)) return null;
+  return <OnboardingFlow key={user.id} user={user} />;
+}
+
+function OnboardingFlow({ user }: Readonly<{ user: User }>) {
+  const { completeOnboarding } = useAuth();
   const { locale, setLocale, t } = useLocale();
   const router = useRouter();
   const [step, setStep] = useState<OnboardingStep>("preferences");
-  const [displayName, setDisplayName] = useState(user?.displayName ?? "");
-  const [preferredLanguage, setPreferredLanguage] = useState<Locale>(user?.preferredLanguage ?? locale);
-  const [defaultGenerationLanguage, setDefaultGenerationLanguage] = useState<Locale>(user?.defaultGenerationLanguage ?? locale);
+  const defaults = onboardingFormDefaults(user, locale);
+  const [displayName, setDisplayName] = useState(defaults.displayName);
+  const [preferredLanguage, setPreferredLanguage] = useState<Locale>(defaults.preferredLanguage);
+  const [defaultGenerationLanguage, setDefaultGenerationLanguage] = useState<Locale>(defaults.defaultGenerationLanguage);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const showOnboarding = shouldShowOnboarding(user);
@@ -50,7 +59,6 @@ export function OnboardingGate() {
   const dialogRef = useDialogAccessibility(showOnboarding, () => undefined);
 
   if (!showOnboarding) return null;
-
   const steps: OnboardingStep[] = ["preferences", "tour", "workflow"];
   const currentStep = steps.indexOf(step) + 1;
   const NextIcon = locale === "en" ? ArrowRight : ArrowLeft;
