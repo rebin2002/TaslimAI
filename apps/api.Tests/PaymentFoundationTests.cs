@@ -138,6 +138,40 @@ public sealed class PaymentFoundationTests
     }
 
     [Fact]
+    public async Task Subscription_activation_rolls_back_before_granting_if_credit_provisioning_fails()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        var workspace = NewWorkspace();
+        var plan = new Plan
+        {
+            Id = Guid.NewGuid(), Code = $"invalid-{Guid.NewGuid():N}", Name = "Invalid zero-credit plan",
+            MonthlyCreditAllowance = 0, Currency = "USD", IsActive = true, SortOrder = 99,
+            CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+        };
+        var subscription = NewSubscription(workspace.Id, plan.Id);
+        subscription.Status = SubscriptionStatus.PastDue;
+        db.Workspaces.Add(workspace);
+        db.Plans.Add(plan);
+        db.Subscriptions.Add(subscription);
+        await db.SaveChangesAsync();
+        var service = NewLifecycle(db);
+        var periodStart = DateTime.UtcNow.Date.AddMonths(1);
+        var periodEnd = periodStart.AddMonths(1);
+
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => service.ActivateSubscriptionAsync(
+            workspace.Id, subscription.Id, plan.Id, "test", "subscription-1", periodStart, periodEnd, "Activate subscription"));
+
+        var persistedSubscription = await db.Subscriptions.AsNoTracking().SingleAsync(item => item.Id == subscription.Id);
+        Assert.Equal(SubscriptionStatus.PastDue, persistedSubscription.Status);
+        Assert.Equal(0, await db.SubscriptionLifecycleEvents.CountAsync());
+        Assert.Equal(0, await db.BillingPeriods.CountAsync());
+        Assert.Equal(0, await db.CreditEntitlements.CountAsync());
+        Assert.Equal(0, await db.CreditLedgerEntries.CountAsync());
+    }
+
+    [Fact]
     public async Task Payment_attempt_replay_cannot_change_provider_reference()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");

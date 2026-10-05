@@ -211,6 +211,10 @@ public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerSer
     {
         ValidatePeriod(periodStart, periodEnd);
         ValidateReason(reason, nameof(reason));
+        var ownsTransaction = db.Database.CurrentTransaction is null;
+        await using var transaction = ownsTransaction
+            ? await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken)
+            : null;
         var subscription = await GetSubscriptionAsync(workspaceId, subscriptionId, cancellationToken);
         var plan = await db.Plans.SingleOrDefaultAsync(item => item.Id == planId && item.IsActive, cancellationToken)
             ?? throw new InvalidOperationException("The subscription plan is not available.");
@@ -226,6 +230,7 @@ public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerSer
         AddLifecycleEvent(subscription, SubscriptionLifecycleEventType.Activated, provider, reason);
         await db.SaveChangesAsync(cancellationToken);
         await EnsurePeriodAndGrantAsync(subscription, plan, periodStart, periodEnd, $"subscription activation: {reason}", cancellationToken);
+        if (ownsTransaction) await transaction!.CommitAsync(cancellationToken);
         return subscription;
     }
 
@@ -234,6 +239,10 @@ public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerSer
         ValidatePeriod(periodStart, periodEnd);
         ValidateReason(idempotencyKey, nameof(idempotencyKey));
         ValidateReason(reason, nameof(reason));
+        var ownsTransaction = db.Database.CurrentTransaction is null;
+        await using var transaction = ownsTransaction
+            ? await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken)
+            : null;
         var subscription = await GetSubscriptionAsync(workspaceId, subscriptionId, cancellationToken);
         if (subscription.CancelAtPeriodEnd)
         {
@@ -241,6 +250,7 @@ public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerSer
             subscription.UpdatedAt = DateTime.UtcNow;
             AddLifecycleEvent(subscription, SubscriptionLifecycleEventType.Cancelled, "payment", reason);
             await db.SaveChangesAsync(cancellationToken);
+            if (ownsTransaction) await transaction!.CommitAsync(cancellationToken);
             return subscription;
         }
         var plan = await db.Plans.SingleAsync(item => item.Id == subscription.PlanId, cancellationToken);
@@ -252,6 +262,7 @@ public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerSer
         AddLifecycleEvent(subscription, SubscriptionLifecycleEventType.Renewed, "payment", reason);
         await db.SaveChangesAsync(cancellationToken);
         await EnsurePeriodAndGrantAsync(subscription, plan, periodStart, periodEnd, $"subscription renewal: {reason}", cancellationToken);
+        if (ownsTransaction) await transaction!.CommitAsync(cancellationToken);
         return subscription;
     }
 
