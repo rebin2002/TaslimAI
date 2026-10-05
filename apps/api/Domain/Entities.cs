@@ -149,6 +149,7 @@ public static class GenerationJobErrorCodes
     public const string NoBillableAsset = "GENERATION_NO_BILLABLE_ASSET";
     public const string NotCancellable = "JOB_NOT_CANCELLABLE";
     public const string NotFound = "JOB_NOT_FOUND";
+    public const string DedicatedRouteRequired = "JOB_TYPE_ROUTE_NOT_ALLOWED";
     public const string ImageRequestInvalid = "IMAGE_REQUEST_INVALID";
     public const string ImageProviderUnavailable = "IMAGE_PROVIDER_UNAVAILABLE";
     public const string ImageStudioUnavailable = "IMAGE_STUDIO_UNAVAILABLE";

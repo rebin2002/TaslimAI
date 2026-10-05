@@ -158,6 +158,29 @@ public sealed class GenerationJobsTests : IClassFixture<GenerationJobsApiFactory
     }
 
     [Fact]
+    public async Task Generic_image_route_rejects_before_queueing_or_usage_reservation()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, $"jobs-image-route-{Guid.NewGuid():N}@example.com");
+        var response = await SendWithCsrf(client, HttpMethod.Post, "/api/generation/jobs", new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            jobType = GenerationJobTypes.ImageGenerate,
+            inputJson = "{}",
+        });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(GenerationJobErrorCodes.DedicatedRouteRequired, body.GetProperty("error").GetProperty("code").GetString());
+        Assert.Equal("Use the Image Studio endpoint for image generation.", body.GetProperty("error").GetProperty("message").GetString());
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.False(await db.GenerationJobs.AsNoTracking().AnyAsync(item => item.WorkspaceId == auth.PersonalWorkspace.Id && item.JobType == GenerationJobTypes.ImageGenerate));
+        Assert.False(await db.UsageTransactions.AsNoTracking().AnyAsync(item => item.WorkspaceId == auth.PersonalWorkspace.Id && item.Feature == UsageFeature.Image));
+    }
+
+    [Fact]
     public async Task Repeated_generation_request_with_same_idempotency_key_returns_one_job()
     {
         using var client = factory.CreateClient();

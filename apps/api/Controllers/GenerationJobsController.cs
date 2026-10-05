@@ -18,6 +18,8 @@ public sealed class GenerationJobsController(IGenerationJobService jobs) : Contr
     public async Task<IActionResult> Create(CreateGenerationJobRequest request, CancellationToken cancellationToken)
     {
         if (!ModelState.IsValid) return ApiResults.Validation(this);
+        if (string.Equals(request.JobType.Trim(), GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase))
+            return ApiResults.Error(this, StatusCodes.Status400BadRequest, GenerationJobErrorCodes.DedicatedRouteRequired, "Use the Image Studio endpoint for image generation.");
         try
         {
             var job = await jobs.CreateAsync(GetUserId(), request, cancellationToken, Request.Headers["Idempotency-Key"].FirstOrDefault(), HttpContext.TraceIdentifier);
