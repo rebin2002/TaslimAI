@@ -12,7 +12,8 @@ public static class AssetVisibility
 {
     public static Expression<Func<Asset, bool>> ForWorkspaceMember(Guid userId) =>
         asset => (asset.ProjectId.HasValue || asset.CreatedByUserId == userId)
-            && (!asset.StoredFileId.HasValue
+            && (asset.CreatedByUserId == userId
+                || !asset.StoredFileId.HasValue
                 || (asset.StoredFile!.WorkspaceId == asset.WorkspaceId
                     && (asset.StoredFile.UserId == userId
                         || (asset.StoredFile.ProjectId.HasValue && !asset.StoredFile.ConversationId.HasValue))));
