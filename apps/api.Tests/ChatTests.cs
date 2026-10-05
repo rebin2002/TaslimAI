@@ -260,6 +260,41 @@ public sealed class ChatTests : IClassFixture<TaslimApiFactory>
     }
 
     [Fact]
+    public async Task Regeneration_request_id_cannot_be_reused_for_a_different_assistant_target()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Regeneration Identity Owner");
+        var conversation = await CreateConversation(client, auth.PersonalWorkspace.Id);
+        var initial = await SendMessage(client, conversation.Id, "Give me a concise plan.");
+        var initialResult = await initial.Content.ReadFromJsonAsync<SendMessageResponse>();
+        Assert.NotNull(initialResult);
+        var requestId = Guid.NewGuid().ToString("N");
+
+        var firstRegeneration = await SendWithCsrf(client, HttpMethod.Post, $"/api/conversations/{conversation.Id}/messages/{initialResult!.AssistantMessage.Id}/regenerate", new { requestId });
+        Assert.Equal(HttpStatusCode.OK, firstRegeneration.StatusCode);
+        Assert.Contains("event: message.completed", await firstRegeneration.Content.ReadAsStringAsync());
+
+        var secondTurn = await SendMessage(client, conversation.Id, "Now make it shorter.");
+        var secondTurnResult = await secondTurn.Content.ReadFromJsonAsync<SendMessageResponse>();
+        Assert.NotNull(secondTurnResult);
+
+        var replayed = await SendWithCsrf(client, HttpMethod.Post, $"/api/conversations/{conversation.Id}/messages/{initialResult.AssistantMessage.Id}/regenerate", new { requestId });
+        var replayedBody = await replayed.Content.ReadAsStringAsync();
+        Assert.Equal(HttpStatusCode.OK, replayed.StatusCode);
+        Assert.Contains("event: message.completed", replayedBody);
+
+        var reused = await SendWithCsrf(client, HttpMethod.Post, $"/api/conversations/{conversation.Id}/messages/{secondTurnResult!.AssistantMessage.Id}/regenerate", new { requestId });
+        var reusedBody = await reused.Content.ReadAsStringAsync();
+        Assert.Equal(HttpStatusCode.OK, reused.StatusCode);
+        Assert.Contains("event: message.failed", reusedBody);
+        Assert.Contains("REQUEST_ID_REUSED", reusedBody);
+
+        var messages = await client.GetFromJsonAsync<List<ChatMessageDto>>($"/api/conversations/{conversation.Id}/messages");
+        Assert.NotNull(messages);
+        Assert.Equal(["User", "Assistant", "Assistant", "User", "Assistant"], messages.Select(message => message.Role));
+    }
+
+    [Fact]
     public async Task Multiple_turns_keep_user_then_assistant_order_after_database_reload()
     {
         using var client = factory.CreateClient();
