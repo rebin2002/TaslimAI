@@ -7,6 +7,7 @@ import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
 import { api, type GenerationJob } from "@/lib/api";
 import { canCancelGenerationJob, isTerminalJob, mergeGenerationJob } from "@/lib/generationJobsState";
+import { nextGenerationJobPollDelay } from "@/lib/generationJobsPolling";
 
 type Translate = (key: string, variables?: Record<string, string>) => string;
 
@@ -135,9 +136,11 @@ export function GenerationJobsView() {
   useEffect(() => { void loadRecent(); }, [loadRecent]);
 
   useEffect(() => {
-    if (!current || isTerminalJob(current)) return;
+    const selectedJob = current;
+    const pollDelay = nextGenerationJobPollDelay(selectedJob);
+    if (!selectedJob || pollDelay === null) return;
     let active = true;
-    const jobId = current.id;
+    const jobId = selectedJob.id;
     const poll = async () => {
       try {
         const next = await api.getGenerationJob(jobId);
@@ -151,7 +154,7 @@ export function GenerationJobsView() {
         }
       }
     };
-    const timer = window.setTimeout(() => { void poll(); }, 500);
+    const timer = window.setTimeout(() => { void poll(); }, pollDelay);
     return () => { active = false; window.clearTimeout(timer); };
   }, [current, pollRetryGeneration, t]);
 
