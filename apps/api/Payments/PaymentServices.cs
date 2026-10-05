@@ -104,12 +104,13 @@ public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerSer
         var normalizedProvider = provider.Trim();
         var normalizedKey = idempotencyKey.Trim();
         var normalizedCurrency = NormalizeCurrency(currency);
+        var normalizedProviderReference = string.IsNullOrWhiteSpace(providerPaymentReference) ? null : providerPaymentReference.Trim();
         var existing = await db.PaymentAttempts.SingleOrDefaultAsync(
             item => item.WorkspaceId == workspaceId && item.IdempotencyKey == normalizedKey,
             cancellationToken);
         if (existing is not null)
         {
-            EnsurePaymentAttemptReplayMatches(existing, normalizedProvider, amount, normalizedCurrency, subscriptionId, checkoutSessionId);
+            EnsurePaymentAttemptReplayMatches(existing, normalizedProvider, amount, normalizedCurrency, subscriptionId, checkoutSessionId, normalizedProviderReference);
             return existing;
         }
         if (subscriptionId.HasValue && !await db.Subscriptions.AnyAsync(item => item.Id == subscriptionId.Value && item.WorkspaceId == workspaceId, cancellationToken))
@@ -118,7 +119,6 @@ public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerSer
             throw new InvalidOperationException("The checkout session belongs to a different workspace or was not found.");
         if (!string.IsNullOrWhiteSpace(providerPaymentReference))
         {
-            var normalizedProviderReference = providerPaymentReference.Trim();
             var byProviderReference = await db.PaymentAttempts.SingleOrDefaultAsync(
                 item => item.Provider == normalizedProvider && item.ProviderPaymentReference == normalizedProviderReference,
                 cancellationToken);
@@ -126,6 +126,7 @@ public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerSer
             {
                 if (byProviderReference.WorkspaceId != workspaceId)
                     throw new InvalidOperationException("The provider payment reference is already associated with another workspace.");
+                EnsurePaymentAttemptReplayMatches(byProviderReference, normalizedProvider, amount, normalizedCurrency, subscriptionId, checkoutSessionId, normalizedProviderReference);
                 return byProviderReference;
             }
         }
@@ -135,7 +136,7 @@ public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerSer
         {
             Id = Guid.NewGuid(), WorkspaceId = workspaceId, SubscriptionId = subscriptionId,
             CheckoutSessionId = checkoutSessionId, Provider = normalizedProvider,
-            ProviderPaymentReference = providerPaymentReference?.Trim(), Status = status,
+            ProviderPaymentReference = normalizedProviderReference, Status = status,
             Amount = amount, Currency = normalizedCurrency, IdempotencyKey = normalizedKey,
             FailureCode = failureCode?.Trim(), FailureReason = failureReason?.Trim(), CreatedAt = now, UpdatedAt = now,
             SucceededAt = status == PaymentAttemptStatus.Succeeded ? now : null,
@@ -151,8 +152,16 @@ public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerSer
         ValidateReason(failureCode, nameof(failureCode));
         ValidateReason(reason, nameof(reason));
         var attempt = await GetAttemptAsync(workspaceId, paymentAttemptId, cancellationToken);
+        if (attempt.Status == PaymentAttemptStatus.Failed)
+        {
+            if (string.Equals(attempt.FailureCode, failureCode.Trim(), StringComparison.Ordinal) && string.Equals(attempt.FailureReason, reason.Trim(), StringComparison.Ordinal))
+                return attempt;
+            throw new InvalidOperationException("The payment attempt has already been recorded as failed with different details.");
+        }
         if (attempt.Status is PaymentAttemptStatus.Refunded or PaymentAttemptStatus.PartiallyRefunded)
             throw new InvalidOperationException("A refunded payment attempt cannot be marked failed.");
+        if (attempt.Status == PaymentAttemptStatus.Succeeded)
+            throw new InvalidOperationException("A succeeded payment attempt cannot be marked failed.");
         attempt.Status = PaymentAttemptStatus.Failed;
         attempt.FailureCode = failureCode.Trim();
         attempt.FailureReason = reason.Trim();
@@ -186,8 +195,8 @@ public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerSer
         ValidateReason(reason, nameof(reason));
         var attempt = await GetAttemptAsync(workspaceId, paymentAttemptId, cancellationToken);
         if (attempt.Status == PaymentAttemptStatus.Succeeded) return attempt;
-        if (attempt.Status is PaymentAttemptStatus.Refunded or PaymentAttemptStatus.PartiallyRefunded)
-            throw new InvalidOperationException("A refunded payment attempt cannot be marked succeeded again.");
+        if (attempt.Status is PaymentAttemptStatus.Failed or PaymentAttemptStatus.Cancelled or PaymentAttemptStatus.Refunded or PaymentAttemptStatus.PartiallyRefunded)
+            throw new InvalidOperationException("A terminal payment attempt cannot be marked succeeded again.");
         attempt.Status = PaymentAttemptStatus.Succeeded;
         attempt.FailureCode = null;
         attempt.FailureReason = null;
@@ -255,26 +264,29 @@ public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerSer
         var normalizedProvider = provider.Trim();
         var normalizedCurrency = NormalizeCurrency(currency);
         var normalizedKey = idempotencyKey.Trim();
+        var normalizedReason = reason.Trim();
+        var normalizedProviderReference = string.IsNullOrWhiteSpace(providerRefundReference) ? null : providerRefundReference.Trim();
         await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
         var existing = await db.PaymentRefunds.SingleOrDefaultAsync(item => item.WorkspaceId == workspaceId && item.IdempotencyKey == normalizedKey, cancellationToken);
         if (existing is not null)
         {
-            EnsureRefundReplayMatches(existing, paymentAttemptId, normalizedProvider, amount, normalizedCurrency);
+            EnsureRefundReplayMatches(existing, paymentAttemptId, normalizedProvider, amount, normalizedCurrency, normalizedReason, normalizedProviderReference);
             return existing;
         }
-        if (!string.IsNullOrWhiteSpace(providerRefundReference))
+        if (normalizedProviderReference is not null)
         {
-            var normalizedProviderReference = providerRefundReference.Trim();
             var duplicateReference = await db.PaymentRefunds.SingleOrDefaultAsync(item => item.Provider == normalizedProvider && item.ProviderRefundReference == normalizedProviderReference, cancellationToken);
             if (duplicateReference is not null)
             {
                 if (duplicateReference.WorkspaceId != workspaceId)
                     throw new InvalidOperationException("The provider refund reference is already associated with another workspace.");
-                EnsureRefundReplayMatches(duplicateReference, paymentAttemptId, normalizedProvider, amount, normalizedCurrency);
+                EnsureRefundReplayMatches(duplicateReference, paymentAttemptId, normalizedProvider, amount, normalizedCurrency, normalizedReason, normalizedProviderReference);
                 return duplicateReference;
             }
         }
         var attempt = await GetAttemptAsync(workspaceId, paymentAttemptId, cancellationToken);
+        if (attempt.Status is not (PaymentAttemptStatus.Succeeded or PaymentAttemptStatus.PartiallyRefunded))
+            throw new InvalidOperationException("Only a succeeded payment attempt can be refunded.");
         if (!string.Equals(attempt.Provider, normalizedProvider, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("The refund provider does not match the payment attempt.");
         if (!string.Equals(attempt.Currency, normalizedCurrency, StringComparison.OrdinalIgnoreCase))
@@ -291,9 +303,9 @@ public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerSer
         var refund = new PaymentRefund
         {
             Id = Guid.NewGuid(), WorkspaceId = workspaceId, PaymentAttemptId = attempt.Id, Provider = normalizedProvider,
-            ProviderRefundReference = providerRefundReference?.Trim(), Status = PaymentRefundStatus.Succeeded,
+            ProviderRefundReference = normalizedProviderReference, Status = PaymentRefundStatus.Succeeded,
             Amount = amount, Currency = normalizedCurrency, IdempotencyKey = normalizedKey,
-            Reason = reason.Trim(), CreatedAt = now, UpdatedAt = now, CompletedAt = now,
+            Reason = normalizedReason, CreatedAt = now, UpdatedAt = now, CompletedAt = now,
         };
         db.PaymentRefunds.Add(refund);
         attempt.Status = totalRefundedAmount >= attempt.Amount ? PaymentAttemptStatus.Refunded : PaymentAttemptStatus.PartiallyRefunded;
@@ -369,23 +381,26 @@ public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerSer
 
     private static void EnsurePaymentAttemptReplayMatches(
         PaymentAttempt existing, string provider, decimal amount, string currency,
-        Guid? subscriptionId, Guid? checkoutSessionId)
+        Guid? subscriptionId, Guid? checkoutSessionId, string? providerPaymentReference)
     {
         if (!string.Equals(existing.Provider, provider, StringComparison.OrdinalIgnoreCase) ||
             existing.Amount != amount ||
             !string.Equals(existing.Currency, currency, StringComparison.OrdinalIgnoreCase) ||
             existing.SubscriptionId != subscriptionId ||
-            existing.CheckoutSessionId != checkoutSessionId)
+            existing.CheckoutSessionId != checkoutSessionId ||
+            !string.Equals(existing.ProviderPaymentReference, providerPaymentReference, StringComparison.Ordinal))
             throw new InvalidOperationException("The payment attempt idempotency key belongs to a different payment.");
     }
 
     private static void EnsureRefundReplayMatches(
-        PaymentRefund existing, Guid paymentAttemptId, string provider, decimal amount, string currency)
+        PaymentRefund existing, Guid paymentAttemptId, string provider, decimal amount, string currency, string reason, string? providerRefundReference)
     {
         if (existing.PaymentAttemptId != paymentAttemptId ||
             !string.Equals(existing.Provider, provider, StringComparison.OrdinalIgnoreCase) ||
             existing.Amount != amount ||
-            !string.Equals(existing.Currency, currency, StringComparison.OrdinalIgnoreCase))
+            !string.Equals(existing.Currency, currency, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(existing.Reason, reason, StringComparison.Ordinal) ||
+            !string.Equals(existing.ProviderRefundReference, providerRefundReference, StringComparison.Ordinal))
             throw new InvalidOperationException("The refund idempotency key belongs to a different refund.");
     }
 

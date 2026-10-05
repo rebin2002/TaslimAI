@@ -223,6 +223,27 @@ public sealed class BillingTests
         Assert.Equal(2, await db.CreditLedgerEntries.CountAsync());
     }
 
+    [Fact]
+    public async Task Reversal_replay_cannot_change_audit_attribution()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connection).Options;
+        await using var db = new TaslimDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+        var workspace = NewWorkspace("reverse-audit");
+        db.Workspaces.Add(workspace);
+        await db.SaveChangesAsync();
+        var service = new CreditLedgerService(db, Options.Create(new BillingOptions { CustomerChargingEnabled = false }));
+        var actor = Guid.NewGuid();
+        var grant = await service.GrantAsync(workspace.Id, CreditEntitlementType.AdministrativeCorrection, 25, "correction:audit", "Goodwill correction");
+
+        await service.ReverseAsync(workspace.Id, grant.Entry.Id, "reversal:audit", "Correction withdrawn", actor);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.ReverseAsync(workspace.Id, grant.Entry.Id, "reversal:audit", "Correction withdrawn", Guid.NewGuid()));
+        Assert.Single(await db.CreditLedgerEntries.Where(item => item.Type == CreditLedgerEntryType.Reversal).ToListAsync());
+    }
+
     private static Workspace NewWorkspace(string prefix) => new()
     {
         Id = Guid.NewGuid(), Name = $"{prefix} workspace", Slug = $"{prefix}-{Guid.NewGuid():N}", Type = WorkspaceType.Personal,

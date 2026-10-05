@@ -117,6 +117,10 @@ public sealed class CreditLedgerService(TaslimDbContext db, IOptions<BillingOpti
         var normalizedKey = NormalizeIdempotencyKey(idempotencyKey);
         var normalizedReason = NormalizeReason(reason);
         var normalizedSourceReference = NormalizeOptionalReference(sourceReference, nameof(sourceReference), 200);
+        var ownsTransaction = db.Database.CurrentTransaction is null;
+        await using var transaction = ownsTransaction
+            ? await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken)
+            : null;
         var existing = await FindEntryAsync(workspaceId, normalizedKey, cancellationToken);
         if (existing is not null)
         {
@@ -142,8 +146,22 @@ public sealed class CreditLedgerService(TaslimDbContext db, IOptions<BillingOpti
         var entry = NewEntry(workspaceId, entitlement.Id, CreditLedgerEntryTypeFor(entitlementType), credits, normalizedKey, normalizedReason, actorUserId, now);
         db.CreditEntitlements.Add(entitlement);
         db.CreditLedgerEntries.Add(entry);
-        await db.SaveChangesAsync(cancellationToken);
-        return new(entry, true);
+        try
+        {
+            await db.SaveChangesAsync(cancellationToken);
+            if (ownsTransaction) await transaction!.CommitAsync(cancellationToken);
+            return new(entry, true);
+        }
+        catch (DbUpdateException)
+        {
+            if (ownsTransaction) await transaction!.RollbackAsync(CancellationToken.None);
+            db.Entry(entry).State = EntityState.Detached;
+            db.Entry(entitlement).State = EntityState.Detached;
+            var concurrent = await FindEntryAsync(workspaceId, normalizedKey, cancellationToken);
+            if (concurrent is null) throw;
+            EnsureGrantReplayMatches(concurrent, entitlementType, credits, normalizedReason, expiresAt, billingPeriodId, actorUserId, normalizedSourceReference);
+            return new(concurrent, false);
+        }
     }
 
     public async Task<CreditMovementResult?> RecordUsageDebitAsync(
@@ -154,15 +172,16 @@ public sealed class CreditLedgerService(TaslimDbContext db, IOptions<BillingOpti
         var normalizedKey = NormalizeIdempotencyKey(idempotencyKey);
         var normalizedReason = NormalizeReason(reason);
         if (!settings.CustomerChargingEnabled) return null;
+        var ownsTransaction = db.Database.CurrentTransaction is null;
+        await using var transaction = ownsTransaction
+            ? await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken)
+            : null;
         var existing = await FindEntryAsync(workspaceId, normalizedKey, cancellationToken);
         if (existing is not null)
         {
-            if (existing.Type != CreditLedgerEntryType.Debit || existing.Amount != -credits || existing.UsageTransactionId != usageTransactionId || existing.Reason != normalizedReason)
-                throw new InvalidOperationException("The credit debit idempotency key belongs to a different movement.");
+            EnsureDebitReplayMatches(existing, usageTransactionId, credits, normalizedReason, actorUserId);
             return new(existing, false);
         }
-
-        await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
         var usage = await db.UsageTransactions.AsNoTracking()
             .SingleOrDefaultAsync(item => item.Id == usageTransactionId && item.WorkspaceId == workspaceId, cancellationToken)
             ?? throw new InvalidOperationException("The usage transaction was not found in the requested workspace.");
@@ -188,9 +207,30 @@ public sealed class CreditLedgerService(TaslimDbContext db, IOptions<BillingOpti
         var entry = NewEntry(workspaceId, null, CreditLedgerEntryType.Debit, -credits, normalizedKey, normalizedReason, actorUserId, now);
         entry.UsageTransactionId = usageTransactionId;
         db.CreditLedgerEntries.Add(entry);
-        await db.SaveChangesAsync(cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
-        return new(entry, true);
+        try
+        {
+            await db.SaveChangesAsync(cancellationToken);
+            if (ownsTransaction) await transaction!.CommitAsync(cancellationToken);
+            return new(entry, true);
+        }
+        catch (DbUpdateException)
+        {
+            if (ownsTransaction) await transaction!.RollbackAsync(CancellationToken.None);
+            db.Entry(entry).State = EntityState.Detached;
+            var concurrent = await FindEntryAsync(workspaceId, normalizedKey, cancellationToken);
+            if (concurrent is not null)
+            {
+                EnsureDebitReplayMatches(concurrent, usageTransactionId, credits, normalizedReason, actorUserId);
+                return new(concurrent, false);
+            }
+
+            var concurrentUsageDebit = await db.CreditLedgerEntries.AsNoTracking().SingleOrDefaultAsync(item =>
+                item.WorkspaceId == workspaceId && item.UsageTransactionId == usageTransactionId && item.Type == CreditLedgerEntryType.Debit,
+                cancellationToken);
+            if (concurrentUsageDebit is not null)
+                throw new InvalidOperationException("The usage transaction already has a credit debit.");
+            throw;
+        }
     }
 
     public async Task<CreditMovementResult> ReverseAsync(
@@ -209,17 +249,20 @@ public sealed class CreditLedgerService(TaslimDbContext db, IOptions<BillingOpti
     {
         var normalizedKey = NormalizeIdempotencyKey(idempotencyKey);
         var normalizedReason = NormalizeReason(reason);
-        var existing = await FindEntryAsync(workspaceId, normalizedKey, cancellationToken);
-        if (existing is not null)
-        {
-            if (existing.Type != entryType || existing.ReversesEntryId != originalEntryId || existing.Reason != normalizedReason)
-                throw new InvalidOperationException("The credit reversal idempotency key belongs to a different movement.");
-            return new(existing, false);
-        }
+        var ownsTransaction = db.Database.CurrentTransaction is null;
+        await using var transaction = ownsTransaction
+            ? await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken)
+            : null;
         var original = await db.CreditLedgerEntries.AsNoTracking()
             .SingleOrDefaultAsync(entry => entry.Id == originalEntryId && entry.WorkspaceId == workspaceId, cancellationToken)
             ?? throw new InvalidOperationException("The credit ledger entry to reverse was not found.");
         if (original.Amount == 0) throw new InvalidOperationException("A zero-value credit entry cannot be reversed.");
+        var existing = await FindEntryAsync(workspaceId, normalizedKey, cancellationToken);
+        if (existing is not null)
+        {
+            EnsureReversalReplayMatches(existing, entryType, originalEntryId, -original.Amount, normalizedReason, actorUserId);
+            return new(existing, false);
+        }
         var priorReversal = await db.CreditLedgerEntries.AsNoTracking()
             .SingleOrDefaultAsync(entry => entry.ReversesEntryId == original.Id, cancellationToken);
         if (priorReversal is not null)
@@ -228,8 +271,28 @@ public sealed class CreditLedgerService(TaslimDbContext db, IOptions<BillingOpti
         entry.ReversesEntryId = original.Id;
         entry.UsageTransactionId = original.UsageTransactionId;
         db.CreditLedgerEntries.Add(entry);
-        await db.SaveChangesAsync(cancellationToken);
-        return new(entry, true);
+        try
+        {
+            await db.SaveChangesAsync(cancellationToken);
+            if (ownsTransaction) await transaction!.CommitAsync(cancellationToken);
+            return new(entry, true);
+        }
+        catch (DbUpdateException)
+        {
+            if (ownsTransaction) await transaction!.RollbackAsync(CancellationToken.None);
+            db.Entry(entry).State = EntityState.Detached;
+            var concurrent = await FindEntryAsync(workspaceId, normalizedKey, cancellationToken);
+            if (concurrent is not null)
+            {
+                EnsureReversalReplayMatches(concurrent, entryType, originalEntryId, -original.Amount, normalizedReason, actorUserId);
+                return new(concurrent, false);
+            }
+
+            var concurrentReversal = await db.CreditLedgerEntries.AsNoTracking().SingleOrDefaultAsync(item => item.ReversesEntryId == originalEntryId, cancellationToken);
+            if (concurrentReversal is not null)
+                throw new InvalidOperationException("The credit ledger entry has already been reversed.");
+            throw;
+        }
     }
 
     private Task<CreditLedgerEntry?> FindEntryAsync(Guid workspaceId, string idempotencyKey, CancellationToken cancellationToken) =>
@@ -259,6 +322,18 @@ public sealed class CreditLedgerService(TaslimDbContext db, IOptions<BillingOpti
             existing.ActorUserId != actorUserId ||
             existing.Reason != reason)
             throw new InvalidOperationException("The credit grant idempotency key belongs to a different movement.");
+    }
+
+    private static void EnsureDebitReplayMatches(CreditLedgerEntry existing, Guid usageTransactionId, long credits, string reason, Guid? actorUserId)
+    {
+        if (existing.Type != CreditLedgerEntryType.Debit || existing.Amount != -credits || existing.UsageTransactionId != usageTransactionId || existing.Reason != reason || existing.ActorUserId != actorUserId)
+            throw new InvalidOperationException("The credit debit idempotency key belongs to a different movement.");
+    }
+
+    private static void EnsureReversalReplayMatches(CreditLedgerEntry existing, CreditLedgerEntryType entryType, Guid originalEntryId, long amount, string reason, Guid? actorUserId)
+    {
+        if (existing.Type != entryType || existing.ReversesEntryId != originalEntryId || existing.Amount != amount || existing.Reason != reason || existing.ActorUserId != actorUserId)
+            throw new InvalidOperationException("The credit reversal idempotency key belongs to a different movement.");
     }
 
     private static CreditLedgerEntry NewEntry(Guid workspaceId, Guid? entitlementId, CreditLedgerEntryType type, long amount, string idempotencyKey, string reason, Guid? actorUserId, DateTime now) => new()

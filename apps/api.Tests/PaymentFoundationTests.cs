@@ -119,6 +119,41 @@ public sealed class PaymentFoundationTests
     }
 
     [Fact]
+    public async Task Refunds_require_a_succeeded_payment_and_succeeded_attempts_cannot_be_marked_failed()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        var workspace = NewWorkspace();
+        db.Workspaces.Add(workspace);
+        await db.SaveChangesAsync();
+        var service = NewLifecycle(db);
+        var created = await service.RecordPaymentAttemptAsync(workspace.Id, "test", "attempt:created-refund", 9, "USD");
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.RecordRefundAsync(workspace.Id, created.Id, "test", 9, "USD", "refund:invalid", "Refund before payment success."));
+
+        var succeeded = await service.RecordPaymentAttemptAsync(workspace.Id, "test", "attempt:succeeded-failed", 9, "USD", PaymentAttemptStatus.Succeeded);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.MarkPaymentFailedAsync(workspace.Id, succeeded.Id, "late_failure", "A late failure must not overwrite success."));
+        Assert.Equal(PaymentAttemptStatus.Succeeded, (await db.PaymentAttempts.SingleAsync(item => item.Id == succeeded.Id)).Status);
+    }
+
+    [Fact]
+    public async Task Payment_attempt_replay_cannot_change_provider_reference()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        var workspace = NewWorkspace();
+        db.Workspaces.Add(workspace);
+        await db.SaveChangesAsync();
+        var service = NewLifecycle(db);
+        await service.RecordPaymentAttemptAsync(workspace.Id, "test", "attempt:provider-reference", 9, "USD", providerPaymentReference: "payment-1");
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.RecordPaymentAttemptAsync(workspace.Id, "test", "attempt:provider-reference", 9, "USD", providerPaymentReference: "payment-2"));
+        Assert.Single(await db.PaymentAttempts.ToListAsync());
+    }
+
+    [Fact]
     public async Task Signed_webhook_is_recorded_once_and_replayed_without_duplicate_state_change()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
