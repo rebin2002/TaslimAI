@@ -36,6 +36,7 @@ import {
   persistPresentationActiveJobId,
   presentationStudioState,
   readPresentationActiveJobId,
+  shouldResetPresentationWorkspaceState,
   shouldPollPresentationJob,
 } from "@/lib/presentationStudioState";
 
@@ -142,28 +143,70 @@ export function PresentationStudioView() {
   const [error, setError] = useState("");
   const [downloadError, setDownloadError] = useState("");
   const restoreJobId = useRef<string | null>(null);
+  const observedWorkspaceId = useRef<string | null>(workspace?.id ?? null);
+  const workspaceGeneration = useRef(0);
 
   const loadSources = useCallback(async () => {
     if (!workspace) return;
+    const workspaceId = workspace.id;
+    const workspaceVersion = workspaceGeneration.current;
     setLoadingSources(true);
     try {
       const [active, archived, sourceFiles, assetResult] = await Promise.all([
-        api.listProjects(workspace.id, "Active"),
-        api.listProjects(workspace.id, "Archived"),
-        api.listFiles(workspace.id),
-        api.listAssets(workspace.id, { assetType: "presentation", sort: "recent", pageSize: 6 }),
+        api.listProjects(workspaceId, "Active"),
+        api.listProjects(workspaceId, "Archived"),
+        api.listFiles(workspaceId),
+        api.listAssets(workspaceId, { assetType: "presentation", sort: "recent", pageSize: 6 }),
       ]);
+      if (observedWorkspaceId.current !== workspaceId || workspaceGeneration.current !== workspaceVersion) return;
       setProjects([...active, ...archived]);
       setFiles(sourceFiles.filter((file) => extensions.includes(file.extension.toLowerCase())));
       setRecentPresentations(assetResult.items);
     } catch {
+      if (observedWorkspaceId.current !== workspaceId || workspaceGeneration.current !== workspaceVersion) return;
       setProjects([]);
       setFiles([]);
       setRecentPresentations([]);
     } finally {
-      setLoadingSources(false);
+      if (observedWorkspaceId.current === workspaceId && workspaceGeneration.current === workspaceVersion) setLoadingSources(false);
     }
   }, [workspace]);
+
+  // Workspace-scoped jobs, briefs, selections, and source lists must not survive an ownership boundary.
+  // The generation counter fences responses and actions that started in the previous workspace.
+  useEffect(() => {
+    const nextWorkspaceId = workspace?.id ?? null;
+    if (observedWorkspaceId.current === nextWorkspaceId) return;
+    const previousWorkspaceId = observedWorkspaceId.current;
+    observedWorkspaceId.current = nextWorkspaceId;
+    workspaceGeneration.current += 1;
+    restoreJobId.current = null;
+    if (previousWorkspaceId === null && nextWorkspaceId !== null && !shouldResetPresentationWorkspaceState(current, nextWorkspaceId)) return;
+    setCurrent(null);
+    setSelected([]);
+    setProjects([]);
+    setFiles([]);
+    setRecentPresentations([]);
+    setTitle("");
+    setDescription("");
+    setProjectId("");
+    setAudience("");
+    setBrandCompany("");
+    setAdditionalInstructions("");
+    setPresentationType("auto");
+    setLength("standard");
+    setTone("professional");
+    setLanguage("auto");
+    setIncludeAgenda(true);
+    setIncludeClosingNextSteps(true);
+    setActiveSlide(0);
+    setPollRetry(0);
+    setRetryingCompleted(false);
+    setWorking(false);
+    setLoadingSources(true);
+    setError("");
+    setDownloadError("");
+  }, [current, workspace?.id]);
 
   // Source loading synchronizes authenticated workspace data into local UI state.
   // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -173,9 +216,10 @@ export function PresentationStudioView() {
     const storedJobId = readPresentationActiveJobId(workspace.id);
     if (!storedJobId) return;
     restoreJobId.current = storedJobId;
+    const workspaceVersion = workspaceGeneration.current;
     let active = true;
     void api.getGenerationJob(storedJobId).then((job) => {
-      if (!active || restoreJobId.current !== storedJobId) return;
+      if (!active || workspaceGeneration.current !== workspaceVersion || restoreJobId.current !== storedJobId) return;
       if (!isRestorablePresentationJob(job, workspace.id)) {
         clearPresentationActiveJobId(workspace.id);
         return;
@@ -183,7 +227,7 @@ export function PresentationStudioView() {
       setCurrent(job);
       setPollRetry(0);
     }).catch((cause) => {
-      if (!active || restoreJobId.current !== storedJobId) return;
+      if (!active || workspaceGeneration.current !== workspaceVersion || restoreJobId.current !== storedJobId) return;
       if (cause instanceof ApiError && (cause.status === 403 || cause.status === 404)) clearPresentationActiveJobId(workspace.id);
     });
     return () => { active = false; };
@@ -191,16 +235,17 @@ export function PresentationStudioView() {
   useEffect(() => {
     if (!current || !shouldPollPresentationJob(current)) return;
     const jobId = current.id;
+    const workspaceVersion = workspaceGeneration.current;
     let active = true;
     const timer = window.setTimeout(async () => {
       try {
         const next = await api.getGenerationJob(jobId);
-        if (!active) return;
+        if (!active || workspaceGeneration.current !== workspaceVersion || current.id !== jobId) return;
         setCurrent(next);
         setPollRetry(0);
         setError("");
       } catch {
-        if (!active) return;
+        if (!active || workspaceGeneration.current !== workspaceVersion || current.id !== jobId) return;
         setPollRetry((attempt) => attempt + 1);
         setError(t("presentation.pollError"));
       }
@@ -233,10 +278,12 @@ export function PresentationStudioView() {
     setError("");
     setDownloadError("");
     restoreJobId.current = null;
-    clearPresentationActiveJobId(workspace.id);
+    const workspaceId = workspace.id;
+    const workspaceVersion = workspaceGeneration.current;
+    clearPresentationActiveJobId(workspaceId);
     try {
       const job = await api.createPresentationGenerationJob({
-        workspaceId: workspace.id,
+        workspaceId,
         projectId: projectId || null,
         title: title.trim(),
         description: description.trim(),
@@ -251,44 +298,60 @@ export function PresentationStudioView() {
         includeClosingNextSteps,
         attachmentIds: selected,
       });
-      persistPresentationActiveJobId(workspace.id, job.id);
+      if (workspaceGeneration.current !== workspaceVersion || observedWorkspaceId.current !== workspaceId) return;
+      persistPresentationActiveJobId(workspaceId, job.id);
       setCurrent(job);
       setActiveSlide(0);
       setPollRetry(0);
     } catch {
-      setError(t("presentation.createError"));
+      if (workspaceGeneration.current === workspaceVersion && observedWorkspaceId.current === workspaceId) setError(t("presentation.createError"));
     } finally {
-      setWorking(false);
+      if (workspaceGeneration.current === workspaceVersion && observedWorkspaceId.current === workspaceId) setWorking(false);
     }
   }
 
   async function cancel() {
     if (!current || !canCancelPresentationJob(current)) return;
+    const workspaceVersion = workspaceGeneration.current;
+    const jobId = current.id;
     setWorking(true);
     setError("");
     try {
-      await api.cancelGenerationJob(current.id);
-      setCurrent(await api.getGenerationJob(current.id));
+      await api.cancelGenerationJob(jobId);
+      const next = await api.getGenerationJob(jobId);
+      if (workspaceGeneration.current !== workspaceVersion || current.id !== jobId) return;
+      setCurrent(next);
     } catch {
-      setError(t("presentation.cancelError"));
+      if (workspaceGeneration.current === workspaceVersion && current.id === jobId) setError(t("presentation.cancelError"));
     } finally {
-      setWorking(false);
+      if (workspaceGeneration.current === workspaceVersion) setWorking(false);
     }
   }
 
   async function retryCompleted() {
     if (!current) return;
+    const workspaceVersion = workspaceGeneration.current;
+    const jobId = current.id;
     setRetryingCompleted(true);
     setError("");
-    try { setCurrent(await api.getGenerationJob(current.id)); } catch { setError(t("presentation.completedLoadError")); } finally { setRetryingCompleted(false); }
+    try {
+      const next = await api.getGenerationJob(jobId);
+      if (workspaceGeneration.current === workspaceVersion && current.id === jobId) setCurrent(next);
+    } catch {
+      if (workspaceGeneration.current === workspaceVersion && current.id === jobId) setError(t("presentation.completedLoadError"));
+    } finally {
+      if (workspaceGeneration.current === workspaceVersion) setRetryingCompleted(false);
+    }
   }
 
   async function downloadRepresentation(representationId: string, fileName: string) {
     if (!result?.assetId) return;
+    const workspaceVersion = workspaceGeneration.current;
     setWorking(true);
     setDownloadError("");
     try {
       const blob = await api.downloadAssetRepresentation(result.assetId, representationId);
+      if (workspaceGeneration.current !== workspaceVersion) return;
       const url = URL.createObjectURL(blob);
       const anchor = window.document.createElement("a");
       anchor.href = url;
@@ -296,9 +359,9 @@ export function PresentationStudioView() {
       anchor.click();
       window.setTimeout(() => URL.revokeObjectURL(url), 0);
     } catch {
-      setDownloadError(t("presentation.downloadError"));
+      if (workspaceGeneration.current === workspaceVersion) setDownloadError(t("presentation.downloadError"));
     } finally {
-      setWorking(false);
+      if (workspaceGeneration.current === workspaceVersion) setWorking(false);
     }
   }
 
