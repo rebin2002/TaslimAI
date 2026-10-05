@@ -53,6 +53,11 @@ describe("Health placeholder safety boundary", () => {
 
   it("uses a generic accessible error boundary without exposing error details", () => {
     const routeError = readFileSync(new URL("../app/personal/health/error.tsx", import.meta.url), "utf8");
+    const appShell = readFileSync(new URL("./AppShell.tsx", import.meta.url), "utf8");
+
+    expect(appShell).toMatch(/<main\b/);
+    expect(routeError).not.toMatch(/<main\b/);
+    expect(routeError).toContain('<div className="placeholder-page">');
     expect(routeError).toContain('role="alert"');
     expect(routeError).toContain('aria-live="assertive"');
     expect(routeError).toContain("error.digest");

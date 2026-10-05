@@ -17,12 +17,14 @@ public sealed class GlobalSearchController(TaslimDbContext db) : ControllerBase
 {
     private const int DefaultLimitPerType = 8;
     private const int MaxLimitPerType = 12;
+    private const int MaxPage = 1_000_000;
     private const int MaxQueryLength = 100;
 
     [HttpGet]
     [EnableRateLimiting(RateLimiting.Search)]
     public async Task<ActionResult<GlobalSearchResponseDto>> Search(
         [FromQuery(Name = "q")] string? query,
+        [FromQuery] int page = 1,
         [FromQuery] int limit = DefaultLimitPerType,
         CancellationToken cancellationToken = default)
     {
@@ -30,11 +32,12 @@ public sealed class GlobalSearchController(TaslimDbContext db) : ControllerBase
         if (normalized.Length > MaxQueryLength)
             normalized = normalized[..MaxQueryLength];
 
+        var currentPage = Math.Clamp(page, 1, MaxPage);
+        var perType = Math.Clamp(limit, 1, MaxLimitPerType);
         if (normalized.Length == 0)
-            return Ok(new GlobalSearchResponseDto(string.Empty, 0, []));
+            return Ok(new GlobalSearchResponseDto(string.Empty, 0, currentPage, perType, false, []));
 
         var search = normalized.ToLowerInvariant();
-        var perType = Math.Clamp(limit, 1, MaxLimitPerType);
         var userId = GetUserId();
         var workspaceIds = await db.WorkspaceMembers.AsNoTracking()
             .Where(member => member.UserId == userId)
@@ -42,17 +45,16 @@ public sealed class GlobalSearchController(TaslimDbContext db) : ControllerBase
             .ToListAsync(cancellationToken);
 
         if (workspaceIds.Count == 0)
-            return Ok(new GlobalSearchResponseDto(normalized, 0, []));
+            return Ok(new GlobalSearchResponseDto(normalized, 0, currentPage, perType, false, []));
 
         var groups = new List<GlobalSearchGroupDto>(capacity: 5);
 
-        var projects = await db.Projects.AsNoTracking()
+        var projectQuery = db.Projects.AsNoTracking()
             .Where(project => workspaceIds.Contains(project.WorkspaceId)
                 && (project.Name.ToLower().Contains(search)
                     || (project.Description != null && project.Description.ToLower().Contains(search))))
             .OrderByDescending(project => project.UpdatedAt)
             .ThenByDescending(project => project.Id)
-            .Take(perType)
             .Select(project => new GlobalSearchResultDto(
                 GlobalSearchResultTypes.Project,
                 project.Id,
@@ -65,12 +67,12 @@ public sealed class GlobalSearchController(TaslimDbContext db) : ControllerBase
                 project.Status,
                 project.Type,
                 project.CreatedAt,
-                project.UpdatedAt))
-            .ToListAsync(cancellationToken);
-        AddGroup(groups, GlobalSearchResultTypes.Project, projects);
+                project.UpdatedAt));
+        var projects = await LoadPageAsync(projectQuery, currentPage, perType, cancellationToken);
+        AddGroup(groups, GlobalSearchResultTypes.Project, projects, currentPage, perType);
 
         // Conversations are private to their creator even when their workspace is shared.
-        var conversations = await db.Conversations.AsNoTracking()
+        var conversationQuery = db.Conversations.AsNoTracking()
             .Where(conversation => workspaceIds.Contains(conversation.WorkspaceId)
                 && conversation.UserId == userId
                 && (conversation.Title.ToLower().Contains(search)
@@ -79,7 +81,6 @@ public sealed class GlobalSearchController(TaslimDbContext db) : ControllerBase
                         && message.Content.ToLower().Contains(search))))
             .OrderByDescending(conversation => conversation.UpdatedAt)
             .ThenByDescending(conversation => conversation.Id)
-            .Take(perType)
             .Select(conversation => new GlobalSearchResultDto(
                 GlobalSearchResultTypes.Conversation,
                 conversation.Id,
@@ -92,15 +93,15 @@ public sealed class GlobalSearchController(TaslimDbContext db) : ControllerBase
                 conversation.Status.ToString(),
                 conversation.LastMessageAt.HasValue ? "message" : "conversation",
                 conversation.CreatedAt,
-                conversation.UpdatedAt))
-            .ToListAsync(cancellationToken);
-        AddGroup(groups, GlobalSearchResultTypes.Conversation, conversations);
+                conversation.UpdatedAt));
+        var conversations = await LoadPageAsync(conversationQuery, currentPage, perType, cancellationToken);
+        AddGroup(groups, GlobalSearchResultTypes.Conversation, conversations, currentPage, perType);
 
         // Keep asset search aligned with the asset-library privacy boundary:
         // project assets are shared only when their backing file is also
         // workspace-shareable; personal and conversation-backed assets remain
         // visible only to their creator.
-        var assets = await db.Assets.AsNoTracking()
+        var assetQuery = db.Assets.AsNoTracking()
             .Where(asset => workspaceIds.Contains(asset.WorkspaceId)
                 && (asset.CreatedByUserId == userId
                     || (asset.ProjectId.HasValue && asset.Project != null && asset.Project.WorkspaceId == asset.WorkspaceId))
@@ -116,7 +117,6 @@ public sealed class GlobalSearchController(TaslimDbContext db) : ControllerBase
                     || (asset.Description != null && asset.Description.ToLower().Contains(search))))
             .OrderByDescending(asset => asset.UpdatedAt)
             .ThenByDescending(asset => asset.Id)
-            .Take(perType)
             .Select(asset => new GlobalSearchResultDto(
                 GlobalSearchResultTypes.Asset,
                 asset.Id,
@@ -129,14 +129,14 @@ public sealed class GlobalSearchController(TaslimDbContext db) : ControllerBase
                 asset.Status.ToString(),
                 asset.AssetType,
                 asset.CreatedAt,
-                asset.UpdatedAt))
-            .ToListAsync(cancellationToken);
-        AddGroup(groups, GlobalSearchResultTypes.Asset, assets);
+                asset.UpdatedAt));
+        var assets = await LoadPageAsync(assetQuery, currentPage, perType, cancellationToken);
+        AddGroup(groups, GlobalSearchResultTypes.Asset, assets, currentPage, perType);
 
         // Project files are workspace-shared; personal and conversation-scoped
         // files remain private to their uploader, even when a conversation also
         // belongs to a project.
-        var files = await db.StoredFiles.AsNoTracking()
+        var fileQuery = db.StoredFiles.AsNoTracking()
             .Where(file => workspaceIds.Contains(file.WorkspaceId)
                 && file.Status != StoredFileStatus.Deleted
                 && (file.UserId == userId
@@ -148,7 +148,6 @@ public sealed class GlobalSearchController(TaslimDbContext db) : ControllerBase
                     || (file.ExtractedText != null && file.ExtractedText.ToLower().Contains(search))))
             .OrderByDescending(file => file.CreatedAt)
             .ThenByDescending(file => file.Id)
-            .Take(perType)
             .Select(file => new GlobalSearchResultDto(
                 GlobalSearchResultTypes.File,
                 file.Id,
@@ -161,14 +160,14 @@ public sealed class GlobalSearchController(TaslimDbContext db) : ControllerBase
                 file.Status.ToString(),
                 file.Extension,
                 file.CreatedAt,
-                file.ProcessedAt ?? file.CreatedAt))
-            .ToListAsync(cancellationToken);
-        AddGroup(groups, GlobalSearchResultTypes.File, files);
+                file.ProcessedAt ?? file.CreatedAt));
+        var files = await LoadPageAsync(fileQuery, currentPage, perType, cancellationToken);
+        AddGroup(groups, GlobalSearchResultTypes.File, files, currentPage, perType);
 
         // Generation execution records, including prompt-bearing InputJson, are
         // private to their creator. Generated Assets remain the workspace-shared
         // discovery surface through the separate asset query above.
-        var generationRows = await db.GenerationJobs.AsNoTracking()
+        var generationQuery = db.GenerationJobs.AsNoTracking()
             .Where(job => workspaceIds.Contains(job.WorkspaceId)
                 && job.CreatedByUserId == userId
                 && ((job.Title != null && job.Title.ToLower().Contains(search))
@@ -179,7 +178,6 @@ public sealed class GlobalSearchController(TaslimDbContext db) : ControllerBase
                         && job.Project.Name.ToLower().Contains(search))))
             .OrderByDescending(job => job.CreatedAt)
             .ThenByDescending(job => job.Id)
-            .Take(perType)
             .Select(job => new
             {
                 job.Id,
@@ -191,9 +189,9 @@ public sealed class GlobalSearchController(TaslimDbContext db) : ControllerBase
                 job.JobType,
                 job.CreatedAt,
                 UpdatedAt = job.CompletedAt ?? job.StartedAt ?? job.QueuedAt ?? job.CreatedAt,
-            })
-            .ToListAsync(cancellationToken);
-        var generation = generationRows.Select(job => new GlobalSearchResultDto(
+            });
+        var generationRows = await LoadPageAsync(generationQuery, currentPage, perType, cancellationToken);
+        var generation = generationRows.Items.Select(job => new GlobalSearchResultDto(
             GlobalSearchResultTypes.Generation,
             job.Id,
             job.Title ?? HumanizeJobType(job.JobType),
@@ -206,17 +204,40 @@ public sealed class GlobalSearchController(TaslimDbContext db) : ControllerBase
             HumanizeJobType(job.JobType),
             job.CreatedAt,
             job.UpdatedAt)).ToList();
-        AddGroup(groups, GlobalSearchResultTypes.Generation, generation);
+        AddGroup(groups, GlobalSearchResultTypes.Generation, generationRows.TotalCount, generation, currentPage, perType);
 
-        return Ok(new GlobalSearchResponseDto(normalized, groups.Sum(group => group.Count), groups));
+        return Ok(new GlobalSearchResponseDto(
+            normalized,
+            projects.TotalCount + conversations.TotalCount + assets.TotalCount + files.TotalCount + generationRows.TotalCount,
+            currentPage,
+            perType,
+            groups.Any(group => group.HasMore),
+            groups));
     }
 
     private Guid GetUserId() => Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier) ?? throw new InvalidOperationException("Authenticated user identifier is missing."));
 
-    private static void AddGroup(List<GlobalSearchGroupDto> groups, string type, IReadOnlyList<GlobalSearchResultDto> items)
+    private static async Task<SearchPage<T>> LoadPageAsync<T>(IQueryable<T> query, int page, int pageSize, CancellationToken cancellationToken)
     {
-        if (items.Count > 0) groups.Add(new GlobalSearchGroupDto(type, items.Count, items));
+        var totalCount = await query.CountAsync(cancellationToken);
+        var items = await query
+            .Skip((page - 1) * pageSize)
+            .Take(pageSize)
+            .ToListAsync(cancellationToken);
+        return new SearchPage<T>(totalCount, items);
     }
+
+    private static void AddGroup(List<GlobalSearchGroupDto> groups, string type, SearchPage<GlobalSearchResultDto> page, int currentPage, int pageSize) =>
+        AddGroup(groups, type, page.TotalCount, page.Items, currentPage, pageSize);
+
+    private static void AddGroup(List<GlobalSearchGroupDto> groups, string type, int totalCount, IReadOnlyList<GlobalSearchResultDto> items, int currentPage, int pageSize)
+    {
+        if (items.Count == 0) return;
+        var offset = (currentPage - 1) * pageSize;
+        groups.Add(new GlobalSearchGroupDto(type, totalCount, totalCount > offset + items.Count, items));
+    }
+
+    private sealed record SearchPage<T>(int TotalCount, IReadOnlyList<T> Items);
 
     private static string HumanizeJobType(string jobType) => jobType switch
     {
