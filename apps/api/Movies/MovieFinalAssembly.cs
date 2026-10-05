@@ -286,7 +286,25 @@ public sealed class MovieFinalAssemblyService(
             UpdatedAt = now,
         };
         db.MovieAssemblies.Add(assembly);
-        await db.SaveChangesAsync(cancellationToken);
+        try
+        {
+            await db.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateException)
+        {
+            // The unique (MovieProjectId, IdempotencyKey) index is the final
+            // concurrency gate. If another request won the race after both
+            // callers passed the read-before-write check, replay that durable
+            // row instead of leaking a database exception to the client.
+            db.Entry(assembly).State = EntityState.Detached;
+            var concurrent = await db.MovieAssemblies
+                .Include(item => item.GenerationJob).ThenInclude(item => item!.Outputs)
+                .FirstOrDefaultAsync(item => item.MovieProjectId == movieProjectId && item.IdempotencyKey == normalizedIdempotencyKey, cancellationToken);
+            if (concurrent is null) throw;
+            if (!string.Equals(concurrent.RequestFingerprint, fingerprint, StringComparison.Ordinal))
+                throw new MovieFinalAssemblyValidationException("IDEMPOTENCY_KEY_REUSED", "This idempotency key was already used for a different assembly request.");
+            return ToDto(concurrent);
+        }
 
         var input = new MovieFinalAssemblyInput(
             "final_assembly",
