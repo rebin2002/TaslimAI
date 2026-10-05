@@ -1,0 +1,56 @@
+name: Production container smoke
+
+on:
+  push:
+    branches: [main, "parallel/**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  container-health:
+    name: Build production images and smoke-test API
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15@sha256:e27d24a29acce1b554771ba68c43afa55446069d228310451bb8c96c1531d2cb
+        env:
+          POSTGRES_USER: taslim
+          POSTGRES_PASSWORD: change-me
+          POSTGRES_DB: taslim_container_smoke
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U taslim -d taslim_container_smoke"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Validate smoke helpers
+        run: |
+          bash -n scripts/container-health-smoke.sh
+          bash scripts/container-health-smoke.test.sh
+          bash -n scripts/web-container-smoke.sh
+          bash scripts/web-container-smoke.test.sh
+
+      - name: Build API production image
+        run: docker build --file apps/api/Dockerfile --tag taslim-api:release-smoke apps/api
+
+      - name: Build web production image
+        run: >-
+          docker build
+          --file apps/web/Dockerfile
+          --build-arg NEXT_PUBLIC_API_URL=https://api.example.test
+          --tag taslim-web:release-smoke
+          apps/web
+
+      - name: Smoke-test API container liveness and readiness
+        env:
+          SMOKE_CONNECTION_STRING: Host=host.docker.internal;Port=5432;Database=taslim_container_smoke;Username=taslim;Password=change-me
+        run: bash scripts/container-health-smoke.sh taslim-api:release-smoke 8080 120
+
+      - name: Smoke-test web container runtime and security headers
+        run: bash scripts/web-container-smoke.sh taslim-web:release-smoke 3000 120
