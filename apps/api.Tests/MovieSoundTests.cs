@@ -204,6 +204,174 @@ public sealed class MovieSoundTests : IClassFixture<GenerationJobsNoWorkerFactor
     }
 
     [Fact]
+    public async Task Library_reference_rejects_audio_asset_from_another_project_in_the_same_workspace()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client);
+        var project = await Post<MovieStudioProjectResponse>(client, "/api/movie-studio/projects", new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            mode = MovieProjectModes.Full,
+            title = "Sound scope contract",
+            description = "Sound asset scope test.",
+            durationSeconds = 20,
+            aspectRatio = "16:9",
+            style = "cinematic",
+            language = "en",
+        });
+        var foreignProjectId = Guid.NewGuid();
+        var foreignAssetId = Guid.NewGuid();
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var now = DateTime.UtcNow;
+            var fileId = Guid.NewGuid();
+            db.Projects.Add(new Project
+            {
+                Id = foreignProjectId,
+                WorkspaceId = auth.PersonalWorkspace.Id,
+                Name = "Another project",
+                CreatedAt = now,
+                UpdatedAt = now,
+            });
+            db.StoredFiles.Add(new StoredFile
+            {
+                Id = fileId,
+                WorkspaceId = auth.PersonalWorkspace.Id,
+                ProjectId = foreignProjectId,
+                UserId = auth.User.Id,
+                OriginalFileName = "foreign.wav",
+                StoredFileName = "foreign.wav",
+                ContentType = "audio/wav",
+                Extension = ".wav",
+                SizeBytes = 44,
+                StorageProvider = FileStorageProviders.Local,
+                StorageKey = "tests/foreign.wav",
+                Status = StoredFileStatus.Ready,
+                CreatedAt = now,
+                ProcessedAt = now,
+            });
+            db.Assets.Add(new Asset
+            {
+                Id = foreignAssetId,
+                WorkspaceId = auth.PersonalWorkspace.Id,
+                ProjectId = foreignProjectId,
+                CreatedByUserId = auth.User.Id,
+                StoredFileId = fileId,
+                Name = "Foreign room tone",
+                AssetType = AssetTypes.Audio,
+                MimeType = "audio/wav",
+                Status = AssetStatus.Active,
+                CreatedAt = now,
+                UpdatedAt = now,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        using var response = await PostRaw(client, $"/api/movie-sound/projects/{project.Project.Id}/library", new
+        {
+            assetId = foreignAssetId,
+            label = "Must not cross project boundary",
+        });
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains(GenerationJobErrorCodes.MovieSoundAssetInvalid, await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        var library = await client.GetFromJsonAsync<MovieSoundLibraryDto>($"/api/movie-sound/projects/{project.Project.Id}/library");
+        Assert.NotNull(library);
+        Assert.Empty(library!.References);
+    }
+
+    [Fact]
+    public async Task Review_rechecks_that_the_sound_asset_is_still_ready_and_private()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client);
+        var project = await Post<MovieStudioProjectResponse>(client, "/api/movie-studio/projects", new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            mode = MovieProjectModes.Full,
+            title = "Sound approval recheck",
+            description = "Sound approval readiness test.",
+            durationSeconds = 20,
+            aspectRatio = "16:9",
+            style = "cinematic",
+            language = "en",
+        });
+        var scene = await Post<MovieSceneDto>(client, $"/api/movie-studio/projects/{project.Project.Id}/scenes", new
+        {
+            title = "Interior",
+            summary = "A room tone cue.",
+            durationSeconds = 20,
+        });
+        var assetId = Guid.NewGuid();
+        var fileId = Guid.NewGuid();
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var now = DateTime.UtcNow;
+            db.StoredFiles.Add(new StoredFile
+            {
+                Id = fileId,
+                WorkspaceId = auth.PersonalWorkspace.Id,
+                UserId = auth.User.Id,
+                OriginalFileName = "room-tone.wav",
+                StoredFileName = "room-tone.wav",
+                ContentType = "audio/wav",
+                Extension = ".wav",
+                SizeBytes = 44,
+                StorageProvider = FileStorageProviders.Local,
+                StorageKey = "tests/recheck-room-tone.wav",
+                Status = StoredFileStatus.Ready,
+                CreatedAt = now,
+                ProcessedAt = now,
+            });
+            db.Assets.Add(new Asset
+            {
+                Id = assetId,
+                WorkspaceId = auth.PersonalWorkspace.Id,
+                CreatedByUserId = auth.User.Id,
+                StoredFileId = fileId,
+                Name = "Room tone",
+                AssetType = AssetTypes.Audio,
+                MimeType = "audio/wav",
+                Status = AssetStatus.Active,
+                CreatedAt = now,
+                UpdatedAt = now,
+            });
+            await db.SaveChangesAsync();
+        }
+        var track = await Post<MovieSoundTrackDto>(client, $"/api/movie-sound/scenes/{scene.Id}/tracks", new
+        {
+            kind = MovieSoundKinds.Ambience,
+            layer = MovieSoundLayers.RoomTone,
+            name = "Interior room tone",
+            description = "Recheck the private room tone before approval.",
+            startMilliseconds = 0,
+            endMilliseconds = 8_000,
+            assetId,
+        });
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var file = await db.StoredFiles.SingleAsync(item => item.Id == fileId);
+            file.Status = StoredFileStatus.Uploading;
+            await db.SaveChangesAsync();
+        }
+
+        using var response = await PostRaw(client, $"/api/movie-sound/tracks/{track.Id}/review", new
+        {
+            approve = true,
+            comment = "The file is no longer ready.",
+        });
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains(GenerationJobErrorCodes.MovieSoundNotReady, await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        using var verifyScope = factory.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var persisted = await verifyDb.MovieSoundTracks.SingleAsync(item => item.Id == track.Id);
+        Assert.Equal(MovieSoundStatuses.ReadyForReview, persisted.Status);
+        Assert.Empty(await verifyDb.MovieSoundApprovals.Where(item => item.MovieSoundTrackId == track.Id).ToListAsync());
+    }
+
+    [Fact]
     public async Task Fake_adapter_emits_valid_audio_without_external_calls()
     {
         var request = new MovieSoundGenerationInput(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), null, MovieSoundKinds.SoundEffect, MovieSoundLayers.Foreground, "A soft latch", 750, null);
