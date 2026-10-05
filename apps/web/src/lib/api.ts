@@ -1315,9 +1315,9 @@ export const api = {
   getActivityUnreadCount: (workspaceId: string) => request<{ unreadCount: number }>(`/api/activity/unread-count?workspaceId=${encodeURIComponent(workspaceId)}`),
   markActivityRead: (workspaceId: string, jobId: string) => request<{ read: boolean }>(`/api/activity/${jobId}/read`, { method: "POST", body: JSON.stringify({ workspaceId }) }, true),
   markAllActivityRead: (workspaceId: string) => request<{ read: boolean }>("/api/activity/read-all", { method: "POST", body: JSON.stringify({ workspaceId }) }, true),
-  listNotifications: (workspaceId: string, page = 1, pageSize = 20, unreadOnly = false) => {
+  listNotifications: (workspaceId: string, page = 1, pageSize = 20, unreadOnly = false, signal?: AbortSignal) => {
     const params = new URLSearchParams({ workspaceId, page: String(page), pageSize: String(pageSize), unreadOnly: String(unreadOnly) });
-    return request<NotificationList>(`/api/notifications?${params.toString()}`);
+    return request<NotificationList>(`/api/notifications?${params.toString()}`, { signal });
   },
   getNotificationUnreadCount: (workspaceId: string) => request<{ unreadCount: number }>(`/api/notifications/unread-count?workspaceId=${encodeURIComponent(workspaceId)}`),
   markNotificationRead: (workspaceId: string, notificationId: string) => request<{ read: boolean }>(`/api/notifications/${notificationId}/read`, { method: "POST", body: JSON.stringify({ workspaceId }) }, true),
