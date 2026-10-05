@@ -153,6 +153,30 @@ public sealed record MovieProductionCheckpointProjection(
     }
 }
 
+internal static class MovieProductionCheckpointReadiness
+{
+    public static bool HasPublishableJobOutput(GenerationJob job, MovieProject movie) =>
+        job.Assets.Any(asset => IsPublishableAsset(asset, movie))
+        || job.Outputs.Any(output => IsPublishableStoredFile(output.StoredFile, movie));
+
+    public static bool IsPublishableAsset(Asset? asset, MovieProject movie) =>
+        asset is not null
+        && asset.Status == AssetStatus.Active
+        && asset.WorkspaceId == movie.WorkspaceId
+        && IsProjectScoped(asset.ProjectId, movie.ProjectId)
+        && IsPublishableStoredFile(asset.StoredFile, movie);
+
+    public static bool IsPublishableStoredFile(StoredFile? file, MovieProject movie) =>
+        file is not null
+        && file.Status == StoredFileStatus.Ready
+        && file.WorkspaceId == movie.WorkspaceId
+        && file.ConversationId is null
+        && IsProjectScoped(file.ProjectId, movie.ProjectId);
+
+    private static bool IsProjectScoped(Guid? fileProjectId, Guid? movieProjectId) =>
+        !fileProjectId.HasValue || fileProjectId == movieProjectId;
+}
+
 public static class MovieProductionCheckpointAnalyzer
 {
     public static MovieProductionCheckpointItemDto AnalyzeShot(
