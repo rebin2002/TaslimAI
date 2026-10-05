@@ -85,7 +85,8 @@ public sealed record ResearchSourceCandidate(
     string? SearchQuery,
     int Rank,
     bool IsSelected,
-    string? MetadataJson);
+    string? MetadataJson,
+    Guid? StoredFileId = null);
 
 public sealed record ResearchEvidenceCandidate(
     string CitationId,
