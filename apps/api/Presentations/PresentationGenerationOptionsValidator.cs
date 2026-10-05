@@ -12,6 +12,12 @@ public sealed class PresentationGenerationOptionsValidator : IValidateOptions<Pr
                 $"PresentationGeneration:MaxBlocksPerSlide must be between 1 and {PresentationRendererLimits.MaxBlocksPerSlide} because the PPTX renderer cannot safely lay out more slide-level blocks.");
         }
 
+        if (options.MaxRowsPerBlock is < 1 or > PresentationRendererLimits.MaxRowsPerBlock)
+        {
+            return ValidateOptionsResult.Fail(
+                $"PresentationGeneration:MaxRowsPerBlock must be between 1 and {PresentationRendererLimits.MaxRowsPerBlock} because the PPTX renderer cannot safely lay out more table rows.");
+        }
+
         return ValidateOptionsResult.Success;
     }
 }

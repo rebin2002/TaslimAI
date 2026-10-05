@@ -29,6 +29,17 @@ public sealed class PresentationGenerationOptionsTests
     }
 
     [Fact]
+    public void Table_rows_above_renderer_capacity_fail_closed()
+    {
+        var options = new PresentationGenerationOptions { MaxRowsPerBlock = PresentationRendererLimits.MaxRowsPerBlock + 1 };
+
+        var result = PresentationGenerationOptionsValidatorResult(options);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("MaxRowsPerBlock", result.FailureMessage, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Drafts_above_renderer_capacity_are_rejected_before_rendering()
     {
         var options = new PresentationGenerationOptions();
