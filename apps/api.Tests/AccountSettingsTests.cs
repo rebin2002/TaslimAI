@@ -143,6 +143,35 @@ public sealed class AccountSettingsTests : IClassFixture<TaslimApiFactory>
     }
 
     [Fact]
+    public async Task Password_change_attempts_are_rate_limited_per_account()
+    {
+        using var client = factory.CreateClient();
+        await Register(client, "Rate Limited Owner", $"password-rate-limit-{Guid.NewGuid():N}@example.com");
+
+        for (var attempt = 0; attempt < 5; attempt++)
+        {
+            var rejectedPassword = await SendWithCsrf(client, HttpMethod.Post, "/api/auth/password", new
+            {
+                currentPassword = "WrongPassword!123",
+                newPassword = "NewStrongPassword!123",
+            });
+
+            Assert.Equal(HttpStatusCode.BadRequest, rejectedPassword.StatusCode);
+        }
+
+        var limited = await SendWithCsrf(client, HttpMethod.Post, "/api/auth/password", new
+        {
+            currentPassword = "WrongPassword!123",
+            newPassword = "NewStrongPassword!123",
+        });
+
+        Assert.Equal(HttpStatusCode.TooManyRequests, limited.StatusCode);
+        Assert.Equal("60", limited.Headers.RetryAfter?.Delta?.TotalSeconds.ToString("0"));
+        var error = await limited.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("RATE_LIMITED", error.GetProperty("error").GetProperty("code").GetString());
+    }
+
+    [Fact]
     public async Task Unsupported_account_preferences_are_rejected_without_persisting_partial_changes()
     {
         using var client = factory.CreateClient();
