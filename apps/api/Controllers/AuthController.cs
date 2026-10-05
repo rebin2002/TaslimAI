@@ -239,6 +239,7 @@ public sealed class AuthController(
     [HttpPost("password")]
     [Authorize]
     [ValidateAntiForgeryToken]
+    [EnableRateLimiting(RateLimiting.AccountSecurity)]
     public async Task<IActionResult> ChangePassword(ChangePasswordRequest request)
     {
         if (!ModelState.IsValid)
