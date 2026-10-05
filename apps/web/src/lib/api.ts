@@ -203,6 +203,7 @@ export type AdminGenerationOverview = {
   byStatus: AdminCountBreakdown[];
   byStudio: AdminCountBreakdown[];
   recentFailures: { jobId: string; jobType: string; errorCode: string | null; failedAt: string }[];
+  failuresByCode: AdminCountBreakdown[];
   runningJobs: { jobId: string; jobType: string; progressPercent: number; queuedAt: string | null; startedAt: string | null; createdAt: string; retryCount: number; claimExpiresAt: string | null; isLongRunning: boolean }[];
   queuedOrPendingCount: number;
   longRunningJobCount: number;
@@ -894,6 +895,15 @@ async function streamRequest(path: string, payload: unknown, onEvent: (event: Ch
     }
     parser.push(decoder.decode());
     parser.end();
+  } catch (error) {
+    // The server has already durably settled the message. A broken connection
+    // after the terminal event must not turn a completed response into a
+    // duplicate-retry prompt in the caller.
+    if (parser.hasTerminalEvent()) {
+      cancelReader = true;
+      return;
+    }
+    throw error;
   } finally {
     if (cancelReader) {
       try { await reader.cancel(); } catch { /* the transport may already be closed */ }
@@ -1323,6 +1333,11 @@ export const api = {
   createMusicGenerationJob: (input: MusicGenerationInput, idempotencyKey = requestId()) => request<{ job: GenerationJob }>("/api/music-generation/jobs", generationInit({ method: "POST", body: JSON.stringify(input) }, idempotencyKey), true).then((response) => response.job),
   getGenerationJob: (jobId: string) => request<GenerationJob>(`/api/generation/jobs/${jobId}`),
   getResearchSources: (jobId: string) => request<{ jobId: string; sources: ResearchSource[] }>(`/api/research-generation/jobs/${jobId}/sources`),
+  downloadResearchSourcesExport: async (jobId: string) => {
+    const response = await fetch(`${API_URL}/api/research-generation/jobs/${jobId}/sources/export`, { credentials: "include" });
+    if (!response.ok) throw new ApiError(response.status, "Research source manifest unavailable.", undefined, "RESEARCH_SOURCE_EXPORT_UNAVAILABLE");
+    return response.blob();
+  },
   listGenerationJobs: (workspaceId: string, page = 1, pageSize = 20) => request<GenerationJobList>(`/api/generation/jobs?workspaceId=${encodeURIComponent(workspaceId)}&page=${page}&pageSize=${pageSize}&jobType=system.test`),
   cancelGenerationJob: (jobId: string) => request<{ status: GenerationJobStatus; cancellationRequested?: boolean }>(`/api/generation/jobs/${jobId}/cancel`, { method: "POST" }, true),
   listActivity: (workspaceId: string, page = 1, pageSize = 50, status?: string) => {
