@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Taslim.Api.Assets;
 using Taslim.Api.Files;
 using Taslim.Api.Infrastructure;
@@ -20,6 +21,7 @@ public sealed class MovieFinalAssemblyController(
 {
     [HttpPost("projects/{id:guid}/final-assembly")]
     [ValidateAntiForgeryToken]
+    [EnableRateLimiting(RateLimiting.ExpensiveAi)]
     public async Task<IActionResult> Queue(Guid id, MovieFinalAssemblyRequest request, CancellationToken cancellationToken)
     {
         try
