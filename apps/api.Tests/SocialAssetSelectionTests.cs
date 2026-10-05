@@ -163,11 +163,11 @@ public sealed class SocialAssetSelectionTests : IClassFixture<SocialGenerationAp
         Assert.Empty(terminal.Outputs);
     }
 
-    private static async Task<AuthResponse> Register(HttpClient client)
+    private static async Task<AuthResponse> Register(HttpClient client, string displayName = "Social Asset Tester")
     {
         var response = await SendWithCsrf(client, new
         {
-            displayName = "Social Asset Tester",
+            displayName,
             email = $"social-asset-{Guid.NewGuid():N}@example.com",
             password = "StrongPassword!123",
             preferredLanguage = "en",
