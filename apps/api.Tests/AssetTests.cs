@@ -251,6 +251,130 @@ public sealed class AssetTests : IClassFixture<GenerationJobsApiFactory>
     }
 
     [Fact]
+    public async Task Workspace_members_cannot_use_an_asset_with_a_foreign_project_relationship()
+    {
+        using var owner = factory.CreateClient();
+        var ownerAuth = await Register(owner, "Foreign Project Asset Owner");
+        using var foreign = factory.CreateClient();
+        var foreignAuth = await Register(foreign, "Foreign Project Owner");
+        var foreignProject = await CreateProject(foreign, foreignAuth.PersonalWorkspace.Id, "Foreign Project Marker");
+
+        Guid assetId;
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var now = DateTime.UtcNow;
+            var asset = new Asset
+            {
+                Id = Guid.NewGuid(),
+                WorkspaceId = ownerAuth.PersonalWorkspace.Id,
+                ProjectId = foreignProject.Id,
+                CreatedByUserId = ownerAuth.User.Id,
+                Name = "Foreign project relationship marker",
+                AssetType = AssetTypes.File,
+                Status = AssetStatus.Active,
+                CreatedAt = now,
+                UpdatedAt = now,
+            };
+            db.Assets.Add(asset);
+            await db.SaveChangesAsync();
+            assetId = asset.Id;
+        }
+
+        using var member = factory.CreateClient();
+        var memberAuth = await Register(member, "Foreign Project Asset Member");
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.WorkspaceMembers.Add(new WorkspaceMember
+            {
+                Id = Guid.NewGuid(),
+                WorkspaceId = ownerAuth.PersonalWorkspace.Id,
+                UserId = memberAuth.User.Id,
+                Role = WorkspaceRole.Member,
+                JoinedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var listed = await member.GetFromJsonAsync<AssetListDto>($"/api/assets?workspaceId={ownerAuth.PersonalWorkspace.Id}&status=Active&pageSize=20");
+        Assert.DoesNotContain(listed!.Items, item => item.Id == assetId);
+        Assert.Equal(HttpStatusCode.NotFound, (await member.GetAsync($"/api/assets/{assetId}")).StatusCode);
+    }
+
+    [Fact]
+    public async Task Workspace_members_cannot_download_a_private_asset_representation_file()
+    {
+        using var owner = factory.CreateClient();
+        var ownerAuth = await Register(owner, "Private Representation Owner");
+        var project = await CreateProject(owner, ownerAuth.PersonalWorkspace.Id, "Private Representation Project");
+        var conversation = await CreateConversation(owner, ownerAuth.PersonalWorkspace.Id, project.Id);
+        var job = await CreateJob(owner, ownerAuth.PersonalWorkspace.Id, project.Id, "Shared representation asset");
+        await WaitForTerminal(owner, job.Id);
+        var ownerAssets = await owner.GetFromJsonAsync<AssetListDto>($"/api/assets?workspaceId={ownerAuth.PersonalWorkspace.Id}&status=Active&pageSize=20");
+        var asset = Assert.Single(ownerAssets!.Items, item => item.Name == "Shared representation asset");
+
+        Guid representationId;
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var now = DateTime.UtcNow;
+            var privateFile = new StoredFile
+            {
+                Id = Guid.NewGuid(),
+                WorkspaceId = ownerAuth.PersonalWorkspace.Id,
+                UserId = ownerAuth.User.Id,
+                ProjectId = project.Id,
+                ConversationId = conversation.Id,
+                OriginalFileName = "private-representation.json",
+                StoredFileName = "private-representation.json",
+                ContentType = "application/json",
+                Extension = ".json",
+                SizeBytes = 1,
+                StorageProvider = FileStorageProviders.Local,
+                StorageKey = $"private-representation/{Guid.NewGuid():N}.json",
+                Status = StoredFileStatus.Ready,
+                CreatedAt = now,
+            };
+            var representation = new AssetRepresentation
+            {
+                Id = Guid.NewGuid(),
+                AssetId = asset.Id,
+                StoredFileId = privateFile.Id,
+                RepresentationType = "private",
+                FileName = privateFile.OriginalFileName,
+                ContentType = privateFile.ContentType,
+                SizeBytes = privateFile.SizeBytes,
+                CreatedAt = now,
+            };
+            db.StoredFiles.Add(privateFile);
+            db.AssetRepresentations.Add(representation);
+            await db.SaveChangesAsync();
+            representationId = representation.Id;
+        }
+
+        using var member = factory.CreateClient();
+        var memberAuth = await Register(member, "Private Representation Member");
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.WorkspaceMembers.Add(new WorkspaceMember
+            {
+                Id = Guid.NewGuid(),
+                WorkspaceId = ownerAuth.PersonalWorkspace.Id,
+                UserId = memberAuth.User.Id,
+                Role = WorkspaceRole.Member,
+                JoinedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var download = await member.GetAsync($"/api/assets/{asset.Id}/representations/{representationId}/download");
+        Assert.Equal(HttpStatusCode.Conflict, download.StatusCode);
+        Assert.DoesNotContain("private-representation", await download.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
     public async Task Asset_download_rejects_a_primary_file_from_another_workspace()
     {
         using var owner = factory.CreateClient();

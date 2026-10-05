@@ -115,7 +115,9 @@ public sealed class AssetService(TaslimDbContext db, WorkspaceAccessService acce
         {
             var representation = asset.Representations.FirstOrDefault(item => item.Id == representationId.Value);
             if (representation is null) return null;
-            var representationFile = await db.StoredFiles.AsNoTracking().FirstOrDefaultAsync(file => file.Id == representation.StoredFileId, cancellationToken);
+            var representationFile = await db.StoredFiles.AsNoTracking()
+                .Include(file => file.Project)
+                .FirstOrDefaultAsync(file => file.Id == representation.StoredFileId, cancellationToken);
             if (representationFile is not { Status: StoredFileStatus.Ready } || !CanReadStoredFile(representationFile, userId, asset.WorkspaceId))
                 throw new AssetValidationException("ASSET_FILE_UNAVAILABLE", "This document format is not available.");
             return new AssetDownload(asset, representationFile, representation.FileName, representation.ContentType);
@@ -142,6 +144,7 @@ public sealed class AssetService(TaslimDbContext db, WorkspaceAccessService acce
         var query = db.Assets
             .Include(asset => asset.Project)
             .Include(asset => asset.StoredFile)
+            .ThenInclude(file => file!.Project)
             .Include(asset => asset.SourceGenerationJob)
             .Include(asset => asset.Representations)
             .AsQueryable();
@@ -153,5 +156,9 @@ public sealed class AssetService(TaslimDbContext db, WorkspaceAccessService acce
 
     private static bool CanReadStoredFile(StoredFile file, Guid userId, Guid workspaceId) =>
         file.WorkspaceId == workspaceId
-        && (file.UserId == userId || (file.ProjectId.HasValue && !file.ConversationId.HasValue));
+        && (file.UserId == userId
+            || (file.ProjectId.HasValue
+                && !file.ConversationId.HasValue
+                && file.Project is not null
+                && file.Project.WorkspaceId == workspaceId));
 }
