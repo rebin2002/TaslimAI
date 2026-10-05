@@ -292,9 +292,10 @@ public sealed class MovieVideoExecutionTests
 
         public async Task<MovieVideoSubmission> SubmitAsync(MovieVideoGenerationRequest request, CancellationToken cancellationToken)
         {
+            var staleToken = Guid.NewGuid();
             await db.GenerationJobs
                 .Where(item => item.Id == jobId)
-                .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.ConcurrencyToken, Guid.NewGuid()), cancellationToken);
+                .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.ConcurrencyToken, staleToken), cancellationToken);
             return new MovieVideoSubmission("provider-job");
         }
 
