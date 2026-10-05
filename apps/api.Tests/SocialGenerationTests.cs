@@ -148,6 +148,49 @@ public sealed class SocialGenerationTests : IClassFixture<SocialGenerationApiFac
         Assert.Empty(terminal.Outputs);
     }
 
+    [Fact]
+    public async Task Social_job_rejects_selected_asset_without_ready_private_file()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client);
+        var assetId = Guid.NewGuid();
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.Assets.Add(new Asset
+            {
+                Id = assetId,
+                WorkspaceId = auth.PersonalWorkspace.Id,
+                CreatedByUserId = auth.User.Id,
+                Name = "Stale social reference",
+                AssetType = AssetTypes.Image,
+                Status = AssetStatus.Active,
+                StoredFileId = null,
+                CreatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var response = await SendWithCsrf(client, new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            prompt = "Use the selected visual reference safely.",
+            socialType = "announcement",
+            platform = "linkedin",
+            tone = "professional",
+            language = "en",
+            assetIds = new[] { assetId },
+            attachmentIds = Array.Empty<Guid>(),
+        });
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        var created = (await response.Content.ReadFromJsonAsync<CreateSocialGenerationResponse>())!;
+        var terminal = await WaitForTerminal(client, created.Job.Id);
+        Assert.Equal("Failed", terminal.Status);
+        Assert.Equal(GenerationJobErrorCodes.SocialContextUnavailable, terminal.ErrorCode);
+        Assert.Empty(terminal.Outputs);
+    }
+
     private static async Task<AuthResponse> Register(HttpClient client)
     {
         var response = await SendWithCsrf(client, new { displayName = "Social Tester", email = $"social-{Guid.NewGuid():N}@example.com", password = "StrongPassword!123", preferredLanguage = "ku" }, "/api/auth/register");
