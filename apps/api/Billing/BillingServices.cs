@@ -290,6 +290,8 @@ public sealed class CreditLedgerService(TaslimDbContext db, IOptions<BillingOpti
             EnsureReversalReplayMatches(existing, entryType, originalEntryId, -original.Amount, normalizedReason, actorUserId);
             return new(existing, false);
         }
+        if (original.Type is CreditLedgerEntryType.Refund or CreditLedgerEntryType.Reversal)
+            throw new InvalidOperationException("A compensating credit ledger entry cannot be adjusted again.");
         var priorReversal = await db.CreditLedgerEntries.AsNoTracking()
             .SingleOrDefaultAsync(entry => entry.ReversesEntryId == original.Id, cancellationToken);
         if (priorReversal is not null)
