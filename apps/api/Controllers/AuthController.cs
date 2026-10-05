@@ -56,7 +56,7 @@ public sealed class AuthController(
     [EnableRateLimiting(RateLimiting.Authentication)]
     public async Task<IActionResult> Register(RegisterRequest request, CancellationToken cancellationToken)
     {
-        if (!ModelState.IsValid || !IsSupportedLanguage(request.PreferredLanguage))
+        if (!ModelState.IsValid || string.IsNullOrWhiteSpace(request.DisplayName) || !IsSupportedLanguage(request.PreferredLanguage, allowEmpty: true))
             return ApiResults.Validation(this, "Please provide a valid name, email, password, and language.");
 
         var now = DateTime.UtcNow;
@@ -66,7 +66,7 @@ public sealed class AuthController(
             UserName = request.Email.Trim(),
             Email = request.Email.Trim(),
             DisplayName = request.DisplayName.Trim(),
-            PreferredLanguage = string.IsNullOrWhiteSpace(request.PreferredLanguage) ? LanguageCodes.English : request.PreferredLanguage!.ToLowerInvariant(),
+            PreferredLanguage = NormalizeLanguage(request.PreferredLanguage),
             CreatedAt = now,
             UpdatedAt = now,
             IsActive = true,
@@ -207,7 +207,7 @@ public sealed class AuthController(
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> UpdateProfile(UpdateProfileRequest request)
     {
-        if (!ModelState.IsValid || !IsSupportedLanguage(request.PreferredLanguage)
+        if (!ModelState.IsValid || string.IsNullOrWhiteSpace(request.DisplayName) || !IsSupportedLanguage(request.PreferredLanguage)
             || (request.DefaultGenerationLanguage is not null && !IsSupportedLanguage(request.DefaultGenerationLanguage))
             || (request.TimeZone is not null && !TimeZoneInfo.GetSystemTimeZones().Any(zone => string.Equals(zone.Id, request.TimeZone.Trim(), StringComparison.Ordinal)))
             || (request.OutputPreference is not null && !OutputPreferences.Supported.Contains(request.OutputPreference.Trim())))
@@ -215,8 +215,8 @@ public sealed class AuthController(
         var user = await userManager.GetUserAsync(User);
         if (user is null || !user.IsActive) return Unauthorized();
         user.DisplayName = request.DisplayName.Trim();
-        user.PreferredLanguage = request.PreferredLanguage.ToLowerInvariant();
-        if (request.DefaultGenerationLanguage is not null) user.DefaultGenerationLanguage = request.DefaultGenerationLanguage.Trim().ToLowerInvariant();
+        user.PreferredLanguage = NormalizeLanguage(request.PreferredLanguage);
+        if (request.DefaultGenerationLanguage is not null) user.DefaultGenerationLanguage = NormalizeLanguage(request.DefaultGenerationLanguage);
         if (request.TimeZone is not null) user.TimeZone = request.TimeZone.Trim();
         if (request.OutputPreference is not null) user.OutputPreference = request.OutputPreference.Trim().ToLowerInvariant();
         if (request.IncludeSourceLinks.HasValue) user.IncludeSourceLinks = request.IncludeSourceLinks.Value;
@@ -312,7 +312,10 @@ public sealed class AuthController(
         Response.Headers.CacheControl = "no-store";
     }
 
-    private static bool IsSupportedLanguage(string? language) => string.IsNullOrWhiteSpace(language) || LanguageCodes.Supported.Contains(language);
+    private static bool IsSupportedLanguage(string? language, bool allowEmpty = false) =>
+        string.IsNullOrWhiteSpace(language) ? allowEmpty : LanguageCodes.Supported.Contains(language.Trim());
+    private static string NormalizeLanguage(string? language) =>
+        string.IsNullOrWhiteSpace(language) ? LanguageCodes.English : language.Trim().ToLowerInvariant();
     private static string[] ToPasswordFieldErrors(IEnumerable<IdentityError> errors) => errors
         .Select(error => error.Code)
         .Where(code => code is "PasswordTooShort" or "PasswordRequiresUpper" or "PasswordRequiresLower" or "PasswordRequiresDigit" or "PasswordRequiresNonAlphanumeric" or "PasswordRequiresUniqueChars")
