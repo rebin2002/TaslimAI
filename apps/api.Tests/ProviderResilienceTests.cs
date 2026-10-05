@@ -130,6 +130,53 @@ public sealed class ProviderResilienceTests
     }
 
     [Fact]
+    public async Task Routing_does_not_use_a_fallback_when_the_route_disallows_it_after_policy_rejection()
+    {
+        var store = new FakeResilienceStore();
+        var primary = new TestProvider(
+            "primary",
+            _ => Task.FromResult("must-not-run"),
+            new ProviderRoutingProfile(QualityRank: 1, EstimatedCostUsd: 1m, SupportsIdempotency: false));
+        var fallback = new TestProvider("fallback", _ => Task.FromResult("must-not-run"));
+
+        var result = await Create(store).ExecuteAsync(
+            JobId,
+            Token,
+            new ProviderRouteRequirements("image.generate", RequireIdempotency: true, AllowFallback: false),
+            "request-no-fallback-policy",
+            "input",
+            [primary, fallback]);
+
+        Assert.Equal(ProviderAttemptResultCategory.UnsupportedCapability, result.Category);
+        Assert.Equal("IDEMPOTENCY_REQUIRED", result.ErrorCode);
+        Assert.Equal(0, primary.Calls);
+        Assert.Equal(0, fallback.Calls);
+        Assert.Empty(store.Attempts);
+    }
+
+    [Fact]
+    public async Task Routing_does_not_use_a_fallback_when_the_route_disallows_it_after_capability_rejection()
+    {
+        var store = new FakeResilienceStore();
+        var primary = new TestProvider("primary", _ => Task.FromResult("must-not-run"), canHandle: false);
+        var fallback = new TestProvider("fallback", _ => Task.FromResult("must-not-run"));
+
+        var result = await Create(store).ExecuteAsync(
+            JobId,
+            Token,
+            new ProviderRouteRequirements("image.generate", AllowFallback: false),
+            "request-no-fallback-capability",
+            "input",
+            [primary, fallback]);
+
+        Assert.Equal(ProviderAttemptResultCategory.UnsupportedCapability, result.Category);
+        Assert.Equal("CAPABILITY_UNSUPPORTED", result.ErrorCode);
+        Assert.Equal(0, primary.Calls);
+        Assert.Equal(0, fallback.Calls);
+        Assert.Empty(store.Attempts);
+    }
+
+    [Fact]
     public async Task Cost_limit_rejection_does_not_call_an_expensive_provider()
     {
         var store = new FakeResilienceStore();
@@ -298,13 +345,14 @@ public sealed class ProviderResilienceTests
             ProviderTimeoutSeconds = 1,
         }), store.Time, NullLogger<ProviderResilienceOrchestrator>.Instance);
 
-    private sealed class TestProvider(string key, Func<int, Task<string>> behavior, ProviderRoutingProfile? routingProfile = null, decimal? reportedCostUsd = null) : IResilientProvider<string, string>, IProviderRoutingProfile<string>
+    private sealed class TestProvider(string key, Func<int, Task<string>> behavior, ProviderRoutingProfile? routingProfile = null, decimal? reportedCostUsd = null, bool canHandle = true) : IResilientProvider<string, string>, IProviderRoutingProfile<string>
     {
         public string Key { get; } = key;
         public int Calls { get; private set; }
         private ProviderRoutingProfile RoutingProfile { get; } = routingProfile ?? ProviderRoutingProfile.Default;
         private decimal? ReportedCostUsd { get; } = reportedCostUsd;
-        public bool CanHandle(string capability, string input) => true;
+        private bool CanHandleRequest { get; } = canHandle;
+        public bool CanHandle(string capability, string input) => CanHandleRequest;
         public ProviderRoutingProfile GetRoutingProfile(string capability, string input) => RoutingProfile;
         public async Task<ProviderExecutionSuccess<string>> ExecuteAsync(ProviderExecutionContext context, string input, CancellationToken cancellationToken)
         {
