@@ -123,6 +123,7 @@ probe_endpoint() {
       sleep "$RETRY_SECONDS"
     fi
   done
+  return 1
 }
 
 printf '%s\n' "[api-health-smoke] checking $BASE_URL"
