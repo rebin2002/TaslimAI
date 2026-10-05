@@ -180,6 +180,84 @@ public sealed class GlobalSearchTests : IClassFixture<TaslimApiFactory>
     }
 
     [Fact]
+    public async Task Search_does_not_project_foreign_workspace_relationship_metadata()
+    {
+        using var owner = factory.CreateClient();
+        var ownerResponse = await Register(owner, "Search Relationship Owner", $"search-relationship-owner-{Guid.NewGuid():N}@example.com");
+        var ownerAuth = await ownerResponse.Content.ReadFromJsonAsync<AuthResponse>();
+        Assert.NotNull(ownerAuth);
+
+        using var foreign = factory.CreateClient();
+        var foreignResponse = await Register(foreign, "Search Relationship Foreign", $"search-relationship-foreign-{Guid.NewGuid():N}@example.com");
+        var foreignAuth = await foreignResponse.Content.ReadFromJsonAsync<AuthResponse>();
+        Assert.NotNull(foreignAuth);
+        var foreignProject = await SendWithCsrf<ProjectDto>(foreign, HttpMethod.Post, $"/api/workspaces/{foreignAuth!.PersonalWorkspace.Id}/projects", new { name = "Foreign Workspace Project" });
+
+        var now = DateTime.UtcNow;
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var crossWorkspaceFile = NewReadyFile(ownerAuth!.PersonalWorkspace.Id, ownerAuth.User.Id, now, foreignProject.Id, conversationId: null);
+            crossWorkspaceFile.OriginalFileName = "Cross workspace file marker.txt";
+            crossWorkspaceFile.ExtractedText = "Cross workspace file marker";
+            crossWorkspaceFile.ExtractedTextLength = crossWorkspaceFile.ExtractedText.Length;
+
+            db.Conversations.Add(new Conversation
+            {
+                Id = Guid.NewGuid(),
+                WorkspaceId = ownerAuth.PersonalWorkspace.Id,
+                ProjectId = foreignProject.Id,
+                UserId = ownerAuth.User.Id,
+                Title = "Cross workspace conversation marker",
+                Status = ConversationStatus.Active,
+                CreatedAt = now,
+                UpdatedAt = now,
+            });
+            db.StoredFiles.Add(crossWorkspaceFile);
+            db.Assets.Add(new Asset
+            {
+                Id = Guid.NewGuid(),
+                WorkspaceId = ownerAuth.PersonalWorkspace.Id,
+                ProjectId = foreignProject.Id,
+                CreatedByUserId = ownerAuth.User.Id,
+                Name = "Cross workspace asset marker",
+                AssetType = AssetTypes.File,
+                MimeType = crossWorkspaceFile.ContentType,
+                Status = AssetStatus.Active,
+                CreatedAt = now,
+                UpdatedAt = now,
+            });
+            db.GenerationJobs.Add(new GenerationJob
+            {
+                Id = Guid.NewGuid(),
+                WorkspaceId = ownerAuth.PersonalWorkspace.Id,
+                ProjectId = foreignProject.Id,
+                CreatedByUserId = ownerAuth.User.Id,
+                JobType = GenerationJobTypes.SystemTest,
+                Status = GenerationJobStatus.Succeeded,
+                Title = "Cross workspace generation marker",
+                InputJson = "{\"brief\":\"Cross workspace generation marker\"}",
+                CreatedAt = now,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var response = await owner.GetFromJsonAsync<GlobalSearchResponseDto>("/api/search?q=Cross%20workspace%20marker&limit=12");
+        Assert.NotNull(response);
+        var results = response!.Groups.SelectMany(group => group.Items).ToArray();
+        Assert.Equal(4, results.Length);
+        Assert.All(results, result =>
+        {
+            Assert.Null(result.ProjectId);
+            Assert.Null(result.ProjectName);
+        });
+        Assert.Contains(results, result => result.Type == GlobalSearchResultTypes.Conversation);
+        Assert.Contains(results, result => result.Type == GlobalSearchResultTypes.Asset);
+        Assert.Contains(results, result => result.Type == GlobalSearchResultTypes.File);
+        Assert.Contains(results, result => result.Type == GlobalSearchResultTypes.Generation);
+    }
+
+    [Fact]
     public async Task Search_requires_authentication_and_empty_query_returns_empty_groups()
     {
         using var anonymous = factory.CreateClient();
