@@ -106,7 +106,7 @@ export function ProjectsView() {
         <h1>{t("projects.title")}</h1>
         <p>{t("projects.subtitle")}</p>
       </div>
-      <button className="primary-button" onClick={() => openForm()}><Plus size={16} /> {t("projects.newProject")}</button>
+      <button className="primary-button" onClick={() => setFormOpen(true)}><Plus size={16} /> {t("projects.newProject")}</button>
     </div>
 
     <div className="workspace-banner projects-workspace-banner">
@@ -121,8 +121,7 @@ export function ProjectsView() {
     </div>
 
     {error && <div className="inline-error" role="alert"><span>{error}</span> <button type="button" className="text-button" onClick={() => void load()}>{t("error.retry")}</button></div>}
-    {loading ? <div className="loading-state"><span className="loading-spinner" /></div> : projects.length === 0 ? <div className="projects-empty"><span className="empty-icon"><FolderOpen size={24} /></span><h2>{status === "Active" ? t("projects.emptyTitle") : t("projects.emptyArchivedTitle")}</h2><p>{status === "Active" ? t("projects.emptyDescription") : t("projects.emptyArchivedDescription")}</p>{status === "Active" && <button className="primary-button" onClick={() => openForm()}><Plus size={16} /> {t("projects.newProject")}</button>}</div> : <div className="project-list project-list-premium">{projects.map((project) => <article className={`project-card project-card-premium ${projectAccent(project.type)}`} key={project.id}>
-    {loading ? <div className="loading-state"><span className="loading-spinner" /></div> : projects.length === 0 ? <div className="projects-empty"><span className="empty-icon"><FolderOpen size={24} /></span><h2>{status === "Active" ? t("projects.emptyTitle") : t("projects.emptyArchivedTitle")}</h2><p>{status === "Active" ? t("projects.emptyDescription") : t("projects.emptyArchivedDescription")}</p>{status === "Active" && <button className="primary-button" onClick={() => openForm()}><Plus size={16} /> {t("projects.newProject")}</button></div> : <div className="project-list project-list-premium">{projects.map((project) => <article className={`project-card project-card-premium ${projectAccent(project.type)}`} key={project.id}>
+    {loading ? <div className="loading-state"><span className="loading-spinner" /></div> : projects.length === 0 ? <div className="projects-empty"><span className="empty-icon"><FolderOpen size={24} /></span><h2>{status === "Active" ? t("projects.emptyTitle") : t("projects.emptyArchivedTitle")}</h2><p>{status === "Active" ? t("projects.emptyDescription") : t("projects.emptyArchivedDescription")}</p>{status === "Active" && <button className="primary-button" onClick={() => setFormOpen(true)}><Plus size={16} /> {t("projects.newProject")}</button>}</div> : <div className="project-list project-list-premium">{projects.map((project) => <article className={`project-card project-card-premium ${projectAccent(project.type)}`} key={project.id}>
       <Link href={`/projects/${project.id}`} className="project-card-main">
         <span className="project-card-icon"><FolderOpen size={19} /></span>
         <span className="project-card-copy"><span className="project-card-kicker">{t(typeKey(project.type))}</span><strong>{project.name}</strong><small>{project.description || t("projects.noDescription")}</small></span>

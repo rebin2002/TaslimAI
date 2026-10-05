@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDownUp, Filter, Grid2X2, LayoutList, LibraryBig, Plus, Search, SlidersHorizontal, X } from "lucide-react";
 import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
@@ -45,8 +45,10 @@ export function AssetsView({ initialProjectId, initialSearch, initialStatus }: {
   const [editProjectId, setEditProjectId] = useState("");
   const [saving, setSaving] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
-  const filterDialogRef = useDialogAccessibility(filtersOpen, () => setFiltersOpen(false));
-  const editDialogRef = useDialogAccessibility<HTMLFormElement>(Boolean(editing), () => setEditing(null));
+  const filterOpenerRef = useRef<HTMLElement | null>(null);
+  const editOpenerRef = useRef<HTMLElement | null>(null);
+  const filterDialogRef = useDialogAccessibility(filtersOpen, () => setFiltersOpen(false), filterOpenerRef);
+  const editDialogRef = useDialogAccessibility<HTMLFormElement>(Boolean(editing), () => setEditing(null), editOpenerRef);
 
   const load = useCallback(async () => {
     if (!workspace) return;
@@ -75,7 +77,12 @@ export function AssetsView({ initialProjectId, initialSearch, initialStatus }: {
   }), [selected, t]);
 
   function setFilter<T>(setter: (value: T) => void, value: T) { setter(value); setPage(1); }
+  function openFilters() {
+    filterOpenerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setFiltersOpen(true);
+  }
   function startEdit(asset: Asset) {
+    editOpenerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setEditing(asset); setEditName(asset.name); setEditDescription(asset.description ?? ""); setEditProjectId(asset.projectId ?? ""); setError("");
   }
   function clearFilters() { setSearch(""); setCategory(""); setProjectId(""); setSort("recent"); setPage(1); }
@@ -107,7 +114,7 @@ export function AssetsView({ initialProjectId, initialSearch, initialStatus }: {
     </section>
 
     <section className="assets-toolbar" aria-label={t("assets.filters")}>
-      <div className="assets-toolbar-top"><label className="asset-search"><Search size={16} /><input value={search} onChange={(event) => { setSearch(event.target.value); setPage(1); }} placeholder={t("assets.searchPlaceholder")} /><kbd>/</kbd></label><button type="button" className="mobile-filter-trigger" onClick={() => setFiltersOpen(true)}><Filter size={15} />{t("assets.filters")}{activeFilters > 0 && <b>{activeFilters}</b>}</button></div>
+      <div className="assets-toolbar-top"><label className="asset-search"><Search size={16} /><input value={search} onChange={(event) => { setSearch(event.target.value); setPage(1); }} placeholder={t("assets.searchPlaceholder")} /><kbd>/</kbd></label><button type="button" className="mobile-filter-trigger" onClick={openFilters}><Filter size={15} />{t("assets.filters")}{activeFilters > 0 && <b>{activeFilters}</b>}</button></div>
       <div className="asset-category-scroll" role="tablist" aria-label={t("assets.typeFilter")}>{assetCategories.map((item) => <button key={item.labelKey} type="button" role="tab" aria-selected={category === item.value} className={category === item.value ? "is-active" : ""} onClick={() => setFilter(setCategory, item.value)}>{t(item.labelKey)}</button>)}</div>
       <div className="assets-secondary-filters"><label className="assets-select"><ArrowDownUp size={14} /><select value={sort} onChange={(event) => setFilter(setSort, event.target.value as AssetSort)} aria-label={t("assets.sortLabel")}>{sortOptions.map((item) => <option key={item} value={item}>{t(`assets.sort.${item}`)}</option>)}</select></label><select value={projectId} onChange={(event) => setFilter(setProjectId, event.target.value)} aria-label={t("assets.projectFilter")}><option value="">{t("assets.allProjects")}</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select><div className="asset-view-toggle" role="group" aria-label={t("assets.viewLabel")}><button type="button" className={view === "grid" ? "is-active" : ""} onClick={() => setView("grid")} aria-label={t("assets.gridView")}><Grid2X2 size={16} /></button><button type="button" className={view === "list" ? "is-active" : ""} onClick={() => setView("list")} aria-label={t("assets.listView")}><LayoutList size={17} /></button></div></div>
       <div className="asset-status-tabs"><button type="button" className={status === "Active" ? "is-active" : ""} onClick={() => setFilter(setStatus, "Active")}>{t("assets.active")}</button><button type="button" className={status === "Archived" ? "is-active" : ""} onClick={() => setFilter(setStatus, "Archived")}>{t("assets.archived")}</button></div>
