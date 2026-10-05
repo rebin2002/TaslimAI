@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ArrowLeft,
   Check,
@@ -19,14 +19,18 @@ import {
 } from "lucide-react";
 import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
-import { api, type Asset, type GenerationJob, type Project, type StoredFile } from "@/lib/api";
+import { ApiError, api, type Asset, type GenerationJob, type Project, type StoredFile } from "@/lib/api";
 import {
   canCancelDocumentJob,
+  clearDocumentActiveJobId,
   displayDocumentProgress,
   documentPresentationState,
+  isDocumentJob,
   isDocumentSourceReady,
   nextDocumentPollDelay,
   parseDocumentJobResult,
+  persistDocumentActiveJobId,
+  readDocumentActiveJobId,
   shouldPollDocumentJob,
 } from "@/lib/documentStudioState";
 
@@ -71,6 +75,7 @@ export function DocumentStudioView() {
   const [error, setError] = useState("");
   const [downloadError, setDownloadError] = useState("");
   const [copyState, setCopyState] = useState<"idle" | "copied" | "error">("idle");
+  const restoreJobId = useRef<string | null>(null);
 
   const loadSources = useCallback(async () => {
     if (!workspace) return;
@@ -96,6 +101,29 @@ export function DocumentStudioView() {
   // Synchronize source documents, projects, and recent document assets when the authenticated workspace changes.
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void loadSources(); }, [loadSources]);
+
+  useEffect(() => {
+    if (!workspace || current) return;
+    const storedJobId = readDocumentActiveJobId(workspace.id);
+    if (!storedJobId) return;
+    restoreJobId.current = storedJobId;
+    let active = true;
+    void api.getGenerationJob(storedJobId).then((job) => {
+      if (!active || restoreJobId.current !== storedJobId) return;
+      if (job.workspaceId !== workspace.id || !isDocumentJob(job)) {
+        clearDocumentActiveJobId(workspace.id);
+        return;
+      }
+      setCurrent(job);
+      setPollRetry(0);
+    }).catch((cause) => {
+      if (!active || restoreJobId.current !== storedJobId) return;
+      if (cause instanceof ApiError && (cause.status === 403 || cause.status === 404)) {
+        clearDocumentActiveJobId(workspace.id);
+      }
+    });
+    return () => { active = false; };
+  }, [workspace, current]);
 
   useEffect(() => {
     if (!current || !shouldPollDocumentJob(current)) return;
@@ -135,8 +163,12 @@ export function DocumentStudioView() {
     setError("");
     setDownloadError("");
     setCopyState("idle");
+    restoreJobId.current = null;
+    clearDocumentActiveJobId(workspace.id);
     try {
-      setCurrent(await api.createDocumentGenerationJob({ workspaceId: workspace.id, projectId: projectId || null, title: title.trim() || null, description: prompt.trim(), documentType, length, audience: audience.trim() || null, additionalInstructions: additionalInstructions.trim() || null, attachmentIds: selected, language, tone, includeTableOfContents }));
+      const job = await api.createDocumentGenerationJob({ workspaceId: workspace.id, projectId: projectId || null, title: title.trim() || null, description: prompt.trim(), documentType, length, audience: audience.trim() || null, additionalInstructions: additionalInstructions.trim() || null, attachmentIds: selected, language, tone, includeTableOfContents });
+      persistDocumentActiveJobId(workspace.id, job.id);
+      setCurrent(job);
       setPollRetry(0);
     } catch {
       setError(t("document.createError"));
@@ -192,6 +224,8 @@ export function DocumentStudioView() {
   }
 
   function createAnother() {
+    restoreJobId.current = null;
+    if (workspace) clearDocumentActiveJobId(workspace.id);
     setCurrent(null);
     setError("");
     setDownloadError("");

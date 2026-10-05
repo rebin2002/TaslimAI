@@ -71,6 +71,8 @@ The CSRF cookie is `Secure` and `SameSite=None` in Production. The token is not 
 
 Authentication changes the antiforgery token’s user binding. Successful registration, login, and logout responses also expire the prior `taslim.csrf` cookie with `Cache-Control: no-store`; the web API client invalidates its cached token and fetches a fresh token after each transition. This keeps concurrent auth-transition responses from leaving a stale cookie/request-token pair available for a later mutation. If a state-changing request receives the safe `CSRF_VALIDATION_FAILED` response, the client refreshes once and retries the same request; it does not retry repeatedly or bypass validation.
 
+Identity security stamps are validated on every authenticated request. A password change or explicit security-stamp revocation therefore rejects every other application session immediately rather than waiting for Identity’s default validation interval; the active-user check also rejects deactivated accounts on the same request path.
+
 The API also validates state-changing authenticated `/api` requests, plus anonymous `/api/auth/login` and `/api/auth/register`, in middleware immediately after authentication and before authorization/MVC execution. This allows stale anonymous login tokens to receive a stable `CSRF_VALIDATION_FAILED` response instead of the generic MVC 400 body. The existing controller `[ValidateAntiForgeryToken]` attributes remain in place as defense in depth.
 
 Safe server diagnostics log only method, path, trace ID, authentication state, and exception type. Tokens, cookies, request bodies, passwords, and antiforgery exception messages are not logged or returned to the browser.

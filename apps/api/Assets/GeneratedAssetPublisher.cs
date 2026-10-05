@@ -73,8 +73,12 @@ public sealed class GeneratedAssetPublisher(
         if (storedFileId.HasValue && storedFile is null)
         {
             storedFile = await db.StoredFiles.AsNoTracking().FirstOrDefaultAsync(
-                file => file.Id == storedFileId && file.WorkspaceId == job.WorkspaceId && file.Status == StoredFileStatus.Ready,
-                cancellationToken) ?? throw new InvalidOperationException("Generated output file is not available in the job workspace.");
+                file => file.Id == storedFileId
+                    && file.WorkspaceId == job.WorkspaceId
+                    && file.Status == StoredFileStatus.Ready
+                    && file.ConversationId == null
+                    && (!file.ProjectId.HasValue || file.ProjectId == job.ProjectId),
+                cancellationToken) ?? throw new InvalidOperationException("Generated output file is not available in the job scope.");
         }
         if (output.Asset is not null && (storedFile is null || storedFile.Status != StoredFileStatus.Ready))
             throw new InvalidOperationException("Generated assets require a completed private stored file.");
