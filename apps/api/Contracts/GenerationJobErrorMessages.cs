@@ -1,0 +1,99 @@
+using Taslim.Api.Domain;
+
+namespace Taslim.Api.Contracts;
+
+/// <summary>
+/// Maps internal Generation Job failure codes to bounded, user-safe messages.
+/// Provider payloads, exception text, and persisted diagnostic strings never cross the public DTO boundary.
+/// </summary>
+public static class GenerationJobErrorMessages
+{
+    public static string? For(string? code)
+    {
+        if (string.IsNullOrWhiteSpace(code)) return null;
+
+        return code switch
+        {
+            GenerationJobErrorCodes.TypeNotSupported => "This job type is not available.",
+            GenerationJobErrorCodes.Cancelled => "The job was cancelled.",
+            GenerationJobErrorCodes.Poisoned => "The generation could not be recovered safely. Please try again.",
+            GenerationJobErrorCodes.NoBillableAsset => "The generation completed without a publishable asset. Please try again.",
+            GenerationJobErrorCodes.ImageProviderUnavailable => "Image generation is temporarily unavailable. Please try again later.",
+            GenerationJobErrorCodes.ImageRequestInvalid => "Please check the image request and try again.",
+            GenerationJobErrorCodes.ImageSafetyRefusal => "This request could not be completed by the image safety system. Try a different description.",
+            GenerationJobErrorCodes.ImageOutputInvalid => "The image result was invalid. Please try again.",
+            GenerationJobErrorCodes.ImageOutputStorageFailed => "The image was generated but could not be saved. Please try again.",
+            GenerationJobErrorCodes.ImageCancelled => "The image generation was cancelled.",
+            GenerationJobErrorCodes.DocumentProviderUnavailable or GenerationJobErrorCodes.DocumentProviderConfiguration or GenerationJobErrorCodes.DocumentProviderUnsupportedRequest or GenerationJobErrorCodes.DocumentProviderRateLimited or GenerationJobErrorCodes.DocumentProviderTransientFailure => "Document generation is temporarily unavailable. Please try again later.",
+            GenerationJobErrorCodes.DocumentContextTooLarge => "The selected source material is too large. Choose fewer or shorter documents.",
+            GenerationJobErrorCodes.DocumentOutputInvalid => "The generated document was invalid. Please try again.",
+            GenerationJobErrorCodes.DocumentStorageFailed => "The document was generated but could not be saved. Please try again.",
+            GenerationJobErrorCodes.DocumentRenderFailed => "The document could not be rendered. Please try again.",
+            GenerationJobErrorCodes.DocumentCancelled => "The document generation was cancelled.",
+            GenerationJobErrorCodes.PresentationProviderUnavailable or GenerationJobErrorCodes.PresentationProviderConfiguration or GenerationJobErrorCodes.PresentationProviderUnsupportedRequest or GenerationJobErrorCodes.PresentationProviderRateLimited or GenerationJobErrorCodes.PresentationProviderTransientFailure => "Presentation generation is temporarily unavailable. Please try again later.",
+            GenerationJobErrorCodes.PresentationContextTooLarge => "The selected source material is too large. Choose fewer or shorter documents.",
+            GenerationJobErrorCodes.PresentationOutputInvalid => "The generated presentation was invalid. Please try again.",
+            GenerationJobErrorCodes.PresentationStorageFailed => "The presentation was generated but could not be saved. Please try again.",
+            GenerationJobErrorCodes.PresentationRenderFailed => "The presentation could not be rendered. Please try again.",
+            GenerationJobErrorCodes.PresentationCancelled => "The presentation generation was cancelled.",
+            GenerationJobErrorCodes.ResearchSearchUnavailable => "Web research is temporarily unavailable. Please try again later.",
+            GenerationJobErrorCodes.ResearchSearchFailed => "Web research could not be completed. Please try again.",
+            GenerationJobErrorCodes.ResearchProviderUnavailable => "Research generation is temporarily unavailable. Please try again later.",
+            GenerationJobErrorCodes.ResearchContextTooLarge => "The selected research context is too large. Choose fewer or shorter sources.",
+            GenerationJobErrorCodes.ResearchOutputInvalid => "The research report was invalid. Please try again.",
+            GenerationJobErrorCodes.ResearchCitationValidationFailed => "The research citations were invalid. Please try again.",
+            GenerationJobErrorCodes.ResearchStorageFailed => "The research report was generated but could not be saved. Please try again.",
+            GenerationJobErrorCodes.ResearchRenderFailed => "The research report could not be rendered. Please try again.",
+            GenerationJobErrorCodes.ResearchCancelled => "The research generation was cancelled.",
+            GenerationJobErrorCodes.SocialProviderUnavailable or GenerationJobErrorCodes.SocialProviderConfiguration or GenerationJobErrorCodes.SocialProviderUnsupportedRequest or GenerationJobErrorCodes.SocialProviderRateLimited or GenerationJobErrorCodes.SocialProviderTransientFailure => "Social content generation is temporarily unavailable. Please try again later.",
+            GenerationJobErrorCodes.SocialContextTooLarge => "The selected social context is too large. Choose fewer or shorter sources.",
+            GenerationJobErrorCodes.SocialOutputInvalid => "The generated social content was invalid. Please try again.",
+            GenerationJobErrorCodes.SocialStorageFailed => "The social content was generated but could not be saved. Please try again.",
+            GenerationJobErrorCodes.SocialCancelled => "The social content generation was cancelled.",
+            GenerationJobErrorCodes.MovieProviderUnavailable => "Movie generation is not available yet because no video provider is configured. Your movie plan was saved.",
+            GenerationJobErrorCodes.MovieProviderTimeout => "Movie generation took too long to finish. Your movie plan was saved.",
+            GenerationJobErrorCodes.MovieProviderUnsupportedRequest => "This movie request is not supported by the configured video provider. Your movie plan was saved.",
+            GenerationJobErrorCodes.MovieOutputInvalid => "The generated movie clip was invalid. Your movie plan was saved.",
+            GenerationJobErrorCodes.MovieOutputStorageFailed => "The movie clip was generated but could not be saved. Your movie plan was saved.",
+            GenerationJobErrorCodes.MovieCancelled => "The movie generation was cancelled.",
+            GenerationJobErrorCodes.MovieGenerationFailed => "The movie could not be generated. Your movie plan was saved.",
+            GenerationJobErrorCodes.MovieSoundProviderUnavailable => "Movie sound generation is temporarily unavailable. Your sound cue was saved.",
+            GenerationJobErrorCodes.MovieSoundOutputInvalid => "The generated sound was invalid. Your sound cue was saved.",
+            GenerationJobErrorCodes.MovieSoundOutputStorageFailed => "The sound was generated but could not be saved. Your sound cue was saved.",
+            GenerationJobErrorCodes.MovieSoundCancelled => "The movie sound generation was cancelled.",
+            GenerationJobErrorCodes.MovieSoundGenerationFailed => "The movie sound could not be generated. Your sound cue was saved.",
+            GenerationJobErrorCodes.MusicProviderUnavailable or GenerationJobErrorCodes.MusicProviderTimeout => "Music generation is temporarily unavailable. Please try again later.",
+            GenerationJobErrorCodes.MusicProviderRateLimited => "Music generation is temporarily busy. Please try again later.",
+            GenerationJobErrorCodes.MusicPromptRejected => "This music request could not be completed. Try a different description.",
+            GenerationJobErrorCodes.MusicProviderInvalidRequest => "Please check the music request and try again.",
+            GenerationJobErrorCodes.MusicOutputInvalid => "The generated music was invalid. Please try again.",
+            GenerationJobErrorCodes.MusicOutputStorageFailed => "The music was generated but could not be saved. Please try again.",
+            GenerationJobErrorCodes.MusicCancelled => "The music generation was cancelled.",
+            GenerationJobErrorCodes.VoiceProviderUnavailable or GenerationJobErrorCodes.VoiceProviderAuthentication => "Voice generation is temporarily unavailable. Please try again later.",
+            GenerationJobErrorCodes.VoiceProviderRateLimited => "Voice generation is busy right now. Please try again later.",
+            GenerationJobErrorCodes.VoiceProviderTimeout => "Voice generation took too long to complete. Please try again.",
+            GenerationJobErrorCodes.VoiceProviderInvalidInput => "Please check the voice request and try again.",
+            GenerationJobErrorCodes.VoiceProviderUnsupportedRequest => "This voice request is not supported. Please use shorter text or different settings.",
+            GenerationJobErrorCodes.VoiceProviderFailed => "Voice generation could not be completed. Please try again.",
+            GenerationJobErrorCodes.VoiceLanguageUnsupported => "This language is not currently supported for voice generation.",
+            GenerationJobErrorCodes.VoiceOutputInvalid => "The generated audio was invalid. Please try again.",
+            GenerationJobErrorCodes.VoiceOutputStorageFailed => "The audio was generated but could not be saved. Please try again.",
+            GenerationJobErrorCodes.VoiceRequestInvalid => "Please check the voice request and try again.",
+            GenerationJobErrorCodes.VoiceCancelled => "The voice generation was cancelled.",
+            GenerationJobErrorCodes.MovieDialogueVoiceProviderUnavailable => "Dialogue voice generation is not available yet. Your movie dialogue plan was saved.",
+            GenerationJobErrorCodes.MovieDialogueVoiceRequestInvalid => "Please check the dialogue speaker, language, text, and timing.",
+            GenerationJobErrorCodes.MovieDialogueVoiceOutputInvalid => "The dialogue voice result was invalid. Please try again.",
+            GenerationJobErrorCodes.MovieDialogueVoiceGenerationFailed => "The dialogue voice take could not be generated. Your movie dialogue plan was saved.",
+            GenerationJobErrorCodes.MovieDialogueVoiceCancelled => "The dialogue voice take was cancelled.",
+            _ when code.StartsWith("IMAGE_", StringComparison.Ordinal) => "The image could not be generated. Please try again.",
+            _ when code.StartsWith("DOCUMENT_", StringComparison.Ordinal) => "The document could not be generated. Please try again.",
+            _ when code.StartsWith("PRESENTATION_", StringComparison.Ordinal) => "The presentation could not be generated. Please try again.",
+            _ when code.StartsWith("RESEARCH_", StringComparison.Ordinal) => "The research report could not be generated. Please try again.",
+            _ when code.StartsWith("SOCIAL_", StringComparison.Ordinal) => "The social content could not be generated. Please try again.",
+            _ when code.StartsWith("MOVIE_", StringComparison.Ordinal) => "The movie could not be generated. Your movie plan was saved.",
+            _ when code.StartsWith("MUSIC_", StringComparison.Ordinal) => "The music could not be generated. Please try again.",
+            _ when code.StartsWith("VOICE_", StringComparison.Ordinal) => "The voice could not be generated. Please try again.",
+            _ => "The job could not be completed.",
+        };
+    }
+}

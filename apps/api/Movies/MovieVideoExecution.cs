@@ -190,7 +190,7 @@ public sealed class MovieVideoExecutionStore(TaslimDbContext db, IOptions<MovieV
             .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.Status, executionStatus).SetProperty(item => item.LastErrorCode, code).SetProperty(item => item.CompletedAt, now).SetProperty(item => item.UpdatedAt, now), cancellationToken);
         await db.MovieClips.Where(item => item.GenerationJobId == jobId && db.GenerationJobs.Any(job => job.Id == jobId && job.Status == GenerationJobStatus.Running && job.ConcurrencyToken == concurrencyToken))
             .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.Status, MovieClipStatuses.Failed).SetProperty(item => item.UpdatedAt, now), cancellationToken);
-        await db.MovieTakes.Where(item => item.GenerationJobId == jobId).ExecuteUpdateAsync(setters => setters
+        await db.MovieTakes.Where(item => item.GenerationJobId == jobId && db.GenerationJobs.Any(job => job.Id == jobId && job.Status == GenerationJobStatus.Running && job.ConcurrencyToken == concurrencyToken)).ExecuteUpdateAsync(setters => setters
             .SetProperty(item => item.Status, MovieTakeStatuses.Failed)
             .SetProperty(item => item.StatusChangedAt, now)
             .SetProperty(item => item.UpdatedAt, now), cancellationToken);
@@ -203,7 +203,7 @@ public sealed class MovieVideoExecutionStore(TaslimDbContext db, IOptions<MovieV
             .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.Status, MovieVideoExecutionStatuses.Cancelled).SetProperty(item => item.CompletedAt, now).SetProperty(item => item.UpdatedAt, now), cancellationToken);
         await db.MovieClips.Where(item => item.GenerationJobId == jobId && db.GenerationJobs.Any(job => job.Id == jobId && job.Status == GenerationJobStatus.Running && job.ConcurrencyToken == concurrencyToken))
             .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.Status, MovieClipStatuses.Cancelled).SetProperty(item => item.UpdatedAt, now), cancellationToken);
-        await db.MovieTakes.Where(item => item.GenerationJobId == jobId).ExecuteUpdateAsync(setters => setters
+        await db.MovieTakes.Where(item => item.GenerationJobId == jobId && db.GenerationJobs.Any(job => job.Id == jobId && job.Status == GenerationJobStatus.Running && job.ConcurrencyToken == concurrencyToken)).ExecuteUpdateAsync(setters => setters
             .SetProperty(item => item.Status, MovieTakeStatuses.Cancelled)
             .SetProperty(item => item.StatusChangedAt, now)
             .SetProperty(item => item.UpdatedAt, now), cancellationToken);
@@ -218,12 +218,12 @@ public sealed class MovieVideoExecutionStore(TaslimDbContext db, IOptions<MovieV
             .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.Status, MovieClipStatuses.Ready).SetProperty(item => item.AssetId, assetId).SetProperty(item => item.StoredFileId, storedFileId).SetProperty(item => item.DurationSeconds, item => durationSeconds ?? item.DurationSeconds).SetProperty(item => item.MetadataJson, metadataJson).SetProperty(item => item.UpdatedAt, now), cancellationToken);
         if (assetId.HasValue)
         {
-            await db.MovieTakes.Where(item => item.GenerationJobId == jobId).ExecuteUpdateAsync(setters => setters
+            await db.MovieTakes.Where(item => item.GenerationJobId == jobId && db.GenerationJobs.Any(job => job.Id == jobId && job.Status == GenerationJobStatus.Succeeded && job.ConcurrencyToken == concurrencyToken)).ExecuteUpdateAsync(setters => setters
                 .SetProperty(item => item.Status, MovieTakeStatuses.Succeeded)
                 .SetProperty(item => item.StatusChangedAt, now)
                 .SetProperty(item => item.AssetId, assetId)
                 .SetProperty(item => item.UpdatedAt, now), cancellationToken);
-            await db.MovieProductionVersions.Where(item => item.GenerationJobId == jobId).ExecuteUpdateAsync(setters => setters.SetProperty(item => item.AssetId, assetId).SetProperty(item => item.UpdatedAt, now), cancellationToken);
+            await db.MovieProductionVersions.Where(item => item.GenerationJobId == jobId && db.GenerationJobs.Any(job => job.Id == jobId && job.Status == GenerationJobStatus.Succeeded && job.ConcurrencyToken == concurrencyToken)).ExecuteUpdateAsync(setters => setters.SetProperty(item => item.AssetId, assetId).SetProperty(item => item.UpdatedAt, now), cancellationToken);
         }
     }
 }

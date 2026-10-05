@@ -1,9 +1,38 @@
 import type { GenerationJob, ImageJobResult } from "./api";
 
 const terminalStatuses = new Set<GenerationJob["status"]>(["Succeeded", "Failed", "Cancelled"]);
+const activeJobStoragePrefix = "taslim:image-generation:";
+
+export function imageActiveJobStorageKey(workspaceId: string) {
+  return `${activeJobStoragePrefix}${workspaceId}`;
+}
+
+export function readImageActiveJobId(workspaceId: string) {
+  if (typeof window === "undefined") return null;
+  try {
+    const jobId = window.sessionStorage.getItem(imageActiveJobStorageKey(workspaceId));
+    return jobId?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+export function persistImageActiveJobId(workspaceId: string, jobId: string) {
+  if (typeof window === "undefined" || !jobId.trim()) return;
+  try { window.sessionStorage.setItem(imageActiveJobStorageKey(workspaceId), jobId); } catch { /* Storage may be unavailable. */ }
+}
+
+export function clearImageActiveJobId(workspaceId: string) {
+  if (typeof window === "undefined") return;
+  try { window.sessionStorage.removeItem(imageActiveJobStorageKey(workspaceId)); } catch { /* Storage may be unavailable. */ }
+}
 
 export function isImageJob(job: GenerationJob | null): boolean {
   return job?.jobType === "image.generate";
+}
+
+export function isRestorableImageJob(job: GenerationJob | null, workspaceId: string): boolean {
+  return !!job && job.workspaceId === workspaceId && isImageJob(job);
 }
 
 export function isImageTerminal(job: GenerationJob | null) {

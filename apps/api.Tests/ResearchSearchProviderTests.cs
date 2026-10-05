@@ -99,6 +99,33 @@ public sealed class ResearchSearchProviderTests
     }
 
     [Fact]
+    public async Task Response_body_cancellation_is_classified_as_a_search_timeout()
+    {
+        var handler = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK) { Content = new CancellationContent() });
+        using var client = new HttpClient(handler);
+        var provider = CreateProvider(client);
+
+        await Assert.ThrowsAsync<ResearchSearchTimeoutException>(() => provider.SearchAsync(ProductionRequest(), new ResearchGenerationOptions { SearchModel = "gpt-5.5" }));
+    }
+
+    [Fact]
+    public async Task Only_provider_reported_search_sources_become_citations()
+    {
+        var responseJson = ValidResponseJson().Replace(
+            "\"url\": \"https://example.gov/iraq-appliances\", \"title\": \"Iraq appliance market source\"",
+            "\"url\": \"https://untrusted.example/claims\", \"title\": \"Iraq appliance market source\"",
+            StringComparison.Ordinal);
+        var handler = new StubHandler(_ => SuccessResponse(responseJson));
+        using var client = new HttpClient(handler);
+        var provider = CreateProvider(client);
+
+        var result = await provider.SearchAsync(ProductionRequest(), new ResearchGenerationOptions { SearchModel = "gpt-5.5" });
+
+        Assert.Equal(2, result.Sources.Count);
+        Assert.DoesNotContain(result.Sources.Select(source => source.Url), url => string.Equals(url, "https://untrusted.example/claims", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task Malformed_output_and_no_sources_are_rejected_without_fabricating_citations()
     {
         var malformedHandler = new StubHandler(_ => SuccessResponse("not-json"));
@@ -110,6 +137,23 @@ public sealed class ResearchSearchProviderTests
         using var noSourcesClient = new HttpClient(noSourcesHandler);
         var noSourcesProvider = CreateProvider(noSourcesClient);
         await Assert.ThrowsAsync<ResearchSearchFailedException>(() => noSourcesProvider.SearchAsync(ProductionRequest(), new ResearchGenerationOptions { SearchModel = "gpt-5.5" }));
+
+        var annotationOnlyHandler = new StubHandler(_ => SuccessResponse("""
+        {
+          "status": "completed",
+          "output": [{
+            "type": "message",
+            "content": [{
+              "type": "output_text",
+              "text": "A claim with an unverified citation.",
+              "annotations": [{ "type": "url_citation", "url": "https://untrusted.example/claims", "title": "Unverified" }]
+            }]
+          }]
+        }
+        """));
+        using var annotationOnlyClient = new HttpClient(annotationOnlyHandler);
+        var annotationOnlyProvider = CreateProvider(annotationOnlyClient);
+        await Assert.ThrowsAsync<ResearchSearchFailedException>(() => annotationOnlyProvider.SearchAsync(ProductionRequest(), new ResearchGenerationOptions { SearchModel = "gpt-5.5" }));
 
         var invalidUrlHandler = new StubHandler(_ => SuccessResponse(ValidResponseJson("ftp://invalid.example/source").Replace("https://example.org/iraq-market", "ftp://invalid.example/second", StringComparison.Ordinal)));
         using var invalidUrlClient = new HttpClient(invalidUrlHandler);
@@ -179,6 +223,17 @@ public sealed class ResearchSearchProviderTests
         {
             RequestBody = request.Content is null ? null : await request.Content.ReadAsStringAsync(cancellationToken);
             return factory(request);
+        }
+    }
+
+    private sealed class CancellationContent : HttpContent
+    {
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context) => throw new OperationCanceledException();
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = 0;
+            return true;
         }
     }
 }
