@@ -27,6 +27,10 @@ public sealed class MusicGenerationController(
     {
         try
         {
+            if (!options.Value.Enabled
+                || string.IsNullOrWhiteSpace(options.Value.ProviderKey)
+                || string.Equals(options.Value.ProviderKey, "unconfigured", StringComparison.OrdinalIgnoreCase))
+                return ApiResults.Error(this, StatusCodes.Status503ServiceUnavailable, "MUSIC_STUDIO_UNAVAILABLE", "Music generation is not available right now.");
             var input = MusicGenerationContractMapper.ToInput(request);
             MusicGenerationRequestValidator.Validate(input, options.Value);
             var preflight = await costControl.CheckPreflightAsync(request.WorkspaceId, UsageFeature.Music, null, cancellationToken);
