@@ -965,6 +965,9 @@ select.memory-control { appearance: auto; cursor: pointer; }
 .security-summary-card { display: flex; flex-direction: column; gap: 13px; }
 .security-point { display: flex; align-items: flex-start; gap: 8px; color: #65798a; font-size: 11px; line-height: 1.45; }
 .security-point svg { flex: 0 0 auto; color: var(--teal); margin-top: 1px; }
+.security-revoke { display: flex; flex-direction: column; gap: 7px; margin-top: 2px; padding-top: 13px; border-top: 1px solid #e6edf2; }
+.security-revoke strong { color: var(--navy-900); font-size: 11px; }
+.security-revoke p { margin: 0; color: #738494; font-size: 11px; line-height: 1.45; }
 .security-logout { align-self: flex-start; margin-top: 7px; }
 .account-context-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 15px; }
 .context-card { display: flex; flex-direction: column; min-height: 236px; }
@@ -2889,3 +2892,8 @@ body { background: var(--canvas); }
 .movie-edit-footnote { display: flex; align-items: center; gap: 7px; margin: 0 2px; color: #6e8b9d; font-size: 9px; line-height: 1.45; }
 .movie-edit-footnote svg { flex: 0 0 auto; color: var(--movie-teal); }
 @media (max-width: 720px) { .movie-edit-toolbar { align-items: stretch; flex-direction: column; }.movie-edit-validation { align-items: flex-start; flex-direction: column; }.movie-edit-validation > span { align-self: flex-end; }.movie-edit-inspector { grid-template-columns: 1fr; }.movie-edit-status { align-items: flex-start; padding: 0; text-align: start; }.movie-edit-blockers, .movie-edit-clear { grid-column: auto; } }
+
+/* Shot Designer keeps its control chrome and saved-shot sequence readable in RTL locales. */
+[dir="rtl"] .movie-shot-title, [dir="rtl"] .movie-shot-list-item { flex-direction: row-reverse; }
+[dir="rtl"] .movie-shot-designer-heading, [dir="rtl"] .movie-shot-intent-heading, [dir="rtl"] .movie-shot-advanced-heading, [dir="rtl"] .movie-shot-designer-footer, [dir="rtl"] .movie-capability-heading { flex-direction: row-reverse; }
+@media (max-width: 520px) { [dir="rtl"] .movie-shot-designer-heading, [dir="rtl"] .movie-shot-advanced-heading, [dir="rtl"] .movie-shot-designer-footer, [dir="rtl"] .movie-capability-heading { flex-direction: column; } }

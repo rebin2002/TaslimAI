@@ -319,7 +319,7 @@ public sealed class AdminOperationsTests : IClassFixture<TaslimApiFactory>
         await AddAdminRole(auth.User.Email);
         var jobId = Guid.NewGuid();
         var now = DateTime.UtcNow;
-        const string requestId = "admin-recovery-replay-20261005-0001";
+        const string idempotencyKey = "admin-recovery-replay-20261005-0001";
 
         using (var scope = factory.Services.CreateScope())
         {
@@ -339,7 +339,7 @@ public sealed class AdminOperationsTests : IClassFixture<TaslimApiFactory>
             HttpMethod.Post,
             $"/api/admin/operations/jobs/{jobId}/recover",
             new { reason = "Recover the expired movie worker lease after a response timeout." },
-            requestId);
+            idempotencyKey);
         Assert.Equal(HttpStatusCode.OK, firstResponse.StatusCode);
         var first = await firstResponse.Content.ReadFromJsonAsync<AdminJobRecoveryResult>();
         Assert.NotNull(first);
@@ -349,7 +349,7 @@ public sealed class AdminOperationsTests : IClassFixture<TaslimApiFactory>
             HttpMethod.Post,
             $"/api/admin/operations/jobs/{jobId}/recover",
             new { reason = "The client is retrying the same recovery command." },
-            requestId);
+            idempotencyKey);
         Assert.Equal(HttpStatusCode.OK, replayResponse.StatusCode);
         var replay = await replayResponse.Content.ReadFromJsonAsync<AdminJobRecoveryResult>();
         Assert.NotNull(replay);
@@ -391,12 +391,12 @@ public sealed class AdminOperationsTests : IClassFixture<TaslimApiFactory>
         Assert.True((await userManager.AddToRoleAsync(user!, AdminPolicies.Role)).Succeeded);
     }
 
-    private static async Task<HttpResponseMessage> SendWithCsrf(HttpClient client, HttpMethod method, string path, object? payload, string? requestId = null)
+    private static async Task<HttpResponseMessage> SendWithCsrf(HttpClient client, HttpMethod method, string path, object? payload, string? idempotencyKey = null)
     {
         var csrf = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
         using var request = new HttpRequestMessage(method, path);
         request.Headers.Add("X-CSRF-TOKEN", csrf.GetProperty("token").GetString()!);
-        if (!string.IsNullOrWhiteSpace(requestId)) request.Headers.Add("X-Request-ID", requestId);
+        if (!string.IsNullOrWhiteSpace(idempotencyKey)) request.Headers.Add("Idempotency-Key", idempotencyKey);
         if (payload is not null) request.Content = JsonContent.Create(payload);
         return await client.SendAsync(request);
     }
