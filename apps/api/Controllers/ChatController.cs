@@ -204,10 +204,10 @@ public sealed class ChatController(
             return;
         }
 
-        await StreamRegenerationAsync(conversation, sourceUser, assistant.Id, request.RequestId.Trim(), cancellationToken);
+        await StreamRegenerationAsync(conversation, sourceUser, request.RequestId.Trim(), cancellationToken);
     }
 
-    private async Task StreamRegenerationAsync(Conversation conversation, ChatMessage sourceUser, Guid supersededAssistantId, string requestId, CancellationToken cancellationToken)
+    private async Task StreamRegenerationAsync(Conversation conversation, ChatMessage sourceUser, string requestId, CancellationToken cancellationToken)
     {
         ChatMessage? assistant = null;
         UsageTransaction? usageTransaction = null;
@@ -260,7 +260,7 @@ public sealed class ChatController(
             usageTransaction = await usageLedger.GetOrCreatePendingAsync(conversation.WorkspaceId, GetUserId(), conversation.ProjectId, conversation.Id, requestId, UsageFeature.Chat, cancellationToken);
             await WriteEventAsync("message.started", new { conversation = ToDto(conversation), userMessage = ToMessageDto(sourceUser), assistantMessage = ToMessageDto(assistant) }, cancellationToken);
 
-            var context = await BuildContextAsync(conversation, sourceUser.Id, cancellationToken, supersededAssistantId);
+            var context = await BuildContextAsync(conversation, sourceUser.Id, cancellationToken, sourceUser.Sequence);
             var content = new StringBuilder();
             AiUsageMetadata? usage = null;
             await foreach (var item in completion.StreamAsync(context, cancellationToken))
@@ -534,10 +534,15 @@ public sealed class ChatController(
         return PreparedChat.New(conversation, userMessage, assistantMessage);
     }
 
-    private async Task<AiChatRequest> BuildContextAsync(Conversation conversation, Guid currentMessageId, CancellationToken cancellationToken, Guid? excludedMessageId = null)
+    private async Task<AiChatRequest> BuildContextAsync(Conversation conversation, Guid currentMessageId, CancellationToken cancellationToken, long? excludedAssistantAfterSequence = null)
     {
         var history = await db.ChatMessages.AsNoTracking()
-            .Where(message => message.ConversationId == conversation.Id && (message.Role == ChatMessageRole.User || message.Role == ChatMessageRole.Assistant) && message.Status == ChatMessageStatus.Completed && (excludedMessageId == null || message.Id != excludedMessageId.Value))
+            .Where(message => message.ConversationId == conversation.Id
+                && (message.Role == ChatMessageRole.User || message.Role == ChatMessageRole.Assistant)
+                && message.Status == ChatMessageStatus.Completed
+                && (excludedAssistantAfterSequence == null
+                    || message.Role != ChatMessageRole.Assistant
+                    || message.Sequence <= excludedAssistantAfterSequence.Value))
             .OrderBy(message => message.Sequence)
             .ThenBy(message => message.CreatedAt)
             .ThenBy(message => message.Id)

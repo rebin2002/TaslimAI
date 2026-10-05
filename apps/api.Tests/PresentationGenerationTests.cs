@@ -82,6 +82,52 @@ public sealed class PresentationGenerationTests : IClassFixture<PresentationGene
         Assert.Equal(0m, usage.ChargedAmount);
     }
 
+    [Fact]
+    public async Task Presentation_generation_requires_idempotency_key()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client);
+        var response = await SendWithCsrf(client, new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            title = "Missing key",
+            description = "This request must be rejected without a retry-safe key.",
+            attachmentIds = Array.Empty<Guid>(),
+        }, null);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("IDEMPOTENCY_KEY_REQUIRED", body.GetProperty("error").GetProperty("code").GetString());
+    }
+
+    [Fact]
+    public async Task Repeated_presentation_request_with_same_idempotency_key_returns_one_job()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client);
+        var payload = new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            title = "Retry-safe presentation",
+            description = "The same request should reuse its durable generation job.",
+            presentationType = "business",
+            attachmentIds = Array.Empty<Guid>(),
+        };
+
+        var first = await SendWithCsrf(client, payload, "presentation-idempotency-001");
+        var second = await SendWithCsrf(client, payload, "presentation-idempotency-001");
+
+        Assert.Equal(HttpStatusCode.Accepted, first.StatusCode);
+        Assert.Equal(HttpStatusCode.Accepted, second.StatusCode);
+        var firstJob = (await first.Content.ReadFromJsonAsync<CreatePresentationGenerationResponse>())!.Job;
+        var secondJob = (await second.Content.ReadFromJsonAsync<CreatePresentationGenerationResponse>())!.Job;
+        Assert.Equal(firstJob.Id, secondJob.Id);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.Equal(1, await db.GenerationJobs.CountAsync(item => item.IdempotencyKey == "presentation-idempotency-001"));
+    }
+
     private static async Task<AuthResponse> Register(HttpClient client)
     {
         var csrf = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
@@ -93,11 +139,12 @@ public sealed class PresentationGenerationTests : IClassFixture<PresentationGene
         return (await response.Content.ReadFromJsonAsync<AuthResponse>())!;
     }
 
-    private static async Task<HttpResponseMessage> SendWithCsrf(HttpClient client, object payload)
+    private static async Task<HttpResponseMessage> SendWithCsrf(HttpClient client, object payload, string? idempotencyKey = "presentation-test-request")
     {
         var csrf = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
         using var request = new HttpRequestMessage(HttpMethod.Post, "/api/presentation-generation/jobs");
         request.Headers.Add("X-CSRF-TOKEN", csrf.GetProperty("token").GetString()!);
+        if (idempotencyKey is not null) request.Headers.Add("Idempotency-Key", idempotencyKey);
         request.Content = JsonContent.Create(payload);
         return await client.SendAsync(request);
     }
