@@ -35,7 +35,7 @@ export function AppHeader({ unreadCount }: Readonly<{ unreadCount: number }>) {
           <NotificationBell unreadCount={unreadCount} />
           <label className="language-select">
             <span className="sr-only">{t("navigation.language")}</span>
-            <select value={locale} onChange={(event) => setLocale(event.target.value as typeof locale)} aria-label={t("navigation.language")}>
+            <select value={locale} onChange={(event) => setLocale(event.target.value as typeof locale)} aria-label={t("navigation.language")} dir="ltr">
               {locales.map((item) => <option key={item} value={item}>{localeNames[item]}</option>)}
             </select>
             <ChevronDown size={14} aria-hidden="true" />

@@ -2002,7 +2002,9 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.Property(subscription => subscription.ProviderSubscriptionReference).HasMaxLength(200);
             entity.Property(subscription => subscription.CreatedAt).IsRequired();
             entity.Property(subscription => subscription.UpdatedAt).IsRequired();
-            entity.HasIndex(subscription => subscription.WorkspaceId);
+            entity.HasIndex(subscription => subscription.WorkspaceId)
+                .IsUnique()
+                .HasFilter("\"Status\" <> 'Cancelled'");
             entity.HasIndex(subscription => new { subscription.Status, subscription.NextRenewalAt });
             entity.HasOne(subscription => subscription.Workspace).WithMany().HasForeignKey(subscription => subscription.WorkspaceId).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne(subscription => subscription.Plan).WithMany(plan => plan.Subscriptions).HasForeignKey(subscription => subscription.PlanId).OnDelete(DeleteBehavior.Restrict);

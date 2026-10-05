@@ -1,3 +1,4 @@
+import { localeTag } from "@/lib/i18n";
 /* eslint-disable @next/next/no-img-element -- previews use authenticated API URLs with session cookies. */
 import { Archive, AudioLines, Download, File, FileText, Image as ImageIcon, Music2, Pencil, Play, Presentation, RotateCcw, Share2, Sparkles, Video, Volume2 } from "lucide-react";
 import type { Asset, AssetType } from "../lib/api";
@@ -56,7 +57,7 @@ export function AssetCard({ asset, labels, locale, onOpen, onEdit, onArchive, on
   onRestore: (asset: Asset) => void;
 }) {
   const fileUrl = assetFileUrl(asset.id);
-  const date = new Intl.DateTimeFormat(locale, { month: "short", day: "numeric", year: "numeric" }).format(new Date(asset.createdAt));
+  const date = new Intl.DateTimeFormat(localeTag(locale), { month: "short", day: "numeric", year: "numeric" }).format(new Date(asset.createdAt));
   return <article className={`asset-card is-${asset.assetType}`}>
     <div className={`asset-preview is-${asset.assetType}`}>
       <MediaPreview asset={asset} labels={labels} onOpen={() => onOpen(asset)} />
