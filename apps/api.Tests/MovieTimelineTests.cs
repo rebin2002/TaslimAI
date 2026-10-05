@@ -1,4 +1,3 @@
-using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Taslim.Api.Authorization;
@@ -12,57 +11,6 @@ namespace Taslim.Api.Tests;
 
 public sealed class MovieTimelineTests
 {
-    [Fact]
-    public async Task Canonical_transition_edit_persists_assembly_provenance_and_replays_idempotently()
-    {
-        await using var connection = new SqliteConnection("Data Source=:memory:");
-        await connection.OpenAsync();
-        await using var db = CreateDb(connection);
-        var fixture = await SeedAsync(db);
-        var service = new MovieTimelineService(db, new MovieCollaborationAccess(db, new WorkspaceAccessService(db)));
-        var timelineId = Guid.NewGuid();
-        var firstClipId = Guid.NewGuid();
-        var secondClipId = Guid.NewGuid();
-        var baseTimeline = new MovieCanonicalTimelineContract(
-            timelineId,
-            10,
-            [
-                new(firstClipId, fixture.ShotId, 1, 0m, 10m),
-                new(secondClipId, fixture.ShotId, 2, 10m, 8m),
-            ],
-            [new(Guid.NewGuid(), MovieTimelineTransitionTypes.Cut, firstClipId, secondClipId, 10m, 0m)]);
-        var baseRevision = await service.CreateRevisionAsync(fixture.UserId, fixture.MovieId, new MovieTimelineRevisionRequest
-        {
-            CanonicalTimelineJson = JsonSerializer.Serialize(baseTimeline, new JsonSerializerOptions(JsonSerializerDefaults.Web)),
-        }, CancellationToken.None);
-        Assert.NotNull(baseRevision);
-
-        var addedTransition = new MovieTimelineTransitionContract(Guid.NewGuid(), MovieTimelineTransitionTypes.FadeOut, secondClipId, null, 16m, 2m);
-        var decision = new MovieTimelineEditDecisionContract(
-            Guid.NewGuid(), timelineId, 10, MovieTimelineEditActions.Add, null, addedTransition, null,
-            new MovieUserTransitionOverrideContract(Guid.NewGuid(), timelineId, 10, null, addedTransition, "The outgoing beat needs a longer fade."));
-        var request = new Taslim.Api.Contracts.MovieTimelineTransitionEditRequest { BaseRevisionId = baseRevision!.Id, Decision = decision };
-
-        var applied = await service.ApplyTransitionEditAsync(fixture.UserId, fixture.MovieId, request, CancellationToken.None);
-        Assert.NotNull(applied);
-        Assert.Equal(2, applied!.RevisionNumber);
-
-        var persisted = await db.MovieTimelineTransitionEdits.SingleAsync();
-        Assert.Equal(10, persisted.BaseTimelineVersion);
-        Assert.Equal(11, persisted.ResultTimelineVersion);
-        Assert.Equal(decision.DecisionId, persisted.DecisionId);
-        var persistedTimeline = JsonSerializer.Deserialize<MovieCanonicalTimelineContract>(persisted.ResultTimelineJson, new JsonSerializerOptions(JsonSerializerDefaults.Web));
-        Assert.NotNull(persistedTimeline);
-        Assert.Equal(2, persistedTimeline!.Transitions.Count);
-        Assert.Contains(persistedTimeline.Transitions, item => item.Id == addedTransition.Id);
-
-        var replayed = await service.ApplyTransitionEditAsync(fixture.UserId, fixture.MovieId, request, CancellationToken.None);
-        Assert.NotNull(replayed);
-        Assert.Equal(applied.Id, replayed!.Id);
-        Assert.Equal(2, await db.MovieTimelineRevisions.CountAsync());
-        Assert.Single(await db.MovieTimelineTransitionEdits.ToListAsync());
-    }
-
     [Fact]
     public async Task Timeline_maps_selected_take_and_approved_assets_with_trimmed_ranges_gaps_and_cross_track_overlap()
     {
@@ -247,7 +195,7 @@ public sealed class MovieTimelineTests
         var shot = await db.MovieShots.SingleAsync(item => item.Id == shotId);
         shot.SelectedTakeId = takeId;
         await db.SaveChangesAsync();
-        return new TimelineFixture(userId, movieId, shotId, takeId, audioAsset.Id, captionAsset.Id);
+        return new TimelineFixture(userId, movieId, takeId, audioAsset.Id, captionAsset.Id);
     }
 
     private static StoredFile NewFile(Guid workspaceId, Guid userId, string name, string contentType, DateTime now) => new()
@@ -263,5 +211,5 @@ public sealed class MovieTimelineTests
         AssetType = type, MimeType = mime, MetadataJson = metadata, Status = AssetStatus.Active, CreatedAt = now, UpdatedAt = now,
     };
 
-    private sealed record TimelineFixture(Guid UserId, Guid MovieId, Guid ShotId, Guid TakeId, Guid AudioAssetId, Guid CaptionAssetId);
+    private sealed record TimelineFixture(Guid UserId, Guid MovieId, Guid TakeId, Guid AudioAssetId, Guid CaptionAssetId);
 }

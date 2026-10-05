@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
+using Taslim.Api.Infrastructure;
 using Taslim.Api.Persistence;
 
 namespace Taslim.Api.Notifications;
@@ -16,16 +17,11 @@ public interface INotificationService : INotificationEventWriter
 
 public sealed class NotificationService(TaslimDbContext db, WorkspaceAccessService access) : INotificationService
 {
-    private const int MaxPage = 10_000;
-    private const int MaxPageSize = 100;
-
     public async Task<NotificationListDto?> ListAsync(Guid userId, NotificationFilter filter, CancellationToken cancellationToken = default)
     {
         if (!await access.IsMemberAsync(userId, filter.WorkspaceId, cancellationToken)) return null;
-        // Bound both values at the API boundary so hostile query strings cannot
-        // overflow the offset calculation or force an unbounded deep scan.
-        var page = Math.Clamp(filter.Page, 1, MaxPage);
-        var pageSize = Math.Clamp(filter.PageSize, 1, MaxPageSize);
+        var page = ApiPagination.NormalizePage(filter.Page);
+        var pageSize = ApiPagination.NormalizePageSize(filter.PageSize);
         var query = db.Notifications.AsNoTracking().Where(item => item.UserId == userId && item.WorkspaceId == filter.WorkspaceId);
         if (filter.UnreadOnly) query = query.Where(item => item.ReadAt == null);
         var totalCount = await query.CountAsync(cancellationToken);
@@ -33,7 +29,7 @@ public sealed class NotificationService(TaslimDbContext db, WorkspaceAccessServi
             .Where(item => item.UserId == userId && item.WorkspaceId == filter.WorkspaceId && item.ReadAt == null)
             .CountAsync(cancellationToken);
         var notifications = await query.OrderByDescending(item => item.CreatedAt).ThenByDescending(item => item.Id)
-            .Skip((page - 1) * pageSize).Take(pageSize).ToListAsync(cancellationToken);
+            .Skip(ApiPagination.GetOffset(page, pageSize)).Take(pageSize).ToListAsync(cancellationToken);
         return new NotificationListDto(
             notifications.Select(ToDto).ToArray(),
             page,
