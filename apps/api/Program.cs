@@ -558,7 +558,14 @@ if (builder.Configuration.GetValue("Database:ApplyMigrations", isProduction))
     await using var scope = app.Services.CreateAsyncScope();
     var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
     var logger = scope.ServiceProvider.GetRequiredService<ILoggerFactory>().CreateLogger("Taslim.DatabaseMigration");
-    await DatabaseMigrator.ApplyAsync(db, logger);
+    var migrationTimeoutSeconds = builder.Configuration.GetValue(
+        "Database:MigrationTimeoutSeconds",
+        DatabaseMigrator.DefaultTimeoutSeconds);
+    await DatabaseMigrator.ApplyAsync(
+        db,
+        logger,
+        TimeSpan.FromSeconds(migrationTimeoutSeconds),
+        app.Lifetime.ApplicationStopping);
     await using var roleScope = app.Services.CreateAsyncScope();
     var roleLogger = roleScope.ServiceProvider.GetRequiredService<ILoggerFactory>().CreateLogger("Taslim.AdminBootstrap");
     await AdminRoleBootstrapper.EnsureConfiguredAdministratorsAsync(roleScope.ServiceProvider, builder.Configuration, roleLogger);
