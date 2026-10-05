@@ -6,11 +6,11 @@ Wave 3.3 adds one protected, workspace-aware search surface for projects, conver
 
 ## API
 
-`GET /api/search?q={query}&limit={perType}` requires the authenticated Taslim session cookie. `q` is trimmed and bounded to 100 characters. `limit` is clamped to 1–12 results per result type, with a default of 8. Empty queries return an empty grouped response without querying content tables.
+`GET /api/search?q={query}&page={page}&limit={perType}` requires the authenticated Taslim session cookie. `q` is trimmed and bounded to 100 characters. `page` is clamped to 1–1,000,000 and `limit` is clamped to 1–12 results per result type, with a default of 8. Empty queries return an empty grouped response without querying content tables.
 
-The response contains the normalized query, total returned count, and only non-empty groups. Each result has a stable type, opaque resource ID, safe title, optional description, project context, status, non-sensitive metadata, and timestamps. Provider names, model names, raw generation payloads, storage keys, storage providers, signed URLs, and private file contents are never returned. Raw prompts and extracted file text are used only as server-side matching fields.
+The response contains the normalized query, the requested page and page size, the total matching count, whether another page exists, and only non-empty groups for the requested page. Each group reports its total matching count and its own `hasMore` flag. Each result has a stable type, opaque resource ID, safe title, optional description, project context, status, non-sensitive metadata, and timestamps. Provider names, model names, raw generation payloads, storage keys, storage providers, signed URLs, and private file contents are never returned. Raw prompts and extracted file text are used only as server-side matching fields.
 
-Results are grouped by `projects`, `conversations`, `assets`, `files`, and `generation`. The API applies a per-type `Take` before materializing results, so a large workspace cannot cause an unbounded response.
+Results are grouped by `projects`, `conversations`, `assets`, `files`, and `generation`. The API counts each authorized result set, then applies a deterministic per-type `Skip`/`Take` before materializing results, so a large workspace cannot cause an unbounded response. The web surface appends later pages with an accessible localized “Load more results” control.
 
 ## Authorization
 

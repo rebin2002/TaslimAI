@@ -26,6 +26,9 @@ a { color: inherit; text-decoration: none; }
 button, select { font: inherit; }
 button { border: 0; cursor: pointer; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+.skip-link { position: fixed; top: 12px; inset-inline-start: 12px; z-index: 100; padding: 10px 14px; color: white; border-radius: 8px; background: var(--navy-900); box-shadow: 0 8px 20px rgba(7,17,31,.2); transform: translateY(-180%); transition: transform .16s var(--ease-out); }
+.skip-link:focus-visible { transform: translateY(0); outline: 3px solid var(--focus-ring); outline-offset: 3px; }
+#main-content { scroll-margin-top: 96px; }
 
 .app-shell { min-height: 100vh; }
 .topbar { position: sticky; top: 0; z-index: 20; background: rgba(247, 249, 251, 0.88); border-bottom: 1px solid rgba(232, 237, 242, 0.85); backdrop-filter: blur(18px); }
@@ -1192,7 +1195,7 @@ select.memory-control { appearance: auto; cursor: pointer; }
 [dir="rtl"] .app-header .top-link.is-active { box-shadow: inset 0 -2px 0 var(--teal); }
 [dir="rtl"] .home-browse-link svg, [dir="rtl"] .home-idea-submit svg, [dir="rtl"] .home-recent-arrow { transform: scaleX(-1); }
 [dir="rtl"] .home-console-footer { flex-direction: row-reverse; }
-@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; } }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; } .skip-link { transition: none; } }
 
 
 /* Wave 4.1 visual replacement — premium Home composition */
@@ -2474,6 +2477,16 @@ body { background: var(--canvas); }
 .operations-detail-list small { color: var(--muted); font-size: .67rem; overflow-wrap: anywhere; }
 .operations-detail-list b { flex: 0 0 auto; color: var(--teal); font-size: .7rem; }
 .operations-empty { margin: 0; color: var(--muted); font-size: .75rem; line-height: 1.6; }
+.operations-table-wrap { min-width: 0; overflow-x: auto; overscroll-behavior-inline: contain; }
+.operations-table { width: 100%; min-width: 660px; border-collapse: collapse; font-size: .74rem; }
+.operations-table th, .operations-table td { padding: 9px 8px; border-bottom: 1px solid var(--line); text-align: start; white-space: nowrap; }
+.operations-table th { color: var(--muted); font-size: .68rem; font-weight: 800; }
+.operations-table td { color: var(--navy-900); }
+.operations-table td small { color: var(--muted); }
+[dir="rtl"] .admin-operations-page .operations-section-heading, [dir="rtl"] .admin-operations-page .provider-health-heading, [dir="rtl"] .admin-operations-page .operations-detail-list > div { flex-direction: row-reverse; }
+[dir="rtl"] .admin-operations-page .operations-section-heading > span { text-align: start; }
+[dir="rtl"] .admin-operations-page .operations-detail-list > div > span { text-align: start; }
+.admin-operations-page [dir="ltr"], .admin-operations-page [dir="auto"] { unicode-bidi: plaintext; }
 @media (max-width: 900px) { .operations-three-column { grid-template-columns: 1fr; }.operations-signal-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 620px) { .operations-section-heading { align-items: flex-start; flex-direction: column; }.operations-section-heading > span { text-align: start; }.operations-two-column, .operations-signal-grid { grid-template-columns: 1fr; }.operations-metric-grid { grid-template-columns: 1fr; }.operations-detail-list > div { align-items: flex-start; flex-direction: column; }.operations-detail-list .secondary-button { width: 100%; justify-content: center; } }
 /* Movie production workspace UX */
@@ -2851,6 +2864,8 @@ body { background: var(--canvas); }
   .notification-panel, .notification-card { scroll-behavior: auto; }
 }
 
+.global-search-pagination { display: flex; justify-content: center; padding-top: 20px; }
+.global-search-pagination .secondary-button { min-width: 180px; justify-content: center; }
 
 .movie-edit-module { gap: 18px; }
 .movie-edit-toolbar { display: flex; align-items: center; justify-content: flex-end; gap: 10px; }
@@ -2892,3 +2907,8 @@ body { background: var(--canvas); }
 .movie-edit-footnote { display: flex; align-items: center; gap: 7px; margin: 0 2px; color: #6e8b9d; font-size: 9px; line-height: 1.45; }
 .movie-edit-footnote svg { flex: 0 0 auto; color: var(--movie-teal); }
 @media (max-width: 720px) { .movie-edit-toolbar { align-items: stretch; flex-direction: column; }.movie-edit-validation { align-items: flex-start; flex-direction: column; }.movie-edit-validation > span { align-self: flex-end; }.movie-edit-inspector { grid-template-columns: 1fr; }.movie-edit-status { align-items: flex-start; padding: 0; text-align: start; }.movie-edit-blockers, .movie-edit-clear { grid-column: auto; } }
+
+/* Shot Designer keeps its control chrome and saved-shot sequence readable in RTL locales. */
+[dir="rtl"] .movie-shot-title, [dir="rtl"] .movie-shot-list-item { flex-direction: row-reverse; }
+[dir="rtl"] .movie-shot-designer-heading, [dir="rtl"] .movie-shot-intent-heading, [dir="rtl"] .movie-shot-advanced-heading, [dir="rtl"] .movie-shot-designer-footer, [dir="rtl"] .movie-capability-heading { flex-direction: row-reverse; }
+@media (max-width: 520px) { [dir="rtl"] .movie-shot-designer-heading, [dir="rtl"] .movie-shot-advanced-heading, [dir="rtl"] .movie-shot-designer-footer, [dir="rtl"] .movie-capability-heading { flex-direction: column; } }

@@ -24,6 +24,7 @@ test.describe("Document Studio provider boundary", () => {
     await page
       .getByLabel(/what would you like taslim to create/i)
       .fill("A concise launch brief for browser regression coverage.");
+    await page.getByLabel(/output format/i).selectOption("pdf");
     await page.getByRole("button", { name: /generate document/i }).click();
 
     const error = page.locator(".document-brief-card").getByRole("alert");
@@ -36,6 +37,7 @@ test.describe("Document Studio provider boundary", () => {
       description: "A concise launch brief for browser regression coverage.",
       projectId: null,
       attachmentIds: [],
+      outputFormat: "pdf",
     });
     expect(JSON.stringify(submittedPayload)).not.toMatch(/provider|model|api.?key|secret/i);
     await expect(page.locator("body")).not.toContainText(/stack trace|exception|api.?key|secret/i);
