@@ -21,6 +21,30 @@ public sealed class DocumentGenerationUnitTests
     }
 
     [Fact]
+    public void Request_mapping_defaults_null_attachment_ids_and_validation_rejects_malformed_persisted_input()
+    {
+        var request = new DocumentGenerationRequest
+        {
+            WorkspaceId = Guid.NewGuid(),
+            Description = "Create a useful brief.",
+            AttachmentIds = null!,
+        };
+
+        var mapped = DocumentGenerationContractMapper.ToInput(request);
+        Assert.Empty(mapped.AttachmentIds);
+
+        var malformed = new DocumentGenerationInput(
+            Guid.NewGuid(), null, null!, "Create a useful brief.", "report", "standard", null, null, null!, "en", "pdf", "professional", true);
+        var exception = Assert.Throws<DocumentRequestValidationException>(() => DocumentGenerationRequestValidator.Validate(malformed, new DocumentGenerationOptions()));
+        Assert.Equal(GenerationJobErrorCodes.DocumentRequestInvalid, exception.Code);
+
+        var missingAttachments = new DocumentGenerationInput(
+            Guid.NewGuid(), null, "Report", "Create a useful brief.", "report", "standard", null, null, null!, "en", "pdf", "professional", true);
+        var attachmentsException = Assert.Throws<DocumentRequestValidationException>(() => DocumentGenerationRequestValidator.Validate(missingAttachments, new DocumentGenerationOptions()));
+        Assert.Equal(GenerationJobErrorCodes.DocumentRequestInvalid, attachmentsException.Code);
+    }
+
+    [Fact]
     public void Renderer_produces_valid_docx_and_pdf_with_unicode_content()
     {
         var input = new DocumentGenerationInput(Guid.NewGuid(), null, "ڕاپۆرتی تاقیکردنەوە", "Create a clear report.", "report", "standard", null, null, [Guid.NewGuid()], "ku", "both", "professional", true);
@@ -54,5 +78,73 @@ public sealed class DocumentGenerationUnitTests
         Assert.Equal(new[] { "title", "summary", "sections" }, schema.GetProperty("required").EnumerateArray().Select(item => item.GetString()).ToArray());
         var block = schema.GetProperty("properties").GetProperty("sections").GetProperty("items").GetProperty("properties").GetProperty("blocks").GetProperty("items");
         Assert.Equal(new[] { "type", "text", "items", "rows" }, block.GetProperty("required").EnumerateArray().Select(item => item.GetString()).ToArray());
+    }
+
+    [Fact]
+    public void Draft_validator_rejects_null_nested_values_and_unbounded_cells()
+    {
+        var options = new DocumentGenerationOptions { MaxBlockCharacters = 20 };
+        var nullSection = new DocumentDraft
+        {
+            Title = "Report",
+            Summary = string.Empty,
+            Sections = [new DocumentSection { Heading = "Overview", Blocks = null! }],
+        };
+        var oversizedCell = new DocumentDraft
+        {
+            Title = "Report",
+            Summary = string.Empty,
+            Sections = [new DocumentSection
+            {
+                Heading = "Overview",
+                Blocks = [new DocumentBlock
+                {
+                    Type = DocumentBlockTypes.Table,
+                    Rows = [new DocumentTableRow { Cells = [new string('x', 21)] }],
+                }],
+            }],
+        };
+
+        Assert.Throws<DocumentOutputValidationException>(() => DocumentDraftValidator.Validate(nullSection, options));
+        Assert.Throws<DocumentOutputValidationException>(() => DocumentDraftValidator.Validate(oversizedCell, options));
+    }
+
+    [Fact]
+    public void Draft_validator_rejects_xml_unsafe_text_before_rendering()
+    {
+        var draft = new DocumentDraft
+        {
+            Title = "Report",
+            Summary = "Summary",
+            Sections = [new DocumentSection
+            {
+                Heading = "Overview",
+                Blocks = [new DocumentBlock { Type = DocumentBlockTypes.Paragraph, Text = "Safe prefix\u0001unsafe suffix" }],
+            }],
+        };
+
+        Assert.Throws<DocumentOutputValidationException>(() => DocumentDraftValidator.Validate(draft, new DocumentGenerationOptions()));
+    }
+
+    [Fact]
+    public void Draft_validator_accepts_canonical_paragraph_list_and_table_blocks()
+    {
+        var draft = new DocumentDraft
+        {
+            Title = "Report",
+            Summary = "Summary",
+            Sections = [new DocumentSection
+            {
+                Heading = "Overview",
+                Blocks =
+                [
+                    new DocumentBlock { Type = DocumentBlockTypes.Paragraph, Text = "Body" },
+                    new DocumentBlock { Type = DocumentBlockTypes.BulletList, Items = ["One", "Two"] },
+                    new DocumentBlock { Type = DocumentBlockTypes.Table, Rows = [new DocumentTableRow { Cells = ["A", "B"] }] },
+                ],
+            }],
+        };
+
+        DocumentDraftValidator.Validate(draft, new DocumentGenerationOptions());
     }
 }
