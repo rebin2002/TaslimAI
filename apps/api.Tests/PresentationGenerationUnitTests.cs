@@ -34,6 +34,46 @@ public sealed class PresentationGenerationUnitTests
     }
 
     [Fact]
+    public void Draft_validator_rejects_contentless_blocks_before_rendering()
+    {
+        var blocks = new[]
+        {
+            new PresentationContentBlock { Type = PresentationBlockTypes.Text },
+            new PresentationContentBlock { Type = PresentationBlockTypes.Bullets },
+            new PresentationContentBlock { Type = PresentationBlockTypes.Columns },
+            new PresentationContentBlock { Type = PresentationBlockTypes.Table },
+            new PresentationContentBlock { Type = PresentationBlockTypes.Metrics },
+            new PresentationContentBlock { Type = PresentationBlockTypes.Quote },
+        };
+
+        foreach (var block in blocks)
+            Assert.Throws<PresentationOutputValidationException>(() => PresentationDraftValidator.Validate(DraftWith(block), new PresentationGenerationOptions()));
+    }
+
+    [Fact]
+    public void Draft_validator_rejects_null_nested_collections_and_unbounded_nested_text()
+    {
+        var options = new PresentationGenerationOptions { MaxBlockCharacters = 8 };
+        var nullItems = new PresentationContentBlock { Type = PresentationBlockTypes.Text, Text = "Safe", Items = null! };
+        Assert.Throws<PresentationOutputValidationException>(() => PresentationDraftValidator.Validate(DraftWith(nullItems), options));
+
+        var oversizedBlocks = new[]
+        {
+            new PresentationContentBlock { Type = PresentationBlockTypes.Bullets, Items = ["123456789"] },
+            new PresentationContentBlock { Type = PresentationBlockTypes.Columns, Columns = [new PresentationColumn { Heading = "Heading", Items = ["123456789"] }] },
+            new PresentationContentBlock { Type = PresentationBlockTypes.Table, Rows = [new PresentationTableRow { Cells = ["123456789"] }] },
+            new PresentationContentBlock { Type = PresentationBlockTypes.Metrics, Metrics = [new PresentationMetric { Label = "Label", Value = "123456789" }] },
+        };
+
+        foreach (var block in oversizedBlocks)
+            Assert.Throws<PresentationOutputValidationException>(() => PresentationDraftValidator.Validate(DraftWith(block), options));
+
+        var oversizedSourceRef = DraftWith(new PresentationContentBlock { Type = PresentationBlockTypes.Text, Text = "Safe" });
+        oversizedSourceRef.Slides[0].SourceRefs = ["123456789"];
+        Assert.Throws<PresentationOutputValidationException>(() => PresentationDraftValidator.Validate(oversizedSourceRef, options));
+    }
+
+    [Fact]
     public void Renderer_creates_editable_16_by_9_pptx_with_rtl_markers_and_expected_slides()
     {
         var input = new PresentationGenerationInput(Guid.NewGuid(), null, "پێشکەشکردن", "Plan", "general", "short", "professional", "ku", null, null, null, true, true, []);
@@ -101,6 +141,14 @@ public sealed class PresentationGenerationUnitTests
 
         Assert.Contains("invalid XML", exception.Message, StringComparison.Ordinal);
     }
+
+    private static PresentationDraft DraftWith(PresentationContentBlock block) => new()
+    {
+        Title = "Launch",
+        Language = "en",
+        PresentationType = "general",
+        Slides = [new PresentationSlide { Order = 1, Type = PresentationSlideTypes.Content, Title = "Overview", Blocks = [block] }],
+    };
 
     private static RenderedPresentation RenderValidPresentation()
     {
