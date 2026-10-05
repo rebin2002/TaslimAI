@@ -1,56 +1,41 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { Activity, AlertTriangle, ArrowLeft, Boxes, CheckCircle2, CircleDollarSign, Clock3, Database, FileStack, Gauge, RefreshCw, ServerCog, ShieldCheck, UsersRound, Workflow, XCircle } from "lucide-react";
+import { useLocale } from "@/components/LocaleProvider";
 import { api, type AdminCountBreakdown, type AdminOperationsDashboard, type AdminProviderHealth } from "@/lib/api";
 import { presetRange } from "@/lib/adminUsageState";
+import { formatAdminBytes, formatAdminDateTime, formatAdminMinutes, formatAdminMoney, formatAdminNumber, translateAdminOperations, type AdminOperationsKey } from "@/lib/adminOperationsI18n";
+import type { Locale } from "@/lib/i18n";
 
-function money(value: number) {
-  return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 4 }).format(value);
+type Translate = (key: AdminOperationsKey, variables?: Record<string, string>) => string;
+type Metric = { label: ReactNode; value: ReactNode; dir?: "ltr" | "auto" };
+
+function dateInputValue(value: Date) { return value.toISOString().slice(0, 10); }
+function providerStatusLabel(provider: AdminProviderHealth, locale: Locale) {
+  const key: AdminOperationsKey = provider.status === "disabled" ? "providerStatusDisabled" : provider.status === "unconfigured" ? "providerStatusUnconfigured" : provider.status === "recent_operational_failure" ? "providerStatusFailure" : provider.status === "operational" ? "providerStatusOperational" : "providerStatusAvailable";
+  return translateAdminOperations(locale, key);
 }
-
-function dateInputValue(value: Date) {
-  return value.toISOString().slice(0, 10);
-}
-
-function dateTime(value: string | null) {
-	return value ? new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(value)) : "No completed generation recorded";
-}
-
-function providerStatusLabel(provider: AdminProviderHealth) {
-	if (provider.status === "disabled") return "Disabled";
-	if (provider.status === "unconfigured") return "Unconfigured";
-	if (provider.status === "recent_operational_failure") return "Recent failure";
-	if (provider.status === "operational") return "Operational";
-	return "Available; no recent success recorded";
-}
-
 function providerStatusIcon(provider: AdminProviderHealth) {
-	if (provider.status === "operational") return <CheckCircle2 size={16} aria-hidden="true" />;
-	if (provider.status === "disabled" || provider.status === "unconfigured") return <XCircle size={16} aria-hidden="true" />;
-	return <AlertTriangle size={16} aria-hidden="true" />;
+  if (provider.status === "operational") return <CheckCircle2 size={16} aria-hidden="true" />;
+  if (provider.status === "disabled" || provider.status === "unconfigured") return <XCircle size={16} aria-hidden="true" />;
+  return <AlertTriangle size={16} aria-hidden="true" />;
 }
-
-function providerCost(provider: AdminProviderHealth) {
-	return `${money(provider.actualProviderCostUsd)} actual · ${money(provider.estimatedProviderCostUsd)} estimated`;
+function MetricGrid({ items }: Readonly<{ items: Metric[] }>) {
+  return <dl className="operations-metric-grid">{items.map((item, index) => <div key={index}><dt>{item.label}</dt><dd dir={item.dir}>{item.value}</dd></div>)}</dl>;
 }
-
-function bytes(value: number) {
-  if (value < 1024) return `${value} B`;
-  const units = ["KB", "MB", "GB", "TB"];
-  let next = value;
-  let unit = -1;
-  while (next >= 1024 && unit < units.length - 1) { next /= 1024; unit += 1; }
-  return `${next.toFixed(next >= 10 ? 1 : 2)} ${units[unit]}`;
-}
-
-function CountList({ items, empty = "No records in this period." }: Readonly<{ items: AdminCountBreakdown[]; empty?: string }>) {
+function CountList({ items, empty, locale }: Readonly<{ items: AdminCountBreakdown[]; empty: string; locale: Locale }>) {
   if (!items.length) return <p className="operations-empty">{empty}</p>;
-  return <div className="operations-count-list">{items.map((item) => <div key={item.key}><span>{item.key}</span><strong>{item.count.toLocaleString()}</strong></div>)}</div>;
+  return <div className="operations-count-list">{items.map((item) => <div key={item.key}><span dir="auto">{item.key}</span><strong>{formatAdminNumber(item.count, locale)}</strong></div>)}</div>;
+}
+function Card({ title, icon, children }: Readonly<{ title: string; icon?: ReactNode; children: ReactNode }>) {
+  return <div className="account-card operations-card">{icon}{title && <h3>{title}</h3>}{children}</div>;
 }
 
 export function AdminOperationsView() {
+  const { locale } = useLocale();
+  const t: Translate = (key, variables) => translateAdminOperations(locale, key, variables);
   const [dashboard, setDashboard] = useState<AdminOperationsDashboard | null>(null);
   const [preset, setPreset] = useState<"today" | "sevenDays" | "thirtyDays" | "custom">("thirtyDays");
   const [from, setFrom] = useState(() => dateInputValue(new Date(Date.now() - 29 * 86_400_000)));
@@ -58,190 +43,45 @@ export function AdminOperationsView() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [recoveringJobId, setRecoveringJobId] = useState<string | null>(null);
-
   const load = useCallback(async (range: { fromUtc: string; toUtc: string }) => {
-    setLoading(true);
-    setError(null);
-    try {
-      setDashboard(await api.getAdminOperationsDashboard(range));
-    } catch {
-      setDashboard(null);
-      setError("Operations data could not be loaded. Administrator access is required.");
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
+    setLoading(true); setError(null);
+    try { setDashboard(await api.getAdminOperationsDashboard(range)); }
+    catch { setDashboard(null); setError(translateAdminOperations(locale, "operationalError")); }
+    finally { setLoading(false); }
+  }, [locale]);
   const recoverJob = async (jobId: string) => {
-    setRecoveringJobId(jobId);
-    setError(null);
+    setRecoveringJobId(jobId); setError(null);
     try {
       await api.recoverAdminStuckJob(jobId, "Administrator recovered an expired movie worker lease from the operations dashboard.");
       await load(dashboard?.range ?? presetRange("thirtyDays"));
-    } catch {
-      setError("The expired lease could not be recovered. Refresh the dashboard and verify that the job is still stuck.");
-    } finally {
-      setRecoveringJobId(null);
-    }
+    } catch { setError(t("recoverError")); }
+    finally { setRecoveringJobId(null); }
   };
+  useEffect(() => { const timer = window.setTimeout(() => { void load(presetRange("thirtyDays")); }, 0); return () => window.clearTimeout(timer); }, [load]);
+  const applyPreset = (next: "today" | "sevenDays" | "thirtyDays") => { setPreset(next); const range = presetRange(next); setFrom(range.fromUtc.slice(0, 10)); setTo(range.toUtc.slice(0, 10)); void load(range); };
+  const applyCustom = () => { if (!from || !to) return; setPreset("custom"); void load({ fromUtc: new Date(`${from}T00:00:00.000Z`).toISOString(), toUtc: new Date(`${to}T23:59:59.999Z`).toISOString() }); };
+  const number = (value: number) => formatAdminNumber(value, locale);
+  const money = (value: number) => formatAdminMoney(value, "USD", locale);
+  const bool = (value: boolean) => t(value ? "yes" : "no");
+  const heading = (eyebrow: string, title: string, note: string, id: string) => <div className="operations-section-heading"><div><p className="section-eyebrow">{eyebrow}</p><h2 id={id}>{title}</h2></div><span>{note}</span></div>;
 
-  useEffect(() => {
-    const timer = window.setTimeout(() => { void load(presetRange("thirtyDays")); }, 0);
-    return () => window.clearTimeout(timer);
-  }, [load]);
-
-  const applyPreset = (next: "today" | "sevenDays" | "thirtyDays") => {
-    setPreset(next);
-    const range = presetRange(next);
-    setFrom(range.fromUtc.slice(0, 10));
-    setTo(range.toUtc.slice(0, 10));
-    void load(range);
-  };
-
-  const applyCustom = () => {
-    if (!from || !to) return;
-    setPreset("custom");
-    void load({ fromUtc: new Date(`${from}T00:00:00.000Z`).toISOString(), toUtc: new Date(`${to}T23:59:59.999Z`).toISOString() });
-  };
-
-  return <div className="account-page admin-operations-page">
-    <div className="detail-header usage-header">
-      <div>
-        <Link className="back-link" href="/account"><ArrowLeft size={14} /> Back to account</Link>
-        <p className="section-eyebrow">Internal operations</p>
-        <h1>Platform operations</h1>
-        <p>Read-only operational data for active Taslim administrators.</p>
-      </div>
-      <div className="detail-icon"><ShieldCheck size={21} /></div>
-    </div>
-
-    <div className="usage-notice admin-usage-notice"><Activity size={16} /><span>Indicators below are derived from recorded jobs, usage, billing, storage, and provider execution data. Secrets, prompts, and raw provider payloads are never returned.</span></div>
-
-    <div className="admin-range-controls">
-      <div className="admin-range-presets">
-        <button className={preset === "today" ? "secondary-button is-active" : "secondary-button"} onClick={() => applyPreset("today")}>Today</button>
-        <button className={preset === "sevenDays" ? "secondary-button is-active" : "secondary-button"} onClick={() => applyPreset("sevenDays")}>7 days</button>
-        <button className={preset === "thirtyDays" ? "secondary-button is-active" : "secondary-button"} onClick={() => applyPreset("thirtyDays")}>30 days</button>
-      </div>
-      <div className="admin-custom-range">
-        <label>From<input type="date" value={from} onChange={(event) => { setPreset("custom"); setFrom(event.target.value); }} /></label>
-        <label>To<input type="date" value={to} onChange={(event) => { setPreset("custom"); setTo(event.target.value); }} /></label>
-        <button className="primary-button" onClick={applyCustom}><RefreshCw size={15} /> Apply</button>
-      </div>
-    </div>
-
-    {loading && <div className="account-card usage-loading">Loading recorded operations data…</div>}
-    {error && <div className="form-error">{error}</div>}
+  return <div className="account-page admin-operations-page" aria-busy={loading}>
+    <div className="detail-header usage-header"><div><Link className="back-link" href="/account"><ArrowLeft size={14} aria-hidden="true" /> {t("backAccount")}</Link><p className="section-eyebrow">{t("eyebrow")}</p><h1>{t("title")}</h1><p>{t("subtitle")}</p></div><div className="detail-icon" aria-hidden="true"><ShieldCheck size={21} /></div></div>
+    <div className="usage-notice admin-usage-notice"><Activity size={16} aria-hidden="true" /><span>{t("notice")}</span></div>
+    <div className="admin-range-controls"><div className="admin-range-presets" role="group" aria-label={t("readOnly")}><button type="button" className={preset === "today" ? "secondary-button is-active" : "secondary-button"} onClick={() => applyPreset("today")}>{t("today")}</button><button type="button" className={preset === "sevenDays" ? "secondary-button is-active" : "secondary-button"} onClick={() => applyPreset("sevenDays")}>{t("sevenDays")}</button><button type="button" className={preset === "thirtyDays" ? "secondary-button is-active" : "secondary-button"} onClick={() => applyPreset("thirtyDays")}>{t("thirtyDays")}</button></div><div className="admin-custom-range"><label>{t("from")}<input type="date" value={from} onChange={(event) => { setPreset("custom"); setFrom(event.target.value); }} /></label><label>{t("to")}<input type="date" value={to} onChange={(event) => { setPreset("custom"); setTo(event.target.value); }} /></label><button type="button" className="primary-button" onClick={applyCustom}><RefreshCw size={15} aria-hidden="true" /> {t("apply")}</button></div></div>
+    {loading && <div className="account-card usage-loading" role="status" aria-live="polite">{t("loading")}</div>}
+    {error && <div className="form-error" role="alert">{error}</div>}
     {!loading && !error && dashboard && <>
-      <div className="usage-stat-grid admin-kpi-grid operations-kpi-grid">
-        <div className="account-card usage-stat"><span><Workflow size={15} /> Jobs in range</span><strong>{dashboard.generation.totalJobsInRange.toLocaleString()}</strong></div>
-        <div className="account-card usage-stat"><span><Gauge size={15} /> Usage requests</span><strong>{dashboard.usage.requestCount.toLocaleString()}</strong></div>
-        <div className="account-card usage-stat"><span><CircleDollarSign size={15} /> Provider cost</span><strong>{money(dashboard.usage.providerCostUsd)}</strong></div>
-        <div className="account-card usage-stat"><span><CircleDollarSign size={15} /> Customer charges</span><strong>{money(dashboard.usage.customerChargesUsd)}</strong></div>
-      </div>
-
-      <section className="operations-section" aria-labelledby="operations-providers">
-        <div className="operations-section-heading"><div><p className="section-eyebrow">Provider control plane</p><h2 id="operations-providers">Generation provider health</h2></div><span>Read-only server configuration state</span></div>
-        <div className="provider-health-grid">
-          {dashboard.providers.map((provider) => <article className="account-card provider-health-card" key={provider.key}>
-            <div className="provider-health-heading">
-              <div><span className="provider-health-category"><ServerCog size={15} /> {provider.category}</span><h3>{provider.key}</h3></div>
-              <span className={`provider-status provider-status-${provider.status}`} title={providerStatusLabel(provider)}>{providerStatusIcon(provider)}<span>{providerStatusLabel(provider)}</span></span>
-            </div>
-            <dl className="operations-metric-grid provider-state-grid">
-              <div><dt>Enabled</dt><dd>{provider.enabled ? "Yes" : "No"}</dd></div>
-              <div><dt>Configured</dt><dd>{provider.configured ? "Yes" : "No"}</dd></div>
-              <div><dt>Recent success / failure</dt><dd>{provider.recentSuccessCount} / {provider.recentFailureCount}</dd></div>
-              <div><dt>Average latency</dt><dd>{provider.averageLatencyMs === null ? "Not recorded" : `${provider.averageLatencyMs.toLocaleString()} ms`}</dd></div>
-              <div><dt>Rate-limit events</dt><dd>{provider.rateLimitEventCount.toLocaleString()}</dd></div>
-              <div><dt>Timeout events</dt><dd>{provider.timeoutEventCount.toLocaleString()}</dd></div>
-              <div><dt>QC failures</dt><dd>{provider.qualityControlFailureCount.toLocaleString()}</dd></div>
-              <div><dt>Retries</dt><dd>{provider.retryCount.toLocaleString()}</dd></div>
-              <div><dt>Fallbacks</dt><dd>{provider.fallbackTelemetryRecorded ? provider.fallbackCount.toLocaleString() : "Not recorded"}</dd></div>
-              <div><dt>Provider cost</dt><dd>{providerCost(provider)}</dd></div>
-              <div><dt>Last success</dt><dd>{provider.lastSuccessAt ? dateTime(provider.lastSuccessAt) : "Not recorded"}</dd></div>
-              <div><dt>Last failure</dt><dd>{provider.lastFailureAt ? `${provider.lastFailureCode ?? "Sanitized failure"} · ${dateTime(provider.lastFailureAt)}` : "Not recorded"}</dd></div>
-            </dl>
-            <div className="provider-health-failures"><h4><Clock3 size={14} /> Recent sanitized failures</h4>{provider.recentFailures.length ? <div className="operations-detail-list">{provider.recentFailures.map((failure, index) => <div key={`${failure.occurredAt}-${failure.errorCode}-${index}`}><span><strong>{failure.errorCode}</strong><small>{failure.jobType} · {dateTime(failure.occurredAt)}</small></span></div>)}</div> : <p className="operations-empty">No sanitized provider failures recorded.</p>}</div>
-          </article>)}
-        </div>
-        <p className="provider-health-footnote">Provider activation remains controlled by secure server configuration. Fallback telemetry is not persisted by the current architecture, so it is shown as not recorded rather than inferred.</p>
-      </section>
-
-      <section className="operations-section" aria-labelledby="operations-signals">
-        <div className="operations-section-heading"><div><p className="section-eyebrow">Recorded signals</p><h2 id="operations-signals">Operational signals</h2></div><span>Live database state</span></div>
-        <div className="operations-signal-grid">
-          <div className="account-card operations-signal"><span>Running jobs</span><strong>{dashboard.signals.runningJobCount}</strong></div>
-          <div className="account-card operations-signal"><span>Queued or pending</span><strong>{dashboard.signals.queuedOrPendingJobCount}</strong></div>
-          <div className="account-card operations-signal"><span>Failures in range</span><strong>{dashboard.signals.recentFailureCount}</strong></div>
-          <div className="account-card operations-signal"><span>Usage anomalies in range</span><strong>{dashboard.signals.anomalousUsageCountInRange}</strong></div>
-          <div className="account-card operations-signal operations-signal-wide"><span>Last completed generation</span><strong>{dateTime(dashboard.signals.lastCompletedGenerationAt)}</strong></div>
-        </div>
-      </section>
-
-      <section className="operations-section" aria-labelledby="operations-movie">
-        <div className="operations-section-heading"><div><p className="section-eyebrow">Movie production engine</p><h2 id="operations-movie">Movie operations evidence</h2></div><span>Provider-neutral internal signals</span></div>
-        <div className="operations-three-column">
-          <div className="account-card operations-card"><Workflow size={18} /><h3>Queue & retries</h3><dl className="operations-metric-grid"><div><dt>Movie jobs in range</dt><dd>{dashboard.movie.movieJobCountInRange.toLocaleString()}</dd></div><div><dt>Queued / pending</dt><dd>{dashboard.movie.queuedOrPendingCount.toLocaleString()}</dd></div><div><dt>Oldest queue age</dt><dd>{dashboard.movie.oldestQueueAgeSeconds === null ? "Not recorded" : `${Math.round(dashboard.movie.oldestQueueAgeSeconds / 60)} min`}</dd></div><div><dt>Average queue age</dt><dd>{dashboard.movie.averageQueueAgeSeconds === null ? "Not recorded" : `${Math.round(dashboard.movie.averageQueueAgeSeconds / 60)} min`}</dd></div><div><dt>Total retries</dt><dd>{dashboard.movie.totalRetryCount.toLocaleString()}</dd></div><div><dt>Jobs retried</dt><dd>{dashboard.movie.retriedJobCount.toLocaleString()}</dd></div></dl></div>
-          <div className="account-card operations-card"><ServerCog size={18} /><h3>Provider-disabled state</h3><dl className="operations-metric-grid"><div><dt>Status</dt><dd>{dashboard.movie.providerStatus}</dd></div><div><dt>Enabled</dt><dd>{dashboard.movie.providerEnabled ? "Yes" : "No"}</dd></div><div><dt>Configured</dt><dd>{dashboard.movie.providerConfigured ? "Yes" : "No"}</dd></div><div><dt>Disabled failures</dt><dd>{dashboard.movie.providerDisabledFailureCount.toLocaleString()}</dd></div><div><dt>QC failures</dt><dd>{dashboard.movie.qualityControlFailureCount.toLocaleString()}</dd></div></dl></div>
-          <div className="account-card operations-card"><Boxes size={18} /><h3>Asset & accounting evidence</h3><dl className="operations-metric-grid"><div><dt>Movie assets</dt><dd>{dashboard.movie.movieAssetCount.toLocaleString()}</dd></div><div><dt>Ingestion gaps</dt><dd>{dashboard.movie.movieAssetIngestionGapCount.toLocaleString()}</dd></div><div><dt>Completed without asset</dt><dd>{dashboard.movie.completedJobsWithoutAssetCount.toLocaleString()}</dd></div><div><dt>Accounting transactions</dt><dd>{dashboard.movie.accountingTransactionCount.toLocaleString()}</dd></div><div><dt>Pending accounting</dt><dd>{dashboard.movie.pendingAccountingCount.toLocaleString()}</dd></div><div><dt>Missing evidence</dt><dd>{dashboard.movie.missingAccountingEvidenceCount.toLocaleString()}</dd></div></dl></div>
-        </div>
-        <div className="operations-two-column">
-          <div className="account-card operations-card"><h3>QC outcomes</h3><CountList items={dashboard.movie.qualityControlByStatus} empty="No movie QC records in this period." /></div>
-          <div className="account-card operations-card"><h3>Failure codes</h3><CountList items={dashboard.movie.failuresByCode} empty="No movie failures in this period." /></div>
-        </div>
-        <div className="account-card operations-card"><h3>Stuck movie jobs</h3>{dashboard.movie.stuckJobs.length ? <div className="operations-detail-list">{dashboard.movie.stuckJobs.map((job) => <div key={job.jobId}><span><strong>{job.jobType}</strong><small>{job.jobId} · lease expired · retry {job.retryCount}</small></span><button className="secondary-button" disabled={recoveringJobId === job.jobId} onClick={() => void recoverJob(job.jobId)}>{recoveringJobId === job.jobId ? "Recovering…" : "Recover lease"}</button></div>)}</div> : <p className="operations-empty">No expired movie worker leases recorded.</p>}</div>
-      </section>
-
-      <section className="operations-section" aria-labelledby="operations-workers">
-        <div className="operations-section-heading"><div><p className="section-eyebrow">Worker fleet</p><h2 id="operations-workers">Generation workers</h2></div><span>{dashboard.workers.healthyWorkerCount} healthy · {dashboard.workers.staleWorkerCount} stale</span></div>
-        <div className="account-card operations-card"><dl className="operations-metric-grid"><div><dt>Configured concurrency</dt><dd>{dashboard.workers.configuredConcurrency}</dd></div><div><dt>Observed workers</dt><dd>{dashboard.workers.observedWorkerCount}</dd></div><div><dt>Healthy workers</dt><dd>{dashboard.workers.healthyWorkerCount}</dd></div><div><dt>Stale workers</dt><dd>{dashboard.workers.staleWorkerCount}</dd></div></dl>{dashboard.workers.workers.length ? <div className="operations-detail-list">{dashboard.workers.workers.map((worker) => <div key={worker.workerId}><span><strong>{worker.workerId}</strong><small>{worker.status} · last seen {dateTime(worker.lastSeenAt)}{worker.activeJobId ? ` · active ${worker.activeJobId}` : ""}</small></span><b>{worker.isStale ? "Stale" : "Healthy"}</b></div>)}</div> : <p className="operations-empty">No worker heartbeat has been observed in this environment.</p>}</div>
-      </section>
-
-      <section className="operations-section" aria-labelledby="operations-audit">
-        <div className="operations-section-heading"><div><p className="section-eyebrow">Administrator audit</p><h2 id="operations-audit">Recent operational actions</h2></div><span>Append-only action evidence</span></div>
-        <div className="account-card operations-card">{dashboard.recentAdminActions.length ? <div className="operations-detail-list">{dashboard.recentAdminActions.map((action) => <div key={action.id}><span><strong>{action.action}</strong><small>{action.targetType} · {action.targetId ?? "aggregate"} · {dateTime(action.createdAt)}</small></span><b>{action.outcome}</b></div>)}</div> : <p className="operations-empty">No administrator operational actions recorded.</p>}</div>
-      </section>
-
-      <section className="operations-section" aria-labelledby="operations-generation">
-        <div className="operations-section-heading"><div><p className="section-eyebrow">Generation</p><h2 id="operations-generation">Job execution</h2></div><span>{dashboard.generation.queuedOrPendingCount} currently queued or pending</span></div>
-        <div className="operations-two-column">
-          <div className="account-card operations-card"><h3>Jobs by status</h3><CountList items={dashboard.generation.byStatus} /></div>
-          <div className="account-card operations-card"><h3>Feature / studio breakdown</h3><CountList items={dashboard.generation.byStudio} /></div>
-        </div>
-        <div className="operations-two-column">
-          <div className="account-card operations-card"><h3>Running jobs</h3>{dashboard.generation.runningJobs.length ? <div className="operations-detail-list">{dashboard.generation.runningJobs.map((job) => <div key={job.jobId}><span><strong>{job.jobType}</strong><small>Started {dateTime(job.startedAt ?? job.queuedAt ?? job.createdAt)}</small></span><b>{job.progressPercent}%</b></div>)}</div> : <p className="operations-empty">No jobs are currently running.</p>}</div>
-          <div className="account-card operations-card"><h3>Recent failures</h3>{dashboard.generation.recentFailures.length ? <div className="operations-detail-list">{dashboard.generation.recentFailures.map((job) => <div key={job.jobId}><span><strong>{job.jobType}</strong><small>{job.errorCode ?? "No error code recorded"} · {dateTime(job.failedAt)}</small></span></div>)}</div> : <p className="operations-empty">No failed jobs recorded.</p>}</div>
-        </div>
-        <div className="account-card operations-card"><h3>Failure codes in selected range</h3>{dashboard.generation.failuresByCode.length ? <CountList items={dashboard.generation.failuresByCode} /> : <p className="operations-empty">No failed jobs recorded in the selected range.</p>}</div>
-      </section>
-
-      <section className="operations-section" aria-labelledby="operations-usage">
-        <div className="operations-section-heading"><div><p className="section-eyebrow">Usage & cost</p><h2 id="operations-usage">Request and unit accounting</h2></div><span>Provider cost and customer charges are shown separately</span></div>
-        <div className="operations-two-column">
-          <div className="account-card operations-card"><h3>Recorded units</h3><dl className="operations-metric-grid"><div><dt>Input tokens</dt><dd>{dashboard.usage.inputTokens.toLocaleString()}</dd></div><div><dt>Cached input</dt><dd>{dashboard.usage.cachedInputTokens.toLocaleString()}</dd></div><div><dt>Output tokens</dt><dd>{dashboard.usage.outputTokens.toLocaleString()}</dd></div><div><dt>Image input units</dt><dd>{dashboard.usage.imageInputTokens.toLocaleString()}</dd></div><div><dt>Image output units</dt><dd>{dashboard.usage.imageOutputTokens.toLocaleString()}</dd></div><div><dt>Pending estimated cost</dt><dd>{money(dashboard.usage.pendingEstimatedProviderCostUsd)}</dd></div></dl></div>
-          <div className="account-card operations-card"><h3>Request outcomes</h3><dl className="operations-metric-grid"><div><dt>Completed</dt><dd>{dashboard.usage.completedRequestCount.toLocaleString()}</dd></div><div><dt>Failed</dt><dd>{dashboard.usage.failedRequestCount.toLocaleString()}</dd></div><div><dt>Pending</dt><dd>{dashboard.usage.pendingRequestCount.toLocaleString()}</dd></div><div><dt>Provider cost</dt><dd>{money(dashboard.usage.providerCostUsd)}</dd></div><div><dt>Customer charges</dt><dd>{money(dashboard.usage.customerChargesUsd)}</dd></div></dl></div>
-        </div>
-        <div className="account-card operations-card"><h3>Usage by feature</h3>{dashboard.usage.byFeature.length ? <div className="operations-table-wrap"><table className="operations-table"><thead><tr><th>Feature</th><th>Requests</th><th>Tokens / units</th><th>Provider cost</th><th>Customer charges</th></tr></thead><tbody>{dashboard.usage.byFeature.map((feature) => <tr key={feature.feature}><td>{feature.feature}</td><td>{feature.requestCount.toLocaleString()} <small>{feature.failedRequestCount} failed</small></td><td>{(feature.inputTokens + feature.cachedInputTokens + feature.outputTokens + feature.imageInputTokens + feature.imageOutputTokens).toLocaleString()}</td><td>{money(feature.providerCostUsd)}</td><td>{money(feature.customerChargesUsd)}</td></tr>)}</tbody></table></div> : <p className="operations-empty">No usage transactions in the selected range.</p>}</div>
-      </section>
-
-      <section className="operations-section" aria-labelledby="operations-platform">
-        <div className="operations-section-heading"><div><p className="section-eyebrow">Platform inventory</p><h2 id="operations-platform">Users, workspaces, assets & storage</h2></div><span>Aggregate counts only</span></div>
-        <div className="operations-three-column">
-          <div className="account-card operations-card"><UsersRound size={18} /><h3>Users & workspaces</h3><dl className="operations-metric-grid"><div><dt>Users</dt><dd>{dashboard.usersAndWorkspaces.totalUsers}</dd></div><div><dt>Active users</dt><dd>{dashboard.usersAndWorkspaces.activeUsers}</dd></div><div><dt>Disabled users</dt><dd>{dashboard.usersAndWorkspaces.disabledUsers}</dd></div><div><dt>Workspaces</dt><dd>{dashboard.usersAndWorkspaces.totalWorkspaces}</dd></div><div><dt>Business workspaces</dt><dd>{dashboard.usersAndWorkspaces.businessWorkspaces}</dd></div><div><dt>Archived workspaces</dt><dd>{dashboard.usersAndWorkspaces.archivedWorkspaces}</dd></div></dl></div>
-          <div className="account-card operations-card"><Boxes size={18} /><h3>Assets</h3><p className="operations-big-number">{dashboard.assetsAndStorage.totalAssets.toLocaleString()}</p><span className="operations-caption">Total assets</span><CountList items={dashboard.assetsAndStorage.assetsByType} empty="No assets created in this range." /></div>
-          <div className="account-card operations-card"><Database size={18} /><h3>Storage</h3><dl className="operations-metric-grid"><div><dt>Stored files</dt><dd>{dashboard.assetsAndStorage.totalStoredFiles.toLocaleString()}</dd></div><div><dt>Recorded bytes</dt><dd>{bytes(dashboard.assetsAndStorage.storedBytes)}</dd></div><div><dt>Configured provider</dt><dd>{dashboard.assetsAndStorage.configuredStorageProvider}</dd></div><div><dt>Persistent storage configured</dt><dd>{dashboard.assetsAndStorage.persistentStorageConfigured ? "Yes" : "No"}</dd></div></dl><CountList items={dashboard.assetsAndStorage.filesByStatus} empty="No stored files." /></div>
-        </div>
-      </section>
-
-      <section className="operations-section" aria-labelledby="operations-billing">
-        <div className="operations-section-heading"><div><p className="section-eyebrow">Billing operations</p><h2 id="operations-billing">Read-only billing state</h2></div><span>No charging controls in this dashboard</span></div>
-        <div className="operations-three-column">
-          <div className="account-card operations-card"><CircleDollarSign size={18} /><h3>Charging state</h3><dl className="operations-metric-grid"><div><dt>Customer charging</dt><dd>{dashboard.billing.customerChargingEnabled ? "Enabled" : "Disabled"}</dd></div><div><dt>Configured provider</dt><dd>{dashboard.billing.configuredProvider}</dd></div><div><dt>Provider configured</dt><dd>{dashboard.billing.paymentProviderConfigured ? "Yes" : "No"}</dd></div><div><dt>Pending reconciliation</dt><dd>{dashboard.billing.pendingReconciliationCount}</dd></div></dl></div>
-          <div className="account-card operations-card"><h3>Subscriptions by plan / status</h3>{dashboard.billing.subscriptions.length ? <div className="operations-detail-list">{dashboard.billing.subscriptions.map((item) => <div key={`${item.planCode}-${item.status}`}><span><strong>{item.planCode}</strong><small>{item.status}</small></span><b>{item.count}</b></div>)}</div> : <p className="operations-empty">No subscriptions recorded.</p>}</div>
-          <div className="account-card operations-card"><FileStack size={18} /><h3>Payment attempts</h3><CountList items={dashboard.billing.paymentAttemptsByStatus} empty="No payment attempts recorded." /></div>
-        </div>
-      </section>
+      <div className="usage-stat-grid admin-kpi-grid operations-kpi-grid"><div className="account-card usage-stat"><span><Workflow size={15} aria-hidden="true" /> {t("movieJobsInRange")}</span><strong>{number(dashboard.generation.totalJobsInRange)}</strong></div><div className="account-card usage-stat"><span><Gauge size={15} aria-hidden="true" /> {t("requests")}</span><strong>{number(dashboard.usage.requestCount)}</strong></div><div className="account-card usage-stat"><span><CircleDollarSign size={15} aria-hidden="true" /> {t("providerCost")}</span><strong>{money(dashboard.usage.providerCostUsd)}</strong></div><div className="account-card usage-stat"><span><CircleDollarSign size={15} aria-hidden="true" /> {t("customerCharges")}</span><strong>{money(dashboard.usage.customerChargesUsd)}</strong></div></div>
+      <section className="operations-section" aria-labelledby="operations-providers">{heading(t("providerControlPlane"), t("generationProviderHealth"), t("readOnlyServerConfig"), "operations-providers")}<div className="provider-health-grid">{dashboard.providers.map((provider) => <article className="account-card provider-health-card" key={provider.key}><div className="provider-health-heading"><div><span className="provider-health-category"><ServerCog size={15} aria-hidden="true" /> {provider.category}</span><h3 dir="ltr">{provider.key}</h3></div><span className={`provider-status provider-status-${provider.status}`} title={providerStatusLabel(provider, locale)}>{providerStatusIcon(provider)}<span>{providerStatusLabel(provider, locale)}</span></span></div><MetricGrid items={[{ label: t("enabled"), value: bool(provider.enabled) }, { label: t("configured"), value: bool(provider.configured) }, { label: `${t("completed")} / ${t("failed")}`, value: `${number(provider.recentSuccessCount)} / ${number(provider.recentFailureCount)}` }, { label: t("latency"), value: provider.averageLatencyMs === null ? t("notRecorded") : `${number(provider.averageLatencyMs)} ms` }, { label: t("rateLimit"), value: number(provider.rateLimitEventCount) }, { label: t("timeout"), value: number(provider.timeoutEventCount) }, { label: t("qcFailures"), value: number(provider.qualityControlFailureCount) }, { label: t("totalRetries"), value: number(provider.retryCount) }, { label: t("fallbacks"), value: provider.fallbackTelemetryRecorded ? number(provider.fallbackCount) : t("notRecorded") }, { label: t("providerCost"), value: t("actualEstimated", { actual: money(provider.actualProviderCostUsd), estimated: money(provider.estimatedProviderCostUsd) }) }, { label: t("lastCompletedGeneration"), value: formatAdminDateTime(provider.lastSuccessAt, locale) }, { label: t("recentFailures"), value: provider.lastFailureAt ? t("lastFailure", { code: provider.lastFailureCode ?? t("sanitizedFailure"), time: formatAdminDateTime(provider.lastFailureAt, locale) }) : t("notRecorded"), dir: "auto" }]} /><div className="provider-health-failures"><h4><Clock3 size={14} aria-hidden="true" /> {t("recentSanitizedFailures")}</h4>{provider.recentFailures.length ? <div className="operations-detail-list">{provider.recentFailures.map((failure, index) => <div key={`${failure.occurredAt}-${failure.errorCode}-${index}`}><span><strong dir="ltr">{failure.errorCode}</strong><small dir="auto">{failure.jobType} · {formatAdminDateTime(failure.occurredAt, locale)}</small></span></div>)}</div> : <p className="operations-empty">{t("noSanitizedProviderFailures")}</p>}</div></article>)}</div><p className="provider-health-footnote">{t("providerActivationNote")}</p></section>
+      <section className="operations-section" aria-labelledby="operations-signals">{heading(t("operationalSignals"), t("operationalSignals"), t("liveDatabaseState"), "operations-signals")}<div className="operations-signal-grid">{[[t("runningJobs"), dashboard.signals.runningJobCount], [t("queuedPending"), dashboard.signals.queuedOrPendingJobCount], [t("failuresInRange"), dashboard.signals.recentFailureCount], [t("usageAnomalies"), dashboard.signals.anomalousUsageCountInRange]].map(([label, value]) => <div className="account-card operations-signal" key={String(label)}><span>{label}</span><strong>{number(value as number)}</strong></div>)}<div className="account-card operations-signal operations-signal-wide"><span>{t("lastCompletedGeneration")}</span><strong>{formatAdminDateTime(dashboard.signals.lastCompletedGenerationAt, locale)}</strong></div></div></section>
+      <section className="operations-section" aria-labelledby="operations-movie">{heading(t("movieProductionEngine"), t("movieOperationsEvidence"), t("internalSignals"), "operations-movie")}<div className="operations-three-column"><Card title={t("queueRetries")} icon={<Workflow size={18} aria-hidden="true" />}><MetricGrid items={[{ label: t("movieJobsInRange"), value: number(dashboard.movie.movieJobCountInRange) }, { label: t("queuedPending"), value: number(dashboard.movie.queuedOrPendingCount) }, { label: t("oldestQueueAge"), value: formatAdminMinutes(dashboard.movie.oldestQueueAgeSeconds, locale) }, { label: t("averageQueueAge"), value: formatAdminMinutes(dashboard.movie.averageQueueAgeSeconds, locale) }, { label: t("totalRetries"), value: number(dashboard.movie.totalRetryCount) }, { label: t("jobsRetried"), value: number(dashboard.movie.retriedJobCount) }]} /></Card><Card title={t("providerDisabledState")} icon={<ServerCog size={18} aria-hidden="true" />}><MetricGrid items={[{ label: t("status"), value: dashboard.movie.providerStatus, dir: "auto" }, { label: t("enabled"), value: bool(dashboard.movie.providerEnabled) }, { label: t("configured"), value: bool(dashboard.movie.providerConfigured) }, { label: t("disabledFailures"), value: number(dashboard.movie.providerDisabledFailureCount) }, { label: t("qcFailures"), value: number(dashboard.movie.qualityControlFailureCount) }]} /></Card><Card title={t("assetAccountingEvidence")} icon={<Boxes size={18} aria-hidden="true" />}><MetricGrid items={[{ label: t("movieAssets"), value: number(dashboard.movie.movieAssetCount) }, { label: t("ingestionGaps"), value: number(dashboard.movie.movieAssetIngestionGapCount) }, { label: t("completedWithoutAsset"), value: number(dashboard.movie.completedJobsWithoutAssetCount) }, { label: t("accountingTransactions"), value: number(dashboard.movie.accountingTransactionCount) }, { label: t("pendingAccounting"), value: number(dashboard.movie.pendingAccountingCount) }, { label: t("missingEvidence"), value: number(dashboard.movie.missingAccountingEvidenceCount) }]} /></Card></div><div className="operations-two-column"><Card title={t("qcOutcomes")}><CountList items={dashboard.movie.qualityControlByStatus} empty={t("noMovieQc")} locale={locale} /></Card><Card title={t("failureCodes")}><CountList items={dashboard.movie.failuresByCode} empty={t("noMovieFailures")} locale={locale} /></Card></div><Card title={t("stuckMovieJobs")}>{dashboard.movie.stuckJobs.length ? <div className="operations-detail-list">{dashboard.movie.stuckJobs.map((job) => <div key={job.jobId}><span><strong dir="ltr">{job.jobType}</strong><small dir="auto">{t("leaseExpiredRetry", { jobId: job.jobId, count: number(job.retryCount) })}</small></span><button type="button" className="secondary-button" disabled={recoveringJobId === job.jobId} onClick={() => void recoverJob(job.jobId)}>{recoveringJobId === job.jobId ? t("recovering") : t("recoverLease")}</button></div>)}</div> : <p className="operations-empty">{t("noExpiredLeases")}</p>}</Card></section>
+      <section className="operations-section" aria-labelledby="operations-workers">{heading(t("workerFleet"), t("generationWorkers"), t("healthyStale", { healthy: number(dashboard.workers.healthyWorkerCount), stale: number(dashboard.workers.staleWorkerCount) }), "operations-workers")}<Card title=""><MetricGrid items={[{ label: t("configuredConcurrency"), value: number(dashboard.workers.configuredConcurrency) }, { label: t("observedWorkers"), value: number(dashboard.workers.observedWorkerCount) }, { label: t("healthyWorkers"), value: number(dashboard.workers.healthyWorkerCount) }, { label: t("staleWorkers"), value: number(dashboard.workers.staleWorkerCount) }]} />{dashboard.workers.workers.length ? <div className="operations-detail-list">{dashboard.workers.workers.map((worker) => <div key={worker.workerId}><span><strong dir="ltr">{worker.workerId}</strong><small dir="auto">{worker.status} · {formatAdminDateTime(worker.lastSeenAt, locale)}{worker.activeJobId ? ` · ${worker.activeJobId}` : ""}</small></span><b>{worker.isStale ? t("staleWorkers") : t("healthyWorkers")}</b></div>)}</div> : <p className="operations-empty">{t("noHeartbeat")}</p>}</Card></section>
+      <section className="operations-section" aria-labelledby="operations-audit">{heading(t("administratorAudit"), t("recentOperationalActions"), t("appendOnlyEvidence"), "operations-audit")}<Card title="">{dashboard.recentAdminActions.length ? <div className="operations-detail-list">{dashboard.recentAdminActions.map((action) => <div key={action.id}><span><strong dir="auto">{action.action}</strong><small dir="auto">{action.targetType} · {action.targetId ?? t("aggregate")} · {formatAdminDateTime(action.createdAt, locale)}</small></span><b dir="auto">{action.outcome}</b></div>)}</div> : <p className="operations-empty">{t("noAdminActions")}</p>}</Card></section>
+      <section className="operations-section" aria-labelledby="operations-generation">{heading(t("generation"), t("jobExecution"), t("currentlyQueued", { count: number(dashboard.generation.queuedOrPendingCount) }), "operations-generation")}<div className="operations-two-column"><Card title={t("jobsByStatus")}><CountList items={dashboard.generation.byStatus} empty={t("noFailedJobs")} locale={locale} /></Card><Card title={t("featureStudioBreakdown")}><CountList items={dashboard.generation.byStudio} empty={t("noFailedJobs")} locale={locale} /></Card></div><div className="operations-two-column"><Card title={t("runningJobsTitle")}>{dashboard.generation.runningJobs.length ? <div className="operations-detail-list">{dashboard.generation.runningJobs.map((job) => <div key={job.jobId}><span><strong dir="ltr">{job.jobType}</strong><small dir="auto">{t("started", { time: formatAdminDateTime(job.startedAt ?? job.queuedAt ?? job.createdAt, locale) })}</small></span><b>{number(job.progressPercent)}%</b></div>)}</div> : <p className="operations-empty">{t("noRunningJobs")}</p>}</Card><Card title={t("recentFailures")}>{dashboard.generation.recentFailures.length ? <div className="operations-detail-list">{dashboard.generation.recentFailures.map((job) => <div key={job.jobId}><span><strong dir="ltr">{job.jobType}</strong><small dir="auto">{job.errorCode ?? t("noValue")} · {formatAdminDateTime(job.failedAt, locale)}</small></span></div>)}</div> : <p className="operations-empty">{t("noFailedJobs")}</p>}</Card></div><Card title={t("failureCodesSelected")}>{dashboard.generation.failuresByCode.length ? <CountList items={dashboard.generation.failuresByCode} empty={t("noFailedJobsRange")} locale={locale} /> : <p className="operations-empty">{t("noFailedJobsRange")}</p>}</Card></section>
+      <section className="operations-section" aria-labelledby="operations-usage">{heading(t("usageCost"), t("requestAccounting"), t("costsSeparate"), "operations-usage")}<div className="operations-two-column"><Card title={t("recordedUnits")}><MetricGrid items={[{ label: t("inputTokens"), value: number(dashboard.usage.inputTokens) }, { label: t("cachedInput"), value: number(dashboard.usage.cachedInputTokens) }, { label: t("outputTokens"), value: number(dashboard.usage.outputTokens) }, { label: t("imageInputUnits"), value: number(dashboard.usage.imageInputTokens) }, { label: t("imageOutputUnits"), value: number(dashboard.usage.imageOutputTokens) }, { label: t("pendingEstimatedCost"), value: money(dashboard.usage.pendingEstimatedProviderCostUsd) }]} /></Card><Card title={t("requestOutcomes")}><MetricGrid items={[{ label: t("completed"), value: number(dashboard.usage.completedRequestCount) }, { label: t("failed"), value: number(dashboard.usage.failedRequestCount) }, { label: t("pending"), value: number(dashboard.usage.pendingRequestCount) }, { label: t("providerCost"), value: money(dashboard.usage.providerCostUsd) }, { label: t("customerCharges"), value: money(dashboard.usage.customerChargesUsd) }]} /></Card></div><Card title={t("usageByFeature")}>{dashboard.usage.byFeature.length ? <div className="operations-table-wrap"><table className="operations-table"><thead><tr><th>{t("feature")}</th><th>{t("requests")}</th><th>{t("tokensUnits")}</th><th>{t("providerCost")}</th><th>{t("customerCharges")}</th></tr></thead><tbody>{dashboard.usage.byFeature.map((feature) => <tr key={feature.feature}><td dir="auto">{feature.feature}</td><td>{number(feature.requestCount)} <small>{t("failedCount", { count: number(feature.failedRequestCount) })}</small></td><td>{number(feature.inputTokens + feature.cachedInputTokens + feature.outputTokens + feature.imageInputTokens + feature.imageOutputTokens)}</td><td>{money(feature.providerCostUsd)}</td><td>{money(feature.customerChargesUsd)}</td></tr>)}</tbody></table></div> : <p className="operations-empty">{t("noUsageTransactions")}</p>}</Card></section>
+      <section className="operations-section" aria-labelledby="operations-platform">{heading(t("platformInventory"), `${t("usersWorkspaces")} · ${t("assets")} & ${t("storage")}`, t("aggregate"), "operations-platform")}<div className="operations-three-column"><Card title={t("usersWorkspaces")} icon={<UsersRound size={18} aria-hidden="true" />}><MetricGrid items={[{ label: t("users"), value: number(dashboard.usersAndWorkspaces.totalUsers) }, { label: t("activeUsers"), value: number(dashboard.usersAndWorkspaces.activeUsers) }, { label: t("disabledUsers"), value: number(dashboard.usersAndWorkspaces.disabledUsers) }, { label: t("workspaces"), value: number(dashboard.usersAndWorkspaces.totalWorkspaces) }, { label: t("businessWorkspaces"), value: number(dashboard.usersAndWorkspaces.businessWorkspaces) }, { label: t("archivedWorkspaces"), value: number(dashboard.usersAndWorkspaces.archivedWorkspaces) }]} /></Card><Card title={t("assets")} icon={<Boxes size={18} aria-hidden="true" />}><p className="operations-big-number">{number(dashboard.assetsAndStorage.totalAssets)}</p><span className="operations-caption">{t("totalAssets")}</span><CountList items={dashboard.assetsAndStorage.assetsByType} empty={t("noAssets")} locale={locale} /></Card><Card title={t("storage")} icon={<Database size={18} aria-hidden="true" />}><MetricGrid items={[{ label: t("storedFiles"), value: number(dashboard.assetsAndStorage.totalStoredFiles) }, { label: t("recordedBytes"), value: formatAdminBytes(dashboard.assetsAndStorage.storedBytes, locale) }, { label: t("configuredProvider"), value: dashboard.assetsAndStorage.configuredStorageProvider, dir: "auto" }, { label: t("persistentStorage"), value: bool(dashboard.assetsAndStorage.persistentStorageConfigured) }]} /><CountList items={dashboard.assetsAndStorage.filesByStatus} empty={t("noStoredFiles")} locale={locale} /></Card></div></section>
+      <section className="operations-section" aria-labelledby="operations-billing">{heading(t("billingOperations"), t("readOnlyBilling"), t("noChargingControls"), "operations-billing")}<div className="operations-three-column"><Card title={t("chargingState")} icon={<CircleDollarSign size={18} aria-hidden="true" />}><MetricGrid items={[{ label: t("customerCharging"), value: bool(dashboard.billing.customerChargingEnabled) }, { label: t("configuredProvider"), value: dashboard.billing.configuredProvider, dir: "auto" }, { label: t("configured"), value: bool(dashboard.billing.paymentProviderConfigured) }, { label: t("pendingAccounting"), value: number(dashboard.billing.pendingReconciliationCount) }]} /></Card><Card title={t("subscriptionsByPlanStatus")}>{dashboard.billing.subscriptions.length ? <div className="operations-detail-list">{dashboard.billing.subscriptions.map((item) => <div key={`${item.planCode}-${item.status}`}><span><strong dir="ltr">{item.planCode}</strong><small dir="auto">{item.status}</small></span><b>{number(item.count)}</b></div>)}</div> : <p className="operations-empty">{t("noSubscriptions")}</p>}</Card><Card title={t("paymentAttempts")} icon={<FileStack size={18} aria-hidden="true" />}><CountList items={dashboard.billing.paymentAttemptsByStatus} empty={t("noPaymentAttempts")} locale={locale} /></Card></div></section>
     </>}
   </div>;
 }
