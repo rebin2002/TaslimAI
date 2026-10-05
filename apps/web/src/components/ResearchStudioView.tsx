@@ -8,7 +8,7 @@ import { ArrowUpRight, BookOpen, CheckCircle2, Download, ExternalLink, FileText,
 import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
 import { ApiError, api, type Asset, type GenerationJob, type Project, type ResearchJobResult, type ResearchSource, type StoredFile } from "@/lib/api";
-import { canCancelResearchJob, clearResearchActiveJobId, displayResearchProgress, isResearchSourceReady, isRestorableResearchJob, isSafeExternalUrl, mergeResearchSources, nextResearchPollDelay, parseResearchJobResult, persistResearchActiveJobId, readResearchActiveJobId, researchStudioState, shouldPollResearchJob } from "@/lib/researchStudioState";
+import { canCancelResearchJob, clearResearchActiveJobId, displayResearchProgress, isCurrentResearchJob, isResearchSourceReady, isRestorableResearchJob, isSafeExternalUrl, mergeResearchSources, nextResearchPollDelay, parseResearchJobResult, persistResearchActiveJobId, readResearchActiveJobId, researchStudioState, shouldPollResearchJob } from "@/lib/researchStudioState";
 
 const extensions = [".pdf", ".docx", ".txt", ".md", ".csv", ".xlsx"];
 type Depth = "quick" | "standard" | "deep";
@@ -48,65 +48,110 @@ export function ResearchStudioView() {
   const [error, setError] = useState("");
   const [downloadError, setDownloadError] = useState("");
   const restoreJobId = useRef<string | null>(null);
+  const observedWorkspaceId = useRef<string | null>(workspace?.id ?? null);
+  const workspaceGeneration = useRef(0);
 
   const loadInputs = useCallback(async () => {
     if (!workspace) return;
+    const workspaceId = workspace.id;
+    const workspaceVersion = workspaceGeneration.current;
     setLoadingSources(true);
     try {
       const [active, archived, available, researchAssets] = await Promise.all([
-        api.listProjects(workspace.id, "Active"),
-        api.listProjects(workspace.id, "Archived"),
-        api.listFiles(workspace.id),
-        api.listAssets(workspace.id, { assetType: "research", pageSize: 4, sort: "recent" }),
+        api.listProjects(workspaceId, "Active"),
+        api.listProjects(workspaceId, "Archived"),
+        api.listFiles(workspaceId),
+        api.listAssets(workspaceId, { assetType: "research", pageSize: 4, sort: "recent" }),
       ]);
+      if (observedWorkspaceId.current !== workspaceId || workspaceGeneration.current !== workspaceVersion) return;
       setProjects([...active, ...archived]);
       setFiles(available.filter((file) => extensions.includes(file.extension.toLowerCase())));
       setRecentResearch(researchAssets.items);
     } catch {
+      if (observedWorkspaceId.current !== workspaceId || workspaceGeneration.current !== workspaceVersion) return;
       setProjects([]);
       setFiles([]);
       setRecentResearch([]);
     } finally {
-      setLoadingSources(false);
+      if (observedWorkspaceId.current === workspaceId && workspaceGeneration.current === workspaceVersion) setLoadingSources(false);
     }
   }, [workspace]);
+
+  // Workspace-scoped jobs, briefs, selections, and source lists must not survive an ownership boundary.
+  // The generation counter fences responses and actions that started in the previous workspace.
+  useEffect(() => {
+    const nextWorkspaceId = workspace?.id ?? null;
+    if (observedWorkspaceId.current === nextWorkspaceId) return;
+    observedWorkspaceId.current = nextWorkspaceId;
+    workspaceGeneration.current += 1;
+    restoreJobId.current = null;
+    setCurrent(null);
+    setSourceDetails([]);
+    setProjects([]);
+    setFiles([]);
+    setRecentResearch([]);
+    setProjectId(searchParams.get("projectId") ?? "");
+    setSelected([]);
+    setTitle("");
+    setQuestion("");
+    setObjective("");
+    setDepth("standard");
+    setReportType("research_report");
+    setLanguage("auto");
+    setAudience("");
+    setGeographicFocus("");
+    setTimePeriod("");
+    setPreferredDomains("");
+    setExcludedDomains("");
+    setAdditionalInstructions("");
+    setUseWebSources(true);
+    setPollRetry(0);
+    setRetryingCompleted(false);
+    setWorking(false);
+    setLoadingSources(true);
+    setError("");
+    setDownloadError("");
+  }, [searchParams, workspace?.id]);
 
   // This effect synchronizes authenticated workspace inputs into the local form.
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void loadInputs(); }, [loadInputs]);
   useEffect(() => {
     if (!workspace || current) return;
-    const storedJobId = readResearchActiveJobId(workspace.id);
+    const workspaceId = workspace.id;
+    const workspaceVersion = workspaceGeneration.current;
+    const storedJobId = readResearchActiveJobId(workspaceId);
     if (!storedJobId) return;
     restoreJobId.current = storedJobId;
     let active = true;
     void api.getGenerationJob(storedJobId).then((job) => {
-      if (!active || restoreJobId.current !== storedJobId) return;
-      if (!isRestorableResearchJob(job, workspace.id)) {
-        clearResearchActiveJobId(workspace.id);
+      if (!active || workspaceGeneration.current !== workspaceVersion || restoreJobId.current !== storedJobId) return;
+      if (!isRestorableResearchJob(job, workspaceId)) {
+        clearResearchActiveJobId(workspaceId);
         return;
       }
       setCurrent(job);
       setPollRetry(0);
     }).catch((cause) => {
-      if (!active || restoreJobId.current !== storedJobId) return;
-      if (cause instanceof ApiError && (cause.status === 403 || cause.status === 404)) clearResearchActiveJobId(workspace.id);
+      if (!active || workspaceGeneration.current !== workspaceVersion || restoreJobId.current !== storedJobId) return;
+      if (cause instanceof ApiError && (cause.status === 403 || cause.status === 404)) clearResearchActiveJobId(workspaceId);
     });
     return () => { active = false; };
   }, [workspace, current]);
   useEffect(() => {
     if (!current || !shouldPollResearchJob(current)) return;
     const jobId = current.id;
+    const workspaceVersion = workspaceGeneration.current;
     let active = true;
     const timer = window.setTimeout(async () => {
       try {
         const next = await api.getGenerationJob(jobId);
-        if (!active) return;
+        if (!active || workspaceGeneration.current !== workspaceVersion || current.id !== jobId || !isCurrentResearchJob(next, current.workspaceId, jobId)) return;
         setCurrent(next);
         setPollRetry(0);
         setError("");
       } catch {
-        if (!active) return;
+        if (!active || workspaceGeneration.current !== workspaceVersion || current.id !== jobId) return;
         setPollRetry((attempt) => attempt + 1);
         setError(t("research.pollError"));
       }
@@ -117,11 +162,13 @@ export function ResearchStudioView() {
     if (!current || current.status !== "Succeeded") return;
     const parsed = parseResearchJobResult(current);
     if (!parsed?.assetId) return;
+    const jobId = current.id;
+    const workspaceVersion = workspaceGeneration.current;
     let active = true;
-    void api.getResearchSources(current.id).then((response) => {
-      if (active) setSourceDetails(response.sources);
+    void api.getResearchSources(jobId).then((response) => {
+      if (active && workspaceGeneration.current === workspaceVersion && current.id === jobId) setSourceDetails(response.sources);
     }).catch(() => {
-      if (active) setSourceDetails([]);
+      if (active && workspaceGeneration.current === workspaceVersion && current.id === jobId) setSourceDetails([]);
     });
     return () => { active = false; };
   }, [current]);
@@ -141,15 +188,17 @@ export function ResearchStudioView() {
       objective.trim() ? `${t("research.objective")}: ${objective.trim()}` : "",
       additionalInstructions.trim(),
     ].filter(Boolean).join("\n\n");
+    const workspaceId = workspace.id;
+    const workspaceVersion = workspaceGeneration.current;
     setWorking(true);
     setError("");
     setDownloadError("");
     setSourceDetails([]);
     restoreJobId.current = null;
-    clearResearchActiveJobId(workspace.id);
+    clearResearchActiveJobId(workspaceId);
     try {
       const job = await api.createResearchGenerationJob({
-        workspaceId: workspace.id,
+        workspaceId,
         projectId: projectId || null,
         question: question.trim(),
         title: title.trim() || null,
@@ -165,49 +214,63 @@ export function ResearchStudioView() {
         useWebSources,
         attachmentIds: selected,
       });
-      persistResearchActiveJobId(workspace.id, job.id);
+      if (workspaceGeneration.current !== workspaceVersion || observedWorkspaceId.current !== workspaceId || !isCurrentResearchJob(job, workspaceId)) return;
+      persistResearchActiveJobId(workspaceId, job.id);
       setCurrent(job);
       setPollRetry(0);
     } catch {
-      setError(t("research.createError"));
+      if (workspaceGeneration.current === workspaceVersion && observedWorkspaceId.current === workspaceId) setError(t("research.createError"));
     } finally {
-      setWorking(false);
+      if (workspaceGeneration.current === workspaceVersion && observedWorkspaceId.current === workspaceId) setWorking(false);
     }
   }
 
   async function cancel() {
     if (!current || !canCancelResearchJob(current)) return;
+    const workspaceId = current.workspaceId;
+    const workspaceVersion = workspaceGeneration.current;
+    const jobId = current.id;
     setWorking(true);
     setError("");
     try {
-      await api.cancelGenerationJob(current.id);
-      setCurrent(await api.getGenerationJob(current.id));
+      await api.cancelGenerationJob(jobId);
+      const next = await api.getGenerationJob(jobId);
+      if (workspaceGeneration.current !== workspaceVersion || current.id !== jobId || !isCurrentResearchJob(next, workspaceId, jobId)) return;
+      setCurrent(next);
     } catch {
-      setError(t("research.cancelError"));
+      if (workspaceGeneration.current === workspaceVersion && current.id === jobId) setError(t("research.cancelError"));
     } finally {
-      setWorking(false);
+      if (workspaceGeneration.current === workspaceVersion && current.id === jobId) setWorking(false);
     }
   }
 
   async function retryCompleted() {
     if (!current) return;
+    const workspaceId = current.workspaceId;
+    const workspaceVersion = workspaceGeneration.current;
+    const jobId = current.id;
     setRetryingCompleted(true);
     setError("");
     try {
-      setCurrent(await api.getGenerationJob(current.id));
+      const next = await api.getGenerationJob(jobId);
+      if (workspaceGeneration.current === workspaceVersion && current.id === jobId && isCurrentResearchJob(next, workspaceId, jobId)) setCurrent(next);
     } catch {
-      setError(t("research.completedLoadError"));
+      if (workspaceGeneration.current === workspaceVersion && current.id === jobId) setError(t("research.completedLoadError"));
     } finally {
-      setRetryingCompleted(false);
+      if (workspaceGeneration.current === workspaceVersion && current.id === jobId) setRetryingCompleted(false);
     }
   }
 
   async function downloadRepresentation(representationId: string, fileName: string) {
     if (!result?.assetId) return;
+    const assetId = result.assetId;
+    const jobId = current?.id;
+    const workspaceVersion = workspaceGeneration.current;
     setWorking(true);
     setDownloadError("");
     try {
-      const blob = await api.downloadAssetRepresentation(result.assetId, representationId);
+      const blob = await api.downloadAssetRepresentation(assetId, representationId);
+      if (workspaceGeneration.current !== workspaceVersion || current?.id !== jobId) return;
       const url = URL.createObjectURL(blob);
       const anchor = window.document.createElement("a");
       anchor.href = url;
@@ -215,28 +278,31 @@ export function ResearchStudioView() {
       anchor.click();
       window.setTimeout(() => URL.revokeObjectURL(url), 0);
     } catch {
-      setDownloadError(t("research.downloadError"));
+      if (workspaceGeneration.current === workspaceVersion && current?.id === jobId) setDownloadError(t("research.downloadError"));
     } finally {
-      setWorking(false);
+      if (workspaceGeneration.current === workspaceVersion && current?.id === jobId) setWorking(false);
     }
   }
 
   async function downloadSourceManifest() {
     if (!current) return;
+    const workspaceVersion = workspaceGeneration.current;
+    const jobId = current.id;
     setWorking(true);
     setDownloadError("");
     try {
-      const blob = await api.downloadResearchSourcesExport(current.id);
+      const blob = await api.downloadResearchSourcesExport(jobId);
+      if (workspaceGeneration.current !== workspaceVersion || current?.id !== jobId) return;
       const url = URL.createObjectURL(blob);
       const anchor = window.document.createElement("a");
       anchor.href = url;
-      anchor.download = `research-sources-${current.id}.csv`;
+      anchor.download = `research-sources-${jobId}.csv`;
       anchor.click();
       window.setTimeout(() => URL.revokeObjectURL(url), 0);
     } catch {
-      setDownloadError(t("research.downloadError"));
+      if (workspaceGeneration.current === workspaceVersion && current?.id === jobId) setDownloadError(t("research.downloadError"));
     } finally {
-      setWorking(false);
+      if (workspaceGeneration.current === workspaceVersion && current?.id === jobId) setWorking(false);
     }
   }
 
