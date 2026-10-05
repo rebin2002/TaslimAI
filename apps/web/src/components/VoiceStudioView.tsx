@@ -29,6 +29,14 @@ const languages = ["en", "ar", "ku"] as const;
 const voiceStyles = ["neutral", "warm", "professional", "storytelling"] as const;
 const speakingStyles = ["conversational", "clear", "expressive", "calm"] as const;
 
+export function voiceLanguageTag(language: VoiceGenerationInput["language"]): string {
+  return language === "ku" ? "ku-Arab" : language;
+}
+
+export function voiceTextDirection(language: VoiceGenerationInput["language"]): "ltr" | "rtl" {
+  return language === "en" ? "ltr" : "rtl";
+}
+
 type AudioPlayerProps = {
   src: string;
   label: string;
@@ -37,10 +45,13 @@ type AudioPlayerProps = {
 };
 
 function VoiceAudioPlayer({ src, label, durationMilliseconds, compact = false }: AudioPlayerProps) {
+  const { t } = useLocale();
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(durationMilliseconds ? durationMilliseconds / 1000 : 0);
+  const currentTimeText = formatVoiceDuration(currentTime * 1000);
+  const durationText = formatVoiceDuration(duration * 1000);
 
   const togglePlayback = async () => {
     const audio = audioRef.current;
@@ -67,17 +78,18 @@ function VoiceAudioPlayer({ src, label, durationMilliseconds, compact = false }:
         preload="metadata"
         crossOrigin="use-credentials"
         src={src}
+        aria-hidden="true"
         onLoadedMetadata={(event) => setDuration(Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration : duration)}
         onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime)}
         onPlay={() => setIsPlaying(true)}
         onPause={() => setIsPlaying(false)}
         onEnded={() => { setIsPlaying(false); setCurrentTime(0); }}
       />
-      <button className="voice-play-button" type="button" onClick={() => void togglePlayback()} aria-label={isPlaying ? `Pause ${label}` : `Play ${label}`}>
+      <button className="voice-play-button" type="button" onClick={() => void togglePlayback()} aria-label={t(isPlaying ? "voice.pause" : "voice.play", { label })}>
         {isPlaying ? <Pause size={compact ? 16 : 20} fill="currentColor" /> : <Play size={compact ? 16 : 20} fill="currentColor" />}
       </button>
       <div className="voice-audio-track">
-        <div className="voice-audio-times"><span>{formatVoiceDuration(currentTime * 1000)}</span><span>{formatVoiceDuration(duration * 1000)}</span></div>
+        <div className="voice-audio-times" aria-hidden="true"><span>{currentTimeText}</span><span>{durationText}</span></div>
         <input
           className="voice-timeline"
           type="range"
@@ -87,7 +99,11 @@ function VoiceAudioPlayer({ src, label, durationMilliseconds, compact = false }:
           value={Math.min(currentTime, duration || 0)}
           onChange={seek}
           disabled={!duration}
-          aria-label={`${label} progress`}
+          aria-label={t("voice.playbackProgress", { label })}
+          aria-valuemin={0}
+          aria-valuemax={duration || 0}
+          aria-valuenow={Math.min(currentTime, duration || 0)}
+          aria-valuetext={t("voice.progressValue", { current: currentTimeText, duration: durationText })}
         />
       </div>
     </div>
@@ -244,6 +260,9 @@ export function VoiceStudioView() {
   const unsupportedLanguage = current?.errorCode === "VOICE_LANGUAGE_UNSUPPORTED";
   const cancelled = current?.errorCode === "VOICE_CANCELLED";
   const isGenerating = !!current && !isSuccess && !isFailure;
+  const progress = Math.max(0, Math.min(100, current?.progressPercent ?? 0));
+  const progressStatus = t(`jobs.status${current?.status ?? "Queued"}`);
+  const progressAnnouncement = t("jobs.progressAnnouncement", { title: t("voice.title"), status: progressStatus, progress: String(progress) });
 
   return (
     <div className="voice-studio-page">
@@ -275,16 +294,17 @@ export function VoiceStudioView() {
           <div className="voice-result-actions"><a className="voice-secondary-action" href={api.assetFileUrl(result.assetId!)}><Download size={15} /> {t("voice.download")}</a><Link className="voice-secondary-action" href={`/assets?search=${encodeURIComponent(text.slice(0, 60))}`}>{t("voice.openAssets")}</Link><button className="voice-primary-action" type="button" onClick={createAnother}><RefreshCw size={15} /> {t("voice.createAnother")}</button></div>
         </section>
       ) : isGenerating ? (
-        <section className="voice-generation-panel" aria-live="polite">
-          <div className="voice-generating-icon"><LoaderCircle size={27} /></div><p className="section-eyebrow">{t("voice.progressEyebrow")}</p><h2>{t(`jobs.status${current?.status ?? "Queued"}`)}</h2><p>{t("voice.progressText")}</p>
-          <div className="generation-progress-label"><span>{t("jobs.progress")}</span><strong>{current?.progressPercent ?? 0}%</strong></div><div className="generation-progress-track"><span style={{ width: `${current?.progressPercent ?? 0}%` }} /></div>
+        <section className="voice-generation-panel" aria-labelledby="voice-generation-title">
+          <div className="voice-generating-icon"><LoaderCircle size={27} aria-hidden="true" /></div><p className="section-eyebrow">{t("voice.progressEyebrow")}</p><h2 id="voice-generation-title">{progressStatus}</h2><p>{t("voice.progressText")}</p>
+          <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">{progressAnnouncement}</p>
+          <div className="generation-progress-label"><span>{t("jobs.progress")}</span><strong>{progress}%</strong></div><div className="generation-progress-track" role="progressbar" aria-label={t("jobs.progress")} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress} aria-valuetext={progressAnnouncement}><span style={{ width: `${progress}%` }} /></div>
           {canCancelVoiceJob(current) && <button className="voice-secondary-action voice-cancel-action" type="button" onClick={() => void cancel()} disabled={working}><XCircle size={15} /> {t("voice.cancel")}</button>}
         </section>
       ) : (
         <form className="voice-studio-workspace" onSubmit={(event) => void generate(event)}>
           <section className="voice-editor-panel">
             <div className="voice-panel-heading"><div><p className="section-eyebrow">01 / {t("voice.workflow.script")}</p><h2>{t("voice.scriptTitle")}</h2><p>{t("voice.scriptSubtitle")}</p></div><span className="voice-panel-icon"><Mic2 size={18} /></span></div>
-            <label className="voice-script-field" htmlFor="voice-script"><span>{t("voice.textLabel")}</span><textarea id="voice-script" dir={language === "en" ? "ltr" : "rtl"} value={text} onChange={(event) => setText(event.target.value)} maxLength={10000} placeholder={t("voice.textPlaceholder")} required /><small>{text.length.toLocaleString(locale)}/10,000</small></label>
+            <label className="voice-script-field" htmlFor="voice-script"><span>{t("voice.textLabel")}</span><textarea id="voice-script" dir={voiceTextDirection(language)} lang={voiceLanguageTag(language)} value={text} onChange={(event) => setText(event.target.value)} maxLength={10000} placeholder={t("voice.textPlaceholder")} required /><small>{text.length.toLocaleString(locale)}/10,000</small></label>
             <div className="voice-editor-footer"><span><Headphones size={14} /> {t("voice.scriptHint")}</span><span>{t(`voice.language.${language}`)}</span></div>
           </section>
 
@@ -308,7 +328,7 @@ export function VoiceStudioView() {
 
       <section className="voice-recent-section" aria-labelledby="voice-recent-title">
         <div className="voice-section-heading"><div><p className="section-eyebrow">03 / {t("voice.workflow.listen")}</p><h2 id="voice-recent-title">{t("voice.recentTitle")}</h2><p>{t("voice.recentSubtitle")}</p></div><Link href="/assets?type=audio" className="voice-text-link">{t("voice.openAssets")} <span aria-hidden="true">→</span></Link></div>
-        {loadingRecent ? <div className="voice-recent-loading"><LoaderCircle size={18} /><span>{t("voice.recentLoading")}</span></div> : recentAssets.length === 0 ? <div className="voice-recent-empty"><div className="voice-empty-icon"><FileAudio size={22} /></div><div><h3>{t("voice.recentEmptyTitle")}</h3><p>{t("voice.recentEmptyDescription")}</p></div></div> : <div className="voice-recent-list">{recentAssets.map((asset) => <article className="voice-recent-item" key={asset.id}><div className="voice-recent-icon"><FileAudio size={17} /></div><div className="voice-recent-copy"><strong title={asset.name}>{asset.name}</strong><span>{asset.projectName ?? t("voice.noProject")} · {formatCreatedAt(asset.createdAt, locale)}</span><small>{formatVoiceFileSize(asset.fileSizeBytes)}{asset.mimeType ? ` · ${asset.mimeType.replace("audio/", "").toUpperCase()}` : ""}</small></div>{asset.hasFile && asset.canPreview ? <VoiceAudioPlayer src={api.assetFileUrl(asset.id, true)} label={asset.name} compact /> : <span className="voice-audio-unavailable">{t("voice.audioUnavailable")}</span>}<a className="voice-download-icon" href={api.assetFileUrl(asset.id)} aria-label={`${t("voice.download")} ${asset.name}`}><Download size={15} /></a></article>)}</div>}
+        {loadingRecent ? <div className="voice-recent-loading" role="status" aria-live="polite"><LoaderCircle size={18} aria-hidden="true" /><span>{t("voice.recentLoading")}</span></div> : recentAssets.length === 0 ? <div className="voice-recent-empty"><div className="voice-empty-icon"><FileAudio size={22} /></div><div><h3>{t("voice.recentEmptyTitle")}</h3><p>{t("voice.recentEmptyDescription")}</p></div></div> : <div className="voice-recent-list">{recentAssets.map((asset) => <article className="voice-recent-item" key={asset.id}><div className="voice-recent-icon"><FileAudio size={17} /></div><div className="voice-recent-copy"><strong title={asset.name}>{asset.name}</strong><span>{asset.projectName ?? t("voice.noProject")} · {formatCreatedAt(asset.createdAt, locale)}</span><small>{formatVoiceFileSize(asset.fileSizeBytes)}{asset.mimeType ? ` · ${asset.mimeType.replace("audio/", "").toUpperCase()}` : ""}</small></div>{asset.hasFile && asset.canPreview ? <VoiceAudioPlayer src={api.assetFileUrl(asset.id, true)} label={asset.name} compact /> : <span className="voice-audio-unavailable">{t("voice.audioUnavailable")}</span>}<a className="voice-download-icon" href={api.assetFileUrl(asset.id)} aria-label={`${t("voice.download")} ${asset.name}`}><Download size={15} /></a></article>)}</div>}
       </section>
       <p className="voice-studio-footnote">{t("voice.safetyNote")}</p>
     </div>
