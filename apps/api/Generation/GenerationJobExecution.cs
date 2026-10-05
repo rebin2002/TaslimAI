@@ -13,6 +13,7 @@ using Taslim.Api.Domain;
 using Taslim.Api.Documents;
 using Taslim.Api.Files;
 using Taslim.Api.Images;
+using Taslim.Api.Infrastructure;
 using Taslim.Api.Music;
 using Taslim.Api.Movies;
 using Taslim.Api.Notifications;
@@ -569,8 +570,8 @@ public sealed class GenerationJobService(
     public async Task<GenerationJobListDto?> ListAsync(Guid userId, GenerationJobFilter filter, CancellationToken cancellationToken = default)
     {
         if (!await access.IsMemberAsync(userId, filter.WorkspaceId, cancellationToken)) return null;
-        var page = Math.Max(filter.Page, 1);
-        var pageSize = Math.Clamp(filter.PageSize, 1, 100);
+        var page = ApiPagination.NormalizePage(filter.Page);
+        var pageSize = ApiPagination.NormalizePageSize(filter.PageSize);
         var query = db.GenerationJobs.AsNoTracking().Where(job => job.WorkspaceId == filter.WorkspaceId);
         if (filter.Status.HasValue) query = query.Where(job => job.Status == filter.Status.Value);
         if (filter.ProjectId.HasValue) query = query.Where(job => job.ProjectId == filter.ProjectId.Value);
@@ -578,7 +579,8 @@ public sealed class GenerationJobService(
         var totalCount = await query.CountAsync(cancellationToken);
         var jobs = await query.Include(job => job.Outputs)
             .OrderByDescending(job => job.CreatedAt)
-            .Skip((page - 1) * pageSize)
+            .ThenByDescending(job => job.Id)
+            .Skip(ApiPagination.GetOffset(page, pageSize))
             .Take(pageSize)
             .ToListAsync(cancellationToken);
         return new GenerationJobListDto(jobs.Select(GenerationJobContractMapper.ToDto).ToArray(), page, pageSize, totalCount, (int)Math.Ceiling(totalCount / (double)pageSize));

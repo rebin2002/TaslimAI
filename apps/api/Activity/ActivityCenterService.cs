@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
+using Taslim.Api.Infrastructure;
 using Taslim.Api.Persistence;
 
 namespace Taslim.Api.Activity;
@@ -20,8 +21,8 @@ public sealed class ActivityCenterService(TaslimDbContext db, WorkspaceAccessSer
     {
         if (!await access.IsMemberAsync(userId, filter.WorkspaceId, cancellationToken)) return null;
 
-        var page = Math.Max(filter.Page, 1);
-        var pageSize = Math.Clamp(filter.PageSize, 1, 100);
+        var page = ApiPagination.NormalizePage(filter.Page);
+        var pageSize = ApiPagination.NormalizePageSize(filter.PageSize);
         var query = db.GenerationJobs.AsNoTracking().Where(job => job.WorkspaceId == filter.WorkspaceId);
         if (!string.IsNullOrWhiteSpace(filter.Status))
         {
@@ -44,7 +45,8 @@ public sealed class ActivityCenterService(TaslimDbContext db, WorkspaceAccessSer
             .CountAsync(cancellationToken);
         var jobs = await query
             .OrderByDescending(job => job.CreatedAt)
-            .Skip((page - 1) * pageSize)
+            .ThenByDescending(job => job.Id)
+            .Skip(ApiPagination.GetOffset(page, pageSize))
             .Take(pageSize)
             .Select(job => new
             {
