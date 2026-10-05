@@ -23,7 +23,7 @@ export default function HealthRouteError({
   }, [error.digest]);
 
   return (
-    <main className="placeholder-page">
+    <div className="placeholder-page">
       <section className="placeholder-panel" role="alert" aria-live="assertive" aria-labelledby="health-error-title" aria-describedby="health-error-description">
         <RefreshCw className="placeholder-symbol" size={28} aria-hidden="true" />
         <p className="section-eyebrow">{t("health.eyebrow")}</p>
@@ -36,6 +36,6 @@ export default function HealthRouteError({
           <Link className="secondary-button" href="/">{t("placeholder.backHome")}</Link>
         </div>
       </section>
-    </main>
+    </div>
   );
 }
