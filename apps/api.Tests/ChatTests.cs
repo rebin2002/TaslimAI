@@ -1,8 +1,12 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
 using Taslim.Api.Persistence;
@@ -10,13 +14,50 @@ using Xunit;
 
 namespace Taslim.Api.Tests;
 
-public sealed class ChatTests : IClassFixture<TaslimApiFactory>
+public sealed class ConcurrentChatApiFactory : WebApplicationFactory<Program>
+{
+    private readonly string databasePath = Path.Combine(Path.GetTempPath(), $"taslim-chat-concurrency-{Guid.NewGuid():N}.db");
+
+    public ConcurrentChatApiFactory()
+    {
+        using var connection = new SqliteConnection($"Data Source={databasePath}");
+        connection.Open();
+        using (var pragma = connection.CreateCommand())
+        {
+            pragma.CommandText = "PRAGMA journal_mode=WAL;";
+            pragma.ExecuteNonQuery();
+        }
+        var options = new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connection).Options;
+        using var db = new TaslimDbContext(options);
+        db.Database.EnsureCreated();
+    }
+
+    protected override void ConfigureWebHost(IWebHostBuilder builder)
+    {
+        builder.UseEnvironment("Testing");
+        builder.ConfigureServices(services =>
+        {
+            services.RemoveAll<DbContextOptions<TaslimDbContext>>();
+            services.AddDbContext<TaslimDbContext>(options => options.UseSqlite($"Data Source={databasePath};Cache=Shared;Default Timeout=30"));
+        });
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        base.Dispose(disposing);
+        if (disposing) File.Delete(databasePath);
+    }
+}
+
+public sealed class ChatTests : IClassFixture<TaslimApiFactory>, IClassFixture<ConcurrentChatApiFactory>
 {
     private readonly TaslimApiFactory factory;
+    private readonly ConcurrentChatApiFactory concurrentFactory;
 
-    public ChatTests(TaslimApiFactory factory)
+    public ChatTests(TaslimApiFactory factory, ConcurrentChatApiFactory concurrentFactory)
     {
         this.factory = factory;
+        this.concurrentFactory = concurrentFactory;
         using var scope = factory.Services.CreateScope();
         scope.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
     }
@@ -302,7 +343,7 @@ public sealed class ChatTests : IClassFixture<TaslimApiFactory>
     [Fact]
     public async Task Concurrent_new_turns_reserve_distinct_message_sequences()
     {
-        using var client = factory.CreateClient();
+        using var client = concurrentFactory.CreateClient();
         var auth = await Register(client, "Concurrent Ordering Chat Owner");
         var conversation = await CreateConversation(client, auth.PersonalWorkspace.Id);
         var csrf = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
