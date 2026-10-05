@@ -28,6 +28,9 @@ export function isPresentationJob(job: GenerationJob | null) {
 export function isRestorablePresentationJob(job: GenerationJob | null, workspaceId: string) {
   return !!job && job.workspaceId === workspaceId && isPresentationJob(job);
 }
+export function hasPresentationExport(result: PresentationJobResult | null) {
+  return !!result?.assetId && result.representations?.some((representation) => representation.type === "pptx") === true;
+}
 export function isPresentationTerminal(job: GenerationJob | null) { return !!job && terminalStatuses.has(job.status); }
 export function shouldPollPresentationJob(job: GenerationJob | null) { return !!job && !isPresentationTerminal(job); }
 export function nextPresentationPollDelay(job: GenerationJob | null, retryAttempt = 0) { return shouldPollPresentationJob(job) ? Math.min(700 * Math.max(1, retryAttempt + 1), 2_800) : null; }
@@ -40,7 +43,7 @@ export function presentationStudioState(job: GenerationJob | null, result: Prese
   if (job.status === "Running") return "running";
   if (job.status === "Failed") return "failed";
   if (job.status === "Cancelled") return "cancelled";
-  return result?.assetId ? "succeeded" : "completed-unavailable";
+  return hasPresentationExport(result) ? "succeeded" : "completed-unavailable";
 }
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null; }
 function nonEmptyString(value: unknown): value is string { return typeof value === "string" && value.trim().length > 0; }
