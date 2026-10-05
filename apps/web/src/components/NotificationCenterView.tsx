@@ -28,6 +28,7 @@ export function NotificationCenterView() {
   const { locale, t } = useLocale();
   const workspaceId = workspace?.id ?? null;
   const activeWorkspaceId = useRef(workspaceId);
+  const requestGeneration = useRef(0);
   const [result, setResult] = useState<NotificationList | null>(null);
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
@@ -37,7 +38,7 @@ export function NotificationCenterView() {
   // Keep late responses and mutations from an old workspace from repainting the active one.
   if (activeWorkspaceId.current !== workspaceId) activeWorkspaceId.current = workspaceId;
 
-  const load = useCallback(async (signal: AbortSignal) => {
+  const load = useCallback(async (generation: number) => {
     if (!workspaceId) {
       setResult(null);
       setLoading(false);
@@ -45,15 +46,15 @@ export function NotificationCenterView() {
     }
     setLoading(true);
     try {
-      const next = await api.listNotifications(workspaceId, page, notificationPageSize, false, signal);
-      if (signal.aborted || activeWorkspaceId.current !== workspaceId) return;
+      const next = await api.listNotifications(workspaceId, page, notificationPageSize);
+      if (generation !== requestGeneration.current || activeWorkspaceId.current !== workspaceId) return;
       setResult(next);
       setError("");
     } catch (caught) {
-      if (signal.aborted || activeWorkspaceId.current !== workspaceId) return;
+      if (generation !== requestGeneration.current || activeWorkspaceId.current !== workspaceId) return;
       setError(caught instanceof Error ? caught.message : t("notification.loadError"));
     } finally {
-      if (!signal.aborted && activeWorkspaceId.current === workspaceId) setLoading(false);
+      if (generation === requestGeneration.current && activeWorkspaceId.current === workspaceId) setLoading(false);
     }
   }, [page, t, workspaceId]);
 
@@ -68,11 +69,12 @@ export function NotificationCenterView() {
   }, [workspaceId]);
 
   useEffect(() => {
-    const controller = new AbortController();
-    // The loader owns loading/error state and ignores aborted or stale responses.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    void load(controller.signal);
-    return () => controller.abort();
+    const generation = ++requestGeneration.current;
+    // The loader owns loading/error state and ignores stale responses.
+    void load(generation);
+    return () => {
+      if (requestGeneration.current === generation) requestGeneration.current += 1;
+    };
   }, [load]);
 
   async function markRead(item: NotificationItem): Promise<boolean> {

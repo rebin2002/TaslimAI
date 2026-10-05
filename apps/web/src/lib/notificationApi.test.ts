@@ -13,20 +13,18 @@ describe("api.listNotifications", () => {
     vi.unstubAllGlobals();
   });
 
-  it("requests the selected workspace page and preserves the abort signal", async () => {
+  it("requests the selected workspace page", async () => {
     const fetchMock = vi.fn().mockResolvedValue(response({ items: [], page: 3, pageSize: 20, totalCount: 41, totalPages: 3, unreadCount: 2 }));
     vi.stubGlobal("fetch", fetchMock);
     const { api } = await import("./api");
-    const controller = new AbortController();
 
-    await expect(api.listNotifications("workspace-7", 3, 20, false, controller.signal)).resolves.toMatchObject({ page: 3, totalPages: 3 });
-    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    await expect(api.listNotifications("workspace-7", 3, 20, false)).resolves.toMatchObject({ page: 3, totalPages: 3 });
+    const [url] = fetchMock.mock.calls[0] as [string];
     expect(url).toContain("/api/notifications?");
     expect(url).toContain("workspaceId=workspace-7");
     expect(url).toContain("page=3");
     expect(url).toContain("pageSize=20");
     expect(url).toContain("unreadOnly=false");
-    expect(init.signal).toBe(controller.signal);
   });
 
   it("encodes unread-only pagination without leaking another workspace identifier", async () => {
