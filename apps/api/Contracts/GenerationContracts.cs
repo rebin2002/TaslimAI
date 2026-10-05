@@ -145,7 +145,7 @@ public static class GenerationJobContractMapper
         job.ProgressPercent,
         job.ResultJson,
         job.ErrorCode,
-        job.ErrorMessage,
+        GenerationJobErrorMessages.For(job.ErrorCode),
         job.CancellationRequested,
         job.CreatedAt,
         job.QueuedAt,
