@@ -1150,6 +1150,78 @@ export type MovieTakeSelectRecord = {
   reviewedAt: string | null;
   reviewNote: string | null;
 };
+export type MovieMissingInsertPlan = {
+  contractVersion: string;
+  movieProjectId: string;
+  timelineRevisionId: string | null;
+  timelineRevisionNumber: number | null;
+  timelineStatus: string;
+  requiresApproval: boolean;
+  canonicalTimelineChanged: boolean;
+  generationQueued: boolean;
+  grounding: {
+    approvedStoryRevisionId: string | null;
+    approvedStoryRevisionNumber: number | null;
+    lockedGuideRevisionId: string | null;
+    lockedGuideRevisionNumber: number | null;
+    productionKits: Array<{ shotId: string; packageHash: string; schemaVersion: number }>;
+    isComplete: boolean;
+  };
+  gaps: Array<{
+    id: string;
+    kind: string;
+    trackId: string | null;
+    timelineInMilliseconds: number;
+    timelineOutMilliseconds: number;
+    durationMilliseconds: number;
+    beforeTimelineItemId: string | null;
+    afterTimelineItemId: string | null;
+    beforeShotId: string | null;
+    afterShotId: string | null;
+    sceneId: string | null;
+    label: string;
+  }>;
+  continuityFindings: Array<{
+    code: string;
+    severity: string;
+    beforeShotId: string | null;
+    afterShotId: string | null;
+    sceneId: string | null;
+    message: string;
+    action: string;
+  }>;
+  proposals: Array<{
+    id: string;
+    gapId: string;
+    approvalStatus: string;
+    requiresApproval: boolean;
+    changesStoryCanon: boolean;
+    insertType: string;
+    sceneId: string | null;
+    storySceneId: string | null;
+    anchorShotId: string | null;
+    durationMilliseconds: number;
+    description: string;
+    purpose: string;
+    subjects: string | null;
+    locationSet: string | null;
+    productionRequirements: string | null;
+    continuityReferences: string | null;
+    cameraAndFraming: string | null;
+    cameraMotion: string | null;
+    visualContinuityNotes: string | null;
+    grounding: {
+      storySceneId: string | null;
+      approvedStoryRevisionId: string | null;
+      lockedGuideRevisionId: string | null;
+      anchorShotId: string | null;
+      productionKitHash: string | null;
+      sourceFields: string[];
+    };
+  }>;
+  warnings: Array<{ code: string; severity: string; message: string; gapId: string | null }>;
+  assembledAtUtc: string;
+};
 export type MovieTeamMember = { id: string; userId: string; displayName: string; role: string; isProjectOwner: boolean; permissions: string[]; createdAt: string; updatedAt: string };
 export type MovieComment = { id: string; targetType: string; targetId: string; authorUserId: string; authorDisplayName: string; body: string; parentCommentId: string | null; mentions: { userId: string; displayName: string }[]; createdAt: string; updatedAt: string; resolvedAt: string | null };
 export type MovieReview = { id: string; targetType: string; targetId: string; requestedByUserId: string; requestedByDisplayName: string; reviewerUserId: string; reviewerDisplayName: string; isFinal: boolean; status: string; requestNote: string | null; decisionNote: string | null; createdAt: string; reviewedAt: string | null };
@@ -1217,6 +1289,7 @@ export const api = {
   previewMovieBudgetDirector: (id: string, input: MovieBudgetDirectorRequest) => request<MovieBudgetDirectorEstimate>(`/api/movie-studio/projects/${id}/budget-director/preview`, { method: "POST", body: JSON.stringify(input) }, true),
   getMovieProject: (id: string) => request<MovieProject>(`/api/movie-studio/projects/${id}`),
   getMovieTimeline: (id: string) => request<MovieTimeline>(`/api/movie-studio/projects/${id}/timeline`),
+  getMovieMissingInsertPlan: (id: string, revisionId?: string | null) => request<MovieMissingInsertPlan>(`/api/movie-studio/projects/${id}/insert-planner${revisionId ? `?revisionId=${encodeURIComponent(revisionId)}` : ""}`),
   getMovieTimelineTransitions: (id: string) => request<MovieTimelineTransitionEdit>(`/api/movie-studio/projects/${id}/timeline/transition-edits`),
   applyMovieTimelineTransition: (id: string, input: { timeline: MovieCanonicalTimeline; decision: MovieTimelineEditDecision }) => request<MovieTimelineTransitionEdit>(`/api/movie-studio/projects/${id}/timeline/transition-edits`, { method: "POST", body: JSON.stringify(input) }, true),
   createMovieTimelineRevision: (id: string, input: MovieTimelineRevisionRequest) => request<MovieTimelineRevision>(`/api/movie-studio/projects/${id}/timeline/revisions`, { method: "POST", body: JSON.stringify(input) }, true),
