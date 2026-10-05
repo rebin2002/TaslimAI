@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { FileText, FolderOpen, LibraryBig, MessageCircle, Search, Sparkles, Upload, X } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocale } from "@/components/LocaleProvider";
 import { api, type GlobalSearchGroup, type GlobalSearchResult, type GlobalSearchResultType } from "@/lib/api";
 import { createRequestSequencer } from "@/lib/searchRequestLifecycle";
@@ -49,6 +49,14 @@ export function GlobalSearchView() {
   const [loading, setLoading] = useState(Boolean(initialQuery.trim()));
   const [error, setError] = useState("");
   const requestSequence = useMemo(() => createRequestSequencer(), []);
+  const pendingSearchTimer = useRef<number | null>(null);
+
+  const clearPendingSearch = useCallback(() => {
+    if (pendingSearchTimer.current !== null) {
+      window.clearTimeout(pendingSearchTimer.current);
+      pendingSearchTimer.current = null;
+    }
+  }, []);
 
   const runSearch = useCallback(async (value: string) => {
     const next = value.trim();
@@ -71,9 +79,13 @@ export function GlobalSearchView() {
   }, [requestSequence, t]);
 
   useEffect(() => {
-    const timer = window.setTimeout(() => void runSearch(initialQuery), initialQuery.trim() ? 180 : 0);
-    return () => window.clearTimeout(timer);
-  }, [initialQuery, runSearch]);
+    clearPendingSearch();
+    pendingSearchTimer.current = window.setTimeout(() => {
+      pendingSearchTimer.current = null;
+      void runSearch(initialQuery);
+    }, initialQuery.trim() ? 180 : 0);
+    return clearPendingSearch;
+  }, [clearPendingSearch, initialQuery, runSearch]);
 
   useEffect(() => {
     const handleShortcut = (event: KeyboardEvent) => {
@@ -89,14 +101,19 @@ export function GlobalSearchView() {
   function submit(event: React.FormEvent) {
     event.preventDefault();
     const next = query.trim();
+    clearPendingSearch();
     if (next === initialQuery.trim()) {
       void runSearch(next);
     } else {
+      requestSequence.begin();
+      setLoading(Boolean(next));
+      setError("");
       router.push(next ? `/search?q=${encodeURIComponent(next)}` : "/search");
     }
   }
 
   function clear() {
+    clearPendingSearch();
     requestSequence.begin();
     setQuery("");
     setSubmittedQuery("");
