@@ -10,6 +10,7 @@ import { useLocale } from "@/components/LocaleProvider";
 import { api, type NotificationItem, type NotificationList } from "@/lib/api";
 import { isNotificationRequestCurrent, startNotificationRequest } from "@/lib/notificationRequest";
 import { applyAllNotificationsRead, applyNotificationRead } from "@/lib/notificationReadState";
+import { resolveNotificationUnreadCount } from "@/lib/notificationUnreadState";
 
 const notificationLabels = {
   "generation.completed": "notification.generationCompleted",
@@ -34,21 +35,28 @@ export function publishNotificationUnreadCount(workspaceId: string, unreadCount:
 export function useNotificationUnreadCount() {
   const { workspace } = useAuth();
   const [unreadCount, setUnreadCount] = useState(0);
+  const unreadCountRef = useRef(0);
   const requestSequence = useRef(0);
 
   useEffect(() => {
     if (!workspace) {
       requestSequence.current += 1;
+      unreadCountRef.current = 0;
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setUnreadCount(0);
       return;
     }
     const workspaceId = workspace.id;
     let active = true;
+    const applyUnreadCount = (nextCount: number | null) => {
+      const resolved = resolveNotificationUnreadCount(unreadCountRef.current, nextCount);
+      unreadCountRef.current = resolved;
+      setUnreadCount(resolved);
+    };
     const onUnreadCount = (event: Event) => {
       const detail = (event as CustomEvent<NotificationUnreadDetail>).detail;
       if (detail?.workspaceId === workspaceId && typeof detail.unreadCount === "number") {
-        setUnreadCount(Math.max(0, detail.unreadCount));
+        applyUnreadCount(detail.unreadCount);
       }
     };
     const refresh = async () => {
@@ -56,9 +64,10 @@ export function useNotificationUnreadCount() {
       requestSequence.current = request.sequence;
       try {
         const next = await api.getNotificationUnreadCount(workspaceId);
-        if (active && isNotificationRequestCurrent(request, requestSequence.current, workspaceId)) setUnreadCount(next.unreadCount);
+        if (active && isNotificationRequestCurrent(request, requestSequence.current, workspaceId)) applyUnreadCount(next.unreadCount);
       } catch {
-        if (active && isNotificationRequestCurrent(request, requestSequence.current, workspaceId)) setUnreadCount(0);
+        // A transient poll failure must not hide a previously observed unread badge.
+        if (active && isNotificationRequestCurrent(request, requestSequence.current, workspaceId)) applyUnreadCount(null);
       }
     };
     window.addEventListener(notificationUnreadEvent, onUnreadCount);
