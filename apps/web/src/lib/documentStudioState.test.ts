@@ -1,20 +1,28 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   canCancelDocumentJob,
+  clearDocumentActiveJobId,
+  documentActiveJobStorageKey,
   displayDocumentProgress,
   documentPresentationState,
+  isDocumentJob,
   isDocumentSourceReady,
   nextDocumentPollDelay,
   parseDocumentJobResult,
+  persistDocumentActiveJobId,
+  readDocumentActiveJobId,
   shouldPollDocumentJob,
 } from "./documentStudioState";
 import type { GenerationJob } from "./api";
 
-const job = (status: GenerationJob["status"], cancellationRequested = false): GenerationJob => ({
+const job = (status: GenerationJob["status"], cancellationRequested = false, overrides: Partial<GenerationJob> = {}): GenerationJob => ({
   id: "job-1", workspaceId: "workspace-1", projectId: null, jobType: "document.generate", status, title: "Report", progressPercent: 70,
   createdAt: "2026-09-22T00:00:00Z", queuedAt: "2026-09-22T00:00:00Z", startedAt: null, completedAt: null, failedAt: null, cancelledAt: null,
   cancellationRequested, resultJson: null, errorCode: null, errorMessage: null, outputs: [],
+  ...overrides,
 });
+
+afterEach(() => vi.unstubAllGlobals());
 
 describe("Document Studio state", () => {
   it("allows cancellation only for eligible nonterminal jobs", () => {
@@ -32,6 +40,26 @@ describe("Document Studio state", () => {
     expect(nextDocumentPollDelay(job("Running"), 1)).toBe(1400);
     expect(nextDocumentPollDelay(job("Running"), 10)).toBe(2800);
     expect(nextDocumentPollDelay(job("Succeeded"), 0)).toBeNull();
+  });
+
+  it("validates the restored job type and keeps active job storage workspace-scoped", () => {
+    expect(isDocumentJob(job("Running"))).toBe(true);
+    expect(isDocumentJob(job("Running", false, { jobType: "image.generate" }))).toBe(false);
+
+    const values = new Map<string, string>();
+    vi.stubGlobal("window", {
+      sessionStorage: {
+        getItem: (key: string) => values.get(key) ?? null,
+        setItem: (key: string, value: string) => values.set(key, value),
+        removeItem: (key: string) => values.delete(key),
+      },
+    });
+    persistDocumentActiveJobId("workspace-1", "job-1");
+    expect(values.get(documentActiveJobStorageKey("workspace-1"))).toBe("job-1");
+    expect(readDocumentActiveJobId("workspace-1")).toBe("job-1");
+    expect(readDocumentActiveJobId("workspace-2")).toBeNull();
+    clearDocumentActiveJobId("workspace-1");
+    expect(readDocumentActiveJobId("workspace-1")).toBeNull();
   });
 
   it("uses status, not 100% progress, to determine completion", () => {
