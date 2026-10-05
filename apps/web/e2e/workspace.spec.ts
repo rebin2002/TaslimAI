@@ -21,6 +21,35 @@ test.describe("workspace and project journeys", () => {
     await expect(page.getByLabel("Project")).not.toHaveValue("");
   });
 
+  test("can retry a project detail load after a transient overview failure", async ({ authenticatedPage: page }) => {
+    const project = await createProject(page, "E2E Retryable Project Detail");
+    const overviewPath = `**/api/projects/${project.id}/overview`;
+    let overviewRequests = 0;
+    let retryRequested = false;
+    await page.route(overviewPath, async (route) => {
+      overviewRequests += 1;
+      if (!retryRequested) {
+        await route.fulfill({
+          status: 503,
+          contentType: "application/json",
+          body: JSON.stringify({ error: { message: "Temporary detail outage" } }),
+        });
+        return;
+      }
+      await route.continue();
+    });
+
+    await page.goto(`/projects/${project.id}`);
+    const alert = page.locator(".inline-error[role='alert']");
+    await expect(alert).toContainText("Temporary detail outage");
+    retryRequested = true;
+    await alert.getByRole("button", { name: /try again/i }).click();
+    await expect(page.getByRole("heading", { name: project.name })).toBeVisible();
+    await expect(page.locator(".inline-error[role='alert']")).toHaveCount(0);
+    expect(overviewRequests).toBeGreaterThanOrEqual(2);
+    await page.unroute(overviewPath);
+  });
+
   test("hands a project into Chat and preserves the project context", async ({ authenticatedPage: page }) => {
     const project = await createProject(page, "E2E Chat Context");
     await page.goto(`/projects/${project.id}`);
