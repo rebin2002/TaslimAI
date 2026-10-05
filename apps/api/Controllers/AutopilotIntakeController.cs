@@ -14,6 +14,7 @@ namespace Taslim.Api.Controllers;
 /// </summary>
 [ApiController]
 [AllowAnonymous]
+[IgnoreAntiforgeryToken]
 [Route("api/autopilot")]
 public sealed class AutopilotIntakeController(IAutopilotEventIntake intake) : ControllerBase
 {

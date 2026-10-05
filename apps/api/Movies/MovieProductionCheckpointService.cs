@@ -10,7 +10,7 @@ namespace Taslim.Api.Movies;
 public interface IMovieProductionCheckpointService
 {
     Task<MovieProductionCheckpointDto?> GetAsync(Guid userId, Guid movieProjectId, CancellationToken cancellationToken);
-    Task<MovieProductionRecoveryResponse?> RecoverAsync(Guid userId, Guid movieProjectId, MovieProductionRecoveryRequest request, CancellationToken cancellationToken, string? idempotencyKey = null);
+    Task<MovieProductionRecoveryResponse?> RecoverAsync(Guid userId, Guid movieProjectId, MovieProductionRecoveryRequest request, CancellationToken cancellationToken);
 }
 
 public sealed class MovieProductionCheckpointService(
@@ -29,8 +29,7 @@ public sealed class MovieProductionCheckpointService(
         Guid userId,
         Guid movieProjectId,
         MovieProductionRecoveryRequest request,
-        CancellationToken cancellationToken,
-        string? idempotencyKey = null)
+        CancellationToken cancellationToken)
     {
         var movie = await db.MovieProjects.FirstOrDefaultAsync(item => item.Id == movieProjectId, cancellationToken);
         if (movie is null || !await collaboration.HasPermissionAsync(userId, movieProjectId, MoviePermissions.Generate, cancellationToken)) return null;
@@ -60,7 +59,9 @@ public sealed class MovieProductionCheckpointService(
         GenerationJob? retry = existingRetry;
         if (retry is null)
         {
-            retry = await jobs.RetryAsync(userId, source.Id, cancellationToken, idempotencyKey ?? $"movie-checkpoint-recovery:{movieProjectId:N}:{source.Id:N}");
+            // Recovery is a project-wide operation. Do not let browser-generated
+            // request keys turn concurrent clicks into distinct retry jobs.
+            retry = await jobs.RetryAsync(userId, source.Id, cancellationToken, BuildRecoveryIdempotencyKey(movieProjectId, source.Id));
             if (retry is null) throw new MovieProductionRecoveryException("RECOVERY_JOB_NOT_FOUND", "The production pass is not available for recovery.");
         }
 
@@ -93,6 +94,9 @@ public sealed class MovieProductionCheckpointService(
         var checkpoint = await BuildAndPersistAsync(movie, cancellationToken, now, userId);
         return new MovieProductionRecoveryResponse(checkpoint, GenerationJobContractMapper.ToMovieDto(retry));
     }
+
+    internal static string BuildRecoveryIdempotencyKey(Guid movieProjectId, Guid sourceJobId) =>
+        $"movie-recovery:{movieProjectId:N}:{sourceJobId:N}";
 
     private async Task<MovieProductionCheckpointDto> BuildAndPersistAsync(MovieProject movie, CancellationToken cancellationToken, DateTime? recoveredAt = null, Guid? recoveredByUserId = null)
     {
