@@ -65,6 +65,19 @@ describe("DocumentStudioView", () => {
     expect(html).not.toContain("resultJson");
   });
 
+  it("renders localized DOCX, PDF, and both output-format choices", () => {
+    const html = renderToStaticMarkup(<DocumentStudioView />);
+
+    expect(html).toContain('id="document-output-format"');
+    expect(html).toContain("document.outputFormat");
+    expect(html).toContain('value="docx"');
+    expect(html).toContain('value="pdf"');
+    expect(html).toContain('value="both"');
+    expect(html).toContain("document.outputDocx");
+    expect(html).toContain("document.outputPdf");
+    expect(html).toContain("document.outputBoth");
+  });
+
   it("keeps the empty source and recent-document states explicit", () => {
     const html = renderToStaticMarkup(<DocumentStudioView />);
 
