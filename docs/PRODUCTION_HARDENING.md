@@ -90,7 +90,7 @@ Disabled music and voice providers remain disabled and do not require credential
 
 ## Readiness and health
 
-`GET /health` is dependency-independent and suitable for liveness. `GET /readiness` performs a bounded database `CanConnectAsync` check. A failed dependency returns a generic `503` response and logs the exception only on the server. Neither endpoint returns secrets, connection strings, storage credentials, provider credentials, or exception details.
+`GET /health` is dependency-independent and suitable for liveness. `GET /readiness` performs bounded database and storage checks using `Health:ProbeTimeoutSeconds` (default 5 seconds, accepted range 1–60 seconds). A failed or timed-out dependency returns a generic `503` response and logs diagnostics only on the server. Health and readiness routes are explicitly anonymous so deployment probes remain available even if a global authorization policy is introduced. Neither endpoint returns secrets, connection strings, storage credentials, provider credentials, or exception details.
 
 ## Container/runtime changes
 
