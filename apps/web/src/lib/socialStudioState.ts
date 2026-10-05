@@ -28,6 +28,7 @@ export function clearSocialActiveJobId(workspaceId: string) {
 export function isSocialTerminal(job: GenerationJob | null) { return !!job && terminalStatuses.has(job.status); }
 export function shouldPollSocialJob(job: GenerationJob | null) { return !!job && !isSocialTerminal(job); }
 export function nextSocialPollDelay(job: GenerationJob | null, retryAttempt = 0) { return shouldPollSocialJob(job) ? Math.min(700 * Math.max(1, retryAttempt + 1), 2_800) : null; }
+export function nextSocialRestoreDelay(retryAttempt = 0) { return retryAttempt <= 0 ? 0 : Math.min(700 * 2 ** Math.min(retryAttempt - 1, 4), 8_000); }
 export function canCancelSocialJob(job: GenerationJob | null) { return !!job && ["Pending", "Queued", "Running"].includes(job.status) && !job.cancellationRequested; }
 export function displaySocialProgress(job: GenerationJob | null) { if (!job) return 0; const progress = Math.max(0, Math.min(100, job.progressPercent)); return isSocialTerminal(job) ? progress : Math.min(progress, 99); }
 export function normalizeSocialPreviewPlatform(platform: string | undefined): SocialPreviewPlatform {
