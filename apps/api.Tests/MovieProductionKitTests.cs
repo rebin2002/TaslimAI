@@ -4,6 +4,7 @@ using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Taslim.Api.Contracts;
+using Taslim.Api.Domain;
 using Taslim.Api.Movies;
 using Taslim.Api.Persistence;
 using Xunit;
@@ -57,6 +58,81 @@ public sealed class MovieProductionKitTests : IClassFixture<GenerationJobsNoWork
         var locked = await Send<MovieProductionKitDto>(client, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/production-kit/lock", new { revisionNumber = 1 });
         Assert.Equal(MovieProductionKitStatuses.Locked, locked.CurrentRevision!.Status);
         Assert.Equal(1, locked.LockedRevisionNumber);
+    }
+
+    [Fact]
+    public async Task Kit_rechecks_asset_readiness_before_approval_when_a_file_is_archived()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Production Kit Asset Owner");
+        var movie = await CreateMovie(client, auth.PersonalWorkspace.Id, "Production Kit Asset Readiness");
+        await Send<MovieGuideRevisionResponse>(client, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/guide/lock", new { });
+
+        var assetId = Guid.NewGuid();
+        var fileId = Guid.NewGuid();
+        var now = DateTime.UtcNow;
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.StoredFiles.Add(new StoredFile
+            {
+                Id = fileId,
+                WorkspaceId = auth.PersonalWorkspace.Id,
+                UserId = auth.User.Id,
+                ProjectId = movie.Project.ProjectId,
+                OriginalFileName = "approved-reference.png",
+                StoredFileName = "approved-reference.png",
+                ContentType = "image/png",
+                Extension = ".png",
+                SizeBytes = 4,
+                StorageProvider = FileStorageProviders.Local,
+                StorageKey = $"tests/{fileId:N}.png",
+                Status = StoredFileStatus.Ready,
+                TextExtractionStatus = FileExtractionStatus.NotApplicable,
+                CreatedAt = now,
+                ProcessedAt = now,
+            });
+            db.Assets.Add(new Asset
+            {
+                Id = assetId,
+                WorkspaceId = auth.PersonalWorkspace.Id,
+                ProjectId = movie.Project.ProjectId,
+                CreatedByUserId = auth.User.Id,
+                StoredFileId = fileId,
+                Name = "Approved reference",
+                AssetType = AssetTypes.Image,
+                MimeType = "image/png",
+                Status = AssetStatus.Active,
+                CreatedAt = now,
+                UpdatedAt = now,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var draft = await Send<MovieProductionKitDto>(client, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/production-kit/revisions", new
+        {
+            references = new[] { new { referenceType = "asset", sourceId = assetId, isRequired = true } },
+        });
+        Assert.True(draft.Readiness.Ready);
+        await Send<MovieProductionKitDto>(client, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/production-kit/review", new { revisionNumber = 1 });
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var asset = await db.Assets.SingleAsync(item => item.Id == assetId);
+            asset.Status = AssetStatus.Archived;
+            asset.ArchivedAt = DateTime.UtcNow;
+            await db.SaveChangesAsync();
+        }
+
+        var current = await client.GetFromJsonAsync<MovieProductionKitDto>($"/api/movie-studio/projects/{movie.Project.Id}/production-kit");
+        Assert.NotNull(current);
+        Assert.False(current!.Readiness.Ready);
+        Assert.Contains(MovieProductionKitReadinessCodes.ReferenceNotReady, current.Readiness.Missing);
+
+        using var blocked = await SendRaw(client, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/production-kit/approve", new { revisionNumber = 1 });
+        Assert.Equal(HttpStatusCode.Conflict, blocked.StatusCode);
+        Assert.Contains("MOVIE_PRODUCTION_KIT_NOT_READY", await blocked.Content.ReadAsStringAsync(), StringComparison.Ordinal);
     }
 
     [Fact]
