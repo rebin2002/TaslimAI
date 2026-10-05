@@ -116,10 +116,11 @@ public sealed class CreditLedgerService(TaslimDbContext db, IOptions<BillingOpti
         ValidatePositiveCredits(credits);
         var normalizedKey = NormalizeIdempotencyKey(idempotencyKey);
         var normalizedReason = NormalizeReason(reason);
+        var normalizedSourceReference = NormalizeOptionalReference(sourceReference, nameof(sourceReference), 200);
         var existing = await FindEntryAsync(workspaceId, normalizedKey, cancellationToken);
         if (existing is not null)
         {
-            EnsureGrantReplayMatches(existing, entitlementType, credits, normalizedReason);
+            EnsureGrantReplayMatches(existing, entitlementType, credits, normalizedReason, expiresAt, billingPeriodId, actorUserId, normalizedSourceReference);
             return new(existing, false);
         }
         if (billingPeriodId.HasValue)
@@ -136,7 +137,7 @@ public sealed class CreditLedgerService(TaslimDbContext db, IOptions<BillingOpti
         {
             Id = Guid.NewGuid(), WorkspaceId = workspaceId, BillingPeriodId = billingPeriodId,
             Type = entitlementType, GrantedCredits = credits, GrantedAt = now, ExpiresAt = expiresAt,
-            IdempotencyKey = normalizedKey, SourceReference = sourceReference?.Trim(), CreatedAt = now,
+            IdempotencyKey = normalizedKey, SourceReference = normalizedSourceReference, CreatedAt = now,
         };
         var entry = NewEntry(workspaceId, entitlement.Id, CreditLedgerEntryTypeFor(entitlementType), credits, normalizedKey, normalizedReason, actorUserId, now);
         db.CreditEntitlements.Add(entitlement);
@@ -236,9 +237,27 @@ public sealed class CreditLedgerService(TaslimDbContext db, IOptions<BillingOpti
             .Include(entry => entry.CreditEntitlement)
             .SingleOrDefaultAsync(entry => entry.WorkspaceId == workspaceId && entry.IdempotencyKey == idempotencyKey, cancellationToken);
 
-    private static void EnsureGrantReplayMatches(CreditLedgerEntry existing, CreditEntitlementType entitlementType, long credits, string reason)
+    private static void EnsureGrantReplayMatches(
+        CreditLedgerEntry existing,
+        CreditEntitlementType entitlementType,
+        long credits,
+        string reason,
+        DateTime? expiresAt,
+        Guid? billingPeriodId,
+        Guid? actorUserId,
+        string? sourceReference)
     {
-        if (existing.Amount != credits || existing.Type != CreditLedgerEntryTypeFor(entitlementType) || existing.CreditEntitlement?.Type != entitlementType || existing.Reason != reason)
+        var entitlement = existing.CreditEntitlement;
+        if (existing.Amount != credits ||
+            existing.Type != CreditLedgerEntryTypeFor(entitlementType) ||
+            entitlement is null ||
+            entitlement.Type != entitlementType ||
+            entitlement.GrantedCredits != credits ||
+            entitlement.BillingPeriodId != billingPeriodId ||
+            entitlement.ExpiresAt != expiresAt ||
+            !string.Equals(entitlement.SourceReference, sourceReference, StringComparison.Ordinal) ||
+            existing.ActorUserId != actorUserId ||
+            existing.Reason != reason)
             throw new InvalidOperationException("The credit grant idempotency key belongs to a different movement.");
     }
 
@@ -272,6 +291,14 @@ public sealed class CreditLedgerService(TaslimDbContext db, IOptions<BillingOpti
         if (string.IsNullOrWhiteSpace(value)) throw new ArgumentException("An auditable credit movement reason is required.", nameof(value));
         var normalized = value.Trim();
         if (normalized.Length > 500) throw new ArgumentException("The credit movement reason is too long.", nameof(value));
+        return normalized;
+    }
+
+    private static string? NormalizeOptionalReference(string? value, string name, int maxLength)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        var normalized = value.Trim();
+        if (normalized.Length > maxLength) throw new ArgumentException($"The {name} is too long.", name);
         return normalized;
     }
 }

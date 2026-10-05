@@ -38,6 +38,40 @@ public sealed class BillingTests
     }
 
     [Fact]
+    public async Task Grant_replay_rejects_changes_to_entitlement_metadata_or_audit_attribution()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connection).Options;
+        await using var db = new TaslimDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+        var workspace = new Workspace { Id = Guid.NewGuid(), Name = "Grant Replay Workspace", Slug = $"grant-replay-{Guid.NewGuid():N}", Type = WorkspaceType.Personal, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow };
+        db.Workspaces.Add(workspace);
+        await db.SaveChangesAsync();
+        var service = new CreditLedgerService(db, Options.Create(new BillingOptions { CustomerChargingEnabled = false }));
+        var actorUserId = Guid.NewGuid();
+        var expiresAt = DateTime.UtcNow.AddDays(30);
+        await service.GrantAsync(
+            workspace.Id,
+            CreditEntitlementType.Purchased,
+            25,
+            "grant:metadata",
+            "Purchased credits",
+            expiresAt,
+            billingPeriodId: null,
+            actorUserId: actorUserId,
+            sourceReference: "provider:purchase-1");
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.GrantAsync(workspace.Id, CreditEntitlementType.Purchased, 25, "grant:metadata", "Purchased credits", expiresAt.AddDays(1), actorUserId: actorUserId, sourceReference: "provider:purchase-1"));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.GrantAsync(workspace.Id, CreditEntitlementType.Purchased, 25, "grant:metadata", "Purchased credits", expiresAt, billingPeriodId: Guid.NewGuid(), actorUserId: actorUserId, sourceReference: "provider:purchase-1"));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.GrantAsync(workspace.Id, CreditEntitlementType.Purchased, 25, "grant:metadata", "Purchased credits", expiresAt, actorUserId: actorUserId, sourceReference: "provider:purchase-2"));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.GrantAsync(workspace.Id, CreditEntitlementType.Purchased, 25, "grant:metadata", "Purchased credits", expiresAt, actorUserId: Guid.NewGuid(), sourceReference: "provider:purchase-1"));
+
+        Assert.Single(await db.CreditEntitlements.ToListAsync());
+        Assert.Single(await db.CreditLedgerEntries.ToListAsync());
+    }
+
+    [Fact]
     public async Task Usage_debit_is_not_written_while_customer_charging_is_disabled()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
