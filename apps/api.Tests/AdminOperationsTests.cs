@@ -308,6 +308,61 @@ public sealed class AdminOperationsTests : IClassFixture<TaslimApiFactory>
         Assert.DoesNotContain("prompt", audit.Reason!, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public async Task Replayed_admin_recovery_request_returns_the_original_result_once()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Movie Recovery Replay Administrator");
+        await AddAdminRole(auth.User.Email);
+        var jobId = Guid.NewGuid();
+        var now = DateTime.UtcNow;
+        const string requestId = "admin-recovery-replay-20261005-0001";
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.GenerationJobs.Add(new GenerationJob
+            {
+                Id = jobId, WorkspaceId = auth.PersonalWorkspace.Id, CreatedByUserId = auth.User.Id,
+                JobType = GenerationJobTypes.MovieClipGenerate, Status = GenerationJobStatus.Running, InputJson = "{}",
+                CreatedAt = now.AddMinutes(-30), StartedAt = now.AddMinutes(-20), ClaimExpiresAt = now.AddMinutes(-5), RetryCount = 1,
+                ConcurrencyToken = Guid.NewGuid(),
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var firstResponse = await SendWithCsrf(
+            client,
+            HttpMethod.Post,
+            $"/api/admin/operations/jobs/{jobId}/recover",
+            new { reason = "Recover the expired movie worker lease after a response timeout." },
+            requestId);
+        Assert.Equal(HttpStatusCode.OK, firstResponse.StatusCode);
+        var first = await firstResponse.Content.ReadFromJsonAsync<AdminJobRecoveryResult>();
+        Assert.NotNull(first);
+
+        var replayResponse = await SendWithCsrf(
+            client,
+            HttpMethod.Post,
+            $"/api/admin/operations/jobs/{jobId}/recover",
+            new { reason = "The client is retrying the same recovery command." },
+            requestId);
+        Assert.Equal(HttpStatusCode.OK, replayResponse.StatusCode);
+        var replay = await replayResponse.Content.ReadFromJsonAsync<AdminJobRecoveryResult>();
+        Assert.NotNull(replay);
+        Assert.Equal(first!.JobId, replay!.JobId);
+        Assert.Equal(first.Status, replay.Status);
+        Assert.Equal(first.RetryCount, replay.RetryCount);
+        Assert.Equal(first.QueuedAt, replay.QueuedAt);
+
+        using var verifyScope = factory.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var job = await verifyDb.GenerationJobs.SingleAsync(item => item.Id == jobId);
+        Assert.Equal(GenerationJobStatus.Queued, job.Status);
+        Assert.Equal(2, job.RetryCount);
+        Assert.Equal(1, await verifyDb.AdminOperationAuditEvents.CountAsync(item => item.TargetId == jobId));
+    }
+
     private async Task<AuthResponse> Register(HttpClient client, string displayName)
     {
         var response = await SendWithCsrf(client, HttpMethod.Post, "/api/auth/register", new
@@ -333,11 +388,12 @@ public sealed class AdminOperationsTests : IClassFixture<TaslimApiFactory>
         Assert.True((await userManager.AddToRoleAsync(user!, AdminPolicies.Role)).Succeeded);
     }
 
-    private static async Task<HttpResponseMessage> SendWithCsrf(HttpClient client, HttpMethod method, string path, object? payload)
+    private static async Task<HttpResponseMessage> SendWithCsrf(HttpClient client, HttpMethod method, string path, object? payload, string? requestId = null)
     {
         var csrf = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
         using var request = new HttpRequestMessage(method, path);
         request.Headers.Add("X-CSRF-TOKEN", csrf.GetProperty("token").GetString()!);
+        if (!string.IsNullOrWhiteSpace(requestId)) request.Headers.Add("X-Request-ID", requestId);
         if (payload is not null) request.Content = JsonContent.Create(payload);
         return await client.SendAsync(request);
     }
