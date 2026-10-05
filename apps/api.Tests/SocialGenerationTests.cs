@@ -83,6 +83,59 @@ public sealed class SocialGenerationTests : IClassFixture<SocialGenerationApiFac
     }
 
     [Fact]
+    public async Task Social_generation_requires_idempotency_key()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client);
+        var response = await SendWithCsrf(client, new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            prompt = "This request must be retry-safe.",
+            socialType = "announcement",
+            platform = "linkedin",
+            tone = "professional",
+            language = "en",
+            assetIds = Array.Empty<Guid>(),
+            attachmentIds = Array.Empty<Guid>(),
+        }, idempotencyKey: null);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("IDEMPOTENCY_KEY_REQUIRED", body.GetProperty("error").GetProperty("code").GetString());
+    }
+
+    [Fact]
+    public async Task Repeated_social_request_with_same_idempotency_key_returns_one_job()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client);
+        var payload = new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            prompt = "Create one retry-safe workshop announcement.",
+            socialType = "announcement",
+            platform = "linkedin",
+            tone = "professional",
+            language = "en",
+            assetIds = Array.Empty<Guid>(),
+            attachmentIds = Array.Empty<Guid>(),
+        };
+
+        var first = await SendWithCsrf(client, payload, idempotencyKey: "social-idempotency-001");
+        var second = await SendWithCsrf(client, payload, idempotencyKey: "social-idempotency-001");
+
+        Assert.Equal(HttpStatusCode.Accepted, first.StatusCode);
+        Assert.Equal(HttpStatusCode.Accepted, second.StatusCode);
+        var firstJob = (await first.Content.ReadFromJsonAsync<CreateSocialGenerationResponse>())!.Job;
+        var secondJob = (await second.Content.ReadFromJsonAsync<CreateSocialGenerationResponse>())!.Job;
+        Assert.Equal(firstJob.Id, secondJob.Id);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.Equal(1, await db.GenerationJobs.CountAsync(item => item.IdempotencyKey == "social-idempotency-001"));
+    }
+
+    [Fact]
     public async Task Social_creation_requires_authentication_and_workspace_isolation()
     {
         using var anonymous = factory.CreateClient();
@@ -148,6 +201,49 @@ public sealed class SocialGenerationTests : IClassFixture<SocialGenerationApiFac
         Assert.Empty(terminal.Outputs);
     }
 
+    [Fact]
+    public async Task Social_job_rejects_selected_asset_without_ready_private_file()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client);
+        var assetId = Guid.NewGuid();
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.Assets.Add(new Asset
+            {
+                Id = assetId,
+                WorkspaceId = auth.PersonalWorkspace.Id,
+                CreatedByUserId = auth.User.Id,
+                Name = "Stale social reference",
+                AssetType = AssetTypes.Image,
+                Status = AssetStatus.Active,
+                StoredFileId = null,
+                CreatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var response = await SendWithCsrf(client, new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            prompt = "Use the selected visual reference safely.",
+            socialType = "announcement",
+            platform = "linkedin",
+            tone = "professional",
+            language = "en",
+            assetIds = new[] { assetId },
+            attachmentIds = Array.Empty<Guid>(),
+        });
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        var created = (await response.Content.ReadFromJsonAsync<CreateSocialGenerationResponse>())!;
+        var terminal = await WaitForTerminal(client, created.Job.Id);
+        Assert.Equal("Failed", terminal.Status);
+        Assert.Equal(GenerationJobErrorCodes.SocialContextUnavailable, terminal.ErrorCode);
+        Assert.Empty(terminal.Outputs);
+    }
+
     private static async Task<AuthResponse> Register(HttpClient client)
     {
         var response = await SendWithCsrf(client, new { displayName = "Social Tester", email = $"social-{Guid.NewGuid():N}@example.com", password = "StrongPassword!123", preferredLanguage = "ku" }, "/api/auth/register");
@@ -155,11 +251,12 @@ public sealed class SocialGenerationTests : IClassFixture<SocialGenerationApiFac
         return (await response.Content.ReadFromJsonAsync<AuthResponse>())!;
     }
 
-    private static async Task<HttpResponseMessage> SendWithCsrf(HttpClient client, object payload, string path = "/api/social-generation/jobs")
+    private static async Task<HttpResponseMessage> SendWithCsrf(HttpClient client, object payload, string path = "/api/social-generation/jobs", string? idempotencyKey = "social-test-request")
     {
         var csrf = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
         using var request = new HttpRequestMessage(HttpMethod.Post, path);
         request.Headers.Add("X-CSRF-TOKEN", csrf.GetProperty("token").GetString()!);
+        if (idempotencyKey is not null) request.Headers.Add("Idempotency-Key", idempotencyKey);
         request.Content = JsonContent.Create(payload);
         return await client.SendAsync(request);
     }

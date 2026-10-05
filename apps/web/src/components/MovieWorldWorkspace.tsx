@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 import { ArrowUpRight, Check, Compass, DoorOpen, Image as ImageIcon, LockKeyhole, MapPin, Package, Pencil, Plus, Route, Save, ShieldCheck, Sparkles, Sun, Theater } from "lucide-react";
 import { useLocale } from "@/components/LocaleProvider";
 import { api, type MovieLocation, type MovieLocationGeographyEntry, type MovieLocationGeographyOpening, type MovieLocationGeographyPath, type MovieLocationGeographySheet, type MovieProp, type MovieSet, type MovieWorldAsset, type MovieWorldReference, type MovieWorldWorkspace as WorldData } from "@/lib/api";
+import { translateMovieWorld } from "@/lib/movieWorldI18n";
 
 // Kept local to the room so the rest of the Movie project does not need the complete graph.
 type Room = "locations" | "sets" | "props";
@@ -159,28 +160,90 @@ const parsePathLines = (value: string): MovieLocationGeographyPath[] => value.sp
 function geographyDraft(sheet: MovieLocationGeographySheet | null | undefined): GeographyDraft { return !sheet ? emptyGeographyDraft : { establishingReferenceAssetId: sheet.establishingReferenceAssetId ?? "", establishingReferenceNotes: sheet.establishingReferenceNotes ?? "", wideThreeQuarterReferenceAssetId: sheet.wideThreeQuarterReferenceAssetId ?? "", wideThreeQuarterReferenceNotes: sheet.wideThreeQuarterReferenceNotes ?? "", entrancesExits: sheet.entrancesExits.map(joinEntry).join("\n"), windows: sheet.windows.map(joinEntry).join("\n"), paths: sheet.paths.map((item) => `${item.label} | ${item.from} | ${item.to} | ${item.description}`).join("\n"), majorObjects: sheet.majorObjects.map(joinEntry).join("\n"), lightSources: sheet.lightSources.map(joinEntry).join("\n"), orientationAnchors: sheet.orientationAnchors.map(joinEntry).join("\n") }; }
 
 function GeographySheetPanel({
-  location, assets, onSaved }: { location: MovieLocation; assets: MovieWorldAsset[]; onSaved: (sheet: MovieLocationGeographySheet) => void }) {
-  const { t } = useLocale();
+  location,
+  assets,
+  onSaved,
+}: {
+  location: MovieLocation;
+  assets: MovieWorldAsset[];
+  onSaved: (sheet: MovieLocationGeographySheet) => void;
+}) {
+  const { locale, t } = useLocale();
+  const worldT = (key: Parameters<typeof translateMovieWorld>[1], variables?: Record<string, string>) => translateMovieWorld(locale, key, variables);
   const [draft, setDraft] = useState<GeographyDraft>(() => geographyDraft(location.geographySheet));
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
-  const [variantName, setVariantName] = useState("");
+  const [error, setError] = useState('');
+  const [variantName, setVariantName] = useState('');
   const [variantSaving, setVariantSaving] = useState(false);
   const sheet = location.geographySheet;
   function change(key: keyof GeographyDraft, value: string) { setDraft((current) => ({ ...current, [key]: value })); }
   async function save() {
-    setSaving(true); setError("");
-    try { const next = await api.upsertMovieLocationGeographySheet(location.id, { establishingReferenceAssetId: draft.establishingReferenceAssetId || null, establishingReferenceNotes: draft.establishingReferenceNotes || null, wideThreeQuarterReferenceAssetId: draft.wideThreeQuarterReferenceAssetId || null, wideThreeQuarterReferenceNotes: draft.wideThreeQuarterReferenceNotes || null, entrancesExits: parseOpeningLines(draft.entrancesExits), windows: parseOpeningLines(draft.windows), paths: parsePathLines(draft.paths), majorObjects: parseEntryLines(draft.majorObjects), lightSources: parseEntryLines(draft.lightSources), orientationAnchors: parseEntryLines(draft.orientationAnchors) }); onSaved(next); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : "The geography sheet could not be saved."); }
+    setSaving(true); setError('');
+    try {
+      const next = await api.upsertMovieLocationGeographySheet(location.id, {
+        establishingReferenceAssetId: draft.establishingReferenceAssetId || null,
+        establishingReferenceNotes: draft.establishingReferenceNotes || null,
+        wideThreeQuarterReferenceAssetId: draft.wideThreeQuarterReferenceAssetId || null,
+        wideThreeQuarterReferenceNotes: draft.wideThreeQuarterReferenceNotes || null,
+        entrancesExits: parseOpeningLines(draft.entrancesExits),
+        windows: parseOpeningLines(draft.windows),
+        paths: parsePathLines(draft.paths),
+        majorObjects: parseEntryLines(draft.majorObjects),
+        lightSources: parseEntryLines(draft.lightSources),
+        orientationAnchors: parseEntryLines(draft.orientationAnchors),
+      });
+      onSaved(next);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : worldT('geography.saveError'));
+    } finally { setSaving(false); }
+  }
+  async function approve() {
+    setSaving(true); setError('');
+    try { onSaved(await api.approveMovieLocationGeographySheet(location.id)); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : worldT('geography.approveError')); }
     finally { setSaving(false); }
   }
-  async function approve() { setSaving(true); setError(""); try { onSaved(await api.approveMovieLocationGeographySheet(location.id)); } catch (cause) { setError(cause instanceof Error ? cause.message : "The geography sheet could not be approved."); } finally { setSaving(false); } }
-  async function addVariant() { if (!variantName.trim()) return; setVariantSaving(true); setError(""); try { const variant = await api.addMovieLocationGeographyVariant(location.id, { name: variantName.trim() }); const next = { ...(location.geographySheet ?? { ...emptyGeographyDraft }), variants: [...(location.geographySheet?.variants ?? []), variant] } as MovieLocationGeographySheet; onSaved(next); setVariantName(""); } catch (cause) { setError(cause instanceof Error ? cause.message : "The location variant could not be saved."); } finally { setVariantSaving(false); } }
-  return <section className="movie-world-geography"><div className="movie-world-card-head"><div><span className="movie-workspace-kicker">Location geography sheet</span><h5>Lock the space before expensive motion</h5></div><span className={sheet?.status === "Approved" ? "movie-world-status is-approved" : "movie-world-status"}>{sheet?.status ?? "Draft"}</span></div><p className="movie-world-muted">A reusable spatial contract for establishing coverage, 3/4 wides, entrances, paths, objects, light, and orientation. It travels with the World and Visual Bible into continuity snapshots.</p><div className="movie-world-geography-reference-grid"><label><span><Compass size={11} /> Establishing reference</span><select value={draft.establishingReferenceAssetId} onChange={(event) => change("establishingReferenceAssetId", event.target.value)} disabled={sheet?.status === "Approved"}><option value="">No Asset selected</option>{assets.map((asset) => <option key={asset.id} value={asset.id}>{asset.name}</option>)}</select><textarea value={draft.establishingReferenceNotes} onChange={(event) => change("establishingReferenceNotes", event.target.value)} placeholder="What the establishing frame must prove" disabled={sheet?.status === "Approved"} /></label><label><span><Compass size={11} /> Wide 3/4 spatial reference</span><select value={draft.wideThreeQuarterReferenceAssetId} onChange={(event) => change("wideThreeQuarterReferenceAssetId", event.target.value)} disabled={sheet?.status === "Approved"}><option value="">No Asset selected</option>{assets.map((asset) => <option key={asset.id} value={asset.id}>{asset.name}</option>)}</select><textarea value={draft.wideThreeQuarterReferenceNotes} onChange={(event) => change("wideThreeQuarterReferenceNotes", event.target.value)} placeholder="Camera-facing spatial relationship" disabled={sheet?.status === "Approved"} /></label></div><div className="movie-world-geography-grid"><GeographyField icon={<DoorOpen size={12} />} label="Entrances / exits" value={draft.entrancesExits} onChange={(value) => change("entrancesExits", value)} placeholder="Front door | Entry from courtyard" disabled={sheet?.status === "Approved"} /><GeographyField icon={<ImageIcon size={12} />} label="Windows" value={draft.windows} onChange={(value) => change("windows", value)} placeholder="North window | Deep exterior view" disabled={sheet?.status === "Approved"} /><GeographyField icon={<Route size={12} />} label="Paths" value={draft.paths} onChange={(value) => change("paths", value)} placeholder="Main path | Door | Tree | Actor route" disabled={sheet?.status === "Approved"} /><GeographyField icon={<Package size={12} />} label="Major objects" value={draft.majorObjects} onChange={(value) => change("majorObjects", value)} placeholder="Table | Left of hearth" disabled={sheet?.status === "Approved"} /><GeographyField icon={<Sun size={12} />} label="Light sources" value={draft.lightSources} onChange={(value) => change("lightSources", value)} placeholder="Window light | North-facing soft source" disabled={sheet?.status === "Approved"} /><GeographyField icon={<Compass size={12} />} label="Orientation anchors" value={draft.orientationAnchors} onChange={(value) => change("orientationAnchors", value)} placeholder="North wall | Camera left" disabled={sheet?.status === "Approved"} /></div><div className="movie-world-geography-actions"><small>{sheet ? `Guide revision ${sheet.guideRevisionNumber} · continuity ${sheet.continuitySnapshotHash ? "hashed" : "pending"}` : "Not yet captured in continuity"}</small>{sheet?.status !== "Approved" && <><button type="button" className="movie-world-save" onClick={() => void save()} disabled={saving}>{saving ? t("movieBody.loading") : <><Save size={13} /> Save sheet</>}</button>{sheet && <button type="button" className="movie-world-inline-add" onClick={() => void approve()} disabled={saving}><ShieldCheck size={13} /> Approve sheet</button>}</>}</div>{sheet?.worldBibleJson && <details className="movie-world-bible"><summary>World / Visual Bible context captured</summary><small>World Bible and Visual Bible references are pinned to this sheet revision for continuity review.</small></details>}<div className="movie-world-variants"><div className="movie-world-card-head"><div><span className="movie-workspace-kicker">Approved variants</span><h5>Controlled time, weather, and light</h5></div><span>{sheet?.variants.filter((item) => item.status === "Approved").length ?? 0} approved</span></div><div className="movie-world-inline-form"><input value={variantName} onChange={(event) => setVariantName(event.target.value)} placeholder="Night / rain / aftermath" disabled={!sheet} /><button type="button" onClick={() => void addVariant()} disabled={variantSaving || !sheet || !variantName.trim()}><Plus size={13} /></button></div>{sheet?.variants.length ? <div className="movie-world-variant-list">{sheet.variants.map((variant) => <div key={variant.id}><span>{variant.name}</span><em>{variant.status}</em>{variant.status !== "Approved" && <button type="button" onClick={() => void api.approveMovieLocationGeographyVariant(variant.id).then((approved) => onSaved({ ...sheet, variants: sheet.variants.map((item) => item.id === approved.id ? approved : item) })).catch((cause) => setError(cause instanceof Error ? cause.message : "The variant could not be approved."))}>Approve</button>}</div>)}</div> : <p className="movie-world-muted">Save a sheet to define controlled variants.</p>}</div>{error && <div className="movie-workspace-error-inline" role="alert">{error}</div>}</section>;
+  async function addVariant() {
+    if (!variantName.trim()) return;
+    setVariantSaving(true); setError('');
+    try {
+      const variant = await api.addMovieLocationGeographyVariant(location.id, { name: variantName.trim() });
+      const next = { ...(location.geographySheet ?? { ...emptyGeographyDraft }), variants: [...(location.geographySheet?.variants ?? []), variant] } as MovieLocationGeographySheet;
+      onSaved(next); setVariantName('');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : worldT('geography.variantError'));
+    } finally { setVariantSaving(false); }
+  }
+  const approvedVariantCount = sheet?.variants.filter((item) => item.status === 'Approved').length ?? 0;
+  return (
+    <section className="movie-world-geography">
+      <div className="movie-world-card-head"><div><span className="movie-workspace-kicker">{worldT('geography.title')}</span><h5>{worldT('geography.lockSpace')}</h5></div><span className={sheet?.status === 'Approved' ? 'movie-world-status is-approved' : 'movie-world-status'}>{sheet?.status ?? 'Draft'}</span></div>
+      <p className="movie-world-muted">{worldT('geography.description')}</p>
+      <div className="movie-world-geography-reference-grid">
+        <label><span><Compass size={11} /> {worldT('geography.establishingReference')}</span><select value={draft.establishingReferenceAssetId} onChange={(event) => change('establishingReferenceAssetId', event.target.value)} disabled={sheet?.status === 'Approved'}><option value="">{worldT('geography.noAssetSelected')}</option>{assets.map((asset) => <option key={asset.id} value={asset.id}>{asset.name}</option>)}</select><textarea value={draft.establishingReferenceNotes} onChange={(event) => change('establishingReferenceNotes', event.target.value)} placeholder={worldT('geography.establishingPlaceholder')} disabled={sheet?.status === 'Approved'} /></label>
+        <label><span><Compass size={11} /> {worldT('geography.wideSpatialReference')}</span><select value={draft.wideThreeQuarterReferenceAssetId} onChange={(event) => change('wideThreeQuarterReferenceAssetId', event.target.value)} disabled={sheet?.status === 'Approved'}><option value="">{worldT('geography.noAssetSelected')}</option>{assets.map((asset) => <option key={asset.id} value={asset.id}>{asset.name}</option>)}</select><textarea value={draft.wideThreeQuarterReferenceNotes} onChange={(event) => change('wideThreeQuarterReferenceNotes', event.target.value)} placeholder={worldT('geography.cameraPlaceholder')} disabled={sheet?.status === 'Approved'} /></label>
+      </div>
+      <div className="movie-world-geography-grid">
+        <GeographyField icon={<DoorOpen size={12} />} label={worldT('geography.entrancesExits')} value={draft.entrancesExits} onChange={(value) => change('entrancesExits', value)} placeholder={worldT('geography.frontDoor')} disabled={sheet?.status === 'Approved'} />
+        <GeographyField icon={<ImageIcon size={12} />} label={worldT('geography.windows')} value={draft.windows} onChange={(value) => change('windows', value)} placeholder={worldT('geography.northWindow')} disabled={sheet?.status === 'Approved'} />
+        <GeographyField icon={<Route size={12} />} label={worldT('geography.paths')} value={draft.paths} onChange={(value) => change('paths', value)} placeholder={worldT('geography.mainPath')} disabled={sheet?.status === 'Approved'} />
+        <GeographyField icon={<Package size={12} />} label={worldT('geography.majorObjects')} value={draft.majorObjects} onChange={(value) => change('majorObjects', value)} placeholder={worldT('geography.table')} disabled={sheet?.status === 'Approved'} />
+        <GeographyField icon={<Sun size={12} />} label={worldT('geography.lightSources')} value={draft.lightSources} onChange={(value) => change('lightSources', value)} placeholder={worldT('geography.windowLight')} disabled={sheet?.status === 'Approved'} />
+        <GeographyField icon={<Compass size={12} />} label={worldT('geography.orientationAnchors')} value={draft.orientationAnchors} onChange={(value) => change('orientationAnchors', value)} placeholder={worldT('geography.northWall')} disabled={sheet?.status === 'Approved'} />
+      </div>
+      <div className="movie-world-geography-actions"><small>{sheet ? worldT('geography.guideRevision', { revision: String(sheet.guideRevisionNumber), continuity: sheet.continuitySnapshotHash ? worldT('geography.hashed') : worldT('geography.pending') }) : worldT('geography.notCaptured')}</small>{sheet?.status !== 'Approved' && <><button type="button" className="movie-world-save" onClick={() => void save()} disabled={saving}>{saving ? t('movieBody.loading') : <><Save size={13} /> {worldT('geography.saveSheet')}</>}</button>{sheet && <button type="button" className="movie-world-inline-add" onClick={() => void approve()} disabled={saving}><ShieldCheck size={13} /> {worldT('geography.approveSheet')}</button>}</>}</div>
+      {sheet?.worldBibleJson && <details className="movie-world-bible"><summary>{worldT('geography.worldBibleCaptured')}</summary><small>{worldT('geography.worldBibleText')}</small></details>}
+      <div className="movie-world-variants"><div className="movie-world-card-head"><div><span className="movie-workspace-kicker">{worldT('geography.approvedVariants')}</span><h5>{worldT('geography.controlledTime')}</h5></div><span>{worldT('geography.approvedCount', { count: String(approvedVariantCount) })}</span></div><div className="movie-world-inline-form"><input value={variantName} onChange={(event) => setVariantName(event.target.value)} placeholder={worldT('geography.variantPlaceholder')} disabled={!sheet} /><button type="button" onClick={() => void addVariant()} disabled={variantSaving || !sheet || !variantName.trim()}><Plus size={13} /></button></div>{sheet?.variants.length ? <div className="movie-world-variant-list">{sheet.variants.map((variant) => <div key={variant.id}><span>{variant.name}</span><em>{variant.status}</em>{variant.status !== 'Approved' && <button type="button" onClick={() => void api.approveMovieLocationGeographyVariant(variant.id).then((approved) => onSaved({ ...sheet, variants: sheet.variants.map((item) => item.id === approved.id ? approved : item) })).catch((cause) => setError(cause instanceof Error ? cause.message : worldT('geography.variantApproveError')))}>{worldT('geography.approve')}</button>}</div>)}</div> : <p className="movie-world-muted">{worldT('geography.saveForVariants')}</p>}</div>
+      {error && <div className="movie-workspace-error-inline" role="alert">{error}</div>}
+    </section>
+  );
 }
-
 function GeographyField({
-  icon, label, value, onChange, placeholder, disabled }: { icon: React.ReactNode; label: string; value: string; onChange: (value: string) => void; placeholder: string; disabled?: boolean }) { return <label className="movie-world-geography-field"><span>{icon} {label}</span><textarea value={value} onChange={(event) => onChange(event.target.value)} placeholder={`${placeholder} · one per line · use | for detail`} disabled={disabled} /></label>; }
+  icon, label, value, onChange, placeholder, disabled,
+}: { icon: React.ReactNode; label: string; value: string; onChange: (value: string) => void; placeholder: string; disabled?: boolean }) {
+  const { locale } = useLocale();
+  return <label className="movie-world-geography-field"><span>{icon} {label}</span><textarea value={value} onChange={(event) => onChange(event.target.value)} placeholder={`${placeholder} ${translateMovieWorld(locale, 'geography.entryHint')}`} disabled={disabled} /></label>;
+}
 function Note({
   label, value }: { label: string; value?: string | null }) { const { t } = useLocale(); return <div><span>{label}</span><p>{value || t("movie.notSet")}</p></div>; }
 function AssetChip({

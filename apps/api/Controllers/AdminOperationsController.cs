@@ -11,6 +11,8 @@ namespace Taslim.Api.Controllers;
 [Route("api/admin/operations")]
 public sealed class AdminOperationsController(IAdminOperationsService operations) : ControllerBase
 {
+    private const string IdempotencyKeyHeader = "Idempotency-Key";
+
     [HttpGet("dashboard")]
     public async Task<ActionResult<AdminOperationsDashboardDto>> Dashboard(
         [FromQuery] AdminOperationsQuery query,
@@ -28,7 +30,8 @@ public sealed class AdminOperationsController(IAdminOperationsService operations
         if (!Guid.TryParse(actorValue, out var actorUserId)) return Unauthorized();
         try
         {
-            var result = await operations.RecoverExpiredJobAsync(actorUserId, jobId, request.Reason, HttpContext.TraceIdentifier, cancellationToken);
+            var idempotencyKey = Request.Headers[IdempotencyKeyHeader].FirstOrDefault();
+            var result = await operations.RecoverExpiredJobAsync(actorUserId, jobId, request.Reason, idempotencyKey, cancellationToken);
             return result is null ? NotFound() : Ok(result);
         }
         catch (AdminOperationConflictException exception)

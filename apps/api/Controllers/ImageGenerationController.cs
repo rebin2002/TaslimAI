@@ -2,6 +2,7 @@ using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
@@ -29,6 +30,8 @@ public sealed class ImageGenerationController(
     {
         try
         {
+            if (!options.Value.Enabled)
+                return ApiResults.Error(this, StatusCodes.Status503ServiceUnavailable, "IMAGE_STUDIO_UNAVAILABLE", "Image generation is not available right now.");
             var input = ImageGenerationContractMapper.ToInput(request);
             var provider = providers.FirstOrDefault(item => string.Equals(item.Key, options.Value.ProviderKey, StringComparison.OrdinalIgnoreCase));
             ImageGenerationRequestValidator.Validate(input, options.Value, (provider as IImageGenerationProviderCapabilities)?.Capabilities);
@@ -45,7 +48,7 @@ public sealed class ImageGenerationController(
                 Title = request.Title,
                 InputJson = System.Text.Json.JsonSerializer.Serialize(input),
                 EstimatedProviderCostUsd = preflight.EstimatedProviderCostUsd,
-            }, cancellationToken, Request.Headers["Idempotency-Key"].FirstOrDefault());
+            }, cancellationToken, Request.Headers["Idempotency-Key"].FirstOrDefault(), requestId: ImageGenerationPersistenceGuards.BuildImageStudioRequestId(HttpContext.TraceIdentifier));
             return Accepted(new CreateImageGenerationResponse(GenerationJobContractMapper.ToDto(job)));
         }
         catch (ImageRequestValidationException exception)
@@ -59,6 +62,10 @@ public sealed class ImageGenerationController(
         catch (GenerationJobForbiddenException)
         {
             return Forbid();
+        }
+        catch (DbUpdateException exception) when (ImageGenerationPersistenceGuards.IsActiveJobConflict(exception))
+        {
+            return ApiResults.Error(this, StatusCodes.Status409Conflict, ImageGenerationPersistenceGuards.ActiveJobConflictCode, ImageGenerationPersistenceGuards.ActiveJobConflictMessage);
         }
     }
 
