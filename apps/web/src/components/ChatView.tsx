@@ -8,6 +8,7 @@ import { useLocale } from "@/components/LocaleProvider";
 import { ApiError, api, type ChatMessage, type Conversation, type Project, type StoredFile } from "@/lib/api";
 import { applyChatStreamEvent, createChatStreamState, failChatStream, stopChatStream } from "@/lib/chatStreamState";
 import { beginChatStreamSession, invalidateChatStreamSessions, isCurrentChatStreamSession } from "@/lib/chatStreamSession";
+import { resolveChatAttachmentScope } from "@/lib/chatAttachmentScope";
 import { claimSubmission, conversationPath, createChatRequestId, createRegenerateRetryRequest, createSendRetryRequest, createSubmission, isAbortError, releaseSubmission, shouldReplaceConversationUrl, studioTransitionPath, type ChatRetryRequest, type RegenerateRetryRequest, type SendRetryRequest } from "@/lib/chatLifecycle";
 import { ProtectedPage } from "@/components/ProtectedPage";
 import { ChatMessageContent } from "@/components/ChatMessageContent";
@@ -100,6 +101,7 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
     let active = true;
     queueMicrotask(() => {
       if (!active) return;
+      setAttachments([]);
       setGenerating(false);
       setRetryRequest(null);
       setLoading(true);
@@ -183,7 +185,8 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
       for (const [index, file] of queue.entries()) {
         setUploadProgress({ complete: index, total: queue.length, fileName: file.name });
         // Chat uploads are scoped only to the uploader until they are explicitly attached to this message.
-        const stored = await api.uploadFile(workspace.id, file);
+        const scope = resolveChatAttachmentScope(conversationId, selected, selectedProjectId);
+        const stored = await api.uploadFile(workspace.id, file, scope);
         setAttachments(current => [...current, stored]);
         setUploadProgress({ complete: index + 1, total: queue.length, fileName: file.name });
       }
