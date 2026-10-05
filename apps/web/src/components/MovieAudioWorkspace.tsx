@@ -12,6 +12,8 @@ import {
   type MovieSoundtrackCue,
 } from "@/lib/api";
 import { useLocale } from "@/components/LocaleProvider";
+import { formatMovieNumber } from "@/lib/movieLocaleFormatting";
+import type { Locale } from "@/lib/i18n";
 
 /**
  * The sound stage. Everything rendered here is a persisted record: the project
@@ -21,7 +23,7 @@ import { useLocale } from "@/components/LocaleProvider";
  * simulated when the seam is unavailable.
  */
 export function MovieAudioWorkspace({ project }: { project: MovieProject }) {
-  const { t } = useLocale();
+  const { locale, t } = useLocale();
   const [library, setLibrary] = useState<MovieSoundLibrary | null>(null);
   const [tracks, setTracks] = useState<MovieSoundTrack[]>([]);
   const [soundtrack, setSoundtrack] = useState<MovieSoundtrack | null>(null);
@@ -90,10 +92,10 @@ export function MovieAudioWorkspace({ project }: { project: MovieProject }) {
       </section>
 
       <section className="movie-audio-summary" aria-label={t("movieAudio.summary")}>
-        <AudioMetric label="Library" value={library?.references.length ?? 0} detail="approved references" />
-        <AudioMetric label="Sound cues" value={tracks.length} detail={`${approved} approved`} />
-        <AudioMetric label="Score cues" value={cues.length} detail={`${approvedCues} approved`} />
-        <AudioMetric label="Caption tracks" value={captionTracks.length} detail={`${captionTracks.filter((track) => track.isRtl).length} RTL`} />
+        <AudioMetric locale={locale} label="Library" value={library?.references.length ?? 0} detail="approved references" />
+        <AudioMetric locale={locale} label="Sound cues" value={tracks.length} detail={`${formatMovieNumber(approved, locale)} approved`} />
+        <AudioMetric locale={locale} label="Score cues" value={cues.length} detail={`${formatMovieNumber(approvedCues, locale)} approved`} />
+        <AudioMetric locale={locale} label="Caption tracks" value={captionTracks.length} detail={`${formatMovieNumber(captionTracks.filter((track) => track.isRtl).length, locale)} RTL`} />
       </section>
 
       {soundtrack && !soundtrack.mediaServiceAvailable && (
@@ -168,18 +170,18 @@ export function MovieAudioWorkspace({ project }: { project: MovieProject }) {
                   <div>
                     <dt>Window</dt>
                     <dd>
-                      {track.startMilliseconds}–{track.endMilliseconds} ms
+                      {formatMovieNumber(track.startMilliseconds, locale)}–{formatMovieNumber(track.endMilliseconds, locale)} ms
                     </dd>
                   </div>
                   <div>
                     <dt>Fades</dt>
                     <dd>
-                      {track.fadeInMilliseconds} / {track.fadeOutMilliseconds} ms
+                      {formatMovieNumber(track.fadeInMilliseconds, locale)} / {formatMovieNumber(track.fadeOutMilliseconds, locale)} ms
                     </dd>
                   </div>
                   <div>
                     <dt>Gain</dt>
-                    <dd>{track.gainDb} dB</dd>
+                    <dd>{formatMovieNumber(track.gainDb, locale)} dB</dd>
                   </div>
                   <div>
                     <dt>Source</dt>
@@ -271,7 +273,7 @@ export function MovieAudioWorkspace({ project }: { project: MovieProject }) {
                   <span className={`movie-audio-status is-${track.status.toLowerCase()}`}>{track.status}</span>
                 </header>
                 <p>
-                  {track.cues.length} cue(s)
+                  {formatMovieNumber(track.cues.length, locale)} cue(s)
                   {track.isDefault ? " · default track" : ""}
                   {track.sourceFormat ? ` · imported ${track.sourceFormat.toUpperCase()}` : ""}
                 </p>
@@ -313,13 +315,14 @@ export function MovieAudioWorkspace({ project }: { project: MovieProject }) {
 }
 
 function ScoreCue({ cue }: { cue: MovieSoundtrackCue }) {
+  const { locale } = useLocale();
   const approvedVersion = cue.versions.find((version) => version.id === cue.approvedVersionId) ?? null;
   return (
     <article className="movie-audio-cue">
       <header>
         <div>
           <span className="movie-audio-track-kicker">
-            Cue {String(cue.sequence).padStart(2, "0")} · {cue.mood} · intensity {cue.intensity}
+            Cue {formatMovieNumber(cue.sequence, locale, { minimumIntegerDigits: 2 })} · {cue.mood} · intensity {formatMovieNumber(cue.intensity, locale)}
           </span>
           <h4>{cue.title}</h4>
           <p>{cue.narrativeIntent ?? "No narrative intent recorded."}</p>
@@ -329,19 +332,19 @@ function ScoreCue({ cue }: { cue: MovieSoundtrackCue }) {
       <dl className="movie-audio-facts">
         <div>
           <dt>Timeline</dt>
-          <dd>{cue.timelineStartSeconds}s</dd>
+          <dd>{formatMovieNumber(cue.timelineStartSeconds, locale)}s</dd>
         </div>
         <div>
           <dt>Duration</dt>
-          <dd>{cue.durationSeconds}s</dd>
+          <dd>{formatMovieNumber(cue.durationSeconds, locale)}s</dd>
         </div>
         <div>
           <dt>Versions</dt>
-          <dd>{cue.versions.length}</dd>
+          <dd>{formatMovieNumber(cue.versions.length, locale)}</dd>
         </div>
         <div>
           <dt>Ducking</dt>
-          <dd>{cue.duckingIntents.length} intent(s)</dd>
+          <dd>{formatMovieNumber(cue.duckingIntents.length, locale)} intent(s)</dd>
         </div>
       </dl>
       {cue.duckingIntents.length > 0 && (
@@ -372,11 +375,11 @@ function ScoreCue({ cue }: { cue: MovieSoundtrackCue }) {
   );
 }
 
-function AudioMetric({ label, value, detail }: { label: string; value: number; detail: string }) {
+function AudioMetric({ locale, label, value, detail }: { locale: Locale; label: string; value: number; detail: string }) {
   return (
     <div className="movie-audio-metric">
       <span>{label}</span>
-      <strong>{value}</strong>
+      <strong>{formatMovieNumber(value, locale)}</strong>
       <small>{detail}</small>
     </div>
   );
