@@ -49,6 +49,8 @@ fi
 printf 'HTTP/1.1 %s Test\r\ncache-control: no-store\r\npragma: no-cache\r\nx-request-id: smoke-request\r\ncontent-type: application/json\r\n\r\n' "$status" > "$headers"
 if [[ "${SMOKE_MODE:-retry}" == 'unsafe' && "$endpoint" == '/health/ready' ]]; then
     printf '{"status":"ready","service":"Taslim API","requestId":"smoke-request","checks":[{"name":"database","status":"available","required":true}],"password":"must-not-leak"}\n' > "$body"
+elif [[ "${SMOKE_MODE:-retry}" == 'invalid' && "$endpoint" == '/health/ready' ]]; then
+    printf '{"status":"ready","service":"Taslim API","requestId":"smoke-request","checks":[{"name":"storage","status":"available","required":true}]}\n' > "$body"
 elif [[ "$endpoint" == '/health/live' ]]; then
     printf '{"status":"alive","service":"Taslim API","requestId":"smoke-request","checks":[{"name":"process","status":"alive","required":true}]}\n' > "$body"
 else
@@ -100,5 +102,23 @@ if PATH="$bin_dir:$PATH" \
     cat "$temp_dir/unsafe.output" >&2
     exit 1
 fi
+
+invalid_log="$temp_dir/invalid.log"
+if PATH="$bin_dir:$PATH" \
+    SMOKE_COMMAND_LOG="$invalid_log" \
+    SMOKE_STATE_FILE="$temp_dir/invalid.state" \
+    SMOKE_MODE=invalid \
+    SMOKE_MAX_ATTEMPTS=1 \
+    SMOKE_RETRY_SECONDS=0 \
+    bash "$script" http://127.0.0.1:5000 >"$temp_dir/invalid.output" 2>&1; then
+    echo 'The smoke helper accepted an invalid HTTP 200 response on the final attempt.' >&2
+    cat "$temp_dir/invalid.output" >&2
+    exit 1
+fi
+grep -F 'returned an invalid response on attempt 1' "$temp_dir/invalid.output" >/dev/null || {
+    echo 'The smoke helper did not report the invalid final-attempt response.' >&2
+    cat "$temp_dir/invalid.output" >&2
+    exit 1
+}
 
 echo 'api-health-smoke behavior tests passed.'
