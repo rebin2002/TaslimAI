@@ -4,8 +4,6 @@ import { useCallback, useEffect, useState } from "react";
 import { AlertTriangle, CheckCircle2, Clock3, MessageSquare, RefreshCw, ShieldCheck, UserCheck, Users, X } from "lucide-react";
 import { api, type MovieCollaboration, type MovieProject } from "@/lib/api";
 import { useLocale } from "@/components/LocaleProvider";
-import { formatMovieDate, formatMovieDateTime, formatMovieNumber } from "@/lib/movieLocaleFormatting";
-import type { Locale } from "@/lib/i18n";
 
 const projectTarget = "MovieProject";
 
@@ -15,7 +13,7 @@ const projectTarget = "MovieProject";
  * actually granted to the signed-in user, not a client-side guess.
  */
 export function MovieTeamWorkspace({ project }: { project: MovieProject }) {
-  const { locale, t } = useLocale();
+  const { t } = useLocale();
   const [collaboration, setCollaboration] = useState<MovieCollaboration | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -95,10 +93,10 @@ export function MovieTeamWorkspace({ project }: { project: MovieProject }) {
       </section>
 
       <section className="movie-team-summary" aria-label={t("movieTeam.summary")}>
-        <TeamMetric locale={locale} label="Members" value={team.length} detail="with project access" />
-        <TeamMetric locale={locale} label="Open notes" value={openComments.length} detail={`${formatMovieNumber(comments.length, locale)} total`} />
-        <TeamMetric locale={locale} label="Reviews" value={reviews.length} detail={`${formatMovieNumber(pendingReviews.length, locale)} awaiting decision`} />
-        <TeamMetric locale={locale} label="Assignments" value={assignments.length} detail="tracked work" />
+        <TeamMetric label="Members" value={team.length} detail="with project access" />
+        <TeamMetric label="Open notes" value={openComments.length} detail={`${comments.length} total`} />
+        <TeamMetric label="Reviews" value={reviews.length} detail={`${pendingReviews.length} awaiting decision`} />
+        <TeamMetric label="Assignments" value={assignments.length} detail="tracked work" />
       </section>
 
       {collaboration && (
@@ -215,7 +213,7 @@ export function MovieTeamWorkspace({ project }: { project: MovieProject }) {
               <li key={comment.id} className={comment.resolvedAt ? "is-resolved" : ""}>
                 <header>
                   <strong>{comment.authorDisplayName}</strong>
-                  <time dateTime={comment.createdAt}>{formatMovieDateTime(comment.createdAt, locale)}</time>
+                  <time dateTime={comment.createdAt}>{new Date(comment.createdAt).toLocaleString()}</time>
                 </header>
                 <p dir="auto">{comment.body}</p>
                 <footer>
@@ -290,7 +288,7 @@ export function MovieTeamWorkspace({ project }: { project: MovieProject }) {
                   <strong>{assignment.title}</strong>
                   <small>
                     {assignment.assigneeDisplayName} · assigned by {assignment.assignedByDisplayName}
-                    {assignment.dueAt ? ` · due ${formatMovieDate(assignment.dueAt, locale)}` : ""}
+                    {assignment.dueAt ? ` · due ${new Date(assignment.dueAt).toLocaleDateString()}` : ""}
                   </small>
                 </div>
                 <span className="movie-team-assignment-status">{assignment.status}</span>
@@ -311,11 +309,11 @@ export function MovieTeamWorkspace({ project }: { project: MovieProject }) {
   );
 }
 
-function TeamMetric({ locale, label, value, detail }: { locale: Locale; label: string; value: number; detail: string }) {
+function TeamMetric({ label, value, detail }: { label: string; value: number; detail: string }) {
   return (
     <div className="movie-team-metric">
       <span>{label}</span>
-      <strong>{formatMovieNumber(value, locale)}</strong>
+      <strong>{value}</strong>
       <small>{detail}</small>
     </div>
   );
