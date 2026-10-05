@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 using Taslim.Api.Files;
 using Taslim.Api.Persistence;
@@ -59,15 +60,24 @@ public sealed class OperationalHealthService(
     TaslimDbContext db,
     IFileStorageService storage,
     IOptions<HealthOptions> healthOptions,
-    ILogger<OperationalHealthService> logger)
+    ILogger<OperationalHealthService> logger,
+    IHostApplicationLifetime? applicationLifetime = null)
 {
     private readonly HealthOptions settings = healthOptions.Value;
+    private readonly IHostApplicationLifetime? lifetime = applicationLifetime;
 
     public OperationalHealthResponse Live(string requestId) =>
         new("alive", "Taslim API", requestId, [new("process", "alive", true)]);
 
     public async Task<(OperationalHealthResponse Response, bool IsReady)> ReadinessAsync(string requestId, CancellationToken cancellationToken)
     {
+        if (lifetime?.ApplicationStopping.IsCancellationRequested == true
+            || lifetime?.ApplicationStopped.IsCancellationRequested == true)
+        {
+            logger.LogInformation("Readiness rejected because host shutdown is in progress. RequestId={RequestId}", requestId);
+            return (new("not_ready", "Taslim API", requestId, [new("application", "stopping", true)]), false);
+        }
+
         using var probeTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         probeTimeout.CancelAfter(settings.ProbeTimeout);
 
