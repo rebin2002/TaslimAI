@@ -305,12 +305,18 @@ public sealed class ChatTests : IClassFixture<TaslimApiFactory>
         using var client = factory.CreateClient();
         var auth = await Register(client, "Concurrent Ordering Chat Owner");
         var conversation = await CreateConversation(client, auth.PersonalWorkspace.Id);
+        var csrf = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
+        var csrfToken = csrf.GetProperty("token").GetString()!;
 
         var responses = await Task.WhenAll(
-            SendMessage(client, conversation.Id, "Concurrent first", Guid.NewGuid().ToString("N")),
-            SendMessage(client, conversation.Id, "Concurrent second", Guid.NewGuid().ToString("N")));
+            SendConcurrentMessage(client, conversation.Id, "Concurrent first", csrfToken),
+            SendConcurrentMessage(client, conversation.Id, "Concurrent second", csrfToken));
 
-        Assert.All(responses, response => Assert.Equal(HttpStatusCode.OK, response.StatusCode));
+        foreach (var response in responses)
+        {
+            var body = await response.Content.ReadAsStringAsync();
+            Assert.True(response.StatusCode == HttpStatusCode.OK, body);
+        }
         var messages = await client.GetFromJsonAsync<List<ChatMessageDto>>($"/api/conversations/{conversation.Id}/messages");
         Assert.NotNull(messages);
         Assert.Equal(4, messages.Count);
@@ -360,6 +366,14 @@ public sealed class ChatTests : IClassFixture<TaslimApiFactory>
 
     private static async Task<HttpResponseMessage> SendMessage(HttpClient client, Guid conversationId, string content, string? requestId = null, bool stream = false) =>
         await SendWithCsrf(client, HttpMethod.Post, $"/api/conversations/{conversationId}/messages{(stream ? "/stream" : string.Empty)}", new { content, requestId });
+
+    private static async Task<HttpResponseMessage> SendConcurrentMessage(HttpClient client, Guid conversationId, string content, string csrfToken)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"/api/conversations/{conversationId}/messages");
+        request.Headers.Add("X-CSRF-TOKEN", csrfToken);
+        request.Content = JsonContent.Create(new { content, requestId = Guid.NewGuid().ToString("N") });
+        return await client.SendAsync(request);
+    }
 
     private static async Task<T> SendWithCsrf<T>(HttpClient client, HttpMethod method, string path, object? payload)
     {
