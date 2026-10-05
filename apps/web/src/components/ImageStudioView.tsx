@@ -26,6 +26,7 @@ import { AccessibleProgressBar } from "@/components/AccessibleProgressBar";
 import { useLocale } from "@/components/LocaleProvider";
 import { useSearchParams } from "next/navigation";
 import { ApiError, api, type Asset, type GenerationJob, type ImageGenerationInput, type Project } from "@/lib/api";
+import { localizedImageErrorMessage } from "@/lib/imageStudioErrors";
 import { canCancelImageJob, clearImageActiveJobId, isRestorableImageJob, nextImagePollDelay, parseImageJobResult, persistImageActiveJobId, readImageActiveJobId, shouldPollImageJob, shouldResetImageWorkspaceState } from "@/lib/imageStudioState";
 
 const styles = ["auto", "photorealistic", "product", "illustration", "3d", "minimal", "poster", "social_media"] as const;
@@ -170,7 +171,7 @@ export function ImageStudioView() {
       } catch (caught) {
         if (active && workspaceGeneration.current === workspaceVersion && current.id === jobId) {
           setPollRetry((attempt) => attempt + 1);
-          setError(caught instanceof Error ? caught.message : t("image.pollError"));
+          setError(localizedImageErrorMessage(caught instanceof ApiError ? caught.code : null, t, "image.pollError"));
         }
       }
     }, nextImagePollDelay(current, pollRetry) ?? 650);
@@ -206,7 +207,7 @@ export function ImageStudioView() {
         setCurrent(job);
       }
     } catch (caught) {
-      if (workspaceGeneration.current === requestWorkspaceVersion) setError(caught instanceof Error ? caught.message : t("image.createError"));
+      if (workspaceGeneration.current === requestWorkspaceVersion) setError(localizedImageErrorMessage(caught instanceof ApiError ? caught.code : null, t, "image.createError"));
     } finally {
       if (workspaceGeneration.current === requestWorkspaceVersion) setWorking(false);
     }
@@ -225,7 +226,7 @@ export function ImageStudioView() {
         setCurrent((previous) => previous?.id === job.id ? next : previous);
       }
     } catch (caught) {
-      if (workspaceGeneration.current === requestWorkspaceVersion) setError(caught instanceof Error ? caught.message : t("image.cancelError"));
+      if (workspaceGeneration.current === requestWorkspaceVersion) setError(localizedImageErrorMessage(caught instanceof ApiError ? caught.code : null, t, "image.cancelError"));
     } finally {
       if (workspaceGeneration.current === requestWorkspaceVersion) setWorking(false);
     }
@@ -246,7 +247,9 @@ export function ImageStudioView() {
   const result = useMemo(() => parseImageJobResult(current), [current]);
   const isSuccess = current?.status === "Succeeded" && !!result?.assetId;
   const isFailure = current?.status === "Failed" || current?.status === "Cancelled" || (current?.status === "Succeeded" && !result);
-  const failureMessage = current?.errorMessage || (current?.status === "Succeeded" ? t("image.resultUnavailable") : t("image.failedText"));
+  const failureMessage = current?.status === "Succeeded"
+    ? t("image.resultUnavailable")
+    : localizedImageErrorMessage(current?.errorCode, t, "image.failedText");
   const detailLabels = useMemo<AssetDetailLabels>(() => ({
     detailEyebrow: t("assets.detailEyebrow"),
     close: t("common.close"),
