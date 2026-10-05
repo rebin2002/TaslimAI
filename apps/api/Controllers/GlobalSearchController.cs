@@ -96,8 +96,18 @@ public sealed class GlobalSearchController(TaslimDbContext db) : ControllerBase
             .ToListAsync(cancellationToken);
         AddGroup(groups, GlobalSearchResultTypes.Conversation, conversations);
 
+        // Keep asset search aligned with the asset-library privacy boundary:
+        // project assets are shared only when their backing file is also
+        // workspace-shareable; personal and conversation-backed assets remain
+        // visible only to their creator.
         var assets = await db.Assets.AsNoTracking()
             .Where(asset => workspaceIds.Contains(asset.WorkspaceId)
+                && (asset.ProjectId.HasValue || asset.CreatedByUserId == userId)
+                && (asset.CreatedByUserId == userId
+                    || !asset.StoredFileId.HasValue
+                    || (asset.StoredFile!.WorkspaceId == asset.WorkspaceId
+                        && (asset.StoredFile.UserId == userId
+                            || (asset.StoredFile.ProjectId.HasValue && asset.StoredFile.ConversationId == null))))
                 && (asset.Name.ToLower().Contains(search)
                     || (asset.Description != null && asset.Description.ToLower().Contains(search))))
             .OrderByDescending(asset => asset.UpdatedAt)
