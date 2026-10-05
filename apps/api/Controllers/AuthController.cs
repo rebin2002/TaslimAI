@@ -183,6 +183,7 @@ public sealed class AuthController(
     [HttpPost("sessions/revoke")]
     [Authorize]
     [ValidateAntiForgeryToken]
+    [EnableRateLimiting(RateLimiting.AccountSecurity)]
     public async Task<IActionResult> RevokeOtherSessions()
     {
         var user = await userManager.GetUserAsync(User);

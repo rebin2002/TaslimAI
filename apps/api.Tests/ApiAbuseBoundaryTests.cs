@@ -13,6 +13,7 @@ public sealed class ApiAbuseBoundaryTests
     [InlineData(typeof(MovieDirectorController), nameof(MovieDirectorController.CreateProposal), RateLimiting.Generation)]
     [InlineData(typeof(MovieDialogueController), nameof(MovieDialogueController.QueueTake), RateLimiting.ExpensiveAi)]
     [InlineData(typeof(AuthController), nameof(AuthController.ChangePassword), RateLimiting.AccountSecurity)]
+    [InlineData(typeof(AuthController), nameof(AuthController.RevokeOtherSessions), RateLimiting.AccountSecurity)]
     public void Sensitive_post_actions_use_safe_rate_policy(Type controllerType, string actionName, string expectedPolicy)
     {
         var action = controllerType.GetMethod(actionName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.DeclaredOnly);
