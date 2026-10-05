@@ -244,6 +244,11 @@ public sealed class OpenAiImageGenerationProvider(
             logger.LogWarning(exception, "Image provider returned an unreadable response without logging response contents.");
             throw new ImageOutputInvalidException();
         }
+        catch (Exception exception) when (exception is InvalidOperationException or KeyNotFoundException or OverflowException)
+        {
+            logger.LogWarning(exception, "Image provider returned an invalid response shape without logging response contents.");
+            throw new ImageOutputInvalidException();
+        }
     }
 
     private ImageProviderUsage ReadUsage(JsonElement root, ImagePromptBuildResult prompt, long latencyMs)
@@ -292,7 +297,7 @@ public sealed class OpenAiImageGenerationProvider(
     }
 
     private static int? ReadInt(JsonElement element, string name) =>
-        element.ValueKind == JsonValueKind.Object && element.TryGetProperty(name, out var value) && value.TryGetInt32(out var result) ? result : null;
+        element.ValueKind == JsonValueKind.Object && element.TryGetProperty(name, out var value) && value.TryGetInt32(out var result) && result >= 0 ? result : null;
 
     private static (string? Code, string? Type) ReadError(string body)
     {
@@ -300,12 +305,15 @@ public sealed class OpenAiImageGenerationProvider(
         {
             using var document = JsonDocument.Parse(body);
             var error = document.RootElement.TryGetProperty("error", out var element) ? element : default;
-            var code = error.ValueKind == JsonValueKind.Object && error.TryGetProperty("code", out var codeElement) ? codeElement.GetString() : null;
-            var type = error.ValueKind == JsonValueKind.Object && error.TryGetProperty("type", out var typeElement) ? typeElement.GetString() : null;
+            var code = error.ValueKind == JsonValueKind.Object && error.TryGetProperty("code", out var codeElement) ? ReadJsonString(codeElement) : null;
+            var type = error.ValueKind == JsonValueKind.Object && error.TryGetProperty("type", out var typeElement) ? ReadJsonString(typeElement) : null;
             return (code, type);
         }
         catch (JsonException) { return (null, null); }
     }
+
+    private static string? ReadJsonString(JsonElement element) =>
+        element.ValueKind == JsonValueKind.String ? element.GetString() : null;
 
     private static Uri BuildImagesUrl(string baseUrl)
     {
