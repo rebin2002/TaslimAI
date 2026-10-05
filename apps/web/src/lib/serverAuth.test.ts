@@ -32,7 +32,10 @@ describe("server-side page authentication", () => {
 
   it("validates the auth cookie through the existing session endpoint without caching", async () => {
     cookiesMock.mockResolvedValue({ get: vi.fn().mockReturnValue({ value: "session-cookie" }) } as never);
-    const fetchMock = vi.mocked(fetch).mockResolvedValue(new Response(null, { status: 200 }));
+    const fetchMock = vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({
+      user: { id: "user-id" },
+      personalWorkspace: { id: "workspace-id" },
+    }), { status: 200, headers: { "content-type": "application/json" } }));
 
     await expect(requireAuthenticatedPage("/personal/health")).resolves.toBeUndefined();
     expect(fetchMock).toHaveBeenCalledWith("http://localhost:5000/api/auth/me", {
@@ -41,6 +44,17 @@ describe("server-side page authentication", () => {
       signal: expect.any(AbortSignal),
     });
     expect(redirectMock).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when an upstream returns success without the session contract", async () => {
+    cookiesMock.mockResolvedValue({ get: vi.fn().mockReturnValue({ value: "session-cookie" }) } as never);
+    vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+
+    await expect(requireAuthenticatedPage("/personal/health")).rejects.toThrow("REDIRECT:/login?next=%2Fpersonal%2Fhealth");
+    expect(redirectMock).toHaveBeenCalledWith("/login?next=%2Fpersonal%2Fhealth");
   });
 
   it("uses the same safe login redirect for rejected or unavailable sessions", async () => {
