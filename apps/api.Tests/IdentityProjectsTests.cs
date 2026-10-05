@@ -170,6 +170,25 @@ public sealed class IdentityProjectsTests : IClassFixture<TaslimApiFactory>
     }
 
     [Fact]
+    public async Task Revoking_other_sessions_invalidates_other_cookies_but_keeps_current_session()
+    {
+        using var currentSession = factory.CreateClient();
+        var email = $"revoke-sessions-{Guid.NewGuid():N}@example.com";
+        await Register(currentSession, "Session Revocation Owner", email);
+
+        using var otherSession = factory.CreateClient();
+        Assert.Equal(HttpStatusCode.OK, (await Login(otherSession, email, "StrongPassword!123")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await otherSession.GetAsync("/api/auth/me")).StatusCode);
+
+        var revoked = await SendWithCsrf(currentSession, HttpMethod.Post, "/api/auth/sessions/revoke", null);
+        Assert.Equal(HttpStatusCode.OK, revoked.StatusCode);
+        AssertCsrfCookieExpired(revoked);
+
+        Assert.Equal(HttpStatusCode.OK, (await currentSession.GetAsync("/api/auth/me")).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await otherSession.GetAsync("/api/auth/me")).StatusCode);
+    }
+
+    [Fact]
     public async Task Project_lifecycle_is_owned_by_workspace()
     {
         using var owner = factory.CreateClient();
