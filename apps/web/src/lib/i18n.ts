@@ -702,6 +702,10 @@ export const translations: Record<Locale, Record<string, string>> = {
     "voice.recentEmptyTitle": "Your audio shelf is ready",
     "voice.recentEmptyDescription": "Successful voice creations will appear here with a private player and download action.",
     "voice.audioUnavailable": "Preview unavailable",
+    "voice.play": "Play {label}",
+    "voice.pause": "Pause {label}",
+    "voice.playbackProgress": "{label} playback progress",
+    "voice.progressValue": "Playback: {current} of {duration}",
     "voice.safetyNote": "Review generated speech before sharing it. Audio is delivered through your authenticated private Asset Library.",
     // Full Movie workspace shell and module map.
     "movieShell.back": "Movie Studio",
@@ -1515,6 +1519,10 @@ export const translations: Record<Locale, Record<string, string>> = {
     "voice.recentEmptyTitle": "رف الصوتيات جاهز",
     "voice.recentEmptyDescription": "ستظهر هنا الإنشاءات الصوتية الناجحة مع مشغل خاص وخيار للتنزيل.",
     "voice.audioUnavailable": "المعاينة غير متاحة",
+    "voice.play": "تشغيل {label}",
+    "voice.pause": "إيقاف مؤقت لـ {label}",
+    "voice.playbackProgress": "تقدم تشغيل {label}",
+    "voice.progressValue": "التشغيل: {current} من {duration}",
     "voice.safetyNote": "راجع الكلام الناتج قبل مشاركته. يُسلّم الصوت عبر مكتبة أصولك الخاصة والمحمية.",
     // Movie Studio delivery surface.
     "movie.addShot": "إضافة لقطة",
@@ -2352,6 +2360,10 @@ export const translations: Record<Locale, Record<string, string>> = {
     "voice.recentEmptyTitle": "ڕەفەکەی دەنگەکانت ئامادەیە",
     "voice.recentEmptyDescription": "دروستکراوە دەنگییە سەرکەوتووەکان لێرە دەردەکەون، لەگەڵ یاری‌کەر و هەڵبژاردەی داگرتنی تایبەت.",
     "voice.audioUnavailable": "پێشبینین بەردەست نییە",
+    "voice.play": "یاری‌کردنی {label}",
+    "voice.pause": "وەستاندنی {label}",
+    "voice.playbackProgress": "پێشکەوتنی یاری‌کردنی {label}",
+    "voice.progressValue": "یاری‌کردن: {current} لە {duration}",
     "voice.safetyNote": "پێش بڵاوکردنەوە، دەنگی دروستکراو پێداچوونەوەی بۆ بکە. دەنگەکە بە کتێبخانەی ئاسێتە تایبەت و پارێزراوەکەتەوە دەدرێت.",
     // Movie Studio delivery surface.
     "movie.addShot": "زیادکردنی شۆت",
