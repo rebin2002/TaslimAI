@@ -138,7 +138,7 @@ public sealed class NotificationService(TaslimDbContext db, WorkspaceAccessServi
 
     private static string Destination(Notification item) => item.Type switch
     {
-        NotificationTypes.GenerationCompleted when item.AssetId.HasValue => "/assets",
+        NotificationTypes.GenerationCompleted when item.AssetId.HasValue => $"/assets?assetId={item.AssetId.Value:N}&status=Active",
         NotificationTypes.GenerationCompleted when item.GenerationJobId.HasValue => $"/activity?jobId={item.GenerationJobId.Value:N}",
         NotificationTypes.GenerationAttention or NotificationTypes.GenerationFailed when item.GenerationJobId.HasValue => $"/activity?jobId={item.GenerationJobId.Value:N}",
         NotificationTypes.BillingPaymentFailed => "/account/billing",
