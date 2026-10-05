@@ -25,6 +25,10 @@ function hasSessionIdentity(payload: unknown): payload is SessionProbePayload {
     && session.personalWorkspace.id.trim().length > 0;
 }
 
+function isJsonResponse(response: Response): boolean {
+  return response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() === "application/json";
+}
+
 async function hasValidSession(authCookie: string): Promise<boolean> {
   // Cookie values come from the browser. Reject delimiters/control characters
   // before interpolating the value into the upstream Cookie header.
@@ -39,6 +43,7 @@ async function hasValidSession(authCookie: string): Promise<boolean> {
       signal: controller.signal,
     });
     if (!response.ok) return false;
+    if (!isJsonResponse(response)) return false;
     // A successful proxy/fallback response is not proof of authentication.
     // Require the stable /api/auth/me contract so a misrouted or malformed
     // upstream cannot fail open at this protected-page boundary.
