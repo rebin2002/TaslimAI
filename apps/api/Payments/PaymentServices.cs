@@ -485,8 +485,17 @@ public sealed class PaymentWebhookService(
         await db.SaveChangesAsync(cancellationToken);
         logger.LogInformation("Payment webhook recorded. ProviderKey={ProviderKey}; PaymentEventId={PaymentEventId}; EventType={EventType}; SignatureVerified={SignatureVerified}", provider.Key, paymentEvent.Id, paymentEvent.Type, paymentEvent.SignatureVerified);
 
+        var ownsTransition = db.Database.CurrentTransaction is null;
+        await using var transition = ownsTransition
+            ? await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken)
+            : null;
+        var savepointName = $"payment_webhook_{Guid.NewGuid():N}";
+        if (!ownsTransition)
+            await db.Database.CurrentTransaction!.CreateSavepointAsync(savepointName, cancellationToken);
+
         try
         {
+            ValidateProviderEventShape(parsed);
             switch (parsed.Type)
             {
                 case PaymentEventType.PaymentSucceeded:
@@ -518,17 +527,59 @@ public sealed class PaymentWebhookService(
             paymentEvent.Status = PaymentEventStatus.Processed;
             paymentEvent.ProcessedAt = DateTime.UtcNow;
             await db.SaveChangesAsync(cancellationToken);
+            if (ownsTransition) await transition!.CommitAsync(cancellationToken);
             logger.LogInformation("Payment webhook processed. ProviderKey={ProviderKey}; PaymentEventId={PaymentEventId}; EventType={EventType}; Status={Status}", provider.Key, paymentEvent.Id, paymentEvent.Type, paymentEvent.Status);
             return new(true, false, "WEBHOOK_PROCESSED", paymentEvent.Id, null);
         }
         catch (Exception exception)
         {
-            paymentEvent.Status = PaymentEventStatus.Rejected;
-            paymentEvent.FailureReason = "The verified event was recorded but its domain transition was not applied.";
-            await db.SaveChangesAsync(cancellationToken);
+            if (ownsTransition)
+            {
+                await transition!.RollbackAsync(CancellationToken.None);
+                await transition.DisposeAsync();
+            }
+            else
+                await db.Database.CurrentTransaction!.RollbackToSavepointAsync(savepointName, CancellationToken.None);
+
+            db.ChangeTracker.Clear();
+            var rejectedEvent = await db.PaymentEvents.SingleAsync(item => item.Id == paymentEvent.Id, CancellationToken.None);
+            rejectedEvent.Status = PaymentEventStatus.Rejected;
+            rejectedEvent.FailureReason = "The verified event was recorded but its domain transition was not applied.";
+            await db.SaveChangesAsync(CancellationToken.None);
             logger.LogError(exception, "Verified payment webhook could not be applied. EventId={EventId}", paymentEvent.Id);
-            return new(false, false, "WEBHOOK_PROCESSING_FAILED", paymentEvent.Id, paymentEvent.FailureReason);
+            return new(false, false, "WEBHOOK_PROCESSING_FAILED", rejectedEvent.Id, rejectedEvent.FailureReason);
         }
+    }
+
+    private static void ValidateProviderEventShape(ProviderPaymentEvent parsed)
+    {
+        switch (parsed.Type)
+        {
+            case PaymentEventType.PaymentSucceeded:
+            case PaymentEventType.PaymentFailed:
+            case PaymentEventType.RenewalFailed:
+                Require(parsed.WorkspaceId, "workspace");
+                Require(parsed.PaymentAttemptId, "payment attempt");
+                break;
+            case PaymentEventType.RenewalSucceeded:
+                Require(parsed.WorkspaceId, "workspace");
+                Require(parsed.SubscriptionId, "subscription");
+                if (!parsed.PeriodStart.HasValue || !parsed.PeriodEnd.HasValue)
+                    throw new InvalidOperationException("The renewal event did not include a complete billing period.");
+                break;
+            case PaymentEventType.SubscriptionCancelled:
+                Require(parsed.WorkspaceId, "workspace");
+                Require(parsed.SubscriptionId, "subscription");
+                break;
+            default:
+                throw new InvalidOperationException("The verified payment event type is not supported by the billing foundation.");
+        }
+    }
+
+    private static void Require(Guid? value, string name)
+    {
+        if (!value.HasValue || value.Value == Guid.Empty)
+            throw new InvalidOperationException($"The payment event did not include a valid {name} reference.");
     }
 }
 

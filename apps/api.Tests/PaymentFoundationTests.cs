@@ -212,6 +212,64 @@ public sealed class PaymentFoundationTests
         Assert.Single(await db.PaymentEvents.ToListAsync());
     }
 
+    [Fact]
+    public async Task Webhook_rejects_incomplete_payment_events_instead_of_marking_them_processed()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        var providerEvent = new ProviderPaymentEvent(
+            "evt-incomplete-payment", PaymentEventType.PaymentSucceeded, null, null, null, null, "pay-1", 9, "USD",
+            DateTime.UtcNow, "Payment succeeded.", null, null, null, false);
+        var service = new PaymentWebhookService(db, [new FakePaymentProvider(providerEvent)], NewLifecycle(db), NullLogger<PaymentWebhookService>.Instance);
+
+        var result = await service.ProcessAsync("fake", "{\"event\":\"evt-incomplete-payment\"}", "valid");
+
+        Assert.False(result.Accepted);
+        Assert.Equal("WEBHOOK_PROCESSING_FAILED", result.Code);
+        var saved = await db.PaymentEvents.SingleAsync();
+        Assert.Equal(PaymentEventStatus.Rejected, saved.Status);
+        Assert.Equal("The verified event was recorded but its domain transition was not applied.", saved.FailureReason);
+    }
+
+    [Fact]
+    public async Task Webhook_rolls_back_payment_success_when_renewal_credit_provisioning_fails()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        var workspace = NewWorkspace();
+        var plan = new Plan
+        {
+            Id = Guid.NewGuid(), Code = $"invalid-renewal-{Guid.NewGuid():N}", Name = "Invalid zero-credit plan",
+            MonthlyCreditAllowance = 0, Currency = "USD", IsActive = true, SortOrder = 99,
+            CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+        };
+        var subscription = NewSubscription(workspace.Id, plan.Id);
+        db.Workspaces.Add(workspace);
+        db.Plans.Add(plan);
+        db.Subscriptions.Add(subscription);
+        await db.SaveChangesAsync();
+        var lifecycle = NewLifecycle(db);
+        var attempt = await lifecycle.RecordPaymentAttemptAsync(workspace.Id, "fake", "attempt:renewal-atomicity", 9, "USD");
+        var periodStart = DateTime.UtcNow.Date.AddMonths(1);
+        var periodEnd = periodStart.AddMonths(1);
+        var providerEvent = new ProviderPaymentEvent(
+            "evt-renewal-atomicity", PaymentEventType.RenewalSucceeded, workspace.Id, subscription.Id, null, attempt.Id, "pay-atomicity", 9, "USD",
+            DateTime.UtcNow, "Renewal succeeded.", null, periodStart, periodEnd, false);
+        var service = new PaymentWebhookService(db, [new FakePaymentProvider(providerEvent)], lifecycle, NullLogger<PaymentWebhookService>.Instance);
+
+        var result = await service.ProcessAsync("fake", "{\"event\":\"evt-renewal-atomicity\"}", "valid");
+
+        Assert.False(result.Accepted);
+        Assert.Equal("WEBHOOK_PROCESSING_FAILED", result.Code);
+        Assert.Equal(PaymentAttemptStatus.Created, (await db.PaymentAttempts.AsNoTracking().SingleAsync(item => item.Id == attempt.Id)).Status);
+        Assert.Equal(SubscriptionStatus.Active, (await db.Subscriptions.AsNoTracking().SingleAsync(item => item.Id == subscription.Id)).Status);
+        Assert.Empty(await db.BillingPeriods.ToListAsync());
+        Assert.Empty(await db.SubscriptionLifecycleEvents.ToListAsync());
+        Assert.Equal(PaymentEventStatus.Rejected, (await db.PaymentEvents.SingleAsync()).Status);
+    }
+
     private static TaslimDbContext CreateDb(SqliteConnection connection)
     {
         var options = new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connection).Options;
