@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
+using Taslim.Api.Infrastructure;
 using Taslim.Api.Persistence;
 
 namespace Taslim.Api.Assets;
@@ -43,8 +44,8 @@ public sealed class AssetService(TaslimDbContext db, WorkspaceAccessService acce
     public async Task<AssetListDto?> ListAsync(Guid userId, AssetFilter filter, CancellationToken cancellationToken = default)
     {
         if (!await access.IsMemberAsync(userId, filter.WorkspaceId, cancellationToken)) return null;
-        var page = Math.Clamp(filter.Page, 1, 1_000_000);
-        var pageSize = Math.Clamp(filter.PageSize, 1, 100);
+        var page = ApiPagination.NormalizePage(filter.Page);
+        var pageSize = ApiPagination.NormalizePageSize(filter.PageSize);
         var query = Query().Where(asset => asset.WorkspaceId == filter.WorkspaceId && asset.Status == (filter.Status ?? AssetStatus.Active));
         if (filter.ProjectId.HasValue) query = query.Where(asset => asset.ProjectId == filter.ProjectId.Value);
         if (!string.IsNullOrWhiteSpace(filter.AssetType))
@@ -69,12 +70,12 @@ public sealed class AssetService(TaslimDbContext db, WorkspaceAccessService acce
         var ordered = sort switch
         {
             AssetSorts.Oldest => query.OrderBy(asset => asset.CreatedAt).ThenBy(asset => asset.Id),
-            AssetSorts.Name => query.OrderBy(asset => asset.Name).ThenByDescending(asset => asset.CreatedAt),
-            AssetSorts.Size => query.OrderByDescending(asset => asset.StoredFile == null ? 0 : asset.StoredFile.SizeBytes).ThenByDescending(asset => asset.CreatedAt),
+            AssetSorts.Name => query.OrderBy(asset => asset.Name).ThenByDescending(asset => asset.CreatedAt).ThenBy(asset => asset.Id),
+            AssetSorts.Size => query.OrderByDescending(asset => asset.StoredFile == null ? 0 : asset.StoredFile.SizeBytes).ThenByDescending(asset => asset.CreatedAt).ThenBy(asset => asset.Id),
             _ => query.OrderByDescending(asset => asset.CreatedAt).ThenBy(asset => asset.Id),
         };
         var items = await ordered
-            .Skip((page - 1) * pageSize)
+            .Skip(ApiPagination.GetOffset(page, pageSize))
             .Take(pageSize)
             .ToListAsync(cancellationToken);
         return new AssetListDto(items.Select(AssetContractMapper.ToDto).ToArray(), page, pageSize, totalCount, (int)Math.Ceiling(totalCount / (double)pageSize));

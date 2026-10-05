@@ -1490,6 +1490,10 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasIndex(job => job.ProjectId);
             entity.HasIndex(job => job.RetryOfJobId);
             entity.HasIndex(job => new { job.CreatedByUserId, job.IdempotencyKey }).IsUnique().HasFilter("\"IdempotencyKey\" IS NOT NULL");
+            entity.HasIndex(job => new { job.WorkspaceId, job.CreatedByUserId, job.JobType })
+                .IsUnique()
+                .HasDatabaseName("IX_GenerationJobs_ImageActiveByUser")
+                .HasFilter("\"JobType\" = 'image.generate' AND \"RequestId\" LIKE 'image-studio:%' AND \"Status\" IN ('Pending', 'Queued', 'Running')");
             entity.HasOne(job => job.Workspace).WithMany().HasForeignKey(job => job.WorkspaceId).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne(job => job.RetryOfJob).WithMany(job => job.Retries).HasForeignKey(job => job.RetryOfJobId).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne(job => job.Project).WithMany().HasForeignKey(job => job.ProjectId).OnDelete(DeleteBehavior.SetNull);
@@ -2002,7 +2006,9 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.Property(subscription => subscription.ProviderSubscriptionReference).HasMaxLength(200);
             entity.Property(subscription => subscription.CreatedAt).IsRequired();
             entity.Property(subscription => subscription.UpdatedAt).IsRequired();
-            entity.HasIndex(subscription => subscription.WorkspaceId);
+            entity.HasIndex(subscription => subscription.WorkspaceId)
+                .IsUnique()
+                .HasFilter("\"Status\" <> 'Cancelled'");
             entity.HasIndex(subscription => new { subscription.Status, subscription.NextRenewalAt });
             entity.HasOne(subscription => subscription.Workspace).WithMany().HasForeignKey(subscription => subscription.WorkspaceId).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne(subscription => subscription.Plan).WithMany(plan => plan.Subscriptions).HasForeignKey(subscription => subscription.PlanId).OnDelete(DeleteBehavior.Restrict);
