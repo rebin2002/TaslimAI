@@ -109,6 +109,7 @@ public sealed class GlobalSearchTests : IClassFixture<TaslimApiFactory>
         Assert.NotNull(sharedWorkspaceSearch);
         Assert.DoesNotContain(sharedWorkspaceSearch!.Groups.SelectMany(group => group.Items), item => item.Type == GlobalSearchResultTypes.Conversation);
         Assert.DoesNotContain(sharedWorkspaceSearch.Groups.SelectMany(group => group.Items), item => item.Type == GlobalSearchResultTypes.File);
+        Assert.DoesNotContain(sharedWorkspaceSearch.Groups.SelectMany(group => group.Items), item => item.Type == GlobalSearchResultTypes.Generation);
         Assert.Contains(sharedWorkspaceSearch.Groups.SelectMany(group => group.Items), item => item.Type == GlobalSearchResultTypes.Project && item.Title == "Private Nebula Project");
 
         var privatePromptSearch = await member.GetFromJsonAsync<GlobalSearchResponseDto>("/api/search?q=Private%20Nebula%20generation%20prompt");
