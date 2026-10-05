@@ -158,6 +158,29 @@ public sealed class GenerationJobsTests : IClassFixture<GenerationJobsApiFactory
     }
 
     [Fact]
+    public async Task Generic_image_route_rejects_before_queueing_or_usage_reservation()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, $"jobs-image-route-{Guid.NewGuid():N}@example.com");
+        var response = await SendWithCsrf(client, HttpMethod.Post, "/api/generation/jobs", new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            jobType = GenerationJobTypes.ImageGenerate,
+            inputJson = "{}",
+        });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(GenerationJobErrorCodes.DedicatedRouteRequired, body.GetProperty("error").GetProperty("code").GetString());
+        Assert.Equal("Use the Image Studio endpoint for image generation.", body.GetProperty("error").GetProperty("message").GetString());
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.False(await db.GenerationJobs.AsNoTracking().AnyAsync(item => item.WorkspaceId == auth.PersonalWorkspace.Id && item.JobType == GenerationJobTypes.ImageGenerate));
+        Assert.False(await db.UsageTransactions.AsNoTracking().AnyAsync(item => item.WorkspaceId == auth.PersonalWorkspace.Id && item.Feature == UsageFeature.Image));
+    }
+
+    [Fact]
     public async Task Repeated_generation_request_with_same_idempotency_key_returns_one_job()
     {
         using var client = factory.CreateClient();
@@ -213,6 +236,46 @@ public sealed class GenerationJobsTests : IClassFixture<GenerationJobsApiFactory
         Assert.Equal(1, first.RetryCount);
         var terminal = await WaitForTerminal(client, first.Id);
         Assert.Equal("Succeeded", terminal.Status);
+    }
+
+    [Fact]
+    public async Task Disabled_image_retry_rejects_before_creating_job_or_usage_reservation()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, $"jobs-image-retry-disabled-{Guid.NewGuid():N}@example.com");
+        var sourceId = Guid.NewGuid();
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.GenerationJobs.Add(new GenerationJob
+            {
+                Id = sourceId,
+                WorkspaceId = auth.PersonalWorkspace.Id,
+                CreatedByUserId = auth.User.Id,
+                JobType = GenerationJobTypes.ImageGenerate,
+                Status = GenerationJobStatus.Failed,
+                InputJson = "{\"description\":\"A disabled image retry\",\"style\":\"auto\",\"aspectRatio\":\"square\",\"quality\":\"standard\"}",
+                ErrorCode = GenerationJobErrorCodes.ImageProviderUnavailable,
+                ErrorMessage = "Image generation is temporarily unavailable.",
+                CreatedAt = DateTime.UtcNow.AddMinutes(-1),
+                FailedAt = DateTime.UtcNow.AddSeconds(-30),
+                ConcurrencyToken = Guid.NewGuid(),
+            });
+            await db.SaveChangesAsync();
+        }
+
+        const string retryKey = "image-disabled-retry-001";
+        var response = await SendWithCsrf(client, HttpMethod.Post, $"/api/generation/jobs/{sourceId}/retry", null, retryKey);
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(GenerationJobErrorCodes.ImageStudioUnavailable, body.GetProperty("error").GetProperty("code").GetString());
+        Assert.Equal("Image generation is not available right now.", body.GetProperty("error").GetProperty("message").GetString());
+
+        using var verifyScope = factory.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.Equal(1, await verifyDb.GenerationJobs.AsNoTracking().CountAsync(item => item.WorkspaceId == auth.PersonalWorkspace.Id));
+        Assert.False(await verifyDb.GenerationJobs.AsNoTracking().AnyAsync(item => item.IdempotencyKey == retryKey));
+        Assert.False(await verifyDb.UsageTransactions.AsNoTracking().AnyAsync(item => item.WorkspaceId == auth.PersonalWorkspace.Id));
     }
 
     [Fact]

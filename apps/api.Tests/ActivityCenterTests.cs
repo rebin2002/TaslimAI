@@ -56,13 +56,25 @@ public sealed class ActivityCenterTests : IClassFixture<GenerationJobsNoWorkerFa
     {
         using var owner = factory.CreateClient();
         var first = await Register(owner, $"activity-owner-{Guid.NewGuid():N}@example.com");
-        var created = await SendWithCsrf<GenerationJobDto>(owner, HttpMethod.Post, "/api/generation/jobs", new
+        var created = new GenerationJob
         {
-            workspaceId = first.PersonalWorkspace.Id,
-            jobType = GenerationJobTypes.ImageGenerate,
-            inputJson = "{}",
-            title = "Private image",
-        });
+            Id = Guid.NewGuid(),
+            WorkspaceId = first.PersonalWorkspace.Id,
+            CreatedByUserId = first.User.Id,
+            JobType = GenerationJobTypes.ImageGenerate,
+            Status = GenerationJobStatus.Queued,
+            InputJson = "{}",
+            Title = "Private image",
+            CreatedAt = DateTime.UtcNow,
+            QueuedAt = DateTime.UtcNow,
+            ConcurrencyToken = Guid.NewGuid(),
+        };
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.GenerationJobs.Add(created);
+            await db.SaveChangesAsync();
+        }
         using var other = factory.CreateClient();
         var second = await Register(other, $"activity-other-{Guid.NewGuid():N}@example.com");
 

@@ -18,6 +18,7 @@ public static class GenerationJobErrorMessages
             GenerationJobErrorCodes.Cancelled => "The job was cancelled.",
             GenerationJobErrorCodes.Poisoned => "The generation could not be recovered safely. Please try again.",
             GenerationJobErrorCodes.NoBillableAsset => "The generation completed without a publishable asset. Please try again.",
+            GenerationJobErrorCodes.ImageStudioUnavailable => "Image generation is not available right now.",
             GenerationJobErrorCodes.ImageProviderUnavailable => "Image generation is temporarily unavailable. Please try again later.",
             GenerationJobErrorCodes.ImageRequestInvalid => "Please check the image request and try again.",
             GenerationJobErrorCodes.ImageSafetyRefusal => "This request could not be completed by the image safety system. Try a different description.",
