@@ -169,6 +169,48 @@ public sealed class MovieSoundtrackWorkflowTests
         Assert.Equal("MOVIE_SOUNDTRACK_ASSET_NOT_READY", exception.Code);
     }
 
+    [Fact]
+    public async Task Approval_rejects_a_stale_canonical_pointer_instead_of_overwriting_a_newer_approval()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        var seed = await SeedAsync(db);
+        var service = CreateService(db, new FakeSoundtrackMediaService());
+        var cue = await service.CreateCueAsync(seed.UserId, seed.MovieProjectId, new MovieSoundtrackCueRequest
+        {
+            MovieActId = seed.ActId, MovieSceneId = seed.SceneId, Title = "Concurrent review cue", Mood = "tense",
+            Intensity = 50, ActStartSeconds = 0, SceneStartSeconds = 0, TimelineStartSeconds = 0, DurationSeconds = 10,
+        }, CancellationToken.None);
+        var first = await service.CreateVersionAsync(seed.UserId, cue!.Id,
+            new MovieSoundtrackCueVersionRequest { Label = "First candidate", AssetId = seed.AssetId }, CancellationToken.None);
+        var second = await service.CreateVersionAsync(seed.UserId, cue.Id,
+            new MovieSoundtrackCueVersionRequest { Label = "Second candidate", AssetId = seed.AssetId }, CancellationToken.None);
+        var firstVersionId = first!.Versions.Single(item => item.VersionNumber == 1).Id;
+        var secondVersionId = second!.Versions.Single(item => item.VersionNumber == 2).Id;
+
+        // Keep the service's tracked cue snapshot stale while a separate writer
+        // records the approval that won the race in the database.
+        _ = await db.MovieSoundtrackCues.SingleAsync(item => item.Id == cue.Id);
+        await db.MovieSoundtrackCueVersions.Where(item => item.Id == firstVersionId)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.ApprovalState, MovieSoundtrackApprovalStates.Approved));
+        await db.MovieSoundtrackCues.Where(item => item.Id == cue.Id)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(item => item.ApprovedVersionId, firstVersionId)
+                .SetProperty(item => item.ApprovalState, MovieSoundtrackApprovalStates.Approved));
+
+        var exception = await Assert.ThrowsAsync<MovieSoundtrackValidationException>(() => service.ReviewVersionAsync(seed.UserId, secondVersionId,
+            new MovieSoundtrackCueVersionReviewRequest { Decision = MovieSoundtrackApprovalStates.Approved }, CancellationToken.None));
+
+        Assert.Equal("MOVIE_SOUNDTRACK_REVIEW_CONFLICT", exception.Code);
+        db.ChangeTracker.Clear();
+        var persistedCue = await db.MovieSoundtrackCues.AsNoTracking().SingleAsync(item => item.Id == cue.Id);
+        var persistedVersions = await db.MovieSoundtrackCueVersions.AsNoTracking().Where(item => item.MovieSoundtrackCueId == cue.Id).ToListAsync();
+        Assert.Equal(firstVersionId, persistedCue.ApprovedVersionId);
+        Assert.Equal(MovieSoundtrackApprovalStates.Approved, persistedVersions.Single(item => item.Id == firstVersionId).ApprovalState);
+        Assert.Equal(MovieSoundtrackApprovalStates.Draft, persistedVersions.Single(item => item.Id == secondVersionId).ApprovalState);
+    }
+
     private static MovieSoundtrackService CreateService(TaslimDbContext db, IMovieSoundtrackMediaService media) =>
         new(db, new MovieAuthorizationService(new MovieCollaborationAccess(db, new WorkspaceAccessService(db))), media);
 

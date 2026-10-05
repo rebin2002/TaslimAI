@@ -1,4 +1,5 @@
 "use client";
+import { localeTag } from "@/lib/i18n";
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
@@ -136,5 +137,5 @@ function OverviewStat({ icon, label, value }: { icon: React.ReactNode; label: st
 }
 
 function formatDate(value: string, locale: string) {
-  return new Intl.DateTimeFormat(locale, { dateStyle: "medium" }).format(new Date(value));
+  return new Intl.DateTimeFormat(localeTag(locale), { dateStyle: "medium" }).format(new Date(value));
 }

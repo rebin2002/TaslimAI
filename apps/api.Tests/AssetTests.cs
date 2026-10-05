@@ -119,6 +119,21 @@ public sealed class AssetTests : IClassFixture<GenerationJobsApiFactory>
     }
 
     [Fact]
+    public async Task Asset_library_bounds_deep_page_values_without_offset_overflow()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Asset Pagination Boundary");
+
+        var response = await client.GetAsync($"/api/assets?workspaceId={auth.PersonalWorkspace.Id}&page={int.MaxValue}&pageSize={int.MaxValue}");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var list = (await response.Content.ReadFromJsonAsync<AssetListDto>())!;
+        Assert.Equal(Taslim.Api.Infrastructure.ApiPagination.MaxPage, list.Page);
+        Assert.Equal(Taslim.Api.Infrastructure.ApiPagination.MaxPageSize, list.PageSize);
+        Assert.Empty(list.Items);
+    }
+
+    [Fact]
     public async Task Asset_get_update_download_and_project_assignment_are_workspace_isolated()
     {
         using var owner = factory.CreateClient();
