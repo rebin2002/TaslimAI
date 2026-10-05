@@ -11,6 +11,7 @@ using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
 using Taslim.Api.Documents;
 using Taslim.Api.Files;
+using Taslim.Api.Infrastructure;
 using Taslim.Api.Images;
 using Taslim.Api.Music;
 using Taslim.Api.Movies;
@@ -697,10 +698,13 @@ public sealed class GenerationJobWorker(
                 }
                 consecutiveFailures = 0;
                 await TouchWorkerHeartbeatSafelyAsync(db, workerId, workerIndex, job.Id, now, consecutiveFailures, now, stoppingToken);
-                logger.LogInformation(
-                    "Generation job claimed. JobId={JobId}; WorkspaceId={WorkspaceId}; JobType={JobType}; RequestId={RequestId}; RetryCount={RetryCount}; ClaimExpiresAt={ClaimExpiresAt}",
-                    job.Id, job.WorkspaceId, job.JobType, job.RequestId, job.RetryCount, job.ClaimExpiresAt);
-                await ExecuteJobAsync(job, workerId, workerIndex, stoppingToken);
+                using (GenerationJobOperationalScope.Begin(logger, job))
+                {
+                    logger.LogInformation(
+                        "Generation job claimed. JobId={JobId}; WorkspaceId={WorkspaceId}; JobType={JobType}; RequestId={RequestId}; RetryCount={RetryCount}; ClaimExpiresAt={ClaimExpiresAt}",
+                        job.Id, job.WorkspaceId, job.JobType, job.RequestId, job.RetryCount, job.ClaimExpiresAt);
+                    await ExecuteJobAsync(job, workerId, workerIndex, stoppingToken);
+                }
                 await TouchWorkerHeartbeatSafelyAsync(db, workerId, workerIndex, null, now, consecutiveFailures, DateTime.UtcNow, stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
@@ -1126,6 +1130,7 @@ public sealed class GenerationJobWorker(
             if (!publicationCommitted)
                 foreach (var publication in publications) await publisher.DiscardAsync(publication, CancellationToken.None);
             var failureCode = MapFailureCode(exception, claimedJob.JobType);
+            var failureClassification = GenerationFailureClassifier.Classify(failureCode);
             if (GenerationJobTypes.MovieTypes.Contains(claimedJob.JobType))
             {
                 if (string.Equals(claimedJob.JobType, GenerationJobTypes.MovieAssembly, StringComparison.OrdinalIgnoreCase))
@@ -1162,11 +1167,13 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
             {
                 var stage = (exception as DocumentGenerationStageException)?.Stage ?? DocumentGenerationStages.Execution;
                 var providerException = exception as AiProviderException ?? exception.InnerException as AiProviderException;
-                logger.LogError("Document generation failed. JobId={JobId}; RequestId={RequestId}; Stage={Stage}; ErrorCode={ErrorCode}; ExceptionType={ExceptionType}; ProviderFailureCategory={ProviderFailureCategory}; ProviderHttpStatus={ProviderHttpStatus}; ProviderErrorCode={ProviderErrorCode}; ModelKey={ModelKey}; StructuredOutput={StructuredOutput}; Streaming={Streaming}; ElapsedMs={ElapsedMs}",
+                logger.LogError("Document generation failed. JobId={JobId}; RequestId={RequestId}; Stage={Stage}; ErrorCode={ErrorCode}; FailureCategory={FailureCategory}; Retryable={Retryable}; ExceptionType={ExceptionType}; ProviderFailureCategory={ProviderFailureCategory}; ProviderHttpStatus={ProviderHttpStatus}; ProviderErrorCode={ProviderErrorCode}; ModelKey={ModelKey}; StructuredOutput={StructuredOutput}; Streaming={Streaming}; ElapsedMs={ElapsedMs}",
                     claimedJob.Id,
                     claimedJob.RequestId,
                     stage,
                     failureCode,
+                    failureClassification.Category,
+                    failureClassification.Retryable,
                     exception.GetType().Name,
                     providerException?.FailureCategory,
                     providerException?.HttpStatusCode,
@@ -1180,11 +1187,13 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
             {
                 var stage = (exception as PresentationGenerationStageException)?.Stage ?? PresentationGenerationStages.Execution;
                 var providerException = exception as AiProviderException ?? exception.InnerException as AiProviderException;
-                logger.LogError("Presentation generation failed. JobId={JobId}; RequestId={RequestId}; Stage={Stage}; ErrorCode={ErrorCode}; ExceptionType={ExceptionType}; ProviderFailureCategory={ProviderFailureCategory}; ProviderHttpStatus={ProviderHttpStatus}; ProviderErrorCode={ProviderErrorCode}; ModelKey={ModelKey}; StructuredOutput={StructuredOutput}; Streaming={Streaming}; ElapsedMs={ElapsedMs}",
+                logger.LogError("Presentation generation failed. JobId={JobId}; RequestId={RequestId}; Stage={Stage}; ErrorCode={ErrorCode}; FailureCategory={FailureCategory}; Retryable={Retryable}; ExceptionType={ExceptionType}; ProviderFailureCategory={ProviderFailureCategory}; ProviderHttpStatus={ProviderHttpStatus}; ProviderErrorCode={ProviderErrorCode}; ModelKey={ModelKey}; StructuredOutput={StructuredOutput}; Streaming={Streaming}; ElapsedMs={ElapsedMs}",
                     claimedJob.Id,
                     claimedJob.RequestId,
                     stage,
                     failureCode,
+                    failureClassification.Category,
+                    failureClassification.Retryable,
                     exception.GetType().Name,
                     providerException?.FailureCategory,
                     providerException?.HttpStatusCode,
@@ -1204,11 +1213,13 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
                     ResearchSearchUnavailableException unavailable => unavailable.Details,
                     _ => null,
                 };
-                logger.LogError("Research generation failed. JobId={JobId}; RequestId={RequestId}; Stage={Stage}; ErrorCode={ErrorCode}; ExceptionType={ExceptionType}; ProviderFailureCategory={ProviderFailureCategory}; ProviderHttpStatus={ProviderHttpStatus}; ProviderErrorCode={ProviderErrorCode}; SearchHttpStatus={SearchHttpStatus}; SearchErrorType={SearchErrorType}; SearchErrorCode={SearchErrorCode}; SearchErrorParam={SearchErrorParam}; ModelKey={ModelKey}; ElapsedMs={ElapsedMs}",
+                logger.LogError("Research generation failed. JobId={JobId}; RequestId={RequestId}; Stage={Stage}; ErrorCode={ErrorCode}; FailureCategory={FailureCategory}; Retryable={Retryable}; ExceptionType={ExceptionType}; ProviderFailureCategory={ProviderFailureCategory}; ProviderHttpStatus={ProviderHttpStatus}; ProviderErrorCode={ProviderErrorCode}; SearchHttpStatus={SearchHttpStatus}; SearchErrorType={SearchErrorType}; SearchErrorCode={SearchErrorCode}; SearchErrorParam={SearchErrorParam}; ModelKey={ModelKey}; ElapsedMs={ElapsedMs}",
                     claimedJob.Id,
                     claimedJob.RequestId,
                     stage,
                     failureCode,
+                    failureClassification.Category,
+                    failureClassification.Retryable,
                     exception.GetType().Name,
                     providerException?.FailureCategory,
                     providerException?.HttpStatusCode,
@@ -1224,11 +1235,13 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
             {
                 var stage = (exception as SocialGenerationStageException)?.Stage ?? SocialGenerationStages.Execution;
                 var providerException = exception as AiProviderException ?? exception.InnerException as AiProviderException;
-                logger.LogError("Social generation failed. JobId={JobId}; RequestId={RequestId}; Stage={Stage}; ErrorCode={ErrorCode}; ExceptionType={ExceptionType}; ProviderFailureCategory={ProviderFailureCategory}; ProviderHttpStatus={ProviderHttpStatus}; ProviderErrorCode={ProviderErrorCode}; ModelKey={ModelKey}; StructuredOutput={StructuredOutput}; ElapsedMs={ElapsedMs}",
+                logger.LogError("Social generation failed. JobId={JobId}; RequestId={RequestId}; Stage={Stage}; ErrorCode={ErrorCode}; FailureCategory={FailureCategory}; Retryable={Retryable}; ExceptionType={ExceptionType}; ProviderFailureCategory={ProviderFailureCategory}; ProviderHttpStatus={ProviderHttpStatus}; ProviderErrorCode={ProviderErrorCode}; ModelKey={ModelKey}; StructuredOutput={StructuredOutput}; ElapsedMs={ElapsedMs}",
                     claimedJob.Id,
                     claimedJob.RequestId,
                     stage,
                     failureCode,
+                    failureClassification.Category,
+                    failureClassification.Retryable,
                     exception.GetType().Name,
                     providerException?.FailureCategory,
                     providerException?.HttpStatusCode,
@@ -1239,8 +1252,8 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
             }
             else
             {
-                logger.LogError(exception, "Generation job execution failed. JobId={JobId}; WorkspaceId={WorkspaceId}; JobType={JobType}; RequestId={RequestId}; FailureCode={FailureCode}; ExceptionType={ExceptionType}; ElapsedMs={ElapsedMs}; UsageFinalized={UsageFinalized}",
-                    claimedJob.Id, claimedJob.WorkspaceId, claimedJob.JobType, claimedJob.RequestId, failureCode, exception.GetType().Name,
+                logger.LogError("Generation job execution failed. JobId={JobId}; WorkspaceId={WorkspaceId}; JobType={JobType}; RequestId={RequestId}; FailureCode={FailureCode}; FailureCategory={FailureCategory}; Retryable={Retryable}; ExceptionType={ExceptionType}; ElapsedMs={ElapsedMs}; UsageFinalized={UsageFinalized}",
+                    claimedJob.Id, claimedJob.WorkspaceId, claimedJob.JobType, claimedJob.RequestId, failureCode, failureClassification.Category, failureClassification.Retryable, exception.GetType().Name,
                     (long)Stopwatch.GetElapsedTime(executionStarted).TotalMilliseconds, true);
             }
             await FailAsync(db, usage, claimedJob, failureCode, FailureMessage(failureCode), failureUsage, claimedJob.ConcurrencyToken, stoppingToken);
