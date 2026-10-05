@@ -18,6 +18,7 @@ vi.mock("next/navigation", () => ({
 describe("server-side page authentication", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.unstubAllGlobals();
     vi.stubGlobal("fetch", vi.fn());
   });
 
@@ -29,7 +30,7 @@ describe("server-side page authentication", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  it("validates the auth cookie through the existing session endpoint", async () => {
+  it("validates the auth cookie through the existing session endpoint without caching", async () => {
     cookiesMock.mockResolvedValue({ get: vi.fn().mockReturnValue({ value: "session-cookie" }) } as never);
     const fetchMock = vi.mocked(fetch).mockResolvedValue(new Response(null, { status: 200 }));
 
@@ -37,6 +38,7 @@ describe("server-side page authentication", () => {
     expect(fetchMock).toHaveBeenCalledWith("http://localhost:5000/api/auth/me", {
       headers: { cookie: "taslim.auth=session-cookie" },
       cache: "no-store",
+      signal: expect.any(AbortSignal),
     });
     expect(redirectMock).not.toHaveBeenCalled();
   });
@@ -54,5 +56,35 @@ describe("server-side page authentication", () => {
 
     await expect(requireAuthenticatedPage("/personal/health")).rejects.toThrow("REDIRECT:/login?next=%2Fpersonal%2Fhealth");
     expect(redirectMock).toHaveBeenCalledWith("/login?next=%2Fpersonal%2Fhealth");
+  });
+
+  it("redirects safely when the cookie store fails or the cookie contains header delimiters", async () => {
+    cookiesMock.mockRejectedValueOnce(new Error("private cookie-store detail"));
+    await expect(requireAuthenticatedPage("/personal/health")).rejects.toThrow("REDIRECT:/login?next=%2Fpersonal%2Fhealth");
+
+    vi.clearAllMocks();
+    cookiesMock.mockResolvedValue({ get: vi.fn().mockReturnValue({ value: "session-cookie; injected=true" }) } as never);
+    await expect(requireAuthenticatedPage("/personal/health")).rejects.toThrow("REDIRECT:/login?next=%2Fpersonal%2Fhealth");
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("bounds a hanging session check and keeps the return path local", async () => {
+    vi.useFakeTimers();
+    try {
+      cookiesMock.mockResolvedValue({ get: vi.fn().mockReturnValue({ value: "session-cookie" }) } as never);
+      const fetchMock = vi.mocked(fetch).mockImplementation((_input, init) => new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new DOMException("timeout", "AbortError")), { once: true });
+      }));
+
+      const pending = requireAuthenticatedPage("//evil.example/health");
+      const redirectAssertion = expect(pending).rejects.toThrow("REDIRECT:/login?next=%2F");
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      await redirectAssertion;
+      expect(fetchMock).toHaveBeenCalledOnce();
+      expect((fetchMock.mock.calls[0][1] as RequestInit).signal).toBeDefined();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
