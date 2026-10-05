@@ -92,7 +92,7 @@ public sealed class ResearchGenerationJobHandler(
         foreach (var file in files)
         {
             var citationId = $"S{nextCitation++}";
-            var candidate = new ResearchSourceCandidate(citationId, null, null, file.OriginalFileName, "uploaded file", null, null, DateTime.UtcNow, "uploaded", Trim(file.ExtractedText!, settings.MaxSourceSnippetCharacters), Trim(file.ExtractedText!, settings.MaxSourceTextCharacters), null, nextCitation - 1, true, JsonSerializer.Serialize(new { storedFileId = file.Id, fileExtension = file.Extension }));
+            var candidate = new ResearchSourceCandidate(citationId, null, null, file.OriginalFileName, "uploaded file", null, null, DateTime.UtcNow, "uploaded", Trim(file.ExtractedText!, settings.MaxSourceSnippetCharacters), Trim(file.ExtractedText!, settings.MaxSourceTextCharacters), null, nextCitation - 1, true, JsonSerializer.Serialize(new { storedFileId = file.Id, fileExtension = file.Extension }), file.Id);
             sourceCandidates.Add(candidate);
             evidenceCandidates.Add(new ResearchEvidenceCandidate(citationId, "uploaded source", Trim(file.ExtractedText!, settings.MaxEvidenceCharacters), null, null));
         }
@@ -103,7 +103,7 @@ public sealed class ResearchGenerationJobHandler(
         sourceCandidates = (await contentFetcher.FetchAsync(sourceCandidates, settings, cancellationToken)).ToList();
         progress.Report(50);
 
-        await PersistSourcesAsync(job, sourceCandidates, files, evidenceCandidates, cancellationToken);
+        await PersistSourcesAsync(job, sourceCandidates, evidenceCandidates, cancellationToken);
         progress.Report(58);
 
         ResearchReportProviderResult report;
@@ -197,15 +197,14 @@ public sealed class ResearchGenerationJobHandler(
         return files.OrderBy(file => order[file.Id]).ToList();
     }
 
-    private async Task PersistSourcesAsync(GenerationJob job, IReadOnlyList<ResearchSourceCandidate> candidates, IReadOnlyList<StoredFile> files, IReadOnlyList<ResearchEvidenceCandidate> evidence, CancellationToken cancellationToken)
+    private async Task PersistSourcesAsync(GenerationJob job, IReadOnlyList<ResearchSourceCandidate> candidates, IReadOnlyList<ResearchEvidenceCandidate> evidence, CancellationToken cancellationToken)
     {
-        var fileByName = files.GroupBy(file => file.OriginalFileName, StringComparer.OrdinalIgnoreCase).ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
         var entities = candidates.Select(candidate => new ResearchSource
         {
             Id = Guid.NewGuid(),
             WorkspaceId = job.WorkspaceId,
             GenerationJobId = job.Id,
-            StoredFileId = candidate.SourceType == "uploaded" && fileByName.TryGetValue(candidate.Title, out var file) ? file.Id : null,
+            StoredFileId = candidate.SourceType == "uploaded" ? candidate.StoredFileId : null,
             CitationId = candidate.CitationId,
             Url = candidate.Url,
             CanonicalUrl = candidate.CanonicalUrl,

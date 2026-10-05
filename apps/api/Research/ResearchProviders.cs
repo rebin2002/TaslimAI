@@ -82,20 +82,27 @@ public sealed class DeterministicResearchEvidenceProcessor : IResearchEvidencePr
         var countsBySource = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var totalCharacters = 0;
-        var maxPerSource = Math.Max(1, options.MaxEvidencePerSource);
+        var maxPerSource = Math.Max(0, options.MaxEvidencePerSource);
+        var maxEvidenceCharacters = Math.Max(0, options.MaxEvidenceCharacters);
         var maxTotalCharacters = Math.Max(0, options.MaxTotalEvidenceCharacters);
         foreach (var item in providerEvidence)
         {
             if (!valid.Contains(item.CitationId) || string.IsNullOrWhiteSpace(item.Excerpt)) continue;
+            if (maxPerSource == 0 || maxEvidenceCharacters == 0) break;
             if (countsBySource.TryGetValue(item.CitationId, out var sourceCount) && sourceCount >= maxPerSource) continue;
-            var excerpt = Trim(item.Excerpt, options.MaxEvidenceCharacters);
-            var context = string.IsNullOrWhiteSpace(item.Context) ? null : Trim(item.Context, options.MaxEvidenceCharacters);
+            var excerpt = Trim(item.Excerpt, maxEvidenceCharacters);
+            var context = string.IsNullOrWhiteSpace(item.Context) ? null : Trim(item.Context, maxEvidenceCharacters);
             var identity = $"{item.CitationId}\n{item.Topic}\n{excerpt}\n{context}";
             if (!seen.Add(identity)) continue;
             var remaining = maxTotalCharacters - totalCharacters;
-            if (remaining <= 3) break;
+            if (remaining <= 0) break;
             if (excerpt.Length > remaining) excerpt = Trim(excerpt, remaining);
             if (string.IsNullOrWhiteSpace(excerpt)) continue;
+            remaining -= excerpt.Length;
+            if (context is not null)
+                context = remaining > 0 ? Trim(context, Math.Min(maxEvidenceCharacters, remaining)) : null;
+            var contribution = excerpt.Length + (context?.Length ?? 0);
+            if (contribution == 0) continue;
             evidence.Add(item with
             {
                 Excerpt = excerpt,
@@ -108,9 +115,10 @@ public sealed class DeterministicResearchEvidenceProcessor : IResearchEvidencePr
         {
             if (countsBySource.ContainsKey(source.CitationId)) continue;
             if (string.IsNullOrWhiteSpace(source.ExtractedText) && string.IsNullOrWhiteSpace(source.Snippet)) continue;
+            if (maxPerSource == 0 || maxEvidenceCharacters == 0) break;
             var remaining = maxTotalCharacters - totalCharacters;
-            if (remaining <= 3) break;
-            var excerpt = Trim(source.ExtractedText ?? source.Snippet!, Math.Min(options.MaxEvidenceCharacters, remaining));
+            if (remaining <= 0) break;
+            var excerpt = Trim(source.ExtractedText ?? source.Snippet!, Math.Min(maxEvidenceCharacters, remaining));
             var identity = $"{source.CitationId}\nsource context\n{excerpt}";
             if (string.IsNullOrWhiteSpace(excerpt) || !seen.Add(identity)) continue;
             evidence.Add(new ResearchEvidenceCandidate(source.CitationId, "source context", excerpt, null, source.PublishedAt));
@@ -120,7 +128,13 @@ public sealed class DeterministicResearchEvidenceProcessor : IResearchEvidencePr
         return evidence.ToArray();
     }
 
-    private static string Trim(string value, int max) => value.Length <= max ? value : value[..Math.Max(1, max - 3)].TrimEnd() + "...";
+    private static string Trim(string value, int max)
+    {
+        if (max <= 0) return string.Empty;
+        if (value.Length <= max) return value;
+        if (max <= 3) return value[..max];
+        return value[..(max - 3)].TrimEnd() + "...";
+    }
 }
 
 public sealed class OpenAiResearchSearchProvider(

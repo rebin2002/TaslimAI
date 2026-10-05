@@ -90,6 +90,32 @@ public sealed class ResearchGenerationUnitTests
     }
 
     [Fact]
+    public void Evidence_processor_counts_excerpt_and_context_within_total_bound()
+    {
+        var source = new ResearchSourceCandidate("S1", "https://example.gov", "https://example.gov", "Source", "example.gov", null, null, DateTime.UtcNow, "web", "Snippet", "Extracted", null, 1, true, null);
+        var evidence = new ResearchEvidenceCandidate("S1", "topic", new string('e', 80), new string('c', 80), null);
+
+        var result = new DeterministicResearchEvidenceProcessor().Normalize([source], [evidence], new ResearchGenerationOptions
+        {
+            MaxEvidenceCharacters = 100,
+            MaxTotalEvidenceCharacters = 100,
+        });
+
+        Assert.Single(result);
+        Assert.True(result[0].Excerpt.Length + (result[0].Context?.Length ?? 0) <= 100);
+    }
+
+    [Fact]
+    public void Uploaded_source_candidate_keeps_stable_file_identity_separate_from_display_name()
+    {
+        var fileId = Guid.NewGuid();
+        var candidate = new ResearchSourceCandidate("S1", null, null, "duplicate-name.txt", "uploaded file", null, null, DateTime.UtcNow, "uploaded", "Snippet", "Extracted", null, 1, true, null, fileId);
+
+        Assert.Equal(fileId, candidate.StoredFileId);
+        Assert.Equal("duplicate-name.txt", candidate.Title);
+    }
+
+    [Fact]
     public void Capability_flags_reject_disabled_web_and_uploaded_sources()
     {
         var webInput = new ResearchGenerationInput(Guid.NewGuid(), null, "Valid question", "Report", "standard", "research_report", "en", null, null, null, null, [], [], true, []);
