@@ -68,6 +68,29 @@ describe("Chat stream state", () => {
     expect(state.terminal).toBe("completed");
   });
 
+  it("ignores late deltas and failures after completion", () => {
+    let state = reduceChatStream(createChatStreamState(), event("message.started", { userMessage: user, assistantMessage: assistant }));
+    state = reduceChatStream(state, event("message.completed", { userMessage: user, assistantMessage: message("assistant-1", "Assistant", "final", "Completed") }));
+    state = reduceChatStream(state, event("message.delta", { messageId: "assistant-1", delta: " stale" }));
+    state = reduceChatStream(state, event("message.failed", { code: "AI_GENERATION_FAILED", message: "late failure" }));
+
+    expect(state.messages.find(item => item.id === "assistant-1")).toMatchObject({ content: "final", status: "Completed" });
+    expect(state.generating).toBe(false);
+    expect(state.terminal).toBe("completed");
+  });
+
+  it("ignores late deltas and completion after failure", () => {
+    let state = reduceChatStream(createChatStreamState(), event("message.started", { userMessage: user, assistantMessage: assistant }));
+    state = reduceChatStream(state, event("message.delta", { messageId: "assistant-1", delta: "partial" }));
+    state = reduceChatStream(state, event("message.failed", { code: "AI_GENERATION_FAILED", message: "safe failure" }));
+    state = reduceChatStream(state, event("message.delta", { messageId: "assistant-1", delta: " stale" }));
+    state = reduceChatStream(state, event("message.completed", { userMessage: user, assistantMessage: message("assistant-1", "Assistant", "late completion", "Completed") }));
+
+    expect(state.messages.find(item => item.id === "assistant-1")).toMatchObject({ content: "partial", status: "Failed" });
+    expect(state.generating).toBe(false);
+    expect(state.terminal).toBe("failed");
+  });
+
   it("ends a local stream immediately and exposes the pending assistant as retryable", () => {
     let state = reduceChatStream(createChatStreamState(), event("message.started", { userMessage: user, assistantMessage: assistant }));
     state = reduceChatStream(state, event("message.delta", { messageId: "assistant-1", delta: "partial" }));
