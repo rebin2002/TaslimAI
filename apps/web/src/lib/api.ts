@@ -747,6 +747,7 @@ export type AssetInput = { name: string; description?: string | null; projectId?
 
 let csrfToken: string | null = null;
 let csrfRequest: Promise<string> | null = null;
+let csrfRefreshRequest: Promise<string> | null = null;
 
 function requestId() {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
@@ -759,9 +760,14 @@ function generationInit(init: RequestInit, idempotencyKey: string): RequestInit 
 }
 
 async function csrf(forceRefresh = false) {
+  if (csrfRefreshRequest) return csrfRefreshRequest;
   if (csrfToken && !forceRefresh) return csrfToken;
   if (csrfRequest && !forceRefresh) return csrfRequest;
   const request = (async () => {
+    // A forced refresh follows any in-flight bootstrap, but does not share its
+    // token: an auth transition may have changed the antiforgery user binding
+    // while the earlier request was still completing.
+    if (forceRefresh && csrfRequest) await csrfRequest.catch(() => undefined);
     const response = await fetch(`${API_URL}/api/auth/csrf`, { credentials: "include", cache: "no-store" });
     if (!response.ok) throw new Error("CSRF token unavailable");
     const body = await response.json().catch(() => null) as { token?: unknown } | null;
@@ -769,10 +775,12 @@ async function csrf(forceRefresh = false) {
     csrfToken = body.token;
     return body.token;
   })();
-  if (!forceRefresh) csrfRequest = request;
+  if (forceRefresh) csrfRefreshRequest = request;
+  else csrfRequest = request;
   try {
     return await request;
   } finally {
+    if (forceRefresh && csrfRefreshRequest === request) csrfRefreshRequest = null;
     if (!forceRefresh && csrfRequest === request) csrfRequest = null;
   }
 }
@@ -1158,6 +1166,7 @@ export const api = {
   updateProfile: (input: ProfileInput) => request<AuthResponse>("/api/auth/profile", { method: "PATCH", body: JSON.stringify(input) }, true),
   completeOnboarding: (input: OnboardingInput) => request<AuthResponse>("/api/auth/onboarding/complete", { method: "POST", body: JSON.stringify(input) }, true),
   changePassword: (input: ChangePasswordInput) => request<{ success: boolean }>("/api/auth/password", { method: "POST", body: JSON.stringify(input) }, true),
+  revokeOtherSessions: async () => { const result = await request<{ success: boolean }>("/api/auth/sessions/revoke", { method: "POST" }, true); csrfToken = null; await csrf(true); return result; },
   listProjects: (workspaceId: string, status: "Active" | "Archived", signal?: AbortSignal) => request<Project[]>(`/api/workspaces/${workspaceId}/projects?status=${status}`, { signal }),
   listWorkspaces: () => request<Workspace[]>('/api/workspaces'),
   getWorkspace: (workspaceId: string) => request<Workspace>(`/api/workspaces/${workspaceId}`),
@@ -1189,7 +1198,7 @@ export const api = {
     const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value !== undefined).map(([key, value]) => [key, String(value)]));
     return request<AdminOperationsDashboard>(`/api/admin/operations/dashboard${query.toString() ? `?${query.toString()}` : ""}`);
   },
-  recoverAdminStuckJob: (jobId: string, reason: string) => request<{ jobId: string; status: GenerationJobStatus; retryCount: number; queuedAt: string; auditAction: string }>(`/api/admin/operations/jobs/${jobId}/recover`, { method: "POST", body: JSON.stringify({ reason }) }, true),
+  recoverAdminStuckJob: (jobId: string, reason: string, idempotencyKey = requestId()) => request<{ jobId: string; status: GenerationJobStatus; retryCount: number; queuedAt: string; auditAction: string }>(`/api/admin/operations/jobs/${jobId}/recover`, generationInit({ method: "POST", body: JSON.stringify({ reason }) }, idempotencyKey), true),
   createGenerationJob: (workspaceId: string, inputJson = "{}", title?: string, idempotencyKey = requestId()) => request<GenerationJob>("/api/generation/jobs", generationInit({ method: "POST", body: JSON.stringify({ workspaceId, jobType: "system.test", inputJson, title }) }, idempotencyKey), true),
   createImageGenerationJob: (input: ImageGenerationInput, idempotencyKey = requestId()) => request<{ job: GenerationJob }>("/api/image-generation/jobs", generationInit({ method: "POST", body: JSON.stringify(input) }, idempotencyKey), true).then((response) => response.job),
   createVoiceGenerationJob: (input: VoiceGenerationInput, idempotencyKey = requestId()) => request<{ job: GenerationJob }>("/api/voice-generation/jobs", generationInit({ method: "POST", body: JSON.stringify(input) }, idempotencyKey), true).then((response) => response.job),
