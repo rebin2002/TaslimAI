@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { Bell, Check, CheckCheck, LoaderCircle } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
 import { useAuth } from "@/components/AuthProvider";
@@ -45,7 +46,7 @@ export function useNotificationUnreadCount() {
     let active = true;
     const onUnreadCount = (event: Event) => {
       const detail = (event as CustomEvent<NotificationUnreadDetail>).detail;
-      if (detail?.workspaceId === workspace.id && typeof detail.unreadCount === "number") {
+      if (detail?.workspaceId === workspaceId && typeof detail.unreadCount === "number") {
         setUnreadCount(Math.max(0, detail.unreadCount));
       }
     };
@@ -73,6 +74,7 @@ export function useNotificationUnreadCount() {
 }
 
 export function NotificationBell({ unreadCount }: Readonly<{ unreadCount: number }>) {
+  const router = useRouter();
   const { workspace } = useAuth();
   const { locale, t } = useLocale();
   const [open, setOpen] = useState(false);
@@ -91,12 +93,13 @@ export function NotificationBell({ unreadCount }: Readonly<{ unreadCount: number
   useEffect(() => {
     panelRequestSequence.current += 1;
     // Workspace changes replace the panel's tenant-scoped state before the next render.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setOpen(false);
+    /* eslint-disable react-hooks/set-state-in-effect */
     setResult(null);
+    setOpen(false);
     setLoading(false);
     setWorkingId(null);
     setPanelError("");
+    /* eslint-enable react-hooks/set-state-in-effect */
   }, [workspace?.id]);
 
   useEffect(() => {
@@ -124,6 +127,8 @@ export function NotificationBell({ unreadCount }: Readonly<{ unreadCount: number
     if (!willOpen || !workspace) {
       panelRequestSequence.current += 1;
       setLoading(false);
+      setWorkingId(null);
+      setPanelError("");
       return;
     }
     const workspaceId = workspace.id;
@@ -144,8 +149,8 @@ export function NotificationBell({ unreadCount }: Readonly<{ unreadCount: number
     }
   }
 
-  async function markRead(item: NotificationItem) {
-    if (!workspace || item.isRead) return;
+  async function markRead(item: NotificationItem): Promise<boolean> {
+    if (!workspace || item.isRead) return true;
     const workspaceId = workspace.id;
     const request = startNotificationRequest(panelRequestSequence.current, workspaceId);
     panelRequestSequence.current = request.sequence;
@@ -153,16 +158,25 @@ export function NotificationBell({ unreadCount }: Readonly<{ unreadCount: number
     setPanelError("");
     try {
       await api.markNotificationRead(workspaceId, item.id);
-      if (!isNotificationRequestCurrent(request, panelRequestSequence.current, activeWorkspaceId.current)) return;
+      if (!isNotificationRequestCurrent(request, panelRequestSequence.current, activeWorkspaceId.current)) return false;
       const nextUnreadCount = Math.max(0, (result?.unreadCount ?? unreadCount) - 1);
       const readAt = new Date().toISOString();
       setResult((current) => current ? { ...current, unreadCount: Math.max(0, current.unreadCount - 1), items: current.items.map((entry) => entry.id === item.id ? { ...entry, isRead: true, readAt: entry.readAt ?? readAt } : entry) } : current);
       publishNotificationUnreadCount(workspaceId, nextUnreadCount);
+      return true;
     } catch {
       if (isNotificationRequestCurrent(request, panelRequestSequence.current, activeWorkspaceId.current)) setPanelError(t("notification.readError"));
+      return false;
     } finally {
       if (isNotificationRequestCurrent(request, panelRequestSequence.current, activeWorkspaceId.current)) setWorkingId(null);
     }
+  }
+
+  async function openNotification(item: NotificationItem, event: React.MouseEvent<HTMLAnchorElement>) {
+    setOpen(false);
+    if (item.isRead) return;
+    event.preventDefault();
+    if (await markRead(item)) router.push(item.destination);
   }
 
   async function markAllRead() {
@@ -195,13 +209,13 @@ export function NotificationBell({ unreadCount }: Readonly<{ unreadCount: number
     {open && <section id={panelId} className="notification-panel" role="dialog" aria-modal="false" aria-label={t("notification.panelLabel")}>
       <div className="notification-panel-heading"><div><p className="section-eyebrow">{t("notification.eyebrow")}</p><h2 id={panelTitleId}>{t("notification.title")}</h2></div><button type="button" className="notification-mark-all" onClick={() => void markAllRead()} disabled={!result?.unreadCount || workingId === "all"} aria-busy={workingId === "all"}><CheckCheck size={14} aria-hidden="true" /> {t("notification.markAllRead")}</button></div>
       {panelError && <p className="notification-panel-error" role="alert">{panelError}</p>}
-      {loading ? <div className="notification-panel-state" role="status" aria-live="polite"><LoaderCircle className="activity-spin" size={20} aria-hidden="true" /> {t("notification.loading")}</div> : !result?.items.length ? <div className="notification-panel-state"><Bell size={20} aria-hidden="true" /><span>{t("notification.empty")}</span></div> : <div className="notification-panel-list" role="list" aria-label={t("notification.title")}>{result.items.map((item) => <NotificationRow key={item.id} item={item} locale={locale} t={t} working={workingId === item.id} onRead={() => void markRead(item)} onNavigate={() => { if (!item.isRead) void markRead(item); setOpen(false); }} />)}</div>}
+      {loading ? <div className="notification-panel-state" role="status" aria-live="polite"><LoaderCircle className="activity-spin" size={20} aria-hidden="true" /> {t("notification.loading")}</div> : !result?.items.length ? <div className="notification-panel-state"><Bell size={20} aria-hidden="true" /><span>{t("notification.empty")}</span></div> : <div className="notification-panel-list" role="list" aria-label={t("notification.title")}>{result.items.map((item) => <NotificationRow key={item.id} item={item} locale={locale} t={t} working={workingId === item.id} onRead={() => void markRead(item)} onNavigate={(event) => void openNotification(item, event)} />)}</div>}
       <Link href="/notifications" className="notification-panel-footer" onClick={() => setOpen(false)}>{t("notification.viewAll")} <span aria-hidden="true">→</span></Link>
     </section>}
   </div>;
 }
 
-function NotificationRow({ item, locale, t, working, onRead, onNavigate }: { item: NotificationItem; locale: "en" | "ar" | "ku"; t: (key: string, variables?: Record<string, string>) => string; working: boolean; onRead: () => void; onNavigate: () => void }) {
+function NotificationRow({ item, locale, t, working, onRead, onNavigate }: { item: NotificationItem; locale: "en" | "ar" | "ku"; t: (key: string, variables?: Record<string, string>) => string; working: boolean; onRead: () => void; onNavigate: (event: React.MouseEvent<HTMLAnchorElement>) => void }) {
   const label = t(notificationLabels[item.type]);
   const itemLabel = item.resourceTitle ? `${label}: ${item.resourceTitle}` : label;
   return <article className={`notification-row ${item.isRead ? "is-read" : "is-unread"}`} role="listitem" aria-label={itemLabel}>

@@ -1,4 +1,6 @@
+using System.Globalization;
 using System.Security.Claims;
+using System.Text;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
@@ -94,9 +96,63 @@ public sealed class ResearchGenerationController(
         return Ok(new { jobId, sources });
     }
 
+    [HttpGet("jobs/{jobId:guid}/sources/export")]
+    public async Task<IActionResult> ExportSources(Guid jobId, CancellationToken cancellationToken)
+    {
+        var job = await jobs.GetAsync(GetUserId(), jobId, cancellationToken);
+        if (job is null) return NotFound();
+        var sources = await db.ResearchSources.AsNoTracking()
+            .Where(source => source.GenerationJobId == jobId)
+            .OrderBy(source => source.Rank)
+            .ThenBy(source => source.CitationId)
+            .Select(source => new ResearchSourceExportRow(
+                source.CitationId,
+                source.SourceType,
+                source.Title,
+                source.Domain,
+                source.Publisher,
+                source.Url,
+                source.CanonicalUrl,
+                source.PublishedAt,
+                source.RetrievedAt,
+                source.Rank,
+                source.IsSelected,
+                source.Evidence.Count))
+            .ToArrayAsync(cancellationToken);
+        var csv = new StringBuilder();
+        csv.AppendLine("citationId,sourceType,title,domain,publisher,url,canonicalUrl,publishedAt,retrievedAt,rank,isSelected,evidenceCount");
+        foreach (var source in sources)
+        {
+            csv.AppendLine(string.Join(',',
+                CsvField(source.CitationId),
+                CsvField(source.SourceType),
+                CsvField(source.Title),
+                CsvField(source.Domain),
+                CsvField(source.Publisher),
+                CsvField(source.Url),
+                CsvField(source.CanonicalUrl),
+                CsvField(source.PublishedAt?.ToString("O", CultureInfo.InvariantCulture)),
+                CsvField(source.RetrievedAt.ToString("O", CultureInfo.InvariantCulture)),
+                CsvField(source.Rank.ToString(CultureInfo.InvariantCulture)),
+                CsvField(source.IsSelected ? "true" : "false"),
+                CsvField(source.EvidenceCount.ToString(CultureInfo.InvariantCulture))));
+        }
+        var bytes = new UTF8Encoding(encoderShouldEmitUTF8Identifier: true).GetBytes(csv.ToString());
+        return File(bytes, "text/csv; charset=utf-8", $"research-sources-{jobId:N}.csv");
+    }
+
+    private static string CsvField(string? value)
+    {
+        var text = value ?? string.Empty;
+        var trimmed = text.TrimStart();
+        if (trimmed.Length > 0 && trimmed[0] is '=' or '+' or '-' or '@') text = $"'{text}";
+        return $"\"{text.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
+    }
+
     private Guid GetUserId() => Guid.Parse(User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? throw new InvalidOperationException("Authenticated user identifier is missing."));
 }
 
 public sealed record CreateResearchGenerationResponse(GenerationJobDto Job);
 public sealed record ResearchSourceDetailDto(string CitationId, string? Url, string Title, string Domain, string? Publisher, DateTime? PublishedAt, DateTime RetrievedAt, string SourceType, string? Snippet, string? SearchQuery, int Rank, bool IsSelected, IReadOnlyList<ResearchEvidenceDto> Evidence);
 public sealed record ResearchEvidenceDto(string Topic, string Excerpt, string? Context, DateTime? PublishedAt);
+internal sealed record ResearchSourceExportRow(string CitationId, string SourceType, string Title, string Domain, string? Publisher, string? Url, string? CanonicalUrl, DateTime? PublishedAt, DateTime RetrievedAt, int Rank, bool IsSelected, int EvidenceCount);
