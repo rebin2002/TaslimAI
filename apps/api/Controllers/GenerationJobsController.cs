@@ -43,6 +43,9 @@ public sealed class GenerationJobsController(IGenerationJobService jobs, IOption
     [EnableRateLimiting(RateLimiting.Generation)]
     public async Task<IActionResult> Retry(Guid id, CancellationToken cancellationToken)
     {
+        var source = await jobs.GetAsync(GetUserId(), id, cancellationToken);
+        if (source is not null && imageOptions.Value.Enabled && string.Equals(source.JobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase))
+            return ApiResults.Error(this, StatusCodes.Status400BadRequest, "JOB_TYPE_ROUTE_NOT_ALLOWED", "Use the dedicated studio endpoint for this generation type.");
         try
         {
             var job = await jobs.RetryAsync(GetUserId(), id, cancellationToken, Request.Headers["Idempotency-Key"].FirstOrDefault(), HttpContext.TraceIdentifier);
