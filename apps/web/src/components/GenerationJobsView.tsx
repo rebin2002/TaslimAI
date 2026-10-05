@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { CheckCircle2, Clock3, LoaderCircle, Play, XCircle } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
 import { api, type GenerationJob } from "@/lib/api";
@@ -100,23 +100,33 @@ export function GenerationJobsView() {
   const [working, setWorking] = useState(false);
   const [error, setError] = useState("");
   const [canRetryLoad, setCanRetryLoad] = useState(false);
+  const requestGeneration = useRef(0);
+  const selectionGeneration = useRef(0);
+  const [pollRetryGeneration, setPollRetryGeneration] = useState(0);
 
   const loadRecent = useCallback(async () => {
     if (!workspace) {
+      requestGeneration.current += 1;
+      setJobs([]);
+      setCurrent(null);
       setLoading(false);
       return;
     }
+    const request = ++requestGeneration.current;
+    const workspaceId = workspace.id;
     setLoading(true);
     setError("");
     setCanRetryLoad(false);
     try {
-      const result = await api.listGenerationJobs(workspace.id);
+      const result = await api.listGenerationJobs(workspaceId);
+      if (request !== requestGeneration.current) return;
       setJobs(result.items);
     } catch (caught) {
+      if (request !== requestGeneration.current) return;
       setError(caught instanceof Error ? caught.message : t("jobs.loadError"));
       setCanRetryLoad(true);
     } finally {
-      setLoading(false);
+      if (request === requestGeneration.current) setLoading(false);
     }
   }, [t, workspace]);
 
@@ -127,52 +137,79 @@ export function GenerationJobsView() {
   useEffect(() => {
     if (!current || isTerminalJob(current)) return;
     let active = true;
+    const jobId = current.id;
     const poll = async () => {
       try {
-        const next = await api.getGenerationJob(current.id);
+        const next = await api.getGenerationJob(jobId);
         if (!active) return;
         setCurrent(next);
         setJobs((previous) => mergeGenerationJob({ jobs: previous, selectedJobId: next.id, error: "" }, next).jobs);
       } catch (caught) {
         if (active) {
           setError(caught instanceof Error ? caught.message : t("jobs.pollError"));
-          setCanRetryLoad(false);
+          setCanRetryLoad(true);
         }
       }
     };
     const timer = window.setTimeout(() => { void poll(); }, 500);
     return () => { active = false; window.clearTimeout(timer); };
-  }, [current, t]);
+  }, [current, pollRetryGeneration, t]);
+
+  function selectJob(job: GenerationJob) {
+    selectionGeneration.current += 1;
+    setCurrent(job);
+    setError("");
+    setCanRetryLoad(false);
+  }
+
+  function retryLoad() {
+    if (current && !isTerminalJob(current)) {
+      setPollRetryGeneration((value) => value + 1);
+      setCanRetryLoad(false);
+      setError("");
+      return;
+    }
+    void loadRecent();
+  }
 
   async function createTestJob() {
     if (!workspace) return;
+    const request = ++requestGeneration.current;
+    const selection = selectionGeneration.current;
+    const workspaceId = workspace.id;
     setWorking(true);
     setError("");
     setCanRetryLoad(false);
     try {
-      const job = await api.createGenerationJob(workspace.id, JSON.stringify({ purpose: "foundation-check" }), t("jobs.testTitle"));
-      setCurrent(job);
+      const job = await api.createGenerationJob(workspaceId, JSON.stringify({ purpose: "foundation-check" }), t("jobs.testTitle"));
+      if (request !== requestGeneration.current) return;
       setJobs((previous) => mergeGenerationJob({ jobs: previous, selectedJobId: job.id, error: "" }, job).jobs);
+      if (selection === selectionGeneration.current) setCurrent(job);
     } catch (caught) {
+      if (request !== requestGeneration.current) return;
       setError(caught instanceof Error ? caught.message : t("jobs.createError"));
     } finally {
-      setWorking(false);
+      if (request === requestGeneration.current) setWorking(false);
     }
   }
 
   async function cancelJob(job: GenerationJob) {
+    const request = ++requestGeneration.current;
+    const selection = selectionGeneration.current;
     setWorking(true);
     setError("");
     setCanRetryLoad(false);
     try {
       await api.cancelGenerationJob(job.id);
       const next = await api.getGenerationJob(job.id);
-      setCurrent(next);
+      if (request !== requestGeneration.current) return;
       setJobs((previous) => mergeGenerationJob({ jobs: previous, selectedJobId: next.id, error: "" }, next).jobs);
+      if (selection === selectionGeneration.current) setCurrent(next);
     } catch (caught) {
+      if (request !== requestGeneration.current) return;
       setError(caught instanceof Error ? caught.message : t("jobs.cancelError"));
     } finally {
-      setWorking(false);
+      if (request === requestGeneration.current) setWorking(false);
     }
   }
 
@@ -189,12 +226,12 @@ export function GenerationJobsView() {
         <div className="card-title"><span className="card-title-icon teal"><Play size={17} aria-hidden="true" /></span><div><h2 id="generation-test-job-title">{t("jobs.testTitle")}</h2><p>{t("jobs.testSubtitle")}</p></div></div>
         <button type="button" className="primary-button generation-create-button" onClick={() => void createTestJob()} disabled={working} aria-busy={working}><Play size={15} aria-hidden="true" /> {working ? t("jobs.working") : t("jobs.create")}</button>
         {error && <div className="form-error" role="alert" aria-atomic="true"><span>{error}</span></div>}
-        {error && canRetryLoad && <button type="button" className="secondary-button generation-retry-button" onClick={() => void loadRecent()} disabled={loading} aria-busy={loading}>{t("jobs.retry")}</button>}
+        {error && canRetryLoad && <button type="button" className="secondary-button generation-retry-button" onClick={retryLoad} disabled={loading} aria-busy={loading}>{t("jobs.retry")}</button>}
         {activeJob && <GenerationJobDetail job={activeJob} t={t} canCancel={canCancel} working={working} onCancel={() => void cancelJob(activeJob)} />}
       </section>
       <section className="account-card generation-recent-card" aria-labelledby="generation-recent-title">
         <div className="card-title"><span className="card-title-icon"><Clock3 size={17} aria-hidden="true" /></span><div><h2 id="generation-recent-title">{t("jobs.recent")}</h2><p>{t("jobs.recentSubtitle")}</p></div></div>
-        {loading ? <div className="generation-empty" role="status" aria-live="polite">{t("jobs.loading")}</div> : jobs.length === 0 ? <div className="generation-empty" role="status" aria-live="polite">{t("jobs.empty")}</div> : <GenerationJobList jobs={jobs} activeJobId={activeJob?.id ?? null} t={t} onSelect={setCurrent} />}
+        {loading ? <div className="generation-empty" role="status" aria-live="polite">{t("jobs.loading")}</div> : jobs.length === 0 ? <div className="generation-empty" role="status" aria-live="polite">{t("jobs.empty")}</div> : <GenerationJobList jobs={jobs} activeJobId={activeJob?.id ?? null} t={t} onSelect={selectJob} />}
       </section>
     </div>
   </div>;
