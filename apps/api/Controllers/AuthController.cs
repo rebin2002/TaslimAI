@@ -140,13 +140,17 @@ public sealed class AuthController(
             return ApiResults.Error(this, StatusCodes.Status401Unauthorized, "INVALID_CREDENTIALS", "Invalid email or password.");
         }
 
+        var workspace = await FindPersonalWorkspace(user.Id, cancellationToken);
+        if (workspace is null)
+        {
+            logger.LogError("Login validation found incomplete account bootstrap. TraceId={TraceId}; UserId={UserId}", HttpContext.TraceIdentifier, user.Id);
+            return ApiResults.Error(this, StatusCodes.Status500InternalServerError, "ACCOUNT_SETUP_INCOMPLETE", "Your account setup is incomplete. Please contact support.");
+        }
+
         user.LastLoginAt = DateTime.UtcNow;
         user.UpdatedAt = DateTime.UtcNow;
         await userManager.UpdateAsync(user);
         await signInManager.SignInAsync(user, isPersistent: true);
-        var workspace = await FindPersonalWorkspace(user.Id, cancellationToken);
-        if (workspace is null)
-            return ApiResults.Error(this, StatusCodes.Status500InternalServerError, "ACCOUNT_SETUP_INCOMPLETE", "Your account setup is incomplete. Please contact support.");
 
         logger.LogInformation("Login validation succeeded. TraceId={TraceId}", HttpContext.TraceIdentifier);
         ExpireCsrfCookie();
