@@ -175,11 +175,6 @@ public sealed class MovieShotExecutionService(
         var now = DateTime.UtcNow;
         var candidates = new List<MovieTake>(takeCount);
 
-        // A batch is one user action. Keep all clips, jobs, usage reservations,
-        // and take links invisible to workers until every candidate is ready;
-        // otherwise a failure on a later candidate strands earlier rows and
-        // permanently turns the idempotency key into a partial batch.
-        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
         for (var index = 1; index <= takeCount; index++)
         {
             var clip = new MovieClip
@@ -275,7 +270,6 @@ public sealed class MovieShotExecutionService(
             // job returned by the shared job service as a new graph node.
             take.GenerationJob = job;
         }
-        await transaction.CommitAsync(cancellationToken);
         return ToResponse(shot, keyframe.Id, durationSeconds.Value, resolution, candidates.ToArray());
     }
 

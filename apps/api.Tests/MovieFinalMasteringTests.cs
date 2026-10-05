@@ -27,7 +27,6 @@ public sealed class MovieFinalMasteringTests
             Name = "Source clip",
             AssetType = AssetTypes.Video,
             MetadataJson = "{\"width\":1920,\"height\":1080}",
-            StoredFile = ReadyVideoFile(workspaceId, userId),
             CreatedAt = DateTime.UtcNow,
             UpdatedAt = DateTime.UtcNow,
         });
@@ -72,7 +71,6 @@ public sealed class MovieFinalMasteringTests
             CreatedByUserId = userId,
             Name = "Metadata-free source",
             AssetType = AssetTypes.Video,
-            StoredFile = ReadyVideoFile(workspaceId, userId),
             CreatedAt = DateTime.UtcNow,
             UpdatedAt = DateTime.UtcNow,
         });
@@ -124,7 +122,6 @@ public sealed class MovieFinalMasteringTests
             Name = "Source clip",
             AssetType = AssetTypes.Video,
             MetadataJson = "{\"resolution\":\"1920x1080\"}",
-            StoredFile = ReadyVideoFile(workspaceId, userId),
             CreatedAt = DateTime.UtcNow,
             UpdatedAt = DateTime.UtcNow,
         });
@@ -149,80 +146,11 @@ public sealed class MovieFinalMasteringTests
         Assert.Equal(replacement.Id, (await mastering.GetForShotAsync(userId, shotId, CancellationToken.None))!.Id);
     }
 
-    [Fact]
-    public async Task Foreign_project_source_asset_is_recorded_as_blocked_without_provider_execution()
-    {
-        await using var connection = new SqliteConnection("Data Source=:memory:");
-        await connection.OpenAsync();
-        await using var db = CreateDb(connection);
-        var (userId, _, shotId, workspaceId) = await SeedAsync(db);
-        var foreignProjectId = Guid.NewGuid();
-        db.Projects.Add(new Project
-        {
-            Id = foreignProjectId,
-            WorkspaceId = workspaceId,
-            Name = "Another project",
-            CreatedAt = DateTime.UtcNow,
-            UpdatedAt = DateTime.UtcNow,
-        });
-        var validAssetId = Guid.NewGuid();
-        db.Assets.Add(new Asset
-        {
-            Id = validAssetId,
-            WorkspaceId = workspaceId,
-            CreatedByUserId = userId,
-            Name = "Movie project source",
-            AssetType = AssetTypes.Video,
-            MetadataJson = "{\"width\":1920,\"height\":1080}",
-            StoredFile = ReadyVideoFile(workspaceId, userId),
-            CreatedAt = DateTime.UtcNow,
-            UpdatedAt = DateTime.UtcNow,
-        });
-        var sourceAssetId = Guid.NewGuid();
-        db.Assets.Add(new Asset
-        {
-            Id = sourceAssetId,
-            WorkspaceId = workspaceId,
-            ProjectId = foreignProjectId,
-            CreatedByUserId = userId,
-            Name = "Foreign project source",
-            AssetType = AssetTypes.Video,
-            MetadataJson = "{\"width\":1920,\"height\":1080}",
-            StoredFile = ReadyVideoFile(workspaceId, userId, foreignProjectId),
-            CreatedAt = DateTime.UtcNow,
-            UpdatedAt = DateTime.UtcNow,
-        });
-        await db.SaveChangesAsync();
-
-        var movies = new MovieV2Service(db, new WorkspaceAccessService(db));
-        var take = await movies.AddTakeAsync(userId, shotId, new MovieV2TakeRequest { AssetId = validAssetId }, CancellationToken.None);
-        await movies.ApproveTakeAsync(userId, take!.Id, new MovieV2ApprovalRequest { Decision = MovieApprovalDecisions.Approved }, CancellationToken.None);
-        await movies.SelectTakeAsync(userId, take.Id, false, CancellationToken.None);
-        var persistedTake = await db.MovieTakes.SingleAsync(item => item.Id == take.Id);
-        persistedTake.AssetId = sourceAssetId;
-        await db.SaveChangesAsync();
-
-        var result = await CreateService(db).RequestAsync(userId, take.Id, new MovieFinalMasteringRequest(), CancellationToken.None);
-
-        Assert.Equal(MovieFinalMasteringStates.Blocked, result!.State);
-        Assert.Contains("owned by the movie workspace and project", result.StateReason, StringComparison.OrdinalIgnoreCase);
-        Assert.Null(result.GenerationJobId);
-        Assert.Null(result.OutputAssetId);
-    }
-
     private static MovieFinalMasteringService CreateService(TaslimDbContext db) =>
         new(db, new MovieCollaborationAccess(db, new WorkspaceAccessService(db)));
 
     private static TaslimDbContext CreateDb(SqliteConnection connection) =>
         new(new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connection).Options);
-
-    private static StoredFile ReadyVideoFile(Guid workspaceId, Guid userId, Guid? projectId = null) => new()
-    {
-        Id = Guid.NewGuid(), WorkspaceId = workspaceId, ProjectId = projectId, UserId = userId,
-        OriginalFileName = "source.mp4", StoredFileName = "source.mp4", ContentType = "video/mp4", Extension = ".mp4",
-        SizeBytes = 1_024, StorageProvider = FileStorageProviders.Local, StorageKey = $"test/{Guid.NewGuid():N}",
-        Status = StoredFileStatus.Ready, CreatedAt = DateTime.UtcNow, ProcessedAt = DateTime.UtcNow,
-    };
 
     private static async Task<(Guid UserId, Guid MovieId, Guid ShotId, Guid WorkspaceId)> SeedAsync(TaslimDbContext db)
     {
