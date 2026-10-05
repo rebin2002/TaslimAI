@@ -28,6 +28,8 @@ public sealed class SocialGenerationController(
         try
         {
             if (!options.Value.Enabled) return ApiResults.Error(this, StatusCodes.Status503ServiceUnavailable, "SOCIAL_STUDIO_UNAVAILABLE", "Social content generation is not available right now.");
+            var idempotencyKey = Request.Headers["Idempotency-Key"].FirstOrDefault();
+            if (string.IsNullOrWhiteSpace(idempotencyKey)) return ApiResults.Error(this, StatusCodes.Status400BadRequest, "IDEMPOTENCY_KEY_REQUIRED", "A unique Idempotency-Key header is required for social generation.");
             var input = SocialGenerationContractMapper.ToInput(request);
             SocialGenerationRequestValidator.Validate(input, options.Value);
             var preflight = await costControl.CheckPreflightAsync(input.WorkspaceId, UsageFeature.Social, SocialGenerationCostEstimator.Estimate(options.Value), cancellationToken);
@@ -40,7 +42,7 @@ public sealed class SocialGenerationController(
                 Title = input.Prompt.Length > 160 ? input.Prompt[..160] : input.Prompt,
                 InputJson = SocialGenerationContractMapper.SerializeInput(input),
                 EstimatedProviderCostUsd = preflight.EstimatedProviderCostUsd,
-            }, cancellationToken, Request.Headers["Idempotency-Key"].FirstOrDefault());
+            }, cancellationToken, idempotencyKey);
             return Accepted(new CreateSocialGenerationResponse(GenerationJobContractMapper.ToDto(job)));
         }
         catch (SocialRequestValidationException exception) { return ApiResults.Error(this, StatusCodes.Status400BadRequest, exception.Code, exception.Message); }
