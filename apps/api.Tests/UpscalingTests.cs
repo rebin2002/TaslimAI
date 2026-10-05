@@ -61,6 +61,21 @@ public sealed class UpscalingTests : IClassFixture<GenerationJobsNoWorkerFactory
     }
 
     [Fact]
+    public async Task Upscaling_list_bounds_deep_page_values_without_offset_overflow()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, $"upscale-page-{Guid.NewGuid():N}@example.com");
+
+        var response = await client.GetAsync($"/api/upscaling/jobs?workspaceId={auth.PersonalWorkspace.Id}&page={int.MaxValue}&pageSize={int.MaxValue}");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var list = (await response.Content.ReadFromJsonAsync<UpscalingJobListDto>())!;
+        Assert.Equal(Taslim.Api.Infrastructure.ApiPagination.MaxPage, list.Page);
+        Assert.Equal(Taslim.Api.Infrastructure.ApiPagination.MaxPageSize, list.PageSize);
+        Assert.Empty(list.Items);
+    }
+
+    [Fact]
     public async Task Invalid_target_and_cross_workspace_source_are_rejected_without_provider_details()
     {
         using var ownerClient = factory.CreateClient();
