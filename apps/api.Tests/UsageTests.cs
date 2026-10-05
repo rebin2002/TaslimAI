@@ -108,6 +108,21 @@ public sealed class UsageTests : IClassFixture<TaslimApiFactory>
         Assert.Equal(HttpStatusCode.Forbidden, forbidden.StatusCode);
     }
 
+    [Fact]
+    public async Task Usage_history_bounds_deep_page_values_without_offset_overflow()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Usage Pagination Boundary");
+
+        var response = await client.GetAsync($"/api/workspaces/{auth.PersonalWorkspace.Id}/usage?page={int.MaxValue}&pageSize={int.MaxValue}");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var history = (await response.Content.ReadFromJsonAsync<UsageHistoryDto>())!;
+        Assert.Equal(Taslim.Api.Infrastructure.ApiPagination.MaxPage, history.Page);
+        Assert.Equal(Taslim.Api.Infrastructure.ApiPagination.MaxPageSize, history.PageSize);
+        Assert.Empty(history.Items);
+    }
+
     private async Task<AuthResponse> Register(HttpClient client, string displayName)
     {
         var response = await SendWithCsrf(client, HttpMethod.Post, "/api/auth/register", new
