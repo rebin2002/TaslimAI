@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Taslim.Api.Contracts;
 using Taslim.Api.Infrastructure;
 using Taslim.Api.Generation;
@@ -37,6 +38,7 @@ public sealed class MovieDialogueController(IMovieDialogueProductionService dial
 
     [HttpPost("dialogue/{lineId:guid}/takes")]
     [ValidateAntiForgeryToken]
+    [EnableRateLimiting(RateLimiting.ExpensiveAi)]
     public async Task<IActionResult> QueueTake(Guid lineId, MovieDialogueTakeRequest request, CancellationToken cancellationToken)
     {
         try
