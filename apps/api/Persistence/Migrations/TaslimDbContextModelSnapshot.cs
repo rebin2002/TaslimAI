@@ -1985,9 +1985,13 @@ namespace Taslim.Api.Persistence.Migrations
 
                     b.HasIndex("CreditEntitlementId");
 
-                    b.HasIndex("ReversesEntryId");
+                    b.HasIndex("ReversesEntryId")
+                        .IsUnique()
+                        .HasFilter("\"ReversesEntryId\" IS NOT NULL");
 
-                    b.HasIndex("UsageTransactionId");
+                    b.HasIndex("UsageTransactionId")
+                        .IsUnique()
+                        .HasFilter("\"UsageTransactionId\" IS NOT NULL AND \"Type\" = 'Debit'");
 
                     b.HasIndex("WorkspaceId", "CreatedAt");
 

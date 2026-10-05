@@ -62,12 +62,15 @@ public sealed class MovieSoundService(
     public async Task<MovieSoundLibraryDto?> GetLibraryAsync(Guid userId, Guid movieProjectId, CancellationToken cancellationToken)
     {
         if (!await collaboration.HasPermissionAsync(userId, movieProjectId, MoviePermissions.View, cancellationToken)) return null;
+        var movie = await db.MovieProjects.AsNoTracking().FirstOrDefaultAsync(item => item.Id == movieProjectId, cancellationToken);
+        if (movie is null) return null;
         var references = await db.MovieSoundLibraryReferences.AsNoTracking()
-            .Include(item => item.Asset)
+            .Include(item => item.Asset).ThenInclude(item => item!.StoredFile)
             .Where(item => item.MovieProjectId == movieProjectId && item.Asset.Status == AssetStatus.Active)
             .OrderBy(item => item.Label)
             .ThenBy(item => item.CreatedAt)
             .ToListAsync(cancellationToken);
+        references = references.Where(item => IsEligibleAudioAsset(item.Asset, movie)).ToList();
         return new MovieSoundLibraryDto(movieProjectId, references.Select(MovieSoundTrackProjection.ToLibraryDto).ToArray());
     }
 
@@ -76,7 +79,7 @@ public sealed class MovieSoundService(
         if (!await collaboration.HasPermissionAsync(userId, movieProjectId, MoviePermissions.Edit, cancellationToken)) return null;
         var movie = await db.MovieProjects.AsNoTracking().FirstOrDefaultAsync(item => item.Id == movieProjectId, cancellationToken);
         if (movie is null) return null;
-        var asset = await FindAudioAssetAsync(request.AssetId, movie.WorkspaceId, cancellationToken);
+        var asset = await FindAudioAssetAsync(request.AssetId, movie, cancellationToken);
         if (asset is null) throw new MovieSoundValidationException(GenerationJobErrorCodes.MovieSoundAssetInvalid, "Choose an audio asset from this movie workspace.");
         var existing = await db.MovieSoundLibraryReferences.Include(item => item.Asset)
             .FirstOrDefaultAsync(item => item.MovieProjectId == movieProjectId && item.AssetId == asset.Id, cancellationToken);
@@ -105,6 +108,8 @@ public sealed class MovieSoundService(
         var asset = track.Asset ?? track.GenerationJob?.Assets.OrderByDescending(item => item.CreatedAt).FirstOrDefault();
         if (request.Approve && asset is null)
             throw new MovieSoundValidationException(GenerationJobErrorCodes.MovieSoundNotReady, "Only a sound track with a completed audio asset can be approved.");
+        if (request.Approve && !IsEligibleAudioAsset(asset!, track.MovieProject))
+            throw new MovieSoundValidationException(GenerationJobErrorCodes.MovieSoundNotReady, "The sound track asset must still be active, project-scoped, and backed by a ready private audio file.");
         if (request.Approve && (track.Status is MovieSoundStatuses.Archived or MovieSoundStatuses.Draft))
             throw new MovieSoundValidationException(GenerationJobErrorCodes.MovieSoundNotReady, "The sound track is not ready for approval.");
         var decision = request.Approve ? MovieSoundStatuses.Approved : MovieSoundStatuses.Rejected;
@@ -144,12 +149,12 @@ public sealed class MovieSoundService(
         {
             var reference = await db.MovieSoundLibraryReferences.AsNoTracking().FirstOrDefaultAsync(item => item.Id == libraryReferenceId && item.MovieProjectId == target.MovieProjectId, cancellationToken);
             if (reference is null) throw new MovieSoundValidationException(GenerationJobErrorCodes.MovieSoundAssetInvalid, "The sound library reference is not part of this movie.");
-            asset = await FindAudioAssetAsync(reference.AssetId, movie.WorkspaceId, cancellationToken);
+            asset = await FindAudioAssetAsync(reference.AssetId, movie, cancellationToken);
             sourceKind = MovieSoundSourceKinds.Library;
         }
         else if (request.AssetId.HasValue)
         {
-            asset = await FindAudioAssetAsync(request.AssetId.Value, movie.WorkspaceId, cancellationToken);
+            asset = await FindAudioAssetAsync(request.AssetId.Value, movie, cancellationToken);
         }
         if (request.AssetId.HasValue && asset is null)
             throw new MovieSoundValidationException(GenerationJobErrorCodes.MovieSoundAssetInvalid, "Choose an audio asset from this movie workspace.");
@@ -219,9 +224,10 @@ public sealed class MovieSoundService(
     private IQueryable<MovieSoundTrack> QueryTracks(bool tracking = false)
     {
         var query = db.MovieSoundTracks
+            .Include(item => item.MovieProject)
             .Include(item => item.Approvals)
-            .Include(item => item.Asset)
-            .Include(item => item.GenerationJob!).ThenInclude(item => item!.Assets)
+            .Include(item => item.Asset).ThenInclude(item => item!.StoredFile)
+            .Include(item => item.GenerationJob!).ThenInclude(item => item!.Assets).ThenInclude(item => item.StoredFile)
             .AsQueryable();
         return tracking ? query : query.AsNoTracking();
     }
@@ -241,8 +247,26 @@ public sealed class MovieSoundService(
         return reference;
     }
 
-    private async Task<Asset?> FindAudioAssetAsync(Guid assetId, Guid workspaceId, CancellationToken cancellationToken) =>
-        await db.Assets.Include(item => item.StoredFile).FirstOrDefaultAsync(item => item.Id == assetId && item.WorkspaceId == workspaceId && item.Status == AssetStatus.Active && item.StoredFile != null && item.StoredFile.Status == StoredFileStatus.Ready && (item.AssetType == AssetTypes.Audio || item.AssetType == AssetTypes.Music || (item.MimeType != null && item.MimeType.StartsWith("audio/"))), cancellationToken);
+    private async Task<Asset?> FindAudioAssetAsync(Guid assetId, MovieProject movie, CancellationToken cancellationToken)
+    {
+        var asset = await db.Assets.Include(item => item.StoredFile)
+            .FirstOrDefaultAsync(item => item.Id == assetId && item.WorkspaceId == movie.WorkspaceId, cancellationToken);
+        return asset is not null && IsEligibleAudioAsset(asset, movie) ? asset : null;
+    }
+
+    private static bool IsEligibleAudioAsset(Asset? asset, MovieProject movie) =>
+        asset is not null
+        && asset.Status == AssetStatus.Active
+        && asset.WorkspaceId == movie.WorkspaceId
+        && (asset.ProjectId is null || asset.ProjectId == movie.ProjectId)
+        && asset.StoredFileId.HasValue
+        && asset.StoredFile is { Status: StoredFileStatus.Ready, ConversationId: null } file
+        && file.WorkspaceId == movie.WorkspaceId
+        && (file.ProjectId is null || file.ProjectId == movie.ProjectId)
+        && (string.Equals(asset.AssetType, AssetTypes.Audio, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(asset.AssetType, AssetTypes.Music, StringComparison.OrdinalIgnoreCase)
+            || asset.MimeType?.StartsWith("audio/", StringComparison.OrdinalIgnoreCase) == true)
+        && file.ContentType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase);
 
     private async Task<SoundTarget?> ResolveTargetAsync(Guid? sceneId, Guid? shotId, CancellationToken cancellationToken)
     {

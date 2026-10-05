@@ -29,6 +29,10 @@ function deltaChunk() {
   return encoder.encode("event: message.delta\ndata: {\"messageId\":\"assistant-1\",\"delta\":\"late\"}\n\n");
 }
 
+function completedChunk() {
+  return encoder.encode("event: message.completed\ndata: {}\n\n");
+}
+
 async function flushMicrotasks() {
   for (let index = 0; index < 12; index += 1) await Promise.resolve();
 }
@@ -98,6 +102,32 @@ describe("Chat stream transport", () => {
     expect(failure.code).toBe("STREAM_CONNECTION_LOST");
     expect(failure.status).toBe(502);
     expect(failure.message).toBe("The chat stream connection was lost.");
+    expect(reader.cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("settles successfully when the connection fails after a terminal event", async () => {
+    let readCount = 0;
+    const reader = {
+      read: vi.fn(() => {
+        readCount += 1;
+        return readCount === 1
+          ? Promise.resolve({ done: false, value: completedChunk() })
+          : Promise.reject(new Error("socket closed after completion"));
+      }),
+      cancel: vi.fn().mockResolvedValue(undefined),
+      releaseLock: vi.fn(),
+    } as unknown as ReadableStreamDefaultReader<Uint8Array>;
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(csrfResponse("token"))
+      .mockResolvedValueOnce(streamResponse(reader));
+    vi.stubGlobal("fetch", fetchMock);
+    const { api } = await import("./api");
+    const events: string[] = [];
+
+    await expect(api.streamMessage("conversation-1", "hello", event => events.push(event.type), "request-terminal"))
+      .resolves.toBeUndefined();
+
+    expect(events).toEqual(["message.completed"]);
     expect(reader.cancel).toHaveBeenCalledTimes(1);
   });
 
