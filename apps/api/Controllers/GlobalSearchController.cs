@@ -147,9 +147,12 @@ public sealed class GlobalSearchController(TaslimDbContext db) : ControllerBase
             .ToListAsync(cancellationToken);
         AddGroup(groups, GlobalSearchResultTypes.File, files);
 
-        // Search user-authored titles and prompts, but expose only safe activity metadata.
+        // Generation execution records, including prompt-bearing InputJson, are
+        // private to their creator. Generated Assets remain the workspace-shared
+        // discovery surface through the separate asset query above.
         var generationRows = await db.GenerationJobs.AsNoTracking()
             .Where(job => workspaceIds.Contains(job.WorkspaceId)
+                && job.CreatedByUserId == userId
                 && ((job.Title != null && job.Title.ToLower().Contains(search))
                     || job.JobType.ToLower().Contains(search)
                     || job.InputJson.ToLower().Contains(search)

@@ -13,6 +13,7 @@ public static class RateLimiting
     public const string Upload = "uploads";
     public const string Search = "search";
     public const string ExpensiveAi = "expensive-ai";
+    public const string AccountSecurity = "account-security";
 
     public static void Configure(RateLimiterOptions options)
     {
@@ -41,6 +42,7 @@ public static class RateLimiting
                 Upload => 2,
                 Search => 8,
                 ExpensiveAi => 2,
+                AccountSecurity => 1,
                 _ => 0,
             };
 
@@ -112,6 +114,16 @@ public static class RateLimiting
             _ => new FixedWindowRateLimiterOptions
             {
                 PermitLimit = 10,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0,
+                AutoReplenishment = true,
+            }));
+
+        options.AddPolicy(AccountSecurity, httpContext => RateLimitPartition.GetFixedWindowLimiter(
+            Partition("account-security", httpContext),
+            _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 5,
                 Window = TimeSpan.FromMinutes(1),
                 QueueLimit = 0,
                 AutoReplenishment = true,

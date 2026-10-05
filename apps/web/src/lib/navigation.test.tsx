@@ -15,6 +15,8 @@ describe("navigation structure", () => {
     expect(desktopNavigation.map((item) => item.href)).not.toContain("/create/voice");
     expect(matchesNavigationPath("/create/research", "/create")).toBe(true);
     expect(matchesNavigationPath("/chat/conversation-1", "/chat")).toBe(true);
+    expect(matchesNavigationPath("/activity", "/notifications")).toBe(true);
+    expect(matchesNavigationPath("/activity/job-1", "/notifications")).toBe(true);
     expect(matchesNavigationPath("/projects", "/")).toBe(false);
   });
 

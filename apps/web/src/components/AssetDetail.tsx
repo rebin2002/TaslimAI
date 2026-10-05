@@ -1,3 +1,4 @@
+import { localeTag } from "@/lib/i18n";
 /* eslint-disable @next/next/no-img-element -- detail previews use authenticated API URLs with session cookies. */
 import { CalendarDays, Download, ExternalLink, FileText, FolderKanban, HardDrive, Headphones, Info, Layers3, Pencil, ShieldCheck, X } from "lucide-react";
 import type { Asset } from "../lib/api";
@@ -29,7 +30,7 @@ export function AssetDetail({ asset, locale, labels, onClose, onEdit }: {
   onClose: () => void;
   onEdit: (asset: Asset) => void;
 }) {
-  const date = new Intl.DateTimeFormat(locale, { dateStyle: "long", timeStyle: "short" }).format(new Date(asset.createdAt));
+  const date = new Intl.DateTimeFormat(localeTag(locale), { dateStyle: "long", timeStyle: "short" }).format(new Date(asset.createdAt));
   const mediaUrl = assetFileUrl(asset.id, true);
   const isImage = asset.canPreview && asset.assetType === "image";
   const isVideo = asset.canPreview && asset.assetType === "video";

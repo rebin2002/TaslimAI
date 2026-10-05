@@ -228,6 +228,31 @@ public sealed class MovieVideoExecutionStore(TaslimDbContext db, IOptions<MovieV
     }
 }
 
+internal static class MovieVideoProviderCleanup
+{
+    public static async Task TryCancelAsync(
+        IMovieVideoProvider provider,
+        string? providerJobId,
+        Guid jobId,
+        ILogger logger)
+    {
+        if (string.IsNullOrWhiteSpace(providerJobId)) return;
+        try
+        {
+            // Cleanup must not inherit a cancelled worker token. Otherwise a
+            // local timeout/cancellation can leave a remote operation running
+            // after the local job has reached a terminal state.
+            await provider.CancelAsync(providerJobId, CancellationToken.None);
+        }
+        catch (Exception exception)
+        {
+            // The local failure remains authoritative; do not surface provider
+            // response details in the user-visible generation result.
+            logger.LogWarning("Movie provider cleanup could not be completed. JobId={JobId}; ExceptionType={ExceptionType}", jobId, exception.GetType().Name);
+        }
+    }
+}
+
 public sealed class MovieVideoGenerationJobHandler(
     TaslimDbContext db,
     IMovieVideoProvider provider,
@@ -371,16 +396,14 @@ public sealed class MovieVideoGenerationJobHandler(
         catch (OperationCanceledException exception)
         {
             if (exception is MovieVideoStaleWorkerException) throw;
-            if (!string.IsNullOrWhiteSpace(execution.ProviderJobId))
-            {
-                try { await provider.CancelAsync(execution.ProviderJobId, CancellationToken.None); }
-                catch (Exception cancellationException) { logger.LogWarning("Movie provider cancellation could not be completed. JobId={JobId}; ExceptionType={ExceptionType}", job.Id, cancellationException.GetType().Name); }
-            }
+            await MovieVideoProviderCleanup.TryCancelAsync(provider, execution.ProviderJobId, job.Id, logger);
             await executions.MarkCancelledAsync(job.Id, job.ConcurrencyToken, CancellationToken.None);
             throw;
         }
         catch (Exception exception)
         {
+            if (exception is MovieVideoProviderTimeoutException)
+                await MovieVideoProviderCleanup.TryCancelAsync(provider, execution.ProviderJobId, job.Id, logger);
             var code = exception switch
             {
                 MovieVideoProviderException providerException => providerException.Code,

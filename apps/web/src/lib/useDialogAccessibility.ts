@@ -34,7 +34,8 @@ export function useDialogAccessibility<T extends HTMLElement>(open: boolean, onC
     if (!open || !dialogRef.current) return;
 
     const dialog = dialogRef.current;
-    openerRef.current = restoreFocusRef?.current ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
+    const opener = restoreFocusRef?.current ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
+    openerRef.current = opener?.isConnected ? opener : null;
     const focusInitial = window.setTimeout(() => {
       if (!dialog.isConnected) return;
       const initial = dialog.querySelector<HTMLElement>("[data-dialog-autofocus]") ?? focusableElements(dialog)[0] ?? dialog;

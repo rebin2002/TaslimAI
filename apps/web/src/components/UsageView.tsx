@@ -1,4 +1,5 @@
 "use client";
+import { localeTag } from "@/lib/i18n";
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
@@ -19,7 +20,7 @@ export function UsageView() {
   const [page, setPage] = useState(1);
   const [loadedWorkspaceId, setLoadedWorkspaceId] = useState<string | null>(null);
   const [error, setError] = useState(false);
-  const numberFormat = useMemo(() => new Intl.NumberFormat(locale), [locale]);
+  const numberFormat = useMemo(() => new Intl.NumberFormat(localeTag(locale)), [locale]);
 
   useEffect(() => {
     if (!workspace?.id) return;
