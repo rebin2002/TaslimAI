@@ -2,7 +2,7 @@ name: Taslim CI
 
 on:
   push:
-    branches: [main, "parallel/**"]
+    branches: [main, "parallel/**", "feature/taslim-autopilot-next-wave"]
   pull_request:
 
 permissions:
