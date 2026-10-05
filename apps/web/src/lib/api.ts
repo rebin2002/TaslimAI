@@ -875,6 +875,15 @@ async function streamRequest(path: string, payload: unknown, onEvent: (event: Ch
     }
     parser.push(decoder.decode());
     parser.end();
+  } catch (error) {
+    // The server has already durably settled the message. A broken connection
+    // after the terminal event must not turn a completed response into a
+    // duplicate-retry prompt in the caller.
+    if (parser.hasTerminalEvent()) {
+      cancelReader = true;
+      return;
+    }
+    throw error;
   } finally {
     if (cancelReader) {
       try { await reader.cancel(); } catch { /* the transport may already be closed */ }
