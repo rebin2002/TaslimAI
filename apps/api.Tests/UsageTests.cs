@@ -134,10 +134,10 @@ public sealed class UsageTests : IClassFixture<TaslimApiFactory>
         {
             var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
             db.UsageTransactions.AddRange(
-                CreateTransaction(auth, UsageTransactionStatus.Completed, 10, 2, 4, 1.25m, 0.25m, now),
+                CreateTransaction(auth, UsageTransactionStatus.Completed, 10, 2, 4, 1.23456789m, 0.23456789m, now),
                 CreateTransaction(auth, UsageTransactionStatus.Failed, null, 3, 1, 0m, 0m, now.AddSeconds(1)),
                 CreateTransaction(auth, UsageTransactionStatus.Cancelled, 7, null, null, 0m, 0m, now.AddSeconds(2)),
-                CreateTransaction(auth, UsageTransactionStatus.Refunded, 1, 1, 2, 4m, 1m, now.AddSeconds(3)));
+                CreateTransaction(auth, UsageTransactionStatus.Refunded, 1, 1, 2, 4.00000001m, 1.00000001m, now.AddSeconds(3)));
             await db.SaveChangesAsync();
         }
 
