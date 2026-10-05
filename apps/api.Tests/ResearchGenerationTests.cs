@@ -119,6 +119,7 @@ public sealed class ResearchGenerationTests : IClassFixture<ResearchApiFactory>
             var source = await db.ResearchSources.SingleAsync(item => item.GenerationJobId == created.Job.Id && item.CitationId == "S1");
             source.Title = "=SUM(A1:A2)";
             source.ExtractedText = "private extracted text must not be exported";
+            source.SearchQuery = "PRIVATE SEARCH QUERY MUST NOT BE EXPORTED";
             await db.SaveChangesAsync();
         }
         using var response = await owner.GetAsync($"/api/research-generation/jobs/{created.Job.Id}/sources/export");
@@ -131,6 +132,8 @@ public sealed class ResearchGenerationTests : IClassFixture<ResearchApiFactory>
         Assert.Contains("https://example.gov/energy", csv, StringComparison.Ordinal);
         Assert.DoesNotContain("private extracted text must not be exported", csv, StringComparison.Ordinal);
         Assert.DoesNotContain("Official energy evidence.", csv, StringComparison.Ordinal);
+        Assert.DoesNotContain("searchQuery", csv, StringComparison.Ordinal);
+        Assert.DoesNotContain("PRIVATE SEARCH QUERY MUST NOT BE EXPORTED", csv, StringComparison.Ordinal);
         Assert.True(csv.IndexOf("S1", StringComparison.Ordinal) < csv.IndexOf("S2", StringComparison.Ordinal));
 
         using var other = factory.CreateClient();

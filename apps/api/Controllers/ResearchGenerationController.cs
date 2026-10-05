@@ -115,13 +115,12 @@ public sealed class ResearchGenerationController(
                 source.CanonicalUrl,
                 source.PublishedAt,
                 source.RetrievedAt,
-                source.SearchQuery,
                 source.Rank,
                 source.IsSelected,
                 source.Evidence.Count))
             .ToArrayAsync(cancellationToken);
         var csv = new StringBuilder();
-        csv.AppendLine("citationId,sourceType,title,domain,publisher,url,canonicalUrl,publishedAt,retrievedAt,searchQuery,rank,isSelected,evidenceCount");
+        csv.AppendLine("citationId,sourceType,title,domain,publisher,url,canonicalUrl,publishedAt,retrievedAt,rank,isSelected,evidenceCount");
         foreach (var source in sources)
         {
             csv.AppendLine(string.Join(',',
@@ -134,7 +133,6 @@ public sealed class ResearchGenerationController(
                 CsvField(source.CanonicalUrl),
                 CsvField(source.PublishedAt?.ToString("O", CultureInfo.InvariantCulture)),
                 CsvField(source.RetrievedAt.ToString("O", CultureInfo.InvariantCulture)),
-                CsvField(source.SearchQuery),
                 CsvField(source.Rank.ToString(CultureInfo.InvariantCulture)),
                 CsvField(source.IsSelected ? "true" : "false"),
                 CsvField(source.EvidenceCount.ToString(CultureInfo.InvariantCulture))));
@@ -157,4 +155,4 @@ public sealed class ResearchGenerationController(
 public sealed record CreateResearchGenerationResponse(GenerationJobDto Job);
 public sealed record ResearchSourceDetailDto(string CitationId, string? Url, string Title, string Domain, string? Publisher, DateTime? PublishedAt, DateTime RetrievedAt, string SourceType, string? Snippet, string? SearchQuery, int Rank, bool IsSelected, IReadOnlyList<ResearchEvidenceDto> Evidence);
 public sealed record ResearchEvidenceDto(string Topic, string Excerpt, string? Context, DateTime? PublishedAt);
-internal sealed record ResearchSourceExportRow(string CitationId, string SourceType, string Title, string Domain, string? Publisher, string? Url, string? CanonicalUrl, DateTime? PublishedAt, DateTime RetrievedAt, string? SearchQuery, int Rank, bool IsSelected, int EvidenceCount);
+internal sealed record ResearchSourceExportRow(string CitationId, string SourceType, string Title, string Domain, string? Publisher, string? Url, string? CanonicalUrl, DateTime? PublishedAt, DateTime RetrievedAt, int Rank, bool IsSelected, int EvidenceCount);
