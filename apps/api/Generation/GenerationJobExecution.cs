@@ -998,6 +998,24 @@ public sealed class GenerationJobWorker(
                             if (publication.Asset is not null) db.Assets.Add(publication.Asset);
                             if (publication.Provenance is not null) db.GeneratedMediaProvenance.Add(publication.Provenance);
                         }
+                        // Movie clip and final-assembly projections must not lag the
+                        // canonical job state. Persist the generated asset first, then
+                        // update the movie sidecar in this same transaction so readers
+                        // can never observe Succeeded with a missing private asset link.
+                        if (GenerationJobTypes.MovieTypes.Contains(claimedJob.JobType))
+                        {
+                            await db.SaveChangesAsync(stoppingToken);
+                            var publication = publications.FirstOrDefault(item => item.Asset is not null);
+                            if (string.Equals(claimedJob.JobType, GenerationJobTypes.MovieAssembly, StringComparison.OrdinalIgnoreCase))
+                            {
+                                if (publication?.Asset is not null)
+                                    await assemblyExecutions.MarkReadyAsync(current.Id, claimedJob.ConcurrencyToken, publication.Asset.Id, publication.Output.MetadataJson, JsonSerializer.Serialize(new { contract = MovieFinalAssemblyQualityControl.ContractVersion, status = MovieFinalAssemblyQcStatuses.Passed }), stoppingToken);
+                            }
+                            else
+                            {
+                                await movieExecutions.MarkReadyAsync(current.Id, claimedJob.ConcurrencyToken, publication?.Asset?.Id, publication?.CreatedFile?.Id, null, publication?.Output.MetadataJson, stoppingToken);
+                            }
+                        }
                         await usage.CompleteAsync(await usage.BeginAsync(current, cancellationToken: stoppingToken), result.Usage ?? new AiUsageMetadata("system", "unknown", null, null, null, 0m, 0m, 0, "completed", true), hasBillableAsset: true, cancellationToken: stoppingToken);
                         await completionTransaction.CommitAsync(stoppingToken);
                     }
@@ -1052,19 +1070,6 @@ public sealed class GenerationJobWorker(
                 claimedJob.Id, claimedJob.JobType, claimedJob.RequestId, result.Usage?.ProviderKey, result.Usage?.ModelKey,
                 (long)Stopwatch.GetElapsedTime(executionStarted).TotalMilliseconds, true);
             await TryNotifyAsync(() => notifications.CreateGenerationCompletedAsync(claimedJob.Id, stoppingToken), claimedJob.Id);
-            if (GenerationJobTypes.MovieTypes.Contains(claimedJob.JobType))
-            {
-                var publication = publications.FirstOrDefault(item => item.Asset is not null);
-                if (string.Equals(claimedJob.JobType, GenerationJobTypes.MovieAssembly, StringComparison.OrdinalIgnoreCase))
-                {
-                    if (publication?.Asset is not null)
-                        await assemblyExecutions.MarkReadyAsync(current.Id, claimedJob.ConcurrencyToken, publication.Asset.Id, publication.Output.MetadataJson, JsonSerializer.Serialize(new { contract = MovieFinalAssemblyQualityControl.ContractVersion, status = MovieFinalAssemblyQcStatuses.Passed }), stoppingToken);
-                }
-                else
-                {
-                    await movieExecutions.MarkReadyAsync(current.Id, claimedJob.ConcurrencyToken, publication?.Asset?.Id, publication?.CreatedFile?.Id, null, publication?.Output.MetadataJson, stoppingToken);
-                }
-            }
             if (GenerationJobTypes.MovieDialogueVoiceTypes.Contains(claimedJob.JobType))
             {
                 var publication = publications.FirstOrDefault(item => item.Asset is not null);
