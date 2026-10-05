@@ -1,4 +1,5 @@
 "use client";
+import { localeTag } from "@/lib/i18n";
 
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
@@ -97,7 +98,7 @@ function VoiceAudioPlayer({ src, label, durationMilliseconds, compact = false }:
 function formatCreatedAt(value: string, locale: string) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "";
-  return new Intl.DateTimeFormat(locale, { month: "short", day: "numeric", year: "numeric" }).format(date);
+  return new Intl.DateTimeFormat(localeTag(locale), { month: "short", day: "numeric", year: "numeric" }).format(date);
 }
 
 export function VoiceStudioView() {
