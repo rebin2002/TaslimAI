@@ -78,6 +78,12 @@ export const studioCategories: StudioCategory[] = [
 
 export const studioRoutes = studioCategories.flatMap((category) => category.studios.map((studio) => studio.href));
 
+const navigationPathAliases: Record<string, readonly string[]> = {
+  "/notifications": ["/activity"],
+};
+
 export function matchesNavigationPath(pathname: string, href: string): boolean {
-  return href === "/" ? pathname === "/" : pathname === href || pathname.startsWith(`${href}/`);
+  if (href === "/") return pathname === "/";
+  const paths = [href, ...(navigationPathAliases[href] ?? [])];
+  return paths.some((path) => pathname === path || pathname.startsWith(`${path}/`));
 }
