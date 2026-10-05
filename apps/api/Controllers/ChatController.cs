@@ -500,9 +500,6 @@ public sealed class ChatController(
         if (conversation.Title == "New chat") conversation.Title = BuildTitle(content);
         conversation.UpdatedAt = now;
         conversation.LastMessageAt = now;
-        var userSequence = conversation.NextMessageSequence + 1;
-        var assistantSequence = userSequence + 1;
-        conversation.NextMessageSequence = assistantSequence;
         var userMessage = new ChatMessage
         {
             Id = Guid.NewGuid(),
@@ -512,7 +509,7 @@ public sealed class ChatController(
             Content = content,
             Status = ChatMessageStatus.Completed,
             CreatedAt = now,
-            Sequence = userSequence,
+            Sequence = 0,
         };
         var assistantMessage = new ChatMessage
         {
@@ -522,17 +519,25 @@ public sealed class ChatController(
             Content = string.Empty,
             Status = ChatMessageStatus.Pending,
             CreatedAt = now.AddTicks(1),
-            Sequence = assistantSequence,
+            Sequence = 0,
         };
         db.ChatMessages.AddRange(userMessage, assistantMessage);
         var attachmentError = await AttachFilesAsync(conversation, userMessage, request.AttachmentIds, cancellationToken);
         if (attachmentError is not null) return PreparedChat.Failure(attachmentError);
+        await using var sequenceTransaction = await db.Database.BeginTransactionAsync(cancellationToken);
+        var assistantSequence = await ReserveMessageSequencePairAsync(conversation.Id, cancellationToken);
+        userMessage.Sequence = assistantSequence - 1;
+        assistantMessage.Sequence = assistantSequence;
+        conversation.NextMessageSequence = assistantSequence;
+        db.Entry(conversation).Property(item => item.NextMessageSequence).IsModified = false;
         try
         {
             await db.SaveChangesAsync(cancellationToken);
+            await sequenceTransaction.CommitAsync(cancellationToken);
         }
         catch (DbUpdateException)
         {
+            await sequenceTransaction.RollbackAsync(CancellationToken.None);
             var duplicate = await db.ChatMessages.AsNoTracking().FirstOrDefaultAsync(message => message.ConversationId == conversationId && message.RequestId == requestId, cancellationToken);
             if (duplicate is not null) return PreparedChat.Failure(ApiResults.Error(this, StatusCodes.Status409Conflict, "MESSAGE_IN_PROGRESS", "That message is already being generated."));
             throw;
@@ -699,6 +704,28 @@ public sealed class ChatController(
             .Where(message => message.Id == assistantId && message.Role == ChatMessageRole.Assistant && message.Status == ChatMessageStatus.Failed)
             .ExecuteUpdateAsync(setters => setters.SetProperty(message => message.Status, ChatMessageStatus.Pending), cancellationToken);
         return updated == 1;
+    }
+
+    private async Task<long> ReserveMessageSequencePairAsync(Guid conversationId, CancellationToken cancellationToken)
+    {
+        // Reserve both message slots with a compare-and-swap update. The
+        // transaction keeps the reservation and message inserts atomic while
+        // the conditional update serializes concurrent writers without
+        // provider-specific locking SQL.
+        for (var attempt = 0; attempt < 8; attempt++)
+        {
+            var current = await db.Conversations.AsNoTracking()
+                .Where(item => item.Id == conversationId)
+                .Select(item => item.NextMessageSequence)
+                .SingleAsync(cancellationToken);
+            var assistantSequence = current + 2;
+            var updated = await db.Conversations
+                .Where(item => item.Id == conversationId && item.NextMessageSequence == current)
+                .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.NextMessageSequence, assistantSequence), cancellationToken);
+            if (updated == 1) return assistantSequence;
+        }
+
+        throw new InvalidOperationException("Could not reserve conversation message sequence.");
     }
 
     private Task<UsageTransaction> BeginUsageAsync(PreparedChat prepared, CancellationToken cancellationToken) => usageLedger.GetOrCreatePendingAsync(

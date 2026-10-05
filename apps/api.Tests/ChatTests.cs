@@ -300,6 +300,26 @@ public sealed class ChatTests : IClassFixture<TaslimApiFactory>
     }
 
     [Fact]
+    public async Task Concurrent_new_turns_reserve_distinct_message_sequences()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Concurrent Ordering Chat Owner");
+        var conversation = await CreateConversation(client, auth.PersonalWorkspace.Id);
+
+        var responses = await Task.WhenAll(
+            SendMessage(client, conversation.Id, "Concurrent first", Guid.NewGuid().ToString("N")),
+            SendMessage(client, conversation.Id, "Concurrent second", Guid.NewGuid().ToString("N")));
+
+        Assert.All(responses, response => Assert.Equal(HttpStatusCode.OK, response.StatusCode));
+        var messages = await client.GetFromJsonAsync<List<ChatMessageDto>>($"/api/conversations/{conversation.Id}/messages");
+        Assert.NotNull(messages);
+        Assert.Equal(4, messages.Count);
+        Assert.Equal([1L, 2L, 3L, 4L], messages.Select(message => message.Sequence));
+        Assert.Equal(2, messages.Count(message => message.Role == "User"));
+        Assert.Equal(2, messages.Count(message => message.Role == "Assistant"));
+    }
+
+    [Fact]
     public async Task Streaming_provider_failure_emits_failed_terminal_event_and_persists_failure()
     {
         using var client = factory.CreateClient();
