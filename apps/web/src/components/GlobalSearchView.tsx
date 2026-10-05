@@ -6,6 +6,7 @@ import { FileText, FolderOpen, LibraryBig, MessageCircle, Search, Sparkles, Uplo
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useLocale } from "@/components/LocaleProvider";
 import { api, type GlobalSearchGroup, type GlobalSearchResult, type GlobalSearchResultType } from "@/lib/api";
+import { globalSearchResultDestination } from "@/lib/searchNavigation";
 
 const groupOrder: GlobalSearchResultType[] = ["projects", "conversations", "assets", "files", "generation"];
 
@@ -20,20 +21,6 @@ const icons: Record<GlobalSearchResultType, typeof FolderOpen> = {
 function formatDate(value: string | null, locale: string) {
   if (!value) return "";
   return new Intl.DateTimeFormat(locale, { month: "short", day: "numeric", year: "numeric" }).format(new Date(value));
-}
-
-function destination(result: GlobalSearchResult) {
-  if (result.type === "projects") return `/projects/${result.id}`;
-  if (result.type === "conversations") return `/chat/${result.id}`;
-  if (result.type === "assets") return `/assets?search=${encodeURIComponent(result.title)}&status=${result.status ?? "Active"}`;
-  if (result.type === "files") {
-    if (result.projectId) return `/projects/${result.projectId}`;
-    if (result.conversationId) return `/chat/${result.conversationId}`;
-    return "/create/document";
-  }
-  if (result.assetId) return `/assets?search=${encodeURIComponent(result.title)}&status=Active`;
-  if (result.projectId) return `/projects/${result.projectId}`;
-  return "/notifications";
 }
 
 export function GlobalSearchView() {
@@ -123,5 +110,5 @@ function SearchGroup({ group, locale, t }: { group: GlobalSearchGroup; locale: s
 function SearchResult({ result, locale, t }: { result: GlobalSearchResult; locale: string; t: (key: string, variables?: Record<string, string>) => string }) {
   const Icon = icons[result.type];
   const metadata = result.type === "files" ? t("search.file", { type: result.metadata ?? "" }) : result.metadata ? (result.type === "projects" ? t("search.type", { type: result.metadata }) : result.metadata) : null;
-  return <Link href={destination(result)} className="global-search-result" aria-label={`${t("search.open")}: ${result.title}`}><span className="global-search-result-icon"><Icon size={17} /></span><span className="global-search-result-copy"><strong>{result.title}</strong><span className="global-search-result-details">{result.projectName ? t("search.project", { name: result.projectName }) : metadata}{result.projectName && metadata ? ` · ${metadata}` : ""}</span><small>{result.status ? t("search.status", { status: result.status }) : ""}{result.status && result.updatedAt ? " · " : ""}{formatDate(result.updatedAt ?? result.createdAt, locale)}</small></span><span className="global-search-open"><FileText size={15} /></span></Link>;
+  return <Link href={globalSearchResultDestination(result)} className="global-search-result" aria-label={`${t("search.open")}: ${result.title}`}><span className="global-search-result-icon"><Icon size={17} /></span><span className="global-search-result-copy"><strong>{result.title}</strong><span className="global-search-result-details">{result.projectName ? t("search.project", { name: result.projectName }) : metadata}{result.projectName && metadata ? ` · ${metadata}` : ""}</span><small>{result.status ? t("search.status", { status: result.status }) : ""}{result.status && result.updatedAt ? " · " : ""}{formatDate(result.updatedAt ?? result.createdAt, locale)}</small></span><span className="global-search-open"><FileText size={15} /></span></Link>;
 }

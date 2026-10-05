@@ -23,7 +23,7 @@ const assetCategories: AssetCategory[] = [
 ];
 const sortOptions: AssetSort[] = ["recent", "oldest", "name", "size"];
 
-export function AssetsView({ initialProjectId, initialSearch, initialStatus }: { initialProjectId?: string; initialSearch?: string; initialStatus?: AssetStatus }) {
+export function AssetsView({ initialAssetId, initialProjectId, initialSearch, initialStatus }: { initialAssetId?: string; initialProjectId?: string; initialSearch?: string; initialStatus?: AssetStatus }) {
   const { workspace } = useAuth();
   const { t, locale } = useLocale();
   const [result, setResult] = useState<AssetList | null>(null);
@@ -63,6 +63,17 @@ export function AssetsView({ initialProjectId, initialSearch, initialStatus }: {
   }, [category, page, projectId, search, sort, status, t, workspace]);
 
   useEffect(() => { const timer = window.setTimeout(() => void load(), 250); return () => window.clearTimeout(timer); }, [load]);
+
+  useEffect(() => {
+    if (!initialAssetId || !workspace) return;
+    let active = true;
+    void api.getAsset(initialAssetId).then((asset) => {
+      if (active) setSelected(asset);
+    }).catch((caught) => {
+      if (active) setError(caught instanceof Error ? caught.message : t("assets.loadError"));
+    });
+    return () => { active = false; };
+  }, [initialAssetId, t, workspace]);
 
   const labels = useMemo<AssetCardLabels>(() => ({
     project: t("assets.project"), workspace: t("assets.workspaceLevel"), rename: t("assets.rename"), archive: t("assets.archive"), restore: t("assets.restore"), download: t("assets.download"), open: t("assets.open"), type: "", fileUnavailable: t("assets.fileUnavailable"),
