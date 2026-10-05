@@ -17,7 +17,8 @@ namespace Taslim.Api.Controllers;
 public sealed class AutopilotConsoleController(
     IAutopilotOrchestrator orchestrator,
     AutopilotConsoleService console,
-    AutopilotBacklogService backlog) : ControllerBase
+    AutopilotBacklogService backlog,
+    IAutopilotAuditLog audit) : ControllerBase
 {
     [HttpGet("overview")]
     public async Task<ActionResult<AutopilotOverviewDto>> Overview(
@@ -75,8 +76,7 @@ public sealed class AutopilotConsoleController(
         [FromBody] AutopilotBacklogItemRequest request,
         CancellationToken cancellationToken)
     {
-        var actorValue = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
-        Guid? actorUserId = Guid.TryParse(actorValue, out var parsed) ? parsed : null;
+        if (!TryGetActorUserId(out var actorUserId)) return Unauthorized();
         if (string.IsNullOrWhiteSpace(request.Reason))
             return BadRequest(new { error = new { code = "AUTOPILOT_REASON_REQUIRED", message = "A reason is required to change the backlog." } });
 
@@ -93,8 +93,7 @@ public sealed class AutopilotConsoleController(
         [FromBody] AutopilotControlRequest request,
         CancellationToken cancellationToken)
     {
-        var actorValue = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
-        Guid? actorUserId = Guid.TryParse(actorValue, out var parsed) ? parsed : null;
+        if (!TryGetActorUserId(out var actorUserId)) return Unauthorized();
         if (string.IsNullOrWhiteSpace(request.Reason))
             return BadRequest(new { error = new { code = "AUTOPILOT_REASON_REQUIRED", message = "A reason is required for a control change." } });
 
@@ -108,11 +107,25 @@ public sealed class AutopilotConsoleController(
         [FromBody] AutopilotReconcileRequest request,
         CancellationToken cancellationToken)
     {
+        if (!TryGetActorUserId(out var actorUserId)) return Unauthorized();
         if (string.IsNullOrWhiteSpace(request.Reason))
             return BadRequest(new { error = new { code = "AUTOPILOT_REASON_REQUIRED", message = "A reason is required to run reconciliation." } });
 
+        await audit.RecordAsync(AutopilotAuditFactory.Create(
+            AutopilotAuditActions.ManualReconciliationRequested,
+            AutopilotAuditOutcomes.Recorded,
+            reason: request.Reason,
+            statusDetail: "manual_reconcile_requested",
+            actorUserId: actorUserId,
+            requestId: HttpContext.TraceIdentifier), cancellationToken);
         var result = await orchestrator.ReconcileAsync($"manual:{request.Reason}", cancellationToken);
         return Ok(result);
+    }
+
+    private bool TryGetActorUserId(out Guid actorUserId)
+    {
+        var actorValue = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+        return Guid.TryParse(actorValue, out actorUserId) && actorUserId != Guid.Empty;
     }
 }
 
