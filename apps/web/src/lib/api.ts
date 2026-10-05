@@ -543,8 +543,8 @@ export type GlobalSearchResult = {
   createdAt: string;
   updatedAt: string | null;
 };
-export type GlobalSearchGroup = { type: GlobalSearchResultType; count: number; items: GlobalSearchResult[] };
-export type GlobalSearchResponse = { query: string; totalCount: number; groups: GlobalSearchGroup[] };
+export type GlobalSearchGroup = { type: GlobalSearchResultType; count: number; hasMore: boolean; items: GlobalSearchResult[] };
+export type GlobalSearchResponse = { query: string; totalCount: number; page: number; pageSize: number; hasMore: boolean; groups: GlobalSearchGroup[] };
 export type NotificationItem = {
   id: string;
   workspaceId: string;
@@ -1335,7 +1335,7 @@ export const api = {
     if (status && status !== "All") params.set("status", status);
     return request<ActivityList>(`/api/activity?${params.toString()}`);
   },
-  search: (query: string, limit = 8) => request<GlobalSearchResponse>(`/api/search?q=${encodeURIComponent(query)}&limit=${limit}`),
+  search: (query: string, page = 1, limit = 8) => request<GlobalSearchResponse>(`/api/search?q=${encodeURIComponent(query)}&page=${page}&limit=${limit}`),
   getActivityUnreadCount: (workspaceId: string) => request<{ unreadCount: number }>(`/api/activity/unread-count?workspaceId=${encodeURIComponent(workspaceId)}`),
   markActivityRead: (workspaceId: string, jobId: string) => request<{ read: boolean }>(`/api/activity/${jobId}/read`, { method: "POST", body: JSON.stringify({ workspaceId }) }, true),
   markAllActivityRead: (workspaceId: string) => request<{ read: boolean }>("/api/activity/read-all", { method: "POST", body: JSON.stringify({ workspaceId }) }, true),
