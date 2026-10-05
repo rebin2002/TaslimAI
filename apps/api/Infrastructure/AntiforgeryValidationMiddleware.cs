@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Antiforgery;
+using Microsoft.AspNetCore.Mvc;
 using Taslim.Api.Contracts;
 
 namespace Taslim.Api.Infrastructure;
@@ -21,8 +22,12 @@ public sealed class AntiforgeryValidationMiddleware(
             || HttpMethods.IsPatch(context.Request.Method)
             || HttpMethods.IsDelete(context.Request.Method);
         var isAnonymousAuthenticationEndpoint = context.Request.Path.Value is "/api/auth/login" or "/api/auth/register";
+        var hasExplicitAntiforgeryExemption = context.GetEndpoint()?.Metadata.GetMetadata<IgnoreAntiforgeryTokenAttribute>() is not null;
 
-        if (endpointRequiresAntiforgery && isStateChanging && (context.User.Identity?.IsAuthenticated == true || isAnonymousAuthenticationEndpoint))
+        if (endpointRequiresAntiforgery
+            && isStateChanging
+            && !hasExplicitAntiforgeryExemption
+            && (context.User.Identity?.IsAuthenticated == true || isAnonymousAuthenticationEndpoint))
         {
             try
             {
