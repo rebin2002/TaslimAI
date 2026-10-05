@@ -11,4 +11,9 @@ describe("admin page access", () => {
     expect(adminPageAccess(false, false, false)).toBe("unauthenticated");
     expect(adminPageAccess(false, true, true)).toBe("allowed");
   });
+
+  it("fails closed when the session bootstrap times out without revoking a recovered admin", () => {
+    expect(adminPageAccess(true, false, false, true)).toBe("unauthenticated");
+    expect(adminPageAccess(false, true, true)).toBe("allowed");
+  });
 });

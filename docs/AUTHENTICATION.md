@@ -4,7 +4,7 @@
 
 Taslim uses ASP.NET Core Identity with a GUID-backed `ApplicationUser`. Identity owns normalized email, password hashing, security stamps, lockout fields, and other security fields. Taslim-owned profile fields are `DisplayName`, `PreferredLanguage`, `CreatedAt`, `UpdatedAt`, `LastLoginAt`, and `IsActive`.
 
-Registration uses `POST /api/auth/register` and creates the user, a Personal Workspace, and an Owner membership in one EF transaction. The user is signed in only after the workspace and membership are saved. Login uses `POST /api/auth/login`; authentication failures use the generic message `Invalid email or password.`. Current session data is returned by `GET /api/auth/me`, and `POST /api/auth/logout` ends the cookie session.
+Registration uses `POST /api/auth/register` and creates the user, a Personal Workspace, and an Owner membership in one EF transaction. The user is signed in only after the workspace and membership are saved. Login uses `POST /api/auth/login`; authentication failures use the generic message `Invalid email or password.`. Current session data is returned by `GET /api/auth/me`, and `POST /api/auth/logout` ends the cookie session. Authenticated users can call the CSRF-protected `POST /api/auth/sessions/revoke` endpoint to rotate their Identity security stamp and revoke every other application session while keeping the current session alive.
 
 The server never returns password or Identity security fields. No access token is stored in localStorage, and the frontend never receives a provider or database secret.
 
@@ -71,7 +71,7 @@ The CSRF cookie is `Secure` and `SameSite=None` in Production. The token is not 
 
 Authentication changes the antiforgery token’s user binding. Successful registration, login, and logout responses also expire the prior `taslim.csrf` cookie with `Cache-Control: no-store`; the web API client invalidates its cached token and fetches a fresh token after each transition. This keeps concurrent auth-transition responses from leaving a stale cookie/request-token pair available for a later mutation. If a state-changing request receives the safe `CSRF_VALIDATION_FAILED` response, the client refreshes once and retries the same request; it does not retry repeatedly or bypass validation.
 
-Identity security stamps are validated on every authenticated request. A password change or explicit security-stamp revocation therefore rejects every other application session immediately rather than waiting for Identity’s default validation interval; the active-user check also rejects deactivated accounts on the same request path.
+Identity security stamps are validated on every authenticated request. A password change or explicit security-stamp revocation therefore rejects every other application session immediately rather than waiting for Identity’s default validation interval; the active-user check also rejects deactivated accounts on the same request path. The session-revocation endpoint refreshes the caller’s cookie after rotating the stamp, so the initiating session remains usable while every other cookie is rejected.
 
 The API also validates state-changing authenticated `/api` requests, plus anonymous `/api/auth/login` and `/api/auth/register`, in middleware immediately after authentication and before authorization/MVC execution. This allows stale anonymous login tokens to receive a stable `CSRF_VALIDATION_FAILED` response instead of the generic MVC 400 body. The existing controller `[ValidateAntiForgeryToken]` attributes remain in place as defense in depth.
 
