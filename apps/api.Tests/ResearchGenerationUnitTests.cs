@@ -106,6 +106,31 @@ public sealed class ResearchGenerationUnitTests
     }
 
     [Fact]
+    public void Evidence_processor_counts_context_across_multiple_items_within_total_bound()
+    {
+        var sources = new[]
+        {
+            new ResearchSourceCandidate("S1", "https://example.gov/one", "https://example.gov/one", "One", "example.gov", null, null, DateTime.UtcNow, "web", "Snippet one", "Extracted one", null, 1, true, null),
+            new ResearchSourceCandidate("S2", "https://example.gov/two", "https://example.gov/two", "Two", "example.gov", null, null, DateTime.UtcNow, "web", "Snippet two", "Extracted two", null, 2, true, null),
+        };
+        var providerEvidence = new[]
+        {
+            new ResearchEvidenceCandidate("S1", "topic one", new string('e', 40), new string('c', 40), null),
+            new ResearchEvidenceCandidate("S2", "topic two", new string('e', 40), new string('c', 40), null),
+        };
+
+        var result = new DeterministicResearchEvidenceProcessor().Normalize(sources, providerEvidence, new ResearchGenerationOptions
+        {
+            MaxEvidencePerSource = 1,
+            MaxEvidenceCharacters = 100,
+            MaxTotalEvidenceCharacters = 100,
+        });
+
+        Assert.Equal(2, result.Count);
+        Assert.True(result.Sum(item => item.Excerpt.Length + (item.Context?.Length ?? 0)) <= 100);
+    }
+
+    [Fact]
     public void Uploaded_source_candidate_keeps_stable_file_identity_separate_from_display_name()
     {
         var fileId = Guid.NewGuid();
