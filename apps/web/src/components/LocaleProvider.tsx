@@ -1,11 +1,15 @@
 "use client";
 
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { localeDirection, localeNames, localeTag, locales, translate, type Locale } from "@/lib/i18n";
+
+export type LocaleSource = "default" | "anonymous-storage" | "user" | "account";
+type LocaleUpdateOptions = { persist?: boolean; source?: LocaleSource };
 
 type LocaleContextValue = {
   locale: Locale;
-  setLocale: (locale: Locale, options?: { persist?: boolean }) => void;
+  getLocaleSource: () => LocaleSource;
+  setLocale: (locale: Locale, options?: LocaleUpdateOptions) => void;
   t: (key: string, variables?: Record<string, string>) => string;
 };
 
@@ -26,11 +30,15 @@ export function LocaleProvider({ children }: Readonly<{ children: React.ReactNod
   // shell. The persisted choice is applied after hydration, which avoids a
   // locale-dependent tree mismatch while still restoring Arabic/Sorani.
   const [locale, setLocaleState] = useState<Locale>("en");
+  const localeSource = useRef<LocaleSource>("default");
 
   useEffect(() => {
     const saved = storedLocale();
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- restore persisted UI state after hydration.
-    if (saved !== "en") setLocaleState(saved);
+    if (saved !== "en") {
+      localeSource.current = "anonymous-storage";
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- restore persisted UI state after hydration.
+      setLocaleState(saved);
+    }
   }, []);
 
   useEffect(() => {
@@ -38,7 +46,9 @@ export function LocaleProvider({ children }: Readonly<{ children: React.ReactNod
     document.documentElement.dir = localeDirection(locale);
   }, [locale]);
 
-  const setLocale = useCallback((next: Locale, options?: { persist?: boolean }) => {
+  const getLocaleSource = useCallback(() => localeSource.current, []);
+  const setLocale = useCallback((next: Locale, options?: LocaleUpdateOptions) => {
+    localeSource.current = options?.source ?? "user";
     setLocaleState(next);
     if (options?.persist === false) return;
     try {
@@ -51,10 +61,11 @@ export function LocaleProvider({ children }: Readonly<{ children: React.ReactNod
   const value = useMemo(
     () => ({
       locale,
+      getLocaleSource,
       setLocale,
       t: (key: string, variables?: Record<string, string>) => translate(locale, key, variables),
     }),
-    [locale, setLocale],
+    [getLocaleSource, locale, setLocale],
   );
 
   return <LocaleContext.Provider value={value}>{children}</LocaleContext.Provider>;

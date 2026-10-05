@@ -24,7 +24,7 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 export function AuthProvider({ children }: Readonly<{ children: React.ReactNode }>) {
   const [session, setSession] = useState<AuthResponse | null>(null);
   const [loading, setLoading] = useState(true);
-  const { locale, setLocale } = useLocale();
+  const { getLocaleSource, locale, setLocale } = useLocale();
   const router = useRouter();
   const sessionLocaleInitialized = useRef<string | null>(null);
   const authRequestGeneration = useRef(0);
@@ -61,9 +61,11 @@ export function AuthProvider({ children }: Readonly<{ children: React.ReactNode 
       } catch {
         // Access to browser storage can be blocked by privacy settings.
       }
-      setLocale(savedLocale ?? user.preferredLanguage, { persist: false });
+      if (getLocaleSource() !== "user") {
+        setLocale(savedLocale ?? user.preferredLanguage, { persist: false, source: "account" });
+      }
     }
-  }, [session?.user, setLocale]);
+  }, [getLocaleSource, session?.user, setLocale]);
   useEffect(() => {
     const userId = session?.user.id;
     if (!userId || sessionLocaleInitialized.current !== userId) return;
@@ -97,7 +99,7 @@ export function AuthProvider({ children }: Readonly<{ children: React.ReactNode 
     if (request !== authRequestGeneration.current) return;
     setSession(null);
     sessionLocaleInitialized.current = null;
-    setLocale("en", { persist: false });
+    setLocale("en", { persist: false, source: "default" });
     try { window.localStorage.removeItem(anonymousLocaleStorageKey); } catch { /* Storage can be unavailable. */ }
     router.push("/");
   }, [router, setLocale]);
@@ -109,7 +111,7 @@ export function AuthProvider({ children }: Readonly<{ children: React.ReactNode 
     // choice immediately so Account does not require a reload to switch the
     // document language and direction.
     const nextLocale = input.preferredLanguage as Locale;
-    if (locales.includes(nextLocale)) setLocale(nextLocale, { persist: false });
+    if (locales.includes(nextLocale)) setLocale(nextLocale, { persist: false, source: "account" });
   }, [setLocale]);
 
   const completeOnboarding = useCallback(async (input: OnboardingInput) => {
