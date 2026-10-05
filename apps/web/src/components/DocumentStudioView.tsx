@@ -25,12 +25,13 @@ import {
   clearDocumentActiveJobId,
   displayDocumentProgress,
   documentPresentationState,
-  isDocumentJob,
   isDocumentSourceReady,
+  isRestorableDocumentJob,
   nextDocumentPollDelay,
   parseDocumentJobResult,
   persistDocumentActiveJobId,
   readDocumentActiveJobId,
+  shouldResetDocumentWorkspaceState,
   shouldPollDocumentJob,
 } from "@/lib/documentStudioState";
 
@@ -76,17 +77,22 @@ export function DocumentStudioView() {
   const [downloadError, setDownloadError] = useState("");
   const [copyState, setCopyState] = useState<"idle" | "copied" | "error">("idle");
   const restoreJobId = useRef<string | null>(null);
+  const observedWorkspaceId = useRef<string | null>(workspace?.id ?? null);
+  const workspaceGeneration = useRef(0);
 
   const loadSources = useCallback(async () => {
     if (!workspace) return;
+    const workspaceId = workspace.id;
+    const workspaceVersion = workspaceGeneration.current;
     setLoadingSources(true);
     setLoadingRecent(true);
     const [projectsResult, archivedResult, filesResult, assetsResult] = await Promise.allSettled([
-      api.listProjects(workspace.id, "Active"),
-      api.listProjects(workspace.id, "Archived"),
-      api.listFiles(workspace.id),
-      api.listAssets(workspace.id, { assetType: "document", sort: "recent", pageSize: 4 }),
+      api.listProjects(workspaceId, "Active"),
+      api.listProjects(workspaceId, "Archived"),
+      api.listFiles(workspaceId),
+      api.listAssets(workspaceId, { assetType: "document", sort: "recent", pageSize: 4 }),
     ]);
+    if (observedWorkspaceId.current !== workspaceId || workspaceGeneration.current !== workspaceVersion) return;
     if (projectsResult.status === "fulfilled" && archivedResult.status === "fulfilled") {
       setProjects([...projectsResult.value, ...archivedResult.value]);
     } else {
@@ -98,28 +104,65 @@ export function DocumentStudioView() {
     setLoadingRecent(false);
   }, [workspace]);
 
+  // Workspace-scoped jobs, briefs, selections, and source lists must not survive an ownership boundary.
+  // The generation counter fences responses and actions that started in the previous workspace.
+  useEffect(() => {
+    const nextWorkspaceId = workspace?.id ?? null;
+    if (observedWorkspaceId.current === nextWorkspaceId) return;
+    const previousWorkspaceId = observedWorkspaceId.current;
+    observedWorkspaceId.current = nextWorkspaceId;
+    workspaceGeneration.current += 1;
+    restoreJobId.current = null;
+    if (previousWorkspaceId === null && nextWorkspaceId !== null && !shouldResetDocumentWorkspaceState(current, nextWorkspaceId)) return;
+    setCurrent(null);
+    setSelected([]);
+    setProjects([]);
+    setFiles([]);
+    setRecentAssets([]);
+    setProjectId("");
+    setTitle("");
+    setPrompt("");
+    setDocumentType("auto");
+    setLength("standard");
+    setAudience("");
+    setAdditionalInstructions("");
+    setLanguage("auto");
+    setTone("professional");
+    setIncludeTableOfContents(true);
+    setPollRetry(0);
+    setRetryingCompleted(false);
+    setWorking(false);
+    setLoadingSources(true);
+    setLoadingRecent(true);
+    setError("");
+    setDownloadError("");
+    setCopyState("idle");
+  }, [current, workspace?.id]);
+
   // Synchronize source documents, projects, and recent document assets when the authenticated workspace changes.
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void loadSources(); }, [loadSources]);
 
   useEffect(() => {
     if (!workspace || current) return;
-    const storedJobId = readDocumentActiveJobId(workspace.id);
+    const workspaceId = workspace.id;
+    const workspaceVersion = workspaceGeneration.current;
+    const storedJobId = readDocumentActiveJobId(workspaceId);
     if (!storedJobId) return;
     restoreJobId.current = storedJobId;
     let active = true;
     void api.getGenerationJob(storedJobId).then((job) => {
-      if (!active || restoreJobId.current !== storedJobId) return;
-      if (job.workspaceId !== workspace.id || !isDocumentJob(job)) {
-        clearDocumentActiveJobId(workspace.id);
+      if (!active || workspaceGeneration.current !== workspaceVersion || restoreJobId.current !== storedJobId) return;
+      if (!isRestorableDocumentJob(job, workspaceId, storedJobId)) {
+        clearDocumentActiveJobId(workspaceId);
         return;
       }
       setCurrent(job);
       setPollRetry(0);
     }).catch((cause) => {
-      if (!active || restoreJobId.current !== storedJobId) return;
+      if (!active || workspaceGeneration.current !== workspaceVersion || restoreJobId.current !== storedJobId) return;
       if (cause instanceof ApiError && (cause.status === 403 || cause.status === 404)) {
-        clearDocumentActiveJobId(workspace.id);
+        clearDocumentActiveJobId(workspaceId);
       }
     });
     return () => { active = false; };
@@ -128,16 +171,17 @@ export function DocumentStudioView() {
   useEffect(() => {
     if (!current || !shouldPollDocumentJob(current)) return;
     const jobId = current.id;
+    const workspaceVersion = workspaceGeneration.current;
     let active = true;
     const timer = window.setTimeout(async () => {
       try {
         const next = await api.getGenerationJob(jobId);
-        if (!active) return;
+        if (!active || workspaceGeneration.current !== workspaceVersion || current.id !== jobId || !isRestorableDocumentJob(next, current.workspaceId, jobId)) return;
         setCurrent(next);
         setError("");
         setPollRetry(0);
       } catch {
-        if (!active) return;
+        if (!active || workspaceGeneration.current !== workspaceVersion || current.id !== jobId) return;
         setError(t("document.pollError"));
         // Keep polling after a transient request failure; the current job remains the source of truth.
         setPollRetry((attempt) => attempt + 1);
@@ -159,57 +203,73 @@ export function DocumentStudioView() {
       setError(t("document.required"));
       return;
     }
+    const workspaceId = workspace.id;
+    const workspaceVersion = workspaceGeneration.current;
     setWorking(true);
     setError("");
     setDownloadError("");
     setCopyState("idle");
     restoreJobId.current = null;
-    clearDocumentActiveJobId(workspace.id);
+    clearDocumentActiveJobId(workspaceId);
     try {
-      const job = await api.createDocumentGenerationJob({ workspaceId: workspace.id, projectId: projectId || null, title: title.trim() || null, description: prompt.trim(), documentType, length, audience: audience.trim() || null, additionalInstructions: additionalInstructions.trim() || null, attachmentIds: selected, language, tone, includeTableOfContents });
-      persistDocumentActiveJobId(workspace.id, job.id);
+      const job = await api.createDocumentGenerationJob({ workspaceId, projectId: projectId || null, title: title.trim() || null, description: prompt.trim(), documentType, length, audience: audience.trim() || null, additionalInstructions: additionalInstructions.trim() || null, attachmentIds: selected, language, tone, includeTableOfContents });
+      if (workspaceGeneration.current !== workspaceVersion || observedWorkspaceId.current !== workspaceId || !isRestorableDocumentJob(job, workspaceId)) return;
+      persistDocumentActiveJobId(workspaceId, job.id);
       setCurrent(job);
       setPollRetry(0);
     } catch {
-      setError(t("document.createError"));
+      if (workspaceGeneration.current === workspaceVersion && observedWorkspaceId.current === workspaceId) setError(t("document.createError"));
     } finally {
-      setWorking(false);
+      if (workspaceGeneration.current === workspaceVersion && observedWorkspaceId.current === workspaceId) setWorking(false);
     }
   }
 
   async function cancel() {
     if (!current || !canCancelDocumentJob(current)) return;
+    const workspaceId = current.workspaceId;
+    const workspaceVersion = workspaceGeneration.current;
+    const jobId = current.id;
     setWorking(true);
     setError("");
     try {
-      await api.cancelGenerationJob(current.id);
-      setCurrent(await api.getGenerationJob(current.id));
+      await api.cancelGenerationJob(jobId);
+      const next = await api.getGenerationJob(jobId);
+      if (workspaceGeneration.current !== workspaceVersion || current.id !== jobId || !isRestorableDocumentJob(next, workspaceId, jobId)) return;
+      setCurrent(next);
     } catch {
-      setError(t("document.cancelError"));
+      if (workspaceGeneration.current === workspaceVersion && current.id === jobId) setError(t("document.cancelError"));
     } finally {
-      setWorking(false);
+      if (workspaceGeneration.current === workspaceVersion && current.id === jobId) setWorking(false);
     }
   }
 
   async function retryCompleted() {
     if (!current) return;
+    const workspaceId = current.workspaceId;
+    const workspaceVersion = workspaceGeneration.current;
+    const jobId = current.id;
     setRetryingCompleted(true);
     setError("");
     try {
-      setCurrent(await api.getGenerationJob(current.id));
+      const next = await api.getGenerationJob(jobId);
+      if (workspaceGeneration.current === workspaceVersion && current.id === jobId && isRestorableDocumentJob(next, workspaceId, jobId)) setCurrent(next);
     } catch {
-      setError(t("document.completedLoadError"));
+      if (workspaceGeneration.current === workspaceVersion && current.id === jobId) setError(t("document.completedLoadError"));
     } finally {
-      setRetryingCompleted(false);
+      if (workspaceGeneration.current === workspaceVersion && current.id === jobId) setRetryingCompleted(false);
     }
   }
 
   async function downloadRepresentation(representationId: string, fileName: string) {
     if (!result?.assetId) return;
+    const assetId = result.assetId;
+    const jobId = current?.id;
+    const workspaceVersion = workspaceGeneration.current;
     setWorking(true);
     setDownloadError("");
     try {
-      const blob = await api.downloadAssetRepresentation(result.assetId, representationId);
+      const blob = await api.downloadAssetRepresentation(assetId, representationId);
+      if (workspaceGeneration.current !== workspaceVersion || current?.id !== jobId) return;
       const url = URL.createObjectURL(blob);
       const anchor = window.document.createElement("a");
       anchor.href = url;
@@ -217,9 +277,9 @@ export function DocumentStudioView() {
       anchor.click();
       window.setTimeout(() => URL.revokeObjectURL(url), 0);
     } catch {
-      setDownloadError(t("document.downloadError"));
+      if (workspaceGeneration.current === workspaceVersion && current?.id === jobId) setDownloadError(t("document.downloadError"));
     } finally {
-      setWorking(false);
+      if (workspaceGeneration.current === workspaceVersion && current?.id === jobId) setWorking(false);
     }
   }
 

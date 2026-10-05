@@ -49,6 +49,14 @@ export function isDocumentJob(job: GenerationJob | null) {
   return job?.jobType.trim().toLowerCase() === "document.generate";
 }
 
+export function isRestorableDocumentJob(job: GenerationJob | null, workspaceId: string, expectedJobId?: string) {
+  return !!job && job.workspaceId === workspaceId && (!expectedJobId || job.id === expectedJobId) && isDocumentJob(job);
+}
+
+export function shouldResetDocumentWorkspaceState(job: GenerationJob | null, workspaceId: string | null) {
+  return !!job && (!workspaceId || !isRestorableDocumentJob(job, workspaceId));
+}
+
 export function isDocumentTerminal(job: GenerationJob | null) {
   return !!job && terminalStatuses.has(job.status);
 }

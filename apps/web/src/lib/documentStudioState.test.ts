@@ -7,10 +7,12 @@ import {
   documentPresentationState,
   isDocumentJob,
   isDocumentSourceReady,
+  isRestorableDocumentJob,
   nextDocumentPollDelay,
   parseDocumentJobResult,
   persistDocumentActiveJobId,
   readDocumentActiveJobId,
+  shouldResetDocumentWorkspaceState,
   shouldPollDocumentJob,
 } from "./documentStudioState";
 import type { GenerationJob } from "./api";
@@ -45,6 +47,12 @@ describe("Document Studio state", () => {
   it("validates the restored job type and keeps active job storage workspace-scoped", () => {
     expect(isDocumentJob(job("Running"))).toBe(true);
     expect(isDocumentJob(job("Running", false, { jobType: "image.generate" }))).toBe(false);
+    expect(isRestorableDocumentJob(job("Running"), "workspace-1")).toBe(true);
+    expect(isRestorableDocumentJob(job("Running", false, { id: "job-2" }), "workspace-1", "job-1")).toBe(false);
+    expect(isRestorableDocumentJob(job("Running", false, { workspaceId: "workspace-2" }), "workspace-1")).toBe(false);
+    expect(shouldResetDocumentWorkspaceState(job("Running"), "workspace-2")).toBe(true);
+    expect(shouldResetDocumentWorkspaceState(job("Running"), "workspace-1")).toBe(false);
+    expect(shouldResetDocumentWorkspaceState(null, "workspace-2")).toBe(false);
 
     const values = new Map<string, string>();
     vi.stubGlobal("window", {
