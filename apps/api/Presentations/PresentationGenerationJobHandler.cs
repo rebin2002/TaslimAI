@@ -39,7 +39,11 @@ public sealed class PresentationGenerationJobHandler(
         progress.Report(8);
 
         var files = await db.StoredFiles.AsNoTracking()
-            .Where(file => file.WorkspaceId == job.WorkspaceId && input.AttachmentIds.Contains(file.Id))
+            .Where(file => file.WorkspaceId == job.WorkspaceId
+                && input.AttachmentIds.Contains(file.Id)
+                // Project-scoped files are shared with workspace members. Personal and
+                // conversation-scoped files remain private to the job creator.
+                && (file.ProjectId.HasValue && !file.ConversationId.HasValue || file.UserId == job.CreatedByUserId))
             .ToListAsync(cancellationToken);
         if (files.Count != input.AttachmentIds.Count)
             throw new PresentationRequestValidationException(GenerationJobErrorCodes.PresentationAttachmentUnavailable, "One or more source documents are unavailable.");

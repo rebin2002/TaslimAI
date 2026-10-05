@@ -1,4 +1,5 @@
 "use client";
+import { localeTag } from "@/lib/i18n";
 
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
@@ -96,7 +97,7 @@ function MusicArtwork({ large = false }: { large?: boolean }) {
 
 function formatAssetDate(value: string, locale: string) {
   try {
-    return new Intl.DateTimeFormat(locale, { month: "short", day: "numeric" }).format(new Date(value));
+    return new Intl.DateTimeFormat(localeTag(locale), { month: "short", day: "numeric" }).format(new Date(value));
   } catch {
     return "";
   }

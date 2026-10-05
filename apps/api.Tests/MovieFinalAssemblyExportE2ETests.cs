@@ -230,6 +230,51 @@ public sealed class MovieFinalAssemblyExportE2ETests : IClassFixture<MovieFinalA
         Assert.Equal("MOVIE_FINAL_ASSEMBLY_NOT_READY", body.GetProperty("error").GetProperty("code").GetString());
     }
 
+    [Fact]
+    public async Task Reading_an_assembly_repairs_a_stale_sidecar_after_the_job_succeeds()
+    {
+        using var client = factory.CreateClient();
+        factory.Scenarios[FakeProviderKind.Movie] = FakeProviderScenario.ImmediateSuccess;
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(client, title: "Final assembly stale sidecar");
+        var projectId = fixture.Project.Project.Id;
+        var takeId = await CreateFinalizedTakeAsync(client, projectId, fixture.Shot.Id, "final-assembly-stale");
+        var created = await MovieOperationalFixtures.PostAsync<MovieFinalAssemblyDto>(
+            client,
+            $"/api/movie-studio/projects/{projectId}/final-assembly",
+            new
+            {
+                resolutionProfile = MovieFinalAssemblyProfiles.Hd1080p,
+                timeline = new[] { new { takeId, inPointSeconds = 0m } },
+            },
+            idempotencyKey: "final-assembly-stale-1");
+
+        var completed = await WaitForAssemblyAsync(client, created.Id);
+        Assert.Equal(MovieAssemblyStatuses.Ready, completed.Status);
+        Assert.NotNull(completed.OutputAssetId);
+
+        // Simulate a lost sidecar finalization after the canonical generation
+        // job and asset publication have already committed.
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            await db.MovieAssemblies.Where(item => item.Id == created.Id)
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(item => item.Status, MovieAssemblyStatuses.Assembling)
+                    .SetProperty(item => item.QcStatus, MovieFinalAssemblyQcStatuses.NotRun)
+                    .SetProperty(item => item.ProgressPercent, 50)
+                    .SetProperty(item => item.CompletedAt, (DateTime?)null));
+        }
+
+        var reconciled = await client.GetFromJsonAsync<MovieFinalAssemblyDto>(
+            $"/api/movie-studio/final-assemblies/{created.Id}");
+        Assert.NotNull(reconciled);
+        Assert.Equal(MovieAssemblyStatuses.Ready, reconciled!.Status);
+        Assert.Equal(MovieFinalAssemblyQcStatuses.Passed, reconciled.QcStatus);
+        Assert.Equal(100, reconciled.ProgressPercent);
+        Assert.Equal(completed.OutputAssetId, reconciled.OutputAssetId);
+        Assert.NotNull(reconciled.CompletedAt);
+    }
+
     private async Task<Guid> CreateFinalizedTakeAsync(HttpClient client, Guid projectId, Guid shotId, string keyPrefix)
     {
         var generated = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
