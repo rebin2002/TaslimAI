@@ -622,9 +622,9 @@ public sealed class ChatController(
         return contextBuilder.Build(history, project?.Instructions, project?.ContextNotes, memories, fileContexts);
     }
 
-    private async Task<IActionResult?> AttachFilesAsync(Conversation conversation, ChatMessage message, IReadOnlyCollection<Guid> requestedIds, CancellationToken cancellationToken)
+    private async Task<IActionResult?> AttachFilesAsync(Conversation conversation, ChatMessage message, IReadOnlyCollection<Guid>? requestedIds, CancellationToken cancellationToken)
     {
-        var ids = requestedIds.Distinct().ToList();
+        var ids = requestedIds?.Distinct().ToList() ?? [];
         var maximumAttachments = Math.Clamp(fileOptions.Value.MaxAttachmentsPerMessage, 1, 20);
         if (ids.Count > maximumAttachments) return ApiResults.Validation(this, $"You can attach up to {maximumAttachments} files to one message.");
         if (ids.Count == 0) return null;

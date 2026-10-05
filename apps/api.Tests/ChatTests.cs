@@ -174,6 +174,26 @@ public sealed class ChatTests : IClassFixture<TaslimApiFactory>, IClassFixture<C
     }
 
     [Fact]
+    public async Task Null_attachment_list_is_treated_as_no_attachments()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Null Attachments Chat Owner");
+        var conversation = await CreateConversation(client, auth.PersonalWorkspace.Id);
+
+        var response = await SendWithCsrf(client, HttpMethod.Post, $"/api/conversations/{conversation.Id}/messages", new
+        {
+            content = "Message without attachments",
+            requestId = Guid.NewGuid().ToString("N"),
+            attachmentIds = (Guid[]?)null,
+        });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var result = await response.Content.ReadFromJsonAsync<SendMessageResponse>();
+        Assert.NotNull(result);
+        Assert.Equal(ChatMessageStatus.Completed.ToString(), result.AssistantMessage.Status);
+    }
+
+    [Fact]
     public async Task Failed_mock_provider_marks_assistant_message_failed_and_preserves_user_message()
     {
         using var client = factory.CreateClient();
