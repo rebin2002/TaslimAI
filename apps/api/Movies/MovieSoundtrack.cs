@@ -247,7 +247,7 @@ public sealed class MovieSoundtrackService(
         if (cue is null) return null;
         await authorization.RequireAsync(userId, cue.MovieProjectId, MovieOperationalActions.SoundtrackEdit, cancellationToken);
         ValidateVersion(request.Label, request.Mood ?? cue.Mood, request.Intensity ?? cue.Intensity, request.ArrangementIntent);
-        var asset = request.AssetId.HasValue ? await LoadAudioAssetAsync(request.AssetId.Value, cue.MovieProject.WorkspaceId, cancellationToken) : null;
+        var asset = request.AssetId.HasValue ? await LoadAudioAssetAsync(request.AssetId.Value, cue.MovieProject, cancellationToken) : null;
         var now = DateTime.UtcNow;
         var version = new MovieSoundtrackCueVersion
         {
@@ -269,6 +269,7 @@ public sealed class MovieSoundtrackService(
     {
         var version = await db.MovieSoundtrackCueVersions
             .Include(item => item.Cue).ThenInclude(item => item.MovieProject)
+            .Include(item => item.Asset).ThenInclude(item => item!.StoredFile)
             .Include(item => item.AudioAssetProvenance)
             .FirstOrDefaultAsync(item => item.Id == versionId, cancellationToken);
         if (version is null) return null;
@@ -280,25 +281,75 @@ public sealed class MovieSoundtrackService(
         if (!MovieSoundtrackApprovalStates.Reviewable.Contains(version.ApprovalState))
             throw new MovieSoundtrackValidationException("MOVIE_SOUNDTRACK_VERSION_NOT_REVIEWABLE", "Only draft or in-review cue versions can be reviewed.");
         if (request.Comment?.Length > 4_000) throw new MovieSoundtrackValidationException("MOVIE_SOUNDTRACK_REVIEW_INVALID", "Review comments must be 4,000 characters or fewer.");
-        if (string.Equals(decision, MovieSoundtrackApprovalStates.Approved, StringComparison.OrdinalIgnoreCase) && (!version.AssetId.HasValue || version.AudioAssetProvenance is null))
+        var approving = string.Equals(decision, MovieSoundtrackApprovalStates.Approved, StringComparison.OrdinalIgnoreCase);
+        if (approving && (!version.AssetId.HasValue || version.AudioAssetProvenance is null))
             throw new MovieSoundtrackValidationException("MOVIE_SOUNDTRACK_AUDIO_ASSET_REQUIRED", "An approved cue version must reference a ready audio asset with provenance.");
+        if (approving
+            && (version.Asset is null || version.AudioAssetProvenance!.AssetId != version.Asset.Id
+                || version.AudioAssetProvenance.StoredFileId != version.Asset.StoredFileId
+                || !IsEligibleAudioAsset(version.Asset, version.Cue.MovieProject)))
+            throw new MovieSoundtrackValidationException("MOVIE_SOUNDTRACK_ASSET_NOT_READY", "The cue asset must still be active, project-scoped, and backed by a ready private audio file.");
 
         var now = DateTime.UtcNow;
-        if (string.Equals(decision, MovieSoundtrackApprovalStates.Approved, StringComparison.OrdinalIgnoreCase))
+        var comment = Clean(request.Comment);
+        var previousApprovedVersionId = version.Cue.ApprovedVersionId;
+        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+        if (approving)
         {
-            var previous = await db.MovieSoundtrackCueVersions.Where(item => item.MovieSoundtrackCueId == version.MovieSoundtrackCueId && item.Id != version.Id && item.ApprovalState == MovieSoundtrackApprovalStates.Approved).ToListAsync(cancellationToken);
-            foreach (var item in previous) { item.ApprovalState = MovieSoundtrackApprovalStates.Superseded; item.UpdatedAt = now; }
-            version.Cue.ApprovedVersionId = version.Id;
-            version.Cue.ApprovalState = MovieSoundtrackApprovalStates.Approved;
+            // The cue pointer is the single canonical approval claim. Compare it
+            // atomically so two reviewers cannot both approve different versions
+            // from the same stale cue snapshot and leave multiple versions marked
+            // Approved or point the cue at the wrong version.
+            var claimed = await db.MovieSoundtrackCues
+                .Where(item => item.Id == version.MovieSoundtrackCueId && item.ApprovedVersionId == previousApprovedVersionId)
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(item => item.ApprovedVersionId, version.Id)
+                    .SetProperty(item => item.ApprovalState, MovieSoundtrackApprovalStates.Approved)
+                    .SetProperty(item => item.UpdatedAt, now), cancellationToken);
+            if (claimed == 0)
+                throw new MovieSoundtrackValidationException("MOVIE_SOUNDTRACK_REVIEW_CONFLICT", "This cue changed while it was being reviewed. Reload it and review the current version.");
+
+            if (previousApprovedVersionId is Guid previousId && previousId != version.Id)
+            {
+                await db.MovieSoundtrackCueVersions
+                    .Where(item => item.Id == previousId && item.MovieSoundtrackCueId == version.MovieSoundtrackCueId)
+                    .ExecuteUpdateAsync(setters => setters
+                        .SetProperty(item => item.ApprovalState, MovieSoundtrackApprovalStates.Superseded)
+                        .SetProperty(item => item.UpdatedAt, now), cancellationToken);
+            }
         }
         else
         {
-            version.Cue.ApprovalState = version.Cue.ApprovedVersionId.HasValue ? MovieSoundtrackApprovalStates.Approved : MovieSoundtrackApprovalStates.Rejected;
+            // Rejection must also observe the same canonical pointer. This keeps
+            // a concurrent approval from being overwritten by a stale rejection.
+            var cueState = previousApprovedVersionId.HasValue ? MovieSoundtrackApprovalStates.Approved : MovieSoundtrackApprovalStates.Rejected;
+            var cueUpdated = await db.MovieSoundtrackCues
+                .Where(item => item.Id == version.MovieSoundtrackCueId && item.ApprovedVersionId == previousApprovedVersionId)
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(item => item.ApprovalState, cueState)
+                    .SetProperty(item => item.UpdatedAt, now), cancellationToken);
+            if (cueUpdated == 0)
+                throw new MovieSoundtrackValidationException("MOVIE_SOUNDTRACK_REVIEW_CONFLICT", "This cue changed while it was being reviewed. Reload it and review the current version.");
         }
-        version.ApprovalState = decision.Equals(MovieSoundtrackApprovalStates.Approved, StringComparison.OrdinalIgnoreCase) ? MovieSoundtrackApprovalStates.Approved : MovieSoundtrackApprovalStates.Rejected;
-        version.ReviewNote = Clean(request.Comment); version.ReviewedByUserId = userId; version.ReviewedAt = now; version.UpdatedAt = now; version.Cue.UpdatedAt = now;
-        db.MovieSoundtrackCueVersionReviews.Add(new MovieSoundtrackCueVersionReview { Id = Guid.NewGuid(), MovieSoundtrackCueVersionId = version.Id, Decision = version.ApprovalState, Comment = version.ReviewNote, ReviewedByUserId = userId, CreatedAt = now });
+
+        var updated = await db.MovieSoundtrackCueVersions
+            .Where(item => item.Id == version.Id && item.ApprovalState == version.ApprovalState)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(item => item.ApprovalState, approving ? MovieSoundtrackApprovalStates.Approved : MovieSoundtrackApprovalStates.Rejected)
+                .SetProperty(item => item.ReviewNote, comment)
+                .SetProperty(item => item.ReviewedByUserId, userId)
+                .SetProperty(item => item.ReviewedAt, now)
+                .SetProperty(item => item.UpdatedAt, now), cancellationToken);
+        if (updated == 0)
+            throw new MovieSoundtrackValidationException("MOVIE_SOUNDTRACK_REVIEW_CONFLICT", "This cue version changed while it was being reviewed. Reload it and review the current version.");
+
+        db.MovieSoundtrackCueVersionReviews.Add(new MovieSoundtrackCueVersionReview
+        {
+            Id = Guid.NewGuid(), MovieSoundtrackCueVersionId = version.Id, Decision = approving ? MovieSoundtrackApprovalStates.Approved : MovieSoundtrackApprovalStates.Rejected,
+            Comment = comment, ReviewedByUserId = userId, CreatedAt = now,
+        });
         await db.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
         return await LoadCueDtoAsync(version.MovieSoundtrackCueId, cancellationToken);
     }
 
@@ -350,16 +401,29 @@ public sealed class MovieSoundtrackService(
 
     private IQueryable<MovieScene> SceneQuery() => db.MovieScenes.Include(item => item.MovieProject).Include(item => item.MovieSequence).ThenInclude(item => item!.MovieAct);
 
-    private async Task<Asset> LoadAudioAssetAsync(Guid assetId, Guid workspaceId, CancellationToken cancellationToken)
+    private async Task<Asset> LoadAudioAssetAsync(Guid assetId, MovieProject movie, CancellationToken cancellationToken)
     {
-        var asset = await db.Assets.Include(item => item.StoredFile).FirstOrDefaultAsync(item => item.Id == assetId && item.WorkspaceId == workspaceId, cancellationToken);
+        var asset = await db.Assets.Include(item => item.StoredFile).FirstOrDefaultAsync(item => item.Id == assetId && item.WorkspaceId == movie.WorkspaceId, cancellationToken);
         if (asset is null) throw new MovieSoundtrackValidationException("MOVIE_SOUNDTRACK_ASSET_NOT_FOUND", "The audio asset was not found in this workspace.");
-        if (asset.Status != AssetStatus.Active || (!string.Equals(asset.AssetType, AssetTypes.Audio, StringComparison.OrdinalIgnoreCase) && !string.Equals(asset.AssetType, AssetTypes.Music, StringComparison.OrdinalIgnoreCase)))
+        if (!string.Equals(asset.AssetType, AssetTypes.Audio, StringComparison.OrdinalIgnoreCase) && !string.Equals(asset.AssetType, AssetTypes.Music, StringComparison.OrdinalIgnoreCase))
             throw new MovieSoundtrackValidationException("MOVIE_SOUNDTRACK_ASSET_INVALID", "The cue asset must be an active audio or music asset.");
-        if (!asset.StoredFileId.HasValue || asset.StoredFile is null || asset.StoredFile.Status != StoredFileStatus.Ready || !asset.StoredFile.ContentType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase))
+        if (asset.ProjectId is not null && asset.ProjectId != movie.ProjectId
+            || asset.StoredFile is not null && (asset.StoredFile.ProjectId is not null && asset.StoredFile.ProjectId != movie.ProjectId))
+            throw new MovieSoundtrackValidationException("MOVIE_SOUNDTRACK_ASSET_OUT_OF_SCOPE", "The cue asset must belong to the movie workspace and project.");
+        if (!IsEligibleAudioAsset(asset, movie))
             throw new MovieSoundtrackValidationException("MOVIE_SOUNDTRACK_ASSET_NOT_READY", "The cue asset must have a ready private audio file.");
         return asset;
     }
+
+    private static bool IsEligibleAudioAsset(Asset asset, MovieProject movie) =>
+        asset.Status == AssetStatus.Active
+        && asset.WorkspaceId == movie.WorkspaceId
+        && (asset.ProjectId is null || asset.ProjectId == movie.ProjectId)
+        && (string.Equals(asset.AssetType, AssetTypes.Audio, StringComparison.OrdinalIgnoreCase) || string.Equals(asset.AssetType, AssetTypes.Music, StringComparison.OrdinalIgnoreCase))
+        && asset.StoredFile is { Status: StoredFileStatus.Ready, ConversationId: null } file
+        && file.WorkspaceId == movie.WorkspaceId
+        && (file.ProjectId is null || file.ProjectId == movie.ProjectId)
+        && file.ContentType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase);
 
     private static MovieSoundtrackAudioAssetProvenance BuildProvenance(Guid versionId, Asset asset, DateTime now) => new()
     {
