@@ -28,6 +28,9 @@ export function isPresentationJob(job: GenerationJob | null) {
 export function isRestorablePresentationJob(job: GenerationJob | null, workspaceId: string) {
   return !!job && job.workspaceId === workspaceId && isPresentationJob(job);
 }
+export function shouldResetPresentationWorkspaceState(job: GenerationJob | null, workspaceId: string | null) {
+  return !!job && (!workspaceId || !isRestorablePresentationJob(job, workspaceId));
+}
 export function isPresentationTerminal(job: GenerationJob | null) { return !!job && terminalStatuses.has(job.status); }
 export function shouldPollPresentationJob(job: GenerationJob | null) { return !!job && !isPresentationTerminal(job); }
 export function nextPresentationPollDelay(job: GenerationJob | null, retryAttempt = 0) { return shouldPollPresentationJob(job) ? Math.min(700 * Math.max(1, retryAttempt + 1), 2_800) : null; }

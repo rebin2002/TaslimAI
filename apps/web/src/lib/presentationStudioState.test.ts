@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GenerationJob } from "./api";
-import { clearPresentationActiveJobId, displayPresentationProgress, isPresentationSourceReady, isPresentationJob, isRestorablePresentationJob, parsePresentationJobResult, persistPresentationActiveJobId, presentationActiveJobStorageKey, presentationStudioState, readPresentationActiveJobId } from "./presentationStudioState";
+import { clearPresentationActiveJobId, displayPresentationProgress, isPresentationSourceReady, isPresentationJob, isRestorablePresentationJob, parsePresentationJobResult, persistPresentationActiveJobId, presentationActiveJobStorageKey, presentationStudioState, readPresentationActiveJobId, shouldResetPresentationWorkspaceState } from "./presentationStudioState";
 
 const job = (status: GenerationJob["status"], resultJson: string | null = null, progressPercent = 70): GenerationJob => ({ id: "job-1", workspaceId: "workspace-1", projectId: null, jobType: "presentation.generate", status, title: "Deck", progressPercent, resultJson, errorCode: null, errorMessage: null, cancellationRequested: false, createdAt: "2026-01-01", queuedAt: null, startedAt: null, completedAt: null, failedAt: null, cancelledAt: null, outputs: [] });
 afterEach(() => vi.unstubAllGlobals());
@@ -15,6 +15,9 @@ describe("presentationStudioState", () => {
     expect(isRestorablePresentationJob(job("Running"), "workspace-1")).toBe(true);
     expect(isRestorablePresentationJob({ ...job("Running"), workspaceId: "workspace-2" }, "workspace-1")).toBe(false);
     expect(isPresentationJob({ ...job("Running"), jobType: "research.generate" })).toBe(false);
+    expect(shouldResetPresentationWorkspaceState(job("Running"), "workspace-2")).toBe(true);
+    expect(shouldResetPresentationWorkspaceState(job("Running"), "workspace-1")).toBe(false);
+    expect(shouldResetPresentationWorkspaceState(null, "workspace-2")).toBe(false);
     const values = new Map<string, string>();
     vi.stubGlobal("window", { sessionStorage: { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => values.set(key, value), removeItem: (key: string) => values.delete(key) } });
     persistPresentationActiveJobId("workspace-1", "presentation-job-1");
