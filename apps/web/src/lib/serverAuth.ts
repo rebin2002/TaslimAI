@@ -3,6 +3,10 @@ import { redirect } from "next/navigation";
 
 const configuredApiUrl = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5000").replace(/\/$/, "");
 const SESSION_CHECK_TIMEOUT_MS = 5_000;
+type SessionProbePayload = {
+  user?: { id?: unknown };
+  personalWorkspace?: { id?: unknown };
+};
 
 function safeReturnPath(path: string): string {
   return path.startsWith("/") && !path.startsWith("//") && !/[\u0000-\u001f\u007f]/.test(path) ? path : "/";
@@ -10,6 +14,15 @@ function safeReturnPath(path: string): string {
 
 function loginRedirect(path: string): never {
   redirect(`/login?next=${encodeURIComponent(safeReturnPath(path))}`);
+}
+
+function hasSessionIdentity(payload: unknown): payload is SessionProbePayload {
+  if (!payload || typeof payload !== "object") return false;
+  const session = payload as SessionProbePayload;
+  return typeof session.user?.id === "string"
+    && session.user.id.trim().length > 0
+    && typeof session.personalWorkspace?.id === "string"
+    && session.personalWorkspace.id.trim().length > 0;
 }
 
 async function hasValidSession(authCookie: string): Promise<boolean> {
@@ -25,9 +38,13 @@ async function hasValidSession(authCookie: string): Promise<boolean> {
       cache: "no-store",
       signal: controller.signal,
     });
-    return response.ok;
+    if (!response.ok) return false;
+    // A successful proxy/fallback response is not proof of authentication.
+    // Require the stable /api/auth/me contract so a misrouted or malformed
+    // upstream cannot fail open at this protected-page boundary.
+    return hasSessionIdentity(await response.json());
   } catch {
-    // Keep upstream availability, timeout, and response details out of the rendered page.
+    // Keep upstream availability, timeout, parse, and response details out of the rendered page.
     return false;
   } finally {
     clearTimeout(timeout);
