@@ -194,7 +194,7 @@ describe("Full Movie workspace foundation", () => {
     expect(workspaceSource).toContain("sceneShotCount");
     expect(workspaceSource).toContain("selectedShot={selectedShot}");
     expect(workspaceSource).toContain("api.addMovieShot");
-    expect(directorSource).toContain("Review → explicit approval → execute");
+    expect(directorSource).toContain('t("boundary")');
   });
 
   it("keeps loading and failure states useful without fabricating project content", () => {
