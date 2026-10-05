@@ -20,6 +20,11 @@ public sealed class ImageGenerationJobHandler(
 
     public async Task<GenerationHandlerResult> ExecuteAsync(GenerationJob job, IProgress<int> progress, CancellationToken cancellationToken)
     {
+        // A job may already be queued when operators disable Image Studio. Enforce
+        // the feature gate at execution time as well as at admission so every
+        // provider implementation observes the same safe boundary.
+        if (!settings.Enabled) throw new ImageProviderUnavailableException();
+
         ImageGenerationInput request;
         try
         {
