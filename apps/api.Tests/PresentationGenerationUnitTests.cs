@@ -51,6 +51,7 @@ public sealed class PresentationGenerationUnitTests
         };
         PresentationDraftValidator.Validate(draft, new PresentationGenerationOptions());
         var rendered = new PresentationRenderer().Render(draft, input, new PresentationGenerationOptions());
+        PresentationOutputIntegrityValidator.Validate(rendered);
         Assert.Equal(AssetRepresentationTypes.Pptx, rendered.RepresentationType);
         Assert.Equal("application/vnd.openxmlformats-officedocument.presentationml.presentation", rendered.ContentType);
         Assert.Equal("PK", Encoding.ASCII.GetString(rendered.Content, 0, 2));
@@ -63,5 +64,83 @@ public sealed class PresentationGenerationUnitTests
         Assert.Contains("rtl=\"1\"", slideXml, StringComparison.Ordinal);
         Assert.Contains("Noto Sans Arabic", slideXml, StringComparison.Ordinal);
         Assert.Contains("<a:tbl>", new StreamReader(archive.GetEntry("ppt/slides/slide3.xml")!.Open()).ReadToEnd(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Output_integrity_validator_rejects_non_zip_content()
+    {
+        var rendered = new RenderedPresentation(
+            AssetRepresentationTypes.Pptx,
+            "presentation.pptx",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            Encoding.UTF8.GetBytes("not a zip archive"));
+
+        var exception = Assert.Throws<PresentationOutputIntegrityException>(() => PresentationOutputIntegrityValidator.Validate(rendered));
+
+        Assert.Contains("could not be read safely", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Output_integrity_validator_rejects_missing_slide_parts()
+    {
+        var rendered = RenderValidPresentation();
+        var corrupted = RewriteArchive(rendered, "ppt/slides/slide1.xml", null);
+
+        var exception = Assert.Throws<PresentationOutputIntegrityException>(() => PresentationOutputIntegrityValidator.Validate(corrupted));
+
+        Assert.Contains("incomplete or non-contiguous slide set", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Output_integrity_validator_rejects_invalid_xml_parts()
+    {
+        var rendered = RenderValidPresentation();
+        var corrupted = RewriteArchive(rendered, null, "<p:sld>");
+
+        var exception = Assert.Throws<PresentationOutputIntegrityException>(() => PresentationOutputIntegrityValidator.Validate(corrupted));
+
+        Assert.Contains("invalid XML", exception.Message, StringComparison.Ordinal);
+    }
+
+    private static RenderedPresentation RenderValidPresentation()
+    {
+        var input = new PresentationGenerationInput(Guid.NewGuid(), null, "Launch", "Plan", "general", "short", "professional", "en", null, null, null, true, true, []);
+        var draft = new PresentationDraft
+        {
+            Title = "Launch",
+            Subtitle = "Plan",
+            Language = "en",
+            PresentationType = "general",
+            Slides = [new PresentationSlide { Order = 1, Type = PresentationSlideTypes.Title, Title = "Launch" }],
+        };
+        return new PresentationRenderer().Render(draft, input, new PresentationGenerationOptions());
+    }
+
+    private static RenderedPresentation RewriteArchive(RenderedPresentation rendered, string? partToOmit, string? replacement)
+    {
+        using var sourceStream = new MemoryStream(rendered.Content);
+        using var source = new ZipArchive(sourceStream, ZipArchiveMode.Read);
+        using var outputStream = new MemoryStream();
+        using (var output = new ZipArchive(outputStream, ZipArchiveMode.Create, leaveOpen: true))
+        {
+            foreach (var entry in source.Entries)
+            {
+                if (partToOmit is not null && entry.FullName == partToOmit) continue;
+                var destination = output.CreateEntry(entry.FullName);
+                using var destinationStream = destination.Open();
+                if (replacement is not null && entry.FullName == "ppt/slides/slide1.xml")
+                {
+                    using var writer = new StreamWriter(destinationStream, Encoding.UTF8, leaveOpen: false);
+                    writer.Write(replacement);
+                }
+                else
+                {
+                    using var sourceEntryStream = entry.Open();
+                    sourceEntryStream.CopyTo(destinationStream);
+                }
+            }
+        }
+
+        return rendered with { Content = outputStream.ToArray() };
     }
 }

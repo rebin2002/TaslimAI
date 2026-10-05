@@ -109,8 +109,16 @@ public sealed class PresentationGenerationJobHandler(
         {
             throw new PresentationGenerationStageException(PresentationGenerationStages.PptxRender, GenerationJobErrorCodes.PresentationRenderFailed, "The presentation could not be rendered.", generated.Usage, exception);
         }
-        if (rendered.Content.Length < 100 || !rendered.RepresentationType.Equals(AssetRepresentationTypes.Pptx, StringComparison.OrdinalIgnoreCase))
-            throw new PresentationGenerationStageException(PresentationGenerationStages.PptxRender, GenerationJobErrorCodes.PresentationRenderFailed, "The presentation renderer returned an invalid file.", generated.Usage);
+        try
+        {
+            if (rendered.Content.Length < 100)
+                throw new PresentationOutputIntegrityException("The presentation renderer returned an empty file.");
+            PresentationOutputIntegrityValidator.Validate(rendered);
+        }
+        catch (PresentationOutputIntegrityException exception)
+        {
+            throw new PresentationGenerationStageException(PresentationGenerationStages.PptxRender, GenerationJobErrorCodes.PresentationRenderFailed, "The presentation renderer returned an invalid file.", generated.Usage, exception);
+        }
 
         var language = string.Equals(input.Language, "auto", StringComparison.OrdinalIgnoreCase) ? generated.Draft.Language : input.Language;
         var metadata = JsonSerializer.Serialize(new
