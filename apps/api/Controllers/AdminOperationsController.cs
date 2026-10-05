@@ -18,6 +18,7 @@ public sealed class AdminOperationsController(IAdminOperationsService operations
         Ok(await operations.GetDashboardAsync(query.ToFilter(), cancellationToken));
 
     [HttpPost("jobs/{jobId:guid}/recover")]
+    [ValidateAntiForgeryToken]
     public async Task<ActionResult<AdminJobRecoveryResult>> Recover(
         Guid jobId,
         [FromBody] AdminJobRecoveryRequest request,

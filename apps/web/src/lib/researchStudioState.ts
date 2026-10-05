@@ -1,7 +1,33 @@
 import type { GenerationJob, ResearchJobResult, ResearchReportBlock, ResearchSource } from "./api";
 
 const terminalStatuses = new Set<GenerationJob["status"]>(["Succeeded", "Failed", "Cancelled"]);
+const activeJobStoragePrefix = "taslim:research-generation:";
 export type ResearchStudioState = "compose" | "pending" | "queued" | "running" | "succeeded" | "completed-unavailable" | "failed" | "cancelled";
+
+export function researchActiveJobStorageKey(workspaceId: string) { return `${activeJobStoragePrefix}${workspaceId}`; }
+export function readResearchActiveJobId(workspaceId: string) {
+  if (typeof window === "undefined") return null;
+  try {
+    const jobId = window.sessionStorage.getItem(researchActiveJobStorageKey(workspaceId));
+    return jobId?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+export function persistResearchActiveJobId(workspaceId: string, jobId: string) {
+  if (typeof window === "undefined" || !jobId.trim()) return;
+  try { window.sessionStorage.setItem(researchActiveJobStorageKey(workspaceId), jobId); } catch { /* Storage may be unavailable. */ }
+}
+export function clearResearchActiveJobId(workspaceId: string) {
+  if (typeof window === "undefined") return;
+  try { window.sessionStorage.removeItem(researchActiveJobStorageKey(workspaceId)); } catch { /* Storage may be unavailable. */ }
+}
+export function isResearchJob(job: GenerationJob | null) {
+  return job?.jobType.trim().toLowerCase() === "research.generate";
+}
+export function isRestorableResearchJob(job: GenerationJob | null, workspaceId: string) {
+  return !!job && job.workspaceId === workspaceId && isResearchJob(job);
+}
 
 export function isResearchTerminal(job: GenerationJob | null) { return !!job && terminalStatuses.has(job.status); }
 export function shouldPollResearchJob(job: GenerationJob | null) { return !!job && !isResearchTerminal(job); }

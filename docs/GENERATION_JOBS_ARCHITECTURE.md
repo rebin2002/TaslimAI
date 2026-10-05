@@ -39,7 +39,7 @@ The authenticated endpoints are:
 | GET | `/api/generation/jobs` | List workspace jobs with page, pageSize, status, projectId, and jobType filters |
 | POST | `/api/generation/jobs/{id}/cancel` | Cancel a pending/queued job or request cooperative cancellation for a running job |
 
-The service, not the controller, owns membership checks, project/workspace validation, supported type validation, lifecycle changes, and queue calls. Cross-workspace reads return a safe not-found result; workspace list operations return authorization failure. Request bodies, provider fields, model fields, stack traces, credentials, and raw exception details are never returned in normal DTOs.
+The service, not the controller, owns membership checks, project/workspace validation, supported type validation, lifecycle changes, and queue calls. Cross-workspace reads return a safe not-found result; workspace list operations return authorization failure. Request bodies, provider fields, model fields, stack traces, credentials, and raw exception details are never returned in normal DTOs. `GenerationJobContractMapper` enforces this boundary by mapping the stable error code through the shared allowlist of user-safe messages instead of returning persisted error text.
 
 ## Outputs and storage
 
