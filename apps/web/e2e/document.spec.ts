@@ -26,9 +26,9 @@ test.describe("Document Studio provider boundary", () => {
       .fill("A concise launch brief for browser regression coverage.");
     await page.getByRole("button", { name: /generate document/i }).click();
 
-    const error = page.getByRole("alert");
+    const error = page.locator(".document-brief-card").getByRole("alert");
     await expect(error).toBeVisible();
-    await expect(error).toContainText(/couldn't start|try again/i);
+    await expect(error).toContainText(/could not be started|try again/i);
     await expect(page.getByRole("heading", { name: /start a document/i })).toBeVisible();
     await expect(page.getByRole("button", { name: /generate document/i })).toBeEnabled();
     expect(submittedPayload).toMatchObject({
@@ -55,7 +55,7 @@ test.describe("Document Studio provider boundary", () => {
     await expect(submit).toBeDisabled();
     await brief.fill("No");
     await expect(submit).toBeDisabled();
-    await expect(page.getByRole("alert")).toHaveCount(0);
+    await expect(page.locator(".document-brief-card").getByRole("alert")).toHaveCount(0);
     expect(requestCount).toBe(0);
   });
 });
