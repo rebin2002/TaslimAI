@@ -29,7 +29,8 @@ test.describe("Document Studio provider boundary", () => {
     const error = page.locator(".document-brief-card").getByRole("alert");
     await expect(error).toBeVisible();
     await expect(error).toContainText(/could not be started|try again/i);
-    await expect(page.getByRole("heading", { name: /start a document/i })).toBeVisible();
+    await expect(page.locator(".document-brief-card")).toBeVisible();
+    await expect(page.getByLabel(/what would you like taslim to create/i)).toHaveValue("A concise launch brief for browser regression coverage.");
     await expect(page.getByRole("button", { name: /generate document/i })).toBeEnabled();
     expect(submittedPayload).toMatchObject({
       description: "A concise launch brief for browser regression coverage.",
