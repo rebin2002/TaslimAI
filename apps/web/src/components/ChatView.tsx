@@ -8,6 +8,8 @@ import { useLocale } from "@/components/LocaleProvider";
 import { ApiError, api, type ChatMessage, type Conversation, type Project, type StoredFile } from "@/lib/api";
 import { applyChatStreamEvent, createChatStreamState, failChatStream, stopChatStream } from "@/lib/chatStreamState";
 import { beginChatStreamSession, invalidateChatStreamSessions, isCurrentChatStreamSession } from "@/lib/chatStreamSession";
+import { resolveChatAttachmentScope } from "@/lib/chatAttachmentScope";
+import { beginChatAttachmentUpload, invalidateChatAttachmentUploads, isCurrentChatAttachmentUpload } from "@/lib/chatAttachmentLifecycle";
 import { claimSubmission, conversationPath, createChatRequestId, createRegenerateRetryRequest, createSendRetryRequest, createSubmission, isAbortError, releaseSubmission, shouldReplaceConversationUrl, studioTransitionPath, type ChatRetryRequest, type RegenerateRetryRequest, type SendRetryRequest } from "@/lib/chatLifecycle";
 import { useDialogAccessibility } from "@/lib/useDialogAccessibility";
 import { ProtectedPage } from "@/components/ProtectedPage";
@@ -72,6 +74,7 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
   const activeRetryRef = useRef<ChatRetryRequest | null>(null);
   const streamGenerationRef = useRef(0);
   const deleteDialogRef = useDialogAccessibility(deleteConfirmOpen, () => setDeleteConfirmOpen(false));
+  const attachmentUploadGenerationRef = useRef(0);
   const cancelActiveStream = useCallback(() => {
     invalidateChatStreamSessions(streamGenerationRef);
     streamAbortRef.current?.abort();
@@ -98,10 +101,13 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
 
   useEffect(() => {
     cancelActiveStream();
+    invalidateChatAttachmentUploads(attachmentUploadGenerationRef);
     // A route transition owns the visible state from this point forward.
     let active = true;
     queueMicrotask(() => {
       if (!active) return;
+      setAttachments([]);
+      setUploadProgress(null);
       setGenerating(false);
       setRetryRequest(null);
       setLoading(true);
@@ -181,21 +187,32 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
   async function uploadSelectedFiles(files: FileList | null) {
     if (!files || !workspace) return;
     const queue = Array.from(files);
+    const uploadGeneration = beginChatAttachmentUpload(attachmentUploadGenerationRef);
+    const scope = resolveChatAttachmentScope(conversationId, selected, selectedProjectId);
     setUploadProgress({ complete: 0, total: queue.length, fileName: queue[0]?.name ?? "" });
     setError("");
     try {
       for (const [index, file] of queue.entries()) {
+        if (!isCurrentChatAttachmentUpload(attachmentUploadGenerationRef, uploadGeneration)) return;
         setUploadProgress({ complete: index, total: queue.length, fileName: file.name });
         // Chat uploads are scoped only to the uploader until they are explicitly attached to this message.
-        const stored = await api.uploadFile(workspace.id, file);
+        const stored = await api.uploadFile(workspace.id, file, scope);
+        if (!isCurrentChatAttachmentUpload(attachmentUploadGenerationRef, uploadGeneration)) {
+          try { await api.deleteFile(stored.id); } catch { /* stale uploads are safe to leave for server cleanup */ }
+          return;
+        }
         setAttachments(current => [...current, stored]);
         setUploadProgress({ complete: index + 1, total: queue.length, fileName: file.name });
       }
     } catch (caught) {
-      setError(caught instanceof ApiError ? caught.message : t("chat.attachmentError"));
+      if (isCurrentChatAttachmentUpload(attachmentUploadGenerationRef, uploadGeneration)) {
+        setError(caught instanceof ApiError ? caught.message : t("chat.attachmentError"));
+      }
     } finally {
-      setUploadProgress(null);
-      if (fileInputRef.current) fileInputRef.current.value = "";
+      if (isCurrentChatAttachmentUpload(attachmentUploadGenerationRef, uploadGeneration)) {
+        setUploadProgress(null);
+        if (fileInputRef.current) fileInputRef.current.value = "";
+      }
     }
   }
 
