@@ -11,6 +11,7 @@ using Taslim.Api.Persistence;
 
 namespace Taslim.Api.Persistence.Migrations
 {
+    [DbContext(typeof(TaslimDbContext))]
     [Migration("20261005160000_AddMovieMissingInsertDecisions")]
     partial class AddMovieMissingInsertDecisions : Migration
     {

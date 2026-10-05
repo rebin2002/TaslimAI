@@ -7,6 +7,7 @@ public static class MovieMissingInsertDecisionStatuses
     public const string PendingReview = "PendingReview";
     public const string Approved = "Approved";
     public const string Rejected = "Rejected";
+    public const string Applying = "Applying";
     public const string Applied = "Applied";
 }
 
