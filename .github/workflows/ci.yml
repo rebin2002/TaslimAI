@@ -111,12 +111,7 @@ jobs:
         run: |
           mkdir -p .e2e-files
           nohup dotnet run --project apps/api --urls http://127.0.0.1:5000 > /tmp/taslim-api.log 2>&1 &
-          for attempt in {1..60}; do
-            if curl --fail --silent http://127.0.0.1:5000/health >/dev/null; then exit 0; fi
-            sleep 2
-          done
-          cat /tmp/taslim-api.log
-          exit 1
+          bash scripts/api-health-smoke.sh http://127.0.0.1:5000
       - name: Run browser tests
         env:
           E2E_API_URL: http://localhost:5000
