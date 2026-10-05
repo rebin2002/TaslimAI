@@ -50,7 +50,7 @@ export function DevelopmentHub() {
   const strings = copy[locale];
 
   return (
-    <main className={styles.page} aria-labelledby="development-hub-title">
+    <section className={styles.page} aria-labelledby="development-hub-title">
       <div className={styles.container}>
         <Link href="/" className={styles.backLink}>
           <ArrowLeft size={15} aria-hidden="true" />
@@ -94,6 +94,6 @@ export function DevelopmentHub() {
 
         <p className={styles.footer}>{strings.footer}</p>
       </div>
-    </main>
+    </section>
   );
 }

@@ -177,6 +177,10 @@
   outline-offset: 3px;
 }
 
+[dir="rtl"] .backLink svg {
+  transform: scaleX(-1);
+}
+
 [dir="rtl"] .arrow {
   right: auto;
   left: 13px;
