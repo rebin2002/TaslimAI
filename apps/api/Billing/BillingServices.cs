@@ -57,9 +57,13 @@ public sealed class BillingProvisioningService(TaslimDbContext db, ILogger<Billi
 {
     public async Task<Subscription> EnsureProvisionedAsync(Guid workspaceId, CancellationToken cancellationToken = default)
     {
+        var ownsTransaction = db.Database.CurrentTransaction is null;
+        await using var transaction = ownsTransaction
+            ? await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken)
+            : null;
         var existing = await db.Subscriptions
             .Include(subscription => subscription.Plan)
-            .Where(subscription => subscription.WorkspaceId == workspaceId)
+            .Where(subscription => subscription.WorkspaceId == workspaceId && subscription.Status != SubscriptionStatus.Cancelled)
             .OrderByDescending(subscription => subscription.CreatedAt)
             .FirstOrDefaultAsync(cancellationToken);
         if (existing is not null) return existing;
@@ -97,10 +101,33 @@ public sealed class BillingProvisioningService(TaslimDbContext db, ILogger<Billi
         db.BillingPeriods.Add(period);
         db.CreditEntitlements.Add(entitlement);
         db.CreditLedgerEntries.Add(grant);
-        await db.SaveChangesAsync(cancellationToken);
-        logger.LogInformation("Free billing foundation provisioned. WorkspaceId={WorkspaceId}; SubscriptionId={SubscriptionId}", workspaceId, subscription.Id);
-        subscription.Plan = plan;
-        return subscription;
+        try
+        {
+            await db.SaveChangesAsync(cancellationToken);
+            if (ownsTransaction) await transaction!.CommitAsync(cancellationToken);
+            logger.LogInformation("Free billing foundation provisioned. WorkspaceId={WorkspaceId}; SubscriptionId={SubscriptionId}", workspaceId, subscription.Id);
+            subscription.Plan = plan;
+            return subscription;
+        }
+        catch (DbUpdateException) when (ownsTransaction)
+        {
+            await transaction!.RollbackAsync(CancellationToken.None);
+            db.Entry(grant).State = EntityState.Detached;
+            db.Entry(entitlement).State = EntityState.Detached;
+            db.Entry(period).State = EntityState.Detached;
+            db.Entry(subscription).State = EntityState.Detached;
+
+            // A concurrent request may have won the workspace-scoped active
+            // subscription constraint. Replay that durable foundation instead
+            // of surfacing a transient uniqueness failure or granting twice.
+            var concurrent = await db.Subscriptions
+                .Include(item => item.Plan)
+                .Where(item => item.WorkspaceId == workspaceId && item.Status != SubscriptionStatus.Cancelled)
+                .OrderByDescending(item => item.CreatedAt)
+                .FirstOrDefaultAsync(cancellationToken);
+            if (concurrent is not null) return concurrent;
+            throw;
+        }
     }
 }
 

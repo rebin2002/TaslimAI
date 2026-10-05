@@ -44,6 +44,10 @@ export function clearSocialActiveJobId(workspaceId: string) {
   if (typeof window === "undefined") return;
   try { window.sessionStorage.removeItem(socialActiveJobStorageKey(workspaceId)); } catch { /* Storage may be unavailable. */ }
 }
+
+export function isSocialJobForWorkspace(job: GenerationJob | null, workspaceId: string | null | undefined) {
+  return !!job && !!workspaceId && job.workspaceId === workspaceId && typeof job.jobType === "string" && job.jobType.trim().toLowerCase() === "social.generate";
+}
 export function socialDraftStorageKey(workspaceId: string) { return `${draftStoragePrefix}${workspaceId}`; }
 export function readSocialDraft(workspaceId: string): SocialStudioDraft | null {
   if (typeof window === "undefined") return null;
