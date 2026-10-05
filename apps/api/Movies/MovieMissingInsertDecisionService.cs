@@ -117,11 +117,35 @@ public sealed class MovieMissingInsertDecisionService(
 
     public async Task<MovieMissingInsertDecisionDto?> ApplyAsync(Guid userId, Guid decisionId, CancellationToken cancellationToken)
     {
+        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
         var decision = await LoadDecisionAsync(decisionId, cancellationToken);
         if (decision is null || !await ProjectCanAsync(userId, decision.MovieProjectId, MoviePermissions.Edit, cancellationToken)) return null;
-        if (decision.Status == MovieMissingInsertDecisionStatuses.Applied) return ToDto(decision);
+        if (decision.Status == MovieMissingInsertDecisionStatuses.Applied)
+        {
+            await transaction.CommitAsync(cancellationToken);
+            return ToDto(decision);
+        }
         if (decision.Status != MovieMissingInsertDecisionStatuses.Approved)
             throw Invalid("MOVIE_INSERT_APPLY_NOT_APPROVED", "Only an approved missing-insert decision can be applied.");
+
+        // Claim the decision inside the same transaction as the timeline write. A concurrent
+        // request waits for this update, then re-reads the committed Applied record and replays
+        // the exact result instead of creating a second canonical revision. Any failed apply
+        // rolls the claim back, so a later request can retry normally.
+        var claimed = await db.MovieMissingInsertDecisions
+            .Where(item => item.Id == decisionId && item.Status == MovieMissingInsertDecisionStatuses.Approved)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.Status, MovieMissingInsertDecisionStatuses.Applying), cancellationToken);
+        if (claimed != 1)
+        {
+            var latest = await db.MovieMissingInsertDecisions.AsNoTracking().SingleOrDefaultAsync(item => item.Id == decisionId, cancellationToken);
+            if (latest?.Status == MovieMissingInsertDecisionStatuses.Applied)
+            {
+                await transaction.CommitAsync(cancellationToken);
+                return ToDto(latest);
+            }
+            throw Conflict("MOVIE_INSERT_APPLY_RACE", "The missing-insert decision changed while it was being applied.");
+        }
+        decision.Status = MovieMissingInsertDecisionStatuses.Applying;
         if (decision.SelectedTakeId is not Guid selectedTakeId)
             throw Invalid("MOVIE_INSERT_SOURCE_REQUIRED", "The approved decision has no selected take.");
         if (decision.ContractVersion != MovieMissingInsertPlanner.ContractVersion)
@@ -178,7 +202,6 @@ public sealed class MovieMissingInsertDecisionService(
             };
         }).ToArray();
 
-        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
         var appliedRevision = await timeline.CreateRevisionAsync(userId, decision.MovieProjectId, new MovieTimelineRevisionRequest
         {
             BaseRevisionId = current.Id,
