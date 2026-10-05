@@ -70,6 +70,7 @@ public sealed class AutopilotConsoleController(
     /// and requires a reason; the controller itself can only consume approved work.
     /// </summary>
     [HttpPost("backlog")]
+    [ValidateAntiForgeryToken]
     public async Task<ActionResult<AutopilotBacklogItemDto>> UpsertBacklog(
         [FromBody] AutopilotBacklogItemRequest request,
         CancellationToken cancellationToken)
@@ -87,6 +88,7 @@ public sealed class AutopilotConsoleController(
     }
 
     [HttpPost("control")]
+    [ValidateAntiForgeryToken]
     public async Task<ActionResult<AutopilotControlDto>> Control(
         [FromBody] AutopilotControlRequest request,
         CancellationToken cancellationToken)
@@ -101,6 +103,7 @@ public sealed class AutopilotConsoleController(
     }
 
     [HttpPost("reconcile")]
+    [ValidateAntiForgeryToken]
     public async Task<ActionResult<AutopilotCycleResult>> Reconcile(
         [FromBody] AutopilotReconcileRequest request,
         CancellationToken cancellationToken)

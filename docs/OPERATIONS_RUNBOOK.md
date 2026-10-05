@@ -52,7 +52,7 @@ The API separates process liveness from dependency readiness.
 | `/health/live` | Process liveness | Returns HTTP 200 with `status=alive`; it does not query dependencies. |
 | `/health/ready` | Application readiness | Returns HTTP 200 with `status=ready` only when the database is reachable and required storage is available. Otherwise it returns HTTP 503 with safe check names and statuses. |
 
-Readiness checks the database with a connectivity probe. It checks the configured storage adapter with a read-only existence request for a reserved health prefix. It does not write a sentinel object and it never returns an R2 endpoint, bucket, credential, or key.
+Readiness checks the database with a connectivity probe and checks the configured storage adapter with a read-only existence request for a reserved health prefix. Both checks share a bounded timeout controlled by `Health:ProbeTimeoutSeconds` (default 5 seconds, accepted range 1–60 seconds). A timed-out dependency is reported as `unavailable` and produces HTTP 503 without exposing provider details. The probe does not write a sentinel object and it never returns an R2 endpoint, bucket, credential, or key.
 
 Optional providers are intentionally absent from readiness. A disabled or unconfigured provider must not prevent the API from serving authentication, existing assets, or other available studios. Provider health is reported separately as `disabled`, `unconfigured`, `available_unknown`, or `recent_operational_failure`; `available_unknown` means that configuration is present but no paid health-generation call was made.
 

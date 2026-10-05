@@ -1,5 +1,6 @@
 import { createSseParser, type TaslimSseEvent } from "./sse";
 import { API_URL, assetFileUrl, assetRepresentationUrl } from "./apiBase";
+import { awaitWithChatStreamWatchdog, CHAT_STREAM_WATCHDOG_TIMEOUT_MS, ChatStreamTransportError } from "./chatStreamTransport";
 
 export type User = {
   id: string;
@@ -818,7 +819,22 @@ async function requestForm<T>(path: string, form: FormData, withCsrf = false, re
 async function streamRequest(path: string, payload: unknown, onEvent: (event: ChatStreamEvent) => void, signal?: AbortSignal, retryCsrf = true): Promise<void> {
   const headers = new Headers({ "Content-Type": "application/json", Accept: "text/event-stream" });
   headers.set("X-CSRF-TOKEN", csrfToken ?? await csrf());
-  const response = await fetch(`${API_URL}${path}`, { method: "POST", headers, credentials: "include", body: JSON.stringify(payload), signal });
+  const streamController = new AbortController();
+  const streamSignal = signal ? AbortSignal.any([signal, streamController.signal]) : streamController.signal;
+  let response: Response;
+  try {
+    response = await awaitWithChatStreamWatchdog(
+      fetch(`${API_URL}${path}`, { method: "POST", headers, credentials: "include", body: JSON.stringify(payload), signal: streamSignal }),
+      signal,
+      CHAT_STREAM_WATCHDOG_TIMEOUT_MS,
+      () => streamController.abort(),
+    );
+  } catch (error) {
+    if (error instanceof ChatStreamTransportError) {
+      throw new ApiError(error.code === "STREAM_TIMEOUT" ? 504 : 502, error.message, undefined, error.code);
+    }
+    throw error;
+  }
   if (!response.ok) {
     const body = await parseError(response);
     if (response.status === 400 && retryCsrf && body?.error?.code === "CSRF_VALIDATION_FAILED") {
@@ -833,15 +849,36 @@ async function streamRequest(path: string, payload: unknown, onEvent: (event: Ch
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   const parser = createSseParser<ChatStreamData>(onEvent);
+  let cancelReader = false;
   try {
     while (true) {
-      const result = await reader.read();
+      let result: ReadableStreamReadResult<Uint8Array>;
+      try {
+        result = await awaitWithChatStreamWatchdog(
+          reader.read(),
+          signal,
+          CHAT_STREAM_WATCHDOG_TIMEOUT_MS,
+          () => {
+            cancelReader = true;
+            streamController.abort();
+          },
+        );
+      } catch (error) {
+        if (error instanceof ChatStreamTransportError) {
+          cancelReader = true;
+          throw new ApiError(error.code === "STREAM_TIMEOUT" ? 504 : 502, error.message, undefined, error.code);
+        }
+        throw error;
+      }
       parser.push(decoder.decode(result.value ?? new Uint8Array(), { stream: !result.done }));
       if (result.done) break;
     }
     parser.push(decoder.decode());
     parser.end();
   } finally {
+    if (cancelReader) {
+      try { await reader.cancel(); } catch { /* the transport may already be closed */ }
+    }
     reader.releaseLock();
   }
 }

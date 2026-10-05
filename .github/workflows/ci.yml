@@ -17,8 +17,8 @@ jobs:
     name: Frontend checks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -38,7 +38,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:15
+        image: postgres:15@sha256:e27d24a29acce1b554771ba68c43afa55446069d228310451bb8c96c1531d2cb # postgres:15 linux/amd64
         env:
           POSTGRES_USER: taslim
           POSTGRES_PASSWORD: change-me
@@ -51,10 +51,19 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
+      - name: Audit production NuGet dependencies
+        shell: bash
+        run: |
+          report="$(dotnet list apps/api/Taslim.Api.csproj package --vulnerable --include-transitive)"
+          printf '%s\n' "$report"
+          if grep -q "has the following vulnerable packages" <<<"$report"; then
+            echo "Production NuGet vulnerability detected." >&2
+            exit 1
+          fi
       - run: dotnet test apps/api.Tests/Taslim.Api.Tests.csproj
         env:
           ConnectionStrings__Postgres: Host=localhost;Port=5432;Database=taslim_tests;Username=taslim;Password=change-me
@@ -66,7 +75,7 @@ jobs:
     needs: [frontend]
     services:
       postgres:
-        image: postgres:15
+        image: postgres:15@sha256:e27d24a29acce1b554771ba68c43afa55446069d228310451bb8c96c1531d2cb # postgres:15 linux/amd64
         env:
           POSTGRES_USER: taslim
           POSTGRES_PASSWORD: change-me
@@ -79,12 +88,12 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
       - run: npm ci
@@ -116,7 +125,7 @@ jobs:
           CI: "true"
         run: npm run test:e2e --workspace @taslim/web
       - if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: playwright-report
           path: |
@@ -131,7 +140,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:15
+        image: postgres:15@sha256:e27d24a29acce1b554771ba68c43afa55446069d228310451bb8c96c1531d2cb # postgres:15 linux/amd64
         env:
           POSTGRES_USER: taslim
           POSTGRES_PASSWORD: change-me
@@ -144,10 +153,10 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
       - run: dotnet tool restore

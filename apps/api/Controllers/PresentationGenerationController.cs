@@ -29,6 +29,9 @@ public sealed class PresentationGenerationController(
         {
             if (!options.Value.Enabled)
                 return ApiResults.Error(this, StatusCodes.Status503ServiceUnavailable, "PRESENTATION_STUDIO_UNAVAILABLE", "Presentation generation is not available right now.");
+            var idempotencyKey = Request.Headers["Idempotency-Key"].FirstOrDefault();
+            if (string.IsNullOrWhiteSpace(idempotencyKey))
+                return ApiResults.Error(this, StatusCodes.Status400BadRequest, "IDEMPOTENCY_KEY_REQUIRED", "A unique Idempotency-Key header is required for presentation generation.");
             var input = PresentationGenerationContractMapper.ToInput(request);
             PresentationGenerationRequestValidator.Validate(input, options.Value);
             var estimate = PresentationGenerationCostEstimator.Estimate(options.Value);
@@ -43,7 +46,7 @@ public sealed class PresentationGenerationController(
                 Title = input.Title,
                 InputJson = PresentationGenerationContractMapper.SerializeInput(input),
                 EstimatedProviderCostUsd = preflight.EstimatedProviderCostUsd,
-            }, cancellationToken, Request.Headers["Idempotency-Key"].FirstOrDefault());
+            }, cancellationToken, idempotencyKey);
             return Accepted(new CreatePresentationGenerationResponse(GenerationJobContractMapper.ToDto(job)));
         }
         catch (PresentationRequestValidationException exception)
