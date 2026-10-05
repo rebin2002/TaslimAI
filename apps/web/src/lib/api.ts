@@ -1148,6 +1148,7 @@ export const api = {
   updateProfile: (input: ProfileInput) => request<AuthResponse>("/api/auth/profile", { method: "PATCH", body: JSON.stringify(input) }, true),
   completeOnboarding: (input: OnboardingInput) => request<AuthResponse>("/api/auth/onboarding/complete", { method: "POST", body: JSON.stringify(input) }, true),
   changePassword: (input: ChangePasswordInput) => request<{ success: boolean }>("/api/auth/password", { method: "POST", body: JSON.stringify(input) }, true),
+  revokeOtherSessions: async () => { const result = await request<{ success: boolean }>("/api/auth/sessions/revoke", { method: "POST" }, true); csrfToken = null; await csrf(true); return result; },
   listProjects: (workspaceId: string, status: "Active" | "Archived", signal?: AbortSignal) => request<Project[]>(`/api/workspaces/${workspaceId}/projects?status=${status}`, { signal }),
   listWorkspaces: () => request<Workspace[]>('/api/workspaces'),
   getWorkspace: (workspaceId: string) => request<Workspace>(`/api/workspaces/${workspaceId}`),

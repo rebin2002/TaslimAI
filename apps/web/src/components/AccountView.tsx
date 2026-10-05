@@ -58,6 +58,8 @@ export function AccountView() {
   const [passwordError, setPasswordError] = useState("");
   const [passwordPolicy, setPasswordPolicy] = useState<PasswordPolicy | null>(null);
   const [policyError, setPolicyError] = useState(false);
+  const [sessionRevokeState, setSessionRevokeState] = useState<SaveState>("idle");
+  const [sessionRevokeError, setSessionRevokeError] = useState("");
 
   useEffect(() => {
     let active = true;
@@ -100,6 +102,18 @@ export function AccountView() {
     } catch (caught) {
       setPasswordState("idle");
       setPasswordError(caught instanceof Error ? caught.message : t("account.passwordError"));
+    }
+  }
+
+  async function revokeOtherSessions() {
+    setSessionRevokeState("saving");
+    setSessionRevokeError("");
+    try {
+      await api.revokeOtherSessions();
+      setSessionRevokeState("saved");
+    } catch (caught) {
+      setSessionRevokeState("idle");
+      setSessionRevokeError(caught instanceof Error ? caught.message : t("account.revokeOtherSessionsError"));
     }
   }
 
@@ -159,7 +173,7 @@ export function AccountView() {
           {passwordState === "saved" && <div className="form-success"><Check size={15} /> {t("account.passwordSaved")}</div>}
           <button className="primary-button" disabled={passwordState === "saving"}>{passwordState === "saving" ? t("common.saving") : <><KeyRound size={15} /> {t("account.updatePassword")}</>}</button>
         </form>
-        <div className="account-card security-summary-card"><div className="card-title"><span className="card-title-icon teal"><ShieldCheck size={17} /></span><div><h2>{t("account.sessionSecurity")}</h2><p>{t("account.sessionSecuritySubtitle")}</p></div></div><div className="security-point"><ShieldCheck size={15} /><span>{t("account.httpOnlySession")}</span></div><div className="security-point"><FileKey2 size={15} /><span>{t("account.csrfProtected")}</span></div><div className="security-point"><LogOut size={15} /><span>{t("account.currentSessionOnly")}</span></div><button className="secondary-button security-logout" onClick={() => void signOut()}><LogOut size={15} /> {t("auth.logout")}</button></div>
+        <div className="account-card security-summary-card"><div className="card-title"><span className="card-title-icon teal"><ShieldCheck size={17} /></span><div><h2>{t("account.sessionSecurity")}</h2><p>{t("account.sessionSecuritySubtitle")}</p></div></div><div className="security-point"><ShieldCheck size={15} /><span>{t("account.httpOnlySession")}</span></div><div className="security-point"><FileKey2 size={15} /><span>{t("account.csrfProtected")}</span></div><div className="security-point"><LogOut size={15} /><span>{t("account.currentSessionOnly")}</span></div><div className="security-revoke"><strong>{t("account.revokeOtherSessions")}</strong><p>{t("account.revokeOtherSessionsSubtitle")}</p><button className="secondary-button" type="button" disabled={sessionRevokeState === "saving"} onClick={() => void revokeOtherSessions()}>{sessionRevokeState === "saving" ? t("common.saving") : <><ShieldCheck size={15} /> {t("account.revokeOtherSessions")}</>}</button>{sessionRevokeError && <div className="form-error" role="alert">{sessionRevokeError}</div>}{sessionRevokeState === "saved" && <div className="form-success"><Check size={15} /> {t("account.revokeOtherSessionsSaved")}</div>}</div><button className="secondary-button security-logout" type="button" onClick={() => void signOut()}><LogOut size={15} /> {t("auth.logout")}</button></div>
       </div>
 
       <div className="account-section-heading"><div><p className="section-eyebrow">{t("account.contextEyebrow")}</p><h2>{t("account.contextTitle")}</h2></div><Brain size={22} /></div>

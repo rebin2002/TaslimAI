@@ -176,6 +176,28 @@ public sealed class AuthController(
         return Ok(new { success = true });
     }
 
+    [HttpPost("sessions/revoke")]
+    [Authorize]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> RevokeOtherSessions()
+    {
+        var user = await userManager.GetUserAsync(User);
+        if (user is null || !user.IsActive) return Unauthorized();
+
+        var result = await userManager.UpdateSecurityStampAsync(user);
+        if (!result.Succeeded)
+        {
+            logger.LogError("Security stamp rotation failed while revoking other sessions. TraceId={TraceId}; UserId={UserId}", HttpContext.TraceIdentifier, user.Id);
+            return ApiResults.Error(this, StatusCodes.Status500InternalServerError, "SESSION_REVOCATION_FAILED", "We could not revoke the other sessions.");
+        }
+
+        // Keep this request's session alive with the new stamp; every other
+        // cookie is rejected by the zero-interval security-stamp validator.
+        await signInManager.RefreshSignInAsync(user);
+        ExpireCsrfCookie();
+        return Ok(new { success = true });
+    }
+
     [HttpPatch("profile")]
     [Authorize]
     [ValidateAntiForgeryToken]
