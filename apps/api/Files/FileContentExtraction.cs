@@ -70,7 +70,11 @@ public sealed class FileContentExtractor(IOptions<FileOptions> options) : IFileC
         {
             throw;
         }
-        catch (Exception exception) when (exception is IOException or InvalidDataException or FormatException or XmlException)
+        // Some document parsers report malformed input as InvalidOperationException
+        // rather than FormatException. Treat it as an unreadable upload at this
+        // boundary; unexpected failures outside extraction still fail closed in
+        // FileProcessingService.
+        catch (Exception exception) when (exception is IOException or InvalidDataException or FormatException or InvalidOperationException or XmlException)
         {
             return new FileExtractionResult(FileExtractionStatus.Failed, null, null, null, "EXTRACTION_FAILED");
         }
