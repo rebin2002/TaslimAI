@@ -68,6 +68,13 @@ public sealed class PresentationGenerationTests : IClassFixture<PresentationGene
         Assert.Equal("Succeeded", terminal.Status);
         Assert.Equal(100, terminal.ProgressPercent);
         Assert.Contains("assetId", terminal.ResultJson);
+        using var resultDocument = JsonDocument.Parse(terminal.ResultJson!);
+        var resultRoot = resultDocument.RootElement;
+        Assert.NotEqual(Guid.Empty, resultRoot.GetProperty("assetId").GetGuid());
+        var resultRepresentation = Assert.Single(resultRoot.GetProperty("representations").EnumerateArray());
+        Assert.Equal("pptx", resultRepresentation.GetProperty("type").GetString());
+        Assert.True(resultRepresentation.GetProperty("fileName").GetString()?.EndsWith(".pptx", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal("application/vnd.openxmlformats-officedocument.presentationml.presentation", resultRepresentation.GetProperty("contentType").GetString());
         Assert.Single(terminal.Outputs);
 
         using var scope = factory.Services.CreateScope();
