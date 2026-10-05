@@ -242,7 +242,7 @@ public sealed class GlobalSearchTests : IClassFixture<TaslimApiFactory>
             await db.SaveChangesAsync();
         }
 
-        var response = await owner.GetFromJsonAsync<GlobalSearchResponseDto>("/api/search?q=Cross%20workspace%20marker&limit=12");
+        var response = await owner.GetFromJsonAsync<GlobalSearchResponseDto>("/api/search?q=marker&limit=12");
         Assert.NotNull(response);
         var results = response!.Groups.SelectMany(group => group.Items).ToArray();
         Assert.Equal(4, results.Length);
