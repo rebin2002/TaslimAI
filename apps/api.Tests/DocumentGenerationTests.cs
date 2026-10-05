@@ -152,6 +152,29 @@ public sealed class DocumentGenerationTests : IClassFixture<DocumentGenerationAp
     }
 
     [Fact]
+    public async Task Document_request_with_null_attachment_ids_defaults_to_no_sources()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client);
+        var response = await SendWithCsrf(client, HttpMethod.Post, "/api/document-generation/jobs", new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            description = "Create a concise professional report.",
+            documentType = "report",
+            length = "standard",
+            tone = "professional",
+            language = "en",
+            outputFormat = "pdf",
+            attachmentIds = (Guid[]?)null,
+        });
+
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        var created = (await response.Content.ReadFromJsonAsync<CreateDocumentGenerationResponse>())!;
+        var terminal = await WaitForTerminal(client, created.Job.Id);
+        Assert.Equal(GenerationJobStatus.Succeeded.ToString(), terminal.Status);
+    }
+
+    [Fact]
     public async Task Document_job_cannot_process_another_workspace_members_private_file()
     {
         using var owner = factory.CreateClient();

@@ -21,6 +21,30 @@ public sealed class DocumentGenerationUnitTests
     }
 
     [Fact]
+    public void Request_mapping_defaults_null_attachment_ids_and_validation_rejects_malformed_persisted_input()
+    {
+        var request = new DocumentGenerationRequest
+        {
+            WorkspaceId = Guid.NewGuid(),
+            Description = "Create a useful brief.",
+            AttachmentIds = null!,
+        };
+
+        var mapped = DocumentGenerationContractMapper.ToInput(request);
+        Assert.Empty(mapped.AttachmentIds);
+
+        var malformed = new DocumentGenerationInput(
+            Guid.NewGuid(), null, null!, "Create a useful brief.", "report", "standard", null, null, null!, "en", "pdf", "professional", true);
+        var exception = Assert.Throws<DocumentRequestValidationException>(() => DocumentGenerationRequestValidator.Validate(malformed, new DocumentGenerationOptions()));
+        Assert.Equal(GenerationJobErrorCodes.DocumentRequestInvalid, exception.Code);
+
+        var missingAttachments = new DocumentGenerationInput(
+            Guid.NewGuid(), null, "Report", "Create a useful brief.", "report", "standard", null, null, null!, "en", "pdf", "professional", true);
+        var attachmentsException = Assert.Throws<DocumentRequestValidationException>(() => DocumentGenerationRequestValidator.Validate(missingAttachments, new DocumentGenerationOptions()));
+        Assert.Equal(GenerationJobErrorCodes.DocumentRequestInvalid, attachmentsException.Code);
+    }
+
+    [Fact]
     public void Renderer_produces_valid_docx_and_pdf_with_unicode_content()
     {
         var input = new DocumentGenerationInput(Guid.NewGuid(), null, "ڕاپۆرتی تاقیکردنەوە", "Create a clear report.", "report", "standard", null, null, [Guid.NewGuid()], "ku", "both", "professional", true);

@@ -34,7 +34,7 @@ public sealed class DocumentGenerationRequest
     public string? AdditionalInstructions { get; set; }
 
     [MaxLength(8)]
-    public IReadOnlyList<Guid> AttachmentIds { get; set; } = [];
+    public IReadOnlyList<Guid>? AttachmentIds { get; set; } = [];
 
     [StringLength(20)]
     public string? Language { get; set; }
@@ -119,7 +119,7 @@ public static class DocumentGenerationContractMapper
             Normalize(request.Length, DocumentGenerationDefaults.DefaultLength),
             NormalizeOptional(request.Audience),
             NormalizeOptional(request.AdditionalInstructions),
-            request.AttachmentIds.Distinct().ToArray(),
+            request.AttachmentIds?.Distinct().ToArray() ?? [],
             language,
             format,
             tone,
@@ -167,15 +167,16 @@ public static class DocumentGenerationRequestValidator
 {
     public static void Validate(DocumentGenerationInput input, DocumentGenerationOptions options)
     {
+        if (input is null) throw new DocumentRequestValidationException(GenerationJobErrorCodes.DocumentRequestInvalid, "The document request is invalid.");
         if (input.WorkspaceId == Guid.Empty) Invalid("WORKSPACE_REQUIRED", "A workspace is required.");
-        if (input.Title.Length is < 1 or > 160) Invalid(GenerationJobErrorCodes.DocumentRequestInvalid, "Document title must be between 1 and 160 characters.");
-        if (input.Description.Length < 3 || input.Description.Length > options.MaxPromptCharacters) Invalid(GenerationJobErrorCodes.DocumentRequestInvalid, $"Document description must be between 3 and {options.MaxPromptCharacters} characters.");
-        if (input.AttachmentIds.Count > options.MaxAttachments) Invalid(GenerationJobErrorCodes.DocumentRequestInvalid, $"Choose no more than {options.MaxAttachments} source documents.");
-        if (!DocumentGenerationDefaults.Languages.Contains(input.Language)) Invalid(GenerationJobErrorCodes.DocumentRequestInvalid, "The selected document language is not supported.");
-        if (!DocumentGenerationDefaults.OutputFormats.Contains(input.OutputFormat)) Invalid(GenerationJobErrorCodes.DocumentRequestInvalid, "The selected output format is not supported.");
-        if (!DocumentGenerationDefaults.Tones.Contains(input.Tone)) Invalid(GenerationJobErrorCodes.DocumentRequestInvalid, "The selected tone is not supported.");
-        if (!DocumentGenerationDefaults.DocumentTypes.Contains(input.DocumentType)) Invalid(GenerationJobErrorCodes.DocumentRequestInvalid, "The selected document type is not supported.");
-        if (!DocumentGenerationDefaults.Lengths.Contains(input.Length)) Invalid(GenerationJobErrorCodes.DocumentRequestInvalid, "The selected document length is not supported.");
+        if (string.IsNullOrWhiteSpace(input.Title) || input.Title.Length is < 1 or > 160) Invalid(GenerationJobErrorCodes.DocumentRequestInvalid, "Document title must be between 1 and 160 characters.");
+        if (string.IsNullOrWhiteSpace(input.Description) || input.Description.Length < 3 || input.Description.Length > options.MaxPromptCharacters) Invalid(GenerationJobErrorCodes.DocumentRequestInvalid, $"Document description must be between 3 and {options.MaxPromptCharacters} characters.");
+        if (input.AttachmentIds is null || input.AttachmentIds.Count > options.MaxAttachments) Invalid(GenerationJobErrorCodes.DocumentRequestInvalid, $"Choose no more than {options.MaxAttachments} source documents.");
+        if (string.IsNullOrWhiteSpace(input.Language) || !DocumentGenerationDefaults.Languages.Contains(input.Language)) Invalid(GenerationJobErrorCodes.DocumentRequestInvalid, "The selected document language is not supported.");
+        if (string.IsNullOrWhiteSpace(input.OutputFormat) || !DocumentGenerationDefaults.OutputFormats.Contains(input.OutputFormat)) Invalid(GenerationJobErrorCodes.DocumentRequestInvalid, "The selected output format is not supported.");
+        if (string.IsNullOrWhiteSpace(input.Tone) || !DocumentGenerationDefaults.Tones.Contains(input.Tone)) Invalid(GenerationJobErrorCodes.DocumentRequestInvalid, "The selected tone is not supported.");
+        if (string.IsNullOrWhiteSpace(input.DocumentType) || !DocumentGenerationDefaults.DocumentTypes.Contains(input.DocumentType)) Invalid(GenerationJobErrorCodes.DocumentRequestInvalid, "The selected document type is not supported.");
+        if (string.IsNullOrWhiteSpace(input.Length) || !DocumentGenerationDefaults.Lengths.Contains(input.Length)) Invalid(GenerationJobErrorCodes.DocumentRequestInvalid, "The selected document length is not supported.");
         if (input.Audience?.Length > 400 || input.AdditionalInstructions?.Length > 3_000) Invalid(GenerationJobErrorCodes.DocumentRequestInvalid, "Optional document guidance is too long.");
         return;
 
