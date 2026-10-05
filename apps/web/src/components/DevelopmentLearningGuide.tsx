@@ -228,11 +228,11 @@ export function DevelopmentLearningGuide() {
             const Icon = trackIcons[trackId];
             const track = strings.tracks[trackId];
             const selected = guideState.activeTrack === trackId;
-            return <button key={trackId} id={`development-tab-${trackId}`} type="button" role="tab" aria-selected={selected} aria-controls={`development-track-${trackId}`} className={`${styles.trackButton} ${selected ? styles.selected : ""}`} onClick={() => chooseTrack(trackId)}><Icon size={18} aria-hidden="true" /><span><strong>{track.title}</strong><small>{track.summary}</small></span><span className={styles.trackArrow} aria-hidden="true">{selected ? "●" : "○"}</span></button>;
+            return <button key={trackId} id={`development-tab-${trackId}`} type="button" role="tab" aria-selected={selected} aria-controls="development-learning-panel" className={`${styles.trackButton} ${selected ? styles.selected : ""}`} onClick={() => chooseTrack(trackId)}><Icon size={18} aria-hidden="true" /><span><strong>{track.title}</strong><small>{track.summary}</small></span><span className={styles.trackArrow} aria-hidden="true">{selected ? "●" : "○"}</span></button>;
           })}
         </nav>
 
-        <section id={`development-track-${guideState.activeTrack}`} className={styles.content} role="tabpanel" tabIndex={0} aria-labelledby={`development-tab-${guideState.activeTrack}`}>
+        <section id="development-learning-panel" className={styles.content} role="tabpanel" tabIndex={0} aria-labelledby={`development-tab-${guideState.activeTrack}`}>
           <div className={styles.contentHeader}>
             <div><p className={styles.sectionLabel}>{strings.lessonsLabel}</p><h2>{activeTrack.title}</h2><p>{activeTrack.summary}</p></div>
             <div className={styles.progressSummary}><strong>{interpolate(strings.progress, { done: String(progress.done), total: String(progress.total) })}</strong><div className={styles.progressTrack} role="progressbar" aria-valuemin={0} aria-valuemax={progress.total} aria-valuenow={progress.done} aria-label={interpolate(strings.progress, { done: String(progress.done), total: String(progress.total) })}><span style={{ width: `${progress.total ? (progress.done / progress.total) * 100 : 0}%` }} /></div></div>
@@ -243,7 +243,7 @@ export function DevelopmentLearningGuide() {
               return <li key={lesson.id} className={`${styles.lesson} ${completed ? styles.lessonComplete : ""}`}><label className={styles.lessonLabel}><input type="checkbox" checked={completed} onChange={(event) => toggleLesson(lesson.id, event.target.checked)} aria-label={`${completed ? strings.markIncomplete : strings.complete}: ${lesson.title}`} /><span className={styles.checkbox} aria-hidden="true">{completed ? <Check size={14} /> : null}</span><span className={styles.lessonCopy}><strong>{lesson.title}</strong><small>{lesson.description}</small></span></label><span className={styles.lessonStatus}>{completed ? <><CheckCircle2 size={14} aria-hidden="true" /> {strings.complete}</> : null}</span></li>;
             })}
           </ol>
-          <label className={styles.notes}><span>{strings.notesLabel}</span><textarea value={guideState.notes} onChange={(event) => persist(setDevelopmentLearningNotes(guideState, event.target.value))} maxLength={2_000} placeholder={strings.notesPlaceholder} aria-describedby="development-notes-hint" /><small id="development-notes-hint">{strings.notesHint} {guideState.notes.length}/2,000</small></label>
+          <label className={styles.notes}><span>{strings.notesLabel}</span><textarea dir="auto" value={guideState.notes} onChange={(event) => persist(setDevelopmentLearningNotes(guideState, event.target.value))} maxLength={2_000} placeholder={strings.notesPlaceholder} aria-describedby="development-notes-hint" /><small id="development-notes-hint">{strings.notesHint} {guideState.notes.length}/2,000</small></label>
           <div className={styles.feedback} role="status" aria-live="polite">{persistenceError ? <><ShieldCheck size={14} aria-hidden="true" /> {strings.storageError}</> : <><CheckCircle2 size={14} aria-hidden="true" /> {strings.saved}</>}</div>
         </section>
       </section>

@@ -62,7 +62,12 @@
 .loading svg { animation: spin 1s linear infinite; }
 .page :is(a, button, input, textarea):focus-visible { outline: 2px solid #3185c1; outline-offset: 3px; }
 [dir="rtl"] .trackButton.selected { box-shadow: inset -3px 0 0 #3b91d0; }
+[dir="rtl"] .backLink svg { transform: rotate(180deg); }
+[dir="rtl"] .progressTrack span { margin-inline-start: 0; margin-inline-end: auto; }
 @keyframes spin { to { transform: rotate(360deg); } }
+@media (min-width: 761px) and (max-width: 900px) {
+  .page { margin-inline: -24px; padding-inline: 24px; }
+}
 @media (max-width: 760px) {
   .page { margin-inline: -16px; padding: 22px 16px 60px; }
   .backLink { margin-bottom: 21px; }
