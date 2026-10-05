@@ -22,8 +22,8 @@ import {
 } from "lucide-react";
 import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
-import { api, type Asset, type GenerationJob, type Project, type VoiceGenerationInput } from "@/lib/api";
-import { canCancelVoiceJob, formatVoiceDuration, formatVoiceFileSize, isVoiceAsset, parseVoiceJobResult } from "@/lib/voiceStudioState";
+import { ApiError, api, type Asset, type GenerationJob, type Project, type VoiceGenerationInput } from "@/lib/api";
+import { canCancelVoiceJob, clearVoiceActiveJobId, formatVoiceDuration, formatVoiceFileSize, isRestorableVoiceJob, isVoiceAsset, nextVoicePollDelay, parseVoiceJobResult, persistVoiceActiveJobId, readVoiceActiveJobId, shouldPollVoiceJob } from "@/lib/voiceStudioState";
 
 const languages = ["en", "ar", "ku"] as const;
 const voiceStyles = ["neutral", "warm", "professional", "storytelling"] as const;
@@ -113,10 +113,12 @@ export function VoiceStudioView() {
   const [instructions, setInstructions] = useState("");
   const [projectId, setProjectId] = useState(() => searchParams.get("projectId") ?? "");
   const [current, setCurrent] = useState<GenerationJob | null>(null);
+  const [pollRetry, setPollRetry] = useState(0);
   const [working, setWorking] = useState(false);
   const [loadingProjects, setLoadingProjects] = useState(true);
   const [loadingRecent, setLoadingRecent] = useState(true);
   const [error, setError] = useState("");
+  const restoreJobId = useRef<string | null>(null);
 
   const loadWorkspaceData = useCallback(async () => {
     if (!workspace) return;
@@ -139,18 +141,46 @@ export function VoiceStudioView() {
   useEffect(() => { void loadWorkspaceData(); }, [loadWorkspaceData]);
 
   useEffect(() => {
-    if (!current || current.status === "Succeeded" || current.status === "Failed" || current.status === "Cancelled") return;
+    if (!workspace || current) return;
+    const storedJobId = readVoiceActiveJobId(workspace.id);
+    if (!storedJobId) return;
+    restoreJobId.current = storedJobId;
+    let active = true;
+    void api.getGenerationJob(storedJobId).then((job) => {
+      if (!active || restoreJobId.current !== storedJobId) return;
+      if (!isRestorableVoiceJob(job, workspace.id)) {
+        clearVoiceActiveJobId(workspace.id);
+        return;
+      }
+      setCurrent(job);
+      setPollRetry(0);
+    }).catch((cause) => {
+      if (!active || restoreJobId.current !== storedJobId) return;
+      if (cause instanceof ApiError && (cause.status === 403 || cause.status === 404)) clearVoiceActiveJobId(workspace.id);
+    });
+    return () => { active = false; };
+  }, [workspace, current]);
+
+  useEffect(() => {
+    if (!current || !shouldPollVoiceJob(current)) return;
     let active = true;
     const timer = window.setTimeout(async () => {
       try {
         const next = await api.getGenerationJob(current.id);
-        if (active) setCurrent(next);
+        if (active) {
+          setCurrent(next);
+          setPollRetry(0);
+          setError("");
+        }
       } catch (caught) {
-        if (active) setError(caught instanceof Error ? caught.message : t("voice.pollError"));
+        if (active) {
+          setPollRetry((attempt) => attempt + 1);
+          setError(caught instanceof Error ? caught.message : t("voice.pollError"));
+        }
       }
-    }, 650);
+    }, nextVoicePollDelay(current, pollRetry) ?? 650);
     return () => { active = false; window.clearTimeout(timer); };
-  }, [current, t]);
+  }, [current, pollRetry, t]);
 
   async function generate(event: React.FormEvent) {
     event.preventDefault();
@@ -160,6 +190,9 @@ export function VoiceStudioView() {
     }
     setWorking(true);
     setError("");
+    setPollRetry(0);
+    restoreJobId.current = null;
+    clearVoiceActiveJobId(workspace.id);
     const input: VoiceGenerationInput = {
       workspaceId: workspace.id,
       projectId: projectId || null,
@@ -170,7 +203,9 @@ export function VoiceStudioView() {
       instructions: instructions.trim() || null,
     };
     try {
-      setCurrent(await api.createVoiceGenerationJob(input));
+      const job = await api.createVoiceGenerationJob(input);
+      persistVoiceActiveJobId(workspace.id, job.id);
+      setCurrent(job);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : t("voice.createError"));
     } finally {
@@ -185,6 +220,7 @@ export function VoiceStudioView() {
     try {
       await api.cancelGenerationJob(current.id);
       setCurrent(await api.getGenerationJob(current.id));
+      setPollRetry(0);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : t("voice.cancelError"));
     } finally {
@@ -193,8 +229,11 @@ export function VoiceStudioView() {
   }
 
   function createAnother() {
+    restoreJobId.current = null;
+    if (workspace) clearVoiceActiveJobId(workspace.id);
     setCurrent(null);
     setError("");
+    setPollRetry(0);
     window.setTimeout(() => document.getElementById("voice-script")?.focus(), 0);
   }
 

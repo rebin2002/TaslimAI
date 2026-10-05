@@ -4,7 +4,7 @@
 /* eslint-disable @next/next/no-img-element */
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowUpRight,
   Check,
@@ -23,8 +23,8 @@ import { useAuth } from "@/components/AuthProvider";
 import { AssetDetail, type AssetDetailLabels } from "@/components/AssetDetail";
 import { useLocale } from "@/components/LocaleProvider";
 import { useSearchParams } from "next/navigation";
-import { api, type Asset, type GenerationJob, type ImageGenerationInput, type Project } from "@/lib/api";
-import { canCancelImageJob, nextImagePollDelay, parseImageJobResult, shouldPollImageJob } from "@/lib/imageStudioState";
+import { ApiError, api, type Asset, type GenerationJob, type ImageGenerationInput, type Project } from "@/lib/api";
+import { canCancelImageJob, clearImageActiveJobId, isRestorableImageJob, nextImagePollDelay, parseImageJobResult, persistImageActiveJobId, readImageActiveJobId, shouldPollImageJob } from "@/lib/imageStudioState";
 
 const styles = ["auto", "photorealistic", "product", "illustration", "3d", "minimal", "poster", "social_media"] as const;
 const aspects = ["square", "portrait", "landscape"] as const;
@@ -62,6 +62,7 @@ export function ImageStudioView() {
   const [projectId, setProjectId] = useState(() => searchParams.get("projectId") ?? "");
   const [current, setCurrent] = useState<GenerationJob | null>(null);
   const [pollRetry, setPollRetry] = useState(0);
+  const restoreJobId = useRef<string | null>(null);
   const [working, setWorking] = useState(false);
   const [loadingProjects, setLoadingProjects] = useState(true);
   const [loadingRecent, setLoadingRecent] = useState(true);
@@ -100,6 +101,27 @@ export function ImageStudioView() {
   useEffect(() => { void loadRecent(); }, [loadRecent]);
 
   useEffect(() => {
+    if (!workspace || current) return;
+    const storedJobId = readImageActiveJobId(workspace.id);
+    if (!storedJobId) return;
+    restoreJobId.current = storedJobId;
+    let active = true;
+    void api.getGenerationJob(storedJobId).then((job) => {
+      if (!active || restoreJobId.current !== storedJobId) return;
+      if (!isRestorableImageJob(job, workspace.id)) {
+        clearImageActiveJobId(workspace.id);
+        return;
+      }
+      setCurrent(job);
+      setPollRetry(0);
+    }).catch((cause) => {
+      if (!active || restoreJobId.current !== storedJobId) return;
+      if (cause instanceof ApiError && (cause.status === 403 || cause.status === 404)) clearImageActiveJobId(workspace.id);
+    });
+    return () => { active = false; };
+  }, [workspace, current]);
+
+  useEffect(() => {
     if (!current || !shouldPollImageJob(current)) return;
     let active = true;
     const timer = window.setTimeout(async () => {
@@ -128,6 +150,7 @@ export function ImageStudioView() {
     setWorking(true);
     setError("");
     setPollRetry(0);
+    restoreJobId.current = null;
     const input: ImageGenerationInput = {
       workspaceId: workspace.id,
       projectId: projectId || null,
@@ -141,7 +164,9 @@ export function ImageStudioView() {
       textInImage: textInImage.trim() || null,
     };
     try {
-      setCurrent(await api.createImageGenerationJob(input));
+      const job = await api.createImageGenerationJob(input);
+      persistImageActiveJobId(workspace.id, job.id);
+      setCurrent(job);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : t("image.createError"));
     } finally {
@@ -169,6 +194,8 @@ export function ImageStudioView() {
   }
 
   function createAnother() {
+    restoreJobId.current = null;
+    if (workspace) clearImageActiveJobId(workspace.id);
     setCurrent(null);
     setError("");
   }

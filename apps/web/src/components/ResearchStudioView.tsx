@@ -2,12 +2,12 @@
 
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowUpRight, BookOpen, CheckCircle2, Download, ExternalLink, FileText, FolderOpen, LoaderCircle, RefreshCw, Search, Sparkles, XCircle } from "lucide-react";
 import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
-import { api, type Asset, type GenerationJob, type Project, type ResearchJobResult, type ResearchSource, type StoredFile } from "@/lib/api";
-import { canCancelResearchJob, displayResearchProgress, isResearchSourceReady, isSafeExternalUrl, mergeResearchSources, nextResearchPollDelay, parseResearchJobResult, researchStudioState, shouldPollResearchJob } from "@/lib/researchStudioState";
+import { ApiError, api, type Asset, type GenerationJob, type Project, type ResearchJobResult, type ResearchSource, type StoredFile } from "@/lib/api";
+import { canCancelResearchJob, clearResearchActiveJobId, displayResearchProgress, isResearchSourceReady, isRestorableResearchJob, isSafeExternalUrl, mergeResearchSources, nextResearchPollDelay, parseResearchJobResult, persistResearchActiveJobId, readResearchActiveJobId, researchStudioState, shouldPollResearchJob } from "@/lib/researchStudioState";
 
 const extensions = [".pdf", ".docx", ".txt", ".md", ".csv", ".xlsx"];
 type Depth = "quick" | "standard" | "deep";
@@ -46,6 +46,7 @@ export function ResearchStudioView() {
   const [retryingCompleted, setRetryingCompleted] = useState(false);
   const [error, setError] = useState("");
   const [downloadError, setDownloadError] = useState("");
+  const restoreJobId = useRef<string | null>(null);
 
   const loadInputs = useCallback(async () => {
     if (!workspace) return;
@@ -72,6 +73,26 @@ export function ResearchStudioView() {
   // This effect synchronizes authenticated workspace inputs into the local form.
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void loadInputs(); }, [loadInputs]);
+  useEffect(() => {
+    if (!workspace || current) return;
+    const storedJobId = readResearchActiveJobId(workspace.id);
+    if (!storedJobId) return;
+    restoreJobId.current = storedJobId;
+    let active = true;
+    void api.getGenerationJob(storedJobId).then((job) => {
+      if (!active || restoreJobId.current !== storedJobId) return;
+      if (!isRestorableResearchJob(job, workspace.id)) {
+        clearResearchActiveJobId(workspace.id);
+        return;
+      }
+      setCurrent(job);
+      setPollRetry(0);
+    }).catch((cause) => {
+      if (!active || restoreJobId.current !== storedJobId) return;
+      if (cause instanceof ApiError && (cause.status === 403 || cause.status === 404)) clearResearchActiveJobId(workspace.id);
+    });
+    return () => { active = false; };
+  }, [workspace, current]);
   useEffect(() => {
     if (!current || !shouldPollResearchJob(current)) return;
     const jobId = current.id;
@@ -123,6 +144,8 @@ export function ResearchStudioView() {
     setError("");
     setDownloadError("");
     setSourceDetails([]);
+    restoreJobId.current = null;
+    clearResearchActiveJobId(workspace.id);
     try {
       const job = await api.createResearchGenerationJob({
         workspaceId: workspace.id,
@@ -141,6 +164,7 @@ export function ResearchStudioView() {
         useWebSources,
         attachmentIds: selected,
       });
+      persistResearchActiveJobId(workspace.id, job.id);
       setCurrent(job);
       setPollRetry(0);
     } catch {
@@ -197,6 +221,8 @@ export function ResearchStudioView() {
   }
 
   function createAnother() {
+    restoreJobId.current = null;
+    if (workspace) clearResearchActiveJobId(workspace.id);
     setCurrent(null);
     setSourceDetails([]);
     setError("");

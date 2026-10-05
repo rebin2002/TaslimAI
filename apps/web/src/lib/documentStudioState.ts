@@ -1,6 +1,7 @@
 import type { DocumentJobResult, GenerationJob } from "./api";
 
 const terminalStatuses = new Set<GenerationJob["status"]>(["Succeeded", "Failed", "Cancelled"]);
+const activeJobStoragePrefix = "taslim:document-generation:";
 
 export type DocumentPresentationState =
   | "compose"
@@ -11,6 +12,42 @@ export type DocumentPresentationState =
   | "completed-unavailable"
   | "failed"
   | "cancelled";
+
+export function documentActiveJobStorageKey(workspaceId: string) {
+  return `${activeJobStoragePrefix}${workspaceId}`;
+}
+
+export function readDocumentActiveJobId(workspaceId: string) {
+  if (typeof window === "undefined") return null;
+  try {
+    const jobId = window.sessionStorage.getItem(documentActiveJobStorageKey(workspaceId));
+    return jobId?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+export function persistDocumentActiveJobId(workspaceId: string, jobId: string) {
+  if (typeof window === "undefined" || !jobId.trim()) return;
+  try {
+    window.sessionStorage.setItem(documentActiveJobStorageKey(workspaceId), jobId);
+  } catch {
+    // Storage may be unavailable; the in-memory polling path remains authoritative.
+  }
+}
+
+export function clearDocumentActiveJobId(workspaceId: string) {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.removeItem(documentActiveJobStorageKey(workspaceId));
+  } catch {
+    // Storage may be unavailable.
+  }
+}
+
+export function isDocumentJob(job: GenerationJob | null) {
+  return job?.jobType.trim().toLowerCase() === "document.generate";
+}
 
 export function isDocumentTerminal(job: GenerationJob | null) {
   return !!job && terminalStatuses.has(job.status);
