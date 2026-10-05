@@ -1,4 +1,5 @@
 "use client";
+import { localeTag } from "@/lib/i18n";
 
 /* The private download endpoint requires the browser's authenticated session cookie. */
 /* eslint-disable @next/next/no-img-element */
@@ -24,7 +25,7 @@ import { AssetDetail, type AssetDetailLabels } from "@/components/AssetDetail";
 import { useLocale } from "@/components/LocaleProvider";
 import { useSearchParams } from "next/navigation";
 import { ApiError, api, type Asset, type GenerationJob, type ImageGenerationInput, type Project } from "@/lib/api";
-import { canCancelImageJob, clearImageActiveJobId, isRestorableImageJob, nextImagePollDelay, parseImageJobResult, persistImageActiveJobId, readImageActiveJobId, shouldPollImageJob } from "@/lib/imageStudioState";
+import { canCancelImageJob, clearImageActiveJobId, isRestorableImageJob, nextImagePollDelay, parseImageJobResult, persistImageActiveJobId, readImageActiveJobId, shouldPollImageJob, shouldResetImageWorkspaceState } from "@/lib/imageStudioState";
 
 const styles = ["auto", "photorealistic", "product", "illustration", "3d", "minimal", "poster", "social_media"] as const;
 const aspects = ["square", "portrait", "landscape"] as const;
@@ -63,6 +64,8 @@ export function ImageStudioView() {
   const [current, setCurrent] = useState<GenerationJob | null>(null);
   const [pollRetry, setPollRetry] = useState(0);
   const restoreJobId = useRef<string | null>(null);
+  const observedWorkspaceId = useRef<string | null>(workspace?.id ?? null);
+  const workspaceGeneration = useRef(0);
   const [working, setWorking] = useState(false);
   const [loadingProjects, setLoadingProjects] = useState(true);
   const [loadingRecent, setLoadingRecent] = useState(true);
@@ -70,27 +73,33 @@ export function ImageStudioView() {
 
   const loadProjects = useCallback(async () => {
     if (!workspace) return;
+    const workspaceId = workspace.id;
     setLoadingProjects(true);
     try {
       const [active, archived] = await Promise.all([api.listProjects(workspace.id, "Active"), api.listProjects(workspace.id, "Archived")]);
+      if (observedWorkspaceId.current !== workspaceId) return;
       setProjects([...active, ...archived]);
     } catch {
+      if (observedWorkspaceId.current !== workspaceId) return;
       setProjects([]);
     } finally {
-      setLoadingProjects(false);
+      if (observedWorkspaceId.current === workspaceId) setLoadingProjects(false);
     }
   }, [workspace]);
 
   const loadRecent = useCallback(async () => {
     if (!workspace) return;
+    const workspaceId = workspace.id;
     setLoadingRecent(true);
     try {
       const result = await api.listAssets(workspace.id, { assetType: "image", status: "Active", sort: "recent", page: 1, pageSize: 6 });
+      if (observedWorkspaceId.current !== workspaceId) return;
       setRecentAssets(result.items);
     } catch {
+      if (observedWorkspaceId.current !== workspaceId) return;
       setRecentAssets([]);
     } finally {
-      setLoadingRecent(false);
+      if (observedWorkspaceId.current === workspaceId) setLoadingRecent(false);
     }
   }, [workspace]);
 
@@ -100,14 +109,37 @@ export function ImageStudioView() {
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void loadRecent(); }, [loadRecent]);
 
+  // Workspace-scoped job, project, and asset state must not survive an ownership boundary.
+  // The generation counter also fences responses from requests started in the previous workspace.
+  useEffect(() => {
+    const nextWorkspaceId = workspace?.id ?? null;
+    if (observedWorkspaceId.current === nextWorkspaceId) return;
+    const previousWorkspaceId = observedWorkspaceId.current;
+    observedWorkspaceId.current = nextWorkspaceId;
+    workspaceGeneration.current += 1;
+    restoreJobId.current = null;
+    if (previousWorkspaceId === null && nextWorkspaceId !== null && !shouldResetImageWorkspaceState(current, nextWorkspaceId)) return;
+    setCurrent(null);
+    setSelectedAsset(null);
+    setProjects([]);
+    setRecentAssets([]);
+    setLoadingProjects(true);
+    setLoadingRecent(true);
+    setProjectId("");
+    setPollRetry(0);
+    setWorking(false);
+    setError("");
+  }, [current, workspace?.id]);
+
   useEffect(() => {
     if (!workspace || current) return;
     const storedJobId = readImageActiveJobId(workspace.id);
     if (!storedJobId) return;
     restoreJobId.current = storedJobId;
+    const workspaceVersion = workspaceGeneration.current;
     let active = true;
     void api.getGenerationJob(storedJobId).then((job) => {
-      if (!active || restoreJobId.current !== storedJobId) return;
+      if (!active || workspaceGeneration.current !== workspaceVersion || restoreJobId.current !== storedJobId) return;
       if (!isRestorableImageJob(job, workspace.id)) {
         clearImageActiveJobId(workspace.id);
         return;
@@ -115,7 +147,7 @@ export function ImageStudioView() {
       setCurrent(job);
       setPollRetry(0);
     }).catch((cause) => {
-      if (!active || restoreJobId.current !== storedJobId) return;
+      if (!active || workspaceGeneration.current !== workspaceVersion || restoreJobId.current !== storedJobId) return;
       if (cause instanceof ApiError && (cause.status === 403 || cause.status === 404)) clearImageActiveJobId(workspace.id);
     });
     return () => { active = false; };
@@ -124,23 +156,25 @@ export function ImageStudioView() {
   useEffect(() => {
     if (!current || !shouldPollImageJob(current)) return;
     let active = true;
+    const jobId = current.id;
+    const workspaceVersion = workspaceGeneration.current;
     const timer = window.setTimeout(async () => {
       try {
-        const next = await api.getGenerationJob(current.id);
-        if (active) {
+        const next = await api.getGenerationJob(jobId);
+        if (active && workspaceGeneration.current === workspaceVersion && current.id === jobId) {
           setCurrent(next);
           setPollRetry(0);
           setError("");
         }
       } catch (caught) {
-        if (active) {
+        if (active && workspaceGeneration.current === workspaceVersion && current.id === jobId) {
           setPollRetry((attempt) => attempt + 1);
           setError(caught instanceof Error ? caught.message : t("image.pollError"));
         }
       }
     }, nextImagePollDelay(current, pollRetry) ?? 650);
     return () => { active = false; window.clearTimeout(timer); };
-  }, [current, pollRetry, t]);
+  }, [current, pollRetry, t, workspace?.id]);
 
   async function startGeneration() {
     if (!workspace || description.trim().length < 3) {
@@ -151,6 +185,7 @@ export function ImageStudioView() {
     setError("");
     setPollRetry(0);
     restoreJobId.current = null;
+    const requestWorkspaceVersion = workspaceGeneration.current;
     const input: ImageGenerationInput = {
       workspaceId: workspace.id,
       projectId: projectId || null,
@@ -165,26 +200,33 @@ export function ImageStudioView() {
     };
     try {
       const job = await api.createImageGenerationJob(input);
-      persistImageActiveJobId(workspace.id, job.id);
-      setCurrent(job);
+      if (workspaceGeneration.current === requestWorkspaceVersion) {
+        persistImageActiveJobId(workspace.id, job.id);
+        setCurrent(job);
+      }
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : t("image.createError"));
+      if (workspaceGeneration.current === requestWorkspaceVersion) setError(caught instanceof Error ? caught.message : t("image.createError"));
     } finally {
-      setWorking(false);
+      if (workspaceGeneration.current === requestWorkspaceVersion) setWorking(false);
     }
   }
 
   async function cancel() {
     if (!current) return;
+    const job = current;
+    const requestWorkspaceVersion = workspaceGeneration.current;
     setWorking(true);
     setError("");
     try {
-      await api.cancelGenerationJob(current.id);
-      setCurrent(await api.getGenerationJob(current.id));
+      await api.cancelGenerationJob(job.id);
+      const next = await api.getGenerationJob(job.id);
+      if (workspaceGeneration.current === requestWorkspaceVersion) {
+        setCurrent((previous) => previous?.id === job.id ? next : previous);
+      }
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : t("image.cancelError"));
+      if (workspaceGeneration.current === requestWorkspaceVersion) setError(caught instanceof Error ? caught.message : t("image.cancelError"));
     } finally {
-      setWorking(false);
+      if (workspaceGeneration.current === requestWorkspaceVersion) setWorking(false);
     }
   }
 
@@ -276,7 +318,7 @@ export function ImageStudioView() {
 
       <aside className="image-recent-panel">
         <div className="image-recent-heading"><div><p className="image-panel-kicker">{t("image.recentEyebrow")}</p><h2>{t("image.recentTitle")}</h2></div><Link href="/assets?assetType=image" aria-label={t("image.openAssets")}><ArrowUpRight size={16} /></Link></div>
-        {loadingRecent ? <div className="image-recent-loading"><span className="image-mini-spinner" /></div> : recentAssets.length === 0 ? <div className="image-recent-empty"><ImageIcon size={21} /><p>{t("image.recentEmpty")}</p><small>{t("image.recentEmptyText")}</small></div> : <div className="image-recent-list">{recentAssets.map((asset) => <button key={asset.id} className="image-recent-item" type="button" onClick={() => setSelectedAsset(asset)}><span className="image-recent-thumb">{asset.hasFile && asset.canPreview ? <img src={api.assetFileUrl(asset.id, true)} alt="" loading="lazy" /> : <ImageIcon size={18} />}</span><span className="image-recent-copy"><strong>{asset.name}</strong><small>{asset.projectName || t("assets.workspaceLevel")}</small><time dateTime={asset.createdAt}>{new Intl.DateTimeFormat(locale, { month: "short", day: "numeric" }).format(new Date(asset.createdAt))}</time></span><ArrowUpRight className="image-recent-arrow" size={14} /></button>)}</div>}
+        {loadingRecent ? <div className="image-recent-loading"><span className="image-mini-spinner" /></div> : recentAssets.length === 0 ? <div className="image-recent-empty"><ImageIcon size={21} /><p>{t("image.recentEmpty")}</p><small>{t("image.recentEmptyText")}</small></div> : <div className="image-recent-list">{recentAssets.map((asset) => <button key={asset.id} className="image-recent-item" type="button" onClick={() => setSelectedAsset(asset)}><span className="image-recent-thumb">{asset.hasFile && asset.canPreview ? <img src={api.assetFileUrl(asset.id, true)} alt="" loading="lazy" /> : <ImageIcon size={18} />}</span><span className="image-recent-copy"><strong>{asset.name}</strong><small>{asset.projectName || t("assets.workspaceLevel")}</small><time dateTime={asset.createdAt}>{new Intl.DateTimeFormat(localeTag(locale), { month: "short", day: "numeric" }).format(new Date(asset.createdAt))}</time></span><ArrowUpRight className="image-recent-arrow" size={14} /></button>)}</div>}
         <div className="image-recent-footer"><CheckCircle2 size={14} /><span>{t("image.libraryNote")}</span></div>
       </aside>
     </div>

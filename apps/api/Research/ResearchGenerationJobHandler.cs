@@ -7,6 +7,7 @@ using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
 using Taslim.Api.Documents;
 using Taslim.Api.Generation;
+using Taslim.Api.Files;
 using Taslim.Api.Persistence;
 
 namespace Taslim.Api.Research;
@@ -35,6 +36,8 @@ public sealed class ResearchGenerationJobHandler(
             if (!ResearchGenerationContractMapper.TryDeserializeInput(job.InputJson, out var deserialized) || deserialized is null)
                 throw new ResearchRequestValidationException(GenerationJobErrorCodes.ResearchRequestInvalid, "The research request is invalid.");
             ResearchGenerationRequestValidator.Validate(deserialized, settings);
+            if (deserialized.WorkspaceId != job.WorkspaceId)
+                throw new ResearchRequestValidationException(GenerationJobErrorCodes.ResearchRequestInvalid, "The research request is invalid.");
             input = deserialized;
         }
         catch (ResearchRequestValidationException exception)
@@ -42,8 +45,9 @@ public sealed class ResearchGenerationJobHandler(
             throw new ResearchGenerationStageException(ResearchGenerationStages.Validation, exception.Code, exception.Message);
         }
         progress.Report(5);
+        await ResearchSourceLifecycle.ClearIfClaimOwnedAsync(db, job, cancellationToken);
 
-        var files = await LoadFilesAsync(input, cancellationToken);
+        var files = await LoadFilesAsync(job, input, cancellationToken);
         progress.Report(12);
         ResearchProjectContext? project = null;
         if (input.ProjectId.HasValue)
@@ -90,7 +94,7 @@ public sealed class ResearchGenerationJobHandler(
         foreach (var file in files)
         {
             var citationId = $"S{nextCitation++}";
-            var candidate = new ResearchSourceCandidate(citationId, null, null, file.OriginalFileName, "uploaded file", null, null, DateTime.UtcNow, "uploaded", Trim(file.ExtractedText!, settings.MaxSourceSnippetCharacters), Trim(file.ExtractedText!, settings.MaxSourceTextCharacters), null, nextCitation - 1, true, JsonSerializer.Serialize(new { storedFileId = file.Id, fileExtension = file.Extension }));
+            var candidate = new ResearchSourceCandidate(citationId, null, null, file.OriginalFileName, "uploaded file", null, null, DateTime.UtcNow, "uploaded", Trim(file.ExtractedText!, settings.MaxSourceSnippetCharacters), Trim(file.ExtractedText!, settings.MaxSourceTextCharacters), null, nextCitation - 1, true, JsonSerializer.Serialize(new { storedFileId = file.Id, fileExtension = file.Extension }), file.Id);
             sourceCandidates.Add(candidate);
             evidenceCandidates.Add(new ResearchEvidenceCandidate(citationId, "uploaded source", Trim(file.ExtractedText!, settings.MaxEvidenceCharacters), null, null));
         }
@@ -101,92 +105,107 @@ public sealed class ResearchGenerationJobHandler(
         sourceCandidates = (await contentFetcher.FetchAsync(sourceCandidates, settings, cancellationToken)).ToList();
         progress.Report(50);
 
-        await PersistSourcesAsync(job, sourceCandidates, files, evidenceCandidates, cancellationToken);
-        progress.Report(58);
-
-        ResearchReportProviderResult report;
+        var sourcesStaged = false;
+        var preserveSources = false;
         try
         {
-            report = await reportProvider.GenerateAsync(new ResearchReportPrompt(input, plan, sourceCandidates, evidenceCandidates, project), settings, cancellationToken);
-        }
-        catch (ResearchContextLimitException exception)
-        {
-            throw new ResearchGenerationStageException(ResearchGenerationStages.Context, GenerationJobErrorCodes.ResearchContextTooLarge, "The selected research context is too large.", usage, exception);
-        }
-        catch (Exception exception) when (exception is not OperationCanceledException)
-        {
-            var code = exception switch
+            await PersistSourcesAsync(job, sourceCandidates, evidenceCandidates, cancellationToken);
+            sourcesStaged = true;
+            progress.Report(58);
+
+            ResearchReportProviderResult report;
+            try
             {
-                AiProviderUnavailableException or AiProviderTimeoutException or ResearchSearchUnavailableException => GenerationJobErrorCodes.ResearchProviderUnavailable,
-                AiProviderException => GenerationJobErrorCodes.ResearchProviderUnavailable,
-                ResearchOutputInvalidException => GenerationJobErrorCodes.ResearchOutputInvalid,
-                _ => GenerationJobErrorCodes.ResearchGenerationFailed,
-            };
-            throw new ResearchGenerationStageException(ResearchGenerationStages.Report, code, "The research report could not be generated.", usage, exception);
-        }
-        try
-        {
-            var citationIds = sourceCandidates.Select(source => source.CitationId).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            ResearchDraftValidator.Validate(report.Draft, citationIds, settings);
-        }
-        catch (ResearchCitationValidationException exception)
-        {
-            throw new ResearchGenerationStageException(ResearchGenerationStages.DraftValidation, GenerationJobErrorCodes.ResearchCitationValidationFailed, "The research report citations were invalid.", report.Usage, exception);
-        }
-        catch (ResearchOutputValidationException exception)
-        {
-            throw new ResearchGenerationStageException(ResearchGenerationStages.DraftValidation, GenerationJobErrorCodes.ResearchOutputInvalid, "The research report structure was invalid.", report.Usage, exception);
-        }
-        progress.Report(70);
+                report = await reportProvider.GenerateAsync(new ResearchReportPrompt(input, plan, sourceCandidates, evidenceCandidates, project), settings, cancellationToken);
+            }
+            catch (ResearchContextLimitException exception)
+            {
+                throw new ResearchGenerationStageException(ResearchGenerationStages.Context, GenerationJobErrorCodes.ResearchContextTooLarge, "The selected research context is too large.", usage, exception);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                var code = exception switch
+                {
+                    AiProviderUnavailableException or AiProviderTimeoutException or ResearchSearchUnavailableException => GenerationJobErrorCodes.ResearchProviderUnavailable,
+                    AiProviderException => GenerationJobErrorCodes.ResearchProviderUnavailable,
+                    ResearchOutputInvalidException => GenerationJobErrorCodes.ResearchOutputInvalid,
+                    _ => GenerationJobErrorCodes.ResearchGenerationFailed,
+                };
+                throw new ResearchGenerationStageException(ResearchGenerationStages.Report, code, "The research report could not be generated.", usage, exception);
+            }
+            try
+            {
+                var citationIds = sourceCandidates.Select(source => source.CitationId).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                ResearchDraftValidator.Validate(report.Draft, citationIds, settings);
+            }
+            catch (ResearchCitationValidationException exception)
+            {
+                throw new ResearchGenerationStageException(ResearchGenerationStages.DraftValidation, GenerationJobErrorCodes.ResearchCitationValidationFailed, "The research report citations were invalid.", report.Usage, exception);
+            }
+            catch (ResearchOutputValidationException exception)
+            {
+                throw new ResearchGenerationStageException(ResearchGenerationStages.DraftValidation, GenerationJobErrorCodes.ResearchOutputInvalid, "The research report structure was invalid.", report.Usage, exception);
+            }
+            progress.Report(70);
 
-        var documentDraft = ResearchDocumentMapper.ToDocumentDraft(report.Draft, sourceCandidates);
-        var documentInput = new DocumentGenerationInput(job.WorkspaceId, input.ProjectId, report.Draft.Title, input.Question, "report", input.Depth, input.Audience, input.AdditionalInstructions, input.AttachmentIds, NormalizeOutputLanguage(report.Draft.Language, input.Language), "both", "professional", true);
-        var rendered = new List<RenderedDocument>();
-        try { rendered.Add(documentRenderer.RenderDocx(documentDraft, documentInput, documentSettings)); }
-        catch (Exception exception) when (exception is not OperationCanceledException) { throw new ResearchGenerationStageException(ResearchGenerationStages.RenderDocx, GenerationJobErrorCodes.ResearchRenderFailed, "The research DOCX report could not be rendered.", report.Usage, exception); }
-        try { rendered.Add(documentRenderer.RenderPdf(documentDraft, documentInput, documentSettings)); }
-        catch (Exception exception) when (exception is not OperationCanceledException) { throw new ResearchGenerationStageException(ResearchGenerationStages.RenderPdf, GenerationJobErrorCodes.ResearchRenderFailed, "The research PDF report could not be rendered.", report.Usage, exception); }
+            var documentDraft = ResearchDocumentMapper.ToDocumentDraft(report.Draft, sourceCandidates);
+            var documentInput = new DocumentGenerationInput(job.WorkspaceId, input.ProjectId, report.Draft.Title, input.Question, "report", input.Depth, input.Audience, input.AdditionalInstructions, input.AttachmentIds, NormalizeOutputLanguage(report.Draft.Language, input.Language), "both", "professional", true);
+            var rendered = new List<RenderedDocument>();
+            try { rendered.Add(documentRenderer.RenderDocx(documentDraft, documentInput, documentSettings)); }
+            catch (Exception exception) when (exception is not OperationCanceledException) { throw new ResearchGenerationStageException(ResearchGenerationStages.RenderDocx, GenerationJobErrorCodes.ResearchRenderFailed, "The research DOCX report could not be rendered.", report.Usage, exception); }
+            try { rendered.Add(documentRenderer.RenderPdf(documentDraft, documentInput, documentSettings)); }
+            catch (Exception exception) when (exception is not OperationCanceledException) { throw new ResearchGenerationStageException(ResearchGenerationStages.RenderPdf, GenerationJobErrorCodes.ResearchRenderFailed, "The research PDF report could not be rendered.", report.Usage, exception); }
 
-        var metadata = JsonSerializer.Serialize(new
-        {
-            assetType = AssetTypes.Research,
-            sourceCount = sourceCandidates.Count,
-            webSourceCount = sourceCandidates.Count(source => source.SourceType == "web"),
-            uploadedSourceCount = sourceCandidates.Count(source => source.SourceType == "uploaded"),
-            language = NormalizeOutputLanguage(report.Draft.Language, input.Language),
-            reportType = input.ReportType,
-            generatedAt = DateTime.UtcNow,
-        });
-        var outputs = rendered.Select((item, index) => new GenerationHandlerOutput(
-            GenerationJobOutputTypes.StoredFile,
-            null,
-            metadata,
-            new GeneratedFileArtifact(item.FileName, item.ContentType, item.Content, metadata, item.RepresentationType),
-            index == 0 ? new GeneratedAssetDescriptor(report.Draft.Title, report.Draft.ExecutiveSummary, AssetTypes.Research, metadata) : null)).ToArray();
-        progress.Report(90);
+            var metadata = JsonSerializer.Serialize(new
+            {
+                assetType = AssetTypes.Research,
+                sourceCount = sourceCandidates.Count,
+                webSourceCount = sourceCandidates.Count(source => source.SourceType == "web"),
+                uploadedSourceCount = sourceCandidates.Count(source => source.SourceType == "uploaded"),
+                language = NormalizeOutputLanguage(report.Draft.Language, input.Language),
+                reportType = input.ReportType,
+                generatedAt = DateTime.UtcNow,
+            });
+            var outputs = rendered.Select((item, index) => new GenerationHandlerOutput(
+                GenerationJobOutputTypes.StoredFile,
+                null,
+                metadata,
+                new GeneratedFileArtifact(item.FileName, item.ContentType, item.Content, metadata, item.RepresentationType),
+                index == 0 ? new GeneratedAssetDescriptor(report.Draft.Title, report.Draft.ExecutiveSummary, AssetTypes.Research, metadata) : null)).ToArray();
+            progress.Report(90);
 
-        var safeSources = sourceCandidates.Select(source => new ResearchSourceDto(source.CitationId, source.Url, source.Title, source.Domain, source.Publisher, source.PublishedAt, source.RetrievedAt, source.SourceType, source.Snippet, source.SearchQuery, source.Rank, source.IsSelected)).ToArray();
-        var result = JsonSerializer.Serialize(new
+            var safeSources = sourceCandidates.Select(source => new ResearchSourceDto(source.CitationId, source.Url, source.Title, source.Domain, source.Publisher, source.PublishedAt, source.RetrievedAt, source.SourceType, source.Snippet, source.SearchQuery, source.Rank, source.IsSelected)).ToArray();
+            var result = JsonSerializer.Serialize(new
+            {
+                researchType = AssetTypes.Research,
+                title = report.Draft.Title,
+                subtitle = report.Draft.Subtitle,
+                language = NormalizeOutputLanguage(report.Draft.Language, input.Language),
+                executiveSummary = report.Draft.ExecutiveSummary,
+                keyFindings = report.Draft.KeyFindings,
+                sections = report.Draft.Sections,
+                conclusion = report.Draft.Conclusion,
+                sourceCount = safeSources.Length,
+                sources = safeSources,
+            });
+            progress.Report(100);
+            preserveSources = true;
+            return new GenerationHandlerResult(result, outputs, MergeUsage(usage, report.Usage, sourceCandidates.Count));
+        }
+        finally
         {
-            researchType = AssetTypes.Research,
-            title = report.Draft.Title,
-            subtitle = report.Draft.Subtitle,
-            language = NormalizeOutputLanguage(report.Draft.Language, input.Language),
-            executiveSummary = report.Draft.ExecutiveSummary,
-            keyFindings = report.Draft.KeyFindings,
-            sections = report.Draft.Sections,
-            conclusion = report.Draft.Conclusion,
-            sourceCount = safeSources.Length,
-            sources = safeSources,
-        });
-        progress.Report(100);
-        return new GenerationHandlerResult(result, outputs, MergeUsage(usage, report.Usage, sourceCandidates.Count));
+            if (sourcesStaged && !preserveSources)
+                await ResearchSourceLifecycle.ClearIfClaimOwnedAsync(db, job, CancellationToken.None);
+        }
     }
 
-    private async Task<List<StoredFile>> LoadFilesAsync(ResearchGenerationInput input, CancellationToken cancellationToken)
+    private async Task<List<StoredFile>> LoadFilesAsync(GenerationJob job, ResearchGenerationInput input, CancellationToken cancellationToken)
     {
         if (input.AttachmentIds.Count == 0) return [];
-        var files = await db.StoredFiles.AsNoTracking().Where(file => file.WorkspaceId == input.WorkspaceId && input.AttachmentIds.Contains(file.Id)).ToListAsync(cancellationToken);
+        var files = await db.StoredFiles.AsNoTracking()
+            .Where(file => file.WorkspaceId == job.WorkspaceId && input.AttachmentIds.Contains(file.Id))
+            .Where(StoredFileVisibility.ForWorkspaceMember(job.CreatedByUserId))
+            .ToListAsync(cancellationToken);
         if (files.Count != input.AttachmentIds.Count || files.Any(file => !ResearchGenerationDefaults.AttachmentExtensions.Contains(file.Extension)) || files.Any(file => file.Status != StoredFileStatus.Ready))
             throw new ResearchRequestValidationException(GenerationJobErrorCodes.ResearchSourceUnavailable, "One or more selected source files are unavailable.");
         if (files.Any(file => file.TextExtractionStatus != FileExtractionStatus.Ready || string.IsNullOrWhiteSpace(file.ExtractedText)))
@@ -195,15 +214,16 @@ public sealed class ResearchGenerationJobHandler(
         return files.OrderBy(file => order[file.Id]).ToList();
     }
 
-    private async Task PersistSourcesAsync(GenerationJob job, IReadOnlyList<ResearchSourceCandidate> candidates, IReadOnlyList<StoredFile> files, IReadOnlyList<ResearchEvidenceCandidate> evidence, CancellationToken cancellationToken)
+    private async Task PersistSourcesAsync(GenerationJob job, IReadOnlyList<ResearchSourceCandidate> candidates, IReadOnlyList<ResearchEvidenceCandidate> evidence, CancellationToken cancellationToken)
     {
-        var fileByName = files.GroupBy(file => file.OriginalFileName, StringComparer.OrdinalIgnoreCase).ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
+        if (!await ResearchSourceLifecycle.ClearIfClaimOwnedAsync(db, job, cancellationToken))
+            throw new OperationCanceledException(cancellationToken);
         var entities = candidates.Select(candidate => new ResearchSource
         {
             Id = Guid.NewGuid(),
             WorkspaceId = job.WorkspaceId,
             GenerationJobId = job.Id,
-            StoredFileId = candidate.SourceType == "uploaded" && fileByName.TryGetValue(candidate.Title, out var file) ? file.Id : null,
+            StoredFileId = candidate.SourceType == "uploaded" ? candidate.StoredFileId : null,
             CitationId = candidate.CitationId,
             Url = candidate.Url,
             CanonicalUrl = candidate.CanonicalUrl,
