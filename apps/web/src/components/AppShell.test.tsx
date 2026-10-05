@@ -18,4 +18,8 @@ describe("shared app shell accessibility", () => {
     expect(shellSource).toContain('id="main-content"');
     expect(shellSource).toContain("tabIndex={-1}");
   });
+
+  it("keeps the skip target in the shared shell so every route gets the same keyboard bypass", () => {
+    expect(shellSource).toContain('<main id="main-content" className="page-content" tabIndex={-1}>');
+  });
 });
