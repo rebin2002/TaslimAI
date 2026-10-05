@@ -46,7 +46,7 @@ public sealed class MovieProductionCheckpointService(
             throw new MovieProductionRecoveryException("RECOVERY_JOB_INVALID", "This production pass is not part of the movie project.");
         if (source.Status is not (GenerationJobStatus.Failed or GenerationJobStatus.Cancelled))
             throw new MovieProductionRecoveryException("RECOVERY_ACTION_STALE", "This production pass is no longer recoverable from the current checkpoint.");
-        if (await HasPublishedOutputAsync(source.Id, movie.Id, cancellationToken))
+        if (await HasPublishedOutputAsync(source.Id, movie, cancellationToken))
             throw new MovieProductionRecoveryException("RECOVERY_OUTPUT_EXISTS", "A publishable output already exists for this production pass. No duplicate recovery was created.");
 
         // A second browser click, tab, or worker delivery must reuse the active retry
@@ -140,8 +140,16 @@ public sealed class MovieProductionCheckpointService(
         var shots = await db.MovieShots.AsNoTracking().AsSplitQuery()
             .Include(item => item.Scene)
             .Include(item => item.ProductionVersions)
+                .ThenInclude(item => item.Asset)
+                    .ThenInclude(item => item!.StoredFile)
             .Include(item => item.Takes)
+                .ThenInclude(item => item.Asset)
+                    .ThenInclude(item => item!.StoredFile)
             .Include(item => item.Clips)
+                .ThenInclude(item => item.Asset)
+                    .ThenInclude(item => item!.StoredFile)
+            .Include(item => item.Clips)
+                .ThenInclude(item => item.StoredFile)
             .Where(item => item.Scene.MovieProjectId == movie.Id && item.Status != MovieShotStatuses.Archived)
             .OrderBy(item => item.Scene.Sequence).ThenBy(item => item.Sequence)
             .ToArrayAsync(cancellationToken);
@@ -153,8 +161,8 @@ public sealed class MovieProductionCheckpointService(
         var candidateJobs = linkedJobIds.Count == 0
             ? []
             : await db.GenerationJobs.AsNoTracking()
-                .Include(item => item.Outputs)
-                .Include(item => item.Assets)
+                .Include(item => item.Outputs).ThenInclude(item => item.StoredFile)
+                .Include(item => item.Assets).ThenInclude(item => item.StoredFile)
                 .Where(item => item.WorkspaceId == movie.WorkspaceId
                     && (item.JobType == GenerationJobTypes.MovieClipGenerate || item.JobType == GenerationJobTypes.MovieQuickGenerate || item.JobType == GenerationJobTypes.MovieAssembly))
                 .ToListAsync(cancellationToken);
@@ -181,10 +189,14 @@ public sealed class MovieProductionCheckpointService(
                 .Select(id =>
                 {
                     var job = relatedJobs[id];
-                    var hasOutput = job.Assets.Count > 0 || job.Outputs.Any(output => output.StoredFileId.HasValue)
-                        || shot.Clips.Any(clip => clip.GenerationJobId == id && (clip.AssetId.HasValue || clip.StoredFileId.HasValue))
-                        || shot.ProductionVersions.Any(version => version.GenerationJobId == id && version.AssetId.HasValue)
-                        || shot.Takes.Any(take => take.GenerationJobId == id && take.AssetId.HasValue);
+                    var hasOutput = MovieProductionCheckpointReadiness.HasPublishableJobOutput(job, movie)
+                        || shot.Clips.Any(clip => clip.GenerationJobId == id
+                            && (MovieProductionCheckpointReadiness.IsPublishableAsset(clip.Asset, movie)
+                                || MovieProductionCheckpointReadiness.IsPublishableStoredFile(clip.StoredFile, movie)))
+                        || shot.ProductionVersions.Any(version => version.GenerationJobId == id
+                            && MovieProductionCheckpointReadiness.IsPublishableAsset(version.Asset, movie))
+                        || shot.Takes.Any(take => take.GenerationJobId == id
+                            && MovieProductionCheckpointReadiness.IsPublishableAsset(take.Asset, movie));
                     return new MovieProductionCheckpointJobSnapshot(id, job.Status.ToString(), hasOutput);
                 })
                 .ToArray();
@@ -230,11 +242,65 @@ public sealed class MovieProductionCheckpointService(
         return MovieProductionCheckpointAnalyzer.Summarize(items, recoveryActions);
     }
 
-    private async Task<bool> HasPublishedOutputAsync(Guid jobId, Guid movieProjectId, CancellationToken cancellationToken)
+    private async Task<bool> HasPublishedOutputAsync(Guid jobId, MovieProject movie, CancellationToken cancellationToken)
     {
-        return await db.GenerationJobs.AsNoTracking().AnyAsync(item => item.Id == jobId && (item.Assets.Any() || item.Outputs.Any(output => output.StoredFileId.HasValue)), cancellationToken)
-            || await db.MovieClips.AsNoTracking().AnyAsync(item => item.MovieProjectId == movieProjectId && item.GenerationJobId == jobId && (item.AssetId.HasValue || item.StoredFileId.HasValue), cancellationToken)
-            || await db.MovieProductionVersions.AsNoTracking().AnyAsync(item => item.MovieShot.Scene.MovieProjectId == movieProjectId && item.GenerationJobId == jobId && item.AssetId.HasValue, cancellationToken);
+        return await db.GenerationJobs.AsNoTracking()
+                .Where(item => item.Id == jobId)
+                .SelectMany(item => item.Assets)
+                .AnyAsync(asset => asset.Status == AssetStatus.Active
+                    && asset.WorkspaceId == movie.WorkspaceId
+                    && (!asset.ProjectId.HasValue || asset.ProjectId == movie.ProjectId)
+                    && asset.StoredFile != null
+                    && asset.StoredFile.Status == StoredFileStatus.Ready
+                    && asset.StoredFile.WorkspaceId == movie.WorkspaceId
+                    && asset.StoredFile.ConversationId == null
+                    && (!asset.StoredFile.ProjectId.HasValue || asset.StoredFile.ProjectId == movie.ProjectId), cancellationToken)
+            || await db.GenerationJobs.AsNoTracking()
+                .Where(item => item.Id == jobId)
+                .SelectMany(item => item.Outputs)
+                .AnyAsync(output => output.StoredFile != null
+                    && output.StoredFile.Status == StoredFileStatus.Ready
+                    && output.StoredFile.WorkspaceId == movie.WorkspaceId
+                    && output.StoredFile.ConversationId == null
+                    && (!output.StoredFile.ProjectId.HasValue || output.StoredFile.ProjectId == movie.ProjectId), cancellationToken)
+            || await db.MovieClips.AsNoTracking()
+                .Where(item => item.MovieProjectId == movie.Id && item.GenerationJobId == jobId)
+                .AnyAsync(item => item.Asset != null
+                    && item.Asset.Status == AssetStatus.Active
+                    && item.Asset.WorkspaceId == movie.WorkspaceId
+                    && (!item.Asset.ProjectId.HasValue || item.Asset.ProjectId == movie.ProjectId)
+                    && item.Asset.StoredFile != null
+                    && item.Asset.StoredFile.Status == StoredFileStatus.Ready
+                    && item.Asset.StoredFile.WorkspaceId == movie.WorkspaceId
+                    && item.Asset.StoredFile.ConversationId == null
+                    && (!item.Asset.StoredFile.ProjectId.HasValue || item.Asset.StoredFile.ProjectId == movie.ProjectId)
+                    || item.StoredFile != null
+                    && item.StoredFile.Status == StoredFileStatus.Ready
+                    && item.StoredFile.WorkspaceId == movie.WorkspaceId
+                    && item.StoredFile.ConversationId == null
+                    && (!item.StoredFile.ProjectId.HasValue || item.StoredFile.ProjectId == movie.ProjectId), cancellationToken)
+            || await db.MovieProductionVersions.AsNoTracking()
+                .Where(item => item.GenerationJobId == jobId && item.MovieShot.Scene.MovieProjectId == movie.Id)
+                .AnyAsync(item => item.Asset != null
+                    && item.Asset.Status == AssetStatus.Active
+                    && item.Asset.WorkspaceId == movie.WorkspaceId
+                    && (!item.Asset.ProjectId.HasValue || item.Asset.ProjectId == movie.ProjectId)
+                    && item.Asset.StoredFile != null
+                    && item.Asset.StoredFile.Status == StoredFileStatus.Ready
+                    && item.Asset.StoredFile.WorkspaceId == movie.WorkspaceId
+                    && item.Asset.StoredFile.ConversationId == null
+                    && (!item.Asset.StoredFile.ProjectId.HasValue || item.Asset.StoredFile.ProjectId == movie.ProjectId), cancellationToken)
+            || await db.MovieTakes.AsNoTracking()
+                .Where(item => item.GenerationJobId == jobId && item.MovieShot.Scene.MovieProjectId == movie.Id)
+                .AnyAsync(item => item.Asset != null
+                    && item.Asset.Status == AssetStatus.Active
+                    && item.Asset.WorkspaceId == movie.WorkspaceId
+                    && (!item.Asset.ProjectId.HasValue || item.Asset.ProjectId == movie.ProjectId)
+                    && item.Asset.StoredFile != null
+                    && item.Asset.StoredFile.Status == StoredFileStatus.Ready
+                    && item.Asset.StoredFile.WorkspaceId == movie.WorkspaceId
+                    && item.Asset.StoredFile.ConversationId == null
+                    && (!item.Asset.StoredFile.ProjectId.HasValue || item.Asset.StoredFile.ProjectId == movie.ProjectId), cancellationToken);
     }
 
     private static MovieProductionCheckpointDto ToDto(MovieProductionCheckpoint checkpoint, MovieProductionCheckpointProjection projection) =>

@@ -119,11 +119,13 @@ public sealed class GlobalSearchController(TaslimDbContext db) : ControllerBase
         var assets = await LoadPageAsync(assetQuery, currentPage, perType, cancellationToken);
         AddGroup(groups, GlobalSearchResultTypes.Asset, assets, currentPage, perType);
 
-        // Unscoped files remain user-private; project files are workspace-authorized.
+        // Project files are workspace-shared; personal and conversation-scoped
+        // files remain private to their uploader, even when a conversation also
+        // belongs to a project.
         var fileQuery = db.StoredFiles.AsNoTracking()
             .Where(file => workspaceIds.Contains(file.WorkspaceId)
                 && file.Status != StoredFileStatus.Deleted
-                && (file.ProjectId != null || file.UserId == userId)
+                && ((file.ProjectId != null && file.ConversationId == null) || file.UserId == userId)
                 && (file.OriginalFileName.ToLower().Contains(search)
                     || (file.ExtractedText != null && file.ExtractedText.ToLower().Contains(search))))
             .OrderByDescending(file => file.CreatedAt)

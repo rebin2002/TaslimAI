@@ -85,7 +85,8 @@ public sealed record ResearchSourceCandidate(
     string? SearchQuery,
     int Rank,
     bool IsSelected,
-    string? MetadataJson);
+    string? MetadataJson,
+    Guid? StoredFileId = null);
 
 public sealed record ResearchEvidenceCandidate(
     string CitationId,
@@ -232,6 +233,10 @@ public static class ResearchGenerationRequestValidator
         if (input.PreferredDomains.Count > 100 || input.ExcludedDomains.Count > 100) Invalid(GenerationJobErrorCodes.ResearchRequestInvalid, "Too many domain preferences were supplied.");
         if (input.Audience?.Length > 400 || input.GeographicFocus?.Length > 240 || input.TimePeriod?.Length > 120 || input.AdditionalInstructions?.Length > 3_000)
             Invalid(GenerationJobErrorCodes.ResearchRequestInvalid, "Optional research guidance is too long.");
+        if (input.UseWebSources && !options.WebSourcesEnabled)
+            Invalid(GenerationJobErrorCodes.ResearchWebSourcesUnavailable, "Web research is not available right now.");
+        if (input.AttachmentIds.Count > 0 && !options.UserProvidedSourcesEnabled)
+            Invalid(GenerationJobErrorCodes.ResearchUserSourcesUnavailable, "Uploaded research sources are not available right now.");
         if (!input.UseWebSources && input.AttachmentIds.Count == 0) Invalid(GenerationJobErrorCodes.ResearchSourceUnavailable, "Choose a source file or enable web sources.");
 
         static void Invalid(string code, string message) => throw new ResearchRequestValidationException(code, message);

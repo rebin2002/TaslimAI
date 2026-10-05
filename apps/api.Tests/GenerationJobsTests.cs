@@ -10,6 +10,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
+using Taslim.Api.Generation;
 using Taslim.Api.Persistence;
 using Xunit;
 
@@ -17,7 +18,7 @@ namespace Taslim.Api.Tests;
 
 public class GenerationJobsApiFactory : WebApplicationFactory<Program>
 {
-    private readonly string databasePath = Path.Combine(Path.GetTempPath(), $"taslim-generation-{Guid.NewGuid():N}.db");
+    protected readonly string databasePath = Path.Combine(Path.GetTempPath(), $"taslim-generation-{Guid.NewGuid():N}.db");
 
     protected virtual bool WorkerEnabled => true;
 
@@ -127,6 +128,35 @@ public sealed class GenerationJobsTests : IClassFixture<GenerationJobsApiFactory
         var notification = Assert.Single(notifications.GetProperty("items").EnumerateArray());
         Assert.Equal("generation.completed", notification.GetProperty("type").GetString());
         Assert.Contains("/assets", notification.GetProperty("destination").GetString());
+    }
+
+    [Fact]
+    public async Task Job_creation_joins_an_existing_transaction_for_compound_workflows()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, $"jobs-transaction-{Guid.NewGuid():N}@example.com");
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var jobs = scope.ServiceProvider.GetRequiredService<IGenerationJobService>();
+        await using var transaction = await db.Database.BeginTransactionAsync();
+
+        var created = await jobs.CreateAsync(auth.User.Id, new CreateGenerationJobRequest
+        {
+            WorkspaceId = auth.PersonalWorkspace.Id,
+            JobType = "system.test",
+            Title = "Compound transaction test",
+            InputJson = "{}",
+        });
+
+        Assert.Equal(GenerationJobStatus.Queued, created.Status);
+        Assert.True(await db.GenerationJobs.AnyAsync(item => item.Id == created.Id));
+        await transaction.RollbackAsync();
+
+        using var verifyScope = factory.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.False(await verifyDb.GenerationJobs.AnyAsync(item => item.Id == created.Id));
+        Assert.False(await verifyDb.UsageTransactions.AnyAsync(item => item.RequestId == $"generation:{created.Id:N}"));
     }
 
     [Fact]

@@ -1,4 +1,5 @@
 "use client";
+import { localeTag } from "@/lib/i18n";
 
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -22,7 +23,7 @@ const icons: Record<GlobalSearchResultType, typeof FolderOpen> = {
 
 function formatDate(value: string | null, locale: string) {
   if (!value) return "";
-  return new Intl.DateTimeFormat(locale, { month: "short", day: "numeric", year: "numeric" }).format(new Date(value));
+  return new Intl.DateTimeFormat(localeTag(locale), { month: "short", day: "numeric", year: "numeric" }).format(new Date(value));
 }
 
 export function GlobalSearchView() {
