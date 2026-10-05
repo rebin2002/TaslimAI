@@ -19,18 +19,21 @@ public sealed class ObservabilityTests : IClassFixture<TaslimApiFactory>
     }
 
     [Fact]
-    public async Task Liveness_echoes_a_safe_request_id_without_querying_dependencies()
+    public async Task Liveness_uses_a_server_owned_request_id_without_querying_dependencies()
     {
         using var client = factory.CreateClient();
         using var request = new HttpRequestMessage(HttpMethod.Get, "/health/live");
-        request.Headers.Add("X-Request-ID", "observability-test-123");
+        request.Headers.Add("X-Request-ID", "incident-review-123");
 
         var response = await client.SendAsync(request);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Equal("observability-test-123", response.Headers.GetValues("X-Request-ID").Single());
+        var requestId = response.Headers.GetValues("X-Request-ID").Single();
+        Assert.NotEqual("incident-review-123", requestId);
+        Assert.True(Guid.TryParseExact(requestId, "N", out _));
         var body = JsonSerializer.Deserialize<JsonElement>(await response.Content.ReadAsStringAsync());
         Assert.Equal("alive", body.GetProperty("status").GetString());
+        Assert.Equal(requestId, body.GetProperty("requestId").GetString());
     }
 
     [Fact]
