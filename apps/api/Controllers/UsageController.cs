@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
+using Taslim.Api.Infrastructure;
 using Taslim.Api.Persistence;
 
 namespace Taslim.Api.Controllers;
@@ -48,15 +49,15 @@ public sealed class UsageController(
     public async Task<IActionResult> History(Guid workspaceId, [FromQuery] int page = 1, [FromQuery] int pageSize = 20, CancellationToken cancellationToken = default)
     {
         if (!await access.IsMemberAsync(GetUserId(), workspaceId, cancellationToken)) return Forbid();
-        page = Math.Max(1, page);
-        pageSize = Math.Clamp(pageSize, 1, 100);
+        page = ApiPagination.NormalizePage(page);
+        pageSize = ApiPagination.NormalizePageSize(pageSize);
 
         var query = db.UsageTransactions.AsNoTracking()
             .Where(transaction => transaction.WorkspaceId == workspaceId)
             .OrderByDescending(transaction => transaction.CreatedAt)
             .ThenByDescending(transaction => transaction.Id);
         var totalCount = await query.CountAsync(cancellationToken);
-        var items = await query.Skip((page - 1) * pageSize).Take(pageSize).Select(transaction => new UsageTransactionDto(
+        var items = await query.Skip(ApiPagination.GetOffset(page, pageSize)).Take(pageSize).Select(transaction => new UsageTransactionDto(
             transaction.Id,
             transaction.Feature.ToString(),
             transaction.Status.ToString(),
