@@ -20,27 +20,36 @@ public sealed class UsageController(
     {
         if (!await access.IsMemberAsync(GetUserId(), workspaceId, cancellationToken)) return Forbid();
 
-        var transactions = await db.UsageTransactions.AsNoTracking()
+        var aggregate = await db.UsageTransactions.AsNoTracking()
             .Where(transaction => transaction.WorkspaceId == workspaceId)
-            .Select(transaction => new
+            .GroupBy(_ => 1)
+            .Select(group => new
             {
-                transaction.Status,
-                transaction.InputTokens,
-                transaction.CachedInputTokens,
-                transaction.OutputTokens,
-                NetChargedAmount = transaction.ChargedAmount - transaction.ReversedAmount,
+                TotalRequests = group.Count(),
+                CompletedRequests = group.Count(transaction => transaction.Status == Domain.UsageTransactionStatus.Completed),
+                FailedRequests = group.Count(transaction => transaction.Status == Domain.UsageTransactionStatus.Failed),
+                CancelledRequests = group.Count(transaction => transaction.Status == Domain.UsageTransactionStatus.Cancelled),
+                RefundedRequests = group.Count(transaction => transaction.Status == Domain.UsageTransactionStatus.Refunded),
+                InputTokens = group.Sum(transaction => (long?)transaction.InputTokens) ?? 0L,
+                CachedInputTokens = group.Sum(transaction => (long?)transaction.CachedInputTokens) ?? 0L,
+                OutputTokens = group.Sum(transaction => (long?)transaction.OutputTokens) ?? 0L,
+                ChargedAmount = group.Sum(transaction => (double?)transaction.ChargedAmount) ?? 0d,
+                ReversedAmount = group.Sum(transaction => (double?)transaction.ReversedAmount) ?? 0d,
             })
-            .ToListAsync(cancellationToken);
-            var summary = new UsageSummaryDto(
-                transactions.Count,
-                transactions.Count(transaction => transaction.Status == Domain.UsageTransactionStatus.Completed),
-                transactions.Count(transaction => transaction.Status == Domain.UsageTransactionStatus.Failed),
-                transactions.Count(transaction => transaction.Status == Domain.UsageTransactionStatus.Cancelled),
-                transactions.Count(transaction => transaction.Status == Domain.UsageTransactionStatus.Refunded),
-                transactions.Sum(transaction => (long?)transaction.InputTokens ?? 0L),
-                transactions.Sum(transaction => (long?)transaction.CachedInputTokens ?? 0L),
-                transactions.Sum(transaction => (long?)transaction.OutputTokens ?? 0L),
-                transactions.Sum(transaction => transaction.NetChargedAmount),
+            .FirstOrDefaultAsync(cancellationToken);
+        var customerChargedAmount = aggregate is null
+            ? 0m
+            : decimal.Round((decimal)(aggregate.ChargedAmount - aggregate.ReversedAmount), 8);
+        var summary = new UsageSummaryDto(
+                aggregate?.TotalRequests ?? 0,
+                aggregate?.CompletedRequests ?? 0,
+                aggregate?.FailedRequests ?? 0,
+                aggregate?.CancelledRequests ?? 0,
+                aggregate?.RefundedRequests ?? 0,
+                aggregate?.InputTokens ?? 0L,
+                aggregate?.CachedInputTokens ?? 0L,
+                aggregate?.OutputTokens ?? 0L,
+                customerChargedAmount,
             Domain.UsageChargeUnit.Usd.ToString());
         return Ok(summary);
     }

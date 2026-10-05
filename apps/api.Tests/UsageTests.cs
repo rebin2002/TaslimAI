@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
 using Taslim.Api.Contracts;
+using Taslim.Api.Domain;
 using Taslim.Api.Persistence;
 using Xunit;
 
@@ -122,6 +123,63 @@ public sealed class UsageTests : IClassFixture<TaslimApiFactory>
         Assert.Equal(Taslim.Api.Infrastructure.ApiPagination.MaxPageSize, history.PageSize);
         Assert.Empty(history.Items);
     }
+
+    [Fact]
+    public async Task Usage_summary_aggregates_statuses_tokens_and_net_amount_without_loading_rows()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Usage Summary Aggregate");
+        var now = DateTime.UtcNow;
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.UsageTransactions.AddRange(
+                CreateTransaction(auth, UsageTransactionStatus.Completed, 10, 2, 4, 1.25m, 0.25m, now),
+                CreateTransaction(auth, UsageTransactionStatus.Failed, null, 3, 1, 0m, 0m, now.AddSeconds(1)),
+                CreateTransaction(auth, UsageTransactionStatus.Cancelled, 7, null, null, 0m, 0m, now.AddSeconds(2)),
+                CreateTransaction(auth, UsageTransactionStatus.Refunded, 1, 1, 2, 4m, 1m, now.AddSeconds(3)));
+            await db.SaveChangesAsync();
+        }
+
+        var summary = await client.GetFromJsonAsync<UsageSummaryDto>($"/api/workspaces/{auth.PersonalWorkspace.Id}/usage/summary");
+
+        Assert.NotNull(summary);
+        Assert.Equal(4, summary.TotalRequests);
+        Assert.Equal(1, summary.CompletedRequests);
+        Assert.Equal(1, summary.FailedRequests);
+        Assert.Equal(1, summary.CancelledRequests);
+        Assert.Equal(1, summary.RefundedRequests);
+        Assert.Equal(18, summary.InputTokens);
+        Assert.Equal(6, summary.CachedInputTokens);
+        Assert.Equal(7, summary.OutputTokens);
+        Assert.Equal(4m, summary.CustomerChargedAmount);
+    }
+
+    private static UsageTransaction CreateTransaction(
+        AuthResponse auth,
+        UsageTransactionStatus status,
+        int? inputTokens,
+        int? cachedInputTokens,
+        int? outputTokens,
+        decimal chargedAmount,
+        decimal reversedAmount,
+        DateTime createdAt) => new()
+        {
+            Id = Guid.NewGuid(),
+            WorkspaceId = auth.PersonalWorkspace.Id,
+            UserId = auth.User.Id,
+            RequestId = $"summary-{Guid.NewGuid():N}",
+            Feature = UsageFeature.Chat,
+            Provider = "test",
+            Model = "test",
+            Status = status,
+            InputTokens = inputTokens,
+            CachedInputTokens = cachedInputTokens,
+            OutputTokens = outputTokens,
+            ChargedAmount = chargedAmount,
+            ReversedAmount = reversedAmount,
+            CreatedAt = createdAt,
+        };
 
     private async Task<AuthResponse> Register(HttpClient client, string displayName)
     {
