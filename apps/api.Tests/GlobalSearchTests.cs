@@ -73,6 +73,14 @@ public sealed class GlobalSearchTests : IClassFixture<TaslimApiFactory>
         var conversation = await SendWithCsrf<ConversationDto>(owner, HttpMethod.Post, $"/api/workspaces/{ownerAuth.PersonalWorkspace.Id}/conversations", new { projectId = project.Id, title = "Private Nebula Conversation" });
         var upload = await Upload(owner, ownerAuth.PersonalWorkspace.Id, "Nebula-private.txt", "Private Nebula source", project.Id, conversation.Id);
         Assert.Equal(HttpStatusCode.Created, upload.StatusCode);
+        await SendWithCsrf<GenerationJobDto>(owner, HttpMethod.Post, "/api/generation/jobs", new
+        {
+            workspaceId = ownerAuth.PersonalWorkspace.Id,
+            projectId = project.Id,
+            jobType = "system.test",
+            inputJson = "{\"brief\":\"Private Nebula generation prompt\"}",
+            title = "Owner-only generation",
+        });
 
         using var member = factory.CreateClient();
         var memberResponse = await Register(member, "Workspace Member", $"workspace-member-{Guid.NewGuid():N}@example.com");
@@ -93,11 +101,19 @@ public sealed class GlobalSearchTests : IClassFixture<TaslimApiFactory>
             await db.SaveChangesAsync();
         }
 
+        var ownerSearch = await owner.GetFromJsonAsync<GlobalSearchResponseDto>("/api/search?q=Private%20Nebula%20generation%20prompt");
+        Assert.NotNull(ownerSearch);
+        Assert.Contains(ownerSearch!.Groups.SelectMany(group => group.Items), item => item.Type == GlobalSearchResultTypes.Generation && item.Title == "Owner-only generation");
+
         var sharedWorkspaceSearch = await member.GetFromJsonAsync<GlobalSearchResponseDto>("/api/search?q=Nebula");
         Assert.NotNull(sharedWorkspaceSearch);
         Assert.DoesNotContain(sharedWorkspaceSearch!.Groups.SelectMany(group => group.Items), item => item.Type == GlobalSearchResultTypes.Conversation);
         Assert.DoesNotContain(sharedWorkspaceSearch.Groups.SelectMany(group => group.Items), item => item.Type == GlobalSearchResultTypes.File);
         Assert.Contains(sharedWorkspaceSearch.Groups.SelectMany(group => group.Items), item => item.Type == GlobalSearchResultTypes.Project && item.Title == "Private Nebula Project");
+
+        var privatePromptSearch = await member.GetFromJsonAsync<GlobalSearchResponseDto>("/api/search?q=Private%20Nebula%20generation%20prompt");
+        Assert.NotNull(privatePromptSearch);
+        Assert.DoesNotContain(privatePromptSearch!.Groups.SelectMany(group => group.Items), item => item.Type == GlobalSearchResultTypes.Generation);
 
         using var unrelated = factory.CreateClient();
         await Register(unrelated, "Unrelated Search User", $"unrelated-search-{Guid.NewGuid():N}@example.com");
