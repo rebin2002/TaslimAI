@@ -103,4 +103,95 @@ public sealed class BillingTests
         Assert.Equal(900, account.Credits.TotalRemaining);
         Assert.Equal(100, account.Transactions.Count);
     }
+
+    [Fact]
+    public async Task Usage_debit_requires_a_completed_billable_transaction_in_the_same_workspace()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connection).Options;
+        await using var db = new TaslimDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+        var workspace = NewWorkspace("usage");
+        var otherWorkspace = NewWorkspace("other");
+        var user = new ApplicationUser
+        {
+            Id = Guid.NewGuid(), UserName = "billing-usage@example.com", NormalizedUserName = "BILLING-USAGE@EXAMPLE.COM",
+            Email = "billing-usage@example.com", NormalizedEmail = "BILLING-USAGE@EXAMPLE.COM", DisplayName = "Billing Usage",
+            CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+        };
+        db.Workspaces.AddRange(workspace, otherWorkspace);
+        db.Users.Add(user);
+        await db.SaveChangesAsync();
+        var completed = new UsageTransaction
+        {
+            Id = Guid.NewGuid(), WorkspaceId = workspace.Id, UserId = user.Id, RequestId = "billable-usage",
+            Feature = UsageFeature.Generation, Provider = "test", Model = "test", Status = UsageTransactionStatus.Completed,
+            IsBillable = true, CreatedAt = DateTime.UtcNow,
+        };
+        var otherWorkspaceUsage = new UsageTransaction
+        {
+            Id = Guid.NewGuid(), WorkspaceId = otherWorkspace.Id, UserId = user.Id, RequestId = "other-usage",
+            Feature = UsageFeature.Generation, Provider = "test", Model = "test", Status = UsageTransactionStatus.Completed,
+            IsBillable = true, CreatedAt = DateTime.UtcNow,
+        };
+        db.UsageTransactions.AddRange(completed, otherWorkspaceUsage);
+        var entitlement = new CreditEntitlement
+        {
+            Id = Guid.NewGuid(), WorkspaceId = workspace.Id, Type = CreditEntitlementType.Purchased, GrantedCredits = 10,
+            GrantedAt = DateTime.UtcNow, IdempotencyKey = "purchased:usage", CreatedAt = DateTime.UtcNow,
+        };
+        db.CreditEntitlements.Add(entitlement);
+        db.CreditLedgerEntries.Add(new CreditLedgerEntry
+        {
+            Id = Guid.NewGuid(), WorkspaceId = workspace.Id, CreditEntitlementId = entitlement.Id,
+            Type = CreditLedgerEntryType.Grant, Amount = 10, IdempotencyKey = "grant:usage", Reason = "Test credits", CreatedAt = DateTime.UtcNow,
+        });
+        await db.SaveChangesAsync();
+        var service = new CreditLedgerService(db, Options.Create(new BillingOptions { CustomerChargingEnabled = true }));
+
+        var first = await service.RecordUsageDebitAsync(workspace.Id, completed.Id, 4, "usage:one", "Billable usage");
+        var duplicate = await service.RecordUsageDebitAsync(workspace.Id, completed.Id, 4, "usage:one", "Billable usage");
+
+        Assert.NotNull(first);
+        Assert.NotNull(duplicate);
+        Assert.False(duplicate!.Created);
+        Assert.Equal(first!.Entry.Id, duplicate.Entry.Id);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.RecordUsageDebitAsync(workspace.Id, otherWorkspaceUsage.Id, 1, "usage:cross-workspace", "Cross-workspace usage"));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.RecordUsageDebitAsync(workspace.Id, completed.Id, 1, "usage:second-debit", "Duplicate usage debit"));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.RecordUsageDebitAsync(workspace.Id, completed.Id, 7, "usage:overdraw", "Overdraw attempt"));
+        Assert.Equal(1, await db.CreditLedgerEntries.CountAsync(item => item.Type == CreditLedgerEntryType.Debit));
+    }
+
+    [Fact]
+    public async Task Reversal_is_append_only_but_cannot_be_applied_twice()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connection).Options;
+        await using var db = new TaslimDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+        var workspace = NewWorkspace("reverse-once");
+        db.Workspaces.Add(workspace);
+        await db.SaveChangesAsync();
+        var service = new CreditLedgerService(db, Options.Create(new BillingOptions { CustomerChargingEnabled = false }));
+
+        var grant = await service.GrantAsync(workspace.Id, CreditEntitlementType.AdministrativeCorrection, 25, "correction:once", "Goodwill correction");
+        await service.ReverseAsync(workspace.Id, grant.Entry.Id, "reversal:once", "Correction withdrawn");
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.ReverseAsync(workspace.Id, grant.Entry.Id, "reversal:twice", "Duplicate correction withdrawal"));
+        db.CreditLedgerEntries.Add(new CreditLedgerEntry
+        {
+            Id = Guid.NewGuid(), WorkspaceId = workspace.Id, Type = CreditLedgerEntryType.Refund, Amount = 25,
+            ReversesEntryId = grant.Entry.Id, IdempotencyKey = "refund:duplicate-link", Reason = "Duplicate reversal link", CreatedAt = DateTime.UtcNow,
+        });
+        await Assert.ThrowsAsync<DbUpdateException>(() => db.SaveChangesAsync());
+        Assert.Equal(2, await db.CreditLedgerEntries.CountAsync());
+    }
+
+    private static Workspace NewWorkspace(string prefix) => new()
+    {
+        Id = Guid.NewGuid(), Name = $"{prefix} workspace", Slug = $"{prefix}-{Guid.NewGuid():N}", Type = WorkspaceType.Personal,
+        CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+    };
 }

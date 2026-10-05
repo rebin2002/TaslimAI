@@ -1,3 +1,4 @@
+using System.Data;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -100,14 +101,26 @@ public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerSer
         ValidateReason(provider, nameof(provider));
         ValidateReason(idempotencyKey, nameof(idempotencyKey));
         if (amount < 0) throw new ArgumentOutOfRangeException(nameof(amount));
+        var normalizedProvider = provider.Trim();
+        var normalizedKey = idempotencyKey.Trim();
+        var normalizedCurrency = NormalizeCurrency(currency);
         var existing = await db.PaymentAttempts.SingleOrDefaultAsync(
-            item => item.WorkspaceId == workspaceId && item.IdempotencyKey == idempotencyKey,
+            item => item.WorkspaceId == workspaceId && item.IdempotencyKey == normalizedKey,
             cancellationToken);
-        if (existing is not null) return existing;
+        if (existing is not null)
+        {
+            EnsurePaymentAttemptReplayMatches(existing, normalizedProvider, amount, normalizedCurrency, subscriptionId, checkoutSessionId);
+            return existing;
+        }
+        if (subscriptionId.HasValue && !await db.Subscriptions.AnyAsync(item => item.Id == subscriptionId.Value && item.WorkspaceId == workspaceId, cancellationToken))
+            throw new InvalidOperationException("The subscription belongs to a different workspace or was not found.");
+        if (checkoutSessionId.HasValue && !await db.CheckoutSessions.AnyAsync(item => item.Id == checkoutSessionId.Value && item.WorkspaceId == workspaceId, cancellationToken))
+            throw new InvalidOperationException("The checkout session belongs to a different workspace or was not found.");
         if (!string.IsNullOrWhiteSpace(providerPaymentReference))
         {
+            var normalizedProviderReference = providerPaymentReference.Trim();
             var byProviderReference = await db.PaymentAttempts.SingleOrDefaultAsync(
-                item => item.Provider == provider && item.ProviderPaymentReference == providerPaymentReference,
+                item => item.Provider == normalizedProvider && item.ProviderPaymentReference == normalizedProviderReference,
                 cancellationToken);
             if (byProviderReference is not null)
             {
@@ -121,9 +134,9 @@ public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerSer
         var attempt = new PaymentAttempt
         {
             Id = Guid.NewGuid(), WorkspaceId = workspaceId, SubscriptionId = subscriptionId,
-            CheckoutSessionId = checkoutSessionId, Provider = provider.Trim(),
+            CheckoutSessionId = checkoutSessionId, Provider = normalizedProvider,
             ProviderPaymentReference = providerPaymentReference?.Trim(), Status = status,
-            Amount = amount, Currency = currency.Trim().ToUpperInvariant(), IdempotencyKey = idempotencyKey.Trim(),
+            Amount = amount, Currency = normalizedCurrency, IdempotencyKey = normalizedKey,
             FailureCode = failureCode?.Trim(), FailureReason = failureReason?.Trim(), CreatedAt = now, UpdatedAt = now,
             SucceededAt = status == PaymentAttemptStatus.Succeeded ? now : null,
         };
@@ -239,14 +252,33 @@ public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerSer
         ValidateReason(idempotencyKey, nameof(idempotencyKey));
         ValidateReason(reason, nameof(reason));
         if (amount <= 0) throw new ArgumentOutOfRangeException(nameof(amount));
-        var existing = await db.PaymentRefunds.SingleOrDefaultAsync(item => item.WorkspaceId == workspaceId && item.IdempotencyKey == idempotencyKey, cancellationToken);
-        if (existing is not null) return existing;
+        var normalizedProvider = provider.Trim();
+        var normalizedCurrency = NormalizeCurrency(currency);
+        var normalizedKey = idempotencyKey.Trim();
+        await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
+        var existing = await db.PaymentRefunds.SingleOrDefaultAsync(item => item.WorkspaceId == workspaceId && item.IdempotencyKey == normalizedKey, cancellationToken);
+        if (existing is not null)
+        {
+            EnsureRefundReplayMatches(existing, paymentAttemptId, normalizedProvider, amount, normalizedCurrency);
+            return existing;
+        }
         if (!string.IsNullOrWhiteSpace(providerRefundReference))
         {
-            var duplicateReference = await db.PaymentRefunds.SingleOrDefaultAsync(item => item.Provider == provider && item.ProviderRefundReference == providerRefundReference, cancellationToken);
-            if (duplicateReference is not null) return duplicateReference;
+            var normalizedProviderReference = providerRefundReference.Trim();
+            var duplicateReference = await db.PaymentRefunds.SingleOrDefaultAsync(item => item.Provider == normalizedProvider && item.ProviderRefundReference == normalizedProviderReference, cancellationToken);
+            if (duplicateReference is not null)
+            {
+                if (duplicateReference.WorkspaceId != workspaceId)
+                    throw new InvalidOperationException("The provider refund reference is already associated with another workspace.");
+                EnsureRefundReplayMatches(duplicateReference, paymentAttemptId, normalizedProvider, amount, normalizedCurrency);
+                return duplicateReference;
+            }
         }
         var attempt = await GetAttemptAsync(workspaceId, paymentAttemptId, cancellationToken);
+        if (!string.Equals(attempt.Provider, normalizedProvider, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("The refund provider does not match the payment attempt.");
+        if (!string.Equals(attempt.Currency, normalizedCurrency, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("The refund currency does not match the payment attempt.");
         var refundedAmounts = await db.PaymentRefunds
             .Where(item => item.PaymentAttemptId == attempt.Id && item.Status == PaymentRefundStatus.Succeeded)
             .Select(item => item.Amount)
@@ -254,22 +286,27 @@ public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerSer
         var refundedAmount = refundedAmounts.Sum();
         if (amount > attempt.Amount - refundedAmount)
             throw new InvalidOperationException("The refund exceeds the remaining refundable payment amount.");
+        var totalRefundedAmount = refundedAmount + amount;
         var now = DateTime.UtcNow;
         var refund = new PaymentRefund
         {
-            Id = Guid.NewGuid(), WorkspaceId = workspaceId, PaymentAttemptId = attempt.Id, Provider = provider.Trim(),
+            Id = Guid.NewGuid(), WorkspaceId = workspaceId, PaymentAttemptId = attempt.Id, Provider = normalizedProvider,
             ProviderRefundReference = providerRefundReference?.Trim(), Status = PaymentRefundStatus.Succeeded,
-            Amount = amount, Currency = currency.Trim().ToUpperInvariant(), IdempotencyKey = idempotencyKey.Trim(),
+            Amount = amount, Currency = normalizedCurrency, IdempotencyKey = normalizedKey,
             Reason = reason.Trim(), CreatedAt = now, UpdatedAt = now, CompletedAt = now,
         };
         db.PaymentRefunds.Add(refund);
-        attempt.Status = amount >= attempt.Amount ? PaymentAttemptStatus.Refunded : PaymentAttemptStatus.PartiallyRefunded;
+        attempt.Status = totalRefundedAmount >= attempt.Amount ? PaymentAttemptStatus.Refunded : PaymentAttemptStatus.PartiallyRefunded;
         attempt.UpdatedAt = now;
         await db.SaveChangesAsync(cancellationToken);
-        if (attempt.CreditLedgerEntryId.HasValue)
+        // A partial monetary refund has no reviewed credit-conversion policy. Do
+        // not reverse the entire purchased grant until the payment is fully
+        // refunded; otherwise a $1 refund could restore all $9-plan credits.
+        if (attempt.CreditLedgerEntryId.HasValue && totalRefundedAmount >= attempt.Amount)
         {
             await creditLedger.RefundAsync(workspaceId, attempt.CreditLedgerEntryId.Value, $"refund:{refund.Id}", $"Payment refund {refund.Id}: {reason}", cancellationToken: cancellationToken);
         }
+        await transaction.CommitAsync(cancellationToken);
         logger.LogInformation("Payment refund recorded. PaymentRefundId={PaymentRefundId}; PaymentAttemptId={PaymentAttemptId}; WorkspaceId={WorkspaceId}; Status={Status}", refund.Id, paymentAttemptId, workspaceId, refund.Status);
         return refund;
     }
@@ -329,6 +366,36 @@ public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerSer
     private async Task<Subscription> GetSubscriptionAsync(Guid workspaceId, Guid id, CancellationToken cancellationToken) =>
         await db.Subscriptions.SingleOrDefaultAsync(item => item.Id == id && item.WorkspaceId == workspaceId, cancellationToken)
         ?? throw new InvalidOperationException("The subscription was not found.");
+
+    private static void EnsurePaymentAttemptReplayMatches(
+        PaymentAttempt existing, string provider, decimal amount, string currency,
+        Guid? subscriptionId, Guid? checkoutSessionId)
+    {
+        if (!string.Equals(existing.Provider, provider, StringComparison.OrdinalIgnoreCase) ||
+            existing.Amount != amount ||
+            !string.Equals(existing.Currency, currency, StringComparison.OrdinalIgnoreCase) ||
+            existing.SubscriptionId != subscriptionId ||
+            existing.CheckoutSessionId != checkoutSessionId)
+            throw new InvalidOperationException("The payment attempt idempotency key belongs to a different payment.");
+    }
+
+    private static void EnsureRefundReplayMatches(
+        PaymentRefund existing, Guid paymentAttemptId, string provider, decimal amount, string currency)
+    {
+        if (existing.PaymentAttemptId != paymentAttemptId ||
+            !string.Equals(existing.Provider, provider, StringComparison.OrdinalIgnoreCase) ||
+            existing.Amount != amount ||
+            !string.Equals(existing.Currency, currency, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("The refund idempotency key belongs to a different refund.");
+    }
+
+    private static string NormalizeCurrency(string value)
+    {
+        ValidateReason(value, nameof(value));
+        var normalized = value.Trim().ToUpperInvariant();
+        if (normalized.Length != 3) throw new ArgumentException("Currency must be a three-letter code.", nameof(value));
+        return normalized;
+    }
 
     private static void ValidateReason(string value, string name)
     {
