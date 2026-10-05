@@ -115,6 +115,47 @@ public sealed class ImageGenerationUnitTests
         Assert.True(result.Usage.LatencyMs >= 1);
     }
 
+    [Theory]
+    [InlineData("{\"data\":[{}]}")]
+    [InlineData("{\"data\":[{\"b64_json\":42}]}")]
+    public async Task OpenAi_provider_normalizes_malformed_success_shapes_to_safe_output_failure(string body)
+    {
+        using var httpClient = new HttpClient(new StubImageResponseHandler(body));
+        var provider = CreateProvider(httpClient);
+        var prompt = CreatePrompt();
+
+        var exception = await Assert.ThrowsAsync<ImageOutputInvalidException>(() => provider.GenerateAsync(prompt.Request, prompt.Prompt));
+
+        Assert.Equal("The image provider returned an invalid image.", exception.Message);
+    }
+
+    [Fact]
+    public async Task OpenAi_provider_ignores_malformed_error_metadata_without_leaking_provider_exceptions()
+    {
+        using var httpClient = new HttpClient(new StatusImageResponseHandler(HttpStatusCode.BadGateway, "{\"error\":{\"code\":42,\"type\":[]}}"));
+        var provider = CreateProvider(httpClient);
+        var prompt = CreatePrompt();
+
+        var exception = await Assert.ThrowsAsync<ImageProviderFailureException>(() => provider.GenerateAsync(prompt.Request, prompt.Prompt));
+
+        Assert.Equal("The image provider failed.", exception.Message);
+    }
+
+    [Fact]
+    public async Task OpenAi_provider_drops_negative_usage_counters_instead_of_persisting_invalid_accounting()
+    {
+        var png = Convert.ToBase64String(Png);
+        using var httpClient = new HttpClient(new StubImageResponseHandler($"{{\"data\":[{{\"b64_json\":\"{png}\"}}],\"usage\":{{\"input_tokens\":-1,\"output_tokens\":-2}}}}"));
+        var provider = CreateProvider(httpClient);
+        var prompt = CreatePrompt();
+
+        var result = await provider.GenerateAsync(prompt.Request, prompt.Prompt);
+
+        Assert.Null(result.Usage.InputTokens);
+        Assert.Null(result.Usage.OutputTokens);
+        Assert.Equal(UsageCostBasis.Estimated, result.Usage.CostBasis);
+    }
+
     [Fact]
     public async Task OpenAi_provider_sends_one_billable_submission_with_a_stable_idempotency_key()
     {
