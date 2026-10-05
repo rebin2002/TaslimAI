@@ -50,6 +50,40 @@ describe("api.login", () => {
     expect(fetchMock.mock.calls[1][1].credentials).toBe("include");
   });
 
+  it("shares one forced CSRF refresh across concurrent login transitions", async () => {
+    let refreshStarted!: () => void;
+    let releaseRefresh!: () => void;
+    const refreshReady = new Promise<void>((resolve) => { refreshStarted = resolve; });
+    const refreshRelease = new Promise<void>((resolve) => { releaseRefresh = resolve; });
+    let csrfCalls = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/auth/csrf")) {
+        csrfCalls += 1;
+        if (csrfCalls === 1) return csrfResponse("before-login");
+        if (csrfCalls === 2) {
+          refreshStarted();
+          await refreshRelease;
+          return csrfResponse("after-login");
+        }
+        throw new Error("unexpected duplicate forced refresh");
+      }
+      expect(init?.method).toBe("POST");
+      return response(authResponse);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const { api } = await import("./api");
+
+    const first = api.login({ email: "owner@example.com", password: "StrongPassword!123" });
+    const second = api.login({ email: "owner@example.com", password: "StrongPassword!123" });
+    await refreshReady;
+
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    releaseRefresh();
+    await expect(Promise.all([first, second])).resolves.toEqual([authResponse, authResponse]);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
   it("surfaces invalid credentials as a typed safe API error", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(csrfResponse("token"))

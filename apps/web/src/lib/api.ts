@@ -747,6 +747,7 @@ export type AssetInput = { name: string; description?: string | null; projectId?
 
 let csrfToken: string | null = null;
 let csrfRequest: Promise<string> | null = null;
+let csrfRefreshRequest: Promise<string> | null = null;
 
 function requestId() {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
@@ -759,9 +760,14 @@ function generationInit(init: RequestInit, idempotencyKey: string): RequestInit 
 }
 
 async function csrf(forceRefresh = false) {
+  if (csrfRefreshRequest) return csrfRefreshRequest;
   if (csrfToken && !forceRefresh) return csrfToken;
   if (csrfRequest && !forceRefresh) return csrfRequest;
   const request = (async () => {
+    // A forced refresh follows any in-flight bootstrap, but does not share its
+    // token: an auth transition may have changed the antiforgery user binding
+    // while the earlier request was still completing.
+    if (forceRefresh && csrfRequest) await csrfRequest.catch(() => undefined);
     const response = await fetch(`${API_URL}/api/auth/csrf`, { credentials: "include", cache: "no-store" });
     if (!response.ok) throw new Error("CSRF token unavailable");
     const body = await response.json().catch(() => null) as { token?: unknown } | null;
@@ -769,10 +775,12 @@ async function csrf(forceRefresh = false) {
     csrfToken = body.token;
     return body.token;
   })();
-  if (!forceRefresh) csrfRequest = request;
+  if (forceRefresh) csrfRefreshRequest = request;
+  else csrfRequest = request;
   try {
     return await request;
   } finally {
+    if (forceRefresh && csrfRefreshRequest === request) csrfRefreshRequest = null;
     if (!forceRefresh && csrfRequest === request) csrfRequest = null;
   }
 }
