@@ -57,6 +57,10 @@ export function shouldResetDocumentWorkspaceState(job: GenerationJob | null, wor
   return !!job && (!workspaceId || !isRestorableDocumentJob(job, workspaceId));
 }
 
+export function retainDocumentWorkspaceProjectId(projectId: string, projects: ReadonlyArray<{ id: string }>) {
+  return projectId && projects.some((project) => project.id === projectId) ? projectId : "";
+}
+
 export function isDocumentTerminal(job: GenerationJob | null) {
   return !!job && terminalStatuses.has(job.status);
 }
@@ -121,16 +125,35 @@ function parseSections(value: unknown): NonNullable<DocumentJobResult["sections"
   });
 }
 
+type DocumentRepresentation = NonNullable<DocumentJobResult["representations"]>[number];
+const documentRepresentationContentTypes: Readonly<Record<string, string>> = {
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  pdf: "application/pdf",
+};
+
+export function isSafeDocumentRepresentation(value: unknown): value is DocumentRepresentation {
+  if (!isRecord(value) || !nonEmptyString(value.id) || !nonEmptyString(value.type)
+    || !nonEmptyString(value.fileName) || !nonEmptyString(value.contentType)) return false;
+  const type = value.type.trim().toLowerCase();
+  const fileName = value.fileName.trim();
+  const contentType = value.contentType.trim().toLowerCase();
+  const expectedContentType = documentRepresentationContentTypes[type];
+  return !!expectedContentType
+    && fileName.length <= 255
+    && !(/[\\/\u0000-\u001f\u007f]/.test(fileName))
+    && fileName.toLowerCase().endsWith(`.${type}`)
+    && contentType === expectedContentType;
+}
+
 function parseRepresentations(value: unknown): NonNullable<DocumentJobResult["representations"]> {
   if (!Array.isArray(value)) return [];
   return value.flatMap((representation) => {
-    if (!isRecord(representation) || !nonEmptyString(representation.id) || !nonEmptyString(representation.type)
-      || !nonEmptyString(representation.fileName) || !nonEmptyString(representation.contentType)) return [];
+    if (!isSafeDocumentRepresentation(representation)) return [];
     return [{
-      id: representation.id,
-      type: representation.type,
-      fileName: representation.fileName,
-      contentType: representation.contentType,
+      id: representation.id.trim(),
+      type: representation.type.trim().toLowerCase(),
+      fileName: representation.fileName.trim(),
+      contentType: representation.contentType.trim().toLowerCase(),
     }];
   });
 }

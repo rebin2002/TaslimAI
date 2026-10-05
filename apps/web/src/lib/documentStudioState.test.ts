@@ -7,11 +7,13 @@ import {
   documentPresentationState,
   isDocumentJob,
   isDocumentSourceReady,
+  isSafeDocumentRepresentation,
   isRestorableDocumentJob,
   nextDocumentPollDelay,
   parseDocumentJobResult,
   persistDocumentActiveJobId,
   readDocumentActiveJobId,
+  retainDocumentWorkspaceProjectId,
   shouldResetDocumentWorkspaceState,
   shouldPollDocumentJob,
 } from "./documentStudioState";
@@ -53,6 +55,8 @@ describe("Document Studio state", () => {
     expect(shouldResetDocumentWorkspaceState(job("Running"), "workspace-2")).toBe(true);
     expect(shouldResetDocumentWorkspaceState(job("Running"), "workspace-1")).toBe(false);
     expect(shouldResetDocumentWorkspaceState(null, "workspace-2")).toBe(false);
+    expect(retainDocumentWorkspaceProjectId("project-1", [{ id: "project-1" }])).toBe("project-1");
+    expect(retainDocumentWorkspaceProjectId("project-from-other-workspace", [{ id: "project-1" }])).toBe("");
 
     const values = new Map<string, string>();
     vi.stubGlobal("window", {
@@ -95,12 +99,16 @@ describe("Document Studio state", () => {
     const parsed = parseDocumentJobResult(completed);
     expect(parsed?.sections?.[0].heading).toBe("Overview");
     expect(parsed?.representations).toHaveLength(1);
+    expect(isSafeDocumentRepresentation(JSON.parse(completed.resultJson!).representations[0])).toBe(true);
 
     completed.resultJson = JSON.stringify({ assetId: "asset-1", sections: [{ heading: null, blocks: null }], representations: [{ id: "bad" }] });
     const partial = parseDocumentJobResult(completed);
     expect(partial?.assetId).toBe("asset-1");
     expect(partial?.sections).toEqual([]);
     expect(partial?.representations).toEqual([]);
+    expect(isSafeDocumentRepresentation({ id: "representation-1", type: "pdf", fileName: "report.docx", contentType: "application/pdf" })).toBe(false);
+    expect(isSafeDocumentRepresentation({ id: "representation-1", type: "pdf", fileName: "../report.pdf", contentType: "application/pdf" })).toBe(false);
+    expect(isSafeDocumentRepresentation({ id: "representation-1", type: "docx", fileName: "report.docx", contentType: "application/pdf" })).toBe(false);
 
     completed.resultJson = "not-json";
     expect(parseDocumentJobResult(completed)).toBeNull();

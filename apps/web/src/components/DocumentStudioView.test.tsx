@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { DocumentProgressMeter, DocumentStudioView } from "./DocumentStudioView";
+import { DocumentPreviewTable, DocumentProgressMeter, DocumentStudioView } from "./DocumentStudioView";
 
 vi.mock("next/navigation", () => ({
   useSearchParams: () => new URLSearchParams(),
@@ -35,6 +35,16 @@ describe("DocumentStudioView", () => {
     expect(html).toContain('aria-valuenow="100"');
     expect(html).toContain('aria-valuetext="100%"');
     expect(html).toContain("Report: running. 100% complete.");
+  });
+
+  it("exposes generated table previews with row and cell semantics", () => {
+    const html = renderToStaticMarkup(<DocumentPreviewTable rows={[{ cells: ["Metric", "Value"] }, { cells: ["Revenue", "$10,000"] }]} label="Document preview" />);
+
+    expect(html).toContain('role="table"');
+    expect(html).toContain('aria-label="Document preview"');
+    expect(html).toContain('role="row"');
+    expect(html).toContain('role="cell"');
+    expect(html).toContain("$10,000");
   });
 
   it("renders a compact guided compose workspace without provider details", () => {

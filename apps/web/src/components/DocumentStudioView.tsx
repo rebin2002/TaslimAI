@@ -30,6 +30,7 @@ import {
   nextDocumentPollDelay,
   parseDocumentJobResult,
   persistDocumentActiveJobId,
+  retainDocumentWorkspaceProjectId,
   readDocumentActiveJobId,
   shouldResetDocumentWorkspaceState,
   shouldPollDocumentJob,
@@ -62,6 +63,13 @@ export function DocumentProgressMeter({ progress, label, announcement }: Documen
       <span style={{ width: `${boundedProgress}%` }} />
     </div>
   </>;
+}
+type DocumentPreviewTableProps = Readonly<{
+  rows: ReadonlyArray<{ cells: ReadonlyArray<string> }>;
+  label: string;
+}>;
+export function DocumentPreviewTable({ rows, label }: DocumentPreviewTableProps) {
+  return <div className="document-preview-table" role="table" aria-label={label}>{rows.map((row, rowIndex) => <div className="document-preview-row" key={rowIndex} role="row">{row.cells.map((cell, cellIndex) => <span key={`${rowIndex}-${cellIndex}`} role="cell">{cell}</span>)}</div>)}</div>;
 }
 export function DocumentStudioView() {
   const { workspace } = useAuth();
@@ -108,7 +116,9 @@ export function DocumentStudioView() {
     ]);
     if (observedWorkspaceId.current !== workspaceId || workspaceGeneration.current !== workspaceVersion) return;
     if (projectsResult.status === "fulfilled" && archivedResult.status === "fulfilled") {
-      setProjects([...projectsResult.value, ...archivedResult.value]);
+      const loadedProjects = [...projectsResult.value, ...archivedResult.value];
+      setProjects(loadedProjects);
+      setProjectId((currentProjectId) => retainDocumentWorkspaceProjectId(currentProjectId, loadedProjects));
     } else {
       setProjects([]);
     }
@@ -370,7 +380,7 @@ export function DocumentStudioView() {
         <header className="document-reader-heading"><p className="section-eyebrow">{t("document.resultEyebrow")}</p><h2 id="document-reader-title">{resultTitle}</h2><p>{t("document.previewHint")}</p></header>
         {result.summary && <p className="document-reader-summary">{result.summary}</p>}
         <div className="document-reader-rule" />
-        {result.sections?.length ? <div className="document-reader-sections">{result.sections.map((section, sectionIndex) => <section className="document-reader-section" key={`${section.heading}-${sectionIndex}`}><h3><span>{String(sectionIndex + 1).padStart(2, "0")}</span>{section.heading}</h3>{section.blocks.map((block, index) => <div className="document-reader-block" key={`${section.heading}-${index}`}>{block.text && <p>{block.text}</p>}{block.items?.length ? <ul>{block.items.map((item) => <li key={item}>{item}</li>)}</ul> : null}{block.rows?.length ? <div className="document-preview-table">{block.rows.map((row, rowIndex) => <div className="document-preview-row" key={rowIndex}>{row.cells.map((cell, cellIndex) => <span key={`${rowIndex}-${cellIndex}`}>{cell}</span>)}</div>)}</div> : null}</div>)}</section>)}</div> : <p className="document-empty-copy">{t("document.resultSummaryUnavailable")}</p>}
+        {result.sections?.length ? <div className="document-reader-sections">{result.sections.map((section, sectionIndex) => <section className="document-reader-section" key={`${section.heading}-${sectionIndex}`}><h3><span>{String(sectionIndex + 1).padStart(2, "0")}</span>{section.heading}</h3>{section.blocks.map((block, index) => <div className="document-reader-block" key={`${section.heading}-${index}`}>{block.text && <p>{block.text}</p>}{block.items?.length ? <ul>{block.items.map((item) => <li key={item}>{item}</li>)}</ul> : null}{block.rows?.length ? <DocumentPreviewTable rows={block.rows} label={t("document.preview")} /> : null}</div>)}</section>)}</div> : <p className="document-empty-copy">{t("document.resultSummaryUnavailable")}</p>}
       </article>
       <aside className="document-inspector" aria-labelledby="document-inspector-title">
         <div className="document-inspector-header"><div className="document-inspector-icon"><FileText size={17} /></div><div><p className="document-card-kicker">{t("document.readingView")}</p><h2 id="document-inspector-title">{t("document.documentLabel")}</h2></div></div>
