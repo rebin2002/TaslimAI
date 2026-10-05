@@ -38,6 +38,23 @@ export function voiceTextDirection(language: VoiceGenerationInput["language"]): 
   return language === "en" ? "ltr" : "rtl";
 }
 
+export function nextVoiceChoiceIndex(currentIndex: number, key: string, count: number): number | null {
+  if (count < 1) return null;
+  if (key === "Home") return 0;
+  if (key === "End") return count - 1;
+  if (key === "ArrowRight" || key === "ArrowDown") return (currentIndex + 1) % count;
+  if (key === "ArrowLeft" || key === "ArrowUp") return (currentIndex - 1 + count) % count;
+  return null;
+}
+
+function handleVoiceChoiceKeyDown<T extends string>(event: React.KeyboardEvent<HTMLButtonElement>, options: readonly T[], value: T, onChange: (next: T) => void) {
+  const nextIndex = nextVoiceChoiceIndex(options.indexOf(value), event.key, options.length);
+  if (nextIndex === null) return;
+  event.preventDefault();
+  onChange(options[nextIndex]);
+  event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="radio"]')[nextIndex]?.focus();
+}
+
 type AudioPlayerProps = {
   src: string;
   label: string;
@@ -311,9 +328,9 @@ export function VoiceStudioView() {
 
           <section className="voice-choices-panel">
             <div className="voice-panel-heading"><div><p className="section-eyebrow">02 / {t("voice.workflow.choices")}</p><h2>{t("voice.choicesTitle")}</h2><p>{t("voice.choicesSubtitle")}</p></div><span className="voice-panel-icon"><Sparkles size={18} /></span></div>
-            <div className="voice-choice-group"><span className="voice-choice-label">{t("voice.language")}</span><div className="voice-choice-grid voice-language-choices" role="radiogroup" aria-label={t("voice.language")}>{languages.map((value) => <button key={value} type="button" role="radio" aria-checked={language === value} className={language === value ? "is-selected" : ""} onClick={() => setLanguage(value)}>{t(`voice.language.${value}`)}{language === value && <Check size={14} />}</button>)}</div></div>
-            <div className="voice-choice-group"><span className="voice-choice-label">{t("voice.voiceStyle")}</span><div className="voice-choice-grid" role="radiogroup" aria-label={t("voice.voiceStyle")}>{voiceStyles.map((value) => <button key={value} type="button" role="radio" aria-checked={voiceStyle === value} className={voiceStyle === value ? "is-selected" : ""} onClick={() => setVoiceStyle(value)}>{t(`voice.style.${value}`)}{voiceStyle === value && <Check size={14} />}</button>)}</div></div>
-            <div className="voice-choice-group"><span className="voice-choice-label">{t("voice.speakingStyle")}</span><div className="voice-choice-grid" role="radiogroup" aria-label={t("voice.speakingStyle")}>{speakingStyles.map((value) => <button key={value} type="button" role="radio" aria-checked={speakingStyle === value} className={speakingStyle === value ? "is-selected" : ""} onClick={() => setSpeakingStyle(value)}>{t(`voice.speaking.${value}`)}{speakingStyle === value && <Check size={14} />}</button>)}</div></div>
+            <div className="voice-choice-group"><span className="voice-choice-label">{t("voice.language")}</span><div className="voice-choice-grid voice-language-choices" role="radiogroup" aria-label={t("voice.language")}>{languages.map((value) => <button key={value} type="button" role="radio" aria-checked={language === value} tabIndex={language === value ? 0 : -1} className={language === value ? "is-selected" : ""} onClick={() => setLanguage(value)} onKeyDown={(event) => handleVoiceChoiceKeyDown(event, languages, value, setLanguage)}>{t(`voice.language.${value}`)}{language === value && <Check size={14} />}</button>)}</div></div>
+            <div className="voice-choice-group"><span className="voice-choice-label">{t("voice.voiceStyle")}</span><div className="voice-choice-grid" role="radiogroup" aria-label={t("voice.voiceStyle")}>{voiceStyles.map((value) => <button key={value} type="button" role="radio" aria-checked={voiceStyle === value} tabIndex={voiceStyle === value ? 0 : -1} className={voiceStyle === value ? "is-selected" : ""} onClick={() => setVoiceStyle(value)} onKeyDown={(event) => handleVoiceChoiceKeyDown(event, voiceStyles, value, setVoiceStyle)}>{t(`voice.style.${value}`)}{voiceStyle === value && <Check size={14} />}</button>)}</div></div>
+            <div className="voice-choice-group"><span className="voice-choice-label">{t("voice.speakingStyle")}</span><div className="voice-choice-grid" role="radiogroup" aria-label={t("voice.speakingStyle")}>{speakingStyles.map((value) => <button key={value} type="button" role="radio" aria-checked={speakingStyle === value} tabIndex={speakingStyle === value ? 0 : -1} className={speakingStyle === value ? "is-selected" : ""} onClick={() => setSpeakingStyle(value)} onKeyDown={(event) => handleVoiceChoiceKeyDown(event, speakingStyles, value, setSpeakingStyle)}>{t(`voice.speaking.${value}`)}{speakingStyle === value && <Check size={14} />}</button>)}</div></div>
             <label className="voice-project-field"><span>{t("voice.project")}</span><select value={projectId} onChange={(event) => setProjectId(event.target.value)} disabled={loadingProjects}><option value="">{t("voice.noProject")}</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label>
             <details className="voice-optional-controls"><summary>{t("voice.moreOptions")}</summary><label className="voice-instructions-field"><span>{t("voice.instructions")}</span><textarea value={instructions} onChange={(event) => setInstructions(event.target.value)} maxLength={3000} placeholder={t("voice.instructionsPlaceholder")} /></label></details>
           </section>

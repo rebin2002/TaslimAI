@@ -1,8 +1,11 @@
+import { readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { LocaleProvider } from "./LocaleProvider";
-import { VoiceAudioPlayer, voiceLanguageTag, voiceTextDirection } from "./VoiceStudioView";
+import { VoiceAudioPlayer, nextVoiceChoiceIndex, voiceLanguageTag, voiceTextDirection } from "./VoiceStudioView";
 import { translate } from "../lib/i18n";
+
+const voiceSource = readFileSync(new URL("./VoiceStudioView.tsx", import.meta.url), "utf8");
 
 describe("Voice Studio accessibility", () => {
   it("gives the custom audio controls localized names and a readable progress value", () => {
@@ -35,5 +38,15 @@ describe("Voice Studio accessibility", () => {
     expect(translate("ku", "voice.play", { label: "ئامادە" })).toBe("یاری‌کردنی ئامادە");
     expect(translate("ar", "voice.progressValue", { current: "0:00", duration: "2:00" })).toContain("0:00");
     expect(translate("ku", "voice.progressValue", { current: "0:00", duration: "2:00" })).toContain("2:00");
+  });
+
+  it("supports arrow and boundary keys without adding every choice to the tab order", () => {
+    expect(nextVoiceChoiceIndex(0, "ArrowRight", 3)).toBe(1);
+    expect(nextVoiceChoiceIndex(0, "ArrowLeft", 3)).toBe(2);
+    expect(nextVoiceChoiceIndex(1, "Home", 3)).toBe(0);
+    expect(nextVoiceChoiceIndex(1, "End", 3)).toBe(2);
+    expect(nextVoiceChoiceIndex(1, "Enter", 3)).toBeNull();
+    expect(voiceSource).toContain('tabIndex={language === value ? 0 : -1}');
+    expect(voiceSource).toContain('onKeyDown={(event) => handleVoiceChoiceKeyDown(event, languages, value, setLanguage)}');
   });
 });
