@@ -239,6 +239,21 @@ public sealed class GenerationJobsTests : IClassFixture<GenerationJobsApiFactory
     }
 
     [Fact]
+    public async Task Jobs_bound_deep_page_values_without_offset_overflow()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, $"jobs-page-{Guid.NewGuid():N}@example.com");
+
+        var response = await client.GetAsync($"/api/generation/jobs?workspaceId={auth.PersonalWorkspace.Id}&page={int.MaxValue}&pageSize={int.MaxValue}");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var list = (await response.Content.ReadFromJsonAsync<GenerationJobListDto>())!;
+        Assert.Equal(Taslim.Api.Infrastructure.ApiPagination.MaxPage, list.Page);
+        Assert.Equal(Taslim.Api.Infrastructure.ApiPagination.MaxPageSize, list.PageSize);
+        Assert.Empty(list.Items);
+    }
+
+    [Fact]
     public async Task Running_test_job_can_receive_cooperative_cancellation_request()
     {
         using var client = factory.CreateClient();
@@ -452,23 +467,67 @@ public sealed class GenerationJobQueuedCancellationTests : IClassFixture<Generat
         Assert.False(await scope.ServiceProvider.GetRequiredService<TaslimDbContext>().Assets.AsNoTracking().AnyAsync(item => item.SourceGenerationJobId == created.Id));
     }
 
+    [Fact]
+    public async Task Shared_workspace_members_cannot_read_list_retry_or_cancel_another_creators_job()
+    {
+        using var owner = factory.CreateClient();
+        var ownerResponse = await Register(owner);
+        var ownerAuth = (await ownerResponse.Content.ReadFromJsonAsync<AuthResponse>())!;
+        using var member = factory.CreateClient();
+        var memberResponse = await Register(member);
+        var memberAuth = (await memberResponse.Content.ReadFromJsonAsync<AuthResponse>())!;
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.WorkspaceMembers.Add(new WorkspaceMember
+            {
+                Id = Guid.NewGuid(),
+                WorkspaceId = ownerAuth.PersonalWorkspace.Id,
+                UserId = memberAuth.User.Id,
+                Role = WorkspaceRole.Member,
+                JoinedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var created = await SendWithCsrf<GenerationJobDto>(owner, HttpMethod.Post, "/api/generation/jobs", new
+        {
+            workspaceId = ownerAuth.PersonalWorkspace.Id,
+            jobType = GenerationJobTypes.SystemTest,
+            title = "Owner-only generation",
+            inputJson = "{\"privatePrompt\":\"do not disclose\"}",
+        });
+
+        var get = await member.GetAsync($"/api/generation/jobs/{created.Id}");
+        Assert.Equal(HttpStatusCode.NotFound, get.StatusCode);
+        var list = await member.GetFromJsonAsync<GenerationJobListDto>($"/api/generation/jobs?workspaceId={ownerAuth.PersonalWorkspace.Id}");
+        Assert.Empty(list!.Items);
+
+        var retry = await SendWithCsrf(member, HttpMethod.Post, $"/api/generation/jobs/{created.Id}/retry", null, "member-retry-key");
+        Assert.Equal(HttpStatusCode.NotFound, retry.StatusCode);
+        var cancel = await SendWithCsrf(member, HttpMethod.Post, $"/api/generation/jobs/{created.Id}/cancel", null);
+        Assert.Equal(HttpStatusCode.Forbidden, cancel.StatusCode);
+    }
+
     private static async Task<HttpResponseMessage> Register(HttpClient client)
     {
         return await SendWithCsrf(client, HttpMethod.Post, "/api/auth/register", new { displayName = "Queued Cancel", email = $"jobs-queued-{Guid.NewGuid():N}@example.com", password = "StrongPassword!123", preferredLanguage = "en" });
     }
 
-    private static async Task<T> SendWithCsrf<T>(HttpClient client, HttpMethod method, string path, object? payload)
+    private static async Task<T> SendWithCsrf<T>(HttpClient client, HttpMethod method, string path, object? payload, string? idempotencyKey = null)
     {
-        var response = await SendWithCsrf(client, method, path, payload);
+        var response = await SendWithCsrf(client, method, path, payload, idempotencyKey);
         Assert.True(response.IsSuccessStatusCode, await response.Content.ReadAsStringAsync());
         return (await response.Content.ReadFromJsonAsync<T>())!;
     }
 
-    private static async Task<HttpResponseMessage> SendWithCsrf(HttpClient client, HttpMethod method, string path, object? payload)
+    private static async Task<HttpResponseMessage> SendWithCsrf(HttpClient client, HttpMethod method, string path, object? payload, string? idempotencyKey = null)
     {
         var csrf = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
         using var request = new HttpRequestMessage(method, path);
         request.Headers.Add("X-CSRF-TOKEN", csrf.GetProperty("token").GetString());
+        if (idempotencyKey is not null) request.Headers.Add("Idempotency-Key", idempotencyKey);
         if (payload is not null) request.Content = JsonContent.Create(payload);
         return await client.SendAsync(request);
     }
