@@ -99,6 +99,47 @@ public sealed class ResearchGenerationTests : IClassFixture<ResearchApiFactory>
         _ = secondAuth;
     }
 
+    [Fact]
+    public async Task Research_source_export_is_private_deterministic_and_safe_for_spreadsheets()
+    {
+        using var owner = factory.CreateClient();
+        var ownerAuth = await Register(owner, $"research-export-{Guid.NewGuid():N}@example.com");
+        var created = await SendWithCsrf<CreateResearchGenerationResponse>(owner, HttpMethod.Post, "/api/research-generation/jobs", new
+        {
+            workspaceId = ownerAuth.PersonalWorkspace.Id,
+            question = "Compare current solar opportunities",
+            useWebSources = true,
+            attachmentIds = Array.Empty<Guid>(),
+        });
+        var completed = await WaitForTerminal(owner, created.Job.Id);
+        Assert.Equal("Succeeded", completed.Status);
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var source = await db.ResearchSources.SingleAsync(item => item.GenerationJobId == created.Job.Id && item.CitationId == "S1");
+            source.Title = "=SUM(A1:A2)";
+            source.ExtractedText = "private extracted text must not be exported";
+            await db.SaveChangesAsync();
+        }
+        using var response = await owner.GetAsync($"/api/research-generation/jobs/{created.Job.Id}/sources/export");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("text/csv", response.Content.Headers.ContentType?.MediaType);
+        Assert.Equal($"research-sources-{created.Job.Id:N}.csv", response.Content.Headers.ContentDisposition?.FileNameStar ?? response.Content.Headers.ContentDisposition?.FileName?.Trim('"'));
+        var csv = await response.Content.ReadAsStringAsync();
+        Assert.StartsWith("citationId,sourceType,title", csv, StringComparison.Ordinal);
+        Assert.Contains("\"'=SUM(A1:A2)\"", csv, StringComparison.Ordinal);
+        Assert.Contains("https://example.gov/energy", csv, StringComparison.Ordinal);
+        Assert.DoesNotContain("private extracted text must not be exported", csv, StringComparison.Ordinal);
+        Assert.DoesNotContain("Official energy evidence.", csv, StringComparison.Ordinal);
+        Assert.True(csv.IndexOf("S1", StringComparison.Ordinal) < csv.IndexOf("S2", StringComparison.Ordinal));
+
+        using var other = factory.CreateClient();
+        var otherAuth = await Register(other, $"research-export-other-{Guid.NewGuid():N}@example.com");
+        using var forbidden = await other.GetAsync($"/api/research-generation/jobs/{created.Job.Id}/sources/export");
+        Assert.Equal(HttpStatusCode.NotFound, forbidden.StatusCode);
+        _ = otherAuth;
+    }
+
     private static async Task<AuthResponse> Register(HttpClient client, string email)
     {
         var response = await SendWithCsrf(client, HttpMethod.Post, "/api/auth/register", new { displayName = "Research Tester", email, password = "StrongPassword!123", preferredLanguage = "en" });
