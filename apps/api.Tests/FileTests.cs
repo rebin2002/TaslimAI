@@ -114,6 +114,49 @@ public sealed class FileTests : IClassFixture<TaslimApiFactory>
     }
 
     [Fact]
+    public async Task File_listing_is_page_bounded_and_deterministic()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "File Pagination Owner");
+        var now = DateTime.UtcNow;
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.StoredFiles.AddRange(Enumerable.Range(1, 3).Select(index => new StoredFile
+            {
+                Id = Guid.NewGuid(),
+                WorkspaceId = auth.PersonalWorkspace.Id,
+                UserId = auth.User.Id,
+                OriginalFileName = $"page-{index}.txt",
+                StoredFileName = $"page-{index}.txt",
+                ContentType = "text/plain",
+                Extension = ".txt",
+                SizeBytes = index,
+                StorageProvider = FileStorageProviders.Local,
+                StorageKey = $"pagination/{index}.txt",
+                Status = StoredFileStatus.Ready,
+                TextExtractionStatus = FileExtractionStatus.Ready,
+                CreatedAt = now,
+                ProcessedAt = now,
+            }));
+            await db.SaveChangesAsync();
+        }
+
+        var pageOne = await client.GetFromJsonAsync<List<StoredFileDto>>($"/api/workspaces/{auth.PersonalWorkspace.Id}/files?page=1&pageSize=2");
+        var pageTwo = await client.GetFromJsonAsync<List<StoredFileDto>>($"/api/workspaces/{auth.PersonalWorkspace.Id}/files?page=2&pageSize=2");
+        Assert.NotNull(pageOne);
+        Assert.NotNull(pageTwo);
+        Assert.Equal(2, pageOne!.Count);
+        Assert.Single(pageTwo!);
+        Assert.Equal(3, pageOne.Concat(pageTwo).Select(file => file.Id).Distinct().Count());
+
+        var oversized = await client.GetAsync($"/api/workspaces/{auth.PersonalWorkspace.Id}/files?page={int.MaxValue}&pageSize={int.MaxValue}");
+        Assert.Equal(HttpStatusCode.OK, oversized.StatusCode);
+        Assert.Empty(await oversized.Content.ReadFromJsonAsync<List<StoredFileDto>>() ?? []);
+    }
+
+    [Fact]
     public async Task Unsupported_file_types_and_invalid_signatures_are_rejected()
     {
         using var client = factory.CreateClient();
