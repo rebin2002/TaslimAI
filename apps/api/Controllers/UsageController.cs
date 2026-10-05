@@ -33,13 +33,16 @@ public sealed class UsageController(
                 InputTokens = group.Sum(transaction => (long?)transaction.InputTokens) ?? 0L,
                 CachedInputTokens = group.Sum(transaction => (long?)transaction.CachedInputTokens) ?? 0L,
                 OutputTokens = group.Sum(transaction => (long?)transaction.OutputTokens) ?? 0L,
-                ChargedAmount = group.Sum(transaction => (decimal?)transaction.ChargedAmount) ?? 0m,
-                ReversedAmount = group.Sum(transaction => (decimal?)transaction.ReversedAmount) ?? 0m,
+                // SQLite cannot translate SUM(decimal); the ledger persists at
+                // eight decimal places, so round the provider-portable numeric
+                // projection back to that exact storage precision below.
+                ChargedAmount = group.Sum(transaction => (double?)transaction.ChargedAmount) ?? 0d,
+                ReversedAmount = group.Sum(transaction => (double?)transaction.ReversedAmount) ?? 0d,
             })
             .FirstOrDefaultAsync(cancellationToken);
         var customerChargedAmount = aggregate is null
             ? 0m
-            : decimal.Round(aggregate.ChargedAmount - aggregate.ReversedAmount, 8);
+            : decimal.Round((decimal)(aggregate.ChargedAmount - aggregate.ReversedAmount), 8);
         var summary = new UsageSummaryDto(
                 aggregate?.TotalRequests ?? 0,
                 aggregate?.CompletedRequests ?? 0,
