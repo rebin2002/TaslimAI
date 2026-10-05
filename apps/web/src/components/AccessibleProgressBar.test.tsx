@@ -5,6 +5,7 @@ import { AccessibleProgressBar, clampAccessibleProgress } from "./AccessibleProg
 
 const imageSource = readFileSync(new URL("./ImageStudioView.tsx", import.meta.url), "utf8");
 const musicSource = readFileSync(new URL("./MusicStudioView.tsx", import.meta.url), "utf8");
+const researchSource = readFileSync(new URL("./ResearchStudioView.tsx", import.meta.url), "utf8");
 
 describe("AccessibleProgressBar", () => {
   it("clamps values and exposes progress semantics to assistive technology", () => {
@@ -22,10 +23,12 @@ describe("AccessibleProgressBar", () => {
     expect(html).toContain('style="width:100%"');
   });
 
-  it("keeps Image and Music Studio progress indicators on the shared accessible implementation", () => {
+  it("keeps Image, Music, and Research Studio progress indicators on the shared accessible implementation", () => {
     expect(imageSource).toContain('import { AccessibleProgressBar } from "@/components/AccessibleProgressBar";');
     expect(imageSource).toContain('<AccessibleProgressBar className="image-progress-track"');
     expect(musicSource).toContain('import { AccessibleProgressBar } from "@/components/AccessibleProgressBar";');
     expect(musicSource).toContain('<AccessibleProgressBar className="music-progress-track"');
+    expect(researchSource).toContain('import { AccessibleProgressBar } from "@/components/AccessibleProgressBar";');
+    expect(researchSource).toContain('<AccessibleProgressBar className="generation-progress-track"');
   });
 });
