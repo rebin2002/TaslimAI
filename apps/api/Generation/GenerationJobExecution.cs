@@ -187,6 +187,7 @@ public sealed class GenerationJobService(
     IGenerationJobUsageService usage,
     IGenerationCostGuardrailService costGuardrails,
     IHttpContextAccessor httpContextAccessor,
+    IOptions<ImageGenerationOptions> imageOptions,
     MovieCollaborationAccess? movieCollaboration = null) : IGenerationJobService
 {
     public async Task<GenerationJob> CreateAsync(Guid userId, CreateGenerationJobRequest request, CancellationToken cancellationToken = default, string? idempotencyKey = null, string? requestId = null, Guid? retryOfJobId = null)
@@ -312,6 +313,8 @@ public sealed class GenerationJobService(
             throw new GenerationJobValidationException("RETRY_SOURCE_NOT_TERMINAL", "Only failed or cancelled jobs can be retried.");
         if (string.IsNullOrWhiteSpace(idempotencyKey))
             throw new GenerationJobValidationException("RETRY_IDEMPOTENCY_REQUIRED", "A retry idempotency key is required.");
+        if (string.Equals(source.JobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase) && !imageOptions.Value.Enabled)
+            throw new GenerationJobValidationException(GenerationJobErrorCodes.ImageStudioUnavailable, "Image generation is not available right now.");
 
         var retryInputJson = source.InputJson;
         MovieDialogueTake? pendingDialogueTake = null;
