@@ -35,6 +35,8 @@ public sealed class ResearchGenerationJobHandler(
             if (!ResearchGenerationContractMapper.TryDeserializeInput(job.InputJson, out var deserialized) || deserialized is null)
                 throw new ResearchRequestValidationException(GenerationJobErrorCodes.ResearchRequestInvalid, "The research request is invalid.");
             ResearchGenerationRequestValidator.Validate(deserialized, settings);
+            if (deserialized.WorkspaceId != job.WorkspaceId)
+                throw new ResearchRequestValidationException(GenerationJobErrorCodes.ResearchRequestInvalid, "The research request is invalid.");
             input = deserialized;
         }
         catch (ResearchRequestValidationException exception)
@@ -43,7 +45,7 @@ public sealed class ResearchGenerationJobHandler(
         }
         progress.Report(5);
 
-        var files = await LoadFilesAsync(input, cancellationToken);
+        var files = await LoadFilesAsync(job, input, cancellationToken);
         progress.Report(12);
         ResearchProjectContext? project = null;
         if (input.ProjectId.HasValue)
@@ -90,7 +92,7 @@ public sealed class ResearchGenerationJobHandler(
         foreach (var file in files)
         {
             var citationId = $"S{nextCitation++}";
-            var candidate = new ResearchSourceCandidate(citationId, null, null, file.OriginalFileName, "uploaded file", null, null, DateTime.UtcNow, "uploaded", Trim(file.ExtractedText!, settings.MaxSourceSnippetCharacters), Trim(file.ExtractedText!, settings.MaxSourceTextCharacters), null, nextCitation - 1, true, JsonSerializer.Serialize(new { storedFileId = file.Id, fileExtension = file.Extension }));
+            var candidate = new ResearchSourceCandidate(citationId, null, null, file.OriginalFileName, "uploaded file", null, null, DateTime.UtcNow, "uploaded", Trim(file.ExtractedText!, settings.MaxSourceSnippetCharacters), Trim(file.ExtractedText!, settings.MaxSourceTextCharacters), null, nextCitation - 1, true, JsonSerializer.Serialize(new { storedFileId = file.Id, fileExtension = file.Extension }), file.Id);
             sourceCandidates.Add(candidate);
             evidenceCandidates.Add(new ResearchEvidenceCandidate(citationId, "uploaded source", Trim(file.ExtractedText!, settings.MaxEvidenceCharacters), null, null));
         }
@@ -101,7 +103,7 @@ public sealed class ResearchGenerationJobHandler(
         sourceCandidates = (await contentFetcher.FetchAsync(sourceCandidates, settings, cancellationToken)).ToList();
         progress.Report(50);
 
-        await PersistSourcesAsync(job, sourceCandidates, files, evidenceCandidates, cancellationToken);
+        await PersistSourcesAsync(job, sourceCandidates, evidenceCandidates, cancellationToken);
         progress.Report(58);
 
         ResearchReportProviderResult report;
@@ -183,10 +185,10 @@ public sealed class ResearchGenerationJobHandler(
         return new GenerationHandlerResult(result, outputs, MergeUsage(usage, report.Usage, sourceCandidates.Count));
     }
 
-    private async Task<List<StoredFile>> LoadFilesAsync(ResearchGenerationInput input, CancellationToken cancellationToken)
+    private async Task<List<StoredFile>> LoadFilesAsync(GenerationJob job, ResearchGenerationInput input, CancellationToken cancellationToken)
     {
         if (input.AttachmentIds.Count == 0) return [];
-        var files = await db.StoredFiles.AsNoTracking().Where(file => file.WorkspaceId == input.WorkspaceId && input.AttachmentIds.Contains(file.Id)).ToListAsync(cancellationToken);
+        var files = await db.StoredFiles.AsNoTracking().Where(file => file.WorkspaceId == job.WorkspaceId && input.AttachmentIds.Contains(file.Id)).ToListAsync(cancellationToken);
         if (files.Count != input.AttachmentIds.Count || files.Any(file => !ResearchGenerationDefaults.AttachmentExtensions.Contains(file.Extension)) || files.Any(file => file.Status != StoredFileStatus.Ready))
             throw new ResearchRequestValidationException(GenerationJobErrorCodes.ResearchSourceUnavailable, "One or more selected source files are unavailable.");
         if (files.Any(file => file.TextExtractionStatus != FileExtractionStatus.Ready || string.IsNullOrWhiteSpace(file.ExtractedText)))
@@ -195,15 +197,14 @@ public sealed class ResearchGenerationJobHandler(
         return files.OrderBy(file => order[file.Id]).ToList();
     }
 
-    private async Task PersistSourcesAsync(GenerationJob job, IReadOnlyList<ResearchSourceCandidate> candidates, IReadOnlyList<StoredFile> files, IReadOnlyList<ResearchEvidenceCandidate> evidence, CancellationToken cancellationToken)
+    private async Task PersistSourcesAsync(GenerationJob job, IReadOnlyList<ResearchSourceCandidate> candidates, IReadOnlyList<ResearchEvidenceCandidate> evidence, CancellationToken cancellationToken)
     {
-        var fileByName = files.GroupBy(file => file.OriginalFileName, StringComparer.OrdinalIgnoreCase).ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
         var entities = candidates.Select(candidate => new ResearchSource
         {
             Id = Guid.NewGuid(),
             WorkspaceId = job.WorkspaceId,
             GenerationJobId = job.Id,
-            StoredFileId = candidate.SourceType == "uploaded" && fileByName.TryGetValue(candidate.Title, out var file) ? file.Id : null,
+            StoredFileId = candidate.SourceType == "uploaded" ? candidate.StoredFileId : null,
             CitationId = candidate.CitationId,
             Url = candidate.Url,
             CanonicalUrl = candidate.CanonicalUrl,

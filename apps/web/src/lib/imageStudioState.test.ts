@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GenerationJob } from "./api";
-import { canCancelImageJob, clearImageActiveJobId, imageActiveJobStorageKey, isImageJob, isImageTerminal, isRestorableImageJob, nextImagePollDelay, parseImageJobResult, persistImageActiveJobId, readImageActiveJobId, safeImageJobView, shouldPollImageJob } from "./imageStudioState";
+import { canCancelImageJob, clearImageActiveJobId, imageActiveJobStorageKey, isImageJob, isImageTerminal, isRestorableImageJob, nextImagePollDelay, parseImageJobResult, persistImageActiveJobId, readImageActiveJobId, safeImageJobView, shouldPollImageJob, shouldResetImageWorkspaceState } from "./imageStudioState";
 
 function job(overrides: Partial<GenerationJob> = {}): GenerationJob {
   return {
@@ -21,6 +21,12 @@ describe("image studio state", () => {
     expect(canCancelImageJob(job({ status: "Queued" }))).toBe(true);
     expect(canCancelImageJob(job({ status: "Succeeded" }))).toBe(false);
     expect(canCancelImageJob(job({ cancellationRequested: true }))).toBe(false);
+  });
+
+  it("resets mounted state when the active workspace no longer owns the image job", () => {
+    expect(shouldResetImageWorkspaceState(job(), "workspace-1")).toBe(false);
+    expect(shouldResetImageWorkspaceState(job({ workspaceId: "workspace-2" }), "workspace-1")).toBe(true);
+    expect(shouldResetImageWorkspaceState(job(), null)).toBe(true);
   });
 
   it("retries transient polling failures with bounded backoff and stops at terminal states", () => {

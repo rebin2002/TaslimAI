@@ -26,8 +26,38 @@ public static class RateLimiting
                 cancellationToken);
         };
 
+        // Endpoint policies below bound the number of requests over time. The
+        // global limiter adds a no-queue concurrency bound to the same
+        // provider-neutral user/IP partitions, so slow database, storage, or
+        // provider work cannot accumulate behind an otherwise valid rate.
+        options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(httpContext =>
+        {
+            var policyName = httpContext.GetEndpoint()?.Metadata.GetMetadata<EnableRateLimitingAttribute>()?.PolicyName;
+            var permitLimit = policyName switch
+            {
+                Authentication => 4,
+                Chat => 2,
+                Generation => 4,
+                Upload => 2,
+                Search => 8,
+                ExpensiveAi => 2,
+                _ => 0,
+            };
+
+            return permitLimit > 0
+                ? RateLimitPartition.GetConcurrencyLimiter(
+                    Partition($"concurrency:{policyName}", httpContext),
+                    _ => new ConcurrencyLimiterOptions
+                    {
+                        PermitLimit = permitLimit,
+                        QueueLimit = 0,
+                        QueueProcessingOrder = QueueProcessingOrder.NewestFirst,
+                    })
+                : RateLimitPartition.GetNoLimiter<string>("unlimited");
+        });
+
         options.AddPolicy(Authentication, httpContext => RateLimitPartition.GetFixedWindowLimiter(
-            Partition("auth", httpContext, includePath: true),
+            Partition("auth", httpContext),
             _ => new FixedWindowRateLimiterOptions
             {
                 PermitLimit = 60,
