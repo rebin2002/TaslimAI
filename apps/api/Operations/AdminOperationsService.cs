@@ -13,7 +13,7 @@ namespace Taslim.Api.Operations;
 public interface IAdminOperationsService
 {
     Task<AdminOperationsDashboardDto> GetDashboardAsync(AdminOperationsFilter filter, CancellationToken cancellationToken = default);
-    Task<AdminJobRecoveryResult?> RecoverExpiredJobAsync(Guid actorUserId, Guid jobId, string reason, string? requestId, CancellationToken cancellationToken = default);
+    Task<AdminJobRecoveryResult?> RecoverExpiredJobAsync(Guid actorUserId, Guid jobId, string reason, string? idempotencyKey, CancellationToken cancellationToken = default);
 }
 
 public sealed class AdminOperationConflictException(string code, string message) : Exception(message)
@@ -69,19 +69,19 @@ public sealed class AdminOperationsService(
         Guid actorUserId,
         Guid jobId,
         string reason,
-        string? requestId,
+        string? idempotencyKey,
         CancellationToken cancellationToken = default)
     {
         var normalizedReason = NormalizeReason(reason);
         var now = DateTime.UtcNow;
-        var normalizedRequestId = NormalizeRequestId(requestId);
+        var normalizedIdempotencyKey = NormalizeIdempotencyKey(idempotencyKey);
         await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
 
-        // The request correlation id is also the idempotency key for this
-        // protected recovery command. A client retry after a response timeout
-        // must replay the original result instead of being reported as a new
-        // conflict after the first recovery already committed.
-        var previous = await FindRecoveryAuditAsync(normalizedRequestId, jobId, cancellationToken);
+        // Request correlation IDs are server-owned and must not be used as
+        // idempotency keys. A caller-provided key is optional, but when it is
+        // present a retry after a response timeout replays the original
+        // result instead of being reported as a new conflict.
+        var previous = await FindRecoveryAuditAsync(normalizedIdempotencyKey, jobId, cancellationToken);
         if (previous is not null)
         {
             var replay = ReplayRecovery(previous, jobId);
@@ -116,7 +116,7 @@ public sealed class AdminOperationsService(
             // the conditional update while this request was waiting on the row.
             // Replay its committed evidence when available; otherwise preserve
             // the existing conflict contract for a genuinely stale recovery.
-            previous = await FindRecoveryAuditAsync(normalizedRequestId, jobId, cancellationToken);
+            previous = await FindRecoveryAuditAsync(normalizedIdempotencyKey, jobId, cancellationToken);
             if (previous is not null)
             {
                 var replay = ReplayRecovery(previous, jobId);
@@ -135,7 +135,9 @@ public sealed class AdminOperationsService(
             TargetId = jobId,
             Outcome = AdminOperationOutcomes.Succeeded,
             Reason = normalizedReason,
-            RequestId = normalizedRequestId,
+            // RequestId is the legacy audit column used for this command's
+            // idempotency key; operational tracing remains server-owned.
+            RequestId = normalizedIdempotencyKey,
             BeforeState = $"status={GenerationJobStatus.Running};retryCount={source.RetryCount}",
             AfterState = $"status={GenerationJobStatus.Queued};retryCount={source.RetryCount + 1}",
             CreatedAt = now,
@@ -146,15 +148,15 @@ public sealed class AdminOperationsService(
     }
 
     private Task<AdminOperationAuditEvent?> FindRecoveryAuditAsync(
-        string? requestId,
+        string? idempotencyKey,
         Guid jobId,
         CancellationToken cancellationToken) =>
-        string.IsNullOrWhiteSpace(requestId)
+        string.IsNullOrWhiteSpace(idempotencyKey)
             ? Task.FromResult<AdminOperationAuditEvent?>(null)
             : db.AdminOperationAuditEvents.AsNoTracking()
                 .Where(item => item.Action == AdminOperationActions.RecoverExpiredGenerationJob
                     && item.TargetId == jobId
-                    && item.RequestId == requestId
+                    && item.RequestId == idempotencyKey
                     && item.Outcome == AdminOperationOutcomes.Succeeded)
                 .OrderBy(item => item.CreatedAt)
                 .FirstOrDefaultAsync(cancellationToken);
@@ -538,8 +540,8 @@ public sealed class AdminOperationsService(
         return normalized;
     }
 
-    private static string? NormalizeRequestId(string? requestId) =>
-        string.IsNullOrWhiteSpace(requestId) ? null : requestId.Trim()[..Math.Min(128, requestId.Trim().Length)];
+    private static string? NormalizeIdempotencyKey(string? idempotencyKey) =>
+        string.IsNullOrWhiteSpace(idempotencyKey) ? null : idempotencyKey.Trim()[..Math.Min(128, idempotencyKey.Trim().Length)];
 
     private static string SanitizeCode(string? code)
     {
