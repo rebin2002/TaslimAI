@@ -2847,3 +2847,6 @@ body { background: var(--canvas); }
 @media (prefers-reduced-motion: reduce) {
   .notification-panel, .notification-card { scroll-behavior: auto; }
 }
+
+.global-search-pagination { display: flex; justify-content: center; padding-top: 20px; }
+.global-search-pagination .secondary-button { min-width: 180px; justify-content: center; }
