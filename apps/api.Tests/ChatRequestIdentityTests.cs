@@ -37,6 +37,21 @@ public sealed class ChatRequestIdentityTests : IClassFixture<TaslimApiFactory>
     }
 
     [Fact]
+    public async Task Completed_request_id_can_be_replayed_with_null_attachments()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Null Attachment Replay Owner");
+        var conversation = await CreateConversation(client, auth.PersonalWorkspace.Id);
+        var requestId = Guid.NewGuid().ToString("N");
+
+        var first = await SendMessage(client, conversation.Id, "Summarize this", requestId);
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+
+        var replay = await SendMessage(client, conversation.Id, "Summarize this", requestId);
+        Assert.Equal(HttpStatusCode.OK, replay.StatusCode);
+    }
+
+    [Fact]
     public async Task Failed_request_id_cannot_retry_with_different_attachments()
     {
         using var client = factory.CreateClient();
@@ -59,7 +74,7 @@ public sealed class ChatRequestIdentityTests : IClassFixture<TaslimApiFactory>
         {
             content,
             requestId,
-            attachmentIds = attachmentIds ?? [],
+            attachmentIds,
         });
     }
 

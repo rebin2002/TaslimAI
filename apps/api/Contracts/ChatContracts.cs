@@ -45,7 +45,7 @@ public sealed class SendMessageRequest
     public string? RequestId { get; set; }
 
     [MaxLength(5)]
-    public List<Guid> AttachmentIds { get; set; } = [];
+    public List<Guid>? AttachmentIds { get; set; } = [];
 }
 
 public sealed class RegenerateMessageRequest
