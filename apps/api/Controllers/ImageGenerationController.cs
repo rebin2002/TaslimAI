@@ -29,6 +29,8 @@ public sealed class ImageGenerationController(
     {
         try
         {
+            if (!options.Value.Enabled)
+                return ApiResults.Error(this, StatusCodes.Status503ServiceUnavailable, "IMAGE_STUDIO_UNAVAILABLE", "Image generation is not available right now.");
             var input = ImageGenerationContractMapper.ToInput(request);
             var provider = providers.FirstOrDefault(item => string.Equals(item.Key, options.Value.ProviderKey, StringComparison.OrdinalIgnoreCase));
             ImageGenerationRequestValidator.Validate(input, options.Value, (provider as IImageGenerationProviderCapabilities)?.Capabilities);
