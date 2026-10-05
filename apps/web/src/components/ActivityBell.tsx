@@ -6,6 +6,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
 import { api, type NotificationItem, type NotificationList } from "@/lib/api";
+import { isNotificationRequestCurrent, startNotificationRequest } from "@/lib/notificationRequest";
 
 const localeMap = { en: "en-US", ar: "ar", ku: "ku-Arab" } as const;
 const notificationLabels = {
@@ -31,13 +32,16 @@ export function publishNotificationUnreadCount(workspaceId: string, unreadCount:
 export function useNotificationUnreadCount() {
   const { workspace } = useAuth();
   const [unreadCount, setUnreadCount] = useState(0);
+  const requestSequence = useRef(0);
 
   useEffect(() => {
     if (!workspace) {
+      requestSequence.current += 1;
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setUnreadCount(0);
       return;
     }
+    const workspaceId = workspace.id;
     let active = true;
     const onUnreadCount = (event: Event) => {
       const detail = (event as CustomEvent<NotificationUnreadDetail>).detail;
@@ -46,11 +50,13 @@ export function useNotificationUnreadCount() {
       }
     };
     const refresh = async () => {
+      const request = startNotificationRequest(requestSequence.current, workspaceId);
+      requestSequence.current = request.sequence;
       try {
-        const next = await api.getNotificationUnreadCount(workspace.id);
-        if (active) setUnreadCount(next.unreadCount);
+        const next = await api.getNotificationUnreadCount(workspaceId);
+        if (active && isNotificationRequestCurrent(request, requestSequence.current, workspaceId)) setUnreadCount(next.unreadCount);
       } catch {
-        if (active) setUnreadCount(0);
+        if (active && isNotificationRequestCurrent(request, requestSequence.current, workspaceId)) setUnreadCount(0);
       }
     };
     window.addEventListener(notificationUnreadEvent, onUnreadCount);
@@ -78,6 +84,9 @@ export function NotificationBell({ unreadCount }: Readonly<{ unreadCount: number
   const panelTitleId = `${panelId}-title`;
   const popoverRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const panelRequestSequence = useRef(0);
+  const activeWorkspaceId = useRef(workspace?.id ?? null);
+  if (activeWorkspaceId.current !== (workspace?.id ?? null)) activeWorkspaceId.current = workspace?.id ?? null;
 
   useEffect(() => {
     if (!open) return;
@@ -101,16 +110,24 @@ export function NotificationBell({ unreadCount }: Readonly<{ unreadCount: number
   async function openPanel() {
     const willOpen = !open;
     setOpen(willOpen);
-    if (!willOpen || !workspace) return;
+    if (!willOpen || !workspace) {
+      panelRequestSequence.current += 1;
+      return;
+    }
+    const request = startNotificationRequest(panelRequestSequence.current, workspace.id);
+    panelRequestSequence.current = request.sequence;
     setLoading(true);
     setPanelError("");
     try {
-      setResult(await api.listNotifications(workspace.id, 1, 6));
+      const next = await api.listNotifications(workspace.id, 1, 6);
+      if (isNotificationRequestCurrent(request, panelRequestSequence.current, activeWorkspaceId.current)) setResult(next);
     } catch {
-      setResult(null);
-      setPanelError(t("notification.loadError"));
+      if (isNotificationRequestCurrent(request, panelRequestSequence.current, activeWorkspaceId.current)) {
+        setResult(null);
+        setPanelError(t("notification.loadError"));
+      }
     } finally {
-      setLoading(false);
+      if (isNotificationRequestCurrent(request, panelRequestSequence.current, activeWorkspaceId.current)) setLoading(false);
     }
   }
 
