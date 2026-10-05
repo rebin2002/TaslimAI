@@ -11,7 +11,7 @@ The gate performs four checks in order:
 3. **Repeat safety** — the same migration command is run again against the now-current database and must complete as a no-op.
 4. **Release evidence** — EF emits an idempotent SQL script, which is uploaded as a workflow artifact with its SHA-256 digest in the job summary.
 
-A green gate therefore covers both the source-model bookkeeping failure mode and the PostgreSQL execution path that a fresh environment would use. The repeat run also catches migrations that do not behave safely when a deployment is restarted after the database has already advanced.
+A green gate therefore covers both the source-model bookkeeping failure mode and the PostgreSQL execution path that a fresh environment would use. The repeat run verifies that an already-current database update is a no-op. It does not simulate an interrupted migration, a partially applied migration, or recovery after a process restart.
 
 ## Migration author workflow
 
@@ -44,5 +44,5 @@ A green workflow is evidence that migrations are reproducible against the pinned
 
 - **Pending model changes:** add the missing migration or revert the model change; do not bypass the check.
 - **Fresh application failure:** inspect the failing migration’s generated SQL and PostgreSQL error; the release is not ready.
-- **Repeat-run failure:** the migration chain is not safely restartable; repair it before deployment.
+- **Repeat-run failure:** an already-current database update did not complete as a no-op; inspect the migration chain before deployment. This check does not cover interruption or partial-application recovery.
 - **Missing or empty SQL artifact:** treat as a failed release-evidence step, even if another command appeared successful.

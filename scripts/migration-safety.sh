@@ -25,6 +25,17 @@ run_ef() {
 echo "Checking that the EF model is represented by a checked-in migration..."
 run_ef migrations has-pending-model-changes
 
+mapfile -t migration_files < <(
+  find "$repo_root/$api_project/Persistence/Migrations" -maxdepth 1 -type f -name '*.cs' -printf '%f\n' \
+    | sort
+)
+migration_latest="$(printf '%s\n' "${migration_files[@]}" | grep -E '^[0-9]{14}_.*\.cs$' | grep -v '\.Designer\.cs$' | tail -n 1)"
+if [[ -z "$migration_latest" ]]; then
+  echo "No primary EF migration was found; refusing to pass the migration gate." >&2
+  exit 1
+fi
+echo "Latest primary migration: $migration_latest"
+
 echo "Applying the complete migration chain to a disposable PostgreSQL database..."
 run_ef database update --connection "$MIGRATION_DATABASE_URL"
 
@@ -59,7 +70,8 @@ if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
     echo
     echo '- EF model drift: **none detected**'
     echo '- Fresh database migration chain: **applied**'
-    echo '- Repeat migration run: **no-op**'
+    echo '- Repeat migration run on an already-current database: **no-op**'
+    echo "- Latest primary migration: \`$migration_latest\`"
     echo "- Idempotent SQL artifact: **${script_bytes} bytes / ${script_lines} lines**"
     echo "- Idempotent SQL SHA-256: \`$script_sha256\`"
   } >> "$GITHUB_STEP_SUMMARY"
