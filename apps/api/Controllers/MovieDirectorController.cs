@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Taslim.Api.Contracts;
 using Taslim.Api.Infrastructure;
 using Taslim.Api.Movies;
@@ -23,6 +24,7 @@ public sealed class MovieDirectorController(IMovieDirectorService director, IMov
 
     [HttpPost("projects/{movieProjectId:guid}/proposals")]
     [ValidateAntiForgeryToken]
+    [EnableRateLimiting(RateLimiting.Generation)]
     public async Task<IActionResult> CreateProposal(Guid movieProjectId, DirectorProposalRequest request, CancellationToken cancellationToken)
     {
         try

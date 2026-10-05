@@ -39,20 +39,23 @@ public sealed class PresentationRenderer : IPresentationRenderer
             Write(archive, "ppt/slideMasters/_rels/slideMaster1.xml.rels", SlideMasterRelationships());
             Write(archive, "ppt/slideLayouts/slideLayout1.xml", SlideLayout());
             Write(archive, "ppt/slideLayouts/_rels/slideLayout1.xml.rels", SlideLayoutRelationships());
+            var draftLanguage = draft.Language.Trim().ToLowerInvariant();
             for (var index = 0; index < draft.Slides.Count; index++)
             {
-                Write(archive, $"ppt/slides/slide{index + 1}.xml", Slide(draft.Slides[index], input, options, index + 1));
+                Write(archive, $"ppt/slides/slide{index + 1}.xml", Slide(draft.Slides[index], draftLanguage, input, options, index + 1));
                 Write(archive, $"ppt/slides/_rels/slide{index + 1}.xml.rels", SlideRelationships());
             }
         }
         return new RenderedPresentation(AssetRepresentationTypes.Pptx, SafeFileName(draft.Title, ".pptx"), "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml".Replace(".main+xml", ""), stream.ToArray());
     }
 
-    private string Slide(PresentationSlide slide, PresentationGenerationInput input, PresentationGenerationOptions options, int number)
+    private string Slide(PresentationSlide slide, string draftLanguage, PresentationGenerationInput input, PresentationGenerationOptions options, int number)
     {
         shapeId = 1;
-        var rtl = input.Language is "ar" or "ku" || slide.Title.Any(character => character >= '\u0600' && character <= '\u08ff');
-        var language = rtl ? (input.Language == "ku" ? "ku-Arab" : "ar-SA") : "en-US";
+        var requestedLanguage = input.Language.Trim().ToLowerInvariant();
+        var resolvedLanguage = requestedLanguage == "auto" ? draftLanguage : requestedLanguage;
+        var rtl = resolvedLanguage is "ar" or "ku" || slide.Title.Any(character => character >= '\u0600' && character <= '\u08ff');
+        var language = rtl ? (resolvedLanguage == "ku" ? "ku-Arab" : "ar-SA") : "en-US";
         var body = new StringBuilder();
         body.Append(ShapeTreeStart());
         body.Append(Rectangle(1, 0, 0, SlideWidth, SlideHeight, "F8FAFC", "F8FAFC", 0));
