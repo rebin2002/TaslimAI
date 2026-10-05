@@ -114,6 +114,7 @@ Billing assertions verify the read-only charging-disabled state. The E2E suite d
 | `chat.spec.ts` | Start Chat, persistent conversation navigation, rename, archive/delete, file attachment, project context, controlled provider error presentation |
 | `navigation.spec.ts` | Global Search, Notifications unread/read controls, Activity navigation |
 | `generation.spec.ts` | Provider-independent job creation, terminal states, safe errors, idempotent job creation |
+| `assets.spec.ts` | Deterministic generated-asset publication, private download, rename, archive, restore, and persisted state |
 | `mobile.spec.ts` | 390×844 Home, Projects, Create, Activity/Notifications, and Account bottom navigation; order is Home, Projects, Create, Activity, Account |
 | `rtl.spec.ts` | Arabic RTL direction, language, navigation, focus, and overflow smoke checks |
 | `accessibility.spec.ts` | Serious/critical axe checks on Home and Projects plus labeled auth controls and keyboard focus |
