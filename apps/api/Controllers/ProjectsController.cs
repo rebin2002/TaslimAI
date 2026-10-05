@@ -73,7 +73,8 @@ public sealed class ProjectsController(TaslimDbContext db, WorkspaceAccessServic
         if (workspace is null) return ApiResults.Error(this, 404, "WORKSPACE_NOT_FOUND", "Workspace not found.");
 
         var files = db.StoredFiles.AsNoTracking()
-            .Where(file => file.ProjectId == projectId && file.WorkspaceId == project.WorkspaceId && file.Status != StoredFileStatus.Deleted);
+            .Where(file => file.ProjectId == projectId && file.WorkspaceId == project.WorkspaceId && file.Status != StoredFileStatus.Deleted)
+            .Where(file => file.ConversationId == null || file.UserId == userId);
         var assets = db.Assets.AsNoTracking()
             .Where(asset => asset.ProjectId == projectId && asset.WorkspaceId == project.WorkspaceId && asset.Status == AssetStatus.Active);
         var conversations = db.Conversations.AsNoTracking()
