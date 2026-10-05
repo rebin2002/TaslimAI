@@ -33,8 +33,8 @@ describe("server-side page authentication", () => {
   it("validates the auth cookie through the existing session endpoint without caching", async () => {
     cookiesMock.mockResolvedValue({ get: vi.fn().mockReturnValue({ value: "session-cookie" }) } as never);
     const fetchMock = vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({
-      user: { id: "user-id" },
-      personalWorkspace: { id: "workspace-id" },
+      user: { id: "user-id", personalWorkspaceId: "workspace-id" },
+      personalWorkspace: { id: "workspace-id", type: "Personal", role: "Owner" },
     }), { status: 200, headers: { "content-type": "application/json" } }));
 
     await expect(requireAuthenticatedPage("/personal/health")).resolves.toBeUndefined();
@@ -60,11 +60,37 @@ describe("server-side page authentication", () => {
   it("fails closed when a non-JSON response carries a session-shaped body", async () => {
     cookiesMock.mockResolvedValue({ get: vi.fn().mockReturnValue({ value: "session-cookie" }) } as never);
     vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({
-      user: { id: "user-id" },
-      personalWorkspace: { id: "workspace-id" },
+      user: { id: "user-id", personalWorkspaceId: "workspace-id" },
+      personalWorkspace: { id: "workspace-id", type: "Personal", role: "Owner" },
     }), {
       status: 200,
       headers: { "content-type": "text/html" },
+    }));
+
+    await expect(requireAuthenticatedPage("/personal/health")).rejects.toThrow("REDIRECT:/login?next=%2Fpersonal%2Fhealth");
+    expect(redirectMock).toHaveBeenCalledWith("/login?next=%2Fpersonal%2Fhealth");
+  });
+
+  it.each([
+    {
+      name: "a mismatched personal workspace identity",
+      payload: {
+        user: { id: "user-id", personalWorkspaceId: "workspace-one" },
+        personalWorkspace: { id: "workspace-two", type: "Personal", role: "Owner" },
+      },
+    },
+    {
+      name: "a business workspace identity",
+      payload: {
+        user: { id: "user-id", personalWorkspaceId: "workspace-id" },
+        personalWorkspace: { id: "workspace-id", type: "Business", role: "Member" },
+      },
+    },
+  ])("fails closed on $name", async ({ payload }) => {
+    cookiesMock.mockResolvedValue({ get: vi.fn().mockReturnValue({ value: "session-cookie" }) } as never);
+    vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify(payload), {
+      status: 200,
+      headers: { "content-type": "application/json" },
     }));
 
     await expect(requireAuthenticatedPage("/personal/health")).rejects.toThrow("REDIRECT:/login?next=%2Fpersonal%2Fhealth");

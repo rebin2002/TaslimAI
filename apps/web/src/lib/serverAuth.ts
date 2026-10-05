@@ -4,8 +4,8 @@ import { redirect } from "next/navigation";
 const configuredApiUrl = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5000").replace(/\/$/, "");
 const SESSION_CHECK_TIMEOUT_MS = 5_000;
 type SessionProbePayload = {
-  user?: { id?: unknown };
-  personalWorkspace?: { id?: unknown };
+  user?: { id?: unknown; personalWorkspaceId?: unknown };
+  personalWorkspace?: { id?: unknown; type?: unknown; role?: unknown };
 };
 
 function safeReturnPath(path: string): string {
@@ -19,10 +19,13 @@ function loginRedirect(path: string): never {
 function hasSessionIdentity(payload: unknown): payload is SessionProbePayload {
   if (!payload || typeof payload !== "object") return false;
   const session = payload as SessionProbePayload;
-  return typeof session.user?.id === "string"
-    && session.user.id.trim().length > 0
-    && typeof session.personalWorkspace?.id === "string"
-    && session.personalWorkspace.id.trim().length > 0;
+  const userId = session.user?.id;
+  const userWorkspaceId = session.user?.personalWorkspaceId;
+  const workspaceId = session.personalWorkspace?.id;
+  if (![userId, userWorkspaceId, workspaceId].every(value => typeof value === "string" && value.trim().length > 0)) return false;
+  return userWorkspaceId === workspaceId
+    && session.personalWorkspace?.type === "Personal"
+    && session.personalWorkspace?.role === "Owner";
 }
 
 function isJsonResponse(response: Response): boolean {
