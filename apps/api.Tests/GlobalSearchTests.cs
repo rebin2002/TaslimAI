@@ -135,6 +135,12 @@ public sealed class GlobalSearchTests : IClassFixture<TaslimApiFactory>
         var project = await SendWithCsrf<ProjectDto>(owner, HttpMethod.Post, $"/api/workspaces/{ownerAuth!.PersonalWorkspace.Id}/projects", new { name = "Private asset search project" });
         var conversation = await SendWithCsrf<ConversationDto>(owner, HttpMethod.Post, $"/api/workspaces/{ownerAuth.PersonalWorkspace.Id}/conversations", new { projectId = project.Id, title = "Private asset search conversation" });
 
+        using var foreign = factory.CreateClient();
+        var foreignResponse = await Register(foreign, "Foreign Asset Search Owner", $"foreign-asset-owner-{Guid.NewGuid():N}@example.com");
+        var foreignAuth = await foreignResponse.Content.ReadFromJsonAsync<AuthResponse>();
+        Assert.NotNull(foreignAuth);
+        var foreignProject = await SendWithCsrf<ProjectDto>(foreign, HttpMethod.Post, $"/api/workspaces/{foreignAuth!.PersonalWorkspace.Id}/projects", new { name = "Foreign asset backing project" });
+
         using var member = factory.CreateClient();
         var memberResponse = await Register(member, "Private Asset Search Member", $"private-asset-member-{Guid.NewGuid():N}@example.com");
         var memberAuth = await memberResponse.Content.ReadFromJsonAsync<AuthResponse>();
@@ -155,7 +161,8 @@ public sealed class GlobalSearchTests : IClassFixture<TaslimApiFactory>
             var now = DateTime.UtcNow;
             var personalFile = NewReadyFile(ownerAuth.PersonalWorkspace.Id, ownerAuth.User.Id, now, projectId: null, conversationId: null);
             var conversationFile = NewReadyFile(ownerAuth.PersonalWorkspace.Id, ownerAuth.User.Id, now, project.Id, conversation.Id);
-            db.StoredFiles.AddRange(personalFile, conversationFile);
+            var foreignProjectFile = NewReadyFile(ownerAuth.PersonalWorkspace.Id, ownerAuth.User.Id, now, foreignProject.Id, conversationId: null);
+            db.StoredFiles.AddRange(personalFile, conversationFile, foreignProjectFile);
             db.Assets.AddRange(
                 new Asset
                 {
@@ -183,13 +190,27 @@ public sealed class GlobalSearchTests : IClassFixture<TaslimApiFactory>
                     Status = AssetStatus.Active,
                     CreatedAt = now,
                     UpdatedAt = now,
+                },
+                new Asset
+                {
+                    Id = Guid.NewGuid(),
+                    WorkspaceId = ownerAuth.PersonalWorkspace.Id,
+                    ProjectId = project.Id,
+                    CreatedByUserId = ownerAuth.User.Id,
+                    StoredFileId = foreignProjectFile.Id,
+                    Name = "Foreign backing asset search marker",
+                    AssetType = AssetTypes.File,
+                    MimeType = foreignProjectFile.ContentType,
+                    Status = AssetStatus.Active,
+                    CreatedAt = now,
+                    UpdatedAt = now,
                 });
             await db.SaveChangesAsync();
         }
 
         var ownerSearch = await owner.GetFromJsonAsync<GlobalSearchResponseDto>("/api/search?q=asset%20search%20marker");
         Assert.NotNull(ownerSearch);
-        Assert.Equal(2, ownerSearch!.Groups.Where(group => group.Type == GlobalSearchResultTypes.Asset).SelectMany(group => group.Items).Count());
+        Assert.Equal(3, ownerSearch!.Groups.Where(group => group.Type == GlobalSearchResultTypes.Asset).SelectMany(group => group.Items).Count());
 
         var memberSearch = await member.GetFromJsonAsync<GlobalSearchResponseDto>("/api/search?q=asset%20search%20marker");
         Assert.NotNull(memberSearch);

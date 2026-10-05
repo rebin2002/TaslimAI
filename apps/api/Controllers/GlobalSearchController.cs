@@ -108,7 +108,10 @@ public sealed class GlobalSearchController(TaslimDbContext db) : ControllerBase
                     || !asset.StoredFileId.HasValue
                     || (asset.StoredFile!.WorkspaceId == asset.WorkspaceId
                         && (asset.StoredFile.UserId == userId
-                            || (asset.StoredFile.ProjectId.HasValue && asset.StoredFile.ConversationId == null))))
+                            || (asset.StoredFile.ProjectId.HasValue
+                                && asset.StoredFile.ConversationId == null
+                                && asset.StoredFile.Project != null
+                                && asset.StoredFile.Project.WorkspaceId == asset.StoredFile.WorkspaceId))))
                 && (asset.Name.ToLower().Contains(search)
                     || (asset.Description != null && asset.Description.ToLower().Contains(search))))
             .OrderByDescending(asset => asset.UpdatedAt)
