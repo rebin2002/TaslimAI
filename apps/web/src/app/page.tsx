@@ -1,4 +1,5 @@
 "use client";
+import { localeTag, type Locale } from "@/lib/i18n";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -11,7 +12,6 @@ import { StudioChooser } from "@/components/StudioChooser";
 import { api, type ActivityItem, type Asset, type Conversation, type Project } from "@/lib/api";
 import { buildHomeRecentItems, hasInFlightActivity, type HomeRecentItem } from "@/lib/homeDashboardState";
 
-const localeMap = { en: "en-US", ar: "ar", ku: "ku-Arab" } as const;
 const promptChips = [
   { labelKey: "home.promptCampaign" },
   { labelKey: "home.promptResearch" },
@@ -20,8 +20,8 @@ const promptChips = [
 ] as const;
 type DashboardData = { projects: Project[]; conversations: Conversation[]; activity: ActivityItem[]; assets: Asset[] };
 
-function formatDate(value: string, locale: keyof typeof localeMap) {
-  return new Intl.DateTimeFormat(localeMap[locale], { month: "short", day: "numeric" }).format(new Date(value));
+function formatDate(value: string, locale: Locale) {
+  return new Intl.DateTimeFormat(localeTag(locale), { month: "short", day: "numeric" }).format(new Date(value));
 }
 
 export default function HomePage() {
