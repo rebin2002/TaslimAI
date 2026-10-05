@@ -35,6 +35,8 @@ public sealed class ResearchGenerationJobHandler(
             if (!ResearchGenerationContractMapper.TryDeserializeInput(job.InputJson, out var deserialized) || deserialized is null)
                 throw new ResearchRequestValidationException(GenerationJobErrorCodes.ResearchRequestInvalid, "The research request is invalid.");
             ResearchGenerationRequestValidator.Validate(deserialized, settings);
+            if (deserialized.WorkspaceId != job.WorkspaceId)
+                throw new ResearchRequestValidationException(GenerationJobErrorCodes.ResearchRequestInvalid, "The research request is invalid.");
             input = deserialized;
         }
         catch (ResearchRequestValidationException exception)
@@ -43,7 +45,7 @@ public sealed class ResearchGenerationJobHandler(
         }
         progress.Report(5);
 
-        var files = await LoadFilesAsync(input, cancellationToken);
+        var files = await LoadFilesAsync(job, input, cancellationToken);
         progress.Report(12);
         ResearchProjectContext? project = null;
         if (input.ProjectId.HasValue)
@@ -183,10 +185,10 @@ public sealed class ResearchGenerationJobHandler(
         return new GenerationHandlerResult(result, outputs, MergeUsage(usage, report.Usage, sourceCandidates.Count));
     }
 
-    private async Task<List<StoredFile>> LoadFilesAsync(ResearchGenerationInput input, CancellationToken cancellationToken)
+    private async Task<List<StoredFile>> LoadFilesAsync(GenerationJob job, ResearchGenerationInput input, CancellationToken cancellationToken)
     {
         if (input.AttachmentIds.Count == 0) return [];
-        var files = await db.StoredFiles.AsNoTracking().Where(file => file.WorkspaceId == input.WorkspaceId && input.AttachmentIds.Contains(file.Id)).ToListAsync(cancellationToken);
+        var files = await db.StoredFiles.AsNoTracking().Where(file => file.WorkspaceId == job.WorkspaceId && input.AttachmentIds.Contains(file.Id)).ToListAsync(cancellationToken);
         if (files.Count != input.AttachmentIds.Count || files.Any(file => !ResearchGenerationDefaults.AttachmentExtensions.Contains(file.Extension)) || files.Any(file => file.Status != StoredFileStatus.Ready))
             throw new ResearchRequestValidationException(GenerationJobErrorCodes.ResearchSourceUnavailable, "One or more selected source files are unavailable.");
         if (files.Any(file => file.TextExtractionStatus != FileExtractionStatus.Ready || string.IsNullOrWhiteSpace(file.ExtractedText)))

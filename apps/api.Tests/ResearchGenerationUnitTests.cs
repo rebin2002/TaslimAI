@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Taslim.Api.Contracts;
+using Taslim.Api.Domain;
 using Taslim.Api.Research;
 using Xunit;
 
@@ -60,4 +61,44 @@ public sealed class ResearchGenerationUnitTests
         Assert.True(result[0].Excerpt.Length <= 100);
         Assert.Equal("S1", result[0].CitationId);
     }
+
+    [Fact]
+    public void Evidence_processor_honors_per_source_bound_and_deduplicates_provider_items()
+    {
+        var sources = new[]
+        {
+            new ResearchSourceCandidate("S1", "https://example.gov/one", "https://example.gov/one", "One", "example.gov", null, null, DateTime.UtcNow, "web", "Snippet one", "Extracted one", null, 1, true, null),
+            new ResearchSourceCandidate("S2", "https://example.gov/two", "https://example.gov/two", "Two", "example.gov", null, null, DateTime.UtcNow, "web", "Snippet two", "Extracted two", null, 2, true, null),
+        };
+        var providerEvidence = new[]
+        {
+            new ResearchEvidenceCandidate("S1", "topic", "First claim", null, null),
+            new ResearchEvidenceCandidate("S1", "topic", "First claim", null, null),
+            new ResearchEvidenceCandidate("S1", "other topic", "Second claim", null, null),
+            new ResearchEvidenceCandidate("S2", "topic", "Third claim", null, null),
+        };
+
+        var result = new DeterministicResearchEvidenceProcessor().Normalize(sources, providerEvidence, new ResearchGenerationOptions
+        {
+            MaxEvidencePerSource = 1,
+            MaxEvidenceCharacters = 100,
+            MaxTotalEvidenceCharacters = 1_000,
+        });
+
+        Assert.Equal(2, result.Count);
+        Assert.Equal(new[] { "S1", "S2" }, result.Select(item => item.CitationId));
+    }
+
+    [Fact]
+    public void Capability_flags_reject_disabled_web_and_uploaded_sources()
+    {
+        var webInput = new ResearchGenerationInput(Guid.NewGuid(), null, "Valid question", "Report", "standard", "research_report", "en", null, null, null, null, [], [], true, []);
+        var webException = Assert.Throws<ResearchRequestValidationException>(() => ResearchGenerationRequestValidator.Validate(webInput, new ResearchGenerationOptions { WebSourcesEnabled = false }));
+        Assert.Equal(GenerationJobErrorCodes.ResearchWebSourcesUnavailable, webException.Code);
+
+        var fileInput = webInput with { UseWebSources = false, AttachmentIds = [Guid.NewGuid()] };
+        var fileException = Assert.Throws<ResearchRequestValidationException>(() => ResearchGenerationRequestValidator.Validate(fileInput, new ResearchGenerationOptions { UserProvidedSourcesEnabled = false }));
+        Assert.Equal(GenerationJobErrorCodes.ResearchUserSourcesUnavailable, fileException.Code);
+    }
+
 }
