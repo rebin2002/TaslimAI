@@ -1120,7 +1120,10 @@ public sealed class GenerationJobWorker(
                 await dialogueExecutions.MarkCancelledAsync(claimedJob.Id, CancellationToken.None);
             if (providerAttempt is not null)
                 await budget.CompleteAttemptAsync(providerAttempt, null, false, GenerationProviderAttemptStatus.Cancelled, GenerationJobErrorCodes.Cancelled, CancellationToken.None);
-            await CancelRunningAsync(db, usage, claimedJob, claimedJob.ConcurrencyToken, stoppingToken);
+            // Host shutdown cancels stoppingToken before this handler exits. Durable
+            // cancellation must still commit so the job does not remain Running until
+            // lease recovery on the next process.
+            await CancelRunningAsync(db, usage, claimedJob, claimedJob.ConcurrencyToken, CancellationToken.None);
             logger.LogInformation(
                 "Generation job execution cancelled. JobId={JobId}; JobType={JobType}; RequestId={RequestId}; ElapsedMs={ElapsedMs}; UsageFinalized={UsageFinalized}",
                 claimedJob.Id, claimedJob.JobType, claimedJob.RequestId, (long)Stopwatch.GetElapsedTime(executionStarted).TotalMilliseconds, true);
