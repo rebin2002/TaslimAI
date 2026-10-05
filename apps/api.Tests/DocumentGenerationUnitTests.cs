@@ -55,4 +55,55 @@ public sealed class DocumentGenerationUnitTests
         var block = schema.GetProperty("properties").GetProperty("sections").GetProperty("items").GetProperty("properties").GetProperty("blocks").GetProperty("items");
         Assert.Equal(new[] { "type", "text", "items", "rows" }, block.GetProperty("required").EnumerateArray().Select(item => item.GetString()).ToArray());
     }
+
+    [Fact]
+    public void Draft_validator_rejects_null_nested_values_and_unbounded_cells()
+    {
+        var options = new DocumentGenerationOptions { MaxBlockCharacters = 20 };
+        var nullSection = new DocumentDraft
+        {
+            Title = "Report",
+            Summary = string.Empty,
+            Sections = [new DocumentSection { Heading = "Overview", Blocks = null! }],
+        };
+        var oversizedCell = new DocumentDraft
+        {
+            Title = "Report",
+            Summary = string.Empty,
+            Sections = [new DocumentSection
+            {
+                Heading = "Overview",
+                Blocks = [new DocumentBlock
+                {
+                    Type = DocumentBlockTypes.Table,
+                    Rows = [new DocumentTableRow { Cells = [new string('x', 21)] }],
+                }],
+            }],
+        };
+
+        Assert.Throws<DocumentOutputValidationException>(() => DocumentDraftValidator.Validate(nullSection, options));
+        Assert.Throws<DocumentOutputValidationException>(() => DocumentDraftValidator.Validate(oversizedCell, options));
+    }
+
+    [Fact]
+    public void Draft_validator_accepts_canonical_paragraph_list_and_table_blocks()
+    {
+        var draft = new DocumentDraft
+        {
+            Title = "Report",
+            Summary = "Summary",
+            Sections = [new DocumentSection
+            {
+                Heading = "Overview",
+                Blocks =
+                [
+                    new DocumentBlock { Type = DocumentBlockTypes.Paragraph, Text = "Body" },
+                    new DocumentBlock { Type = DocumentBlockTypes.BulletList, Items = ["One", "Two"] },
+                    new DocumentBlock { Type = DocumentBlockTypes.Table, Rows = [new DocumentTableRow { Cells = ["A", "B"] }] },
+                ],
+            }],
+        };
+
+        DocumentDraftValidator.Validate(draft, new DocumentGenerationOptions());
+    }
 }

@@ -199,23 +199,53 @@ public static class DocumentDraftValidator
 {
     public static void Validate(DocumentDraft draft, DocumentGenerationOptions options)
     {
-        if (draft.Title.Length < 1 || draft.Title.Length > 255 || draft.Sections.Count < 1 || draft.Sections.Count > options.MaxSections)
+        if (draft is null || string.IsNullOrWhiteSpace(draft.Title) || draft.Title.Length > 255
+            || draft.Sections is null || draft.Sections.Count < 1 || draft.Sections.Count > options.MaxSections
+            || draft.Summary is null || draft.Summary.Length > options.MaxSummaryCharacters)
             throw new DocumentOutputValidationException();
-        var blocks = draft.Sections.Sum(section => section.Blocks.Count);
-        if (blocks < 1 || blocks > options.MaxBlocks)
-            throw new DocumentOutputValidationException();
-        if (draft.Summary.Length > options.MaxSummaryCharacters)
-            throw new DocumentOutputValidationException();
+
+        var blocks = 0;
         foreach (var section in draft.Sections)
         {
-            if (section.Heading.Length > options.MaxHeadingCharacters) throw new DocumentOutputValidationException();
+            if (section is null || string.IsNullOrWhiteSpace(section.Heading) || section.Heading.Length > options.MaxHeadingCharacters
+                || section.Blocks is null || section.Blocks.Count == 0)
+                throw new DocumentOutputValidationException();
+
+            blocks += section.Blocks.Count;
             foreach (var block in section.Blocks)
             {
-                if (!DocumentBlockTypes.Supported.Contains(block.Type)) throw new DocumentOutputValidationException();
-                if ((block.Text?.Length ?? 0) > options.MaxBlockCharacters) throw new DocumentOutputValidationException();
-                if (block.Items is { Count: > 40 } || block.Rows is { Count: > 100 }) throw new DocumentOutputValidationException();
+                if (block is null || string.IsNullOrWhiteSpace(block.Type) || !DocumentBlockTypes.Supported.Contains(block.Type)
+                    || (block.Text?.Length ?? 0) > options.MaxBlockCharacters
+                    || block.Items is { Count: > 40 } || block.Rows is { Count: > 100 })
+                    throw new DocumentOutputValidationException();
+
+                if (block.Items?.Any(item => string.IsNullOrWhiteSpace(item) || item.Length > options.MaxBlockCharacters) == true
+                    || block.Rows?.Any(row => row is null || row.Cells is null || row.Cells.Count is < 1 or > 8
+                        || row.Cells.Any(cell => cell is null || cell.Length > options.MaxBlockCharacters)) == true)
+                    throw new DocumentOutputValidationException();
+
+                switch (block.Type.ToLowerInvariant())
+                {
+                    case DocumentBlockTypes.Paragraph:
+                    case DocumentBlockTypes.Heading:
+                        if (string.IsNullOrWhiteSpace(block.Text) || block.Items is { Count: > 0 } || block.Rows is { Count: > 0 })
+                            throw new DocumentOutputValidationException();
+                        break;
+                    case DocumentBlockTypes.BulletList:
+                    case DocumentBlockTypes.NumberedList:
+                        if (block.Items is not { Count: > 0 } || block.Rows is { Count: > 0 })
+                            throw new DocumentOutputValidationException();
+                        break;
+                    case DocumentBlockTypes.Table:
+                        if (block.Rows is not { Count: > 0 } || block.Items is { Count: > 0 })
+                            throw new DocumentOutputValidationException();
+                        break;
+                }
             }
         }
+
+        if (blocks < 1 || blocks > options.MaxBlocks)
+            throw new DocumentOutputValidationException();
     }
 }
 
