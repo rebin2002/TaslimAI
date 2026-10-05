@@ -1,4 +1,5 @@
 "use client";
+import { localeTag, type Locale } from "@/lib/i18n";
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -8,8 +9,7 @@ import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
 import { api, type NotificationItem, type NotificationList } from "@/lib/api";
 import { publishNotificationUnreadCount } from "@/components/ActivityBell";
-
-const localeMap = { en: "en-US", ar: "ar", ku: "ku-Arab" } as const;
+import { applyAllNotificationsRead, applyNotificationRead } from "@/lib/notificationReadState";
 const notificationPageSize = 20;
 const notificationLabels = {
   "generation.completed": "notification.generationCompleted",
@@ -18,8 +18,8 @@ const notificationLabels = {
   "billing.payment_failed": "notification.paymentFailed",
 } as const;
 
-function formatTime(value: string, locale: keyof typeof localeMap) {
-  return new Intl.DateTimeFormat(localeMap[locale], { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
+function formatTime(value: string, locale: Locale) {
+  return new Intl.DateTimeFormat(localeTag(locale), { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
 }
 
 export function NotificationCenterView() {
@@ -34,12 +34,14 @@ export function NotificationCenterView() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [workingId, setWorkingId] = useState<string | null>(null);
+  const resultRef = useRef<NotificationList | null>(null);
 
   // Keep late responses and mutations from an old workspace from repainting the active one.
   if (activeWorkspaceId.current !== workspaceId) activeWorkspaceId.current = workspaceId;
 
   const load = useCallback(async (generation: number) => {
     if (!workspaceId) {
+      resultRef.current = null;
       setResult(null);
       setLoading(false);
       return;
@@ -48,6 +50,7 @@ export function NotificationCenterView() {
     try {
       const next = await api.listNotifications(workspaceId, page, notificationPageSize);
       if (generation !== requestGeneration.current || activeWorkspaceId.current !== workspaceId) return;
+      resultRef.current = next;
       setResult(next);
       setError("");
     } catch (caught) {
@@ -61,6 +64,7 @@ export function NotificationCenterView() {
   useEffect(() => {
     // Workspace changes must clear the previous tenant's records before the next response arrives.
     /* eslint-disable react-hooks/set-state-in-effect */
+    resultRef.current = null;
     setResult(null);
     setError("");
     setPage(1);
@@ -83,10 +87,14 @@ export function NotificationCenterView() {
     try {
       await api.markNotificationRead(workspaceId, item.id);
       if (activeWorkspaceId.current !== workspaceId) return false;
-      const nextUnreadCount = Math.max(0, (result?.unreadCount ?? 0) - 1);
       const readAt = new Date().toISOString();
-      setResult((current) => current ? { ...current, unreadCount: Math.max(0, current.unreadCount - 1), items: current.items.map((entry) => entry.id === item.id ? { ...entry, isRead: true, readAt: entry.readAt ?? readAt } : entry) } : current);
-      publishNotificationUnreadCount(workspaceId, nextUnreadCount);
+      const current = resultRef.current;
+      if (current) {
+        const update = applyNotificationRead(current, item.id, readAt);
+        resultRef.current = update.next;
+        setResult(update.next);
+        if (update.unreadCountChanged) publishNotificationUnreadCount(workspaceId, update.next.unreadCount);
+      }
       setError("");
       return true;
     } catch {
@@ -110,9 +118,14 @@ export function NotificationCenterView() {
       await api.markAllNotificationsRead(workspaceId);
       if (activeWorkspaceId.current !== workspaceId) return;
       const readAt = new Date().toISOString();
-      setResult((current) => current ? { ...current, unreadCount: 0, items: current.items.map((item) => item.isRead ? item : { ...item, isRead: true, readAt: item.readAt ?? readAt }) } : current);
+      const current = resultRef.current;
+      if (current) {
+        const update = applyAllNotificationsRead(current, readAt);
+        resultRef.current = update.next;
+        setResult(update.next);
+        if (update.unreadCountChanged) publishNotificationUnreadCount(workspaceId, 0);
+      }
       setError("");
-      publishNotificationUnreadCount(workspaceId, 0);
     } catch {
       if (activeWorkspaceId.current === workspaceId) setError(t("notification.readError"));
     } finally {

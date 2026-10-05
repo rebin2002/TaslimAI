@@ -239,6 +239,21 @@ public sealed class GenerationJobsTests : IClassFixture<GenerationJobsApiFactory
     }
 
     [Fact]
+    public async Task Jobs_bound_deep_page_values_without_offset_overflow()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, $"jobs-page-{Guid.NewGuid():N}@example.com");
+
+        var response = await client.GetAsync($"/api/generation/jobs?workspaceId={auth.PersonalWorkspace.Id}&page={int.MaxValue}&pageSize={int.MaxValue}");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var list = (await response.Content.ReadFromJsonAsync<GenerationJobListDto>())!;
+        Assert.Equal(Taslim.Api.Infrastructure.ApiPagination.MaxPage, list.Page);
+        Assert.Equal(Taslim.Api.Infrastructure.ApiPagination.MaxPageSize, list.PageSize);
+        Assert.Empty(list.Items);
+    }
+
+    [Fact]
     public async Task Running_test_job_can_receive_cooperative_cancellation_request()
     {
         using var client = factory.CreateClient();
