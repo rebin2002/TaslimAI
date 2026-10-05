@@ -148,10 +148,19 @@ public sealed class GlobalSearchTests : IClassFixture<TaslimApiFactory>
 
         var pageThree = await client.GetFromJsonAsync<GlobalSearchResponseDto>($"/api/search?q={Uri.EscapeDataString(marker)}&page=3&limit=1");
         Assert.NotNull(pageThree);
+        var thirdGroup = Assert.Single(pageThree!.Groups, group => group.Type == GlobalSearchResultTypes.Project);
         Assert.Equal(3, pageThree!.Page);
         Assert.Equal(3, pageThree.TotalCount);
         Assert.False(pageThree.HasMore);
-        Assert.Empty(pageThree.Groups);
+        Assert.False(thirdGroup.HasMore);
+        Assert.Single(thirdGroup.Items);
+
+        var pageFour = await client.GetFromJsonAsync<GlobalSearchResponseDto>($"/api/search?q={Uri.EscapeDataString(marker)}&page=4&limit=1");
+        Assert.NotNull(pageFour);
+        Assert.Equal(4, pageFour!.Page);
+        Assert.Equal(3, pageFour.TotalCount);
+        Assert.False(pageFour.HasMore);
+        Assert.Empty(pageFour.Groups);
     }
 
     [Fact]
