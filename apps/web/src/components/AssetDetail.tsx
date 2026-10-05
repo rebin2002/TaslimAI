@@ -2,6 +2,7 @@
 import { CalendarDays, Download, ExternalLink, FileText, FolderKanban, HardDrive, Headphones, Info, Layers3, Pencil, ShieldCheck, X } from "lucide-react";
 import type { Asset } from "../lib/api";
 import { assetFileUrl, assetRepresentationUrl } from "../lib/apiBase";
+import { useDialogAccessibility } from "../lib/useDialogAccessibility";
 import { AssetTypeIcon, formatAssetSize } from "./AssetCard";
 
 export type AssetDetailLabels = {
@@ -34,8 +35,9 @@ export function AssetDetail({ asset, locale, labels, onClose, onEdit }: {
   const isVideo = asset.canPreview && asset.assetType === "video";
   const isAudio = asset.canPreview && (asset.assetType === "audio" || asset.assetType === "music");
   const isDocumentLike = asset.assetType === "document" || asset.assetType === "presentation" || asset.assetType === "research" || asset.assetType === "social";
+  const dialogRef = useDialogAccessibility(true, onClose);
   return <div className="modal-backdrop asset-detail-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
-    <section className="asset-detail-panel" role="dialog" aria-modal="true" aria-labelledby="asset-detail-title">
+    <section ref={dialogRef} className="asset-detail-panel" role="dialog" aria-modal="true" aria-labelledby="asset-detail-title" tabIndex={-1}>
       <div className="asset-detail-header"><div className="asset-detail-heading"><span className={`asset-detail-icon is-${asset.assetType}`}><AssetTypeIcon type={asset.assetType} size={25} /></span><div><p className="section-eyebrow">{labels.detailEyebrow}</p><h2 id="asset-detail-title">{asset.name}</h2></div></div><button type="button" className="modal-close" onClick={onClose} aria-label={labels.close}><X size={18} /></button></div>
       <div className="asset-detail-content">
         <div className={`asset-detail-preview is-${asset.assetType}`}>

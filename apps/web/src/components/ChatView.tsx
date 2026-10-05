@@ -9,6 +9,7 @@ import { ApiError, api, type ChatMessage, type Conversation, type Project, type 
 import { applyChatStreamEvent, createChatStreamState, failChatStream, stopChatStream } from "@/lib/chatStreamState";
 import { beginChatStreamSession, invalidateChatStreamSessions, isCurrentChatStreamSession } from "@/lib/chatStreamSession";
 import { claimSubmission, conversationPath, createChatRequestId, createRegenerateRetryRequest, createSendRetryRequest, createSubmission, isAbortError, releaseSubmission, shouldReplaceConversationUrl, studioTransitionPath, type ChatRetryRequest, type RegenerateRetryRequest, type SendRetryRequest } from "@/lib/chatLifecycle";
+import { useDialogAccessibility } from "@/lib/useDialogAccessibility";
 import { ProtectedPage } from "@/components/ProtectedPage";
 import { ChatMessageContent } from "@/components/ChatMessageContent";
 
@@ -70,6 +71,7 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
   const streamAbortRef = useRef<AbortController | null>(null);
   const activeRetryRef = useRef<ChatRetryRequest | null>(null);
   const streamGenerationRef = useRef(0);
+  const deleteDialogRef = useDialogAccessibility(deleteConfirmOpen, () => setDeleteConfirmOpen(false));
   const cancelActiveStream = useCallback(() => {
     invalidateChatStreamSessions(streamGenerationRef);
     streamAbortRef.current?.abort();
@@ -432,7 +434,7 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
         <div className="chat-composer-footer"><span>{uploadProgress ? t("chat.fileUploading") : t("chat.composerHint")}</span><div className="chat-composer-actions"><input ref={fileInputRef} type="file" className="visually-hidden" multiple accept=".pdf,.docx,.txt,.md,.csv,.xlsx,.jpg,.jpeg,.png,.webp" onChange={event => void uploadSelectedFiles(event.target.files)} /><button type="button" className="chat-attach-button" onClick={() => fileInputRef.current?.click()} disabled={generating || !!uploadProgress} aria-label={t("chat.attachFile")}><Paperclip size={16} /></button>{generating ? <button type="button" className="chat-stop-button" onClick={stopGeneration} aria-label={t("chat.stopGeneration")}><Square size={13} />{t("chat.stop")}</button> : <button type="submit" className="chat-send-button" disabled={!!uploadProgress || !content.trim()} aria-label={t("chat.send")}><Send size={16} /></button>}</div></div>
       </form>
     </main>
-    {deleteConfirmOpen && <div className="modal-backdrop" role="presentation"><section className="modal-card chat-delete-dialog" role="dialog" aria-modal="true" aria-labelledby="chat-delete-title"><div className="modal-heading"><div><p className="section-eyebrow">{t("chat.delete")}</p><h2 id="chat-delete-title">{t("chat.deleteConfirmTitle")}</h2></div><button type="button" className="modal-close" onClick={() => setDeleteConfirmOpen(false)} aria-label={t("common.close")}><X size={16} /></button></div><p>{t("chat.deleteConfirmDescription")}</p><div className="modal-actions"><button type="button" className="secondary-button" onClick={() => setDeleteConfirmOpen(false)}>{t("common.cancel")}</button><button type="button" className="chat-delete-confirm-button" onClick={() => void deleteSelected()}>{t("chat.delete")}</button></div></section></div>}
+    {deleteConfirmOpen && <div className="modal-backdrop" role="presentation"><section ref={deleteDialogRef} className="modal-card chat-delete-dialog" role="dialog" aria-modal="true" aria-labelledby="chat-delete-title" tabIndex={-1}><div className="modal-heading"><div><p className="section-eyebrow">{t("chat.delete")}</p><h2 id="chat-delete-title">{t("chat.deleteConfirmTitle")}</h2></div><button type="button" className="modal-close" onClick={() => setDeleteConfirmOpen(false)} aria-label={t("common.close")}><X size={16} /></button></div><p>{t("chat.deleteConfirmDescription")}</p><div className="modal-actions"><button type="button" className="secondary-button" onClick={() => setDeleteConfirmOpen(false)}>{t("common.cancel")}</button><button type="button" className="chat-delete-confirm-button" onClick={() => void deleteSelected()}>{t("chat.delete")}</button></div></section></div>}
   </div></ProtectedPage>;
 }
 
