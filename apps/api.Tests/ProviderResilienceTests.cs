@@ -264,6 +264,27 @@ public sealed class ProviderResilienceTests
         Assert.Equal(1, store.FinalizationCompletions);
     }
 
+    [Fact]
+    public async Task Concurrent_duplicate_executions_allow_only_one_provider_attempt_and_finalization()
+    {
+        var store = new FakeResilienceStore();
+        store.EnableConcurrentDuplicateClaimBarrier();
+        var provider = new TestProvider("primary", _ => Task.FromResult<string>("ok"));
+
+        var executions = new[]
+        {
+            Create(store).ExecuteAsync(JobId, Token, "image.generate", "concurrent-duplicate", "input", [provider]),
+            Create(store).ExecuteAsync(JobId, Token, "image.generate", "concurrent-duplicate", "input", [provider]),
+        };
+        var results = await Task.WhenAll(executions);
+
+        Assert.Equal(1, provider.Calls);
+        Assert.Single(store.Attempts);
+        Assert.Equal(1, store.FinalizationCompletions);
+        Assert.Contains(results, result => result.Succeeded);
+        Assert.Contains(results, result => result.IsReplay || result.ErrorCode == "EXECUTION_ALREADY_CLAIMED");
+    }
+
     private static ProviderResilienceOrchestrator Create(FakeResilienceStore store, int retries = 0) =>
         new(store, new AllowAllProviderCostGuard(), Options.Create(new ProviderResilienceOptions
         {
@@ -303,6 +324,9 @@ public sealed class ProviderResilienceTests
     {
         private readonly Dictionary<string, (ProviderCircuitState State, int Failures, DateTimeOffset OpenUntil)> circuits = new();
         private readonly Dictionary<string, ProviderFinalizationClaimResult> finalizations = new();
+        private readonly object finalizationLock = new();
+        private TaskCompletionSource<bool>? duplicateClaimBarrier;
+        private int duplicateClaimParticipants;
         public List<(string ProviderKey, bool IsRetry, bool IsFallback, ProviderAttemptResultCategory Category, string? ErrorCode)> Attempts { get; } = [];
         public ManualTimeProvider Time { get; } = new();
         public bool StaleWorker { get; set; }
@@ -311,12 +335,24 @@ public sealed class ProviderResilienceTests
         public int FinalizationCompletions { get; private set; }
         public string? FinalizationState { get; private set; }
 
-        public Task<ProviderFinalizationClaimResult> TryClaimFinalizationAsync(Guid generationJobId, Guid jobConcurrencyToken, string idempotencyKey, DateTime now, TimeSpan lease, CancellationToken cancellationToken = default)
+        public void EnableConcurrentDuplicateClaimBarrier() => duplicateClaimBarrier = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async Task<ProviderFinalizationClaimResult> TryClaimFinalizationAsync(Guid generationJobId, Guid jobConcurrencyToken, string idempotencyKey, DateTime now, TimeSpan lease, CancellationToken cancellationToken = default)
         {
-            if (StaleWorker) return Task.FromResult(ProviderFinalizationClaimResult.StaleWorker);
-            if (finalizations.TryGetValue(idempotencyKey, out var existing)) return Task.FromResult(existing == ProviderFinalizationClaimResult.AlreadyCompleted ? existing : ProviderFinalizationClaimResult.AlreadyClaimed);
-            finalizations[idempotencyKey] = ProviderFinalizationClaimResult.AlreadyClaimed;
-            return Task.FromResult(ProviderFinalizationClaimResult.Claimed);
+            var barrier = duplicateClaimBarrier;
+            if (barrier is not null)
+            {
+                if (Interlocked.Increment(ref duplicateClaimParticipants) == 2) barrier.TrySetResult(true);
+                await barrier.Task;
+            }
+
+            lock (finalizationLock)
+            {
+                if (StaleWorker) return ProviderFinalizationClaimResult.StaleWorker;
+                if (finalizations.TryGetValue(idempotencyKey, out var existing)) return existing == ProviderFinalizationClaimResult.AlreadyCompleted ? existing : ProviderFinalizationClaimResult.AlreadyClaimed;
+                finalizations[idempotencyKey] = ProviderFinalizationClaimResult.AlreadyClaimed;
+                return ProviderFinalizationClaimResult.Claimed;
+            }
         }
         public Task CompleteFinalizationAsync(Guid generationJobId, Guid jobConcurrencyToken, string idempotencyKey, ProviderAttemptResultCategory result, CancellationToken cancellationToken = default)
         {
