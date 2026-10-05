@@ -35,12 +35,14 @@ describe("Health placeholder safety boundary", () => {
     }
   });
 
-  it("keeps the dynamic feature route behind the authenticated page gate", () => {
-    const route = readFileSync(new URL("../app/[department]/[feature]/page.tsx", import.meta.url), "utf8");
+  it("keeps the health route behind server and client authentication gates", () => {
+    const route = readFileSync(new URL("../app/personal/health/page.tsx", import.meta.url), "utf8");
 
     expect(route).toContain('import { ProtectedPage } from "@/components/ProtectedPage";');
+    expect(route).toContain('import { requireAuthenticatedPage } from "@/lib/serverAuth";');
     expect(route).toContain('import { HealthPlaceholderPage } from "@/components/HealthPlaceholderPage";');
-    expect(route).toContain('department === "personal" && feature === "health"');
+    expect(route).toContain('await requireAuthenticatedPage("/personal/health");');
+    expect(route).toContain('export const dynamic = "force-dynamic";');
     expect(route).toContain("return <ProtectedPage>");
   });
 });
