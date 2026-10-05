@@ -518,11 +518,13 @@ public sealed class PaymentWebhookService(
                 case PaymentEventType.RenewalSucceeded when parsed.PaymentAttemptId.HasValue:
                     if (linkedAttempt is not null)
                     {
+                        var workspaceId = parsed.WorkspaceId ?? throw new InvalidOperationException("The payment event did not include a valid workspace reference.");
+                        var paymentAttemptId = parsed.PaymentAttemptId ?? throw new InvalidOperationException("The payment event did not include a valid payment attempt reference.");
                         if (parsed.Amount.HasValue && parsed.Amount.Value != linkedAttempt.Amount || !string.Equals(parsed.Currency, linkedAttempt.Currency, StringComparison.OrdinalIgnoreCase))
                             throw new InvalidOperationException("The provider payment amount or currency does not match the recorded payment attempt.");
-                        await lifecycle.MarkPaymentSucceededAsync(parsed.WorkspaceId.Value, parsed.PaymentAttemptId.Value, parsed.Reason ?? "Provider payment succeeded.", cancellationToken);
-                        if (parsed.Type == PaymentEventType.RenewalSucceeded && parsed.SubscriptionId.HasValue && parsed.PeriodStart.HasValue && parsed.PeriodEnd.HasValue)
-                            await lifecycle.RenewSubscriptionAsync(parsed.WorkspaceId.Value, parsed.SubscriptionId.Value, parsed.PeriodStart.Value, parsed.PeriodEnd.Value, $"webhook:{paymentEvent.Id}", parsed.Reason ?? "Provider renewal succeeded.", cancellationToken);
+                        await lifecycle.MarkPaymentSucceededAsync(workspaceId, paymentAttemptId, parsed.Reason ?? "Provider payment succeeded.", cancellationToken);
+                        if (parsed.Type == PaymentEventType.RenewalSucceeded && parsed.SubscriptionId is Guid subscriptionId && parsed.PeriodStart is DateTime periodStart && parsed.PeriodEnd is DateTime periodEnd)
+                            await lifecycle.RenewSubscriptionAsync(workspaceId, subscriptionId, periodStart, periodEnd, $"webhook:{paymentEvent.Id}", parsed.Reason ?? "Provider renewal succeeded.", cancellationToken);
                     }
                     break;
                 case PaymentEventType.PaymentFailed:
