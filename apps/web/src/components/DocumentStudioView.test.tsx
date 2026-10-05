@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { DocumentStudioView } from "./DocumentStudioView";
+import { DocumentProgressMeter, DocumentStudioView } from "./DocumentStudioView";
 
 vi.mock("next/navigation", () => ({
   useSearchParams: () => new URLSearchParams(),
@@ -27,6 +27,16 @@ vi.mock("@/lib/api", () => ({
 }));
 
 describe("DocumentStudioView", () => {
+  it("exposes an announced, bounded progress meter for assistive technology", () => {
+    const html = renderToStaticMarkup(<DocumentProgressMeter progress={140} label="Progress" announcement="Report: running. 100% complete." />);
+
+    expect(html).toContain('role="status"');
+    expect(html).toContain('role="progressbar"');
+    expect(html).toContain('aria-valuenow="100"');
+    expect(html).toContain('aria-valuetext="100%"');
+    expect(html).toContain("Report: running. 100% complete.");
+  });
+
   it("renders a compact guided compose workspace without provider details", () => {
     const html = renderToStaticMarkup(<DocumentStudioView />);
 
@@ -34,6 +44,9 @@ describe("DocumentStudioView", () => {
     expect(html).toContain("document-field-primary");
     expect(html).toContain("document-advanced");
     expect(html).toContain("document-recent-card");
+    expect(html).toContain('aria-labelledby="document-create-title"');
+    expect(html).toContain('aria-describedby="document-brief-count"');
+    expect(html).toContain('aria-labelledby="document-sources-title"');
     expect(html).toContain("document.type");
     expect(html).toContain("document.language");
     expect(html).not.toContain("provider");
@@ -48,5 +61,6 @@ describe("DocumentStudioView", () => {
     expect(html).toContain("document.loading");
     expect(html).toContain("document.sources");
     expect(html).toContain("document.recentTitle");
+    expect(html).toContain('aria-live="polite"');
   });
 });
