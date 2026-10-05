@@ -21,14 +21,15 @@ export function readDocumentActiveJobId(workspaceId: string) {
   if (typeof window === "undefined") return null;
   try {
     const jobId = window.sessionStorage.getItem(documentActiveJobStorageKey(workspaceId));
-    return jobId?.trim() || null;
+    const normalized = jobId?.trim() || "";
+    return isSafeDocumentIdentifier(normalized) ? normalized : null;
   } catch {
     return null;
   }
 }
 
 export function persistDocumentActiveJobId(workspaceId: string, jobId: string) {
-  if (typeof window === "undefined" || !jobId.trim()) return;
+  if (typeof window === "undefined" || !isSafeDocumentIdentifier(jobId)) return;
   try {
     window.sessionStorage.setItem(documentActiveJobStorageKey(workspaceId), jobId);
   } catch {
@@ -50,7 +51,7 @@ export function isDocumentJob(job: GenerationJob | null) {
 }
 
 export function isRestorableDocumentJob(job: GenerationJob | null, workspaceId: string, expectedJobId?: string) {
-  return !!job && job.workspaceId === workspaceId && (!expectedJobId || job.id === expectedJobId) && isDocumentJob(job);
+  return !!job && isSafeDocumentIdentifier(job.id) && job.workspaceId === workspaceId && (!expectedJobId || job.id === expectedJobId) && isDocumentJob(job);
 }
 
 export function shouldResetDocumentWorkspaceState(job: GenerationJob | null, workspaceId: string | null) {
@@ -59,6 +60,14 @@ export function shouldResetDocumentWorkspaceState(job: GenerationJob | null, wor
 
 export function retainDocumentWorkspaceProjectId(projectId: string, projects: ReadonlyArray<{ id: string }>) {
   return projectId && projects.some((project) => project.id === projectId) ? projectId : "";
+}
+
+export function retainDocumentWorkspaceFileIds(
+  selectedIds: ReadonlyArray<string>,
+  files: ReadonlyArray<{ id: string; extension: string; status: string; textExtractionStatus: string }>,
+) {
+  const readyIds = new Set(files.filter(isDocumentSourceReady).map((file) => file.id));
+  return selectedIds.filter((id) => readyIds.has(id));
 }
 
 export function isDocumentTerminal(job: GenerationJob | null) {
@@ -102,6 +111,12 @@ function nonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
 }
 
+const documentIdentifierPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export function isSafeDocumentIdentifier(value: unknown): value is string {
+  return typeof value === "string" && documentIdentifierPattern.test(value.trim());
+}
+
 function parseSections(value: unknown): NonNullable<DocumentJobResult["sections"]> {
   if (!Array.isArray(value)) return [];
   return value.flatMap((section) => {
@@ -132,13 +147,14 @@ const documentRepresentationContentTypes: Readonly<Record<string, string>> = {
 };
 
 export function isSafeDocumentRepresentation(value: unknown): value is DocumentRepresentation {
-  if (!isRecord(value) || !nonEmptyString(value.id) || !nonEmptyString(value.type)
+  if (!isRecord(value) || !isSafeDocumentIdentifier(value.id) || !nonEmptyString(value.type)
     || !nonEmptyString(value.fileName) || !nonEmptyString(value.contentType)) return false;
   const type = value.type.trim().toLowerCase();
   const fileName = value.fileName.trim();
   const contentType = value.contentType.trim().toLowerCase();
   const expectedContentType = documentRepresentationContentTypes[type];
   return !!expectedContentType
+    && fileName.length > type.length + 1
     && fileName.length <= 255
     && !(/[\\/\u0000-\u001f\u007f]/.test(fileName))
     && fileName.toLowerCase().endsWith(`.${type}`)
@@ -164,7 +180,7 @@ export function parseDocumentJobResult(job: GenerationJob | null): DocumentJobRe
     const parsed: unknown = JSON.parse(job.resultJson);
     if (!isRecord(parsed)) return null;
     return {
-      assetId: nonEmptyString(parsed.assetId) ? parsed.assetId : undefined,
+      assetId: isSafeDocumentIdentifier(parsed.assetId) ? parsed.assetId.trim() : undefined,
       documentType: parsed.documentType === "document" ? "document" : undefined,
       title: typeof parsed.title === "string" ? parsed.title : undefined,
       language: typeof parsed.language === "string" ? parsed.language : undefined,

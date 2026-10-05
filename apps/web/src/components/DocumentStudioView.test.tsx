@@ -57,6 +57,7 @@ describe("DocumentStudioView", () => {
     expect(html).toContain('aria-labelledby="document-create-title"');
     expect(html).toContain('aria-describedby="document-brief-count"');
     expect(html).toContain('aria-labelledby="document-sources-title"');
+    expect(html).toContain('id="document-project"');
     expect(html).toContain("document.type");
     expect(html).toContain("document.language");
     expect(html).not.toContain("provider");

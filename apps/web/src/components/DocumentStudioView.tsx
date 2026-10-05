@@ -32,6 +32,7 @@ import {
   parseDocumentJobResult,
   persistDocumentActiveJobId,
   retainDocumentWorkspaceProjectId,
+  retainDocumentWorkspaceFileIds,
   readDocumentActiveJobId,
   shouldResetDocumentWorkspaceState,
   shouldPollDocumentJob,
@@ -100,6 +101,8 @@ export function DocumentStudioView() {
   const [downloadError, setDownloadError] = useState("");
   const [copyState, setCopyState] = useState<"idle" | "copied" | "error">("idle");
   const restoreJobId = useRef<string | null>(null);
+  const activeJobId = useRef<string | null>(null);
+  const activeAssetId = useRef<string | null>(null);
   const observedWorkspaceId = useRef<string | null>(workspace?.id ?? null);
   const workspaceGeneration = useRef(0);
 
@@ -123,7 +126,14 @@ export function DocumentStudioView() {
     } else {
       setProjects([]);
     }
-    setFiles(filesResult.status === "fulfilled" ? filesResult.value.filter((file) => extensions.includes(file.extension.toLowerCase())) : []);
+    if (filesResult.status === "fulfilled") {
+      const loadedFiles = filesResult.value.filter((file) => extensions.includes(file.extension.toLowerCase()));
+      setFiles(loadedFiles);
+      setSelected((selectedIds) => retainDocumentWorkspaceFileIds(selectedIds, loadedFiles));
+    } else {
+      setFiles([]);
+      setSelected([]);
+    }
     setRecentAssets(assetsResult.status === "fulfilled" ? assetsResult.value.items : []);
     setLoadingSources(false);
     setLoadingRecent(false);
@@ -138,6 +148,8 @@ export function DocumentStudioView() {
     observedWorkspaceId.current = nextWorkspaceId;
     workspaceGeneration.current += 1;
     restoreJobId.current = null;
+    activeJobId.current = null;
+    activeAssetId.current = null;
     if (previousWorkspaceId === null && nextWorkspaceId !== null && !shouldResetDocumentWorkspaceState(current, nextWorkspaceId)) return;
     setCurrent(null);
     setSelected([]);
@@ -182,6 +194,8 @@ export function DocumentStudioView() {
         clearDocumentActiveJobId(workspaceId);
         return;
       }
+      activeJobId.current = job.id;
+      activeAssetId.current = parseDocumentJobResult(job)?.assetId ?? null;
       setCurrent(job);
       setPollRetry(0);
     }).catch((cause) => {
@@ -202,6 +216,8 @@ export function DocumentStudioView() {
       try {
         const next = await api.getGenerationJob(jobId);
         if (!active || workspaceGeneration.current !== workspaceVersion || current.id !== jobId || !isRestorableDocumentJob(next, current.workspaceId, jobId)) return;
+        activeJobId.current = next.id;
+        activeAssetId.current = parseDocumentJobResult(next)?.assetId ?? null;
         setCurrent(next);
         setError("");
         setPollRetry(0);
@@ -239,6 +255,8 @@ export function DocumentStudioView() {
     try {
       const job = await api.createDocumentGenerationJob({ workspaceId, projectId: projectId || null, title: title.trim() || null, description: prompt.trim(), documentType, length, audience: audience.trim() || null, additionalInstructions: additionalInstructions.trim() || null, attachmentIds: selected, language, tone, includeTableOfContents });
       if (workspaceGeneration.current !== workspaceVersion || observedWorkspaceId.current !== workspaceId || !isRestorableDocumentJob(job, workspaceId)) return;
+      activeJobId.current = job.id;
+      activeAssetId.current = parseDocumentJobResult(job)?.assetId ?? null;
       persistDocumentActiveJobId(workspaceId, job.id);
       setCurrent(job);
       setPollRetry(0);
@@ -259,12 +277,13 @@ export function DocumentStudioView() {
     try {
       await api.cancelGenerationJob(jobId);
       const next = await api.getGenerationJob(jobId);
-      if (workspaceGeneration.current !== workspaceVersion || current.id !== jobId || !isRestorableDocumentJob(next, workspaceId, jobId)) return;
+      if (workspaceGeneration.current !== workspaceVersion || activeJobId.current !== jobId || !isRestorableDocumentJob(next, workspaceId, jobId)) return;
+      activeAssetId.current = parseDocumentJobResult(next)?.assetId ?? null;
       setCurrent(next);
     } catch {
-      if (workspaceGeneration.current === workspaceVersion && current.id === jobId) setError(t("document.cancelError"));
+      if (workspaceGeneration.current === workspaceVersion && activeJobId.current === jobId) setError(t("document.cancelError"));
     } finally {
-      if (workspaceGeneration.current === workspaceVersion && current.id === jobId) setWorking(false);
+      if (workspaceGeneration.current === workspaceVersion && activeJobId.current === jobId) setWorking(false);
     }
   }
 
@@ -277,11 +296,14 @@ export function DocumentStudioView() {
     setError("");
     try {
       const next = await api.getGenerationJob(jobId);
-      if (workspaceGeneration.current === workspaceVersion && current.id === jobId && isRestorableDocumentJob(next, workspaceId, jobId)) setCurrent(next);
+      if (workspaceGeneration.current === workspaceVersion && activeJobId.current === jobId && isRestorableDocumentJob(next, workspaceId, jobId)) {
+        activeAssetId.current = parseDocumentJobResult(next)?.assetId ?? null;
+        setCurrent(next);
+      }
     } catch {
-      if (workspaceGeneration.current === workspaceVersion && current.id === jobId) setError(t("document.completedLoadError"));
+      if (workspaceGeneration.current === workspaceVersion && activeJobId.current === jobId) setError(t("document.completedLoadError"));
     } finally {
-      if (workspaceGeneration.current === workspaceVersion && current.id === jobId) setRetryingCompleted(false);
+      if (workspaceGeneration.current === workspaceVersion && activeJobId.current === jobId) setRetryingCompleted(false);
     }
   }
 
@@ -294,7 +316,7 @@ export function DocumentStudioView() {
     setDownloadError("");
     try {
       const blob = await api.downloadAssetRepresentation(assetId, representationId);
-      if (workspaceGeneration.current !== workspaceVersion || current?.id !== jobId) return;
+      if (workspaceGeneration.current !== workspaceVersion || activeJobId.current !== jobId || activeAssetId.current !== assetId) return;
       const url = URL.createObjectURL(blob);
       const anchor = window.document.createElement("a");
       anchor.href = url;
@@ -302,14 +324,16 @@ export function DocumentStudioView() {
       anchor.click();
       window.setTimeout(() => URL.revokeObjectURL(url), 0);
     } catch {
-      if (workspaceGeneration.current === workspaceVersion && current?.id === jobId) setDownloadError(t("document.downloadError"));
+      if (workspaceGeneration.current === workspaceVersion && activeJobId.current === jobId && activeAssetId.current === assetId) setDownloadError(t("document.downloadError"));
     } finally {
-      if (workspaceGeneration.current === workspaceVersion && current?.id === jobId) setWorking(false);
+      if (workspaceGeneration.current === workspaceVersion && activeJobId.current === jobId && activeAssetId.current === assetId) setWorking(false);
     }
   }
 
   function createAnother() {
     restoreJobId.current = null;
+    activeJobId.current = null;
+    activeAssetId.current = null;
     if (workspace) clearDocumentActiveJobId(workspace.id);
     setCurrent(null);
     setError("");
@@ -363,7 +387,7 @@ export function DocumentStudioView() {
           <label className="document-field document-field-primary"><span>{t("document.descriptionLabel")}</span><textarea id="document-brief" aria-describedby="document-brief-count" value={prompt} onChange={(event) => setPrompt(event.target.value)} maxLength={8000} placeholder={t("document.descriptionPlaceholder")} required /><small id="document-brief-count">{prompt.length}/8000</small></label>
           <div className="document-field-row"><label className="document-field"><span>{t("document.type")}</span><select value={documentType} onChange={(event) => setDocumentType(event.target.value as DocumentType)}><option value="auto">{t("document.typeAuto")}</option><option value="report">{t("document.typeReport")}</option><option value="proposal">{t("document.typeProposal")}</option><option value="business_letter">{t("document.typeLetter")}</option><option value="company_profile">{t("document.typeProfile")}</option><option value="meeting_minutes">{t("document.typeMinutes")}</option><option value="article">{t("document.typeArticle")}</option><option value="general">{t("document.typeGeneral")}</option></select></label><label className="document-field"><span>{t("document.length")}</span><select value={length} onChange={(event) => setLength(event.target.value as DocumentLength)}><option value="short">{t("document.lengthShort")}</option><option value="standard">{t("document.lengthStandard")}</option><option value="detailed">{t("document.lengthDetailed")}</option></select></label></div>
           <div className="document-field-row"><label className="document-field"><span>{t("document.tone")}</span><select value={tone} onChange={(event) => setTone(event.target.value as DocumentTone)}><option value="professional">{t("document.toneProfessional")}</option><option value="formal">{t("document.toneFormal")}</option><option value="friendly">{t("document.toneFriendly")}</option><option value="persuasive">{t("document.tonePersuasive")}</option><option value="neutral">{t("document.toneNeutral")}</option></select></label><label className="document-field"><span>{t("document.language")}</span><select value={language} onChange={(event) => setLanguage(event.target.value as DocumentLanguage)}><option value="auto">{t("document.languageAuto")}</option><option value="en">{t("document.languageEnglish")}</option><option value="ar">{t("document.languageArabic")}</option><option value="ku">{t("document.languageKurdish")}</option></select></label></div>
-          <div className="document-field"><span>{t("document.project")}</span><select value={projectId} onChange={(event) => setProjectId(event.target.value)} disabled={loadingSources}><option value="">{t("document.noProject")}</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></div>
+          <label className="document-field"><span>{t("document.project")}</span><select id="document-project" value={projectId} onChange={(event) => setProjectId(event.target.value)} disabled={loadingSources}><option value="">{t("document.noProject")}</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label>
           <details className="document-advanced"><summary>{t("document.advanced")}</summary><div className="document-advanced-grid"><label className="document-field"><span>{t("document.titleLabel")}</span><input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={160} placeholder={t("document.titlePlaceholder")} /></label><label className="document-field"><span>{t("document.audience")}</span><input value={audience} onChange={(event) => setAudience(event.target.value)} maxLength={400} placeholder={t("document.audiencePlaceholder")} /></label><label className="document-field document-advanced-wide"><span>{t("document.additionalInstructions")}</span><textarea value={additionalInstructions} onChange={(event) => setAdditionalInstructions(event.target.value)} maxLength={3000} placeholder={t("document.additionalInstructionsPlaceholder")} /></label></div></details>
           <div className="document-brief-footer"><label className="document-checkbox"><input type="checkbox" checked={includeTableOfContents} onChange={(event) => setIncludeTableOfContents(event.target.checked)} /> <span>{t("document.includeContents")}</span></label><button className="primary-button document-generate-button" type="submit" disabled={working || prompt.trim().length < 3} aria-busy={working}><Sparkles size={15} /> {working ? t("document.working") : t("document.generate")}</button></div>
           {error && <div className="form-error" role="alert"><XCircle size={15} /> {error}</div>}
