@@ -93,16 +93,20 @@ public sealed class GenerationJobFailureTests : IClassFixture<GenerationJobFailu
                     .EnumerateArray()
                     .Select(item => item.Clone())
                     .ToArray();
-                var matches = items
-                    .Where(item => item.TryGetProperty("type", out var type)
+                if (items.Length > 1) _ = Assert.Single(items);
+                if (items.Length == 1)
+                {
+                    var notification = items[0];
+                    if (notification.TryGetProperty("type", out var type)
                         && type.GetString() == "generation.failed"
-                        && item.TryGetProperty("generationJobId", out var notificationJobId)
+                        && notification.TryGetProperty("generationJobId", out var notificationJobId)
                         && notificationJobId.ValueKind == JsonValueKind.String
                         && Guid.TryParse(notificationJobId.GetString(), out var parsedJobId)
                         && parsedJobId == jobId)
-                    .ToArray();
-                if (matches.Length == 1) return matches[0];
-                if (matches.Length > 1) return Assert.Single(matches);
+                    {
+                        return notification;
+                    }
+                }
             }
             await Task.Delay(100);
         }
