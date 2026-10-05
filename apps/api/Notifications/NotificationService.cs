@@ -114,7 +114,20 @@ public sealed class NotificationService(TaslimDbContext db, WorkspaceAccessServi
     {
         if (await db.Notifications.AnyAsync(item => item.DeduplicationKey == notification.DeduplicationKey && item.UserId == notification.UserId, cancellationToken)) return;
         db.Notifications.Add(notification);
-        await db.SaveChangesAsync(cancellationToken);
+        try
+        {
+            await db.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateException)
+        {
+            // The unique (UserId, DeduplicationKey) index is the concurrency
+            // boundary. Another worker may have inserted the same event after
+            // the check above; treat that winner as an idempotent success while
+            // preserving unrelated persistence failures.
+            db.Entry(notification).State = EntityState.Detached;
+            if (await db.Notifications.AsNoTracking().AnyAsync(item => item.DeduplicationKey == notification.DeduplicationKey && item.UserId == notification.UserId, cancellationToken)) return;
+            throw;
+        }
     }
 
     private static NotificationDto ToDto(Notification item) => new(
