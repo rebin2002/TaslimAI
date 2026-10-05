@@ -154,6 +154,32 @@ public sealed class S3CompatibleStorageTests
     }
 
     [Fact]
+    public async Task Unexpected_upload_processing_failure_does_not_return_created_failed_file()
+    {
+        using var factory = new StorageProviderFactory(new Dictionary<string, string?>
+        {
+            ["Files:StorageProvider"] = "Local",
+        }, new FailingStorageService(FileStorageProviders.Local, new InvalidOperationException("storage implementation failure")));
+        EnsureDatabase(factory);
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Unexpected upload failure");
+
+        var response = await Upload(client, auth.PersonalWorkspace.Id, "brief.txt", "content");
+        var error = await response.Content.ReadFromJsonAsync<JsonElement>();
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Equal("FILE_STORAGE_OPERATION_FAILED", error.GetProperty("error").GetProperty("code").GetString());
+        Assert.DoesNotContain("storage implementation failure", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var stored = Assert.Single(await db.StoredFiles.AsNoTracking().ToListAsync());
+        Assert.Equal(StoredFileStatus.Failed, stored.Status);
+        Assert.Equal(FileExtractionStatus.Failed, stored.TextExtractionStatus);
+        Assert.NotNull(stored.ProcessedAt);
+    }
+
+    [Fact]
     public async Task Unconfigured_provider_retains_unavailable_error_code()
     {
         using var factory = new StorageProviderFactory(new Dictionary<string, string?>

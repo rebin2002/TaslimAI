@@ -34,7 +34,7 @@ public sealed class DocumentGenerationRequest
     public string? AdditionalInstructions { get; set; }
 
     [MaxLength(8)]
-    public IReadOnlyList<Guid> AttachmentIds { get; set; } = [];
+    public IReadOnlyList<Guid>? AttachmentIds { get; set; } = [];
 
     [StringLength(20)]
     public string? Language { get; set; }
@@ -119,7 +119,7 @@ public static class DocumentGenerationContractMapper
             Normalize(request.Length, DocumentGenerationDefaults.DefaultLength),
             NormalizeOptional(request.Audience),
             NormalizeOptional(request.AdditionalInstructions),
-            request.AttachmentIds.Distinct().ToArray(),
+            request.AttachmentIds?.Distinct().ToArray() ?? [],
             language,
             format,
             tone,
@@ -167,15 +167,16 @@ public static class DocumentGenerationRequestValidator
 {
     public static void Validate(DocumentGenerationInput input, DocumentGenerationOptions options)
     {
+        if (input is null) throw new DocumentRequestValidationException(GenerationJobErrorCodes.DocumentRequestInvalid, "The document request is invalid.");
         if (input.WorkspaceId == Guid.Empty) Invalid("WORKSPACE_REQUIRED", "A workspace is required.");
-        if (input.Title.Length is < 1 or > 160) Invalid(GenerationJobErrorCodes.DocumentRequestInvalid, "Document title must be between 1 and 160 characters.");
-        if (input.Description.Length < 3 || input.Description.Length > options.MaxPromptCharacters) Invalid(GenerationJobErrorCodes.DocumentRequestInvalid, $"Document description must be between 3 and {options.MaxPromptCharacters} characters.");
-        if (input.AttachmentIds.Count > options.MaxAttachments) Invalid(GenerationJobErrorCodes.DocumentRequestInvalid, $"Choose no more than {options.MaxAttachments} source documents.");
-        if (!DocumentGenerationDefaults.Languages.Contains(input.Language)) Invalid(GenerationJobErrorCodes.DocumentRequestInvalid, "The selected document language is not supported.");
-        if (!DocumentGenerationDefaults.OutputFormats.Contains(input.OutputFormat)) Invalid(GenerationJobErrorCodes.DocumentRequestInvalid, "The selected output format is not supported.");
-        if (!DocumentGenerationDefaults.Tones.Contains(input.Tone)) Invalid(GenerationJobErrorCodes.DocumentRequestInvalid, "The selected tone is not supported.");
-        if (!DocumentGenerationDefaults.DocumentTypes.Contains(input.DocumentType)) Invalid(GenerationJobErrorCodes.DocumentRequestInvalid, "The selected document type is not supported.");
-        if (!DocumentGenerationDefaults.Lengths.Contains(input.Length)) Invalid(GenerationJobErrorCodes.DocumentRequestInvalid, "The selected document length is not supported.");
+        if (string.IsNullOrWhiteSpace(input.Title) || input.Title.Length is < 1 or > 160) Invalid(GenerationJobErrorCodes.DocumentRequestInvalid, "Document title must be between 1 and 160 characters.");
+        if (string.IsNullOrWhiteSpace(input.Description) || input.Description.Length < 3 || input.Description.Length > options.MaxPromptCharacters) Invalid(GenerationJobErrorCodes.DocumentRequestInvalid, $"Document description must be between 3 and {options.MaxPromptCharacters} characters.");
+        if (input.AttachmentIds is null || input.AttachmentIds.Count > options.MaxAttachments) Invalid(GenerationJobErrorCodes.DocumentRequestInvalid, $"Choose no more than {options.MaxAttachments} source documents.");
+        if (string.IsNullOrWhiteSpace(input.Language) || !DocumentGenerationDefaults.Languages.Contains(input.Language)) Invalid(GenerationJobErrorCodes.DocumentRequestInvalid, "The selected document language is not supported.");
+        if (string.IsNullOrWhiteSpace(input.OutputFormat) || !DocumentGenerationDefaults.OutputFormats.Contains(input.OutputFormat)) Invalid(GenerationJobErrorCodes.DocumentRequestInvalid, "The selected output format is not supported.");
+        if (string.IsNullOrWhiteSpace(input.Tone) || !DocumentGenerationDefaults.Tones.Contains(input.Tone)) Invalid(GenerationJobErrorCodes.DocumentRequestInvalid, "The selected tone is not supported.");
+        if (string.IsNullOrWhiteSpace(input.DocumentType) || !DocumentGenerationDefaults.DocumentTypes.Contains(input.DocumentType)) Invalid(GenerationJobErrorCodes.DocumentRequestInvalid, "The selected document type is not supported.");
+        if (string.IsNullOrWhiteSpace(input.Length) || !DocumentGenerationDefaults.Lengths.Contains(input.Length)) Invalid(GenerationJobErrorCodes.DocumentRequestInvalid, "The selected document length is not supported.");
         if (input.Audience?.Length > 400 || input.AdditionalInstructions?.Length > 3_000) Invalid(GenerationJobErrorCodes.DocumentRequestInvalid, "Optional document guidance is too long.");
         return;
 
@@ -199,23 +200,69 @@ public static class DocumentDraftValidator
 {
     public static void Validate(DocumentDraft draft, DocumentGenerationOptions options)
     {
-        if (draft.Title.Length < 1 || draft.Title.Length > 255 || draft.Sections.Count < 1 || draft.Sections.Count > options.MaxSections)
+        if (draft is null || string.IsNullOrWhiteSpace(draft.Title) || draft.Title.Length > 255
+            || HasUnsafeText(draft.Title)
+            || draft.Sections is null || draft.Sections.Count < 1 || draft.Sections.Count > options.MaxSections
+            || draft.Summary is null || draft.Summary.Length > options.MaxSummaryCharacters || HasUnsafeText(draft.Summary))
             throw new DocumentOutputValidationException();
-        var blocks = draft.Sections.Sum(section => section.Blocks.Count);
-        if (blocks < 1 || blocks > options.MaxBlocks)
-            throw new DocumentOutputValidationException();
-        if (draft.Summary.Length > options.MaxSummaryCharacters)
-            throw new DocumentOutputValidationException();
+
+        var blocks = 0;
         foreach (var section in draft.Sections)
         {
-            if (section.Heading.Length > options.MaxHeadingCharacters) throw new DocumentOutputValidationException();
+            if (section is null || string.IsNullOrWhiteSpace(section.Heading) || section.Heading.Length > options.MaxHeadingCharacters
+                || HasUnsafeText(section.Heading)
+                || section.Blocks is null || section.Blocks.Count == 0)
+                throw new DocumentOutputValidationException();
+
+            blocks += section.Blocks.Count;
             foreach (var block in section.Blocks)
             {
-                if (!DocumentBlockTypes.Supported.Contains(block.Type)) throw new DocumentOutputValidationException();
-                if ((block.Text?.Length ?? 0) > options.MaxBlockCharacters) throw new DocumentOutputValidationException();
-                if (block.Items is { Count: > 40 } || block.Rows is { Count: > 100 }) throw new DocumentOutputValidationException();
+                if (block is null || string.IsNullOrWhiteSpace(block.Type) || !DocumentBlockTypes.Supported.Contains(block.Type)
+                    || (block.Text?.Length ?? 0) > options.MaxBlockCharacters || HasUnsafeText(block.Text)
+                    || block.Items is { Count: > 40 } || block.Rows is { Count: > 100 })
+                    throw new DocumentOutputValidationException();
+
+                if (block.Items?.Any(item => string.IsNullOrWhiteSpace(item) || item.Length > options.MaxBlockCharacters || HasUnsafeText(item)) == true
+                    || block.Rows?.Any(row => row is null || row.Cells is null || row.Cells.Count is < 1 or > 8
+                        || row.Cells.Any(cell => cell is null || cell.Length > options.MaxBlockCharacters || HasUnsafeText(cell))) == true)
+                    throw new DocumentOutputValidationException();
+
+                switch (block.Type.ToLowerInvariant())
+                {
+                    case DocumentBlockTypes.Paragraph:
+                    case DocumentBlockTypes.Heading:
+                        if (string.IsNullOrWhiteSpace(block.Text) || block.Items is { Count: > 0 } || block.Rows is { Count: > 0 })
+                            throw new DocumentOutputValidationException();
+                        break;
+                    case DocumentBlockTypes.BulletList:
+                    case DocumentBlockTypes.NumberedList:
+                        if (block.Items is not { Count: > 0 } || block.Rows is { Count: > 0 })
+                            throw new DocumentOutputValidationException();
+                        break;
+                    case DocumentBlockTypes.Table:
+                        if (block.Rows is not { Count: > 0 } || block.Items is { Count: > 0 })
+                            throw new DocumentOutputValidationException();
+                        break;
+                }
             }
         }
+
+        if (blocks < 1 || blocks > options.MaxBlocks)
+            throw new DocumentOutputValidationException();
+    }
+
+    private static bool HasUnsafeText(string? value)
+    {
+        if (value is null) return false;
+        for (var index = 0; index < value.Length; index++)
+        {
+            var character = value[index];
+            if (char.IsControl(character) && character is not '\t' and not '\n' and not '\r') return true;
+            if (character is '\uFFFE' or '\uFFFF') return true;
+            if (!char.IsSurrogate(character)) continue;
+            if (!char.IsHighSurrogate(character) || index + 1 >= value.Length || !char.IsLowSurrogate(value[++index])) return true;
+        }
+        return false;
     }
 }
 
