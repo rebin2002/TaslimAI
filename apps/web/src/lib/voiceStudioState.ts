@@ -2,6 +2,8 @@ import type { Asset, GenerationJob, VoiceJobResult } from "./api";
 
 const terminalStatuses = new Set<GenerationJob["status"]>(["Succeeded", "Failed", "Cancelled"]);
 const activeJobStoragePrefix = "taslim:voice-generation:";
+export const voiceJobPollIntervalMs = 2_000;
+export const voiceJobPollMaxDelayMs = 8_000;
 
 export function voiceActiveJobStorageKey(workspaceId: string): string {
   return `${activeJobStoragePrefix}${workspaceId}`;
@@ -52,7 +54,7 @@ export function shouldPollVoiceJob(job: GenerationJob | null): boolean {
 }
 
 export function nextVoicePollDelay(job: GenerationJob | null, retryAttempt = 0): number | null {
-  return shouldPollVoiceJob(job) ? Math.min(650 * Math.max(1, retryAttempt + 1), 2_800) : null;
+  return shouldPollVoiceJob(job) ? Math.min(voiceJobPollIntervalMs * Math.max(1, retryAttempt + 1), voiceJobPollMaxDelayMs) : null;
 }
 
 export function isVoiceAsset(asset: Asset): boolean {
