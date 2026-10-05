@@ -26,9 +26,13 @@ public sealed record GlobalSearchResultDto(
 public sealed record GlobalSearchGroupDto(
     string Type,
     int Count,
+    bool HasMore,
     IReadOnlyList<GlobalSearchResultDto> Items);
 
 public sealed record GlobalSearchResponseDto(
     string Query,
     int TotalCount,
+    int Page,
+    int PageSize,
+    bool HasMore,
     IReadOnlyList<GlobalSearchGroupDto> Groups);
