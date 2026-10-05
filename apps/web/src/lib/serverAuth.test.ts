@@ -57,6 +57,20 @@ describe("server-side page authentication", () => {
     expect(redirectMock).toHaveBeenCalledWith("/login?next=%2Fpersonal%2Fhealth");
   });
 
+  it("fails closed when a non-JSON response carries a session-shaped body", async () => {
+    cookiesMock.mockResolvedValue({ get: vi.fn().mockReturnValue({ value: "session-cookie" }) } as never);
+    vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({
+      user: { id: "user-id" },
+      personalWorkspace: { id: "workspace-id" },
+    }), {
+      status: 200,
+      headers: { "content-type": "text/html" },
+    }));
+
+    await expect(requireAuthenticatedPage("/personal/health")).rejects.toThrow("REDIRECT:/login?next=%2Fpersonal%2Fhealth");
+    expect(redirectMock).toHaveBeenCalledWith("/login?next=%2Fpersonal%2Fhealth");
+  });
+
   it("uses the same safe login redirect for rejected or unavailable sessions", async () => {
     cookiesMock.mockResolvedValue({ get: vi.fn().mockReturnValue({ value: "stale-cookie" }) } as never);
     const fetchMock = vi.mocked(fetch);
