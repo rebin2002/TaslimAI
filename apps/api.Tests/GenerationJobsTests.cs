@@ -17,7 +17,7 @@ namespace Taslim.Api.Tests;
 
 public class GenerationJobsApiFactory : WebApplicationFactory<Program>
 {
-    private readonly string databasePath = Path.Combine(Path.GetTempPath(), $"taslim-generation-{Guid.NewGuid():N}.db");
+    protected readonly string databasePath = Path.Combine(Path.GetTempPath(), $"taslim-generation-{Guid.NewGuid():N}.db");
 
     protected virtual bool WorkerEnabled => true;
 
@@ -236,6 +236,21 @@ public sealed class GenerationJobsTests : IClassFixture<GenerationJobsApiFactory
         var nextJobTimer = Stopwatch.StartNew();
         await WaitForTerminal(client, second.Id);
         Assert.True(nextJobTimer.Elapsed < TimeSpan.FromSeconds(1), $"The next queued job was delayed for {nextJobTimer.Elapsed}.");
+    }
+
+    [Fact]
+    public async Task Jobs_bound_deep_page_values_without_offset_overflow()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, $"jobs-page-{Guid.NewGuid():N}@example.com");
+
+        var response = await client.GetAsync($"/api/generation/jobs?workspaceId={auth.PersonalWorkspace.Id}&page={int.MaxValue}&pageSize={int.MaxValue}");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var list = (await response.Content.ReadFromJsonAsync<GenerationJobListDto>())!;
+        Assert.Equal(Taslim.Api.Infrastructure.ApiPagination.MaxPage, list.Page);
+        Assert.Equal(Taslim.Api.Infrastructure.ApiPagination.MaxPageSize, list.PageSize);
+        Assert.Empty(list.Items);
     }
 
     [Fact]

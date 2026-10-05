@@ -1,4 +1,5 @@
 "use client";
+import { localeTag } from "@/lib/i18n";
 
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
@@ -7,7 +8,7 @@ import { ArrowUpRight, BookOpen, CheckCircle2, Download, ExternalLink, FileText,
 import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
 import { ApiError, api, type Asset, type GenerationJob, type Project, type ResearchJobResult, type ResearchSource, type StoredFile } from "@/lib/api";
-import { canCancelResearchJob, clearResearchActiveJobId, displayResearchProgress, isResearchSourceReady, isRestorableResearchJob, isSafeExternalUrl, mergeResearchSources, nextResearchPollDelay, parseResearchJobResult, persistResearchActiveJobId, readResearchActiveJobId, researchStudioState, shouldPollResearchJob } from "@/lib/researchStudioState";
+import { canCancelResearchJob, clearResearchActiveJobId, displayResearchProgress, isCurrentResearchJob, isResearchSourceReady, isRestorableResearchJob, isSafeExternalUrl, mergeResearchSources, nextResearchPollDelay, parseResearchJobResult, persistResearchActiveJobId, readResearchActiveJobId, researchStudioState, shouldPollResearchJob } from "@/lib/researchStudioState";
 
 const extensions = [".pdf", ".docx", ".txt", ".md", ".csv", ".xlsx"];
 type Depth = "quick" | "standard" | "deep";
@@ -47,65 +48,110 @@ export function ResearchStudioView() {
   const [error, setError] = useState("");
   const [downloadError, setDownloadError] = useState("");
   const restoreJobId = useRef<string | null>(null);
+  const observedWorkspaceId = useRef<string | null>(workspace?.id ?? null);
+  const workspaceGeneration = useRef(0);
 
   const loadInputs = useCallback(async () => {
     if (!workspace) return;
+    const workspaceId = workspace.id;
+    const workspaceVersion = workspaceGeneration.current;
     setLoadingSources(true);
     try {
       const [active, archived, available, researchAssets] = await Promise.all([
-        api.listProjects(workspace.id, "Active"),
-        api.listProjects(workspace.id, "Archived"),
-        api.listFiles(workspace.id),
-        api.listAssets(workspace.id, { assetType: "research", pageSize: 4, sort: "recent" }),
+        api.listProjects(workspaceId, "Active"),
+        api.listProjects(workspaceId, "Archived"),
+        api.listFiles(workspaceId),
+        api.listAssets(workspaceId, { assetType: "research", pageSize: 4, sort: "recent" }),
       ]);
+      if (observedWorkspaceId.current !== workspaceId || workspaceGeneration.current !== workspaceVersion) return;
       setProjects([...active, ...archived]);
       setFiles(available.filter((file) => extensions.includes(file.extension.toLowerCase())));
       setRecentResearch(researchAssets.items);
     } catch {
+      if (observedWorkspaceId.current !== workspaceId || workspaceGeneration.current !== workspaceVersion) return;
       setProjects([]);
       setFiles([]);
       setRecentResearch([]);
     } finally {
-      setLoadingSources(false);
+      if (observedWorkspaceId.current === workspaceId && workspaceGeneration.current === workspaceVersion) setLoadingSources(false);
     }
   }, [workspace]);
+
+  // Workspace-scoped jobs, briefs, selections, and source lists must not survive an ownership boundary.
+  // The generation counter fences responses and actions that started in the previous workspace.
+  useEffect(() => {
+    const nextWorkspaceId = workspace?.id ?? null;
+    if (observedWorkspaceId.current === nextWorkspaceId) return;
+    observedWorkspaceId.current = nextWorkspaceId;
+    workspaceGeneration.current += 1;
+    restoreJobId.current = null;
+    setCurrent(null);
+    setSourceDetails([]);
+    setProjects([]);
+    setFiles([]);
+    setRecentResearch([]);
+    setProjectId(searchParams.get("projectId") ?? "");
+    setSelected([]);
+    setTitle("");
+    setQuestion("");
+    setObjective("");
+    setDepth("standard");
+    setReportType("research_report");
+    setLanguage("auto");
+    setAudience("");
+    setGeographicFocus("");
+    setTimePeriod("");
+    setPreferredDomains("");
+    setExcludedDomains("");
+    setAdditionalInstructions("");
+    setUseWebSources(true);
+    setPollRetry(0);
+    setRetryingCompleted(false);
+    setWorking(false);
+    setLoadingSources(true);
+    setError("");
+    setDownloadError("");
+  }, [searchParams, workspace?.id]);
 
   // This effect synchronizes authenticated workspace inputs into the local form.
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void loadInputs(); }, [loadInputs]);
   useEffect(() => {
     if (!workspace || current) return;
-    const storedJobId = readResearchActiveJobId(workspace.id);
+    const workspaceId = workspace.id;
+    const workspaceVersion = workspaceGeneration.current;
+    const storedJobId = readResearchActiveJobId(workspaceId);
     if (!storedJobId) return;
     restoreJobId.current = storedJobId;
     let active = true;
     void api.getGenerationJob(storedJobId).then((job) => {
-      if (!active || restoreJobId.current !== storedJobId) return;
-      if (!isRestorableResearchJob(job, workspace.id)) {
-        clearResearchActiveJobId(workspace.id);
+      if (!active || workspaceGeneration.current !== workspaceVersion || restoreJobId.current !== storedJobId) return;
+      if (!isRestorableResearchJob(job, workspaceId)) {
+        clearResearchActiveJobId(workspaceId);
         return;
       }
       setCurrent(job);
       setPollRetry(0);
     }).catch((cause) => {
-      if (!active || restoreJobId.current !== storedJobId) return;
-      if (cause instanceof ApiError && (cause.status === 403 || cause.status === 404)) clearResearchActiveJobId(workspace.id);
+      if (!active || workspaceGeneration.current !== workspaceVersion || restoreJobId.current !== storedJobId) return;
+      if (cause instanceof ApiError && (cause.status === 403 || cause.status === 404)) clearResearchActiveJobId(workspaceId);
     });
     return () => { active = false; };
   }, [workspace, current]);
   useEffect(() => {
     if (!current || !shouldPollResearchJob(current)) return;
     const jobId = current.id;
+    const workspaceVersion = workspaceGeneration.current;
     let active = true;
     const timer = window.setTimeout(async () => {
       try {
         const next = await api.getGenerationJob(jobId);
-        if (!active) return;
+        if (!active || workspaceGeneration.current !== workspaceVersion || current.id !== jobId || !isCurrentResearchJob(next, current.workspaceId, jobId)) return;
         setCurrent(next);
         setPollRetry(0);
         setError("");
       } catch {
-        if (!active) return;
+        if (!active || workspaceGeneration.current !== workspaceVersion || current.id !== jobId) return;
         setPollRetry((attempt) => attempt + 1);
         setError(t("research.pollError"));
       }
@@ -116,11 +162,13 @@ export function ResearchStudioView() {
     if (!current || current.status !== "Succeeded") return;
     const parsed = parseResearchJobResult(current);
     if (!parsed?.assetId) return;
+    const jobId = current.id;
+    const workspaceVersion = workspaceGeneration.current;
     let active = true;
-    void api.getResearchSources(current.id).then((response) => {
-      if (active) setSourceDetails(response.sources);
+    void api.getResearchSources(jobId).then((response) => {
+      if (active && workspaceGeneration.current === workspaceVersion && current.id === jobId) setSourceDetails(response.sources);
     }).catch(() => {
-      if (active) setSourceDetails([]);
+      if (active && workspaceGeneration.current === workspaceVersion && current.id === jobId) setSourceDetails([]);
     });
     return () => { active = false; };
   }, [current]);
@@ -140,15 +188,17 @@ export function ResearchStudioView() {
       objective.trim() ? `${t("research.objective")}: ${objective.trim()}` : "",
       additionalInstructions.trim(),
     ].filter(Boolean).join("\n\n");
+    const workspaceId = workspace.id;
+    const workspaceVersion = workspaceGeneration.current;
     setWorking(true);
     setError("");
     setDownloadError("");
     setSourceDetails([]);
     restoreJobId.current = null;
-    clearResearchActiveJobId(workspace.id);
+    clearResearchActiveJobId(workspaceId);
     try {
       const job = await api.createResearchGenerationJob({
-        workspaceId: workspace.id,
+        workspaceId,
         projectId: projectId || null,
         question: question.trim(),
         title: title.trim() || null,
@@ -164,49 +214,63 @@ export function ResearchStudioView() {
         useWebSources,
         attachmentIds: selected,
       });
-      persistResearchActiveJobId(workspace.id, job.id);
+      if (workspaceGeneration.current !== workspaceVersion || observedWorkspaceId.current !== workspaceId || !isCurrentResearchJob(job, workspaceId)) return;
+      persistResearchActiveJobId(workspaceId, job.id);
       setCurrent(job);
       setPollRetry(0);
     } catch {
-      setError(t("research.createError"));
+      if (workspaceGeneration.current === workspaceVersion && observedWorkspaceId.current === workspaceId) setError(t("research.createError"));
     } finally {
-      setWorking(false);
+      if (workspaceGeneration.current === workspaceVersion && observedWorkspaceId.current === workspaceId) setWorking(false);
     }
   }
 
   async function cancel() {
     if (!current || !canCancelResearchJob(current)) return;
+    const workspaceId = current.workspaceId;
+    const workspaceVersion = workspaceGeneration.current;
+    const jobId = current.id;
     setWorking(true);
     setError("");
     try {
-      await api.cancelGenerationJob(current.id);
-      setCurrent(await api.getGenerationJob(current.id));
+      await api.cancelGenerationJob(jobId);
+      const next = await api.getGenerationJob(jobId);
+      if (workspaceGeneration.current !== workspaceVersion || current.id !== jobId || !isCurrentResearchJob(next, workspaceId, jobId)) return;
+      setCurrent(next);
     } catch {
-      setError(t("research.cancelError"));
+      if (workspaceGeneration.current === workspaceVersion && current.id === jobId) setError(t("research.cancelError"));
     } finally {
-      setWorking(false);
+      if (workspaceGeneration.current === workspaceVersion && current.id === jobId) setWorking(false);
     }
   }
 
   async function retryCompleted() {
     if (!current) return;
+    const workspaceId = current.workspaceId;
+    const workspaceVersion = workspaceGeneration.current;
+    const jobId = current.id;
     setRetryingCompleted(true);
     setError("");
     try {
-      setCurrent(await api.getGenerationJob(current.id));
+      const next = await api.getGenerationJob(jobId);
+      if (workspaceGeneration.current === workspaceVersion && current.id === jobId && isCurrentResearchJob(next, workspaceId, jobId)) setCurrent(next);
     } catch {
-      setError(t("research.completedLoadError"));
+      if (workspaceGeneration.current === workspaceVersion && current.id === jobId) setError(t("research.completedLoadError"));
     } finally {
-      setRetryingCompleted(false);
+      if (workspaceGeneration.current === workspaceVersion && current.id === jobId) setRetryingCompleted(false);
     }
   }
 
   async function downloadRepresentation(representationId: string, fileName: string) {
     if (!result?.assetId) return;
+    const assetId = result.assetId;
+    const jobId = current?.id;
+    const workspaceVersion = workspaceGeneration.current;
     setWorking(true);
     setDownloadError("");
     try {
-      const blob = await api.downloadAssetRepresentation(result.assetId, representationId);
+      const blob = await api.downloadAssetRepresentation(assetId, representationId);
+      if (workspaceGeneration.current !== workspaceVersion || current?.id !== jobId) return;
       const url = URL.createObjectURL(blob);
       const anchor = window.document.createElement("a");
       anchor.href = url;
@@ -214,9 +278,31 @@ export function ResearchStudioView() {
       anchor.click();
       window.setTimeout(() => URL.revokeObjectURL(url), 0);
     } catch {
-      setDownloadError(t("research.downloadError"));
+      if (workspaceGeneration.current === workspaceVersion && current?.id === jobId) setDownloadError(t("research.downloadError"));
     } finally {
-      setWorking(false);
+      if (workspaceGeneration.current === workspaceVersion && current?.id === jobId) setWorking(false);
+    }
+  }
+
+  async function downloadSourceManifest() {
+    if (!current) return;
+    const workspaceVersion = workspaceGeneration.current;
+    const jobId = current.id;
+    setWorking(true);
+    setDownloadError("");
+    try {
+      const blob = await api.downloadResearchSourcesExport(jobId);
+      if (workspaceGeneration.current !== workspaceVersion || current?.id !== jobId) return;
+      const url = URL.createObjectURL(blob);
+      const anchor = window.document.createElement("a");
+      anchor.href = url;
+      anchor.download = `research-sources-${jobId}.csv`;
+      anchor.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 0);
+    } catch {
+      if (workspaceGeneration.current === workspaceVersion && current?.id === jobId) setDownloadError(t("research.downloadError"));
+    } finally {
+      if (workspaceGeneration.current === workspaceVersion && current?.id === jobId) setWorking(false);
     }
   }
 
@@ -298,7 +384,7 @@ export function ResearchStudioView() {
       ) : state === "failed" || state === "cancelled" ? (
         <section className="account-card research-generation-state research-terminal-state" aria-live="polite"><XCircle size={28} /><p className="section-eyebrow">{t(`jobs.status${statusKey}`)}</p><h2>{current.errorMessage || t("research.failedSafe")}</h2><div className="research-result-actions"><button className="primary-button" onClick={createAnother}><RefreshCw size={15} /> {t("research.createAnother")}</button><Link className="secondary-button" href="/assets">{t("research.openAssets")}</Link></div></section>
       ) : state === "succeeded" && result?.assetId ? (
-        <ResearchResultView result={result} working={working} downloadError={downloadError} onDownload={(id, name) => void downloadRepresentation(id, name)} onCreateAnother={createAnother} t={t} />
+        <ResearchResultView result={result} working={working} downloadError={downloadError} onDownload={(id, name) => void downloadRepresentation(id, name)} onExport={() => void downloadSourceManifest()} onCreateAnother={createAnother} t={t} />
       ) : state === "completed-unavailable" ? (
         <section className="account-card research-generation-state research-terminal-state"><RefreshCw size={28} /><p className="section-eyebrow">{t("jobs.statusSucceeded")}</p><h2>{t("research.completedLoadError")}</h2><p>{t("research.completedLoadHint")}</p><div className="research-result-actions"><button className="primary-button" onClick={() => void retryCompleted()} disabled={retryingCompleted}>{retryingCompleted ? t("research.working") : t("research.retry")}</button><Link className="secondary-button" href="/assets">{t("research.openAssets")}</Link></div></section>
       ) : (
@@ -313,7 +399,7 @@ function ResearchProgressView({ current, statusKey, progress, error, working, on
   return <section className="account-card research-generation-state research-progress-state" aria-live="polite"><div className="research-progress-topline"><div className="research-progress-icon"><LoaderCircle size={24} /></div><div><p className="section-eyebrow">{t("research.progressEyebrow")}</p><h2>{t(`jobs.status${statusKey}`)}</h2></div></div><p className="research-progress-copy">{t("research.progressText")}</p><div className="research-job-status-line"><span className={`research-job-dot research-job-dot-${current.status.toLowerCase()}`} /><strong>{t(`jobs.status${statusKey}`)}</strong><span>{t("research.jobProgress")}</span><b>{progress}%</b></div><div className="generation-progress-track"><span style={{ width: `${progress}%` }} /></div>{error && <div className="form-error"><XCircle size={15} /> {error}</div>}{canCancelResearchJob(current) && <button className="secondary-button generation-cancel-button" onClick={onCancel} disabled={working}><XCircle size={15} /> {t("research.cancel")}</button>}</section>;
 }
 
-function ResearchResultView({ result, working, downloadError, onDownload, onCreateAnother, t }: { result: ResearchJobResult; working: boolean; downloadError: string; onDownload: (id: string, name: string) => void; onCreateAnother: () => void; t: Translate }) {
+function ResearchResultView({ result, working, downloadError, onDownload, onExport, onCreateAnother, t }: { result: ResearchJobResult; working: boolean; downloadError: string; onDownload: (id: string, name: string) => void; onExport: () => void; onCreateAnother: () => void; t: Translate }) {
   const sources = result.sources ?? [];
   return <section className="research-report-shell" aria-live="polite">
     <div className="research-result-heading"><div><p className="section-eyebrow">{t("research.resultEyebrow")}</p><h2>{result.title || t("research.resultTitle")}</h2>{result.subtitle && <p className="research-report-subtitle">{result.subtitle}</p>}</div><span className="form-success"><CheckCircle2 size={16} /> {t("research.savedToAssets")}</span></div>
@@ -329,7 +415,7 @@ function ResearchResultView({ result, working, downloadError, onDownload, onCrea
     </div>
     <details className="research-mobile-sources"><summary><span>{t("research.sourcesTitle")}</span><strong>{sources.length}</strong></summary><EvidenceRail sources={sources} t={t} /></details>
     {downloadError && <div className="form-error"><XCircle size={15} /> {downloadError}</div>}
-    <div className="research-result-actions">{result.representations?.filter((representation) => ["docx", "pdf"].includes(representation.type)).map((representation) => <button className="secondary-button" key={representation.id} type="button" onClick={() => onDownload(representation.id, representation.fileName)} disabled={working}><Download size={15} /> {representation.type.toUpperCase()}</button>)}{!result.representations?.some((representation) => ["docx", "pdf"].includes(representation.type)) && <span className="research-no-downloads">{t("research.noDownloads")}</span>}<Link className="secondary-button" href="/assets">{t("research.openAssets")}</Link><button className="primary-button" onClick={onCreateAnother}><RefreshCw size={15} /> {t("research.createAnother")}</button></div>
+    <div className="research-result-actions">{result.representations?.filter((representation) => ["docx", "pdf"].includes(representation.type)).map((representation) => <button className="secondary-button" key={representation.id} type="button" onClick={() => onDownload(representation.id, representation.fileName)} disabled={working}><Download size={15} /> {representation.type.toUpperCase()}</button>)}{!result.representations?.some((representation) => ["docx", "pdf"].includes(representation.type)) && <span className="research-no-downloads">{t("research.noDownloads")}</span>}<button className="secondary-button" type="button" onClick={onExport} disabled={working}><Download size={15} /> {t("research.references")} CSV</button><Link className="secondary-button" href="/assets">{t("research.openAssets")}</Link><button className="primary-button" onClick={onCreateAnother}><RefreshCw size={15} /> {t("research.createAnother")}</button></div>
   </section>;
 }
 
@@ -343,7 +429,7 @@ function RecentResearch({ assets, loading, locale, t }: { assets: Asset[]; loadi
 
 function formatAssetDate(value: string, locale: string) {
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat(locale, { month: "short", day: "numeric", year: "numeric" }).format(date);
+  return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat(localeTag(locale), { month: "short", day: "numeric", year: "numeric" }).format(date);
 }
 
 function ResearchBlock({ block }: { block: { type: string; text?: string | null; items?: string[] | null; rows?: { cells: string[] }[] | null; citationIds?: string[] } }) {
