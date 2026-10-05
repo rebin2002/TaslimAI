@@ -31,6 +31,7 @@ Files__S3AccessKey=<server-only>
 Files__S3SecretKey=<server-only>
 Files__MaxFileSizeBytes=26214400
 Files__MaxAttachmentsPerMessage=5
+Files__StorageOperationTimeoutSeconds=120
 Files__MaxExtractedTextCharacters=80000
 Ai__FileContextBudgetTokens=4000
 ```
