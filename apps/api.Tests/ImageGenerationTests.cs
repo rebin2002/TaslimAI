@@ -16,10 +16,12 @@ namespace Taslim.Api.Tests;
 
 public class ImageGenerationApiFactory : GenerationJobsApiFactory
 {
+    public bool ImageGenerationEnabled { get; set; } = true;
+
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         base.ConfigureWebHost(builder);
-        builder.UseSetting("ImageGeneration:Enabled", "true");
+        builder.UseSetting("ImageGeneration:Enabled", ImageGenerationEnabled.ToString());
         builder.UseSetting("ImageGeneration:ProviderKey", "openai");
         builder.ConfigureServices(services =>
         {
@@ -95,6 +97,48 @@ public sealed class ImageGenerationTests : IClassFixture<ImageGenerationApiFacto
         Assert.Equal(1, await verificationScope.ServiceProvider.GetRequiredService<TaslimDbContext>().GenerationJobs
             .AsNoTracking()
             .CountAsync(job => job.Id == sourceId));
+    }
+
+    [Fact]
+    public async Task Generic_image_routes_remain_fenced_when_image_studio_is_disabled()
+    {
+        using var disabledFactory = new ImageGenerationApiFactory { ImageGenerationEnabled = false };
+        using var client = disabledFactory.CreateClient();
+        var auth = await Register(client, $"image-disabled-route-guard-{Guid.NewGuid():N}@example.com");
+        var create = await SendWithCsrf(client, HttpMethod.Post, "/api/generation/jobs", new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            jobType = GenerationJobTypes.ImageGenerate,
+            inputJson = "{}",
+        });
+
+        Assert.Equal(HttpStatusCode.BadRequest, create.StatusCode);
+        Assert.Equal("JOB_TYPE_ROUTE_NOT_ALLOWED", (await create.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error").GetProperty("code").GetString());
+
+        var sourceId = Guid.NewGuid();
+        using (var scope = disabledFactory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.GenerationJobs.Add(new GenerationJob
+            {
+                Id = sourceId,
+                WorkspaceId = auth.PersonalWorkspace.Id,
+                CreatedByUserId = auth.User.Id,
+                JobType = GenerationJobTypes.ImageGenerate,
+                Status = GenerationJobStatus.Failed,
+                InputJson = "{}",
+                ErrorCode = GenerationJobErrorCodes.ImageGenerationFailed,
+                ErrorMessage = "Deterministic test failure.",
+                CreatedAt = DateTime.UtcNow.AddMinutes(-1),
+                FailedAt = DateTime.UtcNow.AddSeconds(-30),
+                ConcurrencyToken = Guid.NewGuid(),
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var retry = await SendWithCsrf(client, HttpMethod.Post, $"/api/generation/jobs/{sourceId}/retry", null, "image-disabled-route-guard-001");
+        Assert.Equal(HttpStatusCode.BadRequest, retry.StatusCode);
+        Assert.Equal("JOB_TYPE_ROUTE_NOT_ALLOWED", (await retry.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error").GetProperty("code").GetString());
     }
 
     [Fact]

@@ -1,18 +1,16 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
-using Microsoft.Extensions.Options;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
 using Taslim.Api.Generation;
-using Taslim.Api.Images;
 using Taslim.Api.Infrastructure;
 
 namespace Taslim.Api.Controllers;
 
 [ApiController]
 [Authorize]
-public sealed class GenerationJobsController(IGenerationJobService jobs, IOptions<ImageGenerationOptions> imageOptions) : ControllerBase
+public sealed class GenerationJobsController(IGenerationJobService jobs) : ControllerBase
 {
     [HttpPost("api/generation/jobs")]
     [ValidateAntiForgeryToken]
@@ -20,7 +18,7 @@ public sealed class GenerationJobsController(IGenerationJobService jobs, IOption
     public async Task<IActionResult> Create(CreateGenerationJobRequest request, CancellationToken cancellationToken)
     {
         if (!ModelState.IsValid) return ApiResults.Validation(this);
-        if (imageOptions.Value.Enabled && string.Equals(request.JobType.Trim(), GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(request.JobType.Trim(), GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase))
             return ApiResults.Error(this, StatusCodes.Status400BadRequest, "JOB_TYPE_ROUTE_NOT_ALLOWED", "Use the dedicated studio endpoint for this generation type.");
         try
         {
@@ -44,7 +42,7 @@ public sealed class GenerationJobsController(IGenerationJobService jobs, IOption
     public async Task<IActionResult> Retry(Guid id, CancellationToken cancellationToken)
     {
         var source = await jobs.GetAsync(GetUserId(), id, cancellationToken);
-        if (source is not null && imageOptions.Value.Enabled && string.Equals(source.JobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase))
+        if (source is not null && string.Equals(source.JobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase))
             return ApiResults.Error(this, StatusCodes.Status400BadRequest, "JOB_TYPE_ROUTE_NOT_ALLOWED", "Use the dedicated studio endpoint for this generation type.");
         try
         {
