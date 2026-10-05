@@ -75,6 +75,45 @@ public sealed class FileTests : IClassFixture<TaslimApiFactory>
     }
 
     [Fact]
+    public async Task Workspace_members_can_list_project_files_but_not_conversation_private_files()
+    {
+        using var owner = factory.CreateClient();
+        var ownerAuth = await Register(owner, "File Visibility Owner");
+        var project = await CreateProject(owner, ownerAuth.PersonalWorkspace.Id);
+        var sharedUpload = await Upload(owner, ownerAuth.PersonalWorkspace.Id, "shared.txt", "Workspace project file", project.Id);
+        Assert.Equal(HttpStatusCode.Created, sharedUpload.StatusCode);
+        var sharedFile = (await sharedUpload.Content.ReadFromJsonAsync<StoredFileDto>())!;
+
+        var conversation = await CreateConversation(owner, ownerAuth.PersonalWorkspace.Id, project.Id);
+        var privateUpload = await Upload(owner, ownerAuth.PersonalWorkspace.Id, "private.txt", "Conversation private file", project.Id, conversation.Id);
+        Assert.Equal(HttpStatusCode.Created, privateUpload.StatusCode);
+        var privateFile = (await privateUpload.Content.ReadFromJsonAsync<StoredFileDto>())!;
+
+        using var member = factory.CreateClient();
+        var memberAuth = await Register(member, "File Visibility Member");
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.WorkspaceMembers.Add(new WorkspaceMember
+            {
+                Id = Guid.NewGuid(),
+                WorkspaceId = ownerAuth.PersonalWorkspace.Id,
+                UserId = memberAuth.User.Id,
+                Role = WorkspaceRole.Member,
+                JoinedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var listed = await member.GetFromJsonAsync<List<StoredFileDto>>($"/api/workspaces/{ownerAuth.PersonalWorkspace.Id}/files");
+        Assert.Contains(listed!, file => file.Id == sharedFile.Id);
+        Assert.DoesNotContain(listed!, file => file.Id == privateFile.Id);
+
+        var conversationScopedList = await member.GetFromJsonAsync<List<StoredFileDto>>($"/api/workspaces/{ownerAuth.PersonalWorkspace.Id}/files?conversationId={conversation.Id}");
+        Assert.Empty(conversationScopedList!);
+    }
+
+    [Fact]
     public async Task Unsupported_file_types_and_invalid_signatures_are_rejected()
     {
         using var client = factory.CreateClient();
@@ -112,7 +151,7 @@ public sealed class FileTests : IClassFixture<TaslimApiFactory>
         return (await response.Content.ReadFromJsonAsync<ConversationDto>())!;
     }
 
-    private static async Task<HttpResponseMessage> Upload(HttpClient client, Guid workspaceId, string name, string content, Guid? projectId)
+    private static async Task<HttpResponseMessage> Upload(HttpClient client, Guid workspaceId, string name, string content, Guid? projectId, Guid? conversationId = null)
     {
         var csrf = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
         using var form = new MultipartFormDataContent();
@@ -120,6 +159,7 @@ public sealed class FileTests : IClassFixture<TaslimApiFactory>
         file.Headers.ContentType = new MediaTypeHeaderValue(name.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase) ? "application/pdf" : "text/plain");
         form.Add(file, "file", name);
         if (projectId is not null) form.Add(new StringContent(projectId.Value.ToString()), "projectId");
+        if (conversationId is not null) form.Add(new StringContent(conversationId.Value.ToString()), "conversationId");
         using var request = new HttpRequestMessage(HttpMethod.Post, $"/api/workspaces/{workspaceId}/files") { Content = form };
         request.Headers.Add("X-CSRF-TOKEN", csrf.GetProperty("token").GetString()!);
         return await client.SendAsync(request);
