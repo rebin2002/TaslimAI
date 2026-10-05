@@ -7,6 +7,7 @@ using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
 using Taslim.Api.Documents;
 using Taslim.Api.Generation;
+using Taslim.Api.Files;
 using Taslim.Api.Persistence;
 
 namespace Taslim.Api.Research;
@@ -201,7 +202,10 @@ public sealed class ResearchGenerationJobHandler(
     private async Task<List<StoredFile>> LoadFilesAsync(GenerationJob job, ResearchGenerationInput input, CancellationToken cancellationToken)
     {
         if (input.AttachmentIds.Count == 0) return [];
-        var files = await db.StoredFiles.AsNoTracking().Where(file => file.WorkspaceId == job.WorkspaceId && input.AttachmentIds.Contains(file.Id)).ToListAsync(cancellationToken);
+        var files = await db.StoredFiles.AsNoTracking()
+            .Where(file => file.WorkspaceId == job.WorkspaceId && input.AttachmentIds.Contains(file.Id))
+            .Where(StoredFileVisibility.ForWorkspaceMember(job.CreatedByUserId))
+            .ToListAsync(cancellationToken);
         if (files.Count != input.AttachmentIds.Count || files.Any(file => !ResearchGenerationDefaults.AttachmentExtensions.Contains(file.Extension)) || files.Any(file => file.Status != StoredFileStatus.Ready))
             throw new ResearchRequestValidationException(GenerationJobErrorCodes.ResearchSourceUnavailable, "One or more selected source files are unavailable.");
         if (files.Any(file => file.TextExtractionStatus != FileExtractionStatus.Ready || string.IsNullOrWhiteSpace(file.ExtractedText)))
