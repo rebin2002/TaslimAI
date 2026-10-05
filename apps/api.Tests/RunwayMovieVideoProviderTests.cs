@@ -193,8 +193,13 @@ public sealed class RunwayMovieVideoProviderTests
         var user = new ApplicationUser { Id = Guid.NewGuid(), UserName = $"movie-{Guid.NewGuid():N}@example.test", NormalizedUserName = "MOVIE", Email = "movie@example.test", NormalizedEmail = "MOVIE@EXAMPLE.TEST", DisplayName = "Movie", CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow };
         var job = new GenerationJob { Id = Guid.NewGuid(), WorkspaceId = workspace.Id, CreatedByUserId = user.Id, JobType = GenerationJobTypes.MovieClipGenerate, Status = GenerationJobStatus.Running, InputJson = "{}", ConcurrencyToken = Guid.NewGuid(), CreatedAt = DateTime.UtcNow };
         var movie = new MovieProject { Id = Guid.NewGuid(), WorkspaceId = workspace.Id, CreatedByUserId = user.Id, Title = "Movie", Description = "Description", DurationSeconds = 5, Mode = MovieProjectModes.Full, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow, Guide = new MovieContinuityGuide { Id = Guid.NewGuid(), UpdatedAt = DateTime.UtcNow } };
-        var clip = new MovieClip { Id = Guid.NewGuid(), MovieProjectId = movie.Id, GenerationJobId = job.Id, Status = MovieClipStatuses.Queued, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow };
-        db.AddRange(workspace, user, new WorkspaceMember { Id = Guid.NewGuid(), WorkspaceId = workspace.Id, UserId = user.Id, Role = WorkspaceRole.Owner, JoinedAt = DateTime.UtcNow }, job, movie, clip);
+        var scene = new MovieScene { Id = Guid.NewGuid(), MovieProjectId = movie.Id, Sequence = 1, Title = "Scene", Summary = "A test scene.", CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow };
+        var shot = new MovieShot { Id = Guid.NewGuid(), MovieSceneId = scene.Id, Sequence = 1, Description = "A test shot.", CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow };
+        var clip = new MovieClip { Id = Guid.NewGuid(), MovieProjectId = movie.Id, MovieSceneId = scene.Id, MovieShotId = shot.Id, GenerationJobId = job.Id, Status = MovieClipStatuses.Queued, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow };
+        var take = new MovieTake { Id = Guid.NewGuid(), MovieShotId = shot.Id, VersionNumber = 1, Label = "Take 1", Status = MovieTakeStatuses.Queued, MovieClipId = clip.Id, GenerationJobId = job.Id, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow };
+        var productionVersion = new MovieProductionVersion { Id = Guid.NewGuid(), MovieShotId = shot.Id, VersionNumber = 1, Stage = MovieProductionStages.ProductionRender, Status = MovieProductionVersionStatuses.PendingApproval, GenerationJobId = job.Id, CreatedByUserId = user.Id, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow };
+        var asset = new Asset { Id = Guid.NewGuid(), WorkspaceId = workspace.Id, CreatedByUserId = user.Id, SourceGenerationJobId = job.Id, Name = "Generated clip", AssetType = AssetTypes.Video, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow };
+        db.AddRange(workspace, user, new WorkspaceMember { Id = Guid.NewGuid(), WorkspaceId = workspace.Id, UserId = user.Id, Role = WorkspaceRole.Owner, JoinedAt = DateTime.UtcNow }, job, movie, scene, shot, clip, take, productionVersion, asset);
         await db.SaveChangesAsync();
         var execution = new MovieVideoProviderExecution { Id = Guid.NewGuid(), GenerationJobId = job.Id, MovieClipId = clip.Id, ProviderKey = "runway", Status = MovieVideoExecutionStatuses.Submitted, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow };
         db.MovieVideoProviderExecutions.Add(execution);
@@ -209,16 +214,30 @@ public sealed class RunwayMovieVideoProviderTests
         await store.PersistSubmittedAsync(execution, job.ConcurrencyToken, TaskId.ToString(), CancellationToken.None);
         Assert.Equal(TaskId.ToString(), (await db.MovieVideoProviderExecutions.AsNoTracking().SingleAsync()).ProviderJobId);
 
-        await db.GenerationJobs.Where(item => item.Id == job.Id).ExecuteUpdateAsync(setters => setters.SetProperty(item => item.Status, GenerationJobStatus.Succeeded));
+        var recoveredToken = Guid.NewGuid();
+        await db.GenerationJobs.Where(item => item.Id == job.Id).ExecuteUpdateAsync(setters => setters.SetProperty(item => item.ConcurrencyToken, recoveredToken));
         await store.MarkFailedAsync(job.Id, job.ConcurrencyToken, GenerationJobErrorCodes.MovieGenerationFailed, CancellationToken.None);
+        await store.MarkCancelledAsync(job.Id, job.ConcurrencyToken, CancellationToken.None);
+        await store.MarkReadyAsync(job.Id, job.ConcurrencyToken, asset.Id, null, 5, "{\"durationSeconds\":5}", CancellationToken.None);
         var afterLateFailure = await db.MovieVideoProviderExecutions.AsNoTracking().SingleAsync();
         var afterLateClip = await db.MovieClips.AsNoTracking().SingleAsync();
+        var afterLateTake = await db.MovieTakes.AsNoTracking().SingleAsync();
+        var afterLateProductionVersion = await db.MovieProductionVersions.AsNoTracking().SingleAsync();
         Assert.Equal(MovieVideoExecutionStatuses.Queued, afterLateFailure.Status);
         Assert.Equal(MovieClipStatuses.Generating, afterLateClip.Status);
+        Assert.Equal(MovieTakeStatuses.Queued, afterLateTake.Status);
+        Assert.Null(afterLateTake.AssetId);
+        Assert.Null(afterLateProductionVersion.AssetId);
 
-        await store.MarkReadyAsync(job.Id, job.ConcurrencyToken, null, null, 5, "{\"durationSeconds\":5}", CancellationToken.None);
+        await db.GenerationJobs.Where(item => item.Id == job.Id).ExecuteUpdateAsync(setters => setters
+            .SetProperty(item => item.Status, GenerationJobStatus.Succeeded)
+            .SetProperty(item => item.ConcurrencyToken, recoveredToken));
+        await store.MarkReadyAsync(job.Id, recoveredToken, asset.Id, null, 5, "{\"durationSeconds\":5}", CancellationToken.None);
         Assert.Equal(MovieVideoExecutionStatuses.Completed, (await db.MovieVideoProviderExecutions.AsNoTracking().SingleAsync()).Status);
         Assert.Equal(MovieClipStatuses.Ready, (await db.MovieClips.AsNoTracking().SingleAsync()).Status);
+        Assert.Equal(MovieTakeStatuses.Succeeded, (await db.MovieTakes.AsNoTracking().SingleAsync()).Status);
+        Assert.Equal(asset.Id, (await db.MovieTakes.AsNoTracking().SingleAsync()).AssetId);
+        Assert.Equal(asset.Id, (await db.MovieProductionVersions.AsNoTracking().SingleAsync()).AssetId);
     }
 
     private static RunwayMovieVideoProvider CreateProvider(HttpMessageHandler handler, MovieVideoOptions options, IProviderUrlPolicy? urlPolicy = null) =>

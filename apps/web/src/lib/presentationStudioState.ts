@@ -1,8 +1,33 @@
 import type { GenerationJob, PresentationJobResult } from "./api";
 
 const terminalStatuses = new Set<GenerationJob["status"]>(["Succeeded", "Failed", "Cancelled"]);
+const activeJobStoragePrefix = "taslim:presentation-generation:";
 export type PresentationStudioState = "compose" | "pending" | "queued" | "running" | "succeeded" | "completed-unavailable" | "failed" | "cancelled";
 
+export function presentationActiveJobStorageKey(workspaceId: string) { return `${activeJobStoragePrefix}${workspaceId}`; }
+export function readPresentationActiveJobId(workspaceId: string) {
+  if (typeof window === "undefined") return null;
+  try {
+    const jobId = window.sessionStorage.getItem(presentationActiveJobStorageKey(workspaceId));
+    return jobId?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+export function persistPresentationActiveJobId(workspaceId: string, jobId: string) {
+  if (typeof window === "undefined" || !jobId.trim()) return;
+  try { window.sessionStorage.setItem(presentationActiveJobStorageKey(workspaceId), jobId); } catch { /* Storage may be unavailable. */ }
+}
+export function clearPresentationActiveJobId(workspaceId: string) {
+  if (typeof window === "undefined") return;
+  try { window.sessionStorage.removeItem(presentationActiveJobStorageKey(workspaceId)); } catch { /* Storage may be unavailable. */ }
+}
+export function isPresentationJob(job: GenerationJob | null) {
+  return job?.jobType.trim().toLowerCase() === "presentation.generate";
+}
+export function isRestorablePresentationJob(job: GenerationJob | null, workspaceId: string) {
+  return !!job && job.workspaceId === workspaceId && isPresentationJob(job);
+}
 export function isPresentationTerminal(job: GenerationJob | null) { return !!job && terminalStatuses.has(job.status); }
 export function shouldPollPresentationJob(job: GenerationJob | null) { return !!job && !isPresentationTerminal(job); }
 export function nextPresentationPollDelay(job: GenerationJob | null, retryAttempt = 0) { return shouldPollPresentationJob(job) ? Math.min(700 * Math.max(1, retryAttempt + 1), 2_800) : null; }
