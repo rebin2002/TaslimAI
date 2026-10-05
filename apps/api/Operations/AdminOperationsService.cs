@@ -135,6 +135,17 @@ public sealed class AdminOperationsService(
             .Take(RecentItemLimit)
             .Select(item => new AdminRecentFailureDto(item.Id, item.JobType, SanitizeCode(item.ErrorCode), item.FailedAt ?? item.CreatedAt))
             .ToArrayAsync(cancellationToken);
+        var failuresByCode = (await inRange
+            .Where(item => item.Status == GenerationJobStatus.Failed)
+            .GroupBy(item => item.ErrorCode)
+            .Select(group => new { ErrorCode = group.Key, Count = group.Count() })
+            .ToArrayAsync(cancellationToken))
+            .Select(item => new AdminCountBreakdownDto(SanitizeCode(item.ErrorCode), item.Count))
+            .GroupBy(item => item.Key, StringComparer.Ordinal)
+            .Select(group => new AdminCountBreakdownDto(group.Key, group.Sum(item => item.Count)))
+            .OrderByDescending(item => item.Count)
+            .ThenBy(item => item.Key)
+            .ToArray();
         var now = DateTime.UtcNow;
         var longRunningSince = now.Subtract(LongRunningThreshold);
         var runningRows = await jobs
@@ -175,6 +186,7 @@ public sealed class AdminOperationsService(
             byStatus.OrderBy(item => item.Key).ToArray(),
             byStudio.OrderByDescending(item => item.Count).ThenBy(item => item.Key).ToArray(),
             recentFailures,
+            failuresByCode,
             runningJobs,
             queuedOrPendingCount,
             longRunningCount,
