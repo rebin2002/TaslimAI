@@ -91,6 +91,17 @@ describe("Chat stream state", () => {
     expect(state.terminal).toBe("failed");
   });
 
+  it("does not regress a completed stream when failure cleanup runs late", () => {
+    let state = reduceChatStream(createChatStreamState(), event("message.started", { userMessage: user, assistantMessage: assistant }));
+    state = reduceChatStream(state, event("message.completed", { userMessage: user, assistantMessage: message("assistant-1", "Assistant", "final", "Completed") }));
+    const afterLateFailure = failChatStream(state);
+
+    expect(afterLateFailure).toBe(state);
+    expect(afterLateFailure.messages.find(item => item.id === "assistant-1")).toMatchObject({ content: "final", status: "Completed" });
+    expect(afterLateFailure.generating).toBe(false);
+    expect(afterLateFailure.terminal).toBe("completed");
+  });
+
   it("ends a local stream immediately and exposes the pending assistant as retryable", () => {
     let state = reduceChatStream(createChatStreamState(), event("message.started", { userMessage: user, assistantMessage: assistant }));
     state = reduceChatStream(state, event("message.delta", { messageId: "assistant-1", delta: "partial" }));

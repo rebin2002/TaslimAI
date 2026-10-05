@@ -71,6 +71,7 @@ export function applyChatStreamEvent(state: ChatStreamState, event: ChatStreamEv
   return next;
 }
 export function failChatStream(state: ChatStreamState): ChatStreamState {
+  if (state.terminal !== null) return state;
   const pendingAssistant = [...state.messages].reverse().find(message => message.role === "Assistant" && message.status === "Pending");
   return {
     ...state,
