@@ -59,7 +59,9 @@ public sealed class FilesController(
         if (!await access.IsMemberAsync(userId, workspaceId, cancellationToken)) return Forbid();
         var files = await db.StoredFiles.AsNoTracking()
             .Where(file => file.WorkspaceId == workspaceId && file.Status != StoredFileStatus.Deleted && (!projectId.HasValue || file.ProjectId == projectId) && (!conversationId.HasValue || file.ConversationId == conversationId))
-            .Where(file => (file.ProjectId != null || file.ConversationId != null) || file.UserId == userId)
+            // Project-scoped files are shared with workspace members. Personal and
+            // conversation-scoped files remain private to their creating user.
+            .Where(file => file.UserId == userId || (file.ProjectId != null && file.ConversationId == null))
             .OrderByDescending(file => file.CreatedAt)
             .Select(file => FileDtoMapper.ToStoredFileDto(file))
             .ToListAsync(cancellationToken);

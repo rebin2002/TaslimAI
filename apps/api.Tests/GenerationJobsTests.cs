@@ -17,7 +17,7 @@ namespace Taslim.Api.Tests;
 
 public class GenerationJobsApiFactory : WebApplicationFactory<Program>
 {
-    private readonly string databasePath = Path.Combine(Path.GetTempPath(), $"taslim-generation-{Guid.NewGuid():N}.db");
+    protected readonly string databasePath = Path.Combine(Path.GetTempPath(), $"taslim-generation-{Guid.NewGuid():N}.db");
 
     protected virtual bool WorkerEnabled => true;
 
