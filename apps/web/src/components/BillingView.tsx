@@ -1,4 +1,5 @@
 "use client";
+import { localeTag } from "@/lib/i18n";
 
 import Link from "next/link";
 import { ArrowLeft, CalendarClock, CheckCircle2, Coins, CreditCard, History, Sparkles } from "lucide-react";
@@ -18,8 +19,8 @@ export function BillingView() {
     void api.getBillingAccount(workspace.id).then((next) => { if (active) setAccount(next); }).catch(() => { if (active) setError(true); });
     return () => { active = false; };
   }, [workspace?.id]);
-  const dateFormatter = useMemo(() => new Intl.DateTimeFormat(locale, { dateStyle: "medium" }), [locale]);
-  const numberFormatter = useMemo(() => new Intl.NumberFormat(locale), [locale]);
+  const dateFormatter = useMemo(() => new Intl.DateTimeFormat(localeTag(locale), { dateStyle: "medium" }), [locale]);
+  const numberFormatter = useMemo(() => new Intl.NumberFormat(localeTag(locale)), [locale]);
   const formatDate = (value: string) => dateFormatter.format(new Date(value));
   const formatCredits = (value: number) => numberFormatter.format(value);
   const formatPrice = (plan: Pick<BillingPlanOption, "monthlyPriceUsd">) => plan.monthlyPriceUsd === 0 ? t("billing.noCharge") : `$${plan.monthlyPriceUsd} / ${t("billing.month")}`;
