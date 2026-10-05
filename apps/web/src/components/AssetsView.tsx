@@ -74,7 +74,6 @@ export function AssetsView({ initialAssetId, initialProjectId, initialSearch, in
       setSelected(null);
       return () => { deepLinkGeneration.current += 1; };
     }
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- replace a detail panel when the deep link changes.
     setSelected(null);
     let active = true;
     void api.getAsset(initialAssetId).then((asset) => {
