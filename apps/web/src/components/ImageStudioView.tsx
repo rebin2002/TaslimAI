@@ -22,9 +22,11 @@ import {
 } from "lucide-react";
 import { useAuth } from "@/components/AuthProvider";
 import { AssetDetail, type AssetDetailLabels } from "@/components/AssetDetail";
+import { AccessibleProgressBar } from "@/components/AccessibleProgressBar";
 import { useLocale } from "@/components/LocaleProvider";
 import { useSearchParams } from "next/navigation";
 import { ApiError, api, type Asset, type GenerationJob, type ImageGenerationInput, type Project } from "@/lib/api";
+import { localizedImageErrorMessage } from "@/lib/imageStudioErrors";
 import { canCancelImageJob, clearImageActiveJobId, isRestorableImageJob, nextImagePollDelay, parseImageJobResult, persistImageActiveJobId, readImageActiveJobId, shouldPollImageJob, shouldResetImageWorkspaceState } from "@/lib/imageStudioState";
 
 const styles = ["auto", "photorealistic", "product", "illustration", "3d", "minimal", "poster", "social_media"] as const;
@@ -169,7 +171,7 @@ export function ImageStudioView() {
       } catch (caught) {
         if (active && workspaceGeneration.current === workspaceVersion && current.id === jobId) {
           setPollRetry((attempt) => attempt + 1);
-          setError(caught instanceof Error ? caught.message : t("image.pollError"));
+          setError(localizedImageErrorMessage(caught instanceof ApiError ? caught.code : null, t, "image.pollError"));
         }
       }
     }, nextImagePollDelay(current, pollRetry) ?? 650);
@@ -205,7 +207,7 @@ export function ImageStudioView() {
         setCurrent(job);
       }
     } catch (caught) {
-      if (workspaceGeneration.current === requestWorkspaceVersion) setError(caught instanceof Error ? caught.message : t("image.createError"));
+      if (workspaceGeneration.current === requestWorkspaceVersion) setError(localizedImageErrorMessage(caught instanceof ApiError ? caught.code : null, t, "image.createError"));
     } finally {
       if (workspaceGeneration.current === requestWorkspaceVersion) setWorking(false);
     }
@@ -224,7 +226,7 @@ export function ImageStudioView() {
         setCurrent((previous) => previous?.id === job.id ? next : previous);
       }
     } catch (caught) {
-      if (workspaceGeneration.current === requestWorkspaceVersion) setError(caught instanceof Error ? caught.message : t("image.cancelError"));
+      if (workspaceGeneration.current === requestWorkspaceVersion) setError(localizedImageErrorMessage(caught instanceof ApiError ? caught.code : null, t, "image.cancelError"));
     } finally {
       if (workspaceGeneration.current === requestWorkspaceVersion) setWorking(false);
     }
@@ -245,7 +247,9 @@ export function ImageStudioView() {
   const result = useMemo(() => parseImageJobResult(current), [current]);
   const isSuccess = current?.status === "Succeeded" && !!result?.assetId;
   const isFailure = current?.status === "Failed" || current?.status === "Cancelled" || (current?.status === "Succeeded" && !result);
-  const failureMessage = current?.errorMessage || (current?.status === "Succeeded" ? t("image.resultUnavailable") : t("image.failedText"));
+  const failureMessage = current?.status === "Succeeded"
+    ? t("image.resultUnavailable")
+    : localizedImageErrorMessage(current?.errorCode, t, "image.failedText");
   const detailLabels = useMemo<AssetDetailLabels>(() => ({
     detailEyebrow: t("assets.detailEyebrow"),
     close: t("common.close"),
@@ -311,7 +315,7 @@ export function ImageStudioView() {
 
       <main className="image-result-canvas" aria-live="polite">
         {!current && <div className="image-empty-canvas"><div className="image-canvas-orbit image-canvas-orbit-one" /><div className="image-canvas-orbit image-canvas-orbit-two" /><div className="image-canvas-core"><Sparkles size={25} /></div><p className="image-canvas-eyebrow">{t("image.canvasEmptyEyebrow")}</p><h2>{t("image.canvasEmptyTitle")}</h2><p>{t("image.canvasEmptyText")}</p><span className="image-canvas-hint">{t("image.canvasHint")}</span></div>}
-        {current && !isSuccess && !isFailure && <div className="image-generating-canvas"><div className="image-generating-spinner"><LoaderCircle size={26} /></div><p className="image-canvas-eyebrow">{t("image.progressEyebrow")}</p><h2>{t(`jobs.status${current.status}`)}</h2><p>{t("image.progressText")}</p><div className="image-progress-meta"><span>{t("jobs.progress")}</span><strong>{current.progressPercent ?? 0}%</strong></div><div className="image-progress-track"><span style={{ width: `${current.progressPercent ?? 0}%` }} /></div>{canCancelImageJob(current) && <button className="image-cancel-button" type="button" onClick={() => void cancel()} disabled={working}><XCircle size={15} /> {t("image.cancel")}</button>}</div>}
+        {current && !isSuccess && !isFailure && <div className="image-generating-canvas"><div className="image-generating-spinner"><LoaderCircle size={26} aria-hidden="true" /></div><p className="image-canvas-eyebrow">{t("image.progressEyebrow")}</p><h2>{t(`jobs.status${current.status}`)}</h2><p>{t("image.progressText")}</p><div className="image-progress-meta"><span>{t("jobs.progress")}</span><strong>{current.progressPercent ?? 0}%</strong></div><AccessibleProgressBar className="image-progress-track" label={t("jobs.progress")} value={current.progressPercent} />{canCancelImageJob(current) && <button className="image-cancel-button" type="button" onClick={() => void cancel()} disabled={working}><XCircle size={15} /> {t("image.cancel")}</button>}</div>}
         {isFailure && <div className="image-failure-canvas"><div className="image-failure-icon"><XCircle size={24} /></div><p className="image-canvas-eyebrow">{t("image.failedEyebrow")}</p><h2>{current?.status === "Cancelled" ? t("jobs.statusCancelled") : t("image.failedTitle")}</h2><p>{failureMessage}</p><button className="image-retry-button" type="button" onClick={() => void startGeneration()} disabled={working}><RefreshCw size={15} /> {t("image.retry")}</button></div>}
         {isSuccess && result && <div className="image-success-canvas"><div className="image-result-heading"><div><p className="image-canvas-eyebrow">{t("image.resultEyebrow")}</p><h2>{t("image.resultTitle")}</h2></div><span className="image-saved-badge"><Check size={14} /> {t("image.savedToAssets")}</span></div><div className={`image-result-frame is-${result.aspectRatio ?? "square"}`}><img crossOrigin="use-credentials" src={api.assetFileUrl(result.assetId!, true)} alt={description} /></div><div className="image-result-actions"><a className="image-result-action" href={api.assetFileUrl(result.assetId!)}><Download size={15} /> {t("image.download")}</a><Link className="image-result-action" href={`/assets?search=${encodeURIComponent(title || "Generated image")}`}><ImageIcon size={15} /> {t("image.openAssets")}</Link><button className="image-result-action is-primary" type="button" onClick={createAnother}><RefreshCw size={15} /> {t("image.createAnother")}</button></div></div>}
       </main>

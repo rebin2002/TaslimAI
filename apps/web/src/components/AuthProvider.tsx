@@ -61,7 +61,8 @@ export function AuthProvider({ children }: Readonly<{ children: React.ReactNode 
       } catch {
         // Access to browser storage can be blocked by privacy settings.
       }
-      if (getLocaleSource() !== "user") {
+      const localeSource = getLocaleSource();
+      if (localeSource !== "user" && localeSource !== "anonymous-storage") {
         setLocale(savedLocale ?? user.preferredLanguage, { persist: false, source: "account" });
       }
     }
