@@ -151,6 +151,91 @@ public sealed class AssetTests : IClassFixture<GenerationJobsApiFactory>
     }
 
     [Fact]
+    public async Task Workspace_members_can_use_project_assets_but_not_personal_assets()
+    {
+        using var owner = factory.CreateClient();
+        var ownerAuth = await Register(owner, "Shared Asset Owner");
+        var project = await CreateProject(owner, ownerAuth.PersonalWorkspace.Id, "Shared Asset Project");
+        var sharedJob = await CreateJob(owner, ownerAuth.PersonalWorkspace.Id, project.Id, "Shared project asset");
+        var personalJob = await CreateJob(owner, ownerAuth.PersonalWorkspace.Id, null, "Personal asset");
+        await WaitForTerminal(owner, sharedJob.Id);
+        await WaitForTerminal(owner, personalJob.Id);
+
+        var ownerAssets = await owner.GetFromJsonAsync<AssetListDto>($"/api/assets?workspaceId={ownerAuth.PersonalWorkspace.Id}&status=Active&pageSize=20");
+        var sharedAsset = Assert.Single(ownerAssets!.Items, item => item.Name == "Shared project asset");
+        var personalAsset = Assert.Single(ownerAssets.Items, item => item.Name == "Personal asset");
+
+        using var member = factory.CreateClient();
+        var memberAuth = await Register(member, "Shared Asset Member");
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.WorkspaceMembers.Add(new WorkspaceMember
+            {
+                Id = Guid.NewGuid(),
+                WorkspaceId = ownerAuth.PersonalWorkspace.Id,
+                UserId = memberAuth.User.Id,
+                Role = WorkspaceRole.Member,
+                JoinedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var listed = await member.GetFromJsonAsync<AssetListDto>($"/api/assets?workspaceId={ownerAuth.PersonalWorkspace.Id}&status=Active&pageSize=20");
+        Assert.Contains(listed!.Items, item => item.Id == sharedAsset.Id);
+        Assert.DoesNotContain(listed.Items, item => item.Id == personalAsset.Id);
+        Assert.Equal(HttpStatusCode.OK, (await member.GetAsync($"/api/assets/{sharedAsset.Id}/download")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await member.GetAsync($"/api/assets/{personalAsset.Id}")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await member.GetAsync($"/api/assets/{personalAsset.Id}/download")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await SendWithCsrf(member, HttpMethod.Patch, $"/api/assets/{personalAsset.Id}", new { name = "Stolen" })).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await SendWithCsrf(member, HttpMethod.Post, $"/api/assets/{personalAsset.Id}/archive", null)).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await SendWithCsrf(member, HttpMethod.Post, $"/api/assets/{personalAsset.Id}/restore", null)).StatusCode);
+    }
+
+    [Fact]
+    public async Task Workspace_members_cannot_use_a_project_asset_backed_by_a_private_file()
+    {
+        using var owner = factory.CreateClient();
+        var ownerAuth = await Register(owner, "Private Backing File Owner");
+        var project = await CreateProject(owner, ownerAuth.PersonalWorkspace.Id, "Private Backing File Project");
+        var conversation = await CreateConversation(owner, ownerAuth.PersonalWorkspace.Id, project.Id);
+        var job = await CreateJob(owner, ownerAuth.PersonalWorkspace.Id, project.Id, "Private-backed asset");
+        await WaitForTerminal(owner, job.Id);
+
+        Guid assetId;
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var asset = await db.Assets.SingleAsync(item => item.SourceGenerationJobId == job.Id);
+            var storedFile = await db.StoredFiles.SingleAsync(item => item.Id == asset.StoredFileId);
+            storedFile.ConversationId = conversation.Id;
+            await db.SaveChangesAsync();
+            assetId = asset.Id;
+        }
+
+        using var member = factory.CreateClient();
+        var memberAuth = await Register(member, "Private Backing File Member");
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.WorkspaceMembers.Add(new WorkspaceMember
+            {
+                Id = Guid.NewGuid(),
+                WorkspaceId = ownerAuth.PersonalWorkspace.Id,
+                UserId = memberAuth.User.Id,
+                Role = WorkspaceRole.Member,
+                JoinedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var listed = await member.GetFromJsonAsync<AssetListDto>($"/api/assets?workspaceId={ownerAuth.PersonalWorkspace.Id}&status=Active&pageSize=20");
+        Assert.DoesNotContain(listed!.Items, item => item.Id == assetId);
+        Assert.Equal(HttpStatusCode.NotFound, (await member.GetAsync($"/api/assets/{assetId}")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await member.GetAsync($"/api/assets/{assetId}/download")).StatusCode);
+    }
+
+    [Fact]
     public async Task Asset_download_rejects_a_primary_file_from_another_workspace()
     {
         using var owner = factory.CreateClient();
@@ -229,6 +314,9 @@ public sealed class AssetTests : IClassFixture<GenerationJobsApiFactory>
 
     private static Task<ProjectDto> CreateProject(HttpClient client, Guid workspaceId, string name) =>
         SendWithCsrf<ProjectDto>(client, HttpMethod.Post, $"/api/workspaces/{workspaceId}/projects", new { name, type = "General" });
+
+    private static Task<ConversationDto> CreateConversation(HttpClient client, Guid workspaceId, Guid projectId) =>
+        SendWithCsrf<ConversationDto>(client, HttpMethod.Post, $"/api/workspaces/{workspaceId}/conversations", new { projectId });
 
     private static Task<GenerationJobDto> CreateJob(HttpClient client, Guid workspaceId, Guid? projectId, string title) =>
         SendWithCsrf<GenerationJobDto>(client, HttpMethod.Post, "/api/generation/jobs", new { workspaceId, projectId, jobType = "system.test", title, inputJson = "{}" });
