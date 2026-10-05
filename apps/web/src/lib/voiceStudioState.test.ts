@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { canCancelVoiceJob, clearVoiceActiveJobId, formatVoiceDuration, formatVoiceFileSize, isRestorableVoiceJob, isVoiceAsset, isVoiceJob, isVoiceTerminal, nextVoicePollDelay, parseVoiceJobResult, persistVoiceActiveJobId, readVoiceActiveJobId, shouldPollVoiceJob, voiceActiveJobStorageKey } from "./voiceStudioState";
+import { canCancelVoiceJob, clearVoiceActiveJobId, formatVoiceDuration, formatVoiceFileSize, isRestorableVoiceJob, isVoiceAsset, isVoiceJob, isVoiceTerminal, nextVoicePollDelay, parseVoiceJobResult, persistVoiceActiveJobId, readVoiceActiveJobId, shouldPollVoiceJob, voiceActiveJobStorageKey, voiceJobPollIntervalMs, voiceJobPollMaxDelayMs } from "./voiceStudioState";
 import type { GenerationJob } from "./api";
 
 const baseJob: GenerationJob = {
@@ -38,9 +38,11 @@ describe("voiceStudioState", () => {
     const running = { ...baseJob, status: "Running" as const, progressPercent: 50 };
     expect(isVoiceTerminal(running)).toBe(false);
     expect(shouldPollVoiceJob(running)).toBe(true);
-    expect(nextVoicePollDelay(running, 0)).toBe(650);
-    expect(nextVoicePollDelay(running, 2)).toBe(1_950);
-    expect(nextVoicePollDelay(running, 99)).toBe(2_800);
+    expect(voiceJobPollIntervalMs).toBe(2_000);
+    expect(voiceJobPollMaxDelayMs).toBe(8_000);
+    expect(nextVoicePollDelay(running, 0)).toBe(2_000);
+    expect(nextVoicePollDelay(running, 2)).toBe(6_000);
+    expect(nextVoicePollDelay(running, 99)).toBe(8_000);
     expect(isVoiceTerminal(baseJob)).toBe(true);
     expect(shouldPollVoiceJob(baseJob)).toBe(false);
     expect(nextVoicePollDelay(baseJob)).toBeNull();
