@@ -108,6 +108,10 @@ public static class SocialGenerationDefaults
     public const string DefaultTone = "professional";
     public const string DefaultSocialType = "general";
     public const string DefaultPlatform = "multi";
+    public static readonly IReadOnlySet<string> SelectableAssetTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        AssetTypes.Image, AssetTypes.Document, AssetTypes.Presentation, AssetTypes.Research, AssetTypes.Social,
+    };
     public static readonly IReadOnlySet<string> Languages = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "auto", "en", "ar", "ku" };
     public static readonly IReadOnlySet<string> Tones = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "professional", "friendly", "persuasive", "educational", "playful", "concise", "thoughtful" };
     public static readonly IReadOnlySet<string> Platforms = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "instagram", "facebook", "linkedin", "x", "tiktok", "multi" };
