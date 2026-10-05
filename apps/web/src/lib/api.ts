@@ -202,6 +202,7 @@ export type AdminGenerationOverview = {
   byStatus: AdminCountBreakdown[];
   byStudio: AdminCountBreakdown[];
   recentFailures: { jobId: string; jobType: string; errorCode: string | null; failedAt: string }[];
+  failuresByCode: AdminCountBreakdown[];
   runningJobs: { jobId: string; jobType: string; progressPercent: number; queuedAt: string | null; startedAt: string | null; createdAt: string; retryCount: number; claimExpiresAt: string | null; isLongRunning: boolean }[];
   queuedOrPendingCount: number;
   longRunningJobCount: number;
