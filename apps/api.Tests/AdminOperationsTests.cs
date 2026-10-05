@@ -115,6 +115,9 @@ public sealed class AdminOperationsTests : IClassFixture<TaslimApiFactory>
         Assert.Contains(dashboard.Generation.ByStudio, item => item.Key == GenerationJobTypes.ImageGenerate && item.Count >= 1);
         Assert.Contains(dashboard.Generation.RunningJobs, item => item.JobId == runningJobId && item.ProgressPercent == 55);
         Assert.Contains(dashboard.Generation.RecentFailures, item => item.JobId == failedJobId && item.ErrorCode == GenerationJobErrorCodes.ImageGenerationFailed);
+        Assert.Contains(dashboard.Generation.FailuresByCode, item => item.Key == GenerationJobErrorCodes.ImageGenerationFailed && item.Count >= 1);
+        Assert.Contains(dashboard.Generation.FailuresByCode, item => item.Key == GenerationJobErrorCodes.DocumentProviderRateLimited && item.Count >= 1);
+        Assert.Contains(dashboard.Generation.FailuresByCode, item => item.Key == GenerationJobErrorCodes.ImageOutputInvalid && item.Count >= 1);
         Assert.True(dashboard.Usage.RequestCount >= 1);
         Assert.True(dashboard.Usage.ProviderCostUsd >= 1.25m);
         Assert.True(dashboard.Usage.CustomerChargesUsd >= 4.50m);
