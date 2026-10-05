@@ -24,7 +24,7 @@ public sealed class MovieDirectorController(IMovieDirectorService director, IMov
 
     [HttpPost("projects/{movieProjectId:guid}/proposals")]
     [ValidateAntiForgeryToken]
-    [EnableRateLimiting(RateLimiting.ExpensiveAi)]
+    [EnableRateLimiting(RateLimiting.Generation)]
     public async Task<IActionResult> CreateProposal(Guid movieProjectId, DirectorProposalRequest request, CancellationToken cancellationToken)
     {
         try

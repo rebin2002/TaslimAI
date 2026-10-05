@@ -10,9 +10,9 @@ namespace Taslim.Api.Tests;
 public sealed class ApiAbuseBoundaryTests
 {
     [Theory]
-    [InlineData(typeof(MovieDirectorController), nameof(MovieDirectorController.CreateProposal))]
-    [InlineData(typeof(MovieDialogueController), nameof(MovieDialogueController.QueueTake))]
-    public void Provider_backed_movie_starts_use_expensive_ai_rate_policy(Type controllerType, string actionName)
+    [InlineData(typeof(MovieDirectorController), nameof(MovieDirectorController.CreateProposal), RateLimiting.Generation)]
+    [InlineData(typeof(MovieDialogueController), nameof(MovieDialogueController.QueueTake), RateLimiting.ExpensiveAi)]
+    public void Provider_backed_movie_starts_use_safe_rate_policy(Type controllerType, string actionName, string expectedPolicy)
     {
         var action = controllerType.GetMethod(actionName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.DeclaredOnly);
 
@@ -21,7 +21,7 @@ public sealed class ApiAbuseBoundaryTests
         var policy = action.GetCustomAttribute<EnableRateLimitingAttribute>(inherit: true);
 
         Assert.NotNull(policy);
-        Assert.Equal(RateLimiting.ExpensiveAi, policy!.PolicyName);
+        Assert.Equal(expectedPolicy, policy!.PolicyName);
         Assert.NotNull(action.GetCustomAttribute<ValidateAntiForgeryTokenAttribute>(inherit: true));
     }
 }
