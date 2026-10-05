@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GenerationJob } from "./api";
-import { clearSocialActiveJobId, displaySocialProgress, formatSocialPostForCopy, isSocialSourceReady, normalizeSocialPreviewPlatform, parseSocialJobResult, persistSocialActiveJobId, readSocialActiveJobId, socialActiveJobStorageKey, socialStudioState } from "./socialStudioState";
+import { clearSocialActiveJobId, clearSocialDraft, displaySocialProgress, formatSocialPostForCopy, isSocialSourceReady, normalizeSocialPreviewPlatform, parseSocialJobResult, persistSocialActiveJobId, persistSocialDraft, readSocialActiveJobId, readSocialDraft, socialActiveJobStorageKey, socialDraftStorageKey, socialStudioState } from "./socialStudioState";
 
 const job = (overrides: Partial<GenerationJob> = {}): GenerationJob => ({ id: "job-1", workspaceId: "workspace-1", projectId: null, jobType: "social.generate", status: "Running", title: null, progressPercent: 100, resultJson: null, errorCode: null, errorMessage: null, cancellationRequested: false, createdAt: "2026-01-01T00:00:00Z", queuedAt: null, startedAt: null, completedAt: null, failedAt: null, cancelledAt: null, outputs: [], ...overrides });
 
@@ -37,5 +37,25 @@ describe("socialStudioState", () => {
     expect(readSocialActiveJobId("workspace-2")).toBeNull();
     clearSocialActiveJobId("workspace-1");
     expect(readSocialActiveJobId("workspace-1")).toBeNull();
+  });
+  it("persists drafts by workspace and bounds values restored from session storage", () => {
+    const values = new Map<string, string>();
+    vi.stubGlobal("window", { sessionStorage: { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => values.set(key, value), removeItem: (key: string) => values.delete(key) } });
+    persistSocialDraft("workspace-1", { projectId: "project-1", selectedFiles: ["file-1"], selectedAssets: ["asset-1"], prompt: "Brief", socialType: "announcement", platform: "linkedin", tone: "professional", language: "en", audience: "Owners", brandVoice: "Clear", callToAction: "Learn more", includeHashtags: true, includeEmojis: false, generateVariants: true });
+    expect(values.has(socialDraftStorageKey("workspace-1"))).toBe(true);
+    expect(readSocialDraft("workspace-2")).toBeNull();
+    expect(readSocialDraft("workspace-1")?.prompt).toBe("Brief");
+    values.set(socialDraftStorageKey("workspace-1"), JSON.stringify({ prompt: "x".repeat(7000), selectedFiles: ["a", "b", "c", "d", "e", "f"] }));
+    const restored = readSocialDraft("workspace-1");
+    expect(restored?.prompt).toHaveLength(6000);
+    expect(restored?.selectedFiles).toEqual(["a", "b", "c", "d", "e"]);
+    values.set(socialDraftStorageKey("workspace-1"), JSON.stringify({ socialType: "unsupported", platform: "provider-only", tone: "unknown", language: "fr" }));
+    expect(readSocialDraft("workspace-1")).toMatchObject({ socialType: "auto", platform: "multi", tone: "professional", language: "auto" });
+    clearSocialDraft("workspace-1");
+    expect(readSocialDraft("workspace-1")).toBeNull();
+  });
+  it("ignores malformed draft storage instead of breaking the studio", () => {
+    vi.stubGlobal("window", { sessionStorage: { getItem: () => "{not-json", setItem: vi.fn(), removeItem: vi.fn() } });
+    expect(readSocialDraft("workspace-1")).toBeNull();
   });
 });
