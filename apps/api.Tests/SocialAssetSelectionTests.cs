@@ -85,6 +85,84 @@ public sealed class SocialAssetSelectionTests : IClassFixture<SocialGenerationAp
         Assert.Empty(terminal.Outputs);
     }
 
+    [Fact]
+    public async Task Social_job_rejects_private_asset_selected_by_workspace_member()
+    {
+        using var owner = factory.CreateClient();
+        var ownerAuth = await Register(owner, "Private Social Asset Owner");
+        var storedFileId = Guid.NewGuid();
+        var assetId = Guid.NewGuid();
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.StoredFiles.Add(new StoredFile
+            {
+                Id = storedFileId,
+                WorkspaceId = ownerAuth.PersonalWorkspace.Id,
+                UserId = ownerAuth.User.Id,
+                OriginalFileName = "private-reference.png",
+                StoredFileName = "private-reference.png",
+                ContentType = "image/png",
+                Extension = ".png",
+                SizeBytes = 128,
+                StorageProvider = FileStorageProviders.Local,
+                StorageKey = $"tests/{storedFileId:N}",
+                Status = StoredFileStatus.Ready,
+                TextExtractionStatus = FileExtractionStatus.NotApplicable,
+                CreatedAt = DateTime.UtcNow,
+            });
+            db.Assets.Add(new Asset
+            {
+                Id = assetId,
+                WorkspaceId = ownerAuth.PersonalWorkspace.Id,
+                CreatedByUserId = ownerAuth.User.Id,
+                StoredFileId = storedFileId,
+                Name = "Private image reference",
+                AssetType = AssetTypes.Image,
+                MimeType = "image/png",
+                Status = AssetStatus.Active,
+                CreatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        using var member = factory.CreateClient();
+        var memberAuth = await Register(member, "Private Social Asset Member");
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.WorkspaceMembers.Add(new WorkspaceMember
+            {
+                Id = Guid.NewGuid(),
+                WorkspaceId = ownerAuth.PersonalWorkspace.Id,
+                UserId = memberAuth.User.Id,
+                Role = WorkspaceRole.Member,
+                JoinedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var response = await SendWithCsrf(member, new
+        {
+            workspaceId = ownerAuth.PersonalWorkspace.Id,
+            prompt = "This member must not use a private asset.",
+            socialType = "announcement",
+            platform = "linkedin",
+            tone = "professional",
+            language = "en",
+            assetIds = new[] { assetId },
+            attachmentIds = Array.Empty<Guid>(),
+        });
+
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        var created = (await response.Content.ReadFromJsonAsync<CreateSocialGenerationResponse>())!;
+        var terminal = await WaitForTerminal(member, created.Job.Id);
+        Assert.Equal("Failed", terminal.Status);
+        Assert.Equal(GenerationJobErrorCodes.SocialContextUnavailable, terminal.ErrorCode);
+        Assert.Empty(terminal.Outputs);
+    }
+
     private static async Task<AuthResponse> Register(HttpClient client)
     {
         var response = await SendWithCsrf(client, new
