@@ -10,6 +10,7 @@ using Taslim.Api.Ai;
 using Taslim.Api.Controllers;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
+using Taslim.Api.Files;
 using Taslim.Api.Generation;
 using Taslim.Api.Persistence;
 using Taslim.Api.Research;
@@ -206,6 +207,61 @@ public sealed class ResearchGenerationTests : IClassFixture<ResearchApiFactory>
         Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync($"/api/research-generation/jobs/{created.Job.Id}/sources")).StatusCode);
         Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync($"/api/research-generation/jobs/{created.Job.Id}/sources/export")).StatusCode);
     }
+
+    [Fact]
+    public async Task Research_uploaded_sources_keep_distinct_file_identity_when_filenames_match()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, $"research-duplicate-files-{Guid.NewGuid():N}@example.com");
+        var firstFile = NewReadySourceFile(auth, "same-name.txt", "first source text");
+        var secondFile = NewReadySourceFile(auth, "same-name.txt", "second source text");
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.StoredFiles.AddRange(firstFile, secondFile);
+            await db.SaveChangesAsync();
+        }
+
+        var created = await SendWithCsrf<CreateResearchGenerationResponse>(client, HttpMethod.Post, "/api/research-generation/jobs", new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            question = "Compare the two uploaded sources",
+            useWebSources = false,
+            attachmentIds = new[] { firstFile.Id, secondFile.Id },
+        });
+        var completed = await WaitForTerminal(client, created.Job.Id);
+        Assert.True(completed.Status == "Succeeded", $"Status={completed.Status}; Code={completed.ErrorCode}; Message={completed.ErrorMessage}");
+
+        using var verificationScope = factory.Services.CreateScope();
+        var verificationDb = verificationScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var sources = await verificationDb.ResearchSources.AsNoTracking()
+            .Where(source => source.GenerationJobId == created.Job.Id)
+            .OrderBy(source => source.Rank)
+            .ToArrayAsync();
+        Assert.Equal(2, sources.Length);
+        Assert.Equal(firstFile.Id, sources[0].StoredFileId);
+        Assert.Equal(secondFile.Id, sources[1].StoredFileId);
+    }
+
+    private static StoredFile NewReadySourceFile(AuthResponse auth, string name, string extractedText) => new()
+    {
+        Id = Guid.NewGuid(),
+        WorkspaceId = auth.PersonalWorkspace.Id,
+        UserId = auth.User.Id,
+        OriginalFileName = name,
+        StoredFileName = $"{Guid.NewGuid():N}.txt",
+        ContentType = "text/plain",
+        Extension = ".txt",
+        SizeBytes = extractedText.Length,
+        StorageProvider = FileStorageProviders.Local,
+        StorageKey = $"research-test/{Guid.NewGuid():N}.txt",
+        Status = StoredFileStatus.Ready,
+        CreatedAt = DateTime.UtcNow,
+        ProcessedAt = DateTime.UtcNow,
+        TextExtractionStatus = FileExtractionStatus.Ready,
+        ExtractedText = extractedText,
+        ExtractedTextLength = extractedText.Length,
+    };
 
     private static async Task<AuthResponse> Register(HttpClient client, string email)
     {
