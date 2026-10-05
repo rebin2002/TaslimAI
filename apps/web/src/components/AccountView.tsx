@@ -24,6 +24,7 @@ import {
 import { useAuth } from "@/components/AuthProvider";
 import { localeNames, locales, useLocale } from "@/components/LocaleProvider";
 import { api, type PasswordPolicy } from "@/lib/api";
+import { accountProfileDraftFromUser, accountProfileSessionKey, canonicalizeAccountProfileDraft } from "@/lib/accountProfileState";
 import type { Locale } from "@/lib/i18n";
 
 const timeZones = [
@@ -42,14 +43,20 @@ const outputPreferences = ["concise", "balanced", "detailed"] as const;
 type SaveState = "idle" | "saving" | "saved";
 
 export function AccountView() {
+  const { user } = useAuth();
+  return <AccountProfileForm key={accountProfileSessionKey(user)} />;
+}
+
+function AccountProfileForm() {
   const { user, workspace, updateProfile, signOut } = useAuth();
   const { t, locale } = useLocale();
-  const [displayName, setDisplayName] = useState(user?.displayName ?? "");
-  const [preferredLanguage, setPreferredLanguage] = useState<Locale>(user?.preferredLanguage ?? "en");
-  const [defaultGenerationLanguage, setDefaultGenerationLanguage] = useState<Locale>(user?.defaultGenerationLanguage ?? "en");
-  const [timeZone, setTimeZone] = useState(user?.timeZone ?? "UTC");
-  const [outputPreference, setOutputPreference] = useState<(typeof outputPreferences)[number]>(user?.outputPreference ?? "balanced");
-  const [includeSourceLinks, setIncludeSourceLinks] = useState(user?.includeSourceLinks ?? true);
+  const profileDefaults = accountProfileDraftFromUser(user);
+  const [displayName, setDisplayName] = useState(profileDefaults.displayName);
+  const [preferredLanguage, setPreferredLanguage] = useState<Locale>(profileDefaults.preferredLanguage);
+  const [defaultGenerationLanguage, setDefaultGenerationLanguage] = useState<Locale>(profileDefaults.defaultGenerationLanguage);
+  const [timeZone, setTimeZone] = useState(profileDefaults.timeZone);
+  const [outputPreference, setOutputPreference] = useState<(typeof outputPreferences)[number]>(profileDefaults.outputPreference);
+  const [includeSourceLinks, setIncludeSourceLinks] = useState(profileDefaults.includeSourceLinks);
   const [profileState, setProfileState] = useState<SaveState>("idle");
   const [profileError, setProfileError] = useState("");
   const [currentPassword, setCurrentPassword] = useState("");
@@ -73,10 +80,13 @@ export function AccountView() {
 
   async function saveProfile(event: FormEvent) {
     event.preventDefault();
+    const draft = canonicalizeAccountProfileDraft({ displayName, preferredLanguage, defaultGenerationLanguage, timeZone, outputPreference, includeSourceLinks });
     setProfileState("saving");
     setProfileError("");
     try {
-      await updateProfile({ displayName, preferredLanguage, defaultGenerationLanguage, timeZone, outputPreference, includeSourceLinks });
+      await updateProfile(draft);
+      setDisplayName(draft.displayName);
+      setTimeZone(draft.timeZone);
       setProfileState("saved");
     } catch (caught) {
       setProfileState("idle");

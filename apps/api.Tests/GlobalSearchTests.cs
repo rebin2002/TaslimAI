@@ -1,5 +1,7 @@
 using System.Net;
+using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Text;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -68,7 +70,9 @@ public sealed class GlobalSearchTests : IClassFixture<TaslimApiFactory>
         var ownerAuth = await ownerResponse.Content.ReadFromJsonAsync<AuthResponse>();
         Assert.NotNull(ownerAuth);
         var project = await SendWithCsrf<ProjectDto>(owner, HttpMethod.Post, $"/api/workspaces/{ownerAuth!.PersonalWorkspace.Id}/projects", new { name = "Private Nebula Project" });
-        await SendWithCsrf<ConversationDto>(owner, HttpMethod.Post, $"/api/workspaces/{ownerAuth.PersonalWorkspace.Id}/conversations", new { projectId = project.Id, title = "Private Nebula Conversation" });
+        var conversation = await SendWithCsrf<ConversationDto>(owner, HttpMethod.Post, $"/api/workspaces/{ownerAuth.PersonalWorkspace.Id}/conversations", new { projectId = project.Id, title = "Private Nebula Conversation" });
+        var upload = await Upload(owner, ownerAuth.PersonalWorkspace.Id, "Nebula-private.txt", "Private Nebula source", project.Id, conversation.Id);
+        Assert.Equal(HttpStatusCode.Created, upload.StatusCode);
 
         using var member = factory.CreateClient();
         var memberResponse = await Register(member, "Workspace Member", $"workspace-member-{Guid.NewGuid():N}@example.com");
@@ -92,6 +96,7 @@ public sealed class GlobalSearchTests : IClassFixture<TaslimApiFactory>
         var sharedWorkspaceSearch = await member.GetFromJsonAsync<GlobalSearchResponseDto>("/api/search?q=Nebula");
         Assert.NotNull(sharedWorkspaceSearch);
         Assert.DoesNotContain(sharedWorkspaceSearch!.Groups.SelectMany(group => group.Items), item => item.Type == GlobalSearchResultTypes.Conversation);
+        Assert.DoesNotContain(sharedWorkspaceSearch.Groups.SelectMany(group => group.Items), item => item.Type == GlobalSearchResultTypes.File);
         Assert.Contains(sharedWorkspaceSearch.Groups.SelectMany(group => group.Items), item => item.Type == GlobalSearchResultTypes.Project && item.Title == "Private Nebula Project");
 
         using var unrelated = factory.CreateClient();
@@ -132,6 +137,20 @@ public sealed class GlobalSearchTests : IClassFixture<TaslimApiFactory>
         using var request = new HttpRequestMessage(method, path);
         request.Headers.Add("X-CSRF-TOKEN", csrf.GetProperty("token").GetString());
         if (payload is not null) request.Content = JsonContent.Create(payload);
+        return await client.SendAsync(request);
+    }
+
+    private static async Task<HttpResponseMessage> Upload(HttpClient client, Guid workspaceId, string name, string content, Guid projectId, Guid conversationId)
+    {
+        var csrf = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
+        using var form = new MultipartFormDataContent();
+        var file = new ByteArrayContent(Encoding.UTF8.GetBytes(content));
+        file.Headers.ContentType = new MediaTypeHeaderValue("text/plain");
+        form.Add(file, "file", name);
+        form.Add(new StringContent(projectId.ToString()), "projectId");
+        form.Add(new StringContent(conversationId.ToString()), "conversationId");
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"/api/workspaces/{workspaceId}/files") { Content = form };
+        request.Headers.Add("X-CSRF-TOKEN", csrf.GetProperty("token").GetString()!);
         return await client.SendAsync(request);
     }
 }

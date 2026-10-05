@@ -9,6 +9,17 @@ export const onboardingWorkflowDefinitions = [
 
 export type OnboardingIntent = (typeof onboardingWorkflowDefinitions)[number]["intent"];
 
+export function onboardingFormDefaults(
+  user: { displayName: string; preferredLanguage: "en" | "ar" | "ku"; defaultGenerationLanguage: "en" | "ar" | "ku" },
+  locale: "en" | "ar" | "ku",
+) {
+  return {
+    displayName: user.displayName,
+    preferredLanguage: user.preferredLanguage || locale,
+    defaultGenerationLanguage: user.defaultGenerationLanguage || locale,
+  };
+}
+
 export function onboardingWorkflowFor(intent: OnboardingIntent) {
   return onboardingWorkflowDefinitions.find((workflow) => workflow.intent === intent)!;
 }
