@@ -1,0 +1,34 @@
+name: Taslim Release Evidence
+
+on:
+  push:
+    branches: [main, "parallel/**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "22"
+  DOTNET_VERSION: "8.0.x"
+
+jobs:
+  release-evidence:
+    name: Release evidence and safety contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Test release evidence behavior
+        run: bash scripts/release-evidence.test.sh
+      - name: Generate release evidence manifest
+        env:
+          RELEASE_EVIDENCE_PATH: ${{ runner.temp }}/taslim-release-evidence.json
+        run: bash scripts/release-evidence.sh
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: taslim-release-evidence-${{ github.run_id }}
+          path: ${{ runner.temp }}/taslim-release-evidence.json
+          if-no-files-found: ignore
