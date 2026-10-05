@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GenerationJob } from "./api";
-import { canCancelImageJob, clearImageActiveJobId, imageActiveJobStorageKey, isImageJob, isImageTerminal, isRestorableImageJob, nextImagePollDelay, parseImageJobResult, persistImageActiveJobId, readImageActiveJobId, safeImageJobView, shouldPollImageJob, shouldResetImageWorkspaceState } from "./imageStudioState";
+import { canCancelImageJob, clearImageActiveJobId, imageActiveJobStorageKey, imageJobPollIntervalMs, imageJobPollMaxDelayMs, isImageJob, isImageTerminal, isRestorableImageJob, nextImagePollDelay, parseImageJobResult, persistImageActiveJobId, readImageActiveJobId, safeImageJobView, shouldPollImageJob, shouldResetImageWorkspaceState } from "./imageStudioState";
 
 function job(overrides: Partial<GenerationJob> = {}): GenerationJob {
   return {
@@ -32,9 +32,11 @@ describe("image studio state", () => {
   it("retries transient polling failures with bounded backoff and stops at terminal states", () => {
     expect(isImageTerminal(job({ status: "Running" }))).toBe(false);
     expect(shouldPollImageJob(job({ status: "Running" }))).toBe(true);
-    expect(nextImagePollDelay(job({ status: "Running" }), 0)).toBe(650);
-    expect(nextImagePollDelay(job({ status: "Running" }), 2)).toBe(1_950);
-    expect(nextImagePollDelay(job({ status: "Running" }), 99)).toBe(2_800);
+    expect(imageJobPollIntervalMs).toBe(2_000);
+    expect(imageJobPollMaxDelayMs).toBe(8_000);
+    expect(nextImagePollDelay(job({ status: "Running" }), 0)).toBe(2_000);
+    expect(nextImagePollDelay(job({ status: "Running" }), 2)).toBe(6_000);
+    expect(nextImagePollDelay(job({ status: "Running" }), 99)).toBe(8_000);
     expect(isImageTerminal(job({ status: "Succeeded" }))).toBe(true);
     expect(shouldPollImageJob(job({ status: "Succeeded" }))).toBe(false);
     expect(nextImagePollDelay(job({ status: "Succeeded" }), 0)).toBeNull();
