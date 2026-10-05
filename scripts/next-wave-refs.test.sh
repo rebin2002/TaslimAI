@@ -56,6 +56,8 @@ check "pull request from the follow-on branch is allowed" \
   allow pull_request refs/pull/9/merge main $EXPECTED_BRANCH ""
 check "pull request targeting the follow-on branch is allowed" \
   allow pull_request refs/pull/9/merge $EXPECTED_BRANCH some/other-branch ""
+check "pull request targeting the canonical billing stack is allowed" \
+  allow pull_request refs/pull/10/merge fix/billing-accounting-foundations-20261005 some/other-branch ""
 check "pull request into an unrelated base is refused" \
   deny pull_request refs/pull/4/merge develop feature/x ""
 check "pull request with no base is refused" \
