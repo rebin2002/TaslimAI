@@ -108,6 +108,10 @@ public static class SocialGenerationDefaults
     public const string DefaultTone = "professional";
     public const string DefaultSocialType = "general";
     public const string DefaultPlatform = "multi";
+    public static readonly IReadOnlySet<string> SelectableAssetTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        AssetTypes.Image, AssetTypes.Document, AssetTypes.Presentation, AssetTypes.Research, AssetTypes.Social,
+    };
     public static readonly IReadOnlySet<string> Languages = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "auto", "en", "ar", "ku" };
     public static readonly IReadOnlySet<string> Tones = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "professional", "friendly", "persuasive", "educational", "playful", "concise", "thoughtful" };
     public static readonly IReadOnlySet<string> Platforms = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "instagram", "facebook", "linkedin", "x", "tiktok", "multi" };
@@ -148,13 +152,13 @@ public static class SocialDraftValidator
 {
     public static void Validate(SocialDraft draft, SocialGenerationOptions options)
     {
-        if (string.IsNullOrWhiteSpace(draft.Title) || draft.Title.Length > options.MaxTitleCharacters || draft.Posts.Count < 1 || draft.Posts.Count > options.MaxPosts) throw new SocialOutputValidationException();
+        if (draft is null || draft.Posts is null || string.IsNullOrWhiteSpace(draft.Title) || draft.Title.Length > options.MaxTitleCharacters || draft.Posts.Count < 1 || draft.Posts.Count > options.MaxPosts) throw new SocialOutputValidationException();
         if (!SocialGenerationDefaults.Languages.Contains(draft.Language) && !string.Equals(draft.Language, "auto", StringComparison.OrdinalIgnoreCase)) throw new SocialOutputValidationException();
         if (!SocialGenerationDefaults.Platforms.Contains(draft.Platform) || !SocialGenerationDefaults.SocialTypes.Contains(draft.SocialType)) throw new SocialOutputValidationException();
         var expectedOrder = 1;
         foreach (var post in draft.Posts)
         {
-            if (post.Order != expectedOrder++ || string.IsNullOrWhiteSpace(post.Hook) || post.Hook.Length > options.MaxHookCharacters || string.IsNullOrWhiteSpace(post.Body) || post.Body.Length > options.MaxPostCharacters || post.CallToAction?.Length > options.MaxCallToActionCharacters || post.AltText?.Length > options.MaxAltTextCharacters || post.VisualDirection?.Length > options.MaxVisualDirectionCharacters || post.Hashtags.Count > options.MaxHashtags || post.AssetRefs.Count > options.MaxAssetRefs) throw new SocialOutputValidationException();
+            if (post is null || post.Hashtags is null || post.AssetRefs is null || post.Order != expectedOrder++ || string.IsNullOrWhiteSpace(post.Hook) || post.Hook.Length > options.MaxHookCharacters || string.IsNullOrWhiteSpace(post.Body) || post.Body.Length > options.MaxPostCharacters || post.CallToAction?.Length > options.MaxCallToActionCharacters || post.AltText?.Length > options.MaxAltTextCharacters || post.VisualDirection?.Length > options.MaxVisualDirectionCharacters || post.Hashtags.Count > options.MaxHashtags || post.AssetRefs.Count > options.MaxAssetRefs) throw new SocialOutputValidationException();
             if (post.Hashtags.Any(tag => tag.Length > options.MaxHashtagCharacters || tag.Contains(' ') || !tag.StartsWith('#'))) throw new SocialOutputValidationException();
             if (post.AssetRefs.Any(reference => reference.Length > options.MaxAssetRefCharacters)) throw new SocialOutputValidationException();
             foreach (var text in AllText(post)) if (text.Contains('<') || text.Contains('>')) throw new SocialOutputValidationException();

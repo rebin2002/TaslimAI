@@ -81,6 +81,8 @@ test.describe("Movie Studio V2 operational browser contracts", () => {
       "Storyboard",
       "Production",
       "Team",
+      "QC",
+      "Exports",
     ]) {
       await page.getByRole("link", { name: room, exact: true }).click();
       await expect(page).toHaveURL(
@@ -93,6 +95,25 @@ test.describe("Movie Studio V2 operational browser contracts", () => {
         }),
       ).toBeVisible({ timeout: 20_000 });
       await expect(page.locator("main.movie-workspace-main")).toBeVisible();
+      if (room === "QC") {
+        await expect(page.locator('[aria-label="Delivery verdict"]')).toBeVisible();
+        await expect(page.getByText("Not ready for delivery", { exact: true })).toBeVisible();
+        await expect(page.getByText(/still have no selected take/i)).toBeVisible();
+        await expect(page.getByText("No master has been assembled", { exact: true })).toBeVisible();
+        await expect(
+          page.locator(".movie-qc-shot-row").getByText("Unselected", { exact: true }),
+        ).toBeVisible();
+        await expect(
+          page.getByText("A slow push toward the compass on a crate.", { exact: true }),
+        ).toBeVisible();
+      }
+      if (room === "Exports") {
+        await expect(page.getByText("Provider-neutral delivery", { exact: true })).toBeVisible();
+        await expect(page.getByText("No export yet", { exact: true })).toBeVisible();
+        await expect(page.getByRole("button", { name: /assemble/i })).toBeDisabled();
+        await expect(page.getByText(/select and finalize a take first/i)).toBeVisible();
+        await expect(page.locator("video")).toHaveCount(0);
+      }
     }
 
     await page.getByRole("link", { name: "Cast", exact: true }).click();

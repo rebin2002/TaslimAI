@@ -316,6 +316,26 @@ public sealed class AutopilotOrchestrator(
             return false;
         }
 
+        if (!AutopilotInputValidation.TryNormalizeOutcome(signal.Outcome, out var normalizedOutcome))
+        {
+            intakeEvent.Status = AutopilotEventStatuses.RejectedInvalid;
+            intakeEvent.Reason = "outcome_invalid";
+            intakeEvent.ProcessedAt = now;
+            Record(context, AutopilotAuditFactory.Create(
+                AutopilotAuditActions.EventRejected,
+                AutopilotAuditOutcomes.Blocked,
+                reason: "outcome_invalid",
+                waveKey: signal.WaveKey,
+                taskId: signal.TaskId,
+                targetId: intakeEvent.Id,
+                dryRun: settings.DryRun));
+            await FlushAsync(context, cancellationToken);
+            context.EventsSkipped++;
+            context.Outcome = "invalid_event";
+            context.Reason = "outcome_invalid";
+            return false;
+        }
+
         var lockHandle = await locks.AcquireAsync(EfAutopilotLockService.WaveResource(signal.WaveKey!), "autopilot-controller", cancellationToken);
         if (!lockHandle.IsAcquired)
         {
@@ -340,7 +360,7 @@ public sealed class AutopilotOrchestrator(
 
         try
         {
-            await ApplySignalAsync(intakeEvent, signal, context, cancellationToken);
+            await ApplySignalAsync(intakeEvent, signal, normalizedOutcome, context, cancellationToken);
             context.EventsProcessed++;
             context.AuditedEventIds.Add(intakeEvent.Id);
             return true;
@@ -354,6 +374,7 @@ public sealed class AutopilotOrchestrator(
     private async Task ApplySignalAsync(
         AutopilotEvent intakeEvent,
         AutopilotCompletionSignal signal,
+        string outcome,
         AutopilotCycleContext context,
         CancellationToken cancellationToken)
     {
@@ -434,9 +455,6 @@ public sealed class AutopilotOrchestrator(
             db.AutopilotWaveTasks.Add(task);
         }
 
-        var outcome = AutopilotTaskOutcomes.Supported.Contains(signal.Outcome ?? string.Empty)
-            ? signal.Outcome!.Trim().ToLowerInvariant()
-            : AutopilotTaskOutcomes.Succeeded;
         var failureClass = AutopilotFailureClasses.Normalize(signal.FailureClass);
         var attempt = Math.Max(0, signal.Attempt ?? task.Attempt);
         var checks = signal.Checks ?? [];

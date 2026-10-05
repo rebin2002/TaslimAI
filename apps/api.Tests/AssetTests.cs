@@ -119,6 +119,21 @@ public sealed class AssetTests : IClassFixture<GenerationJobsApiFactory>
     }
 
     [Fact]
+    public async Task Asset_library_bounds_deep_page_values_without_offset_overflow()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Asset Pagination Boundary");
+
+        var response = await client.GetAsync($"/api/assets?workspaceId={auth.PersonalWorkspace.Id}&page={int.MaxValue}&pageSize={int.MaxValue}");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var list = (await response.Content.ReadFromJsonAsync<AssetListDto>())!;
+        Assert.Equal(Taslim.Api.Infrastructure.ApiPagination.MaxPage, list.Page);
+        Assert.Equal(Taslim.Api.Infrastructure.ApiPagination.MaxPageSize, list.PageSize);
+        Assert.Empty(list.Items);
+    }
+
+    [Fact]
     public async Task Asset_get_update_download_and_project_assignment_are_workspace_isolated()
     {
         using var owner = factory.CreateClient();
@@ -148,6 +163,215 @@ public sealed class AssetTests : IClassFixture<GenerationJobsApiFactory>
         Assert.Equal(HttpStatusCode.BadRequest, invalidMove.StatusCode);
         var body = await invalidMove.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal("PROJECT_NOT_IN_WORKSPACE", body.GetProperty("error").GetProperty("code").GetString());
+    }
+
+    [Fact]
+    public async Task Workspace_members_can_use_project_assets_but_not_personal_assets()
+    {
+        using var owner = factory.CreateClient();
+        var ownerAuth = await Register(owner, "Shared Asset Owner");
+        var project = await CreateProject(owner, ownerAuth.PersonalWorkspace.Id, "Shared Asset Project");
+        var sharedJob = await CreateJob(owner, ownerAuth.PersonalWorkspace.Id, project.Id, "Shared project asset");
+        var personalJob = await CreateJob(owner, ownerAuth.PersonalWorkspace.Id, null, "Personal asset");
+        await WaitForTerminal(owner, sharedJob.Id);
+        await WaitForTerminal(owner, personalJob.Id);
+
+        var ownerAssets = await owner.GetFromJsonAsync<AssetListDto>($"/api/assets?workspaceId={ownerAuth.PersonalWorkspace.Id}&status=Active&pageSize=20");
+        var sharedAsset = Assert.Single(ownerAssets!.Items, item => item.Name == "Shared project asset");
+        var personalAsset = Assert.Single(ownerAssets.Items, item => item.Name == "Personal asset");
+
+        using var member = factory.CreateClient();
+        var memberAuth = await Register(member, "Shared Asset Member");
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.WorkspaceMembers.Add(new WorkspaceMember
+            {
+                Id = Guid.NewGuid(),
+                WorkspaceId = ownerAuth.PersonalWorkspace.Id,
+                UserId = memberAuth.User.Id,
+                Role = WorkspaceRole.Member,
+                JoinedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var listed = await member.GetFromJsonAsync<AssetListDto>($"/api/assets?workspaceId={ownerAuth.PersonalWorkspace.Id}&status=Active&pageSize=20");
+        Assert.Contains(listed!.Items, item => item.Id == sharedAsset.Id);
+        Assert.DoesNotContain(listed.Items, item => item.Id == personalAsset.Id);
+        Assert.Equal(HttpStatusCode.OK, (await member.GetAsync($"/api/assets/{sharedAsset.Id}/download")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await member.GetAsync($"/api/assets/{personalAsset.Id}")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await member.GetAsync($"/api/assets/{personalAsset.Id}/download")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await SendWithCsrf(member, HttpMethod.Patch, $"/api/assets/{personalAsset.Id}", new { name = "Stolen" })).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await SendWithCsrf(member, HttpMethod.Post, $"/api/assets/{personalAsset.Id}/archive", null)).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await SendWithCsrf(member, HttpMethod.Post, $"/api/assets/{personalAsset.Id}/restore", null)).StatusCode);
+    }
+
+    [Fact]
+    public async Task Workspace_members_cannot_use_a_project_asset_backed_by_a_private_file()
+    {
+        using var owner = factory.CreateClient();
+        var ownerAuth = await Register(owner, "Private Backing File Owner");
+        var project = await CreateProject(owner, ownerAuth.PersonalWorkspace.Id, "Private Backing File Project");
+        var conversation = await CreateConversation(owner, ownerAuth.PersonalWorkspace.Id, project.Id);
+        var job = await CreateJob(owner, ownerAuth.PersonalWorkspace.Id, project.Id, "Private-backed asset");
+        await WaitForTerminal(owner, job.Id);
+
+        Guid assetId;
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var asset = await db.Assets.SingleAsync(item => item.SourceGenerationJobId == job.Id);
+            var storedFile = await db.StoredFiles.SingleAsync(item => item.Id == asset.StoredFileId);
+            storedFile.ConversationId = conversation.Id;
+            await db.SaveChangesAsync();
+            assetId = asset.Id;
+        }
+
+        using var member = factory.CreateClient();
+        var memberAuth = await Register(member, "Private Backing File Member");
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.WorkspaceMembers.Add(new WorkspaceMember
+            {
+                Id = Guid.NewGuid(),
+                WorkspaceId = ownerAuth.PersonalWorkspace.Id,
+                UserId = memberAuth.User.Id,
+                Role = WorkspaceRole.Member,
+                JoinedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var listed = await member.GetFromJsonAsync<AssetListDto>($"/api/assets?workspaceId={ownerAuth.PersonalWorkspace.Id}&status=Active&pageSize=20");
+        Assert.DoesNotContain(listed!.Items, item => item.Id == assetId);
+        Assert.Equal(HttpStatusCode.NotFound, (await member.GetAsync($"/api/assets/{assetId}")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await member.GetAsync($"/api/assets/{assetId}/download")).StatusCode);
+    }
+
+    [Fact]
+    public async Task Workspace_members_cannot_use_an_asset_with_a_foreign_project_relationship()
+    {
+        using var owner = factory.CreateClient();
+        var ownerAuth = await Register(owner, "Foreign Project Asset Owner");
+        using var foreign = factory.CreateClient();
+        var foreignAuth = await Register(foreign, "Foreign Project Owner");
+        var foreignProject = await CreateProject(foreign, foreignAuth.PersonalWorkspace.Id, "Foreign Project Marker");
+
+        Guid assetId;
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var now = DateTime.UtcNow;
+            var asset = new Asset
+            {
+                Id = Guid.NewGuid(),
+                WorkspaceId = ownerAuth.PersonalWorkspace.Id,
+                ProjectId = foreignProject.Id,
+                CreatedByUserId = ownerAuth.User.Id,
+                Name = "Foreign project relationship marker",
+                AssetType = AssetTypes.File,
+                Status = AssetStatus.Active,
+                CreatedAt = now,
+                UpdatedAt = now,
+            };
+            db.Assets.Add(asset);
+            await db.SaveChangesAsync();
+            assetId = asset.Id;
+        }
+
+        using var member = factory.CreateClient();
+        var memberAuth = await Register(member, "Foreign Project Asset Member");
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.WorkspaceMembers.Add(new WorkspaceMember
+            {
+                Id = Guid.NewGuid(),
+                WorkspaceId = ownerAuth.PersonalWorkspace.Id,
+                UserId = memberAuth.User.Id,
+                Role = WorkspaceRole.Member,
+                JoinedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var listed = await member.GetFromJsonAsync<AssetListDto>($"/api/assets?workspaceId={ownerAuth.PersonalWorkspace.Id}&status=Active&pageSize=20");
+        Assert.DoesNotContain(listed!.Items, item => item.Id == assetId);
+        Assert.Equal(HttpStatusCode.NotFound, (await member.GetAsync($"/api/assets/{assetId}")).StatusCode);
+    }
+
+    [Fact]
+    public async Task Workspace_members_cannot_download_a_private_asset_representation_file()
+    {
+        using var owner = factory.CreateClient();
+        var ownerAuth = await Register(owner, "Private Representation Owner");
+        var project = await CreateProject(owner, ownerAuth.PersonalWorkspace.Id, "Private Representation Project");
+        var conversation = await CreateConversation(owner, ownerAuth.PersonalWorkspace.Id, project.Id);
+        var job = await CreateJob(owner, ownerAuth.PersonalWorkspace.Id, project.Id, "Shared representation asset");
+        await WaitForTerminal(owner, job.Id);
+        var ownerAssets = await owner.GetFromJsonAsync<AssetListDto>($"/api/assets?workspaceId={ownerAuth.PersonalWorkspace.Id}&status=Active&pageSize=20");
+        var asset = Assert.Single(ownerAssets!.Items, item => item.Name == "Shared representation asset");
+
+        Guid representationId;
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var now = DateTime.UtcNow;
+            var privateFile = new StoredFile
+            {
+                Id = Guid.NewGuid(),
+                WorkspaceId = ownerAuth.PersonalWorkspace.Id,
+                UserId = ownerAuth.User.Id,
+                ProjectId = project.Id,
+                ConversationId = conversation.Id,
+                OriginalFileName = "private-representation.json",
+                StoredFileName = "private-representation.json",
+                ContentType = "application/json",
+                Extension = ".json",
+                SizeBytes = 1,
+                StorageProvider = FileStorageProviders.Local,
+                StorageKey = $"private-representation/{Guid.NewGuid():N}.json",
+                Status = StoredFileStatus.Ready,
+                CreatedAt = now,
+            };
+            var representation = new AssetRepresentation
+            {
+                Id = Guid.NewGuid(),
+                AssetId = asset.Id,
+                StoredFileId = privateFile.Id,
+                RepresentationType = "private",
+                FileName = privateFile.OriginalFileName,
+                ContentType = privateFile.ContentType,
+                SizeBytes = privateFile.SizeBytes,
+                CreatedAt = now,
+            };
+            db.StoredFiles.Add(privateFile);
+            db.AssetRepresentations.Add(representation);
+            await db.SaveChangesAsync();
+            representationId = representation.Id;
+        }
+
+        using var member = factory.CreateClient();
+        var memberAuth = await Register(member, "Private Representation Member");
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.WorkspaceMembers.Add(new WorkspaceMember
+            {
+                Id = Guid.NewGuid(),
+                WorkspaceId = ownerAuth.PersonalWorkspace.Id,
+                UserId = memberAuth.User.Id,
+                Role = WorkspaceRole.Member,
+                JoinedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var download = await member.GetAsync($"/api/assets/{asset.Id}/representations/{representationId}/download");
+        Assert.Equal(HttpStatusCode.Conflict, download.StatusCode);
+        Assert.DoesNotContain("private-representation", await download.Content.ReadAsStringAsync());
     }
 
     [Fact]
@@ -229,6 +453,9 @@ public sealed class AssetTests : IClassFixture<GenerationJobsApiFactory>
 
     private static Task<ProjectDto> CreateProject(HttpClient client, Guid workspaceId, string name) =>
         SendWithCsrf<ProjectDto>(client, HttpMethod.Post, $"/api/workspaces/{workspaceId}/projects", new { name, type = "General" });
+
+    private static Task<ConversationDto> CreateConversation(HttpClient client, Guid workspaceId, Guid projectId) =>
+        SendWithCsrf<ConversationDto>(client, HttpMethod.Post, $"/api/workspaces/{workspaceId}/conversations", new { projectId });
 
     private static Task<GenerationJobDto> CreateJob(HttpClient client, Guid workspaceId, Guid? projectId, string title) =>
         SendWithCsrf<GenerationJobDto>(client, HttpMethod.Post, "/api/generation/jobs", new { workspaceId, projectId, jobType = "system.test", title, inputJson = "{}" });

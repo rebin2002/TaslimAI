@@ -1,3 +1,4 @@
+using System.Data;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -100,19 +101,32 @@ public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerSer
         ValidateReason(provider, nameof(provider));
         ValidateReason(idempotencyKey, nameof(idempotencyKey));
         if (amount < 0) throw new ArgumentOutOfRangeException(nameof(amount));
+        var normalizedProvider = provider.Trim();
+        var normalizedKey = idempotencyKey.Trim();
+        var normalizedCurrency = NormalizeCurrency(currency);
+        var normalizedProviderReference = string.IsNullOrWhiteSpace(providerPaymentReference) ? null : providerPaymentReference.Trim();
         var existing = await db.PaymentAttempts.SingleOrDefaultAsync(
-            item => item.WorkspaceId == workspaceId && item.IdempotencyKey == idempotencyKey,
+            item => item.WorkspaceId == workspaceId && item.IdempotencyKey == normalizedKey,
             cancellationToken);
-        if (existing is not null) return existing;
+        if (existing is not null)
+        {
+            EnsurePaymentAttemptReplayMatches(existing, normalizedProvider, amount, normalizedCurrency, subscriptionId, checkoutSessionId, normalizedProviderReference);
+            return existing;
+        }
+        if (subscriptionId.HasValue && !await db.Subscriptions.AnyAsync(item => item.Id == subscriptionId.Value && item.WorkspaceId == workspaceId, cancellationToken))
+            throw new InvalidOperationException("The subscription belongs to a different workspace or was not found.");
+        if (checkoutSessionId.HasValue && !await db.CheckoutSessions.AnyAsync(item => item.Id == checkoutSessionId.Value && item.WorkspaceId == workspaceId, cancellationToken))
+            throw new InvalidOperationException("The checkout session belongs to a different workspace or was not found.");
         if (!string.IsNullOrWhiteSpace(providerPaymentReference))
         {
             var byProviderReference = await db.PaymentAttempts.SingleOrDefaultAsync(
-                item => item.Provider == provider && item.ProviderPaymentReference == providerPaymentReference,
+                item => item.Provider == normalizedProvider && item.ProviderPaymentReference == normalizedProviderReference,
                 cancellationToken);
             if (byProviderReference is not null)
             {
                 if (byProviderReference.WorkspaceId != workspaceId)
                     throw new InvalidOperationException("The provider payment reference is already associated with another workspace.");
+                EnsurePaymentAttemptReplayMatches(byProviderReference, normalizedProvider, amount, normalizedCurrency, subscriptionId, checkoutSessionId, normalizedProviderReference);
                 return byProviderReference;
             }
         }
@@ -121,9 +135,9 @@ public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerSer
         var attempt = new PaymentAttempt
         {
             Id = Guid.NewGuid(), WorkspaceId = workspaceId, SubscriptionId = subscriptionId,
-            CheckoutSessionId = checkoutSessionId, Provider = provider.Trim(),
-            ProviderPaymentReference = providerPaymentReference?.Trim(), Status = status,
-            Amount = amount, Currency = currency.Trim().ToUpperInvariant(), IdempotencyKey = idempotencyKey.Trim(),
+            CheckoutSessionId = checkoutSessionId, Provider = normalizedProvider,
+            ProviderPaymentReference = normalizedProviderReference, Status = status,
+            Amount = amount, Currency = normalizedCurrency, IdempotencyKey = normalizedKey,
             FailureCode = failureCode?.Trim(), FailureReason = failureReason?.Trim(), CreatedAt = now, UpdatedAt = now,
             SucceededAt = status == PaymentAttemptStatus.Succeeded ? now : null,
         };
@@ -138,8 +152,16 @@ public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerSer
         ValidateReason(failureCode, nameof(failureCode));
         ValidateReason(reason, nameof(reason));
         var attempt = await GetAttemptAsync(workspaceId, paymentAttemptId, cancellationToken);
+        if (attempt.Status == PaymentAttemptStatus.Failed)
+        {
+            if (string.Equals(attempt.FailureCode, failureCode.Trim(), StringComparison.Ordinal) && string.Equals(attempt.FailureReason, reason.Trim(), StringComparison.Ordinal))
+                return attempt;
+            throw new InvalidOperationException("The payment attempt has already been recorded as failed with different details.");
+        }
         if (attempt.Status is PaymentAttemptStatus.Refunded or PaymentAttemptStatus.PartiallyRefunded)
             throw new InvalidOperationException("A refunded payment attempt cannot be marked failed.");
+        if (attempt.Status == PaymentAttemptStatus.Succeeded)
+            throw new InvalidOperationException("A succeeded payment attempt cannot be marked failed.");
         attempt.Status = PaymentAttemptStatus.Failed;
         attempt.FailureCode = failureCode.Trim();
         attempt.FailureReason = reason.Trim();
@@ -173,8 +195,8 @@ public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerSer
         ValidateReason(reason, nameof(reason));
         var attempt = await GetAttemptAsync(workspaceId, paymentAttemptId, cancellationToken);
         if (attempt.Status == PaymentAttemptStatus.Succeeded) return attempt;
-        if (attempt.Status is PaymentAttemptStatus.Refunded or PaymentAttemptStatus.PartiallyRefunded)
-            throw new InvalidOperationException("A refunded payment attempt cannot be marked succeeded again.");
+        if (attempt.Status is PaymentAttemptStatus.Failed or PaymentAttemptStatus.Cancelled or PaymentAttemptStatus.Refunded or PaymentAttemptStatus.PartiallyRefunded)
+            throw new InvalidOperationException("A terminal payment attempt cannot be marked succeeded again.");
         attempt.Status = PaymentAttemptStatus.Succeeded;
         attempt.FailureCode = null;
         attempt.FailureReason = null;
@@ -189,6 +211,10 @@ public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerSer
     {
         ValidatePeriod(periodStart, periodEnd);
         ValidateReason(reason, nameof(reason));
+        var ownsTransaction = db.Database.CurrentTransaction is null;
+        await using var transaction = ownsTransaction
+            ? await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken)
+            : null;
         var subscription = await GetSubscriptionAsync(workspaceId, subscriptionId, cancellationToken);
         var plan = await db.Plans.SingleOrDefaultAsync(item => item.Id == planId && item.IsActive, cancellationToken)
             ?? throw new InvalidOperationException("The subscription plan is not available.");
@@ -204,6 +230,7 @@ public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerSer
         AddLifecycleEvent(subscription, SubscriptionLifecycleEventType.Activated, provider, reason);
         await db.SaveChangesAsync(cancellationToken);
         await EnsurePeriodAndGrantAsync(subscription, plan, periodStart, periodEnd, $"subscription activation: {reason}", cancellationToken);
+        if (ownsTransaction) await transaction!.CommitAsync(cancellationToken);
         return subscription;
     }
 
@@ -212,6 +239,10 @@ public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerSer
         ValidatePeriod(periodStart, periodEnd);
         ValidateReason(idempotencyKey, nameof(idempotencyKey));
         ValidateReason(reason, nameof(reason));
+        var ownsTransaction = db.Database.CurrentTransaction is null;
+        await using var transaction = ownsTransaction
+            ? await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken)
+            : null;
         var subscription = await GetSubscriptionAsync(workspaceId, subscriptionId, cancellationToken);
         if (subscription.CancelAtPeriodEnd)
         {
@@ -219,6 +250,7 @@ public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerSer
             subscription.UpdatedAt = DateTime.UtcNow;
             AddLifecycleEvent(subscription, SubscriptionLifecycleEventType.Cancelled, "payment", reason);
             await db.SaveChangesAsync(cancellationToken);
+            if (ownsTransaction) await transaction!.CommitAsync(cancellationToken);
             return subscription;
         }
         var plan = await db.Plans.SingleAsync(item => item.Id == subscription.PlanId, cancellationToken);
@@ -230,6 +262,7 @@ public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerSer
         AddLifecycleEvent(subscription, SubscriptionLifecycleEventType.Renewed, "payment", reason);
         await db.SaveChangesAsync(cancellationToken);
         await EnsurePeriodAndGrantAsync(subscription, plan, periodStart, periodEnd, $"subscription renewal: {reason}", cancellationToken);
+        if (ownsTransaction) await transaction!.CommitAsync(cancellationToken);
         return subscription;
     }
 
@@ -239,14 +272,36 @@ public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerSer
         ValidateReason(idempotencyKey, nameof(idempotencyKey));
         ValidateReason(reason, nameof(reason));
         if (amount <= 0) throw new ArgumentOutOfRangeException(nameof(amount));
-        var existing = await db.PaymentRefunds.SingleOrDefaultAsync(item => item.WorkspaceId == workspaceId && item.IdempotencyKey == idempotencyKey, cancellationToken);
-        if (existing is not null) return existing;
-        if (!string.IsNullOrWhiteSpace(providerRefundReference))
+        var normalizedProvider = provider.Trim();
+        var normalizedCurrency = NormalizeCurrency(currency);
+        var normalizedKey = idempotencyKey.Trim();
+        var normalizedReason = reason.Trim();
+        var normalizedProviderReference = string.IsNullOrWhiteSpace(providerRefundReference) ? null : providerRefundReference.Trim();
+        await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
+        var existing = await db.PaymentRefunds.SingleOrDefaultAsync(item => item.WorkspaceId == workspaceId && item.IdempotencyKey == normalizedKey, cancellationToken);
+        if (existing is not null)
         {
-            var duplicateReference = await db.PaymentRefunds.SingleOrDefaultAsync(item => item.Provider == provider && item.ProviderRefundReference == providerRefundReference, cancellationToken);
-            if (duplicateReference is not null) return duplicateReference;
+            EnsureRefundReplayMatches(existing, paymentAttemptId, normalizedProvider, amount, normalizedCurrency, normalizedReason, normalizedProviderReference);
+            return existing;
+        }
+        if (normalizedProviderReference is not null)
+        {
+            var duplicateReference = await db.PaymentRefunds.SingleOrDefaultAsync(item => item.Provider == normalizedProvider && item.ProviderRefundReference == normalizedProviderReference, cancellationToken);
+            if (duplicateReference is not null)
+            {
+                if (duplicateReference.WorkspaceId != workspaceId)
+                    throw new InvalidOperationException("The provider refund reference is already associated with another workspace.");
+                EnsureRefundReplayMatches(duplicateReference, paymentAttemptId, normalizedProvider, amount, normalizedCurrency, normalizedReason, normalizedProviderReference);
+                return duplicateReference;
+            }
         }
         var attempt = await GetAttemptAsync(workspaceId, paymentAttemptId, cancellationToken);
+        if (attempt.Status is not (PaymentAttemptStatus.Succeeded or PaymentAttemptStatus.PartiallyRefunded))
+            throw new InvalidOperationException("Only a succeeded payment attempt can be refunded.");
+        if (!string.Equals(attempt.Provider, normalizedProvider, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("The refund provider does not match the payment attempt.");
+        if (!string.Equals(attempt.Currency, normalizedCurrency, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("The refund currency does not match the payment attempt.");
         var refundedAmounts = await db.PaymentRefunds
             .Where(item => item.PaymentAttemptId == attempt.Id && item.Status == PaymentRefundStatus.Succeeded)
             .Select(item => item.Amount)
@@ -254,22 +309,27 @@ public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerSer
         var refundedAmount = refundedAmounts.Sum();
         if (amount > attempt.Amount - refundedAmount)
             throw new InvalidOperationException("The refund exceeds the remaining refundable payment amount.");
+        var totalRefundedAmount = refundedAmount + amount;
         var now = DateTime.UtcNow;
         var refund = new PaymentRefund
         {
-            Id = Guid.NewGuid(), WorkspaceId = workspaceId, PaymentAttemptId = attempt.Id, Provider = provider.Trim(),
-            ProviderRefundReference = providerRefundReference?.Trim(), Status = PaymentRefundStatus.Succeeded,
-            Amount = amount, Currency = currency.Trim().ToUpperInvariant(), IdempotencyKey = idempotencyKey.Trim(),
-            Reason = reason.Trim(), CreatedAt = now, UpdatedAt = now, CompletedAt = now,
+            Id = Guid.NewGuid(), WorkspaceId = workspaceId, PaymentAttemptId = attempt.Id, Provider = normalizedProvider,
+            ProviderRefundReference = normalizedProviderReference, Status = PaymentRefundStatus.Succeeded,
+            Amount = amount, Currency = normalizedCurrency, IdempotencyKey = normalizedKey,
+            Reason = normalizedReason, CreatedAt = now, UpdatedAt = now, CompletedAt = now,
         };
         db.PaymentRefunds.Add(refund);
-        attempt.Status = amount >= attempt.Amount ? PaymentAttemptStatus.Refunded : PaymentAttemptStatus.PartiallyRefunded;
+        attempt.Status = totalRefundedAmount >= attempt.Amount ? PaymentAttemptStatus.Refunded : PaymentAttemptStatus.PartiallyRefunded;
         attempt.UpdatedAt = now;
         await db.SaveChangesAsync(cancellationToken);
-        if (attempt.CreditLedgerEntryId.HasValue)
+        // A partial monetary refund has no reviewed credit-conversion policy. Do
+        // not reverse the entire purchased grant until the payment is fully
+        // refunded; otherwise a $1 refund could restore all $9-plan credits.
+        if (attempt.CreditLedgerEntryId.HasValue && totalRefundedAmount >= attempt.Amount)
         {
             await creditLedger.RefundAsync(workspaceId, attempt.CreditLedgerEntryId.Value, $"refund:{refund.Id}", $"Payment refund {refund.Id}: {reason}", cancellationToken: cancellationToken);
         }
+        await transaction.CommitAsync(cancellationToken);
         logger.LogInformation("Payment refund recorded. PaymentRefundId={PaymentRefundId}; PaymentAttemptId={PaymentAttemptId}; WorkspaceId={WorkspaceId}; Status={Status}", refund.Id, paymentAttemptId, workspaceId, refund.Status);
         return refund;
     }
@@ -329,6 +389,39 @@ public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerSer
     private async Task<Subscription> GetSubscriptionAsync(Guid workspaceId, Guid id, CancellationToken cancellationToken) =>
         await db.Subscriptions.SingleOrDefaultAsync(item => item.Id == id && item.WorkspaceId == workspaceId, cancellationToken)
         ?? throw new InvalidOperationException("The subscription was not found.");
+
+    private static void EnsurePaymentAttemptReplayMatches(
+        PaymentAttempt existing, string provider, decimal amount, string currency,
+        Guid? subscriptionId, Guid? checkoutSessionId, string? providerPaymentReference)
+    {
+        if (!string.Equals(existing.Provider, provider, StringComparison.OrdinalIgnoreCase) ||
+            existing.Amount != amount ||
+            !string.Equals(existing.Currency, currency, StringComparison.OrdinalIgnoreCase) ||
+            existing.SubscriptionId != subscriptionId ||
+            existing.CheckoutSessionId != checkoutSessionId ||
+            !string.Equals(existing.ProviderPaymentReference, providerPaymentReference, StringComparison.Ordinal))
+            throw new InvalidOperationException("The payment attempt idempotency key belongs to a different payment.");
+    }
+
+    private static void EnsureRefundReplayMatches(
+        PaymentRefund existing, Guid paymentAttemptId, string provider, decimal amount, string currency, string reason, string? providerRefundReference)
+    {
+        if (existing.PaymentAttemptId != paymentAttemptId ||
+            !string.Equals(existing.Provider, provider, StringComparison.OrdinalIgnoreCase) ||
+            existing.Amount != amount ||
+            !string.Equals(existing.Currency, currency, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(existing.Reason, reason, StringComparison.Ordinal) ||
+            !string.Equals(existing.ProviderRefundReference, providerRefundReference, StringComparison.Ordinal))
+            throw new InvalidOperationException("The refund idempotency key belongs to a different refund.");
+    }
+
+    private static string NormalizeCurrency(string value)
+    {
+        ValidateReason(value, nameof(value));
+        var normalized = value.Trim().ToUpperInvariant();
+        if (normalized.Length != 3) throw new ArgumentException("Currency must be a three-letter code.", nameof(value));
+        return normalized;
+    }
 
     private static void ValidateReason(string value, string name)
     {
@@ -392,21 +485,46 @@ public sealed class PaymentWebhookService(
         await db.SaveChangesAsync(cancellationToken);
         logger.LogInformation("Payment webhook recorded. ProviderKey={ProviderKey}; PaymentEventId={PaymentEventId}; EventType={EventType}; SignatureVerified={SignatureVerified}", provider.Key, paymentEvent.Id, paymentEvent.Type, paymentEvent.SignatureVerified);
 
+        var ownsTransition = db.Database.CurrentTransaction is null;
+        await using var transition = ownsTransition
+            ? await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken)
+            : null;
+        var savepointName = $"payment_webhook_{Guid.NewGuid():N}";
+        if (!ownsTransition)
+            await db.Database.CurrentTransaction!.CreateSavepointAsync(savepointName, cancellationToken);
+
         try
         {
+            ValidateProviderEventShape(parsed);
+            PaymentAttempt? linkedAttempt = null;
+            if (parsed.PaymentAttemptId.HasValue)
+            {
+                linkedAttempt = await db.PaymentAttempts.SingleOrDefaultAsync(item =>
+                    item.Id == parsed.PaymentAttemptId.Value && item.WorkspaceId == parsed.WorkspaceId!.Value, cancellationToken)
+                    ?? throw new InvalidOperationException("The payment attempt referenced by the event was not found.");
+                if (!string.Equals(linkedAttempt.Provider, provider.Key, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("The payment attempt provider does not match the webhook provider.");
+                if (!string.IsNullOrWhiteSpace(parsed.ProviderPaymentReference))
+                {
+                    if (linkedAttempt.ProviderPaymentReference is not null &&
+                        !string.Equals(linkedAttempt.ProviderPaymentReference, parsed.ProviderPaymentReference, StringComparison.Ordinal))
+                        throw new InvalidOperationException("The provider payment reference does not match the recorded payment attempt.");
+                    linkedAttempt.ProviderPaymentReference ??= parsed.ProviderPaymentReference.Trim();
+                }
+            }
             switch (parsed.Type)
             {
                 case PaymentEventType.PaymentSucceeded:
                 case PaymentEventType.RenewalSucceeded when parsed.PaymentAttemptId.HasValue:
-                    if (parsed.WorkspaceId.HasValue && parsed.PaymentAttemptId.HasValue)
+                    if (linkedAttempt is not null)
                     {
-                        var attempt = await db.PaymentAttempts.AsNoTracking().SingleOrDefaultAsync(item => item.Id == parsed.PaymentAttemptId.Value && item.WorkspaceId == parsed.WorkspaceId.Value, cancellationToken)
-                            ?? throw new InvalidOperationException("The payment attempt referenced by the event was not found.");
-                        if (parsed.Amount.HasValue && parsed.Amount.Value != attempt.Amount || !string.Equals(parsed.Currency, attempt.Currency, StringComparison.OrdinalIgnoreCase))
+                        var workspaceId = parsed.WorkspaceId ?? throw new InvalidOperationException("The payment event did not include a valid workspace reference.");
+                        var paymentAttemptId = parsed.PaymentAttemptId ?? throw new InvalidOperationException("The payment event did not include a valid payment attempt reference.");
+                        if (parsed.Amount.HasValue && parsed.Amount.Value != linkedAttempt.Amount || !string.Equals(parsed.Currency, linkedAttempt.Currency, StringComparison.OrdinalIgnoreCase))
                             throw new InvalidOperationException("The provider payment amount or currency does not match the recorded payment attempt.");
-                        await lifecycle.MarkPaymentSucceededAsync(parsed.WorkspaceId.Value, parsed.PaymentAttemptId.Value, parsed.Reason ?? "Provider payment succeeded.", cancellationToken);
-                        if (parsed.Type == PaymentEventType.RenewalSucceeded && parsed.SubscriptionId.HasValue && parsed.PeriodStart.HasValue && parsed.PeriodEnd.HasValue)
-                            await lifecycle.RenewSubscriptionAsync(parsed.WorkspaceId.Value, parsed.SubscriptionId.Value, parsed.PeriodStart.Value, parsed.PeriodEnd.Value, $"webhook:{paymentEvent.Id}", parsed.Reason ?? "Provider renewal succeeded.", cancellationToken);
+                        await lifecycle.MarkPaymentSucceededAsync(workspaceId, paymentAttemptId, parsed.Reason ?? "Provider payment succeeded.", cancellationToken);
+                        if (parsed.Type == PaymentEventType.RenewalSucceeded && parsed.SubscriptionId is Guid subscriptionId && parsed.PeriodStart is DateTime periodStart && parsed.PeriodEnd is DateTime periodEnd)
+                            await lifecycle.RenewSubscriptionAsync(workspaceId, subscriptionId, periodStart, periodEnd, $"webhook:{paymentEvent.Id}", parsed.Reason ?? "Provider renewal succeeded.", cancellationToken);
                     }
                     break;
                 case PaymentEventType.PaymentFailed:
@@ -425,17 +543,71 @@ public sealed class PaymentWebhookService(
             paymentEvent.Status = PaymentEventStatus.Processed;
             paymentEvent.ProcessedAt = DateTime.UtcNow;
             await db.SaveChangesAsync(cancellationToken);
+            if (ownsTransition) await transition!.CommitAsync(cancellationToken);
             logger.LogInformation("Payment webhook processed. ProviderKey={ProviderKey}; PaymentEventId={PaymentEventId}; EventType={EventType}; Status={Status}", provider.Key, paymentEvent.Id, paymentEvent.Type, paymentEvent.Status);
             return new(true, false, "WEBHOOK_PROCESSED", paymentEvent.Id, null);
         }
         catch (Exception exception)
         {
-            paymentEvent.Status = PaymentEventStatus.Rejected;
-            paymentEvent.FailureReason = "The verified event was recorded but its domain transition was not applied.";
-            await db.SaveChangesAsync(cancellationToken);
+            if (ownsTransition)
+            {
+                await transition!.RollbackAsync(CancellationToken.None);
+                await transition.DisposeAsync();
+            }
+            else
+                await db.Database.CurrentTransaction!.RollbackToSavepointAsync(savepointName, CancellationToken.None);
+
+            db.ChangeTracker.Clear();
+            var rejectedEvent = await db.PaymentEvents.SingleAsync(item => item.Id == paymentEvent.Id, CancellationToken.None);
+            rejectedEvent.Status = PaymentEventStatus.Rejected;
+            rejectedEvent.FailureReason = "The verified event was recorded but its domain transition was not applied.";
+            await db.SaveChangesAsync(CancellationToken.None);
             logger.LogError(exception, "Verified payment webhook could not be applied. EventId={EventId}", paymentEvent.Id);
-            return new(false, false, "WEBHOOK_PROCESSING_FAILED", paymentEvent.Id, paymentEvent.FailureReason);
+            return new(false, false, "WEBHOOK_PROCESSING_FAILED", rejectedEvent.Id, rejectedEvent.FailureReason);
         }
+    }
+
+    private static void ValidateProviderEventShape(ProviderPaymentEvent parsed)
+    {
+        switch (parsed.Type)
+        {
+            case PaymentEventType.PaymentSucceeded:
+                RequireText(parsed.ProviderPaymentReference, "provider payment");
+                Require(parsed.WorkspaceId, "workspace");
+                Require(parsed.PaymentAttemptId, "payment attempt");
+                break;
+            case PaymentEventType.PaymentFailed:
+            case PaymentEventType.RenewalFailed:
+                Require(parsed.WorkspaceId, "workspace");
+                Require(parsed.PaymentAttemptId, "payment attempt");
+                break;
+            case PaymentEventType.RenewalSucceeded:
+                Require(parsed.WorkspaceId, "workspace");
+                Require(parsed.SubscriptionId, "subscription");
+                if (!parsed.PeriodStart.HasValue || !parsed.PeriodEnd.HasValue)
+                    throw new InvalidOperationException("The renewal event did not include a complete billing period.");
+                if (parsed.PaymentAttemptId.HasValue)
+                    RequireText(parsed.ProviderPaymentReference, "provider payment");
+                break;
+            case PaymentEventType.SubscriptionCancelled:
+                Require(parsed.WorkspaceId, "workspace");
+                Require(parsed.SubscriptionId, "subscription");
+                break;
+            default:
+                throw new InvalidOperationException("The verified payment event type is not supported by the billing foundation.");
+        }
+    }
+
+    private static void Require(Guid? value, string name)
+    {
+        if (!value.HasValue || value.Value == Guid.Empty)
+            throw new InvalidOperationException($"The payment event did not include a valid {name} reference.");
+    }
+
+    private static void RequireText(string? value, string name)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            throw new InvalidOperationException($"The payment event did not include a valid {name} reference.");
     }
 }
 

@@ -75,6 +75,100 @@ public sealed class FileTests : IClassFixture<TaslimApiFactory>
     }
 
     [Fact]
+    public async Task Workspace_members_can_list_project_files_but_not_conversation_private_files()
+    {
+        using var owner = factory.CreateClient();
+        var ownerAuth = await Register(owner, "File Visibility Owner");
+        var project = await CreateProject(owner, ownerAuth.PersonalWorkspace.Id);
+        var sharedUpload = await Upload(owner, ownerAuth.PersonalWorkspace.Id, "shared.txt", "Workspace project file", project.Id);
+        Assert.Equal(HttpStatusCode.Created, sharedUpload.StatusCode);
+        var sharedFile = (await sharedUpload.Content.ReadFromJsonAsync<StoredFileDto>())!;
+
+        var conversation = await CreateConversation(owner, ownerAuth.PersonalWorkspace.Id, project.Id);
+        var privateUpload = await Upload(owner, ownerAuth.PersonalWorkspace.Id, "private.txt", "Conversation private file", project.Id, conversation.Id);
+        Assert.Equal(HttpStatusCode.Created, privateUpload.StatusCode);
+        var privateFile = (await privateUpload.Content.ReadFromJsonAsync<StoredFileDto>())!;
+
+        using var member = factory.CreateClient();
+        var memberAuth = await Register(member, "File Visibility Member");
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.WorkspaceMembers.Add(new WorkspaceMember
+            {
+                Id = Guid.NewGuid(),
+                WorkspaceId = ownerAuth.PersonalWorkspace.Id,
+                UserId = memberAuth.User.Id,
+                Role = WorkspaceRole.Member,
+                JoinedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var listed = await member.GetFromJsonAsync<List<StoredFileDto>>($"/api/workspaces/{ownerAuth.PersonalWorkspace.Id}/files");
+        Assert.Contains(listed!, file => file.Id == sharedFile.Id);
+        Assert.DoesNotContain(listed!, file => file.Id == privateFile.Id);
+
+        var conversationScopedList = await member.GetFromJsonAsync<List<StoredFileDto>>($"/api/workspaces/{ownerAuth.PersonalWorkspace.Id}/files?conversationId={conversation.Id}");
+        Assert.Empty(conversationScopedList!);
+    }
+
+    [Fact]
+    public async Task File_listing_is_page_bounded_and_deterministic()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "File Pagination Owner");
+        var now = DateTime.UtcNow;
+        var fileIds = new[]
+        {
+            Guid.Parse("00000000-0000-0000-0000-000000000001"),
+            Guid.Parse("00000000-0000-0000-0000-000000000002"),
+            Guid.Parse("00000000-0000-0000-0000-000000000003"),
+        };
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.StoredFiles.AddRange(fileIds.Select((id, index) => new StoredFile
+            {
+                Id = id,
+                WorkspaceId = auth.PersonalWorkspace.Id,
+                UserId = auth.User.Id,
+                OriginalFileName = $"page-{index + 1}.txt",
+                StoredFileName = $"page-{index + 1}.txt",
+                ContentType = "text/plain",
+                Extension = ".txt",
+                SizeBytes = index + 1,
+                StorageProvider = FileStorageProviders.Local,
+                StorageKey = $"pagination/{index + 1}.txt",
+                Status = StoredFileStatus.Ready,
+                TextExtractionStatus = FileExtractionStatus.Ready,
+                CreatedAt = now,
+                ProcessedAt = now,
+            }));
+            await db.SaveChangesAsync();
+        }
+
+        var pageOne = await client.GetFromJsonAsync<List<StoredFileDto>>($"/api/workspaces/{auth.PersonalWorkspace.Id}/files?page=1&pageSize=2");
+        var pageTwo = await client.GetFromJsonAsync<List<StoredFileDto>>($"/api/workspaces/{auth.PersonalWorkspace.Id}/files?page=2&pageSize=2");
+        Assert.NotNull(pageOne);
+        Assert.NotNull(pageTwo);
+        Assert.Equal(2, pageOne!.Count);
+        Assert.Single(pageTwo!);
+        Assert.Equal(new[] { fileIds[2], fileIds[1] }, pageOne.Select(file => file.Id));
+        Assert.Equal(fileIds[0], pageTwo[0].Id);
+        Assert.Equal(3, pageOne.Concat(pageTwo).Select(file => file.Id).Distinct().Count());
+
+        var clamped = await client.GetFromJsonAsync<List<StoredFileDto>>($"/api/workspaces/{auth.PersonalWorkspace.Id}/files?page=0&pageSize=0");
+        Assert.Single(clamped!);
+        Assert.Equal(fileIds[2], clamped[0].Id);
+
+        var oversized = await client.GetAsync($"/api/workspaces/{auth.PersonalWorkspace.Id}/files?page={int.MaxValue}&pageSize={int.MaxValue}");
+        Assert.Equal(HttpStatusCode.OK, oversized.StatusCode);
+        Assert.Empty(await oversized.Content.ReadFromJsonAsync<List<StoredFileDto>>() ?? []);
+    }
+
+    [Fact]
     public async Task Unsupported_file_types_and_invalid_signatures_are_rejected()
     {
         using var client = factory.CreateClient();
@@ -112,7 +206,7 @@ public sealed class FileTests : IClassFixture<TaslimApiFactory>
         return (await response.Content.ReadFromJsonAsync<ConversationDto>())!;
     }
 
-    private static async Task<HttpResponseMessage> Upload(HttpClient client, Guid workspaceId, string name, string content, Guid? projectId)
+    private static async Task<HttpResponseMessage> Upload(HttpClient client, Guid workspaceId, string name, string content, Guid? projectId, Guid? conversationId = null)
     {
         var csrf = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
         using var form = new MultipartFormDataContent();
@@ -120,6 +214,7 @@ public sealed class FileTests : IClassFixture<TaslimApiFactory>
         file.Headers.ContentType = new MediaTypeHeaderValue(name.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase) ? "application/pdf" : "text/plain");
         form.Add(file, "file", name);
         if (projectId is not null) form.Add(new StringContent(projectId.Value.ToString()), "projectId");
+        if (conversationId is not null) form.Add(new StringContent(conversationId.Value.ToString()), "conversationId");
         using var request = new HttpRequestMessage(HttpMethod.Post, $"/api/workspaces/{workspaceId}/files") { Content = form };
         request.Headers.Add("X-CSRF-TOKEN", csrf.GetProperty("token").GetString()!);
         return await client.SendAsync(request);

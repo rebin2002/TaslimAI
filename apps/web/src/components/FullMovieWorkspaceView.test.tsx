@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 const workspaceSource = readFileSync(new URL("./FullMovieWorkspaceView.tsx", import.meta.url), "utf8");
 const shotDesignerSource = readFileSync(new URL("./ShotDesigner.tsx", import.meta.url), "utf8");
+const shotDesignerI18nSource = readFileSync(new URL("../lib/shotDesignerI18n.ts", import.meta.url), "utf8");
 const createSource = readFileSync(new URL("./MovieStudioView.tsx", import.meta.url), "utf8");
 const directorSource = readFileSync(new URL("./MovieDirectorPanel.tsx", import.meta.url), "utf8");
 const selectsSource = readFileSync(new URL("./MovieSelectsWorkspace.tsx", import.meta.url), "utf8");
@@ -144,8 +145,11 @@ describe("Full Movie workspace foundation", () => {
   it("mounts Shot Designer from the scene inspector without mutating the guide", () => {
     expect(workspaceSource).toContain("<ShotDesigner scene={scene} guide={guide} presets={presets}");
     expect(workspaceSource).toContain("api.addMovieShot(sceneId");
-    expect(shotDesignerSource).toContain("A shot override never rewrites the Movie Guide");
-    expect(shotDesignerSource).toContain("Guide stays locked; this saves as a shot-level override");
+    expect(shotDesignerSource).toContain('text("shotOverrideHint")');
+    expect(shotDesignerSource).toContain('text("guideLockedNote")');
+    expect(shotDesignerI18nSource).toContain("A shot override never rewrites the Movie Guide");
+    expect(shotDesignerI18nSource).toContain("يمكن لهذه اللقطة أن تحدد اتجاهها الخاص");
+    expect(shotDesignerI18nSource).toContain("ئەم شۆتە دەتوانێت ئاراستەی خۆی دابنێت");
     expect(shotDesignerSource).toContain("Native");
     expect(shotDesignerSource).toContain("Translated");
     expect(shotDesignerSource).toContain("Simulated/Post");
@@ -194,7 +198,7 @@ describe("Full Movie workspace foundation", () => {
     expect(workspaceSource).toContain("sceneShotCount");
     expect(workspaceSource).toContain("selectedShot={selectedShot}");
     expect(workspaceSource).toContain("api.addMovieShot");
-    expect(directorSource).toContain("Review → explicit approval → execute");
+    expect(directorSource).toContain('t("boundary")');
   });
 
   it("keeps loading and failure states useful without fabricating project content", () => {
@@ -221,6 +225,16 @@ describe("Full Movie workspace foundation", () => {
     expect(selectsSource).toContain("api.createMovieTakeSelect");
     expect(selectsSource).toContain("api.reviewMovieTakeSelect");
     expect(selectsSource).not.toContain("Accept recommendation");
+  });
+
+  it("makes Edit a stateful, validated, keyboard-accessible timeline", () => {
+    expect(workspaceSource).toContain("buildMovieEditModel(project)");
+    expect(workspaceSource).toContain('role="listbox" aria-label="Movie scene timeline"');
+    expect(workspaceSource).toContain('role="option" aria-selected={selected}');
+    expect(workspaceSource).toContain("moveMovieEditSelection(model, sceneId, event.key)");
+    expect(workspaceSource).toContain("Refresh timeline");
+    expect(workspaceSource).toContain("Validation blockers");
+    expect(workspaceSource).toContain("no provider call or media mutation");
   });
 
 });

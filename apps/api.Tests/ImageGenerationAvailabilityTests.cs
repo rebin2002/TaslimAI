@@ -1,0 +1,75 @@
+using System.Net;
+using System.Net.Http.Json;
+using System.Text.Json;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
+using Taslim.Api.Contracts;
+using Taslim.Api.Domain;
+using Taslim.Api.Persistence;
+using Xunit;
+
+namespace Taslim.Api.Tests;
+
+public sealed class ImageGenerationAvailabilityTests : IClassFixture<GenerationJobsApiFactory>
+{
+    private readonly GenerationJobsApiFactory factory;
+
+    public ImageGenerationAvailabilityTests(GenerationJobsApiFactory factory)
+    {
+        this.factory = factory;
+        using var scope = factory.Services.CreateScope();
+        scope.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+    }
+
+    [Fact]
+    public async Task Disabled_image_studio_rejects_before_queueing_or_reserving_usage()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, $"image-disabled-{Guid.NewGuid():N}@example.com");
+        var response = await SendWithCsrf(client, new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            description = "A product image should not be queued while Image Studio is disabled.",
+            style = "product",
+            aspectRatio = "square",
+            quality = "standard",
+        });
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("IMAGE_STUDIO_UNAVAILABLE", body.GetProperty("error").GetProperty("code").GetString());
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.False(await db.GenerationJobs.AsNoTracking().AnyAsync(job =>
+            job.WorkspaceId == auth.PersonalWorkspace.Id && job.JobType == GenerationJobTypes.ImageGenerate));
+        Assert.False(await db.UsageTransactions.AsNoTracking().AnyAsync(transaction =>
+            transaction.WorkspaceId == auth.PersonalWorkspace.Id && transaction.Feature == UsageFeature.Image));
+    }
+
+    private static async Task<AuthResponse> Register(HttpClient client, string email)
+    {
+        var csrf = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/auth/register");
+        request.Headers.Add("X-CSRF-TOKEN", csrf.GetProperty("token").GetString());
+        request.Content = JsonContent.Create(new
+        {
+            displayName = "Disabled Image Tester",
+            email,
+            password = "StrongPassword!123",
+            preferredLanguage = "en",
+        });
+        var response = await client.SendAsync(request);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        return (await response.Content.ReadFromJsonAsync<AuthResponse>())!;
+    }
+
+    private static async Task<HttpResponseMessage> SendWithCsrf(HttpClient client, object payload)
+    {
+        var csrf = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/image-generation/jobs");
+        request.Headers.Add("X-CSRF-TOKEN", csrf.GetProperty("token").GetString());
+        request.Content = JsonContent.Create(payload);
+        return await client.SendAsync(request);
+    }
+}
