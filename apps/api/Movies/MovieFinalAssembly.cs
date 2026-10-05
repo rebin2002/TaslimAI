@@ -245,6 +245,7 @@ public sealed class MovieFinalAssemblyService(
         {
             if (!string.Equals(existing.RequestFingerprint, fingerprint, StringComparison.Ordinal))
                 throw new MovieFinalAssemblyValidationException("IDEMPOTENCY_KEY_REUSED", "This idempotency key was already used for a different assembly request.");
+            await ReconcileTerminalJobAsync(existing, cancellationToken);
             return ToDto(existing);
         }
 
@@ -359,8 +360,106 @@ public sealed class MovieFinalAssemblyService(
             .Include(item => item.GenerationJob).ThenInclude(item => item!.Outputs)
             .FirstOrDefaultAsync(item => item.Id == assemblyId, cancellationToken);
         if (assembly is null || !await collaboration.HasPermissionAsync(userId, assembly.MovieProjectId, MoviePermissions.View, cancellationToken)) return null;
+        await ReconcileTerminalJobAsync(assembly, cancellationToken);
         return ToDto(assembly);
     }
+
+    /// <summary>
+    /// Repairs the movie-specific projection when the canonical generation job
+    /// is already terminal but the worker's sidecar finalization was interrupted
+    /// or lost a fenced update. Successful reconciliation requires the exact
+    /// published asset and ready stored file, so an incomplete publication can
+    /// never become downloadable by observation.
+    /// </summary>
+    private async Task ReconcileTerminalJobAsync(MovieAssembly assembly, CancellationToken cancellationToken)
+    {
+        var job = assembly.GenerationJob;
+        if (job is null || IsTerminalAssemblyStatus(assembly.Status)) return;
+
+        if (job.Status == GenerationJobStatus.Failed)
+        {
+            var errorCode = job.ErrorCode ?? GenerationJobErrorCodes.MovieAssemblyExecutionFailed;
+            var updated = await db.MovieAssemblies
+                .Where(item => item.Id == assembly.Id
+                    && item.GenerationJobId == job.Id
+                    && item.Status != MovieAssemblyStatuses.Ready
+                    && item.Status != MovieAssemblyStatuses.Failed
+                    && item.Status != MovieAssemblyStatuses.Cancelled)
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(item => item.Status, MovieAssemblyStatuses.Failed)
+                    .SetProperty(item => item.LastErrorCode, errorCode)
+                    .SetProperty(item => item.QcStatus, MovieFinalAssemblyQcStatuses.Failed)
+                    .SetProperty(item => item.UpdatedAt, DateTime.UtcNow), cancellationToken);
+            if (updated > 0)
+            {
+                assembly.Status = MovieAssemblyStatuses.Failed;
+                assembly.LastErrorCode = errorCode;
+                assembly.QcStatus = MovieFinalAssemblyQcStatuses.Failed;
+                assembly.UpdatedAt = DateTime.UtcNow;
+            }
+            return;
+        }
+
+        if (job.Status == GenerationJobStatus.Cancelled)
+        {
+            var errorCode = job.ErrorCode ?? GenerationJobErrorCodes.MovieAssemblyCancelled;
+            var updated = await db.MovieAssemblies
+                .Where(item => item.Id == assembly.Id
+                    && item.GenerationJobId == job.Id
+                    && item.Status != MovieAssemblyStatuses.Ready
+                    && item.Status != MovieAssemblyStatuses.Failed
+                    && item.Status != MovieAssemblyStatuses.Cancelled)
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(item => item.Status, MovieAssemblyStatuses.Cancelled)
+                    .SetProperty(item => item.LastErrorCode, errorCode)
+                    .SetProperty(item => item.UpdatedAt, DateTime.UtcNow), cancellationToken);
+            if (updated > 0)
+            {
+                assembly.Status = MovieAssemblyStatuses.Cancelled;
+                assembly.LastErrorCode = errorCode;
+                assembly.UpdatedAt = DateTime.UtcNow;
+            }
+            return;
+        }
+
+        if (job.Status != GenerationJobStatus.Succeeded || assembly.AssetId is not Guid assetId) return;
+
+        var hasPublishedAsset = await db.Assets.AsNoTracking()
+            .AnyAsync(item => item.Id == assetId
+                && item.SourceGenerationJobId == job.Id
+                && item.Status == AssetStatus.Active
+                && item.StoredFile != null
+                && item.StoredFile.Status == StoredFileStatus.Ready, cancellationToken);
+        if (!hasPublishedAsset) return;
+
+        var checkpoint = JsonSerializer.Serialize(new { phase = "published", progressPercent = 100 });
+        var now = DateTime.UtcNow;
+        var ready = await db.MovieAssemblies
+            .Where(item => item.Id == assembly.Id
+                && item.GenerationJobId == job.Id
+                && item.Status != MovieAssemblyStatuses.Ready
+                && item.Status != MovieAssemblyStatuses.Failed
+                && item.Status != MovieAssemblyStatuses.Cancelled)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(item => item.Status, MovieAssemblyStatuses.Ready)
+                .SetProperty(item => item.QcStatus, MovieFinalAssemblyQcStatuses.Passed)
+                .SetProperty(item => item.ProgressPercent, 100)
+                .SetProperty(item => item.CompletedAt, now)
+                .SetProperty(item => item.UpdatedAt, now)
+                .SetProperty(item => item.CheckpointJson, checkpoint), cancellationToken);
+        if (ready > 0)
+        {
+            assembly.Status = MovieAssemblyStatuses.Ready;
+            assembly.QcStatus = MovieFinalAssemblyQcStatuses.Passed;
+            assembly.ProgressPercent = 100;
+            assembly.CompletedAt = now;
+            assembly.UpdatedAt = now;
+            assembly.CheckpointJson = checkpoint;
+        }
+    }
+
+    private static bool IsTerminalAssemblyStatus(string status) =>
+        status is MovieAssemblyStatuses.Ready or MovieAssemblyStatuses.Failed or MovieAssemblyStatuses.Cancelled;
 
     private async Task<IReadOnlyList<MovieAssemblyAudioMixInput>> NormalizeAudioInputsAsync(Guid workspaceId, Guid? projectId, IReadOnlyList<MovieAssemblyAudioMixInputRequest> requests, CancellationToken cancellationToken)
     {
