@@ -227,6 +227,30 @@ public sealed class ChatTests : IClassFixture<TaslimApiFactory>
     }
 
     [Fact]
+    public async Task Retrying_a_failed_stream_request_reuses_the_same_assistant_without_duplicate_messages()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Failed Retry Chat Owner");
+        var conversation = await CreateConversation(client, auth.PersonalWorkspace.Id);
+        var requestId = Guid.NewGuid().ToString("N");
+
+        var first = await SendMessage(client, conversation.Id, "[[mock-failure]]", requestId, stream: true);
+        var firstBody = await first.Content.ReadAsStringAsync();
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        Assert.Contains("event: message.failed", firstBody);
+
+        var retry = await SendMessage(client, conversation.Id, "[[mock-failure]]", requestId, stream: true);
+        var retryBody = await retry.Content.ReadAsStringAsync();
+        Assert.Equal(HttpStatusCode.OK, retry.StatusCode);
+        Assert.Contains("event: message.failed", retryBody);
+
+        var messages = await client.GetFromJsonAsync<List<ChatMessageDto>>($"/api/conversations/{conversation.Id}/messages");
+        Assert.NotNull(messages);
+        Assert.Equal(["User", "Assistant"], messages.Select(message => message.Role));
+        Assert.Equal(["Completed", "Failed"], messages.Select(message => message.Status));
+    }
+
+    [Fact]
     public async Task Latest_assistant_response_can_be_regenerated_idempotently_without_a_duplicate_user_message()
     {
         using var client = factory.CreateClient();

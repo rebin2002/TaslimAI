@@ -236,6 +236,13 @@ public sealed class ChatController(
                     return;
                 }
 
+                var claimed = await TryClaimFailedAssistantAsync(existing.Id, cancellationToken);
+                if (!claimed)
+                {
+                    await WriteEventAsync("message.failed", new { code = "MESSAGE_IN_PROGRESS", message = "That regeneration is already in progress." }, cancellationToken);
+                    return;
+                }
+                await db.Entry(existing).ReloadAsync(cancellationToken);
                 assistant = existing;
                 ResetAssistantForRetry(assistant);
             }
@@ -480,11 +487,10 @@ public sealed class ChatController(
             if (existingAssistant is null) return PreparedChat.Failure(ApiResults.Error(this, StatusCodes.Status409Conflict, "MESSAGE_IN_PROGRESS", "That message is already being generated."));
             if (existingAssistant.Status == ChatMessageStatus.Failed)
             {
-                existingAssistant.Status = ChatMessageStatus.Pending;
-                existingAssistant.Content = string.Empty;
-                existingAssistant.ProviderKey = null;
-                existingAssistant.ModelKey = null;
-                await db.SaveChangesAsync(cancellationToken);
+                var claimed = await TryClaimFailedAssistantAsync(existingAssistant.Id, cancellationToken);
+                if (!claimed) return PreparedChat.Failure(ApiResults.Error(this, StatusCodes.Status409Conflict, "MESSAGE_IN_PROGRESS", "That message is already being generated."));
+                await db.Entry(existingAssistant).ReloadAsync(cancellationToken);
+                ResetAssistantForRetry(existingAssistant);
                 return PreparedChat.New(conversation, existingUser, existingAssistant);
             }
             return PreparedChat.FromExisting(new SendMessageResponse(ToDto(conversation), ToMessageDto(existingUser), ToMessageDto(existingAssistant, string.Equals(existingAssistant.ProviderKey, "mock", StringComparison.OrdinalIgnoreCase))));
@@ -678,6 +684,16 @@ public sealed class ChatController(
         assistant.ActualCost = null;
         assistant.LatencyMs = null;
         assistant.FinishReason = null;
+    }
+    private async Task<bool> TryClaimFailedAssistantAsync(Guid assistantId, CancellationToken cancellationToken)
+    {
+        // The conditional update is the idempotency fence for retries from
+        // multiple tabs/devices. Only one caller may move a failed assistant
+        // back to Pending; every loser must observe MESSAGE_IN_PROGRESS.
+        var updated = await db.ChatMessages
+            .Where(message => message.Id == assistantId && message.Role == ChatMessageRole.Assistant && message.Status == ChatMessageStatus.Failed)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(message => message.Status, ChatMessageStatus.Pending), cancellationToken);
+        return updated == 1;
     }
 
     private Task<UsageTransaction> BeginUsageAsync(PreparedChat prepared, CancellationToken cancellationToken) => usageLedger.GetOrCreatePendingAsync(
