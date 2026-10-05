@@ -10,6 +10,7 @@ import {
   ShieldCheck,
   Sparkles,
 } from "lucide-react";
+import { useLocale } from "@/components/LocaleProvider";
 import {
   type CinematographyIntentSelection,
   type CinematographyPreset,
@@ -21,32 +22,19 @@ import {
   CINEMATOGRAPHY_INTENTS,
   emptyCinematographySelection,
   guidePreset,
-  intentLabel,
   parseCinematographyJson,
   selectionFromPreset,
   type CinematographyControlKey,
 } from "@/lib/movieCinematography";
-
-const controlLabels: Record<CinematographyControlKey, string> = {
-  shotSize: "Shot size",
-  focalLength: "Focal length intent",
-  lensIntent: "Lens type / intent",
-  apertureDepthOfField: "Aperture / depth",
-  cameraAngle: "Camera angle",
-  cameraMovement: "Camera movement",
-  frameRateIntent: "Frame rate",
-  lighting: "Lighting",
-  exposureLook: "Exposure / look",
-  paletteLook: "Palette / look",
-  compositionNotes: "Composition",
-};
-
-const capabilityLegend = [
-  "Native",
-  "Translated",
-  "Simulated/Post",
-  "Unsupported",
-] as const;
+import type { Locale } from "@/lib/i18n";
+import {
+  formatShotDesignerNumber,
+  formatShotDesignerSequence,
+  shotDesignerCapabilityLabel,
+  shotDesignerControlLabel,
+  shotDesignerIntentLabel,
+  shotDesignerText,
+} from "@/lib/shotDesignerI18n";
 
 type ShotDesignerDraft = {
   description: string;
@@ -79,6 +67,8 @@ export function ShotDesigner({
   saving = false,
   onAddShot,
 }: ShotDesignerProps) {
+  const { locale } = useLocale();
+  const text = (key: Parameters<typeof shotDesignerText>[1], variables?: Record<string, string | number>) => shotDesignerText(locale, key, variables);
   const [mode, setMode] = useState<"simple" | "advanced">("simple");
   const [draft, setDraft] = useState<ShotDesignerDraft>(() =>
     blankDraft(presets.find((preset) => preset.intent === "natural")),
@@ -165,12 +155,12 @@ export function ShotDesigner({
             <Camera size={14} />
           </span>
           <div>
-            <strong id={`shot-designer-${scene.id}`}>Shot Designer</strong>
-            <small>Shape the camera without needing to know lenses.</small>
+            <strong id={`shot-designer-${scene.id}`}>{text("title")}</strong>
+            <small>{text("subtitle")}</small>
           </div>
         </div>
         <span className="movie-shot-saved-label">
-          <span className="movie-live-dot" /> Saved to shot plan
+          <span className="movie-live-dot" /> {text("savedToPlan")}
         </span>
       </div>
 
@@ -185,31 +175,31 @@ export function ShotDesigner({
           )}
         </div>
         <div className="movie-guide-relationship-copy">
-          <span>Guide baseline</span>
+          <span>{text("guideBaseline")}</span>
           <strong>
             {guideBaseline
-              ? `${intentLabel(guideBaseline.intent)} · ${guideBaseline.name}`
+              ? `${shotDesignerIntentLabel(locale, guideBaseline.intent)} · ${guideBaseline.name}`
               : guideBible?.intent
-                ? intentLabel(guideBible.intent)
-                : "No cinematography direction set"}
+                ? shotDesignerIntentLabel(locale, guideBible.intent)
+                : text("noDirection")}
           </strong>
           <p>
             {guideBible?.notes ||
               guideBaseline?.summary ||
-              "This shot can establish its own direction. A shot override never rewrites the Movie Guide."}
+              text("shotOverrideHint")}
           </p>
         </div>
         <span className="movie-guide-relationship-status">
           {guideIsLocked
-            ? `Locked · rev ${guide.lockedRevisionNumber}`
-            : "Project direction"}
+            ? text("lockedRevision", { revision: formatShotDesignerNumber(locale, guide.lockedRevisionNumber!) })
+            : text("projectDirection")}
         </span>
       </div>
 
       <div
         className="movie-shot-mode-switch"
         role="tablist"
-        aria-label="Shot Designer mode"
+        aria-label={text("title")}
       >
         <button
           type="button"
@@ -218,7 +208,7 @@ export function ShotDesigner({
           className={mode === "simple" ? "is-active" : ""}
           onClick={() => setMode("simple")}
         >
-          <Sparkles size={13} /> Simple
+          <Sparkles size={13} /> {text("simple")}
         </button>
         <button
           type="button"
@@ -227,23 +217,21 @@ export function ShotDesigner({
           className={mode === "advanced" ? "is-active" : ""}
           onClick={() => setMode("advanced")}
         >
-          <ChevronDown size={13} /> Advanced
+          <ChevronDown size={13} /> {text("advanced")}
         </button>
       </div>
 
       <div className="movie-shot-intent-heading">
         <div>
-          <span>Creative intent</span>
-          <small>
-            Choose a feeling. Taslim fills the production direction.
-          </small>
+          <span>{text("creativeIntent")}</span>
+          <small>{text("creativeIntentHint")}</small>
         </div>
-        <span className="movie-shot-override-note">Per-shot override</span>
+        <span className="movie-shot-override-note">{text("perShotOverride")}</span>
       </div>
       <div
         className="movie-shot-intents"
         role="radiogroup"
-        aria-label="Creative intent"
+        aria-label={text("creativeIntent")}
       >
         {CINEMATOGRAPHY_INTENTS.map((intent) => {
           const preset = presets.find((item) => item.intent === intent);
@@ -260,15 +248,15 @@ export function ShotDesigner({
               <span className="movie-intent-check">
                 {selected && <Check size={11} />}
               </span>
-              <strong>{intentLabel(intent)}</strong>
-              <small>{preset?.summary ?? "Production direction"}</small>
+              <strong>{shotDesignerIntentLabel(locale, intent)}</strong>
+              <small>{preset?.summary ?? text("productionDirection")}</small>
             </button>
           );
         })}
       </div>
 
       <label className="movie-shot-field movie-shot-description">
-        <span>Shot description</span>
+        <span>{text("shotDescription")}</span>
         <textarea
           value={draft.description}
           onChange={(event) =>
@@ -277,7 +265,7 @@ export function ShotDesigner({
               description: event.target.value,
             }))
           }
-          placeholder="What happens in this shot?"
+          placeholder={text("shotDescriptionPlaceholder")}
           rows={2}
           maxLength={8000}
         />
@@ -290,40 +278,41 @@ export function ShotDesigner({
           </span>
           <div>
             <strong>
-              {selectedPreset?.name ?? intentLabel(draft.cinematography.intent)}{" "}
-              direction ready
+              {text("directionReady", {
+                intent: selectedPreset?.name ?? shotDesignerIntentLabel(locale, draft.cinematography.intent),
+              })}
             </strong>
             <p>
               {selectedPreset?.summary ??
-                "Select an intent to populate a sensible cinematography direction."}
+                text("selectIntentHint")}
             </p>
             <small>
-              Capability truth stays explicit: Native · Translated ·
-              Simulated/Post · Unsupported.
+              {text("capabilityTruthExplicit", {
+                legend: ["Native", "Translated", "Simulated/Post", "Unsupported"]
+                  .map((item) => shotDesignerCapabilityLabel(locale, item))
+                  .join(" · "),
+              })}
             </small>
           </div>
           <button type="button" onClick={() => setMode("advanced")}>
-            Tune details
+            {text("tuneDetails")}
           </button>
         </div>
       ) : (
         <div className="movie-shot-advanced-panel">
           <div className="movie-shot-advanced-heading">
             <div>
-              <span>Advanced controls</span>
-              <small>
-                Every value is a production intent, not a promise of native
-                provider support.
-              </small>
+              <span>{text("advancedControls")}</span>
+              <small>{text("advancedControlsHint")}</small>
             </div>
             <label className="movie-shot-preset-field">
-              <span>Preset</span>
+              <span>{text("preset")}</span>
               <select
-                aria-label="Cinematography preset"
+                aria-label={text("preset")}
                 value={draft.cinematography.presetId ?? "custom"}
                 onChange={(event) => choosePreset(event.target.value)}
               >
-                <option value="custom">Custom direction</option>
+                <option value="custom">{text("customDirection")}</option>
                 {presets.map((preset) => (
                   <option key={preset.id} value={preset.id}>
                     {preset.name}
@@ -338,7 +327,7 @@ export function ShotDesigner({
                 className={`movie-shot-field ${key === "compositionNotes" ? "movie-shot-wide" : ""}`}
                 key={key}
               >
-                <span>{controlLabels[key]}</span>
+                <span>{shotDesignerControlLabel(locale, key)}</span>
                 {key === "compositionNotes" ? (
                   <textarea
                     value={draft.cinematography[key] ?? ""}
@@ -355,7 +344,7 @@ export function ShotDesigner({
             ))}
           </div>
           <label className="movie-shot-field movie-shot-wide">
-            <span>Continuity constraints</span>
+            <span>{text("continuityConstraints")}</span>
             <textarea
               value={(draft.cinematography.continuityConstraints ?? []).join("\n")}
               onChange={(event) =>
@@ -371,16 +360,16 @@ export function ShotDesigner({
                 }))
               }
               rows={3}
-              placeholder="One locked continuity rule per line"
+              placeholder={text("continuityConstraintsPlaceholder")}
             />
           </label>
-          <CapabilityTruth selection={draft.cinematography} />
+          <CapabilityTruth locale={locale} selection={draft.cinematography} />
         </div>
       )}
 
       <div className="movie-shot-designer-footer">
         <label className="movie-shot-duration">
-          <span>Shot duration</span>
+          <span>{text("duration")}</span>
           <input
             type="number"
             min={1}
@@ -396,12 +385,10 @@ export function ShotDesigner({
             }
             placeholder="—"
           />
-          <em>sec</em>
+          <em>{text("seconds")}</em>
         </label>
         <span className="movie-shot-save-note">
-          {guideIsLocked
-            ? "Guide stays locked; this saves as a shot-level override."
-            : "The Movie Guide remains unchanged; this saves a shot-level override."}
+          {guideIsLocked ? text("guideLockedNote") : text("guideOverrideNote")}
         </span>
         <button
           type="button"
@@ -409,27 +396,27 @@ export function ShotDesigner({
           disabled={saving || !draft.description.trim()}
           onClick={() => void saveShot()}
         >
-          <Plus size={13} /> {saving ? "Saving…" : "Add shot"}
+          <Plus size={13} /> {saving ? text("saving") : text("addShot")}
         </button>
       </div>
 
       {scene.shots.length > 0 && (
-        <div className="movie-shot-list" aria-label="Saved shots">
+        <div className="movie-shot-list" aria-label={text("savedShots")}>
           <div className="movie-shot-list-heading">
-            <span>Saved shots</span>
-            <small>{scene.shots.length}</small>
+            <span>{text("savedShots")}</span>
+            <small>{formatShotDesignerNumber(locale, scene.shots.length)}</small>
           </div>
           {scene.shots.map((shot) => {
             const selection = parseCinematographyJson(shot.cinematographyJson);
             return (
               <div className="movie-shot-list-item" key={shot.id}>
-                <span>{String(shot.sequence).padStart(2, "0")}</span>
+                <span>{formatShotDesignerSequence(locale, shot.sequence)}</span>
                 <div>
                   <strong>{shot.description}</strong>
                   <small>
                     {selection
-                      ? `${intentLabel(selection.intent)} override${selection.presetId ? ` · ${presets.find((preset) => preset.id === selection.presetId)?.name ?? "custom"}` : ""}`
-                      : "No cinematography direction"}
+                      ? `${shotDesignerIntentLabel(locale, selection.intent)} ${text("override")}${selection.presetId ? ` · ${presets.find((preset) => preset.id === selection.presetId)?.name ?? text("customDirection")}` : ""}`
+                      : text("noCinematographyDirection")}
                   </small>
                 </div>
               </div>
@@ -442,8 +429,10 @@ export function ShotDesigner({
 }
 
 function CapabilityTruth({
+  locale,
   selection,
 }: {
+  locale: Locale;
   selection: CinematographyIntentSelection;
 }) {
   const references = selection.capabilityReferences ?? [];
@@ -451,15 +440,12 @@ function CapabilityTruth({
     <div className="movie-capability-truth">
       <div className="movie-capability-heading">
         <div>
-          <span>Capability truth</span>
-          <small>
-            Resolution stays explicit and provider/model names stay out of the
-            creative workflow.
-          </small>
+          <span>{shotDesignerText(locale, "capabilityClassification")}</span>
+          <small>{shotDesignerText(locale, "capabilityClassificationHint")}</small>
         </div>
         <div className="movie-capability-legend">
-          {capabilityLegend.map((item) => (
-            <span key={item}>{item}</span>
+          {(["Native", "Translated", "Simulated/Post", "Unsupported"] as const).map((item) => (
+            <span key={item}>{shotDesignerCapabilityLabel(locale, item)}</span>
           ))}
         </div>
       </div>
@@ -471,21 +457,20 @@ function CapabilityTruth({
               className={`movie-capability-item is-${reference.classification.toLowerCase().replace(/[^a-z]+/g, "-")}`}
             >
               <strong>
-                {controlLabels[reference.field as CinematographyControlKey] ??
+                {shotDesignerControlLabel(locale, reference.field as CinematographyControlKey) ??
                   reference.field}
               </strong>
-              <span>{reference.classification}</span>
+              <span>{shotDesignerCapabilityLabel(locale, reference.classification)}</span>
               <small>
                 {reference.rationale ||
-                  "Classification is retained for integration-time resolution."}
+                  shotDesignerText(locale, "capabilityTruthHint")}
               </small>
             </div>
           ))}
         </div>
       ) : (
         <p className="movie-capability-empty">
-          This direction has no field-level classification yet. It remains
-          production intent and will not be presented as native support.
+          {shotDesignerText(locale, "capabilityEmpty")}
         </p>
       )}
     </div>
