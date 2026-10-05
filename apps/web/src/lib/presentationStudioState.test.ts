@@ -11,7 +11,7 @@ describe("presentationStudioState", () => {
   it("requires a published PPTX representation before exposing a successful export state", () => {
     const withoutExport = parsePresentationJobResult(job("Succeeded", '{"assetId":"asset-1","title":"Deck"}'));
     const withNonPptxExport = parsePresentationJobResult(job("Succeeded", '{"assetId":"asset-1","representations":[{"id":"pdf-1","type":"pdf","fileName":"deck.pdf","contentType":"application/pdf"}]}'));
-    const withPptxJson = '{"assetId":"asset-1","representations":[{"id":"pptx-1","type":"pptx","fileName":"deck.pptx","contentType":"application/vnd.openxmlformats-officedocument.presentationml.presentation"]}';
+    const withPptxJson = '{"assetId":"asset-1","representations":[{"id":"pptx-1","type":"pptx","fileName":"deck.pptx","contentType":"application/vnd.openxmlformats-officedocument.presentationml.presentation"}]}';
     const withPptxExport = parsePresentationJobResult(job("Succeeded", withPptxJson));
     expect(hasPresentationExport(withoutExport)).toBe(false);
     expect(hasPresentationExport(withNonPptxExport)).toBe(false);
