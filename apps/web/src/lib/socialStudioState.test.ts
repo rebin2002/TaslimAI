@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GenerationJob } from "./api";
-import { clearSocialActiveJobId, displaySocialProgress, formatSocialPostForCopy, isSocialSourceReady, normalizeSocialPreviewPlatform, parseSocialJobResult, persistSocialActiveJobId, persistSocialDraft, readSocialActiveJobId, readSocialDraft, socialActiveJobStorageKey, socialDraftStorageKey, socialStudioState } from "./socialStudioState";
+import { clearSocialActiveJobId, clearSocialDraft, displaySocialProgress, formatSocialPostForCopy, isSocialSourceReady, normalizeSocialPreviewPlatform, parseSocialJobResult, persistSocialActiveJobId, persistSocialDraft, readSocialActiveJobId, readSocialDraft, socialActiveJobStorageKey, socialDraftStorageKey, socialStudioState } from "./socialStudioState";
 
 const job = (overrides: Partial<GenerationJob> = {}): GenerationJob => ({ id: "job-1", workspaceId: "workspace-1", projectId: null, jobType: "social.generate", status: "Running", title: null, progressPercent: 100, resultJson: null, errorCode: null, errorMessage: null, cancellationRequested: false, createdAt: "2026-01-01T00:00:00Z", queuedAt: null, startedAt: null, completedAt: null, failedAt: null, cancelledAt: null, outputs: [], ...overrides });
 
@@ -49,6 +49,10 @@ describe("socialStudioState", () => {
     const restored = readSocialDraft("workspace-1");
     expect(restored?.prompt).toHaveLength(6000);
     expect(restored?.selectedFiles).toEqual(["a", "b", "c", "d", "e"]);
+    values.set(socialDraftStorageKey("workspace-1"), JSON.stringify({ socialType: "unsupported", platform: "provider-only", tone: "unknown", language: "fr" }));
+    expect(readSocialDraft("workspace-1")).toMatchObject({ socialType: "auto", platform: "multi", tone: "professional", language: "auto" });
+    clearSocialDraft("workspace-1");
+    expect(readSocialDraft("workspace-1")).toBeNull();
   });
   it("ignores malformed draft storage instead of breaking the studio", () => {
     vi.stubGlobal("window", { sessionStorage: { getItem: () => "{not-json", setItem: vi.fn(), removeItem: vi.fn() } });

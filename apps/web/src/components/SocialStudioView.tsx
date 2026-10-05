@@ -7,7 +7,7 @@ import { Check, CheckCircle2, Copy, FileText, Image as ImageIcon, LoaderCircle, 
 import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
 import { ApiError, api, type Asset, type GenerationJob, type Project, type SocialJobResult, type SocialPost, type StoredFile } from "@/lib/api";
-import { canCancelSocialJob, clearSocialActiveJobId, displaySocialProgress, formatSocialPostForCopy, isSocialAssetSelectable, isSocialSourceReady, nextSocialPollDelay, normalizeSocialPreviewPlatform, parseSocialJobResult, persistSocialActiveJobId, persistSocialDraft, readSocialActiveJobId, readSocialDraft, shouldPollSocialJob, socialStudioState, type SocialPreviewPlatform } from "@/lib/socialStudioState";
+import { canCancelSocialJob, clearSocialActiveJobId, clearSocialDraft, displaySocialProgress, formatSocialPostForCopy, isSocialAssetSelectable, isSocialSourceReady, nextSocialPollDelay, normalizeSocialPreviewPlatform, parseSocialJobResult, persistSocialActiveJobId, persistSocialDraft, readSocialActiveJobId, readSocialDraft, shouldPollSocialJob, socialStudioState, type SocialPreviewPlatform } from "@/lib/socialStudioState";
 
 const extensions = [".pdf", ".docx", ".txt", ".md", ".csv", ".xlsx"];
 type Language = "auto" | "en" | "ar" | "ku";
@@ -249,7 +249,7 @@ export function SocialStudioView() {
     try { await navigator.clipboard.writeText(formatSocialPostForCopy(post)); setCopyState(String(post.order)); window.setTimeout(() => setCopyState(""), 1800); }
     catch { setError(t("social.copyError")); }
   }
-  function createAnother() { restoreJobId.current = null; if (workspace) clearSocialActiveJobId(workspace.id); setCurrent(null); setError(""); setCopyState(""); setPollRetry(0); }
+  function createAnother() { restoreJobId.current = null; if (workspace) { clearSocialActiveJobId(workspace.id); clearSocialDraft(workspace.id); } setCurrent(null); setError(""); setCopyState(""); setPollRetry(0); }
 
   const result = parseSocialJobResult(current);
   const state = socialStudioState(current, result);

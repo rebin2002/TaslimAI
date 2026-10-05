@@ -2,6 +2,9 @@ import type { Asset, GenerationJob, SocialJobResult, SocialPost, StoredFile } fr
 
 const terminalStatuses = new Set(["Succeeded", "Failed", "Cancelled"]);
 const socialPlatforms = new Set(["instagram", "facebook", "linkedin", "x", "tiktok", "multi"]);
+const socialTypes = new Set(["auto", "announcement", "product_launch", "promotion", "educational", "thought_leadership", "company_update", "event", "community", "general"]);
+const socialTones = new Set(["professional", "friendly", "persuasive", "educational", "playful", "concise", "thoughtful"]);
+const socialLanguages = new Set(["auto", "en", "ar", "ku"]);
 const activeJobStoragePrefix = "taslim:social-generation:";
 const draftStoragePrefix = "taslim:social-draft:";
 export type SocialStudioState = "compose" | "pending" | "queued" | "running" | "succeeded" | "completed-unavailable" | "failed" | "cancelled";
@@ -85,16 +88,20 @@ function isRecord(value: unknown): value is Record<string, unknown> { return typ
 function nonEmptyString(value: unknown): value is string { return typeof value === "string" && value.trim().length > 0; }
 function boundedString(value: unknown, maxLength: number) { return typeof value === "string" ? value.slice(0, maxLength) : ""; }
 function boundedIds(value: unknown, maxLength: number) { return Array.isArray(value) ? value.filter(nonEmptyString).map((id) => id.trim()).slice(0, maxLength) : []; }
+function allowedDraftValue(value: unknown, allowed: Set<string>, fallback: string) {
+  const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
+  return allowed.has(normalized) ? normalized : fallback;
+}
 function normalizeSocialDraft(value: Record<string, unknown>): SocialStudioDraft {
   return {
     projectId: boundedString(value.projectId, 100),
     selectedFiles: boundedIds(value.selectedFiles, 5),
     selectedAssets: boundedIds(value.selectedAssets, 8),
     prompt: boundedString(value.prompt, 6000),
-    socialType: boundedString(value.socialType, 40) || "auto",
-    platform: boundedString(value.platform, 40) || "multi",
-    tone: boundedString(value.tone, 40) || "professional",
-    language: boundedString(value.language, 12) || "auto",
+    socialType: allowedDraftValue(value.socialType, socialTypes, "auto"),
+    platform: allowedDraftValue(value.platform, socialPlatforms, "multi"),
+    tone: allowedDraftValue(value.tone, socialTones, "professional"),
+    language: allowedDraftValue(value.language, socialLanguages, "auto"),
     audience: boundedString(value.audience, 400),
     brandVoice: boundedString(value.brandVoice, 1000),
     callToAction: boundedString(value.callToAction, 400),
