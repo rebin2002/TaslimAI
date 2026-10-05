@@ -5,7 +5,7 @@ import { localeDirection, localeNames, locales, translate, type Locale } from "@
 
 type LocaleContextValue = {
   locale: Locale;
-  setLocale: (locale: Locale) => void;
+  setLocale: (locale: Locale, options?: { persist?: boolean }) => void;
   t: (key: string, variables?: Record<string, string>) => string;
 };
 
@@ -34,8 +34,9 @@ export function LocaleProvider({ children }: Readonly<{ children: React.ReactNod
     document.documentElement.dir = localeDirection(locale);
   }, [locale]);
 
-  const setLocale = useCallback((next: Locale) => {
+  const setLocale = useCallback((next: Locale, options?: { persist?: boolean }) => {
     setLocaleState(next);
+    if (options?.persist === false) return;
     try {
       window.localStorage.setItem("taslim-locale", next);
     } catch {
