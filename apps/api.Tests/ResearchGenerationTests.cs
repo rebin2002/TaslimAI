@@ -243,6 +243,26 @@ public sealed class ResearchGenerationTests : IClassFixture<ResearchApiFactory>
         Assert.Equal(secondFile.Id, sources[1].StoredFileId);
     }
 
+    [Fact]
+    public void Research_source_budget_retains_explicit_uploaded_sources_when_provider_results_fill_cap()
+    {
+        var firstFileId = Guid.NewGuid();
+        var secondFileId = Guid.NewGuid();
+        var candidates = Enumerable.Range(1, 8)
+            .Select(index => new ResearchSourceCandidate($"S{index}", $"https://example.org/{index}", $"https://example.org/{index}", $"Provider source {index}", "example.org", null, null, DateTime.UtcNow, "web", "snippet", "text", "query", index, true, null))
+            .Concat([
+                new ResearchSourceCandidate("S9", null, null, "First uploaded source", "uploaded file", null, null, DateTime.UtcNow, "uploaded", "snippet", "text", null, 9, true, null, firstFileId),
+                new ResearchSourceCandidate("S10", null, null, "Second uploaded source", "uploaded file", null, null, DateTime.UtcNow, "uploaded", "snippet", "text", null, 10, true, null, secondFileId),
+            ])
+            .ToArray();
+
+        var bounded = ResearchSourceSelection.Bound(candidates, 8);
+
+        Assert.Equal(8, bounded.Count);
+        Assert.Equal(new[] { "S1", "S2", "S3", "S4", "S5", "S6", "S9", "S10" }, bounded.Select(source => source.CitationId));
+        Assert.Equal(new[] { firstFileId, secondFileId }, bounded.Where(source => source.StoredFileId.HasValue).Select(source => source.StoredFileId!.Value));
+    }
+
     private static StoredFile NewReadySourceFile(AuthResponse auth, string name, string extractedText) => new()
     {
         Id = Guid.NewGuid(),
