@@ -165,4 +165,18 @@ describe("api.login", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls[0][1].method ?? "GET").toBe("GET");
   });
+
+  it("revokes other sessions and refreshes CSRF state after the security transition", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(csrfResponse("before-revoke"))
+      .mockResolvedValueOnce(response({ success: true }))
+      .mockResolvedValueOnce(csrfResponse("after-revoke"));
+    vi.stubGlobal("fetch", fetchMock);
+    const { api } = await import("./api");
+
+    await expect(api.revokeOtherSessions()).resolves.toEqual({ success: true });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock.mock.calls.map((call) => (call[1] as RequestInit | undefined)?.method ?? "GET")).toEqual(["GET", "POST", "GET"]);
+    expect(new Headers(fetchMock.mock.calls[1][1].headers).get("X-CSRF-TOKEN")).toBe("before-revoke");
+  });
 });

@@ -13,7 +13,7 @@ namespace Taslim.Api.Operations;
 public interface IAdminOperationsService
 {
     Task<AdminOperationsDashboardDto> GetDashboardAsync(AdminOperationsFilter filter, CancellationToken cancellationToken = default);
-    Task<AdminJobRecoveryResult?> RecoverExpiredJobAsync(Guid actorUserId, Guid jobId, string reason, string? requestId, CancellationToken cancellationToken = default);
+    Task<AdminJobRecoveryResult?> RecoverExpiredJobAsync(Guid actorUserId, Guid jobId, string reason, string? idempotencyKey, CancellationToken cancellationToken = default);
 }
 
 public sealed class AdminOperationConflictException(string code, string message) : Exception(message)
@@ -69,11 +69,26 @@ public sealed class AdminOperationsService(
         Guid actorUserId,
         Guid jobId,
         string reason,
-        string? requestId,
+        string? idempotencyKey,
         CancellationToken cancellationToken = default)
     {
         var normalizedReason = NormalizeReason(reason);
         var now = DateTime.UtcNow;
+        var normalizedIdempotencyKey = NormalizeIdempotencyKey(idempotencyKey);
+        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+
+        // Request correlation IDs are server-owned and must not be used as
+        // idempotency keys. A caller-provided key is optional, but when it is
+        // present a retry after a response timeout replays the original
+        // result instead of being reported as a new conflict.
+        var previous = await FindRecoveryAuditAsync(normalizedIdempotencyKey, jobId, cancellationToken);
+        if (previous is not null)
+        {
+            var replay = ReplayRecovery(previous, jobId);
+            await transaction.CommitAsync(cancellationToken);
+            return replay;
+        }
+
         var source = await db.GenerationJobs.AsNoTracking().FirstOrDefaultAsync(item => item.Id == jobId, cancellationToken);
         if (source is null) return null;
         if (!MovieJobTypes.Contains(source.JobType, StringComparer.Ordinal))
@@ -96,7 +111,20 @@ public sealed class AdminOperationsService(
                 .SetProperty(item => item.RetryCount, item => item.RetryCount + 1)
                 .SetProperty(item => item.ConcurrencyToken, recoveryToken), cancellationToken);
         if (updated == 0)
+        {
+            // A concurrent request with the same idempotency key may have won
+            // the conditional update while this request was waiting on the row.
+            // Replay its committed evidence when available; otherwise preserve
+            // the existing conflict contract for a genuinely stale recovery.
+            previous = await FindRecoveryAuditAsync(normalizedIdempotencyKey, jobId, cancellationToken);
+            if (previous is not null)
+            {
+                var replay = ReplayRecovery(previous, jobId);
+                await transaction.CommitAsync(cancellationToken);
+                return replay;
+            }
             throw new AdminOperationConflictException("JOB_RECOVERY_RACE", "The job changed before recovery could be applied.");
+        }
 
         db.AdminOperationAuditEvents.Add(new AdminOperationAuditEvent
         {
@@ -107,13 +135,46 @@ public sealed class AdminOperationsService(
             TargetId = jobId,
             Outcome = AdminOperationOutcomes.Succeeded,
             Reason = normalizedReason,
-            RequestId = NormalizeRequestId(requestId),
+            // RequestId is the legacy audit column used for this command's
+            // idempotency key; operational tracing remains server-owned.
+            RequestId = normalizedIdempotencyKey,
             BeforeState = $"status={GenerationJobStatus.Running};retryCount={source.RetryCount}",
             AfterState = $"status={GenerationJobStatus.Queued};retryCount={source.RetryCount + 1}",
             CreatedAt = now,
         });
         await db.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
         return new AdminJobRecoveryResult(jobId, GenerationJobStatus.Queued, source.RetryCount + 1, now, AdminOperationActions.RecoverExpiredGenerationJob);
+    }
+
+    private Task<AdminOperationAuditEvent?> FindRecoveryAuditAsync(
+        string? idempotencyKey,
+        Guid jobId,
+        CancellationToken cancellationToken) =>
+        string.IsNullOrWhiteSpace(idempotencyKey)
+            ? Task.FromResult<AdminOperationAuditEvent?>(null)
+            : db.AdminOperationAuditEvents.AsNoTracking()
+                .Where(item => item.Action == AdminOperationActions.RecoverExpiredGenerationJob
+                    && item.TargetId == jobId
+                    && item.RequestId == idempotencyKey
+                    && item.Outcome == AdminOperationOutcomes.Succeeded)
+                .OrderBy(item => item.CreatedAt)
+                .FirstOrDefaultAsync(cancellationToken);
+
+    private static AdminJobRecoveryResult ReplayRecovery(AdminOperationAuditEvent audit, Guid jobId)
+    {
+        var retryCount = ParseRetryCount(audit.AfterState);
+        return new(jobId, GenerationJobStatus.Queued, retryCount, audit.CreatedAt, AdminOperationActions.RecoverExpiredGenerationJob);
+    }
+
+    private static int ParseRetryCount(string? afterState)
+    {
+        const string prefix = "status=Queued;retryCount=";
+        if (afterState?.StartsWith(prefix, StringComparison.Ordinal) != true
+            || !int.TryParse(afterState[prefix.Length..], out var retryCount)
+            || retryCount < 0)
+            throw new AdminOperationConflictException("RECOVERY_RESULT_INVALID", "The prior recovery result could not be replayed safely.");
+        return retryCount;
     }
 
     private async Task<AdminGenerationOverviewDto> BuildGenerationAsync((DateTime FromUtc, DateTime ToUtc) range, CancellationToken cancellationToken)
@@ -479,8 +540,8 @@ public sealed class AdminOperationsService(
         return normalized;
     }
 
-    private static string? NormalizeRequestId(string? requestId) =>
-        string.IsNullOrWhiteSpace(requestId) ? null : requestId.Trim()[..Math.Min(128, requestId.Trim().Length)];
+    private static string? NormalizeIdempotencyKey(string? idempotencyKey) =>
+        string.IsNullOrWhiteSpace(idempotencyKey) ? null : idempotencyKey.Trim()[..Math.Min(128, idempotencyKey.Trim().Length)];
 
     private static string SanitizeCode(string? code)
     {
