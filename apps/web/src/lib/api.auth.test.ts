@@ -131,4 +131,28 @@ describe("api.login", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls[0][1].method ?? "GET").toBe("GET");
   });
+
+  it("maps an unavailable API to a safe retryable error", async () => {
+    const fetchMock = vi.fn().mockRejectedValueOnce(new TypeError("private socket detail"));
+    vi.stubGlobal("fetch", fetchMock);
+    const { api, ApiError } = await import("./api");
+
+    const failure = await api.me().catch((error) => error);
+    expect(failure).toBeInstanceOf(ApiError);
+    expect(failure.status).toBe(503);
+    expect(failure.code).toBe("NETWORK_ERROR");
+    expect(failure.message).toBe("The service is temporarily unavailable. Please try again.");
+    expect(failure.message).not.toContain("private socket detail");
+  });
+
+  it("preserves caller cancellation for abortable workspace loads", async () => {
+    const controller = new AbortController();
+    const fetchMock = vi.fn().mockRejectedValueOnce(Object.assign(new Error("aborted"), { name: "AbortError" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { api } = await import("./api");
+
+    const failure = await api.listProjects("workspace-1", "Active", controller.signal).catch((error) => error);
+    expect(failure.name).toBe("AbortError");
+    expect(failure.code).not.toBe("NETWORK_ERROR");
+  });
 });
