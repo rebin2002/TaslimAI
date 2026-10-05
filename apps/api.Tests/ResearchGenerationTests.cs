@@ -10,6 +10,8 @@ using Taslim.Api.Ai;
 using Taslim.Api.Controllers;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
+using Taslim.Api.Files;
+using Taslim.Api.Generation;
 using Taslim.Api.Persistence;
 using Taslim.Api.Research;
 using Xunit;
@@ -97,6 +99,211 @@ public sealed class ResearchGenerationTests : IClassFixture<ResearchApiFactory>
         var error = await noSource.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal(GenerationJobErrorCodes.ResearchSourceUnavailable, error.GetProperty("error").GetProperty("code").GetString());
         _ = secondAuth;
+    }
+
+    [Fact]
+    public async Task Research_source_export_is_private_deterministic_and_safe_for_spreadsheets()
+    {
+        using var owner = factory.CreateClient();
+        var ownerAuth = await Register(owner, $"research-export-{Guid.NewGuid():N}@example.com");
+        var created = await SendWithCsrf<CreateResearchGenerationResponse>(owner, HttpMethod.Post, "/api/research-generation/jobs", new
+        {
+            workspaceId = ownerAuth.PersonalWorkspace.Id,
+            question = "Compare current solar opportunities",
+            useWebSources = true,
+            attachmentIds = Array.Empty<Guid>(),
+        });
+        var completed = await WaitForTerminal(owner, created.Job.Id);
+        Assert.Equal("Succeeded", completed.Status);
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var source = await db.ResearchSources.SingleAsync(item => item.GenerationJobId == created.Job.Id && item.CitationId == "S1");
+            source.Title = "=SUM(A1:A2)";
+            source.ExtractedText = "private extracted text must not be exported";
+            source.SearchQuery = "PRIVATE SEARCH QUERY MUST NOT BE EXPORTED";
+            await db.SaveChangesAsync();
+        }
+        using var response = await owner.GetAsync($"/api/research-generation/jobs/{created.Job.Id}/sources/export");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("text/csv", response.Content.Headers.ContentType?.MediaType);
+        Assert.Equal($"research-sources-{created.Job.Id:N}.csv", response.Content.Headers.ContentDisposition?.FileNameStar ?? response.Content.Headers.ContentDisposition?.FileName?.Trim('"'));
+        var csv = await response.Content.ReadAsStringAsync();
+        Assert.StartsWith("citationId,sourceType,title", csv, StringComparison.Ordinal);
+        Assert.Contains("\"'=SUM(A1:A2)\"", csv, StringComparison.Ordinal);
+        Assert.Contains("https://example.gov/energy", csv, StringComparison.Ordinal);
+        Assert.DoesNotContain("private extracted text must not be exported", csv, StringComparison.Ordinal);
+        Assert.DoesNotContain("Official energy evidence.", csv, StringComparison.Ordinal);
+        Assert.DoesNotContain("searchQuery", csv, StringComparison.Ordinal);
+        Assert.DoesNotContain("PRIVATE SEARCH QUERY MUST NOT BE EXPORTED", csv, StringComparison.Ordinal);
+        Assert.True(csv.IndexOf("S1", StringComparison.Ordinal) < csv.IndexOf("S2", StringComparison.Ordinal));
+
+        using var other = factory.CreateClient();
+        var otherAuth = await Register(other, $"research-export-other-{Guid.NewGuid():N}@example.com");
+        using var forbidden = await other.GetAsync($"/api/research-generation/jobs/{created.Job.Id}/sources/export");
+        Assert.Equal(HttpStatusCode.NotFound, forbidden.StatusCode);
+        _ = otherAuth;
+    }
+
+    [Fact]
+    public async Task Research_recovery_replaces_staged_sources_before_replaying_attempt()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, $"research-recovery-{Guid.NewGuid():N}@example.com");
+        var created = await SendWithCsrf<CreateResearchGenerationResponse>(client, HttpMethod.Post, "/api/research-generation/jobs", new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            question = "Replay a cited research job safely",
+            useWebSources = true,
+            attachmentIds = Array.Empty<Guid>(),
+        });
+        var completed = await WaitForTerminal(client, created.Job.Id);
+        Assert.Equal("Succeeded", completed.Status);
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var job = await db.GenerationJobs.SingleAsync(item => item.Id == created.Job.Id);
+            job.Status = GenerationJobStatus.Running;
+            job.ConcurrencyToken = Guid.NewGuid();
+            job.CancellationRequested = false;
+            await db.SaveChangesAsync();
+        }
+
+        using var replayScope = factory.Services.CreateScope();
+        var replayDb = replayScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var replayJob = await replayDb.GenerationJobs.AsNoTracking().SingleAsync(item => item.Id == created.Job.Id);
+        var handler = replayScope.ServiceProvider.GetServices<IGenerationJobHandler>().Single(item => item.CanHandle(replayJob.JobType));
+        var result = await handler.ExecuteAsync(replayJob, new Progress<int>(), CancellationToken.None);
+
+        Assert.Equal(2, result.Outputs.Count);
+        Assert.Equal(2, await replayDb.ResearchSources.CountAsync(item => item.GenerationJobId == created.Job.Id));
+        Assert.Equal(2, await replayDb.ResearchEvidence.CountAsync(item => item.GenerationJobId == created.Job.Id));
+    }
+
+    [Fact]
+    public async Task Research_source_details_and_exports_require_a_successful_job()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, $"research-terminal-sources-{Guid.NewGuid():N}@example.com");
+        var created = await SendWithCsrf<CreateResearchGenerationResponse>(client, HttpMethod.Post, "/api/research-generation/jobs", new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            question = "Expose sources only for a completed report",
+            useWebSources = true,
+            attachmentIds = Array.Empty<Guid>(),
+        });
+        var completed = await WaitForTerminal(client, created.Job.Id);
+        Assert.Equal("Succeeded", completed.Status);
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var job = await db.GenerationJobs.SingleAsync(item => item.Id == created.Job.Id);
+            job.Status = GenerationJobStatus.Failed;
+            await db.SaveChangesAsync();
+        }
+
+        Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync($"/api/research-generation/jobs/{created.Job.Id}/sources")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync($"/api/research-generation/jobs/{created.Job.Id}/sources/export")).StatusCode);
+    }
+
+    [Fact]
+    public async Task Research_uploaded_sources_keep_distinct_file_identity_when_filenames_match()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, $"research-duplicate-files-{Guid.NewGuid():N}@example.com");
+        var firstFile = NewReadySourceFile(auth, "same-name.txt", "first source text");
+        var secondFile = NewReadySourceFile(auth, "same-name.txt", "second source text");
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.StoredFiles.AddRange(firstFile, secondFile);
+            await db.SaveChangesAsync();
+        }
+
+        var created = await SendWithCsrf<CreateResearchGenerationResponse>(client, HttpMethod.Post, "/api/research-generation/jobs", new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            question = "Compare the two uploaded sources",
+            useWebSources = false,
+            attachmentIds = new[] { firstFile.Id, secondFile.Id },
+        });
+        var completed = await WaitForTerminal(client, created.Job.Id);
+        Assert.True(completed.Status == "Succeeded", $"Status={completed.Status}; Code={completed.ErrorCode}; Message={completed.ErrorMessage}");
+
+        using var verificationScope = factory.Services.CreateScope();
+        var verificationDb = verificationScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var sources = await verificationDb.ResearchSources.AsNoTracking()
+            .Where(source => source.GenerationJobId == created.Job.Id)
+            .OrderBy(source => source.Rank)
+            .ToArrayAsync();
+        Assert.Equal(2, sources.Length);
+        Assert.Equal(firstFile.Id, sources[0].StoredFileId);
+        Assert.Equal(secondFile.Id, sources[1].StoredFileId);
+    }
+
+    private static StoredFile NewReadySourceFile(AuthResponse auth, string name, string extractedText) => new()
+    {
+        Id = Guid.NewGuid(),
+        WorkspaceId = auth.PersonalWorkspace.Id,
+        UserId = auth.User.Id,
+        OriginalFileName = name,
+        StoredFileName = $"{Guid.NewGuid():N}.txt",
+        ContentType = "text/plain",
+        Extension = ".txt",
+        SizeBytes = extractedText.Length,
+        StorageProvider = FileStorageProviders.Local,
+        StorageKey = $"research-test/{Guid.NewGuid():N}.txt",
+        Status = StoredFileStatus.Ready,
+        CreatedAt = DateTime.UtcNow,
+        ProcessedAt = DateTime.UtcNow,
+        TextExtractionStatus = FileExtractionStatus.Ready,
+        ExtractedText = extractedText,
+        ExtractedTextLength = extractedText.Length,
+    };
+
+    [Fact]
+    public async Task Research_execution_records_are_private_to_the_creator_inside_a_shared_workspace()
+    {
+        using var owner = factory.CreateClient();
+        var ownerAuth = await Register(owner, $"research-record-owner-{Guid.NewGuid():N}@example.com");
+        using var member = factory.CreateClient();
+        var memberAuth = await Register(member, $"research-record-member-{Guid.NewGuid():N}@example.com");
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.WorkspaceMembers.Add(new WorkspaceMember
+            {
+                Id = Guid.NewGuid(),
+                WorkspaceId = ownerAuth.PersonalWorkspace.Id,
+                UserId = memberAuth.User.Id,
+                Role = WorkspaceRole.Member,
+                JoinedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var created = await SendWithCsrf<CreateResearchGenerationResponse>(owner, HttpMethod.Post, "/api/research-generation/jobs", new
+        {
+            workspaceId = ownerAuth.PersonalWorkspace.Id,
+            question = "What are the current opportunities and risks for solar energy in Iraq?",
+            depth = "standard",
+            reportType = "research_report",
+            language = "en",
+            useWebSources = true,
+            attachmentIds = Array.Empty<Guid>(),
+        });
+        var completed = await WaitForTerminal(owner, created.Job.Id);
+        Assert.Equal("Succeeded", completed.Status);
+
+        Assert.Equal(HttpStatusCode.NotFound, (await member.GetAsync($"/api/generation/jobs/{created.Job.Id}")).StatusCode);
+        var list = await member.GetFromJsonAsync<GenerationJobListDto>($"/api/generation/jobs?workspaceId={ownerAuth.PersonalWorkspace.Id}&jobType={GenerationJobTypes.ResearchGenerate}");
+        Assert.NotNull(list);
+        Assert.Empty(list!.Items);
+        Assert.Equal(HttpStatusCode.NotFound, (await member.GetAsync($"/api/research-generation/jobs/{created.Job.Id}/sources")).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await SendWithCsrf(member, HttpMethod.Post, $"/api/generation/jobs/{created.Job.Id}/cancel", null)).StatusCode);
     }
 
     private static async Task<AuthResponse> Register(HttpClient client, string email)

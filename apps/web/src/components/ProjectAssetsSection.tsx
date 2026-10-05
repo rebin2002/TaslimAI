@@ -1,4 +1,5 @@
 "use client";
+import { localeTag } from "@/lib/i18n";
 /* eslint-disable @next/next/no-img-element -- previews use authenticated API URLs with session cookies. */
 
 import Link from "next/link";
@@ -30,7 +31,7 @@ export function ProjectAssetsSection({ project }: { project: Project }) {
     <div className="card-title"><span className="card-title-icon"><LibraryBig size={17} /></span><div><h2>{t("assets.projectSectionTitle")}</h2><p>{t("assets.projectSectionSubtitle")}</p></div><Link className="secondary-button project-assets-link" href={`/assets?projectId=${project.id}`}>{t("assets.viewAll")} <ArrowUpRight size={14} /></Link></div>
     {loading ? <div className="generation-empty">{t("assets.loading")}</div> : assets.length === 0 ? <p className="usage-empty">{t("assets.projectEmpty")}</p> : <div className="project-assets-grid">{assets.map((asset) => <Link href={`/assets?projectId=${project.id}`} className="project-asset-tile" key={asset.id}>
       <span className={`project-asset-preview project-asset-preview-${asset.assetType}`}>{asset.hasFile && asset.canPreview && asset.assetType === "image" ? <img src={assetFileUrl(asset.id, true)} alt="" loading="lazy" /> : <AssetTypeIcon type={asset.assetType} size={23} />}</span>
-      <span className="project-asset-copy"><strong>{asset.name}</strong><small>{t(`assets.type.${asset.assetType}`)} · {new Intl.DateTimeFormat(locale, { dateStyle: "medium" }).format(new Date(asset.createdAt))}</small></span>
+      <span className="project-asset-copy"><strong>{asset.name}</strong><small>{t(`assets.type.${asset.assetType}`)} · {new Intl.DateTimeFormat(localeTag(locale), { dateStyle: "medium" }).format(new Date(asset.createdAt))}</small></span>
       <ArrowUpRight size={14} className="project-asset-arrow" />
     </Link>)}</div>}
   </section>;
