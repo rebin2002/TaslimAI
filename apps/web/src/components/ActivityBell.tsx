@@ -7,6 +7,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
 import { api, type NotificationItem, type NotificationList } from "@/lib/api";
+import { applyAllNotificationsRead, applyNotificationRead } from "@/lib/notificationReadState";
 
 const localeMap = { en: "en-US", ar: "ar", ku: "ku-Arab" } as const;
 const notificationLabels = {
@@ -76,6 +77,7 @@ export function NotificationBell({ unreadCount }: Readonly<{ unreadCount: number
   const [loading, setLoading] = useState(false);
   const [workingId, setWorkingId] = useState<string | null>(null);
   const [panelError, setPanelError] = useState("");
+  const resultRef = useRef<NotificationList | null>(null);
   const panelId = `notification-panel-${useId().replaceAll(":", "")}`;
   const panelTitleId = `${panelId}-title`;
   const popoverRef = useRef<HTMLDivElement>(null);
@@ -86,6 +88,7 @@ export function NotificationBell({ unreadCount }: Readonly<{ unreadCount: number
   useEffect(() => {
     // Do not retain the previous workspace's panel or mutation state.
     /* eslint-disable react-hooks/set-state-in-effect */
+    resultRef.current = null;
     setResult(null);
     setOpen(false);
     setLoading(false);
@@ -123,6 +126,7 @@ export function NotificationBell({ unreadCount }: Readonly<{ unreadCount: number
     try {
       const next = await api.listNotifications(workspaceId, 1, 6);
       if (activeWorkspaceId.current !== workspaceId) return;
+      resultRef.current = next;
       setResult(next);
     } catch {
       if (activeWorkspaceId.current !== workspaceId) return;
@@ -141,10 +145,14 @@ export function NotificationBell({ unreadCount }: Readonly<{ unreadCount: number
     try {
       await api.markNotificationRead(workspaceId, item.id);
       if (activeWorkspaceId.current !== workspaceId) return false;
-      const nextUnreadCount = Math.max(0, (result?.unreadCount ?? unreadCount) - 1);
       const readAt = new Date().toISOString();
-      setResult((current) => current ? { ...current, unreadCount: Math.max(0, current.unreadCount - 1), items: current.items.map((entry) => entry.id === item.id ? { ...entry, isRead: true, readAt: entry.readAt ?? readAt } : entry) } : current);
-      publishNotificationUnreadCount(workspaceId, nextUnreadCount);
+      const current = resultRef.current;
+      if (current) {
+        const update = applyNotificationRead(current, item.id, readAt);
+        resultRef.current = update.next;
+        setResult(update.next);
+        if (update.unreadCountChanged) publishNotificationUnreadCount(workspaceId, update.next.unreadCount);
+      }
       return true;
     } catch {
       if (activeWorkspaceId.current === workspaceId) setPanelError(t("notification.readError"));
@@ -170,8 +178,13 @@ export function NotificationBell({ unreadCount }: Readonly<{ unreadCount: number
       await api.markAllNotificationsRead(workspaceId);
       if (activeWorkspaceId.current !== workspaceId) return;
       const readAt = new Date().toISOString();
-      setResult((current) => current ? { ...current, unreadCount: 0, items: current.items.map((item) => item.isRead ? item : { ...item, isRead: true, readAt: item.readAt ?? readAt }) } : current);
-      publishNotificationUnreadCount(workspaceId, 0);
+      const current = resultRef.current;
+      if (current) {
+        const update = applyAllNotificationsRead(current, readAt);
+        resultRef.current = update.next;
+        setResult(update.next);
+        if (update.unreadCountChanged) publishNotificationUnreadCount(workspaceId, update.next.unreadCount);
+      }
     } catch {
       if (activeWorkspaceId.current === workspaceId) setPanelError(t("notification.readError"));
     } finally {
