@@ -1,8 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GenerationJob } from "./api";
-import { displayResearchProgress, isResearchSourceReady, isSafeExternalUrl, mergeResearchSources, parseResearchJobResult, researchStudioState } from "./researchStudioState";
+import { clearResearchActiveJobId, displayResearchProgress, isResearchSourceReady, isRestorableResearchJob, isResearchJob, isSafeExternalUrl, mergeResearchSources, parseResearchJobResult, persistResearchActiveJobId, readResearchActiveJobId, researchActiveJobStorageKey, researchStudioState } from "./researchStudioState";
 
 const job = (status: GenerationJob["status"], resultJson: string | null = null, progressPercent = 70): GenerationJob => ({ id: "job-1", workspaceId: "workspace-1", projectId: null, jobType: "research.generate", status, title: "Research", progressPercent, resultJson, errorCode: null, errorMessage: null, cancellationRequested: false, createdAt: "2026-01-01", queuedAt: null, startedAt: null, completedAt: null, failedAt: null, cancelledAt: null, outputs: [] });
+afterEach(() => vi.unstubAllGlobals());
 
 describe("researchStudioState", () => {
   it("caps nonterminal progress and honors terminal completion", () => { expect(displayResearchProgress(job("Running", null, 100))).toBe(99); expect(displayResearchProgress(job("Succeeded", '{"assetId":"asset-1"}', 100))).toBe(100); });
@@ -10,4 +11,18 @@ describe("researchStudioState", () => {
   it("uses completed-unavailable when a successful job lacks an asset result", () => { expect(researchStudioState(job("Succeeded", '{"title":"Report"}'), parseResearchJobResult(job("Succeeded", '{"title":"Report"}')))).toBe("completed-unavailable"); });
   it("keeps embedded sources when protected source details are unavailable", () => { const result = parseResearchJobResult(job("Succeeded", '{"assetId":"asset-1","title":"Report","sources":[{"citationId":"S1","title":"Official source","domain":"example.gov","url":"https://example.gov","sourceType":"web"}]}')); const merged = mergeResearchSources(result, []); expect(merged?.sources?.[0].citationId).toBe("S1"); expect(merged?.sourceCount).toBe(1); });
   it("accepts only ready extracted source files and safe HTTP links", () => { expect(isResearchSourceReady({ extension: ".xlsx", status: "Ready", textExtractionStatus: "Ready" })).toBe(true); expect(isResearchSourceReady({ extension: ".png", status: "Ready", textExtractionStatus: "Ready" })).toBe(false); expect(isSafeExternalUrl("https://example.gov/source")).toBe(true); expect(isSafeExternalUrl("javascript:alert(1)")).toBe(false); });
+  it("validates restored jobs and keeps active-job storage workspace-scoped", () => {
+    expect(isResearchJob(job("Running"))).toBe(true);
+    expect(isRestorableResearchJob(job("Running"), "workspace-1")).toBe(true);
+    expect(isRestorableResearchJob({ ...job("Running"), workspaceId: "workspace-2" }, "workspace-1")).toBe(false);
+    expect(isResearchJob({ ...job("Running"), jobType: "presentation.generate" })).toBe(false);
+    const values = new Map<string, string>();
+    vi.stubGlobal("window", { sessionStorage: { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => values.set(key, value), removeItem: (key: string) => values.delete(key) } });
+    persistResearchActiveJobId("workspace-1", "research-job-1");
+    expect(values.get(researchActiveJobStorageKey("workspace-1"))).toBe("research-job-1");
+    expect(readResearchActiveJobId("workspace-1")).toBe("research-job-1");
+    expect(readResearchActiveJobId("workspace-2")).toBeNull();
+    clearResearchActiveJobId("workspace-1");
+    expect(readResearchActiveJobId("workspace-1")).toBeNull();
+  });
 });

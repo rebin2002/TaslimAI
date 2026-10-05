@@ -1,7 +1,58 @@
 import type { Asset, GenerationJob, VoiceJobResult } from "./api";
 
+const terminalStatuses = new Set<GenerationJob["status"]>(["Succeeded", "Failed", "Cancelled"]);
+const activeJobStoragePrefix = "taslim:voice-generation:";
+
+export function voiceActiveJobStorageKey(workspaceId: string): string {
+  return `${activeJobStoragePrefix}${workspaceId}`;
+}
+
+export function readVoiceActiveJobId(workspaceId: string): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const jobId = window.sessionStorage.getItem(voiceActiveJobStorageKey(workspaceId));
+    return jobId?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+export function persistVoiceActiveJobId(workspaceId: string, jobId: string): void {
+  if (typeof window === "undefined" || !jobId.trim()) return;
+  try {
+    window.sessionStorage.setItem(voiceActiveJobStorageKey(workspaceId), jobId);
+  } catch {
+    // Storage may be unavailable; in-memory polling remains authoritative.
+  }
+}
+
+export function clearVoiceActiveJobId(workspaceId: string): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.removeItem(voiceActiveJobStorageKey(workspaceId));
+  } catch {
+    // Storage may be unavailable.
+  }
+}
+
 export function isVoiceJob(job: GenerationJob | null): boolean {
-  return job?.jobType === "voice.generate";
+  return job?.jobType.trim().toLowerCase() === "voice.generate";
+}
+
+export function isRestorableVoiceJob(job: GenerationJob | null, workspaceId: string): boolean {
+  return !!job && job.workspaceId === workspaceId && isVoiceJob(job);
+}
+
+export function isVoiceTerminal(job: GenerationJob | null): boolean {
+  return !!job && terminalStatuses.has(job.status);
+}
+
+export function shouldPollVoiceJob(job: GenerationJob | null): boolean {
+  return !!job && !isVoiceTerminal(job);
+}
+
+export function nextVoicePollDelay(job: GenerationJob | null, retryAttempt = 0): number | null {
+  return shouldPollVoiceJob(job) ? Math.min(650 * Math.max(1, retryAttempt + 1), 2_800) : null;
 }
 
 export function isVoiceAsset(asset: Asset): boolean {
