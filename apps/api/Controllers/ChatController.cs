@@ -236,6 +236,13 @@ public sealed class ChatController(
                     return;
                 }
 
+                var claimed = await TryClaimFailedAssistantAsync(existing.Id, cancellationToken);
+                if (!claimed)
+                {
+                    await WriteEventAsync("message.failed", new { code = "MESSAGE_IN_PROGRESS", message = "That regeneration is already in progress." }, cancellationToken);
+                    return;
+                }
+                await db.Entry(existing).ReloadAsync(cancellationToken);
                 assistant = existing;
                 ResetAssistantForRetry(assistant);
             }
@@ -480,11 +487,10 @@ public sealed class ChatController(
             if (existingAssistant is null) return PreparedChat.Failure(ApiResults.Error(this, StatusCodes.Status409Conflict, "MESSAGE_IN_PROGRESS", "That message is already being generated."));
             if (existingAssistant.Status == ChatMessageStatus.Failed)
             {
-                existingAssistant.Status = ChatMessageStatus.Pending;
-                existingAssistant.Content = string.Empty;
-                existingAssistant.ProviderKey = null;
-                existingAssistant.ModelKey = null;
-                await db.SaveChangesAsync(cancellationToken);
+                var claimed = await TryClaimFailedAssistantAsync(existingAssistant.Id, cancellationToken);
+                if (!claimed) return PreparedChat.Failure(ApiResults.Error(this, StatusCodes.Status409Conflict, "MESSAGE_IN_PROGRESS", "That message is already being generated."));
+                await db.Entry(existingAssistant).ReloadAsync(cancellationToken);
+                ResetAssistantForRetry(existingAssistant);
                 return PreparedChat.New(conversation, existingUser, existingAssistant);
             }
             return PreparedChat.FromExisting(new SendMessageResponse(ToDto(conversation), ToMessageDto(existingUser), ToMessageDto(existingAssistant, string.Equals(existingAssistant.ProviderKey, "mock", StringComparison.OrdinalIgnoreCase))));
@@ -494,9 +500,6 @@ public sealed class ChatController(
         if (conversation.Title == "New chat") conversation.Title = BuildTitle(content);
         conversation.UpdatedAt = now;
         conversation.LastMessageAt = now;
-        var userSequence = conversation.NextMessageSequence + 1;
-        var assistantSequence = userSequence + 1;
-        conversation.NextMessageSequence = assistantSequence;
         var userMessage = new ChatMessage
         {
             Id = Guid.NewGuid(),
@@ -506,7 +509,7 @@ public sealed class ChatController(
             Content = content,
             Status = ChatMessageStatus.Completed,
             CreatedAt = now,
-            Sequence = userSequence,
+            Sequence = 0,
         };
         var assistantMessage = new ChatMessage
         {
@@ -516,17 +519,25 @@ public sealed class ChatController(
             Content = string.Empty,
             Status = ChatMessageStatus.Pending,
             CreatedAt = now.AddTicks(1),
-            Sequence = assistantSequence,
+            Sequence = 0,
         };
         db.ChatMessages.AddRange(userMessage, assistantMessage);
         var attachmentError = await AttachFilesAsync(conversation, userMessage, request.AttachmentIds, cancellationToken);
         if (attachmentError is not null) return PreparedChat.Failure(attachmentError);
+        await using var sequenceTransaction = await db.Database.BeginTransactionAsync(cancellationToken);
+        var assistantSequence = await ReserveMessageSequencePairAsync(conversation.Id, cancellationToken);
+        userMessage.Sequence = assistantSequence - 1;
+        assistantMessage.Sequence = assistantSequence;
+        conversation.NextMessageSequence = assistantSequence;
+        db.Entry(conversation).Property(item => item.NextMessageSequence).IsModified = false;
         try
         {
             await db.SaveChangesAsync(cancellationToken);
+            await sequenceTransaction.CommitAsync(cancellationToken);
         }
         catch (DbUpdateException)
         {
+            await sequenceTransaction.RollbackAsync(CancellationToken.None);
             var duplicate = await db.ChatMessages.AsNoTracking().FirstOrDefaultAsync(message => message.ConversationId == conversationId && message.RequestId == requestId, cancellationToken);
             if (duplicate is not null) return PreparedChat.Failure(ApiResults.Error(this, StatusCodes.Status409Conflict, "MESSAGE_IN_PROGRESS", "That message is already being generated."));
             throw;
@@ -611,9 +622,9 @@ public sealed class ChatController(
         return contextBuilder.Build(history, project?.Instructions, project?.ContextNotes, memories, fileContexts);
     }
 
-    private async Task<IActionResult?> AttachFilesAsync(Conversation conversation, ChatMessage message, IReadOnlyCollection<Guid> requestedIds, CancellationToken cancellationToken)
+    private async Task<IActionResult?> AttachFilesAsync(Conversation conversation, ChatMessage message, IReadOnlyCollection<Guid>? requestedIds, CancellationToken cancellationToken)
     {
-        var ids = requestedIds.Distinct().ToList();
+        var ids = requestedIds?.Distinct().ToList() ?? [];
         var maximumAttachments = Math.Clamp(fileOptions.Value.MaxAttachmentsPerMessage, 1, 20);
         if (ids.Count > maximumAttachments) return ApiResults.Validation(this, $"You can attach up to {maximumAttachments} files to one message.");
         if (ids.Count == 0) return null;
@@ -683,6 +694,41 @@ public sealed class ChatController(
         assistant.ActualCost = null;
         assistant.LatencyMs = null;
         assistant.FinishReason = null;
+    }
+    private async Task<bool> TryClaimFailedAssistantAsync(Guid assistantId, CancellationToken cancellationToken)
+    {
+        // The conditional update is the idempotency fence for retries from
+        // multiple tabs/devices. Only one caller may move a failed assistant
+        // back to Pending; every loser must observe MESSAGE_IN_PROGRESS.
+        var updated = await db.ChatMessages
+            .Where(message => message.Id == assistantId && message.Role == ChatMessageRole.Assistant && message.Status == ChatMessageStatus.Failed)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(message => message.Status, ChatMessageStatus.Pending), cancellationToken);
+        return updated == 1;
+    }
+
+    private async Task<long> ReserveMessageSequencePairAsync(Guid conversationId, CancellationToken cancellationToken)
+    {
+        // Reserve both message slots with a compare-and-swap update. The
+        // transaction keeps the reservation and message inserts atomic while
+        // the conditional update serializes concurrent writers without
+        // provider-specific locking SQL.
+        const int maxAttempts = 64;
+        for (var attempt = 0; attempt < maxAttempts; attempt++)
+        {
+            var current = await db.Conversations.AsNoTracking()
+                .Where(item => item.Id == conversationId)
+                .Select(item => item.NextMessageSequence)
+                .SingleAsync(cancellationToken);
+            var assistantSequence = current + 2;
+            var updated = await db.Conversations
+                .Where(item => item.Id == conversationId && item.NextMessageSequence == current)
+                .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.NextMessageSequence, assistantSequence), cancellationToken);
+            if (updated == 1) return assistantSequence;
+
+            await Task.Delay(TimeSpan.FromMilliseconds(Math.Min(25, attempt + 1)), cancellationToken);
+        }
+
+        throw new InvalidOperationException($"Could not reserve conversation message sequence after {maxAttempts} attempts.");
     }
 
     private Task<UsageTransaction> BeginUsageAsync(PreparedChat prepared, CancellationToken cancellationToken) => usageLedger.GetOrCreatePendingAsync(
