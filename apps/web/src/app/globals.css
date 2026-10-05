@@ -2864,6 +2864,8 @@ body { background: var(--canvas); }
   .notification-panel, .notification-card { scroll-behavior: auto; }
 }
 
+.global-search-pagination { display: flex; justify-content: center; padding-top: 20px; }
+.global-search-pagination .secondary-button { min-width: 180px; justify-content: center; }
 
 .movie-edit-module { gap: 18px; }
 .movie-edit-toolbar { display: flex; align-items: center; justify-content: flex-end; gap: 10px; }
