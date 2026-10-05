@@ -316,7 +316,7 @@ public sealed class AutopilotOrchestrator(
             return false;
         }
 
-        if (!AutopilotTaskOutcomes.TryNormalize(signal.Outcome, out var normalizedOutcome))
+        if (!AutopilotInputValidation.TryNormalizeOutcome(signal.Outcome, out var normalizedOutcome))
         {
             intakeEvent.Status = AutopilotEventStatuses.RejectedInvalid;
             intakeEvent.Reason = "outcome_invalid";

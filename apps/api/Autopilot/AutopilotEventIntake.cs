@@ -110,7 +110,7 @@ public sealed class AutopilotEventIntake(
         if (signal is null || string.IsNullOrWhiteSpace(signal.WaveKey) || string.IsNullOrWhiteSpace(signal.TaskId))
             return await RejectAsync(request, AutopilotEventStatuses.RejectedInvalid, "signal_incomplete", cancellationToken);
 
-        if (!AutopilotTaskOutcomes.TryNormalize(signal.Outcome, out var outcome))
+        if (!AutopilotInputValidation.TryNormalizeOutcome(signal.Outcome, out var outcome))
             return await RejectAsync(request, AutopilotEventStatuses.RejectedInvalid, "outcome_invalid", cancellationToken);
 
         var payloadHash = authenticator.ComputePayloadHash(request.PayloadJson);

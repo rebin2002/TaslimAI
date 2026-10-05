@@ -66,16 +66,6 @@ public static class AutopilotTaskOutcomes
     {
         Succeeded, Failed, Blocked, Cancelled,
     };
-
-    /// <summary>
-    /// Normalizes a completion outcome only when it is explicitly allowlisted.
-    /// Missing or unknown values must never be interpreted as success.
-    /// </summary>
-    public static bool TryNormalize(string? value, out string normalized)
-    {
-        normalized = (value ?? string.Empty).Trim().ToLowerInvariant();
-        return Supported.Contains(normalized);
-    }
 }
 
 /// <summary>
