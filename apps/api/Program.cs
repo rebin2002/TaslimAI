@@ -108,6 +108,12 @@ builder.Services.AddIdentity<ApplicationUser, IdentityRole<Guid>>(options =>
     })
     .AddEntityFrameworkStores<TaslimDbContext>()
     .AddDefaultTokenProviders();
+// The application already loads the current user on every authenticated request
+// for active-account enforcement. Validate Identity's security stamp on that
+// same cadence so password changes and explicit revocations do not leave other
+// cookies usable during Identity's default 30-minute validation interval.
+builder.Services.Configure<SecurityStampValidatorOptions>(options =>
+    options.ValidationInterval = TimeSpan.Zero);
 builder.Services.AddAuthorization(options =>
 {
     options.AddPolicy(AdminPolicies.Usage, policy =>
