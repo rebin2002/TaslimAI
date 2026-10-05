@@ -104,6 +104,8 @@ recorded as `invalid_transition` rather than guessed.
   never re-applied.
 * A repeated identity with a **different** payload is refused (`payload_conflict`); the controller will not
   reinterpret history.
+* Completion outcomes are an explicit allowlist (`succeeded`, `failed`, `blocked`, `cancelled`). Missing or unknown
+  outcomes are rejected and audited as invalid; they are never coerced to success.
 * Concurrent duplicate inserts are resolved by the unique index; the losing writer reports `duplicate` instead of
   creating a second row.
 * Gate evaluation is idempotent per `(run, gate kind, candidate SHA)`, so replaying an event can never launch a
