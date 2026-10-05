@@ -271,6 +271,18 @@ public sealed class MovieProductionGenerationOrchestrator(
             throw;
         }
 
+        // CreateAsync is idempotent at the GenerationJob row, but the clip and
+        // production version are created before that row. Two identical requests
+        // can therefore both create provisional clips and then receive the same
+        // canonical job. Do not attach the losing request's clip/version to that
+        // job; replay the winner after its relationship rows become visible.
+        if (normalizedKey is not null && !JobTargetsClip(job, clip.Id))
+        {
+            db.MovieClips.Remove(clip);
+            await db.SaveChangesAsync(CancellationToken.None);
+            return await FindExistingAfterConcurrentCreateAsync(userId, request, normalizedKey, cancellationToken);
+        }
+
         clip.GenerationJobId = job.Id;
         clip.GenerationJob = job;
         clip.Status = MovieClipStatuses.Queued;
@@ -372,6 +384,45 @@ public sealed class MovieProductionGenerationOrchestrator(
         var target = input.TargetResolution ?? MovieResolutionTiers.P1080;
         var source = input.SourceResolution ?? target;
         return new(version, existingJob, clip, MovieProductionOrchestrationStateMachine.From(existingJob.Status), source, target, input.ProcessingPath ?? MovieResolutionPathKinds.Native, MovieGenerationCostEstimate.Unevaluated("idempotent_replay"));
+    }
+
+    private async Task<MovieProductionOrchestrationResult?> FindExistingAfterConcurrentCreateAsync(
+        Guid userId,
+        MovieProductionGenerationRequest request,
+        string idempotencyKey,
+        CancellationToken cancellationToken)
+    {
+        const int maxAttempts = 20;
+        for (var attempt = 0; attempt < maxAttempts; attempt++)
+        {
+            try
+            {
+                return await FindExistingAsync(userId, request, idempotencyKey, cancellationToken);
+            }
+            catch (MovieProductionValidationException exception)
+                when (exception.Code == "IDEMPOTENCY_INCOMPLETE" && attempt + 1 < maxAttempts)
+            {
+                // The winning request commits the job before its version/clip
+                // relationship update. Give that short, durable write window a
+                // bounded replay path instead of surfacing a false incomplete error.
+                await Task.Delay(TimeSpan.FromMilliseconds(25), cancellationToken);
+            }
+        }
+
+        return await FindExistingAsync(userId, request, idempotencyKey, cancellationToken);
+    }
+
+    internal static bool JobTargetsClip(GenerationJob job, Guid clipId)
+    {
+        try
+        {
+            var input = JsonSerializer.Deserialize<MovieGenerationInput>(job.InputJson);
+            return clipId != Guid.Empty && input?.MovieClipId == clipId;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
     }
 
     private static ProductionPlan BuildPlan(MovieShot shot, MovieProductionGenerationRequest request)

@@ -213,6 +213,7 @@ export function AdminOperationsView() {
           <div className="account-card operations-card"><h3>Running jobs</h3>{dashboard.generation.runningJobs.length ? <div className="operations-detail-list">{dashboard.generation.runningJobs.map((job) => <div key={job.jobId}><span><strong>{job.jobType}</strong><small>Started {dateTime(job.startedAt ?? job.queuedAt ?? job.createdAt)}</small></span><b>{job.progressPercent}%</b></div>)}</div> : <p className="operations-empty">No jobs are currently running.</p>}</div>
           <div className="account-card operations-card"><h3>Recent failures</h3>{dashboard.generation.recentFailures.length ? <div className="operations-detail-list">{dashboard.generation.recentFailures.map((job) => <div key={job.jobId}><span><strong>{job.jobType}</strong><small>{job.errorCode ?? "No error code recorded"} · {dateTime(job.failedAt)}</small></span></div>)}</div> : <p className="operations-empty">No failed jobs recorded.</p>}</div>
         </div>
+        <div className="account-card operations-card"><h3>Failure codes in selected range</h3>{dashboard.generation.failuresByCode.length ? <CountList items={dashboard.generation.failuresByCode} /> : <p className="operations-empty">No failed jobs recorded in the selected range.</p>}</div>
       </section>
 
       <section className="operations-section" aria-labelledby="operations-usage">
