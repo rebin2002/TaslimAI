@@ -184,10 +184,15 @@ export function NotificationBell({ unreadCount }: Readonly<{ unreadCount: number
   }
 
   async function openNotification(item: NotificationItem, event: React.MouseEvent<HTMLAnchorElement>) {
-    setOpen(false);
-    if (item.isRead) return;
+    if (item.isRead) {
+      setOpen(false);
+      return;
+    }
     event.preventDefault();
-    if (await markRead(item)) router.push(item.destination);
+    if (await markRead(item)) {
+      setOpen(false);
+      router.push(item.destination);
+    }
   }
 
   async function markAllRead() {
