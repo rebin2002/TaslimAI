@@ -492,13 +492,12 @@ public sealed class MovieDialogueProductionService(
 
     public async Task<MovieDialogueLineDto?> ApproveTakeAsync(Guid userId, Guid takeId, MovieDialogueTakeApprovalRequest request, CancellationToken cancellationToken)
     {
-        var take = await db.MovieDialogueTakes.Include(item => item.DialogueLine).ThenInclude(item => item.MovieClip).ThenInclude(item => item.MovieProject).SingleOrDefaultAsync(item => item.Id == takeId, cancellationToken);
+        var take = await db.MovieDialogueTakes.Include(item => item.DialogueLine).ThenInclude(item => item.MovieClip).SingleOrDefaultAsync(item => item.Id == takeId, cancellationToken);
         if (take is null || !await authorization.CanAsync(userId, take.DialogueLine.MovieClip.MovieProjectId, MovieOperationalActions.TakeApproval, cancellationToken)) return null;
         var decision = request.Decision?.Trim() ?? string.Empty;
         if (decision is not (MovieDialogueApprovalDecisions.Approved or MovieDialogueApprovalDecisions.Rejected) || request.Comment?.Length > 4_000)
             throw new MovieDialogueValidationException("MOVIE_DIALOGUE_APPROVAL_INVALID", "Choose an approval decision and keep the comment within 4,000 characters.");
         if (!MovieDialogueTakeLifecycle.CanApprove(take.Status)) throw new MovieDialogueValidationException("MOVIE_DIALOGUE_TAKE_NOT_REVIEWABLE", "Only a completed dialogue take can be approved.");
-        if (decision == MovieDialogueApprovalDecisions.Approved) await EnsureReadyOutputAsync(take, cancellationToken);
         var now = DateTime.UtcNow;
         db.MovieDialogueTakeApprovals.Add(new MovieDialogueTakeApproval { Id = Guid.NewGuid(), MovieDialogueTakeId = take.Id, UserId = userId, Decision = decision, Comment = Clean(request.Comment), CreatedAt = now });
         take.Status = decision == MovieDialogueApprovalDecisions.Approved ? MovieDialogueTakeStatuses.Approved : MovieDialogueTakeStatuses.Rejected;
@@ -513,10 +512,9 @@ public sealed class MovieDialogueProductionService(
 
     public async Task<MovieDialogueLineDto?> SelectTakeAsync(Guid userId, Guid takeId, CancellationToken cancellationToken)
     {
-        var take = await db.MovieDialogueTakes.Include(item => item.DialogueLine).ThenInclude(item => item.MovieClip).ThenInclude(item => item.MovieProject).SingleOrDefaultAsync(item => item.Id == takeId, cancellationToken);
+        var take = await db.MovieDialogueTakes.Include(item => item.DialogueLine).ThenInclude(item => item.MovieClip).SingleOrDefaultAsync(item => item.Id == takeId, cancellationToken);
         if (take is null || !await authorization.CanAsync(userId, take.DialogueLine.MovieClip.MovieProjectId, MovieOperationalActions.TakeSelect, cancellationToken)) return null;
         if (!MovieDialogueTakeLifecycle.CanSelect(take.Status)) throw new MovieDialogueValidationException("MOVIE_DIALOGUE_TAKE_NOT_APPROVED", "Approve the dialogue take before selecting it.");
-        await EnsureReadyOutputAsync(take, cancellationToken);
         var now = DateTime.UtcNow;
         var previous = await db.MovieDialogueTakes.Where(item => item.MovieDialogueLineId == take.MovieDialogueLineId && item.Id != take.Id && item.Status == MovieDialogueTakeStatuses.Selected).ToListAsync(cancellationToken);
         foreach (var item in previous) { item.Status = MovieDialogueTakeStatuses.Superseded; item.SelectedAt = null; item.SelectedByUserId = null; item.UpdatedAt = now; }
@@ -536,32 +534,6 @@ public sealed class MovieDialogueProductionService(
     private static MovieDialogueClipDto ToDto(MovieClip clip) => new(clip.Id, clip.MovieProjectId, clip.DialogueLines.OrderBy(item => item.Sequence).Select(ToDto).ToArray());
     private static MovieDialogueLineDto ToDto(MovieDialogueLine line) => new(line.Id, line.MovieClipId, line.MovieCharacterId, line.SelectedTakeId, line.Sequence, line.SpeakerName, line.Language, line.Text, line.StartMilliseconds, line.EndMilliseconds, line.DeliveryNotes, line.Status, line.CreatedAt, line.UpdatedAt, line.Takes.OrderBy(item => item.VersionNumber).Select(ToDto).ToArray());
     private static MovieDialogueTakeDto ToDto(MovieDialogueTake take) => new(take.Id, take.MovieDialogueLineId, take.VersionNumber, take.Label, take.Status, take.GenerationJobId, take.AssetId, take.StoredFileId, take.DurationMilliseconds, take.MetadataJson, take.CreatedAt, take.UpdatedAt, take.ApprovedAt, take.SelectedAt, take.Approvals.OrderByDescending(item => item.CreatedAt).Select(item => new MovieDialogueTakeApprovalDto(item.Id, item.UserId, item.Decision, item.Comment, item.CreatedAt)).ToArray());
-    private async Task EnsureReadyOutputAsync(MovieDialogueTake take, CancellationToken cancellationToken)
-    {
-        if (!MovieDialogueTakeLifecycle.HasPublishedAsset(take.AssetId, take.StoredFileId))
-            throw new MovieDialogueValidationException("MOVIE_DIALOGUE_TAKE_OUTPUT_NOT_READY", "The dialogue take must have a published audio asset before it can be approved or selected.");
-
-        var movie = take.DialogueLine.MovieClip.MovieProject;
-        var asset = await db.Assets.AsNoTracking()
-            .Include(item => item.StoredFile)
-            .FirstOrDefaultAsync(item => item.Id == take.AssetId
-                && item.WorkspaceId == movie.WorkspaceId
-                && item.ProjectId == movie.ProjectId
-                && item.StoredFileId == take.StoredFileId, cancellationToken);
-        var storedFile = asset?.StoredFile;
-        if (asset is null
-            || asset.Status != AssetStatus.Active
-            || !string.Equals(asset.AssetType, AssetTypes.Audio, StringComparison.OrdinalIgnoreCase)
-            || storedFile is null
-            || storedFile.Status != StoredFileStatus.Ready
-            || storedFile.WorkspaceId != movie.WorkspaceId
-            || storedFile.ProjectId != movie.ProjectId
-            || storedFile.ConversationId.HasValue
-            || storedFile.SizeBytes <= 0
-            || string.IsNullOrWhiteSpace(storedFile.ContentType)
-            || !storedFile.ContentType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase))
-            throw new MovieDialogueValidationException("MOVIE_DIALOGUE_TAKE_OUTPUT_NOT_READY", "The dialogue take audio output is missing, stale, out of scope, or not ready.");
-    }
     private static void ValidateLine(MovieDialogueLineRequest request)
     {
         if ((string.IsNullOrWhiteSpace(request.SpeakerName) && !request.MovieCharacterId.HasValue) || request.SpeakerName.Length > 160 || string.IsNullOrWhiteSpace(request.Text) || request.Text.Length > 10_000

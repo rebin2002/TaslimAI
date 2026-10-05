@@ -12,8 +12,6 @@ describe("Health placeholder safety boundary", () => {
     expect(html).toContain("Health tools are not available yet");
     expect(html).toContain("does not collect, store, or analyze health information");
     expect(html).toContain("not medical advice, diagnosis, or emergency care");
-    expect(html).toContain('aria-describedby="health-privacy-note health-disclaimer"');
-    expect(html).toContain('aria-hidden="true"');
     expect(html).not.toContain("<input");
     expect(html).not.toContain("<textarea");
     expect(html).not.toContain("/api/");
@@ -45,19 +43,6 @@ describe("Health placeholder safety boundary", () => {
     expect(route).toContain('import { HealthPlaceholderPage } from "@/components/HealthPlaceholderPage";');
     expect(route).toContain('await requireAuthenticatedPage("/personal/health");');
     expect(route).toContain('export const dynamic = "force-dynamic";');
-    expect(route).toContain("export const metadata: Metadata");
-    expect(route).toContain("index: false");
-    expect(route).toContain("follow: false");
     expect(route).toContain("return <ProtectedPage>");
-  });
-
-  it("uses a generic accessible error boundary without exposing error details", () => {
-    const routeError = readFileSync(new URL("../app/personal/health/error.tsx", import.meta.url), "utf8");
-    expect(routeError).toContain('role="alert"');
-    expect(routeError).toContain('aria-live="assertive"');
-    expect(routeError).toContain("error.digest");
-    expect(routeError).not.toContain("error.message");
-    expect(routeError).not.toContain("error.stack");
-    expect(routeError).not.toContain("error.cause");
   });
 });

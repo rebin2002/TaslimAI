@@ -132,7 +132,7 @@ public sealed class SocialGenerationJobHandler(
     {
         if (input.AssetIds.Count == 0) return [];
         var assets = await db.Assets.AsNoTracking().Include(asset => asset.StoredFile).Where(asset => asset.WorkspaceId == workspaceId && input.AssetIds.Contains(asset.Id)).ToListAsync(cancellationToken);
-        if (assets.Count != input.AssetIds.Count || assets.Any(asset => asset.Status != AssetStatus.Active || asset.StoredFileId is null || asset.StoredFile is not { Status: StoredFileStatus.Ready } || asset.StoredFile.WorkspaceId != workspaceId))
+        if (assets.Count != input.AssetIds.Count || assets.Any(asset => asset.Status != AssetStatus.Active))
             throw new SocialGenerationStageException(SocialGenerationStages.Context, GenerationJobErrorCodes.SocialContextUnavailable, "One or more selected assets are unavailable.");
         return input.AssetIds.Select(id => assets.First(asset => asset.Id == id)).ToArray();
     }
