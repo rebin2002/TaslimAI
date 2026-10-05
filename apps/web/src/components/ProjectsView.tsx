@@ -8,6 +8,7 @@ import { api, type Project, type ProjectInput } from "@/lib/api";
 import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
 import { ProjectForm } from "@/components/ProjectForm";
+import { createRequestGuard, isAbortError } from "@/lib/requestLifecycle";
 
 const typeKey = (type: string) => `project.type.${type.toLowerCase()}`;
 
@@ -35,25 +36,39 @@ export function ProjectsView() {
   const [editing, setEditing] = useState<Project | undefined>();
   const [error, setError] = useState("");
   const formOpenerRef = useRef<HTMLElement | null>(null);
+  const loadGuard = useRef(createRequestGuard());
   const workspaceTypeLabel = workspace?.type === "Business" ? t("projects.businessWorkspace") : t("projects.personalWorkspace");
   const workspaceRoleLabel = workspace ? t(`projects.role.${workspace.role.toLowerCase()}`) : "";
 
   const load = useCallback(async () => {
-    if (!workspace) return;
+    if (!workspace) {
+      loadGuard.current.cancel();
+      setProjects([]);
+      setLoading(false);
+      return;
+    }
+    const request = loadGuard.current.begin();
     setLoading(true);
     setError("");
     try {
-      setProjects(await api.listProjects(workspace.id, status));
+      const nextProjects = await api.listProjects(workspace.id, status, request.signal);
+      if (!request.isCurrent()) return;
+      setProjects(nextProjects);
     } catch (caught) {
+      if (!request.isCurrent() || isAbortError(caught)) return;
       setError(caught instanceof Error ? caught.message : t("projects.loadError"));
     } finally {
-      setLoading(false);
+      if (request.isCurrent()) setLoading(false);
     }
   }, [status, t, workspace]);
 
   // Loading remote projects after the workspace or tab changes is an external synchronization.
-  // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    const guard = loadGuard.current;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void load();
+    return () => guard.cancel();
+  }, [load]);
 
   async function create(input: ProjectInput) {
     if (!workspace) return;
@@ -105,8 +120,9 @@ export function ProjectsView() {
       <button role="tab" aria-selected={status === "Archived"} className={status === "Archived" ? "is-active" : ""} onClick={() => setStatus("Archived")}>{t("projects.archived")} <span>{status === "Archived" ? projects.length : ""}</span></button>
     </div>
 
-    {error && <div className="inline-error" role="alert">{error}</div>}
+    {error && <div className="inline-error" role="alert"><span>{error}</span> <button type="button" className="text-button" onClick={() => void load()}>{t("error.retry")}</button></div>}
     {loading ? <div className="loading-state"><span className="loading-spinner" /></div> : projects.length === 0 ? <div className="projects-empty"><span className="empty-icon"><FolderOpen size={24} /></span><h2>{status === "Active" ? t("projects.emptyTitle") : t("projects.emptyArchivedTitle")}</h2><p>{status === "Active" ? t("projects.emptyDescription") : t("projects.emptyArchivedDescription")}</p>{status === "Active" && <button className="primary-button" onClick={() => openForm()}><Plus size={16} /> {t("projects.newProject")}</button>}</div> : <div className="project-list project-list-premium">{projects.map((project) => <article className={`project-card project-card-premium ${projectAccent(project.type)}`} key={project.id}>
+    {loading ? <div className="loading-state"><span className="loading-spinner" /></div> : projects.length === 0 ? <div className="projects-empty"><span className="empty-icon"><FolderOpen size={24} /></span><h2>{status === "Active" ? t("projects.emptyTitle") : t("projects.emptyArchivedTitle")}</h2><p>{status === "Active" ? t("projects.emptyDescription") : t("projects.emptyArchivedDescription")}</p>{status === "Active" && <button className="primary-button" onClick={() => openForm()}><Plus size={16} /> {t("projects.newProject")}</button></div> : <div className="project-list project-list-premium">{projects.map((project) => <article className={`project-card project-card-premium ${projectAccent(project.type)}`} key={project.id}>
       <Link href={`/projects/${project.id}`} className="project-card-main">
         <span className="project-card-icon"><FolderOpen size={19} /></span>
         <span className="project-card-copy"><span className="project-card-kicker">{t(typeKey(project.type))}</span><strong>{project.name}</strong><small>{project.description || t("projects.noDescription")}</small></span>

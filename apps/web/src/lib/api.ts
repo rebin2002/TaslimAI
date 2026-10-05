@@ -1,6 +1,7 @@
 import { createSseParser, type TaslimSseEvent } from "./sse";
 import { API_URL, assetFileUrl, assetRepresentationUrl } from "./apiBase";
 import { awaitWithChatStreamWatchdog, CHAT_STREAM_WATCHDOG_TIMEOUT_MS, ChatStreamTransportError } from "./chatStreamTransport";
+import { isAbortError } from "./requestLifecycle";
 
 export type User = {
   id: string;
@@ -761,7 +762,13 @@ async function csrf(forceRefresh = false) {
   if (csrfToken && !forceRefresh) return csrfToken;
   if (csrfRequest && !forceRefresh) return csrfRequest;
   const request = (async () => {
-    const response = await fetch(`${API_URL}/api/auth/csrf`, { credentials: "include", cache: "no-store" });
+    let response: Response;
+    try {
+      response = await fetch(`${API_URL}/api/auth/csrf`, { credentials: "include", cache: "no-store" });
+    } catch (error) {
+      if (isAbortError(error)) throw error;
+      throw new ApiError(503, "The service is temporarily unavailable. Please try again.", undefined, "NETWORK_ERROR");
+    }
     if (!response.ok) throw new Error("CSRF token unavailable");
     const body = await response.json().catch(() => null) as { token?: unknown } | null;
     if (!body || typeof body.token !== "string" || body.token.length === 0) throw new Error("CSRF token unavailable");
@@ -786,7 +793,13 @@ async function request<T>(path: string, init: RequestInit = {}, withCsrf = false
   const headers = new Headers(init.headers);
   headers.set("Content-Type", "application/json");
   if (withCsrf) headers.set("X-CSRF-TOKEN", csrfToken ?? await csrf());
-  const response = await fetch(`${API_URL}${path}`, { ...init, headers, credentials: "include" });
+  let response: Response;
+  try {
+    response = await fetch(`${API_URL}${path}`, { ...init, headers, credentials: "include" });
+  } catch (error) {
+    if (isAbortError(error)) throw error;
+    throw new ApiError(503, "The service is temporarily unavailable. Please try again.", undefined, "NETWORK_ERROR");
+  }
   if (response.status === 204) return undefined as T;
   const body = await response.json().catch(() => null) as T & ErrorBody | null;
   if (!response.ok) {
@@ -803,7 +816,13 @@ async function request<T>(path: string, init: RequestInit = {}, withCsrf = false
 async function requestForm<T>(path: string, form: FormData, withCsrf = false, retryCsrf = true): Promise<T> {
   const headers = new Headers();
   if (withCsrf) headers.set("X-CSRF-TOKEN", csrfToken ?? await csrf());
-  const response = await fetch(`${API_URL}${path}`, { method: "POST", headers, credentials: "include", body: form });
+  let response: Response;
+  try {
+    response = await fetch(`${API_URL}${path}`, { method: "POST", headers, credentials: "include", body: form });
+  } catch (error) {
+    if (isAbortError(error)) throw error;
+    throw new ApiError(503, "The service is temporarily unavailable. Please try again.", undefined, "NETWORK_ERROR");
+  }
   const body = await response.json().catch(() => null) as T & ErrorBody | null;
   if (!response.ok) {
     if (response.status === 400 && withCsrf && retryCsrf && body?.error?.code === "CSRF_VALIDATION_FAILED") {
