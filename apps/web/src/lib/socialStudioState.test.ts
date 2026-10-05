@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GenerationJob } from "./api";
-import { clearSocialActiveJobId, displaySocialProgress, formatSocialPostForCopy, isSocialSourceReady, normalizeSocialPreviewPlatform, parseSocialJobResult, persistSocialActiveJobId, readSocialActiveJobId, socialActiveJobStorageKey, socialStudioState } from "./socialStudioState";
+import { clearSocialActiveJobId, clearSocialDraft, displaySocialProgress, formatSocialPostForCopy, isSocialSourceReady, normalizeSocialPreviewPlatform, parseSocialJobResult, persistSocialActiveJobId, persistSocialDraft, readSocialActiveJobId, readSocialDraft, socialActiveJobStorageKey, socialDraftStorageKey, socialStudioState, type SocialComposeDraft } from "./socialStudioState";
 
 const job = (overrides: Partial<GenerationJob> = {}): GenerationJob => ({ id: "job-1", workspaceId: "workspace-1", projectId: null, jobType: "social.generate", status: "Running", title: null, progressPercent: 100, resultJson: null, errorCode: null, errorMessage: null, cancellationRequested: false, createdAt: "2026-01-01T00:00:00Z", queuedAt: null, startedAt: null, completedAt: null, failedAt: null, cancelledAt: null, outputs: [], ...overrides });
 
@@ -37,5 +37,34 @@ describe("socialStudioState", () => {
     expect(readSocialActiveJobId("workspace-2")).toBeNull();
     clearSocialActiveJobId("workspace-1");
     expect(readSocialActiveJobId("workspace-1")).toBeNull();
+  });
+  it("persists compose drafts by workspace and sanitizes restored values", () => {
+    const values = new Map<string, string>();
+    vi.stubGlobal("window", { sessionStorage: { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => values.set(key, value), removeItem: (key: string) => values.delete(key) } });
+    const draft: SocialComposeDraft = {
+      projectId: "project-1",
+      selectedFiles: ["file-1"],
+      selectedAssets: ["asset-1"],
+      prompt: "  Write a launch post  ",
+      socialType: "announcement",
+      platform: "linkedin",
+      tone: "professional",
+      language: "en",
+      audience: "operators",
+      brandVoice: "clear",
+      callToAction: "Join us",
+      includeHashtags: true,
+      includeEmojis: false,
+      generateVariants: true,
+    };
+    persistSocialDraft("workspace-1", draft);
+    persistSocialDraft("workspace-2", { ...draft, prompt: "Other workspace" });
+    expect(readSocialDraft("workspace-1")).toMatchObject({ ...draft, prompt: "Write a launch post" });
+    expect(readSocialDraft("workspace-2")?.prompt).toBe("Other workspace");
+    values.set(socialDraftStorageKey("workspace-1"), JSON.stringify({ ...draft, platform: "provider-specific", selectedFiles: ["file-1", "file-2", "file-3", "file-4", "file-5", "file-6"] }));
+    expect(readSocialDraft("workspace-1")).toMatchObject({ platform: "multi", selectedFiles: ["file-1", "file-2", "file-3", "file-4", "file-5"] });
+    clearSocialDraft("workspace-1");
+    expect(readSocialDraft("workspace-1")).toBeNull();
+    expect(readSocialDraft("workspace-2")?.prompt).toBe("Other workspace");
   });
 });

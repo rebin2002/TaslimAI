@@ -2,11 +2,37 @@ import type { Asset, GenerationJob, SocialJobResult, SocialPost, StoredFile } fr
 
 const terminalStatuses = new Set(["Succeeded", "Failed", "Cancelled"]);
 const socialPlatforms = new Set(["instagram", "facebook", "linkedin", "x", "tiktok", "multi"]);
+const socialTypes = new Set(["auto", "announcement", "product_launch", "promotion", "educational", "thought_leadership", "company_update", "event", "community", "general"]);
+const socialTones = new Set(["professional", "friendly", "persuasive", "educational", "playful", "concise", "thoughtful"]);
+const socialLanguages = new Set(["auto", "en", "ar", "ku"]);
 const activeJobStoragePrefix = "taslim:social-generation:";
+const draftStoragePrefix = "taslim:social-draft:";
 export type SocialStudioState = "compose" | "pending" | "queued" | "running" | "succeeded" | "completed-unavailable" | "failed" | "cancelled";
 export type SocialPreviewPlatform = "instagram" | "facebook" | "linkedin" | "x" | "tiktok" | "multi";
+export type SocialDraftSocialType = "auto" | "announcement" | "product_launch" | "promotion" | "educational" | "thought_leadership" | "company_update" | "event" | "community" | "general";
+export type SocialDraftTone = "professional" | "friendly" | "persuasive" | "educational" | "playful" | "concise" | "thoughtful";
+export type SocialDraftLanguage = "auto" | "en" | "ar" | "ku";
+
+export type SocialComposeDraft = {
+  projectId: string;
+  selectedFiles: string[];
+  selectedAssets: string[];
+  prompt: string;
+  socialType: SocialDraftSocialType;
+  platform: SocialPreviewPlatform;
+  tone: SocialDraftTone;
+  language: SocialDraftLanguage;
+  audience: string;
+  brandVoice: string;
+  callToAction: string;
+  includeHashtags: boolean;
+  includeEmojis: boolean;
+  generateVariants: boolean;
+};
 
 export function socialActiveJobStorageKey(workspaceId: string) { return `${activeJobStoragePrefix}${workspaceId}`; }
+export function socialDraftStorageKey(workspaceId: string) { return `${draftStoragePrefix}${workspaceId}`; }
+
 export function readSocialActiveJobId(workspaceId: string) {
   if (typeof window === "undefined") return null;
   try {
@@ -23,6 +49,49 @@ export function persistSocialActiveJobId(workspaceId: string, jobId: string) {
 export function clearSocialActiveJobId(workspaceId: string) {
   if (typeof window === "undefined") return;
   try { window.sessionStorage.removeItem(socialActiveJobStorageKey(workspaceId)); } catch { /* Storage may be unavailable. */ }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null; }
+function nonEmptyString(value: unknown): value is string { return typeof value === "string" && value.trim().length > 0; }
+function readDraftText(value: unknown, maxLength: number) { return typeof value === "string" ? value.trim().slice(0, maxLength) : ""; }
+function readDraftIds(value: unknown, maxItems: number) { return Array.isArray(value) ? value.filter(nonEmptyString).map((item) => item.trim()).slice(0, maxItems) : []; }
+function readAllowed<T extends string>(value: unknown, allowed: Set<string>, fallback: T) { return typeof value === "string" && allowed.has(value.trim().toLowerCase()) ? value.trim().toLowerCase() as T : fallback; }
+
+export function readSocialDraft(workspaceId: string): SocialComposeDraft | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.sessionStorage.getItem(socialDraftStorageKey(workspaceId));
+    if (!raw) return null;
+    const parsed: unknown = JSON.parse(raw);
+    if (!isRecord(parsed)) return null;
+    return {
+      projectId: readDraftText(parsed.projectId, 200),
+      selectedFiles: readDraftIds(parsed.selectedFiles, 5),
+      selectedAssets: readDraftIds(parsed.selectedAssets, 8),
+      prompt: readDraftText(parsed.prompt, 6_000),
+      socialType: readAllowed(parsed.socialType, socialTypes, "auto"),
+      platform: readAllowed(parsed.platform, socialPlatforms, "multi"),
+      tone: readAllowed(parsed.tone, socialTones, "professional"),
+      language: readAllowed(parsed.language, socialLanguages, "auto"),
+      audience: readDraftText(parsed.audience, 400),
+      brandVoice: readDraftText(parsed.brandVoice, 1_000),
+      callToAction: readDraftText(parsed.callToAction, 400),
+      includeHashtags: parsed.includeHashtags !== false,
+      includeEmojis: parsed.includeEmojis === true,
+      generateVariants: parsed.generateVariants === true,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function persistSocialDraft(workspaceId: string, draft: SocialComposeDraft) {
+  if (typeof window === "undefined") return;
+  try { window.sessionStorage.setItem(socialDraftStorageKey(workspaceId), JSON.stringify(draft)); } catch { /* Storage may be unavailable. */ }
+}
+export function clearSocialDraft(workspaceId: string) {
+  if (typeof window === "undefined") return;
+  try { window.sessionStorage.removeItem(socialDraftStorageKey(workspaceId)); } catch { /* Storage may be unavailable. */ }
 }
 
 export function isSocialTerminal(job: GenerationJob | null) { return !!job && terminalStatuses.has(job.status); }
@@ -43,8 +112,6 @@ export function socialStudioState(job: GenerationJob | null, result: SocialJobRe
   if (job.status === "Cancelled") return "cancelled";
   return result?.assetId && result.posts?.length ? "succeeded" : "completed-unavailable";
 }
-function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null; }
-function nonEmptyString(value: unknown): value is string { return typeof value === "string" && value.trim().length > 0; }
 function parsePosts(value: unknown): SocialPost[] {
   if (!Array.isArray(value)) return [];
   return value.flatMap((post) => {

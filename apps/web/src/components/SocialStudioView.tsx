@@ -7,7 +7,7 @@ import { Check, CheckCircle2, Copy, FileText, Image as ImageIcon, LoaderCircle, 
 import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
 import { ApiError, api, type Asset, type GenerationJob, type Project, type SocialJobResult, type SocialPost, type StoredFile } from "@/lib/api";
-import { canCancelSocialJob, clearSocialActiveJobId, displaySocialProgress, formatSocialPostForCopy, isSocialAssetSelectable, isSocialSourceReady, nextSocialPollDelay, normalizeSocialPreviewPlatform, parseSocialJobResult, persistSocialActiveJobId, readSocialActiveJobId, shouldPollSocialJob, socialStudioState, type SocialPreviewPlatform } from "@/lib/socialStudioState";
+import { canCancelSocialJob, clearSocialActiveJobId, clearSocialDraft, displaySocialProgress, formatSocialPostForCopy, isSocialAssetSelectable, isSocialSourceReady, nextSocialPollDelay, normalizeSocialPreviewPlatform, parseSocialJobResult, persistSocialActiveJobId, persistSocialDraft, readSocialActiveJobId, readSocialDraft, shouldPollSocialJob, socialStudioState, type SocialPreviewPlatform } from "@/lib/socialStudioState";
 
 const extensions = [".pdf", ".docx", ".txt", ".md", ".csv", ".xlsx"];
 type Language = "auto" | "en" | "ar" | "ku";
@@ -120,6 +120,8 @@ export function SocialStudioView() {
   const [error, setError] = useState("");
   const [copyState, setCopyState] = useState("");
   const restoreJobId = useRef<string | null>(null);
+  const hydratedDraftWorkspace = useRef<string | null>(null);
+  const skipDraftPersistence = useRef(false);
 
   const loadInputs = useCallback(async () => {
     if (!workspace) return;
@@ -135,6 +137,62 @@ export function SocialStudioView() {
   // Synchronize authenticated workspace choices into the form.
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void loadInputs(); }, [loadInputs]);
+  /* eslint-disable react-hooks/set-state-in-effect -- hydrate the workspace-scoped draft from session storage. */
+  useEffect(() => {
+    if (!workspace || hydratedDraftWorkspace.current === workspace.id) return;
+    const saved = readSocialDraft(workspace.id);
+    if (saved) {
+      setProjectId(saved.projectId || searchParams.get("projectId") || "");
+      setSelectedFiles(saved.selectedFiles);
+      setSelectedAssets(saved.selectedAssets);
+      setPrompt(saved.prompt);
+      setSocialType(saved.socialType);
+      setPlatform(saved.platform);
+      setTone(saved.tone);
+      setLanguage(saved.language);
+      setAudience(saved.audience);
+      setBrandVoice(saved.brandVoice);
+      setCallToAction(saved.callToAction);
+      setIncludeHashtags(saved.includeHashtags);
+      setIncludeEmojis(saved.includeEmojis);
+      setGenerateVariants(saved.generateVariants);
+    } else {
+      setProjectId(searchParams.get("projectId") || "");
+      setSelectedFiles([]);
+      setSelectedAssets([]);
+      setPrompt("");
+      setSocialType("auto");
+      setPlatform("multi");
+      setTone("professional");
+      setLanguage("auto");
+      setAudience("");
+      setBrandVoice("");
+      setCallToAction("");
+      setIncludeHashtags(true);
+      setIncludeEmojis(false);
+      setGenerateVariants(true);
+    }
+    hydratedDraftWorkspace.current = workspace.id;
+    skipDraftPersistence.current = true;
+  }, [workspace, searchParams]);
+  /* eslint-enable react-hooks/set-state-in-effect */
+  useEffect(() => {
+    if (!workspace || hydratedDraftWorkspace.current !== workspace.id) return;
+    if (skipDraftPersistence.current) {
+      skipDraftPersistence.current = false;
+      return;
+    }
+    persistSocialDraft(workspace.id, { projectId, selectedFiles, selectedAssets, prompt, socialType, platform, tone, language, audience, brandVoice, callToAction, includeHashtags, includeEmojis, generateVariants });
+  }, [workspace, projectId, selectedFiles, selectedAssets, prompt, socialType, platform, tone, language, audience, brandVoice, callToAction, includeHashtags, includeEmojis, generateVariants]);
+  /* eslint-disable react-hooks/set-state-in-effect -- discard state that belongs to a previous workspace. */
+  useEffect(() => {
+    if (!workspace || !current || current.workspaceId === workspace.id) return;
+    restoreJobId.current = null;
+    setCurrent(null);
+    setPollRetry(0);
+    setError("");
+  }, [workspace, current]);
+  /* eslint-enable react-hooks/set-state-in-effect */
   useEffect(() => {
     if (!workspace || current) return;
     const storedJobId = readSocialActiveJobId(workspace.id);
@@ -193,7 +251,7 @@ export function SocialStudioView() {
     try { await navigator.clipboard.writeText(formatSocialPostForCopy(post)); setCopyState(String(post.order)); window.setTimeout(() => setCopyState(""), 1800); }
     catch { setError(t("social.copyError")); }
   }
-  function createAnother() { restoreJobId.current = null; if (workspace) clearSocialActiveJobId(workspace.id); setCurrent(null); setError(""); setCopyState(""); setPollRetry(0); }
+  function createAnother() { restoreJobId.current = null; if (workspace) { clearSocialActiveJobId(workspace.id); clearSocialDraft(workspace.id); } setCurrent(null); setError(""); setCopyState(""); setPollRetry(0); }
 
   const result = parseSocialJobResult(current);
   const state = socialStudioState(current, result);
