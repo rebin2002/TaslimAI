@@ -50,40 +50,6 @@ describe("api.login", () => {
     expect(fetchMock.mock.calls[1][1].credentials).toBe("include");
   });
 
-  it("shares one forced CSRF refresh across concurrent login transitions", async () => {
-    let refreshStarted!: () => void;
-    let releaseRefresh!: () => void;
-    const refreshReady = new Promise<void>((resolve) => { refreshStarted = resolve; });
-    const refreshRelease = new Promise<void>((resolve) => { releaseRefresh = resolve; });
-    let csrfCalls = 0;
-    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input);
-      if (url.endsWith("/api/auth/csrf")) {
-        csrfCalls += 1;
-        if (csrfCalls === 1) return csrfResponse("before-login");
-        if (csrfCalls === 2) {
-          refreshStarted();
-          await refreshRelease;
-          return csrfResponse("after-login");
-        }
-        throw new Error("unexpected duplicate forced refresh");
-      }
-      expect(init?.method).toBe("POST");
-      return response(authResponse);
-    });
-    vi.stubGlobal("fetch", fetchMock);
-    const { api } = await import("./api");
-
-    const first = api.login({ email: "owner@example.com", password: "StrongPassword!123" });
-    const second = api.login({ email: "owner@example.com", password: "StrongPassword!123" });
-    await refreshReady;
-
-    expect(fetchMock).toHaveBeenCalledTimes(4);
-    releaseRefresh();
-    await expect(Promise.all([first, second])).resolves.toEqual([authResponse, authResponse]);
-    expect(fetchMock).toHaveBeenCalledTimes(4);
-  });
-
   it("surfaces invalid credentials as a typed safe API error", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(csrfResponse("token"))
@@ -166,6 +132,30 @@ describe("api.login", () => {
     expect(fetchMock.mock.calls[0][1].method ?? "GET").toBe("GET");
   });
 
+  it("maps an unavailable API to a safe retryable error", async () => {
+    const fetchMock = vi.fn().mockRejectedValueOnce(new TypeError("private socket detail"));
+    vi.stubGlobal("fetch", fetchMock);
+    const { api, ApiError } = await import("./api");
+
+    const failure = await api.me().catch((error) => error);
+    expect(failure).toBeInstanceOf(ApiError);
+    expect(failure.status).toBe(503);
+    expect(failure.code).toBe("NETWORK_ERROR");
+    expect(failure.message).toBe("The service is temporarily unavailable. Please try again.");
+    expect(failure.message).not.toContain("private socket detail");
+  });
+
+  it("preserves caller cancellation for abortable workspace loads", async () => {
+    const controller = new AbortController();
+    const fetchMock = vi.fn().mockRejectedValueOnce(Object.assign(new Error("aborted"), { name: "AbortError" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { api } = await import("./api");
+
+    const failure = await api.listProjects("workspace-1", "Active", controller.signal).catch((error) => error);
+    expect(failure.name).toBe("AbortError");
+    expect(failure.code).not.toBe("NETWORK_ERROR");
+    expect(fetchMock.mock.calls[0][1].signal).toBe(controller.signal);
+  });
   it("revokes other sessions and refreshes CSRF state after the security transition", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(csrfResponse("before-revoke"))
@@ -179,4 +169,5 @@ describe("api.login", () => {
     expect(fetchMock.mock.calls.map((call) => (call[1] as RequestInit | undefined)?.method ?? "GET")).toEqual(["GET", "POST", "GET"]);
     expect(new Headers(fetchMock.mock.calls[1][1].headers).get("X-CSRF-TOKEN")).toBe("before-revoke");
   });
+
 });

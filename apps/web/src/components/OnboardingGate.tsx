@@ -22,6 +22,7 @@ import { localeNames, locales, useLocale } from "@/components/LocaleProvider";
 import type { User } from "@/lib/api";
 import { onboardingFormDefaults, onboardingWorkflowDefinitions, shouldShowOnboarding, type OnboardingIntent } from "@/lib/onboarding";
 import type { Locale } from "@/lib/i18n";
+import { useDialogAccessibility } from "@/lib/useDialogAccessibility";
 
 const workflowIcons: Record<OnboardingIntent, LucideIcon> = {
   project: FolderKanban,
@@ -52,7 +53,12 @@ function OnboardingFlow({ user }: Readonly<{ user: User }>) {
   const [defaultGenerationLanguage, setDefaultGenerationLanguage] = useState<Locale>(defaults.defaultGenerationLanguage);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const showOnboarding = shouldShowOnboarding(user);
+  // Onboarding is a blocking workflow with an explicit Skip action; Escape
+  // keeps focus inside instead of silently submitting that choice.
+  const dialogRef = useDialogAccessibility(showOnboarding, () => undefined);
 
+  if (!showOnboarding) return null;
   const steps: OnboardingStep[] = ["preferences", "tour", "workflow"];
   const currentStep = steps.indexOf(step) + 1;
   const NextIcon = locale === "en" ? ArrowRight : ArrowLeft;
@@ -77,7 +83,7 @@ function OnboardingFlow({ user }: Readonly<{ user: User }>) {
 
   return (
     <div className="modal-backdrop onboarding-backdrop" role="presentation">
-      <section className="onboarding-card" role="dialog" aria-modal="true" aria-labelledby="onboarding-title">
+      <section ref={dialogRef} className="onboarding-card" role="dialog" aria-modal="true" aria-labelledby="onboarding-title" tabIndex={-1}>
         <header className="onboarding-header">
           <div className="onboarding-brand"><span className="onboarding-brand-mark"><Sparkles size={16} /></span><span>Taslim.ai</span></div>
           <button type="button" className="onboarding-skip" onClick={() => void finish()} disabled={saving}>{t("onboarding.skip")}</button>
@@ -92,7 +98,7 @@ function OnboardingFlow({ user }: Readonly<{ user: User }>) {
           <h1 id="onboarding-title">{t("onboarding.preferencesTitle")}</h1>
           <p className="onboarding-description">{t("onboarding.preferencesDescription")}</p>
           <div className="onboarding-fields">
-            <label><span>{t("onboarding.displayName")}</span><input value={displayName} maxLength={120} onChange={(event) => setDisplayName(event.target.value)} placeholder={t("onboarding.displayNamePlaceholder")} autoComplete="name" /></label>
+            <label><span>{t("onboarding.displayName")}</span><input data-dialog-autofocus value={displayName} maxLength={120} onChange={(event) => setDisplayName(event.target.value)} placeholder={t("onboarding.displayNamePlaceholder")} autoComplete="name" /></label>
             <label><span><Globe2 size={15} /> {t("onboarding.interfaceLanguage")}</span><select value={preferredLanguage} onChange={(event) => { const next = event.target.value as Locale; setPreferredLanguage(next); setLocale(next); }}>{locales.map((item) => <option key={item} value={item}>{localeNames[item]}</option>)}</select></label>
             <label><span><Languages size={15} /> {t("onboarding.generationLanguage")}</span><select value={defaultGenerationLanguage} onChange={(event) => setDefaultGenerationLanguage(event.target.value as Locale)}>{locales.map((item) => <option key={item} value={item}>{localeNames[item]}</option>)}</select></label>
           </div>

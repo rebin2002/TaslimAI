@@ -76,7 +76,7 @@ public sealed class FileProcessingService(
         {
             logger.LogInformation("Generated file storage started. FileId={FileId}; WorkspaceId={WorkspaceId}; StorageProvider={StorageProvider}; SizeBytes={SizeBytes}", file.Id, workspaceId, storage.ProviderKey, content.Length);
             await using var input = new MemoryStream(content.ToArray(), writable: false);
-            await storage.StoreAsync(storageKey, input, cancellationToken);
+            await RunStorageOperationAsync("store", token => storage.StoreAsync(storageKey, input, token), cancellationToken);
             file.ContentHashSha256 = hash;
             file.ContainerFormat = inspection.ContainerFormat;
             file.Width = inspection.Width;
@@ -109,7 +109,7 @@ public sealed class FileProcessingService(
 
     private async Task TryDeleteGeneratedObjectAsync(string storageKey, Guid fileId, Guid workspaceId)
     {
-        try { await storage.DeleteAsync(storageKey, CancellationToken.None); }
+        try { await RunStorageOperationAsync("delete", token => storage.DeleteAsync(storageKey, token), CancellationToken.None); }
         catch (Exception exception) { logger.LogWarning(exception, "Generated file cleanup failed. FileId={FileId}; WorkspaceId={WorkspaceId}", fileId, workspaceId); }
     }
 
@@ -196,7 +196,7 @@ public sealed class FileProcessingService(
             logger.LogInformation("Generated stream storage started. FileId={FileId}; WorkspaceId={WorkspaceId}; StorageProvider={StorageProvider}; SizeBytes={SizeBytes}", file.Id, workspaceId, storage.ProviderKey, sizeBytes);
             await using var input = await openReadAsync(cancellationToken);
             await using var bounded = new CountingReadStream(input, Math.Max(1, settings.MaxGeneratedVideoBytes));
-            await storage.StoreAsync(storageKey, bounded, cancellationToken);
+            await RunStorageOperationAsync("store", token => storage.StoreAsync(storageKey, bounded, token), cancellationToken);
             if (bounded.BytesRead != sizeBytes)
                 throw new FileUploadValidationException("Generated video output size did not match its declared size.");
             var inspection = GeneratedMediaInspector.Inspect(descriptor, bounded.Prefix.Span, streamMetadata, bounded.Sha256Hex);
@@ -266,7 +266,7 @@ public sealed class FileProcessingService(
             logger.LogInformation("File upload started. FileId={FileId}; WorkspaceId={WorkspaceId}; StorageProvider={StorageProvider}; Extension={Extension}; SizeBytes={SizeBytes}", file.Id, workspaceId, storage.ProviderKey, file.Extension, file.SizeBytes);
             await using (var input = new CountingReadStream(upload.OpenReadStream(), settings.MaxFileSizeBytes))
             {
-                await storage.StoreAsync(storageKey, input, cancellationToken);
+                await RunStorageOperationAsync("store", token => storage.StoreAsync(storageKey, input, token), cancellationToken);
                 if (input.BytesRead != validated.SizeBytes)
                     throw new FileUploadValidationException("The uploaded file changed while it was being stored.");
             }
@@ -279,7 +279,7 @@ public sealed class FileProcessingService(
 
             if (extractor.CanHandle(file.Extension))
             {
-                await using var input = await storage.OpenReadAsync(storageKey, cancellationToken) ?? throw new FileStorageUnavailableException();
+                await using var input = await RunStorageOperationAsync("read", token => storage.OpenReadAsync(storageKey, token), cancellationToken) ?? throw new FileStorageUnavailableException();
                 extractionStarted = true;
                 var result = await extractor.ExtractAsync(file.Extension, input, cancellationToken);
                 file.TextExtractionStatus = result.Status;
@@ -353,7 +353,7 @@ public sealed class FileProcessingService(
 
     public async Task<bool> DeleteAsync(StoredFile file, CancellationToken cancellationToken)
     {
-        await storage.DeleteAsync(file.StorageKey, cancellationToken);
+        await RunStorageOperationAsync("delete", token => storage.DeleteAsync(file.StorageKey, token), cancellationToken);
         file.Status = StoredFileStatus.Deleted;
         file.DeletedAt = DateTime.UtcNow;
         file.ExtractedText = null;
@@ -366,6 +366,30 @@ public sealed class FileProcessingService(
         file.ProcessedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(cancellationToken);
         return true;
+    }
+
+    private async Task RunStorageOperationAsync(string operation, Func<CancellationToken, Task> action, CancellationToken cancellationToken)
+    {
+        await RunStorageOperationAsync<object?>(operation, async token =>
+        {
+            await action(token);
+            return null;
+        }, cancellationToken);
+    }
+
+    private async Task<T> RunStorageOperationAsync<T>(string operation, Func<CancellationToken, Task<T>> action, CancellationToken cancellationToken)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(settings.StorageOperationTimeout);
+        try
+        {
+            return await action(timeout.Token);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && timeout.IsCancellationRequested)
+        {
+            logger.LogWarning("File storage operation timed out. Operation={Operation}; StorageProvider={StorageProvider}; TimeoutSeconds={TimeoutSeconds}", operation, storage.ProviderKey, settings.StorageOperationTimeout.TotalSeconds);
+            throw new FileStorageOperationException();
+        }
     }
 }
 
