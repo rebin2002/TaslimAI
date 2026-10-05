@@ -1,4 +1,5 @@
 "use client";
+import { localeTag } from "@/lib/i18n";
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -74,8 +75,8 @@ export function AdminUsageView() {
   };
 
   const maximum = useMemo(() => dailyCostMaximum(report?.breakdowns.byDay ?? []), [report]);
-  const formatDate = (value: string) => new Intl.DateTimeFormat(locale, { dateStyle: "medium" }).format(new Date(value));
-  const formatDateTime = (value: string) => new Intl.DateTimeFormat(locale, { dateStyle: "short", timeStyle: "short" }).format(new Date(value));
+  const formatDate = (value: string) => new Intl.DateTimeFormat(localeTag(locale), { dateStyle: "medium" }).format(new Date(value));
+  const formatDateTime = (value: string) => new Intl.DateTimeFormat(localeTag(locale), { dateStyle: "short", timeStyle: "short" }).format(new Date(value));
   const snapshot = readableJson(selected?.pricingSnapshotJson ?? null);
 
   return <div className="account-page admin-usage-page">
