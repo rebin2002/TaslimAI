@@ -9,6 +9,12 @@ describe("admin operations localization", () => {
     }
   });
 
+  it("distinguishes all generation jobs from movie-only jobs", () => {
+    expect(translateAdminOperations("en", "jobsInRange")).toBe("Jobs in range");
+    expect(translateAdminOperations("ar", "jobsInRange")).not.toBe(translateAdminOperations("ar", "movieJobsInRange"));
+    expect(translateAdminOperations("ku", "jobsInRange")).not.toBe(translateAdminOperations("ku", "movieJobsInRange"));
+  });
+
   it("uses Arabic-Indic digits for Arabic and Sorani operational metrics", () => {
     expect(formatAdminNumber(1234567, "en")).toBe("1,234,567");
     expect(formatAdminNumber(1234567, "ar")).toContain("١");
