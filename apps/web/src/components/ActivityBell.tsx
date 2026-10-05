@@ -89,6 +89,17 @@ export function NotificationBell({ unreadCount }: Readonly<{ unreadCount: number
   if (activeWorkspaceId.current !== (workspace?.id ?? null)) activeWorkspaceId.current = workspace?.id ?? null;
 
   useEffect(() => {
+    panelRequestSequence.current += 1;
+    // Workspace changes replace the panel's tenant-scoped state before the next render.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setOpen(false);
+    setResult(null);
+    setLoading(false);
+    setWorkingId(null);
+    setPanelError("");
+  }, [workspace?.id]);
+
+  useEffect(() => {
     if (!open) return;
     const closeOnOutsidePointer = (event: PointerEvent) => {
       if (popoverRef.current && !popoverRef.current.contains(event.target as Node)) setOpen(false);
@@ -112,14 +123,16 @@ export function NotificationBell({ unreadCount }: Readonly<{ unreadCount: number
     setOpen(willOpen);
     if (!willOpen || !workspace) {
       panelRequestSequence.current += 1;
+      setLoading(false);
       return;
     }
-    const request = startNotificationRequest(panelRequestSequence.current, workspace.id);
+    const workspaceId = workspace.id;
+    const request = startNotificationRequest(panelRequestSequence.current, workspaceId);
     panelRequestSequence.current = request.sequence;
     setLoading(true);
     setPanelError("");
     try {
-      const next = await api.listNotifications(workspace.id, 1, 6);
+      const next = await api.listNotifications(workspaceId, 1, 6);
       if (isNotificationRequestCurrent(request, panelRequestSequence.current, activeWorkspaceId.current)) setResult(next);
     } catch {
       if (isNotificationRequestCurrent(request, panelRequestSequence.current, activeWorkspaceId.current)) {
@@ -133,34 +146,42 @@ export function NotificationBell({ unreadCount }: Readonly<{ unreadCount: number
 
   async function markRead(item: NotificationItem) {
     if (!workspace || item.isRead) return;
+    const workspaceId = workspace.id;
+    const request = startNotificationRequest(panelRequestSequence.current, workspaceId);
+    panelRequestSequence.current = request.sequence;
     setWorkingId(item.id);
     setPanelError("");
     try {
-      await api.markNotificationRead(workspace.id, item.id);
+      await api.markNotificationRead(workspaceId, item.id);
+      if (!isNotificationRequestCurrent(request, panelRequestSequence.current, activeWorkspaceId.current)) return;
       const nextUnreadCount = Math.max(0, (result?.unreadCount ?? unreadCount) - 1);
       const readAt = new Date().toISOString();
       setResult((current) => current ? { ...current, unreadCount: Math.max(0, current.unreadCount - 1), items: current.items.map((entry) => entry.id === item.id ? { ...entry, isRead: true, readAt: entry.readAt ?? readAt } : entry) } : current);
-      publishNotificationUnreadCount(workspace.id, nextUnreadCount);
+      publishNotificationUnreadCount(workspaceId, nextUnreadCount);
     } catch {
-      setPanelError(t("notification.readError"));
+      if (isNotificationRequestCurrent(request, panelRequestSequence.current, activeWorkspaceId.current)) setPanelError(t("notification.readError"));
     } finally {
-      setWorkingId(null);
+      if (isNotificationRequestCurrent(request, panelRequestSequence.current, activeWorkspaceId.current)) setWorkingId(null);
     }
   }
 
   async function markAllRead() {
     if (!workspace || !result?.unreadCount) return;
+    const workspaceId = workspace.id;
+    const request = startNotificationRequest(panelRequestSequence.current, workspaceId);
+    panelRequestSequence.current = request.sequence;
     setWorkingId("all");
     setPanelError("");
     try {
-      await api.markAllNotificationsRead(workspace.id);
+      await api.markAllNotificationsRead(workspaceId);
+      if (!isNotificationRequestCurrent(request, panelRequestSequence.current, activeWorkspaceId.current)) return;
       const readAt = new Date().toISOString();
       setResult((current) => current ? { ...current, unreadCount: 0, items: current.items.map((item) => item.isRead ? item : { ...item, isRead: true, readAt: item.readAt ?? readAt }) } : current);
-      publishNotificationUnreadCount(workspace.id, 0);
+      publishNotificationUnreadCount(workspaceId, 0);
     } catch {
-      setPanelError(t("notification.readError"));
+      if (isNotificationRequestCurrent(request, panelRequestSequence.current, activeWorkspaceId.current)) setPanelError(t("notification.readError"));
     } finally {
-      setWorkingId(null);
+      if (isNotificationRequestCurrent(request, panelRequestSequence.current, activeWorkspaceId.current)) setWorkingId(null);
     }
   }
 
