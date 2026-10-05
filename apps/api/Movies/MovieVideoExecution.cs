@@ -395,8 +395,8 @@ public sealed class MovieVideoGenerationJobHandler(
         }
         catch (OperationCanceledException exception)
         {
-            if (exception is MovieVideoStaleWorkerException) throw;
             await MovieVideoProviderCleanup.TryCancelAsync(provider, execution.ProviderJobId, job.Id, logger);
+            if (exception is MovieVideoStaleWorkerException) throw;
             await executions.MarkCancelledAsync(job.Id, job.ConcurrencyToken, CancellationToken.None);
             throw;
         }
