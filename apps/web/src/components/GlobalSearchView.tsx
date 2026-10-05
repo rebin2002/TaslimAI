@@ -3,10 +3,11 @@
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { FileText, FolderOpen, LibraryBig, MessageCircle, Search, Sparkles, Upload, X } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocale } from "@/components/LocaleProvider";
 import { api, type GlobalSearchGroup, type GlobalSearchResult, type GlobalSearchResultType } from "@/lib/api";
 import { globalSearchResultDestination } from "@/lib/searchNavigation";
+import { createRequestSequencer } from "@/lib/searchRequestLifecycle";
 
 const groupOrder: GlobalSearchResultType[] = ["projects", "conversations", "assets", "files", "generation"];
 
@@ -34,9 +35,19 @@ export function GlobalSearchView() {
   const [totalCount, setTotalCount] = useState(0);
   const [loading, setLoading] = useState(Boolean(initialQuery.trim()));
   const [error, setError] = useState("");
+  const requestSequence = useMemo(() => createRequestSequencer(), []);
+  const pendingSearchTimer = useRef<number | null>(null);
+
+  const clearPendingSearch = useCallback(() => {
+    if (pendingSearchTimer.current !== null) {
+      window.clearTimeout(pendingSearchTimer.current);
+      pendingSearchTimer.current = null;
+    }
+  }, []);
 
   const runSearch = useCallback(async (value: string) => {
     const next = value.trim();
+    const requestId = requestSequence.begin();
     if (!next) {
       setGroups([]); setTotalCount(0); setLoading(false); setError("");
       return;
@@ -44,16 +55,24 @@ export function GlobalSearchView() {
     setLoading(true); setError("");
     try {
       const response = await api.search(next);
+      if (!requestSequence.isCurrent(requestId)) return;
       setGroups(response.groups); setTotalCount(response.totalCount); setSubmittedQuery(response.query);
     } catch (caught) {
+      if (!requestSequence.isCurrent(requestId)) return;
       setError(caught instanceof Error ? caught.message : t("search.loadError"));
-    } finally { setLoading(false); }
-  }, [t]);
+    } finally {
+      if (requestSequence.isCurrent(requestId)) setLoading(false);
+    }
+  }, [requestSequence, t]);
 
   useEffect(() => {
-    const timer = window.setTimeout(() => void runSearch(initialQuery), initialQuery.trim() ? 180 : 0);
-    return () => window.clearTimeout(timer);
-  }, [initialQuery, runSearch]);
+    clearPendingSearch();
+    pendingSearchTimer.current = window.setTimeout(() => {
+      pendingSearchTimer.current = null;
+      void runSearch(initialQuery);
+    }, initialQuery.trim() ? 180 : 0);
+    return clearPendingSearch;
+  }, [clearPendingSearch, initialQuery, runSearch]);
 
   useEffect(() => {
     const handleShortcut = (event: KeyboardEvent) => {
@@ -69,11 +88,20 @@ export function GlobalSearchView() {
   function submit(event: React.FormEvent) {
     event.preventDefault();
     const next = query.trim();
-    router.push(next ? `/search?q=${encodeURIComponent(next)}` : "/search");
-    void runSearch(next);
+    clearPendingSearch();
+    if (next === initialQuery.trim()) {
+      void runSearch(next);
+    } else {
+      requestSequence.begin();
+      setLoading(Boolean(next));
+      setError("");
+      router.push(next ? `/search?q=${encodeURIComponent(next)}` : "/search");
+    }
   }
 
   function clear() {
+    clearPendingSearch();
+    requestSequence.begin();
     setQuery("");
     setSubmittedQuery("");
     router.push("/search");
@@ -82,7 +110,7 @@ export function GlobalSearchView() {
 
   const orderedGroups = useMemo(() => groupOrder.map((type) => groups.find((group) => group.type === type)).filter(Boolean) as GlobalSearchGroup[], [groups]);
 
-  return <div className="global-search-page">
+  return <div className="global-search-page" aria-busy={loading}>
     <section className="global-search-hero">
       <p className="section-eyebrow">{t("search.eyebrow")}</p>
       <h1>{t("search.title")}</h1>
@@ -98,7 +126,7 @@ export function GlobalSearchView() {
     </section>
 
     {error && <div className="inline-error" role="alert">{error}</div>}
-    {loading ? <div className="loading-state"><span className="loading-spinner" /><span className="sr-only">{t("search.results")}</span></div> : !submittedQuery ? <section className="global-search-empty"><span className="global-search-empty-icon"><Search size={25} /></span><h2>{t("search.emptyTitle")}</h2><p>{t("search.emptyDescription")}</p></section> : orderedGroups.length === 0 ? <section className="global-search-empty"><span className="global-search-empty-icon"><Search size={25} /></span><h2>{t("search.noResultsTitle")}</h2><p>{t("search.noResultsDescription")}</p></section> : <section className="global-search-results" aria-live="polite"><div className="global-search-results-heading"><div><p className="section-eyebrow">{t("search.results")}</p><h2>{t("search.resultCount", { count: String(totalCount) })}</h2></div><span className="global-search-query">{submittedQuery}</span></div>{orderedGroups.map((group) => <SearchGroup key={group.type} group={group} locale={locale} t={t} />)}</section>}
+    {loading ? <div className="loading-state" role="status" aria-live="polite"><span className="loading-spinner" /><span className="sr-only">{t("search.results")}</span></div> : !submittedQuery ? <section className="global-search-empty"><span className="global-search-empty-icon"><Search size={25} /></span><h2>{t("search.emptyTitle")}</h2><p>{t("search.emptyDescription")}</p></section> : orderedGroups.length === 0 ? <section className="global-search-empty"><span className="global-search-empty-icon"><Search size={25} /></span><h2>{t("search.noResultsTitle")}</h2><p>{t("search.noResultsDescription")}</p></section> : <section className="global-search-results" aria-live="polite"><div className="global-search-results-heading"><div><p className="section-eyebrow">{t("search.results")}</p><h2>{t("search.resultCount", { count: String(totalCount) })}</h2></div><span className="global-search-query">{submittedQuery}</span></div>{orderedGroups.map((group) => <SearchGroup key={group.type} group={group} locale={locale} t={t} />)}</section>}
   </div>;
 }
 
