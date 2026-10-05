@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Taslim.Api.Contracts;
 using Taslim.Api.Infrastructure;
 using Taslim.Api.Upscaling;
@@ -14,6 +15,7 @@ public sealed class UpscalingController(IUpscalingJobService jobs) : ControllerB
 {
     [HttpPost]
     [ValidateAntiForgeryToken]
+    [EnableRateLimiting(RateLimiting.ExpensiveAi)]
     public async Task<IActionResult> Create(CreateUpscalingJobRequest request, CancellationToken cancellationToken)
     {
         if (!ModelState.IsValid) return ApiResults.Validation(this);
@@ -69,6 +71,7 @@ public sealed class UpscalingController(IUpscalingJobService jobs) : ControllerB
 
     [HttpPost("{id:guid}/retry")]
     [ValidateAntiForgeryToken]
+    [EnableRateLimiting(RateLimiting.ExpensiveAi)]
     public async Task<IActionResult> Retry(Guid id, CancellationToken cancellationToken)
     {
         try
