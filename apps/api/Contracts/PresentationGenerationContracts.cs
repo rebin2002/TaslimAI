@@ -185,27 +185,62 @@ public static class PresentationDraftValidator
 {
     public static void Validate(PresentationDraft draft, PresentationGenerationOptions options)
     {
-        if (string.IsNullOrWhiteSpace(draft.Title) || draft.Title.Length > options.MaxTitleCharacters || draft.Slides.Count < 1 || draft.Slides.Count > options.MaxSlides)
+        if (draft is null || string.IsNullOrWhiteSpace(draft.Title) || draft.Title.Length > options.MaxTitleCharacters || draft.Slides is null || draft.Slides.Count < 1 || draft.Slides.Count > options.MaxSlides)
             throw new PresentationOutputValidationException();
-        if (!PresentationGenerationDefaults.Languages.Contains(draft.Language) && !string.Equals(draft.Language, "auto", StringComparison.OrdinalIgnoreCase)) throw new PresentationOutputValidationException();
+        if (draft.Language is null || (!PresentationGenerationDefaults.Languages.Contains(draft.Language) && !string.Equals(draft.Language, "auto", StringComparison.OrdinalIgnoreCase))) throw new PresentationOutputValidationException();
         var expectedOrder = 1;
         foreach (var slide in draft.Slides)
         {
-            if (slide.Order != expectedOrder++ || !PresentationSlideTypes.Supported.Contains(slide.Type) || string.IsNullOrWhiteSpace(slide.Title) || slide.Title.Length > options.MaxTitleCharacters)
+            if (slide is null || slide.Order != expectedOrder++ || slide.Type is null || !PresentationSlideTypes.Supported.Contains(slide.Type) || string.IsNullOrWhiteSpace(slide.Title) || slide.Title.Length > options.MaxTitleCharacters || slide.Blocks is null || slide.SourceRefs is null)
                 throw new PresentationOutputValidationException();
-            if (slide.Subtitle?.Length > options.MaxSubtitleCharacters || slide.Notes?.Length > options.MaxNotesCharacters || slide.VisualSuggestion?.Length > options.MaxVisualSuggestionCharacters || slide.SourceRefs.Count > options.MaxSourceRefsPerSlide)
+            if (slide.Subtitle?.Length > options.MaxSubtitleCharacters || slide.Notes?.Length > options.MaxNotesCharacters || slide.VisualSuggestion?.Length > options.MaxVisualSuggestionCharacters || slide.SourceRefs.Count > options.MaxSourceRefsPerSlide || slide.SourceRefs.Any(reference => string.IsNullOrWhiteSpace(reference) || reference.Length > options.MaxBlockCharacters))
                 throw new PresentationOutputValidationException();
             if (slide.Blocks.Count > options.MaxBlocksPerSlide) throw new PresentationOutputValidationException();
             foreach (var block in slide.Blocks)
+                ValidateBlock(block, options);
+        }
+
+        static void ValidateBlock(PresentationContentBlock block, PresentationGenerationOptions options)
+        {
+            if (block is null || block.Type is null || !PresentationBlockTypes.Supported.Contains(block.Type) || block.Items is null || block.Columns is null || block.Rows is null || block.Metrics is null)
+                throw new PresentationOutputValidationException();
+            if (block.Text?.Length > options.MaxBlockCharacters || block.Label?.Length > options.MaxBlockCharacters || block.Value?.Length > options.MaxBlockCharacters)
+                throw new PresentationOutputValidationException();
+            if (block.Items.Count > options.MaxItemsPerBlock || block.Columns.Count > 4 || block.Rows.Count > options.MaxRowsPerBlock || block.Metrics.Count > 6)
+                throw new PresentationOutputValidationException();
+            if (block.Items.Any(item => string.IsNullOrWhiteSpace(item) || item.Length > options.MaxBlockCharacters)
+                || block.Columns.Any(column => column is null
+                    || string.IsNullOrWhiteSpace(column.Heading)
+                    || column.Heading.Length > options.MaxBlockCharacters
+                    || column.Items is null
+                    || column.Items.Count == 0
+                    || column.Items.Count > options.MaxItemsPerBlock
+                    || column.Items.Any(item => string.IsNullOrWhiteSpace(item) || item.Length > options.MaxBlockCharacters))
+                || block.Rows.Any(row => row is null
+                    || row.Cells is null
+                    || row.Cells.Count == 0
+                    || row.Cells.Count > 8
+                    || row.Cells.Any(cell => cell is null || cell.Length > options.MaxBlockCharacters))
+                || block.Metrics.Any(metric => metric is null
+                    || string.IsNullOrWhiteSpace(metric.Label)
+                    || string.IsNullOrWhiteSpace(metric.Value)
+                    || metric.Label.Length > options.MaxBlockCharacters
+                    || metric.Value.Length > options.MaxBlockCharacters
+                    || metric.Detail?.Length > options.MaxBlockCharacters))
+                throw new PresentationOutputValidationException();
+            var type = block.Type.ToLowerInvariant();
+            var hasRenderableContent = type switch
             {
-                if (!PresentationBlockTypes.Supported.Contains(block.Type) || block.Text?.Length > options.MaxBlockCharacters || block.Label?.Length > options.MaxBlockCharacters || block.Value?.Length > options.MaxBlockCharacters)
-                    throw new PresentationOutputValidationException();
-                if (block.Items.Count > options.MaxItemsPerBlock || block.Columns.Count > 4 || block.Rows.Count > options.MaxRowsPerBlock || block.Metrics.Count > 6)
-                    throw new PresentationOutputValidationException();
-                if (block.Columns.Any(column => column.Heading.Length > options.MaxBlockCharacters || column.Items.Count > options.MaxItemsPerBlock) || block.Rows.Any(row => row.Cells.Count > 8) || block.Metrics.Any(metric => metric.Label.Length > options.MaxBlockCharacters || metric.Value.Length > options.MaxBlockCharacters || metric.Detail?.Length > options.MaxBlockCharacters))
-                    throw new PresentationOutputValidationException();
-                if (AllText(block).Any(text => text.Contains('<') || text.Contains('>'))) throw new PresentationOutputValidationException();
-            }
+                PresentationBlockTypes.Text => !string.IsNullOrWhiteSpace(block.Text) || block.Items.Count > 0,
+                PresentationBlockTypes.Bullets or PresentationBlockTypes.Timeline or PresentationBlockTypes.Process => block.Items.Count > 0 || !string.IsNullOrWhiteSpace(block.Text),
+                PresentationBlockTypes.Columns => block.Columns.Count > 0,
+                PresentationBlockTypes.Table => block.Rows.Count > 0,
+                PresentationBlockTypes.Metrics => block.Metrics.Count > 0,
+                PresentationBlockTypes.Quote => !string.IsNullOrWhiteSpace(block.Text ?? block.Value),
+                _ => false,
+            };
+            if (!hasRenderableContent || AllText(block).Any(text => text.Contains('<') || text.Contains('>')))
+                throw new PresentationOutputValidationException();
         }
 
         static IEnumerable<string> AllText(PresentationContentBlock block)
