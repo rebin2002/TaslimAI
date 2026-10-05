@@ -1313,6 +1313,11 @@ export const api = {
   createMusicGenerationJob: (input: MusicGenerationInput, idempotencyKey = requestId()) => request<{ job: GenerationJob }>("/api/music-generation/jobs", generationInit({ method: "POST", body: JSON.stringify(input) }, idempotencyKey), true).then((response) => response.job),
   getGenerationJob: (jobId: string) => request<GenerationJob>(`/api/generation/jobs/${jobId}`),
   getResearchSources: (jobId: string) => request<{ jobId: string; sources: ResearchSource[] }>(`/api/research-generation/jobs/${jobId}/sources`),
+  downloadResearchSourcesExport: async (jobId: string) => {
+    const response = await fetch(`${API_URL}/api/research-generation/jobs/${jobId}/sources/export`, { credentials: "include" });
+    if (!response.ok) throw new ApiError(response.status, "Research source manifest unavailable.", undefined, "RESEARCH_SOURCE_EXPORT_UNAVAILABLE");
+    return response.blob();
+  },
   listGenerationJobs: (workspaceId: string, page = 1, pageSize = 20) => request<GenerationJobList>(`/api/generation/jobs?workspaceId=${encodeURIComponent(workspaceId)}&page=${page}&pageSize=${pageSize}&jobType=system.test`),
   cancelGenerationJob: (jobId: string) => request<{ status: GenerationJobStatus; cancellationRequested?: boolean }>(`/api/generation/jobs/${jobId}/cancel`, { method: "POST" }, true),
   listActivity: (workspaceId: string, page = 1, pageSize = 50, status?: string) => {
