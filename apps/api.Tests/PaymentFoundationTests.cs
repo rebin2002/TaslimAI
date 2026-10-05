@@ -209,7 +209,58 @@ public sealed class PaymentFoundationTests
         Assert.False(first.Duplicate);
         Assert.True(duplicate.Duplicate);
         Assert.Equal(PaymentAttemptStatus.Succeeded, (await db.PaymentAttempts.SingleAsync(item => item.Id == attempt.Id)).Status);
+        Assert.Equal("pay-1", (await db.PaymentAttempts.SingleAsync(item => item.Id == attempt.Id)).ProviderPaymentReference);
         Assert.Single(await db.PaymentEvents.ToListAsync());
+    }
+
+    [Fact]
+    public async Task Webhook_rejects_a_conflicting_provider_payment_reference()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        var workspace = NewWorkspace();
+        db.Workspaces.Add(workspace);
+        await db.SaveChangesAsync();
+        var lifecycle = NewLifecycle(db);
+        var attempt = await lifecycle.RecordPaymentAttemptAsync(workspace.Id, "fake", "attempt:reference-conflict", 9, "USD", providerPaymentReference: "pay-1");
+        var providerEvent = new ProviderPaymentEvent(
+            "evt-reference-conflict", PaymentEventType.PaymentSucceeded, workspace.Id, null, null, attempt.Id, "pay-2", 9, "USD",
+            DateTime.UtcNow, "Payment succeeded.", null, null, null, false);
+        var service = new PaymentWebhookService(db, [new FakePaymentProvider(providerEvent)], lifecycle, NullLogger<PaymentWebhookService>.Instance);
+
+        var result = await service.ProcessAsync("fake", "{\"event\":\"evt-reference-conflict\"}", "valid");
+
+        Assert.False(result.Accepted);
+        Assert.Equal("WEBHOOK_PROCESSING_FAILED", result.Code);
+        var persistedAttempt = await db.PaymentAttempts.AsNoTracking().SingleAsync(item => item.Id == attempt.Id);
+        Assert.Equal(PaymentAttemptStatus.Created, persistedAttempt.Status);
+        Assert.Equal("pay-1", persistedAttempt.ProviderPaymentReference);
+        Assert.Equal(PaymentEventStatus.Rejected, (await db.PaymentEvents.SingleAsync()).Status);
+    }
+
+    [Fact]
+    public async Task Webhook_rejects_a_payment_attempt_owned_by_another_provider()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        var workspace = NewWorkspace();
+        db.Workspaces.Add(workspace);
+        await db.SaveChangesAsync();
+        var lifecycle = NewLifecycle(db);
+        var attempt = await lifecycle.RecordPaymentAttemptAsync(workspace.Id, "other-provider", "attempt:provider-conflict", 9, "USD");
+        var providerEvent = new ProviderPaymentEvent(
+            "evt-provider-conflict", PaymentEventType.PaymentSucceeded, workspace.Id, null, null, attempt.Id, "pay-1", 9, "USD",
+            DateTime.UtcNow, "Payment succeeded.", null, null, null, false);
+        var service = new PaymentWebhookService(db, [new FakePaymentProvider(providerEvent)], lifecycle, NullLogger<PaymentWebhookService>.Instance);
+
+        var result = await service.ProcessAsync("fake", "{\"event\":\"evt-provider-conflict\"}", "valid");
+
+        Assert.False(result.Accepted);
+        Assert.Equal("WEBHOOK_PROCESSING_FAILED", result.Code);
+        Assert.Equal(PaymentAttemptStatus.Created, (await db.PaymentAttempts.AsNoTracking().SingleAsync(item => item.Id == attempt.Id)).Status);
+        Assert.Equal(PaymentEventStatus.Rejected, (await db.PaymentEvents.SingleAsync()).Status);
     }
 
     [Fact]

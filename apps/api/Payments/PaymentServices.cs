@@ -496,15 +496,29 @@ public sealed class PaymentWebhookService(
         try
         {
             ValidateProviderEventShape(parsed);
+            PaymentAttempt? linkedAttempt = null;
+            if (parsed.PaymentAttemptId.HasValue)
+            {
+                linkedAttempt = await db.PaymentAttempts.SingleOrDefaultAsync(item =>
+                    item.Id == parsed.PaymentAttemptId.Value && item.WorkspaceId == parsed.WorkspaceId!.Value, cancellationToken)
+                    ?? throw new InvalidOperationException("The payment attempt referenced by the event was not found.");
+                if (!string.Equals(linkedAttempt.Provider, provider.Key, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("The payment attempt provider does not match the webhook provider.");
+                if (!string.IsNullOrWhiteSpace(parsed.ProviderPaymentReference))
+                {
+                    if (linkedAttempt.ProviderPaymentReference is not null &&
+                        !string.Equals(linkedAttempt.ProviderPaymentReference, parsed.ProviderPaymentReference, StringComparison.Ordinal))
+                        throw new InvalidOperationException("The provider payment reference does not match the recorded payment attempt.");
+                    linkedAttempt.ProviderPaymentReference ??= parsed.ProviderPaymentReference.Trim();
+                }
+            }
             switch (parsed.Type)
             {
                 case PaymentEventType.PaymentSucceeded:
                 case PaymentEventType.RenewalSucceeded when parsed.PaymentAttemptId.HasValue:
-                    if (parsed.WorkspaceId.HasValue && parsed.PaymentAttemptId.HasValue)
+                    if (linkedAttempt is not null)
                     {
-                        var attempt = await db.PaymentAttempts.AsNoTracking().SingleOrDefaultAsync(item => item.Id == parsed.PaymentAttemptId.Value && item.WorkspaceId == parsed.WorkspaceId.Value, cancellationToken)
-                            ?? throw new InvalidOperationException("The payment attempt referenced by the event was not found.");
-                        if (parsed.Amount.HasValue && parsed.Amount.Value != attempt.Amount || !string.Equals(parsed.Currency, attempt.Currency, StringComparison.OrdinalIgnoreCase))
+                        if (parsed.Amount.HasValue && parsed.Amount.Value != linkedAttempt.Amount || !string.Equals(parsed.Currency, linkedAttempt.Currency, StringComparison.OrdinalIgnoreCase))
                             throw new InvalidOperationException("The provider payment amount or currency does not match the recorded payment attempt.");
                         await lifecycle.MarkPaymentSucceededAsync(parsed.WorkspaceId.Value, parsed.PaymentAttemptId.Value, parsed.Reason ?? "Provider payment succeeded.", cancellationToken);
                         if (parsed.Type == PaymentEventType.RenewalSucceeded && parsed.SubscriptionId.HasValue && parsed.PeriodStart.HasValue && parsed.PeriodEnd.HasValue)
@@ -556,6 +570,10 @@ public sealed class PaymentWebhookService(
         switch (parsed.Type)
         {
             case PaymentEventType.PaymentSucceeded:
+                RequireText(parsed.ProviderPaymentReference, "provider payment");
+                Require(parsed.WorkspaceId, "workspace");
+                Require(parsed.PaymentAttemptId, "payment attempt");
+                break;
             case PaymentEventType.PaymentFailed:
             case PaymentEventType.RenewalFailed:
                 Require(parsed.WorkspaceId, "workspace");
@@ -566,6 +584,8 @@ public sealed class PaymentWebhookService(
                 Require(parsed.SubscriptionId, "subscription");
                 if (!parsed.PeriodStart.HasValue || !parsed.PeriodEnd.HasValue)
                     throw new InvalidOperationException("The renewal event did not include a complete billing period.");
+                if (parsed.PaymentAttemptId.HasValue)
+                    RequireText(parsed.ProviderPaymentReference, "provider payment");
                 break;
             case PaymentEventType.SubscriptionCancelled:
                 Require(parsed.WorkspaceId, "workspace");
@@ -579,6 +599,12 @@ public sealed class PaymentWebhookService(
     private static void Require(Guid? value, string name)
     {
         if (!value.HasValue || value.Value == Guid.Empty)
+            throw new InvalidOperationException($"The payment event did not include a valid {name} reference.");
+    }
+
+    private static void RequireText(string? value, string name)
+    {
+        if (string.IsNullOrWhiteSpace(value))
             throw new InvalidOperationException($"The payment event did not include a valid {name} reference.");
     }
 }
