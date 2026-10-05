@@ -262,7 +262,7 @@ public sealed class MusicUnavailableTests : IClassFixture<MusicUnavailableApiFac
     }
 
     [Fact]
-    public async Task Missing_provider_fails_asynchronously_without_publishing_asset_or_exposing_internals()
+    public async Task Unconfigured_provider_fails_before_reservation_or_queueing()
     {
         using var client = factory.CreateClient();
         var csrf = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
@@ -277,18 +277,13 @@ public sealed class MusicUnavailableTests : IClassFixture<MusicUnavailableApiFac
         create.Headers.Add("X-CSRF-TOKEN", createCsrf.GetProperty("token").GetString());
         create.Content = JsonContent.Create(new { workspaceId = auth.PersonalWorkspace.Id, description = "A calm track", purpose = "A short film", genre = "ambient", mood = "calm", durationSeconds = 30, vocalPreference = "instrumental", language = "auto" });
         var created = await client.SendAsync(create);
-        Assert.Equal(HttpStatusCode.Accepted, created.StatusCode);
-        var envelope = await created.Content.ReadFromJsonAsync<CreateMusicGenerationResponse>();
-        var failed = await WaitForTerminal(client, envelope!.Job.Id);
-
-        Assert.Equal(GenerationJobStatus.Failed.ToString(), failed.Status);
-        Assert.Equal(GenerationJobErrorCodes.MusicProviderUnavailable, failed.ErrorCode);
-        Assert.DoesNotContain("provider", failed.ErrorMessage, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("model", failed.ErrorMessage, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, created.StatusCode);
+        var error = await created.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("MUSIC_STUDIO_UNAVAILABLE", error.GetProperty("error").GetProperty("code").GetString());
         using var scope = factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
-        Assert.False(await db.Assets.AsNoTracking().AnyAsync(item => item.SourceGenerationJobId == failed.Id));
-        Assert.Equal(UsageTransactionStatus.Failed, await db.UsageTransactions.Where(item => item.GenerationJobId == failed.Id).Select(item => item.Status).SingleAsync());
+        Assert.False(await db.GenerationJobs.AsNoTracking().AnyAsync(item => item.CreatedByUserId == auth.User.Id));
+        Assert.False(await db.UsageTransactions.AsNoTracking().AnyAsync(item => item.UserId == auth.User.Id));
     }
 
     private static async Task<GenerationJobDto> WaitForTerminal(HttpClient client, Guid id)
