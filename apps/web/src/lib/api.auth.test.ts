@@ -154,5 +154,6 @@ describe("api.login", () => {
     const failure = await api.listProjects("workspace-1", "Active", controller.signal).catch((error) => error);
     expect(failure.name).toBe("AbortError");
     expect(failure.code).not.toBe("NETWORK_ERROR");
+    expect(fetchMock.mock.calls[0][1].signal).toBe(controller.signal);
   });
 });
