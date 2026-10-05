@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 const workspaceSource = readFileSync(new URL("./FullMovieWorkspaceView.tsx", import.meta.url), "utf8");
 const shotDesignerSource = readFileSync(new URL("./ShotDesigner.tsx", import.meta.url), "utf8");
+const shotDesignerI18nSource = readFileSync(new URL("../lib/shotDesignerI18n.ts", import.meta.url), "utf8");
 const createSource = readFileSync(new URL("./MovieStudioView.tsx", import.meta.url), "utf8");
 const directorSource = readFileSync(new URL("./MovieDirectorPanel.tsx", import.meta.url), "utf8");
 const selectsSource = readFileSync(new URL("./MovieSelectsWorkspace.tsx", import.meta.url), "utf8");
@@ -144,8 +145,11 @@ describe("Full Movie workspace foundation", () => {
   it("mounts Shot Designer from the scene inspector without mutating the guide", () => {
     expect(workspaceSource).toContain("<ShotDesigner scene={scene} guide={guide} presets={presets}");
     expect(workspaceSource).toContain("api.addMovieShot(sceneId");
-    expect(shotDesignerSource).toContain("A shot override never rewrites the Movie Guide");
-    expect(shotDesignerSource).toContain("Guide stays locked; this saves as a shot-level override");
+    expect(shotDesignerSource).toContain('text("shotOverrideHint")');
+    expect(shotDesignerSource).toContain('text("guideLockedNote")');
+    expect(shotDesignerI18nSource).toContain("A shot override never rewrites the Movie Guide");
+    expect(shotDesignerI18nSource).toContain("يمكن لهذه اللقطة أن تحدد اتجاهها الخاص");
+    expect(shotDesignerI18nSource).toContain("ئەم شۆتە دەتوانێت ئاراستەی خۆی دابنێت");
     expect(shotDesignerSource).toContain("Native");
     expect(shotDesignerSource).toContain("Translated");
     expect(shotDesignerSource).toContain("Simulated/Post");

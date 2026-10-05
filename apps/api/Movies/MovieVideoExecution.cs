@@ -303,6 +303,7 @@ public sealed class MovieVideoGenerationJobHandler(
             input.ReferenceImages);
         var execution = await executions.GetOrCreateAsync(job, clip.Id, provider.Key, cancellationToken);
         var started = Stopwatch.GetTimestamp();
+        var providerOperationMayBeActive = !string.IsNullOrWhiteSpace(execution.ProviderJobId);
         progress.Report(5);
 
         try
@@ -314,6 +315,7 @@ public sealed class MovieVideoGenerationJobHandler(
                     cancellationToken);
                 if (string.IsNullOrWhiteSpace(submission.ProviderJobId) || submission.ProviderJobId.Length > 240)
                     throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieGenerationFailed, false);
+                providerOperationMayBeActive = true;
                 await executions.PersistSubmittedAsync(execution, job.ConcurrencyToken, submission.ProviderJobId, cancellationToken);
             }
 
@@ -327,6 +329,7 @@ public sealed class MovieVideoGenerationJobHandler(
                 progress.Report(Math.Clamp(10 + (int)Math.Round(status.ProgressPercent * 0.8), 10, 90));
                 if (status.Status is MovieVideoProviderJobStatus.Succeeded or MovieVideoProviderJobStatus.Failed or MovieVideoProviderJobStatus.Cancelled)
                 {
+                    providerOperationMayBeActive = false;
                     terminal = status;
                     break;
                 }
@@ -395,14 +398,20 @@ public sealed class MovieVideoGenerationJobHandler(
         }
         catch (OperationCanceledException exception)
         {
+            // Ownership can be lost after provider submission but before the
+            // provider job ID is durably persisted; cancel before rethrowing.
+            if (providerOperationMayBeActive)
+                await MovieVideoProviderCleanup.TryCancelAsync(provider, execution.ProviderJobId, job.Id, logger);
             if (exception is MovieVideoStaleWorkerException) throw;
-            await MovieVideoProviderCleanup.TryCancelAsync(provider, execution.ProviderJobId, job.Id, logger);
             await executions.MarkCancelledAsync(job.Id, job.ConcurrencyToken, CancellationToken.None);
             throw;
         }
         catch (Exception exception)
         {
-            if (exception is MovieVideoProviderTimeoutException)
+            // A provider/API failure after submission does not prove that the
+            // remote operation stopped. Best-effort cancellation prevents a
+            // locally failed job from leaving billable remote work running.
+            if (providerOperationMayBeActive)
                 await MovieVideoProviderCleanup.TryCancelAsync(provider, execution.ProviderJobId, job.Id, logger);
             var code = exception switch
             {

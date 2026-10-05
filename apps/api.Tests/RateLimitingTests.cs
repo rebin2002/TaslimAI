@@ -43,6 +43,23 @@ public sealed class RateLimitingTests
     }
 
     [Fact]
+    public async Task Account_security_concurrency_isolated_by_authenticated_user()
+    {
+        var options = CreateOptions();
+        var limiter = options.GlobalLimiter!;
+        var firstUser = CreateContext(RateLimiting.AccountSecurity, Guid.NewGuid());
+        var secondUser = CreateContext(RateLimiting.AccountSecurity, Guid.NewGuid());
+
+        using var firstUserLease = await limiter.AcquireAsync(firstUser);
+        using var firstUserRejected = await limiter.AcquireAsync(firstUser);
+        using var secondUserLease = await limiter.AcquireAsync(secondUser);
+
+        Assert.True(firstUserLease.IsAcquired);
+        Assert.False(firstUserRejected.IsAcquired);
+        Assert.True(secondUserLease.IsAcquired);
+    }
+
+    [Fact]
     public async Task Unprotected_endpoint_bypasses_global_concurrency_limiter()
     {
         var options = CreateOptions();
