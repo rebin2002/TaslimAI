@@ -33,6 +33,8 @@ jobs:
         run: |
           bash -n scripts/container-health-smoke.sh
           bash scripts/container-health-smoke.test.sh
+          bash -n scripts/web-container-smoke.sh
+          bash scripts/web-container-smoke.test.sh
 
       - name: Build API production image
         run: docker build --file apps/api/Dockerfile --tag taslim-api:release-smoke apps/api
@@ -49,3 +51,6 @@ jobs:
         env:
           SMOKE_CONNECTION_STRING: Host=127.0.0.1;Port=5432;Database=taslim_container_smoke;Username=taslim;Password=change-me
         run: bash scripts/container-health-smoke.sh taslim-api:release-smoke 8080 120
+
+      - name: Smoke-test web container runtime and security headers
+        run: bash scripts/web-container-smoke.sh taslim-web:release-smoke 3000 120
