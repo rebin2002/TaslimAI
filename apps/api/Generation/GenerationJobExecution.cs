@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.Extensions.Options;
 using Taslim.Api.Ai;
 using Taslim.Api.Assets;
@@ -281,8 +282,14 @@ public sealed class GenerationJobService(
         // Keep the job row, usage reservation, and queue transition in one
         // transaction even when the caller did not provide an idempotency key.
         // Otherwise a transient queue/database failure can strand a Pending job
-        // with a live usage record that no worker will ever claim.
-        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+        // with a live usage record that no worker will ever claim. A caller may
+        // already own a transaction when it is creating a compound provider-
+        // neutral workflow (for example, a Movie take batch); join that
+        // transaction instead of attempting an unsupported nested transaction.
+        var ownsTransaction = db.Database.CurrentTransaction is null;
+        IDbContextTransaction? transaction = ownsTransaction
+            ? await db.Database.BeginTransactionAsync(cancellationToken)
+            : null;
         try
         {
             await db.SaveChangesAsync(cancellationToken);
@@ -290,18 +297,24 @@ public sealed class GenerationJobService(
             await queue.EnqueueAsync(job.Id, cancellationToken);
             job.Status = GenerationJobStatus.Queued;
             job.QueuedAt = DateTime.UtcNow;
-            await transaction.CommitAsync(cancellationToken);
+            if (ownsTransaction)
+                await transaction!.CommitAsync(cancellationToken);
             return job;
         }
-        catch (DbUpdateException) when (normalizedKey is not null)
+        catch (DbUpdateException) when (normalizedKey is not null && ownsTransaction)
         {
-            await transaction.RollbackAsync(CancellationToken.None);
+            await transaction!.RollbackAsync(CancellationToken.None);
             db.Entry(job).State = EntityState.Detached;
             var existing = await db.GenerationJobs.AsNoTracking().FirstOrDefaultAsync(item => item.CreatedByUserId == userId && item.IdempotencyKey == normalizedKey, cancellationToken);
             if (existing is null) throw;
             if (!string.Equals(existing.RequestFingerprint, requestFingerprint, StringComparison.Ordinal))
                 throw new GenerationJobValidationException("IDEMPOTENCY_KEY_REUSED", "This idempotency key was already used for a different generation request.");
             return existing;
+        }
+        finally
+        {
+            if (ownsTransaction && transaction is not null)
+                await transaction.DisposeAsync();
         }
     }
 
