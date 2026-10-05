@@ -322,6 +322,15 @@ public sealed class ContextIntegrationTests : IClassFixture<ContextRecordingFact
         var recorder = factory.Services.GetRequiredService<RecordingChatCompletionService>();
         Assert.Contains(recorder.LastRequest!.Messages, message => message.Content == "SOURCE_USER_MARKER");
         Assert.DoesNotContain(recorder.LastRequest.Messages, message => message.Content == "SUPERSEDED_ASSISTANT_MARKER");
+
+        using var firstRegenerationCompleted = ExtractEventData(await regeneration.Content.ReadAsStringAsync(), "message.completed");
+        var firstRegeneratedAssistantId = firstRegenerationCompleted.RootElement.GetProperty("assistantMessage").GetProperty("id").GetGuid();
+        var repeatedRegeneration = await SendWithCsrf(client, HttpMethod.Post, $"/api/conversations/{conversation.Id}/messages/{firstRegeneratedAssistantId}/regenerate", new
+        {
+            requestId = Guid.NewGuid().ToString("N"),
+        });
+        Assert.Equal(HttpStatusCode.OK, repeatedRegeneration.StatusCode);
+        Assert.DoesNotContain(recorder.LastRequest!.Messages, message => message.Content == "SUPERSEDED_ASSISTANT_MARKER");
     }
 
     private async Task<AuthResponse> Register(HttpClient client, string displayName)
@@ -414,6 +423,14 @@ public sealed class ContextIntegrationTests : IClassFixture<ContextRecordingFact
         foreach (var offset in offsets.Skip(1)) WriteAscii(output, $"{offset:0000000000} 00000 n \n");
         WriteAscii(output, $"trailer\n<< /Size {objects.Length + 1} /Root 1 0 R >>\nstartxref\n{xrefOffset}\n%%EOF\n");
         return output.ToArray();
+    }
+
+    private static JsonDocument ExtractEventData(string body, string eventName)
+    {
+        var block = body.Split("\n\n", StringSplitOptions.RemoveEmptyEntries)
+            .First(item => item.StartsWith($"event: {eventName}\n", StringComparison.Ordinal));
+        var dataLine = block.Split('\n').Single(line => line.StartsWith("data: ", StringComparison.Ordinal));
+        return JsonDocument.Parse(dataLine[6..]);
     }
 
     private static void WriteAscii(Stream output, string value) => output.Write(Encoding.ASCII.GetBytes(value));
