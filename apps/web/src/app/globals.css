@@ -2892,3 +2892,8 @@ body { background: var(--canvas); }
 .movie-edit-footnote { display: flex; align-items: center; gap: 7px; margin: 0 2px; color: #6e8b9d; font-size: 9px; line-height: 1.45; }
 .movie-edit-footnote svg { flex: 0 0 auto; color: var(--movie-teal); }
 @media (max-width: 720px) { .movie-edit-toolbar { align-items: stretch; flex-direction: column; }.movie-edit-validation { align-items: flex-start; flex-direction: column; }.movie-edit-validation > span { align-self: flex-end; }.movie-edit-inspector { grid-template-columns: 1fr; }.movie-edit-status { align-items: flex-start; padding: 0; text-align: start; }.movie-edit-blockers, .movie-edit-clear { grid-column: auto; } }
+
+/* Shot Designer keeps its control chrome and saved-shot sequence readable in RTL locales. */
+[dir="rtl"] .movie-shot-title, [dir="rtl"] .movie-shot-list-item { flex-direction: row-reverse; }
+[dir="rtl"] .movie-shot-designer-heading, [dir="rtl"] .movie-shot-intent-heading, [dir="rtl"] .movie-shot-advanced-heading, [dir="rtl"] .movie-shot-designer-footer, [dir="rtl"] .movie-capability-heading { flex-direction: row-reverse; }
+@media (max-width: 520px) { [dir="rtl"] .movie-shot-designer-heading, [dir="rtl"] .movie-shot-advanced-heading, [dir="rtl"] .movie-shot-designer-footer, [dir="rtl"] .movie-capability-heading { flex-direction: column; } }
