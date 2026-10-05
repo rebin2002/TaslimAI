@@ -110,7 +110,16 @@ public sealed class DocumentGenerationJobHandler(
         var rendered = new List<RenderedDocument>();
         if (input.OutputFormat is "docx" or "both")
         {
-            try { rendered.Add(renderer.RenderDocx(generated.Draft, input, settings)); }
+            try
+            {
+                var output = renderer.RenderDocx(generated.Draft, input, settings);
+                DocumentOutputIntegrityValidator.Validate(output);
+                rendered.Add(output);
+            }
+            catch (DocumentOutputIntegrityException exception)
+            {
+                throw new DocumentGenerationStageException(DocumentGenerationStages.DocxRender, GenerationJobErrorCodes.DocumentRenderFailed, "The DOCX renderer returned an invalid file.", generated.Usage, exception);
+            }
             catch (Exception exception) when (exception is not OperationCanceledException)
             {
                 throw new DocumentGenerationStageException(DocumentGenerationStages.DocxRender, GenerationJobErrorCodes.DocumentRenderFailed, "The DOCX document could not be rendered.", generated.Usage, exception);
@@ -118,7 +127,16 @@ public sealed class DocumentGenerationJobHandler(
         }
         if (input.OutputFormat is "pdf" or "both")
         {
-            try { rendered.Add(renderer.RenderPdf(generated.Draft, input, settings)); }
+            try
+            {
+                var output = renderer.RenderPdf(generated.Draft, input, settings);
+                DocumentOutputIntegrityValidator.Validate(output);
+                rendered.Add(output);
+            }
+            catch (DocumentOutputIntegrityException exception)
+            {
+                throw new DocumentGenerationStageException(DocumentGenerationStages.PdfRender, GenerationJobErrorCodes.DocumentRenderFailed, "The PDF renderer returned an invalid file.", generated.Usage, exception);
+            }
             catch (Exception exception) when (exception is not OperationCanceledException)
             {
                 throw new DocumentGenerationStageException(DocumentGenerationStages.PdfRender, GenerationJobErrorCodes.DocumentRenderFailed, "The PDF document could not be rendered.", generated.Usage, exception);

@@ -11,7 +11,9 @@ using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
 using Taslim.Api.Documents;
 using Taslim.Api.Files;
+using Taslim.Api.Infrastructure;
 using Taslim.Api.Images;
+using Taslim.Api.Infrastructure;
 using Taslim.Api.Music;
 using Taslim.Api.Movies;
 using Taslim.Api.Notifications;
@@ -187,6 +189,7 @@ public sealed class GenerationJobService(
     IGenerationJobUsageService usage,
     IGenerationCostGuardrailService costGuardrails,
     IHttpContextAccessor httpContextAccessor,
+    IOptions<ImageGenerationOptions> imageOptions,
     MovieCollaborationAccess? movieCollaboration = null) : IGenerationJobService
 {
     public async Task<GenerationJob> CreateAsync(Guid userId, CreateGenerationJobRequest request, CancellationToken cancellationToken = default, string? idempotencyKey = null, string? requestId = null, Guid? retryOfJobId = null)
@@ -307,11 +310,13 @@ public sealed class GenerationJobService(
     public async Task<GenerationJob?> RetryAsync(Guid userId, Guid jobId, CancellationToken cancellationToken = default, string? idempotencyKey = null, string? requestId = null)
     {
         var source = await db.GenerationJobs.AsNoTracking().FirstOrDefaultAsync(item => item.Id == jobId, cancellationToken);
-        if (source is null || !await access.IsMemberAsync(userId, source.WorkspaceId, cancellationToken)) return null;
+        if (source is null || !await access.IsMemberAsync(userId, source.WorkspaceId, cancellationToken) || IsPrivateResearchRecord(source, userId)) return null;
         if (source.Status is not (GenerationJobStatus.Failed or GenerationJobStatus.Cancelled))
             throw new GenerationJobValidationException("RETRY_SOURCE_NOT_TERMINAL", "Only failed or cancelled jobs can be retried.");
         if (string.IsNullOrWhiteSpace(idempotencyKey))
             throw new GenerationJobValidationException("RETRY_IDEMPOTENCY_REQUIRED", "A retry idempotency key is required.");
+        if (string.Equals(source.JobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase) && !imageOptions.Value.Enabled)
+            throw new GenerationJobValidationException(GenerationJobErrorCodes.ImageStudioUnavailable, "Image generation is not available right now.");
 
         var retryInputJson = source.InputJson;
         MovieDialogueTake? pendingDialogueTake = null;
@@ -549,23 +554,28 @@ public sealed class GenerationJobService(
     public async Task<GenerationJob?> GetAsync(Guid userId, Guid jobId, CancellationToken cancellationToken = default)
     {
         var job = await db.GenerationJobs.AsNoTracking().Include(item => item.Outputs).FirstOrDefaultAsync(item => item.Id == jobId, cancellationToken);
-        if (job is null || !await access.IsMemberAsync(userId, job.WorkspaceId, cancellationToken)) return null;
+        if (job is null || !await access.IsMemberAsync(userId, job.WorkspaceId, cancellationToken) || IsPrivateResearchRecord(job, userId)) return null;
         return job;
     }
 
     public async Task<GenerationJobListDto?> ListAsync(Guid userId, GenerationJobFilter filter, CancellationToken cancellationToken = default)
     {
         if (!await access.IsMemberAsync(userId, filter.WorkspaceId, cancellationToken)) return null;
-        var page = Math.Max(filter.Page, 1);
-        var pageSize = Math.Clamp(filter.PageSize, 1, 100);
-        var query = db.GenerationJobs.AsNoTracking().Where(job => job.WorkspaceId == filter.WorkspaceId);
+        var page = ApiPagination.NormalizePage(filter.Page);
+        var pageSize = ApiPagination.NormalizePageSize(filter.PageSize);
+        // Research execution records can contain report text and source excerpts derived from
+        // private uploads. Generated assets remain the intentional workspace sharing surface,
+        // but the execution record itself is only visible to its creator.
+        var query = db.GenerationJobs.AsNoTracking().Where(job => job.WorkspaceId == filter.WorkspaceId &&
+            (job.JobType != GenerationJobTypes.ResearchGenerate || job.CreatedByUserId == userId));
         if (filter.Status.HasValue) query = query.Where(job => job.Status == filter.Status.Value);
         if (filter.ProjectId.HasValue) query = query.Where(job => job.ProjectId == filter.ProjectId.Value);
         if (!string.IsNullOrWhiteSpace(filter.JobType)) query = query.Where(job => job.JobType == filter.JobType);
         var totalCount = await query.CountAsync(cancellationToken);
         var jobs = await query.Include(job => job.Outputs)
             .OrderByDescending(job => job.CreatedAt)
-            .Skip((page - 1) * pageSize)
+            .ThenByDescending(job => job.Id)
+            .Skip(ApiPagination.GetOffset(page, pageSize))
             .Take(pageSize)
             .ToListAsync(cancellationToken);
         return new GenerationJobListDto(jobs.Select(GenerationJobContractMapper.ToDto).ToArray(), page, pageSize, totalCount, (int)Math.Ceiling(totalCount / (double)pageSize));
@@ -575,7 +585,7 @@ public sealed class GenerationJobService(
     {
         var job = await db.GenerationJobs.AsNoTracking().FirstOrDefaultAsync(item => item.Id == jobId, cancellationToken);
         if (job is null) return GenerationJobCancelResult.NotFound;
-        if (!await access.IsMemberAsync(userId, job.WorkspaceId, cancellationToken)) return GenerationJobCancelResult.Forbidden;
+        if (!await access.IsMemberAsync(userId, job.WorkspaceId, cancellationToken) || IsPrivateResearchRecord(job, userId)) return GenerationJobCancelResult.Forbidden;
         var now = DateTime.UtcNow;
         var immediate = await db.GenerationJobs
             .Where(item => item.Id == jobId && (item.Status == GenerationJobStatus.Pending || item.Status == GenerationJobStatus.Queued))
@@ -611,6 +621,10 @@ public sealed class GenerationJobService(
             .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.CancellationRequested, true), cancellationToken);
         return running > 0 ? GenerationJobCancelResult.CancellationRequested : GenerationJobCancelResult.Conflict;
     }
+
+    private static bool IsPrivateResearchRecord(GenerationJob job, Guid userId) =>
+        string.Equals(job.JobType, GenerationJobTypes.ResearchGenerate, StringComparison.OrdinalIgnoreCase)
+        && job.CreatedByUserId != userId;
 
     private async Task CancelUsageAsync(GenerationJob job, string code, CancellationToken cancellationToken)
     {
@@ -697,10 +711,13 @@ public sealed class GenerationJobWorker(
                 }
                 consecutiveFailures = 0;
                 await TouchWorkerHeartbeatSafelyAsync(db, workerId, workerIndex, job.Id, now, consecutiveFailures, now, stoppingToken);
-                logger.LogInformation(
-                    "Generation job claimed. JobId={JobId}; WorkspaceId={WorkspaceId}; JobType={JobType}; RequestId={RequestId}; RetryCount={RetryCount}; ClaimExpiresAt={ClaimExpiresAt}",
-                    job.Id, job.WorkspaceId, job.JobType, job.RequestId, job.RetryCount, job.ClaimExpiresAt);
-                await ExecuteJobAsync(job, workerId, workerIndex, stoppingToken);
+                using (GenerationJobOperationalScope.Begin(logger, job))
+                {
+                    logger.LogInformation(
+                        "Generation job claimed. JobId={JobId}; WorkspaceId={WorkspaceId}; JobType={JobType}; RequestId={RequestId}; RetryCount={RetryCount}; ClaimExpiresAt={ClaimExpiresAt}",
+                        job.Id, job.WorkspaceId, job.JobType, job.RequestId, job.RetryCount, job.ClaimExpiresAt);
+                    await ExecuteJobAsync(job, workerId, workerIndex, stoppingToken);
+                }
                 await TouchWorkerHeartbeatSafelyAsync(db, workerId, workerIndex, null, now, consecutiveFailures, DateTime.UtcNow, stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
@@ -787,7 +804,7 @@ public sealed class GenerationJobWorker(
                 if (recovered == 0) continue;
                 logger.LogWarning("Expired generation lease recovered. JobId={JobId}; RetryReason={RetryReason}; RetryCount={RetryCount}; MaxAutomaticRetries={MaxAutomaticRetries}",
                     job.Id, "lease_expired", job.RetryCount + 1, maxAutomaticRetries);
-                await TryNotifyAsync(() => notifications.CreateGenerationAttentionAsync(job.Id, cancellationToken), job.Id);
+                await TryNotifyAsync(() => notifications.CreateGenerationAttentionAsync(job.Id, cancellationToken), job.Id, cancellationToken);
                 continue;
             }
 
@@ -818,7 +835,7 @@ public sealed class GenerationJobWorker(
             await poisonFinalization.CommitAsync(cancellationToken);
             logger.LogError("Generation job moved to poison terminal state after bounded lease recovery. JobId={JobId}; RetryCount={RetryCount}; MaxAutomaticRetries={MaxAutomaticRetries}",
                 job.Id, job.RetryCount, maxAutomaticRetries);
-            await TryNotifyAsync(() => notifications.CreateGenerationFailedAsync(job.Id, cancellationToken), job.Id);
+            await TryNotifyAsync(() => notifications.CreateGenerationFailedAsync(job.Id, cancellationToken), job.Id, cancellationToken);
         }
     }
 
@@ -902,7 +919,7 @@ public sealed class GenerationJobWorker(
             if (handler is null)
             {
                 await FailAsync(db, usage, claimedJob, GenerationJobErrorCodes.TypeNotSupported, "This job type is not available.", null, claimedJob.ConcurrencyToken, stoppingToken);
-                await TryNotifyAsync(() => notifications.CreateGenerationFailedAsync(claimedJob.Id, stoppingToken), claimedJob.Id);
+                await TryNotifyAsync(() => notifications.CreateGenerationFailedAsync(claimedJob.Id, stoppingToken), claimedJob.Id, stoppingToken);
                 return;
             }
             if (string.Equals(claimedJob.JobType, GenerationJobTypes.MovieAssembly, StringComparison.OrdinalIgnoreCase))
@@ -1069,7 +1086,7 @@ public sealed class GenerationJobWorker(
                 "Generation job execution completed. JobId={JobId}; JobType={JobType}; RequestId={RequestId}; ProviderKey={ProviderKey}; ProviderModel={ProviderModel}; ElapsedMs={ElapsedMs}; UsageFinalized={UsageFinalized}",
                 claimedJob.Id, claimedJob.JobType, claimedJob.RequestId, result.Usage?.ProviderKey, result.Usage?.ModelKey,
                 (long)Stopwatch.GetElapsedTime(executionStarted).TotalMilliseconds, true);
-            await TryNotifyAsync(() => notifications.CreateGenerationCompletedAsync(claimedJob.Id, stoppingToken), claimedJob.Id);
+            await TryNotifyAsync(() => notifications.CreateGenerationCompletedAsync(claimedJob.Id, stoppingToken), claimedJob.Id, stoppingToken);
             if (GenerationJobTypes.MovieDialogueVoiceTypes.Contains(claimedJob.JobType))
             {
                 var publication = publications.FirstOrDefault(item => item.Asset is not null);
@@ -1134,6 +1151,7 @@ public sealed class GenerationJobWorker(
             if (!publicationCommitted)
                 foreach (var publication in publications) await publisher.DiscardAsync(publication, CancellationToken.None);
             var failureCode = MapFailureCode(exception, claimedJob.JobType);
+            var failureClassification = GenerationFailureClassifier.Classify(failureCode);
             if (GenerationJobTypes.MovieTypes.Contains(claimedJob.JobType))
             {
                 if (string.Equals(claimedJob.JobType, GenerationJobTypes.MovieAssembly, StringComparison.OrdinalIgnoreCase))
@@ -1170,11 +1188,13 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
             {
                 var stage = (exception as DocumentGenerationStageException)?.Stage ?? DocumentGenerationStages.Execution;
                 var providerException = exception as AiProviderException ?? exception.InnerException as AiProviderException;
-                logger.LogError("Document generation failed. JobId={JobId}; RequestId={RequestId}; Stage={Stage}; ErrorCode={ErrorCode}; ExceptionType={ExceptionType}; ProviderFailureCategory={ProviderFailureCategory}; ProviderHttpStatus={ProviderHttpStatus}; ProviderErrorCode={ProviderErrorCode}; ModelKey={ModelKey}; StructuredOutput={StructuredOutput}; Streaming={Streaming}; ElapsedMs={ElapsedMs}",
+                logger.LogError("Document generation failed. JobId={JobId}; RequestId={RequestId}; Stage={Stage}; ErrorCode={ErrorCode}; FailureCategory={FailureCategory}; Retryable={Retryable}; ExceptionType={ExceptionType}; ProviderFailureCategory={ProviderFailureCategory}; ProviderHttpStatus={ProviderHttpStatus}; ProviderErrorCode={ProviderErrorCode}; ModelKey={ModelKey}; StructuredOutput={StructuredOutput}; Streaming={Streaming}; ElapsedMs={ElapsedMs}",
                     claimedJob.Id,
                     claimedJob.RequestId,
                     stage,
                     failureCode,
+                    failureClassification.Category,
+                    failureClassification.Retryable,
                     exception.GetType().Name,
                     providerException?.FailureCategory,
                     providerException?.HttpStatusCode,
@@ -1188,11 +1208,13 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
             {
                 var stage = (exception as PresentationGenerationStageException)?.Stage ?? PresentationGenerationStages.Execution;
                 var providerException = exception as AiProviderException ?? exception.InnerException as AiProviderException;
-                logger.LogError("Presentation generation failed. JobId={JobId}; RequestId={RequestId}; Stage={Stage}; ErrorCode={ErrorCode}; ExceptionType={ExceptionType}; ProviderFailureCategory={ProviderFailureCategory}; ProviderHttpStatus={ProviderHttpStatus}; ProviderErrorCode={ProviderErrorCode}; ModelKey={ModelKey}; StructuredOutput={StructuredOutput}; Streaming={Streaming}; ElapsedMs={ElapsedMs}",
+                logger.LogError("Presentation generation failed. JobId={JobId}; RequestId={RequestId}; Stage={Stage}; ErrorCode={ErrorCode}; FailureCategory={FailureCategory}; Retryable={Retryable}; ExceptionType={ExceptionType}; ProviderFailureCategory={ProviderFailureCategory}; ProviderHttpStatus={ProviderHttpStatus}; ProviderErrorCode={ProviderErrorCode}; ModelKey={ModelKey}; StructuredOutput={StructuredOutput}; Streaming={Streaming}; ElapsedMs={ElapsedMs}",
                     claimedJob.Id,
                     claimedJob.RequestId,
                     stage,
                     failureCode,
+                    failureClassification.Category,
+                    failureClassification.Retryable,
                     exception.GetType().Name,
                     providerException?.FailureCategory,
                     providerException?.HttpStatusCode,
@@ -1212,11 +1234,13 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
                     ResearchSearchUnavailableException unavailable => unavailable.Details,
                     _ => null,
                 };
-                logger.LogError("Research generation failed. JobId={JobId}; RequestId={RequestId}; Stage={Stage}; ErrorCode={ErrorCode}; ExceptionType={ExceptionType}; ProviderFailureCategory={ProviderFailureCategory}; ProviderHttpStatus={ProviderHttpStatus}; ProviderErrorCode={ProviderErrorCode}; SearchHttpStatus={SearchHttpStatus}; SearchErrorType={SearchErrorType}; SearchErrorCode={SearchErrorCode}; SearchErrorParam={SearchErrorParam}; ModelKey={ModelKey}; ElapsedMs={ElapsedMs}",
+                logger.LogError("Research generation failed. JobId={JobId}; RequestId={RequestId}; Stage={Stage}; ErrorCode={ErrorCode}; FailureCategory={FailureCategory}; Retryable={Retryable}; ExceptionType={ExceptionType}; ProviderFailureCategory={ProviderFailureCategory}; ProviderHttpStatus={ProviderHttpStatus}; ProviderErrorCode={ProviderErrorCode}; SearchHttpStatus={SearchHttpStatus}; SearchErrorType={SearchErrorType}; SearchErrorCode={SearchErrorCode}; SearchErrorParam={SearchErrorParam}; ModelKey={ModelKey}; ElapsedMs={ElapsedMs}",
                     claimedJob.Id,
                     claimedJob.RequestId,
                     stage,
                     failureCode,
+                    failureClassification.Category,
+                    failureClassification.Retryable,
                     exception.GetType().Name,
                     providerException?.FailureCategory,
                     providerException?.HttpStatusCode,
@@ -1232,11 +1256,13 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
             {
                 var stage = (exception as SocialGenerationStageException)?.Stage ?? SocialGenerationStages.Execution;
                 var providerException = exception as AiProviderException ?? exception.InnerException as AiProviderException;
-                logger.LogError("Social generation failed. JobId={JobId}; RequestId={RequestId}; Stage={Stage}; ErrorCode={ErrorCode}; ExceptionType={ExceptionType}; ProviderFailureCategory={ProviderFailureCategory}; ProviderHttpStatus={ProviderHttpStatus}; ProviderErrorCode={ProviderErrorCode}; ModelKey={ModelKey}; StructuredOutput={StructuredOutput}; ElapsedMs={ElapsedMs}",
+                logger.LogError("Social generation failed. JobId={JobId}; RequestId={RequestId}; Stage={Stage}; ErrorCode={ErrorCode}; FailureCategory={FailureCategory}; Retryable={Retryable}; ExceptionType={ExceptionType}; ProviderFailureCategory={ProviderFailureCategory}; ProviderHttpStatus={ProviderHttpStatus}; ProviderErrorCode={ProviderErrorCode}; ModelKey={ModelKey}; StructuredOutput={StructuredOutput}; ElapsedMs={ElapsedMs}",
                     claimedJob.Id,
                     claimedJob.RequestId,
                     stage,
                     failureCode,
+                    failureClassification.Category,
+                    failureClassification.Retryable,
                     exception.GetType().Name,
                     providerException?.FailureCategory,
                     providerException?.HttpStatusCode,
@@ -1247,15 +1273,15 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
             }
             else
             {
-                logger.LogError(exception, "Generation job execution failed. JobId={JobId}; WorkspaceId={WorkspaceId}; JobType={JobType}; RequestId={RequestId}; FailureCode={FailureCode}; ExceptionType={ExceptionType}; ElapsedMs={ElapsedMs}; UsageFinalized={UsageFinalized}",
-                    claimedJob.Id, claimedJob.WorkspaceId, claimedJob.JobType, claimedJob.RequestId, failureCode, exception.GetType().Name,
+                logger.LogError("Generation job execution failed. JobId={JobId}; WorkspaceId={WorkspaceId}; JobType={JobType}; RequestId={RequestId}; FailureCode={FailureCode}; FailureCategory={FailureCategory}; Retryable={Retryable}; ExceptionType={ExceptionType}; ElapsedMs={ElapsedMs}; UsageFinalized={UsageFinalized}",
+                    claimedJob.Id, claimedJob.WorkspaceId, claimedJob.JobType, claimedJob.RequestId, failureCode, failureClassification.Category, failureClassification.Retryable, exception.GetType().Name,
                     (long)Stopwatch.GetElapsedTime(executionStarted).TotalMilliseconds, true);
             }
             await FailAsync(db, usage, claimedJob, failureCode, FailureMessage(failureCode), failureUsage, claimedJob.ConcurrencyToken, stoppingToken);
             logger.LogInformation(
                 "Generation job failure finalized. JobId={JobId}; JobType={JobType}; RequestId={RequestId}; FailureCode={FailureCode}; UsageFinalized={UsageFinalized}",
                 claimedJob.Id, claimedJob.JobType, claimedJob.RequestId, failureCode, true);
-            await TryNotifyAsync(() => notifications.CreateGenerationFailedAsync(claimedJob.Id, stoppingToken), claimedJob.Id);
+            await TryNotifyAsync(() => notifications.CreateGenerationFailedAsync(claimedJob.Id, stoppingToken), claimedJob.Id, stoppingToken);
         }
         finally
         {
@@ -1398,15 +1424,21 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
         }
     }
 
-    private async Task TryNotifyAsync(Func<Task> action, Guid jobId)
+    private async Task TryNotifyAsync(Func<Task> action, Guid jobId, CancellationToken cancellationToken)
     {
         try
         {
-            await action();
+            if (await NotificationDeliveryRetry.TryExecuteAsync(action, cancellationToken: cancellationToken)) return;
+            logger.LogWarning("Generation notification delivery failed after bounded retries. JobId={JobId}; MaxAttempts={MaxAttempts}",
+                jobId, NotificationDeliveryRetry.DefaultMaxAttempts);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception exception)
         {
-            logger.LogWarning(exception, "Generation notification was skipped safely. JobId={JobId}", jobId);
+            logger.LogWarning(exception, "Generation notification delivery was skipped safely after retry handling. JobId={JobId}", jobId);
         }
     }
 

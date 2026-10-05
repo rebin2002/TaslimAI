@@ -85,10 +85,10 @@ public sealed class GlobalSearchController(TaslimDbContext db) : ControllerBase
                 conversation.Id,
                 conversation.Title,
                 null,
-                conversation.ProjectId,
+                conversation.Project != null && conversation.Project.WorkspaceId == conversation.WorkspaceId ? conversation.ProjectId : null,
                 conversation.Id,
                 null,
-                conversation.Project == null ? null : conversation.Project.Name,
+                conversation.Project != null && conversation.Project.WorkspaceId == conversation.WorkspaceId ? conversation.Project.Name : null,
                 conversation.Status.ToString(),
                 conversation.LastMessageAt.HasValue ? "message" : "conversation",
                 conversation.CreatedAt,
@@ -96,8 +96,22 @@ public sealed class GlobalSearchController(TaslimDbContext db) : ControllerBase
             .ToListAsync(cancellationToken);
         AddGroup(groups, GlobalSearchResultTypes.Conversation, conversations);
 
+        // Keep asset search aligned with the asset-library privacy boundary:
+        // project assets are shared only when their backing file is also
+        // workspace-shareable; personal and conversation-backed assets remain
+        // visible only to their creator.
         var assets = await db.Assets.AsNoTracking()
             .Where(asset => workspaceIds.Contains(asset.WorkspaceId)
+                && (asset.CreatedByUserId == userId
+                    || (asset.ProjectId.HasValue && asset.Project != null && asset.Project.WorkspaceId == asset.WorkspaceId))
+                && (asset.CreatedByUserId == userId
+                    || !asset.StoredFileId.HasValue
+                    || (asset.StoredFile!.WorkspaceId == asset.WorkspaceId
+                        && (asset.StoredFile.UserId == userId
+                            || (asset.StoredFile.ProjectId.HasValue
+                                && asset.StoredFile.ConversationId == null
+                                && asset.StoredFile.Project != null
+                                && asset.StoredFile.Project.WorkspaceId == asset.StoredFile.WorkspaceId))))
                 && (asset.Name.ToLower().Contains(search)
                     || (asset.Description != null && asset.Description.ToLower().Contains(search))))
             .OrderByDescending(asset => asset.UpdatedAt)
@@ -108,10 +122,10 @@ public sealed class GlobalSearchController(TaslimDbContext db) : ControllerBase
                 asset.Id,
                 asset.Name,
                 asset.Description,
-                asset.ProjectId,
+                asset.Project != null && asset.Project.WorkspaceId == asset.WorkspaceId ? asset.ProjectId : null,
                 null,
                 asset.Id,
-                asset.Project == null ? null : asset.Project.Name,
+                asset.Project != null && asset.Project.WorkspaceId == asset.WorkspaceId ? asset.Project.Name : null,
                 asset.Status.ToString(),
                 asset.AssetType,
                 asset.CreatedAt,
@@ -125,7 +139,11 @@ public sealed class GlobalSearchController(TaslimDbContext db) : ControllerBase
         var files = await db.StoredFiles.AsNoTracking()
             .Where(file => workspaceIds.Contains(file.WorkspaceId)
                 && file.Status != StoredFileStatus.Deleted
-                && ((file.ProjectId != null && file.ConversationId == null) || file.UserId == userId)
+                && (file.UserId == userId
+                    || (file.ProjectId != null
+                        && file.ConversationId == null
+                        && file.Project != null
+                        && file.Project.WorkspaceId == file.WorkspaceId))
                 && (file.OriginalFileName.ToLower().Contains(search)
                     || (file.ExtractedText != null && file.ExtractedText.ToLower().Contains(search))))
             .OrderByDescending(file => file.CreatedAt)
@@ -136,10 +154,10 @@ public sealed class GlobalSearchController(TaslimDbContext db) : ControllerBase
                 file.Id,
                 file.OriginalFileName,
                 null,
-                file.ProjectId,
+                file.Project != null && file.Project.WorkspaceId == file.WorkspaceId ? file.ProjectId : null,
                 file.ConversationId,
                 null,
-                file.Project == null ? null : file.Project.Name,
+                file.Project != null && file.Project.WorkspaceId == file.WorkspaceId ? file.Project.Name : null,
                 file.Status.ToString(),
                 file.Extension,
                 file.CreatedAt,
@@ -147,13 +165,18 @@ public sealed class GlobalSearchController(TaslimDbContext db) : ControllerBase
             .ToListAsync(cancellationToken);
         AddGroup(groups, GlobalSearchResultTypes.File, files);
 
-        // Search user-authored titles and prompts, but expose only safe activity metadata.
+        // Generation execution records, including prompt-bearing InputJson, are
+        // private to their creator. Generated Assets remain the workspace-shared
+        // discovery surface through the separate asset query above.
         var generationRows = await db.GenerationJobs.AsNoTracking()
             .Where(job => workspaceIds.Contains(job.WorkspaceId)
+                && job.CreatedByUserId == userId
                 && ((job.Title != null && job.Title.ToLower().Contains(search))
                     || job.JobType.ToLower().Contains(search)
                     || job.InputJson.ToLower().Contains(search)
-                    || (job.Project != null && job.Project.Name.ToLower().Contains(search))))
+                    || (job.Project != null
+                        && job.Project.WorkspaceId == job.WorkspaceId
+                        && job.Project.Name.ToLower().Contains(search))))
             .OrderByDescending(job => job.CreatedAt)
             .ThenByDescending(job => job.Id)
             .Take(perType)
@@ -161,9 +184,9 @@ public sealed class GlobalSearchController(TaslimDbContext db) : ControllerBase
             {
                 job.Id,
                 job.Title,
-                job.ProjectId,
+                ProjectId = job.Project != null && job.Project.WorkspaceId == job.WorkspaceId ? job.ProjectId : null,
                 AssetId = db.Assets.Where(asset => asset.SourceGenerationJobId == job.Id).Select(asset => (Guid?)asset.Id).FirstOrDefault(),
-                ProjectName = job.Project == null ? null : job.Project.Name,
+                ProjectName = job.Project != null && job.Project.WorkspaceId == job.WorkspaceId ? job.Project.Name : null,
                 Status = job.Status.ToString(),
                 job.JobType,
                 job.CreatedAt,

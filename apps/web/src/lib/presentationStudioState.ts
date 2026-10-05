@@ -28,6 +28,9 @@ export function isPresentationJob(job: GenerationJob | null) {
 export function isRestorablePresentationJob(job: GenerationJob | null, workspaceId: string) {
   return !!job && job.workspaceId === workspaceId && isPresentationJob(job);
 }
+export function shouldResetPresentationWorkspaceState(job: GenerationJob | null, workspaceId: string | null) {
+  return !!job && (!workspaceId || !isRestorablePresentationJob(job, workspaceId));
+}
 export function hasPresentationExport(result: PresentationJobResult | null) {
   return !!result?.assetId && result.representations?.some((representation) => representation.type === "pptx") === true;
 }
