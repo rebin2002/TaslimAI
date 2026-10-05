@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { localeDirection, locales, translate, translations } from "./i18n";
+import { localeDirection, localeTag, locales, translate, translations } from "./i18n";
 
 describe("translation catalog integrity", () => {
   it("keeps the exact same keys in every supported locale", () => {
@@ -17,5 +17,13 @@ describe("translation catalog integrity", () => {
       }
       expect(localeDirection(locale)).toBe(locale === "en" ? "ltr" : "rtl");
     }
+  });
+
+  it("uses canonical language tags for document metadata and browser formatting", () => {
+    expect(localeTag("en")).toBe("en");
+    expect(localeTag("ar")).toBe("ar");
+    expect(localeTag("ku")).toBe("ckb");
+    expect(translate("ar", "missing.translation.key")).toBe("missing.translation.key");
+    expect(translate("ar", "navigation.home")).toBe(translations.ar["navigation.home"]);
   });
 });
