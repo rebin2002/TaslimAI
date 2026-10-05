@@ -36,6 +36,17 @@ public sealed class VoiceBlockingApiFactory : GenerationJobsApiFactory
     }
 }
 
+public sealed class VoiceUnavailableApiFactory : GenerationJobsApiFactory
+{
+    protected override void ConfigureWebHost(IWebHostBuilder builder)
+    {
+        base.ConfigureWebHost(builder);
+        builder.UseSetting("VoiceGeneration:Enabled", "true");
+        builder.UseSetting("VoiceGeneration:ProviderKey", "unconfigured");
+        builder.UseSetting("VoiceGeneration:Model", "unconfigured");
+    }
+}
+
 public sealed class VoiceGenerationTests : IClassFixture<VoiceGenerationApiFactory>
 {
     private readonly VoiceGenerationApiFactory factory;
@@ -259,6 +270,45 @@ public sealed class VoiceGenerationCancellationTests : IClassFixture<VoiceBlocki
         request.Headers.Add("X-CSRF-TOKEN", csrf.GetProperty("token").GetString());
         if (payload is not null) request.Content = JsonContent.Create(payload);
         return await client.SendAsync(request);
+    }
+}
+
+public sealed class VoiceUnavailableTests : IClassFixture<VoiceUnavailableApiFactory>
+{
+    private readonly VoiceUnavailableApiFactory factory;
+
+    public VoiceUnavailableTests(VoiceUnavailableApiFactory factory)
+    {
+        this.factory = factory;
+        using var scope = factory.Services.CreateScope();
+        scope.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+    }
+
+    [Fact]
+    public async Task Unconfigured_provider_fails_before_reservation_or_queueing()
+    {
+        using var client = factory.CreateClient();
+        var csrf = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
+        using var register = new HttpRequestMessage(HttpMethod.Post, "/api/auth/register");
+        register.Headers.Add("X-CSRF-TOKEN", csrf.GetProperty("token").GetString());
+        register.Content = JsonContent.Create(new { displayName = "Unavailable Voice", email = $"voice-unavailable-{Guid.NewGuid():N}@example.com", password = "StrongPassword!123", preferredLanguage = "en" });
+        var registered = await client.SendAsync(register);
+        Assert.Equal(HttpStatusCode.OK, registered.StatusCode);
+        var auth = (await registered.Content.ReadFromJsonAsync<AuthResponse>())!;
+
+        var createCsrf = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
+        using var create = new HttpRequestMessage(HttpMethod.Post, "/api/voice-generation/jobs");
+        create.Headers.Add("X-CSRF-TOKEN", createCsrf.GetProperty("token").GetString());
+        create.Content = JsonContent.Create(new { workspaceId = auth.PersonalWorkspace.Id, text = "This request must not be queued.", language = "en", voiceStyle = "neutral", speakingStyle = "clear" });
+        var response = await client.SendAsync(create);
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        var error = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("VOICE_STUDIO_UNAVAILABLE", error.GetProperty("error").GetProperty("code").GetString());
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.False(await db.GenerationJobs.AsNoTracking().AnyAsync(item => item.CreatedByUserId == auth.User.Id));
+        Assert.False(await db.UsageTransactions.AsNoTracking().AnyAsync(item => item.UserId == auth.User.Id));
     }
 }
 
