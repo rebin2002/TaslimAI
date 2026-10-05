@@ -1,4 +1,5 @@
 "use client";
+import { localeTag } from "@/lib/i18n";
 
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
@@ -43,7 +44,7 @@ type DocumentLanguage = "auto" | "en" | "ar" | "ku";
 type DocumentTone = "professional" | "formal" | "friendly" | "persuasive" | "neutral";
 
 function formatAssetDate(value: string, locale: string) {
-  return new Intl.DateTimeFormat(locale, { month: "short", day: "numeric", year: "numeric" }).format(new Date(value));
+  return new Intl.DateTimeFormat(localeTag(locale), { month: "short", day: "numeric", year: "numeric" }).format(new Date(value));
 }
 
 function assetSnippet(asset: Asset) {
