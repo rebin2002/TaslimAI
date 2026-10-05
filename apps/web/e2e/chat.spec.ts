@@ -99,8 +99,10 @@ test.describe("chat journeys", () => {
 
   test("keeps Chat context and handoff controls readable in mobile RTL", async ({ authenticatedPage: page }) => {
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.goto("/chat");
+    await page.goto("/projects");
     await page.locator(".language-select select").first().selectOption("ar");
+    await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+    await page.goto("/chat");
     await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
     await expect(page.locator(".chat-context-item")).toHaveCount(3);
     await expect(page.locator(".chat-creator-handoff > div > button")).toHaveCount(5);
