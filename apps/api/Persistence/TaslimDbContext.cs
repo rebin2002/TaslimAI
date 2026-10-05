@@ -1906,6 +1906,7 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.Property(message => message.Sequence).IsRequired();
             entity.Property(message => message.AttachmentManifestJson).HasMaxLength(10000);
             entity.Property(message => message.RequestId).HasMaxLength(80);
+            entity.Property(message => message.RegenerationTargetMessageId);
             entity.Property(message => message.ProviderKey).HasMaxLength(80);
             entity.Property(message => message.ModelKey).HasMaxLength(160);
             entity.Property(message => message.FinishReason).HasMaxLength(80);

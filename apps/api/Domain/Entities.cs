@@ -544,6 +544,7 @@ public sealed class ChatMessage
     public DateTime CreatedAt { get; set; }
     public long Sequence { get; set; }
     public string? RequestId { get; set; }
+    public Guid? RegenerationTargetMessageId { get; set; }
 
     // Reserved for future attachment manifests stored outside PostgreSQL.
     public string? AttachmentManifestJson { get; set; }
