@@ -110,7 +110,12 @@ public sealed class DocumentGenerationJobHandler(
         var rendered = new List<RenderedDocument>();
         if (input.OutputFormat is "docx" or "both")
         {
-            try { rendered.Add(renderer.RenderDocx(generated.Draft, input, settings)); }
+            try
+            {
+                var docx = renderer.RenderDocx(generated.Draft, input, settings);
+                DocumentOutputIntegrityValidator.Validate(docx);
+                rendered.Add(docx);
+            }
             catch (Exception exception) when (exception is not OperationCanceledException)
             {
                 throw new DocumentGenerationStageException(DocumentGenerationStages.DocxRender, GenerationJobErrorCodes.DocumentRenderFailed, "The DOCX document could not be rendered.", generated.Usage, exception);
@@ -118,7 +123,12 @@ public sealed class DocumentGenerationJobHandler(
         }
         if (input.OutputFormat is "pdf" or "both")
         {
-            try { rendered.Add(renderer.RenderPdf(generated.Draft, input, settings)); }
+            try
+            {
+                var pdf = renderer.RenderPdf(generated.Draft, input, settings);
+                DocumentOutputIntegrityValidator.Validate(pdf);
+                rendered.Add(pdf);
+            }
             catch (Exception exception) when (exception is not OperationCanceledException)
             {
                 throw new DocumentGenerationStageException(DocumentGenerationStages.PdfRender, GenerationJobErrorCodes.DocumentRenderFailed, "The PDF document could not be rendered.", generated.Usage, exception);
