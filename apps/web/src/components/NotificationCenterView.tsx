@@ -1,4 +1,5 @@
 "use client";
+import { localeTag, type Locale } from "@/lib/i18n";
 
 import Link from "next/link";
 import { Bell, Check, CheckCheck, ExternalLink, LoaderCircle } from "lucide-react";
@@ -8,7 +9,6 @@ import { useLocale } from "@/components/LocaleProvider";
 import { api, type NotificationItem, type NotificationList } from "@/lib/api";
 import { publishNotificationUnreadCount } from "@/components/ActivityBell";
 
-const localeMap = { en: "en-US", ar: "ar", ku: "ku-Arab" } as const;
 const notificationLabels = {
   "generation.completed": "notification.generationCompleted",
   "generation.failed": "notification.generationFailed",
@@ -16,8 +16,8 @@ const notificationLabels = {
   "billing.payment_failed": "notification.paymentFailed",
 } as const;
 
-function formatTime(value: string, locale: keyof typeof localeMap) {
-  return new Intl.DateTimeFormat(localeMap[locale], { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
+function formatTime(value: string, locale: Locale) {
+  return new Intl.DateTimeFormat(localeTag(locale), { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
 }
 
 export function NotificationCenterView() {

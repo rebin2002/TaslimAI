@@ -2677,7 +2677,7 @@ export const translations: Record<Locale, Record<string, string>> = {
 };
 
 export const localeDirection = (locale: Locale) => (locale === "en" ? "ltr" : "rtl");
-export const localeTag = (locale: Locale) => localeTags[locale];
+export const localeTag = (locale: Locale | string) => localeTags[locale as Locale] ?? locale;
 export function translate(locale: Locale, key: string, variables?: Record<string, string>) {
   let value = translations[locale][key] ?? translations.en[key] ?? key;
   for (const [variable, replacement] of Object.entries(variables ?? {})) {

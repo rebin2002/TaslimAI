@@ -1,4 +1,5 @@
 "use client";
+import { localeTag } from "@/lib/i18n";
 
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
@@ -343,7 +344,7 @@ function RecentResearch({ assets, loading, locale, t }: { assets: Asset[]; loadi
 
 function formatAssetDate(value: string, locale: string) {
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat(locale, { month: "short", day: "numeric", year: "numeric" }).format(date);
+  return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat(localeTag(locale), { month: "short", day: "numeric", year: "numeric" }).format(date);
 }
 
 function ResearchBlock({ block }: { block: { type: string; text?: string | null; items?: string[] | null; rows?: { cells: string[] }[] | null; citationIds?: string[] } }) {
