@@ -27,6 +27,7 @@ public sealed class PresentationRenderer : IPresentationRenderer
     public RenderedPresentation Render(PresentationDraft draft, PresentationGenerationInput input, PresentationGenerationOptions options)
     {
         if (draft.Slides.Count == 0) throw new InvalidOperationException("A presentation must contain at least one slide.");
+        ValidateRendererCapacity(draft, options);
         using var stream = new MemoryStream();
         using (var archive = new ZipArchive(stream, ZipArchiveMode.Create, true))
         {
@@ -39,20 +40,23 @@ public sealed class PresentationRenderer : IPresentationRenderer
             Write(archive, "ppt/slideMasters/_rels/slideMaster1.xml.rels", SlideMasterRelationships());
             Write(archive, "ppt/slideLayouts/slideLayout1.xml", SlideLayout());
             Write(archive, "ppt/slideLayouts/_rels/slideLayout1.xml.rels", SlideLayoutRelationships());
+            var draftLanguage = draft.Language.Trim().ToLowerInvariant();
             for (var index = 0; index < draft.Slides.Count; index++)
             {
-                Write(archive, $"ppt/slides/slide{index + 1}.xml", Slide(draft.Slides[index], input, options, index + 1));
+                Write(archive, $"ppt/slides/slide{index + 1}.xml", Slide(draft.Slides[index], draftLanguage, input, options, index + 1));
                 Write(archive, $"ppt/slides/_rels/slide{index + 1}.xml.rels", SlideRelationships());
             }
         }
         return new RenderedPresentation(AssetRepresentationTypes.Pptx, SafeFileName(draft.Title, ".pptx"), "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml".Replace(".main+xml", ""), stream.ToArray());
     }
 
-    private string Slide(PresentationSlide slide, PresentationGenerationInput input, PresentationGenerationOptions options, int number)
+    private string Slide(PresentationSlide slide, string draftLanguage, PresentationGenerationInput input, PresentationGenerationOptions options, int number)
     {
         shapeId = 1;
-        var rtl = input.Language is "ar" or "ku" || slide.Title.Any(character => character >= '\u0600' && character <= '\u08ff');
-        var language = rtl ? (input.Language == "ku" ? "ku-Arab" : "ar-SA") : "en-US";
+        var requestedLanguage = input.Language.Trim().ToLowerInvariant();
+        var resolvedLanguage = requestedLanguage == "auto" ? draftLanguage : requestedLanguage;
+        var rtl = resolvedLanguage is "ar" or "ku" || slide.Title.Any(character => character >= '\u0600' && character <= '\u08ff');
+        var language = rtl ? (resolvedLanguage == "ku" ? "ku-Arab" : "ar-SA") : "en-US";
         var body = new StringBuilder();
         body.Append(ShapeTreeStart());
         body.Append(Rectangle(1, 0, 0, SlideWidth, SlideHeight, "F8FAFC", "F8FAFC", 0));
@@ -76,7 +80,7 @@ public sealed class PresentationRenderer : IPresentationRenderer
         if (slide.Blocks.Count == 0) return;
         var blockHeight = Math.Max(500_000, height / Math.Max(1, Math.Min(slide.Blocks.Count, 4)));
         var index = 0;
-        foreach (var block in slide.Blocks.Take(4))
+        foreach (var block in slide.Blocks)
         {
             var blockY = y + index * blockHeight;
             switch (block.Type.ToLowerInvariant())
@@ -111,7 +115,7 @@ public sealed class PresentationRenderer : IPresentationRenderer
 
     private void RenderColumns(StringBuilder body, PresentationContentBlock block, int y, int height, bool rtl, string language)
     {
-        var columns = block.Columns.Take(3).ToArray();
+        var columns = block.Columns.ToArray();
         if (columns.Length == 0) return;
         var width = 10_200_000 / columns.Length;
         for (var index = 0; index < columns.Length; index++)
@@ -125,7 +129,7 @@ public sealed class PresentationRenderer : IPresentationRenderer
 
     private void RenderMetrics(StringBuilder body, PresentationContentBlock block, int y, int height, bool rtl, string language)
     {
-        var metrics = block.Metrics.Take(4).ToArray();
+        var metrics = block.Metrics.ToArray();
         if (metrics.Length == 0) return;
         var width = 10_200_000 / metrics.Length;
         for (var index = 0; index < metrics.Length; index++)
@@ -140,7 +144,7 @@ public sealed class PresentationRenderer : IPresentationRenderer
 
     private void RenderTable(StringBuilder body, PresentationContentBlock block, int y, int height, bool rtl, string language)
     {
-        var rows = block.Rows.Take(8).ToArray();
+        var rows = block.Rows.ToArray();
         if (rows.Length == 0) return;
         var columns = Math.Clamp(rows.Max(row => row.Cells.Count), 1, 8);
         var x = 820_000;
@@ -158,6 +162,27 @@ public sealed class PresentationRenderer : IPresentationRenderer
             body.Append("</a:tr>");
         }
         body.Append("</a:tbl></a:graphicData></a:graphic></p:graphicFrame>");
+    }
+
+    private static void ValidateRendererCapacity(PresentationDraft draft, PresentationGenerationOptions options)
+    {
+        var maxBlocks = Math.Min(options.MaxBlocksPerSlide, PresentationRendererLimits.MaxBlocksPerSlide);
+        var maxRows = Math.Min(options.MaxRowsPerBlock, PresentationRendererLimits.MaxRowsPerBlock);
+        foreach (var slide in draft.Slides)
+        {
+            if (slide.Blocks.Count > maxBlocks)
+                throw new InvalidOperationException($"The presentation renderer supports at most {maxBlocks} blocks per slide.");
+
+            foreach (var block in slide.Blocks)
+            {
+                if (block.Columns.Count > PresentationRendererLimits.MaxColumnsPerBlock)
+                    throw new InvalidOperationException($"The presentation renderer supports at most {PresentationRendererLimits.MaxColumnsPerBlock} columns per block.");
+                if (block.Metrics.Count > PresentationRendererLimits.MaxMetricsPerBlock)
+                    throw new InvalidOperationException($"The presentation renderer supports at most {PresentationRendererLimits.MaxMetricsPerBlock} metrics per block.");
+                if (block.Rows.Count > maxRows)
+                    throw new InvalidOperationException($"The presentation renderer supports at most {maxRows} rows per table block.");
+            }
+        }
     }
 
     private string ShapeTreeStart() => "<p:spTree><p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>";
