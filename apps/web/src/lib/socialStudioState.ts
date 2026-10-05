@@ -25,6 +25,10 @@ export function clearSocialActiveJobId(workspaceId: string) {
   try { window.sessionStorage.removeItem(socialActiveJobStorageKey(workspaceId)); } catch { /* Storage may be unavailable. */ }
 }
 
+export function isSocialJobForWorkspace(job: GenerationJob | null, workspaceId: string | null | undefined) {
+  return !!job && !!workspaceId && job.workspaceId === workspaceId && typeof job.jobType === "string" && job.jobType.trim().toLowerCase() === "social.generate";
+}
+
 export function isSocialTerminal(job: GenerationJob | null) { return !!job && terminalStatuses.has(job.status); }
 export function shouldPollSocialJob(job: GenerationJob | null) { return !!job && !isSocialTerminal(job); }
 export function nextSocialPollDelay(job: GenerationJob | null, retryAttempt = 0) { return shouldPollSocialJob(job) ? Math.min(700 * Math.max(1, retryAttempt + 1), 2_800) : null; }
