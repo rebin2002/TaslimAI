@@ -16,11 +16,16 @@ public interface INotificationService : INotificationEventWriter
 
 public sealed class NotificationService(TaslimDbContext db, WorkspaceAccessService access) : INotificationService
 {
+    private const int MaxPage = 10_000;
+    private const int MaxPageSize = 100;
+
     public async Task<NotificationListDto?> ListAsync(Guid userId, NotificationFilter filter, CancellationToken cancellationToken = default)
     {
         if (!await access.IsMemberAsync(userId, filter.WorkspaceId, cancellationToken)) return null;
-        var page = Math.Max(filter.Page, 1);
-        var pageSize = Math.Clamp(filter.PageSize, 1, 100);
+        // Bound both values at the API boundary so hostile query strings cannot
+        // overflow the offset calculation or force an unbounded deep scan.
+        var page = Math.Clamp(filter.Page, 1, MaxPage);
+        var pageSize = Math.Clamp(filter.PageSize, 1, MaxPageSize);
         var query = db.Notifications.AsNoTracking().Where(item => item.UserId == userId && item.WorkspaceId == filter.WorkspaceId);
         if (filter.UnreadOnly) query = query.Where(item => item.ReadAt == null);
         var totalCount = await query.CountAsync(cancellationToken);
@@ -114,7 +119,20 @@ public sealed class NotificationService(TaslimDbContext db, WorkspaceAccessServi
     {
         if (await db.Notifications.AnyAsync(item => item.DeduplicationKey == notification.DeduplicationKey && item.UserId == notification.UserId, cancellationToken)) return;
         db.Notifications.Add(notification);
-        await db.SaveChangesAsync(cancellationToken);
+        try
+        {
+            await db.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateException)
+        {
+            // The unique (UserId, DeduplicationKey) index is the concurrency
+            // boundary. Another worker may have inserted the same event after
+            // the check above; treat that winner as an idempotent success while
+            // preserving unrelated persistence failures.
+            db.Entry(notification).State = EntityState.Detached;
+            if (await db.Notifications.AsNoTracking().AnyAsync(item => item.DeduplicationKey == notification.DeduplicationKey && item.UserId == notification.UserId, cancellationToken)) return;
+            throw;
+        }
     }
 
     private static NotificationDto ToDto(Notification item) => new(

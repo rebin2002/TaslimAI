@@ -187,6 +187,8 @@ public static class GenerationJobErrorCodes
     public const string PresentationCancelled = "PRESENTATION_CANCELLED";
     public const string ResearchRequestInvalid = "RESEARCH_REQUEST_INVALID";
     public const string ResearchSourceUnavailable = "RESEARCH_SOURCE_UNAVAILABLE";
+    public const string ResearchWebSourcesUnavailable = "RESEARCH_WEB_SOURCES_UNAVAILABLE";
+    public const string ResearchUserSourcesUnavailable = "RESEARCH_USER_SOURCES_UNAVAILABLE";
     public const string ResearchSourceFetchFailed = "RESEARCH_SOURCE_FETCH_FAILED";
     public const string ResearchSourceExtractionFailed = "RESEARCH_SOURCE_EXTRACTION_FAILED";
     public const string ResearchSearchUnavailable = "RESEARCH_SEARCH_UNAVAILABLE";
