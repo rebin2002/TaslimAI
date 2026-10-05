@@ -2213,6 +2213,11 @@ namespace Taslim.Api.Persistence.Migrations
                         .IsUnique()
                         .HasFilter("\"IdempotencyKey\" IS NOT NULL");
 
+                    b.HasIndex("WorkspaceId", "CreatedByUserId", "JobType")
+                        .IsUnique()
+                        .HasDatabaseName("IX_GenerationJobs_ImageActiveByUser")
+                        .HasFilter("\"JobType\" = 'image.generate' AND \"RequestId\" LIKE 'image-studio:%' AND \"Status\" IN ('Pending', 'Queued', 'Running')");
+
                     b.HasIndex("WorkspaceId", "CreatedAt");
 
                     b.HasIndex("Status", "QueuedAt", "CreatedAt");
@@ -3488,7 +3493,9 @@ namespace Taslim.Api.Persistence.Migrations
 
                     b.HasIndex("PlanId");
 
-                    b.HasIndex("WorkspaceId");
+                    b.HasIndex("WorkspaceId")
+                        .IsUnique()
+                        .HasFilter("\"Status\" <> 'Cancelled'");
 
                     b.HasIndex("Status", "NextRenewalAt");
 

@@ -38,6 +38,60 @@ public sealed class BillingTests
     }
 
     [Fact]
+    public async Task Provisioning_keeps_one_active_subscription_and_one_initial_credit_grant_per_workspace()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connection).Options;
+        await using var db = new TaslimDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+        var workspace = NewWorkspace("provisioning");
+        db.Workspaces.Add(workspace);
+        await db.SaveChangesAsync();
+
+        var provisioning = new BillingProvisioningService(db, NullLogger<BillingProvisioningService>.Instance);
+        var first = await provisioning.EnsureProvisionedAsync(workspace.Id);
+        var replay = await provisioning.EnsureProvisionedAsync(workspace.Id);
+
+        Assert.Equal(first.Id, replay.Id);
+        Assert.Equal(1, await db.Subscriptions.CountAsync(item => item.WorkspaceId == workspace.Id && item.Status != SubscriptionStatus.Cancelled));
+        Assert.Equal(1, await db.BillingPeriods.CountAsync(item => item.SubscriptionId == first.Id));
+        Assert.Equal(1, await db.CreditEntitlements.CountAsync(item => item.WorkspaceId == workspace.Id));
+        Assert.Equal(1, await db.CreditLedgerEntries.CountAsync(item => item.WorkspaceId == workspace.Id));
+    }
+
+    [Fact]
+    public async Task Subscription_constraint_rejects_two_active_subscriptions_for_one_workspace()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connection).Options;
+        await using var db = new TaslimDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+        var now = DateTime.UtcNow;
+        var workspace = NewWorkspace("subscription-constraint");
+        db.Workspaces.Add(workspace);
+        await db.SaveChangesAsync();
+
+        var first = await new BillingProvisioningService(db, NullLogger<BillingProvisioningService>.Instance).EnsureProvisionedAsync(workspace.Id);
+        db.Subscriptions.Add(new Subscription
+        {
+            Id = Guid.NewGuid(),
+            WorkspaceId = workspace.Id,
+            PlanId = first.PlanId,
+            Status = SubscriptionStatus.Active,
+            CurrentPeriodStart = now.Date,
+            CurrentPeriodEnd = now.Date.AddMonths(1),
+            NextRenewalAt = now.Date.AddMonths(1),
+            CreatedAt = now,
+            UpdatedAt = now,
+        });
+
+        await Assert.ThrowsAsync<DbUpdateException>(() => db.SaveChangesAsync());
+        Assert.Equal(1, await db.Subscriptions.CountAsync(item => item.WorkspaceId == workspace.Id && item.Status != SubscriptionStatus.Cancelled));
+    }
+
+    [Fact]
     public async Task Grant_replay_rejects_changes_to_entitlement_metadata_or_audit_attribution()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");

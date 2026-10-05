@@ -53,6 +53,46 @@ public sealed class NotificationTests : IClassFixture<GenerationJobsNoWorkerFact
     }
 
     [Fact]
+    public async Task Completed_asset_notifications_deep_link_to_the_exact_asset()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, $"notification-asset-link-{Guid.NewGuid():N}@example.com");
+        var assetId = Guid.NewGuid();
+        var notificationId = Guid.NewGuid();
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var now = DateTime.UtcNow;
+            db.Assets.Add(new Asset
+            {
+                Id = assetId,
+                WorkspaceId = auth.PersonalWorkspace.Id,
+                CreatedByUserId = auth.User.Id,
+                Name = "Exact notification asset",
+                AssetType = AssetTypes.File,
+                CreatedAt = now,
+                UpdatedAt = now,
+            });
+            db.Notifications.Add(new Notification
+            {
+                Id = notificationId,
+                UserId = auth.User.Id,
+                WorkspaceId = auth.PersonalWorkspace.Id,
+                AssetId = assetId,
+                Type = NotificationTypes.GenerationCompleted,
+                DeduplicationKey = $"test:asset-link:{notificationId:N}",
+                ResourceTitle = "Exact notification asset",
+                CreatedAt = now,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var list = await client.GetFromJsonAsync<JsonElement>($"/api/notifications?workspaceId={auth.PersonalWorkspace.Id}");
+        var item = Assert.Single(list.GetProperty("items").EnumerateArray());
+        Assert.Equal($"/assets?assetId={assetId:N}&status=Active", item.GetProperty("destination").GetString());
+    }
+
+    [Fact]
     public async Task Notification_pagination_bounds_hostile_query_values()
     {
         using var client = factory.CreateClient();
