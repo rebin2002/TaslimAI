@@ -114,6 +114,61 @@ public sealed class FileTests : IClassFixture<TaslimApiFactory>
     }
 
     [Fact]
+    public async Task File_listing_is_page_bounded_and_deterministic()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "File Pagination Owner");
+        var now = DateTime.UtcNow;
+        var fileIds = new[]
+        {
+            Guid.Parse("00000000-0000-0000-0000-000000000001"),
+            Guid.Parse("00000000-0000-0000-0000-000000000002"),
+            Guid.Parse("00000000-0000-0000-0000-000000000003"),
+        };
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.StoredFiles.AddRange(fileIds.Select((id, index) => new StoredFile
+            {
+                Id = id,
+                WorkspaceId = auth.PersonalWorkspace.Id,
+                UserId = auth.User.Id,
+                OriginalFileName = $"page-{index + 1}.txt",
+                StoredFileName = $"page-{index + 1}.txt",
+                ContentType = "text/plain",
+                Extension = ".txt",
+                SizeBytes = index + 1,
+                StorageProvider = FileStorageProviders.Local,
+                StorageKey = $"pagination/{index + 1}.txt",
+                Status = StoredFileStatus.Ready,
+                TextExtractionStatus = FileExtractionStatus.Ready,
+                CreatedAt = now,
+                ProcessedAt = now,
+            }));
+            await db.SaveChangesAsync();
+        }
+
+        var pageOne = await client.GetFromJsonAsync<List<StoredFileDto>>($"/api/workspaces/{auth.PersonalWorkspace.Id}/files?page=1&pageSize=2");
+        var pageTwo = await client.GetFromJsonAsync<List<StoredFileDto>>($"/api/workspaces/{auth.PersonalWorkspace.Id}/files?page=2&pageSize=2");
+        Assert.NotNull(pageOne);
+        Assert.NotNull(pageTwo);
+        Assert.Equal(2, pageOne!.Count);
+        Assert.Single(pageTwo!);
+        Assert.Equal(new[] { fileIds[2], fileIds[1] }, pageOne.Select(file => file.Id));
+        Assert.Equal(fileIds[0], pageTwo[0].Id);
+        Assert.Equal(3, pageOne.Concat(pageTwo).Select(file => file.Id).Distinct().Count());
+
+        var clamped = await client.GetFromJsonAsync<List<StoredFileDto>>($"/api/workspaces/{auth.PersonalWorkspace.Id}/files?page=0&pageSize=0");
+        Assert.Single(clamped!);
+        Assert.Equal(fileIds[2], clamped[0].Id);
+
+        var oversized = await client.GetAsync($"/api/workspaces/{auth.PersonalWorkspace.Id}/files?page={int.MaxValue}&pageSize={int.MaxValue}");
+        Assert.Equal(HttpStatusCode.OK, oversized.StatusCode);
+        Assert.Empty(await oversized.Content.ReadFromJsonAsync<List<StoredFileDto>>() ?? []);
+    }
+
+    [Fact]
     public async Task Unsupported_file_types_and_invalid_signatures_are_rejected()
     {
         using var client = factory.CreateClient();
