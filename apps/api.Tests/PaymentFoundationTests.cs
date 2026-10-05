@@ -74,6 +74,86 @@ public sealed class PaymentFoundationTests
     }
 
     [Fact]
+    public async Task Partial_refunds_do_not_reverse_credits_until_the_payment_is_fully_refunded()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        var workspace = NewWorkspace();
+        db.Workspaces.Add(workspace);
+        await db.SaveChangesAsync();
+        var creditLedger = new CreditLedgerService(db, Options.Create(new BillingOptions { CustomerChargingEnabled = true }));
+        var grant = await creditLedger.GrantAsync(workspace.Id, CreditEntitlementType.Purchased, 1_000, "purchase:credits", "Purchased credits");
+        var service = NewLifecycle(db);
+        var attempt = await service.RecordPaymentAttemptAsync(workspace.Id, "test", "attempt:partial-refund", 9, "USD", PaymentAttemptStatus.Succeeded);
+        attempt.CreditLedgerEntryId = grant.Entry.Id;
+        await db.SaveChangesAsync();
+
+        var partial = await service.RecordRefundAsync(workspace.Id, attempt.Id, "test", 1, "USD", "refund:partial", "Partial refund.", "refund-partial");
+        Assert.Equal(PaymentAttemptStatus.PartiallyRefunded, (await db.PaymentAttempts.SingleAsync(item => item.Id == attempt.Id)).Status);
+        Assert.Equal(1, await db.PaymentRefunds.CountAsync());
+        Assert.Empty(await db.CreditLedgerEntries.Where(item => item.Type == CreditLedgerEntryType.Refund).ToListAsync());
+
+        await service.RecordRefundAsync(workspace.Id, attempt.Id, "test", 8, "USD", "refund:remainder", "Refund remainder.", "refund-remainder");
+
+        Assert.Equal(PaymentAttemptStatus.Refunded, (await db.PaymentAttempts.SingleAsync(item => item.Id == attempt.Id)).Status);
+        Assert.Single(await db.CreditLedgerEntries.Where(item => item.Type == CreditLedgerEntryType.Refund).ToListAsync());
+        Assert.Equal(grant.Entry.Id, (await db.CreditLedgerEntries.SingleAsync(item => item.Type == CreditLedgerEntryType.Refund)).ReversesEntryId);
+        Assert.Equal(partial.PaymentAttemptId, attempt.Id);
+    }
+
+    [Fact]
+    public async Task Reusing_a_payment_idempotency_key_with_different_amount_is_rejected()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        var workspace = NewWorkspace();
+        db.Workspaces.Add(workspace);
+        await db.SaveChangesAsync();
+        var service = NewLifecycle(db);
+
+        await service.RecordPaymentAttemptAsync(workspace.Id, "test", "attempt:conflict", 9, "USD");
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.RecordPaymentAttemptAsync(workspace.Id, "test", "attempt:conflict", 19, "USD"));
+    }
+
+    [Fact]
+    public async Task Refunds_require_a_succeeded_payment_and_succeeded_attempts_cannot_be_marked_failed()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        var workspace = NewWorkspace();
+        db.Workspaces.Add(workspace);
+        await db.SaveChangesAsync();
+        var service = NewLifecycle(db);
+        var created = await service.RecordPaymentAttemptAsync(workspace.Id, "test", "attempt:created-refund", 9, "USD");
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.RecordRefundAsync(workspace.Id, created.Id, "test", 9, "USD", "refund:invalid", "Refund before payment success."));
+
+        var succeeded = await service.RecordPaymentAttemptAsync(workspace.Id, "test", "attempt:succeeded-failed", 9, "USD", PaymentAttemptStatus.Succeeded);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.MarkPaymentFailedAsync(workspace.Id, succeeded.Id, "late_failure", "A late failure must not overwrite success."));
+        Assert.Equal(PaymentAttemptStatus.Succeeded, (await db.PaymentAttempts.SingleAsync(item => item.Id == succeeded.Id)).Status);
+    }
+
+    [Fact]
+    public async Task Payment_attempt_replay_cannot_change_provider_reference()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        var workspace = NewWorkspace();
+        db.Workspaces.Add(workspace);
+        await db.SaveChangesAsync();
+        var service = NewLifecycle(db);
+        await service.RecordPaymentAttemptAsync(workspace.Id, "test", "attempt:provider-reference", 9, "USD", providerPaymentReference: "payment-1");
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.RecordPaymentAttemptAsync(workspace.Id, "test", "attempt:provider-reference", 9, "USD", providerPaymentReference: "payment-2"));
+        Assert.Single(await db.PaymentAttempts.ToListAsync());
+    }
+
+    [Fact]
     public async Task Signed_webhook_is_recorded_once_and_replayed_without_duplicate_state_change()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");

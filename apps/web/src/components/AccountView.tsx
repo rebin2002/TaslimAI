@@ -1,4 +1,5 @@
 "use client";
+import { localeTag } from "@/lib/i18n";
 
 import Link from "next/link";
 import { FormEvent, useEffect, useState } from "react";
@@ -74,7 +75,7 @@ function AccountProfileForm() {
     return () => { active = false; };
   }, []);
 
-  const createdDate = user?.createdAt ? new Intl.DateTimeFormat(locale, { dateStyle: "medium" }).format(new Date(user.createdAt)) : "—";
+  const createdDate = user?.createdAt ? new Intl.DateTimeFormat(localeTag(locale), { dateStyle: "medium" }).format(new Date(user.createdAt)) : "—";
   const initials = user?.displayName.trim().slice(0, 1).toUpperCase() || "T";
 
   async function saveProfile(event: FormEvent) {
