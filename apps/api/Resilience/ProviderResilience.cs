@@ -340,6 +340,7 @@ public sealed class ProviderResilienceOrchestrator(
                     lastCategory = ProviderAttemptResultCategory.UnsupportedCapability;
                     lastCode = "CAPABILITY_UNSUPPORTED";
                     lastProvider = provider.Key;
+                    if (!requirements.AllowFallback) break;
                     continue;
                 }
 
@@ -355,6 +356,7 @@ public sealed class ProviderResilienceOrchestrator(
                             ? "IDEMPOTENCY_REQUIRED"
                             : "COST_LIMIT_EXCEEDED";
                     lastProvider = provider.Key;
+                    if (!requirements.AllowFallback) break;
                     continue;
                 }
 

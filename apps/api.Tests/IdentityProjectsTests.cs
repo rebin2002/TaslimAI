@@ -9,6 +9,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Taslim.Api.Contracts;
+using Taslim.Api.Domain;
 using Taslim.Api.Persistence;
 using Xunit;
 
@@ -65,6 +66,56 @@ public sealed class IdentityProjectsTests : IClassFixture<TaslimApiFactory>
         Assert.Equal("Personal", body.PersonalWorkspace.Type);
         Assert.Equal("Owner", body.PersonalWorkspace.Role);
         Assert.Equal(body.PersonalWorkspace.Id, body.User.PersonalWorkspaceId);
+    }
+
+    [Fact]
+    public async Task Workspace_list_is_bounded_and_deterministically_paginated()
+    {
+        using var client = factory.CreateClient();
+        var authResponse = await Register(client, "Workspace Pagination Owner", $"workspace-page-{Guid.NewGuid():N}@example.com");
+        var auth = await authResponse.Content.ReadFromJsonAsync<AuthResponse>();
+        Assert.NotNull(auth);
+
+        var now = DateTime.UtcNow;
+        var extraWorkspaces = Enumerable.Range(1, 3).Select(index => new Workspace
+        {
+            Id = Guid.NewGuid(),
+            Name = $"Bounded Workspace {index}",
+            Slug = $"bounded-workspace-{index}-{Guid.NewGuid():N}",
+            Type = WorkspaceType.Business,
+            CreatedAt = now,
+            UpdatedAt = now,
+        }).ToArray();
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.Workspaces.AddRange(extraWorkspaces);
+            db.WorkspaceMembers.AddRange(extraWorkspaces.Select(workspace => new WorkspaceMember
+            {
+                Id = Guid.NewGuid(),
+                WorkspaceId = workspace.Id,
+                UserId = auth!.User.Id,
+                Role = WorkspaceRole.Member,
+                JoinedAt = now,
+            }));
+            await db.SaveChangesAsync();
+        }
+
+        using var response = await client.GetAsync("/api/workspaces?page=2&pageSize=1");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var page = await response.Content.ReadFromJsonAsync<List<WorkspaceSummaryDto>>();
+        Assert.NotNull(page);
+        Assert.Single(page);
+        Assert.Equal("2", response.Headers.GetValues("X-Page").Single());
+        Assert.Equal("1", response.Headers.GetValues("X-Page-Size").Single());
+        Assert.Equal("4", response.Headers.GetValues("X-Total-Count").Single());
+        Assert.Equal("Bounded Workspace 2", page[0].Name);
+
+        using var cappedResponse = await client.GetAsync("/api/workspaces?page=0&pageSize=1000");
+        Assert.Equal(HttpStatusCode.OK, cappedResponse.StatusCode);
+        Assert.Equal("1", cappedResponse.Headers.GetValues("X-Page").Single());
+        Assert.Equal("100", cappedResponse.Headers.GetValues("X-Page-Size").Single());
+        Assert.Equal(4, (await cappedResponse.Content.ReadFromJsonAsync<List<WorkspaceSummaryDto>>())!.Count);
     }
 
     [Fact]
