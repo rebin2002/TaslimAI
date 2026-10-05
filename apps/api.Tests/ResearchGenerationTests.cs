@@ -99,6 +99,49 @@ public sealed class ResearchGenerationTests : IClassFixture<ResearchApiFactory>
         _ = secondAuth;
     }
 
+    [Fact]
+    public async Task Research_execution_records_are_private_to_the_creator_inside_a_shared_workspace()
+    {
+        using var owner = factory.CreateClient();
+        var ownerAuth = await Register(owner, $"research-record-owner-{Guid.NewGuid():N}@example.com");
+        using var member = factory.CreateClient();
+        var memberAuth = await Register(member, $"research-record-member-{Guid.NewGuid():N}@example.com");
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.WorkspaceMembers.Add(new WorkspaceMember
+            {
+                Id = Guid.NewGuid(),
+                WorkspaceId = ownerAuth.PersonalWorkspace.Id,
+                UserId = memberAuth.User.Id,
+                Role = WorkspaceRole.Member,
+                JoinedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var created = await SendWithCsrf<CreateResearchGenerationResponse>(owner, HttpMethod.Post, "/api/research-generation/jobs", new
+        {
+            workspaceId = ownerAuth.PersonalWorkspace.Id,
+            question = "What are the current opportunities and risks for solar energy in Iraq?",
+            depth = "standard",
+            reportType = "research_report",
+            language = "en",
+            useWebSources = true,
+            attachmentIds = Array.Empty<Guid>(),
+        });
+        var completed = await WaitForTerminal(owner, created.Job.Id);
+        Assert.Equal("Succeeded", completed.Status);
+
+        Assert.Equal(HttpStatusCode.NotFound, (await member.GetAsync($"/api/generation/jobs/{created.Job.Id}")).StatusCode);
+        var list = await member.GetFromJsonAsync<GenerationJobListDto>($"/api/generation/jobs?workspaceId={ownerAuth.PersonalWorkspace.Id}&jobType={GenerationJobTypes.ResearchGenerate}");
+        Assert.NotNull(list);
+        Assert.Empty(list!.Items);
+        Assert.Equal(HttpStatusCode.NotFound, (await member.GetAsync($"/api/research-generation/jobs/{created.Job.Id}/sources")).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await SendWithCsrf(member, HttpMethod.Post, $"/api/generation/jobs/{created.Job.Id}/cancel", null)).StatusCode);
+    }
+
     private static async Task<AuthResponse> Register(HttpClient client, string email)
     {
         var response = await SendWithCsrf(client, HttpMethod.Post, "/api/auth/register", new { displayName = "Research Tester", email, password = "StrongPassword!123", preferredLanguage = "en" });

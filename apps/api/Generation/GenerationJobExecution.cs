@@ -307,7 +307,7 @@ public sealed class GenerationJobService(
     public async Task<GenerationJob?> RetryAsync(Guid userId, Guid jobId, CancellationToken cancellationToken = default, string? idempotencyKey = null, string? requestId = null)
     {
         var source = await db.GenerationJobs.AsNoTracking().FirstOrDefaultAsync(item => item.Id == jobId, cancellationToken);
-        if (source is null || !await access.IsMemberAsync(userId, source.WorkspaceId, cancellationToken)) return null;
+        if (source is null || !await access.IsMemberAsync(userId, source.WorkspaceId, cancellationToken) || IsPrivateResearchRecord(source, userId)) return null;
         if (source.Status is not (GenerationJobStatus.Failed or GenerationJobStatus.Cancelled))
             throw new GenerationJobValidationException("RETRY_SOURCE_NOT_TERMINAL", "Only failed or cancelled jobs can be retried.");
         if (string.IsNullOrWhiteSpace(idempotencyKey))
@@ -549,7 +549,7 @@ public sealed class GenerationJobService(
     public async Task<GenerationJob?> GetAsync(Guid userId, Guid jobId, CancellationToken cancellationToken = default)
     {
         var job = await db.GenerationJobs.AsNoTracking().Include(item => item.Outputs).FirstOrDefaultAsync(item => item.Id == jobId, cancellationToken);
-        if (job is null || !await access.IsMemberAsync(userId, job.WorkspaceId, cancellationToken)) return null;
+        if (job is null || !await access.IsMemberAsync(userId, job.WorkspaceId, cancellationToken) || IsPrivateResearchRecord(job, userId)) return null;
         return job;
     }
 
@@ -558,7 +558,11 @@ public sealed class GenerationJobService(
         if (!await access.IsMemberAsync(userId, filter.WorkspaceId, cancellationToken)) return null;
         var page = Math.Max(filter.Page, 1);
         var pageSize = Math.Clamp(filter.PageSize, 1, 100);
-        var query = db.GenerationJobs.AsNoTracking().Where(job => job.WorkspaceId == filter.WorkspaceId);
+        // Research execution records can contain report text and source excerpts derived from
+        // private uploads. Generated assets remain the intentional workspace sharing surface,
+        // but the execution record itself is only visible to its creator.
+        var query = db.GenerationJobs.AsNoTracking().Where(job => job.WorkspaceId == filter.WorkspaceId &&
+            (job.JobType != GenerationJobTypes.ResearchGenerate || job.CreatedByUserId == userId));
         if (filter.Status.HasValue) query = query.Where(job => job.Status == filter.Status.Value);
         if (filter.ProjectId.HasValue) query = query.Where(job => job.ProjectId == filter.ProjectId.Value);
         if (!string.IsNullOrWhiteSpace(filter.JobType)) query = query.Where(job => job.JobType == filter.JobType);
@@ -575,7 +579,7 @@ public sealed class GenerationJobService(
     {
         var job = await db.GenerationJobs.AsNoTracking().FirstOrDefaultAsync(item => item.Id == jobId, cancellationToken);
         if (job is null) return GenerationJobCancelResult.NotFound;
-        if (!await access.IsMemberAsync(userId, job.WorkspaceId, cancellationToken)) return GenerationJobCancelResult.Forbidden;
+        if (!await access.IsMemberAsync(userId, job.WorkspaceId, cancellationToken) || IsPrivateResearchRecord(job, userId)) return GenerationJobCancelResult.Forbidden;
         var now = DateTime.UtcNow;
         var immediate = await db.GenerationJobs
             .Where(item => item.Id == jobId && (item.Status == GenerationJobStatus.Pending || item.Status == GenerationJobStatus.Queued))
@@ -611,6 +615,10 @@ public sealed class GenerationJobService(
             .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.CancellationRequested, true), cancellationToken);
         return running > 0 ? GenerationJobCancelResult.CancellationRequested : GenerationJobCancelResult.Conflict;
     }
+
+    private static bool IsPrivateResearchRecord(GenerationJob job, Guid userId) =>
+        string.Equals(job.JobType, GenerationJobTypes.ResearchGenerate, StringComparison.OrdinalIgnoreCase)
+        && job.CreatedByUserId != userId;
 
     private async Task CancelUsageAsync(GenerationJob job, string code, CancellationToken cancellationToken)
     {
