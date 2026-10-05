@@ -77,6 +77,38 @@ public sealed class AutopilotEndpointTests : IClassFixture<TaslimApiFactory>
     }
 
     [Fact]
+    public async Task Signed_webhook_does_not_require_csrf_when_an_auth_cookie_is_present()
+    {
+        const string secret = "integration-test-signing-secret";
+        Environment.SetEnvironmentVariable("AUTOPILOT_WEBHOOK_SECRET", secret);
+        try
+        {
+            using var client = factory.CreateClient();
+            await RegisterAdmin(client);
+
+            var payload = Payload("wave-http-authenticated-signed", "task-1");
+            var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString();
+            var signature = Convert.ToHexString(
+                new HMACSHA256(Encoding.UTF8.GetBytes(secret))
+                    .ComputeHash(Encoding.UTF8.GetBytes($"{timestamp}.{payload}"))).ToLowerInvariant();
+
+            using var content = new StringContent(payload, Encoding.UTF8, "application/json");
+            content.Headers.Add("X-Autopilot-Source", "completion-bridge");
+            content.Headers.Add("X-Autopilot-Event-Id", $"evt-{Guid.NewGuid():N}");
+            content.Headers.Add("X-Autopilot-Event-Type", AutopilotEventTypes.WaveTaskCompleted);
+            content.Headers.Add("X-Autopilot-Timestamp", timestamp);
+            content.Headers.Add("X-Autopilot-Signature", $"sha256={signature}");
+
+            var response = await client.PostAsync("/api/autopilot/events", content);
+            Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("AUTOPILOT_WEBHOOK_SECRET", null);
+        }
+    }
+
+    [Fact]
     public async Task Replayed_events_are_rejected_with_a_replay_outcome()
     {
         const string secret = "integration-test-signing-secret";

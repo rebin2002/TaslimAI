@@ -7,6 +7,16 @@ No paid provider call, purchase, customer charge, secret, production deployment,
 destructive database operation was used. All tests use deterministic fakes or in-process
 configuration values.
 
+## Post-report implementation update — 2026-10-04
+
+The provider-neutral Movie video execution seam now fences `MovieTake` and
+`MovieProductionVersion` failure, cancellation, and completion writes by the active
+`GenerationJob.ConcurrencyToken`, matching the existing execution and clip fencing.
+The regression covers a recovered claim continuing after the stale worker attempts all
+three terminal paths, followed by a current-claim completion. Provider credentials,
+paid-provider activation, customer charging, and real-provider validation remain
+unchanged and disabled.
+
 ## A. Code gaps still remaining
 
 1. **Sound effects and ambience remain unavailable.** `IMovieSoundProvider` has only the

@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { canCancelVoiceJob, formatVoiceDuration, formatVoiceFileSize, isVoiceAsset, isVoiceJob, parseVoiceJobResult } from "./voiceStudioState";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { canCancelVoiceJob, clearVoiceActiveJobId, formatVoiceDuration, formatVoiceFileSize, isRestorableVoiceJob, isVoiceAsset, isVoiceJob, isVoiceTerminal, nextVoicePollDelay, parseVoiceJobResult, persistVoiceActiveJobId, readVoiceActiveJobId, shouldPollVoiceJob, voiceActiveJobStorageKey } from "./voiceStudioState";
 import type { GenerationJob } from "./api";
 
 const baseJob: GenerationJob = {
@@ -24,9 +24,26 @@ const baseJob: GenerationJob = {
 };
 
 describe("voiceStudioState", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
   it("recognizes Voice jobs and parses user-safe audio metadata", () => {
     expect(isVoiceJob(baseJob)).toBe(true);
+    expect(isRestorableVoiceJob(baseJob, "workspace-1")).toBe(true);
+    expect(isRestorableVoiceJob({ ...baseJob, workspaceId: "workspace-2" }, "workspace-1")).toBe(false);
+    expect(isRestorableVoiceJob({ ...baseJob, jobType: "image.generate" }, "workspace-1")).toBe(false);
     expect(parseVoiceJobResult(baseJob)).toMatchObject({ assetId: "asset-1", assetType: "audio", language: "ar", format: "mp3" });
+  });
+
+  it("polls active jobs with bounded retry backoff and stops at terminal states", () => {
+    const running = { ...baseJob, status: "Running" as const, progressPercent: 50 };
+    expect(isVoiceTerminal(running)).toBe(false);
+    expect(shouldPollVoiceJob(running)).toBe(true);
+    expect(nextVoicePollDelay(running, 0)).toBe(650);
+    expect(nextVoicePollDelay(running, 2)).toBe(1_950);
+    expect(nextVoicePollDelay(running, 99)).toBe(2_800);
+    expect(isVoiceTerminal(baseJob)).toBe(true);
+    expect(shouldPollVoiceJob(baseJob)).toBe(false);
+    expect(nextVoicePollDelay(baseJob)).toBeNull();
   });
 
   it("rejects malformed or non-audio results", () => {
@@ -57,5 +74,22 @@ describe("voiceStudioState", () => {
     expect(formatVoiceDuration(null)).toBe("0:00");
     expect(formatVoiceFileSize(2048)).toBe("2.0 KB");
     expect(formatVoiceFileSize(null)).toBe("");
+  });
+
+  it("persists active jobs by workspace and clears stale pointers", () => {
+    const values = new Map<string, string>();
+    vi.stubGlobal("window", {
+      sessionStorage: {
+        getItem: (key: string) => values.get(key) ?? null,
+        setItem: (key: string, value: string) => values.set(key, value),
+        removeItem: (key: string) => values.delete(key),
+      },
+    });
+    persistVoiceActiveJobId("workspace-1", "job-1");
+    expect(values.get(voiceActiveJobStorageKey("workspace-1"))).toBe("job-1");
+    expect(readVoiceActiveJobId("workspace-1")).toBe("job-1");
+    expect(readVoiceActiveJobId("workspace-2")).toBeNull();
+    clearVoiceActiveJobId("workspace-1");
+    expect(readVoiceActiveJobId("workspace-1")).toBeNull();
   });
 });
