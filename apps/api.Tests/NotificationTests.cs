@@ -104,6 +104,21 @@ public sealed class NotificationTests : IClassFixture<GenerationJobsNoWorkerFact
     }
 
     [Fact]
+    public async Task Notifications_bound_deep_page_values_without_offset_overflow()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, $"notification-page-{Guid.NewGuid():N}@example.com");
+
+        var response = await client.GetAsync($"/api/notifications?workspaceId={auth.PersonalWorkspace.Id}&page={int.MaxValue}&pageSize={int.MaxValue}");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var list = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(Taslim.Api.Infrastructure.ApiPagination.MaxPage, list.GetProperty("page").GetInt32());
+        Assert.Equal(Taslim.Api.Infrastructure.ApiPagination.MaxPageSize, list.GetProperty("pageSize").GetInt32());
+        Assert.Empty(list.GetProperty("items").EnumerateArray());
+    }
+
+    [Fact]
     public async Task Concurrent_duplicate_events_are_idempotent()
     {
         using var owner = factory.CreateClient();

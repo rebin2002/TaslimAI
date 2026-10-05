@@ -7,6 +7,13 @@ export const localeNames: Record<Locale, string> = {
   ku: "کوردی",
 };
 
+/** Canonical language tags used by the document and browser Intl APIs. */
+export const localeTags: Record<Locale, string> = {
+  en: "en",
+  ar: "ar",
+  ku: "ckb",
+};
+
 export const translations: Record<Locale, Record<string, string>> = {
   en: {
     "assets.category.all": "All",
@@ -2682,7 +2689,7 @@ export const translations: Record<Locale, Record<string, string>> = {
 };
 
 export const localeDirection = (locale: Locale) => (locale === "en" ? "ltr" : "rtl");
-
+export const localeTag = (locale: Locale | string) => localeTags[locale as Locale] ?? locale;
 export function translate(locale: Locale, key: string, variables?: Record<string, string>) {
   let value = translations[locale][key] ?? translations.en[key] ?? key;
   for (const [variable, replacement] of Object.entries(variables ?? {})) {

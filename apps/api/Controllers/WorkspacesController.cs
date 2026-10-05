@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using System.Globalization;
 using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
 using Taslim.Api.Infrastructure;
@@ -13,16 +14,33 @@ namespace Taslim.Api.Controllers;
 [Route("api/workspaces")]
 public sealed class WorkspacesController(TaslimDbContext db, WorkspaceAccessService access) : ControllerBase
 {
+    private const int DefaultPageSize = 100;
+    private const int MaxPage = 10_000;
+    private const int MaxPageSize = 100;
+
     [HttpGet]
-    public async Task<IActionResult> List(CancellationToken cancellationToken)
+    public async Task<IActionResult> List(
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = DefaultPageSize,
+        CancellationToken cancellationToken = default)
     {
         var userId = Guid.Parse(User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value ?? string.Empty);
-        var memberships = await db.WorkspaceMembers.AsNoTracking()
+        page = Math.Clamp(page, 1, MaxPage);
+        pageSize = Math.Clamp(pageSize, 1, MaxPageSize);
+        var query = db.WorkspaceMembers.AsNoTracking()
             .Where(member => member.UserId == userId)
-            .Include(member => member.Workspace)
+            .Include(member => member.Workspace);
+        var totalCount = await query.CountAsync(cancellationToken);
+        var memberships = await query
             .OrderBy(member => member.Workspace.Type)
             .ThenBy(member => member.Workspace.Name)
+            .ThenBy(member => member.WorkspaceId)
+            .Skip((page - 1) * pageSize)
+            .Take(pageSize)
             .ToListAsync(cancellationToken);
+        Response.Headers["X-Total-Count"] = totalCount.ToString(CultureInfo.InvariantCulture);
+        Response.Headers["X-Page"] = page.ToString(CultureInfo.InvariantCulture);
+        Response.Headers["X-Page-Size"] = pageSize.ToString(CultureInfo.InvariantCulture);
         return Ok(memberships.Select(member => new WorkspaceSummaryDto(
             member.Workspace.Id,
             member.Workspace.Name,
