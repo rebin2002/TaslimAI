@@ -80,6 +80,62 @@ public sealed class MovieProductionCheckpointTests
         Assert.NotEqual(key, MovieProductionCheckpointService.BuildRecoveryIdempotencyKey(projectId, Guid.NewGuid()));
     }
 
+    [Fact]
+    public void Recovery_output_requires_an_active_asset_and_ready_private_file_in_movie_scope()
+    {
+        var movie = new MovieProject
+        {
+            Id = Guid.NewGuid(),
+            WorkspaceId = Guid.NewGuid(),
+            ProjectId = Guid.NewGuid(),
+        };
+        var asset = new Asset
+        {
+            WorkspaceId = movie.WorkspaceId,
+            ProjectId = movie.ProjectId,
+            Status = AssetStatus.Active,
+            StoredFile = new StoredFile
+            {
+                WorkspaceId = movie.WorkspaceId,
+                ProjectId = movie.ProjectId,
+                Status = StoredFileStatus.Ready,
+            },
+        };
+
+        Assert.True(MovieProductionCheckpointReadiness.IsPublishableAsset(asset, movie));
+
+        asset.StoredFile!.Status = StoredFileStatus.Failed;
+        Assert.False(MovieProductionCheckpointReadiness.IsPublishableAsset(asset, movie));
+
+        asset.StoredFile.Status = StoredFileStatus.Ready;
+        asset.StoredFile.ProjectId = Guid.NewGuid();
+        Assert.False(MovieProductionCheckpointReadiness.IsPublishableAsset(asset, movie));
+
+        asset.StoredFile.ProjectId = movie.ProjectId;
+        asset.StoredFile.ConversationId = Guid.NewGuid();
+        Assert.False(MovieProductionCheckpointReadiness.IsPublishableAsset(asset, movie));
+    }
+
+    [Fact]
+    public void Recovery_job_output_requires_a_ready_private_file()
+    {
+        var movie = new MovieProject { WorkspaceId = Guid.NewGuid(), ProjectId = Guid.NewGuid() };
+        var file = new StoredFile
+        {
+            WorkspaceId = movie.WorkspaceId,
+            ProjectId = movie.ProjectId,
+            Status = StoredFileStatus.Ready,
+        };
+        var job = new GenerationJob
+        {
+            Outputs = { new GenerationJobOutput { StoredFile = file } },
+        };
+
+        Assert.True(MovieProductionCheckpointReadiness.HasPublishableJobOutput(job, movie));
+        file.Status = StoredFileStatus.Deleted;
+        Assert.False(MovieProductionCheckpointReadiness.HasPublishableJobOutput(job, movie));
+    }
+
     private static MovieProductionCheckpointItemDto Analyze(
         IReadOnlyList<MovieProductionCheckpointVersionSnapshot> versions,
         IReadOnlyList<MovieProductionCheckpointTakeSnapshot> takes,

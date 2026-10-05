@@ -1,11 +1,15 @@
 "use client";
 
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
-import { localeDirection, localeNames, locales, translate, type Locale } from "@/lib/i18n";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { localeDirection, localeNames, localeTag, locales, translate, type Locale } from "@/lib/i18n";
+
+export type LocaleSource = "default" | "anonymous-storage" | "user" | "account";
+type LocaleUpdateOptions = { persist?: boolean; source?: LocaleSource };
 
 type LocaleContextValue = {
   locale: Locale;
-  setLocale: (locale: Locale) => void;
+  getLocaleSource: () => LocaleSource;
+  setLocale: (locale: Locale, options?: LocaleUpdateOptions) => void;
   t: (key: string, variables?: Record<string, string>) => string;
 };
 
@@ -22,20 +26,31 @@ function storedLocale(): Locale {
 }
 
 export function LocaleProvider({ children }: Readonly<{ children: React.ReactNode }>) {
-  const [locale, setLocaleState] = useState<Locale>(storedLocale);
+  // Keep the first client render identical to the server-rendered English
+  // shell. The persisted choice is applied after hydration, which avoids a
+  // locale-dependent tree mismatch while still restoring Arabic/Sorani.
+  const [locale, setLocaleState] = useState<Locale>("en");
+  const localeSource = useRef<LocaleSource>("default");
 
-  // Only the document is updated here. Persisting must never happen on mount:
-  // React reuses the server-rendered default during hydration, so writing the
-  // current locale from this effect overwrote a saved Arabic or Kurdish choice
-  // with "en" on every fresh page load and the document silently fell back to
-  // left-to-right.
   useEffect(() => {
-    document.documentElement.lang = locale;
+    const saved = storedLocale();
+    if (saved !== "en") {
+      localeSource.current = "anonymous-storage";
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- restore persisted UI state after hydration.
+      setLocaleState(saved);
+    }
+  }, []);
+
+  useEffect(() => {
+    document.documentElement.lang = localeTag(locale);
     document.documentElement.dir = localeDirection(locale);
   }, [locale]);
 
-  const setLocale = useCallback((next: Locale) => {
+  const getLocaleSource = useCallback(() => localeSource.current, []);
+  const setLocale = useCallback((next: Locale, options?: LocaleUpdateOptions) => {
+    localeSource.current = options?.source ?? "user";
     setLocaleState(next);
+    if (options?.persist === false) return;
     try {
       window.localStorage.setItem("taslim-locale", next);
     } catch {
@@ -46,10 +61,11 @@ export function LocaleProvider({ children }: Readonly<{ children: React.ReactNod
   const value = useMemo(
     () => ({
       locale,
+      getLocaleSource,
       setLocale,
       t: (key: string, variables?: Record<string, string>) => translate(locale, key, variables),
     }),
-    [locale, setLocale],
+    [getLocaleSource, locale, setLocale],
   );
 
   return <LocaleContext.Provider value={value}>{children}</LocaleContext.Provider>;

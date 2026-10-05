@@ -1,5 +1,7 @@
 using System.Net;
+using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.EntityFrameworkCore;
@@ -9,6 +11,7 @@ using Taslim.Api.Ai;
 using Taslim.Api.Controllers;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
+using Taslim.Api.Files;
 using Taslim.Api.Persistence;
 using Taslim.Api.Presentations;
 using Xunit;
@@ -83,6 +86,52 @@ public sealed class PresentationGenerationTests : IClassFixture<PresentationGene
     }
 
     [Fact]
+    public async Task Presentation_job_cannot_process_another_workspace_members_private_file()
+    {
+        using var owner = factory.CreateClient();
+        var ownerAuth = await Register(owner);
+        var upload = await Upload(owner, ownerAuth.PersonalWorkspace.Id, "private-notes.txt", "PRIVATE_PRESENTATION_SOURCE");
+        Assert.Equal(HttpStatusCode.Created, upload.StatusCode);
+        var source = (await upload.Content.ReadFromJsonAsync<StoredFileDto>())!;
+
+        using var member = factory.CreateClient();
+        var memberAuth = await Register(member);
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.WorkspaceMembers.Add(new WorkspaceMember
+            {
+                Id = Guid.NewGuid(),
+                WorkspaceId = ownerAuth.PersonalWorkspace.Id,
+                UserId = memberAuth.User.Id,
+                Role = WorkspaceRole.Member,
+                JoinedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var response = await SendWithCsrf(member, new
+        {
+            workspaceId = ownerAuth.PersonalWorkspace.Id,
+            title = "Private source presentation",
+            description = "This job must not read another member's private file.",
+            presentationType = "business",
+            attachmentIds = new[] { source.Id },
+        }, $"presentation-private-source-{Guid.NewGuid():N}");
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        var created = (await response.Content.ReadFromJsonAsync<CreatePresentationGenerationResponse>())!;
+
+        var terminal = await WaitForTerminal(member, created.Job.Id);
+        Assert.Equal("Failed", terminal.Status);
+        Assert.Equal(GenerationJobErrorCodes.PresentationAttachmentUnavailable, terminal.ErrorCode);
+        Assert.Empty(terminal.Outputs);
+
+        using var verification = factory.Services.CreateScope();
+        var verificationDb = verification.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.False(await verificationDb.Assets.AsNoTracking().AnyAsync(item => item.SourceGenerationJobId == created.Job.Id));
+    }
+
+    [Fact]
     public async Task Presentation_generation_requires_idempotency_key()
     {
         using var client = factory.CreateClient();
@@ -137,6 +186,18 @@ public sealed class PresentationGenerationTests : IClassFixture<PresentationGene
         var response = await client.SendAsync(request);
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         return (await response.Content.ReadFromJsonAsync<AuthResponse>())!;
+    }
+
+    private static async Task<HttpResponseMessage> Upload(HttpClient client, Guid workspaceId, string name, string content)
+    {
+        var csrf = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
+        using var form = new MultipartFormDataContent();
+        var file = new ByteArrayContent(Encoding.UTF8.GetBytes(content));
+        file.Headers.ContentType = new MediaTypeHeaderValue("text/plain");
+        form.Add(file, "file", name);
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"/api/workspaces/{workspaceId}/files") { Content = form };
+        request.Headers.Add("X-CSRF-TOKEN", csrf.GetProperty("token").GetString()!);
+        return await client.SendAsync(request);
     }
 
     private static async Task<HttpResponseMessage> SendWithCsrf(HttpClient client, object payload, string? idempotencyKey = "presentation-test-request")
