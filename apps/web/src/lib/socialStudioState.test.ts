@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GenerationJob } from "./api";
-import { clearSocialActiveJobId, clearSocialDraft, displaySocialProgress, formatSocialPostForCopy, isSocialSourceReady, nextSocialRestoreDelay, normalizeSocialPreviewPlatform, parseSocialJobResult, persistSocialActiveJobId, persistSocialDraft, readSocialActiveJobId, readSocialDraft, socialActiveJobStorageKey, socialDraftStorageKey, socialStudioState } from "./socialStudioState";
+import { clearSocialActiveJobId, clearSocialDraft, displaySocialProgress, formatSocialPostForCopy, isSocialJobForWorkspace, isSocialSourceReady, nextSocialRestoreDelay, normalizeSocialPreviewPlatform, parseSocialJobResult, persistSocialActiveJobId, persistSocialDraft, readSocialActiveJobId, readSocialDraft, socialActiveJobStorageKey, socialDraftStorageKey, socialStudioState } from "./socialStudioState";
 
 const job = (overrides: Partial<GenerationJob> = {}): GenerationJob => ({ id: "job-1", workspaceId: "workspace-1", projectId: null, jobType: "social.generate", status: "Running", title: null, progressPercent: 100, resultJson: null, errorCode: null, errorMessage: null, cancellationRequested: false, createdAt: "2026-01-01T00:00:00Z", queuedAt: null, startedAt: null, completedAt: null, failedAt: null, cancelledAt: null, outputs: [], ...overrides });
 
@@ -33,6 +33,12 @@ describe("socialStudioState", () => {
   it("normalizes unknown result platforms to the safe multi-platform preview", () => {
     expect(normalizeSocialPreviewPlatform(" LinkedIn ")).toBe("linkedin");
     expect(normalizeSocialPreviewPlatform("provider-specific")).toBe("multi");
+  });
+  it("accepts only Social jobs belonging to the active workspace", () => {
+    expect(isSocialJobForWorkspace(job({ jobType: " SOCIAL.GENERATE " }), "workspace-1")).toBe(true);
+    expect(isSocialJobForWorkspace(job(), "workspace-2")).toBe(false);
+    expect(isSocialJobForWorkspace(job({ jobType: "image.generate" }), "workspace-1")).toBe(false);
+    expect(isSocialJobForWorkspace(null, "workspace-1")).toBe(false);
   });
   it("persists the active job by workspace and clears it when the user starts over", () => {
     const values = new Map<string, string>();
