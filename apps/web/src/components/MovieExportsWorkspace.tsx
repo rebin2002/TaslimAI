@@ -4,6 +4,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { AlertTriangle, CheckCircle2, Clock3, Download, Film, RefreshCw, ShieldCheck, X } from "lucide-react";
 import { api, type MovieFinalAssembly, type MovieProject } from "@/lib/api";
 import { useLocale } from "@/components/LocaleProvider";
+import { formatMovieDateTime, formatMovieNumber } from "@/lib/movieLocaleFormatting";
+import type { Locale } from "@/lib/i18n";
 
 const profiles = [
   { id: "hd-1080p", label: "HD 1080p", detail: "1920 × 1080 · fastest delivery" },
@@ -18,7 +20,7 @@ const terminalStatuses = new Set(["Ready", "Failed", "Cancelled"]);
  * value shown here comes from the persisted final assembly record.
  */
 export function MovieExportsWorkspace({ project }: { project: MovieProject }) {
-  const { t } = useLocale();
+  const { locale, t } = useLocale();
   const [assemblies, setAssemblies] = useState<MovieFinalAssembly[]>([]);
   const [profile, setProfile] = useState("hd-1080p");
   const [includeApprovedSoundtrackCues, setIncludeApprovedSoundtrackCues] = useState(false);
@@ -98,10 +100,10 @@ export function MovieExportsWorkspace({ project }: { project: MovieProject }) {
       </section>
 
       <section className="movie-exports-summary" aria-label={t("movieExports.readiness")}>
-        <ExportMetric label="Shots" value={shots.length} detail="in this project" />
-        <ExportMetric label="Takes" value={takes.length} detail="generated footage" />
-        <ExportMetric label="Selected" value={selected.length} detail="carried to the master" />
-        <ExportMetric label="Finalized" value={finalized.length} detail="locked for assembly" />
+        <ExportMetric locale={locale} label="Shots" value={shots.length} detail="in this project" />
+        <ExportMetric locale={locale} label="Takes" value={takes.length} detail="generated footage" />
+        <ExportMetric locale={locale} label="Selected" value={selected.length} detail="carried to the master" />
+        <ExportMetric locale={locale} label="Finalized" value={finalized.length} detail="locked for assembly" />
       </section>
 
       <section className="movie-exports-boundary">
@@ -201,7 +203,7 @@ export function MovieExportsWorkspace({ project }: { project: MovieProject }) {
         ) : (
           <div className="movie-exports-cards">
             {assemblies.map((assembly) => (
-              <ExportCard key={assembly.id} assembly={assembly} />
+              <ExportCard key={assembly.id} assembly={assembly} locale={locale} />
             ))}
           </div>
         )}
@@ -218,18 +220,18 @@ export function MovieExportsWorkspace({ project }: { project: MovieProject }) {
   );
 }
 
-function ExportCard({ assembly }: { assembly: MovieFinalAssembly }) {
+function ExportCard({ assembly, locale }: { assembly: MovieFinalAssembly; locale: Locale }) {
   const tone = assembly.status === "Ready" ? "is-ready" : assembly.status === "Failed" ? "is-failed" : "is-pending";
   return (
     <article className={`movie-exports-card ${tone}`} aria-label={`Export ${assembly.status}`}>
       <header className="movie-exports-card-header">
         <div>
           <span className="movie-exports-card-kicker">
-            {assembly.resolutionProfile} · {assembly.outputWidth} × {assembly.outputHeight}
+            {assembly.resolutionProfile} · {formatMovieNumber(assembly.outputWidth, locale)} × {formatMovieNumber(assembly.outputHeight, locale)}
           </span>
           <h4>{assembly.status === "Ready" ? "Master ready" : `Assembly ${assembly.status.toLowerCase()}`}</h4>
           <p>
-            {assembly.timelineItemCount} timeline item(s) · {assembly.audioMixInputCount} audio input(s) · captions{" "}
+            {formatMovieNumber(assembly.timelineItemCount, locale)} timeline item(s) · {formatMovieNumber(assembly.audioMixInputCount, locale)} audio input(s) · captions{" "}
             {assembly.captionsMode.toLowerCase()}
           </p>
         </div>
@@ -248,15 +250,15 @@ function ExportCard({ assembly }: { assembly: MovieFinalAssembly }) {
         </div>
         <div>
           <dt>Sources</dt>
-          <dd>{assembly.sourceTakeIds.length} take(s)</dd>
+          <dd>{formatMovieNumber(assembly.sourceTakeIds.length, locale)} take(s)</dd>
         </div>
         <div>
           <dt>Attempts</dt>
-          <dd>{assembly.attemptCount}</dd>
+          <dd>{formatMovieNumber(assembly.attemptCount, locale)}</dd>
         </div>
         <div>
           <dt>Completed</dt>
-          <dd>{assembly.completedAt ? new Date(assembly.completedAt).toLocaleString() : "—"}</dd>
+          <dd>{assembly.completedAt ? formatMovieDateTime(assembly.completedAt, locale) : "—"}</dd>
         </div>
       </dl>
       <footer className="movie-exports-card-actions">
@@ -276,11 +278,11 @@ function ExportCard({ assembly }: { assembly: MovieFinalAssembly }) {
   );
 }
 
-function ExportMetric({ label, value, detail }: { label: string; value: number; detail: string }) {
+function ExportMetric({ locale, label, value, detail }: { locale: Locale; label: string; value: number; detail: string }) {
   return (
     <div className="movie-exports-metric">
       <span>{label}</span>
-      <strong>{value}</strong>
+      <strong>{formatMovieNumber(value, locale)}</strong>
       <small>{detail}</small>
     </div>
   );
