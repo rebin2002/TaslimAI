@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useState } from "react";
+import { FormEvent, useState, type RefObject } from "react";
 import { Check, ChevronDown, X } from "lucide-react";
 import type { Project, ProjectInput } from "@/lib/api";
 import { useLocale } from "@/components/LocaleProvider";
@@ -9,7 +9,7 @@ import { useDialogAccessibility } from "@/lib/useDialogAccessibility";
 const projectTypes = ["General", "Movie", "Marketing", "Business", "Research", "Education", "Development"] as const;
 const typeKey = (type: string) => `project.type.${type.toLowerCase()}`;
 
-export function ProjectForm({ project, onClose, onSubmit }: Readonly<{ project?: Project; onClose: () => void; onSubmit: (input: ProjectInput) => Promise<void> }>) {
+export function ProjectForm({ project, onClose, onSubmit, restoreFocusRef }: Readonly<{ project?: Project; onClose: () => void; onSubmit: (input: ProjectInput) => Promise<void>; restoreFocusRef?: RefObject<HTMLElement | null> }>) {
   const { t } = useLocale();
   const [name, setName] = useState(project?.name ?? "");
   const [description, setDescription] = useState(project?.description ?? "");
@@ -19,7 +19,7 @@ export function ProjectForm({ project, onClose, onSubmit }: Readonly<{ project?:
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const dialogTitleId = "project-form-title";
-  const dialogRef = useDialogAccessibility<HTMLFormElement>(true, onClose);
+  const dialogRef = useDialogAccessibility<HTMLFormElement>(true, onClose, restoreFocusRef);
 
   async function submit(event: FormEvent) {
     event.preventDefault(); setSaving(true); setError("");

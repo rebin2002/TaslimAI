@@ -22,7 +22,7 @@ function focusableElements(container: HTMLElement) {
  * control after dismissal. The hook intentionally owns only interaction
  * behavior; callers provide the dialog semantics and labels in their markup.
  */
-export function useDialogAccessibility<T extends HTMLElement>(open: boolean, onClose: () => void): RefObject<T | null> {
+export function useDialogAccessibility<T extends HTMLElement>(open: boolean, onClose: () => void, restoreFocusRef?: RefObject<HTMLElement | null>): RefObject<T | null> {
   const dialogRef = useRef<T | null>(null);
   const openerRef = useRef<HTMLElement | null>(null);
   const onCloseRef = useRef(onClose);
@@ -34,7 +34,7 @@ export function useDialogAccessibility<T extends HTMLElement>(open: boolean, onC
     if (!open || !dialogRef.current) return;
 
     const dialog = dialogRef.current;
-    openerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    openerRef.current = restoreFocusRef?.current ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
     const focusInitial = window.setTimeout(() => {
       if (!dialog.isConnected) return;
       const initial = dialog.querySelector<HTMLElement>("[data-dialog-autofocus]") ?? focusableElements(dialog)[0] ?? dialog;
@@ -73,13 +73,13 @@ export function useDialogAccessibility<T extends HTMLElement>(open: boolean, onC
       window.clearTimeout(focusInitial);
       dialog.removeEventListener("keydown", handleKeyDown);
       const opener = openerRef.current;
-      if (opener?.isConnected && dialog.contains(document.activeElement)) {
+      if (opener?.isConnected) {
         window.setTimeout(() => {
           if (opener.isConnected) opener.focus();
         }, 0);
       }
     };
-  }, [open]);
+  }, [open, restoreFocusRef]);
 
   return dialogRef;
 }

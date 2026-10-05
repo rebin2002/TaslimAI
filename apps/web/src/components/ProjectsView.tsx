@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Archive, ArrowUpRight, BriefcaseBusiness, CalendarDays, FolderOpen, Pencil, Plus, RotateCcw } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { api, type Project, type ProjectInput } from "@/lib/api";
@@ -34,6 +34,7 @@ export function ProjectsView() {
   const [formOpen, setFormOpen] = useState(() => searchParams.get("create") === "1");
   const [editing, setEditing] = useState<Project | undefined>();
   const [error, setError] = useState("");
+  const formOpenerRef = useRef<HTMLElement | null>(null);
   const workspaceTypeLabel = workspace?.type === "Business" ? t("projects.businessWorkspace") : t("projects.personalWorkspace");
   const workspaceRoleLabel = workspace ? t(`projects.role.${workspace.role.toLowerCase()}`) : "";
 
@@ -66,6 +67,12 @@ export function ProjectsView() {
     await load();
   }
 
+  function openForm(project?: Project) {
+    formOpenerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setEditing(project);
+    setFormOpen(true);
+  }
+
   async function archive(project: Project) {
     if (!window.confirm(t("projects.archiveConfirm"))) return;
     await api.archiveProject(project.id);
@@ -84,7 +91,7 @@ export function ProjectsView() {
         <h1>{t("projects.title")}</h1>
         <p>{t("projects.subtitle")}</p>
       </div>
-      <button className="primary-button" onClick={() => { setEditing(undefined); setFormOpen(true); }}><Plus size={16} /> {t("projects.newProject")}</button>
+      <button className="primary-button" onClick={() => openForm()}><Plus size={16} /> {t("projects.newProject")}</button>
     </div>
 
     <div className="workspace-banner projects-workspace-banner">
@@ -99,7 +106,7 @@ export function ProjectsView() {
     </div>
 
     {error && <div className="inline-error" role="alert">{error}</div>}
-    {loading ? <div className="loading-state"><span className="loading-spinner" /></div> : projects.length === 0 ? <div className="projects-empty"><span className="empty-icon"><FolderOpen size={24} /></span><h2>{status === "Active" ? t("projects.emptyTitle") : t("projects.emptyArchivedTitle")}</h2><p>{status === "Active" ? t("projects.emptyDescription") : t("projects.emptyArchivedDescription")}</p>{status === "Active" && <button className="primary-button" onClick={() => setFormOpen(true)}><Plus size={16} /> {t("projects.newProject")}</button>}</div> : <div className="project-list project-list-premium">{projects.map((project) => <article className={`project-card project-card-premium ${projectAccent(project.type)}`} key={project.id}>
+    {loading ? <div className="loading-state"><span className="loading-spinner" /></div> : projects.length === 0 ? <div className="projects-empty"><span className="empty-icon"><FolderOpen size={24} /></span><h2>{status === "Active" ? t("projects.emptyTitle") : t("projects.emptyArchivedTitle")}</h2><p>{status === "Active" ? t("projects.emptyDescription") : t("projects.emptyArchivedDescription")}</p>{status === "Active" && <button className="primary-button" onClick={() => openForm()}><Plus size={16} /> {t("projects.newProject")}</button>}</div> : <div className="project-list project-list-premium">{projects.map((project) => <article className={`project-card project-card-premium ${projectAccent(project.type)}`} key={project.id}>
       <Link href={`/projects/${project.id}`} className="project-card-main">
         <span className="project-card-icon"><FolderOpen size={19} /></span>
         <span className="project-card-copy"><span className="project-card-kicker">{t(typeKey(project.type))}</span><strong>{project.name}</strong><small>{project.description || t("projects.noDescription")}</small></span>
@@ -107,9 +114,9 @@ export function ProjectsView() {
       </Link>
       <div className="project-card-meta">
         <span><CalendarDays size={13} /> {t("projects.updated")} {formatDate(project.updatedAt, locale)}</span>
-        {status === "Active" ? <div><button onClick={() => { setEditing(project); setFormOpen(true); }} aria-label={t("projects.edit")}><Pencil size={14} /></button><button onClick={() => void archive(project)} aria-label={t("projects.archive")}><Archive size={14} /></button></div> : <button onClick={() => void restore(project)} className="restore-action"><RotateCcw size={14} /> {t("projects.restore")}</button>}
+        {status === "Active" ? <div><button onClick={() => openForm(project)} aria-label={t("projects.edit")}><Pencil size={14} /></button><button onClick={() => void archive(project)} aria-label={t("projects.archive")}><Archive size={14} /></button></div> : <button onClick={() => void restore(project)} className="restore-action"><RotateCcw size={14} /> {t("projects.restore")}</button>}
       </div>
     </article>)}</div>}
-    {formOpen && <ProjectForm project={editing} onClose={() => { setFormOpen(false); setEditing(undefined); }} onSubmit={editing ? update : create} />}
+    {formOpen && <ProjectForm project={editing} restoreFocusRef={formOpenerRef} onClose={() => { setFormOpen(false); setEditing(undefined); }} onSubmit={editing ? update : create} />}
   </div>;
 }
