@@ -142,7 +142,7 @@ public sealed class MovieProductionKitService(
     {
         var kit = await LoadKitAsync(movieProjectId, cancellationToken);
         if (kit is null || !await authorization.CanPermissionAsync(userId, movieProjectId, MoviePermissions.View, cancellationToken)) return null;
-        return ToDto(kit);
+        return await ToDtoAsync(kit, cancellationToken);
     }
 
     public async Task<MovieProductionKitDto?> CreateRevisionAsync(
@@ -214,7 +214,7 @@ public sealed class MovieProductionKitService(
         if (db.Entry(kit).State == EntityState.Detached) db.MovieProductionKits.Add(kit);
         db.MovieProductionKitRevisions.Add(revision);
         await db.SaveChangesAsync(cancellationToken);
-        return ToDto(await LoadKitAsync(movieProjectId, cancellationToken) ?? kit);
+        return await ToDtoAsync(await LoadKitAsync(movieProjectId, cancellationToken) ?? kit, cancellationToken);
     }
 
     public async Task<MovieProductionKitDto?> SubmitForReviewAsync(Guid userId, Guid movieProjectId, int revisionNumber, CancellationToken cancellationToken)
@@ -227,7 +227,7 @@ public sealed class MovieProductionKitService(
         revision.Status = MovieProductionKitStatuses.Review;
         kit.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(cancellationToken);
-        return ToDto(kit);
+        return await ToDtoAsync(kit, cancellationToken);
     }
 
     public async Task<MovieProductionKitDto?> ApproveAsync(Guid userId, Guid movieProjectId, int revisionNumber, string? note, CancellationToken cancellationToken)
@@ -237,7 +237,7 @@ public sealed class MovieProductionKitService(
         if (kit is null) return null;
         var revision = CurrentRevision(kit, revisionNumber);
         EnsureStatus(revision, MovieProductionKitStatuses.Review);
-        var readiness = EvaluateReadiness(kit, revision);
+        var readiness = await EvaluateReadinessAsync(kit, revision, cancellationToken);
         if (!readiness.Ready) throw new MovieProductionKitLifecycleException("MOVIE_PRODUCTION_KIT_NOT_READY", "The Production Kit must pass readiness checks before approval.", readiness.Missing);
         revision.Status = MovieProductionKitStatuses.Approved;
         revision.ReviewedByUserId = userId;
@@ -245,7 +245,7 @@ public sealed class MovieProductionKitService(
         revision.ReviewNote = Clean(note, 4_000);
         kit.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(cancellationToken);
-        return ToDto(kit);
+        return await ToDtoAsync(kit, cancellationToken);
     }
 
     public async Task<MovieProductionKitDto?> LockAsync(Guid userId, Guid movieProjectId, int revisionNumber, CancellationToken cancellationToken)
@@ -255,7 +255,7 @@ public sealed class MovieProductionKitService(
         if (kit is null) return null;
         var revision = CurrentRevision(kit, revisionNumber);
         EnsureStatus(revision, MovieProductionKitStatuses.Approved);
-        var readiness = EvaluateReadiness(kit, revision);
+        var readiness = await EvaluateReadinessAsync(kit, revision, cancellationToken);
         if (!readiness.Ready) throw new MovieProductionKitLifecycleException("MOVIE_PRODUCTION_KIT_NOT_READY", "The Production Kit must pass readiness checks before locking.", readiness.Missing);
         var now = DateTime.UtcNow;
         revision.Status = MovieProductionKitStatuses.Locked;
@@ -266,7 +266,7 @@ public sealed class MovieProductionKitService(
         kit.LockedAt = now;
         kit.UpdatedAt = now;
         await db.SaveChangesAsync(cancellationToken);
-        return ToDto(kit);
+        return await ToDtoAsync(kit, cancellationToken);
     }
 
     public async Task<MovieProductionKitDto?> UnlockAsync(Guid userId, Guid movieProjectId, CancellationToken cancellationToken)
@@ -284,7 +284,7 @@ public sealed class MovieProductionKitService(
         kit.LockedByUserId = null;
         kit.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(cancellationToken);
-        return ToDto(kit);
+        return await ToDtoAsync(kit, cancellationToken);
     }
 
     private async Task<MovieProductionKit?> LoadKitAsync(Guid movieProjectId, CancellationToken cancellationToken) =>
@@ -308,10 +308,12 @@ public sealed class MovieProductionKitService(
             throw new MovieProductionKitLifecycleException("MOVIE_PRODUCTION_KIT_INVALID_TRANSITION", $"A Production Kit revision in {revision.Status} cannot transition to the requested state.");
     }
 
-    private static MovieProductionKitDto ToDto(MovieProductionKit kit)
+    private async Task<MovieProductionKitDto> ToDtoAsync(MovieProductionKit kit, CancellationToken cancellationToken)
     {
         var current = kit.Revisions.OrderByDescending(item => item.RevisionNumber).FirstOrDefault();
-        var readiness = current is null ? new MovieProductionKitReadiness(false, MovieProductionKitReadinessCodes.GuideMissing, [MovieProductionKitReadinessCodes.GuideMissing], [], 0, 0, 0, false, 0) : EvaluateReadiness(kit, current);
+        var readiness = current is null
+            ? new MovieProductionKitReadiness(false, MovieProductionKitReadinessCodes.GuideMissing, [MovieProductionKitReadinessCodes.GuideMissing], [], 0, 0, 0, false, 0)
+            : await EvaluateReadinessAsync(kit, current, cancellationToken);
         return new MovieProductionKitDto(
             kit.Id, kit.MovieProjectId, kit.CurrentRevisionNumber, kit.LockedRevisionNumber,
             kit.LockedAt, kit.LockedByUserId, current is null ? null : ToRevisionDto(current), ToReadinessDto(readiness),
@@ -332,7 +334,10 @@ public sealed class MovieProductionKitService(
                 item.Id, item.ReferenceType, item.SourceId, item.SourceRevision, item.Label, item.Role,
                 item.IsRequired, item.SourceHash, item.ProvenanceJson, item.SortOrder)).ToArray());
 
-    private static MovieProductionKitReadiness EvaluateReadiness(MovieProductionKit kit, MovieProductionKitRevision revision)
+    private async Task<MovieProductionKitReadiness> EvaluateReadinessAsync(
+        MovieProductionKit kit,
+        MovieProductionKitRevision revision,
+        CancellationToken cancellationToken)
     {
         var missing = new List<string>();
         var warnings = new List<string>();
@@ -341,11 +346,39 @@ public sealed class MovieProductionKitService(
         if (guide is null) missing.Add(MovieProductionKitReadinessCodes.GuideMissing);
         else if (guide.LockedRevisionNumber is null) missing.Add(MovieProductionKitReadinessCodes.GuideNotLocked);
         else if (guide.LockedRevisionNumber != revision.SourceGuideRevisionNumber) missing.Add(MovieProductionKitReadinessCodes.GuideRevisionStale);
+        var assetReferences = revision.References
+            .Where(item => item.ReferenceType == MovieProductionKitReferenceTypes.Asset)
+            .Select(item => item.SourceId)
+            .Distinct()
+            .ToArray();
+        IReadOnlyList<Asset> assets = assetReferences.Length == 0
+            ? []
+            : await db.Assets.AsNoTracking()
+                .Include(item => item.StoredFile)
+                .Where(item => assetReferences.Contains(item.Id))
+                .ToListAsync(cancellationToken);
+        var assetsById = assets.ToDictionary(item => item.Id);
         var resolved = 0;
         foreach (var reference in revision.References)
         {
             if (reference.SourceId == Guid.Empty) { missing.Add(MovieProductionKitReadinessCodes.ReferenceNotFound); continue; }
-            // Source existence and project ownership are validated when the revision is created.
+            if (reference.ReferenceType == MovieProductionKitReferenceTypes.Asset)
+            {
+                if (!assetsById.TryGetValue(reference.SourceId, out var asset))
+                {
+                    missing.Add(MovieProductionKitReadinessCodes.ReferenceNotFound);
+                    continue;
+                }
+                if (asset.Status != AssetStatus.Active
+                    || asset.WorkspaceId != kit.MovieProject.WorkspaceId
+                    || asset.ProjectId.HasValue && asset.ProjectId != kit.MovieProject.ProjectId
+                    || asset.StoredFileId.HasValue && asset.StoredFile?.Status != StoredFileStatus.Ready)
+                {
+                    missing.Add(MovieProductionKitReadinessCodes.ReferenceNotReady);
+                    continue;
+                }
+            }
+            // Non-asset source existence and project ownership are validated when the revision is created.
             resolved++;
         }
         var required = revision.References.Count(item => item.IsRequired);

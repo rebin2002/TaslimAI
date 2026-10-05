@@ -223,4 +223,14 @@ describe("Full Movie workspace foundation", () => {
     expect(selectsSource).not.toContain("Accept recommendation");
   });
 
+  it("makes Edit a stateful, validated, keyboard-accessible timeline", () => {
+    expect(workspaceSource).toContain("buildMovieEditModel(project)");
+    expect(workspaceSource).toContain('role="listbox" aria-label="Movie scene timeline"');
+    expect(workspaceSource).toContain('role="option" aria-selected={selected}');
+    expect(workspaceSource).toContain("moveMovieEditSelection(model, sceneId, event.key)");
+    expect(workspaceSource).toContain("Refresh timeline");
+    expect(workspaceSource).toContain("Validation blockers");
+    expect(workspaceSource).toContain("no provider call or media mutation");
+  });
+
 });
