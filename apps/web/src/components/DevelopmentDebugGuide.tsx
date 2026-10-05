@@ -40,6 +40,7 @@ export function DevelopmentDebugGuide() {
   const [loadedWorkspaceId, setLoadedWorkspaceId] = useState<string | null>(null);
   const progress = useMemo(() => developmentDebugProgress(state), [state]);
   const isReady = workspaceId !== null && loadedWorkspaceId === workspaceId;
+  const progressLabel = t("debugGuide.progress", { completed: String(progress.completed), total: String(progress.total) });
 
   useEffect(() => {
     if (!workspaceId) {
@@ -91,11 +92,11 @@ export function DevelopmentDebugGuide() {
         <div className={styles.progressHeading}>
           <div>
             <p className="section-eyebrow">{t("debugGuide.progressLabel")}</p>
-            <h2 id="development-debug-progress-title">{t("debugGuide.progress", { completed: String(progress.completed), total: String(progress.total) })}</h2>
+            <h2 id="development-debug-progress-title">{progressLabel}</h2>
           </div>
           <span className={styles.progressIcon} aria-hidden="true"><Check size={17} /></span>
         </div>
-        <div className={styles.progressTrack} aria-hidden="true"><span style={{ width: `${(progress.completed / progress.total) * 100}%` }} /></div>
+        <div className={styles.progressTrack} role="progressbar" aria-valuemin={0} aria-valuemax={progress.total} aria-valuenow={progress.completed} aria-label={progressLabel}><span aria-hidden="true" style={{ width: `${(progress.completed / progress.total) * 100}%` }} /></div>
       </section>
 
       <section className={styles.contentGrid}>
@@ -137,6 +138,7 @@ export function DevelopmentDebugGuide() {
             value={state.notes}
             disabled={!isReady}
             maxLength={4000}
+            dir="auto"
             onChange={(event) => setState((current) => ({ ...current, notes: event.target.value }))}
             placeholder={t("debugGuide.notesPlaceholder")}
             aria-describedby="development-debug-notes-hint"

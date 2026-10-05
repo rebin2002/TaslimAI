@@ -16,6 +16,8 @@ describe("DevelopmentDebugGuide", () => {
     expect(html).toContain("Reproduce the smallest case");
     expect(html).toContain('type="checkbox"');
     expect(html).toContain('aria-labelledby="development-debug-title"');
+    expect(html).toContain('role="progressbar"');
+    expect(html).toContain('dir="auto"');
     expect(html).toContain('maxLength="4000"');
     expect(html).toContain("does not call a provider or send external requests");
     expect(html).not.toContain("/api/");
