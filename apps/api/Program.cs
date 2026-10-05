@@ -52,7 +52,10 @@ builder.Services.AddControllersWithViews(options =>
             new BadRequestObjectResult(new { error = new { code = "VALIDATION_ERROR", message = "Please check the highlighted fields." } });
     });
 builder.Services.AddHttpContextAccessor();
-builder.Services.Configure<HealthOptions>(builder.Configuration.GetSection("Health"));
+builder.Services.AddOptions<HealthOptions>()
+    .Bind(builder.Configuration.GetSection("Health"))
+    .Validate(options => options.ProbeTimeoutSeconds is >= 1 and <= 60, "Health:ProbeTimeoutSeconds must be between 1 and 60 seconds.")
+    .ValidateOnStart();
 builder.Services.AddScoped<OperationalHealthService>();
 builder.Services.AddOptions<FileSettings>().Bind(builder.Configuration.GetSection("Files"));
 builder.Services.Configure<FormOptions>(options =>
@@ -535,10 +538,12 @@ static IResult LivenessEndpoint(OperationalHealthService health, HttpContext con
 }
 app.MapGet("/health", LivenessEndpoint)
     .WithName("Health")
-    .WithTags("System");
+    .WithTags("System")
+    .AllowAnonymous();
 app.MapGet("/health/live", LivenessEndpoint)
     .WithName("HealthLive")
-    .WithTags("System");
+    .WithTags("System")
+    .AllowAnonymous();
 static async Task<IResult> ReadinessEndpoint(OperationalHealthService health, HttpContext context, CancellationToken cancellationToken)
 {
     SetHealthResponseHeaders(context.Response);
@@ -547,10 +552,12 @@ static async Task<IResult> ReadinessEndpoint(OperationalHealthService health, Ht
 }
 app.MapGet("/health/ready", ReadinessEndpoint)
     .WithName("HealthReady")
-    .WithTags("System");
+    .WithTags("System")
+    .AllowAnonymous();
 app.MapGet("/readiness", ReadinessEndpoint)
     .WithName("Readiness")
-    .WithTags("System");
+    .WithTags("System")
+    .AllowAnonymous();
 app.MapControllers();
 
 if (builder.Configuration.GetValue("Database:ApplyMigrations", isProduction))
