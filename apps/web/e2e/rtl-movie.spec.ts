@@ -52,7 +52,10 @@ async function applyLocale(page: Page, locale: keyof typeof languageTags, label:
   const language = page.locator(".language-select select").first();
   await language.selectOption(locale);
   await expect
-    .poll(() => page.evaluate(() => window.localStorage.getItem("taslim-locale")))
+    .poll(() => page.evaluate(() => {
+      const accountKey = Object.keys(window.localStorage).find((key) => key.startsWith("taslim-locale:user:"));
+      return accountKey ? window.localStorage.getItem(accountKey) : window.localStorage.getItem("taslim-locale");
+    }))
     .toBe(locale);
   await expectDirection(page, locale === "en" ? "ltr" : "rtl", label);
   await expect(page.locator("html")).toHaveAttribute("lang", languageTags[locale]);
