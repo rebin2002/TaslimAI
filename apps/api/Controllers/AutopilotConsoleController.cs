@@ -80,7 +80,7 @@ public sealed class AutopilotConsoleController(
         if (string.IsNullOrWhiteSpace(request.Reason))
             return BadRequest(new { error = new { code = "AUTOPILOT_REASON_REQUIRED", message = "A reason is required to change the backlog." } });
 
-        var result = await backlog.UpsertAsync(request, actorUserId, cancellationToken);
+        var result = await backlog.UpsertAsync(request, actorUserId, HttpContext.TraceIdentifier, cancellationToken);
         if (!result.Succeeded)
             return BadRequest(new { error = new { code = "AUTOPILOT_BACKLOG_REJECTED", message = result.Reason } });
 
@@ -97,7 +97,13 @@ public sealed class AutopilotConsoleController(
         if (string.IsNullOrWhiteSpace(request.Reason))
             return BadRequest(new { error = new { code = "AUTOPILOT_REASON_REQUIRED", message = "A reason is required for a control change." } });
 
-        var control = await orchestrator.SetControlAsync(request.Paused, request.KillSwitch, actorUserId, request.Reason, cancellationToken);
+        var control = await orchestrator.SetControlAsync(
+            request.Paused,
+            request.KillSwitch,
+            actorUserId,
+            request.Reason,
+            requestId: HttpContext.TraceIdentifier,
+            cancellationToken: cancellationToken);
         return Ok(console.MapControl(control));
     }
 

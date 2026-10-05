@@ -27,6 +27,7 @@ public sealed class AutopilotBacklogService(TaslimDbContext db, TimeProvider tim
     public async Task<AutopilotBacklogMutationResult> UpsertAsync(
         AutopilotBacklogItemRequest request,
         Guid? actorUserId,
+        string? requestId = null,
         CancellationToken cancellationToken = default)
     {
         var itemKey = (request.ItemKey ?? string.Empty).Trim();
@@ -84,6 +85,7 @@ public sealed class AutopilotBacklogService(TaslimDbContext db, TimeProvider tim
             taskId: item.ItemKey,
             actorUserId: actorUserId,
             targetId: item.Id,
+            requestId: requestId,
             dryRun: false));
 
         try
