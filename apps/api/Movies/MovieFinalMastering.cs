@@ -178,7 +178,7 @@ public sealed class MovieFinalMasteringService(TaslimDbContext db, MovieCollabor
         }
 
         var now = DateTime.UtcNow;
-        var blockedReason = GetBlockedReason(sourceAsset, sourceResolution);
+        var blockedReason = MovieFinalMasteringSourceRules.GetBlockedReason(sourceAsset, movie.WorkspaceId, movie.ProjectId, sourceResolution is not null);
         var master = new MovieFinalMaster
         {
             Id = Guid.NewGuid(),
@@ -233,13 +233,6 @@ public sealed class MovieFinalMasteringService(TaslimDbContext db, MovieCollabor
         return ToDto(master);
     }
 
-    private static string? GetBlockedReason(Asset? sourceAsset, SourceResolution? resolution)
-    {
-        if (sourceAsset is null) return "A source video asset is required before mastering can be scheduled.";
-        if (!string.Equals(sourceAsset.AssetType, AssetTypes.Video, StringComparison.OrdinalIgnoreCase)) return "The source asset is not a video.";
-        return resolution is null ? "Source video dimensions are required before mastering can be scheduled." : null;
-    }
-
     private static SourceResolution? ReadSourceResolution(MovieTake take, Asset? sourceAsset)
     {
         foreach (var json in new[]
@@ -292,6 +285,30 @@ public sealed class MovieFinalMasteringService(TaslimDbContext db, MovieCollabor
         master.QcResultJson, master.ProvenanceJson, master.SupersedesMasterId, master.SupersededByMasterId, master.RequestedAt, master.UpdatedAt, master.CompletedAt, master.SupersededAt);
 
     private sealed record SourceResolution(int Width, int Height);
+}
+
+public static class MovieFinalMasteringSourceRules
+{
+    public static bool IsEligible(Asset? sourceAsset, Guid movieWorkspaceId, Guid? movieProjectId)
+    {
+        if (sourceAsset is not { Status: AssetStatus.Active } || sourceAsset.WorkspaceId != movieWorkspaceId
+            || sourceAsset.ProjectId is not null && sourceAsset.ProjectId != movieProjectId
+            || !string.Equals(sourceAsset.AssetType, AssetTypes.Video, StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        var file = sourceAsset.StoredFile;
+        return file is { Status: StoredFileStatus.Ready }
+            && file.WorkspaceId == movieWorkspaceId
+            && (file.ProjectId is null || file.ProjectId == movieProjectId);
+    }
+
+    public static string? GetBlockedReason(Asset? sourceAsset, Guid movieWorkspaceId, Guid? movieProjectId, bool hasResolution)
+    {
+        if (sourceAsset is null) return "A source video asset is required before mastering can be scheduled.";
+        if (!IsEligible(sourceAsset, movieWorkspaceId, movieProjectId))
+            return "The source video asset must be active, ready, and owned by the movie workspace and project.";
+        return hasResolution ? null : "Source video dimensions are required before mastering can be scheduled.";
+    }
 }
 
 public sealed class MovieFinalMasteringValidationException(string code, string message) : Exception(message)

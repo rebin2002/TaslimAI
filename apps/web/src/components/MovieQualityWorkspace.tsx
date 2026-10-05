@@ -10,6 +10,8 @@ import {
   type MovieProject,
 } from "@/lib/api";
 import { useLocale } from "@/components/LocaleProvider";
+import { formatMovieDateTime, formatMovieNumber } from "@/lib/movieLocaleFormatting";
+import type { Locale } from "@/lib/i18n";
 
 /**
  * The review gate that stands between an in-progress production and a delivered
@@ -18,7 +20,7 @@ import { useLocale } from "@/components/LocaleProvider";
  * each final assembly.
  */
 export function MovieQualityWorkspace({ project }: { project: MovieProject }) {
-  const { t } = useLocale();
+  const { locale, t } = useLocale();
   const [checkpoint, setCheckpoint] = useState<MovieProductionCheckpoint | null>(null);
   const [continuity, setContinuity] = useState<MovieProductionContinuityReview | null>(null);
   const [assemblies, setAssemblies] = useState<MovieFinalAssembly[]>([]);
@@ -77,10 +79,10 @@ export function MovieQualityWorkspace({ project }: { project: MovieProject }) {
       </section>
 
       <section className="movie-qc-summary" aria-label={t("movieQc.summary")}>
-        <QcMetric label="Shots" value={shots.length} detail="in the cut" />
-        <QcMetric label="Selected takes" value={shots.length - unselectedShots.length} detail="carried forward" />
-        <QcMetric label="Blocking findings" value={blockingFindings.length} detail="continuity errors" />
-        <QcMetric label="Masters ready" value={assemblies.filter((assembly) => assembly.status === "Ready").length} detail="passed the gate" />
+        <QcMetric locale={locale} label="Shots" value={shots.length} detail="in the cut" />
+        <QcMetric locale={locale} label="Selected takes" value={shots.length - unselectedShots.length} detail="carried forward" />
+        <QcMetric locale={locale} label="Blocking findings" value={blockingFindings.length} detail="continuity errors" />
+        <QcMetric locale={locale} label="Masters ready" value={assemblies.filter((assembly) => assembly.status === "Ready").length} detail="passed the gate" />
       </section>
 
       <section className={`movie-qc-verdict ${deliverable ? "is-ready" : "is-blocked"}`} aria-label="Delivery verdict">
@@ -90,7 +92,7 @@ export function MovieQualityWorkspace({ project }: { project: MovieProject }) {
           <span>
             {deliverable
               ? "Every shot points at a selected take, no blocking continuity finding is open, and a master has passed the quality gate."
-              : firstBlocker(unselectedShots.length, blockingFindings.length, masteredAssembly, failedAssembly)}
+              : firstBlocker(unselectedShots.length, blockingFindings.length, masteredAssembly, failedAssembly, locale)}
           </span>
         </div>
         <button type="button" className="movie-workspace-button is-quiet" onClick={() => void load()}>
@@ -115,7 +117,7 @@ export function MovieQualityWorkspace({ project }: { project: MovieProject }) {
             <h3 id="movie-qc-checkpoint-title">What is actually complete.</h3>
             <p>Derived from persisted shot state and generation jobs—not from optimistic UI state.</p>
           </div>
-          {loading ? <Clock3 size={18} /> : <strong className="movie-qc-progress">{checkpoint?.progressPercent ?? 0}%</strong>}
+          {loading ? <Clock3 size={18} /> : <strong className="movie-qc-progress">{formatMovieNumber(checkpoint?.progressPercent ?? 0, locale)}%</strong>}
         </div>
         {!checkpoint || checkpoint.totalShots === 0 ? (
           <div className="movie-qc-empty">
@@ -135,23 +137,23 @@ export function MovieQualityWorkspace({ project }: { project: MovieProject }) {
               </li>
               <li>
                 <span>Complete</span>
-                <strong>{checkpoint.completedShots}/{checkpoint.totalShots}</strong>
+                <strong>{formatMovieNumber(checkpoint.completedShots, locale)}/{formatMovieNumber(checkpoint.totalShots, locale)}</strong>
               </li>
               <li>
                 <span>Running</span>
-                <strong>{checkpoint.runningShots}</strong>
+                <strong>{formatMovieNumber(checkpoint.runningShots, locale)}</strong>
               </li>
               <li>
                 <span>Blocked</span>
-                <strong>{checkpoint.blockedShots}</strong>
+                <strong>{formatMovieNumber(checkpoint.blockedShots, locale)}</strong>
               </li>
               <li>
                 <span>Recoverable</span>
-                <strong>{checkpoint.recoverableShots}</strong>
+                <strong>{formatMovieNumber(checkpoint.recoverableShots, locale)}</strong>
               </li>
               <li>
                 <span>Awaiting approval</span>
-                <strong>{checkpoint.pendingApprovalShots}</strong>
+                <strong>{formatMovieNumber(checkpoint.pendingApprovalShots, locale)}</strong>
               </li>
             </ul>
             {checkpoint.items.some((item) => item.state === "Blocked" || item.state === "Recoverable") && (
@@ -162,7 +164,7 @@ export function MovieQualityWorkspace({ project }: { project: MovieProject }) {
                   .map((item) => (
                     <div key={item.shotId} className="movie-qc-blocked-item">
                       <span>
-                        Scene {String(item.sceneSequence).padStart(2, "0")} · Shot {String(item.shotSequence).padStart(2, "0")}
+                        Scene {formatMovieNumber(item.sceneSequence, locale, { minimumIntegerDigits: 2 })} · Shot {formatMovieNumber(item.shotSequence, locale, { minimumIntegerDigits: 2 })}
                       </span>
                       <strong>{item.label}</strong>
                       <small>{item.blockedReason ?? item.nextAction ?? item.state}</small>
@@ -181,7 +183,7 @@ export function MovieQualityWorkspace({ project }: { project: MovieProject }) {
             <h3 id="movie-qc-continuity-title">Findings with evidence.</h3>
             <p>
               {continuity
-                ? `Assembled ${new Date(continuity.assembledAt).toLocaleString()} · review only`
+                ? `Assembled ${formatMovieDateTime(continuity.assembledAt, locale)} · review only`
                 : "Continuity review is unavailable for this project right now."}
             </p>
           </div>
@@ -234,11 +236,11 @@ export function MovieQualityWorkspace({ project }: { project: MovieProject }) {
               <li key={assembly.id} className={assembly.qcStatus === "Passed" ? "is-pass" : assembly.status === "Failed" ? "is-fail" : "is-pending"}>
                 <div>
                   <strong>
-                    {assembly.resolutionProfile} · {assembly.outputWidth} × {assembly.outputHeight}
+                    {assembly.resolutionProfile} · {formatMovieNumber(assembly.outputWidth, locale)} × {formatMovieNumber(assembly.outputHeight, locale)}
                   </strong>
                   <small>
-                    {assembly.status} · {assembly.sourceTakeIds.length} source take(s) ·{" "}
-                    {assembly.completedAt ? new Date(assembly.completedAt).toLocaleString() : "in progress"}
+                    {assembly.status} · {formatMovieNumber(assembly.sourceTakeIds.length, locale)} source take(s) ·{" "}
+                    {assembly.completedAt ? formatMovieDateTime(assembly.completedAt, locale) : "in progress"}
                   </small>
                 </div>
                 <span>{assembly.qcStatus}</span>
@@ -253,7 +255,7 @@ export function MovieQualityWorkspace({ project }: { project: MovieProject }) {
           <div>
             <span className="movie-workspace-kicker">Take evidence</span>
             <h3 id="movie-qc-takes-title">Approval state per shot.</h3>
-            <p>{approvedTakes.length} take(s) carry an approval decision. Selects evidence lives in the Selects room.</p>
+            <p>{formatMovieNumber(approvedTakes.length, locale)} take(s) carry an approval decision. Selects evidence lives in the Selects room.</p>
           </div>
         </div>
         {shots.length === 0 ? (
@@ -271,7 +273,7 @@ export function MovieQualityWorkspace({ project }: { project: MovieProject }) {
                   <div>
                     <strong>{shot.description}</strong>
                     <small>
-                      {shotTakes.length} take(s)
+                      {formatMovieNumber(shotTakes.length, locale)} take(s)
                       {chosen ? ` · selected: ${chosen.label}` : " · no selected take"}
                     </small>
                   </div>
@@ -299,19 +301,20 @@ function firstBlocker(
   blockingFindings: number,
   mastered: MovieFinalAssembly | null,
   failed: MovieFinalAssembly | null,
+  locale: Locale,
 ) {
-  if (unselectedShots > 0) return `${unselectedShots} shot(s) still have no selected take. Finish the cut in Production.`;
-  if (blockingFindings > 0) return `${blockingFindings} blocking continuity finding(s) remain open.`;
+  if (unselectedShots > 0) return `${formatMovieNumber(unselectedShots, locale)} shot(s) still have no selected take. Finish the cut in Production.`;
+  if (blockingFindings > 0) return `${formatMovieNumber(blockingFindings, locale)} blocking continuity finding(s) remain open.`;
   if (failed) return "The most recent assembly did not pass the quality gate. Review the sources and export again.";
   if (!mastered) return "No master has passed the quality gate yet. Assemble an export in the Exports room.";
   return "The delivery gate has not been satisfied yet.";
 }
 
-function QcMetric({ label, value, detail }: { label: string; value: number; detail: string }) {
+function QcMetric({ locale, label, value, detail }: { locale: Locale; label: string; value: number; detail: string }) {
   return (
     <div className="movie-qc-metric">
       <span>{label}</span>
-      <strong>{value}</strong>
+      <strong>{formatMovieNumber(value, locale)}</strong>
       <small>{detail}</small>
     </div>
   );
