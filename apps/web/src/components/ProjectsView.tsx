@@ -1,4 +1,5 @@
 "use client";
+import { localeTag } from "@/lib/i18n";
 
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
@@ -12,7 +13,7 @@ import { ProjectForm } from "@/components/ProjectForm";
 const typeKey = (type: string) => `project.type.${type.toLowerCase()}`;
 
 function formatDate(value: string, locale: string) {
-  return new Intl.DateTimeFormat(locale, { month: "short", day: "numeric", year: "numeric" }).format(new Date(value));
+  return new Intl.DateTimeFormat(localeTag(locale), { month: "short", day: "numeric", year: "numeric" }).format(new Date(value));
 }
 
 function projectAccent(type: string) {
