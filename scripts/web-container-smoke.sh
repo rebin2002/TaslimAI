@@ -31,7 +31,7 @@ cleanup() {
 trap cleanup EXIT
 
 docker rm --force "$container_name" >/dev/null 2>&1 || true
-docker run --detach --network host --name "$container_name" \
+docker run --detach --publish "${port}:${port}" --name "$container_name" \
     --env NODE_ENV=production \
     --env PORT="$port" \
     --env HOSTNAME=0.0.0.0 \

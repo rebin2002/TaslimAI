@@ -56,7 +56,7 @@ assert_log_contains() {
     }
 }
 
-assert_log_contains 'docker run --detach --network host --name web-container-smoke-test'
+assert_log_contains 'docker run --detach --publish 3000:3000 --name web-container-smoke-test'
 assert_log_contains '--env NODE_ENV=production'
 assert_log_contains '--env PORT=3000'
 assert_log_contains '--env HOSTNAME=0.0.0.0'

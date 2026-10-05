@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 image="${1:?usage: $0 IMAGE [PORT] [TIMEOUT_SECONDS]}"
 port="${2:-8080}"
 timeout_seconds="${3:-120}"
 container_name="${CONTAINER_NAME:-taslim-api-release-smoke}"
-connection_string="${SMOKE_CONNECTION_STRING:-Host=127.0.0.1;Port=5432;Database=taslim_container_smoke;Username=taslim;Password=change-me}"
+connection_string="${SMOKE_CONNECTION_STRING:-Host=host.docker.internal;Port=5432;Database=taslim_container_smoke;Username=taslim;Password=change-me}"
 
 if ! [[ "$port" =~ ^[0-9]+$ ]] || (( port < 1 || port > 65535 )); then
     echo "Container smoke port must be a valid TCP port." >&2
@@ -30,12 +31,15 @@ cleanup() {
 trap cleanup EXIT
 
 docker rm --force "$container_name" >/dev/null 2>&1 || true
-docker run --detach --network host --name "$container_name" \
+docker run --detach \
+    --add-host host.docker.internal:host-gateway \
+    --publish "${port}:${port}" \
+    --name "$container_name" \
     --env ASPNETCORE_ENVIRONMENT=Testing \
     --env ASPNETCORE_URLS="http://0.0.0.0:${port}" \
     --env ASPNETCORE_HTTP_PORTS="$port" \
     --env "ConnectionStrings__Postgres=${connection_string}" \
-    --env Database__ApplyMigrations=false \
+    --env Database__ApplyMigrations=true \
     --env GenerationJobs__WorkerEnabled=false \
     --env Autopilot__WatchdogEnabled=false \
     --env Files__StorageProvider=Local \
@@ -43,26 +47,12 @@ docker run --detach --network host --name "$container_name" \
     "$image" >/dev/null
 started=1
 
-wait_for_status() {
-    local path="$1"
-    local expected_status="$2"
-    local deadline=$((SECONDS + timeout_seconds))
-    local body
+smoke_attempts="$timeout_seconds"
+SMOKE_MAX_ATTEMPTS="$smoke_attempts" \
+SMOKE_RETRY_SECONDS=2 \
+SMOKE_CONNECT_TIMEOUT_SECONDS=2 \
+SMOKE_REQUEST_TIMEOUT_SECONDS=5 \
+bash "$repo_root/scripts/api-health-smoke.sh" "http://127.0.0.1:${port}"
 
-    while (( SECONDS < deadline )); do
-        if body="$(curl --silent --show-error --fail --max-time 5 "http://127.0.0.1:${port}${path}" 2>/dev/null)" \
-            && jq -e --arg expected "$expected_status" '.status == $expected' >/dev/null 2>&1 <<<"$body"; then
-            echo "${path} returned ${expected_status}."
-            return 0
-        fi
-        sleep 2
-    done
-
-    echo "Timed out waiting for ${path} to return ${expected_status}." >&2
-    return 1
-}
-
-wait_for_status "/health/live" "alive"
-wait_for_status "/health/ready" "ready"
-echo "API container smoke passed: liveness and readiness are healthy."
+echo "API container smoke passed: migrations, liveness, and required dependency readiness are healthy."
 passed=1

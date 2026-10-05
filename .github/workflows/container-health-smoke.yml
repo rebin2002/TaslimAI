@@ -49,7 +49,7 @@ jobs:
 
       - name: Smoke-test API container liveness and readiness
         env:
-          SMOKE_CONNECTION_STRING: Host=127.0.0.1;Port=5432;Database=taslim_container_smoke;Username=taslim;Password=change-me
+          SMOKE_CONNECTION_STRING: Host=host.docker.internal;Port=5432;Database=taslim_container_smoke;Username=taslim;Password=change-me
         run: bash scripts/container-health-smoke.sh taslim-api:release-smoke 8080 120
 
       - name: Smoke-test web container runtime and security headers
