@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GenerationJob } from "./api";
-import { clearSocialActiveJobId, clearSocialDraft, displaySocialProgress, formatSocialPostForCopy, isSocialSourceReady, normalizeSocialPreviewPlatform, parseSocialJobResult, persistSocialActiveJobId, persistSocialDraft, readSocialActiveJobId, readSocialDraft, socialActiveJobStorageKey, socialDraftStorageKey, socialStudioState } from "./socialStudioState";
+import { clearSocialActiveJobId, clearSocialDraft, displaySocialProgress, formatSocialPostForCopy, isSocialSourceReady, nextSocialRestoreDelay, normalizeSocialPreviewPlatform, parseSocialJobResult, persistSocialActiveJobId, persistSocialDraft, readSocialActiveJobId, readSocialDraft, socialActiveJobStorageKey, socialDraftStorageKey, socialStudioState } from "./socialStudioState";
 
 const job = (overrides: Partial<GenerationJob> = {}): GenerationJob => ({ id: "job-1", workspaceId: "workspace-1", projectId: null, jobType: "social.generate", status: "Running", title: null, progressPercent: 100, resultJson: null, errorCode: null, errorMessage: null, cancellationRequested: false, createdAt: "2026-01-01T00:00:00Z", queuedAt: null, startedAt: null, completedAt: null, failedAt: null, cancelledAt: null, outputs: [], ...overrides });
 
@@ -10,6 +10,12 @@ describe("socialStudioState", () => {
   it("caps active progress at 99 and permits terminal 100", () => {
     expect(displaySocialProgress(job({ progressPercent: 100 }))).toBe(99);
     expect(displaySocialProgress(job({ status: "Succeeded", progressPercent: 100 }))).toBe(100);
+  });
+  it("uses immediate then bounded exponential backoff for persisted job recovery", () => {
+    expect(nextSocialRestoreDelay(0)).toBe(0);
+    expect(nextSocialRestoreDelay(1)).toBe(700);
+    expect(nextSocialRestoreDelay(3)).toBe(2_800);
+    expect(nextSocialRestoreDelay(20)).toBe(8_000);
   });
   it("defensively parses a completed result and rejects malformed posts", () => {
     const parsed = parseSocialJobResult(job({ status: "Succeeded", resultJson: JSON.stringify({ assetId: "asset-1", title: "Launch", posts: [{ order: 1, hook: "Hook", body: "Body", hashtags: ["#taslim"] }, { order: 2, body: "missing hook" }] }) }));
