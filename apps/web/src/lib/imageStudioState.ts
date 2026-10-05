@@ -2,6 +2,8 @@ import type { GenerationJob, ImageJobResult } from "./api";
 
 const terminalStatuses = new Set<GenerationJob["status"]>(["Succeeded", "Failed", "Cancelled"]);
 const activeJobStoragePrefix = "taslim:image-generation:";
+export const imageJobPollIntervalMs = 2_000;
+export const imageJobPollMaxDelayMs = 8_000;
 
 export function imageActiveJobStorageKey(workspaceId: string) {
   return `${activeJobStoragePrefix}${workspaceId}`;
@@ -49,7 +51,7 @@ export function shouldPollImageJob(job: GenerationJob | null) {
 
 export function nextImagePollDelay(job: GenerationJob | null, retryAttempt = 0) {
   if (!shouldPollImageJob(job)) return null;
-  return Math.min(650 * Math.max(1, retryAttempt + 1), 2_800);
+  return Math.min(imageJobPollIntervalMs * Math.max(1, retryAttempt + 1), imageJobPollMaxDelayMs);
 }
 
 export function canCancelImageJob(job: GenerationJob | null): boolean {

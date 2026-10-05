@@ -77,4 +77,18 @@ public sealed class MovieProductionGenerationOrchestratorTests
         Assert.DoesNotContain("model", json, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("prompt", json, StringComparison.OrdinalIgnoreCase);
     }
+
+    [Fact]
+    public void Canonical_job_ownership_is_bound_to_the_persisted_clip_target()
+    {
+        var canonicalClipId = Guid.NewGuid();
+        var job = new GenerationJob
+        {
+            InputJson = JsonSerializer.Serialize(new { MovieClipId = canonicalClipId }),
+        };
+
+        Assert.True(MovieProductionGenerationOrchestrator.JobTargetsClip(job, canonicalClipId));
+        Assert.False(MovieProductionGenerationOrchestrator.JobTargetsClip(job, Guid.NewGuid()));
+        Assert.False(MovieProductionGenerationOrchestrator.JobTargetsClip(new GenerationJob { InputJson = "not-json" }, canonicalClipId));
+    }
 }

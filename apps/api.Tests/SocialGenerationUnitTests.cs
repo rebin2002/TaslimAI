@@ -18,6 +18,17 @@ public sealed class SocialGenerationUnitTests
     }
 
     [Fact]
+    public void Prompt_builder_keeps_asset_metadata_but_excludes_private_extracted_text()
+    {
+        var input = new SocialGenerationInput(Guid.NewGuid(), null, "Create a product post", "product_launch", "instagram", "professional", "en", null, null, null, true, false, false, [Guid.NewGuid()], []);
+        var prompt = new SocialPromptBuilder().Build(input, null, [new SocialSourceContext("brand-kit.pdf", "asset", "Private extracted document text", "document", "application/pdf")], new SocialGenerationOptions());
+
+        Assert.Contains("[Selected asset] brand-kit.pdf | type=document | contentType=application/pdf", prompt.UserInstruction, StringComparison.Ordinal);
+        Assert.DoesNotContain("Private extracted document text", prompt.UserInstruction, StringComparison.Ordinal);
+        Assert.DoesNotContain("Content:", prompt.UserInstruction, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Structured_social_schema_is_strict_and_requires_canonical_post_fields()
     {
         var schema = SocialDraftStructuredOutput.Spec.Schema;

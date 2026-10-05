@@ -18,6 +18,10 @@ function upsertMessages(messages: ChatMessage[], next: ChatMessage[]) {
 }
 
 export function reduceChatStream(state: ChatStreamState, event: ChatStreamEvent): ChatStreamState {
+  // A terminal event is the durable boundary for this logical stream. Ignore
+  // duplicate or late frames so a completed/failed assistant cannot regress
+  // to pending or receive stale content from a reused transport.
+  if (state.terminal !== null) return state;
   if (event.type === "message.started" && event.data.userMessage && event.data.assistantMessage) {
     return {
       ...state,
@@ -67,6 +71,7 @@ export function applyChatStreamEvent(state: ChatStreamState, event: ChatStreamEv
   return next;
 }
 export function failChatStream(state: ChatStreamState): ChatStreamState {
+  if (state.terminal !== null) return state;
   const pendingAssistant = [...state.messages].reverse().find(message => message.role === "Assistant" && message.status === "Pending");
   return {
     ...state,
