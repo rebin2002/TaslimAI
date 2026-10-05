@@ -2,8 +2,11 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
+using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -44,6 +47,8 @@ public sealed class ConcurrentChatApiFactory : WebApplicationFactory<Program>
             services.AddDbContext<TaslimDbContext>(options => options.UseSqlite($"Data Source={databasePath};Cache=Shared;Default Timeout=30"));
             services.RemoveAll<IAiProvider>();
             services.AddSingleton<IAiProvider>(Provider);
+            services.PostConfigure<RateLimiterOptions>(options =>
+                options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(_ => RateLimitPartition.GetNoLimiter("chat-concurrency-test")));
         });
     }
 
@@ -464,6 +469,30 @@ public sealed class ChatTests : IClassFixture<TaslimApiFactory>, IClassFixture<C
         Assert.Equal([1L, 2L, 3L, 4L], messages.Select(message => message.Sequence));
         Assert.Equal(2, messages.Count(message => message.Role == "User"));
         Assert.Equal(2, messages.Count(message => message.Role == "Assistant"));
+    }
+
+    [Fact]
+    public async Task High_contention_new_turns_eventually_reserve_distinct_message_sequences()
+    {
+        using var client = concurrentFactory.CreateClient();
+        var auth = await Register(client, "High Contention Ordering Chat Owner");
+        var conversation = await CreateConversation(client, auth.PersonalWorkspace.Id);
+        var csrf = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
+        var csrfToken = csrf.GetProperty("token").GetString()!;
+
+        var responses = await Task.WhenAll(Enumerable.Range(1, 9)
+            .Select(index => SendConcurrentMessage(client, conversation.Id, $"Concurrent burst {index}", csrfToken)));
+
+        foreach (var response in responses)
+        {
+            var body = await response.Content.ReadAsStringAsync();
+            Assert.True(response.StatusCode == HttpStatusCode.OK, body);
+        }
+
+        var messages = await client.GetFromJsonAsync<List<ChatMessageDto>>($"/api/conversations/{conversation.Id}/messages");
+        Assert.NotNull(messages);
+        Assert.Equal(18, messages.Count);
+        Assert.Equal(Enumerable.Range(1, 18).Select(value => (long)value), messages.Select(message => message.Sequence));
     }
 
     [Fact]

@@ -712,7 +712,8 @@ public sealed class ChatController(
         // transaction keeps the reservation and message inserts atomic while
         // the conditional update serializes concurrent writers without
         // provider-specific locking SQL.
-        for (var attempt = 0; attempt < 8; attempt++)
+        const int maxAttempts = 64;
+        for (var attempt = 0; attempt < maxAttempts; attempt++)
         {
             var current = await db.Conversations.AsNoTracking()
                 .Where(item => item.Id == conversationId)
@@ -723,9 +724,11 @@ public sealed class ChatController(
                 .Where(item => item.Id == conversationId && item.NextMessageSequence == current)
                 .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.NextMessageSequence, assistantSequence), cancellationToken);
             if (updated == 1) return assistantSequence;
+
+            await Task.Delay(TimeSpan.FromMilliseconds(Math.Min(25, attempt + 1)), cancellationToken);
         }
 
-        throw new InvalidOperationException("Could not reserve conversation message sequence.");
+        throw new InvalidOperationException($"Could not reserve conversation message sequence after {maxAttempts} attempts.");
     }
 
     private Task<UsageTransaction> BeginUsageAsync(PreparedChat prepared, CancellationToken cancellationToken) => usageLedger.GetOrCreatePendingAsync(
