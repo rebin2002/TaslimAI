@@ -1,24 +1,32 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { ShieldAlert } from "lucide-react";
 import { usePathname, useRouter } from "next/navigation";
 import { useAuth } from "@/components/AuthProvider";
-import { adminPageAccess } from "../lib/adminAccess";
+import { ADMIN_PAGE_AUTH_TIMEOUT_MS, adminPageAccess } from "../lib/adminAccess";
 
 export function AdminPage({ children }: Readonly<{ children: React.ReactNode }>) {
   const { user, loading } = useAuth();
   const pathname = usePathname();
   const router = useRouter();
-  const access = adminPageAccess(loading, Boolean(user), Boolean(user?.isAdmin));
+  const [authTimedOut, setAuthTimedOut] = useState(false);
+
+  useEffect(() => {
+    if (!loading) return;
+    const timeout = window.setTimeout(() => setAuthTimedOut(true), ADMIN_PAGE_AUTH_TIMEOUT_MS);
+    return () => window.clearTimeout(timeout);
+  }, [loading]);
+
+  const access = adminPageAccess(loading, Boolean(user), Boolean(user?.isAdmin), loading && authTimedOut);
 
   useEffect(() => {
     if (access === "unauthenticated") router.replace(`/login?next=${encodeURIComponent(pathname)}`);
   }, [access, pathname, router]);
 
   if (access === "loading" || access === "unauthenticated") {
-    return <div className="loading-state"><span className="loading-spinner" /></div>;
+    return <div className="loading-state" role="status" aria-busy="true"><span className="loading-spinner" /></div>;
   }
 
   if (access === "forbidden") {

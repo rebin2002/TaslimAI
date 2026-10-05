@@ -7,6 +7,7 @@ import { useLocale, localeNames, locales } from "@/components/LocaleProvider";
 import { useAuth } from "@/components/AuthProvider";
 import { api, ApiError, type PasswordPolicy } from "@/lib/api";
 import { getAuthErrorTranslationKey } from "@/lib/authErrors";
+import { authSuccessPath } from "@/lib/authRedirect";
 import { BrandMark } from "@/components/BrandMark";
 import { localeDirection } from "@/lib/i18n";
 
@@ -23,7 +24,7 @@ const initialPasswordPolicy: PasswordPolicy = {
   requiredUniqueChars: 1,
 };
 
-export function AuthForm({ mode }: Readonly<{ mode: "login" | "register" }>) {
+export function AuthForm({ mode, nextPath = null }: Readonly<{ mode: "login" | "register"; nextPath?: string | null }>) {
   const { t, locale, setLocale } = useLocale();
   const { signIn, register } = useAuth();
   const [displayName, setDisplayName] = useState("");
@@ -67,7 +68,10 @@ export function AuthForm({ mode }: Readonly<{ mode: "login" | "register" }>) {
     setSubmitting(true);
     try {
       if (isRegister) await register({ displayName, email, password, preferredLanguage: locale });
-      else await signIn({ email, password });
+      else {
+        const redirectTo = authSuccessPath(nextPath);
+        await signIn({ email, password }, redirectTo ?? undefined);
+      }
     } catch (caught) {
       if (caught instanceof ApiError && caught.fields?.password) setPasswordErrors(caught.fields.password);
       else setError(t(getAuthErrorTranslationKey(caught)));
