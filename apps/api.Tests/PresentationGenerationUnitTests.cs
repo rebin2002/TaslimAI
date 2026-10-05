@@ -67,6 +67,28 @@ public sealed class PresentationGenerationUnitTests
     }
 
     [Fact]
+    public void Renderer_uses_provider_language_for_auto_language_rtl_output()
+    {
+        var input = new PresentationGenerationInput(Guid.NewGuid(), null, "Launch plan", "Plan", "general", "short", "professional", "auto", null, null, null, true, true, []);
+        var draft = new PresentationDraft
+        {
+            Title = "Launch plan",
+            Subtitle = "پلان",
+            Language = "ku",
+            PresentationType = "general",
+            Slides = [new PresentationSlide { Order = 1, Type = PresentationSlideTypes.Title, Title = "Launch plan", Subtitle = "پلان" }],
+        };
+
+        var rendered = new PresentationRenderer().Render(draft, input, new PresentationGenerationOptions());
+        using var archive = new ZipArchive(new MemoryStream(rendered.Content), ZipArchiveMode.Read);
+        var slideXml = new StreamReader(archive.GetEntry("ppt/slides/slide1.xml")!.Open()).ReadToEnd();
+
+        Assert.Contains("rtl=\"1\"", slideXml, StringComparison.Ordinal);
+        Assert.Contains("lang=\"ku-Arab\"", slideXml, StringComparison.Ordinal);
+        Assert.Contains("Noto Sans Arabic", slideXml, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Output_integrity_validator_rejects_non_zip_content()
     {
         var rendered = new RenderedPresentation(

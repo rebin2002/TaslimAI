@@ -111,6 +111,64 @@ public sealed class MovieSoundtrackWorkflowTests
         Assert.NotNull(persisted.Versions.Single(item => item.VersionNumber == 2).AudioAssetProvenance);
     }
 
+    [Fact]
+    public async Task Version_rejects_audio_asset_from_another_project_in_the_same_workspace()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        var seed = await SeedAsync(db);
+        var otherProject = new Project
+        {
+            Id = Guid.NewGuid(), WorkspaceId = (await db.MovieProjects.SingleAsync(item => item.Id == seed.MovieProjectId)).WorkspaceId,
+            Name = "Another project", CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+        };
+        db.Projects.Add(otherProject);
+        var asset = await db.Assets.Include(item => item.StoredFile).SingleAsync(item => item.Id == seed.AssetId);
+        asset.ProjectId = otherProject.Id;
+        asset.StoredFile!.ProjectId = otherProject.Id;
+        await db.SaveChangesAsync();
+
+        var service = CreateService(db, new FakeSoundtrackMediaService());
+        var cue = await service.CreateCueAsync(seed.UserId, seed.MovieProjectId, new MovieSoundtrackCueRequest
+        {
+            MovieActId = seed.ActId, MovieSceneId = seed.SceneId, Title = "Out-of-scope cue", Mood = "tense",
+            Intensity = 50, ActStartSeconds = 0, SceneStartSeconds = 0, TimelineStartSeconds = 0, DurationSeconds = 10,
+        }, CancellationToken.None);
+
+        var exception = await Assert.ThrowsAsync<MovieSoundtrackValidationException>(() => service.CreateVersionAsync(seed.UserId, cue!.Id,
+            new MovieSoundtrackCueVersionRequest { Label = "Foreign project candidate", AssetId = seed.AssetId }, CancellationToken.None));
+
+        Assert.Equal("MOVIE_SOUNDTRACK_ASSET_OUT_OF_SCOPE", exception.Code);
+    }
+
+    [Fact]
+    public async Task Approval_rechecks_that_the_soundtrack_asset_is_still_ready_and_private()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        var seed = await SeedAsync(db);
+        var service = CreateService(db, new FakeSoundtrackMediaService());
+        var cue = await service.CreateCueAsync(seed.UserId, seed.MovieProjectId, new MovieSoundtrackCueRequest
+        {
+            MovieActId = seed.ActId, MovieSceneId = seed.SceneId, Title = "Revalidated cue", Mood = "calm",
+            Intensity = 40, ActStartSeconds = 0, SceneStartSeconds = 0, TimelineStartSeconds = 0, DurationSeconds = 10,
+        }, CancellationToken.None);
+        var versioned = await service.CreateVersionAsync(seed.UserId, cue!.Id,
+            new MovieSoundtrackCueVersionRequest { Label = "Candidate", AssetId = seed.AssetId }, CancellationToken.None);
+        var versionId = Assert.Single(versioned!.Versions).Id;
+
+        var asset = await db.Assets.Include(item => item.StoredFile).SingleAsync(item => item.Id == seed.AssetId);
+        asset.StoredFile!.Status = StoredFileStatus.Processing;
+        await db.SaveChangesAsync();
+
+        var exception = await Assert.ThrowsAsync<MovieSoundtrackValidationException>(() => service.ReviewVersionAsync(seed.UserId, versionId,
+            new MovieSoundtrackCueVersionReviewRequest { Decision = MovieSoundtrackApprovalStates.Approved }, CancellationToken.None));
+
+        Assert.Equal("MOVIE_SOUNDTRACK_ASSET_NOT_READY", exception.Code);
+    }
+
     private static MovieSoundtrackService CreateService(TaslimDbContext db, IMovieSoundtrackMediaService media) =>
         new(db, new MovieAuthorizationService(new MovieCollaborationAccess(db, new WorkspaceAccessService(db))), media);
 
