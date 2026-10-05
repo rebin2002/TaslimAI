@@ -16,7 +16,11 @@ public sealed class SocialPromptBuilder : ISocialPromptBuilder
         foreach (var source in sources)
         {
             context.AppendLine($"[Selected {source.Kind}] {source.Name}{(string.IsNullOrWhiteSpace(source.AssetType) ? string.Empty : $" | type={source.AssetType}")}{(string.IsNullOrWhiteSpace(source.ContentType) ? string.Empty : $" | contentType={source.ContentType}")}");
-            if (!string.IsNullOrWhiteSpace(source.Content))
+            // Asset records are media references, not an implicit content-selection
+            // channel. Keep their safe metadata in the prompt, but never forward
+            // private extracted text from the backing StoredFile to a provider.
+            var canIncludeContent = !string.Equals(source.Kind, "asset", StringComparison.OrdinalIgnoreCase);
+            if (canIncludeContent && !string.IsNullOrWhiteSpace(source.Content))
             {
                 context.AppendLine("Content:");
                 context.AppendLine(source.Content);

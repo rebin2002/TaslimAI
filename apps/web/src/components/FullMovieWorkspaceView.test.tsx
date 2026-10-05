@@ -194,7 +194,7 @@ describe("Full Movie workspace foundation", () => {
     expect(workspaceSource).toContain("sceneShotCount");
     expect(workspaceSource).toContain("selectedShot={selectedShot}");
     expect(workspaceSource).toContain("api.addMovieShot");
-    expect(directorSource).toContain("Review → explicit approval → execute");
+    expect(directorSource).toContain('t("boundary")');
   });
 
   it("keeps loading and failure states useful without fabricating project content", () => {
@@ -221,6 +221,16 @@ describe("Full Movie workspace foundation", () => {
     expect(selectsSource).toContain("api.createMovieTakeSelect");
     expect(selectsSource).toContain("api.reviewMovieTakeSelect");
     expect(selectsSource).not.toContain("Accept recommendation");
+  });
+
+  it("makes Edit a stateful, validated, keyboard-accessible timeline", () => {
+    expect(workspaceSource).toContain("buildMovieEditModel(project)");
+    expect(workspaceSource).toContain('role="listbox" aria-label="Movie scene timeline"');
+    expect(workspaceSource).toContain('role="option" aria-selected={selected}');
+    expect(workspaceSource).toContain("moveMovieEditSelection(model, sceneId, event.key)");
+    expect(workspaceSource).toContain("Refresh timeline");
+    expect(workspaceSource).toContain("Validation blockers");
+    expect(workspaceSource).toContain("no provider call or media mutation");
   });
 
 });

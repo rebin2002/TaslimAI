@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
+using Taslim.Api.Infrastructure;
 using Taslim.Api.Persistence;
 
 namespace Taslim.Api.Usage;
@@ -134,15 +135,15 @@ DayUtc = group.Key,
 
     private async Task<AdminUsageTransactionListDto> BuildTransactionsAsync(IQueryable<UsageTransaction> query, int requestedPage, int requestedPageSize, CancellationToken cancellationToken)
     {
-        var page = Math.Max(1, requestedPage);
-        var pageSize = Math.Clamp(requestedPageSize, 1, 100);
+        var page = ApiPagination.NormalizePage(requestedPage);
+        var pageSize = ApiPagination.NormalizePageSize(requestedPageSize);
         var totalCount = await query.CountAsync(cancellationToken);
         var rows = await (from transaction in query
                           join workspace in db.Workspaces.AsNoTracking() on transaction.WorkspaceId equals workspace.Id
                           join user in db.Users.AsNoTracking() on transaction.UserId equals user.Id
                           orderby transaction.CreatedAt descending, transaction.Id descending
                           select new { transaction, WorkspaceName = workspace.Name, UserEmail = user.Email, UserDisplayName = user.DisplayName })
-            .Skip((page - 1) * pageSize).Take(pageSize).ToListAsync(cancellationToken);
+            .Skip(ApiPagination.GetOffset(page, pageSize)).Take(pageSize).ToListAsync(cancellationToken);
         var items = rows.Select(item => ProjectTransaction(item.transaction, item.WorkspaceName, item.UserEmail, item.UserDisplayName)).ToArray();
 
         return new AdminUsageTransactionListDto(items, page, pageSize, totalCount, (int)Math.Ceiling(totalCount / (double)pageSize));
