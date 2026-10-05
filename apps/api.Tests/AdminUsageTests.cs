@@ -52,6 +52,14 @@ public sealed class AdminUsageTests : IClassFixture<TaslimApiFactory>
         Assert.NotNull(inspected);
         Assert.Equal(report.Transactions.Items[0].PricingVersion, inspected!.PricingVersion);
         Assert.Equal(report.Transactions.Items[0].CostBasis, inspected.CostBasis);
+
+        var boundedResponse = await client.GetAsync("/api/admin/usage/report?page=2147483647&pageSize=2147483647");
+        Assert.True(boundedResponse.IsSuccessStatusCode, await boundedResponse.Content.ReadAsStringAsync());
+        var boundedReport = await boundedResponse.Content.ReadFromJsonAsync<AdminUsageReportDto>();
+        Assert.NotNull(boundedReport);
+        Assert.Equal(Taslim.Api.Infrastructure.ApiPagination.MaxPage, boundedReport!.Transactions.Page);
+        Assert.Equal(Taslim.Api.Infrastructure.ApiPagination.MaxPageSize, boundedReport.Transactions.PageSize);
+        Assert.Empty(boundedReport.Transactions.Items);
     }
 
     [Fact]

@@ -7,7 +7,9 @@ import { useLocale, localeNames, locales } from "@/components/LocaleProvider";
 import { useAuth } from "@/components/AuthProvider";
 import { api, ApiError, type PasswordPolicy } from "@/lib/api";
 import { getAuthErrorTranslationKey } from "@/lib/authErrors";
+import { authSuccessPath } from "@/lib/authRedirect";
 import { BrandMark } from "@/components/BrandMark";
+import { localeDirection } from "@/lib/i18n";
 
 type PasswordRequirement = { code: string; label: string; satisfied: boolean };
 
@@ -22,7 +24,7 @@ const initialPasswordPolicy: PasswordPolicy = {
   requiredUniqueChars: 1,
 };
 
-export function AuthForm({ mode }: Readonly<{ mode: "login" | "register" }>) {
+export function AuthForm({ mode, nextPath = null }: Readonly<{ mode: "login" | "register"; nextPath?: string | null }>) {
   const { t, locale, setLocale } = useLocale();
   const { signIn, register } = useAuth();
   const [displayName, setDisplayName] = useState("");
@@ -66,7 +68,10 @@ export function AuthForm({ mode }: Readonly<{ mode: "login" | "register" }>) {
     setSubmitting(true);
     try {
       if (isRegister) await register({ displayName, email, password, preferredLanguage: locale });
-      else await signIn({ email, password });
+      else {
+        const redirectTo = authSuccessPath(nextPath);
+        await signIn({ email, password }, redirectTo ?? undefined);
+      }
     } catch (caught) {
       if (caught instanceof ApiError && caught.fields?.password) setPasswordErrors(caught.fields.password);
       else setError(t(getAuthErrorTranslationKey(caught)));
@@ -89,15 +94,15 @@ export function AuthForm({ mode }: Readonly<{ mode: "login" | "register" }>) {
     <div className="auth-page">
       <div className="auth-backdrop"><span /><span /><span /></div>
       <div className="auth-panel">
-        <div className="auth-header"><BrandMark /><label className="auth-language"><Languages size={14} /><select value={locale} onChange={(event) => setLocale(event.target.value as typeof locale)}>{locales.map((item) => <option key={item} value={item}>{localeNames[item]}</option>)}</select></label></div>
+        <div className="auth-header"><BrandMark /><label className="auth-language"><Languages size={14} /><select value={locale} onChange={(event) => setLocale(event.target.value as typeof locale)} dir="ltr">{locales.map((item) => <option key={item} value={item}>{localeNames[item]}</option>)}</select></label></div>
         <div className="auth-intro"><p className="section-eyebrow">{t("auth.eyebrow")}</p><h1>{isRegister ? t("auth.registerTitle") : t("auth.loginTitle")}</h1><p>{isRegister ? t("auth.registerSubtitle") : t("auth.loginSubtitle")}</p></div>
-        <form className="auth-form" onSubmit={submit}>
-          {isRegister && <label><span>{t("auth.displayName")}</span><div className="input-shell"><UserRound size={17} /><input required minLength={2} maxLength={120} value={displayName} onChange={(event) => setDisplayName(event.target.value)} autoComplete="name" /></div></label>}
-          <label><span>{t("auth.email")}</span><div className="input-shell"><Mail size={17} /><input required type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" /></div></label>
-          <label className={passwordErrors.length > 0 ? "has-field-error" : ""}><span>{t("auth.password")}</span><div className="input-shell"><LockKeyhole size={17} /><input required minLength={isRegister ? 1 : undefined} type={showPassword ? "text" : "password"} value={password} onChange={(event) => { setPassword(event.target.value); setPasswordErrors([]); }} autoComplete={isRegister ? "new-password" : "current-password"} aria-describedby={isRegister ? "password-requirements" : undefined} /><button type="button" className="password-toggle" onClick={() => setShowPassword((value) => !value)} aria-label={t("auth.showPassword")}>{showPassword ? <EyeOff size={16} /> : <Eye size={16} />}</button></div>{isRegister && <div className="password-requirements" id="password-requirements" aria-live="polite"><strong>{t("auth.passwordRequirementsTitle")}</strong>{requirements.map((requirement) => <span className={requirement.satisfied ? "is-satisfied" : "is-missing"} key={requirement.code}>{requirement.satisfied ? <Check size={13} /> : <CircleAlert size={13} />}{requirement.label}</span>)}</div>}{passwordErrors.length > 0 && <div className="field-errors" role="alert">{passwordErrors.map((code) => <span key={code}><CircleAlert size={13} />{passwordErrorLabel(code)}</span>)}</div>}</label>
-          {isRegister && <label><span>{t("auth.confirmPassword")}</span><div className="input-shell"><LockKeyhole size={17} /><input required type={showPassword ? "text" : "password"} value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} autoComplete="new-password" /></div></label>}
+        <form className="auth-form" onSubmit={submit} dir={localeDirection(locale)}>
+          {isRegister && <label><span>{t("auth.displayName")}</span><div className="input-shell"><UserRound size={17} aria-hidden="true" /><input required minLength={2} maxLength={120} value={displayName} onChange={(event) => setDisplayName(event.target.value)} autoComplete="name" dir="auto" /></div></label>}
+          <label><span>{t("auth.email")}</span><div className="input-shell"><Mail size={17} aria-hidden="true" /><input required type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" dir="ltr" /></div></label>
+          <label className={passwordErrors.length > 0 ? "has-field-error" : ""}><span>{t("auth.password")}</span><div className="input-shell"><LockKeyhole size={17} aria-hidden="true" /><input required minLength={isRegister ? 1 : undefined} type={showPassword ? "text" : "password"} value={password} onChange={(event) => { setPassword(event.target.value); setPasswordErrors([]); }} autoComplete={isRegister ? "new-password" : "current-password"} aria-describedby={isRegister ? "password-requirements" : undefined} dir="ltr" /><button type="button" className="password-toggle" onClick={() => setShowPassword((value) => !value)} aria-label={t("auth.showPassword")}>{showPassword ? <EyeOff size={16} aria-hidden="true" /> : <Eye size={16} aria-hidden="true" />}</button></div>{isRegister && <div className="password-requirements" id="password-requirements" aria-live="polite"><strong>{t("auth.passwordRequirementsTitle")}</strong>{requirements.map((requirement) => <span className={requirement.satisfied ? "is-satisfied" : "is-missing"} key={requirement.code}>{requirement.satisfied ? <Check size={13} aria-hidden="true" /> : <CircleAlert size={13} aria-hidden="true" />}{requirement.label}</span>)}</div>}{passwordErrors.length > 0 && <div className="field-errors" role="alert">{passwordErrors.map((code) => <span key={code}><CircleAlert size={13} aria-hidden="true" />{passwordErrorLabel(code)}</span>)}</div>}</label>
+          {isRegister && <label><span>{t("auth.confirmPassword")}</span><div className="input-shell"><LockKeyhole size={17} aria-hidden="true" /><input required type={showPassword ? "text" : "password"} value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} autoComplete="new-password" dir="ltr" /></div></label>}
           {error && <div className="form-error" role="alert">{error}</div>}
-          <button className="auth-submit" disabled={submitting || (isRegister && !passwordValid)}>{submitting ? t("auth.working") : isRegister ? t("auth.createAccount") : t("auth.signIn")} {locale === "en" ? <ArrowRight size={17} /> : <ArrowLeft size={17} />}</button>
+          <button className="auth-submit" disabled={submitting || (isRegister && !passwordValid)}>{submitting ? t("auth.working") : isRegister ? t("auth.createAccount") : t("auth.signIn")} {localeDirection(locale) === "ltr" ? <ArrowRight size={17} aria-hidden="true" /> : <ArrowLeft size={17} aria-hidden="true" />}</button>
         </form>
         <p className="auth-switch">{isRegister ? t("auth.haveAccount") : t("auth.noAccount")} <Link href={isRegister ? "/login" : "/register"}>{isRegister ? t("auth.signIn") : t("auth.createAccount")}</Link></p>
       </div>

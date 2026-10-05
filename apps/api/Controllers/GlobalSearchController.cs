@@ -119,11 +119,13 @@ public sealed class GlobalSearchController(TaslimDbContext db) : ControllerBase
             .ToListAsync(cancellationToken);
         AddGroup(groups, GlobalSearchResultTypes.Asset, assets);
 
-        // Unscoped files remain user-private; project files are workspace-authorized.
+        // Project files are workspace-shared; personal and conversation-scoped
+        // files remain private to their uploader, even when a conversation also
+        // belongs to a project.
         var files = await db.StoredFiles.AsNoTracking()
             .Where(file => workspaceIds.Contains(file.WorkspaceId)
                 && file.Status != StoredFileStatus.Deleted
-                && (file.ProjectId != null || file.UserId == userId)
+                && ((file.ProjectId != null && file.ConversationId == null) || file.UserId == userId)
                 && (file.OriginalFileName.ToLower().Contains(search)
                     || (file.ExtractedText != null && file.ExtractedText.ToLower().Contains(search))))
             .OrderByDescending(file => file.CreatedAt)
@@ -145,9 +147,12 @@ public sealed class GlobalSearchController(TaslimDbContext db) : ControllerBase
             .ToListAsync(cancellationToken);
         AddGroup(groups, GlobalSearchResultTypes.File, files);
 
-        // Search user-authored titles and prompts, but expose only safe activity metadata.
+        // Generation execution records, including prompt-bearing InputJson, are
+        // private to their creator. Generated Assets remain the workspace-shared
+        // discovery surface through the separate asset query above.
         var generationRows = await db.GenerationJobs.AsNoTracking()
             .Where(job => workspaceIds.Contains(job.WorkspaceId)
+                && job.CreatedByUserId == userId
                 && ((job.Title != null && job.Title.ToLower().Contains(search))
                     || job.JobType.ToLower().Contains(search)
                     || job.InputJson.ToLower().Contains(search)
