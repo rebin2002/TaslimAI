@@ -147,6 +147,7 @@ export function NotificationBell({ unreadCount }: Readonly<{ unreadCount: number
       }
     } catch {
       if (isNotificationRequestCurrent(request, panelRequestSequence.current, activeWorkspaceId.current)) {
+        resultRef.current = null;
         setResult(null);
         setPanelError(t("notification.loadError"));
       }
