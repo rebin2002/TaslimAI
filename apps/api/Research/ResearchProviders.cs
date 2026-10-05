@@ -149,47 +149,49 @@ public sealed class OpenAiResearchSearchProvider(
         message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", ai.OpenAI.ApiKey);
         message.Content = JsonContent.Create(payload);
         var stopwatch = Stopwatch.StartNew();
-        HttpResponseMessage response;
-        try { response = await httpClient.SendAsync(message, HttpCompletionOption.ResponseContentRead, timeout.Token); }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { throw new ResearchSearchTimeoutException(); }
-        catch (HttpRequestException exception) { logger.LogWarning(exception, "Research search provider request failed safely. FailureCategory={FailureCategory}", "transient"); throw new ResearchSearchFailedException(); }
-        using (response.Content)
+        try
         {
-            var httpStatus = (int)response.StatusCode;
-            if (!response.IsSuccessStatusCode)
+            using var response = await httpClient.SendAsync(message, HttpCompletionOption.ResponseContentRead, timeout.Token);
+            using (response.Content)
             {
-                var details = await ReadProviderErrorAsync(response.Content, httpStatus, timeout.Token);
-                logger.LogWarning(
-                    "Research search provider rejected request. HttpStatus={HttpStatus}; ErrorType={ErrorType}; ErrorCode={ErrorCode}; ErrorParam={ErrorParam}; FailureCategory={FailureCategory}",
-                    details.HttpStatusCode,
-                    details.ErrorType ?? "none",
-                    details.ErrorCode ?? "none",
-                    details.ErrorParam ?? "none",
-                    details.FailureCategory);
-                throw httpStatus is 401 or 403
-                    ? new ResearchSearchUnavailableException(details)
-                    : new ResearchSearchFailedException(details);
-            }
-            try
-            {
-                using var document = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(timeout.Token), cancellationToken: timeout.Token);
-                return Parse(document.RootElement, stopwatch.ElapsedMilliseconds, options);
-            }
-            catch (ResearchSearchFailedException)
-            {
-                throw;
-            }
-            catch (JsonException)
-            {
-                logger.LogWarning("Research search provider returned malformed output. HttpStatus={HttpStatus}; FailureCategory={FailureCategory}", httpStatus, "malformed_response");
-                throw new ResearchSearchFailedException(new ResearchProviderErrorDetails(httpStatus, null, null, null, "malformed_response"));
-            }
-            catch (InvalidOperationException)
-            {
-                logger.LogWarning("Research search provider returned malformed output. HttpStatus={HttpStatus}; FailureCategory={FailureCategory}", httpStatus, "malformed_response");
-                throw new ResearchSearchFailedException(new ResearchProviderErrorDetails(httpStatus, null, null, null, "malformed_response"));
+                var httpStatus = (int)response.StatusCode;
+                if (!response.IsSuccessStatusCode)
+                {
+                    var details = await ReadProviderErrorAsync(response.Content, httpStatus, timeout.Token);
+                    logger.LogWarning(
+                        "Research search provider rejected request. HttpStatus={HttpStatus}; ErrorType={ErrorType}; ErrorCode={ErrorCode}; ErrorParam={ErrorParam}; FailureCategory={FailureCategory}",
+                        details.HttpStatusCode,
+                        details.ErrorType ?? "none",
+                        details.ErrorCode ?? "none",
+                        details.ErrorParam ?? "none",
+                        details.FailureCategory);
+                    throw httpStatus is 401 or 403
+                        ? new ResearchSearchUnavailableException(details)
+                        : new ResearchSearchFailedException(details);
+                }
+                try
+                {
+                    using var document = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(timeout.Token), cancellationToken: timeout.Token);
+                    return Parse(document.RootElement, stopwatch.ElapsedMilliseconds, options);
+                }
+                catch (ResearchSearchFailedException)
+                {
+                    throw;
+                }
+                catch (JsonException)
+                {
+                    logger.LogWarning("Research search provider returned malformed output. HttpStatus={HttpStatus}; FailureCategory={FailureCategory}", httpStatus, "malformed_response");
+                    throw new ResearchSearchFailedException(new ResearchProviderErrorDetails(httpStatus, null, null, null, "malformed_response"));
+                }
+                catch (InvalidOperationException)
+                {
+                    logger.LogWarning("Research search provider returned malformed output. HttpStatus={HttpStatus}; FailureCategory={FailureCategory}", httpStatus, "malformed_response");
+                    throw new ResearchSearchFailedException(new ResearchProviderErrorDetails(httpStatus, null, null, null, "malformed_response"));
+                }
             }
         }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { throw new ResearchSearchTimeoutException(); }
+        catch (HttpRequestException exception) { logger.LogWarning(exception, "Research search provider request failed safely. FailureCategory={FailureCategory}", "transient"); throw new ResearchSearchFailedException(); }
     }
 
     private static Dictionary<string, object?> BuildWebSearchTool(ResearchSearchRequest request)
@@ -285,7 +287,11 @@ public sealed class OpenAiResearchSearchProvider(
             }
         }
         var answer = string.Join("\n\n", answerParts);
-        var orderedUrls = sourceUrls.Concat(annotations.Select(item => item.Url)).Where(IsHttpUrl).Distinct(StringComparer.OrdinalIgnoreCase).Take(options.MaxSourceCount).ToArray();
+        var orderedUrls = sourceUrls
+            .Where(IsHttpUrl)
+            .DistinctBy(Canonicalize, StringComparer.OrdinalIgnoreCase)
+            .Take(options.MaxSourceCount)
+            .ToArray();
         if (orderedUrls.Length == 0) throw new ResearchSearchFailedException();
         var sourceByUrl = new Dictionary<string, ResearchSourceCandidate>(StringComparer.OrdinalIgnoreCase);
         var evidence = new List<ResearchEvidenceCandidate>();

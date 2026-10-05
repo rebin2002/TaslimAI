@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import {
   ArrowLeft,
   ArrowRight,
@@ -23,15 +23,19 @@ import {
 } from "lucide-react";
 import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
-import { api, type Asset, type GenerationJob, type PresentationJobResult, type Project, type StoredFile } from "@/lib/api";
+import { ApiError, api, type Asset, type GenerationJob, type PresentationJobResult, type Project, type StoredFile } from "@/lib/api";
 import { assetFileUrl } from "@/lib/apiBase";
 import {
   canCancelPresentationJob,
+  clearPresentationActiveJobId,
   displayPresentationProgress,
+  isRestorablePresentationJob,
   isPresentationSourceReady,
   nextPresentationPollDelay,
   parsePresentationJobResult,
+  persistPresentationActiveJobId,
   presentationStudioState,
+  readPresentationActiveJobId,
   shouldPollPresentationJob,
 } from "@/lib/presentationStudioState";
 
@@ -137,6 +141,7 @@ export function PresentationStudioView() {
   const [retryingCompleted, setRetryingCompleted] = useState(false);
   const [error, setError] = useState("");
   const [downloadError, setDownloadError] = useState("");
+  const restoreJobId = useRef<string | null>(null);
 
   const loadSources = useCallback(async () => {
     if (!workspace) return;
@@ -163,6 +168,26 @@ export function PresentationStudioView() {
   // Source loading synchronizes authenticated workspace data into local UI state.
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void loadSources(); }, [loadSources]);
+  useEffect(() => {
+    if (!workspace || current) return;
+    const storedJobId = readPresentationActiveJobId(workspace.id);
+    if (!storedJobId) return;
+    restoreJobId.current = storedJobId;
+    let active = true;
+    void api.getGenerationJob(storedJobId).then((job) => {
+      if (!active || restoreJobId.current !== storedJobId) return;
+      if (!isRestorablePresentationJob(job, workspace.id)) {
+        clearPresentationActiveJobId(workspace.id);
+        return;
+      }
+      setCurrent(job);
+      setPollRetry(0);
+    }).catch((cause) => {
+      if (!active || restoreJobId.current !== storedJobId) return;
+      if (cause instanceof ApiError && (cause.status === 403 || cause.status === 404)) clearPresentationActiveJobId(workspace.id);
+    });
+    return () => { active = false; };
+  }, [workspace, current]);
   useEffect(() => {
     if (!current || !shouldPollPresentationJob(current)) return;
     const jobId = current.id;
@@ -207,6 +232,8 @@ export function PresentationStudioView() {
     setWorking(true);
     setError("");
     setDownloadError("");
+    restoreJobId.current = null;
+    clearPresentationActiveJobId(workspace.id);
     try {
       const job = await api.createPresentationGenerationJob({
         workspaceId: workspace.id,
@@ -224,6 +251,7 @@ export function PresentationStudioView() {
         includeClosingNextSteps,
         attachmentIds: selected,
       });
+      persistPresentationActiveJobId(workspace.id, job.id);
       setCurrent(job);
       setActiveSlide(0);
       setPollRetry(0);
@@ -275,6 +303,8 @@ export function PresentationStudioView() {
   }
 
   function createAnother() {
+    restoreJobId.current = null;
+    if (workspace) clearPresentationActiveJobId(workspace.id);
     setCurrent(null);
     setActiveSlide(0);
     setError("");

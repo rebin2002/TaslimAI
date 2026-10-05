@@ -54,7 +54,7 @@ public sealed class MovieStudioV2Controller(IMovieV2Service movies, IMovieScenes
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> RecoverProduction(Guid id, MovieProductionRecoveryRequest request, CancellationToken cancellationToken) => await Execute(async () =>
     {
-        var result = await checkpoints.RecoverAsync(UserId(), id, request, cancellationToken, Request.Headers["Idempotency-Key"].FirstOrDefault());
+        var result = await checkpoints.RecoverAsync(UserId(), id, request, cancellationToken);
         return result is null ? NotFoundResult("MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Accepted(result);
     });
 

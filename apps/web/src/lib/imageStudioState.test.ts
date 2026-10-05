@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GenerationJob } from "./api";
-import { canCancelImageJob, isImageJob, isImageTerminal, nextImagePollDelay, parseImageJobResult, safeImageJobView, shouldPollImageJob } from "./imageStudioState";
+import { canCancelImageJob, clearImageActiveJobId, imageActiveJobStorageKey, isImageJob, isImageTerminal, isRestorableImageJob, nextImagePollDelay, parseImageJobResult, persistImageActiveJobId, readImageActiveJobId, safeImageJobView, shouldPollImageJob } from "./imageStudioState";
 
 function job(overrides: Partial<GenerationJob> = {}): GenerationJob {
   return {
@@ -11,8 +11,13 @@ function job(overrides: Partial<GenerationJob> = {}): GenerationJob {
 }
 
 describe("image studio state", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
   it("recognizes image jobs and allows cancellation before terminal states", () => {
     expect(isImageJob(job())).toBe(true);
+    expect(isRestorableImageJob(job(), "workspace-1")).toBe(true);
+    expect(isRestorableImageJob(job({ workspaceId: "workspace-2" }), "workspace-1")).toBe(false);
+    expect(isRestorableImageJob(job({ jobType: "social.generate" }), "workspace-1")).toBe(false);
     expect(canCancelImageJob(job({ status: "Queued" }))).toBe(true);
     expect(canCancelImageJob(job({ status: "Succeeded" }))).toBe(false);
     expect(canCancelImageJob(job({ cancellationRequested: true }))).toBe(false);
@@ -40,5 +45,16 @@ describe("image studio state", () => {
     const failed = job({ status: "Failed", errorCode: "IMAGE_PROVIDER_UNAVAILABLE", errorMessage: "Image generation is temporarily unavailable." });
     expect(safeImageJobView(failed)).toMatchObject({ status: "Failed", errorCode: "IMAGE_PROVIDER_UNAVAILABLE" });
     expect(parseImageJobResult(job({ status: "Succeeded", resultJson: "not-json" }))).toBeNull();
+  });
+
+  it("persists the active job by workspace and clears stale pointers", () => {
+    const values = new Map<string, string>();
+    vi.stubGlobal("window", { sessionStorage: { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => values.set(key, value), removeItem: (key: string) => values.delete(key) } });
+    persistImageActiveJobId("workspace-1", "image-job-1");
+    expect(values.get(imageActiveJobStorageKey("workspace-1"))).toBe("image-job-1");
+    expect(readImageActiveJobId("workspace-1")).toBe("image-job-1");
+    expect(readImageActiveJobId("workspace-2")).toBeNull();
+    clearImageActiveJobId("workspace-1");
+    expect(readImageActiveJobId("workspace-1")).toBeNull();
   });
 });
