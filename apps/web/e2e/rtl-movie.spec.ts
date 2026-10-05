@@ -36,6 +36,7 @@ const deepModules = [
 ] as const;
 
 const locales = ["ar", "ku"] as const;
+const languageTags = { en: "en", ar: "ar", ku: "ckb" } as const;
 
 async function expectDirection(page: Page, dir: string, label: string) {
   await expect
@@ -47,7 +48,7 @@ async function expectDirection(page: Page, dir: string, label: string) {
 }
 
 /** Select a locale through the header control and confirm it is applied. */
-async function applyLocale(page: Page, locale: string, label: string) {
+async function applyLocale(page: Page, locale: keyof typeof languageTags, label: string) {
   const language = page.locator(".language-select select").first();
   await language.selectOption(locale);
   await expect
@@ -57,7 +58,7 @@ async function applyLocale(page: Page, locale: string, label: string) {
     }))
     .toBe(locale);
   await expectDirection(page, locale === "en" ? "ltr" : "rtl", label);
-  await expect(page.locator("html")).toHaveAttribute("lang", locale);
+  await expect(page.locator("html")).toHaveAttribute("lang", languageTags[locale]);
 }
 
 async function expectNoHorizontalOverflow(page: Page, label: string) {

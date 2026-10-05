@@ -1,7 +1,7 @@
 "use client";
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
-import { localeDirection, localeNames, locales, translate, type Locale } from "@/lib/i18n";
+import { localeDirection, localeNames, localeTag, locales, translate, type Locale } from "@/lib/i18n";
 
 type LocaleContextValue = {
   locale: Locale;
@@ -22,15 +22,19 @@ function storedLocale(): Locale {
 }
 
 export function LocaleProvider({ children }: Readonly<{ children: React.ReactNode }>) {
-  const [locale, setLocaleState] = useState<Locale>(storedLocale);
+  // Keep the first client render identical to the server-rendered English
+  // shell. The persisted choice is applied after hydration, which avoids a
+  // locale-dependent tree mismatch while still restoring Arabic/Sorani.
+  const [locale, setLocaleState] = useState<Locale>("en");
 
-  // Only the document is updated here. Persisting must never happen on mount:
-  // React reuses the server-rendered default during hydration, so writing the
-  // current locale from this effect overwrote a saved Arabic or Kurdish choice
-  // with "en" on every fresh page load and the document silently fell back to
-  // left-to-right.
   useEffect(() => {
-    document.documentElement.lang = locale;
+    const saved = storedLocale();
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- restore persisted UI state after hydration.
+    if (saved !== "en") setLocaleState(saved);
+  }, []);
+
+  useEffect(() => {
+    document.documentElement.lang = localeTag(locale);
     document.documentElement.dir = localeDirection(locale);
   }, [locale]);
 

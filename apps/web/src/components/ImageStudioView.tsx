@@ -1,4 +1,5 @@
 "use client";
+import { localeTag } from "@/lib/i18n";
 
 /* The private download endpoint requires the browser's authenticated session cookie. */
 /* eslint-disable @next/next/no-img-element */
@@ -276,7 +277,7 @@ export function ImageStudioView() {
 
       <aside className="image-recent-panel">
         <div className="image-recent-heading"><div><p className="image-panel-kicker">{t("image.recentEyebrow")}</p><h2>{t("image.recentTitle")}</h2></div><Link href="/assets?assetType=image" aria-label={t("image.openAssets")}><ArrowUpRight size={16} /></Link></div>
-        {loadingRecent ? <div className="image-recent-loading"><span className="image-mini-spinner" /></div> : recentAssets.length === 0 ? <div className="image-recent-empty"><ImageIcon size={21} /><p>{t("image.recentEmpty")}</p><small>{t("image.recentEmptyText")}</small></div> : <div className="image-recent-list">{recentAssets.map((asset) => <button key={asset.id} className="image-recent-item" type="button" onClick={() => setSelectedAsset(asset)}><span className="image-recent-thumb">{asset.hasFile && asset.canPreview ? <img src={api.assetFileUrl(asset.id, true)} alt="" loading="lazy" /> : <ImageIcon size={18} />}</span><span className="image-recent-copy"><strong>{asset.name}</strong><small>{asset.projectName || t("assets.workspaceLevel")}</small><time dateTime={asset.createdAt}>{new Intl.DateTimeFormat(locale, { month: "short", day: "numeric" }).format(new Date(asset.createdAt))}</time></span><ArrowUpRight className="image-recent-arrow" size={14} /></button>)}</div>}
+        {loadingRecent ? <div className="image-recent-loading"><span className="image-mini-spinner" /></div> : recentAssets.length === 0 ? <div className="image-recent-empty"><ImageIcon size={21} /><p>{t("image.recentEmpty")}</p><small>{t("image.recentEmptyText")}</small></div> : <div className="image-recent-list">{recentAssets.map((asset) => <button key={asset.id} className="image-recent-item" type="button" onClick={() => setSelectedAsset(asset)}><span className="image-recent-thumb">{asset.hasFile && asset.canPreview ? <img src={api.assetFileUrl(asset.id, true)} alt="" loading="lazy" /> : <ImageIcon size={18} />}</span><span className="image-recent-copy"><strong>{asset.name}</strong><small>{asset.projectName || t("assets.workspaceLevel")}</small><time dateTime={asset.createdAt}>{new Intl.DateTimeFormat(localeTag(locale), { month: "short", day: "numeric" }).format(new Date(asset.createdAt))}</time></span><ArrowUpRight className="image-recent-arrow" size={14} /></button>)}</div>}
         <div className="image-recent-footer"><CheckCircle2 size={14} /><span>{t("image.libraryNote")}</span></div>
       </aside>
     </div>
