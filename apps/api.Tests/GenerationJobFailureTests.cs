@@ -69,10 +69,26 @@ public sealed class GenerationJobFailureTests : IClassFixture<GenerationJobFailu
         Assert.False(await db.Assets.AsNoTracking().AnyAsync(item => item.SourceGenerationJobId == job.Id));
         Assert.False(await db.GenerationJobOutputs.AsNoTracking().AnyAsync(item => item.GenerationJobId == job.Id));
         Assert.False(await db.StoredFiles.AsNoTracking().AnyAsync(item => item.WorkspaceId == auth.PersonalWorkspace.Id));
-        var notifications = await client.GetFromJsonAsync<JsonElement>($"/api/notifications?workspaceId={auth.PersonalWorkspace.Id}");
-        var notification = Assert.Single(notifications.GetProperty("items").EnumerateArray());
+        // Failure status and usage are committed before the best-effort notification
+        // event is written. Observe that bounded eventual-consistency boundary while
+        // preserving the exact single-notification assertion.
+        var notification = await WaitForFailureNotificationAsync(client, auth.PersonalWorkspace.Id);
         Assert.Equal("generation.failed", notification.GetProperty("type").GetString());
         Assert.Contains("/activity", notification.GetProperty("destination").GetString());
+    }
+
+    private static async Task<JsonElement> WaitForFailureNotificationAsync(HttpClient client, Guid workspaceId)
+    {
+        JsonElement[] lastItems = [];
+        for (var attempt = 0; attempt < 40; attempt++)
+        {
+            var response = await client.GetFromJsonAsync<JsonElement>($"/api/notifications?workspaceId={workspaceId}");
+            lastItems = response.GetProperty("items").EnumerateArray().ToArray();
+            if (lastItems.Length > 0) return Assert.Single(lastItems);
+            await Task.Delay(25);
+        }
+
+        return Assert.Single(lastItems);
     }
 
     private static async Task<AuthResponse> Register(HttpClient client)
