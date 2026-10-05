@@ -4,6 +4,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Taslim.Api.Autopilot;
@@ -74,6 +75,25 @@ public sealed class AutopilotEndpointTests : IClassFixture<TaslimApiFactory>
         {
             Environment.SetEnvironmentVariable("AUTOPILOT_WEBHOOK_SECRET", null);
         }
+    }
+
+    [Fact]
+    public async Task Intake_endpoint_rejects_oversized_chunked_payload_before_persistence()
+    {
+        using var client = factory.CreateClient();
+        var eventId = $"evt-too-large-{Guid.NewGuid():N}";
+        var bytes = Encoding.UTF8.GetBytes(new string('x', 20_001));
+        using var content = new StreamContent(new ChunkedReadStream(bytes, 64));
+        content.Headers.Add("X-Autopilot-Source", "completion-bridge");
+        content.Headers.Add("X-Autopilot-Event-Id", eventId);
+        content.Headers.Add("X-Autopilot-Event-Type", AutopilotEventTypes.WaveTaskCompleted);
+
+        var response = await client.PostAsync("/api/autopilot/events", content);
+
+        Assert.Equal((HttpStatusCode)StatusCodes.Status413RequestEntityTooLarge, response.StatusCode);
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.Empty(await db.AutopilotEvents.Where(item => item.ExternalEventId == eventId).ToListAsync());
     }
 
     [Fact]
@@ -267,5 +287,47 @@ public sealed class AutopilotEndpointTests : IClassFixture<TaslimApiFactory>
         request.Headers.Add("X-CSRF-TOKEN", csrf.GetProperty("token").GetString()!);
         if (payload is not null) request.Content = JsonContent.Create(payload);
         return await client.SendAsync(request);
+    }
+
+    private sealed class ChunkedReadStream(byte[] data, int chunkSize) : Stream
+    {
+        private int position;
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => data.Length;
+        public override long Position
+        {
+            get => position;
+            set => throw new NotSupportedException();
+        }
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            var read = Math.Min(Math.Min(count, chunkSize), data.Length - position);
+            if (read <= 0) return 0;
+            data.AsSpan(position, read).CopyTo(buffer.AsSpan(offset, read));
+            position += read;
+            return read;
+        }
+
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var read = Math.Min(Math.Min(buffer.Length, chunkSize), data.Length - position);
+            if (read <= 0) return ValueTask.FromResult(0);
+            data.AsMemory(position, read).CopyTo(buffer);
+            position += read;
+            return ValueTask.FromResult(read);
+        }
+
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) =>
+            ReadAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
+
+        public override void Flush() => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 }
