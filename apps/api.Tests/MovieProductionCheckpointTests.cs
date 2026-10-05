@@ -67,6 +67,19 @@ public sealed class MovieProductionCheckpointTests
         Assert.Equal(1, projection.CompletedShots);
     }
 
+    [Fact]
+    public void Recovery_retry_identity_is_deterministic_bounded_and_source_scoped()
+    {
+        var projectId = Guid.Parse("11111111-1111-1111-1111-111111111111");
+        var sourceJobId = Guid.Parse("22222222-2222-2222-2222-222222222222");
+
+        var key = MovieProductionCheckpointService.BuildRecoveryIdempotencyKey(projectId, sourceJobId);
+
+        Assert.Equal($"movie-recovery:{projectId:N}:{sourceJobId:N}", key);
+        Assert.InRange(key.Length, 1, 80);
+        Assert.NotEqual(key, MovieProductionCheckpointService.BuildRecoveryIdempotencyKey(projectId, Guid.NewGuid()));
+    }
+
     private static MovieProductionCheckpointItemDto Analyze(
         IReadOnlyList<MovieProductionCheckpointVersionSnapshot> versions,
         IReadOnlyList<MovieProductionCheckpointTakeSnapshot> takes,
