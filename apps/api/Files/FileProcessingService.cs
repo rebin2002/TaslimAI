@@ -344,7 +344,10 @@ public sealed class FileProcessingService(
             await db.SaveChangesAsync(CancellationToken.None);
             await TryDeleteGeneratedObjectAsync(storageKey, file.Id, workspaceId);
             logger.LogWarning(exception, "File processing failed without logging file contents. FileId={FileId}; WorkspaceId={WorkspaceId}", file.Id, workspaceId);
-            return file;
+            // Do not return a failed record through the success path. The
+            // controller maps this safe exception to a generic 503 response,
+            // while the failed row remains available for operational cleanup.
+            throw new FileStorageOperationException();
         }
     }
 
