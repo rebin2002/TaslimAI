@@ -125,6 +125,62 @@ public sealed class GlobalSearchTests : IClassFixture<TaslimApiFactory>
     }
 
     [Fact]
+    public async Task Search_paginates_each_result_type_with_stable_total_counts()
+    {
+        using var client = factory.CreateClient();
+        var authResponse = await Register(client, "Search Pagination Owner", $"search-pagination-{Guid.NewGuid():N}@example.com");
+        var auth = await authResponse.Content.ReadFromJsonAsync<AuthResponse>();
+        Assert.NotNull(auth);
+
+        var marker = $"Search pagination {Guid.NewGuid():N}";
+        for (var index = 0; index < 3; index++)
+        {
+            await SendWithCsrf<ProjectDto>(client, HttpMethod.Post, $"/api/workspaces/{auth!.PersonalWorkspace.Id}/projects", new
+            {
+                name = $"{marker} {index}",
+                description = "Deterministic pagination fixture",
+                type = "Marketing",
+            });
+        }
+
+        var pageOne = await client.GetFromJsonAsync<GlobalSearchResponseDto>($"/api/search?q={Uri.EscapeDataString(marker)}&page=1&limit=1");
+        Assert.NotNull(pageOne);
+        var firstGroup = Assert.Single(pageOne!.Groups, group => group.Type == GlobalSearchResultTypes.Project);
+        Assert.Equal(1, pageOne.Page);
+        Assert.Equal(1, pageOne.PageSize);
+        Assert.Equal(3, pageOne.TotalCount);
+        Assert.True(pageOne.HasMore);
+        Assert.Equal(3, firstGroup.Count);
+        Assert.True(firstGroup.HasMore);
+        Assert.Single(firstGroup.Items);
+
+        var pageTwo = await client.GetFromJsonAsync<GlobalSearchResponseDto>($"/api/search?q={Uri.EscapeDataString(marker)}&page=2&limit=1");
+        Assert.NotNull(pageTwo);
+        var secondGroup = Assert.Single(pageTwo!.Groups, group => group.Type == GlobalSearchResultTypes.Project);
+        Assert.Equal(2, pageTwo.Page);
+        Assert.Equal(3, pageTwo.TotalCount);
+        Assert.True(secondGroup.HasMore);
+        Assert.Single(secondGroup.Items);
+        Assert.NotEqual(firstGroup.Items[0].Id, secondGroup.Items[0].Id);
+
+        var pageThree = await client.GetFromJsonAsync<GlobalSearchResponseDto>($"/api/search?q={Uri.EscapeDataString(marker)}&page=3&limit=1");
+        Assert.NotNull(pageThree);
+        var thirdGroup = Assert.Single(pageThree!.Groups, group => group.Type == GlobalSearchResultTypes.Project);
+        Assert.Equal(3, pageThree!.Page);
+        Assert.Equal(3, pageThree.TotalCount);
+        Assert.False(pageThree.HasMore);
+        Assert.False(thirdGroup.HasMore);
+        Assert.Single(thirdGroup.Items);
+
+        var pageFour = await client.GetFromJsonAsync<GlobalSearchResponseDto>($"/api/search?q={Uri.EscapeDataString(marker)}&page=4&limit=1");
+        Assert.NotNull(pageFour);
+        Assert.Equal(4, pageFour!.Page);
+        Assert.Equal(3, pageFour.TotalCount);
+        Assert.False(pageFour.HasMore);
+        Assert.Empty(pageFour.Groups);
+    }
+
+    [Fact]
     public async Task Search_does_not_return_private_assets_to_workspace_members()
     {
         using var owner = factory.CreateClient();
