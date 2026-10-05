@@ -260,6 +260,7 @@ public sealed class FileProcessingService(
         db.StoredFiles.Add(file);
         await db.SaveChangesAsync(cancellationToken);
 
+        var extractionStarted = false;
         try
         {
             logger.LogInformation("File upload started. FileId={FileId}; WorkspaceId={WorkspaceId}; StorageProvider={StorageProvider}; Extension={Extension}; SizeBytes={SizeBytes}", file.Id, workspaceId, storage.ProviderKey, file.Extension, file.SizeBytes);
@@ -279,6 +280,7 @@ public sealed class FileProcessingService(
             if (extractor.CanHandle(file.Extension))
             {
                 await using var input = await storage.OpenReadAsync(storageKey, cancellationToken) ?? throw new FileStorageUnavailableException();
+                extractionStarted = true;
                 var result = await extractor.ExtractAsync(file.Extension, input, cancellationToken);
                 file.TextExtractionStatus = result.Status;
                 file.ExtractedText = result.ExtractedText;
@@ -344,7 +346,8 @@ public sealed class FileProcessingService(
             await db.SaveChangesAsync(CancellationToken.None);
             await TryDeleteGeneratedObjectAsync(storageKey, file.Id, workspaceId);
             logger.LogWarning(exception, "File processing failed without logging file contents. FileId={FileId}; WorkspaceId={WorkspaceId}", file.Id, workspaceId);
-            return file;
+            if (extractionStarted) return file;
+            throw new FileStorageOperationException();
         }
     }
 
