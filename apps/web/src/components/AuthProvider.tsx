@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { api, type AuthResponse, type LoginInput, type OnboardingInput, type ProfileInput, type RegisterInput, type User } from "@/lib/api";
 import { useLocale } from "@/components/LocaleProvider";
 import { locales, type Locale } from "@/lib/i18n";
+import { accountLocaleStorageKey, readStoredLocale, writeStoredLocale } from "@/lib/localePersistence";
 
 type AuthContextValue = {
   user: User | null;
@@ -23,9 +24,9 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 export function AuthProvider({ children }: Readonly<{ children: React.ReactNode }>) {
   const [session, setSession] = useState<AuthResponse | null>(null);
   const [loading, setLoading] = useState(true);
-  const { setLocale } = useLocale();
+  const { locale, setLocale } = useLocale();
   const router = useRouter();
-  const sessionLocaleInitialized = useRef(false);
+  const sessionLocaleInitialized = useRef<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -42,12 +43,27 @@ export function AuthProvider({ children }: Readonly<{ children: React.ReactNode 
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void refresh(); }, [refresh]);
   useEffect(() => {
-    if (session?.user.preferredLanguage && !sessionLocaleInitialized.current) {
-      sessionLocaleInitialized.current = true;
-      const savedLocale = window.localStorage.getItem("taslim-locale");
-      if (!savedLocale) setLocale(session.user.preferredLanguage);
+    const user = session?.user;
+    if (user?.preferredLanguage && sessionLocaleInitialized.current !== user.id) {
+      sessionLocaleInitialized.current = user.id;
+      let savedLocale: Locale | null = null;
+      try {
+        savedLocale = readStoredLocale(window.localStorage, accountLocaleStorageKey(user.id));
+      } catch {
+        // Access to browser storage can be blocked by privacy settings.
+      }
+      setLocale(savedLocale ?? user.preferredLanguage);
     }
-  }, [session?.user.preferredLanguage, setLocale]);
+  }, [session?.user, setLocale]);
+  useEffect(() => {
+    const userId = session?.user.id;
+    if (!userId || sessionLocaleInitialized.current !== userId) return;
+    try {
+      writeStoredLocale(window.localStorage, accountLocaleStorageKey(userId), locale);
+    } catch {
+      // The in-memory locale remains active when browser storage is unavailable.
+    }
+  }, [locale, session?.user.id]);
 
   const signIn = useCallback(async (input: LoginInput) => {
     const next = await api.login(input);
@@ -64,7 +80,7 @@ export function AuthProvider({ children }: Readonly<{ children: React.ReactNode 
   const signOut = useCallback(async () => {
     await api.logout();
     setSession(null);
-    sessionLocaleInitialized.current = false;
+    sessionLocaleInitialized.current = null;
     router.push("/");
   }, [router]);
 
