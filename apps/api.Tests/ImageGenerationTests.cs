@@ -41,6 +41,27 @@ public sealed class ImageGenerationTests : IClassFixture<ImageGenerationApiFacto
     }
 
     [Fact]
+    public async Task Generic_generation_route_cannot_bypass_enabled_image_studio_guardrails()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, $"image-route-guard-{Guid.NewGuid():N}@example.com");
+        var response = await SendWithCsrf(client, HttpMethod.Post, "/api/generation/jobs", new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            jobType = GenerationJobTypes.ImageGenerate,
+            inputJson = "{}",
+        });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var error = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("JOB_TYPE_ROUTE_NOT_ALLOWED", error.GetProperty("error").GetProperty("code").GetString());
+        using var scope = factory.Services.CreateScope();
+        Assert.False(await scope.ServiceProvider.GetRequiredService<TaslimDbContext>().GenerationJobs
+            .AsNoTracking()
+            .AnyAsync(job => job.WorkspaceId == auth.PersonalWorkspace.Id && job.JobType == GenerationJobTypes.ImageGenerate));
+    }
+
+    [Fact]
     public async Task Image_job_reaches_success_persists_private_png_asset_and_records_real_provider_cost()
     {
         using var client = factory.CreateClient();

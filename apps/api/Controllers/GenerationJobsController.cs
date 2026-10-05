@@ -1,16 +1,18 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.Extensions.Options;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
 using Taslim.Api.Generation;
+using Taslim.Api.Images;
 using Taslim.Api.Infrastructure;
 
 namespace Taslim.Api.Controllers;
 
 [ApiController]
 [Authorize]
-public sealed class GenerationJobsController(IGenerationJobService jobs) : ControllerBase
+public sealed class GenerationJobsController(IGenerationJobService jobs, IOptions<ImageGenerationOptions> imageOptions) : ControllerBase
 {
     [HttpPost("api/generation/jobs")]
     [ValidateAntiForgeryToken]
@@ -18,6 +20,8 @@ public sealed class GenerationJobsController(IGenerationJobService jobs) : Contr
     public async Task<IActionResult> Create(CreateGenerationJobRequest request, CancellationToken cancellationToken)
     {
         if (!ModelState.IsValid) return ApiResults.Validation(this);
+        if (imageOptions.Value.Enabled && string.Equals(request.JobType.Trim(), GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase))
+            return ApiResults.Error(this, StatusCodes.Status400BadRequest, "JOB_TYPE_ROUTE_NOT_ALLOWED", "Use the dedicated studio endpoint for this generation type.");
         try
         {
             var job = await jobs.CreateAsync(GetUserId(), request, cancellationToken, Request.Headers["Idempotency-Key"].FirstOrDefault(), HttpContext.TraceIdentifier);
