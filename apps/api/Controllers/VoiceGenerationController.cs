@@ -27,6 +27,10 @@ public sealed class VoiceGenerationController(
     {
         try
         {
+            if (!options.Value.Enabled
+                || string.IsNullOrWhiteSpace(options.Value.ProviderKey)
+                || string.Equals(options.Value.ProviderKey, "unconfigured", StringComparison.OrdinalIgnoreCase))
+                return ApiResults.Error(this, StatusCodes.Status503ServiceUnavailable, "VOICE_STUDIO_UNAVAILABLE", "Voice generation is not available right now.");
             var input = VoiceGenerationContractMapper.ToInput(request);
             VoiceGenerationRequestValidator.Validate(input, options.Value);
             var preflight = await costControl.CheckPreflightAsync(request.WorkspaceId, UsageFeature.Voice, null, cancellationToken);
