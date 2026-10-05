@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GenerationJob, ResearchSource } from "./api";
-import { clearResearchActiveJobId, displayResearchProgress, isResearchSourceReady, isRestorableResearchJob, isResearchJob, isSafeExternalUrl, mergeResearchSources, parseResearchJobResult, persistResearchActiveJobId, readResearchActiveJobId, researchActiveJobStorageKey, researchStudioState } from "./researchStudioState";
+import { clearResearchActiveJobId, displayResearchProgress, isCurrentResearchJob, isResearchSourceReady, isRestorableResearchJob, isResearchJob, isSafeExternalUrl, mergeResearchSources, parseResearchJobResult, persistResearchActiveJobId, readResearchActiveJobId, researchActiveJobStorageKey, researchStudioState } from "./researchStudioState";
 
 const job = (status: GenerationJob["status"], resultJson: string | null = null, progressPercent = 70): GenerationJob => ({ id: "job-1", workspaceId: "workspace-1", projectId: null, jobType: "research.generate", status, title: "Research", progressPercent, resultJson, errorCode: null, errorMessage: null, cancellationRequested: false, createdAt: "2026-01-01", queuedAt: null, startedAt: null, completedAt: null, failedAt: null, cancelledAt: null, outputs: [] });
 const source = (citationId: string, title = "Official source"): ResearchSource => ({ citationId, title, domain: "example.gov", url: "https://example.gov/source", publisher: null, publishedAt: null, retrievedAt: "2026-01-01T00:00:00Z", sourceType: "web", snippet: null, searchQuery: null, rank: 1, isSelected: true });
@@ -34,6 +34,9 @@ describe("researchStudioState", () => {
   it("validates restored jobs and keeps active-job storage workspace-scoped", () => {
     expect(isResearchJob(job("Running"))).toBe(true);
     expect(isRestorableResearchJob(job("Running"), "workspace-1")).toBe(true);
+    expect(isCurrentResearchJob(job("Running"), "workspace-1", "job-1")).toBe(true);
+    expect(isCurrentResearchJob({ ...job("Running"), id: "job-2" }, "workspace-1", "job-1")).toBe(false);
+    expect(isCurrentResearchJob({ ...job("Running"), workspaceId: "workspace-2" }, "workspace-1", "job-1")).toBe(false);
     expect(isRestorableResearchJob({ ...job("Running"), workspaceId: "workspace-2" }, "workspace-1")).toBe(false);
     expect(isResearchJob({ ...job("Running"), jobType: "presentation.generate" })).toBe(false);
     const values = new Map<string, string>();

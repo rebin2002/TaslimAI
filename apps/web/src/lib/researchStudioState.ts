@@ -29,6 +29,10 @@ export function isRestorableResearchJob(job: GenerationJob | null, workspaceId: 
   return !!job && job.workspaceId === workspaceId && isResearchJob(job);
 }
 
+export function isCurrentResearchJob(job: GenerationJob | null, workspaceId: string, expectedJobId?: string) {
+  return !!job && job.workspaceId === workspaceId && (!expectedJobId || job.id === expectedJobId) && isResearchJob(job);
+}
+
 export function isResearchTerminal(job: GenerationJob | null) { return !!job && terminalStatuses.has(job.status); }
 export function shouldPollResearchJob(job: GenerationJob | null) { return !!job && !isResearchTerminal(job); }
 export function nextResearchPollDelay(job: GenerationJob | null, retryAttempt = 0) { return shouldPollResearchJob(job) ? Math.min(700 * Math.max(1, retryAttempt + 1), 2_800) : null; }

@@ -73,7 +73,7 @@ public sealed class ResearchGenerationController(
     public async Task<IActionResult> Sources(Guid jobId, CancellationToken cancellationToken)
     {
         var job = await jobs.GetAsync(GetUserId(), jobId, cancellationToken);
-        if (job is null) return NotFound();
+        if (!IsSuccessfulResearchJob(job)) return NotFound();
         var sources = await db.ResearchSources.AsNoTracking()
             .Where(source => source.GenerationJobId == jobId)
             .OrderBy(source => source.Rank)
@@ -100,7 +100,7 @@ public sealed class ResearchGenerationController(
     public async Task<IActionResult> ExportSources(Guid jobId, CancellationToken cancellationToken)
     {
         var job = await jobs.GetAsync(GetUserId(), jobId, cancellationToken);
-        if (job is null) return NotFound();
+        if (!IsSuccessfulResearchJob(job)) return NotFound();
         var sources = await db.ResearchSources.AsNoTracking()
             .Where(source => source.GenerationJobId == jobId)
             .OrderBy(source => source.Rank)
@@ -148,6 +148,11 @@ public sealed class ResearchGenerationController(
         if (trimmed.Length > 0 && trimmed[0] is '=' or '+' or '-' or '@') text = $"'{text}";
         return $"\"{text.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
     }
+
+    private static bool IsSuccessfulResearchJob(GenerationJob? job) =>
+        job is not null
+        && job.Status == GenerationJobStatus.Succeeded
+        && string.Equals(job.JobType, GenerationJobTypes.ResearchGenerate, StringComparison.OrdinalIgnoreCase);
 
     private Guid GetUserId() => Guid.Parse(User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? throw new InvalidOperationException("Authenticated user identifier is missing."));
 }
