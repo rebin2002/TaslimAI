@@ -33,7 +33,10 @@ next_wave_classify_ref() {
   local expected_base="${7:-}"
 
   if [[ "$event_name" == "pull_request" ]]; then
-    if [[ "$base_ref" != "$expected_base" && "$base_ref" != "$expected_branch" ]]; then
+    # Billing work is intentionally stacked so each dependent PR can be
+    # reviewed and gated independently. Keep that explicit stack target
+    # allowlisted; every other unexpected base still fails closed.
+    if [[ "$base_ref" != "$expected_base" && "$base_ref" != "$expected_branch" && "$base_ref" != fix/billing-* ]]; then
       printf 'unexpected pull request base: %s\n' "${base_ref:-<none>}" >&2
       return 1
     fi

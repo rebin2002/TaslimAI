@@ -53,6 +53,34 @@ public sealed class NotificationTests : IClassFixture<GenerationJobsNoWorkerFact
     }
 
     [Fact]
+    public async Task Notification_pagination_bounds_hostile_query_values()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, $"notification-pagination-{Guid.NewGuid():N}@example.com");
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.Notifications.Add(new Notification
+            {
+                Id = Guid.NewGuid(), UserId = auth.User.Id, WorkspaceId = auth.PersonalWorkspace.Id,
+                Type = NotificationTypes.GenerationFailed, DeduplicationKey = $"test:pagination:{Guid.NewGuid():N}",
+                ResourceTitle = "Bounded page", CreatedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var normalized = await client.GetFromJsonAsync<JsonElement>($"/api/notifications?workspaceId={auth.PersonalWorkspace.Id}&page=0&pageSize=0");
+        Assert.Equal(1, normalized.GetProperty("page").GetInt32());
+        Assert.Equal(1, normalized.GetProperty("pageSize").GetInt32());
+        Assert.Single(normalized.GetProperty("items").EnumerateArray());
+
+        var bounded = await client.GetFromJsonAsync<JsonElement>($"/api/notifications?workspaceId={auth.PersonalWorkspace.Id}&page={int.MaxValue}&pageSize={int.MaxValue}");
+        Assert.Equal(10_000, bounded.GetProperty("page").GetInt32());
+        Assert.Equal(100, bounded.GetProperty("pageSize").GetInt32());
+        Assert.Empty(bounded.GetProperty("items").EnumerateArray());
+    }
+
+    [Fact]
     public async Task Notifications_are_workspace_authorized_and_duplicate_events_are_suppressed()
     {
         using var owner = factory.CreateClient();
@@ -73,6 +101,21 @@ public sealed class NotificationTests : IClassFixture<GenerationJobsNoWorkerFact
         var own = await other.GetFromJsonAsync<JsonElement>($"/api/notifications?workspaceId={otherAuth.PersonalWorkspace.Id}");
         Assert.Empty(own.GetProperty("items").EnumerateArray());
         Assert.Equal(HttpStatusCode.Forbidden, (await SendWithCsrf(other, HttpMethod.Post, $"/api/notifications/{list.GetProperty("items")[0].GetProperty("id").GetGuid()}/read", new { workspaceId = auth.PersonalWorkspace.Id })).StatusCode);
+    }
+
+    [Fact]
+    public async Task Notifications_bound_deep_page_values_without_offset_overflow()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, $"notification-page-{Guid.NewGuid():N}@example.com");
+
+        var response = await client.GetAsync($"/api/notifications?workspaceId={auth.PersonalWorkspace.Id}&page={int.MaxValue}&pageSize={int.MaxValue}");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var list = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(Taslim.Api.Infrastructure.ApiPagination.MaxPage, list.GetProperty("page").GetInt32());
+        Assert.Equal(Taslim.Api.Infrastructure.ApiPagination.MaxPageSize, list.GetProperty("pageSize").GetInt32());
+        Assert.Empty(list.GetProperty("items").EnumerateArray());
     }
 
     [Fact]

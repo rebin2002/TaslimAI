@@ -1490,6 +1490,10 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasIndex(job => job.ProjectId);
             entity.HasIndex(job => job.RetryOfJobId);
             entity.HasIndex(job => new { job.CreatedByUserId, job.IdempotencyKey }).IsUnique().HasFilter("\"IdempotencyKey\" IS NOT NULL");
+            entity.HasIndex(job => new { job.WorkspaceId, job.CreatedByUserId, job.JobType })
+                .IsUnique()
+                .HasDatabaseName("IX_GenerationJobs_ImageActiveByUser")
+                .HasFilter("\"JobType\" = 'image.generate' AND \"RequestId\" LIKE 'image-studio:%' AND \"Status\" IN ('Pending', 'Queued', 'Running')");
             entity.HasOne(job => job.Workspace).WithMany().HasForeignKey(job => job.WorkspaceId).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne(job => job.RetryOfJob).WithMany(job => job.Retries).HasForeignKey(job => job.RetryOfJobId).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne(job => job.Project).WithMany().HasForeignKey(job => job.ProjectId).OnDelete(DeleteBehavior.SetNull);
@@ -2003,7 +2007,9 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.Property(subscription => subscription.ProviderSubscriptionReference).HasMaxLength(200);
             entity.Property(subscription => subscription.CreatedAt).IsRequired();
             entity.Property(subscription => subscription.UpdatedAt).IsRequired();
-            entity.HasIndex(subscription => subscription.WorkspaceId);
+            entity.HasIndex(subscription => subscription.WorkspaceId)
+                .IsUnique()
+                .HasFilter("\"Status\" <> 'Cancelled'");
             entity.HasIndex(subscription => new { subscription.Status, subscription.NextRenewalAt });
             entity.HasOne(subscription => subscription.Workspace).WithMany().HasForeignKey(subscription => subscription.WorkspaceId).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne(subscription => subscription.Plan).WithMany(plan => plan.Subscriptions).HasForeignKey(subscription => subscription.PlanId).OnDelete(DeleteBehavior.Restrict);
@@ -2161,8 +2167,12 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.Property(entry => entry.CreatedAt).IsRequired();
             entity.HasIndex(entry => new { entry.WorkspaceId, entry.IdempotencyKey }).IsUnique();
             entity.HasIndex(entry => new { entry.WorkspaceId, entry.CreatedAt });
-            entity.HasIndex(entry => entry.UsageTransactionId);
-            entity.HasIndex(entry => entry.ReversesEntryId);
+            entity.HasIndex(entry => entry.UsageTransactionId)
+                .IsUnique()
+                .HasFilter("\"UsageTransactionId\" IS NOT NULL AND \"Type\" = 'Debit'");
+            entity.HasIndex(entry => entry.ReversesEntryId)
+                .IsUnique()
+                .HasFilter("\"ReversesEntryId\" IS NOT NULL");
             entity.HasOne(entry => entry.Workspace).WithMany().HasForeignKey(entry => entry.WorkspaceId).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne(entry => entry.CreditEntitlement).WithMany(entitlement => entitlement.LedgerEntries).HasForeignKey(entry => entry.CreditEntitlementId).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne(entry => entry.UsageTransaction).WithMany().HasForeignKey(entry => entry.UsageTransactionId).OnDelete(DeleteBehavior.SetNull);

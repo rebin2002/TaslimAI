@@ -1988,9 +1988,13 @@ namespace Taslim.Api.Persistence.Migrations
 
                     b.HasIndex("CreditEntitlementId");
 
-                    b.HasIndex("ReversesEntryId");
+                    b.HasIndex("ReversesEntryId")
+                        .IsUnique()
+                        .HasFilter("\"ReversesEntryId\" IS NOT NULL");
 
-                    b.HasIndex("UsageTransactionId");
+                    b.HasIndex("UsageTransactionId")
+                        .IsUnique()
+                        .HasFilter("\"UsageTransactionId\" IS NOT NULL AND \"Type\" = 'Debit'");
 
                     b.HasIndex("WorkspaceId", "CreatedAt");
 
@@ -2211,6 +2215,11 @@ namespace Taslim.Api.Persistence.Migrations
                     b.HasIndex("CreatedByUserId", "IdempotencyKey")
                         .IsUnique()
                         .HasFilter("\"IdempotencyKey\" IS NOT NULL");
+
+                    b.HasIndex("WorkspaceId", "CreatedByUserId", "JobType")
+                        .IsUnique()
+                        .HasDatabaseName("IX_GenerationJobs_ImageActiveByUser")
+                        .HasFilter("\"JobType\" = 'image.generate' AND \"RequestId\" LIKE 'image-studio:%' AND \"Status\" IN ('Pending', 'Queued', 'Running')");
 
                     b.HasIndex("WorkspaceId", "CreatedAt");
 
@@ -3487,7 +3496,9 @@ namespace Taslim.Api.Persistence.Migrations
 
                     b.HasIndex("PlanId");
 
-                    b.HasIndex("WorkspaceId");
+                    b.HasIndex("WorkspaceId")
+                        .IsUnique()
+                        .HasFilter("\"Status\" <> 'Cancelled'");
 
                     b.HasIndex("Status", "NextRenewalAt");
 

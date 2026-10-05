@@ -23,6 +23,7 @@ public sealed record AdminGenerationOverviewDto(
     IReadOnlyList<AdminCountBreakdownDto> ByStatus,
     IReadOnlyList<AdminCountBreakdownDto> ByStudio,
     IReadOnlyList<AdminRecentFailureDto> RecentFailures,
+    IReadOnlyList<AdminCountBreakdownDto> FailuresByCode,
     IReadOnlyList<AdminRunningJobDto> RunningJobs,
     int QueuedOrPendingCount,
     int LongRunningJobCount,
