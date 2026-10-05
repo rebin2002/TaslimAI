@@ -11,7 +11,7 @@ type AuthContextValue = {
   user: User | null;
   workspace: AuthResponse["personalWorkspace"] | null;
   loading: boolean;
-  signIn: (input: LoginInput) => Promise<void>;
+  signIn: (input: LoginInput, redirectTo?: string) => Promise<void>;
   register: (input: RegisterInput) => Promise<void>;
   signOut: () => Promise<void>;
   updateProfile: (input: ProfileInput) => Promise<void>;
@@ -78,12 +78,13 @@ export function AuthProvider({ children }: Readonly<{ children: React.ReactNode 
     }
   }, [locale, session?.user.id]);
 
-  const signIn = useCallback(async (input: LoginInput) => {
+  const signIn = useCallback(async (input: LoginInput, redirectTo?: string) => {
     const request = ++authRequestGeneration.current;
     const next = await api.login(input);
     if (request !== authRequestGeneration.current) return;
     setSession(next);
-    router.push("/projects");
+    if (redirectTo) router.replace(redirectTo);
+    else router.push("/projects");
   }, [router]);
 
   const register = useCallback(async (input: RegisterInput) => {
