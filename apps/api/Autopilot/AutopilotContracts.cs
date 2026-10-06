@@ -231,9 +231,14 @@ public sealed record AutopilotEventDto(
 
 public sealed record AutopilotAuditDto(
     Guid Id,
+    Guid? ActorUserId,
     string Action,
+    string TargetType,
+    Guid? TargetId,
     string Outcome,
     string? Reason,
+    string? StatusDetail,
+    string? RequestId,
     string? WaveKey,
     string? TaskId,
     string? TaskState,
