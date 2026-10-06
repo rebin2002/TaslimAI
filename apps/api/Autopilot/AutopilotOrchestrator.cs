@@ -56,7 +56,7 @@ public interface IAutopilotOrchestrator
 
     Task<AutopilotControlSnapshot> GetControlAsync(CancellationToken cancellationToken = default);
 
-    Task<AutopilotControlSnapshot> SetControlAsync(bool? paused, bool? killSwitch, Guid? actorUserId, string reason, CancellationToken cancellationToken = default);
+    Task<AutopilotControlSnapshot> SetControlAsync(bool? paused, bool? killSwitch, Guid? actorUserId, string reason, string? requestId = null, CancellationToken cancellationToken = default);
 }
 
 public sealed class AutopilotOrchestrator(
@@ -229,7 +229,7 @@ public sealed class AutopilotOrchestrator(
         return Snapshot(control);
     }
 
-    public async Task<AutopilotControlSnapshot> SetControlAsync(bool? paused, bool? killSwitch, Guid? actorUserId, string reason, CancellationToken cancellationToken = default)
+    public async Task<AutopilotControlSnapshot> SetControlAsync(bool? paused, bool? killSwitch, Guid? actorUserId, string reason, string? requestId = null, CancellationToken cancellationToken = default)
     {
         var control = await EnsureControlAsync(cancellationToken);
         if (paused.HasValue) control.Paused = paused.Value;
@@ -243,6 +243,7 @@ public sealed class AutopilotOrchestrator(
             reason: reason,
             statusDetail: $"paused={control.Paused};killSwitch={control.KillSwitchEngaged}",
             actorUserId: actorUserId,
+            requestId: requestId,
             dryRun: settings.DryRun));
         await db.SaveChangesAsync(cancellationToken);
         return Snapshot(control);
