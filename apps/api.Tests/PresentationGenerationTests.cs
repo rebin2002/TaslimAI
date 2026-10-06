@@ -33,6 +33,20 @@ public sealed class PresentationGenerationApiFactory : GenerationJobsApiFactory
     }
 }
 
+public sealed class DisabledPresentationGenerationApiFactory : GenerationJobsApiFactory
+{
+    protected override void ConfigureWebHost(IWebHostBuilder builder)
+    {
+        base.ConfigureWebHost(builder);
+        builder.UseSetting("PresentationGeneration:Enabled", "false");
+        builder.ConfigureServices(services =>
+        {
+            services.RemoveAll<IPresentationGenerationProvider>();
+            services.AddSingleton<IPresentationGenerationProvider, DeterministicPresentationProvider>();
+        });
+    }
+}
+
 public sealed class PresentationGenerationTests : IClassFixture<PresentationGenerationApiFactory>
 {
     private readonly PresentationGenerationApiFactory factory;
@@ -227,6 +241,85 @@ public sealed class PresentationGenerationTests : IClassFixture<PresentationGene
             await Task.Delay(50);
         }
         throw new TimeoutException("Presentation job did not reach a terminal state.");
+    }
+}
+
+public sealed class PresentationGenerationAvailabilityTests : IClassFixture<DisabledPresentationGenerationApiFactory>
+{
+    private readonly DisabledPresentationGenerationApiFactory factory;
+
+    public PresentationGenerationAvailabilityTests(DisabledPresentationGenerationApiFactory factory)
+    {
+        this.factory = factory;
+        using var scope = factory.Services.CreateScope();
+        scope.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+    }
+
+    [Fact]
+    public async Task Invalid_request_is_rejected_before_disabled_studio_response_without_creating_job()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client);
+        var response = await SendWithCsrf(client, new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            title = "Invalid presentation",
+            description = "x",
+            attachmentIds = Array.Empty<Guid>(),
+        }, "presentation-invalid-disabled-001");
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(GenerationJobErrorCodes.PresentationRequestInvalid, body.GetProperty("error").GetProperty("code").GetString());
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.False(await db.GenerationJobs.AnyAsync(item => item.CreatedByUserId == auth.User.Id));
+        Assert.False(await db.UsageTransactions.AnyAsync(item => item.UserId == auth.User.Id && item.Feature == UsageFeature.Presentation));
+    }
+
+    [Fact]
+    public async Task Valid_request_still_returns_disabled_studio_response_without_creating_job()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client);
+        var response = await SendWithCsrf(client, new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            title = "Valid presentation",
+            description = "Present the validated launch plan.",
+            attachmentIds = Array.Empty<Guid>(),
+        }, "presentation-valid-disabled-001");
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("PRESENTATION_STUDIO_UNAVAILABLE", body.GetProperty("error").GetProperty("code").GetString());
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.False(await db.GenerationJobs.AnyAsync(item => item.CreatedByUserId == auth.User.Id));
+        Assert.False(await db.UsageTransactions.AnyAsync(item => item.UserId == auth.User.Id && item.Feature == UsageFeature.Presentation));
+    }
+
+    private static async Task<AuthResponse> Register(HttpClient client)
+    {
+        var csrf = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/auth/register");
+        request.Headers.Add("X-CSRF-TOKEN", csrf.GetProperty("token").GetString()!);
+        request.Content = JsonContent.Create(new { displayName = "Presentation Availability Tester", email = $"presentation-disabled-{Guid.NewGuid():N}@example.com", password = "StrongPassword!123", preferredLanguage = "en" });
+        var response = await client.SendAsync(request);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        return (await response.Content.ReadFromJsonAsync<AuthResponse>())!;
+    }
+
+    private static async Task<HttpResponseMessage> SendWithCsrf(HttpClient client, object payload, string idempotencyKey)
+    {
+        var csrf = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/presentation-generation/jobs");
+        request.Headers.Add("X-CSRF-TOKEN", csrf.GetProperty("token").GetString()!);
+        request.Headers.Add("Idempotency-Key", idempotencyKey);
+        request.Content = JsonContent.Create(payload);
+        return await client.SendAsync(request);
     }
 }
 
