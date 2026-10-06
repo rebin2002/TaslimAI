@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { AlertTriangle, CheckCircle2, Clock3, MessageSquare, RefreshCw, ShieldCheck, UserCheck, Users, X } from "lucide-react";
 import { api, type MovieCollaboration, type MovieProject } from "@/lib/api";
+import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
 
 const projectTarget = "MovieProject";
@@ -13,11 +14,15 @@ const projectTarget = "MovieProject";
  * actually granted to the signed-in user, not a client-side guess.
  */
 export function MovieTeamWorkspace({ project }: { project: MovieProject }) {
+  const { user } = useAuth();
   const { t } = useLocale();
   const [collaboration, setCollaboration] = useState<MovieCollaboration | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [commentBody, setCommentBody] = useState("");
+  const [reviewerUserId, setReviewerUserId] = useState("");
+  const [reviewNote, setReviewNote] = useState("");
+  const [reviewIsFinal, setReviewIsFinal] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
@@ -70,6 +75,46 @@ export function MovieTeamWorkspace({ project }: { project: MovieProject }) {
     }
   }
 
+  async function requestReview() {
+    if (!user || !reviewerUserId) return;
+    setBusy(true);
+    setError("");
+    setMessage("");
+    try {
+      await api.requestMovieReview(project.id, {
+        targetType: "project",
+        targetId: project.id,
+        reviewerUserId,
+        isFinal: reviewIsFinal,
+        requestNote: reviewNote.trim() || null,
+      });
+      await load();
+      setReviewerUserId("");
+      setReviewNote("");
+      setReviewIsFinal(false);
+      setMessage("Review request saved.");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "The review request could not be saved.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function decideReview(reviewId: string, status: "Approved" | "ChangesRequested" | "Rejected") {
+    setBusy(true);
+    setError("");
+    setMessage("");
+    try {
+      await api.decideMovieReview(project.id, reviewId, { status });
+      await load();
+      setMessage(status === "Approved" ? "Review approved." : status === "ChangesRequested" ? "Changes requested." : "Review rejected.");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "The review decision could not be saved.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const team = collaboration?.team ?? [];
   const comments = collaboration?.comments ?? [];
   const reviews = collaboration?.reviews ?? [];
@@ -77,6 +122,14 @@ export function MovieTeamWorkspace({ project }: { project: MovieProject }) {
   const openComments = comments.filter((comment) => !comment.resolvedAt);
   const pendingReviews = reviews.filter((review) => review.status !== "Approved" && review.status !== "Rejected");
   const canComment = (collaboration?.currentUserPermissions ?? []).includes("Comment");
+  const canRequestReviews = Boolean(user && canComment);
+  const canRequestFinalReview = (collaboration?.currentUserPermissions ?? []).includes("FinalApproval");
+  const reviewerOptions = user ? team.filter((member) => member.userId !== user.id) : [];
+  const canDecide = (review: MovieCollaboration["reviews"][number]) => Boolean(
+    user
+      && review.reviewerUserId === user.id
+      && (review.isFinal ? (collaboration?.currentUserPermissions ?? []).includes("FinalApproval") : (collaboration?.currentUserPermissions ?? []).includes("Approve")),
+  );
 
   return (
     <div className="movie-team-workspace" data-testid="movie-team-workspace">
@@ -245,6 +298,22 @@ export function MovieTeamWorkspace({ project }: { project: MovieProject }) {
           </div>
           <UserCheck size={18} />
         </div>
+        {canRequestReviews && reviewerOptions.length > 0 && (
+          <div className="movie-team-compose">
+            <label htmlFor="movie-team-reviewer">Request project sign-off</label>
+            <select id="movie-team-reviewer" value={reviewerUserId} onChange={(event) => setReviewerUserId(event.target.value)} disabled={busy}>
+              <option value="">Choose a reviewer</option>
+              {reviewerOptions.map((member) => <option key={member.userId} value={member.userId}>{member.displayName} · {member.role}</option>)}
+            </select>
+            <textarea id="movie-team-review-note" value={reviewNote} rows={2} maxLength={4000} placeholder="What should the reviewer check?" onChange={(event) => setReviewNote(event.target.value)} disabled={busy} />
+            <label><input type="checkbox" checked={reviewIsFinal} onChange={(event) => setReviewIsFinal(event.target.checked)} disabled={busy || !canRequestFinalReview} /> <span>Mark this as a final gate request</span></label>
+            <div className="movie-team-compose-actions">
+              <button type="button" className="movie-workspace-button is-primary" onClick={() => void requestReview()} disabled={busy || !reviewerUserId}>{busy ? "Saving…" : "Request review"}</button>
+              {!canRequestFinalReview && <span>Final gate requests require FinalApproval authority.</span>}
+            </div>
+          </div>
+        )}
+        {canRequestReviews && reviewerOptions.length === 0 && <div className="movie-team-compose-actions"><span>Add another current team member before requesting a review.</span></div>}
         {reviews.length === 0 ? (
           <div className="movie-team-empty">
             <UserCheck size={20} />
@@ -264,8 +333,18 @@ export function MovieTeamWorkspace({ project }: { project: MovieProject }) {
                     Requested by {review.requestedByDisplayName} · {review.targetType}
                     {review.requestNote ? ` · ${review.requestNote}` : ""}
                   </small>
+                  {review.decisionNote && <small>Decision note: {review.decisionNote}</small>}
                 </div>
-                <span className={`movie-team-review-status is-${review.status.toLowerCase()}`}>{review.status}</span>
+                <div className="movie-team-compose-actions">
+                  <span className={`movie-team-review-status is-${review.status.toLowerCase()}`}>{review.status}</span>
+                  {canDecide(review) && review.status !== "Approved" && review.status !== "Rejected" && (
+                    <div className="movie-team-compose-actions">
+                      <button type="button" className="movie-text-action" onClick={() => void decideReview(review.id, "Approved")} disabled={busy}><CheckCircle2 size={12} /> Approve</button>
+                      <button type="button" className="movie-text-action" onClick={() => void decideReview(review.id, "ChangesRequested")} disabled={busy}>Request changes</button>
+                      <button type="button" className="movie-text-action is-danger" onClick={() => void decideReview(review.id, "Rejected")} disabled={busy}><X size={12} /> Reject</button>
+                    </div>
+                  )}
+                </div>
               </li>
             ))}
           </ul>
