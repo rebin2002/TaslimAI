@@ -39,6 +39,19 @@ describe("Chat stream state", () => {
     expect(state.messages.find(item => item.id === "assistant-1")?.content).toBe("1");
   });
 
+  it("ignores orphan and cross-message deltas", () => {
+    let state = createChatStreamState([user]);
+    state = reduceChatStream(state, event("message.delta", { messageId: "user-1", delta: " tampered" }));
+    expect(state.messages.find(item => item.id === "user-1")?.content).toBe("List two numbers");
+
+    state = reduceChatStream(state, event("message.started", { userMessage: user, assistantMessage: assistant }));
+    state = reduceChatStream(state, event("message.delta", { messageId: "user-1", delta: " wrong target" }));
+
+    expect(state.messages.find(item => item.id === "user-1")?.content).toBe("List two numbers");
+    expect(state.messages.find(item => item.id === "assistant-1")?.content).toBe("");
+    expect(state.generating).toBe(true);
+  });
+
   it("marks the active assistant failed and ends generation on failure", () => {
     let state = reduceChatStream(createChatStreamState(), event("message.started", { userMessage: user, assistantMessage: assistant }));
     state = reduceChatStream(state, event("message.delta", { messageId: "assistant-1", delta: "partial" }));
