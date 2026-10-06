@@ -34,9 +34,9 @@ public sealed class ImageGenerationController(
                 return ApiResults.Error(this, StatusCodes.Status503ServiceUnavailable, "IMAGE_STUDIO_UNAVAILABLE", "Image generation is not available right now.");
             var input = ImageGenerationContractMapper.ToInput(request);
             var provider = providers.FirstOrDefault(item => string.Equals(item.Key, options.Value.ProviderKey, StringComparison.OrdinalIgnoreCase));
+            ImageGenerationRequestValidator.Validate(input, options.Value, (provider as IImageGenerationProviderCapabilities)?.Capabilities);
             if (provider is not IImageGenerationProviderReadiness { IsAvailable: true })
                 return ApiResults.Error(this, StatusCodes.Status503ServiceUnavailable, GenerationJobErrorCodes.ImageProviderUnavailable, "Image generation is temporarily unavailable. Please try again later.");
-            ImageGenerationRequestValidator.Validate(input, options.Value, (provider as IImageGenerationProviderCapabilities)?.Capabilities);
             var prompt = promptBuilder.Build(input);
             var estimate = ImageGenerationCostEstimator.Estimate(prompt, options.Value.Pricing);
             var preflight = await costControl.CheckPreflightAsync(request.WorkspaceId, UsageFeature.Image, estimate, cancellationToken);
