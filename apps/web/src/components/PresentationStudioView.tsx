@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import {
   ArrowLeft,
   ArrowRight,
@@ -29,11 +29,13 @@ import {
   canCancelPresentationJob,
   clearPresentationActiveJobId,
   displayPresentationProgress,
+  loadPresentationDraftState,
   isRestorablePresentationJob,
   isPresentationSourceReady,
   nextPresentationPollDelay,
   parsePresentationJobResult,
   persistPresentationActiveJobId,
+  persistPresentationDraftState,
   presentationStudioState,
   readPresentationActiveJobId,
   shouldResetPresentationWorkspaceState,
@@ -143,6 +145,7 @@ export function PresentationStudioView() {
   const [error, setError] = useState("");
   const [downloadError, setDownloadError] = useState("");
   const restoreJobId = useRef<string | null>(null);
+  const draftHydratedWorkspace = useRef<string | null>(null);
   const observedWorkspaceId = useRef<string | null>(workspace?.id ?? null);
   const workspaceGeneration = useRef(0);
 
@@ -159,8 +162,13 @@ export function PresentationStudioView() {
         api.listAssets(workspaceId, { assetType: "presentation", sort: "recent", pageSize: 6 }),
       ]);
       if (observedWorkspaceId.current !== workspaceId || workspaceGeneration.current !== workspaceVersion) return;
-      setProjects([...active, ...archived]);
-      setFiles(sourceFiles.filter((file) => extensions.includes(file.extension.toLowerCase())));
+      const availableProjects = [...active, ...archived];
+      const availableFiles = sourceFiles.filter((file) => extensions.includes(file.extension.toLowerCase()));
+      setProjects(availableProjects);
+      setProjectId((value) => value && availableProjects.some((project) => project.id === value) ? value : "");
+      setFiles(availableFiles);
+      const readyIds = new Set(availableFiles.filter((file) => isPresentationSourceReady(file)).map((file) => file.id));
+      setSelected((value) => value.filter((id) => readyIds.has(id)).slice(0, 5));
       setRecentPresentations(assetResult.items);
     } catch {
       if (observedWorkspaceId.current !== workspaceId || workspaceGeneration.current !== workspaceVersion) return;
@@ -181,6 +189,7 @@ export function PresentationStudioView() {
     observedWorkspaceId.current = nextWorkspaceId;
     workspaceGeneration.current += 1;
     restoreJobId.current = null;
+    draftHydratedWorkspace.current = null;
     if (previousWorkspaceId === null && nextWorkspaceId !== null && !shouldResetPresentationWorkspaceState(current, nextWorkspaceId)) return;
     setCurrent(null);
     setSelected([]);
@@ -211,6 +220,29 @@ export function PresentationStudioView() {
   // Source loading synchronizes authenticated workspace data into local UI state.
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void loadSources(); }, [loadSources]);
+  useEffect(() => {
+    if (!workspace || current || draftHydratedWorkspace.current === workspace.id) return;
+    const draft = loadPresentationDraftState(workspace.id);
+    setProjectId(searchParams.get("projectId") ?? draft.projectId);
+    setSelected(draft.selected);
+    setTitle(draft.title);
+    setDescription(draft.description);
+    setPresentationType(draft.presentationType as PresentationType);
+    setLength(draft.length as Length);
+    setTone(draft.tone as Tone);
+    setLanguage(draft.language as Language);
+    setAudience(draft.audience);
+    setBrandCompany(draft.brandCompany);
+    setAdditionalInstructions(draft.additionalInstructions);
+    setIncludeAgenda(draft.includeAgenda);
+    setIncludeClosingNextSteps(draft.includeClosingNextSteps);
+    draftHydratedWorkspace.current = workspace.id;
+  }, [current, searchParams, workspace]);
+  const draft = useMemo(() => ({ projectId, selected, title, description, presentationType, length, tone, language, audience, brandCompany, additionalInstructions, includeAgenda, includeClosingNextSteps }), [additionalInstructions, audience, brandCompany, description, includeAgenda, includeClosingNextSteps, language, length, presentationType, projectId, selected, title, tone]);
+  useEffect(() => {
+    if (!workspace || current || draftHydratedWorkspace.current !== workspace.id) return;
+    persistPresentationDraftState(workspace.id, draft);
+  }, [current, draft, workspace]);
   useEffect(() => {
     if (!workspace || current) return;
     const storedJobId = readPresentationActiveJobId(workspace.id);
@@ -280,6 +312,7 @@ export function PresentationStudioView() {
     restoreJobId.current = null;
     const workspaceId = workspace.id;
     const workspaceVersion = workspaceGeneration.current;
+    persistPresentationDraftState(workspaceId, draft);
     clearPresentationActiveJobId(workspaceId);
     try {
       const job = await api.createPresentationGenerationJob({
