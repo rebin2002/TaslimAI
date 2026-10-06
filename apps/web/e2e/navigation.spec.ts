@@ -94,4 +94,42 @@ test.describe("workspace navigation and protected views", () => {
     await expect(panel).toBeHidden();
     await expect(bell).toBeFocused();
   });
+
+  test("keeps the notification popover open when an unread notification cannot be marked read", async ({ authenticatedPage: page }) => {
+    const notification = {
+      id: "00000000-0000-0000-0000-000000000005",
+      workspaceId: "00000000-0000-0000-0000-000000000006",
+      projectId: null,
+      generationJobId: "00000000-0000-0000-0000-000000000007",
+      assetId: null,
+      type: "generation.failed",
+      resourceTitle: "E2E read failure notification",
+      createdAt: new Date().toISOString(),
+      readAt: null,
+      isRead: false,
+      destination: "/activity?jobId=00000000-0000-0000-0000-000000000007",
+    };
+    await page.route("**/api/notifications/unread-count*", async (route) => {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ unreadCount: 1 }) });
+    });
+    await page.route("**/api/notifications?*", async (route) => {
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({ items: [notification], page: 1, pageSize: 6, totalCount: 1, totalPages: 1, unreadCount: 1 }),
+      });
+    });
+    await page.route("**/api/notifications/*/read", async (route) => {
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "temporarily unavailable" }) });
+    });
+    await page.goto("/projects");
+
+    const bell = page.getByRole("button", { name: /notifications/i }).first();
+    await bell.click();
+    const panel = page.getByRole("dialog", { name: /notifications panel/i });
+    await expect(panel).toBeVisible();
+    await panel.getByRole("link", { name: /E2E read failure notification/i }).click();
+    await expect(panel).toBeVisible();
+    await expect(panel.getByRole("alert")).toContainText(/notification could not be updated/i);
+    await expect(page).toHaveURL(/\/projects/);
+  });
 });
