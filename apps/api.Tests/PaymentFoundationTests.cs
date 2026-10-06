@@ -29,6 +29,52 @@ public sealed class PaymentFoundationTests
     }
 
     [Fact]
+    public async Task Webhook_is_rejected_without_persisting_when_customer_charging_is_disabled()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        var provider = new FakePaymentProvider(new ProviderPaymentEvent(
+            "evt-disabled", PaymentEventType.PaymentSucceeded, null, null, null, null, "pay-disabled", 9, "USD",
+            DateTime.UtcNow, "Payment succeeded.", null, null, null, false));
+        var service = new PaymentWebhookService(
+            db,
+            [provider],
+            NewLifecycle(db),
+            Options.Create(new BillingOptions { CustomerChargingEnabled = false, Provider = "fake" }),
+            NullLogger<PaymentWebhookService>.Instance);
+
+        var result = await service.ProcessAsync("fake", "{\"event\":\"evt-disabled\"}", "invalid");
+
+        Assert.False(result.Accepted);
+        Assert.Equal("PAYMENT_WEBHOOK_DISABLED", result.Code);
+        Assert.Empty(await db.PaymentEvents.ToListAsync());
+    }
+
+    [Fact]
+    public async Task Webhook_rejects_a_provider_that_is_not_the_selected_launch_provider()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        var provider = new FakePaymentProvider(new ProviderPaymentEvent(
+            "evt-unselected", PaymentEventType.PaymentSucceeded, null, null, null, null, "pay-unselected", 9, "USD",
+            DateTime.UtcNow, "Payment succeeded.", null, null, null, false));
+        var service = new PaymentWebhookService(
+            db,
+            [provider],
+            NewLifecycle(db),
+            Options.Create(new BillingOptions { CustomerChargingEnabled = true, Provider = "other-provider" }),
+            NullLogger<PaymentWebhookService>.Instance);
+
+        var result = await service.ProcessAsync("fake", "{\"event\":\"evt-unselected\"}", "valid");
+
+        Assert.False(result.Accepted);
+        Assert.Equal("PAYMENT_PROVIDER_UNCONFIGURED", result.Code);
+        Assert.Empty(await db.PaymentEvents.ToListAsync());
+    }
+
+    [Fact]
     public async Task Payment_attempts_are_idempotent_and_failed_subscription_becomes_past_due()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
@@ -200,7 +246,7 @@ public sealed class PaymentFoundationTests
         var attempt = await lifecycle.RecordPaymentAttemptAsync(workspace.Id, "fake", "attempt:webhook", 9, "USD");
         var providerEvent = new ProviderPaymentEvent("evt-1", PaymentEventType.PaymentSucceeded, workspace.Id, null, null, attempt.Id, "pay-1", 9, "USD", DateTime.UtcNow, "Payment succeeded.", null, null, null, false);
         var provider = new FakePaymentProvider(providerEvent);
-        var service = new PaymentWebhookService(db, [provider], lifecycle, NullLogger<PaymentWebhookService>.Instance);
+        var service = new PaymentWebhookService(db, [provider], lifecycle, Options.Create(new BillingOptions { CustomerChargingEnabled = true, Provider = "fake" }), NullLogger<PaymentWebhookService>.Instance);
 
         var first = await service.ProcessAsync("fake", "{\"event\":\"evt-1\"}", "valid");
         var duplicate = await service.ProcessAsync("fake", "{\"event\":\"evt-1\"}", "valid");
@@ -227,7 +273,7 @@ public sealed class PaymentFoundationTests
         var providerEvent = new ProviderPaymentEvent(
             "evt-reference-conflict", PaymentEventType.PaymentSucceeded, workspace.Id, null, null, attempt.Id, "pay-2", 9, "USD",
             DateTime.UtcNow, "Payment succeeded.", null, null, null, false);
-        var service = new PaymentWebhookService(db, [new FakePaymentProvider(providerEvent)], lifecycle, NullLogger<PaymentWebhookService>.Instance);
+        var service = new PaymentWebhookService(db, [new FakePaymentProvider(providerEvent)], lifecycle, Options.Create(new BillingOptions { CustomerChargingEnabled = true, Provider = "fake" }), NullLogger<PaymentWebhookService>.Instance);
 
         var result = await service.ProcessAsync("fake", "{\"event\":\"evt-reference-conflict\"}", "valid");
 
@@ -253,7 +299,7 @@ public sealed class PaymentFoundationTests
         var providerEvent = new ProviderPaymentEvent(
             "evt-provider-conflict", PaymentEventType.PaymentSucceeded, workspace.Id, null, null, attempt.Id, "pay-1", 9, "USD",
             DateTime.UtcNow, "Payment succeeded.", null, null, null, false);
-        var service = new PaymentWebhookService(db, [new FakePaymentProvider(providerEvent)], lifecycle, NullLogger<PaymentWebhookService>.Instance);
+        var service = new PaymentWebhookService(db, [new FakePaymentProvider(providerEvent)], lifecycle, Options.Create(new BillingOptions { CustomerChargingEnabled = true, Provider = "fake" }), NullLogger<PaymentWebhookService>.Instance);
 
         var result = await service.ProcessAsync("fake", "{\"event\":\"evt-provider-conflict\"}", "valid");
 
@@ -272,7 +318,7 @@ public sealed class PaymentFoundationTests
         var providerEvent = new ProviderPaymentEvent(
             "evt-incomplete-payment", PaymentEventType.PaymentSucceeded, null, null, null, null, "pay-1", 9, "USD",
             DateTime.UtcNow, "Payment succeeded.", null, null, null, false);
-        var service = new PaymentWebhookService(db, [new FakePaymentProvider(providerEvent)], NewLifecycle(db), NullLogger<PaymentWebhookService>.Instance);
+        var service = new PaymentWebhookService(db, [new FakePaymentProvider(providerEvent)], NewLifecycle(db), Options.Create(new BillingOptions { CustomerChargingEnabled = true, Provider = "fake" }), NullLogger<PaymentWebhookService>.Instance);
 
         var result = await service.ProcessAsync("fake", "{\"event\":\"evt-incomplete-payment\"}", "valid");
 
@@ -308,7 +354,7 @@ public sealed class PaymentFoundationTests
         var providerEvent = new ProviderPaymentEvent(
             "evt-renewal-atomicity", PaymentEventType.RenewalSucceeded, workspace.Id, subscription.Id, null, attempt.Id, "pay-atomicity", 9, "USD",
             DateTime.UtcNow, "Renewal succeeded.", null, periodStart, periodEnd, false);
-        var service = new PaymentWebhookService(db, [new FakePaymentProvider(providerEvent)], lifecycle, NullLogger<PaymentWebhookService>.Instance);
+        var service = new PaymentWebhookService(db, [new FakePaymentProvider(providerEvent)], lifecycle, Options.Create(new BillingOptions { CustomerChargingEnabled = true, Provider = "fake" }), NullLogger<PaymentWebhookService>.Instance);
 
         var result = await service.ProcessAsync("fake", "{\"event\":\"evt-renewal-atomicity\"}", "valid");
 

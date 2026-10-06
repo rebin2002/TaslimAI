@@ -438,11 +438,29 @@ public sealed class PaymentWebhookService(
     TaslimDbContext db,
     IEnumerable<IPaymentProvider> providers,
     IPaymentLifecycleService lifecycle,
+    IOptions<BillingOptions> options,
     ILogger<PaymentWebhookService> logger) : IPaymentWebhookService
 {
+    private readonly BillingOptions settings = options.Value;
+
     public async Task<WebhookProcessingResult> ProcessAsync(string providerKey, string rawPayload, string signature, CancellationToken cancellationToken = default)
     {
-        var provider = providers.SingleOrDefault(item => item.Key.Equals(providerKey, StringComparison.OrdinalIgnoreCase));
+        var configuredProvider = settings.Provider?.Trim();
+        if (!settings.CustomerChargingEnabled)
+        {
+            logger.LogInformation("Payment webhook rejected because customer charging is disabled. ProviderKey={ProviderKey}", providerKey);
+            return new(false, false, "PAYMENT_WEBHOOK_DISABLED", null, "Customer charging is intentionally disabled.");
+        }
+
+        if (string.IsNullOrWhiteSpace(configuredProvider)
+            || string.Equals(configuredProvider, "unconfigured", StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(configuredProvider, providerKey.Trim(), StringComparison.OrdinalIgnoreCase))
+        {
+            logger.LogWarning("Payment webhook rejected because the provider is not the selected launch provider. ProviderKey={ProviderKey}; ConfiguredProvider={ConfiguredProvider}", providerKey, configuredProvider ?? "none");
+            return new(false, false, "PAYMENT_PROVIDER_UNCONFIGURED", null, "The payment provider is not configured.");
+        }
+
+        var provider = providers.SingleOrDefault(item => item.Key.Equals(configuredProvider, StringComparison.OrdinalIgnoreCase));
         if (provider is null)
         {
             logger.LogWarning("Payment webhook rejected because provider is unconfigured. ProviderKey={ProviderKey}", providerKey);
