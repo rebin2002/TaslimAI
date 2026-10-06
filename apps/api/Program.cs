@@ -548,10 +548,12 @@ static IResult LivenessEndpoint(OperationalHealthService health, HttpContext con
 app.MapGet("/health", LivenessEndpoint)
     .WithName("Health")
     .WithTags("System")
+    .RequireRateLimiting(RateLimiting.Health)
     .AllowAnonymous();
 app.MapGet("/health/live", LivenessEndpoint)
     .WithName("HealthLive")
     .WithTags("System")
+    .RequireRateLimiting(RateLimiting.Health)
     .AllowAnonymous();
 static async Task<IResult> ReadinessEndpoint(OperationalHealthService health, HttpContext context, CancellationToken cancellationToken)
 {
@@ -562,10 +564,12 @@ static async Task<IResult> ReadinessEndpoint(OperationalHealthService health, Ht
 app.MapGet("/health/ready", ReadinessEndpoint)
     .WithName("HealthReady")
     .WithTags("System")
+    .RequireRateLimiting(RateLimiting.Health)
     .AllowAnonymous();
 app.MapGet("/readiness", ReadinessEndpoint)
     .WithName("Readiness")
     .WithTags("System")
+    .RequireRateLimiting(RateLimiting.Health)
     .AllowAnonymous();
 app.MapControllers();
 
