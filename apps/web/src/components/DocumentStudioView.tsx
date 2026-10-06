@@ -27,6 +27,7 @@ import {
   displayDocumentProgress,
   documentPresentationState,
   isDocumentSourceReady,
+  isDocumentJobUnavailableError,
   isRestorableDocumentJob,
   nextDocumentPollDelay,
   parseDocumentJobResult,
@@ -224,8 +225,18 @@ export function DocumentStudioView() {
         setCurrent(next);
         setError("");
         setPollRetry(0);
-      } catch {
+      } catch (cause) {
         if (!active || workspaceGeneration.current !== workspaceVersion || current.id !== jobId) return;
+        if (isDocumentJobUnavailableError(cause)) {
+          clearDocumentActiveJobId(current.workspaceId);
+          restoreJobId.current = null;
+          activeJobId.current = null;
+          activeAssetId.current = null;
+          setCurrent(null);
+          setPollRetry(0);
+          setError("");
+          return;
+        }
         setError(t("document.pollError"));
         // Keep polling after a transient request failure; the current job remains the source of truth.
         setPollRetry((attempt) => attempt + 1);

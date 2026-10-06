@@ -5,6 +5,7 @@ import {
   documentActiveJobStorageKey,
   displayDocumentProgress,
   documentPresentationState,
+  isDocumentJobUnavailableError,
   isDocumentJob,
   isDocumentSourceReady,
   isSafeDocumentIdentifier,
@@ -46,6 +47,14 @@ describe("Document Studio state", () => {
     expect(nextDocumentPollDelay(job("Running"), 1)).toBe(1400);
     expect(nextDocumentPollDelay(job("Running"), 10)).toBe(2800);
     expect(nextDocumentPollDelay(job("Succeeded"), 0)).toBeNull();
+  });
+
+  it("treats missing or inaccessible jobs as unrecoverable polling state", () => {
+    expect(isDocumentJobUnavailableError({ status: 403 })).toBe(true);
+    expect(isDocumentJobUnavailableError({ status: 404 })).toBe(true);
+    expect(isDocumentJobUnavailableError({ status: 408 })).toBe(false);
+    expect(isDocumentJobUnavailableError(new Error("network failure"))).toBe(false);
+    expect(isDocumentJobUnavailableError(null)).toBe(false);
   });
 
   it("validates the restored job type and keeps active job storage workspace-scoped", () => {
