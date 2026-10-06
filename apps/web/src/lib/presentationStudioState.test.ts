@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GenerationJob } from "./api";
-import { clearPresentationActiveJobId, displayPresentationProgress, hasPresentationExport, isPresentationSourceReady, isPresentationJob, isRestorablePresentationJob, parsePresentationJobResult, persistPresentationActiveJobId, presentationActiveJobStorageKey, presentationStudioState, readPresentationActiveJobId, shouldResetPresentationWorkspaceState } from "./presentationStudioState";
+import { clearPresentationActiveJobId, clearPresentationDraftState, displayPresentationProgress, emptyPresentationDraftState, hasPresentationExport, isPresentationSourceReady, isPresentationJob, isRestorablePresentationJob, loadPresentationDraftState, parsePresentationDraftState, parsePresentationJobResult, persistPresentationActiveJobId, persistPresentationDraftState, presentationActiveJobStorageKey, presentationDraftStorageKey, presentationStudioState, readPresentationActiveJobId, serializePresentationDraftState, shouldResetPresentationWorkspaceState } from "./presentationStudioState";
 
 const job = (status: GenerationJob["status"], resultJson: string | null = null, progressPercent = 70): GenerationJob => ({ id: "job-1", workspaceId: "workspace-1", projectId: null, jobType: "presentation.generate", status, title: "Deck", progressPercent, resultJson, errorCode: null, errorMessage: null, cancellationRequested: false, createdAt: "2026-01-01", queuedAt: null, startedAt: null, completedAt: null, failedAt: null, cancelledAt: null, outputs: [] });
 afterEach(() => vi.unstubAllGlobals());
@@ -37,5 +37,42 @@ describe("presentationStudioState", () => {
     expect(readPresentationActiveJobId("workspace-2")).toBeNull();
     clearPresentationActiveJobId("workspace-1");
     expect(readPresentationActiveJobId("workspace-1")).toBeNull();
+  });
+  it("recovers a bounded draft and rejects malformed or unsupported browser data", () => {
+    const state = parsePresentationDraftState(JSON.stringify({
+      projectId: "project-1",
+      selected: ["source-1", "source-1", "source-2", "source-3", "source-4", "source-5", "source-6", 7],
+      title: "x".repeat(200),
+      description: "brief",
+      presentationType: "not-supported",
+      length: "detailed",
+      tone: "formal",
+      language: "ar",
+      audience: "audience",
+      includeAgenda: false,
+      includeClosingNextSteps: "no",
+      extra: "ignored",
+    }));
+    expect(state).toMatchObject({ projectId: "project-1", selected: ["source-1", "source-2", "source-3", "source-4", "source-5"], title: "x".repeat(160), presentationType: "auto", length: "detailed", tone: "formal", language: "ar", includeAgenda: false, includeClosingNextSteps: true });
+    expect(parsePresentationDraftState("not-json")).toEqual(emptyPresentationDraftState());
+    expect(parsePresentationDraftState(JSON.stringify({ selected: {}, title: 42 }))).toEqual(emptyPresentationDraftState());
+  });
+  it("persists only the supported draft shape and isolates workspaces", () => {
+    const values = new Map<string, string>();
+    const browserStorage = {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => { values.set(key, value); },
+      removeItem: (key: string) => { values.delete(key); },
+    };
+    const first = { ...emptyPresentationDraftState(), title: "Launch", description: "Plan", selected: ["source-1"], includeAgenda: false };
+    persistPresentationDraftState("workspace-a", first, browserStorage);
+    persistPresentationDraftState("workspace-b", { ...emptyPresentationDraftState(), title: "Other" }, browserStorage);
+    expect(presentationDraftStorageKey("workspace-a")).not.toBe(presentationDraftStorageKey("workspace-b"));
+    expect(loadPresentationDraftState("workspace-a", browserStorage)).toMatchObject(first);
+    expect(loadPresentationDraftState("workspace-b", browserStorage).title).toBe("Other");
+    expect(JSON.parse(serializePresentationDraftState({ ...first, extra: "not persisted" } as typeof first & { extra: string })).extra).toBeUndefined();
+    clearPresentationDraftState("workspace-a", browserStorage);
+    expect(loadPresentationDraftState("workspace-a", browserStorage)).toEqual(emptyPresentationDraftState());
+    expect(loadPresentationDraftState("workspace-b", browserStorage).title).toBe("Other");
   });
 });

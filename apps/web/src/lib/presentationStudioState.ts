@@ -2,6 +2,106 @@ import type { GenerationJob, PresentationJobResult } from "./api";
 
 const terminalStatuses = new Set<GenerationJob["status"]>(["Succeeded", "Failed", "Cancelled"]);
 const activeJobStoragePrefix = "taslim:presentation-generation:";
+const draftStoragePrefix = "taslim:presentation-draft:";
+const presentationTypes = new Set(["auto", "business", "company_profile", "sales", "investor", "proposal", "training", "project_update", "report", "educational", "general"]);
+const presentationLengths = new Set(["short", "standard", "detailed"]);
+const presentationTones = new Set(["professional", "formal", "friendly", "persuasive", "neutral"]);
+const presentationLanguages = new Set(["auto", "en", "ar", "ku"]);
+type StorageLike = Pick<Storage, "getItem" | "setItem" | "removeItem">;
+export type PresentationDraftState = {
+  projectId: string;
+  selected: string[];
+  title: string;
+  description: string;
+  presentationType: string;
+  length: string;
+  tone: string;
+  language: string;
+  audience: string;
+  brandCompany: string;
+  additionalInstructions: string;
+  includeAgenda: boolean;
+  includeClosingNextSteps: boolean;
+};
+export function emptyPresentationDraftState(): PresentationDraftState {
+  return {
+    projectId: "",
+    selected: [],
+    title: "",
+    description: "",
+    presentationType: "auto",
+    length: "standard",
+    tone: "professional",
+    language: "auto",
+    audience: "",
+    brandCompany: "",
+    additionalInstructions: "",
+    includeAgenda: true,
+    includeClosingNextSteps: true,
+  };
+}
+export function presentationDraftStorageKey(workspaceId: string) { return `${draftStoragePrefix}${encodeURIComponent(workspaceId)}`; }
+function boundedString(value: unknown, maxLength: number) { return typeof value === "string" ? value.slice(0, maxLength) : ""; }
+function safeIdentifier(value: unknown) { return typeof value === "string" && value.trim().length > 0 && value.length <= 100 ? value : ""; }
+export function parsePresentationDraftState(raw: string | null): PresentationDraftState {
+  const fallback = emptyPresentationDraftState();
+  if (!raw) return fallback;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!isRecord(parsed)) return fallback;
+    const selected = Array.isArray(parsed.selected) ? [...new Set(parsed.selected.map(safeIdentifier).filter(Boolean))].slice(0, 5) : [];
+    return {
+      projectId: safeIdentifier(parsed.projectId),
+      selected,
+      title: boundedString(parsed.title, 160),
+      description: boundedString(parsed.description, 8_000),
+      presentationType: typeof parsed.presentationType === "string" && presentationTypes.has(parsed.presentationType) ? parsed.presentationType : fallback.presentationType,
+      length: typeof parsed.length === "string" && presentationLengths.has(parsed.length) ? parsed.length : fallback.length,
+      tone: typeof parsed.tone === "string" && presentationTones.has(parsed.tone) ? parsed.tone : fallback.tone,
+      language: typeof parsed.language === "string" && presentationLanguages.has(parsed.language) ? parsed.language : fallback.language,
+      audience: boundedString(parsed.audience, 400),
+      brandCompany: boundedString(parsed.brandCompany, 160),
+      additionalInstructions: boundedString(parsed.additionalInstructions, 3_000),
+      includeAgenda: parsed.includeAgenda === false ? false : fallback.includeAgenda,
+      includeClosingNextSteps: parsed.includeClosingNextSteps === false ? false : fallback.includeClosingNextSteps,
+    };
+  } catch {
+    return fallback;
+  }
+}
+export function serializePresentationDraftState(state: PresentationDraftState) {
+  return JSON.stringify({
+    projectId: safeIdentifier(state.projectId),
+    selected: [...new Set(state.selected.map(safeIdentifier).filter(Boolean))].slice(0, 5),
+    title: boundedString(state.title, 160),
+    description: boundedString(state.description, 8_000),
+    presentationType: presentationTypes.has(state.presentationType) ? state.presentationType : "auto",
+    length: presentationLengths.has(state.length) ? state.length : "standard",
+    tone: presentationTones.has(state.tone) ? state.tone : "professional",
+    language: presentationLanguages.has(state.language) ? state.language : "auto",
+    audience: boundedString(state.audience, 400),
+    brandCompany: boundedString(state.brandCompany, 160),
+    additionalInstructions: boundedString(state.additionalInstructions, 3_000),
+    includeAgenda: state.includeAgenda === true,
+    includeClosingNextSteps: state.includeClosingNextSteps === true,
+  });
+}
+function browserStorage(): StorageLike | undefined {
+  if (typeof window === "undefined") return undefined;
+  try { return window.localStorage; } catch { return undefined; }
+}
+export function loadPresentationDraftState(workspaceId: string, storage: StorageLike | undefined = browserStorage()): PresentationDraftState {
+  if (!storage) return emptyPresentationDraftState();
+  try { return parsePresentationDraftState(storage.getItem(presentationDraftStorageKey(workspaceId))); } catch { return emptyPresentationDraftState(); }
+}
+export function persistPresentationDraftState(workspaceId: string, state: PresentationDraftState, storage: StorageLike | undefined = browserStorage()): void {
+  if (!storage) return;
+  try { storage.setItem(presentationDraftStorageKey(workspaceId), serializePresentationDraftState(state)); } catch { /* Browser storage can be unavailable or full. */ }
+}
+export function clearPresentationDraftState(workspaceId: string, storage: StorageLike | undefined = browserStorage()): void {
+  if (!storage) return;
+  try { storage.removeItem(presentationDraftStorageKey(workspaceId)); } catch { /* Clearing is best effort. */ }
+}
 export type PresentationStudioState = "compose" | "pending" | "queued" | "running" | "succeeded" | "completed-unavailable" | "failed" | "cancelled";
 
 export function presentationActiveJobStorageKey(workspaceId: string) { return `${activeJobStoragePrefix}${workspaceId}`; }
