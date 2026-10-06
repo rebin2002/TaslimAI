@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createSseParser, SseProtocolError, type TaslimSseEvent } from "./sse";
+import { createSseParser, SSE_MAX_EVENT_CHARS, SseProtocolError, type TaslimSseEvent } from "./sse";
 
 function parse(chunks: string[]) {
   const events: TaslimSseEvent[] = [];
@@ -54,6 +54,22 @@ describe("Taslim SSE parser", () => {
 
   it("rejects malformed JSON instead of silently leaving generation active", () => {
     expect(() => parse(["event: message.completed\ndata: {bad}\n\n"])).toThrow(/Malformed JSON/);
+  });
+
+  it("rejects an oversized unterminated event before EOF", () => {
+    const parser = createSseParser(() => undefined);
+    expect(() => parser.push(`event: message.completed\ndata: ${"x".repeat(SSE_MAX_EVENT_CHARS)}`)).toThrow(/maximum size/);
+  });
+
+  it("rejects cumulative multiline data before JSON parsing", () => {
+    const parser = createSseParser(() => undefined);
+    parser.push("event: message.completed\n");
+    expect(() => parser.push(`data: ${"x".repeat(SSE_MAX_EVENT_CHARS / 2)}\ndata: ${"y".repeat(SSE_MAX_EVENT_CHARS / 2)}\n\n`)).toThrow(/maximum size/);
+  });
+
+  it("accepts a large event below the maximum size", () => {
+    const payload = JSON.stringify({ value: "x".repeat(SSE_MAX_EVENT_CHARS - 128) });
+    expect(() => parse([`event: message.completed\ndata: ${payload}\n\n`])).not.toThrow();
   });
 
   it("rejects a second terminal or post-terminal event", () => {
