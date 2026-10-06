@@ -890,6 +890,21 @@ public sealed class GenerationJobWorker(
         catch (JsonException) { return null; }
     }
 
+    private static int? ReadDurationSeconds(string? metadataJson)
+    {
+        if (string.IsNullOrWhiteSpace(metadataJson)) return null;
+        try
+        {
+            using var document = JsonDocument.Parse(metadataJson);
+            return document.RootElement.TryGetProperty("durationSeconds", out var value)
+                && value.TryGetInt32(out var duration)
+                && duration is > 0 and <= 3_600
+                ? duration
+                : null;
+        }
+        catch (JsonException) { return null; }
+    }
+
     private async Task ExecuteJobAsync(GenerationJob claimedJob, string workerId, int workerIndex, CancellationToken stoppingToken)
     {
         using var scope = scopeFactory.CreateScope();
@@ -1030,7 +1045,7 @@ public sealed class GenerationJobWorker(
                             }
                             else
                             {
-                                await movieExecutions.MarkReadyAsync(current.Id, claimedJob.ConcurrencyToken, publication?.Asset?.Id, publication?.CreatedFile?.Id, null, publication?.Output.MetadataJson, stoppingToken);
+                                await movieExecutions.MarkReadyAsync(current.Id, claimedJob.ConcurrencyToken, publication?.Asset?.Id, publication?.CreatedFile?.Id, ReadDurationSeconds(publication?.Output.MetadataJson), publication?.Output.MetadataJson, stoppingToken);
                             }
                         }
                         await usage.CompleteAsync(await usage.BeginAsync(current, cancellationToken: stoppingToken), result.Usage ?? new AiUsageMetadata("system", "unknown", null, null, null, 0m, 0m, 0, "completed", true), hasBillableAsset: true, cancellationToken: stoppingToken);
