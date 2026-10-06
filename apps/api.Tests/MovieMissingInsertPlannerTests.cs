@@ -56,6 +56,10 @@ public sealed class MovieMissingInsertPlannerTests
         Assert.True(result.RequiresApproval);
         Assert.False(result.CanonicalTimelineChanged);
         Assert.False(result.GenerationQueued);
+        Assert.NotNull(proposal.AnchorTakeId);
+        Assert.Null(proposal.AnchorSelectId);
+        Assert.NotNull(proposal.ContinuityAnchorJson);
+        Assert.NotNull(proposal.ScreenDirectionAnchorJson);
         Assert.True(result.Grounding.IsComplete);
         Assert.Equal(storySceneId, proposal.Grounding.StorySceneId);
         Assert.Equal("kit-hash-2", proposal.Grounding.ProductionKitHash);
