@@ -31,8 +31,10 @@ export function reduceChatStream(state: ChatStreamState, event: ChatStreamEvent)
   }
 
   if (event.type === "message.delta" && event.data.delta) {
-    const targetId = event.data.messageId ?? state.assistantId;
-    if (!targetId) return state;
+    // A delta is scoped to the assistant announced by message.started. Never
+    // let an omitted, stale, or malformed target mutate another visible row.
+    if (!state.assistantId || (event.data.messageId && event.data.messageId !== state.assistantId)) return state;
+    const targetId = state.assistantId;
     return {
       ...state,
       messages: state.messages.map(message => message.id === targetId
