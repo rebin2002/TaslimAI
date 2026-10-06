@@ -1274,6 +1274,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         if (!string.IsNullOrWhiteSpace(idempotencyKey))
         {
             var targetShotId = shot?.Id;
+            var normalizedIdempotencyKey = idempotencyKey.Trim();
             var existingClip = await db.MovieClips
                 .Include(item => item.GenerationJob)
                 .FirstOrDefaultAsync(item => item.MovieProjectId == movie.Id
@@ -1281,12 +1282,45 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                     && item.MovieShotId == targetShotId
                     && item.GenerationJob != null
                     && item.GenerationJob.CreatedByUserId == userId
-                    && item.GenerationJob.IdempotencyKey == idempotencyKey.Trim(), cancellationToken);
+                    && item.GenerationJob.IdempotencyKey == normalizedIdempotencyKey, cancellationToken);
             if (existingClip?.GenerationJob is not null)
                 return new MovieStudioGenerationResponse(
                     await GetAsync(userId, movie.Id, cancellationToken) ?? throw new InvalidOperationException("Movie project disappeared."),
                     GenerationJobContractMapper.ToMovieDto(existingClip.GenerationJob),
                     existingClip.Id);
+
+            // A concurrent request can observe the canonical job after its
+            // transaction commits but before the winning request links the clip.
+            // Resolve that state before building a new continuity snapshot or
+            // speculative clip; the clip id is part of the job input fingerprint.
+            var existingJob = await db.GenerationJobs.AsNoTracking()
+                .FirstOrDefaultAsync(item => item.CreatedByUserId == userId && item.IdempotencyKey == normalizedIdempotencyKey, cancellationToken);
+            if (existingJob is not null)
+            {
+                MovieGenerationInput? existingInput;
+                try { existingInput = JsonSerializer.Deserialize<MovieGenerationInput>(existingJob.InputJson); }
+                catch (JsonException) { existingInput = null; }
+                var requestedTitle = string.IsNullOrWhiteSpace(request.Title) ? movie.Title : request.Title.Trim();
+                if (existingInput is null
+                    || existingInput.MovieProjectId != movie.Id
+                    || existingInput.MovieSceneId != scene.Id
+                    || existingInput.MovieShotId != targetShotId
+                    || !string.Equals(existingJob.Title, requestedTitle, StringComparison.Ordinal))
+                    throw new GenerationJobValidationException("IDEMPOTENCY_KEY_REUSED", "This idempotency key was already used for a different generation request.");
+                var canonicalClip = await db.MovieClips.SingleOrDefaultAsync(item => item.Id == existingInput.MovieClipId && item.MovieProjectId == movie.Id, cancellationToken);
+                if (canonicalClip is null)
+                    throw new MovieStudioValidationException("The idempotent generation target is no longer available.");
+                if (canonicalClip.GenerationJobId is null)
+                {
+                    canonicalClip.GenerationJobId = existingJob.Id;
+                    canonicalClip.UpdatedAt = DateTime.UtcNow;
+                    await db.SaveChangesAsync(cancellationToken);
+                }
+                return new MovieStudioGenerationResponse(
+                    await GetAsync(userId, movie.Id, cancellationToken) ?? throw new InvalidOperationException("Movie project disappeared."),
+                    GenerationJobContractMapper.ToMovieDto(existingJob),
+                    canonicalClip.Id);
+            }
         }
         var description = shot?.Description ?? scene.Summary;
         var durationSeconds = Math.Clamp(shot?.DurationSeconds ?? scene.DurationSeconds ?? Math.Min(movie.DurationSeconds, 60), 1, 3600);
@@ -1336,8 +1370,11 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         clip.ContinuitySnapshotHash = continuitySnapshot.SnapshotHash;
         db.MovieClips.Add(clip);
         await db.SaveChangesAsync(cancellationToken);
-        var job = await jobs.CreateAsync(userId, new CreateGenerationJobRequest
+        GenerationJob job;
+        try
         {
+            job = await jobs.CreateAsync(userId, new CreateGenerationJobRequest
+            {
             WorkspaceId = movie.WorkspaceId,
             ProjectId = movie.ProjectId,
             JobType = shot is null ? GenerationJobTypes.MovieClipGenerate : GenerationJobTypes.MovieClipGenerate,
@@ -1361,7 +1398,62 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                 SceneSnapshot(scene),
                 shot is null ? null : ShotSnapshot(shot),
                 WorldContextJson: await WorldContextSnapshotAsync(movie.Id, scene.Id, shot?.Id, cancellationToken))),
-        }, cancellationToken, idempotencyKey);
+            }, cancellationToken, idempotencyKey);
+        }
+        catch (GenerationJobValidationException exception) when (exception.Code == "IDEMPOTENCY_KEY_REUSED" && !string.IsNullOrWhiteSpace(idempotencyKey))
+        {
+            var canonicalJob = await db.GenerationJobs.AsNoTracking()
+                .FirstOrDefaultAsync(item => item.CreatedByUserId == userId && item.IdempotencyKey == idempotencyKey.Trim(), cancellationToken);
+            MovieGenerationInput? canonicalInput = null;
+            if (canonicalJob is not null)
+            {
+                try { canonicalInput = JsonSerializer.Deserialize<MovieGenerationInput>(canonicalJob.InputJson); }
+                catch (JsonException) { }
+            }
+            var requestedTitle = string.IsNullOrWhiteSpace(request.Title) ? movie.Title : request.Title.Trim();
+            if (canonicalJob is null
+                || canonicalInput is null
+                || canonicalInput.MovieProjectId != movie.Id
+                || canonicalInput.MovieSceneId != scene.Id
+                || canonicalInput.MovieShotId != shot?.Id
+                || !string.Equals(canonicalJob.Title, requestedTitle, StringComparison.Ordinal))
+                throw;
+            var canonicalClip = await db.MovieClips.SingleOrDefaultAsync(item => item.Id == canonicalInput.MovieClipId && item.MovieProjectId == movie.Id, cancellationToken);
+            if (canonicalClip is null)
+                throw new MovieStudioValidationException("The idempotent generation target is no longer available.");
+            if (canonicalClip.GenerationJobId is null)
+                canonicalClip.GenerationJobId = canonicalJob.Id;
+            db.MovieClips.Remove(clip);
+            await db.SaveChangesAsync(cancellationToken);
+            return new MovieStudioGenerationResponse(
+                await GetAsync(userId, movie.Id, cancellationToken) ?? throw new InvalidOperationException("Movie project disappeared."),
+                GenerationJobContractMapper.ToMovieDto(canonicalJob),
+                canonicalClip.Id);
+        }
+        // The clip is persisted before the job because the job validator needs a
+        // durable target. When two identical requests cross that boundary, the
+        // generation service correctly returns the winner's job to the loser.
+        // Reconcile the loser back to the winner's clip instead of linking the
+        // same job to a second clip row.
+        if (MovieStudioIdempotency.TryGetMovieClipId(job.InputJson, out var canonicalClipId) && canonicalClipId != clip.Id)
+        {
+            var canonicalClip = await db.MovieClips.SingleOrDefaultAsync(
+                item => item.Id == canonicalClipId && item.MovieProjectId == movie.Id,
+                cancellationToken);
+            if (canonicalClip is null)
+                throw new MovieStudioValidationException("The idempotent generation target is no longer available.");
+            if (canonicalClip.GenerationJobId is null)
+            {
+                canonicalClip.GenerationJobId = job.Id;
+                canonicalClip.UpdatedAt = DateTime.UtcNow;
+            }
+            db.MovieClips.Remove(clip);
+            await db.SaveChangesAsync(cancellationToken);
+            return new MovieStudioGenerationResponse(
+                await GetAsync(userId, movie.Id, cancellationToken) ?? throw new InvalidOperationException("Movie project disappeared."),
+                GenerationJobContractMapper.ToMovieDto(job),
+                canonicalClip.Id);
+        }
         // CreateAsync queues immediately; the worker may claim the job before this
         // context links the clip. Do not keep a stale tracked job row in this save.
         db.Entry(job).State = EntityState.Detached;
@@ -1821,6 +1913,25 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
     };
 }
 
+internal static class MovieStudioIdempotency
+{
+    internal static bool TryGetMovieClipId(string? inputJson, out Guid clipId)
+    {
+        clipId = Guid.Empty;
+        if (string.IsNullOrWhiteSpace(inputJson)) return false;
+        try
+        {
+            var input = JsonSerializer.Deserialize<MovieGenerationInput>(inputJson);
+            if (input is null || input.MovieClipId == Guid.Empty) return false;
+            clipId = input.MovieClipId;
+            return true;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+}
 public sealed class MovieStudioValidationException(string message) : Exception(message);
 /// <summary>
 /// Raised when the shared generation cost guardrail refuses to queue a paid movie
