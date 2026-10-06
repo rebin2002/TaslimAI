@@ -41,6 +41,11 @@ public interface IImageGenerationProviderCapabilities
     ImageGenerationCapabilities Capabilities { get; }
 }
 
+public interface IImageGenerationProviderReadiness
+{
+    bool IsAvailable { get; }
+}
+
 public interface IImageGenerationProvider
 {
     string Key { get; }
@@ -74,7 +79,7 @@ public sealed class OpenAiImageGenerationProvider(
     HttpClient httpClient,
     IOptions<AiOptions> aiOptions,
     IOptions<ImageGenerationOptions> imageOptions,
-    ILogger<OpenAiImageGenerationProvider> logger) : IImageGenerationProvider, IImageGenerationProviderCapabilities
+    ILogger<OpenAiImageGenerationProvider> logger) : IImageGenerationProvider, IImageGenerationProviderCapabilities, IImageGenerationProviderReadiness
 {
     private static readonly ImageGenerationCapabilities ProviderCapabilities = new(
         new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -96,6 +101,10 @@ public sealed class OpenAiImageGenerationProvider(
     private readonly ImageGenerationOptions settings = imageOptions.Value;
 
     public string Key => "openai";
+    public bool IsAvailable => settings.Enabled
+        && string.Equals(settings.ProviderKey, Key, StringComparison.OrdinalIgnoreCase)
+        && aiSettings.OpenAI.Enabled
+        && !string.IsNullOrWhiteSpace(aiSettings.OpenAI.ApiKey);
     public ImageGenerationCapabilities Capabilities => ProviderCapabilities;
 
     public async Task<ImageProviderResult> GenerateAsync(
@@ -103,8 +112,7 @@ public sealed class OpenAiImageGenerationProvider(
         ImagePromptBuildResult prompt,
         CancellationToken cancellationToken = default)
     {
-        if (!settings.Enabled || !string.Equals(settings.ProviderKey, Key, StringComparison.OrdinalIgnoreCase)
-            || !aiSettings.OpenAI.Enabled || string.IsNullOrWhiteSpace(aiSettings.OpenAI.ApiKey))
+        if (!IsAvailable)
             throw new ImageProviderUnavailableException();
 
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);

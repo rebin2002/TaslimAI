@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Taslim.Api.Contracts;
@@ -10,15 +11,31 @@ using Xunit;
 
 namespace Taslim.Api.Tests;
 
-public sealed class ImageGenerationAvailabilityTests : IClassFixture<GenerationJobsApiFactory>
+public sealed class ImageProviderUnavailableApiFactory : GenerationJobsApiFactory
+{
+    protected override void ConfigureWebHost(IWebHostBuilder builder)
+    {
+        base.ConfigureWebHost(builder);
+        builder.UseSetting("ImageGeneration:Enabled", "true");
+        builder.UseSetting("ImageGeneration:ProviderKey", "openai");
+        builder.UseSetting("Ai:OpenAI:Enabled", "false");
+        builder.UseSetting("Ai:OpenAI:ApiKey", string.Empty);
+    }
+}
+
+public sealed class ImageGenerationAvailabilityTests : IClassFixture<GenerationJobsApiFactory>, IClassFixture<ImageProviderUnavailableApiFactory>
 {
     private readonly GenerationJobsApiFactory factory;
+    private readonly ImageProviderUnavailableApiFactory providerUnavailableFactory;
 
-    public ImageGenerationAvailabilityTests(GenerationJobsApiFactory factory)
+    public ImageGenerationAvailabilityTests(GenerationJobsApiFactory factory, ImageProviderUnavailableApiFactory providerUnavailableFactory)
     {
         this.factory = factory;
+        this.providerUnavailableFactory = providerUnavailableFactory;
         using var scope = factory.Services.CreateScope();
         scope.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+        using var providerScope = providerUnavailableFactory.Services.CreateScope();
+        providerScope.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
     }
 
     [Fact]
@@ -40,6 +57,32 @@ public sealed class ImageGenerationAvailabilityTests : IClassFixture<GenerationJ
         Assert.Equal("IMAGE_STUDIO_UNAVAILABLE", body.GetProperty("error").GetProperty("code").GetString());
 
         using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.False(await db.GenerationJobs.AsNoTracking().AnyAsync(job =>
+            job.WorkspaceId == auth.PersonalWorkspace.Id && job.JobType == GenerationJobTypes.ImageGenerate));
+        Assert.False(await db.UsageTransactions.AsNoTracking().AnyAsync(transaction =>
+            transaction.WorkspaceId == auth.PersonalWorkspace.Id && transaction.Feature == UsageFeature.Image));
+    }
+
+    [Fact]
+    public async Task Unavailable_configured_provider_rejects_before_queueing_or_reserving_usage()
+    {
+        using var client = providerUnavailableFactory.CreateClient();
+        var auth = await Register(client, $"image-provider-unavailable-{Guid.NewGuid():N}@example.com");
+        var response = await SendWithCsrf(client, new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            description = "A product image should not be queued without a configured provider.",
+            style = "product",
+            aspectRatio = "square",
+            quality = "standard",
+        });
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(GenerationJobErrorCodes.ImageProviderUnavailable, body.GetProperty("error").GetProperty("code").GetString());
+
+        using var scope = providerUnavailableFactory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
         Assert.False(await db.GenerationJobs.AsNoTracking().AnyAsync(job =>
             job.WorkspaceId == auth.PersonalWorkspace.Id && job.JobType == GenerationJobTypes.ImageGenerate));
