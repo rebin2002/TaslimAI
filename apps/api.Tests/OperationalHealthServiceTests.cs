@@ -37,6 +37,29 @@ public sealed class OperationalHealthServiceTests
         Assert.True(storage.CancellationObserved);
     }
 
+    [Fact]
+    public async Task Readiness_redacts_unconfigured_storage_as_unavailable_for_public_contract()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var dbOptions = new DbContextOptionsBuilder<TaslimDbContext>()
+            .UseSqlite(connection)
+            .Options;
+        await using var db = new TaslimDbContext(dbOptions);
+        await db.Database.EnsureCreatedAsync();
+
+        var service = new OperationalHealthService(
+            db,
+            new UnconfiguredStorageService(),
+            Options.Create(new HealthOptions { StorageRequired = false, ProbeTimeoutSeconds = 1 }),
+            NullLogger<OperationalHealthService>.Instance);
+
+        var result = await service.ReadinessAsync("health-privacy-test", CancellationToken.None);
+
+        Assert.True(result.IsReady);
+        Assert.Equal("unavailable", result.Response.Checks.Single(check => check.Name == "storage").Status);
+    }
+
     private sealed class BlockingStorageService : IFileStorageService
     {
         public string ProviderKey => "test-storage";
@@ -59,5 +82,15 @@ public sealed class OperationalHealthServiceTests
                 throw;
             }
         }
+    }
+
+    private sealed class UnconfiguredStorageService : IFileStorageService
+    {
+        public string ProviderKey => "unconfigured";
+
+        public Task StoreAsync(string storageKey, Stream content, CancellationToken cancellationToken = default) => throw new FileStorageUnavailableException();
+        public Task<Stream?> OpenReadAsync(string storageKey, CancellationToken cancellationToken = default) => throw new FileStorageUnavailableException();
+        public Task DeleteAsync(string storageKey, CancellationToken cancellationToken = default) => throw new FileStorageUnavailableException();
+        public Task<bool> ExistsAsync(string storageKey, CancellationToken cancellationToken = default) => throw new FileStorageUnavailableException();
     }
 }
