@@ -27,7 +27,7 @@ import { useLocale } from "@/components/LocaleProvider";
 import { useSearchParams } from "next/navigation";
 import { ApiError, api, type Asset, type GenerationJob, type ImageGenerationInput, type Project } from "@/lib/api";
 import { localizedImageErrorMessage } from "@/lib/imageStudioErrors";
-import { canCancelImageJob, clearImageActiveJobId, isRestorableImageJob, nextImagePollDelay, parseImageJobResult, persistImageActiveJobId, readImageActiveJobId, shouldPollImageJob, shouldResetImageWorkspaceState } from "@/lib/imageStudioState";
+import { canCancelImageJob, clearImageActiveJobId, isRestorableImageJob, nextImagePollDelay, parseImageJobResult, persistImageActiveJobId, readImageActiveJobId, shouldClearImageJobAfterPollError, shouldPollImageJob, shouldResetImageWorkspaceState } from "@/lib/imageStudioState";
 
 const styles = ["auto", "photorealistic", "product", "illustration", "3d", "minimal", "poster", "social_media"] as const;
 const aspects = ["square", "portrait", "landscape"] as const;
@@ -156,7 +156,8 @@ export function ImageStudioView() {
   }, [workspace, current]);
 
   useEffect(() => {
-    if (!current || !shouldPollImageJob(current)) return;
+    const workspaceId = workspace?.id;
+    if (!workspaceId || !current || !shouldPollImageJob(current)) return;
     let active = true;
     const jobId = current.id;
     const workspaceVersion = workspaceGeneration.current;
@@ -170,6 +171,14 @@ export function ImageStudioView() {
         }
       } catch (caught) {
         if (active && workspaceGeneration.current === workspaceVersion && current.id === jobId) {
+          if (caught instanceof ApiError && shouldClearImageJobAfterPollError(caught.status)) {
+            clearImageActiveJobId(workspaceId);
+            restoreJobId.current = null;
+            setCurrent(null);
+            setPollRetry(0);
+            setError(localizedImageErrorMessage(caught.code, t, "image.pollError"));
+            return;
+          }
           setPollRetry((attempt) => attempt + 1);
           setError(localizedImageErrorMessage(caught instanceof ApiError ? caught.code : null, t, "image.pollError"));
         }
