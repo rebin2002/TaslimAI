@@ -310,12 +310,11 @@ public sealed class ImageGenerationTests : IClassFixture<ImageGenerationApiFacto
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 }
 
-internal sealed class DeterministicImageProvider : IImageGenerationProvider
+internal sealed class DeterministicImageProvider : IImageGenerationProvider, IImageGenerationProviderReadiness
 {
     private static readonly byte[] Png = Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=");
-
     public string Key => "openai";
-
+    public bool IsAvailable => true;
     public async Task<ImageProviderResult> GenerateAsync(ImageGenerationInput request, ImagePromptBuildResult prompt, CancellationToken cancellationToken = default)
     {
         await Task.Delay(30, cancellationToken);

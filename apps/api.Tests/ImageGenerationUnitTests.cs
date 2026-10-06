@@ -224,9 +224,10 @@ public sealed class ImageGenerationUnitTests
         Options.Create(new ImageGenerationOptions { Enabled = true, ProviderKey = "openai", Model = "gpt-image-2.5-sunburst", ProviderTimeoutSeconds = timeoutSeconds }),
         NullLogger<OpenAiImageGenerationProvider>.Instance);
 
-    private sealed class InvalidImageProvider : IImageGenerationProvider
+    private sealed class InvalidImageProvider : IImageGenerationProvider, IImageGenerationProviderReadiness
     {
         public string Key => "openai";
+        public bool IsAvailable => true;
         public Task<ImageProviderResult> GenerateAsync(ImageGenerationInput request, ImagePromptBuildResult prompt, CancellationToken cancellationToken = default) =>
             Task.FromResult(new ImageProviderResult("not-an-image"u8.ToArray(), "text/plain", "txt", null, null, new ImageProviderUsage(null, null, null, null, 0m)));
     }

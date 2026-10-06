@@ -80,9 +80,10 @@ public sealed class ImageGenerationFailureTests : IClassFixture<ImageGenerationF
     }
 }
 
-internal sealed class SafetyRefusingImageProvider : IImageGenerationProvider
+internal sealed class SafetyRefusingImageProvider : IImageGenerationProvider, IImageGenerationProviderReadiness
 {
     public string Key => "openai";
+    public bool IsAvailable => true;
 
     public Task<ImageProviderResult> GenerateAsync(ImageGenerationInput request, ImagePromptBuildResult prompt, CancellationToken cancellationToken = default) =>
         throw new ImageProviderSafetyException();
