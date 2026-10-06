@@ -168,14 +168,12 @@ public sealed class DocumentGenerationJobHandler(
                 index == 0 ? new GeneratedAssetDescriptor(input.Title, generated.Draft.Summary, AssetTypes.Document, metadata) : null));
         }
         progress.Report(90);
-        var result = JsonSerializer.Serialize(new
-        {
-            documentType = AssetTypes.Document,
-            title = generated.Draft.Title,
-            language = input.Language,
-            summary = generated.Draft.Summary,
-            sections = generated.Draft.Sections,
-        });
+        var result = DocumentGenerationContractMapper.SerializeResult(
+            AssetTypes.Document,
+            generated.Draft.Title,
+            input.Language,
+            generated.Draft.Summary,
+            generated.Draft.Sections);
         progress.Report(100);
         return new GenerationHandlerResult(result, outputs, generated.Usage);
     }
