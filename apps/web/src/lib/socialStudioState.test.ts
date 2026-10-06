@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GenerationJob } from "./api";
 import { clearSocialActiveJobId, clearSocialDraft, displaySocialProgress, formatSocialPostForCopy, isSocialJobForWorkspace, isSocialSourceReady, nextSocialRestoreDelay, normalizeSocialPreviewPlatform, parseSocialJobResult, persistSocialActiveJobId, persistSocialDraft, readSocialActiveJobId, readSocialDraft, socialActiveJobStorageKey, socialDraftStorageKey, socialStudioState } from "./socialStudioState";
@@ -69,5 +70,13 @@ describe("socialStudioState", () => {
   it("ignores malformed draft storage instead of breaking the studio", () => {
     vi.stubGlobal("window", { sessionStorage: { getItem: () => "{not-json", setItem: vi.fn(), removeItem: vi.fn() } });
     expect(readSocialDraft("workspace-1")).toBeNull();
+  });
+  it("keeps generated drafts out of broad live announcements", () => {
+    const source = readFileSync(new URL("../components/SocialStudioView.tsx", import.meta.url), "utf8");
+    expect(source).toContain('role="status" aria-live="polite" aria-atomic="true"');
+    expect(source).toContain('aria-busy={shouldPollSocialJob(visibleCurrent)}');
+    expect(source).toContain('aria-labelledby="social-result-title"');
+    expect(source).toContain('<h2 id="social-result-title">');
+    expect(source).not.toContain('<section className="social-result-shell" aria-live="polite">');
   });
 });
