@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using System.Net;
 using System.Text;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.RateLimiting;
@@ -14,6 +15,22 @@ public sealed class RateLimitingTests
     {
         var options = CreateOptions();
         var context = CreateContext(RateLimiting.ExpensiveAi, Guid.NewGuid());
+        var limiter = options.GlobalLimiter!;
+
+        using var first = await limiter.AcquireAsync(context);
+        using var second = await limiter.AcquireAsync(context);
+        using var rejected = await limiter.AcquireAsync(context);
+
+        Assert.True(first.IsAcquired);
+        Assert.True(second.IsAcquired);
+        Assert.False(rejected.IsAcquired);
+    }
+
+    [Fact]
+    public async Task Health_policy_rejects_when_anonymous_client_concurrency_is_full_without_queueing()
+    {
+        var options = CreateOptions();
+        var context = CreateAnonymousContext(RateLimiting.Health, "192.0.2.10");
         var limiter = options.GlobalLimiter!;
 
         using var first = await limiter.AcquireAsync(context);
@@ -108,6 +125,17 @@ public sealed class RateLimitingTests
                 [new Claim(ClaimTypes.NameIdentifier, userId.ToString("N"))],
                 "test")),
         };
+        context.SetEndpoint(new Endpoint(
+            requestDelegate: null,
+            new EndpointMetadataCollection(new EnableRateLimitingAttribute(policyName)),
+            displayName: policyName));
+        return context;
+    }
+
+    private static HttpContext CreateAnonymousContext(string policyName, string ipAddress)
+    {
+        var context = new DefaultHttpContext();
+        context.Connection.RemoteIpAddress = IPAddress.Parse(ipAddress);
         context.SetEndpoint(new Endpoint(
             requestDelegate: null,
             new EndpointMetadataCollection(new EnableRateLimitingAttribute(policyName)),
