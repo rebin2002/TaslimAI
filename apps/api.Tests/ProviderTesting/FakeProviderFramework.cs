@@ -148,10 +148,11 @@ public abstract class FakeProviderBase(FakeProviderKind kind, FakeProviderScenar
 
 public sealed class FakeImageGenerationProvider(
     FakeProviderScenarioCatalog scenarios,
-    FakeProviderCallLog calls) : FakeProviderBase(FakeProviderKind.Image, scenarios, calls), IImageGenerationProvider
+    FakeProviderCallLog calls) : FakeProviderBase(FakeProviderKind.Image, scenarios, calls), IImageGenerationProvider, IImageGenerationProviderReadiness
 {
     private static readonly byte[] Png = Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=");
     public string Key => "fake-image";
+    public bool IsAvailable => true;
 
     public async Task<ImageProviderResult> GenerateAsync(ImageGenerationInput request, ImagePromptBuildResult prompt, CancellationToken cancellationToken = default)
     {
