@@ -78,6 +78,12 @@ export function shouldPollDocumentJob(job: GenerationJob | null) {
   return !!job && !isDocumentTerminal(job);
 }
 
+export function isDocumentJobUnavailableError(error: unknown) {
+  if (typeof error !== "object" || error === null || !("status" in error)) return false;
+  const status = (error as { status?: unknown }).status;
+  return status === 403 || status === 404;
+}
+
 export function nextDocumentPollDelay(job: GenerationJob | null, retryAttempt = 0) {
   if (!shouldPollDocumentJob(job)) return null;
   return Math.min(700 * Math.max(1, retryAttempt + 1), 2_800);
