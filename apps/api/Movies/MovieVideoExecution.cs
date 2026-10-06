@@ -460,5 +460,10 @@ public sealed class MovieVideoGenerationJobHandler(
             throw new MovieVideoProviderOutputException();
         if (string.IsNullOrWhiteSpace(output.FileName) || output.FileName.Length > 255)
             throw new MovieVideoProviderOutputException();
+        // A clip cannot enter the ready state without measured temporal evidence.
+        // Otherwise downstream timeline/QC work silently trusts the requested
+        // duration even when the provider returned no usable duration.
+        if (output.DurationSeconds is null or <= 0 or > 3_600)
+            throw new MovieVideoProviderOutputException();
     }
 }
