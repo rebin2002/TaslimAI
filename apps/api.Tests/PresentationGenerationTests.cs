@@ -264,7 +264,8 @@ public sealed class PresentationGenerationAvailabilityTests : IClassFixture<Disa
         {
             workspaceId = auth.PersonalWorkspace.Id,
             title = "Invalid presentation",
-            description = "x",
+            description = "This request uses an unsupported presentation type.",
+            presentationType = "unsupported",
             attachmentIds = Array.Empty<Guid>(),
         }, "presentation-invalid-disabled-001");
 
