@@ -123,6 +123,13 @@ public sealed class MovieTimelineTests
         Assert.Single(second.Tracks);
         Assert.NotEqual(first.Tracks[0].Id, second.Tracks[0].Id);
         Assert.Equal(MovieTimelineRevisionStatuses.Locked, (await service.GetAsync(fixture.UserId, fixture.MovieId, CancellationToken.None))!.Revisions[0].Status);
+
+        var stale = await Assert.ThrowsAsync<MovieTimelineValidationException>(() => service.CreateRevisionAsync(fixture.UserId, fixture.MovieId, new MovieTimelineRevisionRequest
+        {
+            BaseRevisionId = first.Id,
+            Label = "Stale assembly pass",
+        }, CancellationToken.None, requireCurrentRevision: true));
+        Assert.Equal(MovieTimelineErrors.Stale, stale.Code);
     }
 
     [Fact]

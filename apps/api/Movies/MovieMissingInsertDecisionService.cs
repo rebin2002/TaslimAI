@@ -209,7 +209,7 @@ public sealed class MovieMissingInsertDecisionService(
             ChangeSummary = "Applied an approved provider-neutral missing-insert decision.",
             CanonicalTimelineJson = current.CanonicalTimelineJson,
             Tracks = requests,
-        }, cancellationToken);
+        }, cancellationToken, requireCurrentRevision: true);
         if (appliedRevision is null) return null;
         decision.Status = MovieMissingInsertDecisionStatuses.Applied;
         decision.AppliedByUserId = userId;
