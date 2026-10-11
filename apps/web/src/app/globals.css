@@ -889,7 +889,7 @@ select.memory-control { appearance: auto; cursor: pointer; }
 /* Parallel Voice Studio */
 .voice-studio-page { max-width: 1040px; margin: 0 auto; padding: 60px 0 70px; }
 .voice-studio-header { display: flex; justify-content: space-between; align-items: flex-end; gap: 25px; margin-bottom: 31px; }
-.voice-studio-header h1 { margin: 7px 0 10px; color: var(--navy-950); font-size: clamp(38px, 5vw, 59px); line-height: 1; letter-spacing: -.075em; }
+.voice-studio-header h1 { margin: 7px 0 10px; color: var(--white); font-size: clamp(38px, 5vw, 59px); line-height: 1; letter-spacing: -.075em; }
 .voice-studio-header p:not(.section-eyebrow) { max-width: 590px; margin: 0; color: var(--muted); font-size: 13px; line-height: 1.6; }
 .voice-studio-header-icon { width: 51px; height: 51px; display: grid; place-items: center; color: var(--teal); background: #e7f7f4; border-radius: 14px; }
 .voice-studio-layout { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(250px, .65fr); gap: 15px; max-width: 1040px; margin: 0 auto; }
