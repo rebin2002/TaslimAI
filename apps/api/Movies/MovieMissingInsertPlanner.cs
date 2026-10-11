@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
@@ -30,7 +31,8 @@ public sealed record MovieMissingInsertTimelineItemSnapshot(
     Guid? SourceShotId,
     Guid? SourceTakeId,
     int TimelineInMilliseconds,
-    int TimelineOutMilliseconds);
+    int TimelineOutMilliseconds,
+    Guid? SourceSelectId = null);
 
 public sealed record MovieMissingInsertTimelineTrackSnapshot(
     Guid Id,
@@ -70,7 +72,8 @@ public sealed record MovieMissingInsertShotSnapshot(
     string? CameraMotion,
     string? Dialogue,
     string? VisualContinuityNotes,
-    Guid? StorySceneId);
+    Guid? StorySceneId,
+    string? ScreenDirectionJson = null);
 
 public sealed record MovieMissingInsertProductionKitSnapshot(
     Guid ShotId,
@@ -191,6 +194,12 @@ public static class MovieMissingInsertPlanner
 
             var insertType = SelectInsertType(anchor, kit);
             var duration = Math.Min(gap.DurationMilliseconds, MaximumProposalDurationMilliseconds);
+            var anchorItem = ResolveAnchorItem(gap, timeline, anchor.Id);
+            if (anchorItem?.SourceTakeId is not Guid anchorTakeId)
+            {
+                warnings.Add(new("gap_anchor_take_missing", "blocking", "The neighboring coverage has no server-known take to use for a provider-neutral minimal insert; no client-supplied source was accepted.", dto.Id));
+                continue;
+            }
             var proposalId = StableId($"{input.MovieProjectId:N}|{timeline?.Id:N}|{gap.Id:N}|{insertType}|{anchor.Id:N}");
             var storyScene = input.ApprovedStory.StorySceneIdsByMovieSceneId[anchor.SceneId];
             var sourceFields = new List<string> { "neighboring_shot_plan", "approved_story_scene_link", "locked_movie_guide", "production_kit" };
@@ -218,7 +227,11 @@ public static class MovieMissingInsertPlanner
                 anchor.CameraAndFraming,
                 anchor.CameraMotion,
                 anchor.VisualContinuityNotes,
-                new MovieMissingInsertProposalGroundingDto(storyScene, input.ApprovedStory.RevisionId, input.LockedGuide.RevisionId, anchor.Id, kit.PackageHash, sourceFields)));
+                new MovieMissingInsertProposalGroundingDto(storyScene, input.ApprovedStory.RevisionId, input.LockedGuide.RevisionId, anchor.Id, kit.PackageHash, sourceFields),
+                anchorTakeId,
+                anchorItem.SourceSelectId,
+                ContinuityAnchorJson(gap, anchor),
+                ScreenDirectionAnchorJson(gap, anchor)));
         }
 
         var finalTime = assembledAtUtc ?? DateTime.UtcNow;
@@ -320,6 +333,44 @@ public static class MovieMissingInsertPlanner
         if (gap.BeforeShotId is Guid before && shots.TryGetValue(before, out var beforeShot)) return beforeShot;
         return null;
     }
+
+    private static MovieMissingInsertTimelineItemSnapshot? ResolveAnchorItem(
+        GapCandidate gap,
+        MovieMissingInsertTimelineSnapshot? timeline,
+        Guid anchorShotId)
+    {
+        if (timeline is null) return null;
+        var preferredId = gap.AfterShotId == anchorShotId ? gap.AfterTimelineItemId : gap.BeforeTimelineItemId;
+        return timeline.Tracks.SelectMany(item => item.Items)
+            .Where(item => item.SourceShotId == anchorShotId)
+            .OrderByDescending(item => item.Id == preferredId)
+            .ThenBy(item => item.TimelineInMilliseconds)
+            .FirstOrDefault();
+    }
+
+    private static string ContinuityAnchorJson(GapCandidate gap, MovieMissingInsertShotSnapshot anchor) =>
+        JsonSerializer.Serialize(new
+        {
+            beforeShotId = gap.BeforeShotId,
+            afterShotId = gap.AfterShotId,
+            anchorShotId = anchor.Id,
+            sceneId = anchor.SceneId,
+            locationSet = Limit(anchor.LocationSet, 1_000),
+            continuityReferences = Limit(anchor.ContinuityReferences, 1_000),
+            visualContinuityNotes = Limit(anchor.VisualContinuityNotes, 1_000),
+        });
+
+    private static string ScreenDirectionAnchorJson(GapCandidate gap, MovieMissingInsertShotSnapshot anchor) =>
+        JsonSerializer.Serialize(new
+        {
+            beforeShotId = gap.BeforeShotId,
+            afterShotId = gap.AfterShotId,
+            anchorShotId = anchor.Id,
+            screenDirection = Limit(anchor.ScreenDirectionJson, 2_000),
+        });
+
+    private static string? Limit(string? value, int maximum) =>
+        string.IsNullOrWhiteSpace(value) ? null : value.Length <= maximum ? value : value[..maximum];
 
     private static MovieMissingInsertProductionKitSnapshot? ResolveKit(GapCandidate gap, IReadOnlyDictionary<Guid, MovieMissingInsertProductionKitSnapshot> kits)
     {
@@ -434,7 +485,7 @@ public sealed class MovieMissingInsertPlannerService(
             item.Id, item.MovieSceneId, item.Scene.Sequence, item.Scene.Title, item.Sequence, item.Description, item.Purpose, item.Subjects,
             MovieShotReadiness.ParseSubjectCharacterIds(item.SubjectCharacterIdsJson), item.LocationSet, item.ProductionRequirements, item.ContinuityReferences,
             item.CameraAndFraming, item.CameraMotion, item.Dialogue, item.VisualContinuityNotes,
-            story?.StorySceneIdsByMovieSceneId.GetValueOrDefault(item.MovieSceneId))).ToArray();
+            story?.StorySceneIdsByMovieSceneId.GetValueOrDefault(item.MovieSceneId), item.ScreenDirectionJson)).ToArray();
 
         var timeline = revision is null
             ? null
@@ -454,7 +505,8 @@ public sealed class MovieMissingInsertPlannerService(
                         item.SourceTakeId.HasValue && takeShotIds.TryGetValue(item.SourceTakeId.Value, out var shotId) ? shotId : null,
                         item.SourceTakeId,
                         item.TimelineInMilliseconds,
-                        item.TimelineOutMilliseconds)).ToArray())).ToArray());
+                        item.TimelineOutMilliseconds,
+                        item.SourceSelectId)).ToArray())).ToArray());
 
         var anchorShotIds = timeline?.Tracks
             .Where(item => item.Kind.Equals(MovieTimelineTrackKinds.Video, StringComparison.OrdinalIgnoreCase))
