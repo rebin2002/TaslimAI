@@ -256,7 +256,7 @@ public sealed class MovieMissingInsertDecisionTests
         public TaskCompletionSource<bool> SecondCallStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource<bool> ReleaseFirstCall { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        public async Task<MovieTimelineRevisionDto?> CreateRevisionAsync(Guid userId, Guid movieProjectId, MovieTimelineRevisionRequest request, CancellationToken cancellationToken)
+        public async Task<MovieTimelineRevisionDto?> CreateRevisionAsync(Guid userId, Guid movieProjectId, MovieTimelineRevisionRequest request, CancellationToken cancellationToken, bool requireCurrentRevision = false)
         {
             var call = Interlocked.Increment(ref calls);
             if (call == 1)

@@ -37,6 +37,7 @@ public static class MovieTimelineErrors
 {
     public const string Invalid = "MOVIE_TIMELINE_INVALID";
     public const string Locked = "MOVIE_TIMELINE_LOCKED";
+    public const string Stale = "MOVIE_TIMELINE_STALE";
     public const string SourceInvalid = "MOVIE_TIMELINE_SOURCE_INVALID";
 }
 

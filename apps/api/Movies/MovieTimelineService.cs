@@ -10,7 +10,7 @@ namespace Taslim.Api.Movies;
 public interface IMovieTimelineService
 {
     Task<MovieTimelineDto?> GetAsync(Guid userId, Guid movieProjectId, CancellationToken cancellationToken);
-    Task<MovieTimelineRevisionDto?> CreateRevisionAsync(Guid userId, Guid movieProjectId, MovieTimelineRevisionRequest request, CancellationToken cancellationToken);
+    Task<MovieTimelineRevisionDto?> CreateRevisionAsync(Guid userId, Guid movieProjectId, MovieTimelineRevisionRequest request, CancellationToken cancellationToken, bool requireCurrentRevision = false);
     Task<MovieTimelineTrackDto?> AddTrackAsync(Guid userId, Guid revisionId, MovieTimelineTrackRequest request, CancellationToken cancellationToken);
     Task<MovieTimelineItemDto?> AddItemAsync(Guid userId, Guid trackId, MovieTimelineItemRequest request, CancellationToken cancellationToken);
     Task<MovieTimelineRevisionDto?> LockRevisionAsync(Guid userId, Guid revisionId, CancellationToken cancellationToken);
@@ -27,73 +27,102 @@ public sealed class MovieTimelineService(TaslimDbContext db, MovieCollaborationA
         return timeline is null ? null : ToDto(timeline);
     }
 
-    public async Task<MovieTimelineRevisionDto?> CreateRevisionAsync(Guid userId, Guid movieProjectId, MovieTimelineRevisionRequest request, CancellationToken cancellationToken)
+    public async Task<MovieTimelineRevisionDto?> CreateRevisionAsync(Guid userId, Guid movieProjectId, MovieTimelineRevisionRequest request, CancellationToken cancellationToken, bool requireCurrentRevision = false)
     {
         var movie = await db.MovieProjects.FirstOrDefaultAsync(item => item.Id == movieProjectId, cancellationToken);
         if (movie is null || !await collaboration.HasPermissionAsync(userId, movieProjectId, MoviePermissions.Edit, cancellationToken)) return null;
         ValidateBounded(request.Label, 160, "Timeline revision label");
         ValidateBounded(request.ChangeSummary, 2_000, "Timeline revision change summary");
 
-        var timeline = await db.MovieTimelines
-            .Include(item => item.Revisions).ThenInclude(item => item.Tracks).ThenInclude(item => item.Items)
-            .FirstOrDefaultAsync(item => item.MovieProjectId == movieProjectId, cancellationToken);
-        var now = DateTime.UtcNow;
-        var isNewTimeline = timeline is null;
-        if (timeline is null)
+        var ownsTransaction = db.Database.CurrentTransaction is null;
+        await using var transaction = ownsTransaction ? await db.Database.BeginTransactionAsync(cancellationToken) : null;
+        try
         {
-            timeline = new MovieTimeline
+            var timeline = await db.MovieTimelines
+                .Include(item => item.Revisions).ThenInclude(item => item.Tracks).ThenInclude(item => item.Items)
+                .FirstOrDefaultAsync(item => item.MovieProjectId == movieProjectId, cancellationToken);
+            var now = DateTime.UtcNow;
+            var isNewTimeline = timeline is null;
+            var expectedCurrentRevisionNumber = timeline?.CurrentRevisionNumber ?? 0;
+            var expectedCurrentRevisionId = timeline?.CurrentRevisionId;
+            if (timeline is null)
             {
-                Id = Guid.NewGuid(), MovieProjectId = movieProjectId, CurrentRevisionNumber = 0,
-                CreatedAt = now, UpdatedAt = now,
+                timeline = new MovieTimeline
+                {
+                    Id = Guid.NewGuid(), MovieProjectId = movieProjectId, CurrentRevisionNumber = 0,
+                    CreatedAt = now, UpdatedAt = now,
+                };
+            }
+
+            var baseRevision = request.BaseRevisionId.HasValue
+                ? timeline.Revisions.FirstOrDefault(item => item.Id == request.BaseRevisionId.Value)
+                : timeline.CurrentRevisionId.HasValue
+                    ? timeline.Revisions.FirstOrDefault(item => item.Id == timeline.CurrentRevisionId.Value)
+                    : timeline.Revisions.OrderByDescending(item => item.RevisionNumber).FirstOrDefault();
+            if (request.BaseRevisionId.HasValue && baseRevision is null)
+                throw Invalid("The base timeline revision does not belong to this movie project.");
+            if (requireCurrentRevision && request.BaseRevisionId.HasValue && baseRevision!.Id != expectedCurrentRevisionId)
+                throw new MovieTimelineValidationException(MovieTimelineErrors.Stale, "The base timeline revision is no longer current; reload before creating a revision.");
+
+            var revision = new MovieTimelineRevision
+            {
+                Id = Guid.NewGuid(), MovieTimelineId = timeline.Id, RevisionNumber = timeline.CurrentRevisionNumber + 1,
+                BaseRevisionId = baseRevision?.Id, Status = MovieTimelineRevisionStatuses.Draft,
+                Label = Clean(request.Label), ChangeSummary = Clean(request.ChangeSummary), CanonicalTimelineJson = Clean(request.CanonicalTimelineJson),
+                CreatedByUserId = userId, CreatedAt = now, UpdatedAt = now, Timeline = timeline,
             };
-        }
 
-        var baseRevision = request.BaseRevisionId.HasValue
-            ? timeline.Revisions.FirstOrDefault(item => item.Id == request.BaseRevisionId.Value)
-            : timeline.CurrentRevisionId.HasValue
-                ? timeline.Revisions.FirstOrDefault(item => item.Id == timeline.CurrentRevisionId.Value)
-                : timeline.Revisions.OrderByDescending(item => item.RevisionNumber).FirstOrDefault();
-        if (request.BaseRevisionId.HasValue && baseRevision is null)
-            throw Invalid("The base timeline revision does not belong to this movie project.");
+            if (request.Tracks is null)
+            {
+                if (baseRevision is not null)
+                    foreach (var sourceTrack in baseRevision.Tracks.OrderBy(item => item.TrackNumber))
+                        CloneTrack(revision, sourceTrack, now);
+                revision.DurationMilliseconds = baseRevision?.DurationMilliseconds ?? 0;
+            }
+            else
+            {
+                if (request.Tracks.Count > 64 || request.Tracks.Sum(item => item.Items.Count) > MovieTimelineContract.MaxClips)
+                    throw Invalid("A timeline revision is limited to 64 tracks and 10,000 items.");
+                await AddRequestedTracksAsync(revision, request.Tracks, movie.WorkspaceId, movie.ProjectId, movieProjectId, now, cancellationToken);
+                revision.DurationMilliseconds = CalculateDuration(revision);
+            }
 
-        var revision = new MovieTimelineRevision
-        {
-            Id = Guid.NewGuid(), MovieTimelineId = timeline.Id, RevisionNumber = timeline.CurrentRevisionNumber + 1,
-            BaseRevisionId = baseRevision?.Id, Status = MovieTimelineRevisionStatuses.Draft,
-            Label = Clean(request.Label), ChangeSummary = Clean(request.ChangeSummary), CanonicalTimelineJson = Clean(request.CanonicalTimelineJson),
-            CreatedByUserId = userId, CreatedAt = now, UpdatedAt = now, Timeline = timeline,
-        };
-
-        if (request.Tracks is null)
-        {
-            if (baseRevision is not null)
-                foreach (var sourceTrack in baseRevision.Tracks.OrderBy(item => item.TrackNumber))
-                    CloneTrack(revision, sourceTrack, now);
-            revision.DurationMilliseconds = baseRevision?.DurationMilliseconds ?? 0;
-        }
-        else
-        {
-            if (request.Tracks.Count > 64 || request.Tracks.Sum(item => item.Items.Count) > MovieTimelineContract.MaxClips)
-                throw Invalid("A timeline revision is limited to 64 tracks and 10,000 items.");
-            await AddRequestedTracksAsync(revision, request.Tracks, movie.WorkspaceId, movie.ProjectId, movieProjectId, now, cancellationToken);
-            revision.DurationMilliseconds = CalculateDuration(revision);
-        }
-
-        foreach (var previous in timeline.Revisions.Where(item => item.Id != revision.Id && item.Status == MovieTimelineRevisionStatuses.Draft))
-            previous.Status = MovieTimelineRevisionStatuses.Superseded;
-        if (isNewTimeline)
-        {
-            db.MovieTimelines.Add(timeline);
+            foreach (var previous in timeline.Revisions.Where(item => item.Id != revision.Id && item.Status == MovieTimelineRevisionStatuses.Draft))
+                previous.Status = MovieTimelineRevisionStatuses.Superseded;
+            if (isNewTimeline)
+            {
+                db.MovieTimelines.Add(timeline);
+                await db.SaveChangesAsync(cancellationToken);
+            }
+            db.MovieTimelineRevisions.Add(revision);
             await db.SaveChangesAsync(cancellationToken);
-        }
-        db.MovieTimelineRevisions.Add(revision);
-        await db.SaveChangesAsync(cancellationToken);
-        timeline.CurrentRevisionNumber = revision.RevisionNumber;
-        timeline.CurrentRevisionId = revision.Id;
-        timeline.UpdatedAt = now;
-        await db.SaveChangesAsync(cancellationToken);
 
-        return ToDto(await QueryRevision().SingleAsync(item => item.Id == revision.Id, cancellationToken));
+            var advanced = await db.MovieTimelines
+                .Where(item => item.Id == timeline.Id
+                    && item.CurrentRevisionNumber == expectedCurrentRevisionNumber
+                    && item.CurrentRevisionId == expectedCurrentRevisionId)
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(item => item.CurrentRevisionNumber, revision.RevisionNumber)
+                    .SetProperty(item => item.CurrentRevisionId, revision.Id)
+                    .SetProperty(item => item.UpdatedAt, now), cancellationToken);
+            if (advanced != 1)
+                throw new MovieTimelineValidationException(MovieTimelineErrors.Stale, "The timeline changed while this revision was being created; reload and retry.");
+
+            timeline.CurrentRevisionNumber = revision.RevisionNumber;
+            timeline.CurrentRevisionId = revision.Id;
+            timeline.UpdatedAt = now;
+            db.Entry(timeline).State = EntityState.Unchanged;
+            var result = ToDto(await QueryRevision().SingleAsync(item => item.Id == revision.Id, cancellationToken));
+            if (ownsTransaction)
+                await transaction!.CommitAsync(cancellationToken);
+            return result;
+        }
+        catch
+        {
+            if (ownsTransaction && transaction is not null)
+                await transaction.RollbackAsync(cancellationToken);
+            throw;
+        }
     }
 
     public async Task<MovieTimelineRevisionDto?> ApplyTransitionEditAsync(Guid userId, Guid movieProjectId, Taslim.Api.Contracts.MovieTimelineTransitionEditRequest request, CancellationToken cancellationToken)
