@@ -101,21 +101,36 @@ public sealed class MovieTimelineService(TaslimDbContext db, MovieCollaborationA
             db.MovieTimelineRevisions.Add(revision);
             await db.SaveChangesAsync(cancellationToken);
 
-            var advanced = await db.MovieTimelines
-                .Where(item => item.Id == timeline.Id
-                    && item.CurrentRevisionNumber == expectedCurrentRevisionNumber
-                    && item.CurrentRevisionId == expectedCurrentRevisionId)
-                .ExecuteUpdateAsync(setters => setters
-                    .SetProperty(item => item.CurrentRevisionNumber, revision.RevisionNumber)
-                    .SetProperty(item => item.CurrentRevisionId, revision.Id)
-                    .SetProperty(item => item.UpdatedAt, now), cancellationToken);
-            if (advanced != 1)
-                throw new MovieTimelineValidationException(MovieTimelineErrors.Stale, "The timeline changed while this revision was being created; reload and retry.");
+            if (isNewTimeline)
+            {
+                // The new timeline is tracked after insertion; persist its first
+                // canonical pointer with EF rather than mixing a raw update and
+                // a tracked entity before the next SaveChanges.
+                timeline.CurrentRevisionNumber = revision.RevisionNumber;
+                timeline.CurrentRevisionId = revision.Id;
+                timeline.UpdatedAt = now;
+                await db.SaveChangesAsync(cancellationToken);
+            }
+            else
+            {
+                // Existing timelines require a conditional pointer update to
+                // prevent two editors from overwriting each other's revisions.
+                var advanced = await db.MovieTimelines
+                    .Where(item => item.Id == timeline.Id
+                        && item.CurrentRevisionNumber == expectedCurrentRevisionNumber
+                        && item.CurrentRevisionId == expectedCurrentRevisionId)
+                    .ExecuteUpdateAsync(setters => setters
+                        .SetProperty(item => item.CurrentRevisionNumber, revision.RevisionNumber)
+                        .SetProperty(item => item.CurrentRevisionId, revision.Id)
+                        .SetProperty(item => item.UpdatedAt, now), cancellationToken);
+                if (advanced != 1)
+                    throw new MovieTimelineValidationException(MovieTimelineErrors.Stale, "The timeline changed while this revision was being created; reload and retry.");
 
-            timeline.CurrentRevisionNumber = revision.RevisionNumber;
-            timeline.CurrentRevisionId = revision.Id;
-            timeline.UpdatedAt = now;
-            db.Entry(timeline).State = EntityState.Unchanged;
+                timeline.CurrentRevisionNumber = revision.RevisionNumber;
+                timeline.CurrentRevisionId = revision.Id;
+                timeline.UpdatedAt = now;
+                db.Entry(timeline).State = EntityState.Unchanged;
+            }
             var result = ToDto(await QueryRevision().SingleAsync(item => item.Id == revision.Id, cancellationToken));
             if (ownsTransaction)
                 await transaction!.CommitAsync(cancellationToken);
