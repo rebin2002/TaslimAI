@@ -41,6 +41,10 @@ public sealed class MovieTimelineService(TaslimDbContext db, MovieCollaborationA
             var timeline = await db.MovieTimelines
                 .Include(item => item.Revisions).ThenInclude(item => item.Tracks).ThenInclude(item => item.Items)
                 .FirstOrDefaultAsync(item => item.MovieProjectId == movieProjectId, cancellationToken);
+            // ExecuteUpdateAsync bypasses tracked state; reload the current pointer
+            // before allocating the next revision number in a reused DbContext.
+            if (timeline is not null)
+                await db.Entry(timeline).ReloadAsync(cancellationToken);
             var now = DateTime.UtcNow;
             var isNewTimeline = timeline is null;
             var expectedCurrentRevisionNumber = timeline?.CurrentRevisionNumber ?? 0;
