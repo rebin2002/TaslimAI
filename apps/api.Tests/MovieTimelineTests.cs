@@ -112,6 +112,15 @@ public sealed class MovieTimelineTests
         await Assert.ThrowsAsync<MovieTimelineValidationException>(() => service.AddItemAsync(fixture.UserId, first.Tracks[0].Id,
             new MovieTimelineItemRequest { Kind = MovieTimelineItemKinds.VisualTake, SourceTakeId = fixture.TakeId, TimelineInMilliseconds = 1_000, SourceInMilliseconds = 0, SourceOutMilliseconds = 500 }, CancellationToken.None));
 
+        // Verify the persisted canonical pointer and sequence before the next revision.
+        // ExecuteUpdateAsync bypasses EF tracking; this makes any reset observable.
+        var persistedTimeline = await db.MovieTimelines.AsNoTracking()
+            .SingleAsync(item => item.MovieProjectId == fixture.MovieId);
+        Assert.Equal(1, persistedTimeline.CurrentRevisionNumber);
+        Assert.Equal(first.Id, persistedTimeline.CurrentRevisionId);
+        Assert.Equal(1, await db.MovieTimelineRevisions.AsNoTracking()
+            .CountAsync(item => item.MovieTimelineId == persistedTimeline.Id));
+
         var second = await service.CreateRevisionAsync(fixture.UserId, fixture.MovieId, new MovieTimelineRevisionRequest
         {
             BaseRevisionId = first.Id,
