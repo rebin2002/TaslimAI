@@ -174,7 +174,7 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
             var result = await timeline.CreateRevisionAsync(GetUserId(), id, request, cancellationToken);
             return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result);
         }
-        catch (MovieTimelineValidationException exception) { return ApiResults.Error(this, exception.Code == MovieTimelineErrors.Locked ? 409 : 400, exception.Code, exception.Message); }
+        catch (MovieTimelineValidationException exception) { return ApiResults.Error(this, exception.Code is MovieTimelineErrors.Locked or MovieTimelineErrors.Stale ? 409 : 400, exception.Code, exception.Message); }
     }
 
     [HttpPost("projects/{id:guid}/timeline/transitions")]
