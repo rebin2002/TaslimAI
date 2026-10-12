@@ -27,7 +27,9 @@ public sealed class MovieMissingInsertDecisionService(
     private const int MaxGroundingJsonLength = 4_000;
     private const int MaxAnchorJsonLength = 8_000;
     private const int MaxMaterializeUniqueRetryCount = 1;
-    private const string DecisionProposalUniqueConstraint = "IX_MovieMissingInsertDecisions_MovieProjectId_TimelineRevisionId_ProposalId";
+    // PostgreSQL truncates EF's generated identifier at 63 bytes; the trailing
+    // '~' is the actual index name emitted by the provider in the CI database.
+    private const string DecisionProposalUniqueConstraint = "IX_MovieMissingInsertDecisions_MovieProjectId_TimelineRevision~";
 
     public async Task<IReadOnlyList<MovieMissingInsertDecisionDto>?> ListAsync(Guid userId, Guid movieProjectId, CancellationToken cancellationToken)
     {
