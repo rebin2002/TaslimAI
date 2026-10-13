@@ -35,7 +35,7 @@ import {
 } from "@/lib/movieProductionWorkspace";
 import { hasActiveMovieProductionExecution, nextMovieProductionPollDelay } from "@/lib/movieProductionPolling";
 import { productionIntentForTier, type MovieResolutionTier } from "@/lib/movieProductionResolution";
-import { buildMovieRegenerationConfirmation, confirmMovieRegenerationIfAllowed, formatMovieRegenerationCost, type MovieRegenerationConfirmationState } from "@/lib/movieRegenerationConfirmation";
+import { buildMovieRegenerationConfirmation, confirmMovieRegenerationIfAllowed, formatMovieRegenerationCost, movieRegenerationAttemptIsCurrent, retireMovieRegenerationAttempt, type MovieRegenerationAttempt, type MovieRegenerationConfirmationState } from "@/lib/movieRegenerationConfirmation";
 
 const filters: Array<{ id: ProductionWorkspaceFilter; label: string }> = [
   { id: "all", label: "All shots" },
@@ -70,7 +70,7 @@ function createApiAdapter(): MovieProductionWorkspaceAdapter {
   };
 }
 
-type PendingProductionConfirmation = { key: string; confirm: () => Promise<unknown>; title: string; detail: string; preview?: MovieRegenerationConfirmationState };
+type PendingProductionConfirmation = { key: string; confirm: () => Promise<unknown>; title: string; detail: string; preview?: MovieRegenerationConfirmationState; attempt?: MovieRegenerationAttempt };
 
 function isExpensiveProductionAction(key: string) {
   return /:(keyframe|motion|render|retry|master|regenerate)(?:$|-)/.test(key);
@@ -83,8 +83,6 @@ function confirmationCopy(key: string, t: (key: string) => string) {
   if (key.includes(":keyframe")) return { title: t("movieBody.production.confirmKeyframe"), detail: t("movieBody.production.confirmKeyframeDetail") };
   return { title: t("movieBody.production.confirmMotion"), detail: t("movieBody.production.confirmMotionDetail") };
 }
-
-type RegenerationIdempotencyKeys = { create: string; confirm: string };
 
 function newIdempotencyKey(prefix: string) {
   return `${prefix}-${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
@@ -103,7 +101,9 @@ export function MovieProductionWorkspace({ project, completionPercent, onRefresh
   const [pollRetry, setPollRetry] = useState(0);
   const [lastAction, setLastAction] = useState<(() => Promise<void>) | null>(null);
   const [confirmation, setConfirmation] = useState<PendingProductionConfirmation | null>(null);
-  const regenerationKeysRef = useRef(new Map<string, RegenerationIdempotencyKeys>());
+  const regenerationAttemptsRef = useRef(new Map<string, MovieRegenerationAttempt>());
+  const regenerationGenerationRef = useRef(0);
+  const regenerationActionTokenRef = useRef(0);
   const refreshRef = useRef(onRefresh);
   const visibleShots = model.shots.filter((item) => matchesProductionFilter(item, filter));
 
@@ -126,12 +126,26 @@ export function MovieProductionWorkspace({ project, completionPercent, onRefresh
     return () => { active = false; window.clearTimeout(timer); };
   }, [hasActiveExecution, pollRetry]);
 
-  function regenerationKeys(key: string) {
-    const existing = regenerationKeysRef.current.get(key);
+  function regenerationAttempt(key: string) {
+    const existing = regenerationAttemptsRef.current.get(key);
     if (existing) return existing;
-    const keys = { create: newIdempotencyKey(`${key}:create`), confirm: newIdempotencyKey(`${key}:confirm`) };
-    regenerationKeysRef.current.set(key, keys);
-    return keys;
+    const attempt: MovieRegenerationAttempt = { key, generation: ++regenerationGenerationRef.current, keys: { create: newIdempotencyKey(`${key}:create`), confirm: newIdempotencyKey(`${key}:confirm`) } };
+    regenerationAttemptsRef.current.set(key, attempt);
+    return attempt;
+  }
+
+  function retireRegenerationAttempt(attempt: MovieRegenerationAttempt) {
+    const current = regenerationAttemptsRef.current.get(attempt.key);
+    if (!retireMovieRegenerationAttempt(current, attempt)) regenerationAttemptsRef.current.delete(attempt.key);
+  }
+
+  function cancelRegenerationConfirmation(pending: PendingProductionConfirmation) {
+    setConfirmation(null);
+    if (pending.attempt) {
+      retireRegenerationAttempt(pending.attempt);
+      regenerationActionTokenRef.current += 1;
+      setLastAction(null);
+    }
   }
 
   const regenerateShot = (item: ProductionWorkspaceShot) => async (): Promise<MovieSelectiveRegenerationResponse> => {
@@ -142,7 +156,7 @@ export function MovieProductionWorkspace({ project, completionPercent, onRefresh
       reason: "Recover the failed production render from the latest approved source.",
       sourceVersionId: sourceVersion?.id ?? null, changedInputsJson: JSON.stringify({ recovery: "production_render", sourceVersionId: sourceVersion?.id ?? null }),
       compositionJson: sourceVersion?.compositionJson ?? "{}",
-    }, regenerationKeys(key).create);
+    }, regenerationAttempt(key).keys.create);
   };
 
   async function executeAction(key: string, work: () => Promise<unknown>) {
@@ -151,10 +165,22 @@ export function MovieProductionWorkspace({ project, completionPercent, onRefresh
     setLastAction(() => async () => { await executeAction(key, work); });
     try {
       await work();
-      await onRefresh();
-      setRefreshError("");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "That production decision could not be saved.");
+      setBusyKey("");
+      return;
+    }
+    try {
+      await onRefresh();
+      setRefreshError("");
+      setLastAction(null);
+    } catch {
+      setRefreshError("Production status could not be refreshed. Reload the workspace to see the latest state.");
+      setLastAction(() => async () => {
+        await onRefresh();
+        setRefreshError("");
+        setLastAction(null);
+      });
     } finally {
       setBusyKey("");
     }
@@ -174,23 +200,32 @@ export function MovieProductionWorkspace({ project, completionPercent, onRefresh
   }
 
   async function prepareRegeneration(key: string, work: () => Promise<unknown>) {
+    const attempt = regenerationAttempt(key);
+    const actionToken = ++regenerationActionTokenRef.current;
     setBusyKey(key);
     setError("");
     setLastAction(() => async () => { await runAction(key, work); });
     try {
       const response = await work() as MovieSelectiveRegenerationResponse;
+      if (actionToken !== regenerationActionTokenRef.current || !movieRegenerationAttemptIsCurrent(regenerationAttemptsRef.current.get(key), attempt)) return;
       const preview = buildMovieRegenerationConfirmation(response);
       const copy = confirmationCopy(key, t);
       setConfirmation({
         key,
         ...copy,
         preview,
-        confirm: () => confirmMovieRegenerationIfAllowed(preview, (requestId) => api.confirmMovieRegeneration(requestId, true, regenerationKeys(key).confirm)),
+        attempt,
+        confirm: async () => {
+          const confirmed = await confirmMovieRegenerationIfAllowed(preview, (requestId) => api.confirmMovieRegeneration(requestId, true, attempt.keys.confirm));
+          if (confirmed) retireRegenerationAttempt(attempt);
+          return confirmed;
+        },
       });
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : t("movieBody.production.regenerationPrepareError"));
+      if (actionToken === regenerationActionTokenRef.current && movieRegenerationAttemptIsCurrent(regenerationAttemptsRef.current.get(key), attempt))
+        setError(cause instanceof Error ? cause.message : t("movieBody.production.regenerationPrepareError"));
     } finally {
-      setBusyKey("");
+      if (actionToken === regenerationActionTokenRef.current) setBusyKey("");
     }
   }
 
@@ -207,7 +242,7 @@ export function MovieProductionWorkspace({ project, completionPercent, onRefresh
     <ProductionStageRail currentStage={model.currentStage} counts={model.counts} />
 
     <MovieBudgetReadinessPanel project={project} workspace={model} cost={cost} selectedTier={selectedTier} onTierChange={setSelectedTier} />
-    {confirmation && <section className="movie-production-confirmation" role="dialog" aria-modal="false" aria-labelledby="movie-production-confirmation-title"><div className="movie-budget-readiness-icon"><AlertTriangle size={16} /></div><div><span className="movie-workspace-kicker">{t("movieBody.production.reviewBeforeContinuing")}</span><h3 id="movie-production-confirmation-title">{confirmation.title}</h3><p>{confirmation.detail} {t("movieBody.production.nothingCharged")}</p>{confirmation.preview && <div className="movie-production-confirmation-preview" aria-live="polite"><span>{t("movieBody.production.serverCostPreview")}</span><strong>{formatMovieRegenerationCost(confirmation.preview.preview, locale) ?? t("movieBody.production.costUnknown")}</strong><small>{formatMovieRegenerationCost(confirmation.preview.preview, locale) ? t("movieBody.production.costEstimate") : t("movieBody.production.costEstimateUnknown")}</small>{confirmation.preview.preview.guardrails?.warnings.map((warning) => <small key={warning.code}>{warning.message}</small>)}</div>}{confirmation.preview?.blockedReason && <p className="movie-production-confirmation-blocked" role="alert">{confirmation.preview.blockedReason === "server-blocked" ? t("movieBody.production.serverReadinessBlocked") : confirmation.preview.blockedReason === "readiness-unavailable" ? t("movieBody.production.readinessUnavailable") : t("movieBody.production.confirmationRequired")}</p>}<div className="movie-production-confirmation-actions"><button type="button" className="movie-workspace-button is-primary" disabled={Boolean(busyKey) || Boolean(confirmation.preview && !confirmation.preview.canConfirm)} onClick={() => { const pending = confirmation; setConfirmation(null); void executeAction(pending.key, pending.confirm); }}>{t("movieBody.production.continue")}</button><button type="button" className="movie-workspace-button is-secondary" disabled={Boolean(busyKey)} onClick={() => setConfirmation(null)}>{t("movieBody.production.notNow")}</button></div></div></section>}
+    {confirmation && <section className="movie-production-confirmation" role="dialog" aria-modal="false" aria-labelledby="movie-production-confirmation-title"><div className="movie-budget-readiness-icon"><AlertTriangle size={16} /></div><div><span className="movie-workspace-kicker">{t("movieBody.production.reviewBeforeContinuing")}</span><h3 id="movie-production-confirmation-title">{confirmation.title}</h3><p>{confirmation.detail} {t("movieBody.production.nothingCharged")}</p>{confirmation.preview && <div className="movie-production-confirmation-preview" aria-live="polite"><span>{t("movieBody.production.serverCostPreview")}</span><strong>{formatMovieRegenerationCost(confirmation.preview.preview, locale) ?? t("movieBody.production.costUnknown")}</strong><small>{formatMovieRegenerationCost(confirmation.preview.preview, locale) ? t("movieBody.production.costEstimate") : t("movieBody.production.costEstimateUnknown")}</small>{confirmation.preview.preview.guardrails?.warnings.map((warning) => <small key={warning.code}>{warning.message}</small>)}</div>}{confirmation.preview?.blockedReason && <p className="movie-production-confirmation-blocked" role="alert">{confirmation.preview.blockedReason === "server-blocked" ? t("movieBody.production.serverReadinessBlocked") : confirmation.preview.blockedReason === "readiness-unavailable" ? t("movieBody.production.readinessUnavailable") : t("movieBody.production.confirmationRequired")}</p>}<div className="movie-production-confirmation-actions"><button type="button" className="movie-workspace-button is-primary" disabled={Boolean(busyKey) || Boolean(confirmation.preview && !confirmation.preview.canConfirm)} onClick={() => { const pending = confirmation; setConfirmation(null); void executeAction(pending.key, pending.confirm); }}>{t("movieBody.production.continue")}</button><button type="button" className="movie-workspace-button is-secondary" disabled={Boolean(busyKey)} onClick={() => cancelRegenerationConfirmation(confirmation)}>{t("movieBody.production.notNow")}</button></div></div></section>}
 
     <div className="movie-production-summary-grid" aria-label="Production summary">
       <SummaryMetric label="Shot plan" value={`${model.counts.shotPlanReady}/${model.counts.shots}`} detail="approved intent" />

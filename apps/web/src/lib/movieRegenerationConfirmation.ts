@@ -1,6 +1,17 @@
 import type { MovieRegenerationCostPreview, MovieSelectiveRegenerationResponse } from "@/lib/api";
 import { localeTag, type Locale } from "@/lib/i18n";
 
+export type MovieRegenerationIdempotencyKeys = { create: string; confirm: string };
+export type MovieRegenerationAttempt = { key: string; generation: number; keys: MovieRegenerationIdempotencyKeys };
+
+export function movieRegenerationAttemptIsCurrent(current: MovieRegenerationAttempt | undefined, candidate: MovieRegenerationAttempt): boolean {
+  return current?.key === candidate.key && current.generation === candidate.generation;
+}
+
+export function retireMovieRegenerationAttempt(current: MovieRegenerationAttempt | undefined, candidate: MovieRegenerationAttempt): MovieRegenerationAttempt | undefined {
+  return movieRegenerationAttemptIsCurrent(current, candidate) ? undefined : current;
+}
+
 export type MovieRegenerationConfirmationState = {
   requestId: string;
   preview: MovieRegenerationCostPreview;

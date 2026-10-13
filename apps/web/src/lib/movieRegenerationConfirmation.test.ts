@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { MovieRegenerationCostPreview, MovieSelectiveRegenerationResponse } from "@/lib/api";
-import { buildMovieRegenerationConfirmation, confirmMovieRegenerationIfAllowed, formatMovieRegenerationCost } from "./movieRegenerationConfirmation";
+import { buildMovieRegenerationConfirmation, confirmMovieRegenerationIfAllowed, formatMovieRegenerationCost, movieRegenerationAttemptIsCurrent, retireMovieRegenerationAttempt, type MovieRegenerationAttempt } from "./movieRegenerationConfirmation";
 
 function response(preview: MovieRegenerationCostPreview): MovieSelectiveRegenerationResponse {
   return { request: { id: "regen-1", costPreview: preview } } as MovieSelectiveRegenerationResponse;
@@ -48,5 +48,34 @@ describe("Movie regeneration confirmation", () => {
     expect(formatMovieRegenerationCost(preview(), "en")).toContain("1.25");
     expect(formatMovieRegenerationCost(preview({ estimatedProviderCostUsd: null, estimatedProviderCostKnown: false, minimumEstimatedProviderCostUsd: null, maximumEstimatedProviderCostUsd: null }), "ar")).toBeNull();
     expect(formatMovieRegenerationCost(preview({ estimatedProviderCostUsd: null, estimatedProviderCostKnown: false, minimumEstimatedProviderCostUsd: 1, maximumEstimatedProviderCostUsd: 2 }), "ku")).toContain("US$");
+  });
+
+  it("allows the identical confirmation retry after a transient network failure", async () => {
+    const state = buildMovieRegenerationConfirmation(response(preview()));
+    const calls: string[] = [];
+    let failed = true;
+
+    await expect(confirmMovieRegenerationIfAllowed(state, async (requestId) => {
+      calls.push(requestId);
+      if (failed) {
+        failed = false;
+        throw new Error("network unavailable");
+      }
+    })).rejects.toThrow("network unavailable");
+    await expect(confirmMovieRegenerationIfAllowed(state, async (requestId) => { calls.push(requestId); })).resolves.toBe(true);
+
+    expect(calls).toEqual(["regen-1", "regen-1"]);
+  });
+
+  it("rejects a late callback from a cancelled or replaced attempt", () => {
+    const first: MovieRegenerationAttempt = { key: "shot-1:regenerate", generation: 1, keys: { create: "create-1", confirm: "confirm-1" } };
+    const replacement: MovieRegenerationAttempt = { key: first.key, generation: 2, keys: { create: "create-2", confirm: "confirm-2" } };
+
+    expect(movieRegenerationAttemptIsCurrent(first, first)).toBe(true);
+    expect(movieRegenerationAttemptIsCurrent(undefined, first)).toBe(false);
+    expect(movieRegenerationAttemptIsCurrent(replacement, first)).toBe(false);
+    expect(movieRegenerationAttemptIsCurrent(replacement, replacement)).toBe(true);
+    expect(retireMovieRegenerationAttempt(first, first)).toBeUndefined();
+    expect(retireMovieRegenerationAttempt(replacement, first)).toBe(replacement);
   });
 });
