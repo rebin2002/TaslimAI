@@ -1,0 +1,52 @@
+import type { MovieRegenerationCostPreview, MovieSelectiveRegenerationResponse } from "@/lib/api";
+import { localeTag, type Locale } from "@/lib/i18n";
+
+export type MovieRegenerationConfirmationState = {
+  requestId: string;
+  preview: MovieRegenerationCostPreview;
+  canConfirm: boolean;
+  blockedReason: "readiness-unavailable" | "server-blocked" | "confirmation-required" | null;
+};
+
+export function buildMovieRegenerationConfirmation(response: MovieSelectiveRegenerationResponse): MovieRegenerationConfirmationState {
+  const preview = response.request.costPreview;
+  const blockedReason = !preview.guardrails
+    ? "readiness-unavailable"
+    : !preview.guardrails.canProceed
+      ? "server-blocked"
+      : !preview.confirmationRequired
+        ? "confirmation-required"
+        : null;
+  return {
+    requestId: response.request.id,
+    preview,
+    canConfirm: blockedReason === null,
+    blockedReason,
+  };
+}
+
+export async function confirmMovieRegenerationIfAllowed(state: MovieRegenerationConfirmationState, confirm: (requestId: string) => Promise<unknown>): Promise<boolean> {
+  if (!state.canConfirm) return false;
+  await confirm(state.requestId);
+  return true;
+}
+
+export function formatMovieRegenerationCost(preview: MovieRegenerationCostPreview, locale: Locale): string | null {
+  const currency = preview.currency || "USD";
+  const formatter = (amount: number) => {
+    try {
+      return new Intl.NumberFormat(localeTag(locale), { style: "currency", currency, maximumFractionDigits: 4 }).format(amount);
+    } catch {
+      return `${amount} ${currency}`;
+    }
+  };
+  if (preview.estimatedProviderCostKnown && preview.estimatedProviderCostUsd !== null) return formatter(preview.estimatedProviderCostUsd);
+  const minimum = preview.minimumEstimatedProviderCostUsd;
+  const maximum = preview.maximumEstimatedProviderCostUsd;
+  if (typeof minimum === "number" && typeof maximum === "number") {
+    return minimum === maximum
+      ? formatter(minimum)
+      : `${formatter(minimum)}–${formatter(maximum)}`;
+  }
+  return null;
+}
