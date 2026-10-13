@@ -51,10 +51,13 @@ export function formatMovieRegenerationCost(preview: MovieRegenerationCostPrevie
       return `${amount} ${currency}`;
     }
   };
-  if (preview.estimatedProviderCostKnown && preview.estimatedProviderCostUsd !== null) return formatter(preview.estimatedProviderCostUsd);
+  // Treat malformed or inconsistent server estimates as unknown rather than
+  // showing a misleading price (for example, NaN, a negative amount, or a reversed range).
+  const validAmount = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0;
+  if (preview.estimatedProviderCostKnown && validAmount(preview.estimatedProviderCostUsd)) return formatter(preview.estimatedProviderCostUsd);
   const minimum = preview.minimumEstimatedProviderCostUsd;
   const maximum = preview.maximumEstimatedProviderCostUsd;
-  if (typeof minimum === "number" && typeof maximum === "number") {
+  if (validAmount(minimum) && validAmount(maximum) && minimum <= maximum) {
     return minimum === maximum
       ? formatter(minimum)
       : `${formatter(minimum)}–${formatter(maximum)}`;
