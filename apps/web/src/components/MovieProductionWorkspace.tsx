@@ -148,7 +148,7 @@ export function MovieProductionWorkspace({ project, completionPercent, onRefresh
   async function executeAction(key: string, work: () => Promise<unknown>) {
     setBusyKey(key);
     setError("");
-    setLastAction(() => async () => { await runAction(key, work); });
+    setLastAction(() => async () => { await executeAction(key, work); });
     try {
       await work();
       await onRefresh();
