@@ -4,6 +4,16 @@ if (process.env.NODE_ENV === "production" && (!configuredApiUrl || !configuredAp
 const apiOrigin = (configuredApiUrl ?? "http://localhost:5000").replace(/\/$/, "");
 const MAX_PROXY_BODY_BYTES = 25 * 1024 * 1024;
 const UPSTREAM_TIMEOUT_MS = 30_000;
+const untrustedForwardingHeaders = [
+  "forwarded",
+  "via",
+  "x-forwarded-for",
+  "x-forwarded-host",
+  "x-forwarded-port",
+  "x-forwarded-prefix",
+  "x-forwarded-proto",
+  "x-real-ip",
+] as const;
 
 type RouteContext = { params: Promise<{ path: string[] }> };
 
@@ -60,6 +70,10 @@ async function forward(request: Request, context: RouteContext): Promise<Respons
   headers.delete("content-length");
   headers.delete("accept-encoding");
   headers.delete("connection");
+  // The API trusts one hosting-proxy hop for the original HTTPS scheme so it
+  // can issue Secure cookies. Never let a browser manufacture that metadata
+  // through this same-origin proxy.
+  for (const header of untrustedForwardingHeaders) headers.delete(header);
 
   const init: RequestInit & { duplex?: "half" } = {
     method: request.method,

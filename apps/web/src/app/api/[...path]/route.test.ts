@@ -32,6 +32,40 @@ describe("same-origin API proxy", () => {
     vi.unstubAllGlobals();
   });
 
+  it("does not forward client-controlled proxy headers to the API", async () => {
+    const upstream = new Response("{}", { status: 200 });
+    const fetchMock = vi.fn().mockResolvedValue(upstream);
+    vi.stubGlobal("fetch", fetchMock);
+    const request = new Request("http://localhost:3000/api/auth/me", {
+      headers: {
+        forwarded: "for=198.51.100.7;proto=http",
+        via: "client-proxy",
+        "x-forwarded-for": "198.51.100.7",
+        "x-forwarded-host": "attacker.example",
+        "x-forwarded-port": "80",
+        "x-forwarded-prefix": "/spoofed",
+        "x-forwarded-proto": "http",
+        "x-real-ip": "198.51.100.7",
+      },
+    });
+    await GET(request, context(["auth", "me"]));
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const forwardedHeaders = new Headers(init.headers);
+    for (const header of [
+      "forwarded",
+      "via",
+      "x-forwarded-for",
+      "x-forwarded-host",
+      "x-forwarded-port",
+      "x-forwarded-prefix",
+      "x-forwarded-proto",
+      "x-real-ip",
+    ]) {
+      expect(forwardedHeaders.get(header)).toBeNull();
+    }
+    vi.unstubAllGlobals();
+  });
+
   it("forwards each Set-Cookie value separately when authentication rotates multiple cookies", async () => {
     const upstream = new Response(JSON.stringify({ success: true }), { status: 200 });
     upstream.headers.append("set-cookie", "taslim.auth=session-cookie; Path=/; HttpOnly; Secure; SameSite=None");
