@@ -50,6 +50,16 @@ describe("Movie regeneration confirmation", () => {
     expect(formatMovieRegenerationCost(preview({ estimatedProviderCostUsd: null, estimatedProviderCostKnown: false, minimumEstimatedProviderCostUsd: 1, maximumEstimatedProviderCostUsd: 2 }), "ku")).toContain("US$");
   });
 
+  it("does not display malformed, negative, or reversed cost estimates", () => {
+    const noRange = { minimumEstimatedProviderCostUsd: null, maximumEstimatedProviderCostUsd: null };
+    expect(formatMovieRegenerationCost(preview({ ...noRange, estimatedProviderCostUsd: -1 }), "en")).toBeNull();
+    expect(formatMovieRegenerationCost(preview({ ...noRange, estimatedProviderCostUsd: Number.NaN }), "en")).toBeNull();
+    expect(formatMovieRegenerationCost(preview({ ...noRange, estimatedProviderCostUsd: Number.POSITIVE_INFINITY }), "en")).toBeNull();
+    expect(formatMovieRegenerationCost(preview({ estimatedProviderCostKnown: false, estimatedProviderCostUsd: null, minimumEstimatedProviderCostUsd: 4, maximumEstimatedProviderCostUsd: 2 }), "en")).toBeNull();
+    expect(formatMovieRegenerationCost(preview({ estimatedProviderCostKnown: false, estimatedProviderCostUsd: null, minimumEstimatedProviderCostUsd: -1, maximumEstimatedProviderCostUsd: 2 }), "en")).toBeNull();
+    expect(formatMovieRegenerationCost(preview({ estimatedProviderCostUsd: 0 }), "en")).toContain("0.00");
+  });
+
   it("allows the identical confirmation retry after a transient network failure", async () => {
     const state = buildMovieRegenerationConfirmation(response(preview()));
     const calls: string[] = [];
