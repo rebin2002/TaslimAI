@@ -21,7 +21,7 @@ import {
   X,
 } from "lucide-react";
 import { useLocale } from "@/components/LocaleProvider";
-import { api, type MovieOverviewCost, type MovieProductionVersion, type MovieProject, type MovieTake } from "@/lib/api";
+import { api, type MovieOverviewCost, type MovieProductionVersion, type MovieProject, type MovieSelectiveRegenerationResponse, type MovieTake } from "@/lib/api";
 import { assetFileUrl } from "@/lib/apiBase";
 import { MovieBudgetReadinessPanel } from "@/components/MovieBudgetReadinessPanel";
 import {
@@ -35,6 +35,7 @@ import {
 } from "@/lib/movieProductionWorkspace";
 import { hasActiveMovieProductionExecution, nextMovieProductionPollDelay } from "@/lib/movieProductionPolling";
 import { productionIntentForTier, type MovieResolutionTier } from "@/lib/movieProductionResolution";
+import { buildMovieRegenerationConfirmation, confirmMovieRegenerationIfAllowed, formatMovieRegenerationCost, movieRegenerationAttemptIsCurrent, retireMovieRegenerationAttempt, type MovieRegenerationAttempt, type MovieRegenerationConfirmationState } from "@/lib/movieRegenerationConfirmation";
 
 const filters: Array<{ id: ProductionWorkspaceFilter; label: string }> = [
   { id: "all", label: "All shots" },
@@ -69,22 +70,26 @@ function createApiAdapter(): MovieProductionWorkspaceAdapter {
   };
 }
 
-type PendingProductionConfirmation = { key: string; work: () => Promise<unknown>; title: string; detail: string };
+type PendingProductionConfirmation = { key: string; confirm: () => Promise<unknown>; title: string; detail: string; preview?: MovieRegenerationConfirmationState; attempt?: MovieRegenerationAttempt };
 
 function isExpensiveProductionAction(key: string) {
   return /:(keyframe|motion|render|retry|master|regenerate)(?:$|-)/.test(key);
 }
 
-function confirmationCopy(key: string) {
-  if (key.includes(":master")) return { title: "Confirm the master hand-off", detail: "This keeps the selected take as the hand-off point for a higher-finish step." };
-  if (key.includes(":render") || key.includes(":retry")) return { title: "Confirm this production pass", detail: "Review the budget and readiness panel before starting another pass. Only the affected shot will be sent forward." };
-  if (key.includes(":regenerate")) return { title: "Confirm selective regeneration", detail: "Only this shot will be regenerated from its latest approved production source. Review the budget and readiness panel before continuing." };
-  if (key.includes(":keyframe")) return { title: "Confirm the source frame", detail: "This prepares a new visual reference from the approved plan. Review the result before moving on." };
-  return { title: "Confirm the motion check", detail: "This creates a reviewable motion pass from the approved source frame." };
+function confirmationCopy(key: string, t: (key: string) => string) {
+  if (key.includes(":master")) return { title: t("movieBody.production.confirmMaster"), detail: t("movieBody.production.confirmMasterDetail") };
+  if (key.includes(":render") || key.includes(":retry")) return { title: t("movieBody.production.confirmPass"), detail: t("movieBody.production.confirmPassDetail") };
+  if (key.includes(":regenerate")) return { title: t("movieBody.production.confirmRegeneration"), detail: t("movieBody.production.confirmRegenerationDetail") };
+  if (key.includes(":keyframe")) return { title: t("movieBody.production.confirmKeyframe"), detail: t("movieBody.production.confirmKeyframeDetail") };
+  return { title: t("movieBody.production.confirmMotion"), detail: t("movieBody.production.confirmMotionDetail") };
+}
+
+function newIdempotencyKey(prefix: string) {
+  return `${prefix}-${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
 }
 
 export function MovieProductionWorkspace({ project, completionPercent, onRefresh, cost = null, adapter = createApiAdapter() }: { project: MovieProject; completionPercent: number; onRefresh: () => Promise<void>; cost?: MovieOverviewCost | null; adapter?: MovieProductionWorkspaceAdapter }) {
-  const { t } = useLocale();
+  const { locale, t } = useLocale();
   const model = useMemo(() => buildMovieProductionWorkspaceModel(project), [project]);
   const displayProgress = model.shots.length ? model.progressPercent : completionPercent;
   const hasActiveExecution = useMemo(() => hasActiveMovieProductionExecution(project), [project]);
@@ -96,6 +101,9 @@ export function MovieProductionWorkspace({ project, completionPercent, onRefresh
   const [pollRetry, setPollRetry] = useState(0);
   const [lastAction, setLastAction] = useState<(() => Promise<void>) | null>(null);
   const [confirmation, setConfirmation] = useState<PendingProductionConfirmation | null>(null);
+  const regenerationAttemptsRef = useRef(new Map<string, MovieRegenerationAttempt>());
+  const regenerationGenerationRef = useRef(0);
+  const regenerationActionTokenRef = useRef(0);
   const refreshRef = useRef(onRefresh);
   const visibleShots = model.shots.filter((item) => matchesProductionFilter(item, filter));
 
@@ -118,27 +126,61 @@ export function MovieProductionWorkspace({ project, completionPercent, onRefresh
     return () => { active = false; window.clearTimeout(timer); };
   }, [hasActiveExecution, pollRetry]);
 
-  const regenerateShot = (item: ProductionWorkspaceShot) => async () => {
+  function regenerationAttempt(key: string) {
+    const existing = regenerationAttemptsRef.current.get(key);
+    if (existing) return existing;
+    const attempt: MovieRegenerationAttempt = { key, generation: ++regenerationGenerationRef.current, keys: { create: newIdempotencyKey(`${key}:create`), confirm: newIdempotencyKey(`${key}:confirm`) } };
+    regenerationAttemptsRef.current.set(key, attempt);
+    return attempt;
+  }
+
+  function retireRegenerationAttempt(attempt: MovieRegenerationAttempt) {
+    const current = regenerationAttemptsRef.current.get(attempt.key);
+    if (!retireMovieRegenerationAttempt(current, attempt)) regenerationAttemptsRef.current.delete(attempt.key);
+  }
+
+  function cancelRegenerationConfirmation(pending: PendingProductionConfirmation) {
+    setConfirmation(null);
+    if (pending.attempt) {
+      retireRegenerationAttempt(pending.attempt);
+      regenerationActionTokenRef.current += 1;
+      setLastAction(null);
+    }
+  }
+
+  const regenerateShot = (item: ProductionWorkspaceShot) => async (): Promise<MovieSelectiveRegenerationResponse> => {
+    const key = `${item.shot.id}:regenerate`;
     const sourceVersion = item.motion ?? item.keyframe ?? item.render;
-    const response = await api.createMovieRegenerationRequest(item.shot.id, {
+    return api.createMovieRegenerationRequest(item.shot.id, {
       actionType: "production_render", requestedStage: "ProductionRender",
       reason: "Recover the failed production render from the latest approved source.",
       sourceVersionId: sourceVersion?.id ?? null, changedInputsJson: JSON.stringify({ recovery: "production_render", sourceVersionId: sourceVersion?.id ?? null }),
       compositionJson: sourceVersion?.compositionJson ?? "{}",
-    });
-    await api.confirmMovieRegeneration(response.request.id, true);
+    }, regenerationAttempt(key).keys.create);
   };
 
   async function executeAction(key: string, work: () => Promise<unknown>) {
     setBusyKey(key);
     setError("");
-    setLastAction(() => async () => { await runAction(key, work); });
+    setLastAction(() => async () => { await executeAction(key, work); });
     try {
       await work();
-      await onRefresh();
-      setRefreshError("");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "That production decision could not be saved.");
+      setBusyKey("");
+      return;
+    }
+    try {
+      await onRefresh();
+      setRefreshError("");
+      setLastAction(null);
+    } catch {
+      setRefreshError("Production status could not be refreshed. Reload the workspace to see the latest state.");
+      setLastAction(() => async () => {
+        await onRefresh();
+        setRefreshError("");
+        setLastAction(null);
+      });
     } finally {
       setBusyKey("");
     }
@@ -146,11 +188,45 @@ export function MovieProductionWorkspace({ project, completionPercent, onRefresh
 
   async function runAction(key: string, work: () => Promise<unknown>) {
     if (isExpensiveProductionAction(key)) {
-      const copy = confirmationCopy(key);
-      setConfirmation({ key, work, ...copy });
+      if (key.includes(":regenerate")) {
+        await prepareRegeneration(key, work);
+        return;
+      }
+      const copy = confirmationCopy(key, t);
+      setConfirmation({ key, confirm: work, ...copy });
       return;
     }
     await executeAction(key, work);
+  }
+
+  async function prepareRegeneration(key: string, work: () => Promise<unknown>) {
+    const attempt = regenerationAttempt(key);
+    const actionToken = ++regenerationActionTokenRef.current;
+    setBusyKey(key);
+    setError("");
+    setLastAction(() => async () => { await runAction(key, work); });
+    try {
+      const response = await work() as MovieSelectiveRegenerationResponse;
+      if (actionToken !== regenerationActionTokenRef.current || !movieRegenerationAttemptIsCurrent(regenerationAttemptsRef.current.get(key), attempt)) return;
+      const preview = buildMovieRegenerationConfirmation(response);
+      const copy = confirmationCopy(key, t);
+      setConfirmation({
+        key,
+        ...copy,
+        preview,
+        attempt,
+        confirm: async () => {
+          const confirmed = await confirmMovieRegenerationIfAllowed(preview, (requestId) => api.confirmMovieRegeneration(requestId, true, attempt.keys.confirm));
+          if (confirmed) retireRegenerationAttempt(attempt);
+          return confirmed;
+        },
+      });
+    } catch (cause) {
+      if (actionToken === regenerationActionTokenRef.current && movieRegenerationAttemptIsCurrent(regenerationAttemptsRef.current.get(key), attempt))
+        setError(cause instanceof Error ? cause.message : t("movieBody.production.regenerationPrepareError"));
+    } finally {
+      if (actionToken === regenerationActionTokenRef.current) setBusyKey("");
+    }
   }
 
   return <div className="movie-production-workspace" data-testid="movie-production-workspace">
@@ -166,7 +242,7 @@ export function MovieProductionWorkspace({ project, completionPercent, onRefresh
     <ProductionStageRail currentStage={model.currentStage} counts={model.counts} />
 
     <MovieBudgetReadinessPanel project={project} workspace={model} cost={cost} selectedTier={selectedTier} onTierChange={setSelectedTier} />
-    {confirmation && <section className="movie-production-confirmation" role="dialog" aria-modal="false" aria-labelledby="movie-production-confirmation-title"><div className="movie-budget-readiness-icon"><AlertTriangle size={16} /></div><div><span className="movie-workspace-kicker">Review before continuing</span><h3 id="movie-production-confirmation-title">{confirmation.title}</h3><p>{confirmation.detail} Nothing is charged from this planning surface.</p><div className="movie-production-confirmation-actions"><button type="button" className="movie-workspace-button is-primary" onClick={() => { const pending = confirmation; setConfirmation(null); void executeAction(pending.key, pending.work); }}>Continue</button><button type="button" className="movie-workspace-button is-secondary" onClick={() => setConfirmation(null)}>Not now</button></div></div></section>}
+    {confirmation && <section className="movie-production-confirmation" role="dialog" aria-modal="false" aria-labelledby="movie-production-confirmation-title"><div className="movie-budget-readiness-icon"><AlertTriangle size={16} /></div><div><span className="movie-workspace-kicker">{t("movieBody.production.reviewBeforeContinuing")}</span><h3 id="movie-production-confirmation-title">{confirmation.title}</h3><p>{confirmation.detail} {t("movieBody.production.nothingCharged")}</p>{confirmation.preview && <div className="movie-production-confirmation-preview" aria-live="polite"><span>{t("movieBody.production.serverCostPreview")}</span><strong>{formatMovieRegenerationCost(confirmation.preview.preview, locale) ?? t("movieBody.production.costUnknown")}</strong><small>{formatMovieRegenerationCost(confirmation.preview.preview, locale) ? t("movieBody.production.costEstimate") : t("movieBody.production.costEstimateUnknown")}</small>{confirmation.preview.preview.guardrails?.warnings.map((warning) => <small key={warning.code}>{warning.message}</small>)}</div>}{confirmation.preview?.blockedReason && <p className="movie-production-confirmation-blocked" role="alert">{confirmation.preview.blockedReason === "server-blocked" ? t("movieBody.production.serverReadinessBlocked") : confirmation.preview.blockedReason === "readiness-unavailable" ? t("movieBody.production.readinessUnavailable") : t("movieBody.production.confirmationRequired")}</p>}<div className="movie-production-confirmation-actions"><button type="button" className="movie-workspace-button is-primary" disabled={Boolean(busyKey) || Boolean(confirmation.preview && !confirmation.preview.canConfirm)} onClick={() => { const pending = confirmation; setConfirmation(null); void executeAction(pending.key, pending.confirm); }}>{t("movieBody.production.continue")}</button><button type="button" className="movie-workspace-button is-secondary" disabled={Boolean(busyKey)} onClick={() => cancelRegenerationConfirmation(confirmation)}>{t("movieBody.production.notNow")}</button></div></div></section>}
 
     <div className="movie-production-summary-grid" aria-label="Production summary">
       <SummaryMetric label="Shot plan" value={`${model.counts.shotPlanReady}/${model.counts.shots}`} detail="approved intent" />
@@ -194,7 +270,7 @@ function ProductionStageRail({ currentStage, counts }: { currentStage: Productio
   return <nav className="movie-production-stage-rail" aria-label="Production stages">{stageRail.map((stage, index) => { const complete = index < activeIndex || (stage.id === "timeline" && counts.readyForTimeline > 0 && counts.readyForTimeline === counts.shots); const active = index === activeIndex; return <div className={`movie-production-stage-step ${complete ? "is-complete" : ""} ${active ? "is-active" : ""}`} key={stage.id} aria-current={active ? "step" : undefined}><span className="movie-production-stage-index">{complete ? <Check size={13} /> : String(index + 1).padStart(2, "0")}</span><div><strong>{stage.label}</strong><small>{stage.detail}</small></div>{index < stageRail.length - 1 && <ChevronRight size={13} className="movie-production-stage-arrow" aria-hidden="true" />}</div>; })}</nav>;
 }
 
-function ProductionShotCard({ item, busyKey, selectedTier, adapter, onAction, onRegenerate }: { item: ProductionWorkspaceShot; busyKey: string; selectedTier: MovieResolutionTier; adapter: MovieProductionWorkspaceAdapter; onAction: (key: string, work: () => Promise<unknown>) => Promise<void>; onRegenerate: () => Promise<void> }) {
+function ProductionShotCard({ item, busyKey, selectedTier, adapter, onAction, onRegenerate }: { item: ProductionWorkspaceShot; busyKey: string; selectedTier: MovieResolutionTier; adapter: MovieProductionWorkspaceAdapter; onAction: (key: string, work: () => Promise<unknown>) => Promise<void>; onRegenerate: () => Promise<MovieSelectiveRegenerationResponse> }) {
   const { shot } = item;
   const sourceStoryboard = item.storyboard;
   const isBusy = (action: string) => busyKey === `${shot.id}:${action}`;
