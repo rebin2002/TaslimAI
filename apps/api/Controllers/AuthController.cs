@@ -10,6 +10,7 @@ using Taslim.Api.Billing;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
 using Taslim.Api.Infrastructure;
+using Taslim.Api.Localization;
 using Taslim.Api.Persistence;
 
 namespace Taslim.Api.Controllers;
@@ -56,7 +57,7 @@ public sealed class AuthController(
     [EnableRateLimiting(RateLimiting.Authentication)]
     public async Task<IActionResult> Register(RegisterRequest request, CancellationToken cancellationToken)
     {
-        if (!ModelState.IsValid || string.IsNullOrWhiteSpace(request.DisplayName) || !IsSupportedLanguage(request.PreferredLanguage, allowEmpty: true))
+        if (!ModelState.IsValid || string.IsNullOrWhiteSpace(request.DisplayName) || !IsSupportedInterfaceLanguage(request.PreferredLanguage, allowEmpty: true))
             return ApiResults.Validation(this, "Please provide a valid name, email, password, and language.");
 
         var now = DateTime.UtcNow;
@@ -208,8 +209,8 @@ public sealed class AuthController(
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> UpdateProfile(UpdateProfileRequest request)
     {
-        if (!ModelState.IsValid || string.IsNullOrWhiteSpace(request.DisplayName) || !IsSupportedLanguage(request.PreferredLanguage)
-            || (request.DefaultGenerationLanguage is not null && !IsSupportedLanguage(request.DefaultGenerationLanguage))
+        if (!ModelState.IsValid || string.IsNullOrWhiteSpace(request.DisplayName) || !IsSupportedInterfaceLanguage(request.PreferredLanguage)
+            || (request.DefaultGenerationLanguage is not null && !IsSupportedGenerationLanguage(request.DefaultGenerationLanguage))
             || (request.TimeZone is not null && !TimeZoneInfo.GetSystemTimeZones().Any(zone => string.Equals(zone.Id, request.TimeZone.Trim(), StringComparison.Ordinal)))
             || (request.OutputPreference is not null && !OutputPreferences.Supported.Contains(request.OutputPreference.Trim())))
             return ApiResults.Validation(this, "Please provide valid profile and preference values.");
@@ -238,8 +239,8 @@ public sealed class AuthController(
         var displayName = request.DisplayName?.Trim();
         var intent = string.IsNullOrWhiteSpace(request.Intent) ? null : request.Intent.Trim().ToLowerInvariant();
         if (!ModelState.IsValid
-            || !IsSupportedLanguage(request.PreferredLanguage)
-            || !IsSupportedLanguage(request.DefaultGenerationLanguage)
+            || !IsSupportedInterfaceLanguage(request.PreferredLanguage)
+            || !IsSupportedGenerationLanguage(request.DefaultGenerationLanguage)
             || (displayName is not null && displayName.Length > 0 && displayName.Length < 2)
             || (intent is not null && !OnboardingIntents.Supported.Contains(intent)))
             return ApiResults.Validation(this, "Please provide valid onboarding preferences.");
@@ -248,7 +249,7 @@ public sealed class AuthController(
         if (user is null || !user.IsActive) return Unauthorized();
 
         if (!string.IsNullOrWhiteSpace(displayName)) user.DisplayName = displayName;
-        user.PreferredLanguage = request.PreferredLanguage.Trim().ToLowerInvariant();
+        user.PreferredLanguage = LanguagePackCatalog.NormalizeInterfaceLanguage(request.PreferredLanguage);
         user.DefaultGenerationLanguage = request.DefaultGenerationLanguage.Trim().ToLowerInvariant();
         user.OnboardingIntent = intent;
         user.OnboardingCompletedAt = DateTime.UtcNow;
@@ -313,10 +314,12 @@ public sealed class AuthController(
         Response.Headers.CacheControl = "no-store";
     }
 
-    private static bool IsSupportedLanguage(string? language, bool allowEmpty = false) =>
-        string.IsNullOrWhiteSpace(language) ? allowEmpty : LanguageCodes.Supported.Contains(language.Trim());
+    private static bool IsSupportedInterfaceLanguage(string? language, bool allowEmpty = false) =>
+        string.IsNullOrWhiteSpace(language) ? allowEmpty : LanguagePackCatalog.IsInterfaceLanguage(language);
+    private static bool IsSupportedGenerationLanguage(string? language) =>
+        !string.IsNullOrWhiteSpace(language) && LanguageCodes.Supported.Contains(language.Trim());
     private static string NormalizeLanguage(string? language) =>
-        string.IsNullOrWhiteSpace(language) ? LanguageCodes.English : language.Trim().ToLowerInvariant();
+        LanguagePackCatalog.NormalizeInterfaceLanguage(language);
     private static string[] ToPasswordFieldErrors(IEnumerable<IdentityError> errors) => errors
         .Select(error => error.Code)
         .Where(code => code is "PasswordTooShort" or "PasswordRequiresUpper" or "PasswordRequiresLower" or "PasswordRequiresDigit" or "PasswordRequiresNonAlphanumeric" or "PasswordRequiresUniqueChars")
