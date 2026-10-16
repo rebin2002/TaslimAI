@@ -50,11 +50,11 @@ test.describe("account profile persistence", () => {
     await page.goto("/account");
     await expect(page.getByRole("heading", { name: /^account$/i })).toBeVisible();
 
-    const saved = await apiJson<AuthResponse>(page.request, "PATCH", "/api/auth/profile", {
-      displayName: "E2E Chinese Profile Owner",
-      preferredLanguage: " zh-cn ",
-      defaultGenerationLanguage: "ar",
-    });
+    await page.locator(".account-control-grid select").first().selectOption("zh-CN");
+    await page.locator(".account-control-grid select").nth(1).selectOption("ar");
+    await page.locator(".account-profile-card button.primary-button").click();
+
+    const saved = await apiJson<AuthResponse>(page.request, "GET", "/api/auth/me");
     expect(saved.user.preferredLanguage).toBe("zh-CN");
     expect(saved.user.defaultGenerationLanguage).toBe("ar");
 
