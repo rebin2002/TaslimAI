@@ -44,7 +44,8 @@ type SaveState = "idle" | "saving" | "saved";
 
 export function AccountView() {
   const { user } = useAuth();
-  return <AccountProfileForm key={accountProfileSessionKey(user)} />;
+  const { languagePackId } = useLocale();
+  return <AccountProfileForm key={`${accountProfileSessionKey(user)}:${languagePackId}`} />;
 }
 
 function AccountProfileForm() {
@@ -52,7 +53,7 @@ function AccountProfileForm() {
   const { t, languagePackId, languagePackIds, languagePackNames, setLanguagePack } = useLocale();
   const profileDefaults = accountProfileDraftFromUser(user);
   const [displayName, setDisplayName] = useState(profileDefaults.displayName);
-  const [preferredLanguage, setPreferredLanguage] = useState<LanguagePackId>(profileDefaults.preferredLanguage);
+  const [preferredLanguage, setPreferredLanguage] = useState<LanguagePackId>(languagePackId);
   const [defaultGenerationLanguage, setDefaultGenerationLanguage] = useState<Locale>(profileDefaults.defaultGenerationLanguage);
   const [timeZone, setTimeZone] = useState(profileDefaults.timeZone);
   const [outputPreference, setOutputPreference] = useState<(typeof outputPreferences)[number]>(profileDefaults.outputPreference);
