@@ -1,9 +1,10 @@
 import type { ProfileInput, User } from "./api";
 import type { Locale } from "./i18n";
+import type { LanguagePackId } from "./languagePackTypes";
 
 export type AccountProfileDraft = {
   displayName: string;
-  preferredLanguage: Locale;
+  preferredLanguage: LanguagePackId;
   defaultGenerationLanguage: Locale;
   timeZone: string;
   outputPreference: NonNullable<ProfileInput["outputPreference"]>;
