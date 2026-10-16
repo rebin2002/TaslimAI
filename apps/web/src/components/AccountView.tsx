@@ -1,6 +1,4 @@
 "use client";
-import { localeTag } from "@/lib/i18n";
-
 import Link from "next/link";
 import { FormEvent, useEffect, useState } from "react";
 import {
@@ -26,6 +24,8 @@ import { localeNames, locales, useLocale } from "@/components/LocaleProvider";
 import { api, type PasswordPolicy } from "@/lib/api";
 import { accountProfileDraftFromUser, accountProfileSessionKey, canonicalizeAccountProfileDraft } from "@/lib/accountProfileState";
 import type { Locale } from "@/lib/i18n";
+import { languagePackTag } from "@/lib/languagePackRegistry";
+import type { LanguagePackId } from "@/lib/languagePackTypes";
 
 const timeZones = [
   "UTC",
@@ -44,15 +44,16 @@ type SaveState = "idle" | "saving" | "saved";
 
 export function AccountView() {
   const { user } = useAuth();
-  return <AccountProfileForm key={accountProfileSessionKey(user)} />;
+  const { languagePackId } = useLocale();
+  return <AccountProfileForm key={`${accountProfileSessionKey(user)}:${languagePackId}`} />;
 }
 
 function AccountProfileForm() {
   const { user, workspace, updateProfile, signOut } = useAuth();
-  const { t, locale } = useLocale();
+  const { t, languagePackId, languagePackIds, languagePackNames, setLanguagePack } = useLocale();
   const profileDefaults = accountProfileDraftFromUser(user);
   const [displayName, setDisplayName] = useState(profileDefaults.displayName);
-  const [preferredLanguage, setPreferredLanguage] = useState<Locale>(profileDefaults.preferredLanguage);
+  const [preferredLanguage, setPreferredLanguage] = useState<LanguagePackId>(languagePackId);
   const [defaultGenerationLanguage, setDefaultGenerationLanguage] = useState<Locale>(profileDefaults.defaultGenerationLanguage);
   const [timeZone, setTimeZone] = useState(profileDefaults.timeZone);
   const [outputPreference, setOutputPreference] = useState<(typeof outputPreferences)[number]>(profileDefaults.outputPreference);
@@ -77,7 +78,7 @@ function AccountProfileForm() {
     return () => { active = false; };
   }, []);
 
-  const createdDate = user?.createdAt ? new Intl.DateTimeFormat(localeTag(locale), { dateStyle: "medium" }).format(new Date(user.createdAt)) : "—";
+  const createdDate = user?.createdAt ? new Intl.DateTimeFormat(languagePackTag(languagePackId), { dateStyle: "medium" }).format(new Date(user.createdAt)) : "—";
   const initials = user?.displayName.trim().slice(0, 1).toUpperCase() || "T";
 
   async function saveProfile(event: FormEvent) {
@@ -147,7 +148,7 @@ function AccountProfileForm() {
           <div className="account-form-divider" />
           <div className="card-subheading"><Languages size={15} /><span>{t("account.preferences")}</span></div>
           <div className="account-control-grid">
-            <label><span>{t("account.interfaceLanguage")}</span><div className="select-shell"><Globe2 size={16} /><select value={preferredLanguage} onChange={(event) => setPreferredLanguage(event.target.value as Locale)}>{locales.map((item) => <option key={item} value={item}>{localeNames[item]}</option>)}</select></div></label>
+            <label><span>{t("account.interfaceLanguage")}</span><div className="select-shell"><Globe2 size={16} /><select value={preferredLanguage} onChange={(event) => { const next = event.target.value; setPreferredLanguage(next); setLanguagePack(next); }}>{languagePackIds.map((item) => <option key={item} value={item}>{languagePackNames[item]}</option>)}</select></div></label>
             <label><span>{t("account.defaultGenerationLanguage")}</span><div className="select-shell"><Languages size={16} /><select value={defaultGenerationLanguage} onChange={(event) => setDefaultGenerationLanguage(event.target.value as Locale)}>{locales.map((item) => <option key={item} value={item}>{localeNames[item]}</option>)}</select></div></label>
             <label><span>{t("account.timezone")}</span><div className="select-shell"><Clock3 size={16} /><select value={timeZone} onChange={(event) => setTimeZone(event.target.value)}>{!timeZones.includes(timeZone) && <option value={timeZone}>{timeZone}</option>}{timeZones.map((item) => <option key={item} value={item}>{item}</option>)}</select></div></label>
             <label><span>{t("account.outputPreference")}</span><div className="select-shell"><SlidersHorizontal size={16} /><select value={outputPreference} onChange={(event) => setOutputPreference(event.target.value as typeof outputPreferences[number])}>{outputPreferences.map((item) => <option key={item} value={item}>{t(`account.output.${item}`)}</option>)}</select></div></label>
