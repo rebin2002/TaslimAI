@@ -8433,6 +8433,11 @@ namespace Taslim.Api.Persistence.Migrations
 
                     b.HasIndex("MovieTakeId", "CreatedAt");
 
+                    b.HasIndex("MovieTakeId", "TargetMasterResolution")
+                        .IsUnique()
+                        .HasDatabaseName("UX_MovieTakeUpscaleAudit_Active")
+                        .HasFilter("\"Status\" IN ('PendingExecution', 'Completed')");
+
                     b.ToTable("MovieTakeUpscaleAudits");
                 });
 
