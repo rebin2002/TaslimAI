@@ -1,5 +1,6 @@
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
@@ -146,11 +147,100 @@ public sealed class MovieFinalMasteringTests
         Assert.Equal(replacement.Id, (await mastering.GetForShotAsync(userId, shotId, CancellationToken.None))!.Id);
     }
 
+    [Fact]
+    public async Task Active_master_uniqueness_race_replays_the_canonical_winner()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var seedDb = CreateDb(connection);
+        var (userId, _, shotId, workspaceId) = await SeedAsync(seedDb);
+        var sourceAssetId = Guid.NewGuid();
+        seedDb.Assets.Add(new Asset
+        {
+            Id = sourceAssetId,
+            WorkspaceId = workspaceId,
+            CreatedByUserId = userId,
+            Name = "Race source",
+            AssetType = AssetTypes.Video,
+            MetadataJson = "{\"width\":1920,\"height\":1080}",
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+        });
+        await seedDb.SaveChangesAsync();
+
+        var take = await new MovieV2Service(seedDb, new WorkspaceAccessService(seedDb))
+            .AddTakeAsync(userId, shotId, new MovieV2TakeRequest { AssetId = sourceAssetId }, CancellationToken.None);
+        await new MovieV2Service(seedDb, new WorkspaceAccessService(seedDb))
+            .ApproveTakeAsync(userId, take!.Id, new MovieV2ApprovalRequest { Decision = MovieApprovalDecisions.Approved }, CancellationToken.None);
+        await new MovieV2Service(seedDb, new WorkspaceAccessService(seedDb))
+            .SelectTakeAsync(userId, take.Id, false, CancellationToken.None);
+
+        var interceptor = new CanonicalWinnerOnSaveInterceptor(connection);
+        await using var racedDb = CreateDb(connection, interceptor);
+
+        var result = await CreateService(racedDb).RequestAsync(userId, take.Id, new MovieFinalMasteringRequest(), CancellationToken.None);
+
+        Assert.NotNull(result);
+        Assert.Equal(interceptor.WinnerId, result!.Id);
+        Assert.Single(await racedDb.MovieFinalMasters.AsNoTracking().Where(item => item.SourceTakeId == take.Id && item.SupersededByMasterId == null).ToListAsync());
+    }
+
     private static MovieFinalMasteringService CreateService(TaslimDbContext db) =>
         new(db, new MovieCollaborationAccess(db, new WorkspaceAccessService(db)));
 
-    private static TaslimDbContext CreateDb(SqliteConnection connection) =>
-        new(new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connection).Options);
+    private static TaslimDbContext CreateDb(SqliteConnection connection, SaveChangesInterceptor? interceptor = null)
+    {
+        var builder = new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connection);
+        if (interceptor is not null) builder.AddInterceptors(interceptor);
+        return new(builder.Options);
+    }
+
+    private sealed class CanonicalWinnerOnSaveInterceptor(SqliteConnection connection) : SaveChangesInterceptor
+    {
+        private int triggered;
+        public Guid WinnerId { get; private set; }
+
+        public override async ValueTask<InterceptionResult<int>> SavingChangesAsync(
+            DbContextEventData eventData,
+            InterceptionResult<int> result,
+            CancellationToken cancellationToken = default)
+        {
+            if (Interlocked.Exchange(ref triggered, 1) == 0)
+            {
+                var pending = eventData.Context!.ChangeTracker.Entries<MovieFinalMaster>().Single().Entity;
+                WinnerId = Guid.NewGuid();
+                await using var winnerDb = CreateDb(connection);
+                winnerDb.MovieFinalMasters.Add(new MovieFinalMaster
+                {
+                    Id = WinnerId,
+                    MovieProjectId = pending.MovieProjectId,
+                    MovieShotId = pending.MovieShotId,
+                    SourceTakeId = pending.SourceTakeId,
+                    SourceMovieClipId = pending.SourceMovieClipId,
+                    SourceAssetId = pending.SourceAssetId,
+                    TargetProfile = pending.TargetProfile,
+                    SourceWidth = pending.SourceWidth,
+                    SourceHeight = pending.SourceHeight,
+                    TargetWidth = pending.TargetWidth,
+                    TargetHeight = pending.TargetHeight,
+                    State = pending.State,
+                    StateReason = pending.StateReason,
+                    QcStatus = pending.QcStatus,
+                    QcResultJson = pending.QcResultJson,
+                    ProvenanceJson = pending.ProvenanceJson,
+                    RequestedByUserId = pending.RequestedByUserId,
+                    RequestedAt = pending.RequestedAt,
+                    UpdatedAt = pending.UpdatedAt,
+                });
+                await winnerDb.SaveChangesAsync(cancellationToken);
+                throw new DbUpdateException(
+                    "The active final-master request was inserted concurrently.",
+                    new SqliteException("UNIQUE constraint failed: MovieFinalMasters.SourceTakeId, MovieFinalMasters.TargetProfile", 19));
+            }
+
+            return result;
+        }
+    }
 
     private static async Task<(Guid UserId, Guid MovieId, Guid ShotId, Guid WorkspaceId)> SeedAsync(TaslimDbContext db)
     {

@@ -5511,7 +5511,9 @@ namespace Taslim.Api.Persistence.Migrations
 
                     b.HasIndex("MovieShotId", "RequestedAt");
 
-                    b.HasIndex("SourceTakeId", "TargetProfile", "SupersededByMasterId");
+                    b.HasIndex("SourceTakeId", "TargetProfile", "SupersededByMasterId")
+                        .IsUnique()
+                        .HasFilter("\"SupersededByMasterId\" IS NULL");
 
                     b.ToTable("MovieFinalMasters");
                 });
