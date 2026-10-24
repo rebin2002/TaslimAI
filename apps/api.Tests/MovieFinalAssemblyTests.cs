@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Microsoft.EntityFrameworkCore;
 using Taslim.Api.Movies;
 using Xunit;
 
@@ -101,6 +102,24 @@ public sealed class MovieFinalAssemblyTests
             new MovieFinalAssemblyExecutionRequest(Contract(Guid.NewGuid(), null, MovieAssemblyCaptionModes.None), new Dictionary<Guid, string>()),
             new Progress<int>(),
             CancellationToken.None));
+    }
+
+    [Fact]
+    public void Assembly_idempotency_retry_classifier_rejects_unrelated_unique_conflicts()
+    {
+        var sqliteConflict = new DbUpdateException(
+            "assembly idempotency conflict",
+            new InvalidOperationException("SQLite Error 19: 'UNIQUE constraint failed: MovieAssemblies.MovieProjectId, MovieAssemblies.IdempotencyKey'."));
+        var postgresConflict = new DbUpdateException(
+            "assembly PostgreSQL idempotency conflict",
+            new InvalidOperationException("23505: duplicate key value violates unique constraint \"IX_MovieAssemblies_MovieProjectId_IdempotencyKey\""));
+        var otherConflict = new DbUpdateException(
+            "other conflict",
+            new InvalidOperationException("SQLite Error 19: 'UNIQUE constraint failed: MovieAssemblies.Id'."));
+
+        Assert.True(MovieFinalAssemblyService.IsAssemblyIdempotencyUniqueViolation(sqliteConflict));
+        Assert.True(MovieFinalAssemblyService.IsAssemblyIdempotencyUniqueViolation(postgresConflict));
+        Assert.False(MovieFinalAssemblyService.IsAssemblyIdempotencyUniqueViolation(otherConflict));
     }
 
     private static MovieFinalAssemblyInput Contract(Guid videoAsset, Guid? audioAsset, string captionsMode)
