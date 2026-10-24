@@ -71,6 +71,53 @@ public sealed class ResearchPrivateSourceTests : IClassFixture<ResearchApiFactor
         Assert.Empty(await verificationDb.ResearchSources.AsNoTracking().Where(source => source.GenerationJobId == created.Job.Id).ToListAsync());
     }
 
+    [Fact]
+    public async Task Project_research_report_files_are_private_to_the_creator()
+    {
+        using var owner = factory.CreateClient();
+        var ownerAuth = await Register(owner, $"research-output-owner-{Guid.NewGuid():N}@example.com");
+        var project = await SendWithCsrf<ProjectDto>(owner, HttpMethod.Post, $"/api/workspaces/{ownerAuth.PersonalWorkspace.Id}/projects", new { name = "Private report project", type = "Business" });
+        var created = await SendWithCsrf<CreateResearchGenerationResponse>(owner, HttpMethod.Post, "/api/research-generation/jobs", new
+        {
+            workspaceId = ownerAuth.PersonalWorkspace.Id,
+            projectId = project.Id,
+            question = "Keep project research report files private",
+            useWebSources = true,
+            attachmentIds = Array.Empty<Guid>(),
+        });
+        var completed = await WaitForTerminal(owner, created.Job.Id);
+        Assert.Equal("Succeeded", completed.Status);
+        var outputFileIds = completed.Outputs.Select(output => output.StoredFileId).OfType<Guid>().ToArray();
+        Assert.NotEmpty(outputFileIds);
+
+        using var member = factory.CreateClient();
+        var memberAuth = await Register(member, $"research-output-member-{Guid.NewGuid():N}@example.com");
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.WorkspaceMembers.Add(new WorkspaceMember
+            {
+                Id = Guid.NewGuid(),
+                WorkspaceId = ownerAuth.PersonalWorkspace.Id,
+                UserId = memberAuth.User.Id,
+                Role = WorkspaceRole.Member,
+                JoinedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var projectFiles = await member.GetFromJsonAsync<StoredFileDto[]>($"/api/workspaces/{ownerAuth.PersonalWorkspace.Id}/files?projectId={project.Id}");
+        Assert.NotNull(projectFiles);
+        Assert.DoesNotContain(projectFiles!, file => outputFileIds.Contains(file.Id));
+        foreach (var fileId in outputFileIds)
+        {
+            using var ownerVisible = await owner.GetAsync($"/api/files/{fileId}");
+            Assert.Equal(HttpStatusCode.OK, ownerVisible.StatusCode);
+            using var forbidden = await member.GetAsync($"/api/files/{fileId}");
+            Assert.Equal(HttpStatusCode.Forbidden, forbidden.StatusCode);
+        }
+    }
+
     private static async Task<AuthResponse> Register(HttpClient client, string email)
     {
         var response = await SendWithCsrf(client, HttpMethod.Post, "/api/auth/register", new { displayName = "Research Privacy Tester", email, password = "StrongPassword!123", preferredLanguage = "en" });
