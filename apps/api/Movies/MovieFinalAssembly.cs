@@ -155,6 +155,18 @@ public sealed class MovieFinalAssemblyService(
     IMovieTimelineTransitionService transitionEdits) : IMovieFinalAssemblyService
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = false };
+    private const string AssemblyIdempotencyUniqueIndexName = "IX_MovieAssemblies_MovieProjectId_IdempotencyKey";
+
+    internal static bool IsAssemblyIdempotencyUniqueViolation(DbUpdateException exception)
+    {
+        var details = exception.ToString();
+        var isUniqueViolation = details.Contains("duplicate key", StringComparison.OrdinalIgnoreCase)
+            || details.Contains("UNIQUE constraint failed", StringComparison.OrdinalIgnoreCase)
+            || details.Contains("Cannot insert duplicate key", StringComparison.OrdinalIgnoreCase);
+        return isUniqueViolation
+            && (details.Contains(AssemblyIdempotencyUniqueIndexName, StringComparison.OrdinalIgnoreCase)
+                || details.Contains("MovieAssemblies.MovieProjectId", StringComparison.OrdinalIgnoreCase));
+    }
 
     public async Task<MovieFinalAssemblyDto?> RequestAsync(Guid userId, Guid movieProjectId, MovieFinalAssemblyRequest request, string? idempotencyKey, CancellationToken cancellationToken)
     {
@@ -287,7 +299,25 @@ public sealed class MovieFinalAssemblyService(
             UpdatedAt = now,
         };
         db.MovieAssemblies.Add(assembly);
-        await db.SaveChangesAsync(cancellationToken);
+        try
+        {
+            await db.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateException exception) when (IsAssemblyIdempotencyUniqueViolation(exception))
+        {
+            // The project/key unique index is the durable idempotency boundary.
+            // A concurrent identical request may have committed the winner after
+            // the initial lookup; discard the losing Added entity and replay it.
+            db.ChangeTracker.Clear();
+            var winner = await db.MovieAssemblies
+                .Include(item => item.GenerationJob).ThenInclude(item => item!.Outputs)
+                .FirstOrDefaultAsync(item => item.MovieProjectId == movieProjectId && item.IdempotencyKey == normalizedIdempotencyKey, cancellationToken);
+            if (winner is null) throw;
+            if (!string.Equals(winner.RequestFingerprint, fingerprint, StringComparison.Ordinal))
+                throw new MovieFinalAssemblyValidationException("IDEMPOTENCY_KEY_REUSED", "This idempotency key was already used for a different assembly request.");
+            await ReconcileTerminalJobAsync(winner, cancellationToken);
+            return ToDto(winner);
+        }
 
         var input = new MovieFinalAssemblyInput(
             "final_assembly",

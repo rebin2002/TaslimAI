@@ -48,4 +48,12 @@ public sealed class SocialGenerationUnitTests
         var wrongOrder = new SocialDraft { Title = "Launch", Platform = "linkedin", SocialType = "announcement", Language = "en", Posts = [new SocialPost { Order = 2, Hook = "Hook", Body = "Body" }] };
         Assert.Throws<SocialOutputValidationException>(() => SocialDraftValidator.Validate(wrongOrder, new SocialGenerationOptions()));
     }
+
+    [Fact]
+    public void Output_language_preserves_explicit_request_over_provider_drift()
+    {
+        Assert.Equal("ar", SocialOutputLanguagePolicy.Normalize("en", "ar"));
+        Assert.Equal("ku", SocialOutputLanguagePolicy.Normalize(" KU ", "auto"));
+        Assert.Equal("en", SocialOutputLanguagePolicy.Normalize("fr", "auto"));
+    }
 }
