@@ -55,6 +55,48 @@ public sealed class AccountSettingsTests : IClassFixture<TaslimApiFactory>
     }
 
     [Fact]
+    public async Task Profile_update_accepts_canonical_simplified_chinese_without_changing_generation_language_support()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Chinese Profile Owner", $"settings-zh-cn-{Guid.NewGuid():N}@example.com");
+
+        var updated = await SendWithCsrf<AuthResponse>(client, HttpMethod.Patch, "/api/auth/profile", new
+        {
+            displayName = "Chinese Profile Owner",
+            preferredLanguage = " zh-cn ",
+            defaultGenerationLanguage = "ar",
+        });
+
+        Assert.Equal("zh-CN", updated.User.PreferredLanguage);
+        Assert.Equal("ar", updated.User.DefaultGenerationLanguage);
+
+        var current = await client.GetFromJsonAsync<AuthResponse>("/api/auth/me");
+        Assert.NotNull(current);
+        Assert.Equal("zh-CN", current!.User.PreferredLanguage);
+    }
+
+    [Fact]
+    public async Task Profile_update_rejects_unsupported_interface_language_without_partial_persistence()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Unsupported Language Owner", $"settings-unsupported-language-{Guid.NewGuid():N}@example.com");
+
+        var invalid = await SendWithCsrf(client, HttpMethod.Patch, "/api/auth/profile", new
+        {
+            displayName = "Unsupported Language Owner Updated",
+            preferredLanguage = "fr-FR",
+            defaultGenerationLanguage = "ar",
+        });
+
+        Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
+        var current = await client.GetFromJsonAsync<AuthResponse>("/api/auth/me");
+        Assert.NotNull(current);
+        Assert.Equal(auth.User.Id, current!.User.Id);
+        Assert.Equal("en", current.User.PreferredLanguage);
+        Assert.Equal("en", current.User.DefaultGenerationLanguage);
+    }
+
+    [Fact]
     public async Task New_user_can_complete_onboarding_with_preferences_and_a_real_workflow_intent()
     {
         using var client = factory.CreateClient();
