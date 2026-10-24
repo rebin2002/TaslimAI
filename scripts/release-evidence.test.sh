@@ -29,7 +29,11 @@ assert manifest["productionSafetyDefaults"]["databaseApplyMigrations"] is True
 assert manifest["productionSafetyDefaults"]["customerChargingEnabled"] is False
 assert manifest["productionSafetyDefaults"]["openAiEnabled"] is False
 assert manifest["productionSafetyDefaults"]["persistentStorageProvider"] == "S3Compatible"
-for key in ("source", "buildInputs", "migrations", "baseImages", "productionSafetyDefaults"):
+assert manifest["secretHygiene"] == {
+    "status": "passed",
+    "policy": "high-confidence tracked credential pattern scan",
+}
+for key in ("source", "buildInputs", "migrations", "baseImages", "productionSafetyDefaults", "secretHygiene"):
     assert manifest[key] == second[key], key
 
 serialized = Path(sys.argv[1]).read_text(encoding="utf-8").lower()
@@ -41,5 +45,7 @@ if GITHUB_SHA="0000000000000000000000000000000000000000" bash "$script" "$temp_d
   echo "A mismatched GITHUB_SHA must fail closed." >&2
   exit 1
 fi
+
+bash "$repo_root/scripts/secret-hygiene-audit.test.sh"
 
 printf '%s\n' 'Release evidence behavior tests passed.'
