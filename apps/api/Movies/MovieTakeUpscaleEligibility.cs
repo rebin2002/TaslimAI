@@ -117,6 +117,8 @@ public sealed class MovieTakeUpscaleEligibilityService(
     WorkspaceAccessService access,
     MovieCollaborationAccess? collaboration = null) : IMovieTakeUpscaleEligibilityService
 {
+    private const string ActiveRequestIndexName = "UX_MovieTakeUpscaleAudit_Active";
+
     public async Task<MovieTakeUpscaleEligibilityDto?> EvaluateAsync(Guid userId, Guid takeId, string? targetMasterResolution, CancellationToken cancellationToken)
     {
         var context = await LoadAuthorizedTakeAsync(userId, takeId, MoviePermissions.View, cancellationToken);
@@ -168,8 +170,54 @@ public sealed class MovieTakeUpscaleEligibilityService(
             OutcomeNote = decision.Message,
         };
         db.MovieTakeUpscaleAudits.Add(audit);
-        await db.SaveChangesAsync(cancellationToken);
+        try
+        {
+            await db.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateException exception) when (IsActiveRequestUniqueViolation(exception))
+        {
+            // The read above is an optimization, not the idempotency boundary. A concurrent
+            // request may commit between that read and this insert; replay the row protected
+            // by the filtered unique index instead of creating a second hand-off record.
+            db.ChangeTracker.Clear();
+            var winner = await db.MovieTakeUpscaleAudits.AsNoTracking()
+                .Where(item => item.MovieTakeId == takeId
+                    && item.TargetMasterResolution == decision.TargetMasterResolution
+                    && (item.Status == MovieTakeUpscaleAuditStatuses.PendingExecution || item.Status == MovieTakeUpscaleAuditStatuses.Completed))
+                .OrderByDescending(item => item.CreatedAt)
+                .FirstOrDefaultAsync(cancellationToken);
+            if (winner is not null)
+            {
+                var alreadyRequested = decision with
+                {
+                    Code = MovieTakeUpscaleEligibilityCodes.AlreadyRequested,
+                    Message = "Premium mastering has already been requested for this take and target.",
+                };
+                return ToDto(context.Take, alreadyRequested, winner.Id, winner.Status, winner.CreatedAt, sourceResolution);
+            }
+
+            throw;
+        }
         return ToDto(context.Take, decision, audit.Id, audit.Status, now, sourceResolution);
+    }
+
+    internal static bool IsActiveRequestUniqueViolation(DbUpdateException exception)
+    {
+        for (var current = exception.InnerException; current is not null; current = current.InnerException)
+        {
+            if (current is Npgsql.PostgresException postgres
+                && postgres.SqlState == "23505"
+                && string.Equals(postgres.ConstraintName, ActiveRequestIndexName, StringComparison.Ordinal))
+                return true;
+
+            if (current.Message.Contains("UNIQUE constraint failed", StringComparison.OrdinalIgnoreCase)
+                && current.Message.Contains("MovieTakeUpscaleAudits", StringComparison.Ordinal)
+                && current.Message.Contains("MovieTakeId", StringComparison.Ordinal)
+                && current.Message.Contains("TargetMasterResolution", StringComparison.Ordinal))
+                return true;
+        }
+
+        return false;
     }
 
     private async Task<AuthorizedTake?> LoadAuthorizedTakeAsync(Guid userId, Guid takeId, string permission, CancellationToken cancellationToken)
