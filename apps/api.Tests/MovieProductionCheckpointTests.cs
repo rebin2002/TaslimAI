@@ -1,5 +1,11 @@
+using System.Data.Common;
+using Microsoft.Data.Sqlite;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
+using Taslim.Api.Authorization;
 using Taslim.Api.Domain;
 using Taslim.Api.Movies;
+using Taslim.Api.Persistence;
 using Xunit;
 
 namespace Taslim.Api.Tests;
@@ -136,9 +142,145 @@ public sealed class MovieProductionCheckpointTests
         Assert.False(MovieProductionCheckpointReadiness.HasPublishableJobOutput(job, movie));
     }
 
+    [Fact]
+    public async Task Concurrent_checkpoint_initialization_replays_one_canonical_project_checkpoint()
+    {
+        var databasePath = Path.Combine(Path.GetTempPath(), $"taslim-movie-checkpoint-{Guid.NewGuid():N}.db");
+        var barrier = new CheckpointLookupBarrier();
+        try
+        {
+            var seedOptions = new DbContextOptionsBuilder<TaslimDbContext>()
+                .UseSqlite($"Data Source={databasePath};Default Timeout=30")
+                .Options;
+            await using var seedDb = new TaslimDbContext(seedOptions);
+            await seedDb.Database.EnsureCreatedAsync();
+            var seed = await SeedAsync(seedDb);
+
+            async Task<MovieProductionCheckpointDto?> ReadCheckpointAsync()
+            {
+                var options = new DbContextOptionsBuilder<TaslimDbContext>()
+                    .UseSqlite($"Data Source={databasePath};Default Timeout=30")
+                    .AddInterceptors(barrier)
+                    .Options;
+                await using var db = new TaslimDbContext(options);
+                var access = new MovieCollaborationAccess(db, new WorkspaceAccessService(db));
+                var service = new MovieProductionCheckpointService(db, access, null!);
+                return await service.GetAsync(seed.UserId, seed.MovieProjectId, CancellationToken.None);
+            }
+
+            var results = await Task.WhenAll(ReadCheckpointAsync(), ReadCheckpointAsync());
+            Assert.All(results, result => Assert.NotNull(result));
+            Assert.All(results, result => Assert.Equal(seed.MovieProjectId, result!.MovieProjectId));
+
+            await using var verifyDb = new TaslimDbContext(seedOptions);
+            var checkpoints = await verifyDb.MovieProductionCheckpoints.AsNoTracking()
+                .Where(item => item.MovieProjectId == seed.MovieProjectId)
+                .ToListAsync();
+            Assert.Single(checkpoints);
+            Assert.Equal(1, checkpoints[0].Version);
+        }
+        finally
+        {
+            if (File.Exists(databasePath)) File.Delete(databasePath);
+        }
+    }
+
+    [Fact]
+    public void Checkpoint_retry_classifier_rejects_unrelated_unique_conflicts()
+    {
+        var sqliteConflict = new DbUpdateException(
+            "checkpoint project conflict",
+            new InvalidOperationException("SQLite Error 19: 'UNIQUE constraint failed: MovieProductionCheckpoints.MovieProjectId'."));
+        var postgresConflict = new DbUpdateException(
+            "checkpoint PostgreSQL project conflict",
+            new InvalidOperationException("23505: duplicate key value violates unique constraint \"IX_MovieProductionCheckpoints_MovieProjectId\""));
+        var otherConflict = new DbUpdateException(
+            "other conflict",
+            new InvalidOperationException("SQLite Error 19: 'UNIQUE constraint failed: MovieProductionCheckpoints.Id'."));
+
+        Assert.True(MovieProductionCheckpointService.IsCheckpointProjectUniqueViolation(sqliteConflict));
+        Assert.True(MovieProductionCheckpointService.IsCheckpointProjectUniqueViolation(postgresConflict));
+        Assert.False(MovieProductionCheckpointService.IsCheckpointProjectUniqueViolation(otherConflict));
+    }
+
     private static MovieProductionCheckpointItemDto Analyze(
         IReadOnlyList<MovieProductionCheckpointVersionSnapshot> versions,
         IReadOnlyList<MovieProductionCheckpointTakeSnapshot> takes,
         IReadOnlyList<MovieProductionCheckpointJobSnapshot> jobs) =>
         MovieProductionCheckpointAnalyzer.AnalyzeShot(ShotId, "Opening", 1, 1, "Scene 1 · Shot 1", MovieShotStatuses.Planned, UpdatedAt, versions, takes, jobs);
+
+    private static async Task<(Guid UserId, Guid MovieProjectId)> SeedAsync(TaslimDbContext db)
+    {
+        var userId = Guid.NewGuid();
+        var workspaceId = Guid.NewGuid();
+        var movieProjectId = Guid.NewGuid();
+        var now = DateTime.UtcNow;
+        db.Users.Add(new ApplicationUser
+        {
+            Id = userId,
+            UserName = "checkpoint-owner",
+            NormalizedUserName = "CHECKPOINT-OWNER",
+            DisplayName = "Checkpoint Owner",
+            CreatedAt = now,
+            UpdatedAt = now,
+        });
+        db.Workspaces.Add(new Workspace
+        {
+            Id = workspaceId,
+            Name = "Checkpoint Workspace",
+            Slug = $"checkpoint-{Guid.NewGuid():N}",
+            Type = WorkspaceType.Personal,
+            CreatedAt = now,
+            UpdatedAt = now,
+        });
+        db.WorkspaceMembers.Add(new WorkspaceMember { Id = Guid.NewGuid(), WorkspaceId = workspaceId, UserId = userId, Role = WorkspaceRole.Owner });
+        db.MovieProjects.Add(new MovieProject
+        {
+            Id = movieProjectId,
+            WorkspaceId = workspaceId,
+            CreatedByUserId = userId,
+            Title = "Checkpoint Movie",
+            Description = "A checkpoint race fixture.",
+            DurationSeconds = 30,
+            CreatedAt = now,
+            UpdatedAt = now,
+            Guide = new MovieContinuityGuide { Id = Guid.NewGuid(), UpdatedAt = now },
+        });
+        db.MovieTeamMembers.Add(new MovieTeamMember
+        {
+            Id = Guid.NewGuid(),
+            MovieProjectId = movieProjectId,
+            UserId = userId,
+            Role = MovieTeamRoles.Producer,
+            IsProjectOwner = true,
+            CreatedAt = now,
+        });
+        await db.SaveChangesAsync();
+        return (userId, movieProjectId);
+    }
+
+    private sealed class CheckpointLookupBarrier : DbCommandInterceptor
+    {
+        private readonly TaskCompletionSource<bool> released = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int arrivals;
+
+        public override async ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(
+            DbCommand command,
+            CommandEventData eventData,
+            InterceptionResult<DbDataReader> result,
+            CancellationToken cancellationToken = default)
+        {
+            if (IsCheckpointLookup(command))
+            {
+                if (Interlocked.Increment(ref arrivals) >= 2) released.TrySetResult(true);
+                await released.Task.WaitAsync(TimeSpan.FromSeconds(10), cancellationToken);
+            }
+
+            return result;
+        }
+
+        private static bool IsCheckpointLookup(DbCommand command) =>
+            command.CommandText.Contains("MovieProductionCheckpoints", StringComparison.OrdinalIgnoreCase)
+            && command.CommandText.Contains("MovieProjectId", StringComparison.OrdinalIgnoreCase);
+    }
 }
