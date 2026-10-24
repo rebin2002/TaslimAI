@@ -32,6 +32,12 @@ public sealed class GeneratedAssetPublisher(
     {
         var assetType = output.Asset?.AssetType.Trim().ToLowerInvariant();
         if (assetType is not null && !AssetTypes.Supported.Contains(assetType)) throw new InvalidOperationException("Generated asset type is not supported.");
+        // Research execution records and report assets are creator-private even
+        // when the request used a project. Keep the asset's project linkage for
+        // the asset-library policy, but do not let the generic project-file
+        // surface make the report's DOCX/PDF files workspace-shareable.
+        var privateResearchOutput = string.Equals(job.JobType, GenerationJobTypes.ResearchGenerate, StringComparison.OrdinalIgnoreCase);
+        var outputProjectId = privateResearchOutput ? null : job.ProjectId;
         var outputMetadata = GeneratedMediaSecurity.NormalizeMetadataJson(output.MetadataJson);
         var assetMetadata = GeneratedMediaSecurity.NormalizeMetadataJson(output.Asset?.MetadataJson);
         StoredFile? createdFile = null;
@@ -43,7 +49,7 @@ public sealed class GeneratedAssetPublisher(
             storageResult = await files.StoreGeneratedWithResultAsync(
                 job.WorkspaceId,
                 job.CreatedByUserId,
-                job.ProjectId,
+                outputProjectId,
                 output.FileArtifact.FileName,
                 output.FileArtifact.ContentType,
                 output.FileArtifact.Content,
@@ -58,7 +64,7 @@ public sealed class GeneratedAssetPublisher(
             storageResult = await files.StoreGeneratedStreamWithResultAsync(
                 job.WorkspaceId,
                 job.CreatedByUserId,
-                job.ProjectId,
+                outputProjectId,
                 output.StreamArtifact.FileName,
                 output.StreamArtifact.ContentType,
                 output.StreamArtifact.SizeBytes,
@@ -77,7 +83,9 @@ public sealed class GeneratedAssetPublisher(
                     && file.WorkspaceId == job.WorkspaceId
                     && file.Status == StoredFileStatus.Ready
                     && file.ConversationId == null
-                    && (!file.ProjectId.HasValue || file.ProjectId == job.ProjectId),
+                    && (privateResearchOutput
+                        ? file.ProjectId == null
+                        : !file.ProjectId.HasValue || file.ProjectId == job.ProjectId),
                 cancellationToken) ?? throw new InvalidOperationException("Generated output file is not available in the job scope.");
         }
         if (output.Asset is not null && (storedFile is null || storedFile.Status != StoredFileStatus.Ready))
