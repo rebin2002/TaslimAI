@@ -1,5 +1,6 @@
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
@@ -47,6 +48,32 @@ public sealed class MovieCaptionFormatTests
 
 public sealed class MovieCaptionServiceTests
 {
+    [Fact]
+    public async Task Import_rolls_back_track_when_cue_persistence_fails()
+    {
+        var failure = new RejectCaptionCueSaveChangesInterceptor();
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = new TaslimDbContext(new DbContextOptionsBuilder<TaslimDbContext>()
+            .UseSqlite(connection)
+            .AddInterceptors(failure)
+            .Options);
+        var (userId, movieId, _, _, _, _) = await SeedAsync(db);
+        var service = CreateService(db);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.ImportAsync(userId, movieId, new MovieCaptionImportRequest
+        {
+            Name = "Atomic captions",
+            Language = "en",
+            TrackType = MovieCaptionTrackTypes.Subtitle,
+            Format = MovieCaptionFormats.Srt,
+            Content = "1\n00:00:00,500 --> 00:00:02,000\nThis must not leave an empty track.\n",
+        }, CancellationToken.None));
+
+        Assert.Empty(await db.MovieCaptionTracks.AsNoTracking().Where(item => item.MovieProjectId == movieId).ToListAsync());
+        Assert.Empty(await db.MovieCaptionCues.AsNoTracking().ToListAsync());
+    }
+
     [Fact]
     public async Task Tracks_import_export_and_timeline_keep_canonical_links_and_rtl_metadata()
     {
@@ -166,5 +193,18 @@ public sealed class MovieCaptionServiceTests
         public string ContentType => "text/fake";
         public MovieCaptionDocument Parse(string content) => new([]);
         public string Serialize(MovieCaptionDocument document) => "fake-format";
+    }
+
+    private sealed class RejectCaptionCueSaveChangesInterceptor : SaveChangesInterceptor
+    {
+        public override ValueTask<InterceptionResult<int>> SavingChangesAsync(
+            DbContextEventData eventData,
+            InterceptionResult<int> result,
+            CancellationToken cancellationToken = default)
+        {
+            if (eventData.Context?.ChangeTracker.Entries<MovieCaptionCue>().Any(entry => entry.State == EntityState.Added) == true)
+                throw new InvalidOperationException("Synthetic caption cue persistence failure.");
+            return ValueTask.FromResult(result);
+        }
     }
 }
