@@ -153,6 +153,7 @@ describe("Chat stream transport", () => {
     expect(failure).toBeInstanceOf(DOMException);
     expect(failure.name).toBe("AbortError");
     expect(failure.code).not.toBe("STREAM_TIMEOUT");
+    expect(reader.cancel).toHaveBeenCalledTimes(1);
     resolveRead({ done: true, value: undefined });
     await flushMicrotasks();
   });
