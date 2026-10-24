@@ -1137,7 +1137,9 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.Property(item => item.QcResultJson).HasMaxLength(20_000);
             entity.Property(item => item.ProvenanceJson).HasMaxLength(20_000);
             entity.HasIndex(item => new { item.MovieShotId, item.RequestedAt });
-            entity.HasIndex(item => new { item.SourceTakeId, item.TargetProfile, item.SupersededByMasterId });
+            entity.HasIndex(item => new { item.SourceTakeId, item.TargetProfile, item.SupersededByMasterId })
+                .IsUnique()
+                .HasFilter("\"SupersededByMasterId\" IS NULL");
             entity.HasIndex(item => item.SourceAssetId);
             entity.HasIndex(item => item.OutputAssetId);
             entity.HasOne(item => item.MovieProject).WithMany().HasForeignKey(item => item.MovieProjectId).OnDelete(DeleteBehavior.Cascade);
