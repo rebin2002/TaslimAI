@@ -51,6 +51,8 @@ if [[ "${SMOKE_MODE:-retry}" == 'unsafe' && "$endpoint" == '/health/ready' ]]; t
     printf '{"status":"ready","service":"Taslim API","requestId":"smoke-request","checks":[{"name":"database","status":"available","required":true}],"password":"must-not-leak"}\n' > "$body"
 elif [[ "${SMOKE_MODE:-retry}" == 'invalid' && "$endpoint" == '/health/ready' ]]; then
     printf '{"status":"ready","service":"Taslim API","requestId":"smoke-request","checks":[{"name":"storage","status":"available","required":true}]}\n' > "$body"
+elif [[ "${SMOKE_MODE:-retry}" == 'missing-storage' && "$endpoint" == '/health/ready' ]]; then
+    printf '{"status":"ready","service":"Taslim API","requestId":"smoke-request","checks":[{"name":"database","status":"available","required":true}]}\n' > "$body"
 elif [[ "$endpoint" == '/health/live' ]]; then
     printf '{"status":"alive","service":"Taslim API","requestId":"smoke-request","checks":[{"name":"process","status":"alive","required":true}]}\n' > "$body"
 else
@@ -118,6 +120,24 @@ fi
 grep -F 'returned an invalid response on attempt 1' "$temp_dir/invalid.output" >/dev/null || {
     echo 'The smoke helper did not report the invalid final-attempt response.' >&2
     cat "$temp_dir/invalid.output" >&2
+    exit 1
+}
+
+missing_storage_log="$temp_dir/missing-storage.log"
+if PATH="$bin_dir:$PATH" \
+    SMOKE_COMMAND_LOG="$missing_storage_log" \
+    SMOKE_STATE_FILE="$temp_dir/missing-storage.state" \
+    SMOKE_MODE=missing-storage \
+    SMOKE_MAX_ATTEMPTS=1 \
+    SMOKE_RETRY_SECONDS=0 \
+    bash "$script" http://127.0.0.1:5000 >"$temp_dir/missing-storage.output" 2>&1; then
+    echo 'The smoke helper accepted readiness without the required storage check.' >&2
+    cat "$temp_dir/missing-storage.output" >&2
+    exit 1
+fi
+grep -F 'required storage check is not available' "$temp_dir/missing-storage.output" >/dev/null || {
+    echo 'The smoke helper did not identify the missing required storage check.' >&2
+    cat "$temp_dir/missing-storage.output" >&2
     exit 1
 }
 
