@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Headers;
@@ -362,16 +363,43 @@ public static class ImageBinaryInspector
 
     private static ImageBinaryInfo? ReadWebp(ReadOnlySpan<byte> bytes)
     {
-        if (bytes.Length >= 30 && bytes[12..16].SequenceEqual("VP8X"u8))
+        var riffSize = BinaryPrimitives.ReadUInt32LittleEndian(bytes[4..8]);
+        if (riffSize < 4 || (ulong)riffSize + 8 > (ulong)bytes.Length)
+            return null;
+        var riffEnd = (ulong)riffSize + 8;
+        var index = 12;
+        while ((ulong)index + 8 <= riffEnd)
         {
-            var width = 1 + bytes[24] + (bytes[25] << 8) + (bytes[26] << 16);
-            var height = 1 + bytes[27] + (bytes[28] << 8) + (bytes[29] << 16);
-            return new ImageBinaryInfo("image/webp", "webp", width, height);
+            var chunkSize = BinaryPrimitives.ReadUInt32LittleEndian(bytes[(index + 4)..(index + 8)]);
+            var dataStart = index + 8;
+            var dataEnd = (ulong)dataStart + chunkSize;
+            if (dataEnd > riffEnd || dataEnd > (ulong)bytes.Length)
+                return null;
+            if (bytes[index..(index + 4)].SequenceEqual("VP8X"u8) && chunkSize >= 10)
+            {
+                var width = 1 + bytes[dataStart + 4] + (bytes[dataStart + 5] << 8) + (bytes[dataStart + 6] << 16);
+                var height = 1 + bytes[dataStart + 7] + (bytes[dataStart + 8] << 8) + (bytes[dataStart + 9] << 16);
+                return width > 0 && height > 0 ? new ImageBinaryInfo("image/webp", "webp", width, height) : null;
+            }
+            if (bytes[index..(index + 4)].SequenceEqual("VP8L"u8) && chunkSize >= 5 && bytes[dataStart] == 0x2F)
+            {
+                var bits = BinaryPrimitives.ReadUInt32LittleEndian(bytes[(dataStart + 1)..(dataStart + 5)]);
+                var width = 1 + (int)(bits & 0x3FFF);
+                var height = 1 + (int)((bits >> 14) & 0x3FFF);
+                return width > 0 && height > 0 ? new ImageBinaryInfo("image/webp", "webp", width, height) : null;
+            }
+            if (bytes[index..(index + 4)].SequenceEqual("VP8 "u8) && chunkSize >= 10
+                && bytes[(dataStart + 3)..(dataStart + 6)].SequenceEqual(new byte[] { 0x9D, 0x01, 0x2A }))
+            {
+                var width = BinaryPrimitives.ReadUInt16LittleEndian(bytes[(dataStart + 6)..(dataStart + 8)]) & 0x3FFF;
+                var height = BinaryPrimitives.ReadUInt16LittleEndian(bytes[(dataStart + 8)..(dataStart + 10)]) & 0x3FFF;
+                return width > 0 && height > 0 ? new ImageBinaryInfo("image/webp", "webp", width, height) : null;
+            }
+            var next = dataEnd + (chunkSize & 1);
+            if (next > riffEnd || next > (ulong)bytes.Length)
+                return null;
+            index = (int)next;
         }
-        if (bytes.Length >= 17 && bytes[12..16].SequenceEqual("VP8L"u8) && bytes[16] == 0x2F)
-            return new ImageBinaryInfo("image/webp", "webp", null, null);
-        if (bytes.Length >= 20 && bytes[12..16].SequenceEqual("VP8 "u8))
-            return new ImageBinaryInfo("image/webp", "webp", null, null);
         return null;
     }
 
