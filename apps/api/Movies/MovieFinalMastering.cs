@@ -121,6 +121,9 @@ public interface IMovieFinalMasteringService
 
 public sealed class MovieFinalMasteringService(TaslimDbContext db, MovieCollaborationAccess collaboration) : IMovieFinalMasteringService
 {
+    // PostgreSQL truncates this EF-generated index identifier to its 63-byte limit.
+    private const string ActiveMasterIndexPrefix = "IX_MovieFinalMasters_SourceTakeId_TargetProfile_SupersededByMa~";
+
     public async Task<MovieFinalMasterDto?> GetForShotAsync(Guid userId, Guid shotId, CancellationToken cancellationToken)
     {
         var shot = await db.MovieShots.AsNoTracking()
@@ -229,8 +232,46 @@ public sealed class MovieFinalMasteringService(TaslimDbContext db, MovieCollabor
         }
 
         db.MovieFinalMasters.Add(master);
-        await db.SaveChangesAsync(cancellationToken);
+        try
+        {
+            await db.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateException exception) when (IsActiveMasterUniqueViolation(exception))
+        {
+            // The active-master lookup above is intentionally fast, but two approval
+            // requests can pass it before either insert commits. The filtered unique
+            // index is authoritative; discard the losing change tracker and replay
+            // the row that won the insert rather than returning a transient 500.
+            db.ChangeTracker.Clear();
+            var winner = await db.MovieFinalMasters.AsNoTracking()
+                .FirstOrDefaultAsync(item => item.SourceTakeId == take.Id
+                    && item.TargetProfile == profile.Key
+                    && item.SupersededByMasterId == null, cancellationToken);
+            if (winner is not null) return ToDto(winner);
+            throw;
+        }
         return ToDto(master);
+    }
+
+    internal static bool IsActiveMasterUniqueViolation(DbUpdateException exception)
+    {
+        for (var current = exception.InnerException; current is not null; current = current.InnerException)
+        {
+            if (current is Npgsql.PostgresException postgres
+                && postgres.SqlState == "23505"
+                && postgres.ConstraintName is not null
+                && postgres.ConstraintName.StartsWith(ActiveMasterIndexPrefix, StringComparison.Ordinal))
+                return true;
+
+            if (string.Equals(current.GetType().FullName, "Microsoft.Data.Sqlite.SqliteException", StringComparison.Ordinal)
+                && current.Message.Contains("UNIQUE constraint failed", StringComparison.OrdinalIgnoreCase)
+                && current.Message.Contains("MovieFinalMasters", StringComparison.Ordinal)
+                && current.Message.Contains("SourceTakeId", StringComparison.Ordinal)
+                && current.Message.Contains("TargetProfile", StringComparison.Ordinal))
+                return true;
+        }
+
+        return false;
     }
 
     private static string? GetBlockedReason(Asset? sourceAsset, SourceResolution? resolution)

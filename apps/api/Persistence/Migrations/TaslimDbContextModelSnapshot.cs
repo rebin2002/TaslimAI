@@ -5511,7 +5511,9 @@ namespace Taslim.Api.Persistence.Migrations
 
                     b.HasIndex("MovieShotId", "RequestedAt");
 
-                    b.HasIndex("SourceTakeId", "TargetProfile", "SupersededByMasterId");
+                    b.HasIndex("SourceTakeId", "TargetProfile", "SupersededByMasterId")
+                        .IsUnique()
+                        .HasFilter("\"SupersededByMasterId\" IS NULL");
 
                     b.ToTable("MovieFinalMasters");
                 });
@@ -8487,6 +8489,11 @@ namespace Taslim.Api.Persistence.Migrations
                     b.HasIndex("MovieProjectId", "CreatedAt");
 
                     b.HasIndex("MovieTakeId", "CreatedAt");
+
+                    b.HasIndex("MovieTakeId", "TargetMasterResolution")
+                        .IsUnique()
+                        .HasDatabaseName("UX_MovieTakeUpscaleAudit_Active")
+                        .HasFilter("\"Status\" IN ('PendingExecution', 'Completed')");
 
                     b.ToTable("MovieTakeUpscaleAudits");
                 });

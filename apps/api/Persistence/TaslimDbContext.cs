@@ -987,6 +987,10 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.Property(item => item.WasFinal).IsRequired();
             entity.HasIndex(item => new { item.MovieTakeId, item.CreatedAt });
             entity.HasIndex(item => new { item.MovieProjectId, item.CreatedAt });
+            entity.HasIndex(item => new { item.MovieTakeId, item.TargetMasterResolution })
+                .IsUnique()
+                .HasDatabaseName("UX_MovieTakeUpscaleAudit_Active")
+                .HasFilter("\"Status\" IN ('PendingExecution', 'Completed')");
             entity.HasOne(item => item.MovieTake).WithMany(item => item.UpscaleAudits).HasForeignKey(item => item.MovieTakeId).OnDelete(DeleteBehavior.Cascade);
             entity.HasOne(item => item.MovieProject).WithMany().HasForeignKey(item => item.MovieProjectId).OnDelete(DeleteBehavior.Cascade);
             entity.HasOne(item => item.RequestedByUser).WithMany().HasForeignKey(item => item.RequestedByUserId).OnDelete(DeleteBehavior.Restrict);
@@ -1137,7 +1141,9 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.Property(item => item.QcResultJson).HasMaxLength(20_000);
             entity.Property(item => item.ProvenanceJson).HasMaxLength(20_000);
             entity.HasIndex(item => new { item.MovieShotId, item.RequestedAt });
-            entity.HasIndex(item => new { item.SourceTakeId, item.TargetProfile, item.SupersededByMasterId });
+            entity.HasIndex(item => new { item.SourceTakeId, item.TargetProfile, item.SupersededByMasterId })
+                .IsUnique()
+                .HasFilter("\"SupersededByMasterId\" IS NULL");
             entity.HasIndex(item => item.SourceAssetId);
             entity.HasIndex(item => item.OutputAssetId);
             entity.HasOne(item => item.MovieProject).WithMany().HasForeignKey(item => item.MovieProjectId).OnDelete(DeleteBehavior.Cascade);
