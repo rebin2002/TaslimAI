@@ -106,6 +106,7 @@ public static class DirectorScenePlanValidationReasonCodes
     public const string LanguageMismatch = "SCENE_PLAN_LANGUAGE_MISMATCH";
     public const string BaseRevisionMismatch = "SCENE_PLAN_BASE_REVISION_MISMATCH";
     public const string ContextChanged = "SCENE_PLAN_CONTEXT_CHANGED";
+    public const string DuplicateTarget = "SCENE_PLAN_DUPLICATE_TARGET";
 }
 
 public sealed record DirectorScenePlanValidationFinding(string ReasonCode, string Field);
@@ -160,6 +161,7 @@ public sealed class MovieDirectorScenePlanValidator(
         var movieSceneIds = context.RelevantMovieScenes.Select(item => item.Id).ToHashSet();
         var knownCharacters = KnownCharacters(context);
         var sequenceNumbers = new HashSet<int>();
+        var effectiveTargets = new HashSet<string>(StringComparer.Ordinal);
         var combinedText = new List<string>();
         var storyText = new List<string>();
         var guideText = new List<string>();
@@ -205,6 +207,9 @@ public sealed class MovieDirectorScenePlanValidator(
             if (scene.ExistingMovieSceneId is Guid movieSceneId)
                 AddIf(findings, !movieSceneIds.Contains(movieSceneId), DirectorScenePlanValidationReasonCodes.InvalidSource, "existingMovieSceneId");
 
+            var effectiveTarget = EffectiveTargetKey(scene, screenplayScenes);
+            AddIf(findings, effectiveTarget is not null && !effectiveTargets.Add(effectiveTarget), DirectorScenePlanValidationReasonCodes.DuplicateTarget, "target");
+
             combinedText.AddRange([
                 scene.Title, scene.NarrativePurpose, scene.StoryBeat, scene.LocationEnvironment,
                 scene.TimeOfDay, scene.EmotionalObjective, scene.TransitionRelationship, scene.ProductionIntent,
@@ -228,6 +233,20 @@ public sealed class MovieDirectorScenePlanValidator(
 
     private static IReadOnlyList<DirectorScreenplaySceneContext> AllScreenplayScenes(DirectorStoryBoundedContextDto context) =>
         (context.CurrentRevision?.Scenes ?? []).Concat(context.ApprovedRevision?.Scenes ?? []).GroupBy(item => item.Id).Select(item => item.First()).ToArray();
+
+    private static string? EffectiveTargetKey(DirectorSceneProposal scene, IReadOnlyList<DirectorScreenplaySceneContext> screenplayScenes)
+    {
+        if (scene.ExistingMovieSceneId is Guid existingMovieSceneId)
+            return $"movie:{existingMovieSceneId:D}";
+
+        if (scene.SourceScreenplaySceneId is not Guid sourceScreenplaySceneId)
+            return null;
+
+        var screenplay = screenplayScenes.FirstOrDefault(item => item.Id == sourceScreenplaySceneId);
+        return screenplay?.MovieSceneId is Guid linkedMovieSceneId
+            ? $"movie:{linkedMovieSceneId:D}"
+            : $"screenplay:{sourceScreenplaySceneId:D}";
+    }
 
     private static IReadOnlySet<string> KnownCharacters(DirectorStoryBoundedContextDto context) =>
         context.RelevantCharacters.Select(item => Normalize(item.Name)).Where(item => item.Length > 0).Concat(
