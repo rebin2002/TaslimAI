@@ -6,6 +6,20 @@ export type NotificationReadUpdate = {
 };
 
 /**
+ * Prevents a late read mutation from repainting a newer page or workspace.
+ * Workspace identity alone is insufficient when a user navigates away and
+ * returns before the original request settles.
+ */
+export function isNotificationMutationCurrent(
+  mutationGeneration: number,
+  currentGeneration: number,
+  activeWorkspaceId: string | null,
+  mutationWorkspaceId: string,
+) {
+  return mutationGeneration === currentGeneration && activeWorkspaceId === mutationWorkspaceId;
+}
+
+/**
  * Applies one successful read response to the latest visible notification list.
  * Repeated or out-of-order successful responses are intentionally no-ops after
  * the item has already been marked read, keeping the badge count authoritative.
