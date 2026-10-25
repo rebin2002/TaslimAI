@@ -483,6 +483,9 @@ public sealed class MovieShotPlanningActionExecutor(
         var now = DateTime.UtcNow;
         var nextSequence = await db.MovieShots.Where(item => item.MovieSceneId == scene.Id).Select(item => (int?)item.Sequence).MaxAsync(cancellationToken) ?? 0;
         var created = new List<MovieShot>();
+        var productionComplexity = new MovieShotComplexityProfile(MovieShotComplexityLevels.Low, [], "Defaulted for a provider-neutral planning shot.");
+        var qualityRequirements = new MovieShotQualityRequirements(MovieQualityLevels.Fast, ["Shot intent is explicit and reviewable."], "Defaulted for a provider-neutral planning shot.");
+        var targetOutputRequirements = new MovieShotTargetOutputRequirements(current.DirectorContext.AspectRatio);
         foreach (var proposal in payload.Shots.OrderBy(item => item.ShotNumber))
         {
             var productionRequirements = $"Important props: {string.Join(", ", proposal.ImportantProps)}. VFX: {proposal.VfxRequirements}. Production notes: {proposal.ProductionNotes}";
@@ -496,6 +499,12 @@ public sealed class MovieShotPlanningActionExecutor(
                 Subjects = proposal.Subject,
                 LocationSet = proposal.Environment,
                 DurationSeconds = proposal.EstimatedDurationSeconds,
+                NarrativeImportance = MovieShotNarrativeImportance.Supporting,
+                ProductionComplexityJson = MovieShotProductionContractSerialization.ToJson(productionComplexity),
+                QualityRequirementsJson = MovieShotProductionContractSerialization.ToJson(qualityRequirements),
+                ContinuitySensitivity = MovieShotContinuitySensitivities.Low,
+                UpscaleSuitability = MovieShotUpscaleSuitabilities.Preferred,
+                TargetOutputRequirementsJson = MovieShotProductionContractSerialization.ToJson(targetOutputRequirements),
                 ProductionRequirements = productionRequirements,
                 ContinuityReferences = $"{proposal.ContinuityRequirements} Grounding: {string.Join("; ", proposal.GroundingEvidence)}",
                 CameraAndFraming = $"{proposal.ShotSize}; {proposal.Framing}; {proposal.CameraAngle}",
