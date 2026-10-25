@@ -181,6 +181,9 @@ public static class MovieCharacterProductionSheetMapper
 
 public sealed class MovieCharacterProductionSheetService(TaslimDbContext db, MovieCollaborationAccess collaboration) : IMovieCharacterProductionSheetService
 {
+    private const int MaximumVersionAllocationAttempts = 5;
+    private const string SheetUniqueIndexName = "IX_MovieCharacterProductionSheets_MovieCharacterId";
+    private const string VersionUniqueIndexName = "IX_MovieCharacterProductionSheetVersions_MovieCharacterProductionSheetId_VersionNumber";
     private static readonly JsonSerializerOptions ProvenanceOptions = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
 
     public static void ValidateRequest(MovieCharacterProductionSheetRequest request, bool requireComplete = false) => NormalizeAndValidate(request, requireComplete);
@@ -198,43 +201,112 @@ public sealed class MovieCharacterProductionSheetService(TaslimDbContext db, Mov
         if (character.ProductionSheet?.Status == MovieCharacterProductionSheetStatuses.Locked) throw new MovieCharacterProductionSheetLockedException();
         var normalized = NormalizeAndValidate(request, requireComplete: false);
         await ValidateAssetsAsync(character.MovieProject.WorkspaceId, normalized.AssetIds, cancellationToken);
-        var now = DateTime.UtcNow;
-        var sheet = character.ProductionSheet ?? new MovieCharacterProductionSheet { Id = Guid.NewGuid(), MovieCharacterId = character.Id, CreatedAt = now };
-        var versionNumber = (sheet.Versions.Count == 0 ? 0 : sheet.Versions.Max(item => item.VersionNumber)) + 1;
-        var provenance = new
+        for (var attempt = 0; attempt < MaximumVersionAllocationAttempts; attempt++)
         {
-            schemaVersion = 1,
-            source = "character-bible",
-            characterId,
-            characterUpdatedAt = character.UpdatedAt,
-            versionNumber,
-            slots = normalized.Slots,
-            looks = normalized.Looks,
-            note = MovieStudioHelpers.Clean(request.ProvenanceNote),
-        };
-        var provenanceJson = JsonSerializer.Serialize(provenance, ProvenanceOptions);
-        var version = new MovieCharacterProductionSheetVersion
-        {
-            Id = Guid.NewGuid(), MovieCharacterProductionSheetId = sheet.Id, VersionNumber = versionNumber,
-            CanonicalIdentityFaceAssetId = normalized.CanonicalIdentityFaceAssetId, BodyReferenceAssetId = normalized.BodyReferenceAssetId,
-            FrontReferenceAssetId = normalized.FrontReferenceAssetId, SideReferenceAssetId = normalized.SideReferenceAssetId, BackReferenceAssetId = normalized.BackReferenceAssetId,
-            SourceCharacterUpdatedAt = character.UpdatedAt, ProvenanceJson = provenanceJson,
-            ProvenanceHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(provenanceJson))).ToLowerInvariant(),
-            CreatedByUserId = userId, CreatedAt = now,
-            Looks = normalized.Looks.Select((look, index) => new MovieCharacterProductionSheetLook
+            if (attempt > 0)
             {
-                Id = Guid.NewGuid(), Key = look.Key, Name = look.Name, Wardrobe = look.Wardrobe, Appearance = look.Appearance,
-                ReferenceNotes = look.ReferenceNotes, ReferenceAssetId = look.ReferenceAssetId, SortOrder = index,
-            }).ToList(),
-        };
-        sheet.CurrentVersionNumber = versionNumber;
-        sheet.Status = MovieCharacterProductionSheetStatuses.Draft;
-        sheet.ApprovedAt = null; sheet.ApprovedByUserId = null; sheet.LockedAt = null; sheet.LockedByUserId = null; sheet.UpdatedAt = now;
-        sheet.Versions.Add(version);
-        if (character.ProductionSheet is null) db.MovieCharacterProductionSheets.Add(sheet);
-        await db.SaveChangesAsync(cancellationToken);
-        return MovieCharacterProductionSheetMapper.ToDto(await Query().FirstAsync(item => item.Id == sheet.Id, cancellationToken));
+                // A concurrent writer may have won the unique allocation while this
+                // context was still tracking the losing graph. Re-read the canonical
+                // sheet and its versions before allocating the next number.
+                db.ChangeTracker.Clear();
+                character = await db.MovieCharacters.Include(item => item.MovieProject).Include(item => item.ProductionSheet).ThenInclude(item => item!.Versions).ThenInclude(item => item.Looks).FirstOrDefaultAsync(item => item.Id == characterId, cancellationToken);
+                if (character is null || character.ProductionSheet?.Status == MovieCharacterProductionSheetStatuses.Locked) return null;
+            }
+
+            var now = DateTime.UtcNow;
+            var isNewSheet = character.ProductionSheet is null;
+            var sheet = character.ProductionSheet ?? new MovieCharacterProductionSheet { Id = Guid.NewGuid(), MovieCharacterId = character.Id, CreatedAt = now };
+            var versionNumber = (sheet.Versions.Count == 0 ? 0 : sheet.Versions.Max(item => item.VersionNumber)) + 1;
+            var provenance = new
+            {
+                schemaVersion = 1,
+                source = "character-bible",
+                characterId,
+                characterUpdatedAt = character.UpdatedAt,
+                versionNumber,
+                slots = normalized.Slots,
+                looks = normalized.Looks,
+                note = MovieStudioHelpers.Clean(request.ProvenanceNote),
+            };
+            var provenanceJson = JsonSerializer.Serialize(provenance, ProvenanceOptions);
+            var version = new MovieCharacterProductionSheetVersion
+            {
+                Id = Guid.NewGuid(), MovieCharacterProductionSheetId = sheet.Id, VersionNumber = versionNumber,
+                CanonicalIdentityFaceAssetId = normalized.CanonicalIdentityFaceAssetId, BodyReferenceAssetId = normalized.BodyReferenceAssetId,
+                FrontReferenceAssetId = normalized.FrontReferenceAssetId, SideReferenceAssetId = normalized.SideReferenceAssetId, BackReferenceAssetId = normalized.BackReferenceAssetId,
+                SourceCharacterUpdatedAt = character.UpdatedAt, ProvenanceJson = provenanceJson,
+                ProvenanceHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(provenanceJson))).ToLowerInvariant(),
+                CreatedByUserId = userId, CreatedAt = now,
+                Looks = normalized.Looks.Select((look, index) => new MovieCharacterProductionSheetLook
+                {
+                    Id = Guid.NewGuid(), Key = look.Key, Name = look.Name, Wardrobe = look.Wardrobe, Appearance = look.Appearance,
+                    ReferenceNotes = look.ReferenceNotes, ReferenceAssetId = look.ReferenceAssetId, SortOrder = index,
+                }).ToList(),
+            };
+            sheet.Versions.Add(version);
+            db.MovieCharacterProductionSheetVersions.Add(version);
+            if (isNewSheet)
+            {
+                sheet.CurrentVersionNumber = versionNumber;
+                sheet.Status = MovieCharacterProductionSheetStatuses.Draft;
+                sheet.ApprovedAt = null; sheet.ApprovedByUserId = null; sheet.LockedAt = null; sheet.LockedByUserId = null; sheet.UpdatedAt = now;
+                db.MovieCharacterProductionSheets.Add(sheet);
+            }
+            try
+            {
+                await db.SaveChangesAsync(cancellationToken);
+                if (!isNewSheet)
+                {
+                    // Advance the canonical pointer only when this version is newer.
+                    // This avoids a stale writer overwriting a concurrent higher
+                    // version while keeping the canonical pointer monotonic.
+                    await db.MovieCharacterProductionSheets
+                        .Where(item => item.Id == sheet.Id && item.CurrentVersionNumber < versionNumber)
+                        .ExecuteUpdateAsync(setters => setters
+                            .SetProperty(item => item.CurrentVersionNumber, versionNumber)
+                            .SetProperty(item => item.Status, MovieCharacterProductionSheetStatuses.Draft)
+                            .SetProperty(item => item.ApprovedAt, (DateTime?)null)
+                            .SetProperty(item => item.ApprovedByUserId, (Guid?)null)
+                            .SetProperty(item => item.LockedAt, (DateTime?)null)
+                            .SetProperty(item => item.LockedByUserId, (Guid?)null)
+                            .SetProperty(item => item.UpdatedAt, now), cancellationToken);
+                }
+                return MovieCharacterProductionSheetMapper.ToDto(await Query().FirstAsync(item => item.Id == sheet.Id, cancellationToken));
+            }
+            catch (DbUpdateConcurrencyException) when (attempt + 1 < MaximumVersionAllocationAttempts)
+            {
+                // Concurrent draft saves can lose the shared sheet-row update even
+                // when the provider does not surface the version unique conflict.
+                await Task.Delay(TimeSpan.FromMilliseconds(25 * (attempt + 1)), cancellationToken);
+                db.ChangeTracker.Clear();
+            }
+            catch (DbUpdateException exception) when (attempt + 1 < MaximumVersionAllocationAttempts && IsVersionAllocationUniqueViolation(exception))
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(25 * (attempt + 1)), cancellationToken);
+                db.ChangeTracker.Clear();
+            }
+        }
+
+        throw new InvalidOperationException("Movie character production-sheet version allocation did not converge after concurrent retries.");
     }
+
+    internal static bool IsVersionAllocationUniqueViolation(DbUpdateException exception)
+    {
+        var details = exception.ToString();
+        var isUniqueViolation = details.Contains("duplicate key", StringComparison.OrdinalIgnoreCase)
+            || details.Contains("UNIQUE constraint failed", StringComparison.OrdinalIgnoreCase)
+            || details.Contains("Cannot insert duplicate key", StringComparison.OrdinalIgnoreCase);
+        if (!isUniqueViolation) return false;
+
+        return details.Contains(SheetUniqueIndexName, StringComparison.OrdinalIgnoreCase)
+            || details.Contains(VersionUniqueIndexName, StringComparison.OrdinalIgnoreCase)
+            || details.Contains(PostgresTruncatedIdentifier(VersionUniqueIndexName), StringComparison.OrdinalIgnoreCase)
+            || details.Contains("MovieCharacterProductionSheets.MovieCharacterId", StringComparison.OrdinalIgnoreCase)
+            || details.Contains("MovieCharacterProductionSheetVersions.MovieCharacterProductionSheetId, MovieCharacterProductionSheetVersions.VersionNumber", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string PostgresTruncatedIdentifier(string identifier) =>
+        identifier.Length <= 63 ? identifier : identifier[..62] + "~";
 
     public async Task<MovieCharacterProductionSheetDto?> ApproveAsync(Guid userId, Guid sheetId, CancellationToken cancellationToken = default)
     {
