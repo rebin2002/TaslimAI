@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { ArrowLeft, Check, CheckCircle2, ClipboardCheck, Code2, LockKeyhole, RefreshCw, ShieldCheck } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
 import type { Locale } from "@/lib/i18n";
@@ -133,6 +133,7 @@ export function DevelopmentBuildChecklist() {
   const { workspace } = useAuth();
   const strings = copy[locale];
   const [checklistState, setChecklistState] = useState<DevelopmentBuildState>(createDefaultDevelopmentBuildState);
+  const checklistStateRef = useRef<DevelopmentBuildState>(createDefaultDevelopmentBuildState());
   const [loadedWorkspaceId, setLoadedWorkspaceId] = useState<string | null>(null);
   const [persistenceError, setPersistenceError] = useState(false);
   const completedCount = useMemo(
@@ -145,19 +146,23 @@ export function DevelopmentBuildChecklist() {
     // Workspace changes must load a different namespace before rendering old progress.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoadedWorkspaceId(null);
-    setChecklistState(readDevelopmentBuildState(workspace.id));
+    const next = readDevelopmentBuildState(workspace.id);
+    checklistStateRef.current = next;
+    setChecklistState(next);
     setLoadedWorkspaceId(workspace.id);
     setPersistenceError(false);
   }, [workspace?.id]);
 
-  function persist(next: DevelopmentBuildState) {
+  function updateChecklist(update: (current: DevelopmentBuildState) => DevelopmentBuildState) {
+    const next = update(checklistStateRef.current);
+    checklistStateRef.current = next;
     setChecklistState(next);
     if (!workspace?.id || !saveDevelopmentBuildState(workspace.id, next)) setPersistenceError(true);
     else setPersistenceError(false);
   }
 
   function toggleStep(stepId: string, completed: boolean) {
-    persist(setDevelopmentBuildStepCompletion(checklistState, stepId, completed));
+    updateChecklist((current) => setDevelopmentBuildStepCompletion(current, stepId, completed));
   }
 
   if (!workspace) {
@@ -191,7 +196,7 @@ export function DevelopmentBuildChecklist() {
             return <li key={step.id} className={`${styles.step} ${completed ? styles.stepComplete : ""}`}><span className={styles.stepNumber} aria-hidden="true">{String(index + 1).padStart(2, "0")}</span><label className={styles.stepLabel}><input type="checkbox" checked={completed} onChange={(event) => toggleStep(step.id, event.target.checked)} aria-label={`${completed ? strings.markIncomplete : strings.complete}: ${step.title}`} /><span className={styles.checkbox} aria-hidden="true">{completed ? <Check size={14} /> : null}</span><span className={styles.stepCopy}><strong>{step.title}</strong><small>{step.description}</small></span></label><span className={styles.stepStatus}>{completed ? <><CheckCircle2 size={14} aria-hidden="true" /> {strings.complete}</> : null}</span></li>;
           })}
         </ol>
-        <label className={styles.notes}><span>{strings.notesLabel}</span><textarea dir="auto" value={checklistState.note} onChange={(event) => persist(setDevelopmentBuildNote(checklistState, event.target.value))} maxLength={2_000} placeholder={strings.notesPlaceholder} aria-describedby="development-build-note-hint" /><small id="development-build-note-hint">{strings.notesHint} {checklistState.note.length}/2,000</small></label>
+        <label className={styles.notes}><span>{strings.notesLabel}</span><textarea dir="auto" value={checklistState.note} onChange={(event) => updateChecklist((current) => setDevelopmentBuildNote(current, event.target.value))} maxLength={2_000} placeholder={strings.notesPlaceholder} aria-describedby="development-build-note-hint" /><small id="development-build-note-hint">{strings.notesHint} {checklistState.note.length}/2,000</small></label>
         <div className={styles.feedback} role="status" aria-live="polite">{persistenceError ? <><ShieldCheck size={14} aria-hidden="true" /> {strings.storageError}</> : <><Code2 size={14} aria-hidden="true" /> {strings.saved}</>}</div>
       </section>
     </main>
