@@ -190,6 +190,42 @@ public sealed class UsageAccountingUnitTests
     }
 
     [Fact]
+    public async Task Reusing_a_chat_request_id_for_another_conversation_is_rejected_without_rebinding_usage()
+    {
+        await using var connection = new SqliteConnection("DataSource=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connection).Options;
+        await using var db = new TaslimDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+        var ledger = CreateLedger(db, new ConfigurationBuilder().Build());
+        var (workspaceId, userId) = await AddOwnerAsync(db, "usage-scope@example.com");
+        var now = DateTime.UtcNow;
+        var firstConversation = new Conversation
+        {
+            Id = Guid.NewGuid(), WorkspaceId = workspaceId, UserId = userId, Title = "First conversation",
+            CreatedAt = now, UpdatedAt = now,
+        };
+        var secondConversation = new Conversation
+        {
+            Id = Guid.NewGuid(), WorkspaceId = workspaceId, UserId = userId, Title = "Second conversation",
+            CreatedAt = now, UpdatedAt = now,
+        };
+        db.Conversations.AddRange(firstConversation, secondConversation);
+        await db.SaveChangesAsync();
+
+        var first = await ledger.GetOrCreatePendingAsync(
+            workspaceId, userId, null, firstConversation.Id, "reused-chat-request", UsageFeature.Chat);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => ledger.GetOrCreatePendingAsync(
+            workspaceId, userId, null, secondConversation.Id, "reused-chat-request", UsageFeature.Chat));
+
+        var saved = await db.UsageTransactions.SingleAsync();
+        Assert.Equal(first.Id, saved.Id);
+        Assert.Equal(firstConversation.Id, saved.ConversationId);
+        Assert.Equal(UsageTransactionStatus.Pending, saved.Status);
+    }
+
+    [Fact]
     public async Task Cancelled_generation_has_no_customer_charge_or_credit_deduction()
     {
         await using var connection = new SqliteConnection("DataSource=:memory:");
