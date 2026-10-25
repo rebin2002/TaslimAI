@@ -818,8 +818,11 @@ public sealed class MovieDirectorService(
         }
         var executor = executors.FirstOrDefault(item => string.Equals(item.ActionType, action.ActionType, StringComparison.OrdinalIgnoreCase));
         if (executor is null) throw new DirectorActionExecutionException("DIRECTOR_ACTION_UNSUPPORTED", "This Director action is not available.");
+        var startedAt = DateTime.UtcNow;
+        if (!await TryClaimReadyActionAsync(db, action.Id, startedAt, cancellationToken))
+            throw new DirectorActionExecutionException("DIRECTOR_ACTION_ALREADY_RUNNING", "This Director action is already running or has already completed.");
         action.Status = DirectorActionStatuses.Running;
-        action.StartedAt = DateTime.UtcNow;
+        action.StartedAt = startedAt;
         db.DirectorHistoryEvents.Add(new DirectorHistoryEvent { Id = Guid.NewGuid(), WorkspaceId = action.WorkspaceId, DirectorActionId = action.Id, DirectorProposalId = action.DirectorProposalId, EventType = DirectorHistoryEventTypes.ActionStarted, CreatedAt = DateTime.UtcNow });
         await db.SaveChangesAsync(cancellationToken);
 
@@ -836,6 +839,22 @@ public sealed class MovieDirectorService(
         db.DirectorHistoryEvents.Add(new DirectorHistoryEvent { Id = Guid.NewGuid(), WorkspaceId = action.WorkspaceId, DirectorActionId = action.Id, DirectorProposalId = action.DirectorProposalId, EventType = execution.Succeeded ? DirectorHistoryEventTypes.ActionSucceeded : DirectorHistoryEventTypes.ActionFailed, SafeDetailsJson = JsonSerializer.Serialize(new { execution.FailureCode }), CreatedAt = now });
         await db.SaveChangesAsync(cancellationToken);
         return new DirectorActionExecutionResponse(ToDto(action), ToDto(result));
+    }
+
+    internal static async Task<bool> TryClaimReadyActionAsync(
+        TaslimDbContext db,
+        Guid actionId,
+        DateTime startedAt,
+        CancellationToken cancellationToken)
+    {
+        var affected = await db.DirectorActions
+            .Where(item => item.Id == actionId
+                && item.Status == DirectorActionStatuses.Ready
+                && item.Proposal.Status == DirectorProposalStatuses.Approved)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(item => item.Status, DirectorActionStatuses.Running)
+                .SetProperty(item => item.StartedAt, startedAt), cancellationToken);
+        return affected == 1;
     }
 
     private async Task<DirectorProposalDto?> SetProposalStatusAsync(Guid userId, Guid proposalId, bool approve, CancellationToken cancellationToken)
