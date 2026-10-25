@@ -108,4 +108,28 @@ public sealed class MovieCinematographyPlanningTests
 
         Assert.Equal("Every cinematography plan field must use a supported structured value.", CinematographyShotPlanValidator.Validate(plan));
     }
+
+    [Fact]
+    public void FromJson_rejects_null_grounding_entry_without_throwing()
+    {
+        var json = """
+        {
+          "ShotSize":"medium",
+          "Framing":"single",
+          "CameraAngle":"eye_level",
+          "CameraPosition":"front",
+          "CameraMovement":"locked_off",
+          "CompositionIntent":"establish",
+          "LensLookIntent":"neutral",
+          "Depth":"layered",
+          "FocusIntent":"subject_locked",
+          "LightingIntent":"naturalistic",
+          "SubjectEmphasis":"primary_subject",
+          "VisualTransitionIntent":"cut",
+          "Grounding":[null]
+        }
+        """;
+
+        Assert.Null(CinematographyShotPlanValidator.FromJson(json));
+    }
 }
