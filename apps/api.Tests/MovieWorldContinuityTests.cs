@@ -111,6 +111,36 @@ public sealed class MovieWorldContinuityTests : IClassFixture<TaslimApiFactory>
         Assert.Equal(HttpStatusCode.NotFound, (await outsider.GetAsync($"/api/movie-studio/shots/{shot.Id}/world-continuity")).StatusCode);
     }
 
+    [Fact]
+    public async Task Shot_projection_retains_target_usage_when_scene_usage_reaches_the_cap()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Continuity Cap Owner");
+        var movie = await CreateMovie(client, auth.PersonalWorkspace.Id);
+        var prop = await SendJson<MoviePropDto>(client, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/props", new { name = "Target Prop", description = "Must remain visible." });
+        var scene = await SendJson<MovieSceneDto>(client, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/scenes", new { title = "Cap Scene", summary = "A bounded target." });
+        var shot = await SendJson<MovieShotDto>(client, HttpMethod.Post, $"/api/movie-studio/scenes/{scene.Id}/shots", new { description = "Target shot." });
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        db.MovieWorldUsages.AddRange(Enumerable.Range(0, MovieWorldContinuityLimits.MaxUsages).Select(_ => new MovieWorldUsage
+        {
+            Id = Guid.NewGuid(), MovieProjectId = movie.Project.Id, MovieSceneId = scene.Id,
+            EntityType = MovieWorldEntityTypes.Prop, EntityId = Guid.NewGuid(), CreatedAt = DateTime.UtcNow,
+        }));
+        db.MovieWorldUsages.Add(new MovieWorldUsage
+        {
+            Id = Guid.NewGuid(), MovieProjectId = movie.Project.Id, MovieSceneId = scene.Id, MovieShotId = shot.Id,
+            EntityType = MovieWorldEntityTypes.Prop, EntityId = prop.Id, CreatedAt = DateTime.UtcNow,
+        });
+        await db.SaveChangesAsync();
+
+        var snapshot = await new MovieWorldContinuityProjector(db).ProjectAsync(movie.Project.Id, scene.Id, shot.Id);
+
+        Assert.NotNull(snapshot);
+        Assert.Contains(snapshot!.Props, item => item.Id == prop.Id);
+    }
+
     private static async Task<AuthResponse> Register(HttpClient client, string displayName)
     {
         var response = await SendWithCsrf(client, HttpMethod.Post, "/api/auth/register", new { displayName, email = $"movie-continuity-{Guid.NewGuid():N}@example.com", password = "StrongPassword!123", preferredLanguage = "en" });
