@@ -36,7 +36,7 @@ public sealed class SocialPersistedAssetResultTests : IClassFixture<SocialGenera
             language = "en",
             assetIds = Array.Empty<Guid>(),
             attachmentIds = Array.Empty<Guid>(),
-        }, $"social-asset-contract-{Guid.NewGuid():N}");
+        }, idempotencyKey: $"social-asset-contract-{Guid.NewGuid():N}");
 
         Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
         var created = (await response.Content.ReadFromJsonAsync<CreateSocialGenerationResponse>())!;
