@@ -1,6 +1,9 @@
 using Amazon.S3;
 using Amazon.S3.Model;
 using Microsoft.Extensions.Options;
+using System.Net.Http;
+using System.Net.Sockets;
+using System.Security.Authentication;
 using Taslim.Api.Domain;
 
 namespace Taslim.Api.Files;
@@ -113,22 +116,41 @@ public sealed class S3CompatibleFileStorageService : IFileStorageService, IDispo
 
     private void LogFailure(string operation, Exception exception)
     {
+        var failureClass = ClassifyFailure(exception);
         if (exception is AmazonS3Exception s3Exception)
         {
             logger.LogError(
-                "S3-compatible storage operation failed. Operation={Operation}; StatusCode={StatusCode}; ErrorCode={ErrorCode}; ErrorType={ErrorType}; RequestId={RequestId}",
+                "S3-compatible storage operation failed. Operation={Operation}; StatusCode={StatusCode}; ErrorCode={ErrorCode}; ErrorType={ErrorType}; RequestId={RequestId}; FailureClass={FailureClass}",
                 operation,
                 (int)s3Exception.StatusCode,
                 s3Exception.ErrorCode,
                 exception.GetType().Name,
-                s3Exception.RequestId);
+                s3Exception.RequestId,
+                failureClass);
             return;
         }
 
         logger.LogError(
-            "S3-compatible storage operation failed. Operation={Operation}; ErrorType={ErrorType}",
+            "S3-compatible storage operation failed. Operation={Operation}; ErrorType={ErrorType}; FailureClass={FailureClass}",
             operation,
-            exception.GetType().Name);
+            exception.GetType().Name,
+            failureClass);
+    }
+
+    internal static string ClassifyFailure(Exception exception)
+    {
+        if (exception.InnerException is not null)
+            return ClassifyFailure(exception.InnerException);
+
+        return exception switch
+        {
+            SocketException => "network",
+            AuthenticationException => "tls",
+            TaskCanceledException => "timeout",
+            HttpRequestException => "transport",
+            AmazonS3Exception => "s3_response",
+            _ => "unknown",
+        };
     }
 
     private static IS3CompatibleObjectClient CreateClient(FileOptions settings)
