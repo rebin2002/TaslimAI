@@ -109,7 +109,7 @@ public sealed class MovieProductionQualityControlApiTests : IClassFixture<Genera
             continuitySnapshotHash = "continuity-v1",
             continuityWarningCount = 0,
             hardContinuityConflictCount = 0,
-            outputSha256 = "bounded-test-output-hash",
+            outputSha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         },
     };
 
