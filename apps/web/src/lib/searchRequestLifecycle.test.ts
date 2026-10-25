@@ -21,6 +21,15 @@ describe("createRequestSequencer", () => {
     expect(sequence.isCurrent(request)).toBe(false);
   });
 
+  it("keeps the query-change invalidation token current until the debounced request starts", () => {
+    const sequence = createRequestSequencer();
+    const previousRequest = sequence.begin();
+    const queryChange = sequence.begin();
+
+    expect(sequence.isCurrent(previousRequest)).toBe(false);
+    expect(sequence.isCurrent(queryChange)).toBe(true);
+  });
+
   it("invalidates stale search responses before URL-query debounce scheduling", () => {
     const source = readFileSync(new URL("../components/GlobalSearchView.tsx", import.meta.url), "utf8");
     const effectStart = source.indexOf("  useEffect(() => {", source.indexOf("const runSearch"));
