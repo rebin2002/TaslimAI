@@ -112,6 +112,24 @@ public sealed class StableAudioMusicGenerationProviderTests
     }
 
     [Fact]
+    public async Task Download_stream_transport_failure_is_normalized_to_provider_unavailable()
+    {
+        var handler = new StableAudioHandler((_, requestNumber) => requestNumber switch
+        {
+            1 => Json(HttpStatusCode.Accepted, "{\"id\":\"generation-transport\"}"),
+            2 => new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(new FaultingStream()),
+            },
+            _ => throw new InvalidOperationException("unexpected request"),
+        });
+        var provider = CreateProvider(handler, maxPollAttempts: 1);
+
+        await Assert.ThrowsAsync<MusicProviderUnavailableException>(() => provider.GenerateAsync(Input()));
+        Assert.Equal(2, handler.Requests.Count);
+    }
+
+    [Fact]
     public async Task Caller_cancellation_stops_async_polling_without_becoming_timeout()
     {
         var secondRequest = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -226,5 +244,20 @@ public sealed class StableAudioMusicGenerationProviderTests
             RequestBodies.Add(request.Content is null ? null : await request.Content.ReadAsStringAsync(cancellationToken));
             return await responder(request, Interlocked.Increment(ref requestCount), cancellationToken);
         }
+    }
+
+    private sealed class FaultingStream : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => 0;
+        public override long Position { get => 0; set => throw new NotSupportedException(); }
+        public override void Flush() => throw new NotSupportedException();
+        public override int Read(byte[] buffer, int offset, int count) => throw new HttpRequestException("synthetic stream failure");
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) => throw new HttpRequestException("synthetic stream failure");
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 }
