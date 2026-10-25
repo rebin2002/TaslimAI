@@ -1,6 +1,9 @@
 using System.Text.Json;
+using Microsoft.Data.Sqlite;
+using Microsoft.EntityFrameworkCore;
 using Taslim.Api.Movies;
 using Taslim.Api.Domain;
+using Taslim.Api.Persistence;
 using Xunit;
 
 namespace Taslim.Api.Tests;
@@ -90,5 +93,54 @@ public sealed class MovieProductionGenerationOrchestratorTests
         Assert.True(MovieProductionGenerationOrchestrator.JobTargetsClip(job, canonicalClipId));
         Assert.False(MovieProductionGenerationOrchestrator.JobTargetsClip(job, Guid.NewGuid()));
         Assert.False(MovieProductionGenerationOrchestrator.JobTargetsClip(new GenerationJob { InputJson = "not-json" }, canonicalClipId));
+    }
+
+    [Fact]
+    public async Task Duplicate_version_number_retries_with_the_next_database_owned_number()
+    {
+        await using var connection = new SqliteConnection("DataSource=:memory:");
+        await connection.OpenAsync();
+        await using var pragma = connection.CreateCommand();
+        pragma.CommandText = "PRAGMA foreign_keys = OFF";
+        await pragma.ExecuteNonQueryAsync();
+
+        var options = new DbContextOptionsBuilder<TaslimDbContext>()
+            .UseSqlite(connection)
+            .Options;
+        await using var db = new TaslimDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+
+        var shotId = Guid.NewGuid();
+        db.MovieProductionVersions.Add(new MovieProductionVersion
+        {
+            Id = Guid.NewGuid(),
+            MovieShotId = shotId,
+            VersionNumber = 1,
+            CreatedByUserId = Guid.NewGuid(),
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+        });
+        await db.SaveChangesAsync();
+
+        var candidate = new MovieProductionVersion
+        {
+            Id = Guid.NewGuid(),
+            MovieShotId = shotId,
+            VersionNumber = 1,
+            CreatedByUserId = Guid.NewGuid(),
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+        };
+        db.MovieProductionVersions.Add(candidate);
+
+        await MovieProductionGenerationOrchestrator.PersistProductionVersionWithRetryAsync(db, candidate, CancellationToken.None);
+
+        Assert.Equal(2, candidate.VersionNumber);
+        Assert.Equal(new[] { 1, 2 }, await db.MovieProductionVersions
+            .AsNoTracking()
+            .Where(item => item.MovieShotId == shotId)
+            .OrderBy(item => item.VersionNumber)
+            .Select(item => item.VersionNumber)
+            .ToArrayAsync());
     }
 }

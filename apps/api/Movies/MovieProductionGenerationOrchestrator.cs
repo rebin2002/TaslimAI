@@ -332,7 +332,7 @@ public sealed class MovieProductionGenerationOrchestrator(
             MetadataJson = version.StageProvenanceJson,
         });
         shot.UpdatedAt = now;
-        await db.SaveChangesAsync(cancellationToken);
+        await PersistProductionVersionWithRetryAsync(db, version, cancellationToken);
 
         // A worker may complete between CreateAsync and the relationship update. Re-read
         // the canonical job state and reconcile the clip so a fast disabled/fake adapter
@@ -423,6 +423,47 @@ public sealed class MovieProductionGenerationOrchestrator(
         {
             return false;
         }
+    }
+
+    internal static async Task PersistProductionVersionWithRetryAsync(
+        TaslimDbContext db,
+        MovieProductionVersion version,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await db.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateException exception) when (IsVersionNumberUniqueViolation(exception))
+        {
+            // VersionNumber is allocated from a read of the shot graph. The unique
+            // database index is the authoritative concurrency boundary when another
+            // render commits between that read and this insert.
+            version.VersionNumber = (await db.MovieProductionVersions.AsNoTracking()
+                .Where(item => item.MovieShotId == version.MovieShotId)
+                .MaxAsync(item => (int?)item.VersionNumber, cancellationToken) ?? 0) + 1;
+            await db.SaveChangesAsync(cancellationToken);
+        }
+    }
+
+    internal static bool IsVersionNumberUniqueViolation(DbUpdateException exception)
+    {
+        for (var current = exception.InnerException; current is not null; current = current.InnerException)
+        {
+            if (current is Npgsql.PostgresException postgres
+                && postgres.SqlState == "23505"
+                && (string.Equals(postgres.ConstraintName, "IX_MovieProductionVersions_MovieShotId_VersionNumber", StringComparison.Ordinal)
+                    || string.Equals(postgres.ConstraintName, "IX_MovieProductionVersions_MovieShotId_VersionNumber~", StringComparison.Ordinal)))
+                return true;
+
+            if (current.Message.Contains("UNIQUE constraint failed", StringComparison.OrdinalIgnoreCase)
+                && current.Message.Contains("MovieProductionVersions", StringComparison.Ordinal)
+                && current.Message.Contains("MovieShotId", StringComparison.Ordinal)
+                && current.Message.Contains("VersionNumber", StringComparison.Ordinal))
+                return true;
+        }
+
+        return false;
     }
 
     private static ProductionPlan BuildPlan(MovieShot shot, MovieProductionGenerationRequest request)
