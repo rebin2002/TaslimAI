@@ -2,16 +2,18 @@ using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.EntityFrameworkCore;
 using Taslim.Api.Contracts;
 using Taslim.Api.Infrastructure;
 using Taslim.Api.Movies;
+using Taslim.Api.Persistence;
 
 namespace Taslim.Api.Controllers;
 
 [ApiController]
 [Authorize]
 [Route("api/movie-director")]
-public sealed class MovieDirectorController(IMovieDirectorService director, IMovieSalvageDirector salvage, MovieAuthorizationService authorization) : ControllerBase
+public sealed class MovieDirectorController(IMovieDirectorService director, IMovieSalvageDirector salvage, MovieAuthorizationService authorization, TaslimDbContext db) : ControllerBase
 {
     [HttpPost("salvage-plan")]
     [ValidateAntiForgeryToken]
@@ -50,6 +52,18 @@ public sealed class MovieDirectorController(IMovieDirectorService director, IMov
             return Forbid();
         try
         {
+            if (request is null)
+                throw new MovieIntercutPlanningException(MovieIntercutPlanCodes.ClipRequired, "Intercut coverage candidates are required.");
+            if (request.TimelineId is Guid requestedTimelineId && requestedTimelineId != Guid.Empty)
+            {
+                var timelineProjectId = await db.MovieTimelines.AsNoTracking()
+                    .Where(item => item.Id == requestedTimelineId)
+                    .Select(item => (Guid?)item.MovieProjectId)
+                    .SingleOrDefaultAsync(cancellationToken);
+                if (timelineProjectId != movieProjectId)
+                    throw new MovieIntercutPlanningException(MovieIntercutPlanCodes.TimelineProjectMismatch, "The intercut timeline must belong to the requested movie project.");
+            }
+
             // Intercut planning is deliberately a pure proposal seam. It does not create a
             // timeline revision, enqueue a job, publish media, or charge usage.
             return Ok(MovieIntercutPlanner.Build(movieProjectId, request));
