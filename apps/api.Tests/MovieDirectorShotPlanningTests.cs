@@ -60,7 +60,17 @@ public sealed class MovieDirectorShotPlanningTests : IClassFixture<MovieDirector
         var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
         var shots = await db.MovieShots.Where(item => item.MovieSceneId == scene.Id).OrderBy(item => item.Sequence).ToListAsync();
         Assert.Equal(2, shots.Count);
-        Assert.All(shots, shot => Assert.False(string.IsNullOrWhiteSpace(shot.CinematographyJson)));
+        Assert.All(shots, shot =>
+        {
+            Assert.False(string.IsNullOrWhiteSpace(shot.CinematographyJson));
+            var contract = MovieShotProductionContractProjection.FromShot(shot);
+            Assert.Equal(MovieShotNarrativeImportance.Supporting, contract.NarrativeImportance);
+            Assert.Equal(MovieShotComplexityLevels.Low, contract.ProductionComplexity!.Level);
+            Assert.Equal(MovieQualityLevels.Fast, contract.QualityRequirements!.MinimumLevel);
+            Assert.Equal(MovieShotContinuitySensitivities.Low, contract.ContinuitySensitivity);
+            Assert.Equal(MovieShotUpscaleSuitabilities.Preferred, contract.UpscaleSuitability);
+            Assert.Equal("16:9", contract.TargetOutputRequirements!.AspectRatio);
+        });
         Assert.Empty(await db.GenerationJobs.Where(item => item.WorkspaceId == auth.PersonalWorkspace.Id).ToListAsync());
     }
 
