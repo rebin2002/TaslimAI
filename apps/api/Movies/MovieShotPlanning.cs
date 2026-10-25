@@ -86,11 +86,12 @@ public static class MovieShotReadiness
         };
         var missing = checks.Where(item => !item.Satisfied).Select(item => item.Label).ToArray();
         var completed = checks.Length - missing.Length;
-        var ready = missing.Length == 0 && !string.Equals(shot.Status, MovieShotStatuses.Archived, StringComparison.OrdinalIgnoreCase);
-        var summary = ready
-            ? "All required planning fields are present. This shot may proceed to Storyboard."
-            : missing.Length == 0
-                ? "This shot is archived and cannot proceed to Storyboard."
+        var archived = shot.ArchivedAt.HasValue || string.Equals(shot.Status, MovieShotStatuses.Archived, StringComparison.OrdinalIgnoreCase);
+        var ready = missing.Length == 0 && !archived;
+        var summary = archived
+            ? "This shot is archived and cannot proceed to Storyboard."
+            : ready
+                ? "All required planning fields are present. This shot may proceed to Storyboard."
                 : $"{completed} of {checks.Length} readiness checks complete; add {string.Join(", ", missing)}.";
         return new MovieShotReadinessDto(ready, checks, missing, summary);
     }
