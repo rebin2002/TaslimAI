@@ -95,7 +95,7 @@ public interface IMovieProductionContinuityService
 
 public sealed class MovieProductionContinuityService(
     TaslimDbContext db,
-    WorkspaceAccessService access,
+    MovieCollaborationAccess collaboration,
     MovieWorldContinuityProjector worldContinuity) : IMovieProductionContinuityService
 {
     public Task<MovieProductionContinuityReviewDto?> ReviewSceneAsync(Guid userId, Guid sceneId, CancellationToken cancellationToken = default) =>
@@ -122,7 +122,7 @@ public sealed class MovieProductionContinuityService(
         if (!projectId.HasValue) return null;
         var movie = await db.MovieProjects.AsNoTracking().Include(item => item.Guide).ThenInclude(item => item.Revisions)
             .FirstOrDefaultAsync(item => item.Id == projectId.Value, cancellationToken);
-        if (movie is null || !await access.IsMemberAsync(userId, movie.WorkspaceId, cancellationToken)) return null;
+        if (movie is null || !await collaboration.HasPermissionAsync(userId, movie.Id, MoviePermissions.View, cancellationToken)) return null;
 
         var scenesQuery = db.MovieScenes.AsNoTracking().Where(item => item.MovieProjectId == movie.Id);
         if (requestedSceneId.HasValue) scenesQuery = scenesQuery.Where(item => item.Id == requestedSceneId.Value);
