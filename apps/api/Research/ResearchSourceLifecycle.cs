@@ -12,20 +12,27 @@ internal static class ResearchSourceLifecycle
         CancellationToken cancellationToken)
     {
         if (!await OwnsRunningClaimAsync(db, job, cancellationToken)) return false;
-        await ClearAsync(db, job.Id, cancellationToken);
+        await ClearAsync(db, job.Id, job.ConcurrencyToken, cancellationToken);
         return true;
     }
 
     public static async Task ClearAsync(
         TaslimDbContext db,
         Guid generationJobId,
+        Guid concurrencyToken,
         CancellationToken cancellationToken)
     {
         await db.ResearchEvidence
-            .Where(item => item.GenerationJobId == generationJobId)
+            .Where(item => item.GenerationJobId == generationJobId
+                && db.GenerationJobs.Any(job => job.Id == generationJobId
+                    && job.Status == GenerationJobStatus.Running
+                    && job.ConcurrencyToken == concurrencyToken))
             .ExecuteDeleteAsync(cancellationToken);
         await db.ResearchSources
-            .Where(item => item.GenerationJobId == generationJobId)
+            .Where(item => item.GenerationJobId == generationJobId
+                && db.GenerationJobs.Any(job => job.Id == generationJobId
+                    && job.Status == GenerationJobStatus.Running
+                    && job.ConcurrencyToken == concurrencyToken))
             .ExecuteDeleteAsync(cancellationToken);
     }
 
