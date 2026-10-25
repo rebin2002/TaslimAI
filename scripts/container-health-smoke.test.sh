@@ -34,7 +34,9 @@ while (($#)); do
     esac
 done
 endpoint="${url#http://127.0.0.1:8080}"
-printf 'HTTP/1.1 200 OK\r\ncache-control: no-store\r\npragma: no-cache\r\nx-request-id: smoke-request\r\ncontent-type: application/json\r\n\r\n' > "$headers"
+if [[ -n "$headers" ]]; then
+    printf 'HTTP/1.1 200 OK\r\ncache-control: no-store\r\npragma: no-cache\r\nx-request-id: smoke-request\r\ncontent-type: application/json\r\n\r\n' > "$headers"
+fi
 if [[ "$endpoint" == '/health/live' ]]; then
     printf '{"status":"alive","service":"Taslim API","requestId":"smoke-request","checks":[{"name":"process","status":"alive","required":true}]}\n' > "$body"
 else
@@ -64,6 +66,13 @@ assert_log_contains() {
     }
 }
 
+assert_log_contains 'docker run --detach --add-host host.docker.internal:host-gateway --publish 8080:8080 --name container-health-smoke-test-production-startup'
+assert_log_contains '--env ASPNETCORE_ENVIRONMENT=Production'
+assert_log_contains '--env AllowedOrigins__0=https://smoke.example.test'
+assert_log_contains '--env Files__StorageProvider=S3Compatible'
+assert_log_contains '--env Files__S3Endpoint=https://object-storage.invalid'
+assert_log_contains 'http://127.0.0.1:8080/health/live'
+assert_log_contains 'docker rm --force container-health-smoke-test-production-startup'
 assert_log_contains 'docker run --detach --add-host host.docker.internal:host-gateway --publish 8080:8080 --name container-health-smoke-test'
 assert_log_contains '--env ASPNETCORE_ENVIRONMENT=Testing'
 assert_log_contains '--env Database__ApplyMigrations=true'
