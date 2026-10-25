@@ -120,6 +120,20 @@ public sealed class MovieDialogueTimingContractsTests
     }
 
     [Fact]
+    public void Null_dialogue_cue_is_rejected_instead_of_being_silently_dropped()
+    {
+        var request = Request() with
+        {
+            Cues = new MovieDialogueTimingCue[] { null! },
+        };
+        var errors = MovieDialogueTimingRequestValidator.Validate(request);
+
+        Assert.Contains(errors, error => error.Code == "required" && error.Field.Contains("Cues[0]", StringComparison.Ordinal));
+        var exception = Assert.Throws<MovieDialogueTimingValidationException>(() => MovieLipSyncPlanner.Plan(request));
+        Assert.Contains(exception.Errors, error => error.Code == "required" && error.Field.Contains("Cues[0]", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Invalid_request_throws_contract_exception_before_planning()
     {
         var request = Request() with
