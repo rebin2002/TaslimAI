@@ -35,6 +35,17 @@ public sealed class PresentationOutputIntegrityTests
     }
 
     [Fact]
+    public void Output_integrity_validator_rejects_missing_package_root_presentation_relationship()
+    {
+        var rendered = RenderValidPresentation();
+        var corrupted = RewriteArchive(rendered, "_rels/.rels", _ => "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\" />");
+
+        var exception = Assert.Throws<PresentationOutputIntegrityException>(() => PresentationOutputIntegrityValidator.Validate(corrupted));
+
+        Assert.Contains("ppt/presentation.xml", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Output_integrity_validator_rejects_unresolved_slide_master_layout_reference()
     {
         var rendered = RenderValidPresentation();
