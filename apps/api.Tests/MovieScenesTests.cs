@@ -36,6 +36,37 @@ public sealed class MovieScenesTests
     }
 
     [Fact]
+    public async Task Duplicate_screenplay_links_are_withheld_from_workspace_instead_of_throwing()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        var (userId, movieId, revisionId, screenplaySceneId) = await SeedApprovedScreenplayAsync(db);
+        var now = DateTime.UtcNow;
+        var actId = Guid.NewGuid();
+        var sequenceId = Guid.NewGuid();
+        var productionSceneId = Guid.NewGuid();
+        db.MovieActs.Add(new MovieAct { Id = actId, MovieProjectId = movieId, Sequence = 1, Title = "Act 1", Status = MovieHierarchyStatuses.Planned, CreatedAt = now, UpdatedAt = now });
+        db.MovieSequences.Add(new MovieSequence { Id = sequenceId, MovieActId = actId, Sequence = 1, Title = "Sequence 1", Status = MovieHierarchyStatuses.Planned, CreatedAt = now, UpdatedAt = now });
+        db.MovieScenes.Add(new MovieScene { Id = productionSceneId, MovieProjectId = movieId, MovieSequenceId = sequenceId, Sequence = 1, Title = "Production scene", Summary = "A linked production scene.", Status = MovieHierarchyStatuses.Planned, CreatedAt = now, UpdatedAt = now });
+        var firstScreenplayScene = await db.MovieScreenplayScenes.SingleAsync(item => item.Id == screenplaySceneId);
+        firstScreenplayScene.MovieSceneId = productionSceneId;
+        db.MovieScreenplayScenes.Add(new MovieScreenplayScene
+        {
+            Id = Guid.NewGuid(), MovieStoryRevisionId = revisionId, MovieSceneId = productionSceneId, Ordinal = 2,
+            SceneIdentifier = "2", ActNumber = 1, SequenceNumber = 2, Slugline = "INT. WORKSHOP - NIGHT", Synopsis = "A second screenplay scene points to the same production scene.", CreatedAt = now,
+        });
+        await db.SaveChangesAsync();
+
+        var workspace = await CreateService(db).GetWorkspaceAsync(userId, movieId, CancellationToken.None);
+
+        Assert.NotNull(workspace);
+        var scene = Assert.Single(workspace!.Acts.SelectMany(act => act.Sequences).SelectMany(sequence => sequence.Scenes));
+        Assert.Null(scene.ScreenplaySceneId);
+        Assert.Contains(scene.ContinuityWarnings, warning => warning.Contains("Multiple screenplay scenes", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task Scenes_workspace_hides_cross_workspace_projects()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
