@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Taslim.Api.Controllers;
 using Taslim.Api.Contracts;
 using Taslim.Api.Persistence;
 using Xunit;
