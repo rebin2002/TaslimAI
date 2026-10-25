@@ -4,6 +4,7 @@ using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Taslim.Api.Contracts;
+using Taslim.Api.Domain;
 using Taslim.Api.Movies;
 using Taslim.Api.Persistence;
 using Xunit;
@@ -68,6 +69,53 @@ public sealed class MovieProductionContinuityApiTests : IClassFixture<TaslimApiF
         using var outsider = factory.CreateClient();
         await Register(outsider, "Production Continuity Outsider");
         Assert.Equal(HttpStatusCode.NotFound, (await outsider.GetAsync($"/api/movie-studio/shots/{shot.Id}/continuity-review")).StatusCode);
+    }
+
+    [Fact]
+    public async Task Workspace_member_without_movie_view_permission_cannot_review_continuity()
+    {
+        using var owner = factory.CreateClient();
+        var ownerAuth = await Register(owner, "Continuity Permission Owner");
+        var movie = await SendJson<MovieStudioProjectResponse>(owner, HttpMethod.Post, "/api/movie-studio/projects", new
+        {
+            workspaceId = ownerAuth.PersonalWorkspace.Id,
+            mode = "Full",
+            title = "Continuity Permission Movie",
+            description = "A private continuity review.",
+            durationSeconds = 60,
+            aspectRatio = "16:9",
+            style = "cinematic",
+            language = "en",
+        });
+        var scene = await SendJson<MovieSceneDto>(owner, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/scenes", new
+        {
+            title = "Private scene",
+            summary = "A private continuity scene.",
+        });
+        var shot = await SendJson<MovieShotDto>(owner, HttpMethod.Post, $"/api/movie-studio/scenes/{scene.Id}/shots", new
+        {
+            description = "A private continuity shot.",
+        });
+
+        using var workspaceMember = factory.CreateClient();
+        var memberAuth = await Register(workspaceMember, "Continuity Workspace Member");
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.WorkspaceMembers.Add(new WorkspaceMember
+            {
+                Id = Guid.NewGuid(),
+                WorkspaceId = ownerAuth.PersonalWorkspace.Id,
+                UserId = memberAuth.User.Id,
+                Role = WorkspaceRole.Member,
+                JoinedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        Assert.Equal(HttpStatusCode.NotFound, (await workspaceMember.GetAsync($"/api/movie-studio/projects/{movie.Project.Id}/continuity-review")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await workspaceMember.GetAsync($"/api/movie-studio/scenes/{scene.Id}/continuity-review")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await workspaceMember.GetAsync($"/api/movie-studio/shots/{shot.Id}/continuity-review")).StatusCode);
     }
 
     private static async Task<AuthResponse> Register(HttpClient client, string displayName)
