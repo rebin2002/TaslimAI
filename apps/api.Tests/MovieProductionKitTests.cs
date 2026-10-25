@@ -1,7 +1,10 @@
+using System.Data.Common;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
+using Taslim.Api.Authorization;
 using Microsoft.Extensions.DependencyInjection;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
@@ -160,6 +163,69 @@ public sealed class MovieProductionKitTests : IClassFixture<GenerationJobsNoWork
     }
 
     [Fact]
+    public async Task Concurrent_revision_creation_retries_the_losing_revision_number_allocation()
+    {
+        var databasePath = Path.Combine(Path.GetTempPath(), $"taslim-movie-production-kit-{Guid.NewGuid():N}.db");
+        var barrier = new ProductionKitReadBarrier();
+        try
+        {
+            var seedOptions = new DbContextOptionsBuilder<TaslimDbContext>()
+                .UseSqlite($"Data Source={databasePath};Default Timeout=30")
+                .Options;
+            await using (var seedDb = new TaslimDbContext(seedOptions))
+            {
+                await seedDb.Database.EnsureCreatedAsync();
+                await SeedDirectAsync(seedDb);
+            }
+
+            async Task<MovieProductionKitDto?> CreateRevisionAsync(string notes)
+            {
+                var options = new DbContextOptionsBuilder<TaslimDbContext>()
+                    .UseSqlite($"Data Source={databasePath};Default Timeout=30")
+                    .AddInterceptors(barrier)
+                    .Options;
+                await using var db = new TaslimDbContext(options);
+                var seed = await db.MovieProjects.Select(item => new DirectProductionKitSeed(item.CreatedByUserId, item.Id)).SingleAsync();
+                var service = CreateDirectService(db);
+                return await service.CreateRevisionAsync(seed.UserId, seed.MovieProjectId, new MovieProductionKitRevisionRequest { Notes = notes }, CancellationToken.None);
+            }
+
+            var results = await Task.WhenAll(CreateRevisionAsync("Concurrent hand-off A"), CreateRevisionAsync("Concurrent hand-off B"));
+            Assert.All(results, result => Assert.NotNull(result));
+
+            await using var verifyDb = new TaslimDbContext(seedOptions);
+            var kit = await verifyDb.MovieProductionKits
+                .Include(item => item.Revisions)
+                .SingleAsync();
+            Assert.Equal(3, kit.CurrentRevisionNumber);
+            Assert.Equal(new[] { 1, 2, 3 }, kit.Revisions.OrderBy(item => item.RevisionNumber).Select(item => item.RevisionNumber).ToArray());
+            Assert.Equal(3, kit.Revisions.Count);
+        }
+        finally
+        {
+            try { File.Delete(databasePath); } catch (IOException) { }
+        }
+    }
+
+    [Fact]
+    public void Production_kit_retry_classifier_accepts_only_its_allocation_conflicts()
+    {
+        var sqliteConflict = new DbUpdateException(
+            "Production Kit revision insert failed.",
+            new InvalidOperationException("SQLite Error 19: UNIQUE constraint failed: MovieProductionKitRevisions.MovieProductionKitId, MovieProductionKitRevisions.RevisionNumber"));
+        var postgresConflict = new DbUpdateException(
+            "Production Kit revision insert failed.",
+            new InvalidOperationException("23505 duplicate key value violates unique constraint IX_MovieProductionKitRevisions_MovieProductionKitId_RevisionNu~"));
+        var unrelatedConflict = new DbUpdateException(
+            "Reference insert failed.",
+            new InvalidOperationException("SQLite Error 19: UNIQUE constraint failed: MovieProductionKitReferences.Id"));
+
+        Assert.True(MovieProductionKitService.IsProductionKitAllocationUniqueViolation(sqliteConflict));
+        Assert.True(MovieProductionKitService.IsProductionKitAllocationUniqueViolation(postgresConflict));
+        Assert.False(MovieProductionKitService.IsProductionKitAllocationUniqueViolation(unrelatedConflict));
+    }
+
+    [Fact]
     public async Task Kit_is_project_scoped_and_cross_project_sources_are_rejected()
     {
         using var owner = factory.CreateClient();
@@ -208,4 +274,74 @@ public sealed class MovieProductionKitTests : IClassFixture<GenerationJobsNoWork
         if (payload is not null) request.Content = JsonContent.Create(payload);
         return await client.SendAsync(request);
     }
+
+    private static MovieProductionKitService CreateDirectService(TaslimDbContext db) =>
+        new(db, new MovieAuthorizationService(new MovieCollaborationAccess(db, new WorkspaceAccessService(db))));
+
+    private static async Task<DirectProductionKitSeed> SeedDirectAsync(TaslimDbContext db)
+    {
+        var userId = Guid.NewGuid();
+        var workspaceId = Guid.NewGuid();
+        var movieProjectId = Guid.NewGuid();
+        var guideId = Guid.NewGuid();
+        var guideRevisionId = Guid.NewGuid();
+        var kitId = Guid.NewGuid();
+        var kitRevisionId = Guid.NewGuid();
+        var now = DateTime.UtcNow;
+        var guideRevision = new MovieGuideRevision
+        {
+            Id = guideRevisionId, MovieContinuityGuideId = guideId, RevisionNumber = 1,
+            CreatedByUserId = userId, CreatedAt = now,
+        };
+        db.Users.Add(new ApplicationUser { Id = userId, UserName = "production-kit-race-owner", NormalizedUserName = "PRODUCTION-KIT-RACE-OWNER", DisplayName = "Production Kit Race Owner", CreatedAt = now, UpdatedAt = now });
+        db.Workspaces.Add(new Workspace { Id = workspaceId, Name = "Production Kit Race Workspace", Slug = $"production-kit-race-{Guid.NewGuid():N}", Type = WorkspaceType.Personal, CreatedAt = now, UpdatedAt = now });
+        db.WorkspaceMembers.Add(new WorkspaceMember { Id = Guid.NewGuid(), WorkspaceId = workspaceId, UserId = userId, Role = WorkspaceRole.Owner, JoinedAt = now });
+        db.MovieProjects.Add(new MovieProject
+        {
+            Id = movieProjectId, WorkspaceId = workspaceId, CreatedByUserId = userId, Title = "Production Kit Race Movie",
+            Description = "A deterministic concurrency fixture.", DurationSeconds = 30, CreatedAt = now, UpdatedAt = now,
+            Guide = new MovieContinuityGuide { Id = guideId, CurrentRevisionNumber = 1, UpdatedAt = now, Revisions = [guideRevision] },
+        });
+        db.MovieTeamMembers.Add(new MovieTeamMember { Id = Guid.NewGuid(), MovieProjectId = movieProjectId, UserId = userId, Role = MovieTeamRoles.Producer, IsProjectOwner = true, CreatedAt = now });
+        db.MovieProductionKits.Add(new MovieProductionKit
+        {
+            Id = kitId, MovieProjectId = movieProjectId, CurrentRevisionNumber = 1, CreatedAt = now, UpdatedAt = now,
+            Revisions = [new MovieProductionKitRevision
+            {
+                Id = kitRevisionId, MovieProductionKitId = kitId, RevisionNumber = 1,
+                SourceGuideRevisionId = guideRevisionId, SourceGuideRevisionNumber = 1,
+                CreatedByUserId = userId, CreatedAt = now, SourceGuideHash = "seed", RevisionHash = "seed",
+            }],
+        });
+        await db.SaveChangesAsync();
+        return new DirectProductionKitSeed(userId, movieProjectId);
+    }
+
+    private sealed class ProductionKitReadBarrier : DbCommandInterceptor
+    {
+        private readonly TaskCompletionSource<bool> released = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int arrivals;
+
+        public override async ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(
+            DbCommand command,
+            CommandEventData eventData,
+            InterceptionResult<DbDataReader> result,
+            CancellationToken cancellationToken = default)
+        {
+            if (IsInitialKitRead(command))
+            {
+                if (Interlocked.Increment(ref arrivals) >= 2) released.TrySetResult(true);
+                await released.Task.WaitAsync(TimeSpan.FromSeconds(10), cancellationToken);
+            }
+
+            return result;
+        }
+
+        private static bool IsInitialKitRead(DbCommand command) =>
+            command.CommandText.Contains("MovieProductionKits", StringComparison.OrdinalIgnoreCase)
+            && command.CommandText.Contains("MovieProductionKitRevisions", StringComparison.OrdinalIgnoreCase)
+            && command.CommandText.Contains("MovieProjectId", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private sealed record DirectProductionKitSeed(Guid UserId, Guid MovieProjectId);
 }
