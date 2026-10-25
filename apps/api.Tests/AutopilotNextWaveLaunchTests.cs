@@ -234,6 +234,38 @@ public sealed class AutopilotNextWaveLaunchTests
     }
 
     [Fact]
+    public async Task Duplicate_plans_cannot_launch_the_same_backlog_item_twice()
+    {
+        using var host = new Host(options =>
+        {
+            options.DryRun = false;
+            options.SimulationMode = false;
+            options.AllowNextWaveLaunch = true;
+            options.AllowNextWaveLaunchWhenReleasePending = true;
+            options.MaxLaunchBatchesPerCycle = 2;
+        });
+        await host.SeedDuplicatePlansAsync();
+
+        await host.LaunchAsync();
+
+        using var db = host.CreateContext();
+        var backlog = await db.AutopilotBacklogItems.SingleAsync();
+        var tasks = await db.AutopilotWaveLaunchTasks.OrderBy(item => item.TaskKey).ToListAsync();
+
+        // This fixture models two workers that planned the same item before either
+        // reached the provider boundary. Only the atomic claim winner may launch.
+        Assert.Equal(1, host.Provider.LaunchCalls);
+        Assert.Equal(1, tasks.Count(item => item.Status == AutopilotWaveLaunchStatuses.Launched));
+        var blocked = Assert.Single(tasks, item => item.Status == AutopilotWaveLaunchStatuses.Blocked);
+        Assert.Equal("backlog_item_claimed", blocked.ReasonCode);
+        Assert.Equal("backlog_item_already_claimed_by_another_wave", blocked.LastStatusDetail);
+        Assert.NotNull(backlog.ConsumedByWaveKey);
+        Assert.Contains(await db.AutopilotAuditEvents.ToListAsync(), item =>
+            item.Action == AutopilotAuditActions.NextWaveLaunchBlocked
+            && item.Reason == "backlog_item_claimed");
+    }
+
+    [Fact]
     public async Task Missing_approved_backlog_stops_with_a_human_decision_and_resumes_when_supplied()
     {
         using var host = new Host(options => options.AllowNextWaveLaunch = true);
@@ -748,6 +780,89 @@ public sealed class AutopilotNextWaveLaunchTests
                 Reason = "test approval",
             }, null);
             Assert.True(result.Succeeded, result.Reason);
+        }
+
+        public async Task SeedDuplicatePlansAsync()
+        {
+            using var db = CreateContext();
+            var now = Time.GetUtcNow().UtcDateTime;
+            var backlog = new AutopilotBacklogItem
+            {
+                Id = Guid.NewGuid(),
+                ItemKey = "bl-duplicate-plan",
+                Title = "Add workspace audit export",
+                Kind = AutopilotBacklogItemKinds.Development,
+                Approved = true,
+                ApprovedBy = "synthetic-test-owner",
+                ApprovedAt = now,
+                ApprovalNote = "synthetic duplicate-plan fixture",
+                CreatedAt = now,
+                UpdatedAt = now,
+            };
+            db.AutopilotBacklogItems.Add(backlog);
+
+            for (var index = 1; index <= 2; index++)
+            {
+                var sourceWaveKey = $"wave-duplicate-{index}";
+                var runId = Guid.NewGuid();
+                var batchId = Guid.NewGuid();
+                db.AutopilotRuns.Add(new AutopilotRun
+                {
+                    Id = runId,
+                    WaveKey = sourceWaveKey,
+                    RunKey = $"run-{sourceWaveKey}",
+                    State = AutopilotRunStates.HandoffPendingHuman,
+                    BaseSha = BaseSha,
+                    CandidateSha = CandidateSha,
+                    Branch = Branch,
+                    TaskCount = 1,
+                    ExpectedTaskCount = 1,
+                    IntegrationGatePassed = true,
+                    ReleaseGatePassed = true,
+                    HumanDecisionRequired = AutopilotHumanDecisions.ProductionRelease,
+                    CreatedAt = now,
+                    UpdatedAt = now,
+                    ConcurrencyToken = Guid.NewGuid(),
+                });
+                db.AutopilotWaveLaunchBatches.Add(new AutopilotWaveLaunchBatch
+                {
+                    Id = batchId,
+                    SourceRunId = runId,
+                    SourceWaveKey = sourceWaveKey,
+                    WaveKey = $"{sourceWaveKey}-next",
+                    Status = AutopilotWaveLaunchStatuses.Planned,
+                    BaseSha = CandidateSha,
+                    Branch = Branch,
+                    PlanFingerprint = $"synthetic-plan-{index}",
+                    TaskCount = 1,
+                    MaxLaunchAttempts = 3,
+                    MaxReconciles = 3,
+                    CreatedAt = now,
+                    UpdatedAt = now,
+                    ConcurrencyToken = Guid.NewGuid(),
+                });
+                db.AutopilotWaveLaunchTasks.Add(new AutopilotWaveLaunchTask
+                {
+                    Id = Guid.NewGuid(),
+                    BatchId = batchId,
+                    SourceRunId = runId,
+                    SourceWaveKey = sourceWaveKey,
+                    WaveKey = $"{sourceWaveKey}-next",
+                    TaskKey = $"duplicate-task-{index}",
+                    Title = backlog.Title,
+                    BacklogItemKey = backlog.ItemKey,
+                    Status = AutopilotWaveLaunchStatuses.Planned,
+                    Branch = Branch,
+                    BaseSha = CandidateSha,
+                    MaxLaunchAttempts = 3,
+                    MaxReconciles = 3,
+                    CreatedAt = now,
+                    UpdatedAt = now,
+                    ConcurrencyToken = Guid.NewGuid(),
+                });
+            }
+
+            await db.SaveChangesAsync();
         }
 
         public async Task SubmitAsync(string waveKey, string taskId, Dictionary<string, bool> checks)
