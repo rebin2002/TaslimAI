@@ -180,10 +180,7 @@ public sealed class MovieProductionPreflightService(
                 approvedKeyframe ? "An approved keyframe is available for continuity." : "Generate and approve a keyframe before production video."),
             new(MovieProductionPreflightCheckKeys.MotionPreview, "Approved motion preview", approvedMotionPreview, true,
                 approvedMotionPreview ? "The selected motion preview is approved." : "Create and approve a motion preview before the production render."),
-            new(MovieProductionPreflightCheckKeys.ReferencePackage, "Reference package", blockingPackageWarnings.Length == 0, true,
-                blockingPackageWarnings.Length == 0
-                    ? package is null ? "The reference package is unavailable." : "No blocking reference conflicts were found."
-                    : $"Resolve {blockingPackageWarnings.Length} blocking reference conflict{(blockingPackageWarnings.Length == 1 ? "" : "s")} before production."),
+            BuildReferencePackageCheck(package, blockingPackageWarnings),
         };
 
         var adaptiveSatisfied = !plan.Recommendation.QcEscalationRequired;
@@ -266,6 +263,19 @@ public sealed class MovieProductionPreflightService(
             GenerationCostPreviewMapper.ToDto(guardrail),
             rejectionCode,
             rejectionMessage);
+    }
+
+    internal static MovieProductionPreflightCheckDto BuildReferencePackageCheck(
+        MovieProductionReferencePackageDto? package,
+        IReadOnlyCollection<MovieProductionReferenceWarningDto> blockingWarnings)
+    {
+        var satisfied = package is not null && blockingWarnings.Count == 0;
+        var detail = package is null
+            ? "The reference package is unavailable; resolve the reference context before production."
+            : blockingWarnings.Count == 0
+                ? "No blocking reference conflicts were found."
+                : $"Resolve {blockingWarnings.Count} blocking reference conflict{(blockingWarnings.Count == 1 ? "" : "s")} before production.";
+        return new(MovieProductionPreflightCheckKeys.ReferencePackage, "Reference package", satisfied, true, detail);
     }
 
     private static IReadOnlyList<MovieProductionPreflightRecommendationDto> BuildRecommendations(
