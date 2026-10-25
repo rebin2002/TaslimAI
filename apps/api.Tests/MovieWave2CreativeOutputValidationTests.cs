@@ -145,6 +145,18 @@ public sealed class MovieWave2CreativeOutputValidationTests
     }
 
     [Fact]
+    public void Conflicting_base_revision_aliases_are_rejected_instead_of_silently_coalescing()
+    {
+        var output = ValidOutput();
+        output.Source!.BaseRevisionId = Guid.NewGuid();
+
+        var result = new MovieWave2CreativeOutputValidator().ValidateAndRepair(output, context);
+
+        Assert.Contains(result.Findings, item => item.ReasonCode == MovieWave2CreativeValidationReasonCodes.SchemaInvalid);
+        Assert.False(result.IsValid);
+    }
+
+    [Fact]
     public void Locked_canon_conflict_is_rejected_without_substituting_canon_text()
     {
         var output = ValidOutput();
