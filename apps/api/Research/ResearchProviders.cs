@@ -109,7 +109,7 @@ public sealed class DeterministicResearchEvidenceProcessor : IResearchEvidencePr
                 Context = context,
             });
             countsBySource[item.CitationId] = sourceCount + 1;
-            totalCharacters += excerpt.Length;
+            totalCharacters += contribution;
         }
         foreach (var source in sources)
         {

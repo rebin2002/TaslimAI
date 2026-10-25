@@ -101,7 +101,7 @@ test.describe("Movie Studio V2 operational browser contracts", () => {
         await expect(page.getByText(/still have no selected take/i)).toBeVisible();
         await expect(page.getByText("No master has been assembled", { exact: true })).toBeVisible();
         await expect(
-          page.locator(".movie-qc-shot-row").getByText(/no selected take/i),
+          page.locator(".movie-qc-shot-row").getByText("Unselected", { exact: true }),
         ).toBeVisible();
         await expect(
           page.getByText("A slow push toward the compass on a crate.", { exact: true }),

@@ -395,7 +395,10 @@ if (builder.Configuration.GetValue("GenerationJobs:WorkerEnabled", !builder.Envi
 builder.Services.Configure<AiOptions>(builder.Configuration.GetSection("Ai"));
 builder.Services.Configure<ImageGenerationOptions>(builder.Configuration.GetSection("ImageGeneration"));
 builder.Services.Configure<DocumentGenerationOptions>(builder.Configuration.GetSection("DocumentGeneration"));
-builder.Services.Configure<PresentationGenerationOptions>(builder.Configuration.GetSection("PresentationGeneration"));
+builder.Services.AddOptions<PresentationGenerationOptions>()
+    .Bind(builder.Configuration.GetSection("PresentationGeneration"))
+    .ValidateOnStart();
+builder.Services.AddSingleton<IValidateOptions<PresentationGenerationOptions>, PresentationGenerationOptionsValidator>();
 builder.Services.Configure<ResearchGenerationOptions>(builder.Configuration.GetSection("ResearchGeneration"));
 builder.Services.Configure<SocialGenerationOptions>(builder.Configuration.GetSection("SocialGeneration"));
 builder.Services.Configure<MusicGenerationOptions>(builder.Configuration.GetSection("MusicGeneration"));

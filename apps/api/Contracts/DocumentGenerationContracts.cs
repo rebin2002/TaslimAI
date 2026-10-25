@@ -131,7 +131,12 @@ public static class DocumentGenerationContractMapper
 
     public static string? NormalizeOptional(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
+    private static readonly JsonSerializerOptions ResultJsonOptions = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+
     public static string SerializeInput(DocumentGenerationInput input) => JsonSerializer.Serialize(input);
+
+    public static string SerializeResult(string documentType, string title, string language, string summary, IReadOnlyList<DocumentSection> sections) =>
+        JsonSerializer.Serialize(new { documentType, title, language, summary, sections }, ResultJsonOptions);
 
     public static bool TryDeserializeInput(string json, out DocumentGenerationInput? input)
     {

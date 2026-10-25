@@ -2,7 +2,7 @@ name: Taslim CI
 
 on:
   push:
-    branches: [main, "parallel/**"]
+    branches: [main, "parallel/**", "feature/taslim-autopilot-next-wave"]
   pull_request:
 
 permissions:
@@ -141,7 +141,10 @@ jobs:
 
   autopilot-gate:
     name: Autopilot next-wave gate
-    if: ${{ github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/feature/taslim-autopilot-next-wave' }}
+    # This gate is specific to main/next-wave integration. Keep ordinary CI
+    # required for other PRs, but do not make the next-wave policy reject
+    # legitimate chained PRs whose base is another dependency branch.
+    if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/feature/taslim-autopilot-next-wave' || (github.event_name == 'pull_request' && (github.base_ref == 'main' || github.base_ref == 'feature/taslim-autopilot-next-wave')) }}
     runs-on: ubuntu-latest
     services:
       postgres:

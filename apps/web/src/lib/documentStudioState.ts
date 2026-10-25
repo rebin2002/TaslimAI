@@ -107,6 +107,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+function readDocumentProperty(record: Record<string, unknown>, camelCase: string, pascalCase: string) {
+  return record[camelCase] ?? record[pascalCase];
+}
+
 function nonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
 }
@@ -120,23 +124,33 @@ export function isSafeDocumentIdentifier(value: unknown): value is string {
 function parseSections(value: unknown): NonNullable<DocumentJobResult["sections"]> {
   if (!Array.isArray(value)) return [];
   return value.flatMap((section) => {
-    if (!isRecord(section) || !nonEmptyString(section.heading) || !Array.isArray(section.blocks)) return [];
-    const blocks = section.blocks.flatMap((block) => {
-      if (!isRecord(block) || !nonEmptyString(block.type)) return [];
-      const items = Array.isArray(block.items) ? block.items.filter(nonEmptyString) : undefined;
-      const rows = Array.isArray(block.rows)
-        ? block.rows.flatMap((row) => isRecord(row) && Array.isArray(row.cells)
-          ? [{ cells: row.cells.filter(nonEmptyString) }]
-          : [])
+    if (!isRecord(section)) return [];
+    const heading = readDocumentProperty(section, "heading", "Heading");
+    const blocksValue = readDocumentProperty(section, "blocks", "Blocks");
+    if (!nonEmptyString(heading) || !Array.isArray(blocksValue)) return [];
+    const blocks = blocksValue.flatMap((block) => {
+      if (!isRecord(block)) return [];
+      const type = readDocumentProperty(block, "type", "Type");
+      const text = readDocumentProperty(block, "text", "Text");
+      const itemsValue = readDocumentProperty(block, "items", "Items");
+      const rowsValue = readDocumentProperty(block, "rows", "Rows");
+      if (!nonEmptyString(type)) return [];
+      const items = Array.isArray(itemsValue) ? itemsValue.filter(nonEmptyString) : undefined;
+      const rows = Array.isArray(rowsValue)
+        ? rowsValue.flatMap((row) => {
+          if (!isRecord(row)) return [];
+          const cells = readDocumentProperty(row, "cells", "Cells");
+          return Array.isArray(cells) ? [{ cells: cells.filter(nonEmptyString) }] : [];
+        })
         : undefined;
       return [{
-        type: block.type,
-        text: typeof block.text === "string" ? block.text : null,
+        type,
+        text: typeof text === "string" ? text : null,
         items: items?.length ? items : null,
         rows: rows?.length ? rows : null,
       }];
     });
-    return [{ heading: section.heading, blocks }];
+    return [{ heading, blocks }];
   });
 }
 
@@ -147,11 +161,16 @@ const documentRepresentationContentTypes: Readonly<Record<string, string>> = {
 };
 
 export function isSafeDocumentRepresentation(value: unknown): value is DocumentRepresentation {
-  if (!isRecord(value) || !isSafeDocumentIdentifier(value.id) || !nonEmptyString(value.type)
-    || !nonEmptyString(value.fileName) || !nonEmptyString(value.contentType)) return false;
-  const type = value.type.trim().toLowerCase();
-  const fileName = value.fileName.trim();
-  const contentType = value.contentType.trim().toLowerCase();
+  if (!isRecord(value)) return false;
+  const id = readDocumentProperty(value, "id", "Id");
+  const typeValue = readDocumentProperty(value, "type", "Type");
+  const fileNameValue = readDocumentProperty(value, "fileName", "FileName");
+  const contentTypeValue = readDocumentProperty(value, "contentType", "ContentType");
+  if (!isSafeDocumentIdentifier(id) || !nonEmptyString(typeValue)
+    || !nonEmptyString(fileNameValue) || !nonEmptyString(contentTypeValue)) return false;
+  const type = typeValue.trim().toLowerCase();
+  const fileName = fileNameValue.trim();
+  const contentType = contentTypeValue.trim().toLowerCase();
   const expectedContentType = documentRepresentationContentTypes[type];
   return !!expectedContentType
     && fileName.length > type.length + 1
@@ -165,11 +184,16 @@ function parseRepresentations(value: unknown): NonNullable<DocumentJobResult["re
   if (!Array.isArray(value)) return [];
   return value.flatMap((representation) => {
     if (!isSafeDocumentRepresentation(representation)) return [];
+    const record = representation as unknown as Record<string, unknown>;
+    const id = readDocumentProperty(record, "id", "Id");
+    const type = readDocumentProperty(record, "type", "Type");
+    const fileName = readDocumentProperty(record, "fileName", "FileName");
+    const contentType = readDocumentProperty(record, "contentType", "ContentType");
     return [{
-      id: representation.id.trim(),
-      type: representation.type.trim().toLowerCase(),
-      fileName: representation.fileName.trim(),
-      contentType: representation.contentType.trim().toLowerCase(),
+      id: (id as string).trim(),
+      type: (type as string).trim().toLowerCase(),
+      fileName: (fileName as string).trim(),
+      contentType: (contentType as string).trim().toLowerCase(),
     }];
   });
 }
@@ -179,14 +203,21 @@ export function parseDocumentJobResult(job: GenerationJob | null): DocumentJobRe
   try {
     const parsed: unknown = JSON.parse(job.resultJson);
     if (!isRecord(parsed)) return null;
+    const assetId = readDocumentProperty(parsed, "assetId", "AssetId");
+    const documentType = readDocumentProperty(parsed, "documentType", "DocumentType");
+    const title = readDocumentProperty(parsed, "title", "Title");
+    const language = readDocumentProperty(parsed, "language", "Language");
+    const summary = readDocumentProperty(parsed, "summary", "Summary");
+    const sections = readDocumentProperty(parsed, "sections", "Sections");
+    const representations = readDocumentProperty(parsed, "representations", "Representations");
     return {
-      assetId: isSafeDocumentIdentifier(parsed.assetId) ? parsed.assetId.trim() : undefined,
-      documentType: parsed.documentType === "document" ? "document" : undefined,
-      title: typeof parsed.title === "string" ? parsed.title : undefined,
-      language: typeof parsed.language === "string" ? parsed.language : undefined,
-      summary: typeof parsed.summary === "string" ? parsed.summary : undefined,
-      sections: parseSections(parsed.sections),
-      representations: parseRepresentations(parsed.representations),
+      assetId: isSafeDocumentIdentifier(assetId) ? assetId.trim() : undefined,
+      documentType: documentType === "document" ? "document" : undefined,
+      title: typeof title === "string" ? title : undefined,
+      language: typeof language === "string" ? language : undefined,
+      summary: typeof summary === "string" ? summary : undefined,
+      sections: parseSections(sections),
+      representations: parseRepresentations(representations),
     };
   } catch {
     return null;

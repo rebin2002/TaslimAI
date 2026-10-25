@@ -11,6 +11,7 @@ import { beginChatStreamSession, invalidateChatStreamSessions, isCurrentChatStre
 import { resolveChatAttachmentScope } from "@/lib/chatAttachmentScope";
 import { beginChatAttachmentUpload, invalidateChatAttachmentUploads, isCurrentChatAttachmentUpload } from "@/lib/chatAttachmentLifecycle";
 import { claimSubmission, conversationPath, createChatRequestId, createRegenerateRetryRequest, createSendRetryRequest, createSubmission, isAbortError, releaseSubmission, shouldReplaceConversationUrl, studioTransitionPath, type ChatRetryRequest, type RegenerateRetryRequest, type SendRetryRequest } from "@/lib/chatLifecycle";
+import { useDialogAccessibility } from "@/lib/useDialogAccessibility";
 import { ProtectedPage } from "@/components/ProtectedPage";
 import { ChatMessageContent } from "@/components/ChatMessageContent";
 
@@ -72,6 +73,7 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
   const streamAbortRef = useRef<AbortController | null>(null);
   const activeRetryRef = useRef<ChatRetryRequest | null>(null);
   const streamGenerationRef = useRef(0);
+  const deleteDialogRef = useDialogAccessibility(deleteConfirmOpen, () => setDeleteConfirmOpen(false));
   const attachmentUploadGenerationRef = useRef(0);
   const cancelActiveStream = useCallback(() => {
     invalidateChatStreamSessions(streamGenerationRef);
@@ -167,7 +169,7 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
     router.push(conversationPath(item.id));
   }
 
-  function startNewChat() {
+  function startNewChat(projectId = requestedProjectId, replace = false) {
     if (sendingRef.current) return;
     setError("");
     setRetryRequest(null);
@@ -176,8 +178,10 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
     setContent("");
     setRenaming(false);
     setAttachments([]);
-    setSelectedProjectId(requestedProjectId);
-    router.push(requestedProjectId ? `/chat?projectId=${encodeURIComponent(requestedProjectId)}` : "/chat");
+    setSelectedProjectId(projectId);
+    const destination = projectId ? `/chat?projectId=${encodeURIComponent(projectId)}` : "/chat";
+    if (replace) router.replace(destination);
+    else router.push(destination);
   }
 
   async function uploadSelectedFiles(files: FileList | null) {
@@ -394,11 +398,12 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
 
   async function deleteSelected() {
     if (!selected) return;
+    const fallbackProjectId = selected.projectId ?? requestedProjectId;
     try {
       await api.deleteConversation(selected.id);
       setConversations(current => current.filter(item => item.id !== selected.id));
       setDeleteConfirmOpen(false);
-      startNewChat();
+      startNewChat(fallbackProjectId, true);
     } catch (caught) {
       setDeleteConfirmOpen(false);
       setError(caught instanceof Error ? caught.message : t("chat.deleteError"));
@@ -421,8 +426,8 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
 
   return <ProtectedPage><div className="chat-page">
     <aside className="chat-sidebar">
-      <div className="chat-sidebar-header"><div><p className="section-eyebrow">{t("chat.eyebrow")}</p><h1>{t("chat.title")}</h1></div><button type="button" className="chat-icon-button" onClick={startNewChat} aria-label={t("chat.newChat")}><Plus size={18} /></button></div>
-      <button type="button" className="chat-new-button" onClick={startNewChat} disabled={generating}><Plus size={15} />{t("chat.newChat")}</button>
+      <div className="chat-sidebar-header"><div><p className="section-eyebrow">{t("chat.eyebrow")}</p><h1>{t("chat.title")}</h1></div><button type="button" className="chat-icon-button" onClick={() => startNewChat()} aria-label={t("chat.newChat")}><Plus size={18} /></button></div>
+      <button type="button" className="chat-new-button" onClick={() => startNewChat()} disabled={generating}><Plus size={15} />{t("chat.newChat")}</button>
       <label className="chat-search"><Search size={15} /><input value={search} onChange={event => setSearch(event.target.value)} placeholder={t("chat.searchPlaceholder")} aria-label={t("chat.searchPlaceholder")} /></label>
       <div className="chat-history" aria-label={t("chat.history")}>
         {loading ? <div className="chat-sidebar-loading"><span className="loading-spinner" /></div> : groups.length === 0 ? <p className="chat-sidebar-empty">{t("chat.noConversations")}</p> : groups.map(group => <section key={group.label} className="chat-history-group"><span className="chat-history-label">{group.label}</span>{group.items.map(item => <button type="button" key={item.id} className={`chat-history-item ${selected?.id === item.id ? "is-active" : ""}`} onClick={() => selectConversation(item)} disabled={generating}><MessageCircle size={14} /><span>{item.title}</span>{item.projectId && <i aria-label={t("chat.projectContextActive")} />}</button>)}</section>)}
@@ -438,7 +443,7 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
       </div>
       {!selected && <div className="chat-project-selector"><label htmlFor="chat-project">{t("chat.projectSelector")}</label><select id="chat-project" value={selectedProjectId} onChange={(event) => setSelectedProjectId(event.target.value)} disabled={loading}><option value="">{t("chat.noProject")}</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select><small>{t("chat.projectSelectorHint")}</small></div>}
       <div className="chat-messages" aria-live="polite">
-        {loading ? <div className="chat-empty"><span className="loading-spinner" /></div> : error && !selected ? <div className="chat-empty"><CircleMessage /><h3>{error}</h3><button type="button" className="secondary-button" onClick={startNewChat}>{t("chat.newChat")}</button></div> : messages.length === 0 ? <div className="chat-empty"><span className="chat-empty-icon"><Sparkles size={22} /></span><h3>{t("chat.emptyTitle")}</h3><p>{t("chat.emptyDescription")}</p></div> : <>{messages.map(message => <article className={`chat-message chat-message-${message.role.toLowerCase()} ${message.status === "Failed" ? "is-failed" : ""}`} key={message.id}><div className="chat-message-avatar">{message.role.toLowerCase() === "user" ? "T" : <Sparkles size={15} />}</div><div className="chat-message-copy"><span className="chat-message-role">{message.role.toLowerCase() === "user" ? t("chat.you") : t("chat.taslim")}</span><ChatMessageContent role={message.role} status={message.status} content={message.content} />{message.role === "Assistant" && message.content && <div className="chat-message-tools"><button type="button" onClick={() => void copyResponse(message)} aria-label={t("chat.copyResponse")}><Copy size={13} />{copiedMessageId === message.id ? t("chat.copied") : t("chat.copyResponse")}</button>{canRegenerate(message) && <button type="button" onClick={() => void regenerate(message)}><RefreshCw size={13} />{t("chat.regenerate")}</button>}</div>}{message.status === "Failed" && retryRequest && <button type="button" className="chat-retry-button" onClick={() => void retryFailed()} disabled={generating}><RefreshCw size={13} />{t("chat.retry")}</button>}{message.isTestResponse && <small className="chat-test-badge">{t("chat.testResponse")}</small>}</div></article>)}<div ref={messagesEndRef} /></>}
+        {loading ? <div className="chat-empty"><span className="loading-spinner" /></div> : error && !selected ? <div className="chat-empty"><CircleMessage /><h3>{error}</h3><button type="button" className="secondary-button" onClick={() => startNewChat()}>{t("chat.newChat")}</button></div> : messages.length === 0 ? <div className="chat-empty"><span className="chat-empty-icon"><Sparkles size={22} /></span><h3>{t("chat.emptyTitle")}</h3><p>{t("chat.emptyDescription")}</p></div> : <>{messages.map(message => <article className={`chat-message chat-message-${message.role.toLowerCase()} ${message.status === "Failed" ? "is-failed" : ""}`} key={message.id}><div className="chat-message-avatar">{message.role.toLowerCase() === "user" ? "T" : <Sparkles size={15} />}</div><div className="chat-message-copy"><span className="chat-message-role">{message.role.toLowerCase() === "user" ? t("chat.you") : t("chat.taslim")}</span><ChatMessageContent role={message.role} status={message.status} content={message.content} />{message.role === "Assistant" && message.content && <div className="chat-message-tools"><button type="button" onClick={() => void copyResponse(message)} aria-label={t("chat.copyResponse")}><Copy size={13} />{copiedMessageId === message.id ? t("chat.copied") : t("chat.copyResponse")}</button>{canRegenerate(message) && <button type="button" onClick={() => void regenerate(message)}><RefreshCw size={13} />{t("chat.regenerate")}</button>}</div>}{message.status === "Failed" && retryRequest && <button type="button" className="chat-retry-button" onClick={() => void retryFailed()} disabled={generating}><RefreshCw size={13} />{t("chat.retry")}</button>}{message.isTestResponse && <small className="chat-test-badge">{t("chat.testResponse")}</small>}</div></article>)}<div ref={messagesEndRef} /></>}
       </div>
       {error && selected && <div className="chat-inline-error" role="alert"><span>{error}</span><div>{retryRequest && <button type="button" className="chat-inline-retry" onClick={() => void retryFailed()} disabled={generating}>{t("chat.retry")}</button>}<button type="button" className="chat-inline-dismiss" onClick={() => { setError(""); setRetryRequest(null); }} aria-label={t("chat.dismissError")}><X size={14} /></button></div></div>}
       <div className="chat-creator-handoff"><span>{t("chat.handoffHint")}</span><div>{creatorActions.map((creator) => { const Icon = creator.icon; return <button type="button" key={creator.id} onClick={() => openCreator(creator.id)}><Icon size={13} />{t(creator.label)}</button>; })}</div></div>
@@ -449,7 +454,7 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
         <div className="chat-composer-footer"><span>{uploadProgress ? t("chat.fileUploading") : t("chat.composerHint")}</span><div className="chat-composer-actions"><input ref={fileInputRef} type="file" className="visually-hidden" multiple accept=".pdf,.docx,.txt,.md,.csv,.xlsx,.jpg,.jpeg,.png,.webp" onChange={event => void uploadSelectedFiles(event.target.files)} /><button type="button" className="chat-attach-button" onClick={() => fileInputRef.current?.click()} disabled={generating || !!uploadProgress} aria-label={t("chat.attachFile")}><Paperclip size={16} /></button>{generating ? <button type="button" className="chat-stop-button" onClick={stopGeneration} aria-label={t("chat.stopGeneration")}><Square size={13} />{t("chat.stop")}</button> : <button type="submit" className="chat-send-button" disabled={!!uploadProgress || !content.trim()} aria-label={t("chat.send")}><Send size={16} /></button>}</div></div>
       </form>
     </main>
-    {deleteConfirmOpen && <div className="modal-backdrop" role="presentation"><section className="modal-card chat-delete-dialog" role="dialog" aria-modal="true" aria-labelledby="chat-delete-title"><div className="modal-heading"><div><p className="section-eyebrow">{t("chat.delete")}</p><h2 id="chat-delete-title">{t("chat.deleteConfirmTitle")}</h2></div><button type="button" className="modal-close" onClick={() => setDeleteConfirmOpen(false)} aria-label={t("common.close")}><X size={16} /></button></div><p>{t("chat.deleteConfirmDescription")}</p><div className="modal-actions"><button type="button" className="secondary-button" onClick={() => setDeleteConfirmOpen(false)}>{t("common.cancel")}</button><button type="button" className="chat-delete-confirm-button" onClick={() => void deleteSelected()}>{t("chat.delete")}</button></div></section></div>}
+    {deleteConfirmOpen && <div className="modal-backdrop" role="presentation"><section ref={deleteDialogRef} className="modal-card chat-delete-dialog" role="dialog" aria-modal="true" aria-labelledby="chat-delete-title" tabIndex={-1}><div className="modal-heading"><div><p className="section-eyebrow">{t("chat.delete")}</p><h2 id="chat-delete-title">{t("chat.deleteConfirmTitle")}</h2></div><button type="button" className="modal-close" onClick={() => setDeleteConfirmOpen(false)} aria-label={t("common.close")}><X size={16} /></button></div><p>{t("chat.deleteConfirmDescription")}</p><div className="modal-actions"><button type="button" className="secondary-button" onClick={() => setDeleteConfirmOpen(false)}>{t("common.cancel")}</button><button type="button" className="chat-delete-confirm-button" onClick={() => void deleteSelected()}>{t("chat.delete")}</button></div></section></div>}
   </div></ProtectedPage>;
 }
 
