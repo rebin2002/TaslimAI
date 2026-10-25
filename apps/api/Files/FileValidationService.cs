@@ -113,7 +113,7 @@ public sealed class FileValidationService(IOptions<FileOptions> options)
             var bits = BinaryPrimitives.ReadUInt32LittleEndian(bytes[17..21]);
             return ((int)(bits & 0x3FFF) + 1, (int)((bits >> 14) & 0x3FFF) + 1);
         }
-        if (bytes.Length >= 30 && bytes[12..16].SequenceEqual("VP8 "u8) && bytes[20..23].SequenceEqual([0x9D, 0x01, 0x2A]))
+        if (bytes.Length >= 30 && bytes[12..16].SequenceEqual("VP8 "u8) && bytes[20..23].SequenceEqual(new byte[] { 0x9D, 0x01, 0x2A }))
         {
             var width = BinaryPrimitives.ReadUInt16LittleEndian(bytes[26..28]) & 0x3FFF;
             var height = BinaryPrimitives.ReadUInt16LittleEndian(bytes[28..30]) & 0x3FFF;
