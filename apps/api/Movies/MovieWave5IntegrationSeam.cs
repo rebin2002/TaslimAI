@@ -52,12 +52,20 @@ public static class MovieWave5IntegrationContract
         if (shotId == Guid.Empty) throw new ArgumentException("A shot id is required.", nameof(shotId));
         if (targetDurationSeconds <= 0m) throw new ArgumentOutOfRangeException(nameof(targetDurationSeconds));
 
-        var selected = candidates
-            .Where(item => item.IsUsable && item.DurationSeconds > 0m)
+        var usable = candidates
+            .Where(item => item.IsUsable
+                && item.DurationSeconds > 0m
+                && !string.IsNullOrWhiteSpace(item.ContinuityKey)
+                && !string.IsNullOrWhiteSpace(item.ScreenDirection))
             .OrderBy(item => item.StartSeconds)
             .ThenBy(item => item.TakeId)
             .ThenBy(item => item.SegmentId, StringComparer.Ordinal)
             .ToArray();
+        var continuityAnchor = usable.FirstOrDefault();
+        var selected = continuityAnchor is null
+            ? Array.Empty<MovieWave5SegmentCandidate>()
+            : usable.Where(item => string.Equals(item.ContinuityKey, continuityAnchor.ContinuityKey, StringComparison.Ordinal)
+                && string.Equals(item.ScreenDirection, continuityAnchor.ScreenDirection, StringComparison.Ordinal)).ToArray();
         var bounded = new List<MovieWave5SegmentSelection>();
         var cursor = 0m;
         foreach (var candidate in selected)
