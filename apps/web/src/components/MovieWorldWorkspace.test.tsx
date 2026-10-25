@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { movieWorldProjectSwitchReset } from "./MovieWorldWorkspace";
 
 const source = readFileSync(new URL("./MovieWorldWorkspace.tsx", import.meta.url), "utf8");
 const apiSource = readFileSync(new URL("../lib/api.ts", import.meta.url), "utf8");
@@ -38,5 +39,23 @@ describe("Movie World workspace", () => {
     expect(source).toContain("geography.approveSheet");
     expect(apiSource).toContain("upsertMovieLocationGeographySheet");
     expect(apiSource).toContain("approveMovieLocationGeographyVariant");
+  });
+
+  it("clears project-scoped state before loading another project", () => {
+    const reset = movieWorldProjectSwitchReset();
+
+    expect(reset.data).toBeNull();
+    expect(reset.room).toBe("locations");
+    expect(reset.selectedId).toBeNull();
+    expect(reset.form).toEqual({ name: "", description: "", visualContinuityNotes: "", category: "", environmentType: "practical", movieLocationId: "", visualDescription: "", timeOfDay: "", weather: "", continuityNotes: "", referenceAssetId: "" });
+    expect(reset.editing).toBe(false);
+    expect(reset.creating).toBe(false);
+    expect(reset.saving).toBe(false);
+    expect(reset.addingReference).toBe(false);
+    expect(reset.referenceName).toBe("");
+    expect(reset.referenceKind).toBe("moodboard");
+    expect(reset.referenceAssetId).toBe("");
+    expect(reset.error).toBe("");
+    expect(source).toContain("data.movieProjectId !== projectId");
   });
 });
