@@ -358,20 +358,42 @@ public sealed class MovieStoryScenePlanningContextAssembler(TaslimDbContext db)
         var selected = sections.Where(item => item.Item3 || anchorTokens.Length == 0 || anchorTokens.Any(token => item.Item2.Contains(token, StringComparison.OrdinalIgnoreCase)))
             .Select(item => new MovieStoryScenePlanningGuideSectionContext(item.Item1, Bound(item.Item2, MaxGuideSectionCharacters)))
             .ToArray();
+        var visualLanguage = ReadString(revision.VisualBibleJson, "visualLanguage") ?? movie.Guide.VisualLanguage;
+        var cameraLanguage = ReadString(revision.CinematographyBibleJson, "cameraLanguage") ?? movie.Guide.CameraLanguage;
+        var colorAndLighting = ReadString(revision.VisualBibleJson, "colorAndLighting") ?? movie.Guide.ColorAndLighting;
+        var soundAndNarration = ReadString(revision.AudioBibleJson, "soundAndNarration") ?? movie.Guide.SoundAndNarration;
+        var continuityRules = ReadString(revision.ContinuityBibleJson, "continuityRules") ?? movie.Guide.ContinuityRules;
         return new MovieStoryScenePlanningGuideContext(
             revision.RevisionNumber,
             revision.Id,
-            Bound(movie.Guide.VisualLanguage, MaxGuideFieldCharacters),
-            Bound(movie.Guide.CameraLanguage, MaxGuideFieldCharacters),
-            Bound(movie.Guide.ColorAndLighting, MaxGuideFieldCharacters),
-            Bound(movie.Guide.SoundAndNarration, MaxGuideFieldCharacters),
-            Bound(movie.Guide.ContinuityRules, MaxGuideFieldCharacters),
+            Bound(visualLanguage, MaxGuideFieldCharacters),
+            Bound(cameraLanguage, MaxGuideFieldCharacters),
+            Bound(colorAndLighting, MaxGuideFieldCharacters),
+            Bound(soundAndNarration, MaxGuideFieldCharacters),
+            Bound(continuityRules, MaxGuideFieldCharacters),
             selected);
     }
 
     private static string TargetText((MovieStoryRevision Revision, MovieScreenplayScene Scene)? target) => target is null
         ? string.Empty
         : string.Join(" ", target.Value.Scene.SceneIdentifier, target.Value.Scene.Slugline, target.Value.Scene.Synopsis, target.Value.Scene.Elements.SelectMany(item => new[] { item.Content, item.CharacterName, item.Parenthetical }));
+
+    private static string? ReadString(string json, string propertyName)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            return document.RootElement.ValueKind == JsonValueKind.Object
+                && document.RootElement.TryGetProperty(propertyName, out var value)
+                && value.ValueKind == JsonValueKind.String
+                ? value.GetString()
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
 
     private static int CountScenes(MovieStoryScenePlanningRevisionContext? context) => context?.Scenes.Count ?? 0;
     private static int CountElements(MovieStoryScenePlanningRevisionContext? context) => context?.Scenes.Sum(item => item.Elements.Count) ?? 0;
