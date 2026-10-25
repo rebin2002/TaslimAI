@@ -3,11 +3,13 @@ using System.Net.Http.Json;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Taslim.Api.Ai;
 using Taslim.Api.Contracts;
 using Taslim.Api.Movies;
+using Taslim.Api.Persistence;
 using Xunit;
 
 namespace Taslim.Api.Tests;
@@ -101,6 +103,34 @@ public sealed class MovieDirectorScenePlanningTests : IClassFixture<ScenePlanApi
         Assert.Equal(DirectorActionStatuses.Failed, applied.Action.Status);
         Assert.Equal("DIRECTOR_SCENE_PLAN_STALE", applied.Action.FailureCode);
         Assert.Empty((await client.GetFromJsonAsync<MovieStudioProjectDto>($"/api/movie-studio/projects/{movie.Project.Id}"))!.Scenes);
+    }
+
+    [Fact]
+    public async Task Concurrent_director_execution_claims_an_approved_action_only_once()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Concurrent Scene Plan Owner");
+        var movie = await CreateMovie(client, auth.PersonalWorkspace.Id);
+        await CreateCharacter(client, movie.Project.Id);
+        await CreateStory(client, movie.Project.Id);
+        await LockGuide(client, movie.Project.Id);
+        var proposal = await SendWithCsrf<DirectorProposalResponse>(client, HttpMethod.Post, $"/api/movie-director/projects/{movie.Project.Id}/proposals", new { scenePlanAction = DirectorScenePlanActionTypes.PlanScenes });
+        var approved = await SendWithCsrf<DirectorProposalDto>(client, HttpMethod.Post, $"/api/movie-director/proposals/{proposal.Proposal.Id}/approve", null);
+        var actionId = approved.Actions.Single().Id;
+
+        var claims = await Task.WhenAll(Enumerable.Range(0, 2).Select(async _ =>
+        {
+            using var scope = factory.Services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            return await MovieDirectorService.TryClaimReadyActionAsync(db, actionId, DateTime.UtcNow, CancellationToken.None);
+        }));
+
+        Assert.Single(claims, claimed => claimed);
+        using var verifyScope = factory.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var storedAction = await verifyDb.DirectorActions.AsNoTracking().SingleAsync(item => item.Id == actionId);
+        Assert.Equal(DirectorActionStatuses.Running, storedAction.Status);
+        Assert.NotNull(storedAction.StartedAt);
     }
 
     private static async Task<AuthResponse> Register(HttpClient client, string displayName)
