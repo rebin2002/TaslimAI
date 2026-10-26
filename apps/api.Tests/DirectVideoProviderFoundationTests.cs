@@ -97,6 +97,20 @@ public sealed class DirectVideoProviderFoundationTests
     }
 
     [Fact]
+    public void Request_normalization_rejects_null_reference_entries_as_invalid_input()
+    {
+        var request = Request() with
+        {
+            ReferenceImages = new[] { (MovieVideoReferenceImage)null! },
+        };
+
+        var exception = Assert.Throws<DirectVideoRequestNormalizationException>(() =>
+            DirectVideoRequestNormalizer.Normalize(request, Capabilities()));
+
+        Assert.Equal(DirectVideoErrorCodes.RequestInvalid, exception.Code);
+    }
+
+    [Fact]
     public void Result_normalization_maps_states_clamps_progress_and_discards_unsafe_metadata()
     {
         var queued = DirectVideoResultNormalizer.NormalizeStatus(new DirectVideoProviderStatusResponse("processing", 175));
