@@ -11,6 +11,7 @@ import { useLocale } from "@/components/LocaleProvider";
 import { StudioChooser } from "@/components/StudioChooser";
 import { api, type ActivityItem, type Asset, type Conversation, type Project } from "@/lib/api";
 import { buildHomeRecentItems, hasInFlightActivity, type HomeRecentItem } from "@/lib/homeDashboardState";
+import { resolveHomeCreationPrompt } from "@/lib/homeCreation";
 
 const promptChips = [
   { labelKey: "home.promptCampaign" },
@@ -68,7 +69,7 @@ function HomeDashboard() {
   const projects = dashboard?.projects ?? [];
 
   async function askTaslim() {
-    const prompt = idea.trim();
+    const prompt = resolveHomeCreationPrompt(idea, files.length);
     if (!prompt) {
       if (!files.length) router.push("/chat");
       setAskError(t("chat.sendError"));
