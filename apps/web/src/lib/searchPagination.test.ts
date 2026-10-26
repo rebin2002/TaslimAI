@@ -9,10 +9,10 @@ const group = (overrides: Partial<GlobalSearchGroup>): GlobalSearchGroup => ({
   items: [],
   ...overrides,
 });
-const result = (id: string): GlobalSearchResult => ({
+const result = (id: string, title = id): GlobalSearchResult => ({
   type: "projects",
   id,
-  title: id,
+  title,
   description: null,
   projectId: id,
   conversationId: null,
@@ -45,5 +45,17 @@ describe("appendGlobalSearchGroups", () => {
 
     expect(merged.map((item) => item.type)).toEqual(["projects", "assets"]);
     expect(merged[1].items[0].id).toBe("asset-1");
+  });
+
+  it("deduplicates an item repeated across offset pages after a live result update", () => {
+    const merged = appendGlobalSearchGroups(
+      [group({ items: [result("project-1", "Original title")] })],
+      [group({ items: [result("project-1", "Updated title"), result("project-2")] })],
+    );
+
+    expect(merged[0].items.map((item) => [item.id, item.title])).toEqual([
+      ["project-1", "Updated title"],
+      ["project-2", "project-2"],
+    ]);
   });
 });
