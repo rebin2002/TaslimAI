@@ -16,7 +16,7 @@ export function parseMusicJobResult(job: GenerationJob | null): MusicJobResult |
   if (!job?.resultJson) return null;
   try {
     const parsed = JSON.parse(job.resultJson) as MusicJobResult;
-    if (typeof parsed !== "object" || parsed === null || typeof parsed.assetId !== "string") return null;
+    if (typeof parsed !== "object" || parsed === null || typeof parsed.assetId !== "string" || parsed.assetId.trim().length === 0) return null;
     return {
       assetId: parsed.assetId,
       assetType: parsed.assetType === "music" ? "music" : undefined,

@@ -51,6 +51,8 @@ describe("voiceStudioState", () => {
   it("rejects malformed or non-audio results", () => {
     expect(parseVoiceJobResult({ ...baseJob, resultJson: "not-json" })).toBeNull();
     expect(parseVoiceJobResult({ ...baseJob, resultJson: JSON.stringify({ assetId: "asset-1", assetType: "image" }) })).toBeNull();
+    expect(parseVoiceJobResult({ ...baseJob, resultJson: JSON.stringify({ assetId: "", assetType: "audio" }) })).toBeNull();
+    expect(parseVoiceJobResult({ ...baseJob, resultJson: JSON.stringify({ assetId: "   ", assetType: "audio" }) })).toBeNull();
   });
 
   it("only allows cancellation for active Voice jobs", () => {
