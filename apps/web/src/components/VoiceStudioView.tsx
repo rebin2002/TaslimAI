@@ -75,8 +75,12 @@ function VoiceAudioPlayer({ src, label, durationMilliseconds, compact = false }:
     const audio = audioRef.current;
     if (!audio) return;
     if (audio.paused) {
-      await audio.play();
-      setIsPlaying(true);
+      try {
+        await audio.play();
+        setIsPlaying(true);
+      } catch {
+        setIsPlaying(false);
+      }
     } else {
       audio.pause();
       setIsPlaying(false);
