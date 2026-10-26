@@ -3,7 +3,7 @@
 /* eslint-disable react-hooks/set-state-in-effect -- loaders synchronize persisted read models. */
 /* eslint-disable react-hooks/exhaustive-deps -- loader identity follows the project route. */
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, ArrowUpRight, CheckCircle2, Image as ImageIcon, LockKeyhole, MapPinned, Package, ShieldCheck, Sparkles, UsersRound } from "lucide-react";
 import { api, type MovieCast, type MovieCharacter, type MovieProp, type MovieWorldWorkspace } from "@/lib/api";
 import { assetFileUrl } from "@/lib/apiBase";
@@ -90,12 +90,16 @@ export function ProductionKitWorkspace({ projectId }: { projectId: string }) {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
+  const loadGeneration = useRef(0);
 
   async function load(nextRoom = room, nextId: string | null = selectedId) {
+    const generation = ++loadGeneration.current;
+    const isCurrent = () => generation === loadGeneration.current;
     setLoading(true);
     setError("");
     try {
       const [nextCast, nextWorld] = await Promise.all([api.getMovieCast(projectId), api.getMovieWorld(projectId)]);
+      if (!isCurrent()) return;
       setCast(nextCast);
       setWorld(nextWorld);
       const nextRecords = buildKitRecords(nextRoom, nextCast, nextWorld);
@@ -103,16 +107,22 @@ export function ProductionKitWorkspace({ projectId }: { projectId: string }) {
       setSelectedId(resolvedId);
       if (nextRoom === "characters" && resolvedId) {
         const detail = await api.getMovieCharacterDetail(resolvedId);
+        if (!isCurrent()) return;
         setCharacterDetail(detail.character);
       } else {
         setCharacterDetail(null);
       }
     } catch (cause) {
+      if (!isCurrent()) return;
       setError(cause instanceof Error ? cause.message : "The Production Kit could not be loaded.");
     } finally {
-      setLoading(false);
+      if (isCurrent()) setLoading(false);
     }
   }
+
+  useLayoutEffect(() => () => {
+    loadGeneration.current += 1;
+  }, [projectId]);
 
   useEffect(() => {
     void load("characters", null);
