@@ -60,6 +60,8 @@ public sealed class PresentationGenerationJobHandler(
         {
             var projectEntity = await db.Projects.AsNoTracking().FirstOrDefaultAsync(item => item.Id == input.ProjectId && item.WorkspaceId == job.WorkspaceId, cancellationToken)
                 ?? throw new PresentationRequestValidationException("PROJECT_NOT_IN_WORKSPACE", "The selected project is not in this workspace.");
+            if (!string.Equals(projectEntity.Status, ProjectStatuses.Active, StringComparison.OrdinalIgnoreCase))
+                throw new PresentationRequestValidationException(GenerationJobErrorCodes.PresentationRequestInvalid, "The selected project is not active and cannot receive new presentations.");
             project = new PresentationProjectContext(projectEntity.Name, projectEntity.Instructions, projectEntity.ContextNotes);
         }
         var attachmentOrder = input.AttachmentIds.Select((id, index) => (id, index)).ToDictionary(item => item.id, item => item.index);
