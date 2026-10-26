@@ -27,6 +27,9 @@ public static class GenerationFailureClassifier
         if (normalized is GenerationJobErrorCodes.Poisoned or "RETRY_EXHAUSTED")
             return new(normalized, "recovery", false);
 
+        if (normalized == GenerationJobErrorCodes.ResearchSearchUnavailable)
+            return new(normalized, "provider", true);
+
         if (normalized.Contains("STORAGE", StringComparison.Ordinal))
             return new(normalized, "storage", true);
 
