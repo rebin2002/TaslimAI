@@ -58,14 +58,13 @@ export function ResearchStudioView() {
     const workspaceVersion = workspaceGeneration.current;
     setLoadingSources(true);
     try {
-      const [active, archived, available, researchAssets] = await Promise.all([
+      const [active, available, researchAssets] = await Promise.all([
         api.listProjects(workspaceId, "Active"),
-        api.listProjects(workspaceId, "Archived"),
         api.listFiles(workspaceId),
         api.listAssets(workspaceId, { assetType: "research", pageSize: 4, sort: "recent" }),
       ]);
       if (observedWorkspaceId.current !== workspaceId || workspaceGeneration.current !== workspaceVersion) return;
-      setProjects([...active, ...archived]);
+      setProjects(active);
       setFiles(available.filter((file) => extensions.includes(file.extension.toLowerCase())));
       setRecentResearch(researchAssets.items);
     } catch {
