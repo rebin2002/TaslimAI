@@ -147,32 +147,38 @@ export function MusicStudioView() {
   const [loadingLibrary, setLoadingLibrary] = useState(true);
   const [libraryError, setLibraryError] = useState("");
   const [error, setError] = useState("");
+  const activeWorkspaceId = useRef(workspace?.id ?? null);
+  if (activeWorkspaceId.current !== (workspace?.id ?? null)) activeWorkspaceId.current = workspace?.id ?? null;
 
   const loadProjects = useCallback(async () => {
     if (!workspace) return;
+    const workspaceId = workspace.id;
     setLoadingProjects(true);
     try {
-      const [active, archived] = await Promise.all([api.listProjects(workspace.id, "Active"), api.listProjects(workspace.id, "Archived")]);
-      setProjects([...active, ...archived]);
+      const [active, archived] = await Promise.all([api.listProjects(workspaceId, "Active"), api.listProjects(workspaceId, "Archived")]);
+      if (activeWorkspaceId.current === workspaceId) setProjects([...active, ...archived]);
     } catch {
-      setProjects([]);
+      if (activeWorkspaceId.current === workspaceId) setProjects([]);
     } finally {
-      setLoadingProjects(false);
+      if (activeWorkspaceId.current === workspaceId) setLoadingProjects(false);
     }
   }, [workspace]);
 
   const loadRecentMusic = useCallback(async () => {
     if (!workspace) return;
+    const workspaceId = workspace.id;
     setLoadingLibrary(true);
     setLibraryError("");
     try {
-      const result = await api.listAssets(workspace.id, { assetType: "music", status: "Active", sort: "recent", page: 1, pageSize: 5 });
-      setRecentMusic(result.items);
+      const result = await api.listAssets(workspaceId, { assetType: "music", status: "Active", sort: "recent", page: 1, pageSize: 5 });
+      if (activeWorkspaceId.current === workspaceId) setRecentMusic(result.items);
     } catch (caught) {
-      setRecentMusic([]);
-      setLibraryError(caught instanceof Error ? caught.message : t("music.libraryLoadError"));
+      if (activeWorkspaceId.current === workspaceId) {
+        setRecentMusic([]);
+        setLibraryError(caught instanceof Error ? caught.message : t("music.libraryLoadError"));
+      }
     } finally {
-      setLoadingLibrary(false);
+      if (activeWorkspaceId.current === workspaceId) setLoadingLibrary(false);
     }
   }, [t, workspace]);
 
