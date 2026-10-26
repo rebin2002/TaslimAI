@@ -35,6 +35,26 @@ describe("movie edit state", () => {
     expect(model.timelineReady).toBe(true);
   });
 
+  it("does not expose a stale ready clip while a newer generation is active", () => {
+    const model = buildMovieEditModel(projectWithScenes([
+      {
+        id: "scene-1",
+        sequence: 1,
+        title: "Platform",
+        durationSeconds: 6,
+        clips: [
+          clip({ id: "clip-old", assetId: "asset-old", status: "Ready" }),
+          clip({ id: "clip-new", generationJobId: "job-new", status: "Running" }),
+        ],
+      },
+    ]));
+
+    expect(model.scenes[0].clipStatus).toBe("Running");
+    expect(model.scenes[0].clipAssetId).toBeNull();
+    expect(model.scenes[0].readiness).toBe("needs-review");
+    expect(model.timelineReady).toBe(false);
+  });
+
   it("keeps incomplete scenes visible and explains whether they are active or blocked", () => {
     const model = buildMovieEditModel(projectWithScenes([
       { id: "scene-1", sequence: 1, title: "Pending", durationSeconds: 5, clips: [clip({ status: "Running" })] },
