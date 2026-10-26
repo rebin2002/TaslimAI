@@ -207,40 +207,48 @@ public sealed class MubertMusicGenerationProvider(
             catch (HttpRequestException exception)
             {
                 logger.LogWarning(exception, "Mubert download request failed.");
-                throw new MusicProviderFailureException();
+                throw new MusicProviderUnavailableException();
             }
 
             using (response)
             {
-                if ((int)response.StatusCode is 301 or 302 or 303 or 307 or 308)
+                try
                 {
-                    if (redirect == ProviderDownloadSecurity.MaxRedirects || response.Headers.Location is null)
+                    if ((int)response.StatusCode is 301 or 302 or 303 or 307 or 308)
+                    {
+                        if (redirect == ProviderDownloadSecurity.MaxRedirects || response.Headers.Location is null)
+                            throw new MusicOutputInvalidException();
+                        uri = new Uri(uri, response.Headers.Location);
+                        continue;
+                    }
+                    if (!response.IsSuccessStatusCode) throw new MusicProviderFailureException();
+                    if (response.Content.Headers.ContentLength > maxBytes) throw new MusicOutputInvalidException();
+                    await using var source = await response.Content.ReadAsStreamAsync(cancellationToken);
+                    await using var buffer = new MemoryStream(Math.Min((int)(response.Content.Headers.ContentLength ?? 0), maxBytes));
+                    var chunk = new byte[81920];
+                    var total = 0;
+                    while (true)
+                    {
+                        var read = await source.ReadAsync(chunk, cancellationToken);
+                        if (read == 0) break;
+                        total += read;
+                        if (total > maxBytes) throw new MusicOutputInvalidException();
+                        await buffer.WriteAsync(chunk.AsMemory(0, read), cancellationToken);
+                    }
+                    if (response.Content.Headers.ContentLength.HasValue && total != response.Content.Headers.ContentLength.Value)
                         throw new MusicOutputInvalidException();
-                    uri = new Uri(uri, response.Headers.Location);
-                    continue;
-                }
-                if (!response.IsSuccessStatusCode) throw new MusicProviderFailureException();
-                if (response.Content.Headers.ContentLength > maxBytes) throw new MusicOutputInvalidException();
-                await using var source = await response.Content.ReadAsStreamAsync(cancellationToken);
-                await using var buffer = new MemoryStream(Math.Min((int)(response.Content.Headers.ContentLength ?? 0), maxBytes));
-                var chunk = new byte[81920];
-                var total = 0;
-                while (true)
-                {
-                    var read = await source.ReadAsync(chunk, cancellationToken);
-                    if (read == 0) break;
-                    total += read;
-                    if (total > maxBytes) throw new MusicOutputInvalidException();
-                    await buffer.WriteAsync(chunk.AsMemory(0, read), cancellationToken);
-                }
-                if (response.Content.Headers.ContentLength.HasValue && total != response.Content.Headers.ContentLength.Value)
-                    throw new MusicOutputInvalidException();
 
-                var format = NormalizeFormat(settings.MubertFormat);
-                var contentType = NormalizeContentType(response.Content.Headers.ContentType?.MediaType, format);
-                var descriptor = GeneratedMediaSecurity.ValidateDescriptor($"provider-output.{format}", contentType);
-                GeneratedMediaSecurity.ValidateContent(descriptor, buffer.GetBuffer().AsSpan(0, (int)buffer.Length), new Taslim.Api.Files.FileOptions { MaxArchiveEntries = 1, MaxArchiveUncompressedBytes = maxBytes, MaxArchiveEntryBytes = maxBytes });
-                return new MubertDownload(buffer.ToArray(), contentType);
+                    var format = NormalizeFormat(settings.MubertFormat);
+                    var contentType = NormalizeContentType(response.Content.Headers.ContentType?.MediaType, format);
+                    var descriptor = GeneratedMediaSecurity.ValidateDescriptor($"provider-output.{format}", contentType);
+                    GeneratedMediaSecurity.ValidateContent(descriptor, buffer.GetBuffer().AsSpan(0, (int)buffer.Length), new Taslim.Api.Files.FileOptions { MaxArchiveEntries = 1, MaxArchiveUncompressedBytes = maxBytes, MaxArchiveEntryBytes = maxBytes });
+                    return new MubertDownload(buffer.ToArray(), contentType);
+                }
+                catch (HttpRequestException exception)
+                {
+                    logger.LogWarning(exception, "Mubert download stream failed.");
+                    throw new MusicProviderUnavailableException();
+                }
             }
         }
 
