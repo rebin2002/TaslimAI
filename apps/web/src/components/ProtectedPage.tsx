@@ -29,6 +29,6 @@ export function ProtectedPage({ children }: Readonly<{ children: React.ReactNode
     return () => window.clearTimeout(timeout);
   }, [loading, pathname, router]);
 
-  if (loading || !user) return <div className="loading-state" role="status" aria-busy="true"><span className="loading-spinner" /></div>;
+  if (loading || !user) return <div className="loading-state" role="status" aria-live="polite" aria-busy="true"><span className="loading-spinner" aria-hidden="true" /></div>;
   return <>{children}</>;
 }
