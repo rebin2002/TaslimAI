@@ -26,4 +26,11 @@ describe("AdminPage", () => {
     const html = renderToStaticMarkup(<AdminPage><p>Internal provider cost</p></AdminPage>);
     expect(html).toContain("Internal provider cost");
   });
+
+  it("gives the pending authentication status an accessible announcement", () => {
+    mocks.useAuth.mockReturnValue({ user: null, loading: true });
+    const html = renderToStaticMarkup(<AdminPage><p>Internal provider cost</p></AdminPage>);
+    expect(html).toContain('role="status"');
+    expect(html).toContain('aria-label="Checking administrator access"');
+  });
 });
