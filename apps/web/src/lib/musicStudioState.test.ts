@@ -31,5 +31,7 @@ describe("music studio state", () => {
     expect(isMusicProviderUnavailable(failed)).toBe(true);
     expect(isMusicProviderUnavailable(job({ status: "Failed", errorCode: "MUSIC_GENERATION_FAILED" }))).toBe(false);
     expect(parseMusicJobResult(job({ status: "Succeeded", resultJson: "not-json" }))).toBeNull();
+    expect(parseMusicJobResult(job({ status: "Succeeded", resultJson: '{"assetId":""}' }))).toBeNull();
+    expect(parseMusicJobResult(job({ status: "Succeeded", resultJson: '{"assetId":"   "}' }))).toBeNull();
   });
 });
