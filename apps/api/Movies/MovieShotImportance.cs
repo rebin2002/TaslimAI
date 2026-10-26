@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text.RegularExpressions;
 
 namespace Taslim.Api.Movies;
 
@@ -192,22 +193,31 @@ public sealed class MovieShotImportanceClassifier
     {
         foreach (var signal in signals)
         {
-            if (text.IndexOf(signal, StringComparison.OrdinalIgnoreCase) < 0) continue;
+            if (!ContainsSignal(text, signal)) continue;
             evidence.Add(source, code, Excerpt(text, signal));
         }
     }
 
-    private static bool HasAny(string text, IEnumerable<string> signals) => signals.Any(signal =>
-        text.IndexOf(signal, StringComparison.OrdinalIgnoreCase) >= 0);
+    private static bool HasAny(string text, IEnumerable<string> signals) => signals.Any(signal => ContainsSignal(text, signal));
 
     private static bool HasAny(string text, params string[] signals) => HasAny(text, (IEnumerable<string>)signals);
 
     private static string FirstMatchingExcerpt(string text, IEnumerable<string> signals) =>
-        signals.Select(signal => (signal, index: text.IndexOf(signal, StringComparison.OrdinalIgnoreCase)))
+        signals.Select(signal => (signal, index: ContainsSignal(text, signal) ? text.IndexOf(signal, StringComparison.OrdinalIgnoreCase) : -1))
             .Where(item => item.index >= 0)
             .OrderBy(item => item.index)
             .Select(item => Excerpt(text, item.signal))
             .FirstOrDefault() ?? Excerpt(text, null);
+
+    private static bool ContainsSignal(string text, string signal)
+    {
+        var normalizedText = NormalizeSignalText(text);
+        var normalizedSignal = NormalizeSignalText(signal);
+        return normalizedSignal.Length > 0 && $" {normalizedText} ".Contains($" {normalizedSignal} ", StringComparison.Ordinal);
+    }
+
+    private static string NormalizeSignalText(string value) =>
+        Regex.Replace(value.ToLowerInvariant(), @"[^\p{L}\p{N}]+", " ").Trim();
 
     private static string Excerpt(string text, string? signal)
     {
