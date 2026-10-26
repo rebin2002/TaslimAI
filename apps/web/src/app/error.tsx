@@ -24,7 +24,7 @@ export default function AppRouteError({
   }, [error.digest]);
 
   return (
-    <main className="placeholder-page">
+    <div className="placeholder-page">
       <section className="placeholder-panel" role="alert" aria-live="assertive">
         <RefreshCw className="placeholder-symbol" size={28} aria-hidden="true" />
         <p className="section-eyebrow">Taslim.ai</p>
@@ -37,6 +37,6 @@ export default function AppRouteError({
           <Link className="secondary-button" href="/assets">{t("error.openAssets")}</Link>
         </div>
       </section>
-    </main>
+    </div>
   );
 }
