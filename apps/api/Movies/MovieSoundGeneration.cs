@@ -110,6 +110,8 @@ public sealed class MovieSoundGenerationJobHandler(
         progress.Report(82);
         var output = MovieSoundOutputInspector.Validate(generated, settings.MaxOutputBytes);
         var durationMilliseconds = generated.DurationMilliseconds ?? request.DurationMilliseconds;
+        if (durationMilliseconds is < 1 or > 86_400_000 || durationMilliseconds > settings.MaxDurationMilliseconds)
+            throw new MovieSoundOutputInvalidException();
         var metadata = JsonSerializer.Serialize(new
         {
             assetType = AssetTypes.Audio,
