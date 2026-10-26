@@ -9,19 +9,29 @@ public sealed class EfProviderResilienceStore(TaslimDbContext db) : IProviderRes
     public async Task<ProviderFinalizationClaimResult> TryClaimFinalizationAsync(Guid generationJobId, Guid jobConcurrencyToken, string idempotencyKey, DateTime now, TimeSpan lease, CancellationToken cancellationToken = default)
     {
         await EnsureCurrentClaimAsync(generationJobId, jobConcurrencyToken, cancellationToken);
-        var existing = await db.ProviderExecutionFinalizations.SingleOrDefaultAsync(item => item.GenerationJobId == generationJobId && item.IdempotencyKey == idempotencyKey, cancellationToken);
+        var existing = await db.ProviderExecutionFinalizations.AsNoTracking().SingleOrDefaultAsync(item => item.GenerationJobId == generationJobId && item.IdempotencyKey == idempotencyKey, cancellationToken);
         if (existing is not null)
         {
             if (string.Equals(existing.State, "completed", StringComparison.OrdinalIgnoreCase))
                 return ProviderFinalizationClaimResult.AlreadyCompleted;
             if (existing.ClaimExpiresAt > now)
                 return ProviderFinalizationClaimResult.AlreadyClaimed;
-            existing.JobConcurrencyToken = jobConcurrencyToken;
-            existing.State = "claimed";
-            existing.ClaimedAt = now;
-            existing.ClaimExpiresAt = now.Add(lease);
-            await db.SaveChangesAsync(cancellationToken);
-            return ProviderFinalizationClaimResult.Claimed;
+
+            var claimed = await db.ProviderExecutionFinalizations
+                .Where(item => item.Id == existing.Id && item.State == "claimed" && item.ClaimExpiresAt <= now)
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(item => item.JobConcurrencyToken, jobConcurrencyToken)
+                    .SetProperty(item => item.ClaimedAt, now)
+                    .SetProperty(item => item.ClaimExpiresAt, now.Add(lease)), cancellationToken);
+            if (claimed == 1) return ProviderFinalizationClaimResult.Claimed;
+
+            var currentState = await db.ProviderExecutionFinalizations.AsNoTracking()
+                .Where(item => item.Id == existing.Id)
+                .Select(item => item.State)
+                .SingleOrDefaultAsync(cancellationToken);
+            return string.Equals(currentState, "completed", StringComparison.OrdinalIgnoreCase)
+                ? ProviderFinalizationClaimResult.AlreadyCompleted
+                : ProviderFinalizationClaimResult.AlreadyClaimed;
         }
 
         db.ProviderExecutionFinalizations.Add(new ProviderExecutionFinalization
