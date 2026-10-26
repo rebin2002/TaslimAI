@@ -45,7 +45,10 @@ public sealed class MovieDialogueVoiceProviderAdapter(
         var duration = generated.DurationMilliseconds is > 0
             ? generated.DurationMilliseconds.Value
             : (long)expectedDuration;
-        if (duration <= 0 || duration > Math.Max(1, movieSettings.MaxDurationMilliseconds) || duration > int.MaxValue)
+        if (duration <= 0
+            || duration > expectedDuration
+            || duration > Math.Max(1, movieSettings.MaxDurationMilliseconds)
+            || duration > int.MaxValue)
             throw new MovieDialogueVoiceOutputInvalidException();
 
         var contentType = generated.ContentType?.Trim().ToLowerInvariant() ?? string.Empty;
