@@ -365,7 +365,9 @@ public static class DirectVideoRequestNormalizer
     {
         if (values is null || values.Count == 0) return null;
         if (values.Count > maxCount) throw new DirectVideoRequestNormalizationException(DirectVideoErrorCodes.RequestInvalid);
-        var normalized = values.Select(item => new DirectVideoReferenceImage(
+        var normalized = values.Select(item => item is null
+            ? throw new DirectVideoRequestNormalizationException(DirectVideoErrorCodes.RequestInvalid)
+            : new DirectVideoReferenceImage(
             NormalizeMediaUri(item.Uri) ?? throw new DirectVideoRequestNormalizationException(DirectVideoErrorCodes.RequestInvalid),
             string.IsNullOrWhiteSpace(item.Role) ? null : item.Role.Trim()[..Math.Min(item.Role.Trim().Length, 80)])).ToArray();
         return normalized.Length == 0 ? null : normalized;
