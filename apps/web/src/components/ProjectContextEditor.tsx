@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { Check, FileText } from "lucide-react";
 import { api, type Project, type ProjectInput } from "@/lib/api";
 import { useLocale } from "@/components/LocaleProvider";
@@ -12,6 +12,17 @@ export function ProjectContextEditor({ project, onSaved }: Readonly<{ project: P
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState("");
+
+  /* eslint-disable react-hooks/set-state-in-effect */
+  useEffect(() => {
+    setInstructions(project.instructions ?? "");
+    setContextNotes(project.contextNotes ?? "");
+    setSaved(false);
+    setError("");
+    // Project identity intentionally controls the local draft boundary.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project.id]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   async function submit(event: FormEvent) {
     event.preventDefault();
