@@ -14,6 +14,10 @@ describe("Movie Studio mode switch accessibility", () => {
     expect(nextMovieMode("Quick", "Enter")).toBeNull();
   });
 
+  it("keeps the quick result inside the shared application landmark", () => {
+    expect((source.match(/<main\b/g) ?? [])).toHaveLength(0);
+  });
+
   it("exposes the mode switch as a labelled, roving-focus tablist", () => {
     expect(source).toContain('role="tablist"');
     expect(source.match(/role="tab"/g)).toHaveLength(2);
