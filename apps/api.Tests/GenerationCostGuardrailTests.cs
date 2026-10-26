@@ -13,6 +13,25 @@ namespace Taslim.Api.Tests;
 public sealed class GenerationCostGuardrailTests
 {
     [Fact]
+    public void Negative_pricing_rate_is_unknown_and_never_emits_negative_amount()
+    {
+        var estimator = new GenerationCostEstimator(Options.Create(new GenerationCostPricingOptions
+        {
+            Providers = new Dictionary<string, GenerationProviderPricingOptions>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["provider"] = new() { VideoUsdPerSecond = -1m },
+            },
+        }));
+
+        var result = estimator.Estimate(new GenerationCostEstimationRequest("provider", VideoDurationSeconds: 10m));
+
+        Assert.False(result.IsKnown);
+        Assert.Null(result.AmountUsd);
+        Assert.Equal("pricing_rule_invalid", result.UnknownReason);
+        Assert.Empty(result.Components);
+    }
+
+    [Fact]
     public async Task Expensive_known_estimate_returns_warning_and_requires_confirmation()
     {
         await using var connection = new SqliteConnection("DataSource=:memory:");
