@@ -90,7 +90,7 @@ export function parseVoiceJobResult(job: GenerationJob | null): VoiceJobResult |
   if (!job?.resultJson) return null;
   try {
     const parsed = JSON.parse(job.resultJson) as VoiceJobResult;
-    if (typeof parsed !== "object" || parsed === null || typeof parsed.assetId !== "string" || parsed.assetType !== "audio") return null;
+    if (typeof parsed !== "object" || parsed === null || typeof parsed.assetId !== "string" || parsed.assetId.trim().length === 0 || parsed.assetType !== "audio") return null;
     return {
       assetId: parsed.assetId,
       assetType: "audio",
