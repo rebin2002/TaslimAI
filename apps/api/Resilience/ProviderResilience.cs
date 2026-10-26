@@ -262,7 +262,7 @@ public static class ProviderRoutingPolicy
         if (estimate < 0) return false;
 
         var requestMax = requirements.MaxEstimatedCostUsd ?? decimal.MaxValue;
-        var configuredMax = configuredMaxCostUsd >= 0 ? configuredMaxCostUsd : decimal.MaxValue;
+        var configuredMax = configuredMaxCostUsd >= 0 ? configuredMaxCostUsd : 0m;
         return estimate <= Math.Min(requestMax, configuredMax);
     }
 }
@@ -318,6 +318,16 @@ public sealed class ProviderResilienceOrchestrator(
             return new(ProviderAttemptResultCategory.Success, default, null, 0, null, true);
         if (claim == ProviderFinalizationClaimResult.AlreadyClaimed)
             return new(ProviderAttemptResultCategory.TransientFailure, default, "EXECUTION_ALREADY_CLAIMED", 0, null, false);
+        if (settings.MaxEstimatedCostUsd < 0)
+        {
+            await store.CompleteFinalizationAsync(
+                generationJobId,
+                jobConcurrencyToken,
+                idempotencyKey,
+                ProviderAttemptResultCategory.CostGuardRejected,
+                cancellationToken);
+            return new(ProviderAttemptResultCategory.CostGuardRejected, default, "INVALID_COST_LIMIT", 0, null);
+        }
         if (providers.Count == 0)
         {
             await store.CompleteFinalizationAsync(generationJobId, jobConcurrencyToken, idempotencyKey, ProviderAttemptResultCategory.Unavailable, cancellationToken);
@@ -476,7 +486,7 @@ public sealed class ProviderResilienceOrchestrator(
             var cumulativeCost = await store.GetCumulativeEstimatedCostAsync(generationJobId, cancellationToken);
             var maxCost = Math.Min(
                 requirements.MaxEstimatedCostUsd ?? decimal.MaxValue,
-                settings.MaxEstimatedCostUsd >= 0 ? settings.MaxEstimatedCostUsd : decimal.MaxValue);
+                Math.Max(0m, settings.MaxEstimatedCostUsd));
             if (profile.EstimatedCostUsd is { } estimate && estimate >= 0 && cumulativeCost + estimate > maxCost)
             {
                 return new(ProviderAttemptResultCategory.CostGuardRejected, default, "COST_LIMIT_EXCEEDED", attemptCounter.Value, provider.Key);
