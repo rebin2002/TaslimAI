@@ -33,6 +33,7 @@ public sealed class AiPresentationGenerationProvider(IChatCompletionService comp
         {
             throw new AiProviderTimeoutException();
         }
+        cancellationToken.ThrowIfCancellationRequested();
         if (string.IsNullOrWhiteSpace(result.Content))
             throw new PresentationGenerationStageException(PresentationGenerationStages.DraftParse, GenerationJobErrorCodes.PresentationOutputInvalid, "The presentation response was empty.", result.Usage);
 
