@@ -14,10 +14,18 @@ function followLoginReturnPath(loginUrl: string): string | null {
   return authSuccessPath(next);
 }
 
+const protectedPageSource = readFileSync(new URL("./ProtectedPage.tsx", import.meta.url), "utf8");
+
+
 describe("protected page loading boundary", () => {
   it("uses a finite session bootstrap timeout", () => {
     expect(PROTECTED_PAGE_AUTH_TIMEOUT_MS).toBe(10_000);
     expect(PROTECTED_PAGE_AUTH_TIMEOUT_MS).toBeGreaterThan(0);
+  });
+
+  it("announces the session bootstrap boundary and hides its decorative spinner", () => {
+    expect(protectedPageSource).toContain('aria-live="polite"');
+    expect(protectedPageSource).toContain('aria-hidden="true"');
   });
 
   it("keeps login return paths local and rejects control characters", () => {
