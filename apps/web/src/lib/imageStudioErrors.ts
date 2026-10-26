@@ -2,6 +2,7 @@ export type ImageStudioTranslator = (key: string) => string;
 
 const imageErrorKeys: Record<string, string> = {
   IMAGE_STUDIO_UNAVAILABLE: "image.error.unavailable",
+  IMAGE_GENERATION_IN_PROGRESS: "image.error.unavailable",
   IMAGE_PROVIDER_UNAVAILABLE: "image.error.providerUnavailable",
   IMAGE_PROVIDER_CONFIGURATION: "image.error.providerUnavailable",
   IMAGE_PROVIDER_RATE_LIMITED: "image.error.providerUnavailable",
