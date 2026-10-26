@@ -136,6 +136,72 @@ public sealed class ManusMovieVideoProviderTests
     }
 
     [Fact]
+    public async Task Retrieval_accepts_bounded_chunked_video_response_when_metadata_size_is_known()
+    {
+        var handler = new RecordingHandler(request =>
+        {
+            if (request.Method == HttpMethod.Get && request.RequestUri!.Host == "cdn.example.test")
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new ChunkedVideoContent(Encoding.UTF8.GetBytes("clip"), "video/mp4"),
+                };
+            throw new InvalidOperationException($"Unexpected request: {request.Method} {request.RequestUri}");
+        });
+        var provider = CreateProvider(handler, EnabledOptions());
+        var status = new MovieVideoProviderStatus(
+            MovieVideoProviderJobStatus.Succeeded,
+            100,
+            MetadataJson: JsonSerializer.Serialize(new
+            {
+                providerTaskId = TaskId,
+                outputUrl = "https://cdn.example.test/clip.mp4",
+                contentType = "video/mp4",
+                fileName = "clip.mp4",
+                sizeBytes = 4,
+                durationSeconds = 5,
+            }));
+
+        var output = await provider.RetrieveAsync(TaskId, status, CancellationToken.None);
+        await using var stream = await output.OpenReadAsync(CancellationToken.None);
+        using var copy = new MemoryStream();
+        await stream.CopyToAsync(copy);
+
+        Assert.Equal("clip", Encoding.UTF8.GetString(copy.ToArray()));
+        Assert.Equal(4, output.SizeBytes);
+    }
+
+    [Fact]
+    public async Task Retrieval_rejects_chunked_video_response_that_exceeds_metadata_size()
+    {
+        var handler = new RecordingHandler(request =>
+        {
+            if (request.Method == HttpMethod.Get && request.RequestUri!.Host == "cdn.example.test")
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new ChunkedVideoContent(Encoding.UTF8.GetBytes("clips"), "video/mp4"),
+                };
+            throw new InvalidOperationException($"Unexpected request: {request.Method} {request.RequestUri}");
+        });
+        var provider = CreateProvider(handler, EnabledOptions());
+        var status = new MovieVideoProviderStatus(
+            MovieVideoProviderJobStatus.Succeeded,
+            100,
+            MetadataJson: JsonSerializer.Serialize(new
+            {
+                providerTaskId = TaskId,
+                outputUrl = "https://cdn.example.test/clip.mp4",
+                contentType = "video/mp4",
+                fileName = "clip.mp4",
+                sizeBytes = 4,
+                durationSeconds = 5,
+            }));
+
+        var output = await provider.RetrieveAsync(TaskId, status, CancellationToken.None);
+        await using var stream = await output.OpenReadAsync(CancellationToken.None);
+        await Assert.ThrowsAsync<MovieVideoProviderOutputException>(() => stream.CopyToAsync(Stream.Null));
+    }
+
+    [Fact]
     public async Task Unsupported_request_and_non_video_output_are_rejected()
     {
         var provider = CreateProvider(new RecordingHandler(_ => JsonResponse($"{{\"ok\":true,\"task_id\":\"{TaskId}\"}}")), EnabledOptions());
@@ -214,6 +280,26 @@ public sealed class ManusMovieVideoProviderTests
         content.Headers.ContentType = new MediaTypeHeaderValue(contentType);
         content.Headers.ContentLength = bytes.Length;
         return new HttpResponseMessage(HttpStatusCode.OK) { Content = content };
+    }
+
+    private sealed class ChunkedVideoContent : HttpContent
+    {
+        private readonly byte[] bytes;
+
+        public ChunkedVideoContent(byte[] bytes, string contentType)
+        {
+            this.bytes = bytes;
+            Headers.ContentType = new MediaTypeHeaderValue(contentType);
+        }
+
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context) =>
+            stream.WriteAsync(bytes).AsTask();
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = 0;
+            return false;
+        }
     }
 
     private sealed class RecordingHandler(Func<HttpRequestMessage, HttpResponseMessage> responseFactory) : HttpMessageHandler
