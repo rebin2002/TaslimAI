@@ -185,6 +185,10 @@ public sealed class GenerationQualityControlService(
             return Failed(GenerationQualityOutcome.FailedRetryable, GenerationQualityReasonCodes.RepresentationTruncated, "representation", contentType, declaredSize);
 
         var prefix = new MemoryStream();
+        // Image structural validation needs the complete bounded representation: PNG/JPEG
+        // completeness markers may occur after the first 4 KiB. ValidateSize has already
+        // enforced the configured image byte budget before this buffer is populated.
+        using var completeImage = kind == MediaKind.Image ? new MemoryStream(capacity: 64 * 1024) : null;
         var buffer = new byte[64 * 1024];
         long actualSize = 0;
         while (true)
@@ -197,6 +201,8 @@ public sealed class GenerationQualityControlService(
                 var take = (int)Math.Min(read, 4_096 - prefix.Length);
                 prefix.Write(buffer, 0, take);
             }
+            if (completeImage is not null)
+                await completeImage.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
             var maximum = MaximumBytes(kind);
             if (maximum > 0 && actualSize > maximum)
                 return Failed(GenerationQualityOutcome.FailedPermanent, GenerationQualityReasonCodes.SizeExceeded, "size", contentType, actualSize);
@@ -205,7 +211,7 @@ public sealed class GenerationQualityControlService(
         if (actualSize != declaredSize)
             return Failed(GenerationQualityOutcome.FailedRetryable, GenerationQualityReasonCodes.SizeMismatch, "size", contentType, actualSize);
 
-        var sample = prefix.ToArray();
+        var sample = completeImage?.ToArray() ?? prefix.ToArray();
         var signature = kind switch
         {
             MediaKind.Audio => ValidateAudio(sample, contentType, actualSize, metadataJson),

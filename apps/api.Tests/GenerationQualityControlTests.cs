@@ -35,6 +35,27 @@ public sealed class GenerationQualityControlUnitTests
     }
 
     [Fact]
+    public async Task Valid_streamed_png_with_trailer_after_prefix_passes()
+    {
+        var bytes = PngWithTrailingPadding(320, 180);
+        var result = await quality.ValidateAsync(Job(), new GenerationHandlerOutput(
+            GenerationJobOutputTypes.StoredFile,
+            null,
+            null,
+            null,
+            new GeneratedAssetDescriptor("image", null, AssetTypes.Image),
+            new GeneratedStreamFileArtifact(
+                "image.png",
+                "image/png",
+                bytes.Length,
+                _ => Task.FromResult<Stream>(new MemoryStream(bytes, writable: false)))));
+
+        Assert.Equal(GenerationQualityOutcome.Passed, result.Outcome);
+        Assert.Equal(320, result.Width);
+        Assert.Equal(180, result.Height);
+    }
+
+    [Fact]
     public async Task Zero_byte_output_fails_permanently()
     {
         var result = await ValidateAsync(AssetTypes.Image, "image/png", []);
@@ -144,6 +165,18 @@ public sealed class GenerationQualityControlUnitTests
         BinaryPrimitives.WriteInt32BigEndian(bytes.AsSpan(16, 4), width);
         BinaryPrimitives.WriteInt32BigEndian(bytes.AsSpan(20, 4), height);
         "IEND"u8.CopyTo(bytes.AsSpan(32, 4));
+        return bytes;
+    }
+
+    private static byte[] PngWithTrailingPadding(int width, int height)
+    {
+        var bytes = new byte[8_192];
+        new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }.CopyTo(bytes, 0);
+        BinaryPrimitives.WriteUInt32BigEndian(bytes.AsSpan(8, 4), 13);
+        "IHDR"u8.CopyTo(bytes.AsSpan(12, 4));
+        BinaryPrimitives.WriteInt32BigEndian(bytes.AsSpan(16, 4), width);
+        BinaryPrimitives.WriteInt32BigEndian(bytes.AsSpan(20, 4), height);
+        "IEND"u8.CopyTo(bytes.AsSpan(bytes.Length - 8, 4));
         return bytes;
     }
 
