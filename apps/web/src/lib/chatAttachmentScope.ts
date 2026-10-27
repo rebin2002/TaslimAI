@@ -7,14 +7,13 @@ export function resolveChatAttachmentScope(
   selectedConversation: SelectedConversation | null,
   draftProjectId: string,
 ): ChatAttachmentScope {
-  const conversationId = routeConversationId ?? selectedConversation?.id;
   const selectedMatchesRoute = routeConversationId !== undefined && selectedConversation?.id === routeConversationId;
   const projectId = routeConversationId
     ? (selectedMatchesRoute ? selectedConversation?.projectId ?? undefined : undefined)
-    : (selectedConversation?.projectId ?? (draftProjectId || undefined));
+    : (draftProjectId || undefined);
 
   return {
     ...(projectId ? { projectId } : {}),
-    ...(conversationId ? { conversationId } : {}),
+    ...(routeConversationId ? { conversationId: routeConversationId } : {}),
   };
 }
