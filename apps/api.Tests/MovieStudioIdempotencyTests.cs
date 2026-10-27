@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Taslim.Api.Domain;
 using Taslim.Api.Movies;
 using Taslim.Api.Persistence;
 using Xunit;
@@ -103,5 +104,80 @@ public sealed class MovieStudioIdempotencyTests : IClassFixture<MovieOperational
         Assert.False(MovieStudioIdempotency.TryGetMovieClipId(null, out _));
         Assert.False(MovieStudioIdempotency.TryGetMovieClipId("{not-json}", out _));
         Assert.False(MovieStudioIdempotency.TryGetMovieClipId("{}", out _));
+    }
+
+    [Fact]
+    public async Task Completing_the_first_job_before_clip_link_publishes_the_canonical_private_asset()
+    {
+        using var client = factory.CreateClient();
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(client, title: "Movie early completion");
+        var queued = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
+            client, $"/api/movie-studio/shots/{fixture.Shot.Id}/generate",
+            new { title = "Early completed clip" },
+            idempotencyKey: "movie-first-completion-before-link");
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var job = await db.GenerationJobs.SingleAsync(item => item.Id == queued.Job.Id);
+        var now = DateTime.UtcNow;
+        job.Status = GenerationJobStatus.Succeeded;
+        job.ConcurrencyToken = Guid.NewGuid();
+        await db.MovieClips.Where(item => item.Id == queued.ClipId)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.GenerationJobId, (Guid?)null));
+
+        // Deterministically model worker completion inside the first-request
+        // job-save/clip-link gap, with no paid provider or file-store call.
+        var file = new StoredFile
+        {
+            Id = Guid.NewGuid(),
+            WorkspaceId = job.WorkspaceId,
+            ProjectId = job.ProjectId,
+            UserId = job.CreatedByUserId,
+            OriginalFileName = "private-movie.mp4",
+            StoredFileName = "private-movie.mp4",
+            ContentType = "video/mp4",
+            Extension = ".mp4",
+            StorageKey = "tests/movie-first-completion.mp4",
+            CreatedAt = now,
+        };
+        var asset = new Asset
+        {
+            Id = Guid.NewGuid(),
+            WorkspaceId = job.WorkspaceId,
+            ProjectId = job.ProjectId,
+            CreatedByUserId = job.CreatedByUserId,
+            SourceGenerationJobId = job.Id,
+            StoredFileId = file.Id,
+            Name = "Private completed movie clip",
+            AssetType = AssetTypes.Video,
+            MimeType = "video/mp4",
+            CreatedAt = now,
+            UpdatedAt = now,
+        };
+        db.StoredFiles.Add(file);
+        db.Assets.Add(asset);
+        db.MovieVideoProviderExecutions.Add(new MovieVideoProviderExecution
+        {
+            Id = Guid.NewGuid(),
+            GenerationJobId = job.Id,
+            MovieClipId = queued.ClipId,
+            ProviderKey = "fake-movie",
+            Status = MovieVideoExecutionStatuses.Running,
+            CreatedAt = now,
+            UpdatedAt = now,
+        });
+        await db.SaveChangesAsync();
+
+        var executions = scope.ServiceProvider.GetRequiredService<MovieVideoExecutionStore>();
+        await executions.MarkReadyAsync(job.Id, job.ConcurrencyToken, asset.Id, file.Id, 5, null, CancellationToken.None);
+
+        var completedClip = await db.MovieClips.AsNoTracking().SingleAsync(item => item.Id == queued.ClipId);
+        Assert.Equal(job.Id, completedClip.GenerationJobId);
+        Assert.Equal(MovieClipStatuses.Ready, completedClip.Status);
+        Assert.Equal(asset.Id, completedClip.AssetId);
+        Assert.Equal(file.Id, completedClip.StoredFileId);
+        Assert.Equal(1, await db.MovieClips.CountAsync(item => item.MovieProjectId == fixture.Project.Project.Id));
+        Assert.Equal(job.WorkspaceId, await db.Assets.AsNoTracking()
+            .Where(item => item.Id == asset.Id).Select(item => item.WorkspaceId).SingleAsync());
     }
 }
