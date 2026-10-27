@@ -360,6 +360,32 @@ public sealed class MovieStudioIdempotencyTests : IClassFixture<MovieOperational
         Assert.Equal(0, await db.GenerationJobs.CountAsync(item => item.IdempotencyKey == key));
     }
 
+    [Theory]
+    [InlineData(true, null)]
+    [InlineData(false, "upscale")]
+    [InlineData(false, "adaptive")]
+    public async Task Unsupported_upscale_or_processing_path_cannot_queue_or_reserve_usage(
+        bool upscalingRequested, string? processingPath)
+    {
+        using var client = factory.CreateClient();
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Movie unsupported processing path");
+        var key = $"movie-unsupported-path-{Guid.NewGuid():N}";
+        using var rejected = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post,
+            $"/api/movie-studio/shots/{fixture.Shot.Id}/generate",
+            new { title = "Unsupported processing intent", upscalingRequested, processingPath },
+            idempotencyKey: key);
+        Assert.Equal(System.Net.HttpStatusCode.BadRequest, rejected.StatusCode);
+        Assert.Contains("MOVIE_GENERATION_OPTIONS_UNSUPPORTED",
+            await rejected.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.Equal(0, await db.MovieClips.CountAsync(item => item.MovieProjectId == fixture.Project.Project.Id));
+        Assert.Equal(0, await db.GenerationJobs.CountAsync(item => item.IdempotencyKey == key));
+    }
+
     [Fact]
     public async Task Completing_the_first_job_before_clip_link_publishes_the_canonical_private_asset()
     {
