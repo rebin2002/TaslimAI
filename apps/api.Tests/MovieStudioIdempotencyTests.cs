@@ -99,6 +99,48 @@ public sealed class MovieStudioIdempotencyTests : IClassFixture<MovieOperational
     }
 
     [Fact]
+    public async Task Conflicting_title_in_job_first_window_preserves_the_canonical_job_and_clip()
+    {
+        using var client = factory.CreateClient();
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Movie job-first conflicting replay");
+        const string key = "movie-job-first-conflicting-title-1";
+        var path = $"/api/movie-studio/shots/{fixture.Shot.Id}/generate";
+
+        var first = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
+            client, path, new { title = "Canonical clip" }, idempotencyKey: key);
+
+        // Model the job-committed/clip-link-pending interleaving. A conflicting
+        // replay must reject the key, not adopt or alter the canonical clip.
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            await db.MovieClips
+                .Where(item => item.Id == first.ClipId)
+                .ExecuteUpdateAsync(setters =>
+                    setters.SetProperty(item => item.GenerationJobId, (Guid?)null));
+        }
+
+        using var conflicting = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, path, new { title = "Different request" },
+            idempotencyKey: key);
+        Assert.Equal(System.Net.HttpStatusCode.BadRequest, conflicting.StatusCode);
+        Assert.Contains("IDEMPOTENCY_KEY_REUSED",
+            await conflicting.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        using var verifyScope = factory.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var job = Assert.Single(await verifyDb.GenerationJobs.AsNoTracking()
+            .Where(item => item.IdempotencyKey == key).ToListAsync());
+        Assert.Equal(first.Job.Id, job.Id);
+        Assert.Equal("Canonical clip", job.Title);
+        var clip = Assert.Single(await verifyDb.MovieClips.AsNoTracking()
+            .Where(item => item.MovieProjectId == fixture.Project.Project.Id).ToListAsync());
+        Assert.Equal(first.ClipId, clip.Id);
+        Assert.Null(clip.GenerationJobId);
+    }
+
+    [Fact]
     public async Task Rejected_overlong_key_does_not_leave_a_speculative_movie_clip()
     {
         using var client = factory.CreateClient();
