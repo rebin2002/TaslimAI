@@ -318,7 +318,9 @@ public sealed class MovieVideoGenerationJobHandler(
             input.UpscalingRequested,
             input.FirstFrameImageUri,
             input.LastFrameImageUri,
-            input.ReferenceImages);
+            input.ReferenceImages,
+            input.TargetResolution,
+            input.QualityTier);
         var execution = await executions.GetOrCreateAsync(job, clip.Id, provider.Key, cancellationToken);
         var started = Stopwatch.GetTimestamp();
         var providerOperationMayBeActive = !string.IsNullOrWhiteSpace(execution.ProviderJobId);
