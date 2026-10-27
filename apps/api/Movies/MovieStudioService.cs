@@ -1284,10 +1284,18 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                     && item.GenerationJob.CreatedByUserId == userId
                     && item.GenerationJob.IdempotencyKey == normalizedIdempotencyKey, cancellationToken);
             if (existingClip?.GenerationJob is not null)
+            {
+                // The linked-clip fast path must enforce the same request-identity
+                // boundary as job creation. Otherwise, reusing a key with a
+                // different title silently returns the first user's generation.
+                var requestedTitle = string.IsNullOrWhiteSpace(request.Title) ? movie.Title : request.Title.Trim();
+                if (!string.Equals(existingClip.GenerationJob.Title, requestedTitle, StringComparison.Ordinal))
+                    throw new GenerationJobValidationException("IDEMPOTENCY_KEY_REUSED", "This idempotency key was already used for a different generation request.");
                 return new MovieStudioGenerationResponse(
                     await GetAsync(userId, movie.Id, cancellationToken) ?? throw new InvalidOperationException("Movie project disappeared."),
                     GenerationJobContractMapper.ToMovieDto(existingClip.GenerationJob),
                     existingClip.Id);
+            }
 
             // A concurrent request can observe the canonical job after its
             // transaction commits but before the winning request links the clip.
