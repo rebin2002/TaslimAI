@@ -118,7 +118,10 @@ public sealed class AssetService(TaslimDbContext db, WorkspaceAccessService acce
             var representationFile = await db.StoredFiles.AsNoTracking()
                 .Include(file => file.Project)
                 .FirstOrDefaultAsync(file => file.Id == representation.StoredFileId, cancellationToken);
-            if (representationFile is not { Status: StoredFileStatus.Ready } || !CanReadStoredFile(representationFile, userId, asset.WorkspaceId))
+            if (representationFile is not { Status: StoredFileStatus.Ready }
+                || !CanReadStoredFile(representationFile, userId, asset.WorkspaceId)
+                || (string.Equals(asset.AssetType, AssetTypes.Document, StringComparison.OrdinalIgnoreCase)
+                    && !IsDocumentRepresentationConsistent(representation, representationFile)))
                 throw new AssetValidationException("ASSET_FILE_UNAVAILABLE", "This document format is not available.");
             return new AssetDownload(asset, representationFile, representation.FileName, representation.ContentType);
         }
@@ -161,4 +164,20 @@ public sealed class AssetService(TaslimDbContext db, WorkspaceAccessService acce
                 && !file.ConversationId.HasValue
                 && file.Project is not null
                 && file.Project.WorkspaceId == workspaceId));
+
+    private static bool IsDocumentRepresentationConsistent(AssetRepresentation representation, StoredFile file)
+    {
+        var expected = representation.RepresentationType.Trim().ToLowerInvariant() switch
+        {
+            AssetRepresentationTypes.Docx => (Extension: ".docx", ContentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+            AssetRepresentationTypes.Pdf => (Extension: ".pdf", ContentType: "application/pdf"),
+            _ => (Extension: string.Empty, ContentType: string.Empty),
+        };
+        return expected.Extension.Length > 0
+            && representation.SizeBytes == file.SizeBytes
+            && string.Equals(representation.ContentType, expected.ContentType, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(file.ContentType, expected.ContentType, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(Path.GetExtension(representation.FileName), expected.Extension, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(file.Extension, expected.Extension, StringComparison.OrdinalIgnoreCase);
+    }
 }
