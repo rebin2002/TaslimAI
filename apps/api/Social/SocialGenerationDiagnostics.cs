@@ -30,6 +30,7 @@ public static class SocialGenerationFailureCodes
         AiProviderFailureCategories.UnsupportedRequest => GenerationJobErrorCodes.SocialProviderUnsupportedRequest,
         AiProviderFailureCategories.RateLimited => GenerationJobErrorCodes.SocialProviderRateLimited,
         AiProviderFailureCategories.Transient => GenerationJobErrorCodes.SocialProviderTransientFailure,
+        AiProviderFailureCategories.MalformedResponse => GenerationJobErrorCodes.SocialOutputInvalid,
         _ => GenerationJobErrorCodes.SocialProviderUnavailable,
     };
 }
