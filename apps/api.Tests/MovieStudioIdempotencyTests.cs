@@ -68,6 +68,36 @@ public sealed class MovieStudioIdempotencyTests : IClassFixture<MovieOperational
     }
 
     [Fact]
+    public async Task Reusing_a_clip_key_with_a_different_title_is_rejected_without_an_extra_clip()
+    {
+        using var client = factory.CreateClient();
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(client, title: "Movie idempotency mismatch");
+        const string key = "movie-clip-title-mismatch-1";
+        var path = $"/api/movie-studio/shots/{fixture.Shot.Id}/generate";
+
+        var first = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
+            client, path, new { title = "Original clip" }, idempotencyKey: key);
+
+        // Exercise the already-linked fast path. The old behavior silently
+        // returned the original clip despite a materially different request.
+        using var conflicting = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, path, new { title = "Changed clip" }, idempotencyKey: key);
+        Assert.Equal(System.Net.HttpStatusCode.BadRequest, conflicting.StatusCode);
+        Assert.Contains(
+            "IDEMPOTENCY_KEY_REUSED",
+            await conflicting.Content.ReadAsStringAsync(),
+            StringComparison.Ordinal);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.Equal(1, await db.GenerationJobs.CountAsync(job => job.IdempotencyKey == key));
+        var clip = Assert.Single(await db.MovieClips.AsNoTracking()
+            .Where(item => item.MovieProjectId == fixture.Project.Project.Id).ToListAsync());
+        Assert.Equal(first.ClipId, clip.Id);
+        Assert.Equal(first.Job.Id, clip.GenerationJobId);
+    }
+
+    [Fact]
     public void Invalid_or_non_movie_job_input_is_not_treated_as_a_clip_target()
     {
         Assert.False(MovieStudioIdempotency.TryGetMovieClipId(null, out _));
