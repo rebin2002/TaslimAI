@@ -135,6 +135,8 @@ public sealed class OpenAiVoiceGenerationProvider(
                 throw new VoiceOutputInvalidException();
 
             var contentType = response.Content.Headers.ContentType?.MediaType;
+            if (!string.IsNullOrWhiteSpace(contentType) && !ContentTypeMatches(contentType, ContentTypeFor(format)))
+                throw new VoiceOutputInvalidException();
             var usage = BuildUsage(request, content.Length, stopwatch.ElapsedMilliseconds, format);
             logger.LogInformation("OpenAI voice provider completed. ProviderKey={ProviderKey}; ModelKey={ModelKey}; Language={Language}; Format={Format}; SizeBytes={SizeBytes}; DurationMs={DurationMs}; RequestId={RequestId}",
                 Key, settings.Model, request.Language, format, content.Length, stopwatch.ElapsedMilliseconds, ReadRequestId(response));
@@ -230,6 +232,11 @@ public sealed class OpenAiVoiceGenerationProvider(
         "webm" => "audio/webm",
         _ => "audio/mpeg",
     };
+
+    private static bool ContentTypeMatches(string actual, string expected) =>
+        string.Equals(actual.Trim(), expected, StringComparison.OrdinalIgnoreCase)
+        || expected == "audio/mpeg" && string.Equals(actual.Trim(), "audio/mp3", StringComparison.OrdinalIgnoreCase)
+        || expected == "audio/ogg" && string.Equals(actual.Trim(), "audio/opus", StringComparison.OrdinalIgnoreCase);
 
     private static Uri BuildSpeechUrl(string baseUrl)
     {
