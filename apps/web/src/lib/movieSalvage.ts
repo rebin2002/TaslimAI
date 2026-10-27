@@ -122,12 +122,12 @@ function usableRange(take: MovieTake, duration: number, fallbackJson?: string | 
   const metadata = parseMetadata(take, fallbackJson);
   const ranges = Array.isArray(metadata.usableRanges) ? metadata.usableRanges : [];
   const firstRange = ranges.find((item) => item && typeof item === "object") as Record<string, unknown> | undefined;
+  const hasExplicitRange = ranges.length > 0 || metadata.trimInMilliseconds !== undefined || metadata.trimOutMilliseconds !== undefined;
   const sourceInMilliseconds = positiveInteger(firstRange?.startMilliseconds ?? firstRange?.sourceInMilliseconds ?? metadata.trimInMilliseconds) ?? 0;
   const requestedOut = positiveInteger(firstRange?.endMilliseconds ?? firstRange?.sourceOutMilliseconds ?? metadata.trimOutMilliseconds);
   const sourceOutMilliseconds = Math.min(duration, requestedOut ?? duration);
-  return sourceOutMilliseconds > sourceInMilliseconds
-    ? { sourceInMilliseconds, sourceOutMilliseconds }
-    : { sourceInMilliseconds: 0, sourceOutMilliseconds: duration };
+  if (hasExplicitRange && sourceOutMilliseconds <= sourceInMilliseconds) return { sourceInMilliseconds: 0, sourceOutMilliseconds: 0 };
+  return { sourceInMilliseconds, sourceOutMilliseconds };
 }
 
 export function buildMovieSubclips(project: MovieProject): MovieSubclip[] {
@@ -156,7 +156,7 @@ export function buildMovieSubclips(project: MovieProject): MovieSubclip[] {
         selected: Boolean(take.selectedAt),
         finalized: Boolean(take.finalizedAt),
       } satisfies MovieSubclip;
-    })));
+    })).filter((subclip) => subclip.sourceOutMilliseconds > subclip.sourceInMilliseconds));
 }
 
 export function buildSalvageRecommendations(project: MovieProject): SalvageRecommendation[] {
