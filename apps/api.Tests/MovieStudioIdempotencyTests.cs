@@ -166,6 +166,31 @@ public sealed class MovieStudioIdempotencyTests : IClassFixture<MovieOperational
     }
 
     [Fact]
+    public async Task Eighty_character_key_with_surrounding_spaces_replays_the_same_job()
+    {
+        using var client = factory.CreateClient();
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Movie key boundary");
+        var key = new string('k', 80);
+        var path = $"/api/movie-studio/shots/{fixture.Shot.Id}/generate";
+
+        // Normalization must happen before the length limit. A legitimate
+        // 80-character key remains valid even with surrounding whitespace.
+        var first = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
+            client, path, new { title = "Boundary clip" },
+            idempotencyKey: $"  {key}  ");
+        var replay = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
+            client, path, new { title = "Boundary clip" }, idempotencyKey: key);
+
+        Assert.Equal(first.Job.Id, replay.Job.Id);
+        Assert.Equal(first.ClipId, replay.ClipId);
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.Equal(1, await db.GenerationJobs.CountAsync(item => item.IdempotencyKey == key));
+        Assert.Equal(1, await db.MovieClips.CountAsync(item => item.MovieProjectId == fixture.Project.Project.Id));
+    }
+
+    [Fact]
     public void Invalid_or_non_movie_job_input_is_not_treated_as_a_clip_target()
     {
         Assert.False(MovieStudioIdempotency.TryGetMovieClipId(null, out _));
