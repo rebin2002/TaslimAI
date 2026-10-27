@@ -41,6 +41,8 @@ public sealed class ManusMovieVideoProvider(
         && TryGetBaseUri(out _);
 
     public IReadOnlyCollection<string> SupportedOperations => Operations;
+    // Mirrors the existing BuildCreateRequest duration gate.
+    public MovieClipDurationRange? SceneClipDurationRange => new(1, 30);
 
     public async Task<MovieVideoSubmission> SubmitAsync(MovieVideoGenerationRequest request, CancellationToken cancellationToken)
     {
