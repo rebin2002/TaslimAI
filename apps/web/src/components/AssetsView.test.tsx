@@ -31,4 +31,10 @@ describe("AssetCard", () => {
     expect(html).toContain("Restore");
     expect(html).not.toContain(">Archive</button>");
   });
+
+  it("keeps the asset list renderable when persisted metadata has an invalid date", () => {
+    const html = renderToStaticMarkup(<AssetCard asset={{ ...asset, createdAt: "not-a-date" }} labels={labels} locale="en" onOpen={vi.fn()} onEdit={vi.fn()} onArchive={vi.fn()} onRestore={vi.fn()} />);
+    expect(html).toContain("—");
+    expect(html).toContain("Campaign result");
+  });
 });
