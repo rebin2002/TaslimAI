@@ -5,6 +5,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using Taslim.Api.Files;
 using Taslim.Api.Movies;
 using Taslim.Api.Persistence;
 using Taslim.Api.Tests.ProviderTesting;
