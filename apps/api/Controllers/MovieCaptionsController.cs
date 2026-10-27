@@ -87,6 +87,7 @@ public sealed class MovieCaptionsController(IMovieCaptionService captions) : Con
     private async Task<IActionResult> Execute(Func<Task<IActionResult>> action)
     {
         try { return await action(); }
+        catch (MovieCollaborationForbiddenException) { return Forbid(); }
         catch (MovieCaptionValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_CAPTION_REQUEST_INVALID", exception.Message); }
         catch (MovieCaptionFormatException exception) { return ApiResults.Error(this, 400, "MOVIE_CAPTION_FORMAT_INVALID", exception.Message); }
     }
