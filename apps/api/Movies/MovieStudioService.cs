@@ -1987,7 +1987,9 @@ internal static class MovieStudioIdempotency
         try
         {
             var input = JsonSerializer.Deserialize<MovieGenerationInput>(inputJson);
-            if (input is null || input.MovieClipId == Guid.Empty) return false;
+            // Never reconcile another Movie operation as a scene/shot clip, even when
+            // its serialized payload happens to carry a MovieClipId.
+            if (input is null || input.Operation != MovieStudioOperations.SceneClip || input.MovieClipId == Guid.Empty) return false;
             clipId = input.MovieClipId;
             return true;
         }
