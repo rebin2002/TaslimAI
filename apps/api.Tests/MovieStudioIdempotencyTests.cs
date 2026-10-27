@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Taslim.Api.Domain;
@@ -196,6 +197,72 @@ public sealed class MovieStudioIdempotencyTests : IClassFixture<MovieOperational
         Assert.False(MovieStudioIdempotency.TryGetMovieClipId(null, out _));
         Assert.False(MovieStudioIdempotency.TryGetMovieClipId("{not-json}", out _));
         Assert.False(MovieStudioIdempotency.TryGetMovieClipId("{}", out _));
+    }
+
+    [Fact]
+    public async Task Replaying_a_priced_option_change_rejects_the_key_without_changing_the_canonical_job()
+    {
+        using var client = factory.CreateClient();
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Movie priced option replay");
+        const string key = "movie-pricing-option-collision-1";
+        var path = $"/api/movie-studio/shots/{fixture.Shot.Id}/generate";
+
+        var first = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
+            client, path, new { title = "Canonical priced intent" }, idempotencyKey: key);
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var job = await db.GenerationJobs.AsNoTracking().SingleAsync(item => item.Id == first.Job.Id);
+            var input = JsonSerializer.Deserialize<MovieGenerationInput>(job.InputJson);
+            Assert.NotNull(input);
+            Assert.Equal("1080p", input!.SourceResolution);
+            Assert.Equal("1080p", input.TargetResolution);
+            Assert.Equal("native", input.ProcessingPath);
+            Assert.False(input.UpscalingRequested);
+        }
+
+        // Same target and title do not make a changed cost/output request idempotent.
+        using var conflicting = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, path,
+            new { title = "Canonical priced intent", targetResolution = "4k" },
+            idempotencyKey: key);
+        Assert.Equal(System.Net.HttpStatusCode.BadRequest, conflicting.StatusCode);
+        Assert.Contains("IDEMPOTENCY_KEY_REUSED", await conflicting.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        using var verifyScope = factory.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.Equal(1, await verifyDb.GenerationJobs.CountAsync(item => item.IdempotencyKey == key));
+        var canonical = Assert.Single(await verifyDb.MovieClips.AsNoTracking()
+            .Where(item => item.MovieProjectId == fixture.Project.Project.Id).ToListAsync());
+        Assert.Equal(first.ClipId, canonical.Id);
+        Assert.Equal(first.Job.Id, canonical.GenerationJobId);
+    }
+
+    [Theory]
+    [InlineData(1, 0)]
+    [InlineData(0, 1)]
+    public async Task Unsupported_priced_retry_or_upscale_passes_fail_before_persisting_a_clip(
+        int retryAttempts, int upscalePasses)
+    {
+        using var client = factory.CreateClient();
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: $"Movie unsupported attempt {retryAttempts}, pass {upscalePasses}");
+        var key = $"movie-unsupported-{retryAttempts}-{upscalePasses}";
+        using var rejected = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post,
+            $"/api/movie-studio/shots/{fixture.Shot.Id}/generate",
+            new { title = "Unsupported priced settings", retryAttempts, upscalePasses },
+            idempotencyKey: key);
+        Assert.Equal(System.Net.HttpStatusCode.BadRequest, rejected.StatusCode);
+        Assert.Contains("MOVIE_GENERATION_OPTIONS_UNSUPPORTED",
+            await rejected.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.Equal(0, await db.MovieClips.CountAsync(item => item.MovieProjectId == fixture.Project.Project.Id));
+        Assert.Equal(0, await db.GenerationJobs.CountAsync(item => item.IdempotencyKey == key));
     }
 
     [Fact]
