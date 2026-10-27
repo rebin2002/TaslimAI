@@ -1338,6 +1338,17 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                     canonicalClip.Id);
             }
         }
+        // This legacy scene/shot route sends exactly one provider video job. It
+        // has no native-to-upscaled transfer or post-provider upscaling executor.
+        // Reject those options before estimating cost, persisting a clip or
+        // reserving usage, rather than charging for an unsupported processing path.
+        if (request.UpscalingRequested
+            || !string.IsNullOrWhiteSpace(request.ProcessingPath)
+                && !string.Equals(request.ProcessingPath.Trim(), "native", StringComparison.OrdinalIgnoreCase))
+            throw new GenerationJobValidationException(
+                "MOVIE_GENERATION_OPTIONS_UNSUPPORTED",
+                "This generation route does not support upscaling or non-native processing paths.");
+
         var description = shot?.Description ?? scene.Summary;
         var durationSeconds = Math.Clamp(shot?.DurationSeconds ?? scene.DurationSeconds ?? Math.Min(movie.DurationSeconds, 60), 1, 3600);
         var estimate = await movieCostEstimator.EstimateAsync(
