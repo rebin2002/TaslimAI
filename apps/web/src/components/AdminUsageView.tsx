@@ -2,11 +2,11 @@
 import { localeTag } from "@/lib/i18n";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, BarChart3, CircleAlert, Coins, RefreshCw, Search, ShieldCheck } from "lucide-react";
 import { useLocale } from "@/components/LocaleProvider";
 import { api, type AdminUsageReport, type AdminUsageTransaction } from "@/lib/api";
-import { dailyCostMaximum, presetRange } from "@/lib/adminUsageState";
+import { dailyCostMaximum, isAdminUsageRequestCurrent, presetRange, startAdminUsageRequest } from "@/lib/adminUsageState";
 
 function money(value: number, currency: string) {
   return `${value.toFixed(8)} ${currency}`;
@@ -38,18 +38,23 @@ export function AdminUsageView() {
   const [to, setTo] = useState(() => dateInputValue(new Date()));
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
+  const requestSequence = useRef(0);
 
   const load = useCallback(async (range: { fromUtc: string; toUtc: string }) => {
+    const token = startAdminUsageRequest(requestSequence.current, range);
+    requestSequence.current = token.sequence;
     setLoading(true);
     setError(false);
     try {
       const next = await api.getAdminUsageReport({ fromUtc: range.fromUtc, toUtc: range.toUtc, page: 1, pageSize: 20 });
+      if (!isAdminUsageRequestCurrent(token, requestSequence.current)) return;
       setReport(next);
       setSelected(null);
     } catch {
+      if (!isAdminUsageRequestCurrent(token, requestSequence.current)) return;
       setError(true);
     } finally {
-      setLoading(false);
+      if (isAdminUsageRequestCurrent(token, requestSequence.current)) setLoading(false);
     }
   }, []);
 

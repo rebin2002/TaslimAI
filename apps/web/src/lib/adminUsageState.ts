@@ -1,6 +1,13 @@
 import type { AdminUsageDailyBreakdown, AdminUsageReport, AdminUsageTransaction } from "./api";
 
 export type AdminUsageRange = { fromUtc: string; toUtc: string };
+export type AdminUsageRequestToken = { sequence: number; range: AdminUsageRange };
+export function startAdminUsageRequest(currentSequence: number, range: AdminUsageRange): AdminUsageRequestToken {
+  return { sequence: currentSequence + 1, range };
+}
+export function isAdminUsageRequestCurrent(token: AdminUsageRequestToken, currentSequence: number): boolean {
+  return token.sequence === currentSequence;
+}
 
 export function presetRange(preset: "today" | "sevenDays" | "thirtyDays", now = new Date()): AdminUsageRange {
   const end = new Date(now);
