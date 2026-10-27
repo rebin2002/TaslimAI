@@ -1351,6 +1351,16 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
 
         var description = shot?.Description ?? scene.Summary;
         var durationSeconds = Math.Clamp(shot?.DurationSeconds ?? scene.DurationSeconds ?? Math.Min(movie.DurationSeconds, 60), 1, 3600);
+        // This route submits exactly one scene/shot clip, not the whole planned
+        // movie. Check the actual selected adapter before cost confirmation,
+        // speculative clip persistence, usage reservation or provider submission.
+        // Unrecognized adapters fail closed instead of guessing their limits.
+        if (!provider.SupportedOperations.Contains(MovieStudioOperations.SceneClip, StringComparer.OrdinalIgnoreCase)
+            || provider.SceneClipDurationRange is not { } clipDurationRange
+            || !clipDurationRange.Supports(durationSeconds))
+            throw new GenerationJobValidationException(
+                "MOVIE_CLIP_DURATION_UNSUPPORTED",
+                "The selected video provider cannot generate a single clip of this duration. Use a supported duration or split the scene into smaller shots.");
         var estimate = await movieCostEstimator.EstimateAsync(
             new MovieGenerationCostRequest(
                 durationSeconds,
