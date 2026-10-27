@@ -1992,11 +1992,17 @@ internal static class MovieStudioIdempotency
         static string Normalized(string? value, string fallback) =>
             (string.IsNullOrWhiteSpace(value) ? fallback : value.Trim()).ToLowerInvariant();
 
+        // A replay after a scene/shot duration edit is a different provider-cost
+        // intent, even when the caller reuses the same key and title.
+        var effectiveDurationSeconds = Math.Clamp(
+            shot?.DurationSeconds ?? scene.DurationSeconds ?? Math.Min(movie.DurationSeconds, 60),
+            1, 3600);
         var title = string.IsNullOrWhiteSpace(request.Title) ? movie.Title : request.Title.Trim();
         return input.Operation == MovieStudioOperations.SceneClip
             && input.MovieProjectId == movie.Id
             && input.MovieSceneId == scene.Id
             && input.MovieShotId == shot?.Id
+            && input.DurationSeconds == effectiveDurationSeconds
             && string.Equals(job.Title, title, StringComparison.Ordinal)
             && Normalized(input.SourceResolution, "1080p") == Normalized(request.SourceResolution, "1080p")
             && Normalized(input.TargetResolution, "1080p") == Normalized(request.TargetResolution, "1080p")
