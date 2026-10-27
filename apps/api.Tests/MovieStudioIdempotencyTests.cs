@@ -101,6 +101,54 @@ public sealed class MovieStudioIdempotencyTests : IClassFixture<MovieOperational
     }
 
     [Fact]
+    public async Task Reusing_a_clip_key_after_shot_duration_changes_rejects_the_stale_cost_intent()
+    {
+        using var client = factory.CreateClient();
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Movie duration-sensitive replay");
+        const string key = "movie-shot-duration-edit-replay-1";
+        var path = $"/api/movie-studio/shots/{fixture.Shot.Id}/generate";
+
+        var first = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
+            client, path, new { title = "Canonical duration" }, idempotencyKey: key);
+
+        int initialDuration;
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var job = await db.GenerationJobs.AsNoTracking().SingleAsync(item => item.Id == first.Job.Id);
+            var input = JsonSerializer.Deserialize<MovieGenerationInput>(job.InputJson);
+            Assert.NotNull(input);
+            initialDuration = input!.DurationSeconds;
+
+            // Simulate editing a planned shot after a job was queued. The
+            // original idempotency key must not silently serve a clip whose
+            // priced duration no longer matches the requested shot.
+            var shot = await db.MovieShots.SingleAsync(item => item.Id == fixture.Shot.Id);
+            shot.DurationSeconds = initialDuration == 6 ? 7 : 6;
+            await db.SaveChangesAsync();
+        }
+
+        using var conflicting = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, path, new { title = "Canonical duration" },
+            idempotencyKey: key);
+        Assert.Equal(System.Net.HttpStatusCode.BadRequest, conflicting.StatusCode);
+        Assert.Contains("IDEMPOTENCY_KEY_REUSED",
+            await conflicting.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        using var scopeVerify = factory.Services.CreateScope();
+        var verifyDb = scopeVerify.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var canonicalJob = Assert.Single(await verifyDb.GenerationJobs.AsNoTracking()
+            .Where(item => item.IdempotencyKey == key).ToListAsync());
+        Assert.Equal(first.Job.Id, canonicalJob.Id);
+        Assert.Equal(initialDuration, JsonSerializer.Deserialize<MovieGenerationInput>(canonicalJob.InputJson)!.DurationSeconds);
+        var canonicalClip = Assert.Single(await verifyDb.MovieClips.AsNoTracking()
+            .Where(item => item.MovieProjectId == fixture.Project.Project.Id).ToListAsync());
+        Assert.Equal(first.ClipId, canonicalClip.Id);
+        Assert.Equal(first.Job.Id, canonicalClip.GenerationJobId);
+    }
+
+    [Fact]
     public async Task Conflicting_title_in_job_first_window_preserves_the_canonical_job_and_clip()
     {
         using var client = factory.CreateClient();
