@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { dailyCostMaximum, inspectableTransaction, presetRange, reportHasProviderDetails } from "./adminUsageState";
+import { dailyCostMaximum, inspectableTransaction, isAdminUsageRequestCurrent, presetRange, reportHasProviderDetails, startAdminUsageRequest } from "./adminUsageState";
 import type { AdminUsageReport, AdminUsageTransaction } from "./api";
 
 const transaction: AdminUsageTransaction = {
@@ -23,5 +23,15 @@ describe("admin usage state", () => {
     expect(dailyCostMaximum(report.breakdowns.byDay)).toBe(0.002);
     expect(inspectableTransaction(transaction)?.model).toBe("gpt-image-2.5-sunburst");
     expect(reportHasProviderDetails(report)).toBe(true);
+  });
+});
+
+
+describe("admin usage request ordering", () => {
+  it("ignores an older report when a newer range request is active", () => {
+    const first = startAdminUsageRequest(0, { fromUtc: "2026-09-01T00:00:00.000Z", toUtc: "2026-09-30T23:59:59.999Z" });
+    const second = startAdminUsageRequest(first.sequence, { fromUtc: "2026-10-01T00:00:00.000Z", toUtc: "2026-10-31T23:59:59.999Z" });
+    expect(isAdminUsageRequestCurrent(first, second.sequence)).toBe(false);
+    expect(isAdminUsageRequestCurrent(second, second.sequence)).toBe(true);
   });
 });
