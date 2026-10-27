@@ -99,6 +99,31 @@ public sealed class MovieStudioIdempotencyTests : IClassFixture<MovieOperational
     }
 
     [Fact]
+    public async Task Rejected_overlong_key_does_not_leave_a_speculative_movie_clip()
+    {
+        using var client = factory.CreateClient();
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(client, title: "Movie rejected key cleanup");
+        var key = new string('x', 81);
+
+        // GenerationJobService rejects keys longer than 80 chars *after*
+        // QueueClipAsync persists its speculative clip. Rejection must not
+        // strand a queued clip without an associated job.
+        using var response = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post,
+            $"/api/movie-studio/shots/{fixture.Shot.Id}/generate",
+            new { title = "Never queued" }, idempotencyKey: key);
+
+        Assert.Equal(System.Net.HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains("IDEMPOTENCY_KEY_INVALID",
+            await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.Equal(0, await db.MovieClips.CountAsync(item => item.MovieProjectId == fixture.Project.Project.Id));
+        Assert.Equal(0, await db.GenerationJobs.CountAsync(item => item.IdempotencyKey == key));
+    }
+
+    [Fact]
     public void Invalid_or_non_movie_job_input_is_not_treated_as_a_clip_target()
     {
         Assert.False(MovieStudioIdempotency.TryGetMovieClipId(null, out _));
