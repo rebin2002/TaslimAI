@@ -53,6 +53,24 @@ public sealed class OpenAiVoiceGenerationProviderTests
     }
 
     [Fact]
+    public async Task Adapter_rejects_successful_non_audio_content_before_persistence()
+    {
+        var handler = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("{\"error\":\"not audio\"}", System.Text.Encoding.UTF8, "application/json"),
+        });
+        using var client = new HttpClient(handler);
+        var provider = CreateProvider(client, new VoiceGenerationOptions
+        {
+            Enabled = true,
+            ProviderKey = "openai",
+            Model = "gpt-4o-mini-tts",
+        });
+
+        await Assert.ThrowsAsync<VoiceOutputInvalidException>(() => provider.GenerateAsync(Input()));
+    }
+
+    [Fact]
     public async Task Adapter_rejects_kurdish_by_default_without_calling_provider()
     {
         var handler = new StubHandler(_ => throw new InvalidOperationException("provider should not be called"));
