@@ -25,6 +25,13 @@ describe("generation cost guardrails", () => {
     expect(safeGenerationCostPreview(value)?.estimatedProviderCostUsd).toBeNull();
   });
 
+  it("fails closed when a non-known status carries a contradictory numeric estimate", () => {
+    const value = safeGenerationCostPreview(preview({ estimateStatus: "unknown", estimatedProviderCostUsd: 999, estimatedProviderCostKnown: true }));
+    expect(value?.estimatedProviderCostUsd).toBeNull();
+    expect(value?.estimatedProviderCostKnown).toBe(false);
+    expect(generationEstimateLabel(preview({ estimateStatus: "unknown", estimatedProviderCostUsd: 999, estimatedProviderCostKnown: true }))).toBe("Estimate unavailable");
+  });
+
   it("requires an explicit confirmation for a warning and blocks an exceeded cap", () => {
     const value = preview({
       warning: true,
