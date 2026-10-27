@@ -791,11 +791,21 @@ public sealed record MovieVideoProviderOutput(
     string? SafeMetadataJson,
     string? ProviderModelKey = null);
 
+/// <summary>Conservative single-job duration capability advertised by a video adapter.</summary>
+public sealed record MovieClipDurationRange(int MinimumSeconds, int MaximumSeconds)
+{
+    public bool Supports(int seconds) => MinimumSeconds > 0 && MaximumSeconds >= MinimumSeconds
+        && seconds >= MinimumSeconds && seconds <= MaximumSeconds;
+}
+
 public interface IMovieVideoProvider
 {
     string Key { get; }
     bool IsAvailable { get; }
     IReadOnlyCollection<string> SupportedOperations { get; }
+    // Unknown adapters fail closed at legacy scene/shot admission. Implementations
+    // must declare only durations their own submission contract can accept.
+    MovieClipDurationRange? SceneClipDurationRange => null;
     Task<MovieVideoSubmission> SubmitAsync(MovieVideoGenerationRequest request, CancellationToken cancellationToken);
     Task<MovieVideoProviderStatus> GetStatusAsync(string providerJobId, CancellationToken cancellationToken);
     Task<MovieVideoProviderOutput> RetrieveAsync(string providerJobId, MovieVideoProviderStatus status, CancellationToken cancellationToken);
