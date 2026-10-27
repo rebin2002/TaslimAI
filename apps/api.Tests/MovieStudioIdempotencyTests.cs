@@ -142,6 +142,65 @@ public sealed class MovieStudioIdempotencyTests : IClassFixture<MovieOperational
         Assert.Null(clip.GenerationJobId);
     }
 
+    [Theory]
+    [InlineData("targetResolution", "4k")]
+    [InlineData("sourceResolution", "720p")]
+    [InlineData("qualityTier", "alternate-quality")]
+    [InlineData("processingPath", "alternate-path")]
+    [InlineData("upscalingRequested", "true")]
+    public async Task Changed_priced_intent_during_job_first_window_cannot_adopt_or_strand_the_canonical_clip(
+        string option, string value)
+    {
+        using var client = factory.CreateClient();
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Movie job-first priced replay");
+        var key = $"movie-job-first-priced-{option}";
+        var path = $"/api/movie-studio/shots/{fixture.Shot.Id}/generate";
+        var originalRequest = new { title = "Canonical priced job" };
+        var first = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
+            client, path, originalRequest, idempotencyKey: key);
+
+        // The canonical job has committed but the winning request has not yet
+        // published the clip link. A different cost/output intent must not be
+        // allowed to claim this key even if its title and target are unchanged.
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            await db.MovieClips.Where(item => item.Id == first.ClipId)
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(item => item.GenerationJobId, (Guid?)null));
+        }
+
+        var conflictingRequest = new Dictionary<string, object>
+        {
+            ["title"] = originalRequest.title,
+            [option] = option == "upscalingRequested" ? true : value,
+        };
+        using var conflicting = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, path, conflictingRequest, idempotencyKey: key);
+        Assert.Equal(System.Net.HttpStatusCode.BadRequest, conflicting.StatusCode);
+        Assert.Contains("IDEMPOTENCY_KEY_REUSED",
+            await conflicting.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        // Replaying the *original* intent may repair the missing link; the
+        // conflicting request must not consume or mutate the canonical job.
+        var replay = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
+            client, path, originalRequest, idempotencyKey: key);
+        Assert.Equal(first.Job.Id, replay.Job.Id);
+        Assert.Equal(first.ClipId, replay.ClipId);
+
+        using var verifyScope = factory.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var job = Assert.Single(await verifyDb.GenerationJobs.AsNoTracking()
+            .Where(item => item.IdempotencyKey == key).ToListAsync());
+        Assert.Equal(first.Job.Id, job.Id);
+        Assert.Equal(originalRequest.title, job.Title);
+        var clip = Assert.Single(await verifyDb.MovieClips.AsNoTracking()
+            .Where(item => item.MovieProjectId == fixture.Project.Project.Id).ToListAsync());
+        Assert.Equal(first.ClipId, clip.Id);
+        Assert.Equal(first.Job.Id, clip.GenerationJobId);
+    }
+
     [Fact]
     public async Task Rejected_overlong_key_does_not_leave_a_speculative_movie_clip()
     {
