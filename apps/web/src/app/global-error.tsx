@@ -28,10 +28,10 @@ export default function GlobalError({
     <html lang={localeTag(locale)} dir={localeDirection(locale)}>
       <body dir={localeDirection(locale)} style={{ margin: 0, background: "#f7f9fc", color: "#172639", fontFamily: "system-ui, sans-serif" }}>
         <main style={{ minHeight: "100vh", display: "grid", placeItems: "center", padding: "24px" }}>
-          <section role="alert" aria-live="assertive" style={{ maxWidth: "530px", padding: "48px 32px", textAlign: "center", border: "1px solid #dbe4ec", borderRadius: "18px", background: "white", boxShadow: "0 20px 50px rgba(23,38,57,.07)" }}>
+          <section role="alert" aria-live="assertive" aria-labelledby="global-error-title" aria-describedby="global-error-description" style={{ maxWidth: "530px", padding: "48px 32px", textAlign: "center", border: "1px solid #dbe4ec", borderRadius: "18px", background: "white", boxShadow: "0 20px 50px rgba(23,38,57,.07)" }}>
             <p style={{ margin: 0, color: "#6b7d8e", fontSize: "11px", fontWeight: 800, letterSpacing: ".12em", textTransform: "uppercase" }}>Taslim.ai</p>
-            <h1 style={{ margin: "12px 0 14px", fontSize: "32px", letterSpacing: "-.05em" }}>{t("error.title")}</h1>
-            <p style={{ margin: 0, color: "#647587", fontSize: "14px", lineHeight: 1.7 }}>{t("error.description")}</p>
+            <h1 id="global-error-title" style={{ margin: "12px 0 14px", fontSize: "32px", letterSpacing: "-.05em" }}>{t("error.title")}</h1>
+            <p id="global-error-description" style={{ margin: 0, color: "#647587", fontSize: "14px", lineHeight: 1.7 }}>{t("error.description")}</p>
             <div style={{ display: "flex", justifyContent: "center", gap: "9px", marginTop: "28px", flexWrap: "wrap" }}>
               <button type="button" onClick={reset} style={{ cursor: "pointer", border: 0, borderRadius: "8px", padding: "11px 14px", color: "white", background: "#172639", fontSize: "11px", fontWeight: 800 }}>{t("error.retry")}</button>
               <a href="/assets" style={{ display: "inline-flex", alignItems: "center", borderRadius: "8px", padding: "11px 14px", color: "#337cf6", background: "#eef5ff", fontSize: "11px", fontWeight: 800, textDecoration: "none" }}>{t("error.openAssets")}</a>
