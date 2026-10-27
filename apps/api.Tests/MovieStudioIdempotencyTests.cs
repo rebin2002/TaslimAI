@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Taslim.Api.Domain;
@@ -199,13 +200,18 @@ public sealed class MovieStudioIdempotencyTests : IClassFixture<MovieOperational
         Assert.False(MovieStudioIdempotency.TryGetMovieClipId("{}", out _));
     }
 
-    [Fact]
-    public async Task Replaying_a_priced_option_change_rejects_the_key_without_changing_the_canonical_job()
+    [Theory]
+    [InlineData("targetResolution", "4k")]
+    [InlineData("sourceResolution", "720p")]
+    [InlineData("qualityTier", "not-the-current-tier")]
+    [InlineData("processingPath", "not-native")]
+    [InlineData("upscalingRequested", "true")]
+    public async Task Replaying_a_priced_option_change_rejects_the_key_without_changing_the_canonical_job(string option, string value)
     {
         using var client = factory.CreateClient();
         var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
             client, title: "Movie priced option replay");
-        const string key = "movie-pricing-option-collision-1";
+        var key = $"movie-pricing-option-collision-{option}";
         var path = $"/api/movie-studio/shots/{fixture.Shot.Id}/generate";
 
         var first = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
@@ -223,10 +229,15 @@ public sealed class MovieStudioIdempotencyTests : IClassFixture<MovieOperational
             Assert.False(input.UpscalingRequested);
         }
 
-        // Same target and title do not make a changed cost/output request idempotent.
+        // Same target/title do not make a changed quality or cost intent idempotent.
+        // Exercise every field used in the fast-path request fingerprint.
+        var conflictingRequest = new Dictionary<string, object>
+        {
+            ["title"] = "Canonical priced intent",
+            [option] = option == "upscalingRequested" ? true : value,
+        };
         using var conflicting = await MovieOperationalFixtures.SendWithCsrfAsync(
-            client, HttpMethod.Post, path,
-            new { title = "Canonical priced intent", targetResolution = "4k" },
+            client, HttpMethod.Post, path, conflictingRequest,
             idempotencyKey: key);
         Assert.Equal(System.Net.HttpStatusCode.BadRequest, conflicting.StatusCode);
         Assert.Contains("IDEMPOTENCY_KEY_REUSED", await conflicting.Content.ReadAsStringAsync(), StringComparison.Ordinal);
@@ -238,6 +249,31 @@ public sealed class MovieStudioIdempotencyTests : IClassFixture<MovieOperational
             .Where(item => item.MovieProjectId == fixture.Project.Project.Id).ToListAsync());
         Assert.Equal(first.ClipId, canonical.Id);
         Assert.Equal(first.Job.Id, canonical.GenerationJobId);
+    }
+
+    [Fact]
+    public async Task Clip_idempotency_never_adopts_another_movie_operation()
+    {
+        using var client = factory.CreateClient();
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Movie idempotency operation boundary");
+        var response = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
+            client, $"/api/movie-studio/shots/{fixture.Shot.Id}/generate",
+            new { title = "Scene clip" }, idempotencyKey: "movie-operation-boundary-1");
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var inputJson = await db.GenerationJobs.AsNoTracking()
+            .Where(job => job.Id == response.Job.Id)
+            .Select(job => job.InputJson).SingleAsync();
+        Assert.True(MovieStudioIdempotency.TryGetMovieClipId(inputJson, out var clipId));
+        Assert.Equal(response.ClipId, clipId);
+
+        // A valid clip id alone must not allow an unrelated Movie operation to
+        // be mistaken for the canonical scene/shot-generation clip.
+        var otherOperation = JsonNode.Parse(inputJson)!.AsObject();
+        otherOperation[nameof(MovieGenerationInput.Operation)] = "another-movie-operation";
+        Assert.False(MovieStudioIdempotency.TryGetMovieClipId(otherOperation.ToJsonString(), out _));
     }
 
     [Theory]
