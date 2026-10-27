@@ -6,7 +6,7 @@ const configuredApiUrl = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5
 export const API_URL = process.env.NODE_ENV === "production" ? "" : configuredApiUrl;
 
 export const assetFileUrl = (assetId: string, inline = false) =>
-  `${API_URL}/api/assets/${assetId}/download${inline ? "?inline=true" : ""}`;
+  `${API_URL}/api/assets/${encodeURIComponent(assetId)}/download${inline ? "?inline=true" : ""}`;
 
 export const assetRepresentationUrl = (assetId: string, representationId: string) =>
-  `${API_URL}/api/assets/${assetId}/representations/${representationId}/download`;
+  `${API_URL}/api/assets/${encodeURIComponent(assetId)}/representations/${encodeURIComponent(representationId)}/download`;
