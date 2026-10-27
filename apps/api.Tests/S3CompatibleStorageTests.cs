@@ -65,6 +65,21 @@ public sealed class S3CompatibleStorageTests
     }
 
     [Fact]
+    public void S3_client_uses_required_only_checksums_for_R2()
+    {
+        var config = S3CompatibleFileStorageService.CreateConfig(new FileOptions
+        {
+            S3Endpoint = "https://example.r2.cloudflarestorage.com",
+            S3Region = "auto",
+        });
+
+        Assert.Equal(Amazon.Runtime.RequestChecksumCalculation.WHEN_REQUIRED, config.RequestChecksumCalculation);
+        Assert.True(config.ForcePathStyle);
+        Assert.False(config.UseHttp);
+        Assert.Equal("auto", config.AuthenticationRegion);
+    }
+
+    [Fact]
     public void PutObject_request_disables_r2_incompatible_signing_and_checksum_validation()
     {
         using var content = new MemoryStream([1, 2, 3]);
