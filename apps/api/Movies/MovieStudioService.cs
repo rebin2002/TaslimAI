@@ -1271,6 +1271,12 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
 
     private async Task<MovieStudioGenerationResponse> QueueClipAsync(Guid userId, MovieProject movie, MovieScene scene, MovieShot? shot, MovieStudioGenerationRequest request, CancellationToken cancellationToken, string? idempotencyKey)
     {
+        // Reject malformed replay keys before writing a speculative MovieClip or
+        // building a continuity snapshot. Shared generation-job validation still
+        // enforces the identical 80-character limit at job creation.
+        if (idempotencyKey?.Trim().Length > 80)
+            throw new GenerationJobValidationException("IDEMPOTENCY_KEY_INVALID", "The idempotency key is too long.");
+
         if (!string.IsNullOrWhiteSpace(idempotencyKey))
         {
             var targetShotId = shot?.Id;
