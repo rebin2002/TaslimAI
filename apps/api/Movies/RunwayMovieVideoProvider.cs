@@ -37,6 +37,8 @@ public sealed class RunwayMovieVideoProvider(
         && !string.IsNullOrWhiteSpace(settings.Model)
         && TryGetBaseUri(out _);
     public IReadOnlyCollection<string> SupportedOperations => Operations;
+    // Mirrors the existing BuildPayload duration gate; no new provider API claim.
+    public MovieClipDurationRange? SceneClipDurationRange => new(2, 10);
 
     public async Task<MovieVideoSubmission> SubmitAsync(MovieVideoGenerationRequest request, CancellationToken cancellationToken)
     {
