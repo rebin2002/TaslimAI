@@ -32,15 +32,16 @@ import { useLocale } from "@/components/LocaleProvider";
 import {
   formatMovieDirectorDate,
   formatMovieDirectorNumber,
-  movieDirectorActionLabel,
-  movieDirectorHistoryLabel,
-  movieDirectorPrerequisite,
-  movieDirectorProposalStatusLabel,
-  movieDirectorQualityLabel,
-  movieDirectorReasonLabel,
-  movieDirectorRoomDetail,
-  movieDirectorRoomLabel,
-  movieDirectorText,
+  movieDirectorActionLabel as legacyMovieDirectorActionLabel,
+  movieDirectorHistoryLabel as legacyMovieDirectorHistoryLabel,
+  movieDirectorPrerequisite as legacyMovieDirectorPrerequisite,
+  movieDirectorProposalStatusLabel as legacyMovieDirectorProposalStatusLabel,
+  movieDirectorQualityLabel as legacyMovieDirectorQualityLabel,
+  movieDirectorReasonLabel as legacyMovieDirectorReasonLabel,
+  movieDirectorRoomDetail as legacyMovieDirectorRoomDetail,
+  movieDirectorRoomLabel as legacyMovieDirectorRoomLabel,
+  movieDirectorText as legacyMovieDirectorText,
+  type MovieDirectorPackTranslate,
 } from "@/lib/movieDirectorI18n";
 import {
   directorRoomPlan,
@@ -79,65 +80,77 @@ function signalIcon(tone: SignalTone) {
   return <Target size={13} />;
 }
 
-function roomTarget(locale: Parameters<typeof movieDirectorRoomLabel>[0], room: DirectorRoom, project: MovieProject, selectedScene: MovieScene | null, selectedShot: MovieShot | null) {
+function roomTarget(locale: Parameters<typeof legacyMovieDirectorRoomLabel>[0], room: DirectorRoom, project: MovieProject, selectedScene: MovieScene | null, selectedShot: MovieShot | null, translatePack: MovieDirectorPackTranslate) {
   const count = (value: number) => formatMovieDirectorNumber(locale, value);
+  const text = (key: Parameters<typeof legacyMovieDirectorText>[1], variables?: Record<string, string | number>) => legacyMovieDirectorText(locale, key, variables, translatePack);
+  const roomLabel = (targetRoom: DirectorRoom) => legacyMovieDirectorRoomLabel(locale, targetRoom, translatePack);
+  const roomDetail = (key: string, variables?: Record<string, string | number>) => legacyMovieDirectorRoomDetail(locale, key, variables, translatePack);
   switch (room) {
     case "Overview":
-      return { label: project.title, detail: movieDirectorRoomDetail(locale, "overview") };
+      return { label: project.title, detail: roomDetail("overview") };
     case "Story":
-      return { label: project.title, detail: movieDirectorRoomDetail(locale, "story") };
+      return { label: project.title, detail: roomDetail("story") };
     case "Cast":
-      return { label: movieDirectorRoomLabel(locale, room), detail: movieDirectorRoomDetail(locale, "cast", { count: count(project.characters.length) }) };
+      return { label: roomLabel(room), detail: roomDetail("cast", { count: count(project.characters.length) }) };
     case "World":
-      return { label: selectedScene?.title ?? movieDirectorRoomLabel(locale, room), detail: movieDirectorRoomDetail(locale, "world", { count: count(project.locations.length) }) };
+      return { label: selectedScene?.title ?? roomLabel(room), detail: roomDetail("world", { count: count(project.locations.length) }) };
     case "Scene":
       return selectedShot
-        ? { label: movieDirectorText(locale, "shot", { number: String(selectedShot.sequence).padStart(2, "0") }), detail: movieDirectorRoomDetail(locale, "sceneShot") }
+        ? { label: text("shot", { number: String(selectedShot.sequence).padStart(2, "0") }), detail: roomDetail("sceneShot") }
         : selectedScene
-          ? { label: `${String(selectedScene.sequence).padStart(2, "0")} · ${selectedScene.title}`, detail: movieDirectorRoomDetail(locale, "sceneSelected", { count: count(selectedScene.shots.length) }) }
-          : { label: movieDirectorRoomDetail(locale, "noScene"), detail: movieDirectorRoomDetail(locale, "chooseScene") };
+          ? { label: `${String(selectedScene.sequence).padStart(2, "0")} · ${selectedScene.title}`, detail: roomDetail("sceneSelected", { count: count(selectedScene.shots.length) }) }
+          : { label: roomDetail("noScene"), detail: roomDetail("chooseScene") };
     case "Shot":
       return selectedShot
-        ? { label: movieDirectorText(locale, "shot", { number: String(selectedShot.sequence).padStart(2, "0") }), detail: selectedShot.description }
-        : { label: movieDirectorRoomDetail(locale, "noShot"), detail: movieDirectorRoomDetail(locale, "chooseShot") };
+        ? { label: text("shot", { number: String(selectedShot.sequence).padStart(2, "0") }), detail: selectedShot.description }
+        : { label: roomDetail("noShot"), detail: roomDetail("chooseShot") };
     case "Storyboard":
       return selectedShot
-        ? { label: movieDirectorText(locale, "shot", { number: String(selectedShot.sequence).padStart(2, "0") }), detail: movieDirectorRoomDetail(locale, "storyboardShot") }
+        ? { label: text("shot", { number: String(selectedShot.sequence).padStart(2, "0") }), detail: roomDetail("storyboardShot") }
         : selectedScene
-          ? { label: selectedScene.title, detail: movieDirectorRoomDetail(locale, "storyboardScene") }
-          : { label: movieDirectorRoomDetail(locale, "storyboardPass"), detail: movieDirectorRoomDetail(locale, "storyboardPass") };
+          ? { label: selectedScene.title, detail: roomDetail("storyboardScene") }
+          : { label: roomDetail("storyboardPass"), detail: roomDetail("storyboardPass") };
     case "Production":
       return selectedShot
-        ? { label: movieDirectorText(locale, "shot", { number: String(selectedShot.sequence).padStart(2, "0") }), detail: selectedShot.productionStage }
-        : { label: project.title, detail: movieDirectorRoomDetail(locale, "production") };
+        ? { label: text("shot", { number: String(selectedShot.sequence).padStart(2, "0") }), detail: selectedShot.productionStage }
+        : { label: project.title, detail: roomDetail("production") };
   }
 }
 
-function getSignals(locale: Parameters<typeof movieDirectorText>[0], room: DirectorRoom, project: MovieProject, selectedScene: MovieScene | null, selectedShot: MovieShot | null, roomPlan: ReturnType<typeof directorRoomPlan>, proposal: DirectorProposal | null, completionPercent: number): Signal[] {
+function getSignals(locale: Parameters<typeof legacyMovieDirectorText>[0], room: DirectorRoom, project: MovieProject, selectedScene: MovieScene | null, selectedShot: MovieShot | null, roomPlan: ReturnType<typeof directorRoomPlan>, proposal: DirectorProposal | null, completionPercent: number, translatePack: MovieDirectorPackTranslate): Signal[] {
+  const text = (key: Parameters<typeof legacyMovieDirectorText>[1], variables?: Record<string, string | number>) => legacyMovieDirectorText(locale, key, variables, translatePack);
   const signals: Signal[] = [];
   const action = actionForProposal(proposal);
   const missing = roomPlan.prerequisites.filter((item) => !item.satisfied);
   if (missing.length && (room === "Scene" || room === "Storyboard" || room === "Production" || room === "Cast")) {
-    signals.push({ tone: "warning", label: movieDirectorText(locale, "signalPrerequisite"), text: movieDirectorPrerequisite(locale, missing[0].key, false).detail });
+    signals.push({ tone: "warning", label: text("signalPrerequisite"), text: legacyMovieDirectorPrerequisite(locale, missing[0].key, false, translatePack).detail });
   }
-  if (!project.guide.lockedRevisionNumber) signals.push({ tone: "warning", label: movieDirectorText(locale, "signalWarning"), text: movieDirectorText(locale, "signalLockGuide") });
-  if (proposal?.status === "PendingApproval") signals.push({ tone: "approval", label: movieDirectorText(locale, "signalApprovalRequired"), text: movieDirectorText(locale, "boundary") });
-  else if (proposal?.status === "Approved" && action?.status === "Ready") signals.push({ tone: "next", label: movieDirectorText(locale, "signalNextAction"), text: movieDirectorText(locale, "signalApproved") });
-  else if (action?.status === "Succeeded") signals.push({ tone: "status", label: movieDirectorText(locale, "signalProductionStatus"), text: movieDirectorText(locale, "signalSucceeded") });
-  else if (room === "Story" || room === "Overview") signals.push({ tone: "next", label: movieDirectorText(locale, "signalNextAction"), text: movieDirectorText(locale, "signalStoryOverview") });
-  else if (room === "Cast" && !project.characters.length) signals.push({ tone: "suggestion", label: movieDirectorText(locale, "signalSuggestion"), text: movieDirectorText(locale, "signalCast") });
-  else if (room === "World" && !project.locations.length) signals.push({ tone: "suggestion", label: movieDirectorText(locale, "signalSuggestion"), text: movieDirectorText(locale, "signalWorld") });
-  else if (room === "Scene" && selectedScene && !selectedScene.shots.length) signals.push({ tone: "next", label: movieDirectorText(locale, "signalNextAction"), text: movieDirectorText(locale, "signalScene") });
-  else if (room === "Shot" && selectedShot) signals.push({ tone: "suggestion", label: movieDirectorText(locale, "signalSuggestion"), text: movieDirectorText(locale, "signalShot") });
-  else if (room === "Storyboard") signals.push({ tone: "suggestion", label: movieDirectorText(locale, "signalSuggestion"), text: movieDirectorText(locale, "signalStoryboard") });
-  else if (room === "Production") signals.push({ tone: "status", label: movieDirectorText(locale, "signalProductionStatus"), text: movieDirectorText(locale, "signalProduction", { percent: formatMovieDirectorNumber(locale, completionPercent) }) });
+  if (!project.guide.lockedRevisionNumber) signals.push({ tone: "warning", label: text("signalWarning"), text: text("signalLockGuide") });
+  if (proposal?.status === "PendingApproval") signals.push({ tone: "approval", label: text("signalApprovalRequired"), text: text("boundary") });
+  else if (proposal?.status === "Approved" && action?.status === "Ready") signals.push({ tone: "next", label: text("signalNextAction"), text: text("signalApproved") });
+  else if (action?.status === "Succeeded") signals.push({ tone: "status", label: text("signalProductionStatus"), text: text("signalSucceeded") });
+  else if (room === "Story" || room === "Overview") signals.push({ tone: "next", label: text("signalNextAction"), text: text("signalStoryOverview") });
+  else if (room === "Cast" && !project.characters.length) signals.push({ tone: "suggestion", label: text("signalSuggestion"), text: text("signalCast") });
+  else if (room === "World" && !project.locations.length) signals.push({ tone: "suggestion", label: text("signalSuggestion"), text: text("signalWorld") });
+  else if (room === "Scene" && selectedScene && !selectedScene.shots.length) signals.push({ tone: "next", label: text("signalNextAction"), text: text("signalScene") });
+  else if (room === "Shot" && selectedShot) signals.push({ tone: "suggestion", label: text("signalSuggestion"), text: text("signalShot") });
+  else if (room === "Storyboard") signals.push({ tone: "suggestion", label: text("signalSuggestion"), text: text("signalStoryboard") });
+  else if (room === "Production") signals.push({ tone: "status", label: text("signalProductionStatus"), text: text("signalProduction", { percent: formatMovieDirectorNumber(locale, completionPercent) }) });
   return signals.slice(0, 3);
 }
 
 export function MovieDirectorPanel({ project, activeModule, selectedScene, selectedShot, onProjectRefresh }: DirectorPanelProps) {
-  const { locale } = useLocale();
+  const { locale, t: translatePack } = useLocale();
+  const movieDirectorText = (currentLocale: Parameters<typeof legacyMovieDirectorText>[0], key: Parameters<typeof legacyMovieDirectorText>[1], variables: Record<string, string | number> = {}) => legacyMovieDirectorText(currentLocale, key, variables, translatePack);
+  const movieDirectorRoomLabel = (currentLocale: Parameters<typeof legacyMovieDirectorRoomLabel>[0], room: DirectorRoom) => legacyMovieDirectorRoomLabel(currentLocale, room, translatePack);
+  const movieDirectorActionLabel = (currentLocale: Parameters<typeof legacyMovieDirectorActionLabel>[0], actionType: string) => legacyMovieDirectorActionLabel(currentLocale, actionType, translatePack);
+  const movieDirectorHistoryLabel = (currentLocale: Parameters<typeof legacyMovieDirectorHistoryLabel>[0], eventType: string) => legacyMovieDirectorHistoryLabel(currentLocale, eventType, translatePack);
+  const movieDirectorPrerequisite = (currentLocale: Parameters<typeof legacyMovieDirectorPrerequisite>[0], key: string, satisfied: boolean) => legacyMovieDirectorPrerequisite(currentLocale, key, satisfied, translatePack);
+  const movieDirectorProposalStatusLabel = (currentLocale: Parameters<typeof legacyMovieDirectorProposalStatusLabel>[0], status: string) => legacyMovieDirectorProposalStatusLabel(currentLocale, status, translatePack);
+  const movieDirectorQualityLabel = (currentLocale: Parameters<typeof legacyMovieDirectorQualityLabel>[0], value: string) => legacyMovieDirectorQualityLabel(currentLocale, value, translatePack);
+  const movieDirectorReasonLabel = (currentLocale: Parameters<typeof legacyMovieDirectorReasonLabel>[0], reason: string) => legacyMovieDirectorReasonLabel(currentLocale, reason, translatePack);
   const room = directorRoomForModule(activeModule);
-  const target = roomTarget(locale, room, project, selectedScene, selectedShot);
+  const target = roomTarget(locale, room, project, selectedScene, selectedShot, translatePack);
   const [proposal, setProposal] = useState<DirectorProposalResponse | null>(null);
   const [history, setHistory] = useState<DirectorHistoryEvent[]>([]);
   const [loading, setLoading] = useState(true);
@@ -154,7 +167,7 @@ export function MovieDirectorPanel({ project, activeModule, selectedScene, selec
   const roomPlan = useMemo(() => directorRoomPlan(room, project, selectedScene, selectedShot), [room, project, selectedScene, selectedShot]);
   const [roomAction, setRoomAction] = useState<string>("");
   const activeRoomAction = roomPlan.validActions.includes(roomAction as DirectorRoomAction) ? roomAction : roomPlan.validActions[0] ?? "";
-  const signals = useMemo(() => getSignals(locale, room, project, selectedScene, selectedShot, roomPlan, proposal?.proposal ?? null, completionPercent), [locale, room, project, selectedScene, selectedShot, roomPlan, proposal, completionPercent]);
+  const signals = useMemo(() => getSignals(locale, room, project, selectedScene, selectedShot, roomPlan, proposal?.proposal ?? null, completionPercent, translatePack), [locale, room, project, selectedScene, selectedShot, roomPlan, proposal, completionPercent, translatePack]);
   const proposalAction = actionForProposal(proposal?.proposal ?? null);
   const planItem = proposal?.proposal.plan[0] ?? null;
   const castRoomStoryAssistance = room === "Cast";
@@ -179,12 +192,12 @@ export function MovieDirectorPanel({ project, activeModule, selectedScene, selec
         }
       }
     }).catch((cause) => {
-      if (mounted) setError(cause instanceof Error ? cause.message : movieDirectorText(locale, "errorHistoryUnavailable"));
+      if (mounted) setError(cause instanceof Error ? cause.message : legacyMovieDirectorText(locale, "errorHistoryUnavailable", {}, translatePack));
     }).finally(() => {
       if (mounted) setLoading(false);
     });
     return () => { mounted = false; };
-  }, [locale, project.id]);
+  }, [locale, project.id, translatePack]);
 
   async function createProposal() {
     if (!roomPlan.validActions.length) {
@@ -324,6 +337,6 @@ export function MovieDirectorPanel({ project, activeModule, selectedScene, selec
   );
 }
 
-function Slider({ locale, label, value, onChange }: { locale: Parameters<typeof movieDirectorText>[0]; label: string; value: number; onChange: (value: number) => void }) {
+function Slider({ locale, label, value, onChange }: { locale: Parameters<typeof legacyMovieDirectorText>[0]; label: string; value: number; onChange: (value: number) => void }) {
   return <label className="movie-director-slider"><span>{label}</span><strong>{formatMovieDirectorNumber(locale, value)}</strong><input type="range" min="0" max="100" value={value} onChange={(event) => onChange(Number(event.target.value))} /></label>;
 }
