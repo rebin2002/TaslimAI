@@ -17,7 +17,7 @@ public sealed class MemoriesController(TaslimDbContext db, WorkspaceAccessServic
     [HttpGet("api/workspaces/{workspaceId:guid}/memories")]
     public async Task<IActionResult> List(Guid workspaceId, CancellationToken cancellationToken)
     {
-        var userId = GetUserId();
+        if (!TryGetUserId(out var userId)) return Unauthorized();
         if (!await access.IsMemberAsync(userId, workspaceId, cancellationToken)) return Forbid();
 
         var memories = await db.PersonalMemories.AsNoTracking()
@@ -35,7 +35,7 @@ public sealed class MemoriesController(TaslimDbContext db, WorkspaceAccessServic
     {
         if (!ModelState.IsValid) return ApiResults.Validation(this);
         if (!PersonalMemoryCategories.Initial.Contains(request.Category.Trim())) return ApiResults.Validation(this, "Choose a valid memory category.");
-        var userId = GetUserId();
+        if (!TryGetUserId(out var userId)) return Unauthorized();
         if (!await access.IsMemberAsync(userId, workspaceId, cancellationToken)) return Forbid();
 
         var now = DateTime.UtcNow;
@@ -56,9 +56,10 @@ public sealed class MemoriesController(TaslimDbContext db, WorkspaceAccessServic
     {
         if (!ModelState.IsValid) return ApiResults.Validation(this);
         if (!PersonalMemoryCategories.Initial.Contains(request.Category.Trim())) return ApiResults.Validation(this, "Choose a valid memory category.");
-        var memory = await db.PersonalMemories.FirstOrDefaultAsync(item => item.Id == memoryId && item.UserId == GetUserId() && item.IsActive, cancellationToken);
+        if (!TryGetUserId(out var userId)) return Unauthorized();
+        var memory = await db.PersonalMemories.FirstOrDefaultAsync(item => item.Id == memoryId && item.UserId == userId && item.IsActive, cancellationToken);
         if (memory is null) return ApiResults.Error(this, StatusCodes.Status404NotFound, "MEMORY_NOT_FOUND", "Memory not found.");
-        if (!await access.IsMemberAsync(GetUserId(), memory.WorkspaceId, cancellationToken)) return Forbid();
+        if (!await access.IsMemberAsync(userId, memory.WorkspaceId, cancellationToken)) return Forbid();
 
         memory.Category = NormalizeCategory(request.Category);
         memory.Title = request.Title.Trim();
@@ -72,9 +73,10 @@ public sealed class MemoriesController(TaslimDbContext db, WorkspaceAccessServic
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Delete(Guid memoryId, CancellationToken cancellationToken)
     {
-        var memory = await db.PersonalMemories.FirstOrDefaultAsync(item => item.Id == memoryId && item.UserId == GetUserId() && item.IsActive, cancellationToken);
+        if (!TryGetUserId(out var userId)) return Unauthorized();
+        var memory = await db.PersonalMemories.FirstOrDefaultAsync(item => item.Id == memoryId && item.UserId == userId && item.IsActive, cancellationToken);
         if (memory is null) return ApiResults.Error(this, StatusCodes.Status404NotFound, "MEMORY_NOT_FOUND", "Memory not found.");
-        if (!await access.IsMemberAsync(GetUserId(), memory.WorkspaceId, cancellationToken)) return Forbid();
+        if (!await access.IsMemberAsync(userId, memory.WorkspaceId, cancellationToken)) return Forbid();
 
         db.PersonalMemories.Remove(memory);
         await db.SaveChangesAsync(cancellationToken);
@@ -83,5 +85,5 @@ public sealed class MemoriesController(TaslimDbContext db, WorkspaceAccessServic
 
     private static string NormalizeCategory(string category) => PersonalMemoryCategories.Initial.First(item => string.Equals(item, category.Trim(), StringComparison.OrdinalIgnoreCase));
     private static PersonalMemoryDto ToDto(PersonalMemory memory) => new(memory.Id, memory.WorkspaceId, memory.Category, memory.Title, memory.Content, memory.Source, memory.IsActive, memory.CreatedAt, memory.UpdatedAt);
-    private Guid GetUserId() => Guid.Parse(User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? throw new InvalidOperationException("Authenticated user identifier is missing."));
+    private bool TryGetUserId(out Guid userId) => Guid.TryParse(User.FindFirst(ClaimTypes.NameIdentifier)?.Value, out userId);
 }
