@@ -755,7 +755,11 @@ public sealed record MovieVideoGenerationRequest(
     bool UpscalingRequested = false,
     string? FirstFrameImageUri = null,
     string? LastFrameImageUri = null,
-    IReadOnlyList<MovieVideoReferenceImage>? ReferenceImages = null);
+    IReadOnlyList<MovieVideoReferenceImage>? ReferenceImages = null,
+    // Preserve the priced request intent at the provider-neutral boundary.
+    // Adapters must still validate supported resolutions and quality levels.
+    string? TargetResolution = null,
+    string? QualityTier = null);
 public sealed record MovieVideoReferenceImage(string Uri, string? Role = null);
 
 public sealed record MovieVideoSubmission(string ProviderJobId);
