@@ -232,6 +232,8 @@ public sealed class FakeMovieVideoProvider(
     public string Key => "fake-movie";
     public bool IsAvailable => Scenarios[FakeProviderKind.Movie] != FakeProviderScenario.AllProvidersUnavailable;
     public IReadOnlyCollection<string> SupportedOperations { get; } = [MovieStudioOperations.QuickMovie, MovieStudioOperations.SceneClip];
+    // Override in focused admission tests without invoking a paid provider.
+    public MovieClipDurationRange? SceneClipDurationRange { get; set; } = new(1, 3600);
 
     public async Task<MovieVideoSubmission> SubmitAsync(MovieVideoGenerationRequest request, CancellationToken cancellationToken)
     {
