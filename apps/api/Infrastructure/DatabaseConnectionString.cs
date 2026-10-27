@@ -26,8 +26,37 @@ public static class DatabaseConnectionString
             Database = uri.AbsolutePath.Trim('/'),
             Username = Uri.UnescapeDataString(uri.UserInfo.Split(':').FirstOrDefault() ?? string.Empty),
             Password = Uri.UnescapeDataString(uri.UserInfo.Contains(':') ? uri.UserInfo[(uri.UserInfo.IndexOf(':') + 1)..] : string.Empty),
-            SslMode = SslMode.Require,
+            SslMode = ResolveSslMode(uri),
         };
+
+        if (GetQueryParameter(uri, "sslrootcert") is { Length: > 0 } rootCertificate)
+            builder.RootCertificate = rootCertificate;
+
         return builder.ConnectionString;
+    }
+
+    private static SslMode ResolveSslMode(Uri uri) => GetQueryParameter(uri, "sslmode")?.ToLowerInvariant() switch
+    {
+        "verify-ca" => SslMode.VerifyCA,
+        "verify-full" => SslMode.VerifyFull,
+        // Keep the existing TLS requirement; URI options cannot weaken it.
+        _ => SslMode.Require,
+    };
+
+    private static string? GetQueryParameter(Uri uri, string name)
+    {
+        foreach (var component in uri.Query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var separator = component.IndexOf('=');
+            var rawName = separator < 0 ? component : component[..separator];
+            var decodedName = Uri.UnescapeDataString(rawName.Replace('+', ' '));
+            if (!string.Equals(decodedName, name, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            var rawValue = separator < 0 ? string.Empty : component[(separator + 1)..];
+            return Uri.UnescapeDataString(rawValue.Replace('+', ' '));
+        }
+
+        return null;
     }
 }
