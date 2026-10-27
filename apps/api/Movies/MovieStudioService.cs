@@ -1277,6 +1277,13 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         if (idempotencyKey?.Trim().Length > 80)
             throw new GenerationJobValidationException("IDEMPOTENCY_KEY_INVALID", "The idempotency key is too long.");
 
+        // This legacy path has no per-request retry-count or multi-pass upscale
+        // execution contract. Do not price work that the queued job cannot perform.
+        if (request.RetryAttempts != 0 || request.UpscalePasses != 0)
+            throw new GenerationJobValidationException(
+                "MOVIE_GENERATION_OPTIONS_UNSUPPORTED",
+                "This generation route does not support per-request retries or upscale pass counts.");
+
         if (!string.IsNullOrWhiteSpace(idempotencyKey))
         {
             var targetShotId = shot?.Id;
@@ -1294,8 +1301,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                 // The linked-clip fast path must enforce the same request-identity
                 // boundary as job creation. Otherwise, reusing a key with a
                 // different title silently returns the first user's generation.
-                var requestedTitle = string.IsNullOrWhiteSpace(request.Title) ? movie.Title : request.Title.Trim();
-                if (!string.Equals(existingClip.GenerationJob.Title, requestedTitle, StringComparison.Ordinal))
+                if (!MovieStudioIdempotency.MatchesRequest(existingClip.GenerationJob, movie, scene, shot, request))
                     throw new GenerationJobValidationException("IDEMPOTENCY_KEY_REUSED", "This idempotency key was already used for a different generation request.");
                 return new MovieStudioGenerationResponse(
                     await GetAsync(userId, movie.Id, cancellationToken) ?? throw new InvalidOperationException("Movie project disappeared."),
@@ -1314,12 +1320,8 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                 MovieGenerationInput? existingInput;
                 try { existingInput = JsonSerializer.Deserialize<MovieGenerationInput>(existingJob.InputJson); }
                 catch (JsonException) { existingInput = null; }
-                var requestedTitle = string.IsNullOrWhiteSpace(request.Title) ? movie.Title : request.Title.Trim();
                 if (existingInput is null
-                    || existingInput.MovieProjectId != movie.Id
-                    || existingInput.MovieSceneId != scene.Id
-                    || existingInput.MovieShotId != targetShotId
-                    || !string.Equals(existingJob.Title, requestedTitle, StringComparison.Ordinal))
+                    || !MovieStudioIdempotency.MatchesRequest(existingJob, movie, scene, shot, request, existingInput))
                     throw new GenerationJobValidationException("IDEMPOTENCY_KEY_REUSED", "This idempotency key was already used for a different generation request.");
                 var canonicalClip = await db.MovieClips.SingleOrDefaultAsync(item => item.Id == existingInput.MovieClipId && item.MovieProjectId == movie.Id, cancellationToken);
                 if (canonicalClip is null)
@@ -1411,7 +1413,12 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                 clip.ContinuitySnapshotJson,
                 SceneSnapshot(scene),
                 shot is null ? null : ShotSnapshot(shot),
-                WorldContextJson: await WorldContextSnapshotAsync(movie.Id, scene.Id, shot?.Id, cancellationToken))),
+                WorldContextJson: await WorldContextSnapshotAsync(movie.Id, scene.Id, shot?.Id, cancellationToken),
+                SourceResolution: request.SourceResolution ?? "1080p",
+                TargetResolution: request.TargetResolution ?? "1080p",
+                QualityTier: request.QualityTier ?? movie.QualityLevel,
+                ProcessingPath: request.ProcessingPath ?? "native",
+                UpscalingRequested: request.UpscalingRequested)),
             }, cancellationToken, idempotencyKey);
         }
         catch (GenerationJobValidationException exception) when (exception.Code == "IDEMPOTENCY_KEY_REUSED" && !string.IsNullOrWhiteSpace(idempotencyKey))
@@ -1424,13 +1431,9 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                 try { canonicalInput = JsonSerializer.Deserialize<MovieGenerationInput>(canonicalJob.InputJson); }
                 catch (JsonException) { }
             }
-            var requestedTitle = string.IsNullOrWhiteSpace(request.Title) ? movie.Title : request.Title.Trim();
             if (canonicalJob is null
                 || canonicalInput is null
-                || canonicalInput.MovieProjectId != movie.Id
-                || canonicalInput.MovieSceneId != scene.Id
-                || canonicalInput.MovieShotId != shot?.Id
-                || !string.Equals(canonicalJob.Title, requestedTitle, StringComparison.Ordinal))
+                || !MovieStudioIdempotency.MatchesRequest(canonicalJob, movie, scene, shot, request, canonicalInput))
             {
                 // A competing, different request may commit its job after our
                 // initial key lookup. Do not strand this request's persisted
@@ -1945,6 +1948,38 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
 
 internal static class MovieStudioIdempotency
 {
+    internal static bool MatchesRequest(
+        GenerationJob job,
+        MovieProject movie,
+        MovieScene scene,
+        MovieShot? shot,
+        MovieStudioGenerationRequest request,
+        MovieGenerationInput? knownInput = null)
+    {
+        MovieGenerationInput? input = knownInput;
+        if (input is null)
+        {
+            try { input = JsonSerializer.Deserialize<MovieGenerationInput>(job.InputJson); }
+            catch (JsonException) { return false; }
+        }
+        if (input is null) return false;
+
+        static string Normalized(string? value, string fallback) =>
+            (string.IsNullOrWhiteSpace(value) ? fallback : value.Trim()).ToLowerInvariant();
+
+        var title = string.IsNullOrWhiteSpace(request.Title) ? movie.Title : request.Title.Trim();
+        return input.Operation == MovieStudioOperations.SceneClip
+            && input.MovieProjectId == movie.Id
+            && input.MovieSceneId == scene.Id
+            && input.MovieShotId == shot?.Id
+            && string.Equals(job.Title, title, StringComparison.Ordinal)
+            && Normalized(input.SourceResolution, "1080p") == Normalized(request.SourceResolution, "1080p")
+            && Normalized(input.TargetResolution, "1080p") == Normalized(request.TargetResolution, "1080p")
+            && Normalized(input.QualityTier, movie.QualityLevel) == Normalized(request.QualityTier, movie.QualityLevel)
+            && Normalized(input.ProcessingPath, "native") == Normalized(request.ProcessingPath, "native")
+            && input.UpscalingRequested == request.UpscalingRequested;
+    }
+
     internal static bool TryGetMovieClipId(string? inputJson, out Guid clipId)
     {
         clipId = Guid.Empty;
