@@ -10,7 +10,7 @@ export default function NotFound() {
   const t = (key: Parameters<typeof translateNotFound>[1]) => translateNotFound(locale, key);
 
   return (
-    <main className="placeholder-page">
+    <div className="placeholder-page">
       <section className="placeholder-panel" aria-labelledby="not-found-title" aria-describedby="not-found-description">
         <div className="placeholder-symbol" aria-hidden="true"><FileQuestion size={24} /></div>
         <p className="section-eyebrow">{t("eyebrow")}</p>
@@ -21,6 +21,6 @@ export default function NotFound() {
           <Link href="/assets" className="secondary-button"><FolderOpen size={16} aria-hidden="true" /> {t("openAssets")}</Link>
         </div>
       </section>
-    </main>
+    </div>
   );
 }

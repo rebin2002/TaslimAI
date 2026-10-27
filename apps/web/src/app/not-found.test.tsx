@@ -13,6 +13,7 @@ describe("not-found boundary", () => {
 
     expect(html).toContain("Page not found");
     expect(html).toContain("We could not find that page");
+    expect(html).not.toContain("<main");
     expect(html).toContain('aria-labelledby="not-found-title"');
     expect(html).toContain('aria-describedby="not-found-description"');
     expect(html).toContain('href="/"');
