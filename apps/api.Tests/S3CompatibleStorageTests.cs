@@ -77,6 +77,7 @@ public sealed class S3CompatibleStorageTests
         Assert.False(request.AutoResetStreamPosition);
         Assert.True(request.DisablePayloadSigning);
         Assert.True(request.DisableDefaultChecksumValidation);
+        Assert.False(request.UseChunkEncoding);
     }
 
     [Fact]
