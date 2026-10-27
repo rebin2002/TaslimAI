@@ -24,7 +24,8 @@ public sealed class MovieProductionQualityControlController(
         MovieProductionQcRequest? request,
         CancellationToken cancellationToken)
     {
-        if (!await authorization.CanPermissionAsync(UserId(), movieProjectId, MoviePermissions.View, cancellationToken))
+        if (!TryGetUserId(out var userId)) return Unauthorized();
+        if (!await authorization.CanPermissionAsync(userId, movieProjectId, MoviePermissions.View, cancellationToken))
             return ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.");
 
         try
@@ -37,5 +38,5 @@ public sealed class MovieProductionQualityControlController(
         }
     }
 
-    private Guid UserId() => Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+    private bool TryGetUserId(out Guid userId) => Guid.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out userId);
 }
