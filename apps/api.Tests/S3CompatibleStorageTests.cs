@@ -96,6 +96,37 @@ public sealed class S3CompatibleStorageTests
     }
 
     [Fact]
+    public void PutObject_request_sets_content_length_for_validated_nonseekable_upload()
+    {
+        using var source = new MemoryStream([1, 2, 3, 4]);
+        using var counted = new CountingReadStream(source, maxBytes: 25, expectedContentLength: 4);
+
+        Assert.False(counted.CanSeek);
+        Assert.Throws<NotSupportedException>(() => _ = counted.Length);
+
+        var request = AwsS3CompatibleObjectClient.CreatePutObjectRequest(
+            "taslim-private", "workspace/private.pdf", counted);
+
+        Assert.Equal("4", request.Headers["Content-Length"]);
+        Assert.Same(counted, request.InputStream);
+        Assert.False(request.UseChunkEncoding);
+        Assert.False(request.AutoResetStreamPosition);
+    }
+
+    [Fact]
+    public void PutObject_request_sets_remaining_content_length_for_seekable_stream()
+    {
+        using var source = new MemoryStream([1, 2, 3, 4]);
+        source.Position = 1;
+
+        var request = AwsS3CompatibleObjectClient.CreatePutObjectRequest(
+            "taslim-private", "workspace/private.png", source);
+
+        Assert.Equal("3", request.Headers["Content-Length"]);
+        Assert.Same(source, request.InputStream);
+    }
+
+    [Fact]
     public async Task Store_open_exists_and_delete_use_configured_bucket_and_guid_key()
     {
         var client = new FakeObjectClient();
