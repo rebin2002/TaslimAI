@@ -1355,8 +1355,12 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         // movie. Check the actual selected adapter before cost confirmation,
         // speculative clip persistence, usage reservation or provider submission.
         // Unrecognized adapters fail closed instead of guessing their limits.
-        if (!provider.SupportedOperations.Contains(MovieStudioOperations.SceneClip, StringComparer.OrdinalIgnoreCase)
-            || provider.SceneClipDurationRange is not { } clipDurationRange
+        if (!provider.IsAvailable
+            || !provider.SupportedOperations.Contains(MovieStudioOperations.SceneClip, StringComparer.OrdinalIgnoreCase))
+            throw new GenerationJobValidationException(
+                "MOVIE_PROVIDER_UNAVAILABLE",
+                "The selected video provider is unavailable for scene or shot generation.");
+        if (provider.SceneClipDurationRange is not { } clipDurationRange
             || !clipDurationRange.Supports(durationSeconds))
             throw new GenerationJobValidationException(
                 "MOVIE_CLIP_DURATION_UNSUPPORTED",

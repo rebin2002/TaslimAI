@@ -7,11 +7,11 @@ using Xunit;
 
 namespace Taslim.Api.Tests;
 
-public sealed class MovieStudioCastTests : IClassFixture<GenerationJobsApiFactory>
+public sealed class MovieStudioCastTests : IClassFixture<MovieOperationalApiFactory>
 {
-    private readonly GenerationJobsApiFactory factory;
+    private readonly MovieOperationalApiFactory factory;
 
-    public MovieStudioCastTests(GenerationJobsApiFactory factory)
+    public MovieStudioCastTests(MovieOperationalApiFactory factory)
     {
         this.factory = factory;
         Task.Delay(150).GetAwaiter().GetResult();

@@ -10,11 +10,11 @@ using Xunit;
 
 namespace Taslim.Api.Tests;
 
-public sealed class MovieWorldTests : IClassFixture<TaslimApiFactory>
+public sealed class MovieWorldTests : IClassFixture<MovieOperationalApiFactory>
 {
-    private readonly TaslimApiFactory factory;
+    private readonly MovieOperationalApiFactory factory;
 
-    public MovieWorldTests(TaslimApiFactory factory)
+    public MovieWorldTests(MovieOperationalApiFactory factory)
     {
         this.factory = factory;
         using var scope = factory.Services.CreateScope();
