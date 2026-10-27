@@ -6,6 +6,7 @@ const routeError = readFileSync(new URL("./error.tsx", import.meta.url), "utf8")
 describe("Voice Studio route recovery", () => {
   it("provides a Voice-scoped accessible retry boundary", () => {
     expect(routeError).toContain("export default function VoiceStudioError");
+    expect(routeError).not.toContain("<main");
     expect(routeError).toContain('t("voice.title")');
     expect(routeError).toContain('role="alert"');
     expect(routeError).toContain('aria-live="assertive"');

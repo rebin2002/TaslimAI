@@ -13,7 +13,7 @@ export default function VoiceStudioError({ reset }: { error: Error & { digest?: 
   }, []);
 
   return (
-    <main className="placeholder-page">
+    <div className="placeholder-page">
       <section className="placeholder-panel" role="alert" aria-live="assertive">
         <RefreshCw className="placeholder-symbol" size={28} aria-hidden="true" />
         <p className="section-eyebrow">{t("voice.title")}</p>
@@ -26,6 +26,6 @@ export default function VoiceStudioError({ reset }: { error: Error & { digest?: 
           <Link className="secondary-button" href="/assets">{t("error.openAssets")}</Link>
         </div>
       </section>
-    </main>
+    </div>
   );
 }
