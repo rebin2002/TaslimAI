@@ -195,7 +195,7 @@ public sealed class FileProcessingService(
         {
             logger.LogInformation("Generated stream storage started. FileId={FileId}; WorkspaceId={WorkspaceId}; StorageProvider={StorageProvider}; SizeBytes={SizeBytes}", file.Id, workspaceId, storage.ProviderKey, sizeBytes);
             await using var input = await openReadAsync(cancellationToken);
-            await using var bounded = new CountingReadStream(input, Math.Max(1, settings.MaxGeneratedVideoBytes), sizeBytes);
+            await using var bounded = new CountingReadStream(input, Math.Max(1, settings.MaxGeneratedVideoBytes));
             await RunStorageOperationAsync("store", token => storage.StoreAsync(storageKey, bounded, token), cancellationToken);
             if (bounded.BytesRead != sizeBytes)
                 throw new FileUploadValidationException("Generated video output size did not match its declared size.");
