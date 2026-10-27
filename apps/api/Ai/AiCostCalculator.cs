@@ -26,10 +26,17 @@ public sealed class AiCostCalculator(AiModelCatalog catalog) : IAiCostCalculator
             || cached > 0 && !model.CachedInputPricePerMillion.HasValue
             || output > 0 && !model.OutputPricePerMillion.HasValue)
             return null;
-        var cost = uncachedInput * model.InputPricePerMillion.GetValueOrDefault() / 1_000_000m
-            + cached * model.CachedInputPricePerMillion.GetValueOrDefault() / 1_000_000m
-            + output * model.OutputPricePerMillion.GetValueOrDefault() / 1_000_000m;
-        return decimal.Round(cost, 8, MidpointRounding.AwayFromZero);
+        try
+        {
+            var cost = uncachedInput * model.InputPricePerMillion.GetValueOrDefault() / 1_000_000m
+                + cached * model.CachedInputPricePerMillion.GetValueOrDefault() / 1_000_000m
+                + output * model.OutputPricePerMillion.GetValueOrDefault() / 1_000_000m;
+            return decimal.Round(cost, 8, MidpointRounding.AwayFromZero);
+        }
+        catch (OverflowException)
+        {
+            return null;
+        }
     }
 
     public UsagePricingSnapshot? GetPricingSnapshot(AiUsageMetadata usage)
