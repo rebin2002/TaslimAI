@@ -17,7 +17,8 @@ public sealed class MovieDialogueController(IMovieDialogueProductionService dial
     [HttpGet("clips/{clipId:guid}/dialogue")]
     public async Task<IActionResult> Get(Guid clipId, CancellationToken cancellationToken)
     {
-        var result = await dialogue.GetClipAsync(UserId(), clipId, cancellationToken);
+        if (!TryGetUserId(out var userId)) return Unauthorized();
+        var result = await dialogue.GetClipAsync(userId, clipId, cancellationToken);
         return result is null ? ApiResults.Error(this, StatusCodes.Status404NotFound, "MOVIE_CLIP_NOT_FOUND", "Movie clip not found.") : Ok(result);
     }
 
@@ -25,9 +26,10 @@ public sealed class MovieDialogueController(IMovieDialogueProductionService dial
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> AddLine(Guid clipId, MovieDialogueLineRequest request, CancellationToken cancellationToken)
     {
+        if (!TryGetUserId(out var userId)) return Unauthorized();
         try
         {
-            var result = await dialogue.AddLineAsync(UserId(), clipId, request, cancellationToken);
+            var result = await dialogue.AddLineAsync(userId, clipId, request, cancellationToken);
             return result is null ? ApiResults.Error(this, StatusCodes.Status404NotFound, "MOVIE_CLIP_NOT_FOUND", "Movie clip not found.") : Ok(result);
         }
         catch (MovieDialogueValidationException exception)
@@ -41,9 +43,10 @@ public sealed class MovieDialogueController(IMovieDialogueProductionService dial
     [EnableRateLimiting(RateLimiting.ExpensiveAi)]
     public async Task<IActionResult> QueueTake(Guid lineId, MovieDialogueTakeRequest request, CancellationToken cancellationToken)
     {
+        if (!TryGetUserId(out var userId)) return Unauthorized();
         try
         {
-            var result = await dialogue.QueueTakeAsync(UserId(), lineId, request, Request.Headers["Idempotency-Key"].FirstOrDefault(), cancellationToken);
+            var result = await dialogue.QueueTakeAsync(userId, lineId, request, Request.Headers["Idempotency-Key"].FirstOrDefault(), cancellationToken);
             return result is null ? ApiResults.Error(this, StatusCodes.Status404NotFound, "MOVIE_DIALOGUE_LINE_NOT_FOUND", "Dialogue line not found.") : Accepted(result);
         }
         catch (MovieDialogueValidationException exception)
@@ -64,9 +67,10 @@ public sealed class MovieDialogueController(IMovieDialogueProductionService dial
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Approve(Guid takeId, MovieDialogueTakeApprovalRequest request, CancellationToken cancellationToken)
     {
+        if (!TryGetUserId(out var userId)) return Unauthorized();
         try
         {
-            var result = await dialogue.ApproveTakeAsync(UserId(), takeId, request, cancellationToken);
+            var result = await dialogue.ApproveTakeAsync(userId, takeId, request, cancellationToken);
             return result is null ? ApiResults.Error(this, StatusCodes.Status404NotFound, "MOVIE_DIALOGUE_TAKE_NOT_FOUND", "Dialogue take not found.") : Ok(result);
         }
         catch (MovieDialogueValidationException exception)
@@ -79,9 +83,10 @@ public sealed class MovieDialogueController(IMovieDialogueProductionService dial
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Select(Guid takeId, CancellationToken cancellationToken)
     {
+        if (!TryGetUserId(out var userId)) return Unauthorized();
         try
         {
-            var result = await dialogue.SelectTakeAsync(UserId(), takeId, cancellationToken);
+            var result = await dialogue.SelectTakeAsync(userId, takeId, cancellationToken);
             return result is null ? ApiResults.Error(this, StatusCodes.Status404NotFound, "MOVIE_DIALOGUE_TAKE_NOT_FOUND", "Dialogue take not found.") : Ok(result);
         }
         catch (MovieDialogueValidationException exception)
@@ -90,5 +95,9 @@ public sealed class MovieDialogueController(IMovieDialogueProductionService dial
         }
     }
 
-    private Guid UserId() => Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier) ?? throw new InvalidOperationException("Authenticated user identifier is missing."));
+    private bool TryGetUserId(out Guid userId)
+    {
+        var value = User.FindFirstValue(ClaimTypes.NameIdentifier);
+        return Guid.TryParse(value, out userId) && userId != Guid.Empty;
+    }
 }
