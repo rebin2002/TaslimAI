@@ -23,6 +23,9 @@ public sealed class DocumentGenerationJobHandler(
 
     public async Task<GenerationHandlerResult> ExecuteAsync(GenerationJob job, IProgress<int> progress, CancellationToken cancellationToken)
     {
+        if (!settings.Enabled)
+            throw new DocumentGenerationStageException(DocumentGenerationStages.Validation, "DOCUMENT_STUDIO_UNAVAILABLE", "Document generation is not available right now.");
+
         DocumentGenerationInput input;
         try
         {
