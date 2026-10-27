@@ -95,4 +95,14 @@ describe("movie salvage model", () => {
     expect(revision.tracks?.[0].items[0]).toMatchObject({ kind: "VisualTake", sourceTakeId: "take-1", timelineOutMilliseconds: 6600 });
     expect(revision.tracks?.[0].items[0].metadataJson).toContain("salvage-director");
   });
+
+  it("does not widen an explicitly invalid usable range to the full take", () => {
+    const project = projectWithTake();
+    project.scenes[0].shots[0].clips[0].metadataJson = JSON.stringify({
+      durationMilliseconds: 12000,
+      usableRanges: [{ startMilliseconds: 9000, endMilliseconds: 2000 }],
+    });
+
+    expect(buildMovieSubclips(project)).toHaveLength(0);
+  });
 });

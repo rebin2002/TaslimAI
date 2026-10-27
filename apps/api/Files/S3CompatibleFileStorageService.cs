@@ -200,6 +200,9 @@ internal sealed class AwsS3CompatibleObjectClient : IS3CompatibleObjectClient
         AutoResetStreamPosition = false,
         DisablePayloadSigning = true,
         DisableDefaultChecksumValidation = true,
+        // R2 does not support the SDK's streaming/chunked S3 upload signature.
+        // Keep object PUTs non-chunked over HTTPS; the input stream remains caller-owned.
+        UseChunkEncoding = false,
     };
 
     public async Task<Stream?> GetAsync(string bucket, string key, CancellationToken cancellationToken = default)
