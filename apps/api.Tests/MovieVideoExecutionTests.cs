@@ -90,7 +90,10 @@ public sealed class MovieVideoExecutionTests
             null,
             null,
             null,
-            null);
+            null,
+            SourceResolution: "720p",
+            TargetResolution: "1080p",
+            QualityTier: "cinema");
         job.InputJson = System.Text.Json.JsonSerializer.Serialize(input);
 
         db.AddRange(
@@ -128,6 +131,11 @@ public sealed class MovieVideoExecutionTests
         await Assert.ThrowsAsync<MovieVideoProviderTimeoutException>(() => handler.ExecuteAsync(job, new Progress<int>(), CancellationToken.None));
 
         Assert.Equal(1, provider.CancelCalls);
+        Assert.NotNull(provider.SubmittedRequest);
+        Assert.Equal("720p", provider.SubmittedRequest.SourceResolution);
+        Assert.Equal("1080p", provider.SubmittedRequest.TargetResolution);
+        Assert.Equal("cinema", provider.SubmittedRequest.QualityTier);
+        Assert.Null(provider.SubmittedRequest.MasterResolution);
         var execution = await db.MovieVideoProviderExecutions.AsNoTracking().SingleAsync();
         Assert.Equal("provider-job", execution.ProviderJobId);
         Assert.Equal(MovieVideoExecutionStatuses.TimedOut, execution.Status);
@@ -389,9 +397,13 @@ public sealed class MovieVideoExecutionTests
         public bool IsAvailable => true;
         public IReadOnlyCollection<string> SupportedOperations { get; } = [MovieStudioOperations.SceneClip];
         public int CancelCalls { get; private set; }
+        public MovieVideoGenerationRequest? SubmittedRequest { get; private set; }
 
-        public Task<MovieVideoSubmission> SubmitAsync(MovieVideoGenerationRequest request, CancellationToken cancellationToken) =>
-            Task.FromResult(new MovieVideoSubmission("provider-job"));
+        public Task<MovieVideoSubmission> SubmitAsync(MovieVideoGenerationRequest request, CancellationToken cancellationToken)
+        {
+            SubmittedRequest = request;
+            return Task.FromResult(new MovieVideoSubmission("provider-job"));
+        }
 
         public Task<MovieVideoProviderStatus> GetStatusAsync(string providerJobId, CancellationToken cancellationToken) =>
             Task.FromResult(new MovieVideoProviderStatus(MovieVideoProviderJobStatus.Running, 40));
