@@ -1425,7 +1425,14 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                 || canonicalInput.MovieSceneId != scene.Id
                 || canonicalInput.MovieShotId != shot?.Id
                 || !string.Equals(canonicalJob.Title, requestedTitle, StringComparison.Ordinal))
+            {
+                // A competing, different request may commit its job after our
+                // initial key lookup. Do not strand this request's persisted
+                // speculative clip when its idempotency fingerprint conflicts.
+                db.MovieClips.Remove(clip);
+                await db.SaveChangesAsync(CancellationToken.None);
                 throw;
+            }
             var canonicalClip = await db.MovieClips.SingleOrDefaultAsync(item => item.Id == canonicalInput.MovieClipId && item.MovieProjectId == movie.Id, cancellationToken);
             if (canonicalClip is null)
                 throw new MovieStudioValidationException("The idempotent generation target is no longer available.");
@@ -1437,6 +1444,15 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                 await GetAsync(userId, movie.Id, cancellationToken) ?? throw new InvalidOperationException("Movie project disappeared."),
                 GenerationJobContractMapper.ToMovieDto(canonicalJob),
                 canonicalClip.Id);
+        }
+        catch (GenerationJobValidationException)
+        {
+            // Validate-and-queue can reject a request after the target clip was
+            // inserted (e.g. an overlong idempotency key). Keep those rejected
+            // requests from leaving a queued clip with no generation job.
+            db.MovieClips.Remove(clip);
+            await db.SaveChangesAsync(CancellationToken.None);
+            throw;
         }
         // The clip is persisted before the job because the job validator needs a
         // durable target. When two identical requests cross that boundary, the
