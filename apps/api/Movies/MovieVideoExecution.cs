@@ -216,6 +216,24 @@ public sealed class MovieVideoExecutionStore(TaslimDbContext db, IOptions<MovieV
             .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.Status, MovieVideoExecutionStatuses.Completed).SetProperty(item => item.ProgressPercent, 100).SetProperty(item => item.CompletedAt, now).SetProperty(item => item.UpdatedAt, now), cancellationToken);
         await db.MovieClips.Where(item => item.GenerationJobId == jobId && db.GenerationJobs.Any(job => job.Id == jobId && job.Status == GenerationJobStatus.Succeeded && job.ConcurrencyToken == concurrencyToken))
             .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.Status, MovieClipStatuses.Ready).SetProperty(item => item.AssetId, assetId).SetProperty(item => item.StoredFileId, storedFileId).SetProperty(item => item.DurationSeconds, item => durationSeconds ?? item.DurationSeconds).SetProperty(item => item.MetadataJson, metadataJson).SetProperty(item => item.UpdatedAt, now), cancellationToken);
+        // The first worker can finish before QueueClipAsync has saved GenerationJobId.
+        // The provider execution already durably identifies the canonical clip.
+        // Publish only to that exact unlinked clip in the job's workspace and
+        // under the winning execution token; do not adopt a clip linked elsewhere.
+        await db.MovieClips.Where(item => item.GenerationJobId == null
+            && db.MovieVideoProviderExecutions.Any(execution => execution.MovieClipId == item.Id
+                && execution.GenerationJobId == jobId
+                && execution.GenerationJob.Status == GenerationJobStatus.Succeeded
+                && execution.GenerationJob.ConcurrencyToken == concurrencyToken
+                && execution.GenerationJob.WorkspaceId == item.MovieProject.WorkspaceId))
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(item => item.GenerationJobId, (Guid?)jobId)
+                .SetProperty(item => item.Status, MovieClipStatuses.Ready)
+                .SetProperty(item => item.AssetId, assetId)
+                .SetProperty(item => item.StoredFileId, storedFileId)
+                .SetProperty(item => item.DurationSeconds, item => durationSeconds ?? item.DurationSeconds)
+                .SetProperty(item => item.MetadataJson, metadataJson)
+                .SetProperty(item => item.UpdatedAt, now), cancellationToken);
         if (assetId.HasValue)
         {
             await db.MovieTakes.Where(item => item.GenerationJobId == jobId && db.GenerationJobs.Any(job => job.Id == jobId && job.Status == GenerationJobStatus.Succeeded && job.ConcurrencyToken == concurrencyToken)).ExecuteUpdateAsync(setters => setters
