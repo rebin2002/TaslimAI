@@ -1,11 +1,12 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Activity, AlertTriangle, ArrowLeft, Boxes, CheckCircle2, CircleDollarSign, Clock3, Database, FileStack, Gauge, RefreshCw, ServerCog, ShieldCheck, UsersRound, Workflow, XCircle } from "lucide-react";
 import { useLocale } from "@/components/LocaleProvider";
 import { api, type AdminCountBreakdown, type AdminOperationsDashboard, type AdminProviderHealth } from "@/lib/api";
 import { presetRange } from "@/lib/adminUsageState";
+import { isAdminOperationsRequestCurrent, startAdminOperationsRequest } from "@/lib/adminOperationsRequest";
 import { formatAdminBytes, formatAdminDateTime, formatAdminMinutes, formatAdminMoney, formatAdminNumber, translateAdminOperations, type AdminOperationsKey } from "@/lib/adminOperationsI18n";
 import type { Locale } from "@/lib/i18n";
 
@@ -43,11 +44,21 @@ export function AdminOperationsView() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [recoveringJobId, setRecoveringJobId] = useState<string | null>(null);
+  const requestSequence = useRef(0);
   const load = useCallback(async (range: { fromUtc: string; toUtc: string }) => {
+    const request = startAdminOperationsRequest(requestSequence.current, range);
+    requestSequence.current = request.sequence;
     setLoading(true); setError(null);
-    try { setDashboard(await api.getAdminOperationsDashboard(range)); }
-    catch { setDashboard(null); setError(translateAdminOperations(locale, "operationalError")); }
-    finally { setLoading(false); }
+    try {
+      const next = await api.getAdminOperationsDashboard(range);
+      if (!isAdminOperationsRequestCurrent(request, requestSequence.current, range)) return;
+      setDashboard(next);
+    } catch {
+      if (!isAdminOperationsRequestCurrent(request, requestSequence.current, range)) return;
+      setDashboard(null); setError(translateAdminOperations(locale, "operationalError"));
+    } finally {
+      if (isAdminOperationsRequestCurrent(request, requestSequence.current, range)) setLoading(false);
+    }
   }, [locale]);
   const recoverJob = async (jobId: string) => {
     setRecoveringJobId(jobId); setError(null);
@@ -57,7 +68,13 @@ export function AdminOperationsView() {
     } catch { setError(t("recoverError")); }
     finally { setRecoveringJobId(null); }
   };
-  useEffect(() => { const timer = window.setTimeout(() => { void load(presetRange("thirtyDays")); }, 0); return () => window.clearTimeout(timer); }, [load]);
+  useEffect(() => {
+    const sequenceAtSchedule = requestSequence.current;
+    const timer = window.setTimeout(() => {
+      if (requestSequence.current === sequenceAtSchedule) void load(presetRange("thirtyDays"));
+    }, 0);
+    return () => { window.clearTimeout(timer); requestSequence.current += 1; };
+  }, [load]);
   const applyPreset = (next: "today" | "sevenDays" | "thirtyDays") => { setPreset(next); const range = presetRange(next); setFrom(range.fromUtc.slice(0, 10)); setTo(range.toUtc.slice(0, 10)); void load(range); };
   const applyCustom = () => { if (!from || !to) return; setPreset("custom"); void load({ fromUtc: new Date(`${from}T00:00:00.000Z`).toISOString(), toUtc: new Date(`${to}T23:59:59.999Z`).toISOString() }); };
   const number = (value: number) => formatAdminNumber(value, locale);
