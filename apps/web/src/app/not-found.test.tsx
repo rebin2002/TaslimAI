@@ -15,6 +15,7 @@ describe("not-found boundary", () => {
     expect(html).toContain("We could not find that page");
     expect(html).toContain('aria-labelledby="not-found-title"');
     expect(html).toContain('aria-describedby="not-found-description"');
+    expect(html).not.toMatch(/<main\b/);
     expect(html).toContain('href="/"');
     expect(html).toContain('href="/assets"');
     expect(html).not.toContain("error.message");
