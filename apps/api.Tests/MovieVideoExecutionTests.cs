@@ -370,8 +370,66 @@ public sealed class MovieVideoExecutionTests
         Assert.Equal(0, provider.CancelCalls);
         var execution = await db.MovieVideoProviderExecutions.AsNoTracking().SingleAsync();
         Assert.Null(execution.ProviderJobId);
+        Assert.Equal(1, execution.AttemptCount);
         Assert.Equal(MovieVideoExecutionStatuses.ProviderUnavailable, execution.Status);
         Assert.Equal(MovieClipStatuses.Failed, (await db.MovieClips.AsNoTracking().SingleAsync()).Status);
+
+        // A later worker may reclaim the durable job, but must not send a
+        // second potentially billable request after an ambiguous submission.
+        db.ChangeTracker.Clear();
+        var newToken = Guid.NewGuid();
+        await db.GenerationJobs.Where(item => item.Id == fixture.Job.Id)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(item => item.ConcurrencyToken, newToken));
+        var reclaimedJob = await db.GenerationJobs.SingleAsync(item => item.Id == fixture.Job.Id);
+        var reclaimedHandler = new MovieVideoGenerationJobHandler(
+            db, provider, new MovieVideoExecutionStore(db, Options.Create(options)),
+            Options.Create(options), NullLogger<MovieVideoGenerationJobHandler>.Instance);
+        var refused = await Assert.ThrowsAsync<MovieVideoProviderException>(
+            () => reclaimedHandler.ExecuteAsync(reclaimedJob, new Progress<int>(), CancellationToken.None));
+        Assert.Equal(GenerationJobErrorCodes.MovieGenerationFailed, refused.Code);
+        Assert.False(refused.IsTransient);
+        Assert.Equal(1, provider.SubmitCalls);
+        Assert.Equal(1, (await db.MovieVideoProviderExecutions.AsNoTracking().SingleAsync()).AttemptCount);
+    }
+
+    [Fact]
+    public async Task Crash_after_durable_submit_marker_does_not_issue_a_second_provider_request()
+    {
+        var fixture = await CreateRunningMovieJobAsync(
+            "Movie crash recovery test", "No new submit after an unknown remote outcome.");
+        await using var connection = fixture.Connection;
+        await using var db = fixture.Db;
+        var provider = new TransientSubmissionMovieVideoProvider();
+        var options = new MovieVideoOptions { Enabled = true, ProviderKey = provider.Key };
+        var store = new MovieVideoExecutionStore(db, Options.Create(options));
+
+        // Simulate process death after reserving the submission attempt but
+        // before its HTTP response or provider job id is durably recorded.
+        var input = System.Text.Json.JsonSerializer.Deserialize<MovieGenerationInput>(fixture.Job.InputJson)!;
+        var execution = await store.GetOrCreateAsync(fixture.Job, input.MovieClipId, provider.Key, CancellationToken.None);
+        await store.MarkSubmissionAttemptAsync(execution, fixture.Job.ConcurrencyToken, CancellationToken.None);
+        Assert.Equal(1, (await db.MovieVideoProviderExecutions.AsNoTracking().SingleAsync()).AttemptCount);
+        Assert.Equal(0, provider.SubmitCalls);
+
+        db.ChangeTracker.Clear();
+        var newToken = Guid.NewGuid();
+        await db.GenerationJobs.Where(item => item.Id == fixture.Job.Id)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(item => item.ConcurrencyToken, newToken));
+        var reclaimedJob = await db.GenerationJobs.SingleAsync(item => item.Id == fixture.Job.Id);
+        var reclaimedHandler = new MovieVideoGenerationJobHandler(
+            db, provider, new MovieVideoExecutionStore(db, Options.Create(options)),
+            Options.Create(options), NullLogger<MovieVideoGenerationJobHandler>.Instance);
+        var refused = await Assert.ThrowsAsync<MovieVideoProviderException>(
+            () => reclaimedHandler.ExecuteAsync(reclaimedJob, new Progress<int>(), CancellationToken.None));
+
+        Assert.Equal(GenerationJobErrorCodes.MovieGenerationFailed, refused.Code);
+        Assert.False(refused.IsTransient);
+        Assert.Equal(0, provider.SubmitCalls);
+        var persisted = await db.MovieVideoProviderExecutions.AsNoTracking().SingleAsync();
+        Assert.Equal(1, persisted.AttemptCount);
+        Assert.Null(persisted.ProviderJobId);
     }
 
     private static async Task<(SqliteConnection Connection, TaslimDbContext Db, GenerationJob Job)> CreateRunningMovieJobAsync(string title, string description)
