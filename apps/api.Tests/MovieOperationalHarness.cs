@@ -99,7 +99,8 @@ public static class MovieOperationalFixtures
         MovieOperationalDiagnostics? diagnostics = null,
         string title = "Operational E2E Feature",
         bool lastSeedStory = false,
-        int? sceneDurationSeconds = null)
+        int? sceneDurationSeconds = null,
+        AuthResponse? existingOwner = null)
     {
         var storyPremise = lastSeedStory
             ? "A young farmer must protect the last seed through drought until the first rain."
@@ -126,7 +127,9 @@ public static class MovieOperationalFixtures
         var setDescription = lastSeedStory ? "A dry field beneath an old tree." : "A practical warehouse interior.";
         var propName = lastSeedStory ? "Last Seed" : "Brass Compass";
         var propDescription = lastSeedStory ? "The grandfather's final seed, kept safe for the first rain." : "A worn brass compass with a cracked glass face.";
-        var owner = await RegisterAsync(client, "Movie Operational Owner", diagnostics);
+        // Reuse the same authenticated owner when a test needs multiple movies.
+        // Registering again on the shared client would replace its auth cookie.
+        var owner = existingOwner ?? await RegisterAsync(client, "Movie Operational Owner", diagnostics);
         var project = await PostAsync<MovieStudioProjectResponse>(client, "/api/movie-studio/projects", new
         {
             workspaceId = owner.PersonalWorkspace.Id,
