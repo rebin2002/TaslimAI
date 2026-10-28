@@ -88,6 +88,61 @@ public sealed class MovieProductionStructuredPromptAdmissionTests
     }
 
     [Fact]
+    public async Task Legacy_shot_generation_counts_world_context_before_cost_reservation_when_provider_embeds_it()
+    {
+        // The synthetic adapter opts into using the world snapshot, as Manus
+        // does. The other creative sections fit exactly within the configured
+        // capacity; even the smallest world snapshot ("{}") exceeds it.
+        // Provider calls and generation workers are disabled.
+        using var factory = new MovieStructuredPromptBudgetFactory
+        {
+            IncludeWorldContextInPrompt = true,
+        };
+        using (var setup = factory.Services.CreateScope())
+            setup.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+
+        using var client = factory.CreateClient();
+        var movie = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "World Prompt Film", sceneDurationSeconds: 5);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var shot = await db.MovieShots
+            .Include(item => item.Scene).ThenInclude(item => item.MovieProject)
+            .SingleAsync(item => item.Id == movie.Shot.Id);
+        var project = shot.Scene.MovieProject;
+        var withoutWorld = (long)shot.Description.Trim().Length
+            + (project.Style?.Trim().Length ?? 0)
+            + (project.AdditionalInstructions?.Trim().Length ?? 0)
+            + MovieStudioService.SceneSnapshot(shot.Scene).Length
+            + MovieStudioService.ShotSnapshot(shot).Length;
+        Assert.InRange(withoutWorld, 1, int.MaxValue - 2);
+        var provider = Assert.IsType<FakeMovieVideoProvider>(
+            scope.ServiceProvider.GetRequiredService<IMovieVideoProvider>());
+        provider.SceneClipPromptMaxCharacters = checked((int)withoutWorld + 1);
+
+        var clipsBefore = await db.MovieClips.CountAsync();
+        var jobsBefore = await db.GenerationJobs.CountAsync();
+        var usageBefore = await db.UsageTransactions.CountAsync();
+
+        using var response = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, $"/api/movie-studio/shots/{shot.Id}/generate",
+            new { title = "Five-second world shot", sourceResolution = "720p",
+                targetResolution = "720p", qualityTier = "Standard",
+                confirmationAccepted = true },
+            idempotencyKey: "legacy-world-context-overflow");
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains("MOVIE_CLIP_PROMPT_UNSUPPORTED",
+            await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Equal(clipsBefore, await db.MovieClips.CountAsync());
+        Assert.Equal(jobsBefore, await db.GenerationJobs.CountAsync());
+        Assert.Equal(usageBefore, await db.UsageTransactions.CountAsync());
+        Assert.Equal(0, scope.ServiceProvider.GetRequiredService<FakeProviderCallLog>()
+            .Calls(FakeProviderKind.Movie));
+    }
+
+    [Fact]
     public async Task Approved_render_rejects_oversized_structured_direction_before_job_or_usage_reservation()
     {
         using var factory = new MovieStructuredPromptBudgetFactory();
