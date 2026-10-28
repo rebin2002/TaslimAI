@@ -135,6 +135,76 @@ public sealed class MovieProductionPreflightTests : IClassFixture<GenerationJobs
         Assert.Equal(usageBefore, await db.UsageTransactions.CountAsync());
     }
 
+    [Theory]
+    [InlineData(5, 7200, 7200, true)]
+    [InlineData(null, 10, 7200, true)]
+    [InlineData(null, null, 7200, true)]
+    [InlineData(3600, 7200, 7200, true)]
+    [InlineData(0, 10, 7200, false)]
+    [InlineData(3601, 10, 7200, false)]
+    [InlineData(null, 7200, 7200, false)]
+    [InlineData(null, -1, 7200, false)]
+    public void Read_only_preflight_preserves_selected_single_clip_length_instead_of_clamping(
+        int? shotSeconds, int? sceneSeconds, int movieSeconds, bool expected)
+    {
+        var check = MovieProductionPreflightService.BuildClipDurationCheck(shotSeconds, sceneSeconds, movieSeconds);
+
+        Assert.Equal(MovieProductionPreflightCheckKeys.ClipDuration, check.Key);
+        Assert.True(check.Required);
+        Assert.Equal(expected, check.Satisfied);
+        if (!expected)
+            Assert.Contains("shorter shots", check.Detail, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Authenticated_preflight_rejects_oversized_legacy_scene_without_usage_or_clip_persistence()
+    {
+        using var isolatedFactory = new GenerationJobsNoWorkerFactory();
+        using var client = isolatedFactory.CreateClient();
+        var auth = await Register(client);
+        var project = await SendWithCsrf<MovieStudioProjectResponse>(client, HttpMethod.Post, "/api/movie-studio/projects", new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            mode = MovieProjectModes.Quick,
+            title = "Oversized legacy scene",
+            description = "Only a provider-supported shot may become one production clip.",
+            durationSeconds = 20,
+            aspectRatio = "16:9",
+            style = "cinematic",
+            language = "en",
+        });
+        var scene = await SendWithCsrf<MovieSceneDto>(
+            client, HttpMethod.Post, $"/api/movie-studio/projects/{project.Project.Id}/scenes",
+            new { title = "Opening", summary = "Unsegmented long scene." });
+        var shot = await SendWithCsrf<MovieShotDto>(
+            client, HttpMethod.Post, $"/api/movie-studio/scenes/{scene.Id}/shots",
+            new { description = "The entire scene has not been split into supported shots." });
+
+        // Simulate a scene persisted before today's admission guard, without
+        // requiring any unsafe production mutation or external provider.
+        using var scope = isolatedFactory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var persistedScene = await db.MovieScenes.SingleAsync(item => item.Id == scene.Id);
+        persistedScene.DurationSeconds = 7200;
+        await db.SaveChangesAsync();
+        var usageBefore = await db.UsageTransactions.CountAsync();
+
+        using var response = await client.GetAsync(
+            $"/api/movie-studio/shots/{shot.Id}/production/preflight?confirmationAccepted=true");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var preflight = (await response.Content.ReadFromJsonAsync<MovieProductionPreflightDto>())!;
+        Assert.False(preflight.CanProceed);
+        Assert.Equal(MovieProductionPreflightDecisionCodes.ClipDurationUnsupported, preflight.Decision);
+        Assert.Equal("MOVIE_CLIP_DURATION_UNSUPPORTED", preflight.RejectionCode);
+        Assert.Contains(preflight.Checks, item =>
+            item.Key == MovieProductionPreflightCheckKeys.ClipDuration
+            && item.Required && !item.Satisfied);
+        Assert.Contains(preflight.Recommendations, item => item.Key == "shorten_production_shot");
+        Assert.False(await db.MovieClips.AnyAsync(item => item.MovieProjectId == project.Project.Id));
+        Assert.False(await db.GenerationJobs.AnyAsync(item => item.WorkspaceId == auth.PersonalWorkspace.Id));
+        Assert.Equal(usageBefore, await db.UsageTransactions.CountAsync());
+    }
+
     [Fact]
     public void Reference_package_check_fails_closed_when_package_is_unavailable()
     {
