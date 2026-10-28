@@ -118,6 +118,9 @@ jobs:
           Database__ApplyMigrations: "true"
           AllowedOrigins__0: http://localhost:3000
           Ai__OpenAI__Enabled: "false"
+          # A cold E2E database can require substantial EF migration time after API build.
+          # Keep both liveness and readiness checks mandatory; allow startup to finish.
+          SMOKE_MAX_ATTEMPTS: "180"
           Files__StorageProvider: Local
           Files__LocalRootPath: ${{ github.workspace }}/.e2e-files
         run: |
