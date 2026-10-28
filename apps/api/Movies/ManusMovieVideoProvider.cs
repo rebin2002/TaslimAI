@@ -310,6 +310,7 @@ public sealed class ManusMovieVideoProvider(
         };
         AddSection(sections, "Additional direction", request.AdditionalInstructions);
         AddSection(sections, "Continuity guide", request.ContinuityGuideJson);
+        AddSection(sections, "Character continuity", request.CharacterContinuityJson);
         AddSection(sections, "Scene direction", request.SceneJson);
         AddSection(sections, "Shot direction", request.ShotJson);
         AddSection(sections, "World context", request.WorldContextJson);
