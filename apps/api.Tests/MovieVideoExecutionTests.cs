@@ -512,6 +512,46 @@ public sealed class MovieVideoExecutionTests
     }
 
     [Fact]
+    public async Task Worker_preserves_frame_reference_inputs_for_explicitly_capable_provider()
+    {
+        // This capturing provider opts in to a future verified capability.
+        // No external API call is made; execution stops at the fake submit.
+        var fixture = await CreateRunningMovieJobAsync(
+            "Movie reference-capable adapter", "Preserve both frame inputs and references.");
+        await using var connection = fixture.Connection;
+        await using var db = fixture.Db;
+        var input = System.Text.Json.JsonSerializer.Deserialize<MovieGenerationInput>(fixture.Job.InputJson)!;
+        fixture.Job.InputJson = System.Text.Json.JsonSerializer.Serialize(input with
+        {
+            SourceResolution = "720p",
+            TargetResolution = "720p",
+            QualityTier = DirectorQualityLevels.Standard,
+            ProcessingPath = "native",
+            FirstFrameImageUri = "https://example.invalid/first.png",
+            LastFrameImageUri = "https://example.invalid/last.png",
+            ReferenceImages = [new MovieVideoReferenceImage("https://example.invalid/reference.png", "character")],
+        });
+        await db.SaveChangesAsync();
+
+        var provider = new GuardedSceneMovieVideoProvider(supportsFrameReferences: true);
+        var options = new MovieVideoOptions { Enabled = true, ProviderKey = provider.Key };
+        var handler = new MovieVideoGenerationJobHandler(
+            db, provider, new MovieVideoExecutionStore(db, Options.Create(options)),
+            Options.Create(options), NullLogger<MovieVideoGenerationJobHandler>.Instance);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => handler.ExecuteAsync(fixture.Job, new Progress<int>(), CancellationToken.None));
+
+        Assert.Equal(1, provider.SubmitCalls);
+        var submitted = Assert.IsType<MovieVideoGenerationRequest>(provider.LastSubmittedRequest);
+        Assert.Equal("https://example.invalid/first.png", submitted.FirstFrameImageUri);
+        Assert.Equal("https://example.invalid/last.png", submitted.LastFrameImageUri);
+        var reference = Assert.Single(submitted.ReferenceImages!);
+        Assert.Equal("https://example.invalid/reference.png", reference.Uri);
+        Assert.Equal("character", reference.Role);
+    }
+
+    [Fact]
     public async Task Worker_preserves_supported_priced_intent_at_provider_boundary()
     {
         // The provider is a deterministic fake that records the request and throws.
@@ -1084,8 +1124,13 @@ public sealed class MovieVideoExecutionTests
 
     private sealed class GuardedSceneMovieVideoProvider : IMovieVideoProvider
     {
-        public GuardedSceneMovieVideoProvider(int? promptLimit = null) => SceneClipPromptMaxCharacters = promptLimit;
+        public GuardedSceneMovieVideoProvider(int? promptLimit = null, bool supportsFrameReferences = false)
+        {
+            SceneClipPromptMaxCharacters = promptLimit;
+            SupportsSceneClipFrameReferences = supportsFrameReferences;
+        }
         public int? SceneClipPromptMaxCharacters { get; }
+        public bool SupportsSceneClipFrameReferences { get; }
         public string Key => "guarded-scene-test";
         public bool IsAvailable => true;
         public IReadOnlyCollection<string> SupportedOperations { get; } = [MovieStudioOperations.SceneClip];
