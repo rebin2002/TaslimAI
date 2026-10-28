@@ -333,6 +333,10 @@ public sealed class MovieVideoGenerationJobHandler(
             && (provider.SceneClipDurationRange is not { } range
                 || !range.Supports(input.DurationSeconds)
                 || input.UpscalingRequested
+                // The neutral request carries a separate master output tier, but
+                // no scene-clip adapter declares a verified mastering step.
+                // Never silently drop an older queued job's mastering intent.
+                || !string.IsNullOrWhiteSpace(input.MasterResolution)
                 || !provider.SupportsSceneClipCostIntent(
                     input.SourceResolution ?? string.Empty,
                     input.TargetResolution ?? string.Empty,
