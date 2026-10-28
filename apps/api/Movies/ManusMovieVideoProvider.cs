@@ -313,7 +313,12 @@ public sealed class ManusMovieVideoProvider(
         var maximum = Math.Clamp(Manus.MaxPromptCharacters, 1_000, 20_000);
         if (prompt.Length < 1)
             throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);
-        return prompt.Length <= maximum ? prompt : prompt[..(maximum - 3)].TrimEnd() + "...";
+        // task.create is potentially billable. Never silently trim director notes
+        // or continuity context to fit the configured limit: the shortened
+        // prompt would no longer represent the submitted creative intent.
+        if (prompt.Length > maximum)
+            throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);
+        return prompt;
     }
 
     private static object BuildImageContent(string sourceImageUri)
