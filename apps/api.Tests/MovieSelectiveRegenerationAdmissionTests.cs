@@ -189,8 +189,11 @@ public sealed class MovieSelectiveRegenerationAdmissionTests
         using var client = factory.CreateClient();
         var first = await MovieOperationalFixtures.CreateFullMovieAsync(
             client, title: "First independent regeneration", sceneDurationSeconds: 5);
+        // Keep both movies under the same authenticated user. A second RegisterAsync
+        // would replace the client's auth cookie and make first-movie actions 403.
         var second = await MovieOperationalFixtures.CreateFullMovieAsync(
-            client, title: "Second independent regeneration", sceneDurationSeconds: 5);
+            client, title: "Second independent regeneration", sceneDurationSeconds: 5,
+            existingOwner: first.Owner);
         var firstSource = await ApprovedStoryboardAsync(client, first.Shot.Id);
         var secondSource = await ApprovedStoryboardAsync(client, second.Shot.Id);
         var firstPreview = await MovieOperationalFixtures.PostAsync<MovieSelectiveRegenerationResponse>(
@@ -209,6 +212,8 @@ public sealed class MovieSelectiveRegenerationAdmissionTests
         var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
         var clipsBefore = await db.MovieClips.CountAsync(item => item.MovieProjectId == second.Project.Project.Id);
         var jobsBefore = await db.GenerationJobs.CountAsync(item => item.ProjectId == second.Project.Project.ProjectId);
+        var ledgerBefore = await db.UsageTransactions.CountAsync();
+        var canonicalFirstJobCount = await db.GenerationJobs.CountAsync(item => item.ProjectId == first.Project.Project.ProjectId);
 
         using var rejected = await MovieOperationalFixtures.SendWithCsrfAsync(
             client, HttpMethod.Post,
@@ -220,6 +225,9 @@ public sealed class MovieSelectiveRegenerationAdmissionTests
             await rejected.Content.ReadAsStringAsync(), StringComparison.Ordinal);
         Assert.Equal(clipsBefore, await db.MovieClips.CountAsync(item => item.MovieProjectId == second.Project.Project.Id));
         Assert.Equal(jobsBefore, await db.GenerationJobs.CountAsync(item => item.ProjectId == second.Project.Project.ProjectId));
+        Assert.Equal(canonicalFirstJobCount,
+            await db.GenerationJobs.CountAsync(item => item.ProjectId == first.Project.Project.ProjectId));
+        Assert.Equal(ledgerBefore, await db.UsageTransactions.CountAsync());
         Assert.Equal(MovieRegenerationStatuses.PendingConfirmation,
             await db.MovieRegenerationRequests.Where(item => item.Id == secondPreview.Request.Id)
                 .Select(item => item.Status).SingleAsync());
