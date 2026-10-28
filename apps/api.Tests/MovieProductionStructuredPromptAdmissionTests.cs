@@ -37,6 +37,55 @@ public sealed class MovieStructuredPromptBudgetFactory : MovieOperationalApiFact
 public sealed class MovieProductionStructuredPromptAdmissionTests
 {
     [Fact]
+    public async Task Legacy_shot_generation_rejects_oversized_structured_direction_before_reservation()
+    {
+        using var factory = new MovieStructuredPromptBudgetFactory();
+        using (var setup = factory.Services.CreateScope())
+            setup.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+
+        using var client = factory.CreateClient();
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Short Movie", sceneDurationSeconds: 5);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var shot = await db.MovieShots
+            .Include(item => item.Scene).ThenInclude(item => item.MovieProject)
+            .SingleAsync(item => item.Id == fixture.Shot.Id);
+        var movie = shot.Scene.MovieProject;
+
+        // The readable description and style fit the declared prompt budget.
+        // Required serialized shot direction does not; legacy admission must
+        // reject that overflow before estimating or reserving paid usage.
+        var readableLength = (long)shot.Description.Trim().Length
+            + (movie.Style?.Trim().Length ?? 0)
+            + (movie.AdditionalInstructions?.Trim().Length ?? 0);
+        Assert.True(readableLength < 220, $"Fixture must fit before structured direction: {readableLength}");
+        shot.CameraAndFraming = new string('C', 240);
+        await db.SaveChangesAsync();
+
+        var clipsBefore = await db.MovieClips.CountAsync();
+        var jobsBefore = await db.GenerationJobs.CountAsync();
+        var usageBefore = await db.UsageTransactions.CountAsync();
+
+        using var response = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, $"/api/movie-studio/shots/{shot.Id}/generate",
+            new { title = "Short clip", sourceResolution = "720p",
+                targetResolution = "720p", qualityTier = "Standard",
+                confirmationAccepted = true },
+            idempotencyKey: "legacy-structured-prompt-overflow");
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains("MOVIE_CLIP_PROMPT_UNSUPPORTED",
+            await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Equal(clipsBefore, await db.MovieClips.CountAsync());
+        Assert.Equal(jobsBefore, await db.GenerationJobs.CountAsync());
+        Assert.Equal(usageBefore, await db.UsageTransactions.CountAsync());
+        Assert.Equal(0, scope.ServiceProvider.GetRequiredService<FakeProviderCallLog>()
+            .Calls(FakeProviderKind.Movie));
+    }
+
+    [Fact]
     public async Task Approved_render_rejects_oversized_structured_direction_before_job_or_usage_reservation()
     {
         using var factory = new MovieStructuredPromptBudgetFactory();
