@@ -45,9 +45,14 @@ public sealed class RunwayMovieVideoProvider(
     // Current BuildPayload sends fixed 1280:720 or 720:1280 and does not
     // translate paid quality/upscale tiers. Permit only the unenhanced 720p
     // baseline, never imply a higher resolution or quality instruction.
+    // This priced scene-clip contract does not carry a source-image capability.
+    // BuildPayload supports image-free text_to_video only for gen4.5; another
+    // configured model would be rejected after the queue reserves usage.
+    // Fail closed until the admission contract can distinguish image-to-video.
     public bool SupportsSceneClipCostIntent(string sourceResolution, string targetResolution,
         string qualityTier, string processingPath, string aspectRatio) =>
-        string.Equals(sourceResolution, "720p", StringComparison.OrdinalIgnoreCase)
+        string.Equals(settings.Model?.Trim(), "gen4.5", StringComparison.OrdinalIgnoreCase)
+        && string.Equals(sourceResolution, "720p", StringComparison.OrdinalIgnoreCase)
         && string.Equals(targetResolution, "720p", StringComparison.OrdinalIgnoreCase)
         && string.Equals(qualityTier, DirectorQualityLevels.Standard, StringComparison.OrdinalIgnoreCase)
         && string.Equals(processingPath, "native", StringComparison.OrdinalIgnoreCase)
