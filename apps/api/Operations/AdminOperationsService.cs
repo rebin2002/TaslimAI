@@ -540,8 +540,14 @@ public sealed class AdminOperationsService(
         return normalized;
     }
 
-    private static string? NormalizeIdempotencyKey(string? idempotencyKey) =>
-        string.IsNullOrWhiteSpace(idempotencyKey) ? null : idempotencyKey.Trim()[..Math.Min(128, idempotencyKey.Trim().Length)];
+    private static string? NormalizeIdempotencyKey(string? idempotencyKey)
+    {
+        var normalized = idempotencyKey?.Trim();
+        if (string.IsNullOrEmpty(normalized)) return null;
+        if (normalized.Length > 128)
+            throw new AdminOperationConflictException("IDEMPOTENCY_KEY_TOO_LONG", "The idempotency key is too long.");
+        return normalized;
+    }
 
     private static string SanitizeCode(string? code)
     {
