@@ -116,7 +116,7 @@ public sealed class RunwayMovieVideoProviderTests
         var prompt = boundaryPayload.RootElement.GetProperty("promptText").GetString()!;
         Assert.Equal(1000, prompt.Length);
         Assert.Contains(fullInstructions, prompt, StringComparison.Ordinal);
-        Assert.DoesNotEndWith("...", prompt, StringComparison.Ordinal);
+        Assert.False(prompt.EndsWith("...", StringComparison.Ordinal));
     }
 
     [Fact]
