@@ -106,7 +106,10 @@ public sealed class MovieClipDurationAdmissionTests : IClassFixture<MovieClipDur
         var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
         Assert.Equal(duration, await db.MovieClips.Where(item => item.Id == response.ClipId)
             .Select(item => item.DurationSeconds).SingleAsync());
-        Assert.Single(await db.GenerationJobs.Where(item => item.Id == response.Job.Id).ToListAsync());
+        var queued = await db.GenerationJobs.SingleAsync(item => item.Id == response.Job.Id);
+        var queuedInput = System.Text.Json.JsonSerializer.Deserialize<MovieGenerationInput>(queued.InputJson)!;
+        Assert.Equal(scope.ServiceProvider.GetRequiredService<IMovieVideoProvider>().Key,
+            queuedInput.SelectedProviderKey);
     }
 
     [Fact]
