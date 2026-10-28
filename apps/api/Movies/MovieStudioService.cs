@@ -1439,11 +1439,17 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
             throw new GenerationJobValidationException(
                 "MOVIE_CLIP_EXECUTION_INTENT_UNSUPPORTED",
                 "This provider cannot guarantee the requested resolution, quality and processing profile. Choose a supported output profile.");
-        // A single description that is already beyond the complete provider
-        // prompt capacity cannot be made valid by appending creative context.
-        // Reject before estimating cost, persisting a clip or reserving usage.
+        // The final provider prompt also preserves the movie's style and
+        // additional creative direction. Their combined trimmed text is a
+        // conservative lower bound of the final prompt for bounded adapters;
+        // reject impossible requests before estimating cost or reserving usage.
+        // Adapter-specific section headings/continuity snapshots are checked
+        // again at submission and can only increase the assembled length.
+        var minimumCreativePromptLength = (long)description.Trim().Length
+            + (string.IsNullOrWhiteSpace(movie.Style) ? 0 : movie.Style.Trim().Length)
+            + (string.IsNullOrWhiteSpace(movie.AdditionalInstructions) ? 0 : movie.AdditionalInstructions.Trim().Length);
         if (provider.SceneClipPromptMaxCharacters is { } promptCapacity
-            && description.Trim().Length > promptCapacity)
+            && minimumCreativePromptLength > promptCapacity)
             throw new GenerationJobValidationException(
                 "MOVIE_CLIP_PROMPT_UNSUPPORTED",
                 "The scene or shot description exceeds this provider's prompt limit. Shorten the description before generating.");
