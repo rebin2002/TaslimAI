@@ -81,6 +81,26 @@ public sealed class RunwayMovieVideoProviderTests
         Assert.Empty(handler.Requests);
     }
 
+    [Theory]
+    [InlineData("first-frame")]
+    [InlineData("last-frame")]
+    [InlineData("reference-images")]
+    public async Task Unsupported_frame_and_reference_inputs_never_submit_a_billable_provider_request(string referenceCase)
+    {
+        var handler = new RecordingHandler(_ => throw new InvalidOperationException("No provider request is allowed."));
+        var provider = CreateProvider(handler, EnabledOptions());
+        var baseline = Request();
+        var request = referenceCase switch
+        {
+            "first-frame" => baseline with { FirstFrameImageUri = "https://assets.example.test/first.png" },
+            "last-frame" => baseline with { LastFrameImageUri = "https://assets.example.test/last.png" },
+            _ => baseline with { ReferenceImages = [new MovieVideoReferenceImage("https://assets.example.test/character.png", "character")] },
+        };
+
+        await Assert.ThrowsAsync<MovieVideoProviderException>(() => provider.SubmitAsync(request, CancellationToken.None));
+        Assert.Empty(handler.Requests);
+    }
+
     [Fact]
     public async Task Polling_normalizes_queued_generating_and_completed_states_and_preserves_cost_metadata()
     {
