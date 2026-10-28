@@ -75,6 +75,32 @@ public sealed class RunwayMovieVideoProviderTests
         Assert.DoesNotContain("synthetic-runway-token", payload.RootElement.GetProperty("promptText").GetString(), StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task Approved_character_continuity_is_sent_with_movie_guide_in_prompt()
+    {
+        var handler = new RecordingHandler(_ => JsonResponse(JsonSerializer.Serialize(new { id = TaskId })));
+        var provider = CreateProvider(handler, EnabledOptions());
+        var characterContext = JsonSerializer.Serialize(new
+        {
+            name = "Liora",
+            wardrobe = "blue coat",
+            lockedExpression = "calm",
+        });
+
+        await provider.SubmitAsync(Request() with
+        {
+            CharacterContinuityJson = characterContext,
+        }, CancellationToken.None);
+
+        using var payload = JsonDocument.Parse(Assert.Single(handler.RequestBodies));
+        var prompt = payload.RootElement.GetProperty("promptText").GetString();
+        Assert.NotNull(prompt);
+        Assert.Contains("Continuity direction: Visual language: natural light", prompt, StringComparison.Ordinal);
+        Assert.Contains("Character continuity: ", prompt, StringComparison.Ordinal);
+        Assert.Contains(characterContext, prompt, StringComparison.Ordinal);
+        Assert.Contains("Liora", prompt, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData("1080p", "720p", "Standard", "native")]
     [InlineData("720p", "1080p", "Standard", "native")]
