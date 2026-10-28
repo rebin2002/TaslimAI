@@ -102,6 +102,57 @@ public sealed class MovieIntercutPlannerTests
         Assert.Equal(MovieIntercutPlanCodes.StoryOrderInvalid, duplicateException.Code);
     }
 
+    [Fact]
+    public void Two_hour_intercut_timeline_keeps_all_short_clips_and_deterministic_provenance()
+    {
+        // Planning 720 ten-second clips must not be confused with one 7,200-second
+        // provider submission; this pure planner never queues a video generation.
+        var request = new MovieIntercutPlanRequest
+        {
+            Clips = Enumerable.Range(1, 720).Select(index =>
+                Coverage(Guid.NewGuid(), Guid.NewGuid(), SceneOne, 1, index, 10m, MovieIntercutCoverageKinds.Primary)).ToArray(),
+        };
+
+        var proposal = MovieIntercutPlanner.Build(ProjectId, request);
+        var replay = MovieIntercutPlanner.Build(ProjectId, request);
+
+        Assert.Equal(720, proposal.ProposedTimeline.Clips.Count);
+        Assert.Equal(7_200m, proposal.ProposedTimeline.Clips.Sum(clip => clip.DurationSeconds));
+        Assert.Equal(7_190m, proposal.ProposedTimeline.Clips.Last().StartSeconds);
+        Assert.Equal(719, proposal.ProposedTimeline.Transitions.Count);
+        Assert.Equal(proposal.ProvenanceHash, replay.ProvenanceHash);
+        Assert.Equal(proposal.ProposedTimeline.Clips, replay.ProposedTimeline.Clips);
+    }
+
+    [Fact]
+    public void Intercut_rejects_more_than_two_hours_even_when_each_clip_is_short()
+    {
+        var request = new MovieIntercutPlanRequest
+        {
+            Clips = Enumerable.Range(1, 721).Select(index =>
+                Coverage(Guid.NewGuid(), Guid.NewGuid(), SceneOne, 1, index, 10m, MovieIntercutCoverageKinds.Primary)).ToArray(),
+        };
+
+        var exception = Assert.Throws<MovieIntercutPlanningException>(() => MovieIntercutPlanner.Build(ProjectId, request));
+
+        Assert.Equal(MovieIntercutPlanCodes.DurationInvalid, exception.Code);
+        Assert.Contains("7,200", exception.Message);
+    }
+
+    [Fact]
+    public void Two_hour_timeline_cap_does_not_relax_individual_coverage_duration()
+    {
+        var request = new MovieIntercutPlanRequest
+        {
+            Clips = [Coverage(PrimaryOne, ShotOne, SceneOne, 1, 1, 3_601m, MovieIntercutCoverageKinds.Primary)],
+        };
+
+        var exception = Assert.Throws<MovieIntercutPlanningException>(() => MovieIntercutPlanner.Build(ProjectId, request));
+
+        Assert.Equal(MovieIntercutPlanCodes.DurationInvalid, exception.Code);
+        Assert.Contains("3,600", exception.Message);
+    }
+
     private static MovieIntercutCoverageRequest Coverage(Guid clipId, Guid shotId, Guid sceneId, int sceneSequence, int shotSequence, decimal duration, string kind, Guid? anchorShotId = null, string? label = null) => new()
     {
         ClipId = clipId,
