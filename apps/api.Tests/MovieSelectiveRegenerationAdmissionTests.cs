@@ -179,6 +179,52 @@ public sealed class MovieSelectiveRegenerationAdmissionTests
         Assert.Equal(ledgerBefore, await db.UsageTransactions.CountAsync());
     }
 
+    [Fact]
+    public async Task Reusing_another_regeneration_job_key_rejects_without_a_speculative_clip_or_job()
+    {
+        using var factory = new MovieClipDurationApiFactory();
+        using (var setup = factory.Services.CreateScope())
+            setup.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+
+        using var client = factory.CreateClient();
+        var first = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "First independent regeneration", sceneDurationSeconds: 5);
+        var second = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Second independent regeneration", sceneDurationSeconds: 5);
+        var firstSource = await ApprovedStoryboardAsync(client, first.Shot.Id);
+        var secondSource = await ApprovedStoryboardAsync(client, second.Shot.Id);
+        var firstPreview = await MovieOperationalFixtures.PostAsync<MovieSelectiveRegenerationResponse>(
+            client, $"/api/movie-studio/shots/{first.Shot.Id}/regeneration-requests", Request(firstSource));
+        var secondPreview = await MovieOperationalFixtures.PostAsync<MovieSelectiveRegenerationResponse>(
+            client, $"/api/movie-studio/shots/{second.Shot.Id}/regeneration-requests", Request(secondSource));
+
+        const string sharedKey = "selective-regeneration-cross-request-key";
+        using (var confirmed = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post,
+            $"/api/movie-studio/regeneration-requests/{firstPreview.Request.Id}/confirm",
+            new { confirm = true }, idempotencyKey: sharedKey))
+            Assert.True(confirmed.IsSuccessStatusCode, await confirmed.Content.ReadAsStringAsync());
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var clipsBefore = await db.MovieClips.CountAsync(item => item.MovieProjectId == second.Project.Project.Id);
+        var jobsBefore = await db.GenerationJobs.CountAsync(item => item.ProjectId == second.Project.Project.ProjectId);
+
+        using var rejected = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post,
+            $"/api/movie-studio/regeneration-requests/{secondPreview.Request.Id}/confirm",
+            new { confirm = true }, idempotencyKey: sharedKey);
+
+        Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
+        Assert.Contains("IDEMPOTENCY_KEY_REUSED",
+            await rejected.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Equal(clipsBefore, await db.MovieClips.CountAsync(item => item.MovieProjectId == second.Project.Project.Id));
+        Assert.Equal(jobsBefore, await db.GenerationJobs.CountAsync(item => item.ProjectId == second.Project.Project.ProjectId));
+        Assert.Equal(MovieRegenerationStatuses.PendingConfirmation,
+            await db.MovieRegenerationRequests.Where(item => item.Id == secondPreview.Request.Id)
+                .Select(item => item.Status).SingleAsync());
+    }
+
     private static object Request(Guid sourceId) => new
     {
         actionType = MovieRegenerationActionTypes.ProductionKeyframeCandidate,
