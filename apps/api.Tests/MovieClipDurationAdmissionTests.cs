@@ -149,7 +149,12 @@ public sealed class MovieClipUnclampedDurationTests
             idempotencyKey: key);
 
         Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
-        Assert.Contains("MOVIE_CLIP_DURATION_UNSUPPORTED",
+        // A zero-length shot is stopped by MovieShotReadiness before reaching
+        // provider capability admission; both validation paths must fail closed.
+        // Do not weaken readiness just to return a different error code.
+        var expectedCode = !generateScene && invalidSeconds == 0
+            ? "MOVIE_SHOT_NOT_READY" : "MOVIE_CLIP_DURATION_UNSUPPORTED";
+        Assert.Contains(expectedCode,
             await rejected.Content.ReadAsStringAsync(), StringComparison.Ordinal);
         Assert.False(await db.MovieClips.AnyAsync(item => item.MovieProjectId == movie.Id));
         Assert.False(await db.GenerationJobs.AnyAsync(item => item.IdempotencyKey == key));
