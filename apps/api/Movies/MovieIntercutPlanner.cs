@@ -113,7 +113,7 @@ public static class MovieIntercutPlanner
         {
             "primary_coverage_follows_scene_and_shot_story_order",
             "reaction_and_insert_coverage_is_intercut_without_reordering_primary_beats",
-            "proposal_references_existing_canonical_shot_ids_only",
+            "canonical_clip_and_shot_ownership_not_verified_in_review_only_proposal",
             "no_media_generation_started",
         };
         if (storyOrderChangeRequested)
