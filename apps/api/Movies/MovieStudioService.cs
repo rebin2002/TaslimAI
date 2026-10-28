@@ -1172,7 +1172,8 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                 SelectiveRegenerationId: regeneration.Id, SourceProductionVersionId: source?.Id, ChangedInputsJson: regeneration.ChangedInputsJson,
                 SelectiveActionType: regeneration.ActionType, SelectiveReason: regeneration.Reason,
                 SourceResolution: "1080p", TargetResolution: "1080p",
-                QualityTier: movie.QualityLevel, ProcessingPath: "native")),
+                QualityTier: movie.QualityLevel, ProcessingPath: "native",
+                SelectedProviderKey: provider.Key)),
             }, cancellationToken, effectiveIdempotencyKey);
         }
         catch (GenerationJobValidationException exception) when (exception.Code == "IDEMPOTENCY_KEY_REUSED")
@@ -1536,7 +1537,8 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                 TargetResolution: targetResolution,
                 QualityTier: qualityTier,
                 ProcessingPath: processingPath,
-                UpscalingRequested: request.UpscalingRequested)),
+                UpscalingRequested: request.UpscalingRequested,
+                SelectedProviderKey: provider.Key)),
             }, cancellationToken, idempotencyKey);
         }
         catch (GenerationJobValidationException exception) when (exception.Code == "IDEMPOTENCY_KEY_REUSED" && !string.IsNullOrWhiteSpace(idempotencyKey))
