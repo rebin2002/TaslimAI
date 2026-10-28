@@ -155,11 +155,23 @@ public sealed class MovieProductionGenerationOrchestrator(
         ValidateProductionClipAdmission(provider, durationSeconds, plan.SourceResolution,
             plan.TargetResolution, plan.QualityTier, plan.ProcessingPath,
             shot.Scene.MovieProject.AspectRatio);
-        // This necessary prompt-capacity check is intentionally before any
-        // preflight, cost estimate, job or usage writes. The adapter still
-        // validates the *complete* assembled prompt at submission time.
+        // The production render prompt carries the render title as its main
+        // description, and includes the shot direction separately in ShotJson.
+        // Both configured video adapters also preserve style and additional
+        // instructions. Their combined creative text is a conservative lower
+        // bound; catch impossible prompts before preflight or usage reservation.
+        // Provider-specific headings and canonical snapshots remain subject to
+        // the complete prompt validation at submission time.
+        var renderDescription = string.IsNullOrWhiteSpace(request.Title)
+            ? shot.Scene.MovieProject.Title : request.Title.Trim();
+        var minimumCreativePromptLength = (long)renderDescription.Trim().Length
+            + shot.Description.Trim().Length
+            + (string.IsNullOrWhiteSpace(shot.Scene.MovieProject.Style)
+                ? 0 : shot.Scene.MovieProject.Style.Trim().Length)
+            + (string.IsNullOrWhiteSpace(shot.Scene.MovieProject.AdditionalInstructions)
+                ? 0 : shot.Scene.MovieProject.AdditionalInstructions.Trim().Length);
         if (provider.SceneClipPromptMaxCharacters is { } promptCapacity
-            && shot.Description.Trim().Length > promptCapacity)
+            && minimumCreativePromptLength > promptCapacity)
             throw new MovieProductionValidationException(
                 "MOVIE_CLIP_PROMPT_UNSUPPORTED",
                 "The shot description exceeds this provider's prompt limit. Shorten it before rendering.");
