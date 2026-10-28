@@ -80,6 +80,85 @@ public sealed class MovieClipPromptLimitedApiFactory : MovieOperationalApiFactor
     }
 }
 
+// Deliberately advertise a much wider fake range than real adapters. Without
+// an explicit raw-duration guard, the legacy queue path silently clamps bad
+// persisted shot/scene values to 1 or 3,600 and could queue altered work.
+public sealed class MovieClipNoClampApiFactory : MovieOperationalApiFactory
+{
+    protected override bool WorkerEnabled => false;
+
+    protected override void ConfigureWebHost(IWebHostBuilder builder)
+    {
+        base.ConfigureWebHost(builder);
+        builder.ConfigureServices(services =>
+        {
+            services.RemoveAll<IMovieVideoProvider>();
+            services.AddSingleton<IMovieVideoProvider>(sp => new FakeMovieVideoProvider(
+                sp.GetRequiredService<FakeProviderScenarioCatalog>(),
+                sp.GetRequiredService<FakeProviderCallLog>())
+            {
+                SceneClipDurationRange = new MovieClipDurationRange(1, 3600),
+            });
+        });
+    }
+}
+
+public sealed class MovieClipUnclampedDurationTests
+{
+    [Theory]
+    [InlineData(false, 0)]
+    [InlineData(false, 3601)]
+    [InlineData(false, 7200)]
+    [InlineData(true, 0)]
+    [InlineData(true, 7200)]
+    public async Task Invalid_stored_shot_or_scene_timing_never_queues_a_truncated_clip(
+        bool generateScene, int invalidSeconds)
+    {
+        using var factory = new MovieClipNoClampApiFactory();
+        using (var initialization = factory.Services.CreateScope())
+            initialization.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+
+        using var client = factory.CreateClient();
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Do not truncate long or invalid clips", sceneDurationSeconds: 5);
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var movie = await db.MovieProjects.SingleAsync(item => item.Id == fixture.Project.Project.Id);
+        movie.DurationSeconds = 7200; // Long project plan is independently valid.
+        if (generateScene)
+        {
+            var scene = await db.MovieScenes.SingleAsync(item => item.Id == fixture.Scene.Id);
+            scene.DurationSeconds = invalidSeconds;
+        }
+        else
+        {
+            var shot = await db.MovieShots.SingleAsync(item => item.Id == fixture.Shot.Id);
+            shot.DurationSeconds = invalidSeconds;
+        }
+        await db.SaveChangesAsync();
+        var usageBefore = await db.UsageTransactions.CountAsync();
+        var versionsBefore = await db.MovieProductionVersions.CountAsync();
+        var key = $"no-truncation-{(generateScene ? "scene" : "shot")}-{invalidSeconds}";
+        var path = generateScene
+            ? $"/api/movie-studio/projects/{fixture.Project.Project.Id}/scenes/{fixture.Scene.Id}/generate"
+            : $"/api/movie-studio/shots/{fixture.Shot.Id}/generate";
+
+        using var rejected = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, path,
+            new { title = "Refuse silently shortened output", confirmationAccepted = true },
+            idempotencyKey: key);
+
+        Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
+        Assert.Contains("MOVIE_CLIP_DURATION_UNSUPPORTED",
+            await rejected.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.False(await db.MovieClips.AnyAsync(item => item.MovieProjectId == movie.Id));
+        Assert.False(await db.GenerationJobs.AnyAsync(item => item.IdempotencyKey == key));
+        Assert.Equal(usageBefore, await db.UsageTransactions.CountAsync());
+        Assert.Equal(versionsBefore, await db.MovieProductionVersions.CountAsync());
+        Assert.Equal(0, factory.Calls.Calls(FakeProviderKind.Movie));
+    }
+}
+
 public sealed class MovieClipDurationAdmissionTests : IClassFixture<MovieClipDurationApiFactory>
 {
     private readonly MovieClipDurationApiFactory factory;
