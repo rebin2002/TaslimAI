@@ -133,6 +133,12 @@ public sealed class MovieProductionGenerationOrchestrator(
         // reservation is created. The label used to be validated only when the
         // production version was constructed, after the generation job was queued.
         var normalizedLabel = CleanBounded(request.Label, 160);
+        // Match the API's existing 160-character title contract before a
+        // continuity snapshot, speculative clip, job, or cost reservation exists.
+        // A rejected title must not leave paid-generation state behind.
+        if (!string.IsNullOrWhiteSpace(request.Title) && request.Title.Trim().Length > 160)
+            throw new MovieProductionValidationException(
+                "PRODUCTION_TITLE_TOO_LARGE", "The production title must be 160 characters or fewer.");
 
         var existing = await FindExistingAsync(userId, shot, request, normalizedKey, cancellationToken);
         if (existing is not null)
