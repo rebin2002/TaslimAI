@@ -153,6 +153,32 @@ public sealed class MovieIntercutPlannerTests
         Assert.Contains("3,600", exception.Message);
     }
 
+    [Fact]
+    public void Distinct_timelines_with_identical_coverage_receive_distinct_proposal_ids()
+    {
+        // A review proposal must be bound to its canonical timeline identity, not
+        // just its movie project, base version and coverage candidates.
+        var firstTimelineId = Guid.Parse("50000000-0000-0000-0000-000000000101");
+        var secondTimelineId = Guid.Parse("50000000-0000-0000-0000-000000000102");
+        var request = new MovieIntercutPlanRequest
+        {
+            TimelineId = firstTimelineId,
+            BaseTimelineVersion = 1,
+            Clips = [Coverage(PrimaryOne, ShotOne, SceneOne, 1, 1, 2m, MovieIntercutCoverageKinds.Primary)],
+        };
+
+        var first = MovieIntercutPlanner.Build(ProjectId, request);
+        request.TimelineId = secondTimelineId;
+        var second = MovieIntercutPlanner.Build(ProjectId, request);
+        request.TimelineId = firstTimelineId;
+        var replay = MovieIntercutPlanner.Build(ProjectId, request);
+
+        Assert.NotEqual(first.ProposalId, second.ProposalId);
+        Assert.NotEqual(first.ProvenanceHash, second.ProvenanceHash);
+        Assert.Equal(first.ProposalId, replay.ProposalId);
+        Assert.Equal(first.ProvenanceHash, replay.ProvenanceHash);
+    }
+
     private static MovieIntercutCoverageRequest Coverage(Guid clipId, Guid shotId, Guid sceneId, int sceneSequence, int shotSequence, decimal duration, string kind, Guid? anchorShotId = null, string? label = null) => new()
     {
         ClipId = clipId,
