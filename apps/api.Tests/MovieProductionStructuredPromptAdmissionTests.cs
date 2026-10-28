@@ -306,14 +306,14 @@ public sealed class MovieProductionStructuredPromptAdmissionTests
 
         var storyboard = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
             client, $"/api/movie-studio/shots/{shotId}/production/versions",
-            new { stage = MovieProductionStages.StoryboardCandidate, compositionJson = "{\\"frame\\":\\"wide\\"}" });
+            new { stage = MovieProductionStages.StoryboardCandidate, compositionJson = "{\"frame\":\"wide\"}" });
         var approvedStoryboard = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
             client, $"/api/movie-studio/production/versions/{storyboard.Id}/review",
             new { approve = true });
         var keyframe = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
             client, $"/api/movie-studio/shots/{shotId}/production/versions",
             new { stage = MovieProductionStages.ProductionKeyframe,
-                sourceVersionId = approvedStoryboard.Id, compositionJson = "{\\"frame\\":\\"approved\\"}" });
+                sourceVersionId = approvedStoryboard.Id, compositionJson = "{\"frame\":\"approved\"}" });
         var approvedKeyframe = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
             client, $"/api/movie-studio/production/versions/{keyframe.Id}/review",
             new { approve = true });
