@@ -69,8 +69,10 @@ public sealed class MovieProductionProviderUnavailableTests
         Assert.Equal(0, calls.Calls(FakeProviderKind.Movie));
     }
 
-    [Fact]
-    public async Task Approved_render_rejects_unsupported_single_clip_duration_without_persisting_or_reserving_usage()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Approved_render_rejects_unsupported_single_clip_duration_without_persisting_or_reserving_usage(bool confirmationAccepted)
     {
         // The production route must enforce the selected adapter's per-clip
         // duration range even when an approved source already exists.
@@ -113,14 +115,14 @@ public sealed class MovieProductionProviderUnavailableTests
         using var rejected = await MovieOperationalFixtures.SendWithCsrfAsync(
             client, HttpMethod.Post, $"/api/movie-studio/shots/{shotId}/production/render",
             new { sourceVersionId = approvedMotion.Id, label = "Do not queue unsupported clip",
-                confirmationAccepted = true }, idempotencyKey: "approved-duration-unsupported-11");
+                confirmationAccepted }, idempotencyKey: $"approved-duration-unsupported-11-{confirmationAccepted}");
 
         Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
         Assert.Contains("MOVIE_CLIP_DURATION_UNSUPPORTED",
             await rejected.Content.ReadAsStringAsync(), StringComparison.Ordinal);
         Assert.Equal(versionCountBefore, await db.MovieProductionVersions.CountAsync(item => item.MovieShotId == shotId));
         Assert.False(await db.MovieClips.AnyAsync(item => item.MovieProjectId == fixture.Project.Project.Id));
-        Assert.False(await db.GenerationJobs.AnyAsync(item => item.IdempotencyKey == "approved-duration-unsupported-11"));
+        Assert.False(await db.GenerationJobs.AnyAsync(item => item.IdempotencyKey == $"approved-duration-unsupported-11-{confirmationAccepted}"));
         Assert.Equal(transactionCountBefore, await db.UsageTransactions.CountAsync());
         Assert.Equal(0, calls.Calls(FakeProviderKind.Movie));
     }
