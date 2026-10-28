@@ -70,6 +70,18 @@ public sealed class RunwayMovieVideoProviderTests
     }
 
     [Fact]
+    public async Task Upscaling_scene_clip_never_submits_a_billable_provider_request()
+    {
+        var handler = new RecordingHandler(_ => throw new InvalidOperationException("No provider request is allowed."));
+        var provider = CreateProvider(handler, EnabledOptions());
+
+        await Assert.ThrowsAsync<MovieVideoProviderException>(() => provider.SubmitAsync(
+            Request() with { UpscalingRequested = true }, CancellationToken.None));
+
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
     public async Task Polling_normalizes_queued_generating_and_completed_states_and_preserves_cost_metadata()
     {
         var calls = 0;
