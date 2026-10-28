@@ -72,4 +72,39 @@ public sealed class MovieProductionLabelAdmissionTests
         Assert.Single(await db.MovieClips.Where(item => item.MovieShotId == shotId).ToListAsync());
         Assert.Equal(1, await db.GenerationJobs.CountAsync(item => item.IdempotencyKey == "render-label-160-valid"));
     }
+
+    [Fact]
+    public async Task Oversized_production_replay_key_rejects_before_any_render_persistence()
+    {
+        // The idempotency key must be rejected before reference validation,
+        // continuity snapshots, speculative clips, jobs, or usage reservations.
+        using var factory = new MovieOperationalNoWorkerFactory();
+        using (var setup = factory.Services.CreateScope())
+            setup.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+
+        using var client = factory.CreateClient();
+        var movie = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Production replay-key boundary", sceneDurationSeconds: 5);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var versionsBefore = await db.MovieProductionVersions.CountAsync();
+        var clipsBefore = await db.MovieClips.CountAsync();
+        var jobsBefore = await db.GenerationJobs.CountAsync();
+        var ledgerBefore = await db.UsageTransactions.CountAsync();
+
+        using var rejected = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, $"/api/movie-studio/shots/{movie.Shot.Id}/production/render",
+            new { sourceVersionId = Guid.NewGuid(), label = "Replay-key validation",
+                confirmationAccepted = true }, idempotencyKey: new string('k', 81));
+
+        Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
+        Assert.Contains("IDEMPOTENCY_KEY_INVALID",
+            await rejected.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Equal(versionsBefore, await db.MovieProductionVersions.CountAsync());
+        Assert.Equal(clipsBefore, await db.MovieClips.CountAsync());
+        Assert.Equal(jobsBefore, await db.GenerationJobs.CountAsync());
+        Assert.Equal(ledgerBefore, await db.UsageTransactions.CountAsync());
+    }
+
 }
