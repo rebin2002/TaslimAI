@@ -312,7 +312,12 @@ public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWork
     [Fact]
     public async Task Production_render_is_explicit_and_does_not_collapse_into_a_movie_take()
     {
-        using var client = factory.CreateClient();
+        // An approved production render needs an explicitly capable, provider-free
+        // adapter; the default unconfigured provider now correctly fails closed.
+        using var fakeFactory = new MovieOperationalNoWorkerFactory();
+        using (var init = fakeFactory.Services.CreateScope())
+            init.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+        using var client = fakeFactory.CreateClient();
         var auth = await Register(client);
         var project = await SendWithCsrf<MovieStudioProjectResponse>(client, HttpMethod.Post, "/api/movie-studio/projects", new
         {
@@ -342,10 +347,57 @@ public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWork
         Assert.NotNull(production);
         Assert.Contains(production!.Versions, item => item.Stage == MovieProductionStages.ProductionRender && item.GenerationJobId == render.Job.Id);
         Assert.Empty(production.Takes);
-        using var scope = factory.Services.CreateScope();
+        using var scope = fakeFactory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
         Assert.Equal(0, await db.MovieTakes.CountAsync(item => item.MovieShotId == shot.Id));
     }
+    [Fact]
+    public async Task Approved_production_render_rejects_unsupported_clip_duration_without_creating_billable_work()
+    {
+        // Run the real HTTP queue path against a bounded in-memory provider.
+        // This must be rejected before continuity snapshots, clips, jobs, or usage reservations.
+        using var boundedFactory = new MovieClipDurationApiFactory();
+        using (var setup = boundedFactory.Services.CreateScope())
+            setup.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+        using var client = boundedFactory.CreateClient();
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Approved production duration admission", sceneDurationSeconds: 11);
+        var shotId = fixture.Shot.Id;
+
+        var storyboard = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
+            client, $"/api/movie-studio/shots/{shotId}/production/versions",
+            new { stage = MovieProductionStages.StoryboardCandidate, compositionJson = "{\\\"frame\\\":\\\"wide\\\"}" });
+        var approvedStoryboard = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
+            client, $"/api/movie-studio/production/versions/{storyboard.Id}/review", new { approve = true });
+        var keyframe = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
+            client, $"/api/movie-studio/shots/{shotId}/production/versions",
+            new { stage = MovieProductionStages.ProductionKeyframe,
+                sourceVersionId = approvedStoryboard.Id, compositionJson = "{\\\"frame\\\":\\\"approved\\\"}" });
+        var approvedKeyframe = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
+            client, $"/api/movie-studio/production/versions/{keyframe.Id}/review", new { approve = true });
+        var motion = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
+            client, $"/api/movie-studio/shots/{shotId}/production/motion-preview",
+            new { sourceVersionId = approvedKeyframe.Id });
+        var approvedMotion = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
+            client, $"/api/movie-studio/production/versions/{motion.Id}/review", new { approve = true });
+
+        using var scope = boundedFactory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var versionsBefore = await db.MovieProductionVersions.CountAsync(item => item.MovieShotId == shotId);
+        var transactionsBefore = await db.UsageTransactions.CountAsync();
+        using var rejected = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, $"/api/movie-studio/shots/{shotId}/production/render",
+            new { sourceVersionId = approvedMotion.Id, label = "Unsupported production clip",
+                confirmationAccepted = true }, idempotencyKey: "production-duration-11");
+        Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
+        Assert.Contains("MOVIE_CLIP_DURATION_UNSUPPORTED",
+            await rejected.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Equal(versionsBefore, await db.MovieProductionVersions.CountAsync(item => item.MovieShotId == shotId));
+        Assert.False(await db.MovieClips.AnyAsync(item => item.MovieProjectId == fixture.Project.Project.Id));
+        Assert.False(await db.GenerationJobs.AnyAsync(item => item.IdempotencyKey == "production-duration-11"));
+        Assert.Equal(transactionsBefore, await db.UsageTransactions.CountAsync());
+    }
+
     [Fact]
     public async Task Selective_regeneration_requires_confirmation_preserves_history_and_invalidates_downstream()
     {
