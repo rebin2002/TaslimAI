@@ -8,18 +8,23 @@ namespace Taslim.Api.Tests;
 
 public sealed class FilesControllerPrincipalTests
 {
-    [Fact]
-    public async Task Malformed_authenticated_principal_is_rejected_before_file_access()
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("not-a-guid")]
+    [InlineData("00000000-0000-0000-0000-000000000000")]
+    public async Task Invalid_authenticated_principal_is_rejected_before_file_access(string? identifier)
     {
+        IEnumerable<Claim> claims = identifier is null
+            ? Array.Empty<Claim>()
+            : new[] { new Claim(ClaimTypes.NameIdentifier, identifier) };
         var controller = new FilesController(null!, null!, null!, null!)
         {
             ControllerContext = new ControllerContext
             {
                 HttpContext = new DefaultHttpContext
                 {
-                    User = new ClaimsPrincipal(new ClaimsIdentity(
-                        [new Claim(ClaimTypes.NameIdentifier, "not-a-guid")],
-                        authenticationType: "test")),
+                    User = new ClaimsPrincipal(new ClaimsIdentity(claims, authenticationType: "test")),
                 },
             },
         };
