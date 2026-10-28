@@ -427,6 +427,7 @@ public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWork
 
         var shotRow = await db.MovieShots.SingleAsync(item => item.Id == shot.Id);
         var originalDescription = shotRow.Description;
+        var originalDuration = shotRow.DurationSeconds;
         shotRow.Description = "Different shot direction after the canonical render was queued.";
         await db.SaveChangesAsync();
         using var changedDirection = await MovieOperationalFixtures.SendWithCsrfAsync(
@@ -443,6 +444,37 @@ public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWork
         Assert.Equal(HttpStatusCode.BadRequest, changedDuration.StatusCode);
         Assert.Contains("IDEMPOTENCY_KEY_REUSED",
             await changedDuration.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        // Restore the original shot content: a subsequent continuity-card
+        // edit must be the only changed dimension for this replay attempt.
+        shotRow.DurationSeconds = originalDuration;
+        await db.SaveChangesAsync();
+        var continuity = scope.ServiceProvider.GetRequiredService<IMovieCharacterContinuityService>();
+        var originalContinuity = await continuity.BuildSnapshotForTargetAsync(
+            project.Project.Id, scene.Id, shot.Id, persist: false);
+        Assert.Equal(queuedInput.CharacterContinuityJson, originalContinuity.SnapshotJson);
+
+        // The name is present in the scene's original shot direction, so the
+        // new character card becomes relevant to the immutable render prompt.
+        db.MovieCharacters.Add(new MovieCharacter
+        {
+            Id = Guid.NewGuid(),
+            MovieProjectId = project.Project.Id,
+            Name = "Street",
+            Description = "A new character's persistent wardrobe and features.",
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+        });
+        await db.SaveChangesAsync();
+        var revisedContinuity = await continuity.BuildSnapshotForTargetAsync(
+            project.Project.Id, scene.Id, shot.Id, persist: false);
+        Assert.NotEqual(queuedInput.CharacterContinuityJson, revisedContinuity.SnapshotJson);
+
+        using var changedCharacter = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, renderPath, renderPayload, idempotencyKey: replayKey);
+        Assert.Equal(HttpStatusCode.BadRequest, changedCharacter.StatusCode);
+        Assert.Contains("IDEMPOTENCY_KEY_REUSED",
+            await changedCharacter.Content.ReadAsStringAsync(), StringComparison.Ordinal);
 
         Assert.Equal(versionsBefore, await db.MovieProductionVersions.CountAsync(item => item.MovieShotId == shot.Id));
         Assert.Equal(clipsBefore, await db.MovieClips.CountAsync(item => item.MovieShotId == shot.Id));
