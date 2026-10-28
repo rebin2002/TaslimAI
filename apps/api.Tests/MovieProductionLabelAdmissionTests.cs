@@ -107,4 +107,53 @@ public sealed class MovieProductionLabelAdmissionTests
         Assert.Equal(ledgerBefore, await db.UsageTransactions.CountAsync());
     }
 
+
+    [Fact]
+    public async Task Oversized_render_title_rejects_before_clip_job_or_usage_reservation()
+    {
+        // Title validation precedes even source-version validation; an invalid
+        // input must not persist speculative generation state or reserve usage.
+        // The worker is disabled, so no provider calls are made.
+        using var factory = new MovieOperationalNoWorkerFactory();
+        using (var setup = factory.Services.CreateScope())
+            setup.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+
+        using var client = factory.CreateClient();
+        var movie = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Approved render title boundary", sceneDurationSeconds: 5);
+        var path = $"/api/movie-studio/shots/{movie.Shot.Id}/production/render";
+        var nonexistentSource = Guid.NewGuid();
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var versionsBefore = await db.MovieProductionVersions.CountAsync();
+        var clipsBefore = await db.MovieClips.CountAsync();
+        var jobsBefore = await db.GenerationJobs.CountAsync();
+        var usageBefore = await db.UsageTransactions.CountAsync();
+
+        using var oversized = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, path,
+            new { sourceVersionId = nonexistentSource, title = new string('t', 161),
+                confirmationAccepted = true }, idempotencyKey: "render-title-over-160");
+        Assert.Equal(HttpStatusCode.BadRequest, oversized.StatusCode);
+        Assert.Contains("PRODUCTION_TITLE_TOO_LARGE",
+            await oversized.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        // The title's maximum is measured after trimming. The valid boundary
+        // now reaches the independent source-version gate (source intentionally
+        // does not exist), rather than being rejected as an oversized title.
+        using var atBoundary = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, path,
+            new { sourceVersionId = nonexistentSource, title = $"  {new string('t', 160)}  ",
+                confirmationAccepted = true }, idempotencyKey: "render-title-exact-160");
+        Assert.Equal(HttpStatusCode.BadRequest, atBoundary.StatusCode);
+        var boundaryBody = await atBoundary.Content.ReadAsStringAsync();
+        Assert.Contains("PRODUCTION_RENDER_INVALID", boundaryBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("PRODUCTION_TITLE_TOO_LARGE", boundaryBody, StringComparison.Ordinal);
+
+        Assert.Equal(versionsBefore, await db.MovieProductionVersions.CountAsync());
+        Assert.Equal(clipsBefore, await db.MovieClips.CountAsync());
+        Assert.Equal(jobsBefore, await db.GenerationJobs.CountAsync());
+        Assert.Equal(usageBefore, await db.UsageTransactions.CountAsync());
+    }
 }
