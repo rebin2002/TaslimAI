@@ -370,6 +370,8 @@ public sealed class MovieVideoGenerationJobHandler(
                         + (input.ContinuityGuideJson?.Trim().Length ?? 0)
                         + (input.SceneJson?.Trim().Length ?? 0)
                         + (input.ShotJson?.Trim().Length ?? 0)
+                        + (provider.SceneClipWorldContextInPrompt
+                            ? (input.WorldContextJson?.Trim().Length ?? 0) : 0)
                         > promptCapacity)
                 // The neutral request carries a separate master output tier, but
                 // no scene-clip adapter declares a verified mastering step.
