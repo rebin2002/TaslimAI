@@ -106,4 +106,36 @@ public sealed class MovieDirectorIntercutControllerTests
         var persisted = await db.MovieTimelines.SingleAsync(item => item.Id == ownedTimelineId);
         Assert.Equal(1, persisted.CurrentRevisionNumber);
     }
+
+    [Fact]
+    public async Task Malformed_identity_fails_closed_on_all_director_service_endpoints()
+    {
+        // The controller must reject broken authenticated principals before
+        // it calls any Director service (which are intentionally absent here).
+        var controller = new MovieDirectorController(null!, null!, null!, null!)
+        {
+            ControllerContext = new ControllerContext
+            {
+                HttpContext = new DefaultHttpContext(),
+            },
+        };
+        var projectId = Guid.NewGuid();
+        var proposalId = Guid.NewGuid();
+        var actionId = Guid.NewGuid();
+        foreach (var invalidId in new string?[] { null, "", "not-a-guid", Guid.Empty.ToString() })
+        {
+            var claims = new List<Claim>();
+            if (invalidId is not null)
+                claims.Add(new Claim(ClaimTypes.NameIdentifier, invalidId));
+            controller.HttpContext.User = new ClaimsPrincipal(new ClaimsIdentity(claims, "test"));
+
+            Assert.IsType<UnauthorizedResult>(await controller.CreateProposal(projectId, null!, CancellationToken.None));
+            Assert.IsType<UnauthorizedResult>(await controller.CreateIntercutProposal(projectId, null!, CancellationToken.None));
+            Assert.IsType<UnauthorizedResult>(await controller.GetProposal(proposalId, CancellationToken.None));
+            Assert.IsType<UnauthorizedResult>(await controller.History(projectId, CancellationToken.None));
+            Assert.IsType<UnauthorizedResult>(await controller.Approve(proposalId, CancellationToken.None));
+            Assert.IsType<UnauthorizedResult>(await controller.Reject(proposalId, CancellationToken.None));
+            Assert.IsType<UnauthorizedResult>(await controller.Execute(actionId, CancellationToken.None));
+        }
+    }
 }
