@@ -163,12 +163,35 @@ public sealed class MovieProductionGenerationOrchestrator(
         // the complete prompt validation at submission time.
         var renderDescription = string.IsNullOrWhiteSpace(request.Title)
             ? shot.Scene.MovieProject.Title : request.Title.Trim();
+        // Each adapter assembles the title, project directions and these
+        // structured creative snapshots. Count the serialized payload as well:
+        // checking only the readable title/style leaves over-limit JSON
+        // directions to fail after the cost/usage reservation.
+        var guidePayload = shot.Scene.MovieProject.Guide is null ? null : JsonSerializer.Serialize(new
+        {
+            shot.Scene.MovieProject.Guide.VisualLanguage,
+            shot.Scene.MovieProject.Guide.CameraLanguage,
+            shot.Scene.MovieProject.Guide.ColorAndLighting,
+            shot.Scene.MovieProject.Guide.SoundAndNarration,
+            shot.Scene.MovieProject.Guide.ContinuityRules,
+        });
+        var scenePayload = JsonSerializer.Serialize(new
+        {
+            shot.Scene.Title, shot.Scene.Summary, shot.Scene.DurationSeconds,
+        });
+        var shotPayload = JsonSerializer.Serialize(new
+        {
+            shot.Description, shot.Purpose, shot.Subjects,
+            shot.CameraAndFraming, shot.CameraMotion, shot.DurationSeconds,
+        });
+        // These parts occur once in the adapter prompt; provider-specific
+        // headings and separators can only increase the final length.
         var minimumCreativePromptLength = (long)renderDescription.Trim().Length
-            + shot.Description.Trim().Length
-            + (string.IsNullOrWhiteSpace(shot.Scene.MovieProject.Style)
-                ? 0 : shot.Scene.MovieProject.Style.Trim().Length)
-            + (string.IsNullOrWhiteSpace(shot.Scene.MovieProject.AdditionalInstructions)
-                ? 0 : shot.Scene.MovieProject.AdditionalInstructions.Trim().Length);
+            + (shot.Scene.MovieProject.Style?.Trim().Length ?? 0)
+            + (shot.Scene.MovieProject.AdditionalInstructions?.Trim().Length ?? 0)
+            + (guidePayload?.Length ?? 0)
+            + scenePayload.Length
+            + shotPayload.Length;
         if (provider.SceneClipPromptMaxCharacters is { } promptCapacity
             && minimumCreativePromptLength > promptCapacity)
             throw new MovieProductionValidationException(
@@ -257,16 +280,9 @@ public sealed class MovieProductionGenerationOrchestrator(
             shot.Scene.MovieProject.Style,
             shot.Scene.MovieProject.Language,
             shot.Scene.MovieProject.AdditionalInstructions,
-            shot.Scene.MovieProject.Guide is null ? null : JsonSerializer.Serialize(new
-            {
-                shot.Scene.MovieProject.Guide.VisualLanguage,
-                shot.Scene.MovieProject.Guide.CameraLanguage,
-                shot.Scene.MovieProject.Guide.ColorAndLighting,
-                shot.Scene.MovieProject.Guide.SoundAndNarration,
-                shot.Scene.MovieProject.Guide.ContinuityRules,
-            }),
-            JsonSerializer.Serialize(new { shot.Scene.Title, shot.Scene.Summary, shot.Scene.DurationSeconds }),
-            JsonSerializer.Serialize(new { shot.Description, shot.Purpose, shot.Subjects, shot.CameraAndFraming, shot.CameraMotion, shot.DurationSeconds }),
+            guidePayload,
+            scenePayload,
+            shotPayload,
             null,
             null,
             null,
