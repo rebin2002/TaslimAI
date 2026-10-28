@@ -186,6 +186,42 @@ public sealed class MovieClipDurationAdmissionTests : IClassFixture<MovieClipDur
     }
 
     [Fact]
+    public async Task Combined_movie_style_and_direction_overflow_rejects_before_usage_reservation()
+    {
+        using var promptFactory = new MovieClipPromptLimitedApiFactory();
+        using (var setup = promptFactory.Services.CreateScope())
+            setup.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+
+        using var client = promptFactory.CreateClient();
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Combined creative prompt admission", sceneDurationSeconds: 5);
+
+        using var scope = promptFactory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var shot = await db.MovieShots.SingleAsync(item => item.Id == fixture.Shot.Id);
+        var movie = await db.MovieProjects.SingleAsync(item => item.Id == fixture.Project.Project.Id);
+        // Each section fits the fake provider's 30-character bound separately.
+        // They cannot fit together, even before provider-specific headings or
+        // continuity directions are appended.
+        shot.Description = "A sunlit room";
+        movie.Style = "cinematic";
+        movie.AdditionalInstructions = new string('x', 20);
+        await db.SaveChangesAsync();
+        var transactionsBefore = await db.UsageTransactions.CountAsync();
+
+        using var rejected = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, $"/api/movie-studio/shots/{fixture.Shot.Id}/generate",
+            new { title = "Impossible combined prompt", confirmationAccepted = true },
+            idempotencyKey: "combined-creative-prompt-overflow");
+        Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
+        Assert.Contains("MOVIE_CLIP_PROMPT_UNSUPPORTED",
+            await rejected.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.False(await db.MovieClips.AnyAsync(item => item.MovieProjectId == fixture.Project.Project.Id));
+        Assert.False(await db.GenerationJobs.AnyAsync(item => item.IdempotencyKey == "combined-creative-prompt-overflow"));
+        Assert.Equal(transactionsBefore, await db.UsageTransactions.CountAsync());
+    }
+
+    [Fact]
     public async Task Oversized_approved_render_description_rejects_before_job_or_usage_reservation()
     {
         using var promptFactory = new MovieClipPromptLimitedApiFactory();
