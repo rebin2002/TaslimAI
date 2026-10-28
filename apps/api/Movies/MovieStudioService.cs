@@ -1098,6 +1098,19 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
             throw new MovieProductionValidationException("REGENERATION_STALE", "This regeneration request is no longer pending confirmation.");
         if (!request.Confirm) throw new MovieProductionValidationException("REGENERATION_CONFIRMATION_REQUIRED", "Explicit confirmation is required before queuing selective regeneration.");
 
+        // The confirmed-state path above handles ordinary replays. For still-
+        // pending requests, reject any user-scoped key already claimed by a job
+        // before persisting a provisional clip or reserving usage.
+        var effectiveIdempotencyKey = string.IsNullOrWhiteSpace(idempotencyKey)
+            ? $"movie-regeneration:{requestId:N}"
+            : idempotencyKey.Trim();
+        if (await db.GenerationJobs.AsNoTracking().AnyAsync(item =>
+                item.CreatedByUserId == userId && item.IdempotencyKey == effectiveIdempotencyKey,
+                cancellationToken))
+            throw new MovieProductionValidationException(
+                "IDEMPOTENCY_KEY_REUSED",
+                "This idempotency key is already used by a generation job. Refresh the regeneration request before retrying.");
+
         var shot = regeneration.MovieShot;
         var movie = shot.Scene.MovieProject;
         var durationSeconds = Math.Clamp(shot.DurationSeconds ?? shot.Scene.DurationSeconds ?? Math.Min(movie.DurationSeconds, 60), 1, 3600);
@@ -1142,7 +1155,10 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         db.MovieClips.Add(clip);
         await db.SaveChangesAsync(cancellationToken);
 
-        var job = await jobs.CreateAsync(userId, new CreateGenerationJobRequest
+        GenerationJob job;
+        try
+        {
+            job = await jobs.CreateAsync(userId, new CreateGenerationJobRequest
         {
             WorkspaceId = movie.WorkspaceId, ProjectId = movie.ProjectId, JobType = GenerationJobTypes.MovieClipGenerate,
             Title = $"Selective {regeneration.ActionType} for {movie.Title}", EstimatedProviderCostUsd = regeneration.EstimatedProviderCostUsd,
@@ -1157,7 +1173,17 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                 SelectiveActionType: regeneration.ActionType, SelectiveReason: regeneration.Reason,
                 SourceResolution: "1080p", TargetResolution: "1080p",
                 QualityTier: movie.QualityLevel, ProcessingPath: "native")),
-        }, cancellationToken, idempotencyKey ?? $"movie-regeneration:{requestId:N}");
+            }, cancellationToken, effectiveIdempotencyKey);
+        }
+        catch (GenerationJobValidationException exception) when (exception.Code == "IDEMPOTENCY_KEY_REUSED")
+        {
+            // Another request may have claimed this key between the precheck
+            // and CreateAsync. Never link the losing speculative clip to the
+            // canonical job or its usage reservation.
+            db.MovieClips.Remove(clip);
+            await db.SaveChangesAsync(CancellationToken.None);
+            throw;
+        }
         clip.GenerationJobId = job.Id;
 
         var version = new MovieProductionVersion
