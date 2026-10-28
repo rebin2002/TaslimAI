@@ -149,9 +149,8 @@ public sealed class MovieProductionGenerationOrchestrator(
         // not the total movie duration. Fail before cost preflight, continuity
         // persistence, clip/job creation or any usage reservation.
         var plan = BuildPlan(shot, request);
-        var durationSeconds = Math.Clamp(
-            shot.DurationSeconds ?? shot.Scene.DurationSeconds ?? Math.Min(shot.Scene.MovieProject.DurationSeconds, 60),
-            1, 3600);
+        var durationSeconds = ResolveSingleClipDuration(
+            shot.DurationSeconds, shot.Scene.DurationSeconds, shot.Scene.MovieProject.DurationSeconds);
         ValidateProductionClipAdmission(provider, durationSeconds, plan.SourceResolution,
             plan.TargetResolution, plan.QualityTier, plan.ProcessingPath,
             shot.Scene.MovieProject.AspectRatio);
@@ -453,9 +452,8 @@ public sealed class MovieProductionGenerationOrchestrator(
     {
         var movie = shot.Scene.MovieProject;
         var plan = BuildPlan(shot, request);
-        var duration = Math.Clamp(
-            shot.DurationSeconds ?? shot.Scene.DurationSeconds ?? Math.Min(movie.DurationSeconds, 60),
-            1, 3600);
+        var duration = ResolveSingleClipDuration(
+            shot.DurationSeconds, shot.Scene.DurationSeconds, movie.DurationSeconds);
         var title = string.IsNullOrWhiteSpace(request.Title) ? movie.Title : request.Title.Trim();
         var guide = movie.Guide is null ? null : JsonSerializer.Serialize(new
         {
@@ -503,6 +501,21 @@ public sealed class MovieProductionGenerationOrchestrator(
         {
             return false;
         }
+    }
+
+    // Movie/scene duration is timeline planning metadata, never permission to
+    // truncate one billable render to an arbitrary shorter clip. Preserve the
+    // selected shot's actual duration and reject invalid single-clip lengths
+    // before cost estimation or job persistence. The adapter's stricter range
+    // is checked separately by ValidateProductionClipAdmission.
+    internal static int ResolveSingleClipDuration(int? shotSeconds, int? sceneSeconds, int movieSeconds)
+    {
+        var durationSeconds = shotSeconds ?? sceneSeconds ?? Math.Min(movieSeconds, 60);
+        if (durationSeconds is < 1 or > 3600)
+            throw new MovieProductionValidationException(
+                "MOVIE_CLIP_DURATION_UNSUPPORTED",
+                "The selected shot or scene duration cannot be sent as one production clip. Use shorter shots or a validated segmentation workflow.");
+        return durationSeconds;
     }
 
     // Shared provider-neutral admission predicate for the approved production-render route.
