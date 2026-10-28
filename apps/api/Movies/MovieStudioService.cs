@@ -1365,13 +1365,23 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
             throw new GenerationJobValidationException(
                 "MOVIE_CLIP_DURATION_UNSUPPORTED",
                 "The selected video provider cannot generate a single clip of this duration. Use a supported duration or split the scene into smaller shots.");
+        var sourceResolution = request.SourceResolution ?? "1080p";
+        var targetResolution = request.TargetResolution ?? "1080p";
+        var qualityTier = request.QualityTier ?? movie.QualityLevel;
+        var processingPath = request.ProcessingPath ?? "native";
+        if (!provider.SupportsSceneClipCostIntent(sourceResolution, targetResolution,
+                qualityTier, processingPath, movie.AspectRatio))
+            throw new GenerationJobValidationException(
+                "MOVIE_CLIP_EXECUTION_INTENT_UNSUPPORTED",
+                "This provider cannot guarantee the requested resolution, quality and processing profile. Choose a supported output profile.");
+
         var estimate = await movieCostEstimator.EstimateAsync(
             new MovieGenerationCostRequest(
                 durationSeconds,
-                request.SourceResolution ?? "1080p",
-                request.TargetResolution ?? "1080p",
-                request.QualityTier ?? movie.QualityLevel,
-                request.ProcessingPath ?? "native",
+                sourceResolution,
+                targetResolution,
+                qualityTier,
+                processingPath,
                 request.RetryAttempts,
                 request.UpscalingRequested,
                 request.UpscalePasses),
@@ -1439,10 +1449,10 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                 SceneSnapshot(scene),
                 shot is null ? null : ShotSnapshot(shot),
                 WorldContextJson: await WorldContextSnapshotAsync(movie.Id, scene.Id, shot?.Id, cancellationToken),
-                SourceResolution: request.SourceResolution ?? "1080p",
-                TargetResolution: request.TargetResolution ?? "1080p",
-                QualityTier: request.QualityTier ?? movie.QualityLevel,
-                ProcessingPath: request.ProcessingPath ?? "native",
+                SourceResolution: sourceResolution,
+                TargetResolution: targetResolution,
+                QualityTier: qualityTier,
+                ProcessingPath: processingPath,
                 UpscalingRequested: request.UpscalingRequested)),
             }, cancellationToken, idempotencyKey);
         }
