@@ -322,6 +322,15 @@ public sealed class MovieVideoGenerationJobHandler(
         var input = Deserialize(job.InputJson);
         var clip = await db.MovieClips.Include(item => item.MovieProject).FirstOrDefaultAsync(item => item.Id == input.MovieClipId && item.MovieProjectId == input.MovieProjectId, cancellationToken)
             ?? throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieGenerationFailed, false, "The movie clip could not be found.");
+        // A recovered worker may legitimately see an unlinked clip while the
+        // original queue request is still publishing its job. It must never
+        // submit or poll a paid operation for a clip already owned by another
+        // job or belonging to a different workspace.
+        if (clip.MovieProject.WorkspaceId != job.WorkspaceId
+            || (clip.GenerationJobId.HasValue && clip.GenerationJobId.Value != job.Id))
+            throw new MovieVideoProviderException(
+                GenerationJobErrorCodes.MovieGenerationFailed, false,
+                "The video job no longer owns its clip and workspace. Reconcile the job before retrying.");
         // A priced job must not silently move to a different provider if the
         // deployment's routing changes between admission and first submission.
         // This check also covers jobs with no provider-execution record yet.
