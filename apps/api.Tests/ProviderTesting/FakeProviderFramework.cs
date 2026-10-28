@@ -234,6 +234,8 @@ public sealed class FakeMovieVideoProvider(
     public IReadOnlyCollection<string> SupportedOperations { get; } = [MovieStudioOperations.QuickMovie, MovieStudioOperations.SceneClip];
     // Override in focused admission tests without invoking a paid provider.
     public MovieClipDurationRange? SceneClipDurationRange { get; set; } = new(1, 3600);
+    // Allows provider-free HTTP admission tests to assert pre-reservation denial.
+    public int? SceneClipPromptMaxCharacters { get; set; }
     // The deterministic fake can honor the requested profile for provider-free E2E.
     // It is not an assertion about Runway or Manus capabilities.
     public bool SceneClipCostIntentSupported { get; set; } = true;
