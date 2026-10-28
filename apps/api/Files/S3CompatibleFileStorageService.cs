@@ -140,8 +140,15 @@ public sealed class S3CompatibleFileStorageService : IFileStorageService, IDispo
 
     internal static string ClassifyFailure(Exception exception)
     {
+        // Prefer a recognized transport root cause, but do not lose the outer
+        // S3 response classification when the inner exception is unrecognized.
+        // Never log exception messages, endpoints, object keys or credentials.
         if (exception.InnerException is not null)
-            return ClassifyFailure(exception.InnerException);
+        {
+            var innerClass = ClassifyFailure(exception.InnerException);
+            if (innerClass != "unknown")
+                return innerClass;
+        }
 
         return exception switch
         {
@@ -149,6 +156,12 @@ public sealed class S3CompatibleFileStorageService : IFileStorageService, IDispo
             AuthenticationException => "tls",
             TaskCanceledException => "timeout",
             HttpRequestException => "transport",
+            // Status 0 means that the SDK did not expose an HTTP response.
+            // It is NOT proof of a particular network or signing root cause.
+            AmazonS3Exception s3 when (int)s3.StatusCode == 0 => "s3_no_http_response",
+            AmazonS3Exception s3 when (int)s3.StatusCode is 401 or 403 => "s3_auth_or_permission",
+            AmazonS3Exception s3 when (int)s3.StatusCode == 429 => "s3_rate_limited",
+            AmazonS3Exception s3 when (int)s3.StatusCode >= 500 => "s3_service_error",
             AmazonS3Exception => "s3_response",
             _ => "unknown",
         };
