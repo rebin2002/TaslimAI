@@ -1053,7 +1053,8 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         if (workflowError is not null) throw new MovieProductionValidationException("PRODUCTION_STAGE_INVALID", workflowError);
 
         var movie = shot.Scene.MovieProject;
-        var durationSeconds = Math.Clamp(shot.DurationSeconds ?? shot.Scene.DurationSeconds ?? Math.Min(movie.DurationSeconds, 60), 1, 3600);
+        var durationSeconds = MovieProductionGenerationOrchestrator.ResolveSingleClipDuration(
+            shot.DurationSeconds, shot.Scene.DurationSeconds, movie.DurationSeconds);
         EnsureSelectiveRegenerationCapability(movie, durationSeconds, shot.Description);
         // The server owns the estimate. Client-supplied cost fields are not trusted for
         // cap enforcement because they could otherwise be lowered to bypass a cap.
@@ -1113,7 +1114,8 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
 
         var shot = regeneration.MovieShot;
         var movie = shot.Scene.MovieProject;
-        var durationSeconds = Math.Clamp(shot.DurationSeconds ?? shot.Scene.DurationSeconds ?? Math.Min(movie.DurationSeconds, 60), 1, 3600);
+        var durationSeconds = MovieProductionGenerationOrchestrator.ResolveSingleClipDuration(
+            shot.DurationSeconds, shot.Scene.DurationSeconds, movie.DurationSeconds);
         // Recheck at confirmation: provider availability/capabilities may change
         // after the cost preview was created, without user consent to a downgrade.
         EnsureSelectiveRegenerationCapability(movie, durationSeconds, shot.Description);
