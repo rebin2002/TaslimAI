@@ -52,6 +52,23 @@ public sealed class RunwayMovieVideoProviderTests
         Assert.DoesNotContain("synthetic-runway-token", payload.RootElement.GetProperty("promptText").GetString(), StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("1080p", "720p", "Standard", "native")]
+    [InlineData("720p", "1080p", "Standard", "native")]
+    [InlineData("720p", "720p", "Cinematic", "native")]
+    [InlineData("720p", "720p", "Standard", "upscale")]
+    public async Task Unsupported_scene_clip_execution_profile_never_submits_a_billable_provider_request(
+        string sourceResolution, string targetResolution, string qualityTier, string processingPath)
+    {
+        var handler = new RecordingHandler(_ => throw new InvalidOperationException("No provider request is allowed."));
+        var provider = CreateProvider(handler, EnabledOptions());
+
+        await Assert.ThrowsAsync<MovieVideoProviderException>(() => provider.SubmitAsync(
+            Request(sourceResolution: sourceResolution, targetResolution: targetResolution,
+                qualityTier: qualityTier, processingPath: processingPath), CancellationToken.None));
+        Assert.Empty(handler.Requests);
+    }
+
     [Fact]
     public async Task Polling_normalizes_queued_generating_and_completed_states_and_preserves_cost_metadata()
     {
@@ -265,7 +282,11 @@ public sealed class RunwayMovieVideoProviderTests
         int durationSeconds = 5,
         string aspectRatio = "16:9",
         string? sourceImageUri = null,
-        string? continuationProviderJobId = null) => new(
+        string? continuationProviderJobId = null,
+        string sourceResolution = "720p",
+        string targetResolution = "720p",
+        string qualityTier = "Standard",
+        string processingPath = "native") => new(
             MovieStudioOperations.SceneClip,
             Guid.NewGuid(),
             Guid.NewGuid(),
@@ -282,7 +303,11 @@ public sealed class RunwayMovieVideoProviderTests
             "Scene: forest",
             "Shot: slow dolly",
             sourceImageUri,
-            continuationProviderJobId);
+            continuationProviderJobId,
+            SourceResolution: sourceResolution,
+            ProcessingPath: processingPath,
+            TargetResolution: targetResolution,
+            QualityTier: qualityTier);
 
     private static HttpResponseMessage JsonResponse(string body) => new(HttpStatusCode.OK)
     {
