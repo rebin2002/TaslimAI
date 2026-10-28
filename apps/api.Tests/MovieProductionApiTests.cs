@@ -379,6 +379,36 @@ public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWork
         Assert.Equal(render.Job.Id, replay!.Job.Id);
         Assert.Equal(render.ClipId, replay.ClipId);
 
+        // The same replay key cannot silently adopt a differently priced
+        // output profile or a different creative title. All these negative
+        // cases run against the already queued canonical job; no provider is invoked.
+        using var changedResolution = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, renderPath,
+            new { sourceVersionId = approvedMotion.Id, label = "Explicit render",
+                targetResolution = "720p", qualityTier = DirectorQualityLevels.Standard },
+            idempotencyKey: replayKey);
+        Assert.Equal(HttpStatusCode.BadRequest, changedResolution.StatusCode);
+        Assert.Contains("IDEMPOTENCY_KEY_REUSED",
+            await changedResolution.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        using var changedQuality = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, renderPath,
+            new { sourceVersionId = approvedMotion.Id, label = "Explicit render",
+                targetResolution = "1080p", qualityTier = DirectorQualityLevels.Cinematic },
+            idempotencyKey: replayKey);
+        Assert.Equal(HttpStatusCode.BadRequest, changedQuality.StatusCode);
+        Assert.Contains("IDEMPOTENCY_KEY_REUSED",
+            await changedQuality.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        using var changedCreativeTitle = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, renderPath,
+            new { sourceVersionId = approvedMotion.Id, label = "Explicit render",
+                title = "Different creative request" },
+            idempotencyKey: replayKey);
+        Assert.Equal(HttpStatusCode.BadRequest, changedCreativeTitle.StatusCode);
+        Assert.Contains("IDEMPOTENCY_KEY_REUSED",
+            await changedCreativeTitle.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
         // A changed label, shot direction or duration cannot reuse an already
         // priced canonical job, even if the approved source and key stay equal.
         using var changedLabel = await MovieOperationalFixtures.SendWithCsrfAsync(
