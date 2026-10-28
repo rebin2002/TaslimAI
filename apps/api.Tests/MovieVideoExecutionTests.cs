@@ -547,6 +547,65 @@ public sealed class MovieVideoExecutionTests
         Assert.Equal(1, (await db.MovieVideoProviderExecutions.AsNoTracking().SingleAsync()).AttemptCount);
     }
 
+    [Theory]
+    [InlineData(null, 0)]
+    [InlineData("original-provider-job", 1)]
+    public async Task Reclaimed_movie_job_never_switches_video_provider(
+        string? existingProviderJobId, int attemptCount)
+    {
+        // Provider configuration can change while an existing job remains
+        // queued or while a remote paid operation is being polled. Neither
+        // state may be adopted by a different adapter.
+        var fixture = await CreateRunningMovieJobAsync(
+            "Movie provider ownership recovery", "Do not switch adapters across retries.");
+        await using var connection = fixture.Connection;
+        await using var db = fixture.Db;
+        var input = System.Text.Json.JsonSerializer.Deserialize<MovieGenerationInput>(fixture.Job.InputJson)!;
+        fixture.Job.InputJson = System.Text.Json.JsonSerializer.Serialize(input with
+        {
+            SourceResolution = "720p",
+            TargetResolution = "720p",
+            QualityTier = DirectorQualityLevels.Standard,
+            ProcessingPath = "native",
+        });
+
+        var originalClip = await db.MovieClips.SingleAsync();
+        db.MovieVideoProviderExecutions.Add(new MovieVideoProviderExecution
+        {
+            Id = Guid.NewGuid(),
+            GenerationJobId = fixture.Job.Id,
+            MovieClipId = originalClip.Id,
+            ProviderKey = "original-provider",
+            ProviderJobId = existingProviderJobId,
+            AttemptCount = attemptCount,
+            Status = MovieVideoExecutionStatuses.Queued,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+        });
+        await db.SaveChangesAsync();
+
+        var replacementProvider = new GuardedSceneMovieVideoProvider();
+        var options = new MovieVideoOptions { Enabled = true, ProviderKey = replacementProvider.Key };
+        var handler = new MovieVideoGenerationJobHandler(
+            db, replacementProvider, new MovieVideoExecutionStore(db, Options.Create(options)),
+            Options.Create(options), NullLogger<MovieVideoGenerationJobHandler>.Instance);
+
+        var failure = await Assert.ThrowsAsync<MovieVideoProviderException>(
+            () => handler.ExecuteAsync(fixture.Job, new Progress<int>(), CancellationToken.None));
+
+        Assert.Equal(GenerationJobErrorCodes.MovieProviderUnavailable, failure.Code);
+        Assert.False(failure.IsTransient);
+        Assert.Equal(0, replacementProvider.SubmitCalls);
+        var retained = await db.MovieVideoProviderExecutions.AsNoTracking().SingleAsync();
+        Assert.Equal("original-provider", retained.ProviderKey);
+        Assert.Equal(existingProviderJobId, retained.ProviderJobId);
+        Assert.Equal(attemptCount, retained.AttemptCount);
+        Assert.Equal(GenerationJobStatus.Running,
+            (await db.GenerationJobs.AsNoTracking().SingleAsync()).Status);
+        Assert.Equal(MovieClipStatuses.Queued,
+            (await db.MovieClips.AsNoTracking().SingleAsync()).Status);
+    }
+
     [Fact]
     public async Task Crash_after_durable_submit_marker_does_not_issue_a_second_provider_request()
     {
