@@ -1431,6 +1431,14 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
             throw new GenerationJobValidationException(
                 "MOVIE_CLIP_EXECUTION_INTENT_UNSUPPORTED",
                 "This provider cannot guarantee the requested resolution, quality and processing profile. Choose a supported output profile.");
+        // A single description that is already beyond the complete provider
+        // prompt capacity cannot be made valid by appending creative context.
+        // Reject before estimating cost, persisting a clip or reserving usage.
+        if (provider.SceneClipPromptMaxCharacters is { } promptCapacity
+            && description.Trim().Length > promptCapacity)
+            throw new GenerationJobValidationException(
+                "MOVIE_CLIP_PROMPT_UNSUPPORTED",
+                "The scene or shot description exceeds this provider's prompt limit. Shorten the description before generating.");
 
         var estimate = await movieCostEstimator.EstimateAsync(
             new MovieGenerationCostRequest(
