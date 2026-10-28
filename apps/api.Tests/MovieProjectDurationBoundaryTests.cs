@@ -86,4 +86,64 @@ public sealed class MovieProjectDurationBoundaryTests : IClassFixture<MovieOpera
         Assert.False(await db.GenerationJobs.AsNoTracking()
             .AnyAsync(item => item.WorkspaceId == owner.PersonalWorkspace.Id));
     }
+
+    [Fact]
+    public async Task Two_hour_project_duration_budget_preserves_scene_and_shot_totals()
+    {
+        // A feature-length timeline is assembled from planned shots, never from
+        // a single feature-length paid-provider submission.
+        using var client = factory.CreateClient();
+        var owner = await MovieOperationalFixtures.RegisterAsync(client, "Feature Runtime Budget Owner");
+        var created = await MovieOperationalFixtures.PostAsync<MovieStudioProjectResponse>(
+            client, "/api/movie-studio/projects", new
+            {
+                workspaceId = owner.PersonalWorkspace.Id,
+                mode = MovieProjectModes.Full,
+                title = "Two Hour Timeline Budget",
+                description = "Preserve 7,200 seconds of planned runtime without paid generation.",
+                durationSeconds = 7200,
+                aspectRatio = "16:9",
+                style = "cinematic",
+                language = "en",
+            });
+
+        var scene = await MovieOperationalFixtures.PostAsync<MovieSceneDto>(
+            client, $"/api/movie-studio/projects/{created.Project.Id}/scenes", new
+            {
+                title = "Feature-Length Sequence",
+                summary = "Two planned shots spanning a two-hour movie timeline.",
+                durationSeconds = 7200,
+            });
+
+        for (var shotNumber = 1; shotNumber <= 2; shotNumber++)
+        {
+            var shot = await MovieOperationalFixtures.PostAsync<MovieShotDto>(
+                client, $"/api/movie-studio/scenes/{scene.Id}/shots", new
+                {
+                    description = $"Planned shot {shotNumber} of the long-form timeline.",
+                    durationSeconds = 3600,
+                });
+            Assert.Equal(3600, shot.DurationSeconds);
+        }
+
+        var budget = await MovieOperationalFixtures.GetAsync<MovieDurationBudgetResult>(
+            client, $"/api/movie-studio/projects/{created.Project.Id}/duration-budget");
+        Assert.True(budget.IsValid);
+        Assert.True(budget.IsComplete);
+        Assert.Equal(7200, budget.TargetDurationSeconds);
+        Assert.Equal(7200L, budget.TotalSceneDurationSeconds);
+        Assert.Equal(7200L, budget.TotalShotDurationSeconds);
+        Assert.Equal(MovieDurationBudgetStatuses.Valid, budget.Status);
+        Assert.Equal(7200, Assert.Single(budget.Scenes).DeclaredDurationSeconds);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.False(await db.GenerationJobs.AsNoTracking()
+            .AnyAsync(job => job.WorkspaceId == owner.PersonalWorkspace.Id));
+        Assert.False(await db.MovieClips.AsNoTracking()
+            .AnyAsync(clip => clip.MovieProjectId == created.Project.Id));
+        Assert.False(await db.UsageTransactions.AsNoTracking()
+            .AnyAsync(tx => tx.WorkspaceId == owner.PersonalWorkspace.Id));
+    }
+
 }
