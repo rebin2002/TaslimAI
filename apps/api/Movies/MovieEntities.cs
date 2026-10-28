@@ -759,7 +759,9 @@ public sealed record MovieVideoGenerationRequest(
     // Preserve the priced request intent at the provider-neutral boundary.
     // Adapters must still validate supported resolutions and quality levels.
     string? TargetResolution = null,
-    string? QualityTier = null);
+    string? QualityTier = null,
+    // A separate character snapshot avoids replacing the movie's visual guide.
+    string? CharacterContinuityJson = null);
 public sealed record MovieVideoReferenceImage(string Uri, string? Role = null);
 
 public sealed record MovieVideoSubmission(string ProviderJobId);
@@ -896,7 +898,9 @@ public sealed record MovieGenerationInput(
     IReadOnlyList<MovieVideoReferenceImage>? ReferenceImages = null,
     // Bind new priced jobs to the adapter selected at admission. Older serialized
     // jobs without this optional field retain their historical execution path.
-    string? SelectedProviderKey = null);
+    string? SelectedProviderKey = null,
+    // Production renders persist the exact character context they send to video.
+    string? CharacterContinuityJson = null);
 
 public sealed record MovieProviderReadinessDto(bool Ready, IReadOnlyList<string> SupportedOperations);
 
