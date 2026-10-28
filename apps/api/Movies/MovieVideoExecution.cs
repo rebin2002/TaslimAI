@@ -292,6 +292,22 @@ public sealed class MovieVideoGenerationJobHandler(
         if (!provider.IsAvailable || !provider.SupportedOperations.Contains(input.Operation, StringComparer.OrdinalIgnoreCase))
             throw new MovieProviderUnavailableException();
 
+        // Enforce the same fail-closed scene/shot capabilities at execution time.
+        // Older queued jobs and other admission routes must not bypass the
+        // provider's priced-output contract or submit unsupported paid work.
+        // This check intentionally precedes execution-record creation.
+        if (string.Equals(input.Operation, MovieStudioOperations.SceneClip, StringComparison.OrdinalIgnoreCase)
+            && (provider.SceneClipDurationRange is not { } range
+                || !range.Supports(input.DurationSeconds)
+                || input.UpscalingRequested
+                || !provider.SupportsSceneClipCostIntent(
+                    input.SourceResolution ?? string.Empty,
+                    input.TargetResolution ?? string.Empty,
+                    input.QualityTier ?? string.Empty,
+                    input.ProcessingPath ?? string.Empty,
+                    input.AspectRatio)))
+            throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);
+
         var request = new MovieVideoGenerationRequest(
             input.Operation,
             job.Id,
