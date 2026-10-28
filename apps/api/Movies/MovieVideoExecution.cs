@@ -333,11 +333,16 @@ public sealed class MovieVideoGenerationJobHandler(
             && (provider.SceneClipDurationRange is not { } range
                 || !range.Supports(input.DurationSeconds)
                 || input.UpscalingRequested
-                // A description exceeding the provider's complete prompt budget
-                // can never be submitted faithfully. Recheck older queued jobs
-                // before writing a provider execution or making a paid request.
+                // Older queued jobs can predate the admission guard. The
+                // description, style and additional direction together form a
+                // lower bound of the bounded provider's assembled prompt.
+                // Reject before creating an execution record or attempting
+                // an irreversible potentially billable submission.
                 || (provider.SceneClipPromptMaxCharacters is { } promptCapacity
-                    && (input.Description?.Length ?? 0) > promptCapacity)
+                    && (long)(input.Description?.Trim().Length ?? 0)
+                        + (input.Style?.Trim().Length ?? 0)
+                        + (input.AdditionalInstructions?.Trim().Length ?? 0)
+                        > promptCapacity)
                 // The neutral request carries a separate master output tier, but
                 // no scene-clip adapter declares a verified mastering step.
                 // Never silently drop an older queued job's mastering intent.
