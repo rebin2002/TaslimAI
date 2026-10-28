@@ -886,7 +886,10 @@ public sealed record MovieGenerationInput(
     int? TakeCount = null,
     string? FirstFrameImageUri = null,
     string? LastFrameImageUri = null,
-    IReadOnlyList<MovieVideoReferenceImage>? ReferenceImages = null);
+    IReadOnlyList<MovieVideoReferenceImage>? ReferenceImages = null,
+    // Bind new priced jobs to the adapter selected at admission. Older serialized
+    // jobs without this optional field retain their historical execution path.
+    string? SelectedProviderKey = null);
 
 public sealed record MovieProviderReadinessDto(bool Ready, IReadOnlyList<string> SupportedOperations);
 
