@@ -363,9 +363,21 @@ public sealed class MovieVideoGenerationJobHandler(
         {
             if (string.IsNullOrWhiteSpace(execution.ProviderJobId))
             {
-                var submission = await WithTransientRetriesAsync(
-                    token => provider.SubmitAsync(request, token),
-                    cancellationToken);
+                // A generation submit may have reached a billable provider even if
+                // its HTTP response was lost. Without a provider-confirmed
+                // idempotency contract, retrying here could create a second task.
+                // Retry only status polls and output retrieval, never submit.
+                MovieVideoSubmission submission;
+                try
+                {
+                    submission = await provider.SubmitAsync(request, cancellationToken);
+                }
+                catch (MovieVideoProviderException exception) when (exception.IsTransient)
+                {
+                    // An ambiguous remote submission is not safe to retry by
+                    // this worker or by any upstream transient-failure policy.
+                    throw new MovieVideoProviderException(exception.Code, false);
+                }
                 if (string.IsNullOrWhiteSpace(submission.ProviderJobId) || submission.ProviderJobId.Length > 240)
                     throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieGenerationFailed, false);
                 providerOperationMayBeActive = true;
