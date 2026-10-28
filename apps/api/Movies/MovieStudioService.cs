@@ -1054,6 +1054,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
 
         var movie = shot.Scene.MovieProject;
         var durationSeconds = Math.Clamp(shot.DurationSeconds ?? shot.Scene.DurationSeconds ?? Math.Min(movie.DurationSeconds, 60), 1, 3600);
+        EnsureSelectiveRegenerationCapability(movie, durationSeconds);
         // The server owns the estimate. Client-supplied cost fields are not trusted for
         // cap enforcement because they could otherwise be lowered to bypass a cap.
         var estimate = await movieCostEstimator.EstimateAsync(
@@ -1094,6 +1095,10 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
 
         var shot = regeneration.MovieShot;
         var movie = shot.Scene.MovieProject;
+        var durationSeconds = Math.Clamp(shot.DurationSeconds ?? shot.Scene.DurationSeconds ?? Math.Min(movie.DurationSeconds, 60), 1, 3600);
+        // Recheck at confirmation: provider availability/capabilities may change
+        // after the cost preview was created, without user consent to a downgrade.
+        EnsureSelectiveRegenerationCapability(movie, durationSeconds);
         var preflight = await costGuardrails.EvaluateAsync(
             userId,
             movie.WorkspaceId,
@@ -1107,7 +1112,6 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         var workflowError = MovieProductionWorkflow.ValidateVersionCreation(regeneration.RequestedStage, source);
         if (workflowError is not null) throw new MovieProductionValidationException("PRODUCTION_STAGE_INVALID", workflowError);
         var now = DateTime.UtcNow;
-        var durationSeconds = Math.Clamp(shot.DurationSeconds ?? shot.Scene.DurationSeconds ?? Math.Min(movie.DurationSeconds, 60), 1, 3600);
         var estimate = await movieCostEstimator.EstimateAsync(
             new MovieGenerationCostRequest(durationSeconds, "1080p", "1080p", movie.QualityLevel, "native"),
             provider.Key,
@@ -1145,7 +1149,9 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                 movie.AspectRatio, movie.Style, movie.Language, movie.AdditionalInstructions, clip.ContinuitySnapshotJson,
                 SceneSnapshot(shot.Scene), ShotSnapshot(shot), WorldContextJson: await WorldContextSnapshotAsync(movie.Id, shot.Scene.Id, shot.Id, cancellationToken),
                 SelectiveRegenerationId: regeneration.Id, SourceProductionVersionId: source?.Id, ChangedInputsJson: regeneration.ChangedInputsJson,
-                SelectiveActionType: regeneration.ActionType, SelectiveReason: regeneration.Reason)),
+                SelectiveActionType: regeneration.ActionType, SelectiveReason: regeneration.Reason,
+                SourceResolution: "1080p", TargetResolution: "1080p",
+                QualityTier: movie.QualityLevel, ProcessingPath: "native")),
         }, cancellationToken, idempotencyKey ?? $"movie-regeneration:{requestId:N}");
         clip.GenerationJobId = job.Id;
 
@@ -1179,6 +1185,26 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         shot.UpdatedAt = now;
         await db.SaveChangesAsync(cancellationToken);
         return await GetRegenerationRequestAsync(userId, requestId, cancellationToken);
+    }
+
+    private void EnsureSelectiveRegenerationCapability(MovieProject movie, int durationSeconds)
+    {
+        // Selective regeneration currently has a fixed 1080p/native cost profile.
+        // Never silently substitute Runway's 720p baseline or a different provider
+        // after the user reviews and confirms the priced request.
+        if (!provider.IsAvailable ||
+            !provider.SupportedOperations.Contains(MovieStudioOperations.SceneClip, StringComparer.OrdinalIgnoreCase))
+            throw new MovieProductionValidationException(
+                "REGENERATION_PROVIDER_UNAVAILABLE",
+                "The selected video provider cannot run selective regeneration at this time.");
+        if (provider.SceneClipDurationRange is not { } range || !range.Supports(durationSeconds))
+            throw new MovieProductionValidationException(
+                "REGENERATION_DURATION_UNSUPPORTED",
+                "The shot exceeds the selected provider's verified single-clip duration. Shorten the shot before requesting regeneration.");
+        if (!provider.SupportsSceneClipCostIntent("1080p", "1080p", movie.QualityLevel, "native", movie.AspectRatio))
+            throw new MovieProductionValidationException(
+                "REGENERATION_EXECUTION_INTENT_UNSUPPORTED",
+                "The selected provider cannot guarantee the priced 1080p quality profile for this regeneration. An explicitly supported output profile is required.");
     }
 
     public async Task<MovieSelectiveRegenerationResponse?> GetRegenerationRequestAsync(Guid userId, Guid requestId, CancellationToken cancellationToken)
