@@ -179,6 +179,48 @@ public sealed class MovieIntercutPlannerTests
         Assert.Equal(first.ProvenanceHash, replay.ProvenanceHash);
     }
 
+    [Fact]
+    public void Cut_transition_identity_changes_when_source_clip_changes()
+    {
+        // Two proposals for the same timeline revision can put a different source
+        // before the same destination. Their cut IDs must not identify the same edge.
+        var timelineId = Guid.Parse("50000000-0000-0000-0000-000000000103");
+        var firstRequest = new MovieIntercutPlanRequest
+        {
+            TimelineId = timelineId,
+            BaseTimelineVersion = 1,
+            Clips =
+            [
+                Coverage(PrimaryOne, ShotOne, SceneOne, 1, 1, 2m, MovieIntercutCoverageKinds.Primary),
+                Coverage(PrimaryTwo, ShotTwo, SceneOne, 1, 2, 2m, MovieIntercutCoverageKinds.Primary),
+                Coverage(Insert, ShotThree, SceneOne, 1, 3, 2m, MovieIntercutCoverageKinds.Primary),
+            ],
+        };
+        var secondRequest = new MovieIntercutPlanRequest
+        {
+            TimelineId = timelineId,
+            BaseTimelineVersion = 1,
+            Clips =
+            [
+                Coverage(PrimaryOne, ShotOne, SceneOne, 1, 3, 2m, MovieIntercutCoverageKinds.Primary),
+                Coverage(PrimaryTwo, ShotTwo, SceneOne, 1, 2, 2m, MovieIntercutCoverageKinds.Primary),
+                Coverage(Insert, ShotThree, SceneOne, 1, 1, 2m, MovieIntercutCoverageKinds.Primary),
+            ],
+        };
+
+        var first = MovieIntercutPlanner.Build(ProjectId, firstRequest);
+        var second = MovieIntercutPlanner.Build(ProjectId, secondRequest);
+        var replay = MovieIntercutPlanner.Build(ProjectId, firstRequest);
+        var firstCut = first.ProposedTimeline.Transitions.Single(item => item.ToClipId == PrimaryTwo);
+        var secondCut = second.ProposedTimeline.Transitions.Single(item => item.ToClipId == PrimaryTwo);
+        var replayCut = replay.ProposedTimeline.Transitions.Single(item => item.ToClipId == PrimaryTwo);
+
+        Assert.Equal(PrimaryOne, firstCut.FromClipId);
+        Assert.Equal(Insert, secondCut.FromClipId);
+        Assert.NotEqual(firstCut.Id, secondCut.Id);
+        Assert.Equal(firstCut.Id, replayCut.Id);
+    }
+
     private static MovieIntercutCoverageRequest Coverage(Guid clipId, Guid shotId, Guid sceneId, int sceneSequence, int shotSequence, decimal duration, string kind, Guid? anchorShotId = null, string? label = null) => new()
     {
         ClipId = clipId,
