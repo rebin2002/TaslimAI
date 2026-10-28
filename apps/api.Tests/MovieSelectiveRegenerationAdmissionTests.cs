@@ -65,6 +65,49 @@ public sealed class MovieSelectiveRegenerationAdmissionTests
     }
 
     [Fact]
+    public async Task Shot_duration_increased_after_preview_rejects_confirmation_without_creating_billable_work()
+    {
+        using var factory = new MovieClipDurationApiFactory();
+        using (var setup = factory.Services.CreateScope())
+            setup.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+
+        using var client = factory.CreateClient();
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Selective regeneration stale duration preview", sceneDurationSeconds: 5);
+        var sourceId = await ApprovedStoryboardAsync(client, fixture.Shot.Id);
+        var preview = await MovieOperationalFixtures.PostAsync<MovieSelectiveRegenerationResponse>(
+            client, $"/api/movie-studio/shots/{fixture.Shot.Id}/regeneration-requests", Request(sourceId));
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var ledgerBefore = await db.UsageTransactions.CountAsync();
+        var versionsBefore = await db.MovieProductionVersions.CountAsync(item => item.MovieShotId == fixture.Shot.Id);
+
+        // The priced preview was for five seconds, but the shot has since
+        // grown beyond this test provider's verified ten-second clip limit.
+        // Confirmation must revalidate the current shot, not trust the preview.
+        var shot = await db.MovieShots.SingleAsync(item => item.Id == fixture.Shot.Id);
+        shot.DurationSeconds = 11;
+        await db.SaveChangesAsync();
+
+        using var rejected = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post,
+            $"/api/movie-studio/regeneration-requests/{preview.Request.Id}/confirm",
+            new { confirm = true });
+        Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
+        Assert.Contains("REGENERATION_DURATION_UNSUPPORTED",
+            await rejected.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Equal(MovieRegenerationStatuses.PendingConfirmation,
+            await db.MovieRegenerationRequests.Where(item => item.Id == preview.Request.Id)
+                .Select(item => item.Status).SingleAsync());
+        Assert.Equal(versionsBefore,
+            await db.MovieProductionVersions.CountAsync(item => item.MovieShotId == fixture.Shot.Id));
+        Assert.False(await db.MovieClips.AnyAsync(item => item.MovieProjectId == fixture.Project.Project.Id));
+        Assert.False(await db.GenerationJobs.AnyAsync(item => item.ProjectId == fixture.Project.Project.ProjectId));
+        Assert.Equal(ledgerBefore, await db.UsageTransactions.CountAsync());
+    }
+
+    [Fact]
     public async Task Provider_becoming_unavailable_after_preview_rejects_confirmation_without_clip_job_or_debit()
     {
         using var factory = new MovieClipDurationApiFactory();
