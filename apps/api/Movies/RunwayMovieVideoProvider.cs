@@ -40,6 +40,17 @@ public sealed class RunwayMovieVideoProvider(
     // Mirrors the existing BuildPayload duration gate; no new provider API claim.
     public MovieClipDurationRange? SceneClipDurationRange => new(2, 10);
 
+    // Current BuildPayload sends fixed 1280:720 or 720:1280 and does not
+    // translate paid quality/upscale tiers. Permit only the unenhanced 720p
+    // baseline, never imply a higher resolution or quality instruction.
+    public bool SupportsSceneClipCostIntent(string sourceResolution, string targetResolution,
+        string qualityTier, string processingPath, string aspectRatio) =>
+        string.Equals(sourceResolution, "720p", StringComparison.OrdinalIgnoreCase)
+        && string.Equals(targetResolution, "720p", StringComparison.OrdinalIgnoreCase)
+        && string.Equals(qualityTier, DirectorQualityLevels.Standard, StringComparison.OrdinalIgnoreCase)
+        && string.Equals(processingPath, "native", StringComparison.OrdinalIgnoreCase)
+        && aspectRatio is "16:9" or "9:16";
+
     public async Task<MovieVideoSubmission> SubmitAsync(MovieVideoGenerationRequest request, CancellationToken cancellationToken)
     {
         EnsureAvailable();
@@ -185,6 +196,17 @@ public sealed class RunwayMovieVideoProvider(
         if (!string.IsNullOrWhiteSpace(request.ContinuationProviderJobId))
             throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);
         if (request.DurationSeconds is < 2 or > 10)
+            throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);
+        // Defence in depth: other production paths may still queue a priced
+        // scene request without legacy QueueClipAsync's admission check.
+        // Never submit a provider task for a profile this adapter cannot enact.
+        if (request.Operation == MovieStudioOperations.SceneClip
+            && !SupportsSceneClipCostIntent(
+                request.SourceResolution ?? string.Empty,
+                request.TargetResolution ?? string.Empty,
+                request.QualityTier ?? string.Empty,
+                request.ProcessingPath ?? string.Empty,
+                request.AspectRatio))
             throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);
 
         var ratio = request.AspectRatio.Trim() switch
