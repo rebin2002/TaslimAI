@@ -143,6 +143,84 @@ public sealed class MovieProductionStructuredPromptAdmissionTests
     }
 
     [Fact]
+    public async Task Legacy_shot_generation_rejects_oversized_character_continuity_without_persisting_a_snapshot()
+    {
+        // The provider would receive the selected character's continuity card,
+        // which is not part of the readable description or scene/shot JSON.
+        using var factory = new MovieStructuredPromptBudgetFactory();
+        using (var setup = factory.Services.CreateScope())
+            setup.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+
+        using var client = factory.CreateClient();
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Character Continuity Film", sceneDurationSeconds: 5);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var shot = await db.MovieShots
+            .Include(item => item.Scene).ThenInclude(item => item.MovieProject)
+            .SingleAsync(item => item.Id == fixture.Shot.Id);
+        shot.Description = "Liora crosses the courtyard.";
+        await db.SaveChangesAsync();
+
+        var continuity = scope.ServiceProvider.GetRequiredService<IMovieCharacterContinuityService>();
+        var emptySnapshot = await continuity.BuildSnapshotForTargetAsync(
+            shot.Scene.MovieProjectId, shot.Scene.Id, shot.Id, false);
+
+        var now = DateTime.UtcNow;
+        db.MovieCharacters.Add(new MovieCharacter
+        {
+            Id = Guid.NewGuid(),
+            MovieProjectId = shot.Scene.MovieProjectId,
+            Name = "Liora",
+            Description = new string('L', 1_500),
+            CreatedAt = now,
+            UpdatedAt = now,
+        });
+        await db.SaveChangesAsync();
+
+        var expandedSnapshot = await continuity.BuildSnapshotForTargetAsync(
+            shot.Scene.MovieProjectId, shot.Scene.Id, shot.Id, false);
+        Assert.True(expandedSnapshot.SnapshotJson.Length > emptySnapshot.SnapshotJson.Length + 500,
+            "The relevant character's continuity card must expand the provider prompt.");
+
+        var movie = shot.Scene.MovieProject;
+        var otherCreativeLength = (long)shot.Description.Trim().Length
+            + (movie.Style?.Trim().Length ?? 0)
+            + (movie.AdditionalInstructions?.Trim().Length ?? 0)
+            + MovieStudioService.SceneSnapshot(shot.Scene).Length
+            + MovieStudioService.ShotSnapshot(shot).Length;
+        var provider = Assert.IsType<FakeMovieVideoProvider>(
+            scope.ServiceProvider.GetRequiredService<IMovieVideoProvider>());
+        provider.SceneClipPromptMaxCharacters = checked((int)
+            (otherCreativeLength + emptySnapshot.SnapshotJson.Trim().Length + 50));
+        Assert.True(otherCreativeLength + expandedSnapshot.SnapshotJson.Trim().Length
+            > provider.SceneClipPromptMaxCharacters.Value);
+
+        var snapshotsBefore = await db.MovieCharacterContinuitySnapshots.CountAsync();
+        var clipsBefore = await db.MovieClips.CountAsync();
+        var jobsBefore = await db.GenerationJobs.CountAsync();
+        var usageBefore = await db.UsageTransactions.CountAsync();
+
+        using var response = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, $"/api/movie-studio/shots/{shot.Id}/generate",
+            new { title = "Character continuity shot", sourceResolution = "720p",
+                targetResolution = "720p", qualityTier = "Standard",
+                confirmationAccepted = true },
+            idempotencyKey: "character-continuity-prompt-overflow");
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains("MOVIE_CLIP_PROMPT_UNSUPPORTED",
+            await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Equal(snapshotsBefore, await db.MovieCharacterContinuitySnapshots.CountAsync());
+        Assert.Equal(clipsBefore, await db.MovieClips.CountAsync());
+        Assert.Equal(jobsBefore, await db.GenerationJobs.CountAsync());
+        Assert.Equal(usageBefore, await db.UsageTransactions.CountAsync());
+        Assert.Equal(0, scope.ServiceProvider.GetRequiredService<FakeProviderCallLog>()
+            .Calls(FakeProviderKind.Movie));
+    }
+
+    [Fact]
     public async Task Approved_render_rejects_oversized_structured_direction_before_job_or_usage_reservation()
     {
         using var factory = new MovieStructuredPromptBudgetFactory();
