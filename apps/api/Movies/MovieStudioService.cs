@@ -2013,6 +2013,13 @@ internal static class MovieStudioIdempotency
             && input.MovieSceneId == scene.Id
             && input.MovieShotId == shot?.Id
             && input.DurationSeconds == effectiveDurationSeconds
+            // An edited scene/shot or movie direction is a different generation
+            // request even when its duration, price settings and title match.
+            && string.Equals(input.Description, shot?.Description ?? scene.Summary, StringComparison.Ordinal)
+            && string.Equals(input.AspectRatio, movie.AspectRatio, StringComparison.Ordinal)
+            && string.Equals(input.Style, movie.Style, StringComparison.Ordinal)
+            && string.Equals(input.Language, movie.Language, StringComparison.Ordinal)
+            && string.Equals(input.AdditionalInstructions, movie.AdditionalInstructions, StringComparison.Ordinal)
             && string.Equals(job.Title, title, StringComparison.Ordinal)
             && Normalized(input.SourceResolution, "1080p") == Normalized(request.SourceResolution, "1080p")
             && Normalized(input.TargetResolution, "1080p") == Normalized(request.TargetResolution, "1080p")
