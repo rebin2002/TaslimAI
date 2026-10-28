@@ -57,6 +57,28 @@ public sealed class MovieClipIntentDeniedApiFactory : MovieOperationalApiFactory
     }
 }
 
+// A deliberately small fake prompt budget verifies rejection at HTTP admission,
+// without submitting a billable task or depending on external providers.
+public sealed class MovieClipPromptLimitedApiFactory : MovieOperationalApiFactory
+{
+    protected override bool WorkerEnabled => false;
+
+    protected override void ConfigureWebHost(IWebHostBuilder builder)
+    {
+        base.ConfigureWebHost(builder);
+        builder.ConfigureServices(services =>
+        {
+            services.RemoveAll<IMovieVideoProvider>();
+            services.AddSingleton<IMovieVideoProvider>(sp => new FakeMovieVideoProvider(
+                sp.GetRequiredService<FakeProviderScenarioCatalog>(),
+                sp.GetRequiredService<FakeProviderCallLog>())
+            {
+                SceneClipPromptMaxCharacters = 30,
+            });
+        });
+    }
+}
+
 public sealed class MovieClipDurationAdmissionTests : IClassFixture<MovieClipDurationApiFactory>
 {
     private readonly MovieClipDurationApiFactory factory;
@@ -135,6 +157,60 @@ public sealed class MovieClipDurationAdmissionTests : IClassFixture<MovieClipDur
         Assert.Equal(0, await db.MovieClips.CountAsync(item => item.MovieProjectId == fixture.Project.Project.Id));
         Assert.Equal(0, await db.GenerationJobs.CountAsync(item => item.IdempotencyKey == "movie-output-profile-unsupported"));
         Assert.Equal(transactionCountBefore, await db.UsageTransactions.CountAsync());
+    }
+
+    [Fact]
+    public async Task Oversized_scene_clip_description_rejects_before_job_clip_or_usage_reservation()
+    {
+        using var promptFactory = new MovieClipPromptLimitedApiFactory();
+        using (var setup = promptFactory.Services.CreateScope())
+            setup.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+
+        using var client = promptFactory.CreateClient();
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Oversized clip prompt admission", sceneDurationSeconds: 5);
+        using var scope = promptFactory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var countBefore = await db.UsageTransactions.CountAsync();
+
+        using var rejected = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, $"/api/movie-studio/shots/{fixture.Shot.Id}/generate",
+            new { title = "Unsupported description", confirmationAccepted = true },
+            idempotencyKey: "prompt-overflow-safe-admission");
+        Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
+        Assert.Contains("MOVIE_CLIP_PROMPT_UNSUPPORTED",
+            await rejected.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.False(await db.MovieClips.AnyAsync(item => item.MovieProjectId == fixture.Project.Project.Id));
+        Assert.False(await db.GenerationJobs.AnyAsync(item => item.IdempotencyKey == "prompt-overflow-safe-admission"));
+        Assert.Equal(countBefore, await db.UsageTransactions.CountAsync());
+    }
+
+    [Fact]
+    public async Task Oversized_approved_render_description_rejects_before_job_or_usage_reservation()
+    {
+        using var promptFactory = new MovieClipPromptLimitedApiFactory();
+        using (var setup = promptFactory.Services.CreateScope())
+            setup.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+
+        using var client = promptFactory.CreateClient();
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Oversized production prompt admission", sceneDurationSeconds: 5);
+        using var scope = promptFactory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var countBefore = await db.UsageTransactions.CountAsync();
+        var versionCountBefore = await db.MovieProductionVersions.CountAsync();
+
+        using var rejected = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, $"/api/movie-studio/shots/{fixture.Shot.Id}/production/render",
+            new { sourceVersionId = Guid.NewGuid(), label = "Unsupported description", confirmationAccepted = true },
+            idempotencyKey: "production-prompt-overflow-admission");
+        // Without an approved source, the existing source workflow gate must
+        // win before the prompt-capacity gate; no speculative resources may exist.
+        Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
+        Assert.False(await db.MovieClips.AnyAsync(item => item.MovieProjectId == fixture.Project.Project.Id));
+        Assert.False(await db.GenerationJobs.AnyAsync(item => item.IdempotencyKey == "production-prompt-overflow-admission"));
+        Assert.Equal(versionCountBefore, await db.MovieProductionVersions.CountAsync());
+        Assert.Equal(countBefore, await db.UsageTransactions.CountAsync());
     }
 
     [Theory]
