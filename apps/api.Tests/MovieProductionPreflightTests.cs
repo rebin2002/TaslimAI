@@ -136,6 +136,36 @@ public sealed class MovieProductionPreflightTests : IClassFixture<GenerationJobs
     }
 
     [Theory]
+    [InlineData(5, 120, 7200, 5)]
+    [InlineData(null, 12, 7200, 12)]
+    [InlineData(null, null, 7200, 60)]
+    [InlineData(null, null, 30, 30)]
+    [InlineData(3600, 7200, 7200, 3600)]
+    public void Adaptive_preflight_uses_the_same_selected_clip_duration_as_queue_and_cost_preview(
+        int? shotSeconds, int? sceneSeconds, int movieSeconds, int expectedSeconds)
+    {
+        // A missing shot duration must not silently become a one-second
+        // adaptive-quality decision while cost and queue use the scene/film fallback.
+        var shot = new MovieShot
+        {
+            DurationSeconds = shotSeconds,
+            Scene = new MovieScene
+            {
+                DurationSeconds = sceneSeconds,
+                MovieProject = new MovieProject { DurationSeconds = movieSeconds },
+            },
+        };
+        Assert.Equal(expectedSeconds, MovieProductionAdaptivePlanBuilder.ResolveAdaptiveDurationSeconds(shot));
+
+        var inherited = MovieProductionAdaptivePlanBuilder.Build(shot, "1080p", DirectorQualityLevels.Standard);
+        shot.DurationSeconds = expectedSeconds;
+        var explicitDuration = MovieProductionAdaptivePlanBuilder.Build(shot, "1080p", DirectorQualityLevels.Standard);
+        Assert.Equal(explicitDuration.SourceResolution, inherited.SourceResolution);
+        Assert.Equal(explicitDuration.Recommendation.QualityConfidence, inherited.Recommendation.QualityConfidence);
+        Assert.Equal(explicitDuration.Recommendation.QcEscalationRequired, inherited.Recommendation.QcEscalationRequired);
+    }
+
+    [Theory]
     [InlineData(5, 7200, 7200, true)]
     [InlineData(null, 10, 7200, true)]
     [InlineData(null, null, 7200, true)]
