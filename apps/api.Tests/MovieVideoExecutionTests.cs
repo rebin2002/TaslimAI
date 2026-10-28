@@ -342,6 +342,38 @@ public sealed class MovieVideoExecutionTests
         Assert.Equal(GenerationJobStatus.Running, (await db.GenerationJobs.AsNoTracking().SingleAsync()).Status);
     }
 
+    [Fact]
+    public async Task Transient_submission_failure_is_not_retried_without_provider_idempotency()
+    {
+        var fixture = await CreateRunningMovieJobAsync(
+            "Movie submit ambiguity test", "A synthetic transient submission response.");
+        await using var connection = fixture.Connection;
+        await using var db = fixture.Db;
+        var provider = new TransientSubmissionMovieVideoProvider();
+        var options = new MovieVideoOptions
+        {
+            Enabled = true,
+            ProviderKey = provider.Key,
+            MaxTransientRetries = 3,
+            RetryBaseDelaySeconds = 1,
+        };
+        var handler = new MovieVideoGenerationJobHandler(
+            db, provider, new MovieVideoExecutionStore(db, Options.Create(options)),
+            Options.Create(options), NullLogger<MovieVideoGenerationJobHandler>.Instance);
+
+        var failure = await Assert.ThrowsAsync<MovieVideoProviderException>(
+            () => handler.ExecuteAsync(fixture.Job, new Progress<int>(), CancellationToken.None));
+
+        Assert.Equal(GenerationJobErrorCodes.MovieProviderUnavailable, failure.Code);
+        Assert.False(failure.IsTransient);
+        Assert.Equal(1, provider.SubmitCalls);
+        Assert.Equal(0, provider.CancelCalls);
+        var execution = await db.MovieVideoProviderExecutions.AsNoTracking().SingleAsync();
+        Assert.Null(execution.ProviderJobId);
+        Assert.Equal(MovieVideoExecutionStatuses.ProviderUnavailable, execution.Status);
+        Assert.Equal(MovieClipStatuses.Failed, (await db.MovieClips.AsNoTracking().SingleAsync()).Status);
+    }
+
     private static async Task<(SqliteConnection Connection, TaslimDbContext Db, GenerationJob Job)> CreateRunningMovieJobAsync(string title, string description)
     {
         var connection = new SqliteConnection("Data Source=:memory:");
@@ -536,6 +568,35 @@ public sealed class MovieVideoExecutionTests
         public Task<MovieVideoProviderOutput> RetrieveAsync(string providerJobId, MovieVideoProviderStatus status, CancellationToken cancellationToken) =>
             Task.FromException<MovieVideoProviderOutput>(new InvalidOperationException("No output retrieval is expected."));
         public Task CancelAsync(string providerJobId, CancellationToken cancellationToken) => Task.CompletedTask;
+    }
+
+    private sealed class TransientSubmissionMovieVideoProvider : IMovieVideoProvider
+    {
+        public string Key => "ambiguous-submit-test";
+        public bool IsAvailable => true;
+        public IReadOnlyCollection<string> SupportedOperations { get; } = [MovieStudioOperations.SceneClip];
+        public MovieClipDurationRange? SceneClipDurationRange => new(1, 3600);
+        public bool SupportsSceneClipCostIntent(string sourceResolution, string targetResolution,
+            string qualityTier, string processingPath, string aspectRatio) => true;
+        public int SubmitCalls { get; private set; }
+        public int CancelCalls { get; private set; }
+
+        public Task<MovieVideoSubmission> SubmitAsync(MovieVideoGenerationRequest request, CancellationToken cancellationToken)
+        {
+            SubmitCalls++;
+            return Task.FromException<MovieVideoSubmission>(
+                new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnavailable, true));
+        }
+
+        public Task<MovieVideoProviderStatus> GetStatusAsync(string providerJobId, CancellationToken cancellationToken) =>
+            Task.FromException<MovieVideoProviderStatus>(new InvalidOperationException("Status must not be polled after an ambiguous submit."));
+        public Task<MovieVideoProviderOutput> RetrieveAsync(string providerJobId, MovieVideoProviderStatus status, CancellationToken cancellationToken) =>
+            Task.FromException<MovieVideoProviderOutput>(new InvalidOperationException("No output should be retrieved."));
+        public Task CancelAsync(string providerJobId, CancellationToken cancellationToken)
+        {
+            CancelCalls++;
+            return Task.CompletedTask;
+        }
     }
 
     private sealed class ProviderFailureMovieVideoProvider : IMovieVideoProvider
