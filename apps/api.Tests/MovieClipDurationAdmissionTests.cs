@@ -151,6 +151,43 @@ public sealed class MovieClipDurationAdmissionTests : IClassFixture<MovieClipDur
     }
 
     [Fact]
+    public async Task Feature_length_plan_does_not_override_unsupported_single_shot_duration()
+    {
+        // A two-hour movie is assembled from many clips; it does not grant the
+        // selected adapter permission to generate an 11-second single shot when
+        // that adapter only declares 2-10 seconds per submission.
+        using var client = factory.CreateClient();
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Feature length unsupported shot", sceneDurationSeconds: 5);
+        using (var setupScope = factory.Services.CreateScope())
+        {
+            var db = setupScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var movie = await db.MovieProjects.SingleAsync(item => item.Id == fixture.Project.Project.Id);
+            var scene = await db.MovieScenes.SingleAsync(item => item.Id == fixture.Scene.Id);
+            var shot = await db.MovieShots.SingleAsync(item => item.Id == fixture.Shot.Id);
+            movie.DurationSeconds = 7_200;
+            scene.DurationSeconds = 120;
+            shot.DurationSeconds = 11;
+            await db.SaveChangesAsync();
+        }
+
+        using var scope = factory.Services.CreateScope();
+        var verify = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var initialUsageCount = await verify.UsageTransactions.CountAsync();
+        using var rejected = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post,
+            $"/api/movie-studio/shots/{fixture.Shot.Id}/generate",
+            new { title = "Unsupported eleven-second feature shot", confirmationAccepted = true },
+            idempotencyKey: "feature-length-unsupported-shot");
+        Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
+        Assert.Contains("MOVIE_CLIP_DURATION_UNSUPPORTED",
+            await rejected.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.False(await verify.MovieClips.AnyAsync(item => item.MovieProjectId == fixture.Project.Project.Id));
+        Assert.False(await verify.GenerationJobs.AnyAsync(item => item.IdempotencyKey == "feature-length-unsupported-shot"));
+        Assert.Equal(initialUsageCount, await verify.UsageTransactions.CountAsync());
+    }
+
+    [Fact]
     public async Task Unsupported_clip_duration_rejects_before_job_clip_or_usage_reservation()
     {
         using var client = factory.CreateClient();
