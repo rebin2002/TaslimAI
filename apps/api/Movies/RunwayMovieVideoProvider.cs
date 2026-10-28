@@ -266,7 +266,12 @@ public sealed class RunwayMovieVideoProvider(
         };
         var prompt = string.Join("\n", visualDirection.Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => value.Trim()));
         if (prompt.Length < 1) throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);
-        return prompt.Length <= 1000 ? prompt : prompt[..997].TrimEnd() + "...";
+        // Silently truncating a paid generation prompt can drop continuity and
+        // creative directions while preserving their original priced/idempotent
+        // identity. Reject it before resolving image hosts or posting to Runway.
+        if (prompt.Length > 1000)
+            throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);
+        return prompt;
     }
 
     private MovieVideoProviderStatus MapStatus(RunwayTaskResponse task)
