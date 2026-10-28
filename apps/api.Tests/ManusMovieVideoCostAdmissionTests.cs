@@ -76,6 +76,29 @@ public sealed class ManusMovieVideoCostAdmissionTests
         Assert.Equal(0, handler.RequestCount);
     }
 
+    [Fact]
+    public async Task Oversized_Manus_director_prompt_rejects_before_image_host_lookup_or_task_creation()
+    {
+        // The old prompt builder truncated continuity/direction silently.
+        // A potentially billable task must not omit unreviewed source intent.
+        var handler = new RejectingHandler();
+        var urlPolicy = new CountingUrlPolicy();
+        var provider = CreateProvider(handler, urlPolicy);
+        var request = CreateRequest() with
+        {
+            AdditionalInstructions = new string('X', 13_000),
+            SourceImageUri = "https://assets.example.test/guide.png",
+        };
+
+        var failure = await Assert.ThrowsAsync<MovieVideoProviderException>(
+            () => provider.SubmitAsync(request, CancellationToken.None));
+
+        Assert.Equal(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, failure.Code);
+        Assert.False(failure.IsTransient);
+        Assert.Equal(0, urlPolicy.Calls);
+        Assert.Equal(0, handler.RequestCount);
+    }
+
     private static ManusMovieVideoProvider CreateProvider(HttpMessageHandler handler, IProviderUrlPolicy? urlPolicy = null)
     {
         var options = new MovieVideoOptions
