@@ -109,6 +109,14 @@ public sealed record MovieProductionAdaptivePlan(
 /// </summary>
 public static class MovieProductionAdaptivePlanBuilder
 {
+    // Match the selected production-clip duration used by preflight cost estimation
+    // and the queue path. A shot with no override inherits its scene duration;
+    // a movie-wide plan without either duration uses at most 60 seconds per clip.
+    // Invalid durations remain separately rejected by the admission checks.
+    internal static int ResolveAdaptiveDurationSeconds(MovieShot shot) =>
+        Math.Clamp(shot.DurationSeconds ?? shot.Scene.DurationSeconds
+            ?? Math.Min(shot.Scene.MovieProject.DurationSeconds, 60), 1, 3_600);
+
     public static MovieProductionAdaptivePlan Build(MovieShot shot, string? targetResolution, string? qualityTier)
     {
         var target = string.IsNullOrWhiteSpace(targetResolution) ? MovieResolutionTiers.P1080 : targetResolution.Trim();
@@ -124,7 +132,7 @@ public static class MovieProductionAdaptivePlanBuilder
         {
             MasterTargetResolution = targetTier.Code,
             QualityTier = quality,
-            DurationSeconds = Math.Clamp(shot.DurationSeconds ?? 1, 1, 3_600),
+            DurationSeconds = ResolveAdaptiveDurationSeconds(shot),
             Importance = string.IsNullOrWhiteSpace(shot.Purpose) ? 50 : 70,
             MotionComplexity = string.IsNullOrWhiteSpace(shot.CameraMotion) ? 35 : 65,
             CameraComplexity = string.IsNullOrWhiteSpace(shot.CameraAndFraming) ? 35 : 60,
