@@ -109,6 +109,8 @@ jobs:
       - run: npm ci
       - run: npx playwright install --with-deps chromium
         working-directory: apps/web
+      - name: Build API before startup smoke
+        run: dotnet build apps/api/Taslim.Api.csproj
       - name: Start API
         env:
           ASPNETCORE_ENVIRONMENT: Development
@@ -116,11 +118,14 @@ jobs:
           Database__ApplyMigrations: "true"
           AllowedOrigins__0: http://localhost:3000
           Ai__OpenAI__Enabled: "false"
+          # A cold E2E database can require substantial EF migration time after API build.
+          # Keep both liveness and readiness checks mandatory; allow startup to finish.
+          SMOKE_MAX_ATTEMPTS: "180"
           Files__StorageProvider: Local
           Files__LocalRootPath: ${{ github.workspace }}/.e2e-files
         run: |
           mkdir -p .e2e-files
-          nohup dotnet run --project apps/api --urls http://127.0.0.1:5000 > /tmp/taslim-api.log 2>&1 &
+          nohup dotnet run --no-build --project apps/api --urls http://127.0.0.1:5000 > /tmp/taslim-api.log 2>&1 &
           bash scripts/api-health-smoke.sh http://127.0.0.1:5000
       - name: Run browser tests
         env:

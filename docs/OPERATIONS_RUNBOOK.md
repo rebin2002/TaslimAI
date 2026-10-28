@@ -107,6 +107,8 @@ Migration application is controlled by `Database:ApplyMigrations`. Production mi
 
 If database connectivity is intermittent, compare the timestamps of readiness failures, worker iteration failures, payment webhook failures, and usage finalization failures. A single request can be retried safely only after checking idempotency keys and existing durable rows.
 
+Startup migrations acquire the `taslim_ef_migrations` PostgreSQL advisory lock and use the configured `Database:MigrationTimeoutSeconds` bound (120 seconds by default; production accepts 10–900 seconds). The same bound applies to lock acquisition and EF migration commands. If another instance is migrating, the lock is held until that work finishes or the bound expires; a timeout stops startup rather than allowing a Railway rollout to hang indefinitely. The API also cancels migration work when host shutdown begins, and closing the database session releases the advisory lock. Increase the value only when a reviewed migration requires it; do not disable the fail-closed startup behavior or run destructive reset commands.
+
 ## Provider diagnosis
 
 The admin dashboard distinguishes configuration from observed operation. `disabled` means the feature flag is off. `unconfigured` means the feature is enabled or expected but its provider credentials or provider adapter are not available. `available_unknown` means configuration and adapter availability are present, but the system has not made an active paid generation call for health purposes. `recent_operational_failure` means a related durable generation failure was recorded in the recent observation window.

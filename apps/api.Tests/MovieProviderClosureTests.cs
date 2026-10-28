@@ -124,6 +124,29 @@ public sealed class MovieProviderProductionConfigurationTests
         ProductionConfigurationValidator.Validate(Configuration(BaseValues()), ProductionEnvironment());
     }
 
+    [Theory]
+    [InlineData(9)]
+    [InlineData(901)]
+    public void Production_migration_timeout_must_be_bounded(int timeoutSeconds)
+    {
+        var values = BaseValues();
+        values["Database:MigrationTimeoutSeconds"] = timeoutSeconds.ToString();
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            ProductionConfigurationValidator.Validate(Configuration(values), ProductionEnvironment()));
+
+        Assert.Contains("MigrationTimeoutSeconds", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Production_migration_timeout_accepts_the_configured_operational_window()
+    {
+        var values = BaseValues();
+        values["Database:MigrationTimeoutSeconds"] = "600";
+
+        ProductionConfigurationValidator.Validate(Configuration(values), ProductionEnvironment());
+    }
+
     [Fact]
     public void Enabled_movie_dialogue_requires_matching_complete_generic_voice_configuration()
     {
