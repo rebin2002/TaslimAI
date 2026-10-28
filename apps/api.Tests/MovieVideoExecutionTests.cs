@@ -422,6 +422,51 @@ public sealed class MovieVideoExecutionTests
     }
 
     [Fact]
+    public async Task Worker_rejects_queued_structured_prompt_overflow_before_execution_record()
+    {
+        // A legacy queued job may have a short description yet contain scene
+        // and shot JSON that cannot fit the selected adapter's prompt budget.
+        // No actual provider API is contacted by this test.
+        var fixture = await CreateRunningMovieJobAsync(
+            "Movie structured prompt capacity", "Short direction with oversized scene JSON.");
+        await using var connection = fixture.Connection;
+        await using var db = fixture.Db;
+        var input = System.Text.Json.JsonSerializer.Deserialize<MovieGenerationInput>(fixture.Job.InputJson)!;
+        fixture.Job.InputJson = System.Text.Json.JsonSerializer.Serialize(input with
+        {
+            Description = "Short shot",
+            Style = null,
+            AdditionalInstructions = null,
+            ContinuityGuideJson = null,
+            SceneJson = new string('S', 80),
+            ShotJson = null,
+            SourceResolution = "720p",
+            TargetResolution = "720p",
+            QualityTier = DirectorQualityLevels.Standard,
+            ProcessingPath = "native",
+            MasterResolution = null,
+            DurationSeconds = 5,
+            UpscalingRequested = false,
+        });
+        await db.SaveChangesAsync();
+
+        var provider = new GuardedSceneMovieVideoProvider(promptLimit: 64);
+        var options = new MovieVideoOptions { Enabled = true, ProviderKey = provider.Key };
+        var handler = new MovieVideoGenerationJobHandler(
+            db, provider, new MovieVideoExecutionStore(db, Options.Create(options)),
+            Options.Create(options), NullLogger<MovieVideoGenerationJobHandler>.Instance);
+
+        var failure = await Assert.ThrowsAsync<MovieVideoProviderException>(
+            () => handler.ExecuteAsync(fixture.Job, new Progress<int>(), CancellationToken.None));
+
+        Assert.Equal(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, failure.Code);
+        Assert.Equal(0, provider.SubmitCalls);
+        Assert.Empty(await db.MovieVideoProviderExecutions.AsNoTracking().ToListAsync());
+        Assert.Equal(MovieClipStatuses.Failed, (await db.MovieClips.AsNoTracking().SingleAsync()).Status);
+        Assert.Equal(GenerationJobStatus.Running, (await db.GenerationJobs.AsNoTracking().SingleAsync()).Status);
+    }
+
+    [Fact]
     public async Task Worker_preserves_supported_priced_intent_at_provider_boundary()
     {
         // The provider is a deterministic fake that records the request and throws.
