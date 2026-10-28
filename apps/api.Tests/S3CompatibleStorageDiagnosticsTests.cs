@@ -3,6 +3,9 @@ using System.Net.Http;
 using System.Security.Authentication;
 using System.Net.Sockets;
 using Amazon.S3;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
+using Taslim.Api.Files;
 using Xunit;
 
 namespace Taslim.Api.Tests;
@@ -72,5 +75,67 @@ public sealed class S3CompatibleStorageDiagnosticsTests
             {
                 StatusCode = HttpStatusCode.Forbidden,
             }));
+    }
+    [Theory]
+    [InlineData("put")]
+    [InlineData("get")]
+    [InlineData("delete")]
+    [InlineData("head")]
+    public async Task Sdk_timeout_without_caller_cancellation_is_a_storage_failure(string operation)
+    {
+        // A provider timeout must not be mistaken for a client-aborted request.
+        using var storage = CreateThrowingStorage(new TaskCanceledException("synthetic upstream timeout"));
+        using var content = new MemoryStream([1, 2, 3]);
+        await Assert.ThrowsAsync<FileStorageOperationException>(() => operation switch
+        {
+            "put" => storage.StoreAsync("private/key", content),
+            "get" => storage.OpenReadAsync("private/key"),
+            "delete" => storage.DeleteAsync("private/key"),
+            "head" => storage.ExistsAsync("private/key"),
+            _ => throw new ArgumentOutOfRangeException(nameof(operation)),
+        });
+    }
+
+    [Theory]
+    [InlineData("put")]
+    [InlineData("get")]
+    [InlineData("delete")]
+    [InlineData("head")]
+    public async Task Explicit_caller_cancellation_is_preserved(string operation)
+    {
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        using var storage = CreateThrowingStorage(new OperationCanceledException(cancellation.Token));
+        using var content = new MemoryStream([1, 2, 3]);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => operation switch
+        {
+            "put" => storage.StoreAsync("private/key", content, cancellation.Token),
+            "get" => storage.OpenReadAsync("private/key", cancellation.Token),
+            "delete" => storage.DeleteAsync("private/key", cancellation.Token),
+            "head" => storage.ExistsAsync("private/key", cancellation.Token),
+            _ => throw new ArgumentOutOfRangeException(nameof(operation)),
+        });
+    }
+
+    private static S3CompatibleFileStorageService CreateThrowingStorage(Exception failure) => new(
+        new ThrowingObjectClient(failure),
+        Options.Create(new FileOptions { S3Bucket = "test-bucket" }),
+        NullLogger<S3CompatibleFileStorageService>.Instance);
+
+    private sealed class ThrowingObjectClient(Exception failure) : IS3CompatibleObjectClient
+    {
+        public Task PutAsync(string bucket, string key, Stream content, CancellationToken cancellationToken = default)
+            => Task.FromException(failure);
+
+        public Task<Stream?> GetAsync(string bucket, string key, CancellationToken cancellationToken = default)
+            => Task.FromException<Stream?>(failure);
+
+        public Task DeleteAsync(string bucket, string key, CancellationToken cancellationToken = default)
+            => Task.FromException(failure);
+
+        public Task<bool> ExistsAsync(string bucket, string key, CancellationToken cancellationToken = default)
+            => Task.FromException<bool>(failure);
+
+        public void Dispose() { }
     }
 }
