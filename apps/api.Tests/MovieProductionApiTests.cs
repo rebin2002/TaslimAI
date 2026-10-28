@@ -349,7 +349,12 @@ public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWork
     [Fact]
     public async Task Selective_regeneration_requires_confirmation_preserves_history_and_invalidates_downstream()
     {
-        using var client = factory.CreateClient();
+        // The positive execution path needs an explicitly capable synthetic adapter.
+        // Real Runway/Manus are not asserted to honor 1080p regeneration intent.
+        using var fakeFactory = new MovieOperationalNoWorkerFactory();
+        using (var init = fakeFactory.Services.CreateScope())
+            init.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+        using var client = fakeFactory.CreateClient();
         var auth = await Register(client);
         var project = await SendWithCsrf<MovieStudioProjectResponse>(client, HttpMethod.Post, "/api/movie-studio/projects", new
         {
@@ -362,7 +367,7 @@ public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWork
         var downstream = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post, $"/api/movie-studio/shots/{shot.Id}/production/versions", new { stage = MovieProductionStages.ProductionKeyframe, sourceVersionId = storyboard.Id, compositionJson = "{\"frame\":\"approved\"}" });
         downstream = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post, $"/api/movie-studio/production/versions/{downstream.Id}/review", new { approve = true, reason = "Approved keyframe." });
 
-        using (var beforeConfirmation = factory.Services.CreateScope())
+        using (var beforeConfirmation = fakeFactory.Services.CreateScope())
         {
             var db = beforeConfirmation.ServiceProvider.GetRequiredService<TaslimDbContext>();
             Assert.Equal(0, await db.GenerationJobs.CountAsync(item => item.WorkspaceId == auth.PersonalWorkspace.Id));
@@ -392,7 +397,7 @@ public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWork
         Assert.Equal(GenerationJobStatus.Queued.ToString(), confirmed.Job!.Status);
         Assert.Equal(MovieTakeStatuses.Generating, confirmed.Take!.Status);
 
-        using var scope = factory.Services.CreateScope();
+        using var scope = fakeFactory.Services.CreateScope();
         var dbAfter = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
         Assert.Equal(1, await dbAfter.GenerationJobs.CountAsync(item => item.Id == confirmed.Job.Id));
         Assert.Equal(3, await dbAfter.MovieProductionVersions.CountAsync(item => item.MovieShotId == shot.Id));
@@ -402,6 +407,10 @@ public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWork
         using var input = JsonDocument.Parse(job.InputJson);
         Assert.Equal(preview.Request.Id.ToString(), input.RootElement.GetProperty("SelectiveRegenerationId").GetString());
         Assert.Contains("characterContinuity", input.RootElement.GetProperty("ChangedInputsJson").GetString());
+        Assert.Equal("1080p", input.RootElement.GetProperty("SourceResolution").GetString());
+        Assert.Equal("1080p", input.RootElement.GetProperty("TargetResolution").GetString());
+        Assert.Equal("native", input.RootElement.GetProperty("ProcessingPath").GetString());
+        Assert.False(string.IsNullOrWhiteSpace(input.RootElement.GetProperty("QualityTier").GetString()));
         Assert.Equal(0, await dbAfter.MovieVideoProviderExecutions.CountAsync(item => item.GenerationJobId == confirmed.Job.Id));
     }
     [Fact]
