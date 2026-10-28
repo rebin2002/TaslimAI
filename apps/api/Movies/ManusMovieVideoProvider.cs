@@ -45,6 +45,8 @@ public sealed class ManusMovieVideoProvider(
     public MovieClipDurationRange? SceneClipDurationRange => new(1, 30);
     // Must use the same configured bound enforced by BuildPrompt.
     public int? SceneClipPromptMaxCharacters => Math.Clamp(Manus.MaxPromptCharacters, 1_000, 20_000);
+    // BuildPrompt includes WorldContextJson as a required section.
+    public bool SceneClipWorldContextInPrompt => true;
 
     public async Task<MovieVideoSubmission> SubmitAsync(MovieVideoGenerationRequest request, CancellationToken cancellationToken)
     {
