@@ -303,10 +303,15 @@ internal sealed class AwsS3CompatibleObjectClient : IS3CompatibleObjectClient
 
     public void Dispose() => client?.Dispose();
 
-    private static bool IsNotFound(AmazonS3Exception exception) =>
+    // Never turn an auth, transport, or bucket-configuration failure into an
+    // apparent missing private file just because the upstream error code says
+    // "NoSuchKey". Only a 404 for an object (or a generic 404 without an S3
+    // error code) proves absence. Other failures must reach safe diagnostics.
+    internal static bool IsNotFound(AmazonS3Exception exception) =>
         exception.StatusCode == System.Net.HttpStatusCode.NotFound
-        || string.Equals(exception.ErrorCode, "NoSuchKey", StringComparison.OrdinalIgnoreCase)
-        || string.Equals(exception.ErrorCode, "NotFound", StringComparison.OrdinalIgnoreCase);
+        && (string.IsNullOrWhiteSpace(exception.ErrorCode)
+            || string.Equals(exception.ErrorCode, "NoSuchKey", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(exception.ErrorCode, "NotFound", StringComparison.OrdinalIgnoreCase));
 
     private sealed class ResponseOwnedStream(Stream inner, IDisposable response) : Stream
     {
