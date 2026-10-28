@@ -129,6 +129,11 @@ public sealed class MovieProductionGenerationOrchestrator(
         if (shot is null || !await collaboration.HasPermissionAsync(userId, shot.Scene.MovieProjectId, MoviePermissions.Generate, cancellationToken))
             return null;
 
+        // Validate the user-supplied label before any speculative clip, job or usage
+        // reservation is created. The label used to be validated only when the
+        // production version was constructed, after the generation job was queued.
+        var normalizedLabel = CleanBounded(request.Label, 160);
+
         var existing = await FindExistingAsync(userId, shot, request, normalizedKey, cancellationToken);
         if (existing is not null)
             return existing;
@@ -304,7 +309,7 @@ public sealed class MovieProductionGenerationOrchestrator(
             VersionNumber = shot.ProductionVersions.Count == 0 ? 1 : shot.ProductionVersions.Max(item => item.VersionNumber) + 1,
             Stage = MovieProductionStages.ProductionRender,
             Status = MovieProductionVersionStatuses.PendingApproval,
-            Label = CleanBounded(request.Label, 160),
+            Label = normalizedLabel,
             CompositionJson = source.CompositionJson,
             StageProvenanceJson = JsonSerializer.Serialize(new
             {
