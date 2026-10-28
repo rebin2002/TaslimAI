@@ -1444,15 +1444,21 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
             throw new GenerationJobValidationException(
                 "MOVIE_CLIP_EXECUTION_INTENT_UNSUPPORTED",
                 "This provider cannot guarantee the requested resolution, quality and processing profile. Choose a supported output profile.");
-        // The final provider prompt also preserves the movie's style and
-        // additional creative direction. Their combined trimmed text is a
-        // conservative lower bound of the final prompt for bounded adapters;
-        // reject impossible requests before estimating cost or reserving usage.
-        // Adapter-specific section headings/continuity snapshots are checked
-        // again at submission and can only increase the assembled length.
+        // Scene and shot JSON are also sent to the video adapter. Checking only
+        // the readable description could reserve usage for a request whose
+        // required structured direction already exceeds the provider limit.
+        // Cache exactly the same payloads we persist on the generation job so
+        // admission and execution cannot disagree about their lengths.
+        var sceneSnapshot = SceneSnapshot(scene);
+        var shotSnapshot = shot is null ? null : ShotSnapshot(shot);
+        // Provider-specific headings and continuity snapshots add more text;
+        // this conservative lower bound rejects certain overflow before
+        // estimation, job creation, or any usage reservation.
         var minimumCreativePromptLength = (long)description.Trim().Length
             + (string.IsNullOrWhiteSpace(movie.Style) ? 0 : movie.Style.Trim().Length)
-            + (string.IsNullOrWhiteSpace(movie.AdditionalInstructions) ? 0 : movie.AdditionalInstructions.Trim().Length);
+            + (string.IsNullOrWhiteSpace(movie.AdditionalInstructions) ? 0 : movie.AdditionalInstructions.Trim().Length)
+            + sceneSnapshot.Length
+            + (shotSnapshot?.Length ?? 0);
         if (provider.SceneClipPromptMaxCharacters is { } promptCapacity
             && minimumCreativePromptLength > promptCapacity)
             throw new GenerationJobValidationException(
@@ -1530,8 +1536,8 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                 movie.Language,
                 movie.AdditionalInstructions,
                 clip.ContinuitySnapshotJson,
-                SceneSnapshot(scene),
-                shot is null ? null : ShotSnapshot(shot),
+                sceneSnapshot,
+                shotSnapshot,
                 WorldContextJson: await WorldContextSnapshotAsync(movie.Id, scene.Id, shot?.Id, cancellationToken),
                 SourceResolution: sourceResolution,
                 TargetResolution: targetResolution,
