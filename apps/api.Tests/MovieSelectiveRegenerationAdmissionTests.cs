@@ -65,6 +65,43 @@ public sealed class MovieSelectiveRegenerationAdmissionTests
     }
 
     [Fact]
+    public async Task Overlong_confirmation_idempotency_key_rejects_before_speculative_clip_persistence()
+    {
+        using var factory = new MovieClipDurationApiFactory();
+        using (var setup = factory.Services.CreateScope())
+            setup.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+
+        using var client = factory.CreateClient();
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Selective regeneration invalid replay key", sceneDurationSeconds: 5);
+        var sourceId = await ApprovedStoryboardAsync(client, fixture.Shot.Id);
+        var preview = await MovieOperationalFixtures.PostAsync<MovieSelectiveRegenerationResponse>(
+            client, $"/api/movie-studio/shots/{fixture.Shot.Id}/regeneration-requests", Request(sourceId));
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var ledgerBefore = await db.UsageTransactions.CountAsync();
+        var versionsBefore = await db.MovieProductionVersions.CountAsync(item => item.MovieShotId == fixture.Shot.Id);
+
+        using var rejected = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post,
+            $"/api/movie-studio/regeneration-requests/{preview.Request.Id}/confirm",
+            new { confirm = true },
+            idempotencyKey: new string('x', 81));
+        Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
+        Assert.Contains("IDEMPOTENCY_KEY_INVALID",
+            await rejected.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Equal(MovieRegenerationStatuses.PendingConfirmation,
+            await db.MovieRegenerationRequests.Where(item => item.Id == preview.Request.Id)
+                .Select(item => item.Status).SingleAsync());
+        Assert.Equal(versionsBefore,
+            await db.MovieProductionVersions.CountAsync(item => item.MovieShotId == fixture.Shot.Id));
+        Assert.False(await db.MovieClips.AnyAsync(item => item.MovieProjectId == fixture.Project.Project.Id));
+        Assert.False(await db.GenerationJobs.AnyAsync(item => item.ProjectId == fixture.Project.Project.ProjectId));
+        Assert.Equal(ledgerBefore, await db.UsageTransactions.CountAsync());
+    }
+
+    [Fact]
     public async Task Shot_duration_increased_after_preview_rejects_confirmation_without_creating_billable_work()
     {
         using var factory = new MovieClipDurationApiFactory();
