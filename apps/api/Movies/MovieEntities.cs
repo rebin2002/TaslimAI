@@ -806,6 +806,10 @@ public interface IMovieVideoProvider
     // Unknown adapters fail closed at legacy scene/shot admission. Implementations
     // must declare only durations their own submission contract can accept.
     MovieClipDurationRange? SceneClipDurationRange => null;
+    // A description longer than the entire provider prompt limit can never
+    // be submitted faithfully. Null means no safe early length assertion.
+    // Providers still validate the assembled prompt before outbound submission.
+    int? SceneClipPromptMaxCharacters => null;
     // Declared only when an adapter can honor the same priced output profile.
     // Unknown providers fail closed before usage reservation or paid submission.
     bool SupportsSceneClipCostIntent(string sourceResolution, string targetResolution,
