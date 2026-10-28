@@ -1236,14 +1236,18 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
             throw new MovieProductionValidationException(
                 "REGENERATION_EXECUTION_INTENT_UNSUPPORTED",
                 "The selected provider cannot guarantee the priced 1080p quality profile for this regeneration. An explicitly supported output profile is required.");
-        // This minimum bound is guaranteed to be included in the eventual
-        // provider prompt. Reject impossible prompts at preview and confirmation
-        // rather than creating a job or reserving usage that will fail at submit.
+        // The final provider prompt preserves all three creative sections.
+        // Their combined trimmed lengths form a conservative lower bound:
+        // headings and continuity context can only increase it. Enforce this
+        // at both preview and confirmation before any usage reservation.
+        var minimumCreativePromptLength = (long)description.Trim().Length
+            + (string.IsNullOrWhiteSpace(movie.Style) ? 0 : movie.Style.Trim().Length)
+            + (string.IsNullOrWhiteSpace(movie.AdditionalInstructions) ? 0 : movie.AdditionalInstructions.Trim().Length);
         if (provider.SceneClipPromptMaxCharacters is { } maximum
-            && description.Trim().Length > maximum)
+            && minimumCreativePromptLength > maximum)
             throw new MovieProductionValidationException(
                 "REGENERATION_PROMPT_UNSUPPORTED",
-                "The shot description exceeds the selected video provider's prompt limit. Shorten it before requesting regeneration.");
+                "The shot description and creative direction exceed this provider's prompt limit. Shorten them before requesting regeneration.");
     }
 
     public async Task<MovieSelectiveRegenerationResponse?> GetRegenerationRequestAsync(Guid userId, Guid requestId, CancellationToken cancellationToken)
