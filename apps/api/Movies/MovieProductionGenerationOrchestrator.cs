@@ -443,6 +443,18 @@ public sealed class MovieProductionGenerationOrchestrator(
         try { input = JsonSerializer.Deserialize<MovieGenerationInput>(existingJob.InputJson); } catch (JsonException) { }
         if (input is null || !MatchesProductionReplay(input, shot, request))
             throw new MovieProductionValidationException("IDEMPOTENCY_KEY_REUSED", "This idempotency key was already used for a different production request.");
+        // For newly admitted production jobs, character continuity forms part
+        // of the canonical creative request. The same replay key must not adopt
+        // a previously priced render after the character bible changes. Older
+        // serialized jobs lacking this optional field preserve replay behavior.
+        if (input.CharacterContinuityJson is not null)
+        {
+            var currentContinuity = await continuity.BuildSnapshotForTargetAsync(
+                shot.Scene.MovieProjectId, shot.Scene.Id, shot.Id, persist: false, cancellationToken);
+            if (!string.Equals(input.CharacterContinuityJson, currentContinuity.SnapshotJson, StringComparison.Ordinal))
+                throw new MovieProductionValidationException("IDEMPOTENCY_KEY_REUSED",
+                    "This idempotency key was already used for a different production request.");
+        }
         var version = await db.MovieProductionVersions
             .Include(item => item.AssetReferences)
             .Include(item => item.GenerationJob).ThenInclude(item => item!.ProviderAttempts)
