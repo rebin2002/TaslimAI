@@ -487,11 +487,13 @@ public sealed class MovieProductionGenerationOrchestrator(
         }
     }
 
-    private static string? NormalizeIdempotencyKey(string? value)
+    internal static string? NormalizeIdempotencyKey(string? value)
     {
         var key = value?.Trim();
         if (string.IsNullOrWhiteSpace(key)) return null;
-        if (key.Length > 128) throw new MovieProductionValidationException("IDEMPOTENCY_KEY_INVALID", "The idempotency key is too long.");
+        // GenerationJobService accepts at most 80 characters. Reject before
+        // continuity snapshots or speculative clip/version persistence.
+        if (key.Length > 80) throw new MovieProductionValidationException("IDEMPOTENCY_KEY_INVALID", "The idempotency key is too long.");
         return key;
     }
 
