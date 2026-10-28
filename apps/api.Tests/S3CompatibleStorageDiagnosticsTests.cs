@@ -119,7 +119,7 @@ public sealed class S3CompatibleStorageDiagnosticsTests
 
     private static S3CompatibleFileStorageService CreateThrowingStorage(Exception failure) => new(
         new ThrowingObjectClient(failure),
-        Options.Create(new FileOptions { S3Bucket = "test-bucket" }),
+        Options.Create(new Taslim.Api.Files.FileOptions { S3Bucket = "test-bucket" }),
         NullLogger<S3CompatibleFileStorageService>.Instance);
 
     private sealed class ThrowingObjectClient(Exception failure) : IS3CompatibleObjectClient
