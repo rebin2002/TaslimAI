@@ -30,6 +30,29 @@ public sealed class RunwayMovieVideoProviderTests
     }
 
     [Fact]
+    public async Task Unverified_Runway_model_fails_priced_scene_clip_admission_before_network_access()
+    {
+        // The production queue does not promise a source image. The adapter
+        // only supports its current text-only payload for the verified model.
+        // Reject a different configured model before booking a priced job.
+        var handler = new RecordingHandler(_ => throw new InvalidOperationException("No provider request is allowed."));
+        var urlPolicy = new CountingProviderUrlPolicy();
+        var options = EnabledOptions();
+        options.Model = "unverified-model";
+        var provider = CreateProvider(handler, options, urlPolicy);
+
+        Assert.True(provider.IsAvailable);
+        Assert.False(provider.SupportsSceneClipCostIntent("720p", "720p", "Standard", "native", "16:9"));
+
+        var error = await Assert.ThrowsAsync<MovieVideoProviderException>(() =>
+            provider.SubmitAsync(Request(), CancellationToken.None));
+
+        Assert.Equal(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, error.Code);
+        Assert.Equal(0, urlPolicy.Calls);
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
     public async Task Submission_maps_prompt_duration_ratio_and_reference_image_without_leaking_secrets()
     {
         var handler = new RecordingHandler(_ => JsonResponse($"{{\"id\":\"{TaskId}\",\"estimatedCost\":{{\"credits\":60}}}}"));
