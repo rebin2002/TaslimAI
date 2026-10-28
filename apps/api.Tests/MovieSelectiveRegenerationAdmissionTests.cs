@@ -39,6 +39,32 @@ public sealed class MovieSelectiveRegenerationAdmissionTests
     }
 
     [Fact]
+    public async Task Out_of_range_single_clip_duration_rejects_regeneration_before_preview_or_ledger_write()
+    {
+        using var factory = new MovieClipDurationApiFactory();
+        using (var setup = factory.Services.CreateScope())
+            setup.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+
+        using var client = factory.CreateClient();
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Selective regeneration unsupported duration", sceneDurationSeconds: 11);
+        var sourceId = await ApprovedStoryboardAsync(client, fixture.Shot.Id);
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var ledgerBefore = await db.UsageTransactions.CountAsync();
+
+        using var rejected = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, $"/api/movie-studio/shots/{fixture.Shot.Id}/regeneration-requests",
+            Request(sourceId));
+        Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
+        Assert.Contains("REGENERATION_DURATION_UNSUPPORTED",
+            await rejected.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.False(await db.MovieRegenerationRequests.AnyAsync(item => item.MovieShotId == fixture.Shot.Id));
+        Assert.False(await db.MovieClips.AnyAsync(item => item.MovieProjectId == fixture.Project.Project.Id));
+        Assert.Equal(ledgerBefore, await db.UsageTransactions.CountAsync());
+    }
+
+    [Fact]
     public async Task Provider_becoming_unavailable_after_preview_rejects_confirmation_without_clip_job_or_debit()
     {
         using var factory = new MovieClipDurationApiFactory();
