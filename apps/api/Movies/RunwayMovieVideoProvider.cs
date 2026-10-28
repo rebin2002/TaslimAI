@@ -271,6 +271,7 @@ public sealed class RunwayMovieVideoProvider(
             string.IsNullOrWhiteSpace(request.Style) ? null! : $"Visual style: {request.Style}",
             string.IsNullOrWhiteSpace(request.AdditionalInstructions) ? null! : request.AdditionalInstructions,
             string.IsNullOrWhiteSpace(request.ContinuityGuideJson) ? null! : $"Continuity direction: {request.ContinuityGuideJson}",
+            string.IsNullOrWhiteSpace(request.CharacterContinuityJson) ? null! : $"Character continuity: {request.CharacterContinuityJson}",
             string.IsNullOrWhiteSpace(request.SceneJson) ? null! : $"Scene direction: {request.SceneJson}",
             string.IsNullOrWhiteSpace(request.ShotJson) ? null! : $"Shot direction: {request.ShotJson}",
         };
