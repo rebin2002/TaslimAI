@@ -45,7 +45,7 @@ public sealed class MovieProductionStructuredPromptAdmissionTests
 
         using var client = factory.CreateClient();
         var movie = await MovieOperationalFixtures.CreateFullMovieAsync(
-            client, title: "A", sceneDurationSeconds: 5);
+            client, title: "Short Movie", sceneDurationSeconds: 5);
         var shotId = movie.Shot.Id;
 
         var storyboard = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
@@ -74,7 +74,7 @@ public sealed class MovieProductionStructuredPromptAdmissionTests
         var shot = await db.MovieShots
             .Include(item => item.Scene).ThenInclude(item => item.MovieProject)
             .SingleAsync(item => item.Id == shotId);
-        var plainCreativeLength = "A".Length
+        var plainCreativeLength = "Short Movie".Length
             + (shot.Scene.MovieProject.Style?.Trim().Length ?? 0)
             + (shot.Scene.MovieProject.AdditionalInstructions?.Trim().Length ?? 0)
             + shot.Description.Trim().Length;
@@ -90,7 +90,7 @@ public sealed class MovieProductionStructuredPromptAdmissionTests
 
         using var response = await MovieOperationalFixtures.SendWithCsrfAsync(
             client, HttpMethod.Post, $"/api/movie-studio/shots/{shotId}/production/render",
-            new { sourceVersionId = approvedMotion.Id, title = "A",
+            new { sourceVersionId = approvedMotion.Id, title = "Short Movie",
                 targetResolution = "720p", qualityTier = "Standard",
                 confirmationAccepted = true }, idempotencyKey: "structured-prompt-too-long");
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
