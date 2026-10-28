@@ -1035,6 +1035,9 @@ public sealed record MovieStudioGenerationRequest(
 
 public static class MovieStudioValidation
 {
+    // A full-film project/timeline limit, not a per-provider generation clip limit.
+    public const int MaxProjectDurationSeconds = 120 * 60;
+
     public static readonly IReadOnlySet<string> SupportedAspectRatios = new HashSet<string>(StringComparer.Ordinal)
     {
         "16:9", "9:16", "1:1", "4:5", "4:3",
@@ -1044,7 +1047,7 @@ public static class MovieStudioValidation
     {
         if (string.IsNullOrWhiteSpace(request.Title) || request.Title.Trim().Length > 160) return "Add a movie title.";
         if (string.IsNullOrWhiteSpace(request.Description) || request.Description.Trim().Length > 8000) return "Describe the movie in 1–8,000 characters.";
-        if (request.DurationSeconds is < 1 or > 3600) return "Movie duration must be between 1 second and 60 minutes.";
+        if (request.DurationSeconds is < 1 or > MaxProjectDurationSeconds) return "Movie duration must be between 1 second and 120 minutes.";
         if (!SupportedAspectRatios.Contains(request.AspectRatio)) return "Choose a supported aspect ratio.";
         if (!LanguageCodes.Supported.Contains(request.Language)) return "Choose English, Arabic, or Kurdish.";
         if (request.Mode is not (MovieProjectModes.Quick or MovieProjectModes.Full)) return "Choose Quick Movie or Full Movie Project.";
