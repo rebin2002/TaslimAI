@@ -16,6 +16,7 @@ public static class MovieProductionPreflightDecisionCodes
     public const string CostConfirmationRequired = "cost_confirmation_required";
     public const string CostGuardrailBlocked = "cost_guardrail_blocked";
     public const string ProviderUnavailable = "provider_unavailable";
+    public const string ClipDurationUnsupported = "clip_duration_unsupported";
 }
 
 public static class MovieProductionPreflightCheckKeys
@@ -28,6 +29,7 @@ public static class MovieProductionPreflightCheckKeys
     public const string AdaptiveQuality = "adaptive_quality";
     public const string CostGuardrails = "cost_guardrails";
     public const string ProviderAdmission = "provider_admission";
+    public const string ClipDuration = "clip_duration";
 }
 
 public sealed record MovieProductionPreflightRequest(
@@ -202,6 +204,13 @@ public sealed class MovieProductionPreflightService(
             provider.SupportedOperations.Contains(MovieStudioOperations.SceneClip, StringComparer.OrdinalIgnoreCase));
         checks.Add(providerAdmission);
 
+        // Movie/scene runtime is timeline metadata, not permission to silently
+        // shorten an oversized production shot into a differently priced clip.
+        // The selected adapter may have a stricter limit; admission there
+        // remains authoritative until the shared capability contract is merged.
+        var clipDurationCheck = BuildClipDurationCheck(
+            shot.DurationSeconds, shot.Scene.DurationSeconds, shot.Scene.MovieProject.DurationSeconds);
+        checks.Add(clipDurationCheck);
         var durationSeconds = Math.Clamp(shot.DurationSeconds ?? shot.Scene.DurationSeconds ?? Math.Min(shot.Scene.MovieProject.DurationSeconds, 60), 1, 3_600);
         var estimate = await costEstimator.EstimateAsync(
             new MovieGenerationCostRequest(durationSeconds, plan.SourceResolution, plan.TargetResolution, plan.QualityTier, plan.ProcessingPath),
@@ -230,9 +239,15 @@ public sealed class MovieProductionPreflightService(
             recommendations = recommendations.Concat([
                 new MovieProductionPreflightRecommendationDto("enable_video_provider", "Enable scene-clip generation",
                     "Configure an approved video route that supports scene clips before production.")]).ToArray();
+        if (!clipDurationCheck.Satisfied)
+            recommendations = recommendations.Concat([
+                new MovieProductionPreflightRecommendationDto("shorten_production_shot", "Create shorter shots",
+                    "Split this timeline into smaller shots. A single production clip cannot represent the selected duration.")]).ToArray();
         var requiredChecksPassed = checks.Where(item => item.Required).All(item => item.Satisfied);
         var decision = requiredChecksPassed
             ? MovieProductionPreflightDecisionCodes.Ready
+            : !clipDurationCheck.Satisfied
+                ? MovieProductionPreflightDecisionCodes.ClipDurationUnsupported
             : checks.Any(item => !item.Satisfied && item.Key is MovieProductionPreflightCheckKeys.Storyboard or MovieProductionPreflightCheckKeys.Keyframe or MovieProductionPreflightCheckKeys.MotionPreview or MovieProductionPreflightCheckKeys.ReferencePackage)
                 ? MovieProductionPreflightDecisionCodes.ReferenceWorkRequired
                 : !providerAdmission.Satisfied
@@ -245,6 +260,8 @@ public sealed class MovieProductionPreflightService(
         var canProceed = requiredChecksPassed;
         var summary = canProceed
             ? "Cheap reference work, adaptive quality, and server-side cost safety checks are ready for production."
+            : decision == MovieProductionPreflightDecisionCodes.ClipDurationUnsupported
+                ? clipDurationCheck.Detail
             : decision == MovieProductionPreflightDecisionCodes.ReferenceWorkRequired
                 ? "Complete the recommended reference work before starting this expensive production pass."
                 : decision == MovieProductionPreflightDecisionCodes.ProviderUnavailable
@@ -252,7 +269,9 @@ public sealed class MovieProductionPreflightService(
                     : decision == MovieProductionPreflightDecisionCodes.QualityReviewRequired
                     ? "Review the adaptive quality escalation before starting production."
                     : guardrail.RejectionMessage ?? "Review the production preflight before continuing.";
-        var rejectionCode = canProceed ? null : decision == MovieProductionPreflightDecisionCodes.ProviderUnavailable
+        var rejectionCode = canProceed ? null : decision == MovieProductionPreflightDecisionCodes.ClipDurationUnsupported
+            ? "MOVIE_CLIP_DURATION_UNSUPPORTED"
+            : decision == MovieProductionPreflightDecisionCodes.ProviderUnavailable
             ? "MOVIE_PROVIDER_UNAVAILABLE"
             : decision == MovieProductionPreflightDecisionCodes.CostConfirmationRequired
             ? "GENERATION_CONFIRMATION_REQUIRED"
@@ -282,6 +301,17 @@ public sealed class MovieProductionPreflightService(
             GenerationCostPreviewMapper.ToDto(guardrail),
             rejectionCode,
             rejectionMessage);
+    }
+
+    internal static MovieProductionPreflightCheckDto BuildClipDurationCheck(
+        int? shotDurationSeconds, int? sceneDurationSeconds, int movieDurationSeconds)
+    {
+        var selectedDuration = shotDurationSeconds ?? sceneDurationSeconds ?? Math.Min(movieDurationSeconds, 60);
+        var valid = selectedDuration is >= 1 and <= 3_600;
+        return new(MovieProductionPreflightCheckKeys.ClipDuration, "Single production clip duration", valid, true,
+            valid
+                ? "The selected shot is within the platform's single-clip duration ceiling. Provider-specific limits are checked separately."
+                : "The selected shot or scene duration cannot be rendered as one clip. Create shorter shots or use a validated segmentation workflow.");
     }
 
     internal static MovieProductionPreflightCheckDto BuildProviderAdmissionCheck(bool available, bool supportsSceneClip)
