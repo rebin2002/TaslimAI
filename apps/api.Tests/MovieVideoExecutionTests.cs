@@ -466,6 +466,93 @@ public sealed class MovieVideoExecutionTests
         Assert.Equal(GenerationJobStatus.Running, (await db.GenerationJobs.AsNoTracking().SingleAsync()).Status);
     }
 
+    [Fact]
+    public async Task Worker_rejects_oversized_Manus_style_world_context_without_provider_submission()
+    {
+        // Only adapters that actually embed WorldContextJson in their prompt
+        // should count it against the declared capacity. An older queued job
+        // can contain this field even if the original admission missed it.
+        var fixture = await CreateRunningMovieJobAsync(
+            "Movie world prompt capacity", "Small shot with a large world snapshot.");
+        await using var connection = fixture.Connection;
+        await using var db = fixture.Db;
+        var original = System.Text.Json.JsonSerializer.Deserialize<MovieGenerationInput>(fixture.Job.InputJson)!;
+        fixture.Job.InputJson = System.Text.Json.JsonSerializer.Serialize(original with
+        {
+            Description = "Small shot",
+            Style = null,
+            AdditionalInstructions = null,
+            ContinuityGuideJson = null,
+            SceneJson = null,
+            ShotJson = null,
+            WorldContextJson = new string('W', 96),
+            SourceResolution = "720p",
+            TargetResolution = "720p",
+            QualityTier = DirectorQualityLevels.Standard,
+            ProcessingPath = "native",
+            MasterResolution = null,
+            DurationSeconds = 5,
+            UpscalingRequested = false,
+        });
+        await db.SaveChangesAsync();
+
+        var provider = new GuardedSceneMovieVideoProvider(promptLimit: 64, includesWorldContext: true);
+        var options = new MovieVideoOptions { Enabled = true, ProviderKey = provider.Key };
+        var handler = new MovieVideoGenerationJobHandler(
+            db, provider, new MovieVideoExecutionStore(db, Options.Create(options)),
+            Options.Create(options), NullLogger<MovieVideoGenerationJobHandler>.Instance);
+
+        var failure = await Assert.ThrowsAsync<MovieVideoProviderException>(
+            () => handler.ExecuteAsync(fixture.Job, new Progress<int>(), CancellationToken.None));
+
+        Assert.Equal(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, failure.Code);
+        Assert.Equal(0, provider.SubmitCalls);
+        Assert.Empty(await db.MovieVideoProviderExecutions.AsNoTracking().ToListAsync());
+        Assert.Equal(MovieClipStatuses.Failed, (await db.MovieClips.AsNoTracking().SingleAsync()).Status);
+    }
+
+    [Fact]
+    public async Task Worker_does_not_count_world_context_for_adapter_that_does_not_send_it()
+    {
+        var fixture = await CreateRunningMovieJobAsync(
+            "Movie world context adapter contract", "The adapter does not send world context.");
+        await using var connection = fixture.Connection;
+        await using var db = fixture.Db;
+        var original = System.Text.Json.JsonSerializer.Deserialize<MovieGenerationInput>(fixture.Job.InputJson)!;
+        fixture.Job.InputJson = System.Text.Json.JsonSerializer.Serialize(original with
+        {
+            Description = "Small shot",
+            Style = null,
+            AdditionalInstructions = null,
+            ContinuityGuideJson = null,
+            SceneJson = null,
+            ShotJson = null,
+            WorldContextJson = new string('W', 96),
+            SourceResolution = "720p",
+            TargetResolution = "720p",
+            QualityTier = DirectorQualityLevels.Standard,
+            ProcessingPath = "native",
+            MasterResolution = null,
+            DurationSeconds = 5,
+            UpscalingRequested = false,
+        });
+        await db.SaveChangesAsync();
+
+        var provider = new GuardedSceneMovieVideoProvider(promptLimit: 64);
+        var options = new MovieVideoOptions { Enabled = true, ProviderKey = provider.Key };
+        var handler = new MovieVideoGenerationJobHandler(
+            db, provider, new MovieVideoExecutionStore(db, Options.Create(options)),
+            Options.Create(options), NullLogger<MovieVideoGenerationJobHandler>.Instance);
+
+        // The fake stops execution at SubmitAsync, and never makes an external
+        // request. Reaching it proves the optional world field was not counted.
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => handler.ExecuteAsync(fixture.Job, new Progress<int>(), CancellationToken.None));
+
+        Assert.Equal(1, provider.SubmitCalls);
+        Assert.Equal(new string('W', 96), provider.LastSubmittedRequest!.WorldContextJson);
+    }
+
     [Theory]
     [InlineData("first-frame")]
     [InlineData("last-frame")]
