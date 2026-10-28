@@ -271,7 +271,7 @@ public static class MovieIntercutPlanner
             start += item.DurationSeconds;
         }
         var transitions = clips.Skip(1).Select((clip, index) => new MovieTimelineTransitionContract(
-            StableGuid("movie-intercut-cut", timelineId.ToString("N"), version.ToString(CultureInfo.InvariantCulture), clip.ClipId.ToString("N")),
+            StableGuid("movie-intercut-cut", timelineId.ToString("N"), version.ToString(CultureInfo.InvariantCulture), clips[index].ClipId.ToString("N"), clip.ClipId.ToString("N")),
             MovieTimelineTransitionTypes.Cut,
             clips[index].ClipId,
             clip.ClipId,
