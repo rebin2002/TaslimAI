@@ -1054,7 +1054,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
 
         var movie = shot.Scene.MovieProject;
         var durationSeconds = Math.Clamp(shot.DurationSeconds ?? shot.Scene.DurationSeconds ?? Math.Min(movie.DurationSeconds, 60), 1, 3600);
-        EnsureSelectiveRegenerationCapability(movie, durationSeconds);
+        EnsureSelectiveRegenerationCapability(movie, durationSeconds, shot.Description);
         // The server owns the estimate. Client-supplied cost fields are not trusted for
         // cap enforcement because they could otherwise be lowered to bypass a cap.
         var estimate = await movieCostEstimator.EstimateAsync(
@@ -1116,7 +1116,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         var durationSeconds = Math.Clamp(shot.DurationSeconds ?? shot.Scene.DurationSeconds ?? Math.Min(movie.DurationSeconds, 60), 1, 3600);
         // Recheck at confirmation: provider availability/capabilities may change
         // after the cost preview was created, without user consent to a downgrade.
-        EnsureSelectiveRegenerationCapability(movie, durationSeconds);
+        EnsureSelectiveRegenerationCapability(movie, durationSeconds, shot.Description);
         var preflight = await costGuardrails.EvaluateAsync(
             userId,
             movie.WorkspaceId,
@@ -1218,7 +1218,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         return await GetRegenerationRequestAsync(userId, requestId, cancellationToken);
     }
 
-    private void EnsureSelectiveRegenerationCapability(MovieProject movie, int durationSeconds)
+    private void EnsureSelectiveRegenerationCapability(MovieProject movie, int durationSeconds, string description)
     {
         // Selective regeneration currently has a fixed 1080p/native cost profile.
         // Never silently substitute Runway's 720p baseline or a different provider
@@ -1236,6 +1236,14 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
             throw new MovieProductionValidationException(
                 "REGENERATION_EXECUTION_INTENT_UNSUPPORTED",
                 "The selected provider cannot guarantee the priced 1080p quality profile for this regeneration. An explicitly supported output profile is required.");
+        // This minimum bound is guaranteed to be included in the eventual
+        // provider prompt. Reject impossible prompts at preview and confirmation
+        // rather than creating a job or reserving usage that will fail at submit.
+        if (provider.SceneClipPromptMaxCharacters is { } maximum
+            && description.Trim().Length > maximum)
+            throw new MovieProductionValidationException(
+                "REGENERATION_PROMPT_UNSUPPORTED",
+                "The shot description exceeds the selected video provider's prompt limit. Shorten it before requesting regeneration.");
     }
 
     public async Task<MovieSelectiveRegenerationResponse?> GetRegenerationRequestAsync(Guid userId, Guid requestId, CancellationToken cancellationToken)
