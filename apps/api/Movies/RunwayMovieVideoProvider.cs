@@ -195,6 +195,13 @@ public sealed class RunwayMovieVideoProvider(
             throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieGenerationFailed, false);
         if (!string.IsNullOrWhiteSpace(request.ContinuationProviderJobId))
             throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);
+        // This adapter currently serializes only SourceImageUri as promptImage.
+        // Reject other frame/reference inputs instead of silently discarding
+        // direction that may have affected the user's generation decision.
+        if (!string.IsNullOrWhiteSpace(request.FirstFrameImageUri)
+            || !string.IsNullOrWhiteSpace(request.LastFrameImageUri)
+            || request.ReferenceImages is { Count: > 0 })
+            throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);
         if (request.DurationSeconds is < 2 or > 10)
             throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);
         // Defence in depth: other production paths may still queue a priced
