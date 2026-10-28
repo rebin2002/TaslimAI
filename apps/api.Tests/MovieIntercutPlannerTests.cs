@@ -103,6 +103,42 @@ public sealed class MovieIntercutPlannerTests
     }
 
     [Fact]
+    public void Intercut_anchor_must_target_primary_story_coverage()
+    {
+        // Anchoring to another reaction is syntactically a known shot, but the
+        // planner only aligns non-primary coverage to primary story beats.
+        // It must reject the request instead of silently putting an insert elsewhere.
+        var request = new MovieIntercutPlanRequest
+        {
+            Clips =
+            [
+                Coverage(PrimaryOne, ShotOne, SceneOne, 1, 1, 2m, MovieIntercutCoverageKinds.Primary),
+                Coverage(Reaction, ShotThree, SceneOne, 1, 2, 1m, MovieIntercutCoverageKinds.Reaction),
+                Coverage(Insert, ShotTwo, SceneOne, 1, 3, 1m, MovieIntercutCoverageKinds.Insert, ShotThree),
+            ],
+        };
+
+        var exception = Assert.Throws<MovieIntercutPlanningException>(() => MovieIntercutPlanner.Build(ProjectId, request));
+        Assert.Equal(MovieIntercutPlanCodes.AnchorInvalid, exception.Code);
+    }
+
+    [Fact]
+    public void Intercut_without_a_primary_story_beat_is_rejected()
+    {
+        var request = new MovieIntercutPlanRequest
+        {
+            Clips =
+            [
+                Coverage(Reaction, ShotThree, SceneOne, 1, 1, 1m, MovieIntercutCoverageKinds.Reaction),
+                Coverage(Insert, ShotTwo, SceneOne, 1, 2, 1m, MovieIntercutCoverageKinds.Insert),
+            ],
+        };
+
+        var exception = Assert.Throws<MovieIntercutPlanningException>(() => MovieIntercutPlanner.Build(ProjectId, request));
+        Assert.Equal(MovieIntercutPlanCodes.StoryOrderInvalid, exception.Code);
+    }
+
+    [Fact]
     public void Two_hour_intercut_timeline_keeps_all_short_clips_and_deterministic_provenance()
     {
         // Planning 720 ten-second clips must not be confused with one 7,200-second
