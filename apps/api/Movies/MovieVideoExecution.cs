@@ -322,6 +322,15 @@ public sealed class MovieVideoGenerationJobHandler(
         var input = Deserialize(job.InputJson);
         var clip = await db.MovieClips.Include(item => item.MovieProject).FirstOrDefaultAsync(item => item.Id == input.MovieClipId && item.MovieProjectId == input.MovieProjectId, cancellationToken)
             ?? throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieGenerationFailed, false, "The movie clip could not be found.");
+        // A priced job must not silently move to a different provider if the
+        // deployment's routing changes between admission and first submission.
+        // This check also covers jobs with no provider-execution record yet.
+        // Older persisted inputs without provider identity are left unchanged.
+        if (!string.IsNullOrWhiteSpace(input.SelectedProviderKey)
+            && !string.Equals(input.SelectedProviderKey, provider.Key, StringComparison.OrdinalIgnoreCase))
+            throw new MovieVideoProviderException(
+                GenerationJobErrorCodes.MovieProviderUnavailable, false,
+                "The selected video provider changed since this job was queued. Restore the original provider or reconcile the job.");
         if (!provider.IsAvailable || !provider.SupportedOperations.Contains(input.Operation, StringComparer.OrdinalIgnoreCase))
             throw new MovieProviderUnavailableException();
 
