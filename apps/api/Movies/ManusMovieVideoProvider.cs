@@ -43,6 +43,8 @@ public sealed class ManusMovieVideoProvider(
     public IReadOnlyCollection<string> SupportedOperations => Operations;
     // Mirrors the existing BuildCreateRequest duration gate.
     public MovieClipDurationRange? SceneClipDurationRange => new(1, 30);
+    // Must use the same configured bound enforced by BuildPrompt.
+    public int? SceneClipPromptMaxCharacters => Math.Clamp(Manus.MaxPromptCharacters, 1_000, 20_000);
 
     public async Task<MovieVideoSubmission> SubmitAsync(MovieVideoGenerationRequest request, CancellationToken cancellationToken)
     {
