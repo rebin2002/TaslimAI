@@ -302,8 +302,13 @@ public sealed class MovieVideoExecutionTests
     [InlineData("720p", "720p", "Standard", "upscale", 5, false)]
     [InlineData("720p", "720p", "Standard", "native", 11, false)]
     [InlineData("720p", "720p", "Standard", "native", 5, true)]
+    // Older selective-regeneration jobs omit the priced execution profile.
+    // Missing metadata must never be treated as permission to submit paid work.
+    [InlineData(null, null, null, null, 5, false)]
+    [InlineData("720p", "720p", "Standard", null, 5, false)]
+    [InlineData("720p", "720p", null, "native", 5, false)]
     public async Task Worker_rejects_unsupported_priced_scene_intent_before_provider_submission(
-        string sourceResolution, string targetResolution, string qualityTier, string processingPath,
+        string? sourceResolution, string? targetResolution, string? qualityTier, string? processingPath,
         int durationSeconds, bool upscalingRequested)
     {
         var fixture = await CreateRunningMovieJobAsync("Movie execution capability test", "No paid provider submission allowed.");
