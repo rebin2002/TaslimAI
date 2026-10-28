@@ -47,6 +47,9 @@ public sealed class ManusMovieVideoProvider(
     public async Task<MovieVideoSubmission> SubmitAsync(MovieVideoGenerationRequest request, CancellationToken cancellationToken)
     {
         EnsureAvailable();
+        // Reject unsupported paid execution intent before any source-image URL
+        // policy lookup (including DNS) or outbound provider request.
+        var payload = BuildCreateRequest(request);
         if (!string.IsNullOrWhiteSpace(request.SourceImageUri)
             && !request.SourceImageUri.TrimStart().StartsWith("data:image/", StringComparison.OrdinalIgnoreCase))
         {
@@ -56,7 +59,6 @@ public sealed class ManusMovieVideoProvider(
             try { await downloadUrlPolicy.EnsureSafeAsync(sourceUri, cancellationToken); }
             catch (InvalidDataException) { throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false); }
         }
-        var payload = BuildCreateRequest(request);
         var body = await SendJsonAsync(
             HttpMethod.Post,
             new Uri(GetBaseUri(), "v2/task.create"),
