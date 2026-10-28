@@ -416,6 +416,13 @@ public sealed class MovieVideoGenerationJobHandler(
         // can misroute a paid operation; even an unsubmitted execution must not
         // silently change the priced provider. Reconcile with the original
         // adapter instead of sending a second request.
+        // The execution record is durably owned by one canonical clip. A
+        // recovered job whose input points to a different clip must not poll
+        // an earlier paid task or publish its output under the wrong clip.
+        if (execution.MovieClipId != clip.Id)
+            throw new MovieVideoProviderException(
+                GenerationJobErrorCodes.MovieGenerationFailed, false,
+                "The video execution no longer matches its original clip. Reconcile the job before retrying.");
         if (!string.Equals(execution.ProviderKey, provider.Key, StringComparison.OrdinalIgnoreCase))
             throw new MovieVideoProviderException(
                 GenerationJobErrorCodes.MovieProviderUnavailable, false,
