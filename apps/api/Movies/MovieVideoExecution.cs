@@ -351,6 +351,14 @@ public sealed class MovieVideoGenerationJobHandler(
             && (provider.SceneClipDurationRange is not { } range
                 || !range.Supports(input.DurationSeconds)
                 || input.UpscalingRequested
+                // No currently selected scene-clip adapter maps distinct
+                // first/last frame or multi-reference image inputs to its
+                // provider payload. Reject legacy queued requests carrying
+                // these inputs before an irreversible, potentially paid submit.
+                // SourceImageUri is a separate, supported adapter contract.
+                || !string.IsNullOrWhiteSpace(input.FirstFrameImageUri)
+                || !string.IsNullOrWhiteSpace(input.LastFrameImageUri)
+                || input.ReferenceImages is { Count: > 0 }
                 // Older queued jobs can predate admission guards. Include
                 // required continuity, scene and shot JSON in the lower bound:
                 // an apparently short description may still carry structured
