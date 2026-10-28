@@ -368,6 +368,7 @@ public sealed class MovieVideoGenerationJobHandler(
                         + (input.Style?.Trim().Length ?? 0)
                         + (input.AdditionalInstructions?.Trim().Length ?? 0)
                         + (input.ContinuityGuideJson?.Trim().Length ?? 0)
+                        + (input.CharacterContinuityJson?.Trim().Length ?? 0)
                         + (input.SceneJson?.Trim().Length ?? 0)
                         + (input.ShotJson?.Trim().Length ?? 0)
                         + (provider.SceneClipWorldContextInPrompt
@@ -430,7 +431,8 @@ public sealed class MovieVideoGenerationJobHandler(
             input.LastFrameImageUri,
             input.ReferenceImages,
             input.TargetResolution,
-            input.QualityTier);
+            input.QualityTier,
+            input.CharacterContinuityJson);
         var execution = await executions.GetOrCreateAsync(job, clip.Id, provider.Key, cancellationToken);
         // A persisted provider id belongs to the original adapter. After a
         // configuration change, polling or cancelling it through another adapter
