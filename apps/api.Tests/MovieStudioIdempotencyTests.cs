@@ -148,6 +148,72 @@ public sealed class MovieStudioIdempotencyTests : IClassFixture<MovieOperational
         Assert.Equal(first.Job.Id, canonicalClip.GenerationJobId);
     }
 
+    [Theory]
+    [InlineData("shot-description")]
+    [InlineData("movie-style")]
+    [InlineData("movie-language")]
+    [InlineData("movie-instructions")]
+    [InlineData("movie-aspect-ratio")]
+    public async Task Replaying_after_creative_direction_changes_rejects_the_stale_generation_intent(string editedField)
+    {
+        using var client = factory.CreateClient();
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Creative direction idempotency replay");
+        var key = $"movie-creative-{editedField}-{Guid.NewGuid():N}";
+        var path = $"/api/movie-studio/shots/{fixture.Shot.Id}/generate";
+
+        var first = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
+            client, path, new { title = "Canonical creative direction" }, idempotencyKey: key);
+
+        using (var editScope = factory.Services.CreateScope())
+        {
+            var db = editScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var shot = await db.MovieShots.SingleAsync(item => item.Id == fixture.Shot.Id);
+            var movie = await db.MovieProjects.SingleAsync(item => item.Id == fixture.Project.Project.Id);
+            switch (editedField)
+            {
+                case "shot-description":
+                    shot.Description = "Newly edited scene action that must not reuse the previous video.";
+                    break;
+                case "movie-style":
+                    movie.Style = "distinct-new-visual-style";
+                    break;
+                case "movie-language":
+                    movie.Language = "eo";
+                    break;
+                case "movie-instructions":
+                    movie.AdditionalInstructions = "Fresh creative direction for subsequent clips.";
+                    break;
+                case "movie-aspect-ratio":
+                    movie.AspectRatio = "9:16";
+                    break;
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(editedField));
+            }
+            await db.SaveChangesAsync();
+        }
+
+        using var verifyScope = factory.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var usageCount = await verifyDb.UsageTransactions.CountAsync();
+
+        using var conflicting = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, path,
+            new { title = "Canonical creative direction" }, idempotencyKey: key);
+        Assert.Equal(System.Net.HttpStatusCode.BadRequest, conflicting.StatusCode);
+        Assert.Contains("IDEMPOTENCY_KEY_REUSED",
+            await conflicting.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        var canonicalJob = Assert.Single(await verifyDb.GenerationJobs.AsNoTracking()
+            .Where(item => item.IdempotencyKey == key).ToListAsync());
+        Assert.Equal(first.Job.Id, canonicalJob.Id);
+        var canonicalClip = Assert.Single(await verifyDb.MovieClips.AsNoTracking()
+            .Where(item => item.MovieProjectId == fixture.Project.Project.Id).ToListAsync());
+        Assert.Equal(first.ClipId, canonicalClip.Id);
+        Assert.Equal(first.Job.Id, canonicalClip.GenerationJobId);
+        Assert.Equal(usageCount, await verifyDb.UsageTransactions.CountAsync());
+    }
+
     [Fact]
     public async Task Conflicting_title_in_job_first_window_preserves_the_canonical_job_and_clip()
     {
