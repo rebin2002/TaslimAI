@@ -75,6 +75,51 @@ public sealed class RunwayMovieVideoProviderTests
     }
 
     [Fact]
+    public async Task Oversized_Runway_prompt_rejects_before_image_host_lookup_or_provider_submission()
+    {
+        // The old adapter truncated to 997 characters plus an ellipsis,
+        // silently discarding paid creative/continuity instructions.
+        var handler = new RecordingHandler(_ => throw new InvalidOperationException("No paid provider request is allowed."));
+        var urlPolicy = new CountingProviderUrlPolicy();
+        var provider = CreateProvider(handler, EnabledOptions(), urlPolicy);
+        var request = Request(sourceImageUri: "https://assets.example.test/frame.png") with
+        {
+            AdditionalInstructions = new string('X', 1200),
+        };
+
+        var error = await Assert.ThrowsAsync<MovieVideoProviderException>(() =>
+            provider.SubmitAsync(request, CancellationToken.None));
+
+        Assert.Equal(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, error.Code);
+        Assert.Equal(0, urlPolicy.Calls);
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
+    public async Task Runway_prompt_at_exact_1000_character_boundary_preserves_all_instructions()
+    {
+        var handler = new RecordingHandler(_ => JsonResponse($"{{\"id\":\"{TaskId}\"}}"));
+        var provider = CreateProvider(handler, EnabledOptions());
+        var baseline = Request();
+
+        await provider.SubmitAsync(baseline, CancellationToken.None);
+        using var baselinePayload = JsonDocument.Parse(handler.RequestBodies.Single());
+        var baselinePrompt = baselinePayload.RootElement.GetProperty("promptText").GetString()!;
+        var instructionLength = 1000 - baselinePrompt.Length + baseline.AdditionalInstructions!.Length;
+        Assert.True(instructionLength > 0);
+        var fullInstructions = new string('X', instructionLength);
+
+        await provider.SubmitAsync(baseline with { AdditionalInstructions = fullInstructions }, CancellationToken.None);
+
+        Assert.Equal(2, handler.Requests.Count);
+        using var boundaryPayload = JsonDocument.Parse(handler.RequestBodies.Last());
+        var prompt = boundaryPayload.RootElement.GetProperty("promptText").GetString()!;
+        Assert.Equal(1000, prompt.Length);
+        Assert.Contains(fullInstructions, prompt, StringComparison.Ordinal);
+        Assert.DoesNotEndWith("...", prompt, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Upscaling_scene_clip_never_submits_a_billable_provider_request()
     {
         var handler = new RecordingHandler(_ => throw new InvalidOperationException("No provider request is allowed."));
