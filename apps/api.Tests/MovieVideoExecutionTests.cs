@@ -333,7 +333,8 @@ public sealed class MovieVideoExecutionTests
         Assert.Equal(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, failure.Code);
         Assert.Equal(0, provider.SubmitCalls);
         Assert.Empty(await db.MovieVideoProviderExecutions.AsNoTracking().ToListAsync());
-        Assert.Equal(MovieClipStatuses.Queued, (await db.MovieClips.AsNoTracking().SingleAsync()).Status);
+        Assert.Equal(MovieClipStatuses.Failed, (await db.MovieClips.AsNoTracking().SingleAsync()).Status);
+        Assert.Equal(GenerationJobStatus.Running, (await db.GenerationJobs.AsNoTracking().SingleAsync()).Status);
     }
 
     private static async Task<(SqliteConnection Connection, TaslimDbContext Db, GenerationJob Job)> CreateRunningMovieJobAsync(string title, string description)
