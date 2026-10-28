@@ -130,5 +130,6 @@ public sealed class FilesController(
     }
 
     private bool TryGetUserId(out Guid userId) =>
-        Guid.TryParse(User.FindFirst(ClaimTypes.NameIdentifier)?.Value, out userId);
+        Guid.TryParse(User.FindFirst(ClaimTypes.NameIdentifier)?.Value, out userId)
+        && userId != Guid.Empty;
 }
