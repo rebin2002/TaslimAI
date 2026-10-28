@@ -295,6 +295,47 @@ public sealed class MovieVideoExecutionTests
         Assert.Equal(MovieClipStatuses.Failed, (await db.MovieClips.AsNoTracking().SingleAsync()).Status);
     }
 
+    [Theory]
+    [InlineData("1080p", "720p", "Standard", "native", 5, false)]
+    [InlineData("720p", "1080p", "Standard", "native", 5, false)]
+    [InlineData("720p", "720p", "Studio", "native", 5, false)]
+    [InlineData("720p", "720p", "Standard", "upscale", 5, false)]
+    [InlineData("720p", "720p", "Standard", "native", 11, false)]
+    [InlineData("720p", "720p", "Standard", "native", 5, true)]
+    public async Task Worker_rejects_unsupported_priced_scene_intent_before_provider_submission(
+        string sourceResolution, string targetResolution, string qualityTier, string processingPath,
+        int durationSeconds, bool upscalingRequested)
+    {
+        var fixture = await CreateRunningMovieJobAsync("Movie execution capability test", "No paid provider submission allowed.");
+        await using var connection = fixture.Connection;
+        await using var db = fixture.Db;
+        var input = System.Text.Json.JsonSerializer.Deserialize<MovieGenerationInput>(fixture.Job.InputJson)!;
+        fixture.Job.InputJson = System.Text.Json.JsonSerializer.Serialize(input with
+        {
+            SourceResolution = sourceResolution,
+            TargetResolution = targetResolution,
+            QualityTier = qualityTier,
+            ProcessingPath = processingPath,
+            DurationSeconds = durationSeconds,
+            UpscalingRequested = upscalingRequested,
+        });
+        await db.SaveChangesAsync();
+
+        var provider = new GuardedSceneMovieVideoProvider();
+        var options = new MovieVideoOptions { Enabled = true, ProviderKey = provider.Key };
+        var handler = new MovieVideoGenerationJobHandler(
+            db, provider, new MovieVideoExecutionStore(db, Options.Create(options)),
+            Options.Create(options), NullLogger<MovieVideoGenerationJobHandler>.Instance);
+
+        var failure = await Assert.ThrowsAsync<MovieVideoProviderException>(
+            () => handler.ExecuteAsync(fixture.Job, new Progress<int>(), CancellationToken.None));
+
+        Assert.Equal(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, failure.Code);
+        Assert.Equal(0, provider.SubmitCalls);
+        Assert.Empty(await db.MovieVideoProviderExecutions.AsNoTracking().ToListAsync());
+        Assert.Equal(MovieClipStatuses.Queued, (await db.MovieClips.AsNoTracking().SingleAsync()).Status);
+    }
+
     private static async Task<(SqliteConnection Connection, TaslimDbContext Db, GenerationJob Job)> CreateRunningMovieJobAsync(string title, string description)
     {
         var connection = new SqliteConnection("Data Source=:memory:");
@@ -396,6 +437,11 @@ public sealed class MovieVideoExecutionTests
         public string Key => "timeout-test";
         public bool IsAvailable => true;
         public IReadOnlyCollection<string> SupportedOperations { get; } = [MovieStudioOperations.SceneClip];
+        // Test double intentionally supports the fixture's arbitrary intent;
+        // execution forwarding, timeout and cancellation remain under test.
+        public MovieClipDurationRange? SceneClipDurationRange => new(1, 3600);
+        public bool SupportsSceneClipCostIntent(string sourceResolution, string targetResolution,
+            string qualityTier, string processingPath, string aspectRatio) => true;
         public int CancelCalls { get; private set; }
         public MovieVideoGenerationRequest? SubmittedRequest { get; private set; }
 
@@ -424,6 +470,11 @@ public sealed class MovieVideoExecutionTests
         public string Key => "stale-submission-test";
         public bool IsAvailable => true;
         public IReadOnlyCollection<string> SupportedOperations { get; } = [MovieStudioOperations.SceneClip];
+        // Test double intentionally supports the fixture's arbitrary intent;
+        // execution forwarding, timeout and cancellation remain under test.
+        public MovieClipDurationRange? SceneClipDurationRange => new(1, 3600);
+        public bool SupportsSceneClipCostIntent(string sourceResolution, string targetResolution,
+            string qualityTier, string processingPath, string aspectRatio) => true;
         public int CancelCalls { get; private set; }
         public string? CancelledProviderJobId { get; private set; }
         public bool CancelCancellationWasRequested { get; private set; }
@@ -452,11 +503,45 @@ public sealed class MovieVideoExecutionTests
         }
     }
 
+    private sealed class GuardedSceneMovieVideoProvider : IMovieVideoProvider
+    {
+        public string Key => "guarded-scene-test";
+        public bool IsAvailable => true;
+        public IReadOnlyCollection<string> SupportedOperations { get; } = [MovieStudioOperations.SceneClip];
+        public MovieClipDurationRange? SceneClipDurationRange => new(2, 10);
+        public int SubmitCalls { get; private set; }
+
+        public bool SupportsSceneClipCostIntent(string sourceResolution, string targetResolution,
+            string qualityTier, string processingPath, string aspectRatio) =>
+            string.Equals(sourceResolution, "720p", StringComparison.OrdinalIgnoreCase)
+            && string.Equals(targetResolution, "720p", StringComparison.OrdinalIgnoreCase)
+            && string.Equals(qualityTier, DirectorQualityLevels.Standard, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(processingPath, "native", StringComparison.OrdinalIgnoreCase)
+            && aspectRatio == "16:9";
+
+        public Task<MovieVideoSubmission> SubmitAsync(MovieVideoGenerationRequest request, CancellationToken cancellationToken)
+        {
+            SubmitCalls++;
+            throw new InvalidOperationException("Unsupported intent must not reach a provider submission.");
+        }
+
+        public Task<MovieVideoProviderStatus> GetStatusAsync(string providerJobId, CancellationToken cancellationToken) =>
+            Task.FromException<MovieVideoProviderStatus>(new InvalidOperationException("No status polling is expected."));
+        public Task<MovieVideoProviderOutput> RetrieveAsync(string providerJobId, MovieVideoProviderStatus status, CancellationToken cancellationToken) =>
+            Task.FromException<MovieVideoProviderOutput>(new InvalidOperationException("No output retrieval is expected."));
+        public Task CancelAsync(string providerJobId, CancellationToken cancellationToken) => Task.CompletedTask;
+    }
+
     private sealed class ProviderFailureMovieVideoProvider : IMovieVideoProvider
     {
         public string Key => "provider-failure-test";
         public bool IsAvailable => true;
         public IReadOnlyCollection<string> SupportedOperations { get; } = [MovieStudioOperations.SceneClip];
+        // Test double intentionally supports the fixture's arbitrary intent;
+        // execution forwarding, timeout and cancellation remain under test.
+        public MovieClipDurationRange? SceneClipDurationRange => new(1, 3600);
+        public bool SupportsSceneClipCostIntent(string sourceResolution, string targetResolution,
+            string qualityTier, string processingPath, string aspectRatio) => true;
         public int CancelCalls { get; private set; }
 
         public Task<MovieVideoSubmission> SubmitAsync(MovieVideoGenerationRequest request, CancellationToken cancellationToken) =>
