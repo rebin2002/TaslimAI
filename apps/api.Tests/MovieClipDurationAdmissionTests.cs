@@ -113,6 +113,43 @@ public sealed class MovieClipDurationAdmissionTests : IClassFixture<MovieClipDur
     }
 
     [Fact]
+    public async Task Feature_length_movie_and_long_scene_keep_short_shot_within_provider_clip_limit()
+    {
+        // A long-form movie is a sequence of short clips. The selected shot's
+        // duration must take precedence over the containing scene and movie,
+        // even when their plans are much longer than one provider submission.
+        // No worker is enabled and the fake adapter never receives a request.
+        using var client = factory.CreateClient();
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Feature length timeline with short shot", sceneDurationSeconds: 5);
+        using (var setupScope = factory.Services.CreateScope())
+        {
+            var db = setupScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var movie = await db.MovieProjects.SingleAsync(item => item.Id == fixture.Project.Project.Id);
+            var scene = await db.MovieScenes.SingleAsync(item => item.Id == fixture.Scene.Id);
+            var shot = await db.MovieShots.SingleAsync(item => item.Id == fixture.Shot.Id);
+            movie.DurationSeconds = 7_200;
+            scene.DurationSeconds = 120;
+            shot.DurationSeconds = 5;
+            await db.SaveChangesAsync();
+        }
+
+        var response = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
+            client, $"/api/movie-studio/shots/{fixture.Shot.Id}/generate",
+            new { title = "Five-second feature film shot" },
+            idempotencyKey: "feature-length-short-shot-admission");
+
+        using var scope = factory.Services.CreateScope();
+        var verify = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.Equal(5, await verify.MovieClips.Where(item => item.Id == response.ClipId)
+            .Select(item => item.DurationSeconds).SingleAsync());
+        var job = await verify.GenerationJobs.SingleAsync(item => item.Id == response.Job.Id);
+        var input = System.Text.Json.JsonSerializer.Deserialize<MovieGenerationInput>(job.InputJson)!;
+        Assert.Equal(5, input.DurationSeconds);
+        Assert.Equal(GenerationJobStatus.Queued, job.Status);
+    }
+
+    [Fact]
     public async Task Unsupported_clip_duration_rejects_before_job_clip_or_usage_reservation()
     {
         using var client = factory.CreateClient();
