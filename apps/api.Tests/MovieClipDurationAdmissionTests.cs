@@ -35,6 +35,28 @@ public sealed class MovieClipDurationApiFactory : MovieOperationalApiFactory
     }
 }
 
+// A separate test host makes intent denial deterministic without mutating
+// the shared duration test fixture or reaching an external video provider.
+public sealed class MovieClipIntentDeniedApiFactory : MovieOperationalApiFactory
+{
+    protected override bool WorkerEnabled => false;
+
+    protected override void ConfigureWebHost(IWebHostBuilder builder)
+    {
+        base.ConfigureWebHost(builder);
+        builder.ConfigureServices(services =>
+        {
+            services.RemoveAll<IMovieVideoProvider>();
+            services.AddSingleton<IMovieVideoProvider>(sp => new FakeMovieVideoProvider(
+                sp.GetRequiredService<FakeProviderScenarioCatalog>(),
+                sp.GetRequiredService<FakeProviderCallLog>())
+            {
+                SceneClipCostIntentSupported = false,
+            });
+        });
+    }
+}
+
 public sealed class MovieClipDurationAdmissionTests : IClassFixture<MovieClipDurationApiFactory>
 {
     private readonly MovieClipDurationApiFactory factory;
@@ -85,6 +107,33 @@ public sealed class MovieClipDurationAdmissionTests : IClassFixture<MovieClipDur
             await rejected.Content.ReadAsStringAsync(), StringComparison.Ordinal);
         Assert.Equal(0, await db.MovieClips.CountAsync(item => item.MovieProjectId == fixture.Project.Project.Id));
         Assert.Equal(0, await db.GenerationJobs.CountAsync(item => item.IdempotencyKey == "movie-duration-unsupported-11"));
+        Assert.Equal(transactionCountBefore, await db.UsageTransactions.CountAsync());
+    }
+
+    [Fact]
+    public async Task Unsupported_priced_clip_profile_rejects_before_cost_reservation_or_job()
+    {
+        using var denyingFactory = new MovieClipIntentDeniedApiFactory();
+        using (var setup = denyingFactory.Services.CreateScope())
+            setup.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+
+        using var client = denyingFactory.CreateClient();
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Movie price execution mismatch", sceneDurationSeconds: 5);
+        using var scope = denyingFactory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var transactionCountBefore = await db.UsageTransactions.CountAsync();
+
+        using var rejected = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post,
+            $"/api/movie-studio/shots/{fixture.Shot.Id}/generate",
+            new { title = "Unverified provider quality", confirmationAccepted = true },
+            idempotencyKey: "movie-output-profile-unsupported");
+        Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
+        Assert.Contains("MOVIE_CLIP_EXECUTION_INTENT_UNSUPPORTED",
+            await rejected.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Equal(0, await db.MovieClips.CountAsync(item => item.MovieProjectId == fixture.Project.Project.Id));
+        Assert.Equal(0, await db.GenerationJobs.CountAsync(item => item.IdempotencyKey == "movie-output-profile-unsupported"));
         Assert.Equal(transactionCountBefore, await db.UsageTransactions.CountAsync());
     }
 
