@@ -54,6 +54,7 @@ public sealed class MovieProductionPreflightTests : IClassFixture<GenerationJobs
         Assert.Equal(MovieProductionPreflightDecisionCodes.ReferenceWorkRequired, preflight.Decision);
         Assert.Contains(preflight.Checks, item => item.Key == MovieProductionPreflightCheckKeys.Storyboard && !item.Satisfied && item.Required);
         Assert.Contains(preflight.Checks, item => item.Key == MovieProductionPreflightCheckKeys.Keyframe && !item.Satisfied && item.Required);
+        Assert.Contains(preflight.Checks, item => item.Key == MovieProductionPreflightCheckKeys.ProviderAdmission && item.Required);
         Assert.Contains(preflight.Recommendations, item => item.Key == "approve_keyframe");
         Assert.Equal("1080p", preflight.AdaptiveResolution.TargetResolution);
         Assert.DoesNotContain(preflight.Recommendations, item => item.Detail.Contains("provider", StringComparison.OrdinalIgnoreCase));
@@ -83,6 +84,29 @@ public sealed class MovieProductionPreflightTests : IClassFixture<GenerationJobs
             [new MovieProductionReferenceWarningDto("hard_continuity_conflict", "error", "Resolve the conflict.")]);
         Assert.False(blocked.Satisfied);
         Assert.Contains("blocking reference conflict", blocked.Detail, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    public void Production_provider_preflight_fails_closed_without_enabled_scene_clip_operation(
+        bool available, bool supportsSceneClip)
+    {
+        var check = MovieProductionPreflightService.BuildProviderAdmissionCheck(available, supportsSceneClip);
+        Assert.Equal(MovieProductionPreflightCheckKeys.ProviderAdmission, check.Key);
+        Assert.True(check.Required);
+        Assert.False(check.Satisfied);
+        Assert.Contains("provider", check.Detail, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Production_provider_preflight_accepts_available_scene_clip_operation()
+    {
+        var check = MovieProductionPreflightService.BuildProviderAdmissionCheck(true, true);
+        Assert.True(check.Required);
+        Assert.True(check.Satisfied);
+        Assert.Contains("queue", check.Detail, StringComparison.OrdinalIgnoreCase);
     }
 
     private static async Task<AuthResponse> Register(HttpClient client)
