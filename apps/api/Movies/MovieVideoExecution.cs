@@ -306,7 +306,14 @@ public sealed class MovieVideoGenerationJobHandler(
                     input.QualityTier ?? string.Empty,
                     input.ProcessingPath ?? string.Empty,
                     input.AspectRatio)))
+        {
+            // Admission on older paths may already have persisted a queued
+            // clip. Keep its terminal state consistent when the worker refuses
+            // an unsupported paid operation, without submitting to the provider.
+            await executions.MarkFailedAsync(job.Id, job.ConcurrencyToken,
+                GenerationJobErrorCodes.MovieProviderUnsupportedRequest, CancellationToken.None);
             throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);
+        }
 
         var request = new MovieVideoGenerationRequest(
             input.Operation,
