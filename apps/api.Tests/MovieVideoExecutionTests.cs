@@ -343,6 +343,45 @@ public sealed class MovieVideoExecutionTests
     }
 
     [Fact]
+    public async Task Worker_rejects_oversized_queued_scene_description_before_execution_or_submission()
+    {
+        // Even an older queued job must not create an execution record or
+        // submit paid work when its description exceeds the adapter's entire
+        // declared prompt budget. This fake provider makes no outbound calls.
+        var fixture = await CreateRunningMovieJobAsync(
+            "Movie prompt-capacity contract", "Reject an oversized legacy description.");
+        await using var connection = fixture.Connection;
+        await using var db = fixture.Db;
+        var input = System.Text.Json.JsonSerializer.Deserialize<MovieGenerationInput>(fixture.Job.InputJson)!;
+        fixture.Job.InputJson = System.Text.Json.JsonSerializer.Serialize(input with
+        {
+            Description = new string('x', 48),
+            SourceResolution = "720p",
+            TargetResolution = "720p",
+            QualityTier = DirectorQualityLevels.Standard,
+            ProcessingPath = "native",
+            MasterResolution = null,
+            DurationSeconds = 5,
+            UpscalingRequested = false,
+        });
+        await db.SaveChangesAsync();
+
+        var provider = new GuardedSceneMovieVideoProvider(promptLimit: 32);
+        var options = new MovieVideoOptions { Enabled = true, ProviderKey = provider.Key };
+        var handler = new MovieVideoGenerationJobHandler(
+            db, provider, new MovieVideoExecutionStore(db, Options.Create(options)),
+            Options.Create(options), NullLogger<MovieVideoGenerationJobHandler>.Instance);
+
+        var failure = await Assert.ThrowsAsync<MovieVideoProviderException>(
+            () => handler.ExecuteAsync(fixture.Job, new Progress<int>(), CancellationToken.None));
+
+        Assert.Equal(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, failure.Code);
+        Assert.Equal(0, provider.SubmitCalls);
+        Assert.Empty(await db.MovieVideoProviderExecutions.AsNoTracking().ToListAsync());
+        Assert.Equal(MovieClipStatuses.Failed, (await db.MovieClips.AsNoTracking().SingleAsync()).Status);
+    }
+
+    [Fact]
     public async Task Worker_preserves_supported_priced_intent_at_provider_boundary()
     {
         // The provider is a deterministic fake that records the request and throws.
@@ -676,6 +715,8 @@ public sealed class MovieVideoExecutionTests
 
     private sealed class GuardedSceneMovieVideoProvider : IMovieVideoProvider
     {
+        public GuardedSceneMovieVideoProvider(int? promptLimit = null) => SceneClipPromptMaxCharacters = promptLimit;
+        public int? SceneClipPromptMaxCharacters { get; }
         public string Key => "guarded-scene-test";
         public bool IsAvailable => true;
         public IReadOnlyCollection<string> SupportedOperations { get; } = [MovieStudioOperations.SceneClip];
