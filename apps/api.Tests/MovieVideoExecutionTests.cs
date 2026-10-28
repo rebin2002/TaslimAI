@@ -646,6 +646,74 @@ public sealed class MovieVideoExecutionTests
             (await db.MovieClips.AsNoTracking().SingleAsync()).Status);
     }
 
+    [Theory]
+    [InlineData(null)]
+    [InlineData("existing-provider-task")]
+    public async Task Reclaimed_execution_rejects_a_different_clip_without_submitting_or_polling(string? providerJobId)
+    {
+        // A recovery worker must not adopt a persisted provider operation
+        // whose canonical clip differs from the clip named in the job input.
+        // The synthetic adapter cannot make external or billable requests.
+        var fixture = await CreateRunningMovieJobAsync(
+            "Movie clip execution binding", "Do not attach another clip's provider task.");
+        await using var connection = fixture.Connection;
+        await using var db = fixture.Db;
+        var originalInput = System.Text.Json.JsonSerializer.Deserialize<MovieGenerationInput>(fixture.Job.InputJson)!;
+        fixture.Job.InputJson = System.Text.Json.JsonSerializer.Serialize(originalInput with
+        {
+            SourceResolution = "720p",
+            TargetResolution = "720p",
+            QualityTier = DirectorQualityLevels.Standard,
+            ProcessingPath = "native",
+        });
+
+        var canonicalClip = await db.MovieClips.SingleAsync();
+        var now = DateTime.UtcNow;
+        var unrelatedClip = new MovieClip
+        {
+            Id = Guid.NewGuid(),
+            MovieProjectId = canonicalClip.MovieProjectId,
+            Status = MovieClipStatuses.Queued,
+            CreatedAt = now,
+            UpdatedAt = now,
+        };
+        db.MovieClips.Add(unrelatedClip);
+        var provider = new GuardedSceneMovieVideoProvider();
+        db.MovieVideoProviderExecutions.Add(new MovieVideoProviderExecution
+        {
+            Id = Guid.NewGuid(),
+            GenerationJobId = fixture.Job.Id,
+            MovieClipId = unrelatedClip.Id,
+            ProviderKey = provider.Key,
+            ProviderJobId = providerJobId,
+            AttemptCount = providerJobId is null ? 0 : 1,
+            Status = MovieVideoExecutionStatuses.Queued,
+            CreatedAt = now,
+            UpdatedAt = now,
+        });
+        await db.SaveChangesAsync();
+
+        var options = new MovieVideoOptions { Enabled = true, ProviderKey = provider.Key };
+        var handler = new MovieVideoGenerationJobHandler(
+            db, provider, new MovieVideoExecutionStore(db, Options.Create(options)),
+            Options.Create(options), NullLogger<MovieVideoGenerationJobHandler>.Instance);
+
+        var failure = await Assert.ThrowsAsync<MovieVideoProviderException>(
+            () => handler.ExecuteAsync(fixture.Job, new Progress<int>(), CancellationToken.None));
+
+        Assert.Equal(GenerationJobErrorCodes.MovieGenerationFailed, failure.Code);
+        Assert.False(failure.IsTransient);
+        Assert.Equal(0, provider.SubmitCalls);
+        var execution = await db.MovieVideoProviderExecutions.AsNoTracking().SingleAsync();
+        Assert.Equal(unrelatedClip.Id, execution.MovieClipId);
+        Assert.Equal(providerJobId, execution.ProviderJobId);
+        Assert.Equal(providerJobId is null ? 0 : 1, execution.AttemptCount);
+        Assert.Equal(GenerationJobStatus.Running,
+            (await db.GenerationJobs.AsNoTracking().SingleAsync()).Status);
+        Assert.Equal(MovieClipStatuses.Queued,
+            (await db.MovieClips.AsNoTracking().SingleAsync(item => item.Id == canonicalClip.Id)).Status);
+    }
+
     [Fact]
     public async Task Crash_after_durable_submit_marker_does_not_issue_a_second_provider_request()
     {
