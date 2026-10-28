@@ -810,6 +810,10 @@ public interface IMovieVideoProvider
     // be submitted faithfully. Null means no safe early length assertion.
     // Providers still validate the assembled prompt before outbound submission.
     int? SceneClipPromptMaxCharacters => null;
+    // Some adapters include the full world-continuity snapshot in the paid
+    // prompt. Opt in only when the adapter actually sends that field so
+    // admission and worker checks use the same conservative prompt budget.
+    bool SceneClipWorldContextInPrompt => false;
     // A provider may opt in only after mapping these distinct frame/reference
     // fields to its verified submission payload. Unknown adapters fail closed.
     bool SupportsSceneClipFrameReferences => false;
