@@ -83,6 +83,47 @@ public sealed class MovieStudioIdempotencyTests : IClassFixture<MovieOperational
     }
 
     [Fact]
+    public async Task Same_user_key_cannot_be_reassigned_to_another_movie()
+    {
+        // An idempotency key belongs to one user-scoped generation request,
+        // not merely to a movie. Reusing it on another private project must
+        // neither reveal the old clip nor persist a losing speculative clip.
+        using var client = factory.CreateClient();
+        var firstMovie = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "First movie for shared user");
+        var secondMovie = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Second movie for shared user",
+            existingOwner: firstMovie.Owner);
+        const string key = "movie-cross-project-idempotency-boundary";
+        var canonical = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
+            client, $"/api/movie-studio/shots/{firstMovie.Shot.Id}/generate",
+            new { title = "Canonical project clip" }, idempotencyKey: key);
+
+        using var conflicting = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post,
+            $"/api/movie-studio/shots/{secondMovie.Shot.Id}/generate",
+            new { title = "Different project clip" }, idempotencyKey: key);
+        Assert.Equal(System.Net.HttpStatusCode.BadRequest, conflicting.StatusCode);
+        Assert.Contains("IDEMPOTENCY_KEY_REUSED",
+            await conflicting.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var job = Assert.Single(await db.GenerationJobs.AsNoTracking()
+            .Where(item => item.IdempotencyKey == key).ToListAsync());
+        Assert.Equal(canonical.Job.Id, job.Id);
+        Assert.Equal(firstMovie.Owner.User.Id, job.CreatedByUserId);
+        var firstClip = await db.MovieClips.AsNoTracking()
+            .SingleAsync(item => item.MovieProjectId == firstMovie.Project.Project.Id);
+        Assert.Equal(canonical.ClipId, firstClip.Id);
+        Assert.Equal(job.Id, firstClip.GenerationJobId);
+        Assert.False(await db.MovieClips.AsNoTracking()
+            .AnyAsync(item => item.MovieProjectId == secondMovie.Project.Project.Id));
+        Assert.Single(await db.UsageTransactions.AsNoTracking()
+            .Where(item => item.RequestId == $"generation:{job.Id:N}").ToListAsync());
+    }
+
+    [Fact]
     public async Task Reused_movie_job_reconciles_to_canonical_clip_without_persisting_a_duplicate()
     {
         using var client = factory.CreateClient();
