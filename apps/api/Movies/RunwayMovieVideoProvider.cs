@@ -212,6 +212,9 @@ public sealed class RunwayMovieVideoProvider(
         // Never submit a provider task for a profile this adapter cannot enact.
         if (request.Operation == MovieStudioOperations.SceneClip
             && (request.UpscalingRequested
+                // Runway's current payload has only a fixed 720p output ratio;
+                // MasterResolution would otherwise be accepted then discarded.
+                || !string.IsNullOrWhiteSpace(request.MasterResolution)
                 || !SupportsSceneClipCostIntent(
                 request.SourceResolution ?? string.Empty,
                 request.TargetResolution ?? string.Empty,
