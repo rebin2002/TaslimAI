@@ -307,12 +307,22 @@ public sealed class MovieVideoGenerationJobHandler(
                     input.ProcessingPath ?? string.Empty,
                     input.AspectRatio)))
         {
-            // Admission on older paths may already have persisted a queued
-            // clip. Keep its terminal state consistent when the worker refuses
-            // an unsupported paid operation, without submitting to the provider.
-            await executions.MarkFailedAsync(job.Id, job.ConcurrencyToken,
-                GenerationJobErrorCodes.MovieProviderUnsupportedRequest, CancellationToken.None);
-            throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);
+            // A prior worker may already have submitted a provider operation.
+            // Continue polling that *existing* job instead of abandoning paid
+            // work remotely. Never permit a new unsupported submission.
+            var submittedProviderJobId = await db.MovieVideoProviderExecutions.AsNoTracking()
+                .Where(item => item.GenerationJobId == job.Id)
+                .Select(item => item.ProviderJobId)
+                .FirstOrDefaultAsync(cancellationToken);
+            if (string.IsNullOrWhiteSpace(submittedProviderJobId))
+            {
+                // Admission on older paths may have persisted a queued clip.
+                // Fail that clip/take under this worker claim without leaving
+                // a speculative provider-execution record or a remote job.
+                await executions.MarkFailedAsync(job.Id, job.ConcurrencyToken,
+                    GenerationJobErrorCodes.MovieProviderUnsupportedRequest, CancellationToken.None);
+                throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);
+            }
         }
 
         var request = new MovieVideoGenerationRequest(
