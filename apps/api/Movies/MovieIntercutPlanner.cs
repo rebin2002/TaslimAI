@@ -227,9 +227,14 @@ public static class MovieIntercutPlanner
         var totalDuration = candidates.Sum(item => item.DurationSeconds);
         if (totalDuration > MaxTimelineDurationSeconds)
             throw new MovieIntercutPlanningException(MovieIntercutPlanCodes.DurationInvalid, "The proposed timeline exceeds the supported 7,200-second duration.");
-        var knownShots = candidates.Select(item => item.MovieShotId).ToHashSet();
-        if (candidates.Any(item => item.AnchorShotId.HasValue && !knownShots.Contains(item.AnchorShotId.Value)))
-            throw new MovieIntercutPlanningException(MovieIntercutPlanCodes.AnchorInvalid, "Every intercut anchor must reference a shot in the same proposal.");
+        // An intercut is editorial coverage *around a primary story beat*. An anchor
+        // pointing to another reaction/insert is never placed at the anchored shot by
+        // OrderForStory, so fail closed rather than silently proposing the wrong cut.
+        var primaryShots = candidates.Where(item => item.IsPrimary).Select(item => item.MovieShotId).ToHashSet();
+        if (primaryShots.Count == 0)
+            throw new MovieIntercutPlanningException(MovieIntercutPlanCodes.StoryOrderInvalid, "An intercut proposal requires at least one primary story shot.");
+        if (candidates.Any(item => item.AnchorShotId is Guid anchor && !primaryShots.Contains(anchor)))
+            throw new MovieIntercutPlanningException(MovieIntercutPlanCodes.AnchorInvalid, "Every intercut anchor must reference a primary story shot in the same proposal.");
     }
 
     private static void ValidateRequestedOrder(IReadOnlyList<MovieIntercutCandidate> candidates, IReadOnlyList<Guid>? requestedOrder)
