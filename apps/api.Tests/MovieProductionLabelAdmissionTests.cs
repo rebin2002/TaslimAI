@@ -1,0 +1,75 @@
+using System.Net;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
+using Taslim.Api.Domain;
+using Taslim.Api.Movies;
+using Taslim.Api.Persistence;
+using Xunit;
+
+namespace Taslim.Api.Tests;
+
+public sealed class MovieProductionLabelAdmissionTests
+{
+    [Fact]
+    public async Task Oversized_render_label_rejects_before_clip_job_or_usage_reservation()
+    {
+        // The same provider-free approval workflow can render a valid request.
+        // Only an oversized label must fail before any billable work exists.
+        using var factory = new MovieOperationalNoWorkerFactory();
+        using (var setup = factory.Services.CreateScope())
+            setup.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+
+        using var client = factory.CreateClient();
+        var movie = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Production render label admission", sceneDurationSeconds: 5);
+        var shotId = movie.Shot.Id;
+        var storyboard = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
+            client, $"/api/movie-studio/shots/{shotId}/production/versions",
+            new { stage = MovieProductionStages.StoryboardCandidate, compositionJson = "{\"frame\":\"wide\"}" });
+        var approvedStoryboard = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
+            client, $"/api/movie-studio/production/versions/{storyboard.Id}/review",
+            new { approve = true });
+        var keyframe = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
+            client, $"/api/movie-studio/shots/{shotId}/production/versions",
+            new { stage = MovieProductionStages.ProductionKeyframe, sourceVersionId = approvedStoryboard.Id,
+                compositionJson = "{\"frame\":\"approved\"}" });
+        var approvedKeyframe = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
+            client, $"/api/movie-studio/production/versions/{keyframe.Id}/review",
+            new { approve = true });
+        var motion = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
+            client, $"/api/movie-studio/shots/{shotId}/production/motion-preview",
+            new { sourceVersionId = approvedKeyframe.Id });
+        var approvedMotion = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
+            client, $"/api/movie-studio/production/versions/{motion.Id}/review",
+            new { approve = true });
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var versionsBefore = await db.MovieProductionVersions.CountAsync(item => item.MovieShotId == shotId);
+        var ledgerBefore = await db.UsageTransactions.CountAsync();
+        var path = $"/api/movie-studio/shots/{shotId}/production/render";
+
+        using var rejected = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, path,
+            new { sourceVersionId = approvedMotion.Id, label = new string('x', 161),
+                confirmationAccepted = true }, idempotencyKey: "render-long-label-rejected");
+        Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
+        Assert.Contains("PRODUCTION_LABEL_TOO_LARGE",
+            await rejected.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Equal(versionsBefore, await db.MovieProductionVersions.CountAsync(item => item.MovieShotId == shotId));
+        Assert.False(await db.MovieClips.AnyAsync(item => item.MovieProjectId == movie.Project.Project.Id));
+        Assert.False(await db.GenerationJobs.AnyAsync(item => item.IdempotencyKey == "render-long-label-rejected"));
+        Assert.Equal(ledgerBefore, await db.UsageTransactions.CountAsync());
+
+        // The boundary length remains legal, and the same approved source can
+        // still queue once with a fresh idempotency key.
+        var valid = await MovieOperationalFixtures.PostAsync<MovieProductionRenderResponse>(
+            client, path,
+            new { sourceVersionId = approvedMotion.Id, label = new string('x', 160),
+                confirmationAccepted = true }, idempotencyKey: "render-label-160-valid");
+        Assert.NotEqual(Guid.Empty, valid.ClipId);
+        Assert.Equal(valid.Job.Id, valid.Version.GenerationJobId);
+        Assert.Single(await db.MovieClips.Where(item => item.MovieShotId == shotId).ToListAsync());
+        Assert.Equal(1, await db.GenerationJobs.CountAsync(item => item.IdempotencyKey == "render-label-160-valid"));
+    }
+}
