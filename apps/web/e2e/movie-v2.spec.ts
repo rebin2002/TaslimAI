@@ -55,6 +55,42 @@ test.describe("Movie Studio V2 browser smoke", () => {
     await expect(page).not.toHaveURL(/\/create\/movie\/[0-9a-f-]+\/overview$/i);
   });
 
+  test("persists a two-hour full movie timeline without queueing paid work", async ({ authenticatedPage: page }) => {
+    test.setTimeout(120_000);
+    await page.goto("/create/movie");
+    await page.getByRole("tab", { name: /full movie/i }).first().click();
+
+    // The project duration is a timeline goal; it is not an instruction to
+    // generate a single 7,200-second paid provider clip.
+    const durationField = page.locator(".movie-brief-card input[type=number]").first();
+    await expect(durationField).toHaveAttribute("max", "7200");
+    await durationField.fill("7200");
+    await page.getByLabel("Movie title").fill("E2E Two Hour Movie Timeline");
+    await page.getByLabel("Describe your movie").fill("A two-hour production plan that will be assembled from separately admitted shots.");
+    await page.getByRole("button", { name: /create full project/i }).click();
+
+    await expect(page).toHaveURL(/\/create\/movie\/[0-9a-f-]+\/overview$/i);
+    const projectId = page.url().match(/\/create\/movie\/([0-9a-f-]+)\/overview$/i)?.[1];
+    expect(projectId).toBeTruthy();
+
+    const response = await page.request.get(`/api/movie-studio/projects/${projectId}`);
+    expect(response.ok()).toBe(true);
+    const project = (await response.json()) as {
+      id: string;
+      mode: string;
+      durationSeconds: number;
+      clips: unknown[];
+    };
+    expect(project.id).toBe(projectId);
+    expect(project.mode).toBe("Full");
+    expect(project.durationSeconds).toBe(7200);
+    expect(project.clips).toEqual([]);
+
+    await page.reload();
+    await expect(page.getByRole("heading", { name: "E2E Two Hour Movie Timeline", level: 1 })).toBeVisible();
+    await expect(page.getByText("No generated footage yet")).toBeVisible();
+  });
+
   test("creates an empty Story Director proposal for the same MovieProject after the guide is locked", async ({ authenticatedPage: page }) => {
     test.setTimeout(120_000);
     await page.goto("/create/movie");
