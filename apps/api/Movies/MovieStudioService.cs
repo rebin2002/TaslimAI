@@ -1480,6 +1480,18 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                 "MOVIE_CLIP_PROMPT_UNSUPPORTED",
                 "The scene or shot description exceeds this provider's prompt limit. Shorten the description before generating.");
 
+        // The character-continuity payload is part of the eventual provider
+        // prompt, but is generated separately from scene/shot direction.
+        // Preview it without persisting a snapshot: an oversized character
+        // bible must not trigger a priced admission or an orphan snapshot.
+        var continuityPromptPreview = await continuity.BuildSnapshotForTargetAsync(
+            movie.Id, scene.Id, shot?.Id, false, cancellationToken);
+        if (provider.SceneClipPromptMaxCharacters is { } continuityPromptCapacity
+            && minimumCreativePromptLength + continuityPromptPreview.SnapshotJson.Trim().Length > continuityPromptCapacity)
+            throw new GenerationJobValidationException(
+                "MOVIE_CLIP_PROMPT_UNSUPPORTED",
+                "The clip's character-continuity context exceeds this provider's prompt limit. Shorten the continuity details before generating.");
+
         var estimate = await movieCostEstimator.EstimateAsync(
             new MovieGenerationCostRequest(
                 durationSeconds,
@@ -1520,6 +1532,13 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
             UpdatedAt = now,
         };
         var continuitySnapshot = await continuity.BuildSnapshotForTargetAsync(movie.Id, scene.Id, shot?.Id, true, cancellationToken);
+        // Recheck the persisted snapshot in case continuity edits raced with
+        // the read-only preview. The worker enforces the same bound again.
+        if (provider.SceneClipPromptMaxCharacters is { } persistedPromptCapacity
+            && minimumCreativePromptLength + continuitySnapshot.SnapshotJson.Trim().Length > persistedPromptCapacity)
+            throw new GenerationJobValidationException(
+                "MOVIE_CLIP_PROMPT_UNSUPPORTED",
+                "The clip's character-continuity context exceeds this provider's prompt limit. Shorten the continuity details before generating.");
         clip.ContinuitySnapshotJson = continuitySnapshot.SnapshotJson;
         clip.ContinuitySnapshotId = continuitySnapshot.SnapshotId;
         clip.ContinuitySnapshotVersion = continuitySnapshot.Version;
