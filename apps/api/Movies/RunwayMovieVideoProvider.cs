@@ -54,9 +54,12 @@ public sealed class RunwayMovieVideoProvider(
     public async Task<MovieVideoSubmission> SubmitAsync(MovieVideoGenerationRequest request, CancellationToken cancellationToken)
     {
         EnsureAvailable();
+        // Reject unsupported priced profiles, frame inputs and durations before
+        // resolving any user-supplied image host. This is a local validation only;
+        // a rejected request must not trigger DNS resolution or provider traffic.
+        var payload = BuildPayload(request, out var endpoint);
         if (Uri.TryCreate(request.SourceImageUri, UriKind.Absolute, out var sourceUri) && sourceUri.Scheme == Uri.UriSchemeHttps)
             await urlPolicy.EnsureSafeAsync(sourceUri, cancellationToken);
-        var payload = BuildPayload(request, out var endpoint);
         var response = await SendJsonWithRetryAsync(HttpMethod.Post, endpoint, payload, cancellationToken);
         var task = Deserialize<RunwayTaskResponse>(response) ?? throw Failure();
         if (!Guid.TryParse(task.Id, out _)) throw Failure();
