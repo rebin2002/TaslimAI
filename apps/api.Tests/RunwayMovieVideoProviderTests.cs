@@ -61,11 +61,16 @@ public sealed class RunwayMovieVideoProviderTests
         string sourceResolution, string targetResolution, string qualityTier, string processingPath)
     {
         var handler = new RecordingHandler(_ => throw new InvalidOperationException("No provider request is allowed."));
-        var provider = CreateProvider(handler, EnabledOptions());
+        var urlPolicy = new CountingProviderUrlPolicy();
+        var provider = CreateProvider(handler, EnabledOptions(), urlPolicy);
 
-        await Assert.ThrowsAsync<MovieVideoProviderException>(() => provider.SubmitAsync(
-            Request(sourceResolution: sourceResolution, targetResolution: targetResolution,
+        var error = await Assert.ThrowsAsync<MovieVideoProviderException>(() => provider.SubmitAsync(
+            Request(sourceImageUri: "https://assets.example.test/frame.png",
+                sourceResolution: sourceResolution, targetResolution: targetResolution,
                 qualityTier: qualityTier, processingPath: processingPath), CancellationToken.None));
+
+        Assert.Equal(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, error.Code);
+        Assert.Equal(0, urlPolicy.Calls);
         Assert.Empty(handler.Requests);
     }
 
@@ -295,6 +300,17 @@ public sealed class RunwayMovieVideoProviderTests
     private sealed class AllowAllProviderUrlPolicy : IProviderUrlPolicy
     {
         public Task EnsureSafeAsync(Uri uri, CancellationToken cancellationToken = default) => Task.CompletedTask;
+    }
+
+    private sealed class CountingProviderUrlPolicy : IProviderUrlPolicy
+    {
+        public int Calls { get; private set; }
+
+        public Task EnsureSafeAsync(Uri uri, CancellationToken cancellationToken = default)
+        {
+            Calls++;
+            return Task.CompletedTask;
+        }
     }
 
     private static MovieVideoOptions EnabledOptions() => new()
