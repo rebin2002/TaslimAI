@@ -60,6 +60,29 @@ public sealed class S3CompatibleStorageDiagnosticsTests
             Taslim.Api.Files.S3CompatibleFileStorageService.ClassifyFailure(failure));
     }
 
+    [Theory]
+    [InlineData(HttpStatusCode.NotFound, "NoSuchKey", true)]
+    [InlineData(HttpStatusCode.NotFound, "NotFound", true)]
+    [InlineData(HttpStatusCode.NotFound, null, true)]
+    [InlineData(HttpStatusCode.NotFound, "NoSuchBucket", false)]
+    [InlineData(HttpStatusCode.Forbidden, "NoSuchKey", false)]
+    [InlineData(HttpStatusCode.ServiceUnavailable, "NotFound", false)]
+    [InlineData(HttpStatusCode.BadRequest, "NoSuchKey", false)]
+    [InlineData((HttpStatusCode)0, "NoSuchKey", false)]
+    public void Only_object_not_found_responses_may_hide_missing_private_file(
+        HttpStatusCode status, string? errorCode, bool expected)
+    {
+        // A misleading code on an auth, network, or bucket error must never
+        // silently become a null GET response or false HEAD result.
+        var exception = new AmazonS3Exception("synthetic failure")
+        {
+            StatusCode = status,
+            ErrorCode = errorCode,
+        };
+
+        Assert.Equal(expected, AwsS3CompatibleObjectClient.IsNotFound(exception));
+    }
+
     [Fact]
     public void Classifies_timeout_and_provider_response_failures_separately()
     {
