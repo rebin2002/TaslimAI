@@ -150,6 +150,10 @@ public sealed class MovieStudioIdempotencyTests : IClassFixture<MovieOperational
 
     [Theory]
     [InlineData("shot-description")]
+    [InlineData("shot-framing")]
+    [InlineData("shot-narration")]
+    [InlineData("scene-title")]
+    [InlineData("scene-dialogue")]
     [InlineData("movie-style")]
     [InlineData("movie-language")]
     [InlineData("movie-instructions")]
@@ -174,6 +178,18 @@ public sealed class MovieStudioIdempotencyTests : IClassFixture<MovieOperational
             {
                 case "shot-description":
                     shot.Description = "Newly edited scene action that must not reuse the previous video.";
+                    break;
+                case "shot-framing":
+                    shot.CameraAndFraming = "Newly edited shot framing must request another clip.";
+                    break;
+                case "shot-narration":
+                    shot.Narration = "Rewritten narration for the shot.";
+                    break;
+                case "scene-title":
+                    (await db.MovieScenes.SingleAsync(item => item.Id == fixture.Scene.Id)).Title = "Rewritten scene heading";
+                    break;
+                case "scene-dialogue":
+                    (await db.MovieScenes.SingleAsync(item => item.Id == fixture.Scene.Id)).Dialogue = "New scene dialogue";
                     break;
                 case "movie-style":
                     movie.Style = "distinct-new-visual-style";
