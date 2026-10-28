@@ -1,4 +1,5 @@
 using System.Net;
+using System.Text.Json;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -280,6 +281,113 @@ public sealed class MovieProductionStructuredPromptAdmissionTests
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
         Assert.Contains("MOVIE_CLIP_PROMPT_UNSUPPORTED",
             await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Equal(versionsBefore, await db.MovieProductionVersions.CountAsync());
+        Assert.Equal(clipsBefore, await db.MovieClips.CountAsync());
+        Assert.Equal(jobsBefore, await db.GenerationJobs.CountAsync());
+        Assert.Equal(usageBefore, await db.UsageTransactions.CountAsync());
+        Assert.Equal(0, scope.ServiceProvider.GetRequiredService<FakeProviderCallLog>()
+            .Calls(FakeProviderKind.Movie));
+    }
+
+    [Fact]
+    public async Task Approved_render_rejects_oversized_character_context_without_snapshot_job_or_usage()
+    {
+        // Production render must account for the selected character bible just
+        // as legacy shot generation does, before any cost or clip reservation.
+        // The fake provider never submits paid work; workers are disabled.
+        using var factory = new MovieStructuredPromptBudgetFactory();
+        using (var setup = factory.Services.CreateScope())
+            setup.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+
+        using var client = factory.CreateClient();
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Character Production", sceneDurationSeconds: 5);
+        var shotId = fixture.Shot.Id;
+
+        var storyboard = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
+            client, $"/api/movie-studio/shots/{shotId}/production/versions",
+            new { stage = MovieProductionStages.StoryboardCandidate, compositionJson = "{\\"frame\\":\\"wide\\"}" });
+        var approvedStoryboard = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
+            client, $"/api/movie-studio/production/versions/{storyboard.Id}/review",
+            new { approve = true });
+        var keyframe = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
+            client, $"/api/movie-studio/shots/{shotId}/production/versions",
+            new { stage = MovieProductionStages.ProductionKeyframe,
+                sourceVersionId = approvedStoryboard.Id, compositionJson = "{\\"frame\\":\\"approved\\"}" });
+        var approvedKeyframe = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
+            client, $"/api/movie-studio/production/versions/{keyframe.Id}/review",
+            new { approve = true });
+        var motion = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
+            client, $"/api/movie-studio/shots/{shotId}/production/motion-preview",
+            new { sourceVersionId = approvedKeyframe.Id });
+        var approvedMotion = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
+            client, $"/api/movie-studio/production/versions/{motion.Id}/review",
+            new { approve = true });
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var shot = await db.MovieShots
+            .Include(item => item.Scene).ThenInclude(item => item.MovieProject).ThenInclude(item => item.Guide)
+            .SingleAsync(item => item.Id == shotId);
+        shot.Description = "Liora crosses the courtyard.";
+        var now = DateTime.UtcNow;
+        db.MovieCharacters.Add(new MovieCharacter
+        {
+            Id = Guid.NewGuid(),
+            MovieProjectId = shot.Scene.MovieProjectId,
+            Name = "Liora",
+            Description = new string('L', 1_500),
+            CreatedAt = now,
+            UpdatedAt = now,
+        });
+        await db.SaveChangesAsync();
+
+        var movie = shot.Scene.MovieProject;
+        var title = "Continuity render";
+        var guide = movie.Guide is null ? null : JsonSerializer.Serialize(new
+        {
+            movie.Guide.VisualLanguage, movie.Guide.CameraLanguage,
+            movie.Guide.ColorAndLighting, movie.Guide.SoundAndNarration,
+            movie.Guide.ContinuityRules,
+        });
+        var sceneJson = JsonSerializer.Serialize(new
+        {
+            shot.Scene.Title, shot.Scene.Summary, shot.Scene.DurationSeconds,
+        });
+        var shotJson = JsonSerializer.Serialize(new
+        {
+            shot.Description, shot.Purpose, shot.Subjects,
+            shot.CameraAndFraming, shot.CameraMotion, shot.DurationSeconds,
+        });
+        var plainLength = (long)title.Length
+            + (movie.Style?.Trim().Length ?? 0)
+            + (movie.AdditionalInstructions?.Trim().Length ?? 0)
+            + (guide?.Length ?? 0) + sceneJson.Length + shotJson.Length;
+        var provider = Assert.IsType<FakeMovieVideoProvider>(
+            scope.ServiceProvider.GetRequiredService<IMovieVideoProvider>());
+        provider.SceneClipPromptMaxCharacters = checked((int)plainLength + 50);
+        var continuity = scope.ServiceProvider.GetRequiredService<IMovieCharacterContinuityService>();
+        var preview = await continuity.BuildSnapshotForTargetAsync(
+            movie.Id, shot.Scene.Id, shot.Id, persist: false);
+        Assert.Contains("Liora", preview.SnapshotJson, StringComparison.Ordinal);
+        Assert.True(preview.SnapshotJson.Trim().Length > 50);
+
+        var snapshotsBefore = await db.MovieCharacterContinuitySnapshots.CountAsync();
+        var versionsBefore = await db.MovieProductionVersions.CountAsync();
+        var clipsBefore = await db.MovieClips.CountAsync();
+        var jobsBefore = await db.GenerationJobs.CountAsync();
+        var usageBefore = await db.UsageTransactions.CountAsync();
+
+        using var response = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, $"/api/movie-studio/shots/{shotId}/production/render",
+            new { sourceVersionId = approvedMotion.Id, title,
+                targetResolution = "720p", qualityTier = "Standard",
+                confirmationAccepted = true }, idempotencyKey: "approved-character-prompt-overflow");
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains("MOVIE_CLIP_PROMPT_UNSUPPORTED",
+            await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Equal(snapshotsBefore, await db.MovieCharacterContinuitySnapshots.CountAsync());
         Assert.Equal(versionsBefore, await db.MovieProductionVersions.CountAsync());
         Assert.Equal(clipsBefore, await db.MovieClips.CountAsync());
         Assert.Equal(jobsBefore, await db.GenerationJobs.CountAsync());
