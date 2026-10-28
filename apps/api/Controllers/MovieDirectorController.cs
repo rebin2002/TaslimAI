@@ -56,19 +56,23 @@ public sealed class MovieDirectorController(IMovieDirectorService director, IMov
                 throw new MovieIntercutPlanningException(MovieIntercutPlanCodes.ClipRequired, "Intercut coverage candidates are required.");
             if (request.TimelineId is Guid requestedTimelineId && requestedTimelineId != Guid.Empty)
             {
-                var timelineProjectId = await db.MovieTimelines.AsNoTracking()
+                var timeline = await db.MovieTimelines.AsNoTracking()
                     .Where(item => item.Id == requestedTimelineId)
-                    .Select(item => (Guid?)item.MovieProjectId)
+                    .Select(item => new { item.MovieProjectId, item.CurrentRevisionNumber })
                     .SingleOrDefaultAsync(cancellationToken);
-                if (timelineProjectId != movieProjectId)
+                if (timeline is null || timeline.MovieProjectId != movieProjectId)
                     throw new MovieIntercutPlanningException(MovieIntercutPlanCodes.TimelineProjectMismatch, "The intercut timeline must belong to the requested movie project.");
+                // A proposal based on an older canonical revision must be rebuilt before review.
+                // This check is read-only and does not persist a timeline or start generation.
+                if (timeline.CurrentRevisionNumber != request.BaseTimelineVersion)
+                    throw new MovieIntercutPlanningException(MovieIntercutPlanCodes.TimelineVersionMismatch, "The intercut timeline revision has changed; refresh the timeline before planning.");
             }
 
             // Intercut planning is deliberately a pure proposal seam. It does not create a
             // timeline revision, enqueue a job, publish media, or charge usage.
             return Ok(MovieIntercutPlanner.Build(movieProjectId, request));
         }
-        catch (MovieIntercutPlanningException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
+        catch (MovieIntercutPlanningException exception) { return ApiResults.Error(this, exception.Code == MovieIntercutPlanCodes.TimelineVersionMismatch ? 409 : 400, exception.Code, exception.Message); }
     }
 
     [HttpGet("proposals/{proposalId:guid}")]
