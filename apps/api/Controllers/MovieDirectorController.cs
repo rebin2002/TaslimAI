@@ -29,9 +29,10 @@ public sealed class MovieDirectorController(IMovieDirectorService director, IMov
     [EnableRateLimiting(RateLimiting.Generation)]
     public async Task<IActionResult> CreateProposal(Guid movieProjectId, DirectorProposalRequest request, CancellationToken cancellationToken)
     {
+        if (!TryGetUserId(out var userId)) return Unauthorized();
         try
         {
-            var result = await director.CreateProposalAsync(GetUserId(), movieProjectId, request, cancellationToken);
+            var result = await director.CreateProposalAsync(userId, movieProjectId, request, cancellationToken);
             return result is null ? ApiResults.Error(this, 404, "DIRECTOR_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result);
         }
         catch (DirectorValidationException exception) { return ApiResults.Error(this, 400, "DIRECTOR_REQUEST_INVALID", exception.Message); }
@@ -50,8 +51,7 @@ public sealed class MovieDirectorController(IMovieDirectorService director, IMov
     {
         // The authentication middleware establishes identity, but an authenticated claim
         // can still be absent or malformed; do not let Guid.Parse turn it into HTTP 500.
-        if (!Guid.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out var userId) || userId == Guid.Empty)
-            return Unauthorized();
+        if (!TryGetUserId(out var userId)) return Unauthorized();
         if (!await authorization.CanAsync(userId, movieProjectId, MovieOperationalActions.DirectorProposalCreate, cancellationToken))
             return Forbid();
         try
@@ -82,14 +82,16 @@ public sealed class MovieDirectorController(IMovieDirectorService director, IMov
     [HttpGet("proposals/{proposalId:guid}")]
     public async Task<IActionResult> GetProposal(Guid proposalId, CancellationToken cancellationToken)
     {
-        var result = await director.GetProposalAsync(GetUserId(), proposalId, cancellationToken);
+        if (!TryGetUserId(out var userId)) return Unauthorized();
+        var result = await director.GetProposalAsync(userId, proposalId, cancellationToken);
         return result is null ? ApiResults.Error(this, 404, "DIRECTOR_PROPOSAL_NOT_FOUND", "Director proposal not found.") : Ok(result);
     }
 
     [HttpGet("projects/{movieProjectId:guid}/history")]
     public async Task<IActionResult> History(Guid movieProjectId, CancellationToken cancellationToken)
     {
-        var result = await director.GetHistoryAsync(GetUserId(), movieProjectId, cancellationToken);
+        if (!TryGetUserId(out var userId)) return Unauthorized();
+        var result = await director.GetHistoryAsync(userId, movieProjectId, cancellationToken);
         return result is null ? ApiResults.Error(this, 404, "DIRECTOR_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result);
     }
 
@@ -97,9 +99,10 @@ public sealed class MovieDirectorController(IMovieDirectorService director, IMov
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Approve(Guid proposalId, CancellationToken cancellationToken)
     {
+        if (!TryGetUserId(out var userId)) return Unauthorized();
         try
         {
-            var result = await director.ApproveProposalAsync(GetUserId(), proposalId, cancellationToken);
+            var result = await director.ApproveProposalAsync(userId, proposalId, cancellationToken);
             return result is null ? ApiResults.Error(this, 404, "DIRECTOR_PROPOSAL_NOT_FOUND", "Director proposal not found.") : Ok(result);
         }
         catch (DirectorValidationException exception) { return ApiResults.Error(this, 409, "DIRECTOR_PROPOSAL_NOT_PENDING", exception.Message); }
@@ -110,9 +113,10 @@ public sealed class MovieDirectorController(IMovieDirectorService director, IMov
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Reject(Guid proposalId, CancellationToken cancellationToken)
     {
+        if (!TryGetUserId(out var userId)) return Unauthorized();
         try
         {
-            var result = await director.RejectProposalAsync(GetUserId(), proposalId, cancellationToken);
+            var result = await director.RejectProposalAsync(userId, proposalId, cancellationToken);
             return result is null ? ApiResults.Error(this, 404, "DIRECTOR_PROPOSAL_NOT_FOUND", "Director proposal not found.") : Ok(result);
         }
         catch (DirectorValidationException exception) { return ApiResults.Error(this, 409, "DIRECTOR_PROPOSAL_NOT_PENDING", exception.Message); }
@@ -122,9 +126,10 @@ public sealed class MovieDirectorController(IMovieDirectorService director, IMov
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Execute(Guid actionId, CancellationToken cancellationToken)
     {
+        if (!TryGetUserId(out var userId)) return Unauthorized();
         try
         {
-            var result = await director.ExecuteActionAsync(GetUserId(), actionId, cancellationToken);
+            var result = await director.ExecuteActionAsync(userId, actionId, cancellationToken);
             return result is null ? ApiResults.Error(this, 404, "DIRECTOR_ACTION_NOT_FOUND", "Director action not found.") : Ok(result);
         }
         catch (DirectorActionNotApprovedException exception) { return ApiResults.Error(this, 409, "DIRECTOR_APPROVAL_REQUIRED", exception.Message); }
@@ -132,5 +137,6 @@ public sealed class MovieDirectorController(IMovieDirectorService director, IMov
         catch (DirectorActionExecutionException exception) { return ApiResults.Error(this, 409, exception.Code, exception.Message); }
     }
 
-    private Guid GetUserId() => Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier) ?? throw new InvalidOperationException("Authenticated user identifier is missing."));
+    private bool TryGetUserId(out Guid userId) =>
+        Guid.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out userId) && userId != Guid.Empty;
 }
