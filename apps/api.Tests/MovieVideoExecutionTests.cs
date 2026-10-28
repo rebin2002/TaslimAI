@@ -466,6 +466,51 @@ public sealed class MovieVideoExecutionTests
         Assert.Equal(GenerationJobStatus.Running, (await db.GenerationJobs.AsNoTracking().SingleAsync()).Status);
     }
 
+    [Theory]
+    [InlineData("first-frame")]
+    [InlineData("last-frame")]
+    [InlineData("reference-images")]
+    public async Task Worker_rejects_unimplemented_frame_reference_inputs_before_paid_submission(string inputKind)
+    {
+        // Current scene-clip adapters cannot faithfully submit separate
+        // first/last frames or a multi-reference array. A legacy queued job
+        // must fail before an execution record or irreversible provider call.
+        var fixture = await CreateRunningMovieJobAsync(
+            "Movie frame reference admission", "Reject unmapped frame inputs.");
+        await using var connection = fixture.Connection;
+        await using var db = fixture.Db;
+        var input = System.Text.Json.JsonSerializer.Deserialize<MovieGenerationInput>(fixture.Job.InputJson)!;
+        fixture.Job.InputJson = System.Text.Json.JsonSerializer.Serialize(input with
+        {
+            SourceResolution = "720p",
+            TargetResolution = "720p",
+            QualityTier = DirectorQualityLevels.Standard,
+            ProcessingPath = "native",
+            DurationSeconds = 5,
+            FirstFrameImageUri = inputKind == "first-frame" ? "https://example.invalid/first.png" : null,
+            LastFrameImageUri = inputKind == "last-frame" ? "https://example.invalid/last.png" : null,
+            ReferenceImages = inputKind == "reference-images"
+                ? [new MovieVideoReferenceImage("https://example.invalid/reference.png")]
+                : null,
+        });
+        await db.SaveChangesAsync();
+
+        var provider = new GuardedSceneMovieVideoProvider();
+        var options = new MovieVideoOptions { Enabled = true, ProviderKey = provider.Key };
+        var handler = new MovieVideoGenerationJobHandler(
+            db, provider, new MovieVideoExecutionStore(db, Options.Create(options)),
+            Options.Create(options), NullLogger<MovieVideoGenerationJobHandler>.Instance);
+
+        var failure = await Assert.ThrowsAsync<MovieVideoProviderException>(
+            () => handler.ExecuteAsync(fixture.Job, new Progress<int>(), CancellationToken.None));
+
+        Assert.Equal(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, failure.Code);
+        Assert.Equal(0, provider.SubmitCalls);
+        Assert.Empty(await db.MovieVideoProviderExecutions.AsNoTracking().ToListAsync());
+        Assert.Equal(MovieClipStatuses.Failed, (await db.MovieClips.AsNoTracking().SingleAsync()).Status);
+        Assert.Equal(GenerationJobStatus.Running, (await db.GenerationJobs.AsNoTracking().SingleAsync()).Status);
+    }
+
     [Fact]
     public async Task Worker_preserves_supported_priced_intent_at_provider_boundary()
     {
