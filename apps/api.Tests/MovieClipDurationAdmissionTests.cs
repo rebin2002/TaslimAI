@@ -188,6 +188,37 @@ public sealed class MovieClipDurationAdmissionTests : IClassFixture<MovieClipDur
     }
 
     [Fact]
+    public async Task Feature_length_scene_generation_rejects_one_hundred_twenty_second_single_clip()
+    {
+        // A 120-second scene in a two-hour project must be split into supported
+        // shots; the legacy scene endpoint cannot submit it as one paid clip.
+        using var client = factory.CreateClient();
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Feature length scene requires shot splitting", sceneDurationSeconds: 5);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var movie = await db.MovieProjects.SingleAsync(item => item.Id == fixture.Project.Project.Id);
+        var scene = await db.MovieScenes.SingleAsync(item => item.Id == fixture.Scene.Id);
+        movie.DurationSeconds = 7_200;
+        scene.DurationSeconds = 120;
+        await db.SaveChangesAsync();
+        var transactionsBefore = await db.UsageTransactions.CountAsync();
+
+        using var rejected = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post,
+            $"/api/movie-studio/projects/{fixture.Project.Project.Id}/scenes/{fixture.Scene.Id}/generate",
+            new { title = "Unsupported full-scene single clip", confirmationAccepted = true },
+            idempotencyKey: "feature-length-scene-120-seconds");
+        Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
+        Assert.Contains("MOVIE_CLIP_DURATION_UNSUPPORTED",
+            await rejected.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.False(await db.MovieClips.AnyAsync(item => item.MovieProjectId == fixture.Project.Project.Id));
+        Assert.False(await db.GenerationJobs.AnyAsync(item => item.IdempotencyKey == "feature-length-scene-120-seconds"));
+        Assert.Equal(transactionsBefore, await db.UsageTransactions.CountAsync());
+    }
+
+    [Fact]
     public async Task Unsupported_clip_duration_rejects_before_job_clip_or_usage_reservation()
     {
         using var client = factory.CreateClient();
