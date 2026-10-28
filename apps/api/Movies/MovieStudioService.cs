@@ -1420,7 +1420,15 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                 "This generation route does not support upscaling or non-native processing paths.");
 
         var description = shot?.Description ?? scene.Summary;
-        var durationSeconds = Math.Clamp(shot?.DurationSeconds ?? scene.DurationSeconds ?? Math.Min(movie.DurationSeconds, 60), 1, 3600);
+        var durationSeconds = shot?.DurationSeconds ?? scene.DurationSeconds ?? Math.Min(movie.DurationSeconds, 60);
+        // A single clip must not silently inherit a shortened duration from
+        // Math.Clamp. A 7,200-second movie is allowed, but an oversized shot
+        // must be split into provider-supported clips, not truncated to 3,600.
+        // Reject malformed legacy timing before pricing or persisting anything.
+        if (durationSeconds is < 1 or > 3600)
+            throw new GenerationJobValidationException(
+                "MOVIE_CLIP_DURATION_UNSUPPORTED",
+                "A single clip must last between 1 and 3600 seconds. Split longer scenes into shorter shots.");
         // This route submits exactly one scene/shot clip, not the whole planned
         // movie. Check the actual selected adapter before cost confirmation,
         // speculative clip persistence, usage reservation or provider submission.
@@ -2109,9 +2117,10 @@ internal static class MovieStudioIdempotency
 
         // A replay after a scene/shot duration edit is a different provider-cost
         // intent, even when the caller reuses the same key and title.
-        var effectiveDurationSeconds = Math.Clamp(
-            shot?.DurationSeconds ?? scene.DurationSeconds ?? Math.Min(movie.DurationSeconds, 60),
-            1, 3600);
+        // Compare the source timing without clamping: changing a 3,600-second
+        // clip to 7,200 seconds cannot replay the earlier priced job.
+        var effectiveDurationSeconds =
+            shot?.DurationSeconds ?? scene.DurationSeconds ?? Math.Min(movie.DurationSeconds, 60);
         var title = string.IsNullOrWhiteSpace(request.Title) ? movie.Title : request.Title.Trim();
         return input.Operation == MovieStudioOperations.SceneClip
             && input.MovieProjectId == movie.Id
