@@ -402,6 +402,15 @@ public sealed class MovieVideoGenerationJobHandler(
             input.TargetResolution,
             input.QualityTier);
         var execution = await executions.GetOrCreateAsync(job, clip.Id, provider.Key, cancellationToken);
+        // A persisted provider id belongs to the original adapter. After a
+        // configuration change, polling or cancelling it through another adapter
+        // can misroute a paid operation; even an unsubmitted execution must not
+        // silently change the priced provider. Reconcile with the original
+        // adapter instead of sending a second request.
+        if (!string.Equals(execution.ProviderKey, provider.Key, StringComparison.OrdinalIgnoreCase))
+            throw new MovieVideoProviderException(
+                GenerationJobErrorCodes.MovieProviderUnavailable, false,
+                "This video job belongs to another provider. Restore the original provider or reconcile its execution.");
         var started = Stopwatch.GetTimestamp();
         var providerOperationMayBeActive = !string.IsNullOrWhiteSpace(execution.ProviderJobId);
         progress.Report(5);
