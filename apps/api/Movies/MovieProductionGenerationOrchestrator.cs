@@ -280,7 +280,8 @@ public sealed class MovieProductionGenerationOrchestrator(
             plan.TargetResolution,
             plan.ProcessingPath,
             plan.QualityTier,
-            snapshot.SnapshotHash);
+            snapshot.SnapshotHash,
+            SelectedProviderKey: provider.Key);
 
         GenerationJob job;
         try
