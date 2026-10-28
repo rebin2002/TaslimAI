@@ -15,6 +15,7 @@ namespace Taslim.Api.Tests;
 // that the actual video adapters also include in their assembled prompts.
 public sealed class MovieStructuredPromptBudgetFactory : MovieOperationalApiFactory
 {
+    public bool IncludeWorldContextInPrompt { get; init; }
     protected override bool WorkerEnabled => false;
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
@@ -28,6 +29,7 @@ public sealed class MovieStructuredPromptBudgetFactory : MovieOperationalApiFact
                 sp.GetRequiredService<FakeProviderCallLog>())
             {
                 SceneClipPromptMaxCharacters = 220,
+                SceneClipWorldContextInPrompt = IncludeWorldContextInPrompt,
                 SceneClipDurationRange = new MovieClipDurationRange(2, 10),
             });
         });
