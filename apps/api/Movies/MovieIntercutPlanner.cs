@@ -27,6 +27,7 @@ public static class MovieIntercutPlanCodes
     public const string ProjectRequired = "MOVIE_INTERCUT_PROJECT_REQUIRED";
     public const string TimelineRequired = "MOVIE_INTERCUT_TIMELINE_REQUIRED";
     public const string TimelineProjectMismatch = "MOVIE_INTERCUT_TIMELINE_PROJECT_MISMATCH";
+    public const string TimelineVersionMismatch = "MOVIE_INTERCUT_TIMELINE_VERSION_MISMATCH";
     public const string TimelineVersionInvalid = "MOVIE_INTERCUT_TIMELINE_VERSION_INVALID";
     public const string ClipRequired = "MOVIE_INTERCUT_CLIP_REQUIRED";
     public const string ClipDuplicate = "MOVIE_INTERCUT_CLIP_DUPLICATE";
