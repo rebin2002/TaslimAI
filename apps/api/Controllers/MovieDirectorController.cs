@@ -48,7 +48,11 @@ public sealed class MovieDirectorController(IMovieDirectorService director, IMov
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> CreateIntercutProposal(Guid movieProjectId, MovieIntercutPlanRequest request, CancellationToken cancellationToken)
     {
-        if (!await authorization.CanAsync(GetUserId(), movieProjectId, MovieOperationalActions.DirectorProposalCreate, cancellationToken))
+        // The authentication middleware establishes identity, but an authenticated claim
+        // can still be absent or malformed; do not let Guid.Parse turn it into HTTP 500.
+        if (!Guid.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out var userId) || userId == Guid.Empty)
+            return Unauthorized();
+        if (!await authorization.CanAsync(userId, movieProjectId, MovieOperationalActions.DirectorProposalCreate, cancellationToken))
             return Forbid();
         try
         {
