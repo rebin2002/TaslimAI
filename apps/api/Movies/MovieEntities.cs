@@ -806,6 +806,10 @@ public interface IMovieVideoProvider
     // Unknown adapters fail closed at legacy scene/shot admission. Implementations
     // must declare only durations their own submission contract can accept.
     MovieClipDurationRange? SceneClipDurationRange => null;
+    // Declared only when an adapter can honor the same priced output profile.
+    // Unknown providers fail closed before usage reservation or paid submission.
+    bool SupportsSceneClipCostIntent(string sourceResolution, string targetResolution,
+        string qualityTier, string processingPath, string aspectRatio) => false;
     Task<MovieVideoSubmission> SubmitAsync(MovieVideoGenerationRequest request, CancellationToken cancellationToken);
     Task<MovieVideoProviderStatus> GetStatusAsync(string providerJobId, CancellationToken cancellationToken);
     Task<MovieVideoProviderOutput> RetrieveAsync(string providerJobId, MovieVideoProviderStatus status, CancellationToken cancellationToken);
