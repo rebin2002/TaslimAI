@@ -89,6 +89,35 @@ public sealed class MovieClipDurationAdmissionTests : IClassFixture<MovieClipDur
     }
 
     [Theory]
+    [InlineData("720p", "720p", "Standard", "native", "16:9", true)]
+    [InlineData("720p", "720p", "Standard", "native", "9:16", true)]
+    [InlineData("1080p", "720p", "Standard", "native", "16:9", false)]
+    [InlineData("720p", "1080p", "Standard", "native", "16:9", false)]
+    [InlineData("720p", "4k", "Standard", "native", "16:9", false)]
+    [InlineData("720p", "720p", "Cinematic", "native", "16:9", false)]
+    [InlineData("720p", "720p", "Standard", "upscale", "16:9", false)]
+    [InlineData("720p", "720p", "Standard", "native", "1:1", false)]
+    public void Runway_scene_clip_only_advertises_the_execution_profile_it_submits(
+        string source, string target, string quality, string path, string aspect, bool accepted)
+    {
+        using var httpClient = new HttpClient();
+        IMovieVideoProvider provider = new RunwayMovieVideoProvider(
+            httpClient, Options.Create(new MovieVideoOptions()),
+            NullLogger<RunwayMovieVideoProvider>.Instance, new ProviderUrlPolicy());
+        Assert.Equal(accepted, provider.SupportsSceneClipCostIntent(source, target, quality, path, aspect));
+    }
+
+    [Fact]
+    public void Manus_scene_clip_output_resolution_and_quality_are_not_verified()
+    {
+        using var httpClient = new HttpClient();
+        IMovieVideoProvider provider = new ManusMovieVideoProvider(
+            httpClient, Options.Create(new MovieVideoOptions()),
+            NullLogger<ManusMovieVideoProvider>.Instance);
+        Assert.False(provider.SupportsSceneClipCostIntent("720p", "720p", "Standard", "native", "16:9"));
+    }
+
+    [Theory]
     [InlineData("runway", 1, false)]
     [InlineData("runway", 2, true)]
     [InlineData("runway", 10, true)]
