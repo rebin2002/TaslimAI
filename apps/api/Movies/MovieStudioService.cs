@@ -1544,7 +1544,14 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
             }
             var canonicalClip = await db.MovieClips.SingleOrDefaultAsync(item => item.Id == canonicalInput.MovieClipId && item.MovieProjectId == movie.Id, cancellationToken);
             if (canonicalClip is null)
+            {
+                // The winning job's original clip may have been removed while
+                // this request was being queued. Do not strand our speculative
+                // clip without a valid canonical generation target.
+                db.MovieClips.Remove(clip);
+                await db.SaveChangesAsync(CancellationToken.None);
                 throw new MovieStudioValidationException("The idempotent generation target is no longer available.");
+            }
             if (canonicalClip.GenerationJobId is null)
                 canonicalClip.GenerationJobId = canonicalJob.Id;
             db.MovieClips.Remove(clip);
@@ -1574,7 +1581,14 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                 item => item.Id == canonicalClipId && item.MovieProjectId == movie.Id,
                 cancellationToken);
             if (canonicalClip is null)
+            {
+                // The winning job's original clip may have been removed while
+                // this request was being queued. Do not strand our speculative
+                // clip without a valid canonical generation target.
+                db.MovieClips.Remove(clip);
+                await db.SaveChangesAsync(CancellationToken.None);
                 throw new MovieStudioValidationException("The idempotent generation target is no longer available.");
+            }
             if (canonicalClip.GenerationJobId is null)
             {
                 canonicalClip.GenerationJobId = job.Id;
