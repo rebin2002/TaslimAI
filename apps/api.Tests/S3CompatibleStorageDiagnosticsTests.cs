@@ -67,7 +67,7 @@ public sealed class S3CompatibleStorageDiagnosticsTests
             "transport",
             Taslim.Api.Files.S3CompatibleFileStorageService.ClassifyFailure(new HttpRequestException()));
         Assert.Equal(
-            "s3_response",
+            "s3_auth_or_permission",
             Taslim.Api.Files.S3CompatibleFileStorageService.ClassifyFailure(new AmazonS3Exception("synthetic response failure")
             {
                 StatusCode = HttpStatusCode.Forbidden,
