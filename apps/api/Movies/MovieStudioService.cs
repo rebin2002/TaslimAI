@@ -1461,6 +1461,10 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         // admission and execution cannot disagree about their lengths.
         var sceneSnapshot = SceneSnapshot(scene);
         var shotSnapshot = shot is null ? null : ShotSnapshot(shot);
+        // Capture before estimating cost. Manus includes this snapshot in its
+        // billable prompt, so its size must be admitted before usage is reserved.
+        // Reuse exactly this snapshot in the queued job to prevent drift.
+        var worldContextSnapshot = await WorldContextSnapshotAsync(movie.Id, scene.Id, shot?.Id, cancellationToken);
         // Provider-specific headings and continuity snapshots add more text;
         // this conservative lower bound rejects certain overflow before
         // estimation, job creation, or any usage reservation.
@@ -1468,7 +1472,8 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
             + (string.IsNullOrWhiteSpace(movie.Style) ? 0 : movie.Style.Trim().Length)
             + (string.IsNullOrWhiteSpace(movie.AdditionalInstructions) ? 0 : movie.AdditionalInstructions.Trim().Length)
             + sceneSnapshot.Length
-            + (shotSnapshot?.Length ?? 0);
+            + (shotSnapshot?.Length ?? 0)
+            + (provider.SceneClipWorldContextInPrompt ? worldContextSnapshot.Trim().Length : 0);
         if (provider.SceneClipPromptMaxCharacters is { } promptCapacity
             && minimumCreativePromptLength > promptCapacity)
             throw new GenerationJobValidationException(
@@ -1548,7 +1553,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                 clip.ContinuitySnapshotJson,
                 sceneSnapshot,
                 shotSnapshot,
-                WorldContextJson: await WorldContextSnapshotAsync(movie.Id, scene.Id, shot?.Id, cancellationToken),
+                WorldContextJson: worldContextSnapshot,
                 SourceResolution: sourceResolution,
                 TargetResolution: targetResolution,
                 QualityTier: qualityTier,
