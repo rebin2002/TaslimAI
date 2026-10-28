@@ -51,7 +51,9 @@ public sealed class S3CompatibleFileStorageService : IFileStorageService, IDispo
         {
             await client.PutAsync(settings.S3Bucket, storageKey, content, cancellationToken);
         }
-        catch (OperationCanceledException)
+        // Preserve a real caller abort; an SDK-initiated timeout with an active
+        // caller token is a storage failure, not a client cancellation.
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
         }
@@ -68,7 +70,9 @@ public sealed class S3CompatibleFileStorageService : IFileStorageService, IDispo
         {
             return await client.GetAsync(settings.S3Bucket, storageKey, cancellationToken);
         }
-        catch (OperationCanceledException)
+        // Preserve a real caller abort; an SDK-initiated timeout with an active
+        // caller token is a storage failure, not a client cancellation.
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
         }
@@ -85,7 +89,9 @@ public sealed class S3CompatibleFileStorageService : IFileStorageService, IDispo
         {
             await client.DeleteAsync(settings.S3Bucket, storageKey, cancellationToken);
         }
-        catch (OperationCanceledException)
+        // Preserve a real caller abort; an SDK-initiated timeout with an active
+        // caller token is a storage failure, not a client cancellation.
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
         }
@@ -102,7 +108,9 @@ public sealed class S3CompatibleFileStorageService : IFileStorageService, IDispo
         {
             return await client.ExistsAsync(settings.S3Bucket, storageKey, cancellationToken);
         }
-        catch (OperationCanceledException)
+        // Preserve a real caller abort; an SDK-initiated timeout with an active
+        // caller token is a storage failure, not a client cancellation.
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
         }
@@ -155,6 +163,7 @@ public sealed class S3CompatibleFileStorageService : IFileStorageService, IDispo
             SocketException => "network",
             AuthenticationException => "tls",
             TaskCanceledException => "timeout",
+            OperationCanceledException => "timeout",
             HttpRequestException => "transport",
             // Status 0 means that the SDK did not expose an HTTP response.
             // It is NOT proof of a particular network or signing root cause.
