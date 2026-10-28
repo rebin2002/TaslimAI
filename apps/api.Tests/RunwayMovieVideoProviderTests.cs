@@ -74,6 +74,28 @@ public sealed class RunwayMovieVideoProviderTests
         Assert.Empty(handler.Requests);
     }
 
+    [Theory]
+    [InlineData("720p")]
+    [InlineData("1080p")]
+    public async Task Unsupported_master_resolution_is_rejected_before_Runway_network_access(string masterResolution)
+    {
+        // The scene-clip payload cannot enact a separate mastering step, even
+        // when its fixed 720p output otherwise matches the priced clip profile.
+        var handler = new RecordingHandler(_ => throw new InvalidOperationException("No provider request allowed."));
+        var urlPolicy = new CountingProviderUrlPolicy();
+        var provider = CreateProvider(handler, EnabledOptions(), urlPolicy);
+
+        var error = await Assert.ThrowsAsync<MovieVideoProviderException>(() => provider.SubmitAsync(
+            Request(sourceImageUri: "https://assets.example.test/frame.png") with
+            {
+                MasterResolution = masterResolution,
+            }, CancellationToken.None));
+
+        Assert.Equal(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, error.Code);
+        Assert.Equal(0, urlPolicy.Calls);
+        Assert.Empty(handler.Requests);
+    }
+
     [Fact]
     public async Task Oversized_Runway_prompt_rejects_before_image_host_lookup_or_provider_submission()
     {
