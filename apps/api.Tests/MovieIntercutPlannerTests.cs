@@ -102,6 +102,45 @@ public sealed class MovieIntercutPlannerTests
         Assert.Equal(MovieIntercutPlanCodes.StoryOrderInvalid, duplicateException.Code);
     }
 
+    [Fact]
+    public void Two_hour_film_timeline_is_composed_from_short_clips_without_truncation()
+    {
+        // These are editorial references only. Video provider clip durations remain
+        // independently enforced by the provider-specific queue admission gate.
+        var clips = Enumerable.Range(1, 720).Select(index => Coverage(
+            Guid.Parse($"40000000-0000-0000-0000-{index:D12}"),
+            Guid.Parse($"30000000-0000-0000-0000-{index:D12}"),
+            SceneOne, 1, index, 10m, MovieIntercutCoverageKinds.Primary)).ToArray();
+
+        var proposal = MovieIntercutPlanner.Build(ProjectId, new MovieIntercutPlanRequest
+        {
+            BaseTimelineVersion = 1,
+            Clips = clips,
+        });
+
+        Assert.Equal(720, proposal.ProposedTimeline.Clips.Count);
+        Assert.Equal(719, proposal.ProposedTimeline.Transitions.Count);
+        Assert.Equal(7200m, proposal.ProposedTimeline.Clips.Sum(item => item.DurationSeconds));
+        Assert.Equal(7200m, proposal.ProposedTimeline.Clips.Last().StartSeconds
+            + proposal.ProposedTimeline.Clips.Last().DurationSeconds);
+        Assert.All(proposal.ProposedTimeline.Clips, item => Assert.Equal(10m, item.DurationSeconds));
+
+        var overlong = clips.Concat(
+        [
+            Coverage(Guid.Parse("40000000-0000-0000-0000-000000000721"),
+                Guid.Parse("30000000-0000-0000-0000-000000000721"),
+                SceneOne, 1, 721, 1m, MovieIntercutCoverageKinds.Primary),
+        ]).ToArray();
+
+        var exception = Assert.Throws<MovieIntercutPlanningException>(() =>
+            MovieIntercutPlanner.Build(ProjectId, new MovieIntercutPlanRequest
+            {
+                BaseTimelineVersion = 1,
+                Clips = overlong,
+            }));
+        Assert.Equal(MovieIntercutPlanCodes.DurationInvalid, exception.Code);
+    }
+
     private static MovieIntercutCoverageRequest Coverage(Guid clipId, Guid shotId, Guid sceneId, int sceneSequence, int shotSequence, decimal duration, string kind, Guid? anchorShotId = null, string? label = null) => new()
     {
         ClipId = clipId,
