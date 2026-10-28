@@ -358,6 +358,16 @@ public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWork
         var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
         Assert.Equal(0, await db.MovieTakes.CountAsync(item => item.MovieShotId == shot.Id));
 
+        // An approved production render must durably bind its queued job to
+        // the provider selected at admission. If runtime routing changes
+        // before the worker starts, that job must not be sent elsewhere.
+        var queuedJob = await db.GenerationJobs.AsNoTracking()
+            .SingleAsync(item => item.Id == render.Job.Id);
+        var queuedInput = JsonSerializer.Deserialize<MovieGenerationInput>(queuedJob.InputJson);
+        Assert.NotNull(queuedInput);
+        Assert.Equal(scope.ServiceProvider.GetRequiredService<IMovieVideoProvider>().Key,
+            queuedInput.SelectedProviderKey);
+
         var versionsBefore = await db.MovieProductionVersions.CountAsync(item => item.MovieShotId == shot.Id);
         var clipsBefore = await db.MovieClips.CountAsync(item => item.MovieShotId == shot.Id);
         var ledgerBefore = await db.UsageTransactions.CountAsync();
