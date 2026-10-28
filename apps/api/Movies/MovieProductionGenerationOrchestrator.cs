@@ -129,7 +129,7 @@ public sealed class MovieProductionGenerationOrchestrator(
         if (shot is null || !await collaboration.HasPermissionAsync(userId, shot.Scene.MovieProjectId, MoviePermissions.Generate, cancellationToken))
             return null;
 
-        var existing = await FindExistingAsync(userId, request, normalizedKey, cancellationToken);
+        var existing = await FindExistingAsync(userId, shot, request, normalizedKey, cancellationToken);
         if (existing is not null)
             return existing;
 
@@ -289,7 +289,7 @@ public sealed class MovieProductionGenerationOrchestrator(
         {
             db.MovieClips.Remove(clip);
             await db.SaveChangesAsync(CancellationToken.None);
-            return await FindExistingAfterConcurrentCreateAsync(userId, request, normalizedKey, cancellationToken);
+            return await FindExistingAfterConcurrentCreateAsync(userId, shot, request, normalizedKey, cancellationToken);
         }
 
         clip.GenerationJobId = job.Id;
@@ -361,6 +361,7 @@ public sealed class MovieProductionGenerationOrchestrator(
 
     private async Task<MovieProductionOrchestrationResult?> FindExistingAsync(
         Guid userId,
+        MovieShot shot,
         MovieProductionGenerationRequest request,
         string? idempotencyKey,
         CancellationToken cancellationToken)
@@ -372,15 +373,7 @@ public sealed class MovieProductionGenerationOrchestrator(
         if (existingJob is null) return null;
         MovieGenerationInput? input = null;
         try { input = JsonSerializer.Deserialize<MovieGenerationInput>(existingJob.InputJson); } catch (JsonException) { }
-        var requestedTarget = string.IsNullOrWhiteSpace(request.TargetResolution) ? MovieResolutionTiers.P1080 : request.TargetResolution.Trim();
-        var requestedQuality = string.IsNullOrWhiteSpace(request.QualityTier) ? DirectorQualityLevels.Standard : request.QualityTier.Trim();
-        var requestedTitle = string.IsNullOrWhiteSpace(request.Title) ? null : request.Title.Trim();
-        if (input is null
-            || input.MovieShotId != request.MovieShotId
-            || input.SourceProductionVersionId != request.ApprovedSourceVersionId
-            || !string.Equals(input.TargetResolution, requestedTarget, StringComparison.OrdinalIgnoreCase)
-            || !string.Equals(input.QualityTier, requestedQuality, StringComparison.OrdinalIgnoreCase)
-            || (requestedTitle is not null && !string.Equals(input.Description, requestedTitle, StringComparison.Ordinal)))
+        if (input is null || !MatchesProductionReplay(input, shot, request))
             throw new MovieProductionValidationException("IDEMPOTENCY_KEY_REUSED", "This idempotency key was already used for a different production request.");
         var version = await db.MovieProductionVersions
             .Include(item => item.AssetReferences)
@@ -390,6 +383,8 @@ public sealed class MovieProductionGenerationOrchestrator(
         var clip = await db.MovieClips.FirstOrDefaultAsync(item => item.MovieShotId == request.MovieShotId && item.GenerationJobId == existingJob.Id, cancellationToken);
         if (version is null || clip is null)
             throw new MovieProductionValidationException("IDEMPOTENCY_INCOMPLETE", "The previous production request is still being finalized; retry with the same idempotency key.");
+        if (!string.Equals(version.Label, CleanBounded(request.Label, 160), StringComparison.Ordinal))
+            throw new MovieProductionValidationException("IDEMPOTENCY_KEY_REUSED", "This idempotency key was already used for a different production request.");
         var target = input.TargetResolution ?? MovieResolutionTiers.P1080;
         var source = input.SourceResolution ?? target;
         return new(version, existingJob, clip, MovieProductionOrchestrationStateMachine.From(existingJob.Status), source, target, input.ProcessingPath ?? MovieResolutionPathKinds.Native, MovieGenerationCostEstimate.Unevaluated("idempotent_replay"));
@@ -397,6 +392,7 @@ public sealed class MovieProductionGenerationOrchestrator(
 
     private async Task<MovieProductionOrchestrationResult?> FindExistingAfterConcurrentCreateAsync(
         Guid userId,
+        MovieShot shot,
         MovieProductionGenerationRequest request,
         string idempotencyKey,
         CancellationToken cancellationToken)
@@ -406,7 +402,7 @@ public sealed class MovieProductionGenerationOrchestrator(
         {
             try
             {
-                return await FindExistingAsync(userId, request, idempotencyKey, cancellationToken);
+                return await FindExistingAsync(userId, shot, request, idempotencyKey, cancellationToken);
             }
             catch (MovieProductionValidationException exception)
                 when (exception.Code == "IDEMPOTENCY_INCOMPLETE" && attempt + 1 < maxAttempts)
@@ -418,7 +414,56 @@ public sealed class MovieProductionGenerationOrchestrator(
             }
         }
 
-        return await FindExistingAsync(userId, request, idempotencyKey, cancellationToken);
+        return await FindExistingAsync(userId, shot, request, idempotencyKey, cancellationToken);
+    }
+
+    // A production render's idempotency key binds its actual priced and creative
+    // intent, not just the source version and output tier. A changed shot, scene,
+    // guide, or movie must not silently adopt the previous billable job.
+    private static bool MatchesProductionReplay(
+        MovieGenerationInput input,
+        MovieShot shot,
+        MovieProductionGenerationRequest request)
+    {
+        var movie = shot.Scene.MovieProject;
+        var plan = BuildPlan(shot, request);
+        var duration = Math.Clamp(
+            shot.DurationSeconds ?? shot.Scene.DurationSeconds ?? Math.Min(movie.DurationSeconds, 60),
+            1, 3600);
+        var title = string.IsNullOrWhiteSpace(request.Title) ? movie.Title : request.Title.Trim();
+        var guide = movie.Guide is null ? null : JsonSerializer.Serialize(new
+        {
+            movie.Guide.VisualLanguage,
+            movie.Guide.CameraLanguage,
+            movie.Guide.ColorAndLighting,
+            movie.Guide.SoundAndNarration,
+            movie.Guide.ContinuityRules,
+        });
+        var scene = JsonSerializer.Serialize(new { shot.Scene.Title, shot.Scene.Summary, shot.Scene.DurationSeconds });
+        var shotSnapshot = JsonSerializer.Serialize(new
+        {
+            shot.Description, shot.Purpose, shot.Subjects,
+            shot.CameraAndFraming, shot.CameraMotion, shot.DurationSeconds,
+        });
+
+        return string.Equals(input.Operation, MovieStudioOperations.SceneClip, StringComparison.OrdinalIgnoreCase)
+            && input.MovieProjectId == movie.Id
+            && input.MovieSceneId == shot.Scene.Id
+            && input.MovieShotId == shot.Id
+            && input.SourceProductionVersionId == request.ApprovedSourceVersionId
+            && input.DurationSeconds == duration
+            && string.Equals(input.Description, title, StringComparison.Ordinal)
+            && string.Equals(input.AspectRatio, movie.AspectRatio, StringComparison.Ordinal)
+            && string.Equals(input.Style, movie.Style, StringComparison.Ordinal)
+            && string.Equals(input.Language, movie.Language, StringComparison.Ordinal)
+            && string.Equals(input.AdditionalInstructions, movie.AdditionalInstructions, StringComparison.Ordinal)
+            && string.Equals(input.ContinuityGuideJson, guide, StringComparison.Ordinal)
+            && string.Equals(input.SceneJson, scene, StringComparison.Ordinal)
+            && string.Equals(input.ShotJson, shotSnapshot, StringComparison.Ordinal)
+            && string.Equals(input.SourceResolution, plan.SourceResolution, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(input.TargetResolution, plan.TargetResolution, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(input.ProcessingPath, plan.ProcessingPath, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(input.QualityTier, plan.QualityTier, StringComparison.OrdinalIgnoreCase);
     }
 
     internal static bool JobTargetsClip(GenerationJob job, Guid clipId)
