@@ -343,6 +343,48 @@ public sealed class MovieVideoExecutionTests
     }
 
     [Fact]
+    public async Task Worker_preserves_supported_priced_intent_at_provider_boundary()
+    {
+        // The provider is a deterministic fake that records the request and throws.
+        // No external provider call or paid generation occurs.
+        var fixture = await CreateRunningMovieJobAsync(
+            "Movie provider intent contract", "Preserve the confirmed 720p output.");
+        await using var connection = fixture.Connection;
+        await using var db = fixture.Db;
+        var original = System.Text.Json.JsonSerializer.Deserialize<MovieGenerationInput>(fixture.Job.InputJson)!;
+        fixture.Job.InputJson = System.Text.Json.JsonSerializer.Serialize(original with
+        {
+            SourceResolution = "720p",
+            TargetResolution = "720p",
+            QualityTier = DirectorQualityLevels.Standard,
+            ProcessingPath = "native",
+            MasterResolution = null,
+            DurationSeconds = 5,
+            UpscalingRequested = false,
+        });
+        await db.SaveChangesAsync();
+
+        var provider = new GuardedSceneMovieVideoProvider();
+        var options = new MovieVideoOptions { Enabled = true, ProviderKey = provider.Key };
+        var handler = new MovieVideoGenerationJobHandler(
+            db, provider, new MovieVideoExecutionStore(db, Options.Create(options)),
+            Options.Create(options), NullLogger<MovieVideoGenerationJobHandler>.Instance);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => handler.ExecuteAsync(fixture.Job, new Progress<int>(), CancellationToken.None));
+
+        Assert.Equal(1, provider.SubmitCalls);
+        var submitted = Assert.IsType<MovieVideoGenerationRequest>(provider.LastSubmittedRequest);
+        Assert.Equal("720p", submitted.SourceResolution);
+        Assert.Equal("720p", submitted.TargetResolution);
+        Assert.Equal(DirectorQualityLevels.Standard, submitted.QualityTier);
+        Assert.Equal("native", submitted.ProcessingPath);
+        Assert.Equal(5, submitted.DurationSeconds);
+        Assert.Null(submitted.MasterResolution);
+        Assert.False(submitted.UpscalingRequested);
+    }
+
+    [Fact]
     public async Task Worker_rejects_unimplemented_scene_clip_mastering_before_provider_submission()
     {
         var fixture = await CreateRunningMovieJobAsync(
@@ -639,6 +681,7 @@ public sealed class MovieVideoExecutionTests
         public IReadOnlyCollection<string> SupportedOperations { get; } = [MovieStudioOperations.SceneClip];
         public MovieClipDurationRange? SceneClipDurationRange => new(2, 10);
         public int SubmitCalls { get; private set; }
+        public MovieVideoGenerationRequest? LastSubmittedRequest { get; private set; }
 
         public bool SupportsSceneClipCostIntent(string sourceResolution, string targetResolution,
             string qualityTier, string processingPath, string aspectRatio) =>
@@ -651,7 +694,8 @@ public sealed class MovieVideoExecutionTests
         public Task<MovieVideoSubmission> SubmitAsync(MovieVideoGenerationRequest request, CancellationToken cancellationToken)
         {
             SubmitCalls++;
-            throw new InvalidOperationException("Unsupported intent must not reach a provider submission.");
+            LastSubmittedRequest = request;
+            throw new InvalidOperationException("Synthetic submission stops here; no outbound provider call.");
         }
 
         public Task<MovieVideoProviderStatus> GetStatusAsync(string providerJobId, CancellationToken cancellationToken) =>
