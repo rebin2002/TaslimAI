@@ -236,8 +236,9 @@ public sealed class FakeMovieVideoProvider(
     public MovieClipDurationRange? SceneClipDurationRange { get; set; } = new(1, 3600);
     // The deterministic fake can honor the requested profile for provider-free E2E.
     // It is not an assertion about Runway or Manus capabilities.
+    public bool SceneClipCostIntentSupported { get; set; } = true;
     public bool SupportsSceneClipCostIntent(string sourceResolution, string targetResolution,
-        string qualityTier, string processingPath, string aspectRatio) => true;
+        string qualityTier, string processingPath, string aspectRatio) => SceneClipCostIntentSupported;
 
     public async Task<MovieVideoSubmission> SubmitAsync(MovieVideoGenerationRequest request, CancellationToken cancellationToken)
     {
