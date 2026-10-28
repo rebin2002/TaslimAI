@@ -11,6 +11,13 @@ using Xunit;
 
 namespace Taslim.Api.Tests;
 
+// Keep the production-render creation test fully provider-free while exercising
+// the same admission path that rejects an unconfigured production provider.
+public sealed class MovieProductionRenderNoWorkerFactory : MovieOperationalApiFactory
+{
+    protected override bool WorkerEnabled => false;
+}
+
 public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWorkerFactory>
 {
     private readonly GenerationJobsNoWorkerFactory factory;
@@ -312,7 +319,8 @@ public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWork
     [Fact]
     public async Task Production_render_is_explicit_and_does_not_collapse_into_a_movie_take()
     {
-        using var client = factory.CreateClient();
+        using var renderFactory = new MovieProductionRenderNoWorkerFactory();
+        using var client = renderFactory.CreateClient();
         var auth = await Register(client);
         var project = await SendWithCsrf<MovieStudioProjectResponse>(client, HttpMethod.Post, "/api/movie-studio/projects", new
         {
@@ -342,7 +350,7 @@ public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWork
         Assert.NotNull(production);
         Assert.Contains(production!.Versions, item => item.Stage == MovieProductionStages.ProductionRender && item.GenerationJobId == render.Job.Id);
         Assert.Empty(production.Takes);
-        using var scope = factory.Services.CreateScope();
+        using var scope = renderFactory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
         Assert.Equal(0, await db.MovieTakes.CountAsync(item => item.MovieShotId == shot.Id));
     }
