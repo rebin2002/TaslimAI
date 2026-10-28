@@ -140,6 +140,17 @@ public sealed class MovieProductionGenerationOrchestrator(
         if (workflowError is not null)
             throw new MovieProductionValidationException("PRODUCTION_RENDER_INVALID", workflowError);
 
+        // Admission must use the selected adapter's declared single-clip capability,
+        // not the total movie duration. Fail before cost preflight, continuity
+        // persistence, clip/job creation or any usage reservation.
+        var plan = BuildPlan(shot, request);
+        var durationSeconds = Math.Clamp(
+            shot.DurationSeconds ?? shot.Scene.DurationSeconds ?? Math.Min(shot.Scene.MovieProject.DurationSeconds, 60),
+            1, 3600);
+        ValidateProductionClipAdmission(provider, durationSeconds, plan.SourceResolution,
+            plan.TargetResolution, plan.QualityTier, plan.ProcessingPath,
+            shot.Scene.MovieProject.AspectRatio);
+
         var preflightResult = await productionPreflight.EvaluateAsync(
             userId,
             request.MovieShotId,
@@ -164,8 +175,6 @@ public sealed class MovieProductionGenerationOrchestrator(
             MovieReferenceReadinessOverrideSources.ProductionRender,
             cancellationToken);
 
-        var plan = BuildPlan(shot, request);
-        var durationSeconds = Math.Clamp(shot.DurationSeconds ?? shot.Scene.DurationSeconds ?? Math.Min(shot.Scene.MovieProject.DurationSeconds, 60), 1, 3600);
         var estimate = await costEstimator.EstimateAsync(
             new MovieGenerationCostRequest(
                 durationSeconds,
@@ -423,6 +432,36 @@ public sealed class MovieProductionGenerationOrchestrator(
         {
             return false;
         }
+    }
+
+    // Shared provider-neutral admission predicate for the approved production-render route.
+    // Unknown adapters and unsupported priced profiles must fail closed; no provider is called here.
+    internal static void ValidateProductionClipAdmission(
+        IMovieVideoProvider videoProvider,
+        int durationSeconds,
+        string sourceResolution,
+        string targetResolution,
+        string qualityTier,
+        string processingPath,
+        string aspectRatio)
+    {
+        if (!videoProvider.IsAvailable
+            || !videoProvider.SupportedOperations.Contains(MovieStudioOperations.SceneClip, StringComparer.OrdinalIgnoreCase))
+            throw new MovieProductionValidationException(
+                "MOVIE_PROVIDER_UNAVAILABLE",
+                "The selected video provider is unavailable for production clips.");
+
+        if (videoProvider.SceneClipDurationRange is not { } durationRange
+            || !durationRange.Supports(durationSeconds))
+            throw new MovieProductionValidationException(
+                "MOVIE_CLIP_DURATION_UNSUPPORTED",
+                "The selected video provider cannot generate a single clip of this duration. Use shorter shots or a validated segmentation workflow.");
+
+        if (!videoProvider.SupportsSceneClipCostIntent(
+                sourceResolution, targetResolution, qualityTier, processingPath, aspectRatio))
+            throw new MovieProductionValidationException(
+                "MOVIE_CLIP_EXECUTION_INTENT_UNSUPPORTED",
+                "The selected video provider cannot deliver the requested resolution, quality and processing profile.");
     }
 
     private static ProductionPlan BuildPlan(MovieShot shot, MovieProductionGenerationRequest request)
