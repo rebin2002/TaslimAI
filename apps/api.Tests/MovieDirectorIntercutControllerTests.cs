@@ -67,6 +67,17 @@ public sealed class MovieDirectorIntercutControllerTests
             ],
         };
 
+        foreach (var invalidId in new string?[] { null, "", "invalid-guid", Guid.Empty.ToString() })
+        {
+            var claims = new List<Claim>();
+            if (invalidId is not null)
+                claims.Add(new Claim(ClaimTypes.NameIdentifier, invalidId));
+            controller.HttpContext.User = new ClaimsPrincipal(new ClaimsIdentity(claims, "test"));
+            var invalidResult = await controller.CreateIntercutProposal(requestedProjectId, request, CancellationToken.None);
+            Assert.IsType<UnauthorizedResult>(invalidResult);
+        }
+        controller.HttpContext.User = new ClaimsPrincipal(new ClaimsIdentity([new Claim(ClaimTypes.NameIdentifier, userId.ToString())], "test"));
+
         var foreignResult = await controller.CreateIntercutProposal(requestedProjectId, request, CancellationToken.None);
         var foreignError = Assert.IsType<ObjectResult>(foreignResult);
         Assert.Equal(400, foreignError.StatusCode);
