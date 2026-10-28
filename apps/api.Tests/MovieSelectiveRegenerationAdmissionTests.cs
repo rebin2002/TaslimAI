@@ -1,4 +1,5 @@
 using System.Net;
+using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Taslim.Api.Domain;
@@ -382,6 +383,16 @@ public sealed class MovieSelectiveRegenerationAdmissionTests
         var jobsBefore = await db.GenerationJobs.CountAsync(item => item.ProjectId == second.Project.Project.ProjectId);
         var ledgerBefore = await db.UsageTransactions.CountAsync();
         var canonicalFirstJobCount = await db.GenerationJobs.CountAsync(item => item.ProjectId == first.Project.Project.ProjectId);
+
+        // Confirmation must persist the admission-time video route so a future
+        // worker cannot silently send this priced regeneration to a different
+        // adapter after routing configuration changes.
+        var canonicalJob = await db.GenerationJobs.AsNoTracking()
+            .SingleAsync(item => item.IdempotencyKey == sharedKey);
+        var canonicalInput = JsonSerializer.Deserialize<MovieGenerationInput>(canonicalJob.InputJson);
+        Assert.NotNull(canonicalInput);
+        Assert.Equal(scope.ServiceProvider.GetRequiredService<IMovieVideoProvider>().Key,
+            canonicalInput.SelectedProviderKey);
 
         using var rejected = await MovieOperationalFixtures.SendWithCsrfAsync(
             client, HttpMethod.Post,
