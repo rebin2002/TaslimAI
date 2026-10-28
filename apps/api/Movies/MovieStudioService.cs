@@ -1089,6 +1089,11 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         var regeneration = await RegenerationQuery().FirstOrDefaultAsync(item => item.Id == requestId, cancellationToken);
         if (regeneration is null || !await collaboration.HasPermissionAsync(userId, regeneration.MovieShot.Scene.MovieProjectId, MoviePermissions.Generate, cancellationToken)) return null;
         if (regeneration.Status == MovieRegenerationStatuses.Confirmed) return await GetRegenerationRequestAsync(userId, requestId, cancellationToken);
+        // The confirmation path writes a speculative clip before it creates the job.
+        // Reject an invalid replay key now so a shared job-validation failure
+        // cannot leave an orphaned clip or stale confirmation state.
+        if (idempotencyKey?.Trim().Length > 80)
+            throw new GenerationJobValidationException("IDEMPOTENCY_KEY_INVALID", "The idempotency key is too long.");
         if (regeneration.Status != MovieRegenerationStatuses.PendingConfirmation)
             throw new MovieProductionValidationException("REGENERATION_STALE", "This regeneration request is no longer pending confirmation.");
         if (!request.Confirm) throw new MovieProductionValidationException("REGENERATION_CONFIRMATION_REQUIRED", "Explicit confirmation is required before queuing selective regeneration.");
