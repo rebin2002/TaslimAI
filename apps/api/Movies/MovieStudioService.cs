@@ -1683,8 +1683,8 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         var snapshot = await worldContinuity.ProjectAsync(movieProjectId, sceneId, shotId, cancellationToken);
         return snapshot?.ToJson() ?? "{}";
     }
-    private static string SceneSnapshot(MovieScene scene) => JsonSerializer.Serialize(new { scene.Id, scene.Sequence, scene.Title, scene.Summary, scene.DurationSeconds, scene.ContinuityNotes, scene.Narration, scene.Dialogue });
-    private static string ShotSnapshot(MovieShot shot)
+    internal static string SceneSnapshot(MovieScene scene) => JsonSerializer.Serialize(new { scene.Id, scene.Sequence, scene.Title, scene.Summary, scene.DurationSeconds, scene.ContinuityNotes, scene.Narration, scene.Dialogue });
+    internal static string ShotSnapshot(MovieShot shot)
     {
         var profile = MovieShotQualityRequirementsPlanner.TryParse(shot.QualityRequirementsJson, out var stored) && stored is not null
             ? stored
@@ -2016,6 +2016,13 @@ internal static class MovieStudioIdempotency
             // An edited scene/shot or movie direction is a different generation
             // request even when its duration, price settings and title match.
             && string.Equals(input.Description, shot?.Description ?? scene.Summary, StringComparison.Ordinal)
+            // The provider receives the serialized scene/shot directions too.
+            // Reusing a key after changing those inputs must not silently
+            // return the old clip or accept the old usage reservation.
+            && string.Equals(input.SceneJson, MovieStudioService.SceneSnapshot(scene), StringComparison.Ordinal)
+            && (shot is null
+                ? string.IsNullOrEmpty(input.ShotJson)
+                : string.Equals(input.ShotJson, MovieStudioService.ShotSnapshot(shot), StringComparison.Ordinal))
             && string.Equals(input.AspectRatio, movie.AspectRatio, StringComparison.Ordinal)
             && string.Equals(input.Style, movie.Style, StringComparison.Ordinal)
             && string.Equals(input.Language, movie.Language, StringComparison.Ordinal)
