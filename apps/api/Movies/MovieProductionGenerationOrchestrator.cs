@@ -204,6 +204,18 @@ public sealed class MovieProductionGenerationOrchestrator(
                 "MOVIE_CLIP_PROMPT_UNSUPPORTED",
                 "The shot description exceeds this provider's prompt limit. Shorten it before rendering.");
 
+        // Approved production sends the character-continuity snapshot as well
+        // as the scene/shot direction. Preview without writing the snapshot so
+        // an oversized character card cannot reach pricing or usage admission.
+        var continuityPreview = await continuity.BuildSnapshotForTargetAsync(
+            shot.Scene.MovieProjectId, shot.Scene.Id, shot.Id,
+            persist: false, cancellationToken);
+        if (provider.SceneClipPromptMaxCharacters is { } continuityPromptCapacity
+            && minimumCreativePromptLength + continuityPreview.SnapshotJson.Trim().Length > continuityPromptCapacity)
+            throw new MovieProductionValidationException(
+                "MOVIE_CLIP_PROMPT_UNSUPPORTED",
+                "The character-continuity context exceeds this provider's prompt limit. Shorten it before rendering.");
+
         var preflightResult = await productionPreflight.EvaluateAsync(
             userId,
             request.MovieShotId,
@@ -255,6 +267,14 @@ public sealed class MovieProductionGenerationOrchestrator(
             shot.Id,
             persist: true,
             cancellationToken);
+        // Character cards can change between the read-only preview and the
+        // snapshot committed for this clip. Recheck the exact persisted content
+        // so a raced edit cannot introduce unsupported paid prompt text.
+        if (provider.SceneClipPromptMaxCharacters is { } persistedPromptCapacity
+            && minimumCreativePromptLength + snapshot.SnapshotJson.Trim().Length > persistedPromptCapacity)
+            throw new MovieProductionValidationException(
+                "MOVIE_CLIP_PROMPT_UNSUPPORTED",
+                "The character-continuity context exceeds this provider's prompt limit. Shorten it before rendering.");
         var now = DateTime.UtcNow;
         var clip = new MovieClip
         {
