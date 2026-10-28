@@ -714,6 +714,78 @@ public sealed class MovieVideoExecutionTests
             (await db.MovieClips.AsNoTracking().SingleAsync(item => item.Id == canonicalClip.Id)).Status);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Worker_rejects_foreign_clip_job_or_workspace_before_provider_execution(bool foreignWorkspace)
+    {
+        // Even with no previous provider execution, a recovered job must not
+        // submit billable work for a clip linked to another job or workspace.
+        // This in-memory provider has no network implementation.
+        var fixture = await CreateRunningMovieJobAsync(
+            "Movie ownership integrity", "Reject cross-job or cross-workspace execution.");
+        await using var connection = fixture.Connection;
+        await using var db = fixture.Db;
+        var input = System.Text.Json.JsonSerializer.Deserialize<MovieGenerationInput>(fixture.Job.InputJson)!;
+        fixture.Job.InputJson = System.Text.Json.JsonSerializer.Serialize(input with
+        {
+            SourceResolution = "720p",
+            TargetResolution = "720p",
+            QualityTier = DirectorQualityLevels.Standard,
+            ProcessingPath = "native",
+        });
+
+        if (foreignWorkspace)
+        {
+            var now = DateTime.UtcNow;
+            var otherWorkspace = new Workspace
+            {
+                Id = Guid.NewGuid(),
+                Name = "Unrelated movie workspace",
+                Slug = $"unrelated-movie-workspace-{Guid.NewGuid():N}",
+                Type = WorkspaceType.Personal,
+                CreatedAt = now,
+                UpdatedAt = now,
+            };
+            db.Add(otherWorkspace);
+            fixture.Job.WorkspaceId = otherWorkspace.Id;
+        }
+        else
+        {
+            var otherJob = new GenerationJob
+            {
+                Id = Guid.NewGuid(),
+                WorkspaceId = fixture.Job.WorkspaceId,
+                CreatedByUserId = fixture.Job.CreatedByUserId,
+                JobType = GenerationJobTypes.MovieClipGenerate,
+                Status = GenerationJobStatus.Queued,
+                InputJson = "{}",
+                ConcurrencyToken = Guid.NewGuid(),
+                CreatedAt = DateTime.UtcNow,
+            };
+            db.Add(otherJob);
+            var clip = await db.MovieClips.SingleAsync();
+            clip.GenerationJobId = otherJob.Id;
+        }
+        await db.SaveChangesAsync();
+
+        var provider = new GuardedSceneMovieVideoProvider();
+        var options = new MovieVideoOptions { Enabled = true, ProviderKey = provider.Key };
+        var handler = new MovieVideoGenerationJobHandler(
+            db, provider, new MovieVideoExecutionStore(db, Options.Create(options)),
+            Options.Create(options), NullLogger<MovieVideoGenerationJobHandler>.Instance);
+
+        var failure = await Assert.ThrowsAsync<MovieVideoProviderException>(
+            () => handler.ExecuteAsync(fixture.Job, new Progress<int>(), CancellationToken.None));
+
+        Assert.Equal(GenerationJobErrorCodes.MovieGenerationFailed, failure.Code);
+        Assert.False(failure.IsTransient);
+        Assert.Equal(0, provider.SubmitCalls);
+        Assert.Empty(await db.MovieVideoProviderExecutions.AsNoTracking().ToListAsync());
+        Assert.Equal(GenerationJobStatus.Running,
+            (await db.GenerationJobs.AsNoTracking().SingleAsync(item => item.Id == fixture.Job.Id)).Status);
+    }
+
     [Fact]
     public async Task Crash_after_durable_submit_marker_does_not_issue_a_second_provider_request()
     {
