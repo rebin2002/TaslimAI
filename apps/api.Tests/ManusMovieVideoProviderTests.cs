@@ -51,6 +51,37 @@ public sealed class ManusMovieVideoProviderTests
     }
 
     [Fact]
+    public async Task Character_continuity_text_is_forwarded_with_movie_guide_in_synthetic_prompt()
+    {
+        // The recording transport is local: this test never contacts Manus or
+        // creates a potentially billable task.
+        var handler = new RecordingHandler(_ => JsonResponse(JsonSerializer.Serialize(new
+        {
+            ok = true,
+            task_id = TaskId,
+        })));
+        var provider = CreateProvider(handler, EnabledOptions());
+        var characterContext = JsonSerializer.Serialize(new
+        {
+            name = "Liora",
+            lockedWardrobe = "blue coat",
+        });
+
+        await provider.SubmitAsync(Request() with
+        {
+            CharacterContinuityJson = characterContext,
+        }, CancellationToken.None);
+
+        using var payload = JsonDocument.Parse(Assert.Single(handler.RequestBodies));
+        var prompt = payload.RootElement.GetProperty("message")
+            .GetProperty("content")[0].GetProperty("text").GetString();
+        Assert.NotNull(prompt);
+        Assert.Contains("Continuity guide: Visual language: natural light", prompt, StringComparison.Ordinal);
+        Assert.Contains("Character continuity: ", prompt, StringComparison.Ordinal);
+        Assert.Contains(characterContext, prompt, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Status_normalizes_running_and_completed_attachment_with_internal_credit_estimate()
     {
         var calls = 0;
