@@ -60,6 +60,19 @@ public sealed class MovieProductionGenerationOrchestratorTests
         Assert.Equal(expected, MovieProductionOrchestrationStateMachine.From(status));
     }
 
+    [Fact]
+    public void Approved_production_replay_key_is_trimmed_and_bounded_before_speculative_writes()
+    {
+        Assert.Null(MovieProductionGenerationOrchestrator.NormalizeIdempotencyKey("   "));
+        var accepted = new string('x', 80);
+        Assert.Equal(accepted,
+            MovieProductionGenerationOrchestrator.NormalizeIdempotencyKey($"  {accepted}  "));
+
+        var error = Assert.Throws<MovieProductionValidationException>(() =>
+            MovieProductionGenerationOrchestrator.NormalizeIdempotencyKey(new string('x', 81)));
+        Assert.Equal("IDEMPOTENCY_KEY_INVALID", error.Code);
+    }
+
     [Theory]
     [InlineData(2)]
     [InlineData(10)]
