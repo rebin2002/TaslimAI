@@ -339,8 +339,15 @@ public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWork
         var motion = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post, $"/api/movie-studio/shots/{shot.Id}/production/motion-preview", new { sourceVersionId = approvedKeyframe.Id });
         var approvedMotion = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post, $"/api/movie-studio/production/versions/{motion.Id}/review", new { approve = true });
 
-        var render = await SendWithCsrf<MovieProductionRenderResponse>(client, HttpMethod.Post, $"/api/movie-studio/shots/{shot.Id}/production/render", new { sourceVersionId = approvedMotion.Id, label = "Explicit render" });
-        Assert.Equal(render.Job.Id, render.Version.GenerationJobId);
+        const string replayKey = "approved-production-creative-intent";
+        var renderPath = $"/api/movie-studio/shots/{shot.Id}/production/render";
+        var renderPayload = new { sourceVersionId = approvedMotion.Id, label = "Explicit render" };
+        using var firstResponse = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, renderPath, renderPayload, idempotencyKey: replayKey);
+        Assert.True(firstResponse.IsSuccessStatusCode, await firstResponse.Content.ReadAsStringAsync());
+        var render = await firstResponse.Content.ReadFromJsonAsync<MovieProductionRenderResponse>();
+        Assert.NotNull(render);
+        Assert.Equal(render!.Job.Id, render.Version.GenerationJobId);
         Assert.NotEqual(Guid.Empty, render.ClipId);
 
         var production = await client.GetFromJsonAsync<MovieShotProductionDto>($"/api/movie-studio/shots/{shot.Id}/production");
@@ -350,6 +357,51 @@ public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWork
         using var scope = fakeFactory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
         Assert.Equal(0, await db.MovieTakes.CountAsync(item => item.MovieShotId == shot.Id));
+
+        var versionsBefore = await db.MovieProductionVersions.CountAsync(item => item.MovieShotId == shot.Id);
+        var clipsBefore = await db.MovieClips.CountAsync(item => item.MovieShotId == shot.Id);
+        var ledgerBefore = await db.UsageTransactions.CountAsync();
+        using var replayResponse = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, renderPath, renderPayload, idempotencyKey: replayKey);
+        Assert.True(replayResponse.IsSuccessStatusCode, await replayResponse.Content.ReadAsStringAsync());
+        var replay = await replayResponse.Content.ReadFromJsonAsync<MovieProductionRenderResponse>();
+        Assert.NotNull(replay);
+        Assert.Equal(render.Job.Id, replay!.Job.Id);
+        Assert.Equal(render.ClipId, replay.ClipId);
+
+        // A changed label, shot direction or duration cannot reuse an already
+        // priced canonical job, even if the approved source and key stay equal.
+        using var changedLabel = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, renderPath,
+            new { sourceVersionId = approvedMotion.Id, label = "Different render" },
+            idempotencyKey: replayKey);
+        Assert.Equal(HttpStatusCode.BadRequest, changedLabel.StatusCode);
+        Assert.Contains("IDEMPOTENCY_KEY_REUSED",
+            await changedLabel.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        var shotRow = await db.MovieShots.SingleAsync(item => item.Id == shot.Id);
+        var originalDescription = shotRow.Description;
+        shotRow.Description = "Different shot direction after the canonical render was queued.";
+        await db.SaveChangesAsync();
+        using var changedDirection = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, renderPath, renderPayload, idempotencyKey: replayKey);
+        Assert.Equal(HttpStatusCode.BadRequest, changedDirection.StatusCode);
+        Assert.Contains("IDEMPOTENCY_KEY_REUSED",
+            await changedDirection.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        shotRow.Description = originalDescription;
+        shotRow.DurationSeconds = 25;
+        await db.SaveChangesAsync();
+        using var changedDuration = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, renderPath, renderPayload, idempotencyKey: replayKey);
+        Assert.Equal(HttpStatusCode.BadRequest, changedDuration.StatusCode);
+        Assert.Contains("IDEMPOTENCY_KEY_REUSED",
+            await changedDuration.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        Assert.Equal(versionsBefore, await db.MovieProductionVersions.CountAsync(item => item.MovieShotId == shot.Id));
+        Assert.Equal(clipsBefore, await db.MovieClips.CountAsync(item => item.MovieShotId == shot.Id));
+        Assert.Equal(1, await db.GenerationJobs.CountAsync(item => item.IdempotencyKey == replayKey));
+        Assert.Equal(ledgerBefore, await db.UsageTransactions.CountAsync());
     }
     [Fact]
     public async Task Approved_production_render_rejects_unsupported_clip_duration_without_creating_billable_work()
