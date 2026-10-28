@@ -1124,12 +1124,14 @@ public sealed class MovieVideoExecutionTests
 
     private sealed class GuardedSceneMovieVideoProvider : IMovieVideoProvider
     {
-        public GuardedSceneMovieVideoProvider(int? promptLimit = null, bool supportsFrameReferences = false)
+        public GuardedSceneMovieVideoProvider(int? promptLimit = null, bool supportsFrameReferences = false, bool includesWorldContext = false)
         {
             SceneClipPromptMaxCharacters = promptLimit;
             SupportsSceneClipFrameReferences = supportsFrameReferences;
+            SceneClipWorldContextInPrompt = includesWorldContext;
         }
         public int? SceneClipPromptMaxCharacters { get; }
+        public bool SceneClipWorldContextInPrompt { get; }
         public bool SupportsSceneClipFrameReferences { get; }
         public string Key => "guarded-scene-test";
         public bool IsAvailable => true;
