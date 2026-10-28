@@ -810,6 +810,9 @@ public interface IMovieVideoProvider
     // be submitted faithfully. Null means no safe early length assertion.
     // Providers still validate the assembled prompt before outbound submission.
     int? SceneClipPromptMaxCharacters => null;
+    // A provider may opt in only after mapping these distinct frame/reference
+    // fields to its verified submission payload. Unknown adapters fail closed.
+    bool SupportsSceneClipFrameReferences => false;
     // Declared only when an adapter can honor the same priced output profile.
     // Unknown providers fail closed before usage reservation or paid submission.
     bool SupportsSceneClipCostIntent(string sourceResolution, string targetResolution,
