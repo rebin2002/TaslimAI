@@ -65,6 +65,86 @@ public sealed class MovieSelectiveRegenerationAdmissionTests
     }
 
     [Fact]
+    public async Task Oversized_shot_prompt_rejects_regeneration_preview_before_cost_or_usage_writes()
+    {
+        using var factory = new MovieClipPromptLimitedApiFactory();
+        using (var setup = factory.Services.CreateScope())
+            setup.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+
+        using var client = factory.CreateClient();
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Selective regeneration over-budget prompt", sceneDurationSeconds: 5);
+        var sourceId = await ApprovedStoryboardAsync(client, fixture.Shot.Id);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var ledgerBefore = await db.UsageTransactions.CountAsync();
+
+        using var rejected = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post,
+            $"/api/movie-studio/shots/{fixture.Shot.Id}/regeneration-requests",
+            Request(sourceId));
+        Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
+        Assert.Contains("REGENERATION_PROMPT_UNSUPPORTED",
+            await rejected.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.False(await db.MovieRegenerationRequests.AnyAsync(item => item.MovieShotId == fixture.Shot.Id));
+        Assert.False(await db.MovieClips.AnyAsync(item => item.MovieProjectId == fixture.Project.Project.Id));
+        Assert.False(await db.GenerationJobs.AnyAsync(item => item.ProjectId == fixture.Project.Project.ProjectId));
+        Assert.Equal(ledgerBefore, await db.UsageTransactions.CountAsync());
+    }
+
+    [Fact]
+    public async Task Shot_prompt_expanded_after_preview_rejects_confirmation_without_creating_billable_work()
+    {
+        using var factory = new MovieClipPromptLimitedApiFactory();
+        using (var setup = factory.Services.CreateScope())
+            setup.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+
+        using var client = factory.CreateClient();
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Selective regeneration stale prompt preview", sceneDurationSeconds: 5);
+
+        // Use a small provider-supported description for the initial preview.
+        using (var setup = factory.Services.CreateScope())
+        {
+            var db = setup.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var shot = await db.MovieShots.SingleAsync(item => item.Id == fixture.Shot.Id);
+            shot.Description = "Brief shot.";
+            await db.SaveChangesAsync();
+        }
+        var sourceId = await ApprovedStoryboardAsync(client, fixture.Shot.Id);
+        var preview = await MovieOperationalFixtures.PostAsync<MovieSelectiveRegenerationResponse>(
+            client, $"/api/movie-studio/shots/{fixture.Shot.Id}/regeneration-requests", Request(sourceId));
+
+        using var scope = factory.Services.CreateScope();
+        var verifyDb = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var ledgerBefore = await verifyDb.UsageTransactions.CountAsync();
+        var versionsBefore = await verifyDb.MovieProductionVersions.CountAsync(item => item.MovieShotId == fixture.Shot.Id);
+
+        // The user edited the shot after pricing; confirmation must re-check
+        // the current provider limit instead of trusting the earlier preview.
+        var editedShot = await verifyDb.MovieShots.SingleAsync(item => item.Id == fixture.Shot.Id);
+        editedShot.Description = new string('x', 50);
+        await verifyDb.SaveChangesAsync();
+
+        using var rejected = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post,
+            $"/api/movie-studio/regeneration-requests/{preview.Request.Id}/confirm",
+            new { confirm = true });
+        Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
+        Assert.Contains("REGENERATION_PROMPT_UNSUPPORTED",
+            await rejected.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Equal(MovieRegenerationStatuses.PendingConfirmation,
+            await verifyDb.MovieRegenerationRequests.Where(item => item.Id == preview.Request.Id)
+                .Select(item => item.Status).SingleAsync());
+        Assert.Equal(versionsBefore,
+            await verifyDb.MovieProductionVersions.CountAsync(item => item.MovieShotId == fixture.Shot.Id));
+        Assert.False(await verifyDb.MovieClips.AnyAsync(item => item.MovieProjectId == fixture.Project.Project.Id));
+        Assert.False(await verifyDb.GenerationJobs.AnyAsync(item => item.ProjectId == fixture.Project.Project.ProjectId));
+        Assert.Equal(ledgerBefore, await verifyDb.UsageTransactions.CountAsync());
+    }
+
+    [Fact]
     public async Task Overlong_confirmation_idempotency_key_rejects_before_speculative_clip_persistence()
     {
         using var factory = new MovieClipDurationApiFactory();
