@@ -48,6 +48,9 @@ public sealed class MovieIntercutPlannerTests
         Assert.Equal(5, first.ProposedTimeline.Version);
         Assert.Equal(10m, first.ProposedTimeline.Clips.Sum(item => item.DurationSeconds));
         Assert.Equal(3, first.ProposedTimeline.Transitions.Count);
+        // Review-only plans have not checked whether supplied shot/clip IDs exist
+        // in the movie DB. Do not misrepresent them as canonically verified.
+        Assert.Contains("canonical_clip_and_shot_ownership_not_verified_in_review_only_proposal", first.Findings);
         Assert.DoesNotContain("provider", JsonSerializer.Serialize(first), StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("model", JsonSerializer.Serialize(first), StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("prompt", JsonSerializer.Serialize(first), StringComparison.OrdinalIgnoreCase);
