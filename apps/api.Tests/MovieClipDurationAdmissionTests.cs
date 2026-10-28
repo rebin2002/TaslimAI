@@ -221,8 +221,10 @@ public sealed class MovieClipDurationAdmissionTests : IClassFixture<MovieClipDur
         Assert.Equal(transactionsBefore, await db.UsageTransactions.CountAsync());
     }
 
-    [Fact]
-    public async Task Oversized_approved_render_description_rejects_before_job_or_usage_reservation()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Approved_render_rejects_single_or_combined_prompt_overflow_before_usage_reservation(bool combinedPromptOnly)
     {
         using var promptFactory = new MovieClipPromptLimitedApiFactory();
         using (var setup = promptFactory.Services.CreateScope())
@@ -254,12 +256,24 @@ public sealed class MovieClipDurationAdmissionTests : IClassFixture<MovieClipDur
             new { approve = true });
         using var scope = promptFactory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        if (combinedPromptOnly)
+        {
+            // Neither the render title nor the shot direction individually
+            // exceeds capacity, but their combined mandatory creative context
+            // does. Run after approvals to exercise queue admission itself.
+            var shot = await db.MovieShots.SingleAsync(item => item.Id == fixture.Shot.Id);
+            var movie = await db.MovieProjects.SingleAsync(item => item.Id == fixture.Project.Project.Id);
+            shot.Description = "Short shot";
+            movie.Style = "cinematic";
+            movie.AdditionalInstructions = new string('x', 20);
+            await db.SaveChangesAsync();
+        }
         var countBefore = await db.UsageTransactions.CountAsync();
         var versionCountBefore = await db.MovieProductionVersions.CountAsync();
 
         using var rejected = await MovieOperationalFixtures.SendWithCsrfAsync(
             client, HttpMethod.Post, $"/api/movie-studio/shots/{fixture.Shot.Id}/production/render",
-            new { sourceVersionId = approvedMotion.Id, label = "Unsupported description", confirmationAccepted = true },
+            new { sourceVersionId = approvedMotion.Id, title = "Short", label = "Unsupported description", confirmationAccepted = true },
             idempotencyKey: "production-prompt-overflow-admission");
         Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
         Assert.Contains("MOVIE_CLIP_PROMPT_UNSUPPORTED",
