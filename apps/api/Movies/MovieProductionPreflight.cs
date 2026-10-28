@@ -15,6 +15,7 @@ public static class MovieProductionPreflightDecisionCodes
     public const string QualityReviewRequired = "quality_review_required";
     public const string CostConfirmationRequired = "cost_confirmation_required";
     public const string CostGuardrailBlocked = "cost_guardrail_blocked";
+    public const string ProviderUnavailable = "provider_unavailable";
 }
 
 public static class MovieProductionPreflightCheckKeys
@@ -26,6 +27,7 @@ public static class MovieProductionPreflightCheckKeys
     public const string ReferencePackage = "reference_package";
     public const string AdaptiveQuality = "adaptive_quality";
     public const string CostGuardrails = "cost_guardrails";
+    public const string ProviderAdmission = "provider_admission";
 }
 
 public sealed record MovieProductionPreflightRequest(
@@ -193,6 +195,13 @@ public sealed class MovieProductionPreflightService(
                 ? $"The {plan.SourceResolution} source plan meets the {plan.Recommendation.QualityRequirement.MinimumConfidence:0.##} quality floor."
                 : $"Quality confidence {plan.Recommendation.QualityConfidence:0.##} is below the {plan.Recommendation.QualityRequirement.MinimumConfidence:0.##} floor; review the higher-source escalation."));
 
+        // Read-only admission must not promise a render that the selected adapter
+        // cannot start. It does not submit work or reveal provider credentials.
+        var providerAdmission = BuildProviderAdmissionCheck(
+            provider.IsAvailable,
+            provider.SupportedOperations.Contains(MovieStudioOperations.SceneClip, StringComparer.OrdinalIgnoreCase));
+        checks.Add(providerAdmission);
+
         var durationSeconds = Math.Clamp(shot.DurationSeconds ?? shot.Scene.DurationSeconds ?? Math.Min(shot.Scene.MovieProject.DurationSeconds, 60), 1, 3_600);
         var estimate = await costEstimator.EstimateAsync(
             new MovieGenerationCostRequest(durationSeconds, plan.SourceResolution, plan.TargetResolution, plan.QualityTier, plan.ProcessingPath),
@@ -217,12 +226,18 @@ public sealed class MovieProductionPreflightService(
                 : guardrail.RejectionMessage ?? "Review the server-side cost safety decision before continuing."));
 
         var recommendations = BuildRecommendations(readiness, approvedStoryboard, approvedKeyframe, approvedMotionPreview, source, package, blockingPackageWarnings, plan, guardrail, request.ConfirmationAccepted);
+        if (!providerAdmission.Satisfied)
+            recommendations = recommendations.Concat([
+                new MovieProductionPreflightRecommendationDto("enable_video_provider", "Enable scene-clip generation",
+                    "Configure an approved video route that supports scene clips before production.")]).ToArray();
         var requiredChecksPassed = checks.Where(item => item.Required).All(item => item.Satisfied);
         var decision = requiredChecksPassed
             ? MovieProductionPreflightDecisionCodes.Ready
             : checks.Any(item => !item.Satisfied && item.Key is MovieProductionPreflightCheckKeys.Storyboard or MovieProductionPreflightCheckKeys.Keyframe or MovieProductionPreflightCheckKeys.MotionPreview or MovieProductionPreflightCheckKeys.ReferencePackage)
                 ? MovieProductionPreflightDecisionCodes.ReferenceWorkRequired
-                : !adaptiveSatisfied
+                : !providerAdmission.Satisfied
+                    ? MovieProductionPreflightDecisionCodes.ProviderUnavailable
+                    : !adaptiveSatisfied
                     ? MovieProductionPreflightDecisionCodes.QualityReviewRequired
                     : !guardrail.CanProceed && guardrail.ConfirmationRequired
                         ? MovieProductionPreflightDecisionCodes.CostConfirmationRequired
@@ -232,10 +247,14 @@ public sealed class MovieProductionPreflightService(
             ? "Cheap reference work, adaptive quality, and server-side cost safety checks are ready for production."
             : decision == MovieProductionPreflightDecisionCodes.ReferenceWorkRequired
                 ? "Complete the recommended reference work before starting this expensive production pass."
-                : decision == MovieProductionPreflightDecisionCodes.QualityReviewRequired
+                : decision == MovieProductionPreflightDecisionCodes.ProviderUnavailable
+                    ? providerAdmission.Detail
+                    : decision == MovieProductionPreflightDecisionCodes.QualityReviewRequired
                     ? "Review the adaptive quality escalation before starting production."
                     : guardrail.RejectionMessage ?? "Review the production preflight before continuing.";
-        var rejectionCode = canProceed ? null : decision == MovieProductionPreflightDecisionCodes.CostConfirmationRequired
+        var rejectionCode = canProceed ? null : decision == MovieProductionPreflightDecisionCodes.ProviderUnavailable
+            ? "MOVIE_PROVIDER_UNAVAILABLE"
+            : decision == MovieProductionPreflightDecisionCodes.CostConfirmationRequired
             ? "GENERATION_CONFIRMATION_REQUIRED"
             : guardrail.RejectionCode ?? "PRODUCTION_PREFLIGHT_REQUIRED";
         var rejectionMessage = canProceed ? null : summary;
@@ -263,6 +282,15 @@ public sealed class MovieProductionPreflightService(
             GenerationCostPreviewMapper.ToDto(guardrail),
             rejectionCode,
             rejectionMessage);
+    }
+
+    internal static MovieProductionPreflightCheckDto BuildProviderAdmissionCheck(bool available, bool supportsSceneClip)
+    {
+        var satisfied = available && supportsSceneClip;
+        return new(MovieProductionPreflightCheckKeys.ProviderAdmission, "Video generation availability", satisfied, true,
+            satisfied
+                ? "An enabled video route supports scene clips. The queue still validates priced output and duration capabilities."
+                : "No enabled video route can generate scene clips. Configure an approved video provider before production.");
     }
 
     internal static MovieProductionPreflightCheckDto BuildReferencePackageCheck(
