@@ -122,7 +122,7 @@ public static class MovieIntercutPlanner
             findings.Add("story_order_change_not_requested");
 
         var timeline = BuildTimeline(timelineId, request.BaseTimelineVersion + 1, canonicalOrder);
-        var proposalId = StableGuid("movie-intercut-proposal", movieProjectId.ToString("N"), request.BaseTimelineVersion.ToString(CultureInfo.InvariantCulture), ComputeCandidateHash(candidates, requestedOrder));
+        var proposalId = StableGuid("movie-intercut-proposal", movieProjectId.ToString("N"), timelineId.ToString("N"), request.BaseTimelineVersion.ToString(CultureInfo.InvariantCulture), ComputeCandidateHash(candidates, requestedOrder));
         var provenanceHash = ComputeProposalHash(movieProjectId, proposalId, request.BaseTimelineVersion, timeline, candidates, requestedOrder);
         return new MovieIntercutPlanDto(
             proposalId,
