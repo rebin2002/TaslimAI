@@ -1,13 +1,40 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Taslim.Api.Contracts;
 using Taslim.Api.Movies;
 using Taslim.Api.Persistence;
 using Xunit;
 
 namespace Taslim.Api.Tests;
+
+// Test the real authenticated endpoint with a reference service that cannot
+// assemble a canonical package. No generation worker or provider is invoked.
+public sealed class MovieMissingReferencePackageApiFactory : GenerationJobsApiFactory
+{
+    protected override bool WorkerEnabled => false;
+
+    protected override void ConfigureWebHost(IWebHostBuilder builder)
+    {
+        base.ConfigureWebHost(builder);
+        builder.ConfigureServices(services =>
+        {
+            services.RemoveAll<IMovieProductionReferencePackageService>();
+            services.AddSingleton<IMovieProductionReferencePackageService, MissingReferencePackageService>();
+        });
+    }
+
+    private sealed class MissingReferencePackageService : IMovieProductionReferencePackageService
+    {
+        public Task<MovieProductionReferencePackageDto?> GetForShotAsync(
+            Guid userId, Guid shotId, CancellationToken cancellationToken = default) =>
+            Task.FromResult<MovieProductionReferencePackageDto?>(null);
+    }
+}
 
 public sealed class MovieProductionPreflightTests : IClassFixture<GenerationJobsNoWorkerFactory>
 {
@@ -62,6 +89,50 @@ public sealed class MovieProductionPreflightTests : IClassFixture<GenerationJobs
         Assert.DoesNotContain("\"provider\"", json, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("\"model\"", json, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("prompt", json, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Authenticated_preflight_rejects_missing_canonical_reference_package_without_creating_work()
+    {
+        using var unavailableFactory = new MovieMissingReferencePackageApiFactory();
+        using var client = unavailableFactory.CreateClient();
+        var auth = await Register(client);
+        var project = await SendWithCsrf<MovieStudioProjectResponse>(client, HttpMethod.Post, "/api/movie-studio/projects", new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            mode = MovieProjectModes.Quick,
+            title = "Unavailable reference preflight",
+            description = "Missing reference data cannot authorize production.",
+            durationSeconds = 5,
+            aspectRatio = "16:9",
+            style = "cinematic",
+            language = "en",
+        });
+        var scene = await SendWithCsrf<MovieSceneDto>(
+            client, HttpMethod.Post, $"/api/movie-studio/projects/{project.Project.Id}/scenes",
+            new { title = "Opening", summary = "A reference-safe opening." });
+        var shot = await SendWithCsrf<MovieShotDto>(
+            client, HttpMethod.Post, $"/api/movie-studio/scenes/{scene.Id}/shots",
+            new { description = "A stable wide shot.", durationSeconds = 5 });
+
+        using var scope = unavailableFactory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var usageBefore = await db.UsageTransactions.CountAsync();
+        using var response = await client.GetAsync(
+            $"/api/movie-studio/shots/{shot.Id}/production/preflight?targetResolution=1080p&qualityTier=Standard&confirmationAccepted=true");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var preflight = (await response.Content.ReadFromJsonAsync<MovieProductionPreflightDto>())!;
+        Assert.False(preflight.CanProceed);
+        Assert.Equal(MovieProductionPreflightDecisionCodes.ReferenceWorkRequired, preflight.Decision);
+        Assert.Contains(preflight.Checks, check =>
+            check.Key == MovieProductionPreflightCheckKeys.ReferencePackage
+            && check.Required && !check.Satisfied
+            && check.Detail.Contains("unavailable", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(preflight.Recommendations, item => item.Key == "rebuild_reference_package");
+        Assert.Equal(0, await db.MovieClips.CountAsync(item => item.MovieProjectId == project.Project.Id));
+        Assert.Equal(0, await db.GenerationJobs.CountAsync(item => item.WorkspaceId == auth.PersonalWorkspace.Id));
+        Assert.Equal(usageBefore, await db.UsageTransactions.CountAsync());
     }
 
     [Fact]
