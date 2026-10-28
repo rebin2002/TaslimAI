@@ -547,6 +547,46 @@ public sealed class MovieVideoExecutionTests
         Assert.Equal(1, (await db.MovieVideoProviderExecutions.AsNoTracking().SingleAsync()).AttemptCount);
     }
 
+    [Fact]
+    public async Task Queued_movie_job_cannot_switch_priced_provider_before_first_execution()
+    {
+        // Unlike recovered jobs with an execution record, this job has never
+        // contacted a provider. Its admission-time provider still owns the
+        // priced contract; runtime routing must not silently replace it.
+        var fixture = await CreateRunningMovieJobAsync(
+            "Movie original provider binding", "Do not substitute providers before submission.");
+        await using var connection = fixture.Connection;
+        await using var db = fixture.Db;
+        var input = System.Text.Json.JsonSerializer.Deserialize<MovieGenerationInput>(fixture.Job.InputJson)!;
+        fixture.Job.InputJson = System.Text.Json.JsonSerializer.Serialize(input with
+        {
+            SelectedProviderKey = "original-provider",
+            SourceResolution = "720p",
+            TargetResolution = "720p",
+            QualityTier = DirectorQualityLevels.Standard,
+            ProcessingPath = "native",
+        });
+        await db.SaveChangesAsync();
+
+        var replacementProvider = new GuardedSceneMovieVideoProvider();
+        var options = new MovieVideoOptions { Enabled = true, ProviderKey = replacementProvider.Key };
+        var handler = new MovieVideoGenerationJobHandler(
+            db, replacementProvider, new MovieVideoExecutionStore(db, Options.Create(options)),
+            Options.Create(options), NullLogger<MovieVideoGenerationJobHandler>.Instance);
+
+        var failure = await Assert.ThrowsAsync<MovieVideoProviderException>(
+            () => handler.ExecuteAsync(fixture.Job, new Progress<int>(), CancellationToken.None));
+
+        Assert.Equal(GenerationJobErrorCodes.MovieProviderUnavailable, failure.Code);
+        Assert.False(failure.IsTransient);
+        Assert.Equal(0, replacementProvider.SubmitCalls);
+        Assert.Empty(await db.MovieVideoProviderExecutions.AsNoTracking().ToListAsync());
+        Assert.Equal(GenerationJobStatus.Running,
+            (await db.GenerationJobs.AsNoTracking().SingleAsync()).Status);
+        Assert.Equal(MovieClipStatuses.Queued,
+            (await db.MovieClips.AsNoTracking().SingleAsync()).Status);
+    }
+
     [Theory]
     [InlineData(null, 0)]
     [InlineData("original-provider-job", 1)]
