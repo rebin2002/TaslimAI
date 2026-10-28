@@ -201,12 +201,13 @@ public sealed class RunwayMovieVideoProvider(
         // scene request without legacy QueueClipAsync's admission check.
         // Never submit a provider task for a profile this adapter cannot enact.
         if (request.Operation == MovieStudioOperations.SceneClip
-            && !SupportsSceneClipCostIntent(
+            && (request.UpscalingRequested
+                || !SupportsSceneClipCostIntent(
                 request.SourceResolution ?? string.Empty,
                 request.TargetResolution ?? string.Empty,
                 request.QualityTier ?? string.Empty,
                 request.ProcessingPath ?? string.Empty,
-                request.AspectRatio))
+                request.AspectRatio)))
             throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);
 
         var ratio = request.AspectRatio.Trim() switch
