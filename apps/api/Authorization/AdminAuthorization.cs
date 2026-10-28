@@ -51,6 +51,12 @@ public static class AdminRoleBootstrapper
                 continue;
             }
 
+            if (!user.EmailConfirmed)
+            {
+                logger.LogWarning("A configured administrator account is not confirmed.");
+                continue;
+            }
+
             if (!await userManager.IsInRoleAsync(user, AdminPolicies.Role))
             {
                 var result = await userManager.AddToRoleAsync(user, AdminPolicies.Role);

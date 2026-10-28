@@ -3,7 +3,9 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
@@ -90,6 +92,42 @@ public sealed class AdminUsageTests : IClassFixture<TaslimApiFactory>
 
         using var anonymous = factory.CreateClient();
         Assert.Equal(HttpStatusCode.Unauthorized, (await anonymous.GetAsync("/api/admin/usage/summary")).StatusCode);
+    }
+
+    [Fact]
+    public async Task Unconfirmed_configured_bootstrap_email_does_not_grant_admin_access()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Unconfirmed Bootstrap Candidate");
+        var email = auth.User.Email!;
+
+        using var scope = factory.Services.CreateScope();
+        var userManager = scope.ServiceProvider.GetRequiredService<UserManager<ApplicationUser>>();
+        var user = await userManager.FindByEmailAsync(email);
+        Assert.NotNull(user);
+        Assert.False(user!.EmailConfirmed);
+
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Admin:BootstrapEmails:0"] = email,
+            })
+            .Build();
+        var logger = scope.ServiceProvider.GetRequiredService<ILoggerFactory>()
+            .CreateLogger(nameof(AdminRoleBootstrapper));
+
+        try
+        {
+            await AdminRoleBootstrapper.EnsureConfiguredAdministratorsAsync(scope.ServiceProvider, configuration, logger);
+            using var response = await client.GetAsync("/api/admin/usage/summary");
+            Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+            Assert.False(await userManager.IsInRoleAsync(user, AdminPolicies.Role));
+        }
+        finally
+        {
+            if (await userManager.IsInRoleAsync(user, AdminPolicies.Role))
+                await userManager.RemoveFromRoleAsync(user, AdminPolicies.Role);
+        }
     }
 
     [Fact]
