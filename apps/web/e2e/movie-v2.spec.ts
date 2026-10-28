@@ -58,6 +58,8 @@ test.describe("Movie Studio V2 browser smoke", () => {
   test("persists a two-hour full movie timeline without queueing paid work", async ({ authenticatedPage: page }) => {
     test.setTimeout(120_000);
     await page.goto("/create/movie");
+    const quickDurationField = page.locator(".movie-brief-card input[type=number]").first();
+    await expect(quickDurationField).toHaveAttribute("max", "3600");
     await page.getByRole("tab", { name: /full movie/i }).first().click();
 
     // The project duration is a timeline goal; it is not an instruction to
