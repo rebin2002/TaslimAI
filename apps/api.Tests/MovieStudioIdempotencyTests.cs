@@ -26,6 +26,63 @@ public sealed class MovieStudioIdempotencyTests : IClassFixture<MovieOperational
     }
 
     [Fact]
+    public async Task Identical_keys_for_different_users_remain_independent()
+    {
+        // Job idempotency is user-scoped, not global. A user choosing the
+        // same key as another must never receive the other's private clip or
+        // reuse their usage reservation. Workers and paid providers are off.
+        using var firstClient = factory.CreateClient();
+        using var secondClient = factory.CreateClient();
+        var firstMovie = await MovieOperationalFixtures.CreateFullMovieAsync(
+            firstClient, title: "First user's private movie");
+        var secondMovie = await MovieOperationalFixtures.CreateFullMovieAsync(
+            secondClient, title: "Second user's private movie");
+        Assert.NotEqual(firstMovie.Owner.User.Id, secondMovie.Owner.User.Id);
+        Assert.NotEqual(firstMovie.Owner.PersonalWorkspace.Id, secondMovie.Owner.PersonalWorkspace.Id);
+
+        var key = $"movie-separate-user-scope-{Guid.NewGuid():N}";
+        var firstPath = $"/api/movie-studio/shots/{firstMovie.Shot.Id}/generate";
+        var secondPath = $"/api/movie-studio/shots/{secondMovie.Shot.Id}/generate";
+        var first = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
+            firstClient, firstPath, new { title = "First private clip" }, idempotencyKey: key);
+        var second = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
+            secondClient, secondPath, new { title = "Second private clip" }, idempotencyKey: key);
+
+        Assert.NotEqual(first.ClipId, second.ClipId);
+        Assert.NotEqual(first.Job.Id, second.Job.Id);
+        var firstReplay = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
+            firstClient, firstPath, new { title = "First private clip" }, idempotencyKey: key);
+        var secondReplay = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
+            secondClient, secondPath, new { title = "Second private clip" }, idempotencyKey: key);
+        Assert.Equal(first.ClipId, firstReplay.ClipId);
+        Assert.Equal(second.ClipId, secondReplay.ClipId);
+        Assert.Equal(first.Job.Id, firstReplay.Job.Id);
+        Assert.Equal(second.Job.Id, secondReplay.Job.Id);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var jobs = await db.GenerationJobs.AsNoTracking()
+            .Where(item => item.IdempotencyKey == key).ToListAsync();
+        Assert.Equal(2, jobs.Count);
+        Assert.Contains(jobs, item => item.Id == first.Job.Id
+            && item.CreatedByUserId == firstMovie.Owner.User.Id);
+        Assert.Contains(jobs, item => item.Id == second.Job.Id
+            && item.CreatedByUserId == secondMovie.Owner.User.Id);
+        var firstClip = await db.MovieClips.AsNoTracking()
+            .SingleAsync(item => item.MovieProjectId == firstMovie.Project.Project.Id);
+        var secondClip = await db.MovieClips.AsNoTracking()
+            .SingleAsync(item => item.MovieProjectId == secondMovie.Project.Project.Id);
+        Assert.Equal(first.ClipId, firstClip.Id);
+        Assert.Equal(second.ClipId, secondClip.Id);
+        Assert.Equal(first.Job.Id, firstClip.GenerationJobId);
+        Assert.Equal(second.Job.Id, secondClip.GenerationJobId);
+        Assert.Single(await db.UsageTransactions.AsNoTracking()
+            .Where(item => item.RequestId == $"generation:{first.Job.Id:N}").ToListAsync());
+        Assert.Single(await db.UsageTransactions.AsNoTracking()
+            .Where(item => item.RequestId == $"generation:{second.Job.Id:N}").ToListAsync());
+    }
+
+    [Fact]
     public async Task Reused_movie_job_reconciles_to_canonical_clip_without_persisting_a_duplicate()
     {
         using var client = factory.CreateClient();
