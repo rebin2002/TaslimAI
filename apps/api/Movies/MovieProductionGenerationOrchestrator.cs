@@ -322,7 +322,8 @@ public sealed class MovieProductionGenerationOrchestrator(
             plan.ProcessingPath,
             plan.QualityTier,
             snapshot.SnapshotHash,
-            SelectedProviderKey: provider.Key);
+            SelectedProviderKey: provider.Key,
+            CharacterContinuityJson: snapshot.SnapshotJson);
 
         GenerationJob job;
         try
