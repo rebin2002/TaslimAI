@@ -12,6 +12,84 @@ namespace Taslim.Api.Tests;
 
 public sealed class MovieSelectiveRegenerationAdmissionTests
 {
+
+    [Theory]
+    [InlineData(3601)]
+    [InlineData(7200)]
+    public async Task Selective_regeneration_rejects_legacy_oversized_shot_before_preview(int storedDuration)
+    {
+        // This provider deliberately declares 1..3600 seconds. The previous
+        // Math.Clamp converted an invalid stored shot into a different, priced
+        // 3600-second request that the provider would accept.
+        using var factory = new MovieClipNoClampApiFactory();
+        using (var setup = factory.Services.CreateScope())
+            setup.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+
+        using var client = factory.CreateClient();
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Reject selective preview truncation", sceneDurationSeconds: 5);
+        var sourceId = await ApprovedStoryboardAsync(client, fixture.Shot.Id);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var shot = await db.MovieShots.SingleAsync(item => item.Id == fixture.Shot.Id);
+        shot.DurationSeconds = storedDuration; // Simulate historical persisted data.
+        await db.SaveChangesAsync();
+        var usageBefore = await db.UsageTransactions.CountAsync();
+
+        using var rejected = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post,
+            $"/api/movie-studio/shots/{fixture.Shot.Id}/regeneration-requests",
+            Request(sourceId));
+        Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
+        Assert.Contains("MOVIE_CLIP_DURATION_UNSUPPORTED",
+            await rejected.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.False(await db.MovieRegenerationRequests.AnyAsync(item => item.MovieShotId == fixture.Shot.Id));
+        Assert.False(await db.MovieClips.AnyAsync(item => item.MovieProjectId == fixture.Project.Project.Id));
+        Assert.False(await db.GenerationJobs.AnyAsync(item => item.ProjectId == fixture.Project.Project.ProjectId));
+        Assert.Equal(usageBefore, await db.UsageTransactions.CountAsync());
+    }
+
+    [Theory]
+    [InlineData(3601)]
+    [InlineData(7200)]
+    public async Task Selective_regeneration_revalidates_unclamped_shot_at_confirmation(int storedDuration)
+    {
+        // The user only reviewed a five-second preview; later historical
+        // edits must not silently turn that confirmation into a 3600-second job.
+        using var factory = new MovieClipNoClampApiFactory();
+        using (var setup = factory.Services.CreateScope())
+            setup.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+
+        using var client = factory.CreateClient();
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Reject selective confirmation truncation", sceneDurationSeconds: 5);
+        var sourceId = await ApprovedStoryboardAsync(client, fixture.Shot.Id);
+        var preview = await MovieOperationalFixtures.PostAsync<MovieSelectiveRegenerationResponse>(
+            client, $"/api/movie-studio/shots/{fixture.Shot.Id}/regeneration-requests", Request(sourceId));
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var shot = await db.MovieShots.SingleAsync(item => item.Id == fixture.Shot.Id);
+        shot.DurationSeconds = storedDuration;
+        await db.SaveChangesAsync();
+        var usageBefore = await db.UsageTransactions.CountAsync();
+
+        using var rejected = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post,
+            $"/api/movie-studio/regeneration-requests/{preview.Request.Id}/confirm",
+            new { confirm = true });
+        Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
+        Assert.Contains("MOVIE_CLIP_DURATION_UNSUPPORTED",
+            await rejected.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Equal(MovieRegenerationStatuses.PendingConfirmation,
+            await db.MovieRegenerationRequests.Where(item => item.Id == preview.Request.Id)
+                .Select(item => item.Status).SingleAsync());
+        Assert.False(await db.MovieClips.AnyAsync(item => item.MovieProjectId == fixture.Project.Project.Id));
+        Assert.False(await db.GenerationJobs.AnyAsync(item => item.ProjectId == fixture.Project.Project.ProjectId));
+        Assert.Equal(usageBefore, await db.UsageTransactions.CountAsync());
+    }
+
     [Fact]
     public async Task Unsupported_priced_profile_rejects_preview_before_any_regeneration_or_usage_write()
     {
