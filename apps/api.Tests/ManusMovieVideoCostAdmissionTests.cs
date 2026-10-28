@@ -1,6 +1,7 @@
 using System.Net;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using Taslim.Api.Files;
 using Taslim.Api.Movies;
 using Xunit;
 
@@ -53,7 +54,28 @@ public sealed class ManusMovieVideoCostAdmissionTests
         Assert.Equal(0, handler.RequestCount);
     }
 
-    private static ManusMovieVideoProvider CreateProvider(HttpMessageHandler handler)
+    [Fact]
+    public async Task Unsupported_priced_scene_clip_does_not_resolve_source_image_host()
+    {
+        var handler = new RejectingHandler();
+        var urlPolicy = new CountingUrlPolicy();
+        var provider = CreateProvider(handler, urlPolicy);
+        var request = CreateRequest() with
+        {
+            TargetResolution = "1080p",
+            SourceImageUri = "https://assets.example.test/guide.png",
+        };
+
+        var failure = await Assert.ThrowsAsync<MovieVideoProviderException>(
+            () => provider.SubmitAsync(request, CancellationToken.None));
+
+        Assert.Equal(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, failure.Code);
+        Assert.False(failure.IsTransient);
+        Assert.Equal(0, urlPolicy.Calls);
+        Assert.Equal(0, handler.RequestCount);
+    }
+
+    private static ManusMovieVideoProvider CreateProvider(HttpMessageHandler handler, IProviderUrlPolicy? urlPolicy = null)
     {
         var options = new MovieVideoOptions
         {
@@ -70,7 +92,8 @@ public sealed class ManusMovieVideoCostAdmissionTests
         return new ManusMovieVideoProvider(
             new HttpClient(handler),
             Options.Create(options),
-            NullLogger<ManusMovieVideoProvider>.Instance);
+            NullLogger<ManusMovieVideoProvider>.Instance,
+            urlPolicy);
     }
 
     private static MovieVideoGenerationRequest CreateRequest() => new(
@@ -89,6 +112,17 @@ public sealed class ManusMovieVideoCostAdmissionTests
         null,
         null,
         null);
+
+    private sealed class CountingUrlPolicy : IProviderUrlPolicy
+    {
+        public int Calls { get; private set; }
+
+        public Task EnsureSafeAsync(Uri uri, CancellationToken cancellationToken = default)
+        {
+            Calls++;
+            return Task.CompletedTask;
+        }
+    }
 
     private sealed class RejectingHandler : HttpMessageHandler
     {
