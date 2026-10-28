@@ -77,6 +77,12 @@ public sealed class MovieDirectorIntercutControllerTests
         Assert.Equal(400, missingError.StatusCode);
 
         request.TimelineId = ownedTimelineId;
+        request.BaseTimelineVersion = 2;
+        var staleResult = await controller.CreateIntercutProposal(requestedProjectId, request, CancellationToken.None);
+        var staleError = Assert.IsType<ObjectResult>(staleResult);
+        Assert.Equal(409, staleError.StatusCode);
+
+        request.BaseTimelineVersion = 1;
         var ownedResult = await controller.CreateIntercutProposal(requestedProjectId, request, CancellationToken.None);
         var success = Assert.IsType<OkObjectResult>(ownedResult);
         var proposal = Assert.IsType<MovieIntercutPlanDto>(success.Value);
