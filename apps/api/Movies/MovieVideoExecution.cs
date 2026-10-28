@@ -135,6 +135,40 @@ public sealed class MovieVideoExecutionStore(TaslimDbContext db, IOptions<MovieV
         }
     }
 
+    /// <summary>
+    /// Reserve the one permitted provider submission durably before sending the
+    /// request. A crashed worker can lose a provider response (and job id), so a
+    /// later claimant must not assume it is safe to submit the same billable job.
+    /// Existing provider ids remain resumable through read-only polling.
+    /// </summary>
+    public async Task MarkSubmissionAttemptAsync(MovieVideoProviderExecution execution, Guid concurrencyToken, CancellationToken cancellationToken)
+    {
+        var now = DateTime.UtcNow;
+        var marked = await db.MovieVideoProviderExecutions
+            .Where(item => item.Id == execution.Id
+                && item.GenerationJobId == execution.GenerationJobId
+                && item.ProviderJobId == null
+                && item.AttemptCount == 0
+                && item.GenerationJob.Status == GenerationJobStatus.Running
+                && item.GenerationJob.ConcurrencyToken == concurrencyToken)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(item => item.AttemptCount, 1)
+                .SetProperty(item => item.UpdatedAt, now), cancellationToken);
+        if (marked == 1) return;
+
+        var stillOwned = await db.GenerationJobs.AsNoTracking()
+            .AnyAsync(item => item.Id == execution.GenerationJobId
+                && item.Status == GenerationJobStatus.Running
+                && item.ConcurrencyToken == concurrencyToken, cancellationToken);
+        if (!stillOwned) throw new MovieVideoStaleWorkerException();
+
+        // No confirmed provider id exists. Reconciliation is required; another
+        // paid submit could produce a duplicate even if the first worker failed.
+        throw new MovieVideoProviderException(
+            GenerationJobErrorCodes.MovieGenerationFailed, false,
+            "An earlier video submission may already be active. Reconcile its outcome before retrying.");
+    }
+
     public async Task PersistSubmittedAsync(MovieVideoProviderExecution execution, Guid concurrencyToken, string providerJobId, CancellationToken cancellationToken)
     {
         execution.ProviderJobId = providerJobId;
@@ -144,7 +178,6 @@ public sealed class MovieVideoExecutionStore(TaslimDbContext db, IOptions<MovieV
             .ExecuteUpdateAsync(setters => setters
                 .SetProperty(item => item.ProviderJobId, providerJobId)
                 .SetProperty(item => item.Status, MovieVideoExecutionStatuses.Queued)
-                .SetProperty(item => item.AttemptCount, item => item.AttemptCount + 1)
                 .SetProperty(item => item.UpdatedAt, now), cancellationToken);
         if (persisted == 0) throw new MovieVideoStaleWorkerException();
         await db.MovieClips.Where(item => item.Id == execution.MovieClipId && db.GenerationJobs.Any(job => job.Id == execution.GenerationJobId && job.Status == GenerationJobStatus.Running && job.ConcurrencyToken == concurrencyToken))
@@ -363,6 +396,11 @@ public sealed class MovieVideoGenerationJobHandler(
         {
             if (string.IsNullOrWhiteSpace(execution.ProviderJobId))
             {
+                // Persist the irreversible submit attempt before any outbound call.
+                // A fresh worker can poll a known provider id but cannot safely
+                // re-submit after an ambiguous crash or lost HTTP response.
+                await executions.MarkSubmissionAttemptAsync(
+                    execution, job.ConcurrencyToken, cancellationToken);
                 // A generation submit may have reached a billable provider even if
                 // its HTTP response was lost. Without a provider-confirmed
                 // idempotency contract, retrying here could create a second task.
