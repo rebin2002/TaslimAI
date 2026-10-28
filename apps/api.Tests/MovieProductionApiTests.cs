@@ -355,6 +355,70 @@ public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWork
         Assert.Equal(0, await db.MovieTakes.CountAsync(item => item.MovieShotId == shot.Id));
     }
     [Fact]
+    public async Task Production_render_without_enabled_video_route_creates_no_job_clip_or_usage()
+    {
+        // This host has no configured video adapter: preflight must fail closed
+        // without ever creating billable work, even with all reference approvals.
+        using var client = factory.CreateClient();
+        var auth = await Register(client);
+        var project = await SendWithCsrf<MovieStudioProjectResponse>(client, HttpMethod.Post, "/api/movie-studio/projects", new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            mode = MovieProjectModes.Quick,
+            title = "No provider production",
+            description = "Unconfigured production video must not queue.",
+            durationSeconds = 24,
+            aspectRatio = "16:9",
+            style = "cinematic",
+            language = "en",
+        });
+        var scene = await SendWithCsrf<MovieSceneDto>(client, HttpMethod.Post,
+            $"/api/movie-studio/projects/{project.Project.Id}/scenes", new { title = "Opening", summary = "A protected opening." });
+        var shot = await SendWithCsrf<MovieShotDto>(client, HttpMethod.Post,
+            $"/api/movie-studio/scenes/{scene.Id}/shots", new { description = "A locked-off street wide shot." });
+        var storyboard = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post,
+            $"/api/movie-studio/shots/{shot.Id}/production/versions", new { stage = MovieProductionStages.StoryboardCandidate, compositionJson = "{}" });
+        var approvedStoryboard = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post,
+            $"/api/movie-studio/production/versions/{storyboard.Id}/review", new { approve = true });
+        var keyframe = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post,
+            $"/api/movie-studio/shots/{shot.Id}/production/versions",
+            new { stage = MovieProductionStages.ProductionKeyframe, sourceVersionId = approvedStoryboard.Id, compositionJson = "{}" });
+        var approvedKeyframe = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post,
+            $"/api/movie-studio/production/versions/{keyframe.Id}/review", new { approve = true });
+        var motion = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post,
+            $"/api/movie-studio/shots/{shot.Id}/production/motion-preview", new { sourceVersionId = approvedKeyframe.Id });
+        var approvedMotion = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post,
+            $"/api/movie-studio/production/versions/{motion.Id}/review", new { approve = true });
+
+        int clipsBefore, jobsBefore, usageBefore, versionsBefore;
+        using (var beforeScope = factory.Services.CreateScope())
+        {
+            var db = beforeScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            clipsBefore = await db.MovieClips.CountAsync(item => item.MovieProjectId == project.Project.Id);
+            jobsBefore = await db.GenerationJobs.CountAsync(item => item.WorkspaceId == auth.PersonalWorkspace.Id);
+            usageBefore = await db.UsageTransactions.CountAsync(item => item.WorkspaceId == auth.PersonalWorkspace.Id);
+            versionsBefore = await db.MovieProductionVersions.CountAsync(item => item.MovieShotId == shot.Id);
+        }
+
+        using var rejected = await SendWithCsrf(client, HttpMethod.Post,
+            $"/api/movie-studio/shots/{shot.Id}/production/render",
+            new { sourceVersionId = approvedMotion.Id, label = "Must not queue" });
+        Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
+        using var error = JsonDocument.Parse(await rejected.Content.ReadAsStringAsync());
+        Assert.Equal("MOVIE_PROVIDER_UNAVAILABLE",
+            error.RootElement.GetProperty("error").GetProperty("code").GetString());
+
+        using var verifyScope = factory.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.Equal(clipsBefore, await verifyDb.MovieClips.CountAsync(item => item.MovieProjectId == project.Project.Id));
+        Assert.Equal(jobsBefore, await verifyDb.GenerationJobs.CountAsync(item => item.WorkspaceId == auth.PersonalWorkspace.Id));
+        Assert.Equal(usageBefore, await verifyDb.UsageTransactions.CountAsync(item => item.WorkspaceId == auth.PersonalWorkspace.Id));
+        Assert.Equal(versionsBefore, await verifyDb.MovieProductionVersions.CountAsync(item => item.MovieShotId == shot.Id));
+        Assert.False(await verifyDb.MovieProductionVersions.AnyAsync(item =>
+            item.MovieShotId == shot.Id && item.Stage == MovieProductionStages.ProductionRender));
+    }
+
+    [Fact]
     public async Task Selective_regeneration_requires_confirmation_preserves_history_and_invalidates_downstream()
     {
         using var client = factory.CreateClient();
