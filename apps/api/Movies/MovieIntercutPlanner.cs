@@ -80,7 +80,9 @@ public static class MovieIntercutPlanner
 {
     private const int MaxClips = 10_000;
     private const decimal MaxClipDurationSeconds = 3_600m;
-    private const decimal MaxTimelineDurationSeconds = 3_600m;
+    // This is the assembled film timeline, NOT a single paid provider submission.
+    // Keep MaxClipDurationSeconds independent from the two-hour film cap.
+    private const decimal MaxTimelineDurationSeconds = 7_200m;
 
     public static MovieIntercutPlanDto Build(Guid movieProjectId, MovieIntercutPlanRequest request)
     {
@@ -223,7 +225,7 @@ public static class MovieIntercutPlanner
 
         var totalDuration = candidates.Sum(item => item.DurationSeconds);
         if (totalDuration > MaxTimelineDurationSeconds)
-            throw new MovieIntercutPlanningException(MovieIntercutPlanCodes.DurationInvalid, "The proposed timeline exceeds the supported 3,600-second duration.");
+            throw new MovieIntercutPlanningException(MovieIntercutPlanCodes.DurationInvalid, "The proposed timeline exceeds the supported 7,200-second duration.");
         var knownShots = candidates.Select(item => item.MovieShotId).ToHashSet();
         if (candidates.Any(item => item.AnchorShotId.HasValue && !knownShots.Contains(item.AnchorShotId.Value)))
             throw new MovieIntercutPlanningException(MovieIntercutPlanCodes.AnchorInvalid, "Every intercut anchor must reference a shot in the same proposal.");
