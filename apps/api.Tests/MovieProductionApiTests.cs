@@ -367,6 +367,12 @@ public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWork
         Assert.NotNull(queuedInput);
         Assert.Equal(scope.ServiceProvider.GetRequiredService<IMovieVideoProvider>().Key,
             queuedInput.SelectedProviderKey);
+        // The previously captured character bible must travel with the job,
+        // not merely live on the clip record where the provider cannot see it.
+        var queuedClip = await db.MovieClips.AsNoTracking()
+            .SingleAsync(item => item.Id == render.ClipId);
+        Assert.False(string.IsNullOrWhiteSpace(queuedInput.CharacterContinuityJson));
+        Assert.Equal(queuedClip.ContinuitySnapshotJson, queuedInput.CharacterContinuityJson);
 
         var versionsBefore = await db.MovieProductionVersions.CountAsync(item => item.MovieShotId == shot.Id);
         var clipsBefore = await db.MovieClips.CountAsync(item => item.MovieShotId == shot.Id);
