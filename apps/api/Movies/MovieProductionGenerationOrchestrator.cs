@@ -155,6 +155,14 @@ public sealed class MovieProductionGenerationOrchestrator(
         ValidateProductionClipAdmission(provider, durationSeconds, plan.SourceResolution,
             plan.TargetResolution, plan.QualityTier, plan.ProcessingPath,
             shot.Scene.MovieProject.AspectRatio);
+        // This necessary prompt-capacity check is intentionally before any
+        // preflight, cost estimate, job or usage writes. The adapter still
+        // validates the *complete* assembled prompt at submission time.
+        if (provider.SceneClipPromptMaxCharacters is { } promptCapacity
+            && shot.Description.Trim().Length > promptCapacity)
+            throw new MovieProductionValidationException(
+                "MOVIE_CLIP_PROMPT_UNSUPPORTED",
+                "The shot description exceeds this provider's prompt limit. Shorten it before rendering.");
 
         var preflightResult = await productionPreflight.EvaluateAsync(
             userId,
