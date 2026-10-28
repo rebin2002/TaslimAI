@@ -39,6 +39,8 @@ public sealed class RunwayMovieVideoProvider(
     public IReadOnlyCollection<string> SupportedOperations => Operations;
     // Mirrors the existing BuildPayload duration gate; no new provider API claim.
     public MovieClipDurationRange? SceneClipDurationRange => new(2, 10);
+    // Must remain equal to the BuildPrompt limit below.
+    public int? SceneClipPromptMaxCharacters => 1000;
 
     // Current BuildPayload sends fixed 1280:720 or 720:1280 and does not
     // translate paid quality/upscale tiers. Permit only the unenhanced 720p
