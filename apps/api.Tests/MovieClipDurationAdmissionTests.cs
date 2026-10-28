@@ -195,6 +195,27 @@ public sealed class MovieClipDurationAdmissionTests : IClassFixture<MovieClipDur
         using var client = promptFactory.CreateClient();
         var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
             client, title: "Oversized production prompt admission", sceneDurationSeconds: 5);
+        var shotId = fixture.Shot.Id;
+        var storyboard = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
+            client, $"/api/movie-studio/shots/{shotId}/production/versions",
+            new { stage = MovieProductionStages.StoryboardCandidate,
+                compositionJson = "{\"frame\":\"wide\"}" });
+        var approvedStoryboard = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
+            client, $"/api/movie-studio/production/versions/{storyboard.Id}/review",
+            new { approve = true });
+        var keyframe = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
+            client, $"/api/movie-studio/shots/{shotId}/production/versions",
+            new { stage = MovieProductionStages.ProductionKeyframe,
+                sourceVersionId = approvedStoryboard.Id, compositionJson = "{\"frame\":\"approved\"}" });
+        var approvedKeyframe = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
+            client, $"/api/movie-studio/production/versions/{keyframe.Id}/review",
+            new { approve = true });
+        var motion = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
+            client, $"/api/movie-studio/shots/{shotId}/production/motion-preview",
+            new { sourceVersionId = approvedKeyframe.Id });
+        var approvedMotion = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
+            client, $"/api/movie-studio/production/versions/{motion.Id}/review",
+            new { approve = true });
         using var scope = promptFactory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
         var countBefore = await db.UsageTransactions.CountAsync();
@@ -202,11 +223,11 @@ public sealed class MovieClipDurationAdmissionTests : IClassFixture<MovieClipDur
 
         using var rejected = await MovieOperationalFixtures.SendWithCsrfAsync(
             client, HttpMethod.Post, $"/api/movie-studio/shots/{fixture.Shot.Id}/production/render",
-            new { sourceVersionId = Guid.NewGuid(), label = "Unsupported description", confirmationAccepted = true },
+            new { sourceVersionId = approvedMotion.Id, label = "Unsupported description", confirmationAccepted = true },
             idempotencyKey: "production-prompt-overflow-admission");
-        // Without an approved source, the existing source workflow gate must
-        // win before the prompt-capacity gate; no speculative resources may exist.
         Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
+        Assert.Contains("MOVIE_CLIP_PROMPT_UNSUPPORTED",
+            await rejected.Content.ReadAsStringAsync(), StringComparison.Ordinal);
         Assert.False(await db.MovieClips.AnyAsync(item => item.MovieProjectId == fixture.Project.Project.Id));
         Assert.False(await db.GenerationJobs.AnyAsync(item => item.IdempotencyKey == "production-prompt-overflow-admission"));
         Assert.Equal(versionCountBefore, await db.MovieProductionVersions.CountAsync());
