@@ -812,6 +812,9 @@ public interface IMovieVideoProvider
     // be submitted faithfully. Null means no safe early length assertion.
     // Providers still validate the assembled prompt before outbound submission.
     int? SceneClipPromptMaxCharacters => null;
+    // Account for adapter-inserted section labels and newlines before queueing
+    // potentially billable work. Unknown adapters default to zero overhead.
+    int SceneClipPromptFormattingOverheadCharacters => 0;
     // Some adapters include the full world-continuity snapshot in the paid
     // prompt. Opt in only when the adapter actually sends that field so
     // admission and worker checks use the same conservative prompt budget.
