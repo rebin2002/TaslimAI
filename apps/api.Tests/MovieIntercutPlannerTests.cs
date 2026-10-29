@@ -141,6 +141,33 @@ public sealed class MovieIntercutPlannerTests
     }
 
     [Fact]
+    public void Different_primary_shots_cannot_claim_the_same_canonical_story_position()
+    {
+        // A deterministic clip-ID tie breaker is not a valid editorial story order.
+        // Reject duplicated (scene sequence, shot sequence) slots even if shot IDs differ.
+        var request = new MovieIntercutPlanRequest
+        {
+            Clips =
+            [
+                Coverage(PrimaryOne, ShotOne, SceneOne, 1, 1, 2m, MovieIntercutCoverageKinds.Primary),
+                Coverage(PrimaryTwo, ShotTwo, SceneOne, 1, 1, 2m, MovieIntercutCoverageKinds.Primary),
+            ],
+        };
+
+        var invalid = Assert.Throws<MovieIntercutPlanningException>(() => MovieIntercutPlanner.Build(ProjectId, request));
+        Assert.Equal(MovieIntercutPlanCodes.StoryOrderInvalid, invalid.Code);
+
+        // Shot sequence numbers repeat legitimately across distinct scenes.
+        request.Clips =
+        [
+            Coverage(PrimaryOne, ShotOne, SceneOne, 1, 1, 2m, MovieIntercutCoverageKinds.Primary),
+            Coverage(PrimaryTwo, ShotTwo, SceneTwo, 2, 1, 2m, MovieIntercutCoverageKinds.Primary),
+        ];
+        var valid = MovieIntercutPlanner.Build(ProjectId, request);
+        Assert.Equal(new[] { PrimaryOne, PrimaryTwo }, valid.ProposedTimeline.Clips.Select(item => item.ClipId));
+    }
+
+    [Fact]
     public void Invalid_anchor_and_duplicate_primary_are_blocked_before_a_proposal_is_created()
     {
         var invalidAnchor = new MovieIntercutPlanRequest
