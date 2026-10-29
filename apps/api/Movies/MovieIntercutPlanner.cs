@@ -31,6 +31,7 @@ public static class MovieIntercutPlanCodes
     public const string TimelineVersionInvalid = "MOVIE_INTERCUT_TIMELINE_VERSION_INVALID";
     public const string ClipRequired = "MOVIE_INTERCUT_CLIP_REQUIRED";
     public const string ClipDuplicate = "MOVIE_INTERCUT_CLIP_DUPLICATE";
+    public const string ClipOwnershipMismatch = "MOVIE_INTERCUT_CLIP_OWNERSHIP_MISMATCH";
     public const string ShotRequired = "MOVIE_INTERCUT_SHOT_REQUIRED";
     public const string SceneRequired = "MOVIE_INTERCUT_SCENE_REQUIRED";
     public const string StoryOrderInvalid = "MOVIE_INTERCUT_STORY_ORDER_INVALID";
