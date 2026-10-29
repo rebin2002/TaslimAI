@@ -206,7 +206,10 @@ public sealed class MovieCollaborationService(TaslimDbContext db, WorkspaceAcces
     {
         var assignment = await db.MovieProductionAssignments.FirstOrDefaultAsync(item => item.Id == assignmentId && item.MovieProjectId == movieProjectId, cancellationToken);
         if (assignment is null) return null;
-        if (assignment.AssigneeUserId != userId) await authorization.RequireAsync(userId, movieProjectId, MovieOperationalActions.TeamManagement, cancellationToken);
+        if (assignment.AssigneeUserId != userId)
+            await authorization.RequireAsync(userId, movieProjectId, MovieOperationalActions.TeamManagement, cancellationToken);
+        else if (!await access.HasPermissionAsync(userId, movieProjectId, MoviePermissions.View, cancellationToken))
+            throw new MovieCollaborationForbiddenException();
         ValidateAssignment(assignment.Title, request.Description, request.Status);
         assignment.Status = request.Status.Trim();
         assignment.Description = MovieStudioHelpers.Clean(request.Description);
