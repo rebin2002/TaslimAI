@@ -72,9 +72,42 @@ public sealed class MovieDirectorController(IMovieDirectorService director, IMov
                     throw new MovieIntercutPlanningException(MovieIntercutPlanCodes.TimelineVersionMismatch, "The intercut timeline revision has changed; refresh the timeline before planning.");
             }
 
-            // Intercut planning is deliberately a pure proposal seam. It does not create a
-            // timeline revision, enqueue a job, publish media, or charge usage.
-            return Ok(MovieIntercutPlanner.Build(movieProjectId, request));
+            // Pure validation bounds the request before any database lookup; this is still
+            // review-only and never enqueues, persists, publishes media, or reserves usage.
+            var proposal = MovieIntercutPlanner.Build(movieProjectId, request);
+            var requestedClipIds = request.Clips.Select(item => item.ClipId).ToArray();
+            var canonicalClips = await db.MovieClips.AsNoTracking()
+                .Where(clip => requestedClipIds.Contains(clip.Id))
+                .Select(clip => new
+                {
+                    clip.Id,
+                    clip.MovieProjectId,
+                    clip.MovieSceneId,
+                    clip.MovieShotId,
+                    SceneProjectId = clip.MovieScene != null ? (Guid?)clip.MovieScene.MovieProjectId : null,
+                    SceneSequence = clip.MovieScene != null ? (int?)clip.MovieScene.Sequence : null,
+                    ShotSceneId = clip.MovieShot != null ? (Guid?)clip.MovieShot.MovieSceneId : null,
+                    ShotSequence = clip.MovieShot != null ? (int?)clip.MovieShot.Sequence : null,
+                })
+                .ToDictionaryAsync(clip => clip.Id, cancellationToken);
+            if (canonicalClips.Count != request.Clips.Count ||
+                request.Clips.Any(item =>
+                    !canonicalClips.TryGetValue(item.ClipId, out var clip)
+                    || clip.MovieProjectId != movieProjectId
+                    || clip.MovieSceneId != item.MovieSceneId
+                    || clip.MovieShotId != item.MovieShotId
+                    || clip.SceneProjectId != movieProjectId
+                    || clip.ShotSceneId != item.MovieSceneId
+                    || clip.SceneSequence != item.SceneSequence
+                    || clip.ShotSequence != item.ShotSequence))
+                throw new MovieIntercutPlanningException(MovieIntercutPlanCodes.ClipOwnershipMismatch, "Intercut coverage must reference canonical clips, shots, and scenes in the requested movie project.");
+
+            // The pure planner cannot check database ownership; the controller has now verified it.
+            var verifiedFindings = proposal.Findings
+                .Where(item => item != "canonical_clip_and_shot_ownership_not_verified_in_review_only_proposal")
+                .Append("canonical_clip_shot_scene_ownership_verified")
+                .ToArray();
+            return Ok(proposal with { Findings = verifiedFindings });
         }
         catch (MovieIntercutPlanningException exception) { return ApiResults.Error(this, exception.Code == MovieIntercutPlanCodes.TimelineVersionMismatch ? 409 : 400, exception.Code, exception.Message); }
     }
