@@ -21,7 +21,7 @@ describe("Full Movie draft duration editor", () => {
     expect(editor).toContain("Number.isSafeInteger(number)");
     expect(editor).toContain("type=\"number\"");
     expect(editor).toContain("max={7200}");
-    expect(editor).toContain("editing an established timeline");
+    expect(editor).toContain("Editing an established timeline requires a separately reviewed replan.");
   });
 
   it("checks the returned persisted project, refreshes the read model and localizes copy", () => {
