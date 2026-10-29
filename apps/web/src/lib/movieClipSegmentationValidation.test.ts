@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { MovieClipSegmentationPreview } from "./api";
-import { isConsistentMovieClipSegmentation } from "./movieClipSegmentationValidation";
+import { isConsistentMovieClipSegmentation, isConsistentMovieSceneClipSegmentation } from "./movieClipSegmentationValidation";
 
 const preview = (overrides: Partial<MovieClipSegmentationPreview> = {}): MovieClipSegmentationPreview => ({
   movieProjectId: "test-project",
@@ -93,5 +93,70 @@ describe("Movie Studio provider-neutral segmentation preview integrity", () => {
     for (const variant of variants) {
       expect(isConsistentMovieClipSegmentation(preview(variant))).toBe(false);
     }
+  });
+});
+
+describe("Movie Studio scene-aware read-only preview integrity", () => {
+  const firstId = "11111111-1111-4111-8111-111111111111";
+  const secondId = "22222222-2222-4222-8222-222222222222";
+  const aligned = (): MovieClipSegmentationPreview => preview({
+    canSplitByScene: true,
+    sceneSegments: [
+      { sceneId: firstId, sceneSequence: 1, clipSequence: 1,
+        timelineStartSeconds: 0, sceneOffsetSeconds: 0, durationSeconds: 6 },
+      { sceneId: secondId, sceneSequence: 2, clipSequence: 2,
+        timelineStartSeconds: 6, sceneOffsetSeconds: 0, durationSeconds: 5 },
+    ],
+  });
+
+  it("accepts exact scene boundaries and older API responses without optional fields", () => {
+    expect(isConsistentMovieSceneClipSegmentation(aligned())).toBe(true);
+    expect(isConsistentMovieSceneClipSegmentation(preview())).toBe(true);
+    expect(isConsistentMovieSceneClipSegmentation(preview({
+      canSplitByScene: false, sceneSegments: [],
+    }))).toBe(true);
+  });
+
+  it("rejects malformed or invented scene claims before showing an aligned plan", () => {
+    const variants = [
+      { canSplitByScene: true, sceneSegments: [] },
+      { canSplitByScene: false, sceneSegments: aligned().sceneSegments },
+      { canSplitByScene: "true", sceneSegments: aligned().sceneSegments },
+      { canSplitByScene: true, sceneSegments: [null] },
+      { canSplitByScene: true, sceneSegments: [{ ...aligned().sceneSegments![0], sceneId: "not-a-guid" }] },
+    ] as unknown as Array<Partial<MovieClipSegmentationPreview>>;
+    for (const variant of variants) {
+      expect(isConsistentMovieSceneClipSegmentation(preview(variant))).toBe(false);
+    }
+  });
+
+  it("rejects missing seconds, gaps, repeated scenes and inconsistent scene offsets", () => {
+    const initial = aligned();
+    const slots = initial.sceneSegments!;
+    const badPlans = [
+      [{ ...slots[0], durationSeconds: 5 }, slots[1]],
+      [slots[0], { ...slots[1], timelineStartSeconds: 7 }],
+      [slots[0], { ...slots[1], clipSequence: 3 }],
+      [slots[0], { ...slots[1], sceneOffsetSeconds: 6 }],
+      [slots[0], { ...slots[1], sceneId: firstId, sceneSequence: 2 }],
+      [slots[0], { ...slots[1], sceneSequence: 1 }],
+      [slots[0], { ...slots[1], durationSeconds: 6 }],
+    ];
+    for (const sceneSegments of badPlans) {
+      expect(isConsistentMovieSceneClipSegmentation({
+        ...initial, sceneSegments,
+      })).toBe(false);
+    }
+  });
+
+  it("accepts consecutive slots within one scene with matching relative offsets", () => {
+    const oneScene = aligned();
+    oneScene.sceneSegments = [
+      { sceneId: firstId, sceneSequence: 1, clipSequence: 1,
+        timelineStartSeconds: 0, sceneOffsetSeconds: 0, durationSeconds: 6 },
+      { sceneId: firstId, sceneSequence: 1, clipSequence: 2,
+        timelineStartSeconds: 6, sceneOffsetSeconds: 6, durationSeconds: 5 },
+    ];
+    expect(isConsistentMovieSceneClipSegmentation(oneScene)).toBe(true);
   });
 });
