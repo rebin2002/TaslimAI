@@ -1373,7 +1373,8 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                 // The linked-clip fast path must enforce the same request-identity
                 // boundary as job creation. Otherwise, reusing a key with a
                 // different title silently returns the first user's generation.
-                if (!MovieStudioIdempotency.MatchesRequest(existingClip.GenerationJob, movie, scene, shot, request))
+                if (!MovieStudioIdempotency.MatchesRequest(existingClip.GenerationJob, movie, scene, shot, request)
+                    || !await LegacyContinuityMatchesAsync(existingClip.GenerationJob, movie, scene, shot, cancellationToken))
                     throw new GenerationJobValidationException("IDEMPOTENCY_KEY_REUSED", "This idempotency key was already used for a different generation request.");
                 return new MovieStudioGenerationResponse(
                     await GetAsync(userId, movie.Id, cancellationToken) ?? throw new InvalidOperationException("Movie project disappeared."),
@@ -1393,7 +1394,8 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                 try { existingInput = JsonSerializer.Deserialize<MovieGenerationInput>(existingJob.InputJson); }
                 catch (JsonException) { existingInput = null; }
                 if (existingInput is null
-                    || !MovieStudioIdempotency.MatchesRequest(existingJob, movie, scene, shot, request, existingInput))
+                    || !MovieStudioIdempotency.MatchesRequest(existingJob, movie, scene, shot, request, existingInput)
+                    || !await LegacyContinuityMatchesAsync(existingJob, movie, scene, shot, cancellationToken))
                     throw new GenerationJobValidationException("IDEMPOTENCY_KEY_REUSED", "This idempotency key was already used for a different generation request.");
                 var canonicalClip = await db.MovieClips.SingleOrDefaultAsync(item => item.Id == existingInput.MovieClipId && item.MovieProjectId == movie.Id, cancellationToken);
                 if (canonicalClip is null)
@@ -1602,7 +1604,8 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
             }
             if (canonicalJob is null
                 || canonicalInput is null
-                || !MovieStudioIdempotency.MatchesRequest(canonicalJob, movie, scene, shot, request, canonicalInput))
+                || !MovieStudioIdempotency.MatchesRequest(canonicalJob, movie, scene, shot, request, canonicalInput)
+                || !await LegacyContinuityMatchesAsync(canonicalJob, movie, scene, shot, cancellationToken))
             {
                 // A competing, different request may commit its job after our
                 // initial key lookup. Do not strand this request's persisted
@@ -1646,6 +1649,13 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         // same job to a second clip row.
         if (MovieStudioIdempotency.TryGetMovieClipId(job.InputJson, out var canonicalClipId) && canonicalClipId != clip.Id)
         {
+            if (!await LegacyContinuityMatchesAsync(job, movie, scene, shot, cancellationToken))
+            {
+                db.MovieClips.Remove(clip);
+                await db.SaveChangesAsync(CancellationToken.None);
+                throw new GenerationJobValidationException("IDEMPOTENCY_KEY_REUSED",
+                    "This idempotency key was already used for a different generation request.");
+            }
             var canonicalClip = await db.MovieClips.SingleOrDefaultAsync(
                 item => item.Id == canonicalClipId && item.MovieProjectId == movie.Id,
                 cancellationToken);
@@ -1676,6 +1686,27 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         clip.GenerationJobId = job.Id;
         await db.SaveChangesAsync(cancellationToken);
         return new MovieStudioGenerationResponse(await GetAsync(userId, movie.Id, cancellationToken) ?? throw new InvalidOperationException("Movie project disappeared."), GenerationJobContractMapper.ToMovieDto(job), clip.Id);
+    }
+
+    // Legacy scene/shot clips persist the character-continuity snapshot in
+    // ContinuityGuideJson. Replaying a priced job after editing a relevant
+    // character card must not silently reuse a video with stale continuity.
+    // This preview is read-only and cannot reserve usage or call a provider.
+    private async Task<bool> LegacyContinuityMatchesAsync(
+        GenerationJob job, MovieProject movie, MovieScene scene, MovieShot? shot,
+        CancellationToken cancellationToken)
+    {
+        MovieGenerationInput? input;
+        try { input = JsonSerializer.Deserialize<MovieGenerationInput>(job.InputJson); }
+        catch (JsonException) { return false; }
+        if (input is null) return false;
+        // Older serialized jobs without this optional field retain their
+        // original replay semantics rather than being retroactively invalidated.
+        if (input.ContinuityGuideJson is null) return true;
+
+        var current = await continuity.BuildSnapshotForTargetAsync(
+            movie.Id, scene.Id, shot?.Id, persist: false, cancellationToken);
+        return string.Equals(input.ContinuityGuideJson, current.SnapshotJson, StringComparison.Ordinal);
     }
 
     private IQueryable<MovieProject> Query() => db.MovieProjects.AsNoTracking().AsSplitQuery()
