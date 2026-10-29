@@ -1,3 +1,5 @@
+using System.Buffers.Binary;
+using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
 using Taslim.Api.Ai;
@@ -102,6 +104,11 @@ public sealed record MusicOutputInfo(string ContentType, string Format);
 
 public static class MusicOutputInspector
 {
+    private static readonly IReadOnlySet<string> SupportedM4aBrands = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        "M4A ", "M4B ", "isom", "iso2", "mp41", "mp42",
+    };
+
     private static readonly IReadOnlyDictionary<string, string> Supported = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
     {
         ["audio/mpeg"] = "mp3",
@@ -132,9 +139,20 @@ public static class MusicOutputInspector
         "mp3" => content.Length >= 4 && ((content[..3].SequenceEqual("ID3"u8) && content.Length >= 10) || (content[0] == 0xFF && (content[1] & 0xE0) == 0xE0)),
         "wav" => content.Length >= 12 && content[..4].SequenceEqual("RIFF"u8) && content.Slice(8, 4).SequenceEqual("WAVE"u8),
         "ogg" => content.Length >= 4 && content[..4].SequenceEqual("OggS"u8),
-        "m4a" => content.Length >= 12 && content.Slice(4, 4).SequenceEqual("ftyp"u8),
+        "m4a" => HasValidM4aFileTypeBox(content),
         "aac" => content.Length >= 2 && content[0] == 0xFF && (content[1] & 0xF6) == 0xF0,
         "flac" => content.Length >= 4 && content[..4].SequenceEqual("fLaC"u8),
         _ => false,
     };
+
+    private static bool HasValidM4aFileTypeBox(ReadOnlySpan<byte> content)
+    {
+        if (content.Length < 16 || !content.Slice(4, 4).SequenceEqual("ftyp"u8)) return false;
+
+        var boxSize = BinaryPrimitives.ReadUInt32BigEndian(content[..4]);
+        if (boxSize < 16 || boxSize > content.Length) return false;
+
+        var majorBrand = Encoding.ASCII.GetString(content.Slice(8, 4));
+        return SupportedM4aBrands.Contains(majorBrand);
+    }
 }
