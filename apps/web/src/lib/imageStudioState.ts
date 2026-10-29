@@ -49,6 +49,10 @@ export function shouldPollImageJob(job: GenerationJob | null) {
   return !!job && !isImageTerminal(job);
 }
 
+export function shouldClearImageJobAfterPollError(status: number | null | undefined) {
+  return status === 403 || status === 404;
+}
+
 export function nextImagePollDelay(job: GenerationJob | null, retryAttempt = 0) {
   if (!shouldPollImageJob(job)) return null;
   return Math.min(imageJobPollIntervalMs * Math.max(1, retryAttempt + 1), imageJobPollMaxDelayMs);

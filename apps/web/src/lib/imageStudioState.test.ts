@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GenerationJob } from "./api";
-import { canCancelImageJob, clearImageActiveJobId, imageActiveJobStorageKey, imageJobPollIntervalMs, imageJobPollMaxDelayMs, isImageJob, isImageTerminal, isRestorableImageJob, nextImagePollDelay, parseImageJobResult, persistImageActiveJobId, readImageActiveJobId, safeImageJobView, shouldPollImageJob, shouldResetImageWorkspaceState } from "./imageStudioState";
+import { canCancelImageJob, clearImageActiveJobId, imageActiveJobStorageKey, imageJobPollIntervalMs, imageJobPollMaxDelayMs, isImageJob, isImageTerminal, isRestorableImageJob, nextImagePollDelay, parseImageJobResult, persistImageActiveJobId, readImageActiveJobId, safeImageJobView, shouldClearImageJobAfterPollError, shouldPollImageJob, shouldResetImageWorkspaceState } from "./imageStudioState";
 
 function job(overrides: Partial<GenerationJob> = {}): GenerationJob {
   return {
@@ -40,6 +40,14 @@ describe("image studio state", () => {
     expect(isImageTerminal(job({ status: "Succeeded" }))).toBe(true);
     expect(shouldPollImageJob(job({ status: "Succeeded" }))).toBe(false);
     expect(nextImagePollDelay(job({ status: "Succeeded" }), 0)).toBeNull();
+  });
+
+  it("treats inaccessible active jobs as orphaned instead of retrying forever", () => {
+    expect(shouldClearImageJobAfterPollError(403)).toBe(true);
+    expect(shouldClearImageJobAfterPollError(404)).toBe(true);
+    expect(shouldClearImageJobAfterPollError(408)).toBe(false);
+    expect(shouldClearImageJobAfterPollError(500)).toBe(false);
+    expect(shouldClearImageJobAfterPollError(null)).toBe(false);
   });
 
   it("parses only the safe Asset result fields", () => {
