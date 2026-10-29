@@ -191,10 +191,11 @@ public sealed class MovieProductionPreflightTests : IClassFixture<GenerationJobs
     }
 
     [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
+    [InlineData(true, false)]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
     public async Task Read_only_preflight_fails_closed_for_missing_or_non_scene_clip_provider_capabilities(
-        bool missingDurationRange)
+        bool missingDurationRange, bool providerUnavailable)
     {
         // Real HTTP preview with a synthetic adapter: neither an unknown
         // single-clip duration contract nor a Quick-Movie-only adapter may
@@ -215,6 +216,9 @@ public sealed class MovieProductionPreflightTests : IClassFixture<GenerationJobs
             provider.SceneClipDurationRange = null;
         else
             provider.SupportedOperations = [MovieStudioOperations.QuickMovie];
+        if (providerUnavailable)
+            scope.ServiceProvider.GetRequiredService<FakeProviderScenarioCatalog>()[FakeProviderKind.Movie] =
+                FakeProviderScenario.AllProvidersUnavailable;
 
         var clipsBefore = await db.MovieClips.CountAsync();
         var jobsBefore = await db.GenerationJobs.CountAsync();
