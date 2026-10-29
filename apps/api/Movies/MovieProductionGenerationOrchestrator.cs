@@ -160,45 +160,12 @@ public sealed class MovieProductionGenerationOrchestrator(
         ValidateProductionClipAdmission(provider, durationSeconds, plan.SourceResolution,
             plan.TargetResolution, plan.QualityTier, plan.ProcessingPath,
             shot.Scene.MovieProject.AspectRatio);
-        // The production render prompt carries the render title as its main
-        // description, and includes the shot direction separately in ShotJson.
-        // Both configured video adapters also preserve style and additional
-        // instructions. Their combined creative text is a conservative lower
-        // bound; catch impossible prompts before preflight or usage reservation.
-        // Provider-specific headings and canonical snapshots remain subject to
-        // the complete prompt validation at submission time.
+        // Share the conservative prompt floor with the read-only preflight.
+        // Queue admission still validates an optional custom render title.
         var renderDescription = string.IsNullOrWhiteSpace(request.Title)
             ? shot.Scene.MovieProject.Title : request.Title.Trim();
-        // Each adapter assembles the title, project directions and these
-        // structured creative snapshots. Count the serialized payload as well:
-        // checking only the readable title/style leaves over-limit JSON
-        // directions to fail after the cost/usage reservation.
-        var guidePayload = shot.Scene.MovieProject.Guide is null ? null : JsonSerializer.Serialize(new
-        {
-            shot.Scene.MovieProject.Guide.VisualLanguage,
-            shot.Scene.MovieProject.Guide.CameraLanguage,
-            shot.Scene.MovieProject.Guide.ColorAndLighting,
-            shot.Scene.MovieProject.Guide.SoundAndNarration,
-            shot.Scene.MovieProject.Guide.ContinuityRules,
-        });
-        var scenePayload = JsonSerializer.Serialize(new
-        {
-            shot.Scene.Title, shot.Scene.Summary, shot.Scene.DurationSeconds,
-        });
-        var shotPayload = JsonSerializer.Serialize(new
-        {
-            shot.Description, shot.Purpose, shot.Subjects,
-            shot.CameraAndFraming, shot.CameraMotion, shot.DurationSeconds,
-        });
-        // These parts occur once in the adapter prompt; provider-specific
-        // headings and separators can only increase the final length.
-        var minimumCreativePromptLength = (long)renderDescription.Trim().Length
-            + (shot.Scene.MovieProject.Style?.Trim().Length ?? 0)
-            + (shot.Scene.MovieProject.AdditionalInstructions?.Trim().Length ?? 0)
-            + (guidePayload?.Length ?? 0)
-            + scenePayload.Length
-            + shotPayload.Length
-            + Math.Max(0, provider.SceneClipPromptFormattingOverheadCharacters);
+        var minimumCreativePromptLength = MinimumProductionPromptCharacters(
+            shot, renderDescription, provider);
         if (provider.SceneClipPromptMaxCharacters is { } promptCapacity
             && minimumCreativePromptLength > promptCapacity)
             throw new MovieProductionValidationException(
@@ -638,6 +605,39 @@ public sealed class MovieProductionGenerationOrchestrator(
             sourceResolution, targetResolution, qualityTier, processingPath, aspectRatio);
         if (rejection is not null)
             throw rejection;
+    }
+
+    // Excludes character continuity, which both preflight and queue check
+    // separately. The JSON properties and order match the video job payload.
+    internal static long MinimumProductionPromptCharacters(
+        MovieShot shot, string renderDescription, IMovieVideoProvider videoProvider)
+    {
+        var movie = shot.Scene.MovieProject;
+        var guide = movie.Guide;
+        var guidePayload = guide is null ? null : JsonSerializer.Serialize(new
+        {
+            guide.VisualLanguage,
+            guide.CameraLanguage,
+            guide.ColorAndLighting,
+            guide.SoundAndNarration,
+            guide.ContinuityRules,
+        });
+        var scenePayload = JsonSerializer.Serialize(new
+        {
+            shot.Scene.Title, shot.Scene.Summary, shot.Scene.DurationSeconds,
+        });
+        var shotPayload = JsonSerializer.Serialize(new
+        {
+            shot.Description, shot.Purpose, shot.Subjects,
+            shot.CameraAndFraming, shot.CameraMotion, shot.DurationSeconds,
+        });
+        return (long)renderDescription.Trim().Length
+            + (movie.Style?.Trim().Length ?? 0)
+            + (movie.AdditionalInstructions?.Trim().Length ?? 0)
+            + (guidePayload?.Length ?? 0)
+            + scenePayload.Length
+            + shotPayload.Length
+            + Math.Max(0, videoProvider.SceneClipPromptFormattingOverheadCharacters);
     }
 
     private static ProductionPlan BuildPlan(MovieShot shot, MovieProductionGenerationRequest request)

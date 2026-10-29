@@ -272,6 +272,49 @@ public sealed class MovieProductionPreflightTests : IClassFixture<GenerationJobs
     }
 
     [Fact]
+    public async Task Read_only_preflight_rejects_oversized_default_prompt_without_jobs_or_usage()
+    {
+        // Synthetic prompt cap: no paid adapter, background worker or debit.
+        using var isolatedFactory = new MovieClipDurationApiFactory();
+        using (var setup = isolatedFactory.Services.CreateScope())
+            setup.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+
+        using var client = isolatedFactory.CreateClient();
+        var movie = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Prompt capacity preview", sceneDurationSeconds: 5);
+        using var scope = isolatedFactory.Services.CreateScope();
+        var provider = Assert.IsType<FakeMovieVideoProvider>(
+            scope.ServiceProvider.GetRequiredService<IMovieVideoProvider>());
+        provider.SceneClipPromptMaxCharacters = 1;
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var snapshotsBefore = await db.MovieCharacterContinuitySnapshots.CountAsync();
+        var clipsBefore = await db.MovieClips.CountAsync();
+        var jobsBefore = await db.GenerationJobs.CountAsync();
+        var usageBefore = await db.UsageTransactions.CountAsync();
+        var callsBefore = scope.ServiceProvider.GetRequiredService<FakeProviderCallLog>()
+            .Calls(FakeProviderKind.Movie);
+
+        using var response = await client.GetAsync(
+            $"/api/movie-studio/shots/{movie.Shot.Id}/production/preflight?targetResolution=720p&qualityTier=Standard&confirmationAccepted=true");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var decision = (await response.Content.ReadFromJsonAsync<MovieProductionPreflightDto>())!;
+        Assert.False(decision.CanProceed);
+        Assert.Equal(MovieProductionPreflightDecisionCodes.PromptCapacityUnsupported, decision.Decision);
+        Assert.Equal("MOVIE_CLIP_PROMPT_UNSUPPORTED", decision.RejectionCode);
+        Assert.Contains(decision.Checks, check =>
+            check.Key == MovieProductionPreflightCheckKeys.PromptCapacity
+            && check.Required && !check.Satisfied);
+        Assert.Contains(decision.Recommendations, recommendation =>
+            recommendation.Key == "shorten_production_prompt");
+        Assert.Equal(snapshotsBefore, await db.MovieCharacterContinuitySnapshots.CountAsync());
+        Assert.Equal(clipsBefore, await db.MovieClips.CountAsync());
+        Assert.Equal(jobsBefore, await db.GenerationJobs.CountAsync());
+        Assert.Equal(usageBefore, await db.UsageTransactions.CountAsync());
+        Assert.Equal(callsBefore, scope.ServiceProvider.GetRequiredService<FakeProviderCallLog>()
+            .Calls(FakeProviderKind.Movie));
+    }
+
+    [Fact]
     public void Reference_package_check_fails_closed_when_package_is_unavailable()
     {
         // Null packages must not become "ready" simply because they cannot

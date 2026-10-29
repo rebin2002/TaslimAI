@@ -18,6 +18,7 @@ public static class MovieProductionPreflightDecisionCodes
     public const string ProviderUnavailable = "provider_unavailable";
     public const string ClipDurationUnsupported = "clip_duration_unsupported";
     public const string ExecutionIntentUnsupported = "execution_intent_unsupported";
+    public const string PromptCapacityUnsupported = "prompt_capacity_unsupported";
 }
 
 public static class MovieProductionPreflightCheckKeys
@@ -31,6 +32,7 @@ public static class MovieProductionPreflightCheckKeys
     public const string CostGuardrails = "cost_guardrails";
     public const string ProviderAdmission = "provider_admission";
     public const string ClipDuration = "clip_duration";
+    public const string PromptCapacity = "prompt_capacity";
 }
 
 public sealed record MovieProductionPreflightRequest(
@@ -141,6 +143,7 @@ public sealed class MovieProductionPreflightService(
     TaslimDbContext db,
     MovieCollaborationAccess collaboration,
     IMovieProductionReferencePackageService references,
+    IMovieCharacterContinuityService continuity,
     IMovieVideoProvider provider,
     IMovieGenerationCostEstimator costEstimator,
     IGenerationCostGuardrailService costGuardrails) : IMovieProductionPreflightService
@@ -152,7 +155,7 @@ public sealed class MovieProductionPreflightService(
         CancellationToken cancellationToken = default)
     {
         var shot = await db.MovieShots.AsNoTracking()
-            .Include(item => item.Scene).ThenInclude(item => item.MovieProject)
+            .Include(item => item.Scene).ThenInclude(item => item.MovieProject).ThenInclude(item => item.Guide)
             .Include(item => item.ProductionVersions)
             .FirstOrDefaultAsync(item => item.Id == shotId, cancellationToken);
         if (shot is null || !await collaboration.HasPermissionAsync(userId, shot.Scene.MovieProjectId, MoviePermissions.Generate, cancellationToken))
@@ -230,6 +233,24 @@ public sealed class MovieProductionPreflightService(
             "Video provider output capability", admissionError is null, true,
             admissionError?.Message ?? "The selected adapter supports this output profile and scene-clip operation."));
 
+        // A read-only, non-persisted continuity preview keeps the provider
+        // prompt floor consistent with actual queue admission. Any custom title
+        // supplied later remains subject to the queue's own validation.
+        var minimumPromptCharacters = MovieProductionGenerationOrchestrator.MinimumProductionPromptCharacters(
+            shot, shot.Scene.MovieProject.Title, provider);
+        var continuityPreview = await continuity.BuildSnapshotForTargetAsync(
+            shot.Scene.MovieProjectId, shot.Scene.Id, shot.Id,
+            persist: false, cancellationToken);
+        var totalPromptCharacters = minimumPromptCharacters + continuityPreview.SnapshotJson.Trim().Length;
+        var promptFits = provider.SceneClipPromptMaxCharacters is not { } promptLimit
+            || totalPromptCharacters <= promptLimit;
+        checks.Add(new MovieProductionPreflightCheckDto(
+            MovieProductionPreflightCheckKeys.PromptCapacity,
+            "Production prompt capacity", promptFits, true,
+            promptFits
+                ? "The current project prompt and character-continuity context fit the selected adapter's declared limit."
+                : "Shorten the project, shot or character-continuity directions before rendering."));
+
         // Preserve the source duration when valid; any invalid value is a
         // read-only estimate placeholder and cannot authorize an actual render.
         var durationSeconds = Math.Clamp(selectedDuration, 1, 3_600);
@@ -264,6 +285,10 @@ public sealed class MovieProductionPreflightService(
             recommendations = recommendations.Concat([
                 new MovieProductionPreflightRecommendationDto("choose_supported_video_profile",
                     "Choose a supported output profile", "The selected output quality or resolution cannot be executed as priced.")]).ToArray();
+        if (!promptFits)
+            recommendations = recommendations.Concat([
+                new MovieProductionPreflightRecommendationDto("shorten_production_prompt",
+                    "Shorten production directions", "The video adapter cannot fit the current creative and continuity context.")]).ToArray();
         var requiredChecksPassed = checks.Where(item => item.Required).All(item => item.Satisfied);
         // An unavailable or incompatible video adapter is a hard production
         // blocker even when reference work is incomplete. Report the actionable
@@ -277,7 +302,9 @@ public sealed class MovieProductionPreflightService(
                     ? MovieProductionPreflightDecisionCodes.ClipDurationUnsupported
                     : admissionError?.Code == "MOVIE_CLIP_EXECUTION_INTENT_UNSUPPORTED"
                         ? MovieProductionPreflightDecisionCodes.ExecutionIntentUnsupported
-                        : checks.Any(item => !item.Satisfied && item.Key is MovieProductionPreflightCheckKeys.Storyboard or MovieProductionPreflightCheckKeys.Keyframe or MovieProductionPreflightCheckKeys.MotionPreview or MovieProductionPreflightCheckKeys.ReferencePackage)
+                        : !promptFits
+                            ? MovieProductionPreflightDecisionCodes.PromptCapacityUnsupported
+                            : checks.Any(item => !item.Satisfied && item.Key is MovieProductionPreflightCheckKeys.Storyboard or MovieProductionPreflightCheckKeys.Keyframe or MovieProductionPreflightCheckKeys.MotionPreview or MovieProductionPreflightCheckKeys.ReferencePackage)
                             ? MovieProductionPreflightDecisionCodes.ReferenceWorkRequired
                             : !adaptiveSatisfied
                                 ? MovieProductionPreflightDecisionCodes.QualityReviewRequired
@@ -289,6 +316,8 @@ public sealed class MovieProductionPreflightService(
             ? "Cheap reference work, adaptive quality, provider capability, and server-side cost safety checks are ready for production."
             : decision == MovieProductionPreflightDecisionCodes.ClipDurationUnsupported
                 ? "Create shorter shots or use validated segmentation before production."
+                : decision == MovieProductionPreflightDecisionCodes.PromptCapacityUnsupported
+                    ? "Shorten creative directions or character continuity to fit the video adapter."
                 : decision == MovieProductionPreflightDecisionCodes.ReferenceWorkRequired
                     ? "Complete the recommended reference work before starting this expensive production pass."
                     : decision is MovieProductionPreflightDecisionCodes.ProviderUnavailable or MovieProductionPreflightDecisionCodes.ExecutionIntentUnsupported
@@ -301,6 +330,8 @@ public sealed class MovieProductionPreflightService(
                 ? "MOVIE_CLIP_DURATION_UNSUPPORTED"
                 : decision is MovieProductionPreflightDecisionCodes.ProviderUnavailable or MovieProductionPreflightDecisionCodes.ExecutionIntentUnsupported
                     ? admissionError!.Code
+                : decision == MovieProductionPreflightDecisionCodes.PromptCapacityUnsupported
+                    ? "MOVIE_CLIP_PROMPT_UNSUPPORTED"
                     : decision == MovieProductionPreflightDecisionCodes.CostConfirmationRequired
                         ? "GENERATION_CONFIRMATION_REQUIRED"
                         : guardrail.RejectionCode ?? "PRODUCTION_PREFLIGHT_REQUIRED";
