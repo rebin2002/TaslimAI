@@ -170,6 +170,36 @@ public sealed class S3CompatibleStorageDiagnosticsTests
         Assert.Empty(logger.Exceptions);
     }
 
+    [Fact]
+    public async Task Failed_put_does_not_log_untrusted_provider_error_code_or_exception_message()
+    {
+        // S3 error codes are upstream-controlled strings. Preserve the HTTP
+        // status and sanitized class without echoing arbitrary provider data.
+        const string privateMarker = "synthetic-private-provider-detail-DO-NOT-LOG";
+        var logger = new CapturingLogger();
+        var upstreamFailure = new AmazonS3Exception($"Upstream endpoint {privateMarker}")
+        {
+            StatusCode = HttpStatusCode.Forbidden,
+            ErrorCode = $"AccessDenied/{privateMarker}",
+        };
+        using var storage = new S3CompatibleFileStorageService(
+            new ThrowingObjectClient(upstreamFailure),
+            Options.Create(new Taslim.Api.Files.FileOptions { S3Bucket = "private-test-bucket" }),
+            logger);
+        using var content = new MemoryStream([1, 2, 3]);
+
+        await Assert.ThrowsAsync<FileStorageOperationException>(
+            () => storage.StoreAsync("private/test-object", content));
+
+        var message = Assert.Single(logger.Messages);
+        Assert.Contains("Operation=put", message, StringComparison.Ordinal);
+        Assert.Contains("StatusCode=403", message, StringComparison.Ordinal);
+        Assert.Contains("FailureClass=s3_auth_or_permission", message, StringComparison.Ordinal);
+        Assert.DoesNotContain(privateMarker, message, StringComparison.Ordinal);
+        Assert.DoesNotContain("ErrorCode=", message, StringComparison.Ordinal);
+        Assert.Empty(logger.Exceptions);
+    }
+
     private sealed class CapturingLogger : ILogger<S3CompatibleFileStorageService>
     {
         public List<string> Messages { get; } = [];
