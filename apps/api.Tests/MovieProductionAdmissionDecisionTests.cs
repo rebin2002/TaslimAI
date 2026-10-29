@@ -89,11 +89,9 @@ public sealed class MovieProductionAdmissionDecisionTests
             [FakeProviderKind.Movie] = FakeProviderScenario.AllProvidersUnavailable,
         };
         var calls = new FakeProviderCallLog();
-        var provider = CreateProvider(scenarios, calls)
-        {
-            SceneClipCostIntentSupported = false,
-            SceneClipDurationRange = null,
-        };
+        var provider = CreateProvider(scenarios, calls);
+        provider.SceneClipCostIntentSupported = false;
+        provider.SceneClipDurationRange = null;
 
         var rejection = Decide(provider, 7_200);
 
@@ -107,10 +105,8 @@ public sealed class MovieProductionAdmissionDecisionTests
     {
         var scenarios = new FakeProviderScenarioCatalog();
         var calls = new FakeProviderCallLog();
-        var provider = CreateProvider(scenarios, calls)
-        {
-            SceneClipCostIntentSupported = false,
-        };
+        var provider = CreateProvider(scenarios, calls);
+        provider.SceneClipCostIntentSupported = false;
 
         var rejection = Decide(provider, 5);
 
