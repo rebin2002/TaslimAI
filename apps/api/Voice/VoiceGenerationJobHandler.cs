@@ -85,11 +85,25 @@ public sealed class VoiceGenerationJobHandler(
     {
         if (generated.Content.Length <= 0 || generated.Content.Length > Math.Min(10 * 1_048_576, Math.Max(1, settings.MaxOutputBytes)))
             throw new VoiceOutputInvalidException();
-        if (string.IsNullOrWhiteSpace(generated.ContentType) || !generated.ContentType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase))
+        var contentType = generated.ContentType?.Trim().ToLowerInvariant();
+        var format = generated.Format?.Trim().ToLowerInvariant();
+        if (string.IsNullOrWhiteSpace(contentType) || !contentType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase))
             throw new VoiceOutputInvalidException();
-        if (!VoiceGenerationValues.Formats.Contains(generated.Format.Trim()))
+        if (string.IsNullOrWhiteSpace(format) || !VoiceGenerationValues.Formats.Contains(format) || !ContentTypeMatchesFormat(contentType, format))
             throw new VoiceOutputInvalidException();
     }
+
+    private static bool ContentTypeMatchesFormat(string contentType, string format) => contentType switch
+    {
+        "audio/aac" => format == "aac",
+        "audio/flac" => format == "flac",
+        "audio/mp4" => format == "m4a",
+        "audio/mpeg" or "audio/mp3" => format == "mp3",
+        "audio/ogg" => format is "ogg" or "opus",
+        "audio/wav" or "audio/x-wav" => format == "wav",
+        "audio/webm" => format == "webm",
+        _ => false,
+    };
 
     private static string BuildDefaultTitle(string text)
     {
