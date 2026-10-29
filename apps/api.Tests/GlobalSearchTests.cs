@@ -274,6 +274,61 @@ public sealed class GlobalSearchTests : IClassFixture<TaslimApiFactory>
     }
 
     [Fact]
+    public async Task Search_does_not_return_project_research_asset_metadata_to_workspace_members()
+    {
+        using var owner = factory.CreateClient();
+        var ownerResponse = await Register(owner, "Research Search Owner", $"research-search-owner-{Guid.NewGuid():N}@example.com");
+        var ownerAuth = await ownerResponse.Content.ReadFromJsonAsync<AuthResponse>();
+        Assert.NotNull(ownerAuth);
+        var project = await SendWithCsrf<ProjectDto>(owner, HttpMethod.Post, $"/api/workspaces/{ownerAuth!.PersonalWorkspace.Id}/projects", new { name = "Research search project" });
+
+        using var member = factory.CreateClient();
+        var memberResponse = await Register(member, "Research Search Member", $"research-search-member-{Guid.NewGuid():N}@example.com");
+        var memberAuth = await memberResponse.Content.ReadFromJsonAsync<AuthResponse>();
+        Assert.NotNull(memberAuth);
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.WorkspaceMembers.Add(new WorkspaceMember
+            {
+                Id = Guid.NewGuid(),
+                WorkspaceId = ownerAuth.PersonalWorkspace.Id,
+                UserId = memberAuth!.User.Id,
+                Role = WorkspaceRole.Member,
+                JoinedAt = DateTime.UtcNow,
+            });
+            var now = DateTime.UtcNow;
+            var reportFile = NewReadyFile(ownerAuth.PersonalWorkspace.Id, ownerAuth.User.Id, now, project.Id, conversationId: null);
+            reportFile.OriginalFileName = "private-research-report.pdf";
+            db.StoredFiles.Add(reportFile);
+            db.Assets.Add(new Asset
+            {
+                Id = Guid.NewGuid(),
+                WorkspaceId = ownerAuth.PersonalWorkspace.Id,
+                ProjectId = project.Id,
+                CreatedByUserId = ownerAuth.User.Id,
+                StoredFileId = reportFile.Id,
+                Name = "Research asset privacy search marker",
+                Description = "Private report metadata",
+                AssetType = AssetTypes.Research,
+                MimeType = reportFile.ContentType,
+                Status = AssetStatus.Active,
+                CreatedAt = now,
+                UpdatedAt = now,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var ownerSearch = await owner.GetFromJsonAsync<GlobalSearchResponseDto>("/api/search?q=research%20asset%20privacy%20search%20marker");
+        Assert.NotNull(ownerSearch);
+        Assert.Contains(ownerSearch!.Groups.SelectMany(group => group.Items), item => item.Type == GlobalSearchResultTypes.Asset && item.Title == "Research asset privacy search marker");
+
+        var memberSearch = await member.GetFromJsonAsync<GlobalSearchResponseDto>("/api/search?q=research%20asset%20privacy%20search%20marker");
+        Assert.NotNull(memberSearch);
+        Assert.DoesNotContain(memberSearch!.Groups.SelectMany(group => group.Items), item => item.Type == GlobalSearchResultTypes.Asset);
+    }
+
+    [Fact]
     public async Task Search_does_not_project_foreign_workspace_relationship_metadata()
     {
         using var owner = factory.CreateClient();
