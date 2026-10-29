@@ -24,9 +24,10 @@ public sealed class MovieFinalAssemblyController(
     [EnableRateLimiting(RateLimiting.ExpensiveAi)]
     public async Task<IActionResult> Queue(Guid id, MovieFinalAssemblyRequest request, CancellationToken cancellationToken)
     {
+        if (!TryGetUserId(out var userId)) return Unauthorized();
         try
         {
-            var result = await assemblies.RequestAsync(UserId(), id, request, HttpContext.Request.Headers["Idempotency-Key"].FirstOrDefault(), cancellationToken);
+            var result = await assemblies.RequestAsync(userId, id, request, HttpContext.Request.Headers["Idempotency-Key"].FirstOrDefault(), cancellationToken);
             return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Accepted(result);
         }
         catch (MovieFinalAssemblyValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
@@ -38,7 +39,8 @@ public sealed class MovieFinalAssemblyController(
     [HttpGet("final-assemblies/{id:guid}")]
     public async Task<IActionResult> Get(Guid id, CancellationToken cancellationToken)
     {
-        var result = await assemblies.GetAsync(UserId(), id, cancellationToken);
+        if (!TryGetUserId(out var userId)) return Unauthorized();
+        var result = await assemblies.GetAsync(userId, id, cancellationToken);
         return result is null ? ApiResults.Error(this, 404, "MOVIE_FINAL_ASSEMBLY_NOT_FOUND", "Final assembly not found.") : Ok(result);
     }
 
@@ -50,11 +52,12 @@ public sealed class MovieFinalAssemblyController(
     [HttpGet("final-assemblies/{id:guid}/download")]
     public async Task<IActionResult> Download(Guid id, CancellationToken cancellationToken)
     {
-        var assembly = await assemblies.GetAsync(UserId(), id, cancellationToken);
+        if (!TryGetUserId(out var userId)) return Unauthorized();
+        var assembly = await assemblies.GetAsync(userId, id, cancellationToken);
         if (assembly is null) return ApiResults.Error(this, 404, "MOVIE_FINAL_ASSEMBLY_NOT_FOUND", "Final assembly not found.");
         if (assembly.OutputAssetId is not Guid assetId)
             return ApiResults.Error(this, 409, "MOVIE_FINAL_ASSEMBLY_NOT_READY", "This final assembly does not have a published output yet.");
-        var download = await assets.GetDownloadAsync(UserId(), assetId, null, cancellationToken);
+        var download = await assets.GetDownloadAsync(userId, assetId, null, cancellationToken);
         if (download is null) return ApiResults.Error(this, 404, "MOVIE_FINAL_ASSEMBLY_OUTPUT_NOT_FOUND", "The final assembly output is not available.");
         try
         {
@@ -69,5 +72,6 @@ public sealed class MovieFinalAssemblyController(
         }
     }
 
-    private Guid UserId() => Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier) ?? throw new InvalidOperationException("Authenticated user identifier is missing."));
+    private bool TryGetUserId(out Guid userId) =>
+        Guid.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out userId);
 }
