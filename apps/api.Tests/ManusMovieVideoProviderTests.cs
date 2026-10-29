@@ -82,6 +82,42 @@ public sealed class ManusMovieVideoProviderTests
     }
 
     [Fact]
+    public async Task Declared_scene_clip_prompt_overhead_covers_all_adapter_added_text()
+    {
+        // No Manus task is created: the recording HTTP handler returns a synthetic
+        // response. Admission counts creative fields separately, so the declared
+        // formatting allowance must cover mandatory instructions, labels, and
+        // duration/aspect/language metadata before a usage reservation is made.
+        var handler = new RecordingHandler(_ => JsonResponse($"{{\"ok\":true,\"task_id\":\"{TaskId}\"}}"));
+        var provider = CreateProvider(handler, EnabledOptions());
+        var request = Request() with
+        {
+            DurationSeconds = 30,
+            Language = "zh-CN",
+            CharacterContinuityJson = "{\\\"name\\\":\\\"Liora\\\"}",
+            WorldContextJson = "{\\\"location\\\":\\\"forest\\\"}",
+        };
+
+        await provider.SubmitAsync(request, CancellationToken.None);
+
+        using var payload = JsonDocument.Parse(Assert.Single(handler.RequestBodies));
+        var prompt = payload.RootElement.GetProperty("message")
+            .GetProperty("content")[0].GetProperty("text").GetString()!;
+        var countedCreativeLength = request.Description.Trim().Length
+            + request.Style.Trim().Length
+            + request.AdditionalInstructions!.Trim().Length
+            + request.ContinuityGuideJson!.Trim().Length
+            + request.CharacterContinuityJson!.Trim().Length
+            + request.SceneJson!.Trim().Length
+            + request.ShotJson!.Trim().Length
+            + request.WorldContextJson!.Trim().Length;
+
+        Assert.InRange(prompt.Length - countedCreativeLength, 1,
+            provider.SceneClipPromptFormattingOverheadCharacters);
+        Assert.True(prompt.Length <= provider.SceneClipPromptMaxCharacters);
+    }
+
+    [Fact]
     public async Task Status_normalizes_running_and_completed_attachment_with_internal_credit_estimate()
     {
         var calls = 0;
