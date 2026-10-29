@@ -72,6 +72,7 @@ export function isConsistentMovieSceneClipSegmentation(preview: MovieClipSegment
     if (slot == null || typeof slot !== "object"
         || typeof slot.sceneId !== "string"
         || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(slot.sceneId)
+        || /^0{8}-0{4}-0{4}-0{4}-0{12}$/i.test(slot.sceneId)
         || !Number.isSafeInteger(slot.sceneSequence)
         || !Number.isSafeInteger(slot.clipSequence)
         || !Number.isSafeInteger(slot.timelineStartSeconds)
