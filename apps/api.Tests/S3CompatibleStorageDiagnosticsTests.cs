@@ -3,6 +3,7 @@ using System.Net.Http;
 using System.Security.Authentication;
 using System.Net.Sockets;
 using Amazon.S3;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Taslim.Api.Files;
@@ -138,6 +139,57 @@ public sealed class S3CompatibleStorageDiagnosticsTests
             "head" => storage.ExistsAsync("private/key", cancellation.Token),
             _ => throw new ArgumentOutOfRangeException(nameof(operation)),
         });
+    }
+
+
+    [Fact]
+    public async Task Failed_put_logs_only_sanitized_failure_class_not_exception_or_object_identity()
+    {
+        // Reproduce the production symptom (S3 status zero) with synthetic
+        // sensitive text. Diagnostic logging must never expose an SDK message,
+        // bucket name, storage key, or a raw exception object.
+        const string secretMarker = "synthetic-sensitive-credential-DO-NOT-LOG";
+        var logger = new CapturingLogger();
+        using var storage = new S3CompatibleFileStorageService(
+            new ThrowingObjectClient(new AmazonS3Exception(
+                $"Private endpoint and credential: {secretMarker}")),
+            Options.Create(new FileOptions { S3Bucket = $"bucket-{secretMarker}" }),
+            logger);
+        using var content = new MemoryStream([1, 2, 3]);
+
+        await Assert.ThrowsAsync<FileStorageOperationException>(
+            () => storage.StoreAsync($"private/{secretMarker}/medical.pdf", content));
+
+        var message = Assert.Single(logger.Messages);
+        Assert.Contains("Operation=put", message, StringComparison.Ordinal);
+        Assert.Contains("StatusCode=0", message, StringComparison.Ordinal);
+        Assert.Contains("FailureClass=s3_no_http_response", message, StringComparison.Ordinal);
+        Assert.DoesNotContain(secretMarker, message, StringComparison.Ordinal);
+        Assert.DoesNotContain("medical.pdf", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("Private endpoint", message, StringComparison.Ordinal);
+        Assert.Empty(logger.Exceptions);
+    }
+
+    private sealed class CapturingLogger : ILogger<S3CompatibleFileStorageService>
+    {
+        public List<string> Messages { get; } = [];
+        public List<Exception> Exceptions { get; } = [];
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => NoopScope.Instance;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state,
+            Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            Messages.Add(formatter(state, exception));
+            if (exception is not null)
+                Exceptions.Add(exception);
+        }
+    }
+
+    private sealed class NoopScope : IDisposable
+    {
+        public static NoopScope Instance { get; } = new();
+        public void Dispose() { }
     }
 
     private static S3CompatibleFileStorageService CreateThrowingStorage(Exception failure) => new(
