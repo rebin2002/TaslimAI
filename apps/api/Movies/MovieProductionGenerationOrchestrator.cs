@@ -574,9 +574,11 @@ public sealed class MovieProductionGenerationOrchestrator(
         return durationSeconds;
     }
 
-    // Shared provider-neutral admission predicate for the approved production-render route.
-    // Unknown adapters and unsupported priced profiles must fail closed; no provider is called here.
-    internal static void ValidateProductionClipAdmission(
+    // Shared provider-neutral admission predicate for approved production renders.
+    // The read-only preflight can inspect the same decision without throwing or
+    // creating a clip/job; queue admission throws the exact same rejection.
+    // Unknown adapters, unverified durations and unpriced profiles fail closed.
+    internal static MovieProductionValidationException? EvaluateProductionClipAdmission(
         IMovieVideoProvider videoProvider,
         int durationSeconds,
         string sourceResolution,
@@ -587,21 +589,38 @@ public sealed class MovieProductionGenerationOrchestrator(
     {
         if (!videoProvider.IsAvailable
             || !videoProvider.SupportedOperations.Contains(MovieStudioOperations.SceneClip, StringComparer.OrdinalIgnoreCase))
-            throw new MovieProductionValidationException(
+            return new MovieProductionValidationException(
                 "MOVIE_PROVIDER_UNAVAILABLE",
                 "The selected video provider is unavailable for production clips.");
 
         if (videoProvider.SceneClipDurationRange is not { } durationRange
             || !durationRange.Supports(durationSeconds))
-            throw new MovieProductionValidationException(
+            return new MovieProductionValidationException(
                 "MOVIE_CLIP_DURATION_UNSUPPORTED",
                 "The selected video provider cannot generate a single clip of this duration. Use shorter shots or a validated segmentation workflow.");
 
         if (!videoProvider.SupportsSceneClipCostIntent(
                 sourceResolution, targetResolution, qualityTier, processingPath, aspectRatio))
-            throw new MovieProductionValidationException(
+            return new MovieProductionValidationException(
                 "MOVIE_CLIP_EXECUTION_INTENT_UNSUPPORTED",
                 "The selected video provider cannot deliver the requested resolution, quality and processing profile.");
+
+        return null;
+    }
+
+    internal static void ValidateProductionClipAdmission(
+        IMovieVideoProvider videoProvider,
+        int durationSeconds,
+        string sourceResolution,
+        string targetResolution,
+        string qualityTier,
+        string processingPath,
+        string aspectRatio)
+    {
+        var rejection = EvaluateProductionClipAdmission(videoProvider, durationSeconds,
+            sourceResolution, targetResolution, qualityTier, processingPath, aspectRatio);
+        if (rejection is not null)
+            throw rejection;
     }
 
     private static ProductionPlan BuildPlan(MovieShot shot, MovieProductionGenerationRequest request)
