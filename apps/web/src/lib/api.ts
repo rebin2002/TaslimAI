@@ -448,6 +448,16 @@ export type MovieOverviewAction = { key: string; label: string; reason: string; 
 export type MovieOverviewWarning = { key: string; severity: string; label: string; detail: string; module: string | null; entityId: string | null; entityType: string | null };
 export type MovieOverviewActivity = { key: string; label: string; detail: string; occurredAt: string; module: string | null };
 export type MovieOverviewBlockedItem = { entityId: string; entityType: string; label: string; detail: string; module: string };
+export type MovieClipSegmentationPreview = {
+  movieProjectId: string;
+  totalDurationSeconds: number;
+  providerKey: string;
+  providerDeclaresSceneClipOperation: boolean;
+  canSplitByDuration: boolean;
+  minimumClipSeconds: number | null;
+  maximumClipSeconds: number | null;
+  segments: Array<{ sequence: number; startSeconds: number; durationSeconds: number }>;
+};
 export type MovieOverview = { project: MovieOverviewProject; story: MovieOverviewStory; cast: MovieOverviewResource; world: MovieOverviewResource; scenes: MovieOverviewCounts; shots: MovieOverviewCounts; progress: MovieOverviewProgress; takes: MovieOverviewTakes; approvals: MovieOverviewApprovals; cost: MovieOverviewCost; latestOutputAssetId: string | null; nextActions: MovieOverviewAction[]; warnings: MovieOverviewWarning[]; blockedItems: MovieOverviewBlockedItem[]; recentActivity: MovieOverviewActivity[] };
 export type MovieBudgetDirectorPlanItem = { key: string; label: string; generationUnits: number; durationSecondsPerUnit: number; rationale: string };
 export type MovieBudgetDirectorRequest = { durationSeconds: number; shotCount: number; candidatePassesPerShot: number; approvedReferenceReuseCount: number; salvagedSelectCount: number; missingInsertCount: number; selectedTakeCount: number; missingInsertDurationSeconds: number; selectedOnlyMastering: boolean; naiveSourceResolution?: string; naiveTargetResolution?: string; naiveQualityTier?: string; draftSourceResolution?: string; draftTargetResolution?: string; draftQualityTier?: string; masterSourceResolution?: string; masterTargetResolution?: string; masterQualityTier?: string };
@@ -1213,6 +1223,7 @@ export const api = {
   planMovieCameraProfile: (shotId: string, input: { characterEmotionalPurpose?: string | null; creativeNotes?: string | null; overrides?: CinematographyShotPlan | null; cameraProfile?: CinematographyCameraProfileOverride | null }) => request<MovieCinematographyPlanResponse>(`/api/movie-studio/shots/${shotId}/camera-profile`, { method: "POST", body: JSON.stringify(input) }, true),
   createMovieProject: (input: MovieStudioCreateInput) => request<MovieStudioResponse>("/api/movie-studio/projects", { method: "POST", body: JSON.stringify(input) }, true),
   getMovieOverview: (id: string) => request<MovieOverview>(`/api/movie-studio/projects/${id}/overview`),
+  getMovieClipSegmentationPreview: (id: string) => request<MovieClipSegmentationPreview>(`/api/movie-studio/projects/${id}/clip-segmentation-preview`),
   getMovieBudgetDirector: (id: string) => request<MovieBudgetDirectorEstimate>(`/api/movie-studio/projects/${id}/budget-director`),
   previewMovieBudgetDirector: (id: string, input: MovieBudgetDirectorRequest) => request<MovieBudgetDirectorEstimate>(`/api/movie-studio/projects/${id}/budget-director/preview`, { method: "POST", body: JSON.stringify(input) }, true),
   getMovieProject: (id: string) => request<MovieProject>(`/api/movie-studio/projects/${id}`),
