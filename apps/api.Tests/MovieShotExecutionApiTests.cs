@@ -105,6 +105,39 @@ public sealed class MovieShotExecutionApiTests : IClassFixture<GenerationJobsNoW
     }
 
     [Fact]
+    public async Task Execution_rejects_reusing_a_key_for_a_different_resolution_plan()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client);
+        var (_, shot) = await CreateShot(client, auth.PersonalWorkspace.Id, "16:9", 5);
+        var keyframe = await CreateApprovedKeyframe(client, shot.Id);
+        const string idempotencyKey = "shot-execution-plan-reuse";
+
+        var first = await SendWithCsrf<MovieShotExecutionResponse>(client, HttpMethod.Post, $"/api/movie-studio/shots/{shot.Id}/production/execute", new
+        {
+            keyframeVersionId = keyframe.Id,
+            sourceResolution = "1080p",
+            masterResolution = "1080p",
+            processingPath = "native",
+            takeCount = 2,
+        }, idempotencyKey);
+        Assert.Equal(2, first.Candidates.Count);
+
+        using var reused = await SendWithCsrf(client, HttpMethod.Post, $"/api/movie-studio/shots/{shot.Id}/production/execute", new
+        {
+            keyframeVersionId = keyframe.Id,
+            sourceResolution = "720p",
+            masterResolution = "1080p",
+            processingPath = "source_to_master",
+            takeCount = 2,
+        }, idempotencyKey);
+
+        Assert.Equal(HttpStatusCode.BadRequest, reused.StatusCode);
+        using var body = JsonDocument.Parse(await reused.Content.ReadAsStringAsync());
+        Assert.Equal("SHOT_EXECUTION_IDEMPOTENCY_REUSED", body.RootElement.GetProperty("error").GetProperty("code").GetString());
+    }
+
+    [Fact]
     public async Task Execution_rejects_unapproved_keyframes_and_invalid_native_resolution_plans()
     {
         using var client = factory.CreateClient();
