@@ -228,8 +228,12 @@ public static class MovieShotProductionContractProjection
         try
         {
             using var document = JsonDocument.Parse(json);
+            if (document.RootElement.ValueKind != JsonValueKind.Object) return null;
             if (document.RootElement.TryGetProperty("productionContractQualityRequirements", out var embedded))
+            {
+                if (embedded.ValueKind != JsonValueKind.Object) return null;
                 return JsonSerializer.Deserialize<MovieShotQualityRequirements>(embedded.GetRawText(), new JsonSerializerOptions(JsonSerializerDefaults.Web));
+            }
         }
         catch (JsonException) { }
         return MovieShotProductionContractSerialization.FromJson<MovieShotQualityRequirements>(json);
