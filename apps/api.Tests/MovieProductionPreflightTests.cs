@@ -6,6 +6,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Taslim.Api.Contracts;
 using Taslim.Api.Movies;
 using Taslim.Api.Persistence;
+using Taslim.Api.Tests.ProviderTesting;
 using Xunit;
 
 namespace Taslim.Api.Tests;
@@ -138,6 +139,60 @@ public sealed class MovieProductionPreflightTests : IClassFixture<GenerationJobs
         Assert.False(await db.MovieClips.AnyAsync(item => item.MovieProjectId == movie.Project.Project.Id));
         Assert.False(await db.GenerationJobs.AnyAsync());
         Assert.Equal(usageBefore, await db.UsageTransactions.CountAsync());
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Read_only_preflight_fails_closed_for_missing_or_non_scene_clip_provider_capabilities(
+        bool missingDurationRange)
+    {
+        // Real HTTP preview with a synthetic adapter: neither an unknown
+        // single-clip duration contract nor a Quick-Movie-only adapter may
+        // suggest that approved production video can proceed. This endpoint
+        // must not persist or reserve billable work, even after confirmation.
+        using var isolatedFactory = new MovieClipDurationApiFactory();
+        using (var setup = isolatedFactory.Services.CreateScope())
+            setup.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+
+        using var client = isolatedFactory.CreateClient();
+        var movie = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Unverified video adapter preflight", sceneDurationSeconds: 5);
+        using var scope = isolatedFactory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var provider = Assert.IsType<FakeMovieVideoProvider>(
+            scope.ServiceProvider.GetRequiredService<IMovieVideoProvider>());
+        if (missingDurationRange)
+            provider.SceneClipDurationRange = null;
+        else
+            provider.SupportedOperations = [MovieStudioOperations.QuickMovie];
+
+        var clipsBefore = await db.MovieClips.CountAsync();
+        var jobsBefore = await db.GenerationJobs.CountAsync();
+        var usageBefore = await db.UsageTransactions.CountAsync();
+
+        using var response = await client.GetAsync(
+            $"/api/movie-studio/shots/{movie.Shot.Id}/production/preflight?targetResolution=720p&qualityTier=Standard&confirmationAccepted=true");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var decision = (await response.Content.ReadFromJsonAsync<MovieProductionPreflightDto>())!;
+        Assert.False(decision.CanProceed);
+        Assert.Contains(decision.Checks, check =>
+            check.Key == MovieProductionPreflightCheckKeys.ProviderAdmission
+            && check.Required && !check.Satisfied);
+        Assert.Contains(decision.Checks, check =>
+            check.Key == MovieProductionPreflightCheckKeys.ClipDuration
+            && check.Required && check.Satisfied == !missingDurationRange);
+        if (missingDurationRange)
+        {
+            Assert.Equal(MovieProductionPreflightDecisionCodes.ClipDurationUnsupported, decision.Decision);
+            Assert.Equal("MOVIE_CLIP_DURATION_UNSUPPORTED", decision.RejectionCode);
+        }
+
+        Assert.Equal(clipsBefore, await db.MovieClips.CountAsync());
+        Assert.Equal(jobsBefore, await db.GenerationJobs.CountAsync());
+        Assert.Equal(usageBefore, await db.UsageTransactions.CountAsync());
+        Assert.Equal(0, scope.ServiceProvider.GetRequiredService<FakeProviderCallLog>()
+            .Calls(FakeProviderKind.Movie));
     }
 
     private static async Task<AuthResponse> Register(HttpClient client)
