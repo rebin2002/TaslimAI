@@ -124,6 +124,7 @@ describe("Movie Studio scene-aware read-only preview integrity", () => {
       { canSplitByScene: "true", sceneSegments: aligned().sceneSegments },
       { canSplitByScene: true, sceneSegments: [null] },
       { canSplitByScene: true, sceneSegments: [{ ...aligned().sceneSegments![0], sceneId: "not-a-guid" }] },
+      { canSplitByScene: true, sceneSegments: [{ ...aligned().sceneSegments![0], sceneId: "00000000-0000-0000-0000-000000000000" }] },
     ] as unknown as Array<Partial<MovieClipSegmentationPreview>>;
     for (const variant of variants) {
       expect(isConsistentMovieSceneClipSegmentation(preview(variant))).toBe(false);
