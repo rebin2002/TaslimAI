@@ -234,6 +234,18 @@ public sealed class RunwayMovieVideoProvider(
                 request.AspectRatio)))
             throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);
 
+        // Quick Movie also uses this provider's fixed output payload. It cannot
+        // honor an independently priced resolution, quality or upscale request;
+        // refuse such requests rather than silently discarding their intent.
+        if (request.Operation == MovieStudioOperations.QuickMovie
+            && (request.UpscalingRequested
+                || !string.IsNullOrWhiteSpace(request.SourceResolution)
+                || !string.IsNullOrWhiteSpace(request.TargetResolution)
+                || !string.IsNullOrWhiteSpace(request.MasterResolution)
+                || !string.IsNullOrWhiteSpace(request.QualityTier)
+                || !string.IsNullOrWhiteSpace(request.ProcessingPath)))
+            throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);
+
         var ratio = request.AspectRatio.Trim() switch
         {
             "16:9" => "1280:720",

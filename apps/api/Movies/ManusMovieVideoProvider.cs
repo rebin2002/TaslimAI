@@ -270,11 +270,11 @@ public sealed class ManusMovieVideoProvider(
             throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);
         // Manus task.create accepts a descriptive prompt, not a verified
         // resolution/quality/upscaling or multi-frame execution contract.
-        // Do not send a priced scene clip that cannot be faithfully executed.
-        // Legacy unpriced scene-clip adapter tests remain unaffected; normal
-        // queued scene clips already fail closed at the worker capability gate.
-        if (request.Operation == MovieStudioOperations.SceneClip
-            && (request.UpscalingRequested
+        // Do not send a priced clip of either operation that cannot be
+        // faithfully executed. The Quick Movie operation must not silently
+        // discard priced intent or unsupported frame/reference controls.
+        // Legacy unpriced adapter requests remain unaffected.
+        if (request.UpscalingRequested
                 || !string.IsNullOrWhiteSpace(request.SourceResolution)
                 || !string.IsNullOrWhiteSpace(request.TargetResolution)
                 || !string.IsNullOrWhiteSpace(request.MasterResolution)
@@ -282,7 +282,7 @@ public sealed class ManusMovieVideoProvider(
                 || !string.IsNullOrWhiteSpace(request.ProcessingPath)
                 || !string.IsNullOrWhiteSpace(request.FirstFrameImageUri)
                 || !string.IsNullOrWhiteSpace(request.LastFrameImageUri)
-                || request.ReferenceImages is { Count: > 0 }))
+                || request.ReferenceImages is { Count: > 0 })
             throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);
         if (request.DurationSeconds is < 1 or > 30)
             throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);

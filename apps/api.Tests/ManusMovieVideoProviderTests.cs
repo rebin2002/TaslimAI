@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using Taslim.Api.Domain;
 using Taslim.Api.Movies;
 using Xunit;
 
@@ -12,6 +13,53 @@ namespace Taslim.Api.Tests;
 public sealed class ManusMovieVideoProviderTests
 {
     private const string TaskId = "manus_task_123";
+
+
+    [Theory]
+    [InlineData("source-resolution")]
+    [InlineData("target-resolution")]
+    [InlineData("master-resolution")]
+    [InlineData("quality")]
+    [InlineData("processing")]
+    [InlineData("upscaling")]
+    [InlineData("first-frame")]
+    public async Task Quick_movie_rejects_unmapped_provider_intent_before_creating_a_Manus_task(string option)
+    {
+        // A Quick Movie request must not bypass the priced scene-clip guard.
+        // The fake transport ensures no billable Manus task is submitted.
+        var handler = new RecordingHandler(_ => throw new InvalidOperationException("No provider request allowed."));
+        var provider = CreateProvider(handler, EnabledOptions());
+        var baseline = Request() with { Operation = MovieStudioOperations.QuickMovie };
+        var request = option switch
+        {
+            "source-resolution" => baseline with { SourceResolution = "720p" },
+            "target-resolution" => baseline with { TargetResolution = "720p" },
+            "master-resolution" => baseline with { MasterResolution = "1080p" },
+            "quality" => baseline with { QualityTier = "Standard" },
+            "processing" => baseline with { ProcessingPath = "native" },
+            "upscaling" => baseline with { UpscalingRequested = true },
+            _ => baseline with { FirstFrameImageUri = "https://assets.example.test/frame.png" },
+        };
+
+        var error = await Assert.ThrowsAsync<MovieVideoProviderException>(() =>
+            provider.SubmitAsync(request, CancellationToken.None));
+
+        Assert.Equal(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, error.Code);
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
+    public async Task Unpriced_quick_movie_still_submits_with_fake_transport()
+    {
+        var handler = new RecordingHandler(_ => JsonResponse(JsonSerializer.Serialize(new { ok = true, task_id = TaskId })));
+        var provider = CreateProvider(handler, EnabledOptions());
+
+        var submitted = await provider.SubmitAsync(
+            Request() with { Operation = MovieStudioOperations.QuickMovie }, CancellationToken.None);
+
+        Assert.Equal(TaskId, submitted.ProviderJobId);
+        Assert.Single(handler.Requests);
+    }
 
     [Fact]
     public async Task Disabled_configuration_never_calls_Manus_and_is_unavailable()

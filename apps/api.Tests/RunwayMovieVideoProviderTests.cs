@@ -18,6 +18,67 @@ public sealed class RunwayMovieVideoProviderTests
 {
     private static readonly Guid TaskId = Guid.Parse("8d2d2e6e-88c7-4c47-a6ab-7c6ce6e1a6a4");
 
+
+    [Theory]
+    [InlineData("source-resolution")]
+    [InlineData("target-resolution")]
+    [InlineData("master-resolution")]
+    [InlineData("quality")]
+    [InlineData("processing")]
+    [InlineData("upscaling")]
+    public async Task Quick_movie_rejects_unmapped_paid_execution_intent_before_provider_or_dns(string option)
+    {
+        // Quick Movie uses the same fixed-ratio Runway payload, not a hidden
+        // quality, resolution or upscaling executor. HTTP transport stays fake.
+        var handler = new RecordingHandler(_ => throw new InvalidOperationException("No provider request allowed."));
+        var urlPolicy = new CountingProviderUrlPolicy();
+        var provider = CreateProvider(handler, EnabledOptions(), urlPolicy);
+        var baseline = Request(sourceImageUri: "https://assets.example.test/frame.png") with
+        {
+            Operation = MovieStudioOperations.QuickMovie,
+            SourceResolution = null,
+            TargetResolution = null,
+            QualityTier = null,
+            ProcessingPath = null,
+        };
+        var request = option switch
+        {
+            "source-resolution" => baseline with { SourceResolution = "1080p" },
+            "target-resolution" => baseline with { TargetResolution = "1080p" },
+            "master-resolution" => baseline with { MasterResolution = "1080p" },
+            "quality" => baseline with { QualityTier = "Cinematic" },
+            "processing" => baseline with { ProcessingPath = "upscale" },
+            _ => baseline with { UpscalingRequested = true },
+        };
+
+        var error = await Assert.ThrowsAsync<MovieVideoProviderException>(() =>
+            provider.SubmitAsync(request, CancellationToken.None));
+
+        Assert.Equal(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, error.Code);
+        Assert.Equal(0, urlPolicy.Calls);
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
+    public async Task Unpriced_quick_movie_preserves_supported_short_video_submission()
+    {
+        var handler = new RecordingHandler(_ => JsonResponse(JsonSerializer.Serialize(new { id = TaskId })));
+        var provider = CreateProvider(handler, EnabledOptions());
+        var request = Request() with
+        {
+            Operation = MovieStudioOperations.QuickMovie,
+            SourceResolution = null,
+            TargetResolution = null,
+            QualityTier = null,
+            ProcessingPath = null,
+        };
+
+        var submitted = await provider.SubmitAsync(request, CancellationToken.None);
+
+        Assert.Equal(TaskId.ToString(), submitted.ProviderJobId);
+        Assert.EndsWith("/text_to_video", Assert.Single(handler.Requests).RequestUri!.AbsoluteUri);
+    }
+
     [Fact]
     public async Task Disabled_configuration_never_calls_Runway_and_is_unavailable()
     {
