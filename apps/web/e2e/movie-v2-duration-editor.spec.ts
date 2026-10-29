@@ -3,6 +3,72 @@ import { test, expect, apiJson } from "./fixtures";
 // This journey edits only project metadata and adds a planning record.
 // It must never submit a provider job, reserve paid generation, or invent footage.
 test.describe("Full Movie draft runtime browser acceptance", () => {
+  test("rejects a malformed overlapping clip segmentation response without generating work", async ({
+    authenticatedPage: page,
+  }) => {
+    test.setTimeout(120_000);
+    let malformedReplies = 0;
+    let allowUnmodifiedRead = false;
+    const providerSubmissions: string[] = [];
+
+    page.on("request", (request) => {
+      const path = new URL(request.url()).pathname;
+      if (
+        request.method() === "POST" &&
+        /\/api\/(?:generation-jobs|movie-studio\/.*\/(?:generate|render|queue))(?:\/|$)/i.test(path)
+      ) providerSubmissions.push(path);
+    });
+
+    await page.route("**/api/movie-studio/projects/*/clip-segmentation-preview", async (route) => {
+      if (allowUnmodifiedRead) {
+        await route.continue();
+        return;
+      }
+      // Preserve the real authenticated preview's project ID and runtime,
+      // but simulate a faulty provider adapter returning a noncontiguous slot.
+      const upstream = await route.fetch();
+      const data = await upstream.json() as Record<string, unknown>;
+      malformedReplies += 1;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          ...data,
+          providerDeclaresSceneClipOperation: true,
+          canSplitByDuration: true,
+          minimumClipSeconds: 1,
+          maximumClipSeconds: 10,
+          segments: [{ sequence: 1, startSeconds: 1, durationSeconds: 1 }],
+        }),
+      });
+    });
+
+    await page.goto("/create/movie");
+    await page.getByRole("tab", { name: /full movie/i }).first().click();
+    await page.getByLabel("Movie title").fill("E2E Malformed Duration Preview");
+    await page.getByLabel("Describe your movie").fill(
+      "Provider-free rejection of an invalid read-only timeline preview.",
+    );
+    await page.getByRole("button", { name: /create full project/i }).click();
+    await expect(page).toHaveURL(/\/create\/movie\/[0-9a-f-]+\/overview$/i);
+
+    await expect(page.getByText("The duration preview could not be loaded.")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Retry preview" })).toBeVisible();
+    await expect(page.getByText("Duration slots", { exact: true })).toHaveCount(0);
+    expect(malformedReplies).toBeGreaterThanOrEqual(1);
+
+    // Recovery still uses GET; it must never interpret the malformed preview
+    // as permission to submit, price, or generate provider clips.
+    allowUnmodifiedRead = true;
+    await page.getByRole("button", { name: "Retry preview" }).click();
+    await expect(page.getByRole("button", { name: "Retry preview" })).toHaveCount(0, {
+      timeout: 20_000,
+    });
+    expect(providerSubmissions).toEqual([]);
+    await expect(page.locator("video")).toHaveCount(0);
+  });
+
+
   test("recovers a failed duration-only preview without submitting provider work", async ({
     authenticatedPage: page,
   }) => {
