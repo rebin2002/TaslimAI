@@ -195,6 +195,30 @@ public sealed class MovieProductionPreflightTests : IClassFixture<GenerationJobs
             .Calls(FakeProviderKind.Movie));
     }
 
+    [Fact]
+    public void Reference_package_check_fails_closed_when_package_is_unavailable()
+    {
+        // Null packages must not become "ready" simply because they cannot
+        // contain blocking warnings. This is a pure, provider-free regression.
+        var unavailable = MovieProductionPreflightService.BuildReferencePackageCheck(null, []);
+
+        Assert.False(unavailable.Satisfied);
+        Assert.True(unavailable.Required);
+        Assert.Contains("unavailable", unavailable.Detail, StringComparison.OrdinalIgnoreCase);
+
+        var validPackage = new MovieProductionReferencePackageDto(
+            1, Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "hash", DateTime.UnixEpoch,
+            null!, null!, [], [], null!, [], [], null, [], []);
+        var valid = MovieProductionPreflightService.BuildReferencePackageCheck(validPackage, []);
+        Assert.True(valid.Satisfied);
+
+        var blocked = MovieProductionPreflightService.BuildReferencePackageCheck(
+            validPackage,
+            [new MovieProductionReferenceWarningDto("hard_continuity_conflict", "error", "Resolve the conflict.")]);
+        Assert.False(blocked.Satisfied);
+        Assert.Contains("blocking reference conflict", blocked.Detail, StringComparison.OrdinalIgnoreCase);
+    }
+
     private static async Task<AuthResponse> Register(HttpClient client)
     {
         var response = await SendWithCsrf(client, HttpMethod.Post, "/api/auth/register", new
