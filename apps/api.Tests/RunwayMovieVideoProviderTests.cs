@@ -53,6 +53,29 @@ public sealed class RunwayMovieVideoProviderTests
     }
 
     [Fact]
+    public async Task Whitespace_padded_verified_model_preserves_priced_admission_at_text_submission()
+    {
+        // The declared capability trims the configured model. Submission must
+        // use the same normalized model or a priced clip can fail after queueing.
+        // This uses a fake HTTP handler: no paid provider request is sent.
+        var handler = new RecordingHandler(_ => JsonResponse(JsonSerializer.Serialize(new { id = TaskId })));
+        var options = EnabledOptions();
+        options.Model = " gen4.5 ";
+        var provider = CreateProvider(handler, options);
+
+        Assert.True(provider.IsAvailable);
+        Assert.True(provider.SupportsSceneClipCostIntent("720p", "720p", "Standard", "native", "16:9"));
+
+        var submission = await provider.SubmitAsync(Request(), CancellationToken.None);
+
+        Assert.Equal(TaskId.ToString(), submission.ProviderJobId);
+        var outbound = Assert.Single(handler.Requests);
+        Assert.EndsWith("/text_to_video", outbound.RequestUri!.AbsoluteUri);
+        using var payload = JsonDocument.Parse(Assert.Single(handler.RequestBodies));
+        Assert.Equal("gen4.5", payload.RootElement.GetProperty("model").GetString());
+    }
+
+    [Fact]
     public async Task Submission_maps_prompt_duration_ratio_and_reference_image_without_leaking_secrets()
     {
         var handler = new RecordingHandler(_ => JsonResponse($"{{\"id\":\"{TaskId}\",\"estimatedCost\":{{\"credits\":60}}}}"));
