@@ -26,7 +26,12 @@ public sealed class MovieProductionPreflightTests : IClassFixture<GenerationJobs
     [Fact]
     public async Task Preflight_requires_cheap_reference_work_before_production_and_stays_provider_neutral()
     {
-        using var client = factory.CreateClient();
+        // Exercise missing reference work with a supported provider-sized shot;
+        // otherwise an unknown/unsupported video duration correctly takes priority.
+        using var isolatedFactory = new MovieClipDurationApiFactory();
+        using (var setup = isolatedFactory.Services.CreateScope())
+            setup.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+        using var client = isolatedFactory.CreateClient();
         var auth = await Register(client);
         var project = await SendWithCsrf<MovieStudioProjectResponse>(client, HttpMethod.Post, "/api/movie-studio/projects", new
         {
@@ -43,6 +48,7 @@ public sealed class MovieProductionPreflightTests : IClassFixture<GenerationJobs
         {
             title = "Opening",
             summary = "A controlled opening.",
+            durationSeconds = 5,
         });
         var shot = await SendWithCsrf<MovieShotDto>(client, HttpMethod.Post, $"/api/movie-studio/scenes/{scene.Id}/shots", new
         {
@@ -55,6 +61,8 @@ public sealed class MovieProductionPreflightTests : IClassFixture<GenerationJobs
         var preflight = (await response.Content.ReadFromJsonAsync<MovieProductionPreflightDto>())!;
         Assert.False(preflight.CanProceed);
         Assert.Equal(MovieProductionPreflightDecisionCodes.ReferenceWorkRequired, preflight.Decision);
+        Assert.Contains(preflight.Checks, item => item.Key == MovieProductionPreflightCheckKeys.ClipDuration && item.Satisfied && item.Required);
+        Assert.Contains(preflight.Checks, item => item.Key == MovieProductionPreflightCheckKeys.ProviderAdmission && item.Satisfied && item.Required);
         Assert.Contains(preflight.Checks, item => item.Key == MovieProductionPreflightCheckKeys.Storyboard && !item.Satisfied && item.Required);
         Assert.Contains(preflight.Checks, item => item.Key == MovieProductionPreflightCheckKeys.Keyframe && !item.Satisfied && item.Required);
         Assert.Contains(preflight.Recommendations, item => item.Key == "approve_keyframe");
