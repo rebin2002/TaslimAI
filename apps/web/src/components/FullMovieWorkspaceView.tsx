@@ -57,6 +57,7 @@ import { MovieAudioWorkspace } from "@/components/MovieAudioWorkspace";
 import { MovieQualityWorkspace } from "@/components/MovieQualityWorkspace";
 import { MovieExportsWorkspace } from "@/components/MovieExportsWorkspace";
 import { MovieClipSegmentationPanel } from "@/components/MovieClipSegmentationPanel";
+import { MovieProjectDurationEditor } from "@/components/MovieProjectDurationEditor";
 import { MovieTeamWorkspace } from "@/components/MovieTeamWorkspace";
 import { useLocale } from "@/components/LocaleProvider";
 import { buildMovieEditModel, clampMovieEditPlayhead, moveMovieEditSelection } from "@/lib/movieEditState";
@@ -244,7 +245,7 @@ function FullMovieProjectWorkspace({ projectId, module }: { projectId: string; m
 
         <main className="movie-workspace-main">
           <div className="movie-module-heading"><div><span className="movie-workspace-kicker">{copy.eyebrow}</span><h2>{copy.title}</h2><p>{copy.description}</p></div><span className="movie-module-index">{String(fullMovieModules.findIndex((item) => item.slug === activeModule) + 1).padStart(2, "0")} / {fullMovieModules.length}</span></div>
-          {activeModule === "overview" && overview && <OverviewModule overview={overview} budgetEstimate={budgetEstimate} outputAssetId={outputAssetId} />}
+          {activeModule === "overview" && overview && <OverviewModule overview={overview} budgetEstimate={budgetEstimate} outputAssetId={outputAssetId} onRefresh={() => api.getMovieOverview(projectId).then(setOverview)} />}
           {activeModule === "production-kit" && <ProductionKitWorkspace projectId={fullProject.id} />}
           {activeModule === "story" && <StoryModule projectId={workspace.id} guideLocked={projectShell?.lockedGuideRevisionNumber != null} />}
           {activeModule === "cast" && <CastModule projectId={workspace.id} />}
@@ -267,7 +268,7 @@ function FullMovieProjectWorkspace({ projectId, module }: { projectId: string; m
   );
 }
 
-function OverviewModule({ overview, budgetEstimate, outputAssetId }: { overview: MovieOverview; budgetEstimate: MovieBudgetDirectorEstimate | null; outputAssetId: string | null }) {
+function OverviewModule({ overview, budgetEstimate, outputAssetId, onRefresh }: { overview: MovieOverview; budgetEstimate: MovieBudgetDirectorEstimate | null; outputAssetId: string | null; onRefresh: () => Promise<void> }) {
   const project = overview.project;
   const action = overview.nextActions[0];
   const progressItems = [
@@ -308,6 +309,7 @@ function OverviewModule({ overview, budgetEstimate, outputAssetId }: { overview:
     </div>
 
     <BudgetDirectorCard estimate={budgetEstimate} />
+    <MovieProjectDurationEditor key={`${project.id}-${project.durationSeconds}`} projectId={project.id} durationSeconds={project.durationSeconds} canEditDraft={project.status === "Draft" && overview.scenes.total === 0 && overview.shots.total === 0} onUpdated={onRefresh} />
     <MovieClipSegmentationPanel key={`${project.id}-${project.durationSeconds}`} projectId={project.id} totalDurationSeconds={project.durationSeconds} />
 
     <div className="movie-command-grid movie-command-grid-bottom"><section className="movie-command-section"><CommandSectionTitle eyebrow="Warnings & blockers" title={overview.warnings.length ? `${overview.warnings.length} signals need attention` : "No active warnings"} detail="Continuity and production" />{overview.warnings.length ? <div className="movie-warning-list">{overview.warnings.map((warning) => <div className={`movie-warning-row is-${warning.severity}`} key={warning.key}><CircleAlert size={14} /><div><strong>{warning.label}</strong><p>{warning.detail}</p></div></div>)}</div> : <HonestEmpty text="No unresolved warnings have been recorded for this project." />}</section><section className="movie-command-section"><CommandSectionTitle eyebrow="Recent activity" title="Meaningful changes" detail="Latest persisted records" />{overview.recentActivity.length ? <div className="movie-activity-list">{overview.recentActivity.map((item) => <div className="movie-activity-row" key={item.key}><Clock3 size={14} /><div><strong>{item.label}</strong><span>{item.detail}</span></div><time dateTime={item.occurredAt}>{formatRelativeDate(item.occurredAt)}</time></div>)}</div> : <HonestEmpty text="Activity will appear after a project record changes." />}</section></div>
