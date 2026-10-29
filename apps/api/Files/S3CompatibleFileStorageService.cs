@@ -262,7 +262,12 @@ internal sealed class AwsS3CompatibleObjectClient : IS3CompatibleObjectClient
                 Key = key,
             }, cancellationToken);
 
-            if (response.ResponseStream is null) return null;
+            // A successful GET without a response body is a malformed upstream
+            // response, not proof that a private object is missing. Only a
+            // verified object-level 404 should be reported as absent.
+            if (response.ResponseStream is null)
+                throw new InvalidDataException("S3-compatible GET returned no response stream.");
+
             var stream = new ResponseOwnedStream(response.ResponseStream, response);
             response = null;
             return stream;
