@@ -180,23 +180,30 @@ public sealed class MovieGenerationCostEstimator(
                 continue;
             }
 
-            var attempts = retryAttempts + 1m;
-            var generationCost = Add(baseFixed ?? new PriceRange(0m, 0m), Multiply(basePrice, duration));
-            var baseTotal = Multiply(generationCost, attempts);
-            var upscaleTotal = requiresUpscale
-                ? Multiply(Add(upscaleFixed ?? new PriceRange(0m, 0m), Multiply(upscalePrice!, duration)), upscalePasses)
-                : PricePair(0m, 0m)!;
-            routeResults.Add(new RouteResult(
-                Add(baseTotal, upscaleTotal),
-                new Dictionary<string, PriceRange>(StringComparer.Ordinal)
-                {
-                    ["generation"] = baseTotal,
-                    ["upscaling"] = upscaleTotal,
-                },
-                NormalizeCurrency(candidate.Currency),
-                string.IsNullOrWhiteSpace(candidate.PricingVersion) ? null : candidate.PricingVersion.Trim(),
-                candidate.EffectiveAtUtc == default ? null : candidate.EffectiveAtUtc,
-                string.IsNullOrWhiteSpace(candidate.Source) ? null : candidate.Source.Trim()));
+            try
+            {
+                var attempts = retryAttempts + 1m;
+                var generationCost = Add(baseFixed ?? new PriceRange(0m, 0m), Multiply(basePrice, duration));
+                var baseTotal = Multiply(generationCost, attempts);
+                var upscaleTotal = requiresUpscale
+                    ? Multiply(Add(upscaleFixed ?? new PriceRange(0m, 0m), Multiply(upscalePrice!, duration)), upscalePasses)
+                    : PricePair(0m, 0m)!;
+                routeResults.Add(new RouteResult(
+                    Add(baseTotal, upscaleTotal),
+                    new Dictionary<string, PriceRange>(StringComparer.Ordinal)
+                    {
+                        ["generation"] = baseTotal,
+                        ["upscaling"] = upscaleTotal,
+                    },
+                    NormalizeCurrency(candidate.Currency),
+                    string.IsNullOrWhiteSpace(candidate.PricingVersion) ? null : candidate.PricingVersion.Trim(),
+                    candidate.EffectiveAtUtc == default ? null : candidate.EffectiveAtUtc,
+                    string.IsNullOrWhiteSpace(candidate.Source) ? null : candidate.Source.Trim()));
+            }
+            catch (OverflowException)
+            {
+                return MovieGenerationCostEstimate.Unknown(MovieGenerationCostEstimateReasons.EstimateCapExceeded, NormalizeCurrency(candidate.Currency));
+            }
         }
 
         if (routeResults.Count == 0)
