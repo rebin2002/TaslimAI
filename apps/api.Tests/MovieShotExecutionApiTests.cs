@@ -63,7 +63,7 @@ public sealed class MovieShotExecutionApiFactory : MovieOperationalApiFactory
 
     public MovieShotExecutionApiFactory() : this(null, true, true) { }
 
-    public MovieShotExecutionApiFactory(
+    internal MovieShotExecutionApiFactory(
         MovieClipDurationRange? durationRange,
         bool supportsCostIntent = true,
         bool supportsReferencePackageCostIntent = true)
