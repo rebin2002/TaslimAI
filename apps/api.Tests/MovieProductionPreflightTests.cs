@@ -87,6 +87,14 @@ public sealed class MovieProductionPreflightTests : IClassFixture<GenerationJobs
         using var client = configuredFactory.CreateClient();
         var movie = await MovieOperationalFixtures.CreateFullMovieAsync(
             client, title: "Cost confirmation preview only", sceneDurationSeconds: 5);
+        using var verify = configuredFactory.Services.CreateScope();
+        var db = verify.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var clipCountBefore = await db.MovieClips.CountAsync();
+        var jobCountBefore = await db.GenerationJobs.CountAsync();
+        var usageCountBefore = await db.UsageTransactions.CountAsync();
+        var providerCallsBefore = verify.ServiceProvider.GetRequiredService<FakeProviderCallLog>()
+            .Calls(FakeProviderKind.Movie);
+
         var path = $"/api/movie-studio/shots/{movie.Shot.Id}/production/preflight?targetResolution=720p&qualityTier=Standard";
         using var unconfirmedResponse = await client.GetAsync(path);
         using var confirmedResponse = await client.GetAsync(path + "&confirmationAccepted=true");
@@ -100,12 +108,10 @@ public sealed class MovieProductionPreflightTests : IClassFixture<GenerationJobs
         Assert.True(confirmed.CostGuardrails.ConfirmationRequired);
         Assert.True(confirmed.CostGuardrails.CanProceed);
 
-        using var verify = configuredFactory.Services.CreateScope();
-        var db = verify.ServiceProvider.GetRequiredService<TaslimDbContext>();
-        Assert.False(await db.MovieClips.AnyAsync(item => item.MovieProjectId == movie.Project.Project.Id));
-        Assert.False(await db.GenerationJobs.AnyAsync());
-        Assert.False(await db.UsageTransactions.AnyAsync());
-        Assert.Equal(0, verify.ServiceProvider.GetRequiredService<FakeProviderCallLog>()
+        Assert.Equal(clipCountBefore, await db.MovieClips.CountAsync());
+        Assert.Equal(jobCountBefore, await db.GenerationJobs.CountAsync());
+        Assert.Equal(usageCountBefore, await db.UsageTransactions.CountAsync());
+        Assert.Equal(providerCallsBefore, verify.ServiceProvider.GetRequiredService<FakeProviderCallLog>()
             .Calls(FakeProviderKind.Movie));
     }
 
