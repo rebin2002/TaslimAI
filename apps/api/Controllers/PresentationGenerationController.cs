@@ -27,13 +27,13 @@ public sealed class PresentationGenerationController(
     {
         try
         {
-            if (!options.Value.Enabled)
-                return ApiResults.Error(this, StatusCodes.Status503ServiceUnavailable, "PRESENTATION_STUDIO_UNAVAILABLE", "Presentation generation is not available right now.");
             var idempotencyKey = Request.Headers["Idempotency-Key"].FirstOrDefault();
             if (string.IsNullOrWhiteSpace(idempotencyKey))
                 return ApiResults.Error(this, StatusCodes.Status400BadRequest, "IDEMPOTENCY_KEY_REQUIRED", "A unique Idempotency-Key header is required for presentation generation.");
             var input = PresentationGenerationContractMapper.ToInput(request);
             PresentationGenerationRequestValidator.Validate(input, options.Value);
+            if (!options.Value.Enabled)
+                return ApiResults.Error(this, StatusCodes.Status503ServiceUnavailable, "PRESENTATION_STUDIO_UNAVAILABLE", "Presentation generation is not available right now.");
             var estimate = PresentationGenerationCostEstimator.Estimate(options.Value);
             var preflight = await costControl.CheckPreflightAsync(input.WorkspaceId, UsageFeature.Presentation, estimate, cancellationToken);
             if (!preflight.Allowed)
