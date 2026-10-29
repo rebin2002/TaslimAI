@@ -24,6 +24,14 @@ describe("Full Movie draft duration editor", () => {
     expect(editor).toContain("Editing an established timeline requires a separately reviewed replan.");
   });
 
+  it("resets stale form content and notices when project or server duration changes", () => {
+    expect(editor).toContain("useEffect, useState");
+    expect(editor).toContain("setValue(String(durationSeconds));");
+    expect(editor).toContain("setNotice(\"\");");
+    expect(editor).toContain("setError(\"\");");
+    expect(editor).toContain("}, [projectId, durationSeconds]);");
+  });
+
   it("checks the returned persisted project, refreshes the read model and localizes copy", () => {
     expect(editor).toContain("updated.id !== projectId || updated.durationSeconds !== number");
     expect(editor).toContain("await onUpdated()");
