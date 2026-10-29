@@ -67,6 +67,24 @@ public sealed class MovieDirectorEditRepairAudioTests
     }
 
     [Fact]
+    public void Out_of_range_timeline_is_reported_as_unresolved_instead_of_emitting_an_invalid_bridge()
+    {
+        var plan = MovieDirectorEditRepairAudioPlanner.Plan(OutOfRangeTimeline(), [
+            new MovieDirectorAudioCapabilitySnapshot(
+                Guid.Parse("44000000-0000-0000-0000-000000000004"),
+                MovieDirectorAudioBridgeKinds.Ambience,
+                MovieDirectorAudioBridgeSourceKinds.Library,
+                "Approved room tone",
+                true,
+                MovieSoundLayers.Environment),
+        ]);
+
+        Assert.Empty(plan.Recommendations);
+        Assert.Contains("timeline:audio_bridge_range_exceeded", plan.UnresolvedNeeds);
+        MovieDirectorEditRepairAudioPlanner.ValidatePlan(plan);
+    }
+
+    [Fact]
     public void Capability_mappers_keep_music_and_soundtrack_approval_provider_neutral()
     {
         var cue = new MovieSoundtrackCue
@@ -104,4 +122,13 @@ public sealed class MovieDirectorEditRepairAudioTests
             new MovieTimelineClipContract(ClipB, Guid.NewGuid(), 2, 6m, 4m),
         ],
         []);
+
+    private static MovieCanonicalTimelineContract OutOfRangeTimeline() => new(
+        TimelineId,
+        4,
+        [
+            new MovieTimelineClipContract(ClipA, Guid.NewGuid(), 1, 86_400m, 1m),
+            new MovieTimelineClipContract(ClipB, Guid.NewGuid(), 2, 86_401m, 1m),
+        ],
+        [new MovieTimelineTransitionContract(CutId, MovieTimelineTransitionTypes.Cut, ClipA, ClipB, 86_401m, 0m)]);
 }

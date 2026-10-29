@@ -102,6 +102,7 @@ public static class MovieDirectorEditRepairAudioPlanner
     private const decimal DefaultBridgeSeconds = 0.8m;
     private const decimal SoundEffectBridgeSeconds = 0.4m;
     private const decimal GapThresholdSeconds = 0.05m;
+    private const decimal MaxAudioBridgeEndSeconds = 86_400m;
 
     public static MovieDirectorEditRepairAudioPlan Plan(
         MovieCanonicalTimelineContract canonicalTimeline,
@@ -119,6 +120,16 @@ public static class MovieDirectorEditRepairAudioPlanner
         var unresolved = new List<string>();
         var clips = canonicalTimeline.Clips.OrderBy(item => item.Sequence).ThenBy(item => item.StartSeconds).ThenBy(item => item.ClipId).ToArray();
         var transitions = canonicalTimeline.Transitions.ToDictionary(item => (item.FromClipId, item.ToClipId), item => item);
+
+        if (clips.Any(item => item.StartSeconds + item.DurationSeconds > MaxAudioBridgeEndSeconds))
+        {
+            return new MovieDirectorEditRepairAudioPlan(
+                canonicalTimeline.TimelineId,
+                canonicalTimeline.Version,
+                Fingerprint(canonicalTimeline),
+                [],
+                ["timeline:audio_bridge_range_exceeded"]);
+        }
 
         for (var index = 1; index < clips.Length && recommendations.Count < MaxRecommendations; index++)
         {
@@ -242,7 +253,7 @@ public static class MovieDirectorEditRepairAudioPlanner
                 throw new DirectorEditRepairAudioValidationException("Audio bridge recommendations must target the same canonical timeline version.");
             if (!MovieDirectorAudioBridgeKinds.Supported.Contains(recommendation.Kind) || !MovieSoundLayers.Supported.Contains(recommendation.Layer))
                 throw new DirectorEditRepairAudioValidationException("The audio bridge kind or layer is not supported.");
-            if (recommendation.StartSeconds < 0m || recommendation.DurationSeconds <= 0m || recommendation.StartSeconds + recommendation.DurationSeconds > 86_400m)
+            if (recommendation.StartSeconds < 0m || recommendation.DurationSeconds <= 0m || recommendation.StartSeconds + recommendation.DurationSeconds > MaxAudioBridgeEndSeconds)
                 throw new DirectorEditRepairAudioValidationException("Audio bridge timing is outside the supported range.");
             if (string.IsNullOrWhiteSpace(recommendation.Rationale) || recommendation.Rationale.Length > 2_000)
                 throw new DirectorEditRepairAudioValidationException("Audio bridge rationale is required and bounded.");
