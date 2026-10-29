@@ -87,6 +87,67 @@ public sealed class MovieProjectDurationBoundaryTests : IClassFixture<MovieOpera
             .AnyAsync(item => item.WorkspaceId == owner.PersonalWorkspace.Id));
     }
 
+    [Theory]
+    [InlineData(3601)]
+    [InlineData(7200)]
+    public async Task Quick_movie_rejects_overlong_brief_before_persistence(int durationSeconds)
+    {
+        using var client = factory.CreateClient();
+        var owner = await MovieOperationalFixtures.RegisterAsync(client, "Quick Duration Boundary Owner");
+        using var response = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, "/api/movie-studio/projects", new
+            {
+                workspaceId = owner.PersonalWorkspace.Id,
+                mode = MovieProjectModes.Quick,
+                title = "Rejected Overlong Quick Movie",
+                description = "Quick briefs must not inherit a full-film timeline ceiling.",
+                durationSeconds,
+                aspectRatio = "16:9",
+                style = "cinematic",
+                language = "en",
+            });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains("60 minutes", await response.Content.ReadAsStringAsync());
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.False(await db.MovieProjects.AsNoTracking()
+            .AnyAsync(item => item.WorkspaceId == owner.PersonalWorkspace.Id));
+        Assert.False(await db.GenerationJobs.AsNoTracking()
+            .AnyAsync(item => item.WorkspaceId == owner.PersonalWorkspace.Id));
+        Assert.False(await db.UsageTransactions.AsNoTracking()
+            .AnyAsync(item => item.WorkspaceId == owner.PersonalWorkspace.Id));
+    }
+
+    [Fact]
+    public async Task Quick_movie_accepts_one_hour_brief_without_queuing_generation()
+    {
+        using var client = factory.CreateClient();
+        var owner = await MovieOperationalFixtures.RegisterAsync(client, "Quick One Hour Boundary Owner");
+        var created = await MovieOperationalFixtures.PostAsync<MovieStudioProjectResponse>(
+            client, "/api/movie-studio/projects", new
+            {
+                workspaceId = owner.PersonalWorkspace.Id,
+                mode = MovieProjectModes.Quick,
+                title = "One Hour Quick Movie Brief",
+                description = "The supported upper brief limit saves only project metadata.",
+                durationSeconds = 3600,
+                aspectRatio = "16:9",
+                style = "cinematic",
+                language = "en",
+            });
+
+        Assert.Equal(3600, created.Project.DurationSeconds);
+        Assert.Null(created.Job);
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.False(await db.GenerationJobs.AsNoTracking()
+            .AnyAsync(item => item.WorkspaceId == owner.PersonalWorkspace.Id));
+        Assert.False(await db.UsageTransactions.AsNoTracking()
+            .AnyAsync(item => item.WorkspaceId == owner.PersonalWorkspace.Id));
+    }
+
     [Fact]
     public async Task Two_hour_project_duration_budget_preserves_scene_and_shot_totals()
     {
