@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { canCreateMovieMode, isQuickMovieProviderReady, nextMovieMode } from "./MovieStudioView";
+import { isQuickMovieProviderReady, nextMovieMode } from "./MovieStudioView";
 
 const source = readFileSync(new URL("./MovieStudioView.tsx", import.meta.url), "utf8");
 
@@ -30,20 +30,16 @@ describe("Movie Studio mode switch accessibility", () => {
 });
 
 describe("Movie Studio Quick Movie provider readiness", () => {
-  it("keeps provider-free Full Movie planning usable but prevents unsupported Quick Movie jobs", () => {
-    const sceneOnly = { ready: true, supportedOperations: ["scene_clip"] };
-    const quickReady = { ready: true, supportedOperations: ["quick_movie"] };
-
-    expect(canCreateMovieMode("Quick", null)).toBe(false);
-    expect(canCreateMovieMode("Quick", sceneOnly)).toBe(false);
-    expect(canCreateMovieMode("Quick", quickReady)).toBe(true);
-    expect(canCreateMovieMode("Full", null)).toBe(true);
-    expect(canCreateMovieMode("Full", sceneOnly)).toBe(true);
-
-    // The submit handler must guard direct submissions as well as disabling
-    // its button; changing tabs cannot bypass the operation-readiness gate.
-    expect(source).toContain('if (!canCreateMovieMode(mode, provider))');
-    expect(source).toContain('form.description.trim().length < 3 || !canCreateMovieMode(mode, provider)');
+  it("lets users save Quick and Full Movie briefs without a video-generation provider", () => {
+    // The create-project API saves metadata and returns job:null in both modes;
+    // it never submits a paid generation job. Readiness gates belong to later
+    // video-generation operations, not the safe brief-save flow.
+    expect(source).toContain("await api.createMovieProject({");
+    expect(source).toContain("setSaved(result.project)");
+    expect(source).toContain("setJob(result.job)");
+    expect(source).not.toContain("canCreateMovieMode(");
+    expect(source).toContain("disabled={working || form.description.trim().length < 3}");
+    expect(source).toContain('t("movieBody.quick.quickNote")');
   });
 
   it("advertises Quick Movie only when the configured provider is ready for quick_movie", () => {
