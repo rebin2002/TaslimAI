@@ -87,6 +87,19 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
         var canSplit = adapterDeclaresSceneClip
             && MovieClipSegmentationPlanner.TryPlan(
                 movie.DurationSeconds, videoProvider.SceneClipDurationRange, out segments);
+
+        // Scene-aware slots require a complete, explicitly timed scene plan.
+        // Never infer missing scene durations or let a slot cross scenes.
+        IReadOnlyList<MoviePlannedSceneClipSegment> sceneSegments = [];
+        var canSplitByScene = canSplit
+            && movie.Scenes.Count > 0
+            && movie.Scenes.All(scene => scene.DurationSeconds is > 0)
+            && MovieSceneClipSegmentationPlanner.TryPlan(
+                movie.DurationSeconds,
+                movie.Scenes.Select(scene => new MoviePlannedSceneDuration(
+                    scene.Id, scene.Sequence, scene.DurationSeconds!.Value)).ToArray(),
+                videoProvider.SceneClipDurationRange,
+                out sceneSegments);
         return Ok(new MovieClipSegmentationPreviewDto(
             id,
             movie.DurationSeconds,
@@ -95,7 +108,9 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
             canSplit,
             videoProvider.SceneClipDurationRange?.MinimumSeconds,
             videoProvider.SceneClipDurationRange?.MaximumSeconds,
-            segments));
+            segments,
+            canSplitByScene,
+            sceneSegments));
     }
 
     [HttpGet("projects/{id:guid}/timeline")]
