@@ -75,6 +75,74 @@ public sealed class RunwayMovieVideoProviderTests
         Assert.Equal("gen4.5", payload.RootElement.GetProperty("model").GetString());
     }
 
+    [Theory]
+    [InlineData(1, "720p", "720p", "Standard", "native", "16:9", "MOVIE_CLIP_DURATION_UNSUPPORTED")]
+    [InlineData(11, "720p", "720p", "Standard", "native", "16:9", "MOVIE_CLIP_DURATION_UNSUPPORTED")]
+    [InlineData(7200, "720p", "720p", "Standard", "native", "16:9", "MOVIE_CLIP_DURATION_UNSUPPORTED")]
+    [InlineData(5, "1080p", "720p", "Standard", "native", "16:9", "MOVIE_CLIP_EXECUTION_INTENT_UNSUPPORTED")]
+    [InlineData(5, "720p", "1080p", "Standard", "native", "16:9", "MOVIE_CLIP_EXECUTION_INTENT_UNSUPPORTED")]
+    [InlineData(5, "720p", "720p", "Cinematic", "native", "16:9", "MOVIE_CLIP_EXECUTION_INTENT_UNSUPPORTED")]
+    [InlineData(5, "720p", "720p", "Standard", "upscale", "16:9", "MOVIE_CLIP_EXECUTION_INTENT_UNSUPPORTED")]
+    [InlineData(5, "720p", "720p", "Standard", "native", "4:5", "MOVIE_CLIP_EXECUTION_INTENT_UNSUPPORTED")]
+    public void Approved_production_admission_rejects_unexecutable_Runway_clips_before_provider_access(
+        int durationSeconds, string sourceResolution, string targetResolution,
+        string qualityTier, string processingPath, string aspectRatio, string rejectionCode)
+    {
+        // Check the actual adapter, not a permissive fake capability flag.
+        // This shared decision is suitable for both read-only production preflight
+        // and queue admission, with no network or usage side effects.
+        var handler = new RecordingHandler(_ => throw new InvalidOperationException("No provider request is permitted."));
+        var provider = CreateProvider(handler, EnabledOptions());
+
+        var rejection = MovieProductionGenerationOrchestrator.EvaluateProductionClipAdmission(
+            provider, durationSeconds, sourceResolution, targetResolution,
+            qualityTier, processingPath, aspectRatio);
+
+        Assert.NotNull(rejection);
+        Assert.Equal(rejectionCode, rejection.Code);
+        Assert.Empty(handler.Requests);
+    }
+
+    [Theory]
+    [InlineData(2, "16:9", "1280:720")]
+    [InlineData(5, "16:9", "1280:720")]
+    [InlineData(10, "9:16", "720:1280")]
+    public async Task Approved_production_admission_matches_verified_Runway_payload_at_supported_boundaries(
+        int durationSeconds, string aspectRatio, string expectedRatio)
+    {
+        var handler = new RecordingHandler(_ => JsonResponse(JsonSerializer.Serialize(new { id = TaskId })));
+        var provider = CreateProvider(handler, EnabledOptions());
+
+        var rejection = MovieProductionGenerationOrchestrator.EvaluateProductionClipAdmission(
+            provider, durationSeconds, "720p", "720p", "Standard", "native", aspectRatio);
+
+        Assert.Null(rejection);
+        // Fake HTTP only: accepted admission must serialize the same duration,
+        // aspect and fixed 720p output that was admitted and priced.
+        await provider.SubmitAsync(Request(durationSeconds: durationSeconds, aspectRatio: aspectRatio), CancellationToken.None);
+        using var payload = JsonDocument.Parse(Assert.Single(handler.RequestBodies));
+        Assert.Equal(durationSeconds, payload.RootElement.GetProperty("duration").GetInt32());
+        Assert.Equal(expectedRatio, payload.RootElement.GetProperty("ratio").GetString());
+        Assert.Equal("gen4.5", payload.RootElement.GetProperty("model").GetString());
+        Assert.Single(handler.Requests);
+    }
+
+    [Fact]
+    public void Approved_production_admission_rejects_unverified_Runway_model()
+    {
+        var handler = new RecordingHandler(_ => throw new InvalidOperationException("No provider request is permitted."));
+        var options = EnabledOptions();
+        options.Model = "unverified-model";
+        var provider = CreateProvider(handler, options);
+
+        var rejection = MovieProductionGenerationOrchestrator.EvaluateProductionClipAdmission(
+            provider, 5, "720p", "720p", "Standard", "native", "16:9");
+
+        Assert.NotNull(rejection);
+        Assert.Equal("MOVIE_CLIP_EXECUTION_INTENT_UNSUPPORTED", rejection.Code);
+        Assert.Empty(handler.Requests);
+    }
+
     [Fact]
     public async Task Submission_maps_prompt_duration_ratio_and_reference_image_without_leaking_secrets()
     {
