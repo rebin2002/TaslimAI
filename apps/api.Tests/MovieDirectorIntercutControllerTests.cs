@@ -1,12 +1,14 @@
 using System.Security.Claims;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
 using Taslim.Api.Controllers;
 using Taslim.Api.Domain;
+using Taslim.Api.Infrastructure;
 using Taslim.Api.Movies;
 using Taslim.Api.Persistence;
 using Xunit;
@@ -190,6 +192,7 @@ public sealed class MovieDirectorIntercutControllerTests
                 claims.Add(new Claim(ClaimTypes.NameIdentifier, invalidId));
             controller.HttpContext.User = new ClaimsPrincipal(new ClaimsIdentity(claims, "test"));
 
+            Assert.IsType<UnauthorizedResult>(controller.CreateSalvagePlan(null!));
             Assert.IsType<UnauthorizedResult>(await controller.CreateProposal(projectId, null!, CancellationToken.None));
             Assert.IsType<UnauthorizedResult>(await controller.CreateIntercutProposal(projectId, null!, CancellationToken.None));
             Assert.IsType<UnauthorizedResult>(await controller.GetProposal(proposalId, CancellationToken.None));
@@ -198,5 +201,19 @@ public sealed class MovieDirectorIntercutControllerTests
             Assert.IsType<UnauthorizedResult>(await controller.Reject(proposalId, CancellationToken.None));
             Assert.IsType<UnauthorizedResult>(await controller.Execute(actionId, CancellationToken.None));
         }
+    }
+
+    [Theory]
+    [InlineData(nameof(MovieDirectorController.CreateSalvagePlan))]
+    [InlineData(nameof(MovieDirectorController.CreateIntercutProposal))]
+    public void Review_planning_endpoints_enforce_generation_rate_limit(string methodName)
+    {
+        // Both routes can parse substantial caller-supplied story coverage and the
+        // intercut route also reads canonical clips. They must not bypass the
+        // established generation policy used by other Director proposal routes.
+        var method = typeof(MovieDirectorController).GetMethod(methodName)!;
+        var limiter = Assert.Single(method.GetCustomAttributes(typeof(EnableRateLimitingAttribute), true)
+            .Cast<EnableRateLimitingAttribute>());
+        Assert.Equal(RateLimiting.Generation, limiter.PolicyName);
     }
 }
