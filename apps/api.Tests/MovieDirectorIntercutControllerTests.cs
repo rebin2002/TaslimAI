@@ -129,6 +129,26 @@ public sealed class MovieDirectorIntercutControllerTests
         Assert.Contains("canonical_clip_shot_scene_ownership_verified", proposal.Findings);
         Assert.DoesNotContain("canonical_clip_and_shot_ownership_not_verified_in_review_only_proposal", proposal.Findings);
 
+        // A persisted project timeline need not use the planner's deterministic
+        // fallback ID. Omitting the timeline must still check its revision and
+        // plan against that exact canonical ID, without mutating the request.
+        request.TimelineId = null;
+        request.BaseTimelineVersion = 2;
+        var omittedStale = await controller.CreateIntercutProposal(requestedProjectId, request, CancellationToken.None);
+        Assert.Equal(409, Assert.IsType<ObjectResult>(omittedStale).StatusCode);
+        request.BaseTimelineVersion = 1;
+        var omittedResult = await controller.CreateIntercutProposal(requestedProjectId, request, CancellationToken.None);
+        var omittedPlan = Assert.IsType<MovieIntercutPlanDto>(Assert.IsType<OkObjectResult>(omittedResult).Value);
+        Assert.Null(request.TimelineId);
+        Assert.Equal(ownedTimelineId, omittedPlan.TimelineId);
+        Assert.Equal(proposal.ProposalId, omittedPlan.ProposalId);
+        request.TimelineId = Guid.Empty;
+        var emptyResult = await controller.CreateIntercutProposal(requestedProjectId, request, CancellationToken.None);
+        var emptyPlan = Assert.IsType<MovieIntercutPlanDto>(Assert.IsType<OkObjectResult>(emptyResult).Value);
+        Assert.Equal(ownedTimelineId, emptyPlan.TimelineId);
+        Assert.Equal(proposal.ProposalId, emptyPlan.ProposalId);
+        request.TimelineId = ownedTimelineId;
+
         // Invalid references must not be able to smuggle another project's clip or
         // misrepresent the canonical scene/shot sequence, even for a review-only cut.
         async Task AssertInvalidCoverageAsync()
