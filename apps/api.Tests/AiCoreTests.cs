@@ -97,6 +97,27 @@ public sealed class AiCoreTests
     }
 
     [Fact]
+    public void Context_builder_uses_default_chat_output_budget()
+    {
+        var context = new AiContextBuilder(Options.Create(new AiOptions())).Build([]);
+
+        Assert.Equal(2_048, context.MaxOutputTokens);
+    }
+
+    [Theory]
+    [InlineData(0, 256)]
+    [InlineData(255, 256)]
+    [InlineData(256, 256)]
+    [InlineData(16_000, 16_000)]
+    [InlineData(16_001, 16_000)]
+    public void Context_builder_clamps_configured_chat_output_budget(int configured, int expected)
+    {
+        var context = new AiContextBuilder(Options.Create(new AiOptions { MaxChatOutputTokens = configured })).Build([]);
+
+        Assert.Equal(expected, context.MaxOutputTokens);
+    }
+
+    [Fact]
     public async Task Completion_service_exposes_provider_independent_stream_events()
     {
         var options = Options.Create(new AiOptions { AllowMockProvider = false, OpenAI = new OpenAiOptions { Enabled = true, ApiKey = "test-only" } });

@@ -40,7 +40,7 @@ Taslim uses three internal tiers:
 | Smart | `gpt-5.6-terra` | Not exposed; default |
 | Advanced | `gpt-5.6-sol` | Not exposed |
 
-The default is configured with `Ai__DefaultChatTier=Smart`. The current router is deterministic and configuration-driven. It is intentionally not an automatic classifier. A future router can analyze task characteristics while retaining the same contract.
+The default is configured with `Ai__DefaultChatTier=Smart`. Chat output is bounded by the server-side `Ai__MaxChatOutputTokens` setting, which defaults to 2,048 and is clamped to 256–16,000 before a provider request is built. The current router is deterministic and configuration-driven. It is intentionally not an automatic classifier. A future router can analyze task characteristics while retaining the same contract.
 
 ## OpenAI adapter
 
@@ -141,6 +141,7 @@ The API service requires these Railway variables:
 Ai__OpenAI__Enabled=true
 Ai__OpenAI__ApiKey=<SECRET>
 Ai__DefaultChatTier=Smart
+Ai__MaxChatOutputTokens=2048
 ```
 
 The optional base URL is already defaulted to `https://api.openai.com/v1`; set `Ai__OpenAI__BaseUrl` only when a compatible server-side endpoint is intentionally used. Put these variables only on **Taslim API**, never on Taslim Web. The EF migrations `AddChatUsageAndIdempotency` and `AddDeterministicChatMessageOrdering` are applied through the existing Production startup migration runner.
