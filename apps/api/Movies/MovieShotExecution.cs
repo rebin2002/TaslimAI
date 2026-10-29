@@ -549,6 +549,14 @@ public sealed class MovieShotExecutionService(
                     throw new MovieShotExecutionValidationException(
                         "SHOT_EXECUTION_IDEMPOTENCY_IN_PROGRESS",
                         "A generation job for this candidate already committed. Retry the same request shortly.");
+                var committedJobOwnsRequestKey = candidateKeys[index - 1] is { } candidateKey
+                    && await db.GenerationJobs.AsNoTracking().AnyAsync(
+                        item => item.CreatedByUserId == userId && item.IdempotencyKey == candidateKey,
+                        CancellationToken.None);
+                if (committedJobOwnsRequestKey)
+                    throw new MovieShotExecutionValidationException(
+                        "SHOT_EXECUTION_IDEMPOTENCY_IN_PROGRESS",
+                        "A generation job with this request key committed during reconciliation. Retry the same request shortly.");
                 throw;
             }
 
