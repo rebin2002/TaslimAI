@@ -18,7 +18,7 @@ public static class MovieProductionPreflightDecisionCodes
     public const string ProviderUnavailable = "provider_unavailable";
     public const string ClipDurationUnsupported = "clip_duration_unsupported";
     public const string ExecutionIntentUnsupported = "execution_intent_unsupported";
-    public const string PromptCapacityUnsupported = "prompt_capacity_unsupported";
+    public const string PromptCapacityUnsupported = "creative_text_capacity_unsupported";
 }
 
 public static class MovieProductionPreflightCheckKeys
@@ -32,7 +32,7 @@ public static class MovieProductionPreflightCheckKeys
     public const string CostGuardrails = "cost_guardrails";
     public const string ProviderAdmission = "provider_admission";
     public const string ClipDuration = "clip_duration";
-    public const string PromptCapacity = "prompt_capacity";
+    public const string PromptCapacity = "creative_text_capacity";
 }
 
 public sealed record MovieProductionPreflightRequest(
@@ -246,9 +246,9 @@ public sealed class MovieProductionPreflightService(
             || totalPromptCharacters <= promptLimit;
         checks.Add(new MovieProductionPreflightCheckDto(
             MovieProductionPreflightCheckKeys.PromptCapacity,
-            "Production prompt capacity", promptFits, true,
+            "Creative text capacity", promptFits, true,
             promptFits
-                ? "The current project prompt and character-continuity context fit the selected adapter's declared limit."
+                ? "The current creative directions and continuity context fit the selected adapter's declared limit."
                 : "Shorten the project, shot or character-continuity directions before rendering."));
 
         // Preserve the source duration when valid; any invalid value is a
