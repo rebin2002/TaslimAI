@@ -46,6 +46,52 @@ public sealed class S3CompatibleStorageTests
     }
 
     [Fact]
+    public async Task Verified_missing_object_get_returns_null_without_storage_error()
+    {
+        // Only a genuine object-level 404 may be interpreted as an absent file.
+        var client = new AwsS3CompatibleObjectClient((_, _) =>
+            Task.FromException<GetObjectResponse>(new AmazonS3Exception("synthetic missing object")
+            {
+                StatusCode = HttpStatusCode.NotFound,
+                ErrorCode = "NoSuchKey",
+            }));
+        var logger = new RecordingLogger();
+        using var service = CreateService(client, logger);
+
+        Assert.Null(await service.OpenReadAsync("private/missing.pdf"));
+        Assert.Empty(logger.Messages);
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.NotFound, "NoSuchBucket", "s3_response")]
+    [InlineData(HttpStatusCode.Forbidden, "NoSuchKey", "s3_auth_or_permission")]
+    [InlineData(HttpStatusCode.ServiceUnavailable, "NoSuchKey", "s3_service_error")]
+    public async Task Non_object_s3_get_failures_cannot_be_reported_as_missing_private_files(
+        HttpStatusCode upstreamStatus, string upstreamErrorCode, string expectedFailureClass)
+    {
+        // A missing bucket, permission denial or provider outage must not be
+        // transformed into "file not found" even when the upstream code is misleading.
+        const string privateMarker = "synthetic-private-file-name-DO-NOT-LOG";
+        var client = new AwsS3CompatibleObjectClient((_, _) =>
+            Task.FromException<GetObjectResponse>(new AmazonS3Exception($"synthetic {privateMarker}")
+            {
+                StatusCode = upstreamStatus,
+                ErrorCode = upstreamErrorCode,
+            }));
+        var logger = new RecordingLogger();
+        using var service = CreateService(client, logger);
+
+        await Assert.ThrowsAsync<FileStorageOperationException>(
+            () => service.OpenReadAsync($"private/{privateMarker}.pdf"));
+
+        Assert.Contains(logger.Messages, message =>
+            message.Contains("Operation=get", StringComparison.Ordinal) &&
+            message.Contains($"FailureClass={expectedFailureClass}", StringComparison.Ordinal));
+        Assert.DoesNotContain(logger.Messages,
+            message => message.Contains(privateMarker, StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task Successful_get_with_null_response_stream_fails_closed_instead_of_hiding_private_file()
     {
         // A malformed successful response is not equivalent to the S3 object
