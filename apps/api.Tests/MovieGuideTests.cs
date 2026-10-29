@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Taslim.Api.Contracts;
 using Taslim.Api.Movies;
@@ -130,6 +131,53 @@ public sealed class MovieGuideTests : IClassFixture<TaslimApiFactory>
         Assert.Equal(HttpStatusCode.NotFound, forbiddenHistory.StatusCode);
         var forbiddenContext = await other.GetAsync($"/api/movie-studio/projects/{created.Project.Id}/director-context");
         Assert.Equal(HttpStatusCode.NotFound, forbiddenContext.StatusCode);
+    }
+
+    [Fact]
+    public async Task Locking_a_revision_synchronizes_the_legacy_guide_projection_from_authoritative_sections()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Movie Guide Projection Owner");
+        var created = await SendWithCsrf<MovieStudioProjectResponse>(client, HttpMethod.Post, "/api/movie-studio/projects", new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            mode = MovieProjectModes.Full,
+            title = "Canonical Guide Projection",
+            description = "The locked revision is the production authority.",
+            durationSeconds = 60,
+            aspectRatio = "16:9",
+            style = "cinematic",
+            language = "en",
+            visualLanguage = "LEGACY_VISUAL",
+            cameraLanguage = "LEGACY_CAMERA",
+            colorAndLighting = "LEGACY_COLOR",
+            soundAndNarration = "LEGACY_AUDIO",
+            continuityRules = "LEGACY_CONTINUITY",
+        });
+
+        await SendWithCsrf<MovieGuideRevisionResponse>(client, HttpMethod.Post, $"/api/movie-studio/projects/{created.Project.Id}/guide/revisions", new
+        {
+            storyBibleJson = "{\"logline\":\"A promise survives a storm.\"}",
+            characterBibleReferencesJson = "[]",
+            worldBibleReferencesJson = "[]",
+            visualBibleJson = "{\"visualLanguage\":\"LOCKED_VISUAL\",\"colorAndLighting\":\"LOCKED_COLOR\"}",
+            cinematographyBibleJson = "{\"cameraLanguage\":\"LOCKED_CAMERA\"}",
+            audioBibleJson = "{\"soundAndNarration\":\"LOCKED_AUDIO\"}",
+            continuityBibleJson = "{\"continuityRules\":\"LOCKED_CONTINUITY\"}",
+        });
+
+        var locked = await SendWithCsrf<MovieGuideRevisionResponse>(client, HttpMethod.Post, $"/api/movie-studio/projects/{created.Project.Id}/guide/lock", new { revisionNumber = 2 });
+        Assert.Equal(MovieGuideRevisionStatuses.Locked, locked.Revision.Status);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<Taslim.Api.Persistence.TaslimDbContext>();
+        var guide = await db.MovieContinuityGuides.SingleAsync(item => item.MovieProjectId == created.Project.Id);
+
+        Assert.Equal("LOCKED_VISUAL", guide.VisualLanguage);
+        Assert.Equal("LOCKED_CAMERA", guide.CameraLanguage);
+        Assert.Equal("LOCKED_COLOR", guide.ColorAndLighting);
+        Assert.Equal("LOCKED_AUDIO", guide.SoundAndNarration);
+        Assert.Equal("LOCKED_CONTINUITY", guide.ContinuityRules);
     }
 
     private static async Task<AuthResponse> Register(HttpClient client, string displayName)
