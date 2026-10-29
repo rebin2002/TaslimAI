@@ -175,6 +175,15 @@ public sealed class MovieDirectorIntercutControllerTests
         });
         await db.SaveChangesAsync();
 
+        // Capture the actually persisted timeline IDs before further review-only
+        // requests. The endpoint must not insert, delete, or replace a timeline;
+        // this is more precise than assuming a global row count across project scopes.
+        var persistedTimelineIdsBeforeReview = await db.MovieTimelines.AsNoTracking()
+            .Select(item => item.Id)
+            .OrderBy(id => id)
+            .ToArrayAsync();
+        Assert.Contains(defaultPlan.TimelineId, persistedTimelineIdsBeforeReview);
+
         var implicitStale = await controller.CreateIntercutProposal(requestedProjectId, request, CancellationToken.None);
         Assert.Equal(409, Assert.IsType<ObjectResult>(implicitStale).StatusCode);
         request.TimelineId = Guid.Empty;
@@ -187,7 +196,12 @@ public sealed class MovieDirectorIntercutControllerTests
         Assert.Equal(4, currentDefaultPlan.ProposedTimelineVersion);
 
         // This endpoint builds a review-only proposal. It must not persist a new timeline or revision.
-        Assert.Equal(3, await db.MovieTimelines.CountAsync());
+        var persistedTimelineIdsAfterReview = await db.MovieTimelines.AsNoTracking()
+            .Select(item => item.Id)
+            .OrderBy(id => id)
+            .ToArrayAsync();
+        Assert.Equal(persistedTimelineIdsBeforeReview, persistedTimelineIdsAfterReview);
+        Assert.Equal(3, (await db.MovieTimelines.SingleAsync(item => item.Id == defaultPlan.TimelineId)).CurrentRevisionNumber);
         Assert.Equal(2, await db.MovieScenes.CountAsync());
         Assert.Equal(2, await db.MovieShots.CountAsync());
         Assert.Equal(2, await db.MovieClips.CountAsync());
