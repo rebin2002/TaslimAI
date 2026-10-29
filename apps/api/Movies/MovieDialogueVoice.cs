@@ -453,6 +453,27 @@ public sealed class MovieDialogueProductionService(
         var line = await db.MovieDialogueLines.Include(item => item.MovieClip).ThenInclude(item => item.MovieProject).SingleOrDefaultAsync(item => item.Id == lineId, cancellationToken);
         if (line is null || !await authorization.CanAsync(userId, line.MovieClip.MovieProjectId, MovieOperationalActions.Generate, cancellationToken)) return null;
         if (request.Label?.Length > 160) throw new MovieDialogueValidationException("MOVIE_DIALOGUE_TAKE_INVALID", "The take label must be 160 characters or fewer.");
+        var normalizedIdempotencyKey = idempotencyKey?.Trim();
+        if (!string.IsNullOrEmpty(normalizedIdempotencyKey))
+        {
+            var existingTake = await db.MovieDialogueTakes
+                .Include(item => item.GenerationJob)
+                .FirstOrDefaultAsync(item => item.MovieDialogueLineId == line.Id
+                    && item.GenerationJob != null
+                    && item.GenerationJob.CreatedByUserId == userId
+                    && item.GenerationJob.JobType == GenerationJobTypes.MovieDialogueVoiceGenerate
+                    && item.GenerationJob.IdempotencyKey == normalizedIdempotencyKey, cancellationToken);
+            if (existingTake?.GenerationJob is { } existingJob)
+            {
+                var requestedLabel = string.IsNullOrWhiteSpace(request.Label) ? existingTake.Label : request.Label.Trim();
+                if (!string.Equals(requestedLabel, existingTake.Label, StringComparison.Ordinal))
+                    throw new GenerationJobValidationException("IDEMPOTENCY_KEY_REUSED", "This idempotency key was already used for a different generation request.");
+                var existingLine = await QueryLine().SingleAsync(item => item.Id == line.Id, cancellationToken);
+                return new MovieDialogueTakeResponse(
+                    ToDto(existingLine.Takes.Single(item => item.Id == existingTake.Id)),
+                    GenerationJobContractMapper.ToMovieDto(existingJob));
+            }
+        }
         var take = new MovieDialogueTake
         {
             Id = Guid.NewGuid(), MovieDialogueLineId = line.Id, MovieClipId = line.MovieClipId,
