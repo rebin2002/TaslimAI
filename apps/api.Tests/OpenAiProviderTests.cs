@@ -38,6 +38,24 @@ public sealed class OpenAiProviderTests
     }
 
     [Fact]
+    public async Task Adapter_flushes_a_terminal_event_at_eof_without_a_blank_delimiter()
+    {
+        var handler = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}}")
+        });
+        using var client = new HttpClient(handler);
+        var provider = new OpenAiProvider(client, Options.Create(new AiOptions { OpenAI = new OpenAiOptions { Enabled = true, ApiKey = "test-key", BaseUrl = "https://example.test/v1" } }), Microsoft.Extensions.Logging.Abstractions.NullLogger<OpenAiProvider>.Instance);
+
+        var events = new List<AiStreamEvent>();
+        await foreach (var item in provider.StreamAsync(new AiChatRequest([new("user", "Hello")], "instruction", "Smart", true), new AiProviderSelection("openai", "gpt-5.6-terra", "Taslim Smart", "Smart", false))) events.Add(item);
+
+        Assert.Equal(2, events.Count);
+        Assert.Equal("Hello", ((AiMessageDelta)events[0]).Delta);
+        Assert.IsType<AiMessageCompleted>(events[1]);
+    }
+
+    [Fact]
     public async Task Adapter_returns_safe_failure_for_non_success_provider_response()
     {
         var handler = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.BadGateway) { Content = new StringContent("secret provider payload") });
