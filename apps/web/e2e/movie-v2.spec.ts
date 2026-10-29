@@ -55,6 +55,35 @@ test.describe("Movie Studio V2 browser smoke", () => {
     await expect(page).not.toHaveURL(/\/create\/movie\/[0-9a-f-]+\/overview$/i);
   });
 
+  test("keeps Quick and Full draft durations separate when switching tabs", async ({ authenticatedPage: page }) => {
+    await page.goto("/create/movie");
+    const quickTab = page.getByRole("tab", { name: /quick movie/i }).first();
+    const fullTab = page.getByRole("tab", { name: /full movie/i }).first();
+    const durationField = page.locator(".movie-brief-card input[type=number]").first();
+
+    await expect(durationField).toHaveAttribute("max", "3600");
+    await durationField.fill("90");
+    await fullTab.click();
+    await expect(durationField).toHaveValue("30");
+    await expect(durationField).toHaveAttribute("max", "7200");
+    await durationField.fill("7200");
+
+    // Switching back cannot quietly turn a feature-length film into a
+    // 3,600-second Quick clip or leave the Quick form invalid.
+    await quickTab.click();
+    await expect(durationField).toHaveAttribute("max", "3600");
+    await expect(durationField).toHaveValue("90");
+    await fullTab.click();
+    await expect(durationField).toHaveValue("7200");
+
+    // Keyboard tab navigation must preserve the same independent drafts.
+    await fullTab.press("ArrowLeft");
+    await expect(durationField).toHaveValue("90");
+    await quickTab.press("ArrowRight");
+    await expect(durationField).toHaveValue("7200");
+    // No generation or project creation is invoked by this regression.
+  });
+
   test("persists a two-hour full movie timeline without queueing paid work", async ({ authenticatedPage: page }) => {
     test.setTimeout(120_000);
     await page.goto("/create/movie");
