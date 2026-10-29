@@ -78,6 +78,24 @@ public sealed class MovieDirectorController(IMovieDirectorService director, IMov
             // Pure validation bounds the request before any database lookup; this is still
             // review-only and never enqueues, persists, publishes media, or reserves usage.
             var proposal = MovieIntercutPlanner.Build(movieProjectId, request);
+            // An omitted or empty timeline id resolves to the deterministic project
+            // timeline. It can already exist: do not bypass the same stale-revision
+            // and cross-project checks enforced for explicitly supplied timeline ids.
+            if (request.TimelineId.GetValueOrDefault() == Guid.Empty)
+            {
+                var existingDefault = await db.MovieTimelines.AsNoTracking()
+                    .Where(item => item.Id == proposal.TimelineId)
+                    .Select(item => new { item.MovieProjectId, item.CurrentRevisionNumber })
+                    .SingleOrDefaultAsync(cancellationToken);
+                if (existingDefault is not null)
+                {
+                    if (existingDefault.MovieProjectId != movieProjectId)
+                        throw new MovieIntercutPlanningException(MovieIntercutPlanCodes.TimelineProjectMismatch, "The intercut timeline must belong to the requested movie project.");
+                    if (existingDefault.CurrentRevisionNumber != request.BaseTimelineVersion)
+                        throw new MovieIntercutPlanningException(MovieIntercutPlanCodes.TimelineVersionMismatch, "The intercut timeline revision has changed; refresh the timeline before planning.");
+                }
+            }
+
             var requestedClipIds = request.Clips.Select(item => item.ClipId).ToArray();
             var canonicalClips = await db.MovieClips.AsNoTracking()
                 .Where(clip => requestedClipIds.Contains(clip.Id))
