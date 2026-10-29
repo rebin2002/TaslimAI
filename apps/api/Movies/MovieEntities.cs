@@ -826,6 +826,9 @@ public interface IMovieVideoProvider
     // Unknown providers fail closed before usage reservation or paid submission.
     bool SupportsSceneClipCostIntent(string sourceResolution, string targetResolution,
         string qualityTier, string processingPath, string aspectRatio) => false;
+    // SourceImageUri can select a distinct image-to-video execution mode.
+    // It is not covered by the base scene-clip quote unless explicitly priced.
+    bool SupportsSceneClipSourceImageCostIntent => false;
     Task<MovieVideoSubmission> SubmitAsync(MovieVideoGenerationRequest request, CancellationToken cancellationToken);
     Task<MovieVideoProviderStatus> GetStatusAsync(string providerJobId, CancellationToken cancellationToken);
     Task<MovieVideoProviderOutput> RetrieveAsync(string providerJobId, MovieVideoProviderStatus status, CancellationToken cancellationToken);

@@ -181,11 +181,13 @@ public sealed class RunwayMovieVideoProviderTests
         // Fake HTTP only: accepted admission must serialize the same duration,
         // aspect and fixed 720p output that was admitted and priced.
         await provider.SubmitAsync(Request(durationSeconds: durationSeconds, aspectRatio: aspectRatio), CancellationToken.None);
+        Assert.EndsWith("/text_to_video", Assert.Single(handler.Requests).RequestUri!.AbsoluteUri);
         using var payload = JsonDocument.Parse(Assert.Single(handler.RequestBodies));
         Assert.Equal(durationSeconds, payload.RootElement.GetProperty("duration").GetInt32());
         Assert.Equal(expectedRatio, payload.RootElement.GetProperty("ratio").GetString());
         Assert.Equal("gen4.5", payload.RootElement.GetProperty("model").GetString());
-        Assert.Single(handler.Requests);
+        Assert.False(payload.RootElement.TryGetProperty("resolution", out _));
+        Assert.False(payload.RootElement.TryGetProperty("quality", out _));
     }
 
     [Fact]
@@ -205,12 +207,20 @@ public sealed class RunwayMovieVideoProviderTests
     }
 
     [Fact]
-    public async Task Submission_maps_prompt_duration_ratio_and_reference_image_without_leaking_secrets()
+    public async Task Quick_movie_image_to_video_payload_maps_prompt_duration_ratio_and_image_without_leaking_secrets()
     {
         var handler = new RecordingHandler(_ => JsonResponse($"{{\"id\":\"{TaskId}\",\"estimatedCost\":{{\"credits\":60}}}}"));
         var provider = CreateProvider(handler, EnabledOptions());
 
-        var submission = await provider.SubmitAsync(Request(sourceImageUri: "https://assets.example.test/frame.png"), CancellationToken.None);
+        var imageRequest = Request(sourceImageUri: "https://assets.example.test/frame.png") with
+        {
+            Operation = MovieStudioOperations.QuickMovie,
+            SourceResolution = null,
+            TargetResolution = null,
+            QualityTier = null,
+            ProcessingPath = null,
+        };
+        var submission = await provider.SubmitAsync(imageRequest, CancellationToken.None);
 
         Assert.Equal(TaskId.ToString(), submission.ProviderJobId);
         var request = Assert.Single(handler.Requests);
@@ -225,6 +235,22 @@ public sealed class RunwayMovieVideoProviderTests
         Assert.Equal(5, payload.RootElement.GetProperty("duration").GetInt32());
         Assert.Equal("https://assets.example.test/frame.png", payload.RootElement.GetProperty("promptImage").GetString());
         Assert.DoesNotContain("synthetic-runway-token", payload.RootElement.GetProperty("promptText").GetString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Scene_clip_source_image_rejects_before_image_host_lookup_or_provider_submission()
+    {
+        var handler = new RecordingHandler(_ => throw new InvalidOperationException("No provider request is allowed."));
+        var urlPolicy = new CountingProviderUrlPolicy();
+        var provider = CreateProvider(handler, EnabledOptions(), urlPolicy);
+
+        var error = await Assert.ThrowsAsync<MovieVideoProviderException>(() => provider.SubmitAsync(
+            Request(sourceImageUri: "https://assets.example.test/frame.png"), CancellationToken.None));
+
+        Assert.Equal(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, error.Code);
+        Assert.False(provider.SupportsSceneClipSourceImageCostIntent);
+        Assert.Equal(0, urlPolicy.Calls);
+        Assert.Empty(handler.Requests);
     }
 
     [Fact]
@@ -266,8 +292,7 @@ public sealed class RunwayMovieVideoProviderTests
         var provider = CreateProvider(handler, EnabledOptions(), urlPolicy);
 
         var error = await Assert.ThrowsAsync<MovieVideoProviderException>(() => provider.SubmitAsync(
-            Request(sourceImageUri: "https://assets.example.test/frame.png",
-                sourceResolution: sourceResolution, targetResolution: targetResolution,
+            Request(sourceResolution: sourceResolution, targetResolution: targetResolution,
                 qualityTier: qualityTier, processingPath: processingPath), CancellationToken.None));
 
         Assert.Equal(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, error.Code);
@@ -287,7 +312,7 @@ public sealed class RunwayMovieVideoProviderTests
         var provider = CreateProvider(handler, EnabledOptions(), urlPolicy);
 
         var error = await Assert.ThrowsAsync<MovieVideoProviderException>(() => provider.SubmitAsync(
-            Request(sourceImageUri: "https://assets.example.test/frame.png") with
+            Request() with
             {
                 MasterResolution = masterResolution,
             }, CancellationToken.None));
@@ -305,7 +330,7 @@ public sealed class RunwayMovieVideoProviderTests
         var handler = new RecordingHandler(_ => throw new InvalidOperationException("No paid provider request is allowed."));
         var urlPolicy = new CountingProviderUrlPolicy();
         var provider = CreateProvider(handler, EnabledOptions(), urlPolicy);
-        var request = Request(sourceImageUri: "https://assets.example.test/frame.png") with
+        var request = Request() with
         {
             AdditionalInstructions = new string('X', 1200),
         };

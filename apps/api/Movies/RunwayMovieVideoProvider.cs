@@ -50,9 +50,7 @@ public sealed class RunwayMovieVideoProvider(
     // translate paid quality/upscale tiers. Permit only the unenhanced 720p
     // baseline, never imply a higher resolution or quality instruction.
     // This priced scene-clip contract does not carry a source-image capability.
-    // BuildPayload supports image-free text_to_video only for gen4.5; another
-    // configured model would be rejected after the queue reserves usage.
-    // Fail closed until the admission contract can distinguish image-to-video.
+    // Image-to-video remains a separate mode until its price intent is verified.
     public bool SupportsSceneClipCostIntent(string sourceResolution, string targetResolution,
         string qualityTier, string processingPath, string aspectRatio) =>
         string.Equals(settings.Model?.Trim(), "gen4.5", StringComparison.OrdinalIgnoreCase)
@@ -61,6 +59,7 @@ public sealed class RunwayMovieVideoProvider(
         && string.Equals(qualityTier, DirectorQualityLevels.Standard, StringComparison.OrdinalIgnoreCase)
         && string.Equals(processingPath, "native", StringComparison.OrdinalIgnoreCase)
         && aspectRatio is "16:9" or "9:16";
+    public bool SupportsSceneClipSourceImageCostIntent => false;
 
     public async Task<MovieVideoSubmission> SubmitAsync(MovieVideoGenerationRequest request, CancellationToken cancellationToken)
     {
@@ -231,7 +230,9 @@ public sealed class RunwayMovieVideoProvider(
                 request.TargetResolution ?? string.Empty,
                 request.QualityTier ?? string.Empty,
                 request.ProcessingPath ?? string.Empty,
-                request.AspectRatio)))
+                request.AspectRatio)
+                || (!string.IsNullOrWhiteSpace(request.SourceImageUri)
+                    && !SupportsSceneClipSourceImageCostIntent)))
             throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);
 
         // Quick Movie also uses this provider's fixed output payload. It cannot

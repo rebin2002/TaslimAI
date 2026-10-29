@@ -353,7 +353,10 @@ public sealed class MovieVideoGenerationJobHandler(
                 || input.UpscalingRequested
                 // Distinct frame and multi-reference input requires explicit
                 // provider capability; all current adapters fail closed here.
-                // SourceImageUri has a separate adapter contract.
+                // SourceImageUri selects an image-to-video mode and is not
+                // covered by the base scene-clip cost intent.
+                || (!string.IsNullOrWhiteSpace(input.SourceImageUri)
+                    && !provider.SupportsSceneClipSourceImageCostIntent)
                 || (!provider.SupportsSceneClipFrameReferences
                     && (!string.IsNullOrWhiteSpace(input.FirstFrameImageUri)
                         || !string.IsNullOrWhiteSpace(input.LastFrameImageUri)
