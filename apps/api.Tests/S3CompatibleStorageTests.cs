@@ -170,9 +170,11 @@ public sealed class S3CompatibleStorageTests
         Assert.DoesNotContain("taslim-secret", exception.Message, StringComparison.Ordinal);
         Assert.Contains(logger.Messages, message => message.Contains("Operation=put", StringComparison.Ordinal));
         Assert.Contains(logger.Messages, message => message.Contains("StatusCode=403", StringComparison.Ordinal));
-        Assert.Contains(logger.Messages, message => message.Contains("ErrorCode=AccessDenied", StringComparison.Ordinal));
+        Assert.Contains(logger.Messages, message => message.Contains("FailureClass=s3_auth_or_permission", StringComparison.Ordinal));
         Assert.Contains(logger.Messages, message => message.Contains("ErrorType=AmazonS3Exception", StringComparison.Ordinal));
-        Assert.Contains(logger.Messages, message => message.Contains("RequestId=r2-request-123", StringComparison.Ordinal));
+        Assert.Contains(logger.Messages, message => message.Contains("HasRequestId=True", StringComparison.Ordinal));
+        Assert.DoesNotContain(logger.Messages, message => message.Contains("ErrorCode=", StringComparison.Ordinal));
+        Assert.DoesNotContain(logger.Messages, message => message.Contains("RequestId=r2-request-123", StringComparison.Ordinal));
         Assert.DoesNotContain(logger.Messages, message => message.Contains("r2-secret-value", StringComparison.Ordinal));
         Assert.DoesNotContain(logger.Messages, message => message.Contains("taslim-secret", StringComparison.Ordinal));
     }
