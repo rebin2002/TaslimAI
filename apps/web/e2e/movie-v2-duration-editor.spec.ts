@@ -3,6 +3,57 @@ import { test, expect, apiJson } from "./fixtures";
 // This journey edits only project metadata and adds a planning record.
 // It must never submit a provider job, reserve paid generation, or invent footage.
 test.describe("Full Movie draft runtime browser acceptance", () => {
+  test("recovers a failed duration-only preview without submitting provider work", async ({
+    authenticatedPage: page,
+  }) => {
+    test.setTimeout(120_000);
+    let acceptPreviewRequests = false;
+    let failedPreviewRequests = 0;
+    let retriedPreviewRequests = 0;
+    const providerSubmissions: string[] = [];
+
+    page.on("request", (request) => {
+      const path = new URL(request.url()).pathname;
+      if (
+        request.method() === "POST" &&
+        /\/api\/(?:generation-jobs|movie-studio\/.*\/(?:generate|render|queue))(?:\/|$)/i.test(path)
+      ) providerSubmissions.push(path);
+    });
+    await page.route("**/api/movie-studio/projects/*/clip-segmentation-preview", async (route) => {
+      if (!acceptPreviewRequests) {
+        failedPreviewRequests += 1;
+        await route.fulfill({
+          status: 503,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "Synthetic preview outage" }),
+        });
+        return;
+      }
+      retriedPreviewRequests += 1;
+      await route.continue();
+    });
+
+    await page.goto("/create/movie");
+    await page.getByRole("tab", { name: /full movie/i }).first().click();
+    await page.getByLabel("Movie title").fill("E2E Read-only Preview Retry");
+    await page.getByLabel("Describe your movie").fill(
+      "Synthetic, provider-free transport recovery in the long-film planning view.",
+    );
+    await page.getByRole("button", { name: /create full project/i }).click();
+    await expect(page).toHaveURL(/\/create\/movie\/[0-9a-f-]+\/overview$/i);
+
+    const retry = page.getByRole("button", { name: "Retry preview" });
+    await expect(retry).toBeVisible({ timeout: 20_000 });
+    expect(failedPreviewRequests).toBeGreaterThanOrEqual(1);
+
+    acceptPreviewRequests = true;
+    await retry.click();
+    await expect.poll(() => retriedPreviewRequests).toBeGreaterThanOrEqual(1);
+    await expect(retry).toHaveCount(0, { timeout: 20_000 });
+    expect(providerSubmissions).toEqual([]);
+    await expect(page.locator("video")).toHaveCount(0);
+  });
+
   test("persists a two-hour draft edit and locks duration after planning begins", async ({
     authenticatedPage: page,
   }) => {
