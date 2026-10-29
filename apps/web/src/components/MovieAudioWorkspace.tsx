@@ -12,6 +12,12 @@ import {
   type MovieSoundtrackCue,
 } from "@/lib/api";
 import { useLocale } from "@/components/LocaleProvider";
+import {
+  formatMovieAudioNumber,
+  movieAudioStatusLabel,
+  movieAudioText,
+  type MovieAudioKey,
+} from "@/lib/movieAudioI18n";
 
 /**
  * The sound stage. Everything rendered here is a persisted record: the project
@@ -21,7 +27,9 @@ import { useLocale } from "@/components/LocaleProvider";
  * simulated when the seam is unavailable.
  */
 export function MovieAudioWorkspace({ project }: { project: MovieProject }) {
-  const { t } = useLocale();
+  const { locale, t } = useLocale();
+  const text = (key: MovieAudioKey, variables?: Record<string, string | number>) =>
+    movieAudioText(locale, key, variables);
   const [library, setLibrary] = useState<MovieSoundLibrary | null>(null);
   const [tracks, setTracks] = useState<MovieSoundTrack[]>([]);
   const [soundtrack, setSoundtrack] = useState<MovieSoundtrack | null>(null);
@@ -63,9 +71,9 @@ export function MovieAudioWorkspace({ project }: { project: MovieProject }) {
     try {
       const updated = await api.reviewMovieSoundTrack(track.id, { approve });
       setTracks((current) => current.map((item) => (item.id === updated.id ? updated : item)));
-      setMessage(approve ? "Sound cue approved." : "Sound cue rejected. The record keeps the decision.");
+      setMessage(text(approve ? "reviewApproved" : "reviewRejected"));
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "The sound review could not be saved.");
+      setError(cause instanceof Error ? cause.message : text("reviewSaveError"));
     } finally {
       setBusyTrackId(null);
     }
@@ -90,21 +98,18 @@ export function MovieAudioWorkspace({ project }: { project: MovieProject }) {
       </section>
 
       <section className="movie-audio-summary" aria-label={t("movieAudio.summary")}>
-        <AudioMetric label="Library" value={library?.references.length ?? 0} detail="approved references" />
-        <AudioMetric label="Sound cues" value={tracks.length} detail={`${approved} approved`} />
-        <AudioMetric label="Score cues" value={cues.length} detail={`${approvedCues} approved`} />
-        <AudioMetric label="Caption tracks" value={captionTracks.length} detail={`${captionTracks.filter((track) => track.isRtl).length} RTL`} />
+        <AudioMetric locale={locale} label={text("summaryLibrary")} value={library?.references.length ?? 0} detail={text("summaryApprovedReferences")} />
+        <AudioMetric locale={locale} label={text("summarySoundCues")} value={tracks.length} detail={text("summaryApprovedCues", { count: formatMovieAudioNumber(locale, approved) })} />
+        <AudioMetric locale={locale} label={text("summaryScoreCues")} value={cues.length} detail={text("summaryApprovedCues", { count: formatMovieAudioNumber(locale, approvedCues) })} />
+        <AudioMetric locale={locale} label={text("summaryCaptionTracks")} value={captionTracks.length} detail={text("summaryRtlTracks", { count: formatMovieAudioNumber(locale, captionTracks.filter((track) => track.isRtl).length) })} />
       </section>
 
       {soundtrack && !soundtrack.mediaServiceAvailable && (
         <section className="movie-audio-boundary">
           <ShieldAlert size={16} />
           <div>
-            <strong>Score generation is not connected</strong>
-            <span>
-              Cue, version, ducking and approval data are fully persisted, but no soundtrack media provider is
-              configured for this deployment. Cues stay reviewable and can carry an approved asset.
-            </span>
+            <strong>{text("providerUnavailableTitle")}</strong>
+            <span>{text("providerUnavailableText")}</span>
           </div>
         </section>
       )}
@@ -119,7 +124,7 @@ export function MovieAudioWorkspace({ project }: { project: MovieProject }) {
         <div className="movie-selects-notice is-error" role="alert">
           <AlertTriangle size={15} />
           <span>{error}</span>
-          <button type="button" onClick={() => setError("")} aria-label="Dismiss error">
+          <button type="button" onClick={() => setError("")} aria-label={text("dismissError")}>
             <X size={13} />
           </button>
         </div>
@@ -144,11 +149,8 @@ export function MovieAudioWorkspace({ project }: { project: MovieProject }) {
         ) : tracks.length === 0 ? (
           <div className="movie-audio-empty">
             <AudioLines size={20} />
-            <strong>No sound tracks yet</strong>
-            <p>
-              Sound tracks appear after a real cue is created for a scene or shot. Nothing is generated or simulated
-              here.
-            </p>
+            <strong>{text("noSoundTracks")}</strong>
+            <p>{text("noSoundTracksText")}</p>
           </div>
         ) : (
           <div className="movie-audio-tracks">
@@ -162,32 +164,32 @@ export function MovieAudioWorkspace({ project }: { project: MovieProject }) {
                     <h4>{track.name}</h4>
                     <p>{track.description}</p>
                   </div>
-                  <span className={`movie-audio-status is-${track.status.toLowerCase()}`}>{track.status}</span>
+                  <span className={`movie-audio-status is-${track.status.toLowerCase()}`}>{movieAudioStatusLabel(locale, track.status)}</span>
                 </header>
                 <dl className="movie-audio-facts">
                   <div>
-                    <dt>Window</dt>
+                    <dt>{text("window")}</dt>
                     <dd>
-                      {track.startMilliseconds}–{track.endMilliseconds} ms
+                      {formatMovieAudioNumber(locale, track.startMilliseconds)}–{formatMovieAudioNumber(locale, track.endMilliseconds)} ms
                     </dd>
                   </div>
                   <div>
-                    <dt>Fades</dt>
+                    <dt>{text("fades")}</dt>
                     <dd>
-                      {track.fadeInMilliseconds} / {track.fadeOutMilliseconds} ms
+                      {formatMovieAudioNumber(locale, track.fadeInMilliseconds)} / {formatMovieAudioNumber(locale, track.fadeOutMilliseconds)} ms
                     </dd>
                   </div>
                   <div>
-                    <dt>Gain</dt>
-                    <dd>{track.gainDb} dB</dd>
+                    <dt>{text("gain")}</dt>
+                    <dd>{formatMovieAudioNumber(locale, track.gainDb)} dB</dd>
                   </div>
                   <div>
-                    <dt>Source</dt>
+                    <dt>{text("source")}</dt>
                     <dd>{track.sourceKind}</dd>
                   </div>
                 </dl>
                 <footer>
-                  {track.assetId && <audio src={`/api/assets/${track.assetId}/download?inline=true`} controls preload="metadata" aria-label={`${track.name} preview`} />}
+                  {track.assetId && <audio src={`/api/assets/${track.assetId}/download?inline=true`} controls preload="metadata" aria-label={text("previewAudio", { name: track.name })} />}
                   <div className="movie-audio-track-actions">
                     {track.status !== "Approved" && (
                       <button
@@ -196,7 +198,7 @@ export function MovieAudioWorkspace({ project }: { project: MovieProject }) {
                         onClick={() => void review(track, true)}
                         disabled={busyTrackId === track.id}
                       >
-                        Approve cue
+                        {text("approveCue")}
                       </button>
                     )}
                     {track.status !== "Rejected" && (
@@ -206,7 +208,7 @@ export function MovieAudioWorkspace({ project }: { project: MovieProject }) {
                         onClick={() => void review(track, false)}
                         disabled={busyTrackId === track.id}
                       >
-                        <X size={12} /> Reject
+                        <X size={12} /> {text("rejectCue")}
                       </button>
                     )}
                   </div>
@@ -220,22 +222,22 @@ export function MovieAudioWorkspace({ project }: { project: MovieProject }) {
       <section className="movie-audio-section" aria-labelledby="movie-audio-score-title">
         <div className="movie-audio-section-heading">
           <div>
-            <span className="movie-workspace-kicker">Score · soundtrack cues</span>
-            <h3 id="movie-audio-score-title">Where the music belongs.</h3>
-            <p>Cues carry a mood, intensity, timeline placement and explicit ducking intents.</p>
+            <span className="movie-workspace-kicker">{text("scoreEyebrow")}</span>
+            <h3 id="movie-audio-score-title">{text("scoreTitle")}</h3>
+            <p>{text("scoreText")}</p>
           </div>
           <Music4 size={18} />
         </div>
         {cues.length === 0 ? (
           <div className="movie-audio-empty">
             <Music4 size={20} />
-            <strong>No score cues yet</strong>
-            <p>A cue appears here after it is created against a real scene in this project.</p>
+            <strong>{text("noScoreCues")}</strong>
+            <p>{text("noScoreCuesText")}</p>
           </div>
         ) : (
           <div className="movie-audio-cues">
             {cues.map((cue) => (
-              <ScoreCue key={cue.id} cue={cue} />
+              <ScoreCue key={cue.id} cue={cue} locale={locale} text={text} />
             ))}
           </div>
         )}
@@ -244,17 +246,17 @@ export function MovieAudioWorkspace({ project }: { project: MovieProject }) {
       <section className="movie-audio-section" aria-labelledby="movie-audio-captions-title">
         <div className="movie-audio-section-heading">
           <div>
-            <span className="movie-workspace-kicker">Captions and subtitles</span>
-            <h3 id="movie-audio-captions-title">Accessible delivery.</h3>
-            <p>Tracks keep their language and direction so RTL delivery stays correct.</p>
+            <span className="movie-workspace-kicker">{text("captionsEyebrow")}</span>
+            <h3 id="movie-audio-captions-title">{text("captionsTitle")}</h3>
+            <p>{text("captionsText")}</p>
           </div>
           <Subtitles size={18} />
         </div>
         {captionTracks.length === 0 ? (
           <div className="movie-audio-empty">
             <Subtitles size={20} />
-            <strong>No caption tracks yet</strong>
-            <p>Caption tracks appear after they are authored or imported for this project.</p>
+            <strong>{text("noCaptionTracks")}</strong>
+            <p>{text("noCaptionTracksText")}</p>
           </div>
         ) : (
           <div className="movie-audio-captions">
@@ -264,16 +266,16 @@ export function MovieAudioWorkspace({ project }: { project: MovieProject }) {
                   <div>
                     <span className="movie-audio-track-kicker">
                       {track.trackType} · {track.language}
-                      {track.isRtl ? " · RTL" : ""}
+                      {track.isRtl ? ` · ${text("rtl")}` : ""}
                     </span>
                     <h4>{track.name}</h4>
                   </div>
-                  <span className={`movie-audio-status is-${track.status.toLowerCase()}`}>{track.status}</span>
+                  <span className={`movie-audio-status is-${track.status.toLowerCase()}`}>{movieAudioStatusLabel(locale, track.status)}</span>
                 </header>
                 <p>
-                  {track.cues.length} cue(s)
-                  {track.isDefault ? " · default track" : ""}
-                  {track.sourceFormat ? ` · imported ${track.sourceFormat.toUpperCase()}` : ""}
+                  {text("cueCount", { count: formatMovieAudioNumber(locale, track.cues.length) })}
+                  {track.isDefault ? ` · ${text("defaultTrack")}` : ""}
+                  {track.sourceFormat ? ` · ${text("imported", { format: track.sourceFormat.toUpperCase() })}` : ""}
                 </p>
                 {track.cues.length > 0 && (
                   <ol className="movie-audio-caption-cues" dir={track.isRtl ? "rtl" : "ltr"}>
@@ -303,52 +305,54 @@ export function MovieAudioWorkspace({ project }: { project: MovieProject }) {
 
       <div className="movie-audio-footnote">
         <Clock3 size={14} />
-        <span>
-          Audio records are workspace-scoped. Previewing a cue uses the private asset download path; no provider URL is
-          exposed.
-        </span>
+        <span>{text("footnote")}</span>
       </div>
     </div>
   );
 }
 
-function ScoreCue({ cue }: { cue: MovieSoundtrackCue }) {
+function ScoreCue({ cue, locale, text }: { cue: MovieSoundtrackCue; locale: Parameters<typeof movieAudioText>[0]; text: (key: MovieAudioKey, variables?: Record<string, string | number>) => string }) {
   const approvedVersion = cue.versions.find((version) => version.id === cue.approvedVersionId) ?? null;
   return (
     <article className="movie-audio-cue">
       <header>
         <div>
           <span className="movie-audio-track-kicker">
-            Cue {String(cue.sequence).padStart(2, "0")} · {cue.mood} · intensity {cue.intensity}
+            {text("cue", { number: formatMovieAudioNumber(locale, cue.sequence), mood: cue.mood, intensity: formatMovieAudioNumber(locale, cue.intensity) })}
           </span>
           <h4>{cue.title}</h4>
-          <p>{cue.narrativeIntent ?? "No narrative intent recorded."}</p>
+          <p>{cue.narrativeIntent ?? text("noNarrativeIntent")}</p>
         </div>
-        <span className={`movie-audio-status is-${cue.approvalState.toLowerCase()}`}>{cue.approvalState}</span>
+        <span className={`movie-audio-status is-${cue.approvalState.toLowerCase()}`}>{movieAudioStatusLabel(locale, cue.approvalState)}</span>
       </header>
       <dl className="movie-audio-facts">
         <div>
-          <dt>Timeline</dt>
-          <dd>{cue.timelineStartSeconds}s</dd>
+          <dt>{text("timeline")}</dt>
+          <dd>{formatMovieAudioNumber(locale, cue.timelineStartSeconds)}s</dd>
         </div>
         <div>
-          <dt>Duration</dt>
-          <dd>{cue.durationSeconds}s</dd>
+          <dt>{text("duration")}</dt>
+          <dd>{formatMovieAudioNumber(locale, cue.durationSeconds)}s</dd>
         </div>
         <div>
-          <dt>Versions</dt>
-          <dd>{cue.versions.length}</dd>
+          <dt>{text("versions")}</dt>
+          <dd>{formatMovieAudioNumber(locale, cue.versions.length)}</dd>
         </div>
         <div>
-          <dt>Ducking</dt>
-          <dd>{cue.duckingIntents.length} intent(s)</dd>
+          <dt>{text("ducking")}</dt>
+          <dd>{formatMovieAudioNumber(locale, cue.duckingIntents.length)} {text("duckingIntentCount")}</dd>
         </div>
       </dl>
       {cue.duckingIntents.length > 0 && (
         <ul className="movie-audio-ducking">
           {cue.duckingIntents.map((intent) => (
             <li key={intent.id}>
-              Duck {intent.targetLane} by {intent.duckDecibels} dB · {intent.startOffsetSeconds}s–{intent.endOffsetSeconds}s
+              {text("duckingIntent", {
+                target: intent.targetLane,
+                decibels: formatMovieAudioNumber(locale, intent.duckDecibels),
+                start: formatMovieAudioNumber(locale, intent.startOffsetSeconds),
+                end: formatMovieAudioNumber(locale, intent.endOffsetSeconds),
+              })}
             </li>
           ))}
         </ul>
@@ -357,7 +361,10 @@ function ScoreCue({ cue }: { cue: MovieSoundtrackCue }) {
         <div className="movie-audio-approved">
           <CheckCircle2 size={13} />
           <span>
-            Approved version {approvedVersion.versionNumber} · {approvedVersion.label}
+            {text("approvedVersion", {
+              version: formatMovieAudioNumber(locale, approvedVersion.versionNumber),
+              label: approvedVersion.label,
+            })}
             {approvedVersion.audioAssetProvenance ? ` · ${approvedVersion.audioAssetProvenance.mimeType}` : ""}
           </span>
         </div>
@@ -365,18 +372,18 @@ function ScoreCue({ cue }: { cue: MovieSoundtrackCue }) {
       {!approvedVersion && cue.versions.length > 0 && (
         <div className="movie-audio-approved is-pending">
           <Clock3 size={13} />
-          <span>No version has been approved yet. The cue stays review-only.</span>
+          <span>{text("noApprovedVersion")}</span>
         </div>
       )}
     </article>
   );
 }
 
-function AudioMetric({ label, value, detail }: { label: string; value: number; detail: string }) {
+function AudioMetric({ locale, label, value, detail }: { locale: Parameters<typeof movieAudioText>[0]; label: string; value: number; detail: string }) {
   return (
     <div className="movie-audio-metric">
       <span>{label}</span>
-      <strong>{value}</strong>
+      <strong>{formatMovieAudioNumber(locale, value)}</strong>
       <small>{detail}</small>
     </div>
   );
