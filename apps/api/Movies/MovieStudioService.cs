@@ -1404,7 +1404,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                 // adopt a clip already attached to a different generation job.
                 // Otherwise, the response can pair one job's pricing/reservation
                 // with another job's clip and falsely report an idempotent replay.
-                if (canonicalClip.GenerationJobId is { } linkedJobId && linkedJobId != existingJob.Id)
+                if (!MovieStudioIdempotency.IsCompatibleClipLink(canonicalClip.GenerationJobId, existingJob.Id))
                     throw new GenerationJobValidationException(
                         "IDEMPOTENCY_KEY_REUSED",
                         "The idempotent generation clip is linked to a different job.");
@@ -1624,6 +1624,16 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                 await db.SaveChangesAsync(CancellationToken.None);
                 throw new MovieStudioValidationException("The idempotent generation target is no longer available.");
             }
+            if (!MovieStudioIdempotency.IsCompatibleClipLink(canonicalClip.GenerationJobId, canonicalJob.Id))
+            {
+                // The job-creation collision path must respect the same clip/job
+                // identity boundary as the earlier job-first replay path.
+                db.MovieClips.Remove(clip);
+                await db.SaveChangesAsync(CancellationToken.None);
+                throw new GenerationJobValidationException(
+                    "IDEMPOTENCY_KEY_REUSED",
+                    "The idempotent generation clip is linked to a different job.");
+            }
             if (canonicalClip.GenerationJobId is null)
                 canonicalClip.GenerationJobId = canonicalJob.Id;
             db.MovieClips.Remove(clip);
@@ -1667,6 +1677,16 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                 db.MovieClips.Remove(clip);
                 await db.SaveChangesAsync(CancellationToken.None);
                 throw new MovieStudioValidationException("The idempotent generation target is no longer available.");
+            }
+            if (!MovieStudioIdempotency.IsCompatibleClipLink(canonicalClip.GenerationJobId, job.Id))
+            {
+                // A successful idempotent job response must not silently pair
+                // another generation job's clip with this job's usage reservation.
+                db.MovieClips.Remove(clip);
+                await db.SaveChangesAsync(CancellationToken.None);
+                throw new GenerationJobValidationException(
+                    "IDEMPOTENCY_KEY_REUSED",
+                    "The idempotent generation clip is linked to a different job.");
             }
             if (canonicalClip.GenerationJobId is null)
             {
@@ -2162,6 +2182,12 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
 
 internal static class MovieStudioIdempotency
 {
+    // Reuse a persisted clip only when it is unlinked (recoverable job-first
+    // window) or already linked to this exact generation job. Shared by all
+    // fast-path, exception and post-creation replay reconciliation branches.
+    internal static bool IsCompatibleClipLink(Guid? linkedJobId, Guid canonicalJobId) =>
+        !linkedJobId.HasValue || linkedJobId.Value == canonicalJobId;
+
     internal static bool MatchesRequest(
         GenerationJob job,
         MovieProject movie,
