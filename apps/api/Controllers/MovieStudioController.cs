@@ -847,14 +847,24 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
         [FromQuery] Guid? sourceVersionId,
         [FromQuery] string? targetResolution,
         [FromQuery] string? qualityTier,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        [FromQuery] bool confirmationAccepted = false,
+        [FromQuery] Guid? sourceProductionVersionId = null)
     {
         try
         {
+            // Support both existing source query names without silently choosing
+            // between conflicting production versions. This GET is read-only;
+            // confirmation here never authorizes a paid queue submission.
+            if (sourceVersionId.HasValue && sourceProductionVersionId.HasValue
+                && sourceVersionId.Value != sourceProductionVersionId.Value)
+                return ApiResults.Error(this, 400, "MOVIE_PREFLIGHT_SOURCE_CONFLICT",
+                    "Choose one production source version for preflight.");
+            var selectedSourceId = sourceVersionId ?? sourceProductionVersionId;
             var result = await productionPreflight.EvaluateAsync(
                 GetUserId(),
                 shotId,
-                new MovieProductionPreflightRequest(sourceVersionId, targetResolution, qualityTier),
+                new MovieProductionPreflightRequest(selectedSourceId, targetResolution, qualityTier, confirmationAccepted),
                 cancellationToken);
             return result is null ? ApiResults.Error(this, 404, "MOVIE_SHOT_NOT_FOUND", "Movie shot not found.") : Ok(result);
         }
