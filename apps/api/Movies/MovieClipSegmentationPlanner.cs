@@ -57,3 +57,17 @@ public static class MovieClipSegmentationPlanner
         return true;
     }
 }
+
+/// <summary>
+/// A duration-only preview, not production preflight, consent, pricing,
+/// storyboard approval or authorization for provider execution.
+/// </summary>
+public sealed record MovieClipSegmentationPreviewDto(
+    Guid MovieProjectId,
+    int TotalDurationSeconds,
+    string ProviderKey,
+    bool ProviderDeclaresSceneClipOperation,
+    bool CanSplitByDuration,
+    int? MinimumClipSeconds,
+    int? MaximumClipSeconds,
+    IReadOnlyList<MoviePlannedClipSegment> Segments);
