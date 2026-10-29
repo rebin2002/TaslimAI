@@ -17,8 +17,10 @@ public sealed class MovieDirectorController(IMovieDirectorService director, IMov
 {
     [HttpPost("salvage-plan")]
     [ValidateAntiForgeryToken]
+    [EnableRateLimiting(RateLimiting.Generation)]
     public IActionResult CreateSalvagePlan(MovieSalvageDirectorRequest request)
     {
+        if (!TryGetUserId(out _)) return Unauthorized();
         try { return Ok(salvage.Plan(request)); }
         catch (ArgumentNullException exception) { return ApiResults.Error(this, 400, "MOVIE_SALVAGE_REQUEST_INVALID", exception.Message); }
         catch (ArgumentException exception) { return ApiResults.Error(this, 400, "MOVIE_SALVAGE_REQUEST_INVALID", exception.Message); }
@@ -47,6 +49,7 @@ public sealed class MovieDirectorController(IMovieDirectorService director, IMov
 
     [HttpPost("projects/{movieProjectId:guid}/intercut-proposals")]
     [ValidateAntiForgeryToken]
+    [EnableRateLimiting(RateLimiting.Generation)]
     public async Task<IActionResult> CreateIntercutProposal(Guid movieProjectId, MovieIntercutPlanRequest request, CancellationToken cancellationToken)
     {
         // The authentication middleware establishes identity, but an authenticated claim
