@@ -254,6 +254,22 @@ public sealed class RunwayMovieVideoProviderTests
     }
 
     [Fact]
+    public async Task Scene_clip_reference_package_rejects_before_provider_submission()
+    {
+        var handler = new RecordingHandler(_ => throw new InvalidOperationException("No provider request is allowed."));
+        var urlPolicy = new CountingProviderUrlPolicy();
+        var provider = CreateProvider(handler, EnabledOptions(), urlPolicy);
+
+        var error = await Assert.ThrowsAsync<MovieVideoProviderException>(() => provider.SubmitAsync(
+            Request() with { ReferencePackageJson = "{\"schemaVersion\":1}" }, CancellationToken.None));
+
+        Assert.Equal(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, error.Code);
+        Assert.False(provider.SupportsReferencePackageCostIntent);
+        Assert.Equal(0, urlPolicy.Calls);
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
     public async Task Approved_character_continuity_is_sent_with_movie_guide_in_prompt()
     {
         var handler = new RecordingHandler(_ => JsonResponse(JsonSerializer.Serialize(new { id = TaskId })));

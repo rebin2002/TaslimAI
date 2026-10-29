@@ -829,6 +829,9 @@ public interface IMovieVideoProvider
     // SourceImageUri can select a distinct image-to-video execution mode.
     // It is not covered by the base scene-clip quote unless explicitly priced.
     bool SupportsSceneClipSourceImageCostIntent => false;
+    // Reference packages are a distinct Movie input mode. Unknown adapters must
+    // not queue them as if the base generation quote covered them.
+    bool SupportsReferencePackageCostIntent => false;
     Task<MovieVideoSubmission> SubmitAsync(MovieVideoGenerationRequest request, CancellationToken cancellationToken);
     Task<MovieVideoProviderStatus> GetStatusAsync(string providerJobId, CancellationToken cancellationToken);
     Task<MovieVideoProviderOutput> RetrieveAsync(string providerJobId, MovieVideoProviderStatus status, CancellationToken cancellationToken);

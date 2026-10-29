@@ -62,6 +62,37 @@ public sealed class ManusMovieVideoProviderTests
     }
 
     [Fact]
+    public async Task Reference_package_rejects_before_manus_task_creation()
+    {
+        var handler = new RecordingHandler(_ => throw new InvalidOperationException("No provider request allowed."));
+        var provider = CreateProvider(handler, EnabledOptions());
+
+        var error = await Assert.ThrowsAsync<MovieVideoProviderException>(() => provider.SubmitAsync(
+            Request() with
+            {
+                ReferencePackageJson = "{\"schemaVersion\":1}",
+            }, CancellationToken.None));
+
+        Assert.Equal(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, error.Code);
+        Assert.False(provider.SupportsReferencePackageCostIntent);
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
+    public async Task Scene_clip_source_image_rejects_before_manus_task_creation()
+    {
+        var handler = new RecordingHandler(_ => throw new InvalidOperationException("No provider request allowed."));
+        var provider = CreateProvider(handler, EnabledOptions());
+
+        var error = await Assert.ThrowsAsync<MovieVideoProviderException>(() => provider.SubmitAsync(
+            Request(sourceImageUri: "https://assets.example.test/frame.png"), CancellationToken.None));
+
+        Assert.Equal(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, error.Code);
+        Assert.False(provider.SupportsSceneClipSourceImageCostIntent);
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
     public async Task Disabled_configuration_never_calls_Manus_and_is_unavailable()
     {
         var handler = new RecordingHandler(_ => throw new InvalidOperationException("should not call"));
@@ -80,7 +111,11 @@ public sealed class ManusMovieVideoProviderTests
         var handler = new RecordingHandler(request => JsonResponse($"{{\"ok\":true,\"task_id\":\"{TaskId}\"}}"));
         var provider = CreateProvider(handler, EnabledOptions());
 
-        var submission = await provider.SubmitAsync(Request(sourceImageUri: "https://assets.example.test/frame.png"), CancellationToken.None);
+        var quickMovieRequest = Request(sourceImageUri: "https://assets.example.test/frame.png") with
+        {
+            Operation = MovieStudioOperations.QuickMovie,
+        };
+        var submission = await provider.SubmitAsync(quickMovieRequest, CancellationToken.None);
 
         Assert.Equal(TaskId, submission.ProviderJobId);
         var request = Assert.Single(handler.Requests);

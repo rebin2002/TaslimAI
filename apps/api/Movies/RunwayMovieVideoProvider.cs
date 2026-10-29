@@ -60,6 +60,7 @@ public sealed class RunwayMovieVideoProvider(
         && string.Equals(processingPath, "native", StringComparison.OrdinalIgnoreCase)
         && aspectRatio is "16:9" or "9:16";
     public bool SupportsSceneClipSourceImageCostIntent => false;
+    public bool SupportsReferencePackageCostIntent => false;
 
     public async Task<MovieVideoSubmission> SubmitAsync(MovieVideoGenerationRequest request, CancellationToken cancellationToken)
     {
@@ -207,6 +208,9 @@ public sealed class RunwayMovieVideoProvider(
         if (request.Operation is not (MovieStudioOperations.QuickMovie or MovieStudioOperations.SceneClip))
             throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieGenerationFailed, false);
         if (!string.IsNullOrWhiteSpace(request.ContinuationProviderJobId))
+            throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);
+        if (!string.IsNullOrWhiteSpace(request.ReferencePackageJson)
+            && !SupportsReferencePackageCostIntent)
             throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);
         // This adapter currently serializes only SourceImageUri as promptImage.
         // Reject other frame/reference inputs instead of silently discarding

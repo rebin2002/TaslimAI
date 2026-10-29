@@ -681,16 +681,179 @@ public sealed class MovieVideoExecutionTests
     }
 
     [Fact]
-    public async Task Worker_rejects_unpriced_scene_source_image_before_execution_record_or_submission()
+    public async Task Worker_keeps_source_version_jobs_without_shot_take_on_their_existing_path()
     {
         var fixture = await CreateRunningMovieJobAsync(
-            "Movie source-image price intent", "Image-to-video is not covered by the scene-clip quote.");
+            "Movie source version without shot take", "Preserve the production-render input path.");
+        await using var connection = fixture.Connection;
+        await using var db = fixture.Db;
+        var provider = new GuardedSceneMovieVideoProvider(supportsReferencePackageCostIntent: true);
+        var original = System.Text.Json.JsonSerializer.Deserialize<MovieGenerationInput>(fixture.Job.InputJson)!;
+        fixture.Job.InputJson = System.Text.Json.JsonSerializer.Serialize(original with
+        {
+            SourceProductionVersionId = Guid.NewGuid(),
+            ReferencePackageJson = "{\"schemaVersion\":1}",
+            SourceResolution = "720p",
+            TargetResolution = "720p",
+            QualityTier = DirectorQualityLevels.Standard,
+            ProcessingPath = "native",
+            MasterResolution = null,
+            UpscalingRequested = false,
+            TakeNumber = null,
+            TakeCount = null,
+            SelectedProviderKey = provider.Key,
+        });
+        var options = new MovieVideoOptions { Enabled = true, ProviderKey = provider.Key };
+        var handler = new MovieVideoGenerationJobHandler(
+            db, provider, new MovieVideoExecutionStore(db, Options.Create(options)),
+            Options.Create(options), NullLogger<MovieVideoGenerationJobHandler>.Instance);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => handler.ExecuteAsync(fixture.Job, new Progress<int>(), CancellationToken.None));
+
+        Assert.Equal(1, provider.SubmitCalls);
+        Assert.Single(await db.MovieVideoProviderExecutions.AsNoTracking().ToListAsync());
+    }
+
+    [Fact]
+    public async Task Worker_repairs_exact_unlinked_shot_take_before_provider_submission()
+    {
+        // Simulate a process stopping after the generation job commits but
+        // before the API persists the clip/take job links. The durable take
+        // fingerprint must allow only this exact job to repair those links.
+        var fixture = await CreateRunningMovieJobAsync(
+            "Movie shot link recovery", "Repair the canonical take before any provider submission.");
+        await using var connection = fixture.Connection;
+        await using var db = fixture.Db;
+        var provider = new GuardedSceneMovieVideoProvider(supportsReferencePackageCostIntent: true);
+        var now = DateTime.UtcNow;
+        var movie = await db.MovieProjects.SingleAsync();
+        var clip = await db.MovieClips.SingleAsync();
+        var scene = new MovieScene
+        {
+            Id = Guid.NewGuid(),
+            MovieProjectId = movie.Id,
+            Sequence = 1,
+            Title = "Link recovery scene",
+            Summary = "Synthetic worker fixture.",
+            CreatedAt = now,
+            UpdatedAt = now,
+        };
+        var shot = new MovieShot
+        {
+            Id = Guid.NewGuid(),
+            MovieSceneId = scene.Id,
+            Sequence = 1,
+            Description = "A deterministic keyframe shot.",
+            CreatedAt = now,
+            UpdatedAt = now,
+        };
+        db.AddRange(scene, shot);
+        clip.MovieSceneId = scene.Id;
+        clip.MovieShotId = shot.Id;
+        clip.GenerationJobId = null;
+        clip.DurationSeconds = 5;
+
+        const string idempotencyKey = "worker-shot-link-recovery";
+        var sourceProductionVersionId = Guid.NewGuid();
+        var original = System.Text.Json.JsonSerializer.Deserialize<MovieGenerationInput>(fixture.Job.InputJson)!;
+        fixture.Job.IdempotencyKey = idempotencyKey;
+        fixture.Job.InputJson = System.Text.Json.JsonSerializer.Serialize(original with
+        {
+            MovieSceneId = scene.Id,
+            MovieShotId = shot.Id,
+            SourceProductionVersionId = sourceProductionVersionId,
+            ReferencePackageJson = "{\"schemaVersion\":1}",
+            SourceResolution = "720p",
+            TargetResolution = "720p",
+            QualityTier = DirectorQualityLevels.Standard,
+            ProcessingPath = "native",
+            MasterResolution = null,
+            DurationSeconds = 5,
+            TakeNumber = 1,
+            TakeCount = 1,
+            SelectedProviderKey = provider.Key,
+        });
+        var inputFingerprint = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(fixture.Job.InputJson)));
+        var take = new MovieTake
+        {
+            Id = Guid.NewGuid(),
+            MovieShotId = shot.Id,
+            VersionNumber = 1,
+            Label = "Take 1",
+            Status = MovieTakeStatuses.Queued,
+            QualityLevel = DirectorQualityLevels.Standard,
+            MovieClipId = clip.Id,
+            GenerationJobId = null,
+            MetadataJson = System.Text.Json.JsonSerializer.Serialize(new
+            {
+                schemaVersion = 1,
+                execution = MovieShotExecutionOperations.ImageToVideo,
+                sourceProductionVersionId,
+                takeNumber = 1,
+                takeCount = 1,
+                idempotencyKey,
+                queuedInputFingerprint = "mismatched-fingerprint",
+            }),
+            CreatedAt = now,
+            UpdatedAt = now,
+        };
+        db.MovieTakes.Add(take);
+        await db.SaveChangesAsync();
+
+        var options = new MovieVideoOptions { Enabled = true, ProviderKey = provider.Key };
+        var handler = new MovieVideoGenerationJobHandler(
+            db, provider, new MovieVideoExecutionStore(db, Options.Create(options)),
+            Options.Create(options), NullLogger<MovieVideoGenerationJobHandler>.Instance);
+
+        var rejected = await Assert.ThrowsAsync<MovieVideoProviderException>(
+            () => handler.ExecuteAsync(fixture.Job, new Progress<int>(), CancellationToken.None));
+        Assert.Equal(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, rejected.Code);
+        Assert.False(rejected.IsTransient);
+        Assert.Equal(0, provider.SubmitCalls);
+        Assert.Empty(await db.MovieVideoProviderExecutions.AsNoTracking().ToListAsync());
+        Assert.Null((await db.MovieClips.AsNoTracking().SingleAsync()).GenerationJobId);
+        Assert.Null((await db.MovieTakes.AsNoTracking().SingleAsync()).GenerationJobId);
+
+        take.MetadataJson = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            schemaVersion = 1,
+            execution = MovieShotExecutionOperations.ImageToVideo,
+            sourceProductionVersionId,
+            takeNumber = 1,
+            takeCount = 1,
+            idempotencyKey,
+            queuedInputFingerprint = inputFingerprint,
+        });
+        await db.SaveChangesAsync();
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => handler.ExecuteAsync(fixture.Job, new Progress<int>(), CancellationToken.None));
+
+        Assert.Equal(1, provider.SubmitCalls);
+        Assert.Equal(fixture.Job.Id, (await db.MovieClips.AsNoTracking().SingleAsync()).GenerationJobId);
+        var persistedTake = await db.MovieTakes.AsNoTracking().SingleAsync();
+        Assert.Equal(fixture.Job.Id, persistedTake.GenerationJobId);
+        Assert.Equal(MovieTakeStatuses.Failed, persistedTake.Status);
+        var execution = await db.MovieVideoProviderExecutions.AsNoTracking().SingleAsync();
+        Assert.Equal(1, execution.AttemptCount);
+        Assert.Equal(MovieClipStatuses.Failed, (await db.MovieClips.AsNoTracking().SingleAsync()).Status);
+    }
+
+    [Theory]
+    [InlineData("source-image")]
+    [InlineData("reference-package")]
+    public async Task Worker_rejects_unpriced_scene_reference_modes_before_execution_record_or_submission(string referenceMode)
+    {
+        var fixture = await CreateRunningMovieJobAsync(
+            "Movie reference price intent", "Extra image-to-video inputs are not covered by the scene-clip quote.");
         await using var connection = fixture.Connection;
         await using var db = fixture.Db;
         var input = System.Text.Json.JsonSerializer.Deserialize<MovieGenerationInput>(fixture.Job.InputJson)!;
         fixture.Job.InputJson = System.Text.Json.JsonSerializer.Serialize(input with
         {
-            SourceImageUri = "https://example.invalid/frame.png",
+            SourceImageUri = referenceMode == "source-image" ? "https://example.invalid/frame.png" : null,
+            ReferencePackageJson = referenceMode == "reference-package" ? "{\"schemaVersion\":1}" : null,
             SourceResolution = "720p",
             TargetResolution = "720p",
             QualityTier = DirectorQualityLevels.Standard,
@@ -1295,17 +1458,19 @@ public sealed class MovieVideoExecutionTests
 
     private sealed class GuardedSceneMovieVideoProvider : IMovieVideoProvider
     {
-        public GuardedSceneMovieVideoProvider(int? promptLimit = null, bool supportsFrameReferences = false, bool includesWorldContext = false, int promptFormattingOverhead = 0)
+        public GuardedSceneMovieVideoProvider(int? promptLimit = null, bool supportsFrameReferences = false, bool includesWorldContext = false, int promptFormattingOverhead = 0, bool supportsReferencePackageCostIntent = false)
         {
             SceneClipPromptMaxCharacters = promptLimit;
             SupportsSceneClipFrameReferences = supportsFrameReferences;
             SceneClipWorldContextInPrompt = includesWorldContext;
             SceneClipPromptFormattingOverheadCharacters = promptFormattingOverhead;
+            SupportsReferencePackageCostIntent = supportsReferencePackageCostIntent;
         }
         public int? SceneClipPromptMaxCharacters { get; }
         public bool SceneClipWorldContextInPrompt { get; }
         public int SceneClipPromptFormattingOverheadCharacters { get; }
         public bool SupportsSceneClipFrameReferences { get; }
+        public bool SupportsReferencePackageCostIntent { get; }
         public string Key => "guarded-scene-test";
         public bool IsAvailable => true;
         public IReadOnlyCollection<string> SupportedOperations { get; } = [MovieStudioOperations.SceneClip];

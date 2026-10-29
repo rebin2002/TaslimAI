@@ -243,6 +243,9 @@ public sealed class FakeMovieVideoProvider(
     // The deterministic fake can honor the requested profile for provider-free E2E.
     // It is not an assertion about Runway or Manus capabilities.
     public bool SceneClipCostIntentSupported { get; set; } = true;
+    // Test-only opt-in for the approved-keyframe reference package route.
+    public bool ReferencePackageCostIntentSupported { get; set; } = true;
+    public bool SupportsReferencePackageCostIntent => ReferencePackageCostIntentSupported;
     public bool SupportsSceneClipCostIntent(string sourceResolution, string targetResolution,
         string qualityTier, string processingPath, string aspectRatio) => SceneClipCostIntentSupported;
 

@@ -41,6 +41,8 @@ public sealed class ManusMovieVideoProvider(
         && TryGetBaseUri(out _);
 
     public IReadOnlyCollection<string> SupportedOperations => Operations;
+    public bool SupportsSceneClipSourceImageCostIntent => false;
+    public bool SupportsReferencePackageCostIntent => false;
     // Mirrors the existing BuildCreateRequest duration gate.
     public MovieClipDurationRange? SceneClipDurationRange => new(1, 30);
     // Must use the same configured bound enforced by BuildPrompt.
@@ -280,6 +282,10 @@ public sealed class ManusMovieVideoProvider(
                 || !string.IsNullOrWhiteSpace(request.MasterResolution)
                 || !string.IsNullOrWhiteSpace(request.QualityTier)
                 || !string.IsNullOrWhiteSpace(request.ProcessingPath)
+                || !string.IsNullOrWhiteSpace(request.ReferencePackageJson)
+                || (request.Operation == MovieStudioOperations.SceneClip
+                    && !string.IsNullOrWhiteSpace(request.SourceImageUri)
+                    && !SupportsSceneClipSourceImageCostIntent)
                 || !string.IsNullOrWhiteSpace(request.FirstFrameImageUri)
                 || !string.IsNullOrWhiteSpace(request.LastFrameImageUri)
                 || request.ReferenceImages is { Count: > 0 })
