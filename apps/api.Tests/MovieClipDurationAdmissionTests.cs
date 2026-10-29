@@ -198,6 +198,53 @@ public sealed class MovieClipDurationAdmissionTests : IClassFixture<MovieClipDur
     }
 
     [Fact]
+    public async Task Explicit_supported_720p_profile_is_preserved_in_job_and_idempotent_replay()
+    {
+        // A supported explicit output request must reach the stored job intact,
+        // rather than silently being replaced with the legacy 1080p default.
+        // This exercises real HTTP admission and persistence with a fake
+        // range-limited adapter and a disabled worker: no paid provider calls.
+        using var client = factory.CreateClient();
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Explicit priced 720p clip", sceneDurationSeconds: 5);
+        var path = $"/api/movie-studio/shots/{fixture.Shot.Id}/generate";
+        const string key = "movie-explicit-720p-profile-1";
+        var requested = new
+        {
+            title = "Verified 720p native clip",
+            sourceResolution = "720p",
+            targetResolution = "720p",
+            qualityTier = "Standard",
+            processingPath = "native",
+            confirmationAccepted = true,
+        };
+
+        var first = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
+            client, path, requested, idempotencyKey: key);
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var job = await db.GenerationJobs.AsNoTracking().SingleAsync(item => item.Id == first.Job.Id);
+        var input = System.Text.Json.JsonSerializer.Deserialize<MovieGenerationInput>(job.InputJson)!;
+        Assert.Equal("720p", input.SourceResolution);
+        Assert.Equal("720p", input.TargetResolution);
+        Assert.Equal("Standard", input.QualityTier);
+        Assert.Equal("native", input.ProcessingPath);
+        Assert.Equal(5, input.DurationSeconds);
+        Assert.Equal(GenerationJobStatus.Queued, job.Status);
+        var usageAfterFirst = await db.UsageTransactions.CountAsync();
+
+        var replay = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
+            client, path, requested, idempotencyKey: key);
+        Assert.Equal(first.Job.Id, replay.Job.Id);
+        Assert.Equal(first.ClipId, replay.ClipId);
+        Assert.Single(await db.MovieClips.AsNoTracking()
+            .Where(item => item.MovieProjectId == fixture.Project.Project.Id).ToListAsync());
+        Assert.Equal(1, await db.GenerationJobs.CountAsync(item => item.IdempotencyKey == key));
+        Assert.Equal(usageAfterFirst, await db.UsageTransactions.CountAsync());
+        Assert.Equal(0, factory.Calls.Calls(FakeProviderKind.Movie));
+    }
+
+    [Fact]
     public async Task Feature_length_movie_and_long_scene_keep_short_shot_within_provider_clip_limit()
     {
         // A long-form movie is a sequence of short clips. The selected shot's
