@@ -1213,11 +1213,11 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                 SelectedProviderKey: provider.Key)),
             }, cancellationToken, effectiveIdempotencyKey);
         }
-        catch (GenerationJobValidationException exception) when (exception.Code == "IDEMPOTENCY_KEY_REUSED")
+        catch
         {
-            // Another request may have claimed this key between the precheck
-            // and CreateAsync. Never link the losing speculative clip to the
-            // canonical job or its usage reservation.
+            // CreateAsync commits the job, usage reservation, and queue entry
+            // together. Keep the request pending and remove this speculative
+            // clip for any failure before that transaction returns.
             db.MovieClips.Remove(clip);
             await db.SaveChangesAsync(CancellationToken.None);
             throw;
@@ -1680,11 +1680,10 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                 GenerationJobContractMapper.ToMovieDto(canonicalJob),
                 canonicalClip.Id);
         }
-        catch (GenerationJobValidationException)
+        catch
         {
-            // Validate-and-queue can reject a request after the target clip was
-            // inserted (e.g. an overlong idempotency key). Keep those rejected
-            // requests from leaving a queued clip with no generation job.
+            // CreateAsync commits the job, usage reservation, and queue entry in
+            // one transaction. Any failure leaves this speculative clip unused.
             db.MovieClips.Remove(clip);
             await db.SaveChangesAsync(CancellationToken.None);
             throw;
