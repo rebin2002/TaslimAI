@@ -22,7 +22,6 @@ namespace Taslim.Api.Tests;
 public sealed class PasswordRecoveryApiFactory : WebApplicationFactory<Program>
 {
     private readonly SqliteConnection connection = new("DataSource=:memory:");
-    private bool recoveryEnabled;
     private readonly TimeSpan? resetTokenLifetime;
     private readonly Dictionary<string, string?> recoverySettings = new()
     {
@@ -33,14 +32,16 @@ public sealed class PasswordRecoveryApiFactory : WebApplicationFactory<Program>
         ["PasswordRecovery:MaxDeliveryAttempts"] = "5",
         ["PasswordRecovery:LeaseSeconds"] = "60",
     };
+    private readonly RecoverySettingsSource recoverySettingsSource;
     public RecordingEmailSender EmailSender { get; } = new();
 
     public PasswordRecoveryApiFactory() : this(recoveryEnabled: true, resetTokenLifetime: null) { }
 
     internal PasswordRecoveryApiFactory(bool recoveryEnabled = true, TimeSpan? resetTokenLifetime = null)
     {
-        this.recoveryEnabled = recoveryEnabled;
+        recoverySettings["PasswordRecovery:Enabled"] = recoveryEnabled ? "true" : "false";
         this.resetTokenLifetime = resetTokenLifetime;
+        recoverySettingsSource = new RecoverySettingsSource(recoverySettings);
         connection.Open();
         using var db = new TaslimDbContext(new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connection).Options);
         db.Database.EnsureCreated();
@@ -49,8 +50,7 @@ public sealed class PasswordRecoveryApiFactory : WebApplicationFactory<Program>
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseEnvironment("Testing");
-        recoverySettings["PasswordRecovery:Enabled"] = recoveryEnabled ? "true" : "false";
-        builder.ConfigureAppConfiguration((_, configuration) => configuration.AddInMemoryCollection(recoverySettings));
+        builder.ConfigureAppConfiguration((_, configuration) => configuration.Add(recoverySettingsSource));
         builder.ConfigureServices(services =>
         {
             services.RemoveAll<DbContextOptions<TaslimDbContext>>();
@@ -65,8 +65,33 @@ public sealed class PasswordRecoveryApiFactory : WebApplicationFactory<Program>
 
     public void SetRecoveryEnabled(bool enabled)
     {
-        recoveryEnabled = enabled;
-        recoverySettings["PasswordRecovery:Enabled"] = enabled ? "true" : "false";
+        recoverySettingsSource.SetAndReload("PasswordRecovery:Enabled", enabled ? "true" : "false");
+    }
+
+    private sealed class RecoverySettingsSource(IDictionary<string, string?> settings) : IConfigurationSource
+    {
+        private RecoverySettingsProvider? provider;
+
+        public IConfigurationProvider Build(IConfigurationBuilder builder)
+        {
+            provider = new RecoverySettingsProvider(settings);
+            return provider;
+        }
+
+        public void SetAndReload(string key, string? value) =>
+            (provider ?? throw new InvalidOperationException("The recovery settings provider is not initialized.")).SetAndReload(key, value);
+    }
+
+    private sealed class RecoverySettingsProvider(IDictionary<string, string?> settings) : ConfigurationProvider
+    {
+        public override void Load() => Data = new Dictionary<string, string?>(settings, StringComparer.OrdinalIgnoreCase);
+
+        public void SetAndReload(string key, string? value)
+        {
+            settings[key] = value;
+            Data[key] = value;
+            OnReload();
+        }
     }
 
     protected override void Dispose(bool disposing)
@@ -136,21 +161,17 @@ public sealed class PasswordRecoveryTests(PasswordRecoveryApiFactory factory) : 
     {
         using var reloadFactory = new PasswordRecoveryApiFactory();
         using var client = reloadFactory.CreateClient();
-        var configuration = reloadFactory.Services.GetRequiredService<IConfiguration>() as IConfigurationRoot
-            ?? throw new InvalidOperationException("The test configuration root is unavailable.");
 
         var initiallyReady = await client.GetFromJsonAsync<JsonElement>("/api/auth/password-recovery/availability");
         Assert.True(initiallyReady.GetProperty("available").GetBoolean());
 
         reloadFactory.SetRecoveryEnabled(false);
-        configuration.Reload();
         var unavailable = await client.GetFromJsonAsync<JsonElement>("/api/auth/password-recovery/availability");
         Assert.False(unavailable.GetProperty("available").GetBoolean());
         var resetWhileDisabled = await Reset(client, "disabled@example.test", "unusable-token", "EvenStronger!123");
         Assert.Equal(HttpStatusCode.ServiceUnavailable, resetWhileDisabled.StatusCode);
 
         reloadFactory.SetRecoveryEnabled(true);
-        configuration.Reload();
         var availableAgain = await client.GetFromJsonAsync<JsonElement>("/api/auth/password-recovery/availability");
         Assert.True(availableAgain.GetProperty("available").GetBoolean());
     }
