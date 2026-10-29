@@ -199,6 +199,35 @@ public sealed class ProviderResilienceTests
     }
 
     [Fact]
+    public void Negative_configured_cost_ceiling_rejects_estimated_provider_costs()
+    {
+        var profile = new ProviderRoutingProfile(EstimatedCostUsd: 1m);
+        var requirements = new ProviderRouteRequirements("image.generate");
+
+        Assert.False(ProviderRoutingPolicy.MeetsRequirements(profile, requirements, -1m));
+    }
+
+    [Fact]
+    public async Task Negative_configured_cost_ceiling_fails_closed_before_an_unknown_cost_provider_runs()
+    {
+        var store = new FakeResilienceStore();
+        var provider = new TestProvider("unknown-cost", _ => Task.FromResult("must-not-run"));
+
+        var result = await Create(store, maxCostUsd: -1m).ExecuteAsync(
+            JobId,
+            Token,
+            "image.generate",
+            "request-invalid-cost-limit",
+            "input",
+            [provider]);
+
+        Assert.Equal(ProviderAttemptResultCategory.CostGuardRejected, result.Category);
+        Assert.Equal("INVALID_COST_LIMIT", result.ErrorCode);
+        Assert.Equal(0, provider.Calls);
+        Assert.Equal("completed", store.FinalizationState);
+    }
+
+    [Fact]
     public async Task Provider_reported_cost_is_checked_before_accepting_the_result()
     {
         var store = new FakeResilienceStore();
@@ -332,7 +361,7 @@ public sealed class ProviderResilienceTests
         Assert.Contains(results, result => result.IsReplay || result.ErrorCode == "EXECUTION_ALREADY_CLAIMED");
     }
 
-    private static ProviderResilienceOrchestrator Create(FakeResilienceStore store, int retries = 0) =>
+    private static ProviderResilienceOrchestrator Create(FakeResilienceStore store, int retries = 0, decimal maxCostUsd = 5m) =>
         new(store, new AllowAllProviderCostGuard(), Options.Create(new ProviderResilienceOptions
         {
             MaxProviders = 3,
@@ -343,6 +372,7 @@ public sealed class ProviderResilienceTests
             CircuitOpenSeconds = 30,
             CircuitProbeLeaseSeconds = 60,
             ProviderTimeoutSeconds = 1,
+            MaxEstimatedCostUsd = maxCostUsd,
         }), store.Time, NullLogger<ProviderResilienceOrchestrator>.Instance);
 
     private sealed class TestProvider(string key, Func<int, Task<string>> behavior, ProviderRoutingProfile? routingProfile = null, decimal? reportedCostUsd = null, bool canHandle = true) : IResilientProvider<string, string>, IProviderRoutingProfile<string>
