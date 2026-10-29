@@ -58,7 +58,6 @@ describe("Movie Studio project duration controls", () => {
   it("allows two-hour Full Movie planning without expanding Quick brief limits", () => {
     expect(movieDraftDurationLimit("Quick")).toBe(3_600);
     expect(movieDraftDurationLimit("Full")).toBe(7_200);
-    expect(movieDraftDurationLimit("Quick")).toBe(3_600);
     expect(source).toContain("max={movieDraftDurationLimit(mode)}");
   });
 
