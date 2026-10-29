@@ -164,6 +164,58 @@ public sealed class MovieIntercutPlannerTests
     }
 
     [Fact]
+    public void Two_hour_intercut_primary_reorder_requires_approval_and_retains_every_clip()
+    {
+        // Exercises the requested-order membership check, primary-order detection,
+        // and explicit approval path at the supported long-film scale. These
+        // operations must not repeatedly scan the entire coverage collection.
+        var clips = Enumerable.Range(1, 720).Select(index =>
+            Coverage(Guid.NewGuid(), Guid.NewGuid(), SceneOne, 1, index, 10m, MovieIntercutCoverageKinds.Primary)).ToArray();
+        var approvedOrder = clips.Select(item => item.ClipId).Reverse().ToArray();
+        var request = new MovieIntercutPlanRequest
+        {
+            BaseTimelineVersion = 1,
+            Clips = clips,
+            RequestedClipOrder = approvedOrder,
+        };
+
+        var proposal = MovieIntercutPlanner.Build(ProjectId, request);
+        var replay = MovieIntercutPlanner.Build(ProjectId, request);
+        Assert.True(proposal.RequiresUserApproval);
+        Assert.Equal(720, proposal.ProposedTimeline.Clips.Count);
+        Assert.Equal(clips[0].ClipId, proposal.ProposedTimeline.Clips[0].ClipId);
+        Assert.Equal(proposal.ProposalId, replay.ProposalId);
+
+        var approved = MovieIntercutPlanner.ApplyUserApproval(
+            proposal, new MovieIntercutApproval(true, "Explicitly approved reverse-story edit for the final cut."));
+        Assert.Equal(approvedOrder, approved.Clips.Select(item => item.ClipId));
+        Assert.Equal(7_200m, approved.Clips.Sum(item => item.DurationSeconds));
+        Assert.Equal(719, approved.Transitions.Count);
+        Assert.Equal(proposal.ProposedTimeline.Version + 1, approved.Version);
+    }
+
+    [Fact]
+    public void Requested_clip_order_rejects_duplicates_and_unknown_ids()
+    {
+        var request = new MovieIntercutPlanRequest
+        {
+            Clips =
+            [
+                Coverage(PrimaryOne, ShotOne, SceneOne, 1, 1, 2m, MovieIntercutCoverageKinds.Primary),
+                Coverage(PrimaryTwo, ShotTwo, SceneTwo, 2, 1, 2m, MovieIntercutCoverageKinds.Primary),
+            ],
+            RequestedClipOrder = [PrimaryOne, PrimaryOne],
+        };
+
+        var duplicate = Assert.Throws<MovieIntercutPlanningException>(() => MovieIntercutPlanner.Build(ProjectId, request));
+        Assert.Equal(MovieIntercutPlanCodes.StoryOrderInvalid, duplicate.Code);
+
+        request.RequestedClipOrder = [PrimaryOne, Reaction];
+        var unknown = Assert.Throws<MovieIntercutPlanningException>(() => MovieIntercutPlanner.Build(ProjectId, request));
+        Assert.Equal(MovieIntercutPlanCodes.StoryOrderInvalid, unknown.Code);
+    }
+
+    [Fact]
     public void Intercut_rejects_more_than_two_hours_even_when_each_clip_is_short()
     {
         var request = new MovieIntercutPlanRequest
