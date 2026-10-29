@@ -22,13 +22,6 @@ export function isQuickMovieProviderReady(provider: MovieProviderReadiness | nul
     && provider.supportedOperations?.some((operation) => operation.toLowerCase() === "quick_movie"));
 }
 
-// Creating Full Movie planning metadata is safe even without a configured video adapter.
-// Quick Movie creates a generation job, so it must not be offered unless the
-// selected provider explicitly supports that operation and is ready.
-export function canCreateMovieMode(mode: MovieMode, provider: MovieProviderReadiness | null): boolean {
-  return mode === "Full" || isQuickMovieProviderReady(provider);
-}
-
 export function nextMovieMode(currentMode: MovieMode, key: string): MovieMode | null {
   const currentIndex = movieModes.indexOf(currentMode);
   if (key === "Home") return movieModes[0];
@@ -91,12 +84,9 @@ export function MovieStudioView() {
   async function createMovie(event: FormEvent) {
     event.preventDefault();
     if (!workspace) return;
-    // This guards direct form submissions as well as the disabled Quick button.
-    // Do not enqueue a paid job into an unavailable or scene-only video route.
-    if (!canCreateMovieMode(mode, provider)) {
-      setError(t("movieBody.quick.unavailable"));
-      return;
-    }
+    // POST /movie-studio/projects persists a draft and returns job:null for
+    // Quick and Full modes. Provider readiness must not block saving a brief.
+    // Future generation endpoints enforce provider/cost admission separately.
     setWorking(true);
     setError("");
     try {
@@ -161,7 +151,7 @@ export function MovieStudioView() {
         <label className="movie-field"><span>{t("movie.project")}</span><select value={form.projectId} onChange={(event) => setForm({ ...form, projectId: event.target.value })}><option value="">{t("movie.noProject")}</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select><small>{t("movie.projectHint")}</small></label>
         <label className="movie-field"><span>{t("movie.instructions")}</span><textarea value={form.additionalInstructions} onChange={(event) => setForm({ ...form, additionalInstructions: event.target.value })} placeholder={t("movie.instructionsPlaceholder")} rows={3} maxLength={8000} /></label>
         {mode === "Full" && <div className="movie-continuity-form"><div className="movie-section-heading"><span className="movie-step-index">02</span><div><p className="section-eyebrow">{t("movie.guideEyebrow")}</p><h2>{t("movie.guideTitle")}</h2></div></div><p className="movie-field-note">{t("movie.guideIntro")}</p><div className="movie-control-grid"><label className="movie-field"><span>{t("movie.visualLanguage")}</span><input value={form.visualLanguage} onChange={(event) => setForm({ ...form, visualLanguage: event.target.value })} placeholder={t("movie.visualLanguagePlaceholder")} /></label><label className="movie-field"><span>{t("movie.cameraLanguage")}</span><input value={form.cameraLanguage} onChange={(event) => setForm({ ...form, cameraLanguage: event.target.value })} placeholder={t("movie.cameraLanguagePlaceholder")} /></label><label className="movie-field"><span>{t("movie.colorLighting")}</span><input value={form.colorAndLighting} onChange={(event) => setForm({ ...form, colorAndLighting: event.target.value })} placeholder={t("movie.colorLightingPlaceholder")} /></label><label className="movie-field"><span>{t("movie.soundNarration")}</span><input value={form.soundAndNarration} onChange={(event) => setForm({ ...form, soundAndNarration: event.target.value })} placeholder={t("movie.soundNarrationPlaceholder")} /></label></div><label className="movie-field"><span>{t("movie.continuityRules")}</span><textarea value={form.continuityRules} onChange={(event) => setForm({ ...form, continuityRules: event.target.value })} placeholder={t("movie.continuityRulesPlaceholder")} rows={3} /></label></div>}
-        {error && <div className="form-error"><XCircle size={15} /> {error}</div>}<div className="movie-submit-row"><span>{mode === "Quick" && !canCreateMovieMode(mode, provider) ? t("movieBody.quick.unavailable") : mode === "Quick" ? t("movieBody.quick.quickNote") : t("movieBody.quick.fullNote")}</span><button className="primary-button movie-submit" type="submit" disabled={working || form.description.trim().length < 3 || !canCreateMovieMode(mode, provider)}><Sparkles size={16} /> {working ? t("movie.saving") : mode === "Quick" ? t("movie.createQuick") : t("movie.createFull")}</button></div>
+        {error && <div className="form-error"><XCircle size={15} /> {error}</div>}<div className="movie-submit-row"><span>{mode === "Quick" ? t("movieBody.quick.quickNote") : t("movieBody.quick.fullNote")}</span><button className="primary-button movie-submit" type="submit" disabled={working || form.description.trim().length < 3}><Sparkles size={16} /> {working ? t("movie.saving") : mode === "Quick" ? t("movie.createQuick") : t("movie.createFull")}</button></div>
       </section>
       <aside className="movie-empty-stage"><div className="movie-stage-label"><span>{mode === "Quick" ? t("movieBody.quick.preview") : t("movieBody.quick.canvas")}</span><span>00 / 00</span></div><div className="movie-empty-frame"><div className="movie-frame-grid" /><div className="movie-empty-mark"><Film size={30} /><span>{mode === "Quick" ? t("movieBody.quick.oneFocused") : t("movieBody.quick.grow")}</span><small>{mode === "Quick" ? t("movieBody.quick.concise") : t("movieBody.quick.workspace")}</small></div></div><div className="movie-stage-footer"><span><span className="movie-status-dot" /> {t("movieBody.quick.ready")}</span><span>{mode === "Quick" ? t("movieBody.quick.simple") : t("movieBody.quick.rooms")}</span></div></aside>
     </form>
