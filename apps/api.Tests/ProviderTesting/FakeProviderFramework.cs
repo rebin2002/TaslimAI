@@ -231,7 +231,9 @@ public sealed class FakeMovieVideoProvider(
     private readonly ConcurrentDictionary<string, int> polls = new();
     public string Key => "fake-movie";
     public bool IsAvailable => Scenarios[FakeProviderKind.Movie] != FakeProviderScenario.AllProvidersUnavailable;
-    public IReadOnlyCollection<string> SupportedOperations { get; } = [MovieStudioOperations.QuickMovie, MovieStudioOperations.SceneClip];
+    // Test-only capability override: simulate a ready adapter advertising only Quick Movie,
+    // no operations, or case-variant SceneClip without making any provider calls.
+    public IReadOnlyCollection<string> SupportedOperations { get; set; } = [MovieStudioOperations.QuickMovie, MovieStudioOperations.SceneClip];
     // Override in focused admission tests without invoking a paid provider.
     public MovieClipDurationRange? SceneClipDurationRange { get; set; } = new(1, 3600);
     // Allows provider-free HTTP admission tests to assert pre-reservation denial.
