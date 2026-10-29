@@ -24,6 +24,8 @@ Apply the EF migration `AddPasswordResetEmailOutbox` to the API database through
 
 Use an SMTP relay that supports STARTTLS (the built-in .NET SMTP client does not support implicit TLS on port 465). TLS and both SMTP username/password are required by the adapter. The sender address must be authorized by the relay. Store secrets in the API host's secret manager, not in this repository. The production origin is deliberately restricted to `https://taslim.ai`; development may use `http://localhost:3000` or `https://localhost:3000`.
 
+The anonymous `GET /api/auth/password-recovery/availability` endpoint returns only `{ "available": true }` or `{ "available": false }` with no-store headers. `available` is true only when the explicit feature flag, configured sender, and allowed public base URL pass server readiness checks; it does not probe the SMTP relay or prove end-to-end delivery. The login link and recovery forms remain hidden until this server-owned response is true, and the API rejects both reset requests and submissions while readiness is false. A failed or unavailable status request keeps the UI closed.
+
 Until all settings are valid and `PasswordRecovery__Enabled=true`, both known and unknown addresses receive the same generic `503` recovery-unavailable response and no reset request is queued. This prevents a decorative/fake success response when delivery is not configured. Once configured, the API responds `202 Accepted` with the same message for existing and unknown accounts after recording eligible requests in the outbox.
 
 ## Delivery and token behavior
@@ -39,4 +41,4 @@ A `202` means the API accepted a configured delivery request for processing, not
 
 ## Verification
 
-The API integration tests exercise configured/unconfigured behavior, non-enumerating responses, CSRF rejection, per-account cooldown, actual test outbox delivery, valid and invalid Identity tokens, token replay rejection, session invalidation, and no automatic sign-in. Frontend e2e tests cover the login link and ensure the fragment token is removed from the displayed/reset-page URL before the form is shown.
+The API integration tests exercise configured/unconfigured behavior, readiness changes on configuration reload, non-enumerating responses, CSRF rejection, per-account cooldown, actual test outbox delivery, valid/invalid/expired/replayed Identity tokens, sanitized mail-sender failure storage, session invalidation, and no automatic sign-in. Frontend e2e tests cover enabled and disabled availability UI states, the generic request result, and fragment-token removal before the reset form can be shown.

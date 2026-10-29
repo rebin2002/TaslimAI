@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Net;
+using System.Net.Mail;
 using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.AspNetCore.Hosting;
@@ -21,10 +22,22 @@ namespace Taslim.Api.Tests;
 public sealed class PasswordRecoveryApiFactory : WebApplicationFactory<Program>
 {
     private readonly SqliteConnection connection = new("DataSource=:memory:");
+    private readonly TimeSpan? resetTokenLifetime;
+    private readonly Dictionary<string, string?> recoverySettings = new()
+    {
+        ["PasswordRecovery:Enabled"] = "true",
+        ["PasswordRecovery:PublicBaseUrl"] = "http://localhost:3000",
+        ["PasswordRecovery:RequestCooldownMinutes"] = "5",
+        ["PasswordRecovery:WorkerPollSeconds"] = "1",
+        ["PasswordRecovery:MaxDeliveryAttempts"] = "5",
+        ["PasswordRecovery:LeaseSeconds"] = "60",
+    };
     public RecordingEmailSender EmailSender { get; } = new();
 
-    public PasswordRecoveryApiFactory()
+    public PasswordRecoveryApiFactory(bool recoveryEnabled = true, TimeSpan? resetTokenLifetime = null)
     {
+        recoverySettings["PasswordRecovery:Enabled"] = recoveryEnabled ? "true" : "false";
+        this.resetTokenLifetime = resetTokenLifetime;
         connection.Open();
         using var db = new TaslimDbContext(new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connection).Options);
         db.Database.EnsureCreated();
@@ -33,15 +46,7 @@ public sealed class PasswordRecoveryApiFactory : WebApplicationFactory<Program>
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseEnvironment("Testing");
-        builder.ConfigureAppConfiguration((_, configuration) => configuration.AddInMemoryCollection(new Dictionary<string, string?>
-        {
-            ["PasswordRecovery:Enabled"] = "true",
-            ["PasswordRecovery:PublicBaseUrl"] = "http://localhost:3000",
-            ["PasswordRecovery:RequestCooldownMinutes"] = "5",
-            ["PasswordRecovery:WorkerPollSeconds"] = "1",
-            ["PasswordRecovery:MaxDeliveryAttempts"] = "5",
-            ["PasswordRecovery:LeaseSeconds"] = "60",
-        }));
+        builder.ConfigureAppConfiguration((_, configuration) => configuration.AddInMemoryCollection(recoverySettings));
         builder.ConfigureServices(services =>
         {
             services.RemoveAll<DbContextOptions<TaslimDbContext>>();
@@ -49,8 +54,12 @@ public sealed class PasswordRecoveryApiFactory : WebApplicationFactory<Program>
             services.AddDbContext<TaslimDbContext>(options => options.UseSqlite(connection));
             services.RemoveAll<IEmailSender>();
             services.AddSingleton<IEmailSender>(EmailSender);
+            if (resetTokenLifetime is { } tokenLifetime)
+                services.PostConfigure<DataProtectionTokenProviderOptions>(options => options.TokenLifespan = tokenLifetime);
         });
     }
+
+    public void SetRecoveryEnabled(bool enabled) => recoverySettings["PasswordRecovery:Enabled"] = enabled ? "true" : "false";
 
     protected override void Dispose(bool disposing)
     {
@@ -64,13 +73,17 @@ public sealed record CapturedEmail(string Recipient, string Subject, string Body
 public sealed class RecordingEmailSender : IEmailSender
 {
     private int configured = 1;
+    private int failSends;
     public bool IsConfigured => Volatile.Read(ref configured) == 1;
     public ConcurrentQueue<CapturedEmail> Messages { get; } = new();
     public void SetConfigured(bool value) => Volatile.Write(ref configured, value ? 1 : 0);
+    public void SetFailure(bool value) => Volatile.Write(ref failSends, value ? 1 : 0);
 
     public Task SendAsync(string recipient, string subject, string plainTextBody, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        if (Volatile.Read(ref failSends) == 1)
+            throw new SmtpException($"Sensitive test-only transport detail for {recipient}: AUTH payload must not escape.");
         Messages.Enqueue(new CapturedEmail(recipient, subject, plainTextBody));
         return Task.CompletedTask;
     }
@@ -78,6 +91,115 @@ public sealed class RecordingEmailSender : IEmailSender
 
 public sealed class PasswordRecoveryTests(PasswordRecoveryApiFactory factory) : IClassFixture<PasswordRecoveryApiFactory>
 {
+    [Fact]
+    public async Task Availability_reports_only_server_readiness_and_reset_fails_closed_when_disabled()
+    {
+        using var disabledFactory = new PasswordRecoveryApiFactory(recoveryEnabled: false);
+        using var enabledFactory = new PasswordRecoveryApiFactory(recoveryEnabled: true);
+        using var unconfiguredFactory = new PasswordRecoveryApiFactory(recoveryEnabled: true);
+        unconfiguredFactory.EmailSender.SetConfigured(false);
+        using var disabledClient = disabledFactory.CreateClient();
+        using var enabledClient = enabledFactory.CreateClient();
+        using var unconfiguredClient = unconfiguredFactory.CreateClient();
+
+        var disabledAvailability = await disabledClient.GetAsync("/api/auth/password-recovery/availability");
+        var enabledAvailability = await enabledClient.GetAsync("/api/auth/password-recovery/availability");
+        var unconfiguredAvailability = await unconfiguredClient.GetAsync("/api/auth/password-recovery/availability");
+        Assert.Equal(HttpStatusCode.OK, disabledAvailability.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, enabledAvailability.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, unconfiguredAvailability.StatusCode);
+        Assert.Contains("no-store", disabledAvailability.Headers.CacheControl?.ToString() ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("no-store", enabledAvailability.Headers.CacheControl?.ToString() ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+
+        var disabledBody = await disabledAvailability.Content.ReadFromJsonAsync<JsonElement>();
+        var enabledBody = await enabledAvailability.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(new[] { "available" }, disabledBody.EnumerateObject().Select(property => property.Name).ToArray());
+        Assert.False(disabledBody.GetProperty("available").GetBoolean());
+        Assert.True(enabledBody.GetProperty("available").GetBoolean());
+        Assert.False((await unconfiguredAvailability.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("available").GetBoolean());
+
+        var reset = await Reset(disabledClient, "disabled@example.test", "unusable-token", "EvenStronger!123");
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, reset.StatusCode);
+        Assert.Equal("PASSWORD_RECOVERY_UNAVAILABLE", (await reset.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error").GetProperty("code").GetString());
+    }
+
+    [Fact]
+    public async Task Availability_and_reset_gate_follow_reloaded_recovery_options()
+    {
+        using var reloadFactory = new PasswordRecoveryApiFactory();
+        using var client = reloadFactory.CreateClient();
+        var configuration = reloadFactory.Services.GetRequiredService<IConfiguration>() as IConfigurationRoot
+            ?? throw new InvalidOperationException("The test configuration root is unavailable.");
+
+        var initiallyReady = await client.GetFromJsonAsync<JsonElement>("/api/auth/password-recovery/availability");
+        Assert.True(initiallyReady.GetProperty("available").GetBoolean());
+
+        reloadFactory.SetRecoveryEnabled(false);
+        configuration.Reload();
+        var unavailable = await client.GetFromJsonAsync<JsonElement>("/api/auth/password-recovery/availability");
+        Assert.False(unavailable.GetProperty("available").GetBoolean());
+        var resetWhileDisabled = await Reset(client, "disabled@example.test", "unusable-token", "EvenStronger!123");
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, resetWhileDisabled.StatusCode);
+
+        reloadFactory.SetRecoveryEnabled(true);
+        configuration.Reload();
+        var availableAgain = await client.GetFromJsonAsync<JsonElement>("/api/auth/password-recovery/availability");
+        Assert.True(availableAgain.GetProperty("available").GetBoolean());
+    }
+
+    [Fact]
+    public async Task Actually_expired_identity_reset_token_is_rejected()
+    {
+        using var expiryFactory = new PasswordRecoveryApiFactory(resetTokenLifetime: TimeSpan.FromSeconds(3));
+        var email = $"expired-{Guid.NewGuid():N}@example.test";
+        using var registering = expiryFactory.CreateClient();
+        Assert.Equal(HttpStatusCode.OK, (await Register(registering, email)).StatusCode);
+        using var requestClient = expiryFactory.CreateClient();
+        Assert.Equal(HttpStatusCode.Accepted, (await Forgot(requestClient, email)).StatusCode);
+
+        var sent = await WaitForEmailAsync(expiryFactory.EmailSender, email);
+        var fragment = new Uri(ExtractResetUrl(sent.Body)).Fragment.TrimStart('#');
+        var token = fragment.Split('&', StringSplitOptions.RemoveEmptyEntries)
+            .Select(part => part.Split('=', 2))
+            .ToDictionary(pair => Uri.UnescapeDataString(pair[0]), pair => Uri.UnescapeDataString(pair[1]), StringComparer.Ordinal)["token"];
+        using (var scope = expiryFactory.Services.CreateScope())
+        {
+            var userManager = scope.ServiceProvider.GetRequiredService<UserManager<ApplicationUser>>();
+            var user = await userManager.FindByEmailAsync(email);
+            Assert.NotNull(user);
+            Assert.True(await userManager.VerifyUserTokenAsync(
+                user!,
+                userManager.Options.Tokens.PasswordResetTokenProvider,
+                UserManager<ApplicationUser>.ResetPasswordTokenPurpose,
+                token));
+        }
+        await Task.Delay(TimeSpan.FromMilliseconds(3_100));
+
+        using var resetClient = expiryFactory.CreateClient();
+        var reset = await Reset(resetClient, email, token, "EvenStronger!123");
+        Assert.Equal(HttpStatusCode.BadRequest, reset.StatusCode);
+        Assert.Equal("PASSWORD_RESET_INVALID", (await reset.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error").GetProperty("code").GetString());
+    }
+
+    [Fact]
+    public async Task Mail_sender_failures_store_only_a_sanitized_failure_code()
+    {
+        using var failureFactory = new PasswordRecoveryApiFactory();
+        var email = $"failure-{Guid.NewGuid():N}@example.test";
+        failureFactory.EmailSender.SetFailure(true);
+        using var registering = failureFactory.CreateClient();
+        Assert.Equal(HttpStatusCode.OK, (await Register(registering, email)).StatusCode);
+        using var requestClient = failureFactory.CreateClient();
+        Assert.Equal(HttpStatusCode.Accepted, (await Forgot(requestClient, email)).StatusCode);
+
+        var entry = await WaitForOutboxFailureAsync(failureFactory);
+        Assert.NotNull(entry);
+        Assert.Equal("SMTP_DELIVERY_FAILED", entry!.LastFailureCode);
+        Assert.DoesNotContain(email, entry.LastFailureCode!, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(1, entry.AttemptCount);
+        Assert.Empty(failureFactory.EmailSender.Messages);
+    }
+
     [Fact]
     public void Smtp_configuration_fails_closed_without_authenticated_TLS_sender_details()
     {
@@ -207,15 +329,32 @@ public sealed class PasswordRecoveryTests(PasswordRecoveryApiFactory factory) : 
     }
 
     private async Task<CapturedEmail> WaitForEmailAsync(string email)
+        => await WaitForEmailAsync(factory.EmailSender, email);
+
+    private static async Task<CapturedEmail> WaitForEmailAsync(RecordingEmailSender sender, string email)
     {
         var end = DateTime.UtcNow.AddSeconds(8);
         while (DateTime.UtcNow < end)
         {
-            var message = factory.EmailSender.Messages.FirstOrDefault(candidate => string.Equals(candidate.Recipient, email, StringComparison.OrdinalIgnoreCase));
+            var message = sender.Messages.FirstOrDefault(candidate => string.Equals(candidate.Recipient, email, StringComparison.OrdinalIgnoreCase));
             if (message is not null) return message;
             await Task.Delay(50);
         }
         throw new Xunit.Sdk.XunitException("Timed out waiting for the test email sender to capture a reset message.");
+    }
+
+    private static async Task<PasswordResetEmailOutboxEntry?> WaitForOutboxFailureAsync(PasswordRecoveryApiFactory source)
+    {
+        var end = DateTime.UtcNow.AddSeconds(8);
+        while (DateTime.UtcNow < end)
+        {
+            await using var scope = source.Services.CreateAsyncScope();
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var entry = await db.PasswordResetEmailOutbox.AsNoTracking().FirstOrDefaultAsync();
+            if (entry?.LastFailureCode is not null) return entry;
+            await Task.Delay(50);
+        }
+        return null;
     }
 
     private static string ExtractResetUrl(string body) => body

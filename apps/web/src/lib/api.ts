@@ -35,6 +35,7 @@ export type PasswordPolicy = {
   requireNonAlphanumeric: boolean;
   requiredUniqueChars: number;
 };
+export type PasswordRecoveryAvailability = { available: boolean };
 
 export type Project = {
   id: string;
@@ -1162,6 +1163,7 @@ export type MovieCollaboration = { movieProjectId: string; team: MovieTeamMember
 export const api = {
   me: () => request<AuthResponse>("/api/auth/me"),
   passwordPolicy: () => request<PasswordPolicy>("/api/auth/password-policy"),
+  passwordRecoveryAvailability: () => request<PasswordRecoveryAvailability>("/api/auth/password-recovery/availability"),
   requestPasswordReset: (input: PasswordResetRequestInput) => request<{ message: string }>("/api/auth/password/forgot", { method: "POST", body: JSON.stringify(input) }, true),
   resetPassword: (input: PasswordResetInput) => request<{ success: boolean }>("/api/auth/password/reset", { method: "POST", body: JSON.stringify(input) }, true),
   register: async (input: RegisterInput) => { const result = await request<AuthResponse>("/api/auth/register", { method: "POST", body: JSON.stringify(input) }, true); csrfToken = null; clearMovieWorkspaceRequests(); await csrf(true); return result; },

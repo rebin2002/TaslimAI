@@ -25,7 +25,7 @@ public sealed class AuthController(
     IAntiforgery antiforgery,
     IOptions<IdentityOptions> identityOptions,
     IBillingProvisioningService billingProvisioning,
-    IOptions<PasswordRecoveryOptions> passwordRecoveryOptions,
+    IOptionsMonitor<PasswordRecoveryOptions> passwordRecoveryOptions,
     IEmailSender emailSender,
     PasswordResetOutboxService passwordResetOutbox,
     IWebHostEnvironment environment,
@@ -56,6 +56,15 @@ public sealed class AuthController(
             password.RequiredUniqueChars));
     }
 
+    [HttpGet("password-recovery/availability")]
+    [AllowAnonymous]
+    public IActionResult PasswordRecoveryAvailability()
+    {
+        SetNoStoreHeaders();
+        var available = passwordRecoveryOptions.CurrentValue.IsReady(environment.IsProduction(), emailSender);
+        return Ok(new { available });
+    }
+
     [HttpPost("password/forgot")]
     [AllowAnonymous]
     [ValidateAntiForgeryToken]
@@ -63,7 +72,7 @@ public sealed class AuthController(
     public async Task<IActionResult> ForgotPassword(ForgotPasswordRequest request, CancellationToken cancellationToken)
     {
         SetNoStoreHeaders();
-        var options = passwordRecoveryOptions.Value;
+        var options = passwordRecoveryOptions.CurrentValue;
         if (!options.IsReady(environment.IsProduction(), emailSender))
         {
             logger.LogWarning("Password recovery request unavailable. TraceId={TraceId}; Reason=DeliveryNotConfigured", HttpContext.TraceIdentifier);
@@ -93,6 +102,11 @@ public sealed class AuthController(
     {
         SetNoStoreHeaders();
         cancellationToken.ThrowIfCancellationRequested();
+        if (!passwordRecoveryOptions.CurrentValue.IsReady(environment.IsProduction(), emailSender))
+        {
+            logger.LogWarning("Password recovery reset unavailable. TraceId={TraceId}; Reason=DeliveryNotConfigured", HttpContext.TraceIdentifier);
+            return ApiResults.Error(this, StatusCodes.Status503ServiceUnavailable, "PASSWORD_RECOVERY_UNAVAILABLE", "Password recovery is temporarily unavailable. Please try again later.");
+        }
         if (!ModelState.IsValid)
             return ApiResults.Validation(this, "Please provide the reset link and a new password.");
 

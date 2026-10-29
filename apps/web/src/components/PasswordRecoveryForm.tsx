@@ -33,7 +33,18 @@ export function PasswordRecoveryForm({ mode }: Readonly<{ mode: RecoveryMode }>)
   const [passwordErrors, setPasswordErrors] = useState<string[]>([]);
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [recoveryAvailable, setRecoveryAvailable] = useState(false);
+  const [availabilityResolved, setAvailabilityResolved] = useState(false);
   const isReset = mode === "reset";
+
+  useEffect(() => {
+    let active = true;
+    void api.passwordRecoveryAvailability()
+      .then(({ available }) => { if (active) setRecoveryAvailable(available === true); })
+      .catch(() => { if (active) setRecoveryAvailable(false); })
+      .finally(() => { if (active) setAvailabilityResolved(true); });
+    return () => { active = false; };
+  }, []);
 
   useEffect(() => {
     if (!isReset) return;
@@ -95,7 +106,12 @@ export function PasswordRecoveryForm({ mode }: Readonly<{ mode: RecoveryMode }>)
       setEmail("");
       setRequestSent(true);
     } catch (caught) {
-      setError(caught instanceof ApiError && caught.status === 503 ? t("auth.recoveryUnavailable") : t("auth.genericError"));
+      if (caught instanceof ApiError && caught.status === 503) {
+        setRecoveryAvailable(false);
+        setError(t("auth.recoveryUnavailable"));
+      } else {
+        setError(t("auth.genericError"));
+      }
     } finally {
       setSubmitting(false);
     }
@@ -128,6 +144,7 @@ export function PasswordRecoveryForm({ mode }: Readonly<{ mode: RecoveryMode }>)
         setLinkState("invalid");
         setError(t("auth.resetInvalid"));
       } else if (caught instanceof ApiError && caught.status === 503) {
+        setRecoveryAvailable(false);
         setError(t("auth.recoveryUnavailable"));
       } else {
         setError(t("auth.genericError"));
@@ -152,17 +169,20 @@ export function PasswordRecoveryForm({ mode }: Readonly<{ mode: RecoveryMode }>)
           <p>{t(isReset ? "auth.resetSubtitle" : "auth.forgotSubtitle")}</p>
         </div>
 
-        {!isReset && !requestSent && <form className="auth-form" onSubmit={submitRequest} dir={direction}>
+        {!availabilityResolved && <p className="auth-recovery-message" role="status">{t("auth.working")}</p>}
+        {availabilityResolved && !recoveryAvailable && <div className="auth-recovery-message is-error" role="status" aria-live="polite">{t("auth.recoveryUnavailable")}</div>}
+
+        {availabilityResolved && recoveryAvailable && !isReset && !requestSent && <form className="auth-form" onSubmit={submitRequest} dir={direction}>
           <label><span>{t("auth.email")}</span><div className="input-shell"><Mail size={17} aria-hidden="true" /><input required type="email" maxLength={256} value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" autoCapitalize="none" spellCheck={false} dir="ltr" /></div></label>
           {error && <div className="form-error" role="alert">{error}</div>}
           <button className="auth-submit" disabled={submitting}>{submitting ? t("auth.passwordResetWorking") : t("auth.sendResetLink")} {direction === "ltr" ? <ArrowRight size={17} aria-hidden="true" /> : <ArrowLeft size={17} aria-hidden="true" />}</button>
         </form>}
 
-        {!isReset && requestSent && <div className="auth-recovery-message is-success" role="status" aria-live="polite">{t("auth.resetRequestSent")}</div>}
+        {availabilityResolved && recoveryAvailable && !isReset && requestSent && <div className="auth-recovery-message is-success" role="status" aria-live="polite">{t("auth.resetRequestSent")}</div>}
 
-        {isReset && linkState === "loading" && <p className="auth-recovery-message" role="status">{t("auth.working")}</p>}
-        {isReset && linkState === "invalid" && <div className="auth-recovery-message is-error" role="status" aria-live="polite">{error || t("auth.resetLinkMissing")}</div>}
-        {isReset && linkState === "ready" && !resetComplete && <form className="auth-form" onSubmit={submitReset} dir={direction}>
+        {availabilityResolved && recoveryAvailable && isReset && linkState === "loading" && <p className="auth-recovery-message" role="status">{t("auth.working")}</p>}
+        {availabilityResolved && recoveryAvailable && isReset && linkState === "invalid" && <div className="auth-recovery-message is-error" role="status" aria-live="polite">{error || t("auth.resetLinkMissing")}</div>}
+        {availabilityResolved && recoveryAvailable && isReset && linkState === "ready" && !resetComplete && <form className="auth-form" onSubmit={submitReset} dir={direction}>
           <label className={passwordErrors.length > 0 ? "has-field-error" : ""}><span>{t("auth.newPassword")}</span><div className="input-shell"><LockKeyhole size={17} aria-hidden="true" /><input required type="password" maxLength={128} value={newPassword} onChange={(event) => { setNewPassword(event.target.value); setPasswordErrors([]); }} autoComplete="new-password" aria-describedby="password-requirements" dir="ltr" /></div>
             <div className="password-requirements" id="password-requirements" aria-live="polite"><strong>{t("auth.passwordRequirementsTitle")}</strong>{requirements.map((requirement) => <span className={requirement.satisfied ? "is-satisfied" : "is-missing"} key={requirement.code}>{requirement.satisfied ? <Check size={13} aria-hidden="true" /> : <CircleAlert size={13} aria-hidden="true" />}{requirement.label}</span>)}</div>
             {passwordErrors.length > 0 && <div className="field-errors" role="alert">{passwordErrors.map((code) => <span key={code}><CircleAlert size={13} aria-hidden="true" />{passwordErrorLabel(code)}</span>)}</div>}
@@ -172,8 +192,8 @@ export function PasswordRecoveryForm({ mode }: Readonly<{ mode: RecoveryMode }>)
           <button className="auth-submit" disabled={submitting}>{submitting ? t("auth.passwordResetWorking") : t("auth.resetPassword")} {direction === "ltr" ? <ArrowRight size={17} aria-hidden="true" /> : <ArrowLeft size={17} aria-hidden="true" />}</button>
         </form>}
 
-        {isReset && resetComplete && <div className="auth-recovery-message is-success" role="status" aria-live="polite">{t("auth.resetSuccess")}</div>}
-        <p className="auth-switch">{isReset && linkState === "invalid" && <><Link href="/forgot-password">{t("auth.forgotPassword")}</Link> · </>}<Link href="/login">{t("auth.backToLogin")}</Link>{!isReset && !requestSent && <> · <Link href="/register">{t("auth.createAccount")}</Link></>}</p>
+        {availabilityResolved && recoveryAvailable && isReset && resetComplete && <div className="auth-recovery-message is-success" role="status" aria-live="polite">{t("auth.resetSuccess")}</div>}
+        <p className="auth-switch">{recoveryAvailable && isReset && linkState === "invalid" && <><Link href="/forgot-password">{t("auth.forgotPassword")}</Link> · </>}<Link href="/login">{t("auth.backToLogin")}</Link>{recoveryAvailable && !isReset && !requestSent && <> · <Link href="/register">{t("auth.createAccount")}</Link></>}</p>
       </section>
     </div>
   );
