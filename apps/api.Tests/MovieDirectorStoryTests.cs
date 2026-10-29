@@ -65,6 +65,58 @@ public sealed class MovieDirectorStoryTests : IClassFixture<MovieDirectorStoryAp
     }
 
     [Fact]
+    public async Task Rewrite_selected_passage_updates_the_target_element_when_duplicate_content_exists()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Duplicate Passage Director");
+        var movie = await CreateMovie(client, auth.PersonalWorkspace.Id);
+        await LockGuide(client, movie.Project.Id);
+        var original = await SendWithCsrf<MovieStoryDto>(client, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/story/revisions", new
+        {
+            premise = "A guarded witness must choose truth over safety.",
+            logline = "A guarded witness must choose truth over safety before the city closes its borders.",
+            synopsis = "The witness follows a clue through a changing city.",
+            treatment = "The witness moves from secrecy to an irreversible public choice.",
+            authorship = "Human",
+            scenes = new[]
+            {
+                new
+                {
+                    sceneIdentifier = "SCENE-1",
+                    actNumber = 1,
+                    sequenceNumber = 1,
+                    slugline = "INT. ROOM - NIGHT",
+                    synopsis = "The witness faces the choice.",
+                    elements = new[]
+                    {
+                        new { elementType = "Action", content = "The door opens." },
+                        new { elementType = "Action", content = "The door opens." },
+                    },
+                },
+            },
+        });
+        var scene = original.CurrentRevision!.Scenes.Single();
+        var targetElement = scene.Elements[1];
+        await SendWithCsrf<MovieStoryRevisionDto>(client, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/story/revisions/{original.CurrentRevisionId}/approve", null);
+
+        var proposal = await SendWithCsrf<DirectorProposalResponse>(client, HttpMethod.Post, $"/api/movie-director/projects/{movie.Project.Id}/proposals", new
+        {
+            storyAction = DirectorStoryActionTypes.RewriteSelectedPassage,
+            targetSceneId = scene.Id,
+            targetElementId = targetElement.Id,
+            selectedPassage = "The door opens.",
+        });
+        var approved = await SendWithCsrf<DirectorProposalDto>(client, HttpMethod.Post, $"/api/movie-director/proposals/{proposal.Proposal.Id}/approve", null);
+        var applied = await SendWithCsrf<DirectorActionExecutionResponse>(client, HttpMethod.Post, $"/api/movie-director/actions/{approved.Actions[0].Id}/execute", null);
+
+        Assert.Equal(DirectorActionStatuses.Succeeded, applied.Action.Status);
+        var updated = await client.GetFromJsonAsync<MovieStoryDto>($"/api/movie-studio/projects/{movie.Project.Id}/story");
+        var updatedElements = updated!.CurrentRevision!.Scenes.Single().Elements;
+        Assert.Equal("The door opens.", updatedElements[0].Content);
+        Assert.Equal("AI generated replacement passage.", updatedElements[1].Content);
+    }
+
+    [Fact]
     public async Task Rejected_story_proposal_cancels_action_and_does_not_change_story()
     {
         using var client = factory.CreateClient();
