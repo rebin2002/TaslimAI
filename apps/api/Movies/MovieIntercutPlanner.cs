@@ -170,18 +170,26 @@ public static class MovieIntercutPlanner
         // deterministic requested order. Rebuild from the explicit approval using the
         // canonical clip durations and stable coverage metadata.
         var clipsById = proposal.ProposedTimeline.Clips.ToDictionary(item => item.ClipId);
+        // One lookup per clip keeps approval linear for long-form films. Repeated
+        // First() scans made large editorial reorders quadratic in clip count.
+        var coverageByClipId = proposal.Coverage.ToDictionary(item => item.ClipId);
         var approvedOrder = proposal.RequestedClipOrder.ToArray();
-        var reordered = approvedOrder.Select(id => clipsById[id]).ToArray();
-        var nextTimeline = BuildTimeline(proposal.TimelineId, checked(proposal.ProposedTimeline.Version + 1), reordered.Select((clip, index) => new MovieIntercutCandidate(
-            clip.ClipId,
-            clip.MovieShotId,
-            proposal.Coverage.First(item => item.ClipId == clip.ClipId).MovieSceneId,
-            proposal.Coverage.First(item => item.ClipId == clip.ClipId).SceneSequence,
-            proposal.Coverage.First(item => item.ClipId == clip.ClipId).ShotSequence,
-            clip.DurationSeconds,
-            proposal.Coverage.First(item => item.ClipId == clip.ClipId).CoverageKind,
-            proposal.Coverage.First(item => item.ClipId == clip.ClipId).AnchorShotId,
-            proposal.Coverage.First(item => item.ClipId == clip.ClipId).Label)).ToArray());
+        var reordered = approvedOrder.Select(id =>
+        {
+            var clip = clipsById[id];
+            var coverage = coverageByClipId[id];
+            return new MovieIntercutCandidate(
+                clip.ClipId,
+                clip.MovieShotId,
+                coverage.MovieSceneId,
+                coverage.SceneSequence,
+                coverage.ShotSequence,
+                clip.DurationSeconds,
+                coverage.CoverageKind,
+                coverage.AnchorShotId,
+                coverage.Label);
+        }).ToArray();
+        var nextTimeline = BuildTimeline(proposal.TimelineId, checked(proposal.ProposedTimeline.Version + 1), reordered);
         return nextTimeline;
     }
 
@@ -242,7 +250,9 @@ public static class MovieIntercutPlanner
     private static void ValidateRequestedOrder(IReadOnlyList<MovieIntercutCandidate> candidates, IReadOnlyList<Guid>? requestedOrder)
     {
         if (requestedOrder is null || requestedOrder.Count == 0) return;
-        if (requestedOrder.Count != candidates.Count || requestedOrder.Distinct().Count() != requestedOrder.Count || requestedOrder.Any(id => candidates.All(item => item.ClipId != id)))
+        var candidateIds = candidates.Select(item => item.ClipId).ToHashSet();
+        // Bound membership verification to O(n), even for the maximum 10,000 clips.
+        if (requestedOrder.Count != candidates.Count || requestedOrder.Distinct().Count() != requestedOrder.Count || requestedOrder.Any(id => !candidateIds.Contains(id)))
             throw new MovieIntercutPlanningException(MovieIntercutPlanCodes.StoryOrderInvalid, "A requested clip order must contain every proposal clip exactly once.");
     }
 
@@ -264,7 +274,8 @@ public static class MovieIntercutPlanner
     {
         if (requestedOrder.Count == 0) return false;
         var canonicalPrimaries = canonicalOrder.Where(item => item.IsPrimary).Select(item => item.ClipId).ToArray();
-        var requestedPrimaries = requestedOrder.Where(id => candidates.First(item => item.ClipId == id).IsPrimary).ToArray();
+        var primaryClipIds = candidates.Where(item => item.IsPrimary).Select(item => item.ClipId).ToHashSet();
+        var requestedPrimaries = requestedOrder.Where(primaryClipIds.Contains).ToArray();
         return !canonicalPrimaries.SequenceEqual(requestedPrimaries);
     }
 
