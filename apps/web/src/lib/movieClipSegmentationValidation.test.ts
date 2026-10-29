@@ -180,6 +180,36 @@ describe("Movie Studio preview envelope, including unavailable adapters", () => 
     expect(isConsistentMovieClipSegmentationResponse(unavailable, "test-project", 7_200)).toBe(false);
   });
 
+  it("rejects contradictory clip ranges even when generation is unavailable", () => {
+    const unavailable = preview({
+      providerDeclaresSceneClipOperation: false,
+      canSplitByDuration: false,
+      minimumClipSeconds: null,
+      maximumClipSeconds: null,
+      segments: [],
+    });
+    expect(isConsistentMovieClipSegmentationResponse(unavailable, "test-project", 11)).toBe(true);
+    expect(isConsistentMovieClipSegmentationResponse({
+      ...unavailable, minimumClipSeconds: 2, maximumClipSeconds: 10,
+    }, "test-project", 11)).toBe(true);
+
+    const malformed = [
+      { minimumClipSeconds: 2, maximumClipSeconds: null },
+      { minimumClipSeconds: null, maximumClipSeconds: 10 },
+      { minimumClipSeconds: 0, maximumClipSeconds: 10 },
+      { minimumClipSeconds: -1, maximumClipSeconds: 10 },
+      { minimumClipSeconds: 11, maximumClipSeconds: 10 },
+      { minimumClipSeconds: 2.5, maximumClipSeconds: 10 },
+      { minimumClipSeconds: 2, maximumClipSeconds: Number.POSITIVE_INFINITY },
+      { minimumClipSeconds: "2", maximumClipSeconds: 10 },
+    ] as unknown as Array<Partial<MovieClipSegmentationPreview>>;
+    for (const variant of malformed) {
+      expect(isConsistentMovieClipSegmentationResponse({
+        ...unavailable, ...variant,
+      }, "test-project", 11)).toBe(false);
+    }
+  });
+
   it("rejects malformed capability flags and provider identities even on the unavailable path", () => {
     const unavailable = preview({
       providerDeclaresSceneClipOperation: false,
