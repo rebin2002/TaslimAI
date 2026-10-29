@@ -135,6 +135,60 @@ public sealed class MovieProductionPreflightTests : IClassFixture<GenerationJobs
         Assert.Equal(usageBefore, await db.UsageTransactions.CountAsync());
     }
 
+    [Fact]
+    public async Task Authenticated_preflight_preserves_short_shot_inside_two_hour_movie_without_creating_work()
+    {
+        // The film duration is timeline metadata. A read-only preflight for a
+        // seven-second shot must not treat the enclosing two-hour film as one clip.
+        // The legacy creation baseline is extended in the isolated test database;
+        // long-form project creation is covered by the separate Movie owner PR.
+        using var isolatedFactory = new GenerationJobsNoWorkerFactory();
+        using var client = isolatedFactory.CreateClient();
+        var auth = await Register(client);
+        var project = await SendWithCsrf<MovieStudioProjectResponse>(
+            client, HttpMethod.Post, "/api/movie-studio/projects", new
+            {
+                workspaceId = auth.PersonalWorkspace.Id,
+                mode = MovieProjectModes.Quick,
+                title = "Long film short production shot",
+                description = "Two-hour timelines must preserve short-shot preflight.",
+                durationSeconds = 20,
+                aspectRatio = "16:9",
+                style = "cinematic",
+                language = "en",
+            });
+        var scene = await SendWithCsrf<MovieSceneDto>(
+            client, HttpMethod.Post, $"/api/movie-studio/projects/{project.Project.Id}/scenes",
+            new { title = "Opening", summary = "A short segment of a feature film." });
+        var shot = await SendWithCsrf<MovieShotDto>(
+            client, HttpMethod.Post, $"/api/movie-studio/scenes/{scene.Id}/shots",
+            new { description = "A seven-second establishing shot.", durationSeconds = 7 });
+
+        using var scope = isolatedFactory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var movie = await db.MovieProjects.SingleAsync(item => item.Id == project.Project.Id);
+        movie.DurationSeconds = 7_200;
+        await db.SaveChangesAsync();
+        var usageBefore = await db.UsageTransactions.CountAsync();
+
+        using var response = await client.GetAsync(
+            $"/api/movie-studio/shots/{shot.Id}/production/preflight?targetResolution=1080p&qualityTier=Standard&confirmationAccepted=true");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var preflight = (await response.Content.ReadFromJsonAsync<MovieProductionPreflightDto>())!;
+
+        Assert.Contains(preflight.Checks, check =>
+            check.Key == MovieProductionPreflightCheckKeys.ClipDuration
+            && check.Required && check.Satisfied);
+        Assert.DoesNotContain(preflight.Recommendations, item => item.Key == "shorten_production_shot");
+        // Storyboard/reference/provider readiness remains independent of clip
+        // length; this preview must not queue or bill anything.
+        Assert.False(preflight.CanProceed);
+        Assert.Equal(7_200, movie.DurationSeconds);
+        Assert.False(await db.MovieClips.AnyAsync(item => item.MovieProjectId == movie.Id));
+        Assert.False(await db.GenerationJobs.AnyAsync(item => item.WorkspaceId == auth.PersonalWorkspace.Id));
+        Assert.Equal(usageBefore, await db.UsageTransactions.CountAsync());
+    }
+
     [Theory]
     [InlineData(5, 120, 7200, 5)]
     [InlineData(null, 12, 7200, 12)]
