@@ -385,40 +385,6 @@ public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWork
         Assert.Equal(render.Job.Id, replay!.Job.Id);
         Assert.Equal(render.ClipId, replay.ClipId);
 
-        // A restored/reconfigured provider route cannot silently replay a
-        // canonical production job that was priced for another adapter.
-        // Exercise provider identity drift without outbound video requests.
-        var providerBoundJob = await db.GenerationJobs.SingleAsync(item => item.Id == render.Job.Id);
-        var originalInputJson = providerBoundJob.InputJson;
-        providerBoundJob.InputJson = JsonSerializer.Serialize(queuedInput with
-        {
-            SelectedProviderKey = "other-video-adapter",
-        });
-        await db.SaveChangesAsync();
-        using var changedProvider = await MovieOperationalFixtures.SendWithCsrfAsync(
-            client, HttpMethod.Post, renderPath, renderPayload, idempotencyKey: replayKey);
-        Assert.Equal(HttpStatusCode.BadRequest, changedProvider.StatusCode);
-        Assert.Contains("IDEMPOTENCY_KEY_REUSED",
-            await changedProvider.Content.ReadAsStringAsync(), StringComparison.Ordinal);
-
-        // Older jobs without adapter identity continue to replay their
-        // original canonical clip/job; this is a compatibility-only exception.
-        providerBoundJob.InputJson = JsonSerializer.Serialize(queuedInput with
-        {
-            SelectedProviderKey = null,
-        });
-        await db.SaveChangesAsync();
-        using var legacyReplay = await MovieOperationalFixtures.SendWithCsrfAsync(
-            client, HttpMethod.Post, renderPath, renderPayload, idempotencyKey: replayKey);
-        Assert.True(legacyReplay.IsSuccessStatusCode,
-            await legacyReplay.Content.ReadAsStringAsync());
-        var legacyResult = await legacyReplay.Content.ReadFromJsonAsync<MovieProductionRenderResponse>();
-        Assert.NotNull(legacyResult);
-        Assert.Equal(render.Job.Id, legacyResult!.Job.Id);
-        Assert.Equal(render.ClipId, legacyResult.ClipId);
-        providerBoundJob.InputJson = originalInputJson;
-        await db.SaveChangesAsync();
-
         // The same replay key cannot silently adopt a differently priced
         // output profile or a different creative title. All these negative
         // cases run against the already queued canonical job; no provider is invoked.
@@ -479,10 +445,96 @@ public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWork
         Assert.Contains("IDEMPOTENCY_KEY_REUSED",
             await changedDuration.Content.ReadAsStringAsync(), StringComparison.Ordinal);
 
-        // Restore the original shot content: a subsequent continuity-card
-        // edit must be the only changed dimension for this replay attempt.
+        // Restore the test shot after checking duration-sensitive replay.
         shotRow.DurationSeconds = originalDuration;
         await db.SaveChangesAsync();
+
+        Assert.Equal(versionsBefore, await db.MovieProductionVersions.CountAsync(item => item.MovieShotId == shot.Id));
+        Assert.Equal(clipsBefore, await db.MovieClips.CountAsync(item => item.MovieShotId == shot.Id));
+        Assert.Equal(1, await db.GenerationJobs.CountAsync(item => item.IdempotencyKey == replayKey));
+        Assert.Equal(ledgerBefore, await db.UsageTransactions.CountAsync());
+    }
+    [Fact]
+    public async Task Approved_production_render_replay_rejects_provider_and_character_continuity_drift()
+    {
+        // Keep this independent of the other replay matrix so HTTP rate
+        // limits cannot turn an expected idempotency 400 into a 429.
+        using var fakeFactory = new MovieOperationalNoWorkerFactory();
+        using (var init = fakeFactory.Services.CreateScope())
+            init.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+        using var client = fakeFactory.CreateClient();
+        var auth = await Register(client);
+        var project = await SendWithCsrf<MovieStudioProjectResponse>(client, HttpMethod.Post, "/api/movie-studio/projects", new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            mode = MovieProjectModes.Quick,
+            title = "Explicit production",
+            description = "A render should require a deliberate action.",
+            durationSeconds = 24,
+            aspectRatio = "16:9",
+            style = "cinematic",
+            language = "en",
+        });
+        var scene = await SendWithCsrf<MovieSceneDto>(client, HttpMethod.Post, $"/api/movie-studio/projects/{project.Project.Id}/scenes", new { title = "Dawn", summary = "A quiet opening beat." });
+        var shot = await SendWithCsrf<MovieShotDto>(client, HttpMethod.Post, $"/api/movie-studio/scenes/{scene.Id}/shots", new { description = "A locked-off street wide shot." });
+        var candidate = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post, $"/api/movie-studio/shots/{shot.Id}/production/versions", new { stage = MovieProductionStages.StoryboardCandidate, compositionJson = "{\"frame\":\"wide\"}" });
+        var approvedStoryboard = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post, $"/api/movie-studio/production/versions/{candidate.Id}/review", new { approve = true });
+        var keyframe = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post, $"/api/movie-studio/shots/{shot.Id}/production/versions", new { stage = MovieProductionStages.ProductionKeyframe, sourceVersionId = approvedStoryboard.Id, compositionJson = "{\"frame\":\"keyframe\"}" });
+        var approvedKeyframe = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post, $"/api/movie-studio/production/versions/{keyframe.Id}/review", new { approve = true });
+        var motion = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post, $"/api/movie-studio/shots/{shot.Id}/production/motion-preview", new { sourceVersionId = approvedKeyframe.Id });
+        var approvedMotion = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post, $"/api/movie-studio/production/versions/{motion.Id}/review", new { approve = true });
+
+        const string replayKey = "approved-production-provider-continuity";
+        var renderPath = $"/api/movie-studio/shots/{shot.Id}/production/render";
+        var renderPayload = new { sourceVersionId = approvedMotion.Id, label = "Explicit render" };
+        using var firstResponse = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, renderPath, renderPayload, idempotencyKey: replayKey);
+        Assert.True(firstResponse.IsSuccessStatusCode, await firstResponse.Content.ReadAsStringAsync());
+        var render = await firstResponse.Content.ReadFromJsonAsync<MovieProductionRenderResponse>();
+        Assert.NotNull(render);
+        using var scope = fakeFactory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var queuedJob = await db.GenerationJobs.AsNoTracking().SingleAsync(item => item.Id == render!.Job.Id);
+        var queuedInput = JsonSerializer.Deserialize<MovieGenerationInput>(queuedJob.InputJson);
+        Assert.NotNull(queuedInput);
+        var versionsBefore = await db.MovieProductionVersions.CountAsync(item => item.MovieShotId == shot.Id);
+        var clipsBefore = await db.MovieClips.CountAsync(item => item.MovieShotId == shot.Id);
+        var ledgerBefore = await db.UsageTransactions.CountAsync();
+
+        // A restored/reconfigured provider route cannot silently replay a
+        // canonical production job that was priced for another adapter.
+        // Exercise provider identity drift without outbound video requests.
+        var providerBoundJob = await db.GenerationJobs.SingleAsync(item => item.Id == render.Job.Id);
+        var originalInputJson = providerBoundJob.InputJson;
+        providerBoundJob.InputJson = JsonSerializer.Serialize(queuedInput with
+        {
+            SelectedProviderKey = "other-video-adapter",
+        });
+        await db.SaveChangesAsync();
+        using var changedProvider = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, renderPath, renderPayload, idempotencyKey: replayKey);
+        Assert.Equal(HttpStatusCode.BadRequest, changedProvider.StatusCode);
+        Assert.Contains("IDEMPOTENCY_KEY_REUSED",
+            await changedProvider.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        // Older jobs without adapter identity continue to replay their
+        // original canonical clip/job; this is a compatibility-only exception.
+        providerBoundJob.InputJson = JsonSerializer.Serialize(queuedInput with
+        {
+            SelectedProviderKey = null,
+        });
+        await db.SaveChangesAsync();
+        using var legacyReplay = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, renderPath, renderPayload, idempotencyKey: replayKey);
+        Assert.True(legacyReplay.IsSuccessStatusCode,
+            await legacyReplay.Content.ReadAsStringAsync());
+        var legacyResult = await legacyReplay.Content.ReadFromJsonAsync<MovieProductionRenderResponse>();
+        Assert.NotNull(legacyResult);
+        Assert.Equal(render.Job.Id, legacyResult!.Job.Id);
+        Assert.Equal(render.ClipId, legacyResult.ClipId);
+        providerBoundJob.InputJson = originalInputJson;
+        await db.SaveChangesAsync();
+
         var continuity = scope.ServiceProvider.GetRequiredService<IMovieCharacterContinuityService>();
         var originalContinuity = await continuity.BuildSnapshotForTargetAsync(
             project.Project.Id, scene.Id, shot.Id, persist: false);
@@ -515,6 +567,7 @@ public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWork
         Assert.Equal(1, await db.GenerationJobs.CountAsync(item => item.IdempotencyKey == replayKey));
         Assert.Equal(ledgerBefore, await db.UsageTransactions.CountAsync());
     }
+
     [Fact]
     public async Task Approved_production_render_rejects_unsupported_clip_duration_without_creating_billable_work()
     {
