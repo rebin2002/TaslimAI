@@ -293,4 +293,116 @@ public sealed class MovieProjectDurationBoundaryTests : IClassFixture<MovieOpera
             .AnyAsync(tx => tx.WorkspaceId == owner.PersonalWorkspace.Id));
     }
 
+
+    [Theory]
+    [InlineData(MovieProjectModes.Full, 7200)]
+    [InlineData(MovieProjectModes.Quick, 3600)]
+    public async Task Unplanned_draft_duration_edit_preserves_mode_cap_and_does_not_queue_work(
+        string mode, int revisedDuration)
+    {
+        using var client = factory.CreateClient();
+        var owner = await MovieOperationalFixtures.RegisterAsync(client, "Duration Edit Owner");
+        var created = await MovieOperationalFixtures.PostAsync<MovieStudioProjectResponse>(
+            client, "/api/movie-studio/projects", new
+            {
+                workspaceId = owner.PersonalWorkspace.Id,
+                mode,
+                title = "Editable Runtime Draft",
+                description = "Metadata-only duration correction before scene planning.",
+                durationSeconds = 30,
+                aspectRatio = "16:9",
+                style = "cinematic",
+                language = "en",
+            });
+
+        using var response = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Patch, $"/api/movie-studio/projects/{created.Project.Id}/duration",
+            new { durationSeconds = revisedDuration });
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var fetched = await MovieOperationalFixtures.GetAsync<MovieStudioProjectDto>(
+            client, $"/api/movie-studio/projects/{created.Project.Id}");
+        Assert.Equal(revisedDuration, fetched.DurationSeconds);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.Equal(revisedDuration, (await db.MovieProjects.AsNoTracking()
+            .SingleAsync(movie => movie.Id == created.Project.Id)).DurationSeconds);
+        Assert.False(await db.MovieClips.AsNoTracking()
+            .AnyAsync(clip => clip.MovieProjectId == created.Project.Id));
+        Assert.False(await db.GenerationJobs.AsNoTracking()
+            .AnyAsync(job => job.WorkspaceId == owner.PersonalWorkspace.Id));
+        Assert.False(await db.UsageTransactions.AsNoTracking()
+            .AnyAsync(tx => tx.WorkspaceId == owner.PersonalWorkspace.Id));
+    }
+
+    [Theory]
+    [InlineData(MovieProjectModes.Full, 0)]
+    [InlineData(MovieProjectModes.Full, 7201)]
+    [InlineData(MovieProjectModes.Quick, 3601)]
+    public async Task Invalid_draft_duration_edits_leave_the_persisted_runtime_unchanged(
+        string mode, int revisedDuration)
+    {
+        using var client = factory.CreateClient();
+        var owner = await MovieOperationalFixtures.RegisterAsync(client, "Invalid Duration Edit Owner");
+        var created = await MovieOperationalFixtures.PostAsync<MovieStudioProjectResponse>(
+            client, "/api/movie-studio/projects", new
+            {
+                workspaceId = owner.PersonalWorkspace.Id,
+                mode,
+                title = "Immutable On Rejection",
+                description = "Bad edits must not modify the stored runtime.",
+                durationSeconds = 30,
+                aspectRatio = "16:9",
+                style = "cinematic",
+                language = "en",
+            });
+
+        using var response = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Patch, $"/api/movie-studio/projects/{created.Project.Id}/duration",
+            new { durationSeconds = revisedDuration });
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+
+        var fetched = await MovieOperationalFixtures.GetAsync<MovieStudioProjectDto>(
+            client, $"/api/movie-studio/projects/{created.Project.Id}");
+        Assert.Equal(30, fetched.DurationSeconds);
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.False(await db.GenerationJobs.AsNoTracking()
+            .AnyAsync(job => job.WorkspaceId == owner.PersonalWorkspace.Id));
+        Assert.False(await db.UsageTransactions.AsNoTracking()
+            .AnyAsync(tx => tx.WorkspaceId == owner.PersonalWorkspace.Id));
+    }
+
+    [Fact]
+    public async Task Duration_edit_after_scene_planning_requires_an_explicit_timeline_replan()
+    {
+        using var client = factory.CreateClient();
+        var owner = await MovieOperationalFixtures.RegisterAsync(client, "Planned Duration Owner");
+        var created = await MovieOperationalFixtures.PostAsync<MovieStudioProjectResponse>(
+            client, "/api/movie-studio/projects", new
+            {
+                workspaceId = owner.PersonalWorkspace.Id,
+                mode = MovieProjectModes.Full,
+                title = "Already Planned Film",
+                description = "Existing scene budgets cannot be silently invalidated.",
+                durationSeconds = 600,
+                aspectRatio = "16:9",
+                style = "cinematic",
+                language = "en",
+            });
+        await MovieOperationalFixtures.PostAsync<MovieSceneDto>(
+            client, $"/api/movie-studio/projects/{created.Project.Id}/scenes",
+            new { title = "Opening", summary = "First planned scene.", durationSeconds = 600 });
+
+        using var response = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Patch, $"/api/movie-studio/projects/{created.Project.Id}/duration",
+            new { durationSeconds = 7200 });
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+
+        var fetched = await MovieOperationalFixtures.GetAsync<MovieStudioProjectDto>(
+            client, $"/api/movie-studio/projects/{created.Project.Id}");
+        Assert.Equal(600, fetched.DurationSeconds);
+    }
+
 }

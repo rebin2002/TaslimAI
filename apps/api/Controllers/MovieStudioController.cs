@@ -45,6 +45,25 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
         return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result);
     }
 
+
+    [HttpPatch("projects/{id:guid}/duration")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> UpdateProjectDuration(Guid id, MovieStudioProjectDurationRequest request, CancellationToken cancellationToken)
+    {
+        if (!ModelState.IsValid) return ApiResults.Validation(this);
+        try
+        {
+            var result = await movies.UpdateProjectDurationAsync(GetUserId(), id, request.DurationSeconds, cancellationToken);
+            return result is null
+                ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.")
+                : Ok(result);
+        }
+        catch (MovieStudioValidationException exception)
+        {
+            return ApiResults.Error(this, 400, "MOVIE_REQUEST_INVALID", exception.Message);
+        }
+    }
+
     [HttpGet("projects/{id:guid}/duration-budget")]
     public async Task<IActionResult> GetDurationBudget(Guid id, CancellationToken cancellationToken)
     {

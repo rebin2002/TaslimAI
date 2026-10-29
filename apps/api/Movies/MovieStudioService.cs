@@ -10,10 +10,14 @@ using Taslim.Api.Usage;
 
 namespace Taslim.Api.Movies;
 
+// Metadata-only edit. Production timeline edits must never implicitly queue a video clip.
+public sealed record MovieStudioProjectDurationRequest(int DurationSeconds);
+
 public interface IMovieStudioService
 {
     Task<MovieStudioProjectResponse?> CreateAsync(Guid userId, MovieStudioCreateRequest request, CancellationToken cancellationToken, string? idempotencyKey = null);
     Task<MovieStudioProjectDto?> GetAsync(Guid userId, Guid id, CancellationToken cancellationToken);
+    Task<MovieStudioProjectDto?> UpdateProjectDurationAsync(Guid userId, Guid id, int durationSeconds, CancellationToken cancellationToken);
     Task<MovieWorkspaceResponse?> GetWorkspaceAsync(Guid userId, Guid id, string? module, CancellationToken cancellationToken);
     Task<MovieStudioProjectShellDto?> GetShellAsync(Guid userId, Guid id, CancellationToken cancellationToken);
     Task<MovieCastDto?> GetCastAsync(Guid userId, Guid id, CancellationToken cancellationToken);
@@ -113,6 +117,37 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         GenerationJobDto? job = null;
         var saved = await GetAsync(userId, movie.Id, cancellationToken);
         return saved is null ? null : new MovieStudioProjectResponse(saved, job);
+    }
+
+
+    /// <summary>
+    /// Change only the target duration of an unplanned draft. Once scene planning
+    /// begins, changing the total runtime requires an explicit timeline replan
+    /// rather than silently invalidating an existing scene/shot budget.
+    /// This path never generates clips, creates jobs or reserves usage.
+    /// </summary>
+    public async Task<MovieStudioProjectDto?> UpdateProjectDurationAsync(
+        Guid userId, Guid id, int durationSeconds, CancellationToken cancellationToken)
+    {
+        var movie = await db.MovieProjects.FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
+        if (movie is null || !await collaboration.HasPermissionAsync(userId, id, MoviePermissions.Edit, cancellationToken))
+            return null;
+
+        if (movie.Status != MovieProjectStatuses.Draft
+            || await db.MovieScenes.AnyAsync(item => item.MovieProjectId == id, cancellationToken)
+            || await db.MovieClips.AnyAsync(item => item.MovieProjectId == id, cancellationToken))
+            throw new MovieStudioValidationException(
+                "Change the runtime before scene planning or generated clips; replan an existing timeline explicitly.");
+
+        if (durationSeconds < 1 || durationSeconds > MovieStudioValidation.MaxProjectDurationSeconds)
+            throw new MovieStudioValidationException("Movie duration must be between 1 second and 120 minutes.");
+        if (movie.Mode == MovieProjectModes.Quick && durationSeconds > MovieStudioValidation.MaxQuickDurationSeconds)
+            throw new MovieStudioValidationException("Quick Movie duration must be between 1 second and 60 minutes.");
+
+        movie.DurationSeconds = durationSeconds;
+        movie.UpdatedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync(cancellationToken);
+        return await GetAsync(userId, id, cancellationToken);
     }
 
     public async Task<MovieStudioProjectDto?> GetAsync(Guid userId, Guid id, CancellationToken cancellationToken)
