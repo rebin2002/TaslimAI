@@ -90,7 +90,7 @@ export function MovieClipSegmentationPanel({
         <small>{labels.explanation}</small>
       </div>
       {error ? <p className="movie-command-note" role="status">{labels.error}</p>
-        : !valid ? <p className="movie-command-note" role="status">{labels.loading}</p>
+        : (!valid || !preview) ? <p className="movie-command-note" role="status">{labels.loading}</p>
           : !preview.canSplitByDuration || !preview.segments.length
             ? <p className="movie-command-note" role="status">{labels.unavailable}</p>
             : <div className="movie-health-list">
