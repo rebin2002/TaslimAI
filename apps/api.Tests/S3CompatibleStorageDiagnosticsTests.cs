@@ -153,7 +153,7 @@ public sealed class S3CompatibleStorageDiagnosticsTests
         using var storage = new S3CompatibleFileStorageService(
             new ThrowingObjectClient(new AmazonS3Exception(
                 $"Private endpoint and credential: {secretMarker}")),
-            Options.Create(new FileOptions { S3Bucket = $"bucket-{secretMarker}" }),
+            Options.Create(new Taslim.Api.Files.FileOptions { S3Bucket = $"bucket-{secretMarker}" }),
             logger);
         using var content = new MemoryStream([1, 2, 3]);
 
