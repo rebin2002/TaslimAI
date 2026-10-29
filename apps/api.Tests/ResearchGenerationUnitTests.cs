@@ -52,6 +52,29 @@ public sealed class ResearchGenerationUnitTests
     }
 
     [Fact]
+    public void Draft_validator_requires_citations_on_factual_blocks_but_allows_synthesis_fields()
+    {
+        var draft = new ResearchDraft
+        {
+            Title = "Report",
+            Language = "en",
+            ExecutiveSummary = "A synthesis that does not make a source-specific claim.",
+            KeyFindings = [new ResearchReportBlock { Type = ResearchBlockTypes.KeyFinding, Text = "A factual finding." }],
+            Sections = [new ResearchSection { Heading = "Evidence", Blocks = [new ResearchReportBlock { Type = ResearchBlockTypes.Paragraph, Text = "A factual section claim.", CitationIds = ["S1"] }] }],
+            Conclusion = "A conclusion that frames the implications.",
+            Sources = ["S1"],
+        };
+
+        Assert.Throws<ResearchCitationValidationException>(() => ResearchDraftValidator.Validate(draft, new HashSet<string> { "S1" }, new ResearchGenerationOptions()));
+
+        draft.KeyFindings[0].CitationIds = ["S1"];
+        ResearchDraftValidator.Validate(draft, new HashSet<string> { "S1" }, new ResearchGenerationOptions());
+
+        draft.Sections[0].Blocks[0].CitationIds = [];
+        Assert.Throws<ResearchCitationValidationException>(() => ResearchDraftValidator.Validate(draft, new HashSet<string> { "S1" }, new ResearchGenerationOptions()));
+    }
+
+    [Fact]
     public void Evidence_processor_bounds_and_deduplicates_source_context()
     {
         var source = new ResearchSourceCandidate("S1", "https://example.gov", "https://example.gov", "Source", "example.gov", null, null, DateTime.UtcNow, "web", "Snippet", "Extracted", null, 1, true, null);

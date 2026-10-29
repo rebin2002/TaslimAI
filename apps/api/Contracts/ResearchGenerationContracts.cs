@@ -286,9 +286,22 @@ public static class ResearchDraftValidator
         foreach (var section in draft.Sections)
         {
             if (string.IsNullOrWhiteSpace(section.Heading) || section.Heading.Length > options.MaxHeadingCharacters) throw new ResearchOutputValidationException();
-            foreach (var block in section.Blocks) ValidateBlock(block, options);
+            foreach (var block in section.Blocks)
+            {
+                ValidateBlock(block, options);
+                ValidateFactualBlockCitations(block);
+            }
         }
-        foreach (var block in draft.KeyFindings) ValidateBlock(block, options);
+        foreach (var block in draft.KeyFindings)
+        {
+            ValidateBlock(block, options);
+            ValidateFactualBlockCitations(block);
+        }
+    }
+
+    private static void ValidateFactualBlockCitations(ResearchReportBlock block)
+    {
+        if (block.CitationIds.Count == 0) throw new ResearchCitationValidationException();
     }
 
     private static void ValidateBlock(ResearchReportBlock block, ResearchGenerationOptions options)
