@@ -5,6 +5,12 @@ import { generationJobPollIntervalMs, nextGenerationJobPollDelay } from "./gener
 const job = (status: GenerationJob["status"]) => ({ status } as GenerationJob);
 
 describe("generation-job polling", () => {
+  it("stops polling when the server sends an unknown status", () => {
+    const unknownStatus = "PausedByProvider" as GenerationJob["status"];
+
+    expect(nextGenerationJobPollDelay(job(unknownStatus))).toBeNull();
+  });
+
   it("waits two seconds between active-job detail requests", () => {
     expect(generationJobPollIntervalMs).toBe(2_000);
     expect(nextGenerationJobPollDelay(job("Running"))).toBe(2_000);
