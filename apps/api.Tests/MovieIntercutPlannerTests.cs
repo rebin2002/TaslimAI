@@ -121,6 +121,17 @@ public sealed class MovieIntercutPlannerTests
         Assert.Equal(proposal.ProposedTimeline.Version + 1, approved.Version);
         Assert.Equal(approved.Clips.Count - 1, approved.Transitions.Count);
 
+        var missingApprovalReason = Assert.Throws<MovieIntercutPlanningException>(() =>
+            MovieIntercutPlanner.ApplyUserApproval(proposal, new MovieIntercutApproval(true, " ")));
+        Assert.Equal(MovieIntercutPlanCodes.ApprovalRequired, missingApprovalReason.Code);
+
+        // If a proposal is subsequently tampered with, approval still cannot
+        // introduce duplicate or missing canonical clips into the final cut.
+        var tampered = proposal with { RequestedClipOrder = new[] { PrimaryOne, Insert, Insert } };
+        var tamperedApproval = Assert.Throws<MovieIntercutPlanningException>(() =>
+            MovieIntercutPlanner.ApplyUserApproval(tampered, new MovieIntercutApproval(true, "Approve this cut.")));
+        Assert.Equal(MovieIntercutPlanCodes.StoryOrderInvalid, tamperedApproval.Code);
+
         // Re-submitting canonical ordering is not a changed edit and must not
         // demand needless user approval.
         request.RequestedClipOrder = [PrimaryOne, Reaction, Insert];
