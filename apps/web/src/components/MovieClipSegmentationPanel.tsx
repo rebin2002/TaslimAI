@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { api, type MovieClipSegmentationPreview } from "@/lib/api";
+import { isConsistentMovieClipSegmentation } from "@/lib/movieClipSegmentationValidation";
 import { useLocale } from "@/components/LocaleProvider";
 
 // A read-only duration preview. This is not a shot list, price quotation,
@@ -72,7 +73,13 @@ export function MovieClipSegmentationPanel({
     void api.getMovieClipSegmentationPreview(projectId).then((result) => {
       if (!active) return;
       // Never display a cached plan for a different project or runtime.
-      if (result.movieProjectId !== projectId || result.totalDurationSeconds !== totalDurationSeconds) {
+      if (result.movieProjectId !== projectId
+          || result.totalDurationSeconds !== totalDurationSeconds
+          || !Array.isArray(result.segments)
+          || (result.canSplitByDuration && !isConsistentMovieClipSegmentation(result))
+          || (!result.canSplitByDuration && result.segments.length > 0)) {
+        // Never advertise a partial, overlapping or fabricated duration split.
+        // A malformed server preview is a retriable read error, not render approval.
         setPreview(null);
         setError(true);
         return;
