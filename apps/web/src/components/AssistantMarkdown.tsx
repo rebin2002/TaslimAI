@@ -7,6 +7,9 @@ export function safeMarkdownHref(href: string | undefined): string | undefined {
   if (!href) return undefined;
   const value = href.trim();
   if (!value) return undefined;
+  // Browsers treat backslashes as slashes for special URLs, so `/\\evil.example`
+  // would otherwise become the external origin `https://evil.example/`.
+  if (value.includes("\\")) return undefined;
   if (value.startsWith("//")) return undefined;
   if (value.startsWith("/") || value.startsWith("./") || value.startsWith("../") || value.startsWith("#")) return value;
 
