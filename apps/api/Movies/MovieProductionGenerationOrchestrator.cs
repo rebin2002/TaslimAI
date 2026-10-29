@@ -442,7 +442,12 @@ public sealed class MovieProductionGenerationOrchestrator(
         if (existingJob is null) return null;
         MovieGenerationInput? input = null;
         try { input = JsonSerializer.Deserialize<MovieGenerationInput>(existingJob.InputJson); } catch (JsonException) { }
-        if (input is null || !MatchesProductionReplay(input, shot, request))
+        // An idempotent replay must not silently adopt a paid job from a
+        // different adapter after routing or deployment configuration changes.
+        // Historical jobs without a bound provider retain their legacy behavior.
+        if (input is null || !MatchesProductionReplay(input, shot, request)
+            || (!string.IsNullOrWhiteSpace(input.SelectedProviderKey)
+                && !string.Equals(input.SelectedProviderKey, provider.Key, StringComparison.OrdinalIgnoreCase)))
             throw new MovieProductionValidationException("IDEMPOTENCY_KEY_REUSED", "This idempotency key was already used for a different production request.");
         // For newly admitted production jobs, character continuity forms part
         // of the canonical creative request. The same replay key must not adopt
