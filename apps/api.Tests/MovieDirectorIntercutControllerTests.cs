@@ -144,6 +144,17 @@ public sealed class MovieDirectorIntercutControllerTests
         candidate.ShotSequence = 2;
         await AssertInvalidCoverageAsync();
         candidate.ShotSequence = 1;
+
+        // The review proposal must not invent additional footage beyond the
+        // canonical source clip. A shorter editorial trim is still allowed.
+        candidate.DurationSeconds = 3;
+        await AssertInvalidCoverageAsync();
+        candidate.DurationSeconds = 1;
+        var trimmedResult = await controller.CreateIntercutProposal(requestedProjectId, request, CancellationToken.None);
+        var trimmed = Assert.IsType<MovieIntercutPlanDto>(Assert.IsType<OkObjectResult>(trimmedResult).Value);
+        Assert.Equal(1m, Assert.Single(trimmed.ProposedTimeline.Clips).DurationSeconds);
+        candidate.DurationSeconds = 2;
+
         request.TimelineId = null;
         candidate.ClipId = foreignClipId;
         await AssertInvalidCoverageAsync();
