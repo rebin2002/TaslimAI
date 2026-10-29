@@ -457,6 +457,17 @@ export type MovieClipSegmentationPreview = {
   minimumClipSeconds: number | null;
   maximumClipSeconds: number | null;
   segments: Array<{ sequence: number; startSeconds: number; durationSeconds: number }>;
+  // Optional for compatibility with older API releases. Still read-only:
+  // no generation, approval, pricing, or scene durations are inferred here.
+  canSplitByScene?: boolean;
+  sceneSegments?: Array<{
+    sceneId: string;
+    sceneSequence: number;
+    clipSequence: number;
+    timelineStartSeconds: number;
+    sceneOffsetSeconds: number;
+    durationSeconds: number;
+  }> | null;
 };
 export type MovieOverview = { project: MovieOverviewProject; story: MovieOverviewStory; cast: MovieOverviewResource; world: MovieOverviewResource; scenes: MovieOverviewCounts; shots: MovieOverviewCounts; progress: MovieOverviewProgress; takes: MovieOverviewTakes; approvals: MovieOverviewApprovals; cost: MovieOverviewCost; latestOutputAssetId: string | null; nextActions: MovieOverviewAction[]; warnings: MovieOverviewWarning[]; blockedItems: MovieOverviewBlockedItem[]; recentActivity: MovieOverviewActivity[] };
 export type MovieBudgetDirectorPlanItem = { key: string; label: string; generationUnits: number; durationSecondsPerUnit: number; rationale: string };
