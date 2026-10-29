@@ -84,6 +84,7 @@ public sealed class MovieDirectorController(IMovieDirectorService director, IMov
                     clip.MovieProjectId,
                     clip.MovieSceneId,
                     clip.MovieShotId,
+                    clip.DurationSeconds,
                     SceneProjectId = clip.MovieScene != null ? (Guid?)clip.MovieScene.MovieProjectId : null,
                     SceneSequence = clip.MovieScene != null ? (int?)clip.MovieScene.Sequence : null,
                     ShotSceneId = clip.MovieShot != null ? (Guid?)clip.MovieShot.MovieSceneId : null,
@@ -98,6 +99,10 @@ public sealed class MovieDirectorController(IMovieDirectorService director, IMov
                     || clip.MovieShotId != item.MovieShotId
                     || clip.SceneProjectId != movieProjectId
                     || clip.ShotSceneId != item.MovieSceneId
+                    // A proposed cut cannot use more seconds than the known source clip.
+                    // Shorter editorial trims are permitted; unknown source durations
+                    // remain review-only and must not be represented as verified.
+                    || (clip.DurationSeconds is int sourceSeconds && item.DurationSeconds > sourceSeconds)
                     || clip.SceneSequence != item.SceneSequence
                     || clip.ShotSequence != item.ShotSequence))
                 throw new MovieIntercutPlanningException(MovieIntercutPlanCodes.ClipOwnershipMismatch, "Intercut coverage must reference canonical clips, shots, and scenes in the requested movie project.");
