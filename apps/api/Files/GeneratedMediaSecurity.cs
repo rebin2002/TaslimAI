@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.IO.Compression;
 using System.Text;
 using System.Text.Json;
@@ -58,6 +59,8 @@ public static class GeneratedMediaSecurity
     {
         if (content.Length <= 0) throw new FileUploadValidationException("Generated file is empty.");
         ValidateHeader(descriptor, content);
+        if (descriptor.ContentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
+            ValidateImageCompleteness(descriptor, content);
 
         switch (descriptor.Extension)
         {
@@ -144,6 +147,69 @@ public static class GeneratedMediaSecurity
 
     private static bool IsMpegFrame(ReadOnlySpan<byte> content) =>
         content.Length >= 2 && content[0] == 0xFF && (content[1] & 0xE0) == 0xE0;
+
+    private static void ValidateImageCompleteness(GeneratedMediaDescriptor descriptor, ReadOnlySpan<byte> content)
+    {
+        var complete = descriptor.Extension switch
+        {
+            ".png" => IsCompletePng(content),
+            ".jpg" or ".jpeg" => IsCompleteJpeg(content),
+            ".webp" => IsCompleteWebp(content),
+            _ => true,
+        };
+
+        if (!complete)
+            throw new FileUploadValidationException("Generated image is truncated or structurally incomplete.");
+    }
+
+    private static bool IsCompletePng(ReadOnlySpan<byte> content)
+    {
+        return content.Length >= 40
+            && content[..8].SequenceEqual(new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A })
+            && BinaryPrimitives.ReadUInt32BigEndian(content[8..12]) >= 13
+            && content[12..16].SequenceEqual("IHDR"u8)
+            && content[^8..^4].SequenceEqual("IEND"u8);
+    }
+
+    private static bool IsCompleteJpeg(ReadOnlySpan<byte> content)
+    {
+        if (content.Length < 4 || content[0] != 0xFF || content[1] != 0xD8)
+            return false;
+
+        for (var index = 2; index < content.Length - 1; index++)
+            if (content[index] == 0xFF && content[index + 1] == 0xD9)
+                return true;
+
+        return false;
+    }
+
+    private static bool IsCompleteWebp(ReadOnlySpan<byte> content)
+    {
+        if (content.Length < 20 || !content[..4].SequenceEqual("RIFF"u8) || !content[8..12].SequenceEqual("WEBP"u8))
+            return false;
+
+        var riffEnd = 8L + BinaryPrimitives.ReadUInt32LittleEndian(content[4..8]);
+        if (riffEnd > content.Length || riffEnd < 20) return false;
+
+        var index = 12L;
+        while (index + 8 <= riffEnd)
+        {
+            var chunkStart = (int)index;
+            var chunkLength = BinaryPrimitives.ReadUInt32LittleEndian(content[(chunkStart + 4)..(chunkStart + 8)]);
+            var chunkEnd = index + 8 + chunkLength;
+            if (chunkEnd > riffEnd) return false;
+
+            var chunkType = content[chunkStart..(chunkStart + 4)];
+            if ((chunkType.SequenceEqual("VP8 "u8) || chunkType.SequenceEqual("VP8L"u8)) && chunkLength > 0)
+                return true;
+            if (chunkType.SequenceEqual("VP8X"u8) && chunkLength >= 10)
+                return true;
+
+            index = chunkEnd + (chunkLength & 1);
+        }
+
+        return false;
+    }
 
     private static bool IsFtyp(ReadOnlySpan<byte> content) =>
         content.Length >= 12 && content[4..8].SequenceEqual("ftyp"u8);
