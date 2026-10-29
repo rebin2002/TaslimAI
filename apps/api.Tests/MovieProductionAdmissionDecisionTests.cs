@@ -123,8 +123,8 @@ public sealed class MovieProductionAdmissionDecisionTests
         var calls = new FakeProviderCallLog();
         var provider = CreateProvider(new FakeProviderScenarioCatalog(), calls);
         provider.SupportedOperations = quickMovieOnly
-            ? [MovieStudioOperations.QuickMovie]
-            : [];
+            ? new[] { MovieStudioOperations.QuickMovie }
+            : Array.Empty<string>();
 
         var rejection = Decide(provider);
 
