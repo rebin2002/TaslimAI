@@ -714,6 +714,54 @@ public sealed class MovieVideoExecutionTests
     }
 
     [Fact]
+    public async Task Worker_rejects_prompt_exceeding_capacity_only_after_provider_formatting()
+    {
+        // Provider-specific labels and separators consume prompt capacity too.
+        // This synthetic adapter stops before any potentially billable call.
+        var fixture = await CreateRunningMovieJobAsync(
+            "Movie prompt format safety", "A nearly full prompt.");
+        await using var connection = fixture.Connection;
+        await using var db = fixture.Db;
+        var input = System.Text.Json.JsonSerializer.Deserialize<MovieGenerationInput>(fixture.Job.InputJson)!;
+        fixture.Job.InputJson = System.Text.Json.JsonSerializer.Serialize(input with
+        {
+            Description = new string('D', 45),
+            Style = null,
+            AdditionalInstructions = null,
+            ContinuityGuideJson = null,
+            CharacterContinuityJson = null,
+            SceneJson = null,
+            ShotJson = null,
+            WorldContextJson = null,
+            SourceResolution = "720p",
+            TargetResolution = "720p",
+            QualityTier = DirectorQualityLevels.Standard,
+            ProcessingPath = "native",
+            MasterResolution = null,
+            DurationSeconds = 5,
+            UpscalingRequested = false,
+        });
+        await db.SaveChangesAsync();
+
+        // Creative text alone fits (45 <= 48); four adapter format characters
+        // make the actual prompt length 49 and must fail before execution.
+        var provider = new GuardedSceneMovieVideoProvider(
+            promptLimit: 48, promptFormattingOverhead: 4);
+        var options = new MovieVideoOptions { Enabled = true, ProviderKey = provider.Key };
+        var handler = new MovieVideoGenerationJobHandler(
+            db, provider, new MovieVideoExecutionStore(db, Options.Create(options)),
+            Options.Create(options), NullLogger<MovieVideoGenerationJobHandler>.Instance);
+
+        var failure = await Assert.ThrowsAsync<MovieVideoProviderException>(
+            () => handler.ExecuteAsync(fixture.Job, new Progress<int>(), CancellationToken.None));
+
+        Assert.Equal(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, failure.Code);
+        Assert.Equal(0, provider.SubmitCalls);
+        Assert.Empty(await db.MovieVideoProviderExecutions.AsNoTracking().ToListAsync());
+        Assert.Equal(MovieClipStatuses.Failed, (await db.MovieClips.AsNoTracking().SingleAsync()).Status);
+    }
+
+    [Fact]
     public async Task Transient_submission_failure_is_not_retried_without_provider_idempotency()
     {
         var fixture = await CreateRunningMovieJobAsync(
@@ -1211,14 +1259,16 @@ public sealed class MovieVideoExecutionTests
 
     private sealed class GuardedSceneMovieVideoProvider : IMovieVideoProvider
     {
-        public GuardedSceneMovieVideoProvider(int? promptLimit = null, bool supportsFrameReferences = false, bool includesWorldContext = false)
+        public GuardedSceneMovieVideoProvider(int? promptLimit = null, bool supportsFrameReferences = false, bool includesWorldContext = false, int promptFormattingOverhead = 0)
         {
             SceneClipPromptMaxCharacters = promptLimit;
             SupportsSceneClipFrameReferences = supportsFrameReferences;
             SceneClipWorldContextInPrompt = includesWorldContext;
+            SceneClipPromptFormattingOverheadCharacters = promptFormattingOverhead;
         }
         public int? SceneClipPromptMaxCharacters { get; }
         public bool SceneClipWorldContextInPrompt { get; }
+        public int SceneClipPromptFormattingOverheadCharacters { get; }
         public bool SupportsSceneClipFrameReferences { get; }
         public string Key => "guarded-scene-test";
         public bool IsAvailable => true;
