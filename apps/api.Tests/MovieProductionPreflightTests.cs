@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Taslim.Api.Contracts;
@@ -65,6 +66,48 @@ public sealed class MovieProductionPreflightTests : IClassFixture<GenerationJobs
         Assert.DoesNotContain("prompt", json, StringComparison.OrdinalIgnoreCase);
     }
 
+
+    [Fact]
+    public async Task Read_only_production_preflight_honors_explicit_cost_confirmation_without_queueing_work()
+    {
+        // A confirmed GET changes only the read-only guardrail decision; it
+        // must never reserve usage, create a clip or submit to any provider.
+        using var baselineFactory = new MovieClipDurationApiFactory();
+        using var configuredFactory = baselineFactory.WithWebHostBuilder(builder =>
+        {
+            builder.UseSetting("GenerationBudget:Enabled", "true");
+            builder.UseSetting("GenerationBudget:RejectUnknownEstimates", "false");
+            builder.UseSetting("GenerationBudget:ExpensiveGenerationWarningThresholdUsd", "0");
+            builder.UseSetting("GenerationBudget:RequireConfirmationForExpensiveGeneration", "true");
+            builder.UseSetting("GenerationBudget:RequireConfirmationForUnknownEstimates", "true");
+        });
+        using (var setup = configuredFactory.Services.CreateScope())
+            setup.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+
+        using var client = configuredFactory.CreateClient();
+        var movie = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Cost confirmation preview only", sceneDurationSeconds: 5);
+        var path = $"/api/movie-studio/shots/{movie.Shot.Id}/production/preflight?targetResolution=720p&qualityTier=Standard";
+        using var unconfirmedResponse = await client.GetAsync(path);
+        using var confirmedResponse = await client.GetAsync(path + "&confirmationAccepted=true");
+
+        Assert.Equal(HttpStatusCode.OK, unconfirmedResponse.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, confirmedResponse.StatusCode);
+        var unconfirmed = (await unconfirmedResponse.Content.ReadFromJsonAsync<MovieProductionPreflightDto>())!;
+        var confirmed = (await confirmedResponse.Content.ReadFromJsonAsync<MovieProductionPreflightDto>())!;
+        Assert.True(unconfirmed.CostGuardrails.ConfirmationRequired);
+        Assert.False(unconfirmed.CostGuardrails.CanProceed);
+        Assert.True(confirmed.CostGuardrails.ConfirmationRequired);
+        Assert.True(confirmed.CostGuardrails.CanProceed);
+
+        using var verify = configuredFactory.Services.CreateScope();
+        var db = verify.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.False(await db.MovieClips.AnyAsync(item => item.MovieProjectId == movie.Project.Project.Id));
+        Assert.False(await db.GenerationJobs.AnyAsync());
+        Assert.False(await db.UsageTransactions.AnyAsync());
+        Assert.Equal(0, verify.ServiceProvider.GetRequiredService<FakeProviderCallLog>()
+            .Calls(FakeProviderKind.Movie));
+    }
 
     [Theory]
     [InlineData(2, true)]
