@@ -4,6 +4,10 @@ import { localeDirection, locales, translate } from "./i18n";
 const chatUxKeys = [
   "chat.clearAttachments",
   "chat.cancelled",
+  "chat.streamGenerating",
+  "chat.streamCompleted",
+  "chat.streamFailed",
+  "chat.streamCancelled",
   "chat.stopGeneration",
   "chat.deleteConfirmTitle",
   "chat.copyResponse",
