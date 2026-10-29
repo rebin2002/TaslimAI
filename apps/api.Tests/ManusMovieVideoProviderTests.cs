@@ -94,8 +94,8 @@ public sealed class ManusMovieVideoProviderTests
         {
             DurationSeconds = 30,
             Language = "zh-CN",
-            CharacterContinuityJson = "{\\\"name\\\":\\\"Liora\\\"}",
-            WorldContextJson = "{\\\"location\\\":\\\"forest\\\"}",
+            CharacterContinuityJson = JsonSerializer.Serialize(new { name = "Liora" }),
+            WorldContextJson = JsonSerializer.Serialize(new { location = "forest" }),
         };
 
         await provider.SubmitAsync(request, CancellationToken.None);
