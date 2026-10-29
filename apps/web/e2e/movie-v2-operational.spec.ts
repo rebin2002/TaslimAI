@@ -145,9 +145,16 @@ test.describe("Movie Studio V2 operational browser contracts", () => {
       page.getByRole("tab", { name: /quick movie/i }).first(),
     ).toBeVisible();
     await expect(page.getByText("One brief, one output")).toBeVisible();
-    await expect(
-      page.getByText(/Quick Movie stays intentionally small/i),
-    ).toBeVisible();
+    // A provider-free CI environment must not pretend Quick Movie generation
+    // is available. A quick-capable configured adapter can show the brief hint.
+    const quickNote = page.locator(".movie-submit-row > span");
+    await expect(quickNote).toContainText(
+      /Quick Movie stays intentionally small|Generation is currently unavailable/i,
+    );
+    if ((await quickNote.innerText()).includes("unavailable")) {
+      await page.getByLabel("Describe your movie").fill("A short movie brief for the operational test.");
+      await expect(page.locator(".movie-submit-row button[type=submit]")).toBeDisabled();
+    }
     await expect(page).not.toHaveURL(/\/create\/movie\/[0-9a-f-]+\/overview$/i);
 
     const observed = diagnostics.stop();
