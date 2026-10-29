@@ -45,6 +45,13 @@ public sealed class ManusMovieVideoProvider(
     public MovieClipDurationRange? SceneClipDurationRange => new(1, 30);
     // Must use the same configured bound enforced by BuildPrompt.
     public int? SceneClipPromptMaxCharacters => Math.Clamp(Manus.MaxPromptCharacters, 1_000, 20_000);
+    // BuildPrompt adds two mandatory direction paragraphs, duration/aspect/language
+    // metadata, section labels, and newline separators in addition to the creative
+    // fields counted by queue admission. Reserve a conservative 512 characters
+    // for that adapter formatting so near-limit jobs fail before cost reservation
+    // instead of discovering the overflow only in the worker. The verified
+    // supported-language and clip-duration metadata fit within this allowance.
+    public int SceneClipPromptFormattingOverheadCharacters => 512;
     // BuildPrompt includes WorldContextJson as a required section.
     public bool SceneClipWorldContextInPrompt => true;
 
