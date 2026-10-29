@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { GlobalSearchResult } from "./api";
-import { globalSearchResultDestination } from "./searchNavigation";
+import { assetDestination, globalSearchResultDestination } from "./searchNavigation";
 
 const result = (overrides: Partial<GlobalSearchResult>): GlobalSearchResult => ({
   type: "assets",
@@ -19,6 +19,10 @@ const result = (overrides: Partial<GlobalSearchResult>): GlobalSearchResult => (
 });
 
 describe("globalSearchResultDestination", () => {
+  it("encodes exact asset IDs and preserves the requested asset status", () => {
+    expect(assetDestination("asset/with spaces", "Archived")).toBe("/assets?assetId=asset%2Fwith%20spaces&status=Archived");
+  });
+
   it("opens the exact asset instead of searching by a potentially duplicated title", () => {
     expect(globalSearchResultDestination(result({ id: "asset/with spaces", title: "Shared name" }))).toBe(
       "/assets?assetId=asset%2Fwith%20spaces&status=Active",
