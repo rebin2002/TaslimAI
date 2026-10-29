@@ -23,6 +23,50 @@ public sealed class MovieTimelineTransitionsTests
     }
 
     [Fact]
+    public void Overlapping_clips_require_an_explicit_dissolve_transition()
+    {
+        var timeline = CanonicalTimeline() with
+        {
+            Transitions = [
+                new MovieTimelineTransitionContract(CutId, MovieTimelineTransitionTypes.Cut, ClipA, ClipB, 10m, 0m),
+                new MovieTimelineTransitionContract(FadeInId, MovieTimelineTransitionTypes.FadeIn, null, ClipA, 0m, 1m),
+                new MovieTimelineTransitionContract(FadeOutId, MovieTimelineTransitionTypes.FadeOut, ClipC, null, 20m, 2m),
+            ],
+        };
+
+        var result = MovieTimelineValidator.Validate(timeline);
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, item => item.Code == MovieTimelineValidationCodes.ClipOverlapInvalid);
+    }
+
+    [Fact]
+    public void Add_dissolve_decision_validates_the_prospective_overlap()
+    {
+        var timeline = CanonicalTimeline() with
+        {
+            Transitions = [
+                new MovieTimelineTransitionContract(CutId, MovieTimelineTransitionTypes.Cut, ClipA, ClipB, 10m, 0m),
+                new MovieTimelineTransitionContract(FadeInId, MovieTimelineTransitionTypes.FadeIn, null, ClipA, 0m, 1m),
+                new MovieTimelineTransitionContract(FadeOutId, MovieTimelineTransitionTypes.FadeOut, ClipC, null, 20m, 2m),
+            ],
+        };
+        var dissolve = new MovieTimelineTransitionContract(DissolveId, MovieTimelineTransitionTypes.Dissolve, ClipB, ClipC, 16m, 2m);
+        var decision = new MovieTimelineEditDecisionContract(
+            Guid.Parse("50000000-0000-0000-0000-000000000004"), TimelineId, timeline.Version,
+            MovieTimelineEditActions.Add, null, dissolve, null,
+            new MovieUserTransitionOverrideContract(
+                Guid.Parse("60000000-0000-0000-0000-000000000004"), TimelineId, timeline.Version, null, dissolve,
+                "Add the approved dissolve for the overlapping clip boundary."));
+
+        var result = MovieTimelineValidator.ValidateEditDecision(timeline, decision);
+
+        Assert.True(result.IsValid, string.Join(Environment.NewLine, result.Errors.Select(item => item.Message)));
+        var next = MovieTimelineAuthority.ApplyUserOverride(timeline, decision);
+        Assert.Contains(next.Transitions, item => item.Id == DissolveId);
+    }
+
+    [Fact]
     public void Dissolve_must_match_the_exact_overlap_between_adjacent_clips()
     {
         var timeline = CanonicalTimeline() with
