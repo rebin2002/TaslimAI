@@ -374,6 +374,17 @@ public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWork
         Assert.False(string.IsNullOrWhiteSpace(queuedInput.CharacterContinuityJson));
         Assert.Equal(queuedClip.ContinuitySnapshotJson, queuedInput.CharacterContinuityJson);
 
+        // Regression for structured prompt-budget refactors: validating the
+        // combined creative text must never drop the exact guide, scene and shot
+        // payloads subsequently handed to the video execution worker.
+        using var guidePayload = JsonDocument.Parse(Assert.IsType<string>(queuedInput.ContinuityGuideJson));
+        Assert.True(guidePayload.RootElement.TryGetProperty("VisualLanguage", out _));
+        using var scenePayload = JsonDocument.Parse(Assert.IsType<string>(queuedInput.SceneJson));
+        Assert.Equal("Dawn", scenePayload.RootElement.GetProperty("Title").GetString());
+        Assert.Equal("A quiet opening beat.", scenePayload.RootElement.GetProperty("Summary").GetString());
+        using var shotPayload = JsonDocument.Parse(Assert.IsType<string>(queuedInput.ShotJson));
+        Assert.Equal("A locked-off street wide shot.", shotPayload.RootElement.GetProperty("Description").GetString());
+
         var versionsBefore = await db.MovieProductionVersions.CountAsync(item => item.MovieShotId == shot.Id);
         var clipsBefore = await db.MovieClips.CountAsync(item => item.MovieShotId == shot.Id);
         var ledgerBefore = await db.UsageTransactions.CountAsync();
