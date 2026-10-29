@@ -50,6 +50,32 @@ describe("Movie Studio provider-neutral segmentation preview integrity", () => {
     }
   });
 
+  it("rejects non-boolean capability claims and blank provider identities", () => {
+    const malformed = [
+      { providerKey: "" },
+      { providerKey: "  " },
+      { providerKey: null },
+      { providerDeclaresSceneClipOperation: "true" },
+      { canSplitByDuration: "true" },
+      { providerDeclaresSceneClipOperation: 1 },
+      { canSplitByDuration: 1 },
+    ] as unknown as Array<Partial<MovieClipSegmentationPreview>>;
+    for (const variant of malformed) {
+      expect(isConsistentMovieClipSegmentation(preview(variant))).toBe(false);
+    }
+  });
+
+  it("rejects null, primitive and malformed slots from an untrusted API response", () => {
+    const malformedSlots: unknown[] = [null, undefined, "clip", 5, false];
+    for (const slot of malformedSlots) {
+      const segments = [slot] as MovieClipSegmentationPreview["segments"];
+      expect(isConsistentMovieClipSegmentation(preview({ segments }))).toBe(false);
+    }
+    expect(isConsistentMovieClipSegmentation(preview({
+      segments: {} as MovieClipSegmentationPreview["segments"],
+    }))).toBe(false);
+  });
+
   it("rejects unsupported declared durations and absent provider capabilities", () => {
     const variants: Array<Partial<MovieClipSegmentationPreview>> = [
       { minimumClipSeconds: null },
