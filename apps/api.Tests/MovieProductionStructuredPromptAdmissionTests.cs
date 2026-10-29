@@ -40,6 +40,61 @@ public sealed class MovieStructuredPromptBudgetFactory : MovieOperationalApiFact
 public sealed class MovieProductionStructuredPromptAdmissionTests
 {
     [Fact]
+    public async Task Legacy_shot_generation_rejects_provider_prompt_format_overhead_before_reservation()
+    {
+        using var factory = new MovieStructuredPromptBudgetFactory();
+        using (var setup = factory.Services.CreateScope())
+            setup.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+
+        using var client = factory.CreateClient();
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Prompt formatting film", sceneDurationSeconds: 5);
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var shot = await db.MovieShots
+            .Include(item => item.Scene).ThenInclude(item => item.MovieProject)
+            .SingleAsync(item => item.Id == fixture.Shot.Id);
+        var movie = shot.Scene.MovieProject;
+        var continuity = scope.ServiceProvider.GetRequiredService<IMovieCharacterContinuityService>();
+        var snapshot = await continuity.BuildSnapshotForTargetAsync(
+            movie.Id, shot.Scene.Id, shot.Id, persist: false);
+        var baseLength = (long)shot.Description.Trim().Length
+            + (movie.Style?.Trim().Length ?? 0)
+            + (movie.AdditionalInstructions?.Trim().Length ?? 0)
+            + MovieStudioService.SceneSnapshot(shot.Scene).Length
+            + MovieStudioService.ShotSnapshot(shot).Length
+            + snapshot.SnapshotJson.Trim().Length;
+        var provider = Assert.IsType<FakeMovieVideoProvider>(
+            scope.ServiceProvider.GetRequiredService<IMovieVideoProvider>());
+        provider.SceneClipPromptMaxCharacters = checked((int)baseLength + 1);
+        provider.SceneClipPromptFormattingOverheadCharacters = 2;
+        Assert.True(baseLength < provider.SceneClipPromptMaxCharacters.Value);
+        Assert.True(baseLength + provider.SceneClipPromptFormattingOverheadCharacters
+            > provider.SceneClipPromptMaxCharacters.Value);
+
+        var snapshotsBefore = await db.MovieCharacterContinuitySnapshots.CountAsync();
+        var clipsBefore = await db.MovieClips.CountAsync();
+        var jobsBefore = await db.GenerationJobs.CountAsync();
+        var usageBefore = await db.UsageTransactions.CountAsync();
+
+        using var response = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, $"/api/movie-studio/shots/{shot.Id}/generate",
+            new { title = "Prompt formatting test", sourceResolution = "720p",
+                targetResolution = "720p", qualityTier = "Standard", confirmationAccepted = true },
+            idempotencyKey: "legacy-provider-format-overflow");
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains("MOVIE_CLIP_PROMPT_UNSUPPORTED",
+            await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Equal(snapshotsBefore, await db.MovieCharacterContinuitySnapshots.CountAsync());
+        Assert.Equal(clipsBefore, await db.MovieClips.CountAsync());
+        Assert.Equal(jobsBefore, await db.GenerationJobs.CountAsync());
+        Assert.Equal(usageBefore, await db.UsageTransactions.CountAsync());
+        Assert.Equal(0, scope.ServiceProvider.GetRequiredService<FakeProviderCallLog>()
+            .Calls(FakeProviderKind.Movie));
+    }
+
+    [Fact]
     public async Task Legacy_shot_generation_rejects_oversized_structured_direction_before_reservation()
     {
         using var factory = new MovieStructuredPromptBudgetFactory();
@@ -214,6 +269,95 @@ public sealed class MovieProductionStructuredPromptAdmissionTests
         Assert.Contains("MOVIE_CLIP_PROMPT_UNSUPPORTED",
             await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
         Assert.Equal(snapshotsBefore, await db.MovieCharacterContinuitySnapshots.CountAsync());
+        Assert.Equal(clipsBefore, await db.MovieClips.CountAsync());
+        Assert.Equal(jobsBefore, await db.GenerationJobs.CountAsync());
+        Assert.Equal(usageBefore, await db.UsageTransactions.CountAsync());
+        Assert.Equal(0, scope.ServiceProvider.GetRequiredService<FakeProviderCallLog>()
+            .Calls(FakeProviderKind.Movie));
+    }
+
+    [Fact]
+    public async Task Approved_render_rejects_provider_prompt_format_overhead_before_reservation()
+    {
+        using var factory = new MovieStructuredPromptBudgetFactory();
+        using (var setup = factory.Services.CreateScope())
+            setup.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+
+        using var client = factory.CreateClient();
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Formatting production", sceneDurationSeconds: 5);
+        var shotId = fixture.Shot.Id;
+        var storyboard = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
+            client, $"/api/movie-studio/shots/{shotId}/production/versions",
+            new { stage = MovieProductionStages.StoryboardCandidate, compositionJson = "{\\\"frame\\\":\\\"wide\\\"}" });
+        var approvedStoryboard = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
+            client, $"/api/movie-studio/production/versions/{storyboard.Id}/review",
+            new { approve = true });
+        var keyframe = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
+            client, $"/api/movie-studio/shots/{shotId}/production/versions",
+            new { stage = MovieProductionStages.ProductionKeyframe,
+                sourceVersionId = approvedStoryboard.Id, compositionJson = "{\\\"frame\\\":\\\"approved\\\"}" });
+        var approvedKeyframe = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
+            client, $"/api/movie-studio/production/versions/{keyframe.Id}/review",
+            new { approve = true });
+        var motion = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
+            client, $"/api/movie-studio/shots/{shotId}/production/motion-preview",
+            new { sourceVersionId = approvedKeyframe.Id });
+        var approvedMotion = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
+            client, $"/api/movie-studio/production/versions/{motion.Id}/review",
+            new { approve = true });
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var shot = await db.MovieShots
+            .Include(item => item.Scene).ThenInclude(item => item.MovieProject).ThenInclude(item => item.Guide)
+            .SingleAsync(item => item.Id == shotId);
+        var movie = shot.Scene.MovieProject;
+        var title = "Formatting production";
+        var guide = movie.Guide is null ? null : JsonSerializer.Serialize(new
+        {
+            movie.Guide.VisualLanguage, movie.Guide.CameraLanguage,
+            movie.Guide.ColorAndLighting, movie.Guide.SoundAndNarration,
+            movie.Guide.ContinuityRules,
+        });
+        var sceneJson = JsonSerializer.Serialize(new
+        {
+            shot.Scene.Title, shot.Scene.Summary, shot.Scene.DurationSeconds,
+        });
+        var shotJson = JsonSerializer.Serialize(new
+        {
+            shot.Description, shot.Purpose, shot.Subjects,
+            shot.CameraAndFraming, shot.CameraMotion, shot.DurationSeconds,
+        });
+        var continuity = scope.ServiceProvider.GetRequiredService<IMovieCharacterContinuityService>();
+        var snapshot = await continuity.BuildSnapshotForTargetAsync(
+            movie.Id, shot.Scene.Id, shot.Id, persist: false);
+        var baseLength = (long)title.Length
+            + (movie.Style?.Trim().Length ?? 0)
+            + (movie.AdditionalInstructions?.Trim().Length ?? 0)
+            + (guide?.Length ?? 0) + sceneJson.Length + shotJson.Length
+            + snapshot.SnapshotJson.Trim().Length;
+        var provider = Assert.IsType<FakeMovieVideoProvider>(
+            scope.ServiceProvider.GetRequiredService<IMovieVideoProvider>());
+        provider.SceneClipPromptMaxCharacters = checked((int)baseLength + 1);
+        provider.SceneClipPromptFormattingOverheadCharacters = 2;
+
+        var snapshotsBefore = await db.MovieCharacterContinuitySnapshots.CountAsync();
+        var versionsBefore = await db.MovieProductionVersions.CountAsync();
+        var clipsBefore = await db.MovieClips.CountAsync();
+        var jobsBefore = await db.GenerationJobs.CountAsync();
+        var usageBefore = await db.UsageTransactions.CountAsync();
+
+        using var response = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, $"/api/movie-studio/shots/{shotId}/production/render",
+            new { sourceVersionId = approvedMotion.Id, title, targetResolution = "720p",
+                qualityTier = "Standard", confirmationAccepted = true },
+            idempotencyKey: "approved-provider-format-overflow");
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains("MOVIE_CLIP_PROMPT_UNSUPPORTED",
+            await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Equal(snapshotsBefore, await db.MovieCharacterContinuitySnapshots.CountAsync());
+        Assert.Equal(versionsBefore, await db.MovieProductionVersions.CountAsync());
         Assert.Equal(clipsBefore, await db.MovieClips.CountAsync());
         Assert.Equal(jobsBefore, await db.GenerationJobs.CountAsync());
         Assert.Equal(usageBefore, await db.UsageTransactions.CountAsync());
