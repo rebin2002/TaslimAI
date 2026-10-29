@@ -58,6 +58,8 @@ check "pull request targeting the follow-on branch is allowed" \
   allow pull_request refs/pull/9/merge $EXPECTED_BRANCH some/other-branch ""
 check "pull request targeting the canonical billing stack is allowed" \
   allow pull_request refs/pull/10/merge fix/billing-accounting-foundations-20261005 some/other-branch ""
+check "pull request targeting an unapproved billing-looking branch is refused" \
+  deny pull_request refs/pull/10/merge fix/billing-unreviewed-20261024 some/other-branch ""
 check "pull request targeting the canonical Search stack is allowed" \
   allow pull_request refs/pull/11/merge fix/search-asset-deep-links-20261005 some/other-branch ""
 check "pull request targeting an unapproved Search branch is refused" \
