@@ -37,7 +37,7 @@ test("Chat PDF upload failure shows a safe error and allows a private retry with
       return;
     }
     if (allowedLocalHosts.has(url.hostname)) {
-      await route.continue();
+      await route.fallback();
       return;
     }
     blockedExternalRequests.push(`${route.request().method()} ${url.origin}`);
