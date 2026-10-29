@@ -1398,6 +1398,14 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                 var canonicalClip = await db.MovieClips.SingleOrDefaultAsync(item => item.Id == existingInput.MovieClipId && item.MovieProjectId == movie.Id, cancellationToken);
                 if (canonicalClip is null)
                     throw new MovieStudioValidationException("The idempotent generation target is no longer available.");
+                // A job-first replay may repair a missing link, but it must never
+                // adopt a clip already attached to a different generation job.
+                // Otherwise, the response can pair one job's pricing/reservation
+                // with another job's clip and falsely report an idempotent replay.
+                if (canonicalClip.GenerationJobId is { } linkedJobId && linkedJobId != existingJob.Id)
+                    throw new GenerationJobValidationException(
+                        "IDEMPOTENCY_KEY_REUSED",
+                        "The idempotent generation clip is linked to a different job.");
                 if (canonicalClip.GenerationJobId is null)
                 {
                     canonicalClip.GenerationJobId = existingJob.Id;
