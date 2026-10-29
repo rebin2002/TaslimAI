@@ -1,7 +1,9 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
+using Taslim.Api.Infrastructure;
 using Taslim.Api.Operations;
 
 namespace Taslim.Api.Controllers;
@@ -21,6 +23,7 @@ public sealed class AdminOperationsController(IAdminOperationsService operations
 
     [HttpPost("jobs/{jobId:guid}/recover")]
     [ValidateAntiForgeryToken]
+    [EnableRateLimiting(RateLimiting.AccountSecurity)]
     public async Task<ActionResult<AdminJobRecoveryResult>> Recover(
         Guid jobId,
         [FromBody] AdminJobRecoveryRequest request,
