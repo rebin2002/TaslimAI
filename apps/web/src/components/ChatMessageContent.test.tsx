@@ -47,4 +47,12 @@ describe("ChatMessageContent production rendering path", () => {
     expect(html).not.toContain("<h3>Summary</h3>");
     expect(html).not.toContain("<strong>test summary</strong>");
   });
+
+  it("preserves submitted line breaks in a user message", () => {
+    const html = renderToStaticMarkup(
+      <ChatMessageContent role="User" status="Completed" content={"First line\nSecond line"} />,
+    );
+
+    expect(html).toContain('style="white-space:pre-wrap"');
+  });
 });
