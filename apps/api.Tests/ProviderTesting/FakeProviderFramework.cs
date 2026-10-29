@@ -236,6 +236,7 @@ public sealed class FakeMovieVideoProvider(
     public MovieClipDurationRange? SceneClipDurationRange { get; set; } = new(1, 3600);
     // Allows provider-free HTTP admission tests to assert pre-reservation denial.
     public int? SceneClipPromptMaxCharacters { get; set; }
+    public int SceneClipPromptFormattingOverheadCharacters { get; set; }
     public bool SceneClipWorldContextInPrompt { get; set; }
     // The deterministic fake can honor the requested profile for provider-free E2E.
     // It is not an assertion about Runway or Manus capabilities.
