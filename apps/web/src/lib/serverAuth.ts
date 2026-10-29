@@ -9,7 +9,7 @@ type SessionProbePayload = {
 };
 
 function safeReturnPath(path: string): string {
-  return path.startsWith("/") && !path.startsWith("//") && !/[\u0000-\u001f\u007f]/.test(path) ? path : "/";
+  return path.startsWith("/") && !path.startsWith("//") && !path.includes("\\") && !/[\u0000-\u001f\u007f]/.test(path) ? path : "/";
 }
 
 function loginRedirect(path: string): never {
