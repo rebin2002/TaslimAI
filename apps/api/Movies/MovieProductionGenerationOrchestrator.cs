@@ -197,7 +197,8 @@ public sealed class MovieProductionGenerationOrchestrator(
             + (shot.Scene.MovieProject.AdditionalInstructions?.Trim().Length ?? 0)
             + (guidePayload?.Length ?? 0)
             + scenePayload.Length
-            + shotPayload.Length;
+            + shotPayload.Length
+            + Math.Max(0, provider.SceneClipPromptFormattingOverheadCharacters);
         if (provider.SceneClipPromptMaxCharacters is { } promptCapacity
             && minimumCreativePromptLength > promptCapacity)
             throw new MovieProductionValidationException(
