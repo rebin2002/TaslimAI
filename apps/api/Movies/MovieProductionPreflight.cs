@@ -211,8 +211,12 @@ public sealed class MovieProductionPreflightService(
             : new MovieProductionValidationException(
                 "MOVIE_CLIP_DURATION_UNSUPPORTED",
                 "The selected shot or scene duration cannot be rendered as one clip. Create shorter shots or use a validated segmentation workflow.");
+        // Duration support is independent of provider availability. An unavailable
+        // adapter with no declared duration range must not be advertised as
+        // supporting this clip merely because availability was checked first.
         var clipDurationAccepted = durationInPlatformRange
-            && admissionError?.Code != "MOVIE_CLIP_DURATION_UNSUPPORTED";
+            && provider.SceneClipDurationRange is { } clipDurationRange
+            && clipDurationRange.Supports(selectedDuration);
         checks.Add(new MovieProductionPreflightCheckDto(
             MovieProductionPreflightCheckKeys.ClipDuration,
             "Single production clip duration", clipDurationAccepted, true,
