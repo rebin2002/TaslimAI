@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { api, type MovieClipSegmentationPreview } from "@/lib/api";
-import { isConsistentMovieClipSegmentation } from "@/lib/movieClipSegmentationValidation";
+import { isConsistentMovieClipSegmentation, isConsistentMovieSceneClipSegmentation } from "@/lib/movieClipSegmentationValidation";
 import { useLocale } from "@/components/LocaleProvider";
 
 // A read-only duration preview. This is not a shot list, price quotation,
@@ -16,6 +16,8 @@ const copy = {
     error: "The duration preview could not be loaded.",
     retry: "Retry preview",
     slots: "Duration slots",
+    sceneSlots: "Scene-aligned slots",
+    scenePending: "Explicit scene timing needed",
     runtime: "Planned runtime",
     first: "First slot",
     last: "Last slot",
@@ -31,6 +33,8 @@ const copy = {
     error: "تعذّر تحميل معاينة تقسيم المدة.",
     retry: "إعادة محاولة المعاينة",
     slots: "أجزاء المدة",
+    sceneSlots: "المقاطع الملتزمة بحدود المشاهد",
+    scenePending: "يجب تحديد مدة كل مشهد",
     runtime: "المدة المخططة",
     first: "الجزء الأول",
     last: "الجزء الأخير",
@@ -46,6 +50,8 @@ const copy = {
     error: "نەتوانرا پێشبینینی دابەشکردنی ماوە باربکرێت.",
     retry: "دووبارە هەوڵ بدە",
     slots: "بەشەکانی ماوە",
+    sceneSlots: "کلیپەکانی لە سنووری دیمەن",
+    scenePending: "پێویستە ماوەی هەر دیمەنێک دیاری بکرێت",
     runtime: "ماوەی پلانکراو",
     first: "بەشی یەکەم",
     last: "بەشی کۆتایی",
@@ -77,7 +83,8 @@ export function MovieClipSegmentationPanel({
           || result.totalDurationSeconds !== totalDurationSeconds
           || !Array.isArray(result.segments)
           || (result.canSplitByDuration && !isConsistentMovieClipSegmentation(result))
-          || (!result.canSplitByDuration && result.segments.length > 0)) {
+          || (!result.canSplitByDuration && result.segments.length > 0)
+          || !isConsistentMovieSceneClipSegmentation(result)) {
         // Never advertise a partial, overlapping or fabricated duration split.
         // A malformed server preview is a retriable read error, not render approval.
         setPreview(null);
@@ -121,6 +128,7 @@ export function MovieClipSegmentationPanel({
             ? <p className="movie-command-note" role="status">{labels.unavailable}</p>
             : <div className="movie-health-list">
                 <div className="movie-health-line"><span>{labels.slots}</span><strong>{number(preview.segments.length)}</strong></div>
+                <div className="movie-health-line"><span>{labels.sceneSlots}</span><strong>{preview.canSplitByScene && preview.sceneSegments?.length ? number(preview.sceneSegments.length) : labels.scenePending}</strong></div>
                 <div className="movie-health-line"><span>{labels.range}</span><strong>{number(preview.minimumClipSeconds ?? 0)}–{number(preview.maximumClipSeconds ?? 0)} {labels.seconds}</strong></div>
                 <div className="movie-health-line"><span>{labels.first}</span><strong>{number(preview.segments[0].durationSeconds)} {labels.seconds}</strong></div>
                 <div className="movie-health-line"><span>{labels.last}</span><strong>{number(preview.segments[preview.segments.length - 1].durationSeconds)} {labels.seconds}</strong></div>
