@@ -11,6 +11,43 @@ namespace Taslim.Api.Tests;
 public sealed class ManusMovieVideoCostAdmissionTests
 {
     [Theory]
+    [InlineData(1)]
+    [InlineData(5)]
+    [InlineData(30)]
+    public void Approved_production_refuses_unenforceable_priced_Manus_profile(int durationSeconds)
+    {
+        // The Manus text-task API cannot verify a priced 720p/quality profile.
+        // Preflight and the queue must reject rather than promise footage that
+        // the adapter would silently generate with unspecified output settings.
+        var handler = new RejectingHandler();
+        var provider = CreateProvider(handler);
+
+        var rejection = MovieProductionGenerationOrchestrator.EvaluateProductionClipAdmission(
+            provider, durationSeconds, "720p", "720p", "Standard", "native", "16:9");
+
+        Assert.NotNull(rejection);
+        Assert.Equal("MOVIE_CLIP_EXECUTION_INTENT_UNSUPPORTED", rejection.Code);
+        Assert.Equal(0, handler.RequestCount);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(31)]
+    [InlineData(7200)]
+    public void Approved_production_rejects_oversized_Manus_single_clip_before_priced_profile(int durationSeconds)
+    {
+        var handler = new RejectingHandler();
+        var provider = CreateProvider(handler);
+
+        var rejection = MovieProductionGenerationOrchestrator.EvaluateProductionClipAdmission(
+            provider, durationSeconds, "720p", "720p", "Standard", "native", "16:9");
+
+        Assert.NotNull(rejection);
+        Assert.Equal("MOVIE_CLIP_DURATION_UNSUPPORTED", rejection.Code);
+        Assert.Equal(0, handler.RequestCount);
+    }
+
+    [Theory]
     [InlineData("720p", null, null, false)]
     [InlineData(null, "720p", "standard", false)]
     [InlineData("720p", "1080p", "cinema", false)]
