@@ -260,6 +260,51 @@ public sealed class MovieIntercutPlannerTests
         Assert.Equal(firstCut.Id, replayCut.Id);
     }
 
+    [Fact]
+    public void Labels_containing_candidate_delimiters_cannot_alias_another_proposals_identity()
+    {
+        // The previous colon/pipe serialization assigned the same candidate
+        // digest to these requests: the first label contains an entire serialized
+        // second candidate, whereas the other request has that actual candidate.
+        var encodedSecond = string.Join(":",
+            PrimaryTwo.ToString("N"), ShotTwo.ToString("N"), SceneTwo.ToString("N"),
+            "2", "1", "2", MovieIntercutCoverageKinds.Primary, "-", "second");
+        var timelineId = Guid.Parse("50000000-0000-0000-0000-000000000104");
+        var single = new MovieIntercutPlanRequest
+        {
+            TimelineId = timelineId,
+            BaseTimelineVersion = 1,
+            Clips =
+            [
+                Coverage(PrimaryOne, ShotOne, SceneOne, 1, 1, 2m,
+                    MovieIntercutCoverageKinds.Primary, label: $"first|{encodedSecond}"),
+            ],
+        };
+        var two = new MovieIntercutPlanRequest
+        {
+            TimelineId = timelineId,
+            BaseTimelineVersion = 1,
+            Clips =
+            [
+                Coverage(PrimaryOne, ShotOne, SceneOne, 1, 1, 2m,
+                    MovieIntercutCoverageKinds.Primary, label: "first"),
+                Coverage(PrimaryTwo, ShotTwo, SceneTwo, 2, 1, 2m,
+                    MovieIntercutCoverageKinds.Primary, label: "second"),
+            ],
+        };
+
+        var first = MovieIntercutPlanner.Build(ProjectId, single);
+        var second = MovieIntercutPlanner.Build(ProjectId, two);
+        var replay = MovieIntercutPlanner.Build(ProjectId, single);
+
+        Assert.Single(first.ProposedTimeline.Clips);
+        Assert.Equal(2, second.ProposedTimeline.Clips.Count);
+        Assert.NotEqual(first.ProposalId, second.ProposalId);
+        Assert.NotEqual(first.ProvenanceHash, second.ProvenanceHash);
+        Assert.Equal(first.ProposalId, replay.ProposalId);
+        Assert.Equal(first.ProvenanceHash, replay.ProvenanceHash);
+    }
+
     private static MovieIntercutCoverageRequest Coverage(Guid clipId, Guid shotId, Guid sceneId, int sceneSequence, int shotSequence, decimal duration, string kind, Guid? anchorShotId = null, string? label = null) => new()
     {
         ClipId = clipId,
