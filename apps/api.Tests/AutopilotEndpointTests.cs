@@ -234,6 +234,47 @@ public sealed class AutopilotEndpointTests : IClassFixture<TaslimApiFactory>
         Assert.Equal(HttpStatusCode.OK, reconcile.StatusCode);
     }
 
+    [Fact]
+    public async Task Manual_autopilot_mutations_are_attributed_to_the_authenticated_administrator()
+    {
+        using var client = factory.CreateClient();
+        var auth = await RegisterAdmin(client);
+        await AddAdminRole(auth.User.Email);
+
+        var control = await SendWithCsrf(client, HttpMethod.Post, "/api/admin/autopilot/control", new { paused = true, reason = "attribute control change" });
+        Assert.Equal(HttpStatusCode.OK, control.StatusCode);
+        var backlog = await SendWithCsrf(client, HttpMethod.Post, "/api/admin/autopilot/backlog", new
+        {
+            itemKey = $"audit-correlation-{Guid.NewGuid():N}",
+            title = "Trace the next control-plane mutation",
+            kind = AutopilotBacklogItemKinds.Development,
+            approved = true,
+            reason = "attribute backlog approval",
+        });
+        Assert.Equal(HttpStatusCode.OK, backlog.StatusCode);
+        var reconcile = await SendWithCsrf(client, HttpMethod.Post, "/api/admin/autopilot/reconcile", new { reason = "attribute manual reconcile" });
+        Assert.Equal(HttpStatusCode.OK, reconcile.StatusCode);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var events = await db.AutopilotAuditEvents
+            .Where(item => item.ActorUserId == auth.User.Id)
+            .ToListAsync();
+        Assert.Contains(events, item => item.Action == AutopilotAuditActions.ControlChanged
+            && item.Reason == "attribute control change"
+            && item.RequestId is not null);
+        Assert.Contains(events, item => item.Action == AutopilotAuditActions.BacklogItemChanged
+            && item.Reason == "attribute backlog approval"
+            && item.RequestId is not null);
+        Assert.Contains(events, item => item.Action == AutopilotAuditActions.ManualReconciliationRequested
+            && item.Reason == "attribute manual reconcile"
+            && item.StatusDetail == "manual_reconcile_requested"
+            && item.RequestId is not null);
+        Assert.DoesNotContain(events, item =>
+            (item.Action == AutopilotAuditActions.ControlChanged || item.Action == AutopilotAuditActions.ManualReconciliationRequested)
+            && item.ActorUserId is null);
+    }
+
     private static string Payload(string waveKey, string taskId) => JsonSerializer.Serialize(new
     {
         waveKey,
