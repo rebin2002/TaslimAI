@@ -1473,7 +1473,8 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
             + (string.IsNullOrWhiteSpace(movie.AdditionalInstructions) ? 0 : movie.AdditionalInstructions.Trim().Length)
             + sceneSnapshot.Length
             + (shotSnapshot?.Length ?? 0)
-            + (provider.SceneClipWorldContextInPrompt ? worldContextSnapshot.Trim().Length : 0);
+            + (provider.SceneClipWorldContextInPrompt ? worldContextSnapshot.Trim().Length : 0)
+            + Math.Max(0, provider.SceneClipPromptFormattingOverheadCharacters);
         if (provider.SceneClipPromptMaxCharacters is { } promptCapacity
             && minimumCreativePromptLength > promptCapacity)
             throw new GenerationJobValidationException(
