@@ -41,6 +41,10 @@ public sealed class RunwayMovieVideoProvider(
     public MovieClipDurationRange? SceneClipDurationRange => new(2, 10);
     // Must remain equal to the BuildPrompt limit below.
     public int? SceneClipPromptMaxCharacters => 1000;
+    // BuildPrompt adds five optional field labels (91 characters total) and
+    // at most six newlines. Reserve all 97 characters during early admission
+    // so a near-limit prompt is rejected before usage can be reserved.
+    public int SceneClipPromptFormattingOverheadCharacters => 97;
 
     // Current BuildPayload sends fixed 1280:720 or 720:1280 and does not
     // translate paid quality/upscale tiers. Permit only the unenhanced 720p
