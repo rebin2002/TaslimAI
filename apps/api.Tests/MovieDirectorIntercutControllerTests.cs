@@ -30,6 +30,12 @@ public sealed class MovieDirectorIntercutControllerTests
         var foreignProjectId = Guid.NewGuid();
         var foreignTimelineId = Guid.NewGuid();
         var ownedTimelineId = Guid.NewGuid();
+        var ownedSceneId = Guid.NewGuid();
+        var ownedShotId = Guid.NewGuid();
+        var ownedClipId = Guid.NewGuid();
+        var foreignSceneId = Guid.NewGuid();
+        var foreignShotId = Guid.NewGuid();
+        var foreignClipId = Guid.NewGuid();
         db.Users.Add(new ApplicationUser { Id = userId, UserName = "intercut-owner", NormalizedUserName = "INTERCUT-OWNER", DisplayName = "Intercut Owner", CreatedAt = now, UpdatedAt = now });
         db.Workspaces.Add(new Workspace { Id = workspaceId, Name = "Intercut Workspace", Slug = $"intercut-{Guid.NewGuid():N}", Type = WorkspaceType.Personal, CreatedAt = now, UpdatedAt = now });
         db.WorkspaceMembers.Add(new WorkspaceMember { Id = Guid.NewGuid(), WorkspaceId = workspaceId, UserId = userId, Role = WorkspaceRole.Owner });
@@ -40,6 +46,15 @@ public sealed class MovieDirectorIntercutControllerTests
         db.MovieTimelines.AddRange(
             new MovieTimeline { Id = foreignTimelineId, MovieProjectId = foreignProjectId, CurrentRevisionNumber = 1, CreatedAt = now, UpdatedAt = now },
             new MovieTimeline { Id = ownedTimelineId, MovieProjectId = requestedProjectId, CurrentRevisionNumber = 1, CreatedAt = now, UpdatedAt = now });
+        db.MovieScenes.AddRange(
+            new MovieScene { Id = ownedSceneId, MovieProjectId = requestedProjectId, Sequence = 1, Title = "Owned Scene", CreatedAt = now, UpdatedAt = now },
+            new MovieScene { Id = foreignSceneId, MovieProjectId = foreignProjectId, Sequence = 1, Title = "Foreign Scene", CreatedAt = now, UpdatedAt = now });
+        db.MovieShots.AddRange(
+            new MovieShot { Id = ownedShotId, MovieSceneId = ownedSceneId, Sequence = 1, Description = "Owned shot", CreatedAt = now, UpdatedAt = now },
+            new MovieShot { Id = foreignShotId, MovieSceneId = foreignSceneId, Sequence = 1, Description = "Foreign shot", CreatedAt = now, UpdatedAt = now });
+        db.MovieClips.AddRange(
+            new MovieClip { Id = ownedClipId, MovieProjectId = requestedProjectId, MovieSceneId = ownedSceneId, MovieShotId = ownedShotId, DurationSeconds = 2, CreatedAt = now, UpdatedAt = now },
+            new MovieClip { Id = foreignClipId, MovieProjectId = foreignProjectId, MovieSceneId = foreignSceneId, MovieShotId = foreignShotId, DurationSeconds = 2, CreatedAt = now, UpdatedAt = now });
         await db.SaveChangesAsync();
 
         var authorization = new MovieAuthorizationService(new MovieCollaborationAccess(db, new WorkspaceAccessService(db)));
@@ -61,7 +76,7 @@ public sealed class MovieDirectorIntercutControllerTests
             [
                 new MovieIntercutCoverageRequest
                 {
-                    ClipId = Guid.NewGuid(), MovieShotId = Guid.NewGuid(), MovieSceneId = Guid.NewGuid(),
+                    ClipId = ownedClipId, MovieShotId = ownedShotId, MovieSceneId = ownedSceneId,
                     SceneSequence = 1, ShotSequence = 1, DurationSeconds = 2,
                 },
             ],
@@ -100,9 +115,44 @@ public sealed class MovieDirectorIntercutControllerTests
         Assert.Equal(requestedProjectId, proposal.MovieProjectId);
         Assert.Equal(ownedTimelineId, proposal.TimelineId);
         Assert.Equal(2, proposal.ProposedTimelineVersion);
+        Assert.Contains("canonical_clip_shot_scene_ownership_verified", proposal.Findings);
+        Assert.DoesNotContain("canonical_clip_and_shot_ownership_not_verified_in_review_only_proposal", proposal.Findings);
+
+        // Invalid references must not be able to smuggle another project's clip or
+        // misrepresent the canonical scene/shot sequence, even for a review-only cut.
+        async Task AssertInvalidCoverageAsync()
+        {
+            var rejected = await controller.CreateIntercutProposal(requestedProjectId, request, CancellationToken.None);
+            Assert.Equal(400, Assert.IsType<ObjectResult>(rejected).StatusCode);
+        }
+
+        var candidate = Assert.Single(request.Clips);
+        candidate.ClipId = foreignClipId;
+        await AssertInvalidCoverageAsync();
+        candidate.ClipId = Guid.NewGuid();
+        await AssertInvalidCoverageAsync();
+        candidate.ClipId = ownedClipId;
+        candidate.MovieShotId = foreignShotId;
+        await AssertInvalidCoverageAsync();
+        candidate.MovieShotId = ownedShotId;
+        candidate.MovieSceneId = foreignSceneId;
+        await AssertInvalidCoverageAsync();
+        candidate.MovieSceneId = ownedSceneId;
+        candidate.SceneSequence = 2;
+        await AssertInvalidCoverageAsync();
+        candidate.SceneSequence = 1;
+        candidate.ShotSequence = 2;
+        await AssertInvalidCoverageAsync();
+        candidate.ShotSequence = 1;
+        request.TimelineId = null;
+        candidate.ClipId = foreignClipId;
+        await AssertInvalidCoverageAsync();
 
         // This endpoint builds a review-only proposal. It must not persist a new timeline or revision.
         Assert.Equal(2, await db.MovieTimelines.CountAsync());
+        Assert.Equal(2, await db.MovieScenes.CountAsync());
+        Assert.Equal(2, await db.MovieShots.CountAsync());
+        Assert.Equal(2, await db.MovieClips.CountAsync());
         var persisted = await db.MovieTimelines.SingleAsync(item => item.Id == ownedTimelineId);
         Assert.Equal(1, persisted.CurrentRevisionNumber);
     }
