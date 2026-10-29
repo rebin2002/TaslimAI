@@ -416,6 +416,38 @@ public sealed class MovieProductionPreflightTests : IClassFixture<GenerationJobs
         Assert.Equal(callsBefore, providerLog.Calls(FakeProviderKind.Movie));
     }
 
+    [Theory]
+    [InlineData(5, 120, 7200, 5)]
+    [InlineData(null, 12, 7200, 12)]
+    [InlineData(null, null, 7200, 60)]
+    [InlineData(null, null, 30, 30)]
+    [InlineData(3600, 7200, 7200, 3600)]
+    public void Adaptive_quality_uses_effective_single_clip_duration_instead_of_one_second_default(
+        int? shotSeconds, int? sceneSeconds, int movieSeconds, int expectedSeconds)
+    {
+        // An inherited scene duration affects adaptive quality and the priced
+        // render; it must not be replaced by a one-second quality assumption.
+        var shot = new MovieShot
+        {
+            DurationSeconds = shotSeconds,
+            Scene = new MovieScene
+            {
+                DurationSeconds = sceneSeconds,
+                MovieProject = new MovieProject { DurationSeconds = movieSeconds },
+            },
+        };
+
+        Assert.Equal(expectedSeconds, MovieProductionAdaptivePlanBuilder.ResolveAdaptiveDurationSeconds(shot));
+
+        var inherited = MovieProductionAdaptivePlanBuilder.Build(shot, "1080p", DirectorQualityLevels.Standard);
+        shot.DurationSeconds = expectedSeconds;
+        var explicitDuration = MovieProductionAdaptivePlanBuilder.Build(shot, "1080p", DirectorQualityLevels.Standard);
+
+        Assert.Equal(explicitDuration.SourceResolution, inherited.SourceResolution);
+        Assert.Equal(explicitDuration.Recommendation.QualityConfidence, inherited.Recommendation.QualityConfidence);
+        Assert.Equal(explicitDuration.Recommendation.QcEscalationRequired, inherited.Recommendation.QcEscalationRequired);
+    }
+
     private static async Task<AuthResponse> Register(HttpClient client)
     {
         var response = await SendWithCsrf(client, HttpMethod.Post, "/api/auth/register", new
