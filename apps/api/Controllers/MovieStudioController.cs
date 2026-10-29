@@ -12,7 +12,7 @@ namespace Taslim.Api.Controllers;
 [ApiController]
 [Authorize]
 [Route("api/movie-studio")]
-public sealed class MovieStudioController(IMovieStudioService movies, IMovieProductionComplexityService complexity, IMovieDurationBudgetService durationBudgets, IMovieGuideService guides, IMovieStoryService stories, IMovieStoryCastService storyCast, IMovieCharacterContinuityService continuity, IMovieWorldContinuityService worldContinuity, IMovieProductionContinuityService productionContinuity, IMovieProductionReferencePackageService productionReferences, IMovieProductionPreflightService productionPreflight, IMovieTimelineService timeline, IMovieTimelineTransitionService transitionEdits, IMovieTakeSelectService takeSelects, IMovieShotExecutionService shotExecution, MovieAuthorizationService authorization, MovieShotImportanceService shotImportance, IMovieCinematographyPlanningService cinematographyPlanning, IMovieCharacterProductionSheetService productionSheets, IMovieLocationGeographySheetService geographySheets, IMoviePropBibleService propBible, IMovieReferenceReadinessService referenceReadiness, IMovieMissingInsertPlannerService insertPlanner) : ControllerBase
+public sealed class MovieStudioController(IMovieStudioService movies, IMovieProductionComplexityService complexity, IMovieDurationBudgetService durationBudgets, IMovieGuideService guides, IMovieStoryService stories, IMovieStoryCastService storyCast, IMovieCharacterContinuityService continuity, IMovieWorldContinuityService worldContinuity, IMovieProductionContinuityService productionContinuity, IMovieProductionReferencePackageService productionReferences, IMovieProductionPreflightService productionPreflight, IMovieTimelineService timeline, IMovieTimelineTransitionService transitionEdits, IMovieTakeSelectService takeSelects, IMovieShotExecutionService shotExecution, MovieAuthorizationService authorization, MovieShotImportanceService shotImportance, IMovieCinematographyPlanningService cinematographyPlanning, IMovieCharacterProductionSheetService productionSheets, IMovieLocationGeographySheetService geographySheets, IMoviePropBibleService propBible, IMovieReferenceReadinessService referenceReadiness, IMovieMissingInsertPlannerService insertPlanner, IMovieVideoProvider videoProvider) : ControllerBase
 {
     [HttpGet("cinematography/presets")]
     public IActionResult CinematographyPresets() => Ok(CinematographyPresetCatalog.All);
@@ -70,6 +70,34 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
         var result = await durationBudgets.GetAsync(GetUserId(), id, cancellationToken);
         return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result);
     }
+    // This endpoint is read-only and exposes only a duration split plan.
+    // It does not approve reference packages, quote generation costs, create
+    // a clip/job, or claim that long-form assembly is production-ready.
+    [HttpGet("projects/{id:guid}/clip-segmentation-preview")]
+    public async Task<IActionResult> GetClipSegmentationPreview(Guid id, CancellationToken cancellationToken)
+    {
+        var movie = await movies.GetAsync(GetUserId(), id, cancellationToken);
+        if (movie is null)
+            return ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.");
+
+        var adapterDeclaresSceneClip = videoProvider.IsAvailable
+            && videoProvider.SupportedOperations.Contains(
+                MovieStudioOperations.SceneClip, StringComparer.OrdinalIgnoreCase);
+        IReadOnlyList<MoviePlannedClipSegment> segments = [];
+        var canSplit = adapterDeclaresSceneClip
+            && MovieClipSegmentationPlanner.TryPlan(
+                movie.DurationSeconds, videoProvider.SceneClipDurationRange, out segments);
+        return Ok(new MovieClipSegmentationPreviewDto(
+            id,
+            movie.DurationSeconds,
+            videoProvider.Key,
+            adapterDeclaresSceneClip,
+            canSplit,
+            videoProvider.SceneClipDurationRange?.MinimumSeconds,
+            videoProvider.SceneClipDurationRange?.MaximumSeconds,
+            segments));
+    }
+
     [HttpGet("projects/{id:guid}/timeline")]
     public async Task<IActionResult> GetTimeline(Guid id, CancellationToken cancellationToken)
     {
