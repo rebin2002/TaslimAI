@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GenerationJob, ResearchSource } from "./api";
-import { clearResearchActiveJobId, displayResearchProgress, isCurrentResearchJob, isResearchSourceReady, isRestorableResearchJob, isResearchJob, isSafeExternalUrl, mergeResearchSources, parseResearchJobResult, persistResearchActiveJobId, readResearchActiveJobId, researchActiveJobStorageKey, researchStudioState } from "./researchStudioState";
+import { clearResearchActiveJobId, displayResearchProgress, hasRenderableResearchResult, isCurrentResearchJob, isResearchSourceReady, isRestorableResearchJob, isResearchJob, isSafeExternalUrl, mergeResearchSources, parseResearchJobResult, persistResearchActiveJobId, readResearchActiveJobId, researchActiveJobStorageKey, researchStudioState } from "./researchStudioState";
 
 const job = (status: GenerationJob["status"], resultJson: string | null = null, progressPercent = 70): GenerationJob => ({ id: "job-1", workspaceId: "workspace-1", projectId: null, jobType: "research.generate", status, title: "Research", progressPercent, resultJson, errorCode: null, errorMessage: null, cancellationRequested: false, createdAt: "2026-01-01", queuedAt: null, startedAt: null, completedAt: null, failedAt: null, cancelledAt: null, outputs: [] });
 const source = (citationId: string, title = "Official source"): ResearchSource => ({ citationId, title, domain: "example.gov", url: "https://example.gov/source", publisher: null, publishedAt: null, retrievedAt: "2026-01-01T00:00:00Z", sourceType: "web", snippet: null, searchQuery: null, rank: 1, isSelected: true });
@@ -22,7 +22,16 @@ describe("researchStudioState", () => {
     expect(result?.keyFindings?.[0].citationIds).toEqual(["S1"]);
     expect(result?.sections?.[0].blocks[0].citationIds).toEqual(["S1"]);
   });
-  it("uses completed-unavailable when a successful job lacks an asset result", () => { expect(researchStudioState(job("Succeeded", '{"title":"Report"}'), parseResearchJobResult(job("Succeeded", '{"title":"Report"}')))).toBe("completed-unavailable"); });
+  it("uses completed-unavailable when a successful job has only an asset fallback", () => {
+    const fallback = parseResearchJobResult(job("Succeeded", '{"assetId":"asset-1"}'));
+    expect(hasRenderableResearchResult(fallback)).toBe(false);
+    expect(researchStudioState(job("Succeeded", '{"assetId":"asset-1"}'), fallback)).toBe("completed-unavailable");
+  });
+  it("shows success only when the report and downloads are complete", () => {
+    const result = parseResearchJobResult(job("Succeeded", JSON.stringify({ assetId: "asset-1", title: "Report", executiveSummary: "Summary", sections: [{ heading: "Evidence", blocks: [{ type: "paragraph", text: "Evidence" }] }], representations: [{ id: "docx-1", type: "docx", fileName: "report.docx", contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" }] })));
+    expect(hasRenderableResearchResult(result)).toBe(true);
+    expect(researchStudioState(job("Succeeded"), result)).toBe("succeeded");
+  });
   it("merges only persisted source details that match the embedded citation manifest", () => {
     const result = parseResearchJobResult(job("Succeeded", JSON.stringify({ assetId: "asset-1", sources: [source("S1")] })));
     const merged = mergeResearchSources(result, [source("S1", "Enriched source"), source("S2", "Unrelated source"), source("s1", "Duplicate detail")]);
