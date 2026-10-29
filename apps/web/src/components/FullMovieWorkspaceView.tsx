@@ -56,6 +56,7 @@ import { MovieSelectsWorkspace } from "@/components/MovieSelectsWorkspace";
 import { MovieAudioWorkspace } from "@/components/MovieAudioWorkspace";
 import { MovieQualityWorkspace } from "@/components/MovieQualityWorkspace";
 import { MovieExportsWorkspace } from "@/components/MovieExportsWorkspace";
+import { MovieClipSegmentationPanel } from "@/components/MovieClipSegmentationPanel";
 import { MovieTeamWorkspace } from "@/components/MovieTeamWorkspace";
 import { useLocale } from "@/components/LocaleProvider";
 import { buildMovieEditModel, clampMovieEditPlayhead, moveMovieEditSelection } from "@/lib/movieEditState";
@@ -307,6 +308,7 @@ function OverviewModule({ overview, budgetEstimate, outputAssetId }: { overview:
     </div>
 
     <BudgetDirectorCard estimate={budgetEstimate} />
+    <MovieClipSegmentationPanel key={`${project.id}-${project.durationSeconds}`} projectId={project.id} totalDurationSeconds={project.durationSeconds} />
 
     <div className="movie-command-grid movie-command-grid-bottom"><section className="movie-command-section"><CommandSectionTitle eyebrow="Warnings & blockers" title={overview.warnings.length ? `${overview.warnings.length} signals need attention` : "No active warnings"} detail="Continuity and production" />{overview.warnings.length ? <div className="movie-warning-list">{overview.warnings.map((warning) => <div className={`movie-warning-row is-${warning.severity}`} key={warning.key}><CircleAlert size={14} /><div><strong>{warning.label}</strong><p>{warning.detail}</p></div></div>)}</div> : <HonestEmpty text="No unresolved warnings have been recorded for this project." />}</section><section className="movie-command-section"><CommandSectionTitle eyebrow="Recent activity" title="Meaningful changes" detail="Latest persisted records" />{overview.recentActivity.length ? <div className="movie-activity-list">{overview.recentActivity.map((item) => <div className="movie-activity-row" key={item.key}><Clock3 size={14} /><div><strong>{item.label}</strong><span>{item.detail}</span></div><time dateTime={item.occurredAt}>{formatRelativeDate(item.occurredAt)}</time></div>)}</div> : <HonestEmpty text="Activity will appear after a project record changes." />}</section></div>
 
