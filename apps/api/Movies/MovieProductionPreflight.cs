@@ -222,7 +222,9 @@ public sealed class MovieProductionPreflightService(
             "Single production clip duration", clipDurationAccepted, true,
             clipDurationAccepted
                 ? "The selected adapter accepts this single-clip duration."
-                : "Create shorter shots or use a validated segmentation workflow; the selected clip is outside the supported duration."));
+                : provider.SceneClipDurationRange is null
+                    ? "The selected adapter has not declared a verified single-clip duration range."
+                    : "Create shorter shots or use a validated segmentation workflow; the selected clip is outside the supported duration."));
         checks.Add(new MovieProductionPreflightCheckDto(
             MovieProductionPreflightCheckKeys.ProviderAdmission,
             "Video provider output capability", admissionError is null, true,
@@ -254,7 +256,7 @@ public sealed class MovieProductionPreflightService(
                 : guardrail.RejectionMessage ?? "Review the server-side cost safety decision before continuing."));
 
         var recommendations = BuildRecommendations(readiness, approvedStoryboard, approvedKeyframe, approvedMotionPreview, source, package, blockingPackageWarnings, plan, guardrail, request.ConfirmationAccepted);
-        if (!clipDurationAccepted)
+        if (!clipDurationAccepted && admissionError?.Code == "MOVIE_CLIP_DURATION_UNSUPPORTED")
             recommendations = recommendations.Concat([
                 new MovieProductionPreflightRecommendationDto("shorten_production_shot",
                     "Create shorter shots", "Split the selected shot into adapter-supported clips before production.")]).ToArray();
@@ -263,16 +265,20 @@ public sealed class MovieProductionPreflightService(
                 new MovieProductionPreflightRecommendationDto("choose_supported_video_profile",
                     "Choose a supported output profile", "The selected output quality or resolution cannot be executed as priced.")]).ToArray();
         var requiredChecksPassed = checks.Where(item => item.Required).All(item => item.Satisfied);
+        // An unavailable or incompatible video adapter is a hard production
+        // blocker even when reference work is incomplete. Report the actionable
+        // provider problem first rather than suggesting that completing reference
+        // assets alone will make the render executable.
         var decision = requiredChecksPassed
             ? MovieProductionPreflightDecisionCodes.Ready
-            : !clipDurationAccepted
-                ? MovieProductionPreflightDecisionCodes.ClipDurationUnsupported
-                : checks.Any(item => !item.Satisfied && item.Key is MovieProductionPreflightCheckKeys.Storyboard or MovieProductionPreflightCheckKeys.Keyframe or MovieProductionPreflightCheckKeys.MotionPreview or MovieProductionPreflightCheckKeys.ReferencePackage)
-                    ? MovieProductionPreflightDecisionCodes.ReferenceWorkRequired
-                    : admissionError?.Code == "MOVIE_PROVIDER_UNAVAILABLE"
-                        ? MovieProductionPreflightDecisionCodes.ProviderUnavailable
-                        : admissionError?.Code == "MOVIE_CLIP_EXECUTION_INTENT_UNSUPPORTED"
-                            ? MovieProductionPreflightDecisionCodes.ExecutionIntentUnsupported
+            : admissionError?.Code == "MOVIE_PROVIDER_UNAVAILABLE"
+                ? MovieProductionPreflightDecisionCodes.ProviderUnavailable
+                : !clipDurationAccepted
+                    ? MovieProductionPreflightDecisionCodes.ClipDurationUnsupported
+                    : admissionError?.Code == "MOVIE_CLIP_EXECUTION_INTENT_UNSUPPORTED"
+                        ? MovieProductionPreflightDecisionCodes.ExecutionIntentUnsupported
+                        : checks.Any(item => !item.Satisfied && item.Key is MovieProductionPreflightCheckKeys.Storyboard or MovieProductionPreflightCheckKeys.Keyframe or MovieProductionPreflightCheckKeys.MotionPreview or MovieProductionPreflightCheckKeys.ReferencePackage)
+                            ? MovieProductionPreflightDecisionCodes.ReferenceWorkRequired
                             : !adaptiveSatisfied
                                 ? MovieProductionPreflightDecisionCodes.QualityReviewRequired
                                 : !guardrail.CanProceed && guardrail.ConfirmationRequired
