@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { NotificationList } from "./api";
-import { applyAllNotificationsRead, applyNotificationRead } from "./notificationReadState";
+import { applyAllNotificationsRead, applyNotificationRead, isNotificationMutationCurrent } from "./notificationReadState";
 
 const list: NotificationList = {
   items: [
@@ -39,6 +39,12 @@ const list: NotificationList = {
 };
 
 describe("notification read state transitions", () => {
+  it("rejects a late mutation after a newer page or workspace load begins", () => {
+    expect(isNotificationMutationCurrent(4, 5, "workspace-1", "workspace-1")).toBe(false);
+    expect(isNotificationMutationCurrent(4, 4, "workspace-2", "workspace-1")).toBe(false);
+    expect(isNotificationMutationCurrent(4, 4, "workspace-1", "workspace-1")).toBe(true);
+  });
+
   it("does not decrement the unread count when a duplicate read response arrives", () => {
     const first = applyNotificationRead(list, "notification-1", "2026-01-01T00:02:00Z");
     const duplicate = applyNotificationRead(first.next, "notification-1", "2026-01-01T00:03:00Z");
