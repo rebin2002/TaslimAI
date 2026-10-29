@@ -8,6 +8,7 @@ namespace Taslim.Api.Infrastructure;
 public static class RateLimiting
 {
     public const string Authentication = "authentication";
+    public const string Health = "health";
     public const string Chat = "chat-generation";
     public const string Generation = "generation-creation";
     public const string Upload = "uploads";
@@ -37,6 +38,7 @@ public static class RateLimiting
             var permitLimit = policyName switch
             {
                 Authentication => 4,
+                Health => 2,
                 Chat => 2,
                 Generation => 4,
                 Upload => 2,
@@ -63,6 +65,16 @@ public static class RateLimiting
             _ => new FixedWindowRateLimiterOptions
             {
                 PermitLimit = 60,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0,
+                AutoReplenishment = true,
+            }));
+
+        options.AddPolicy(Health, httpContext => RateLimitPartition.GetFixedWindowLimiter(
+            Partition("health", httpContext),
+            _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 30,
                 Window = TimeSpan.FromMinutes(1),
                 QueueLimit = 0,
                 AutoReplenishment = true,
