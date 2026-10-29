@@ -114,4 +114,34 @@ public sealed class MovieProductionAdmissionDecisionTests
         Assert.Equal("MOVIE_CLIP_EXECUTION_INTENT_UNSUPPORTED", rejection.Code);
         Assert.Equal(0, calls.Calls(FakeProviderKind.Movie));
     }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Provider_without_scene_clip_operation_is_rejected_even_when_available(bool quickMovieOnly)
+    {
+        var calls = new FakeProviderCallLog();
+        var provider = CreateProvider(new FakeProviderScenarioCatalog(), calls);
+        provider.SupportedOperations = quickMovieOnly
+            ? [MovieStudioOperations.QuickMovie]
+            : [];
+
+        var rejection = Decide(provider);
+
+        Assert.NotNull(rejection);
+        Assert.Equal("MOVIE_PROVIDER_UNAVAILABLE", rejection.Code);
+        Assert.Equal(0, calls.Calls(FakeProviderKind.Movie));
+    }
+
+    [Fact]
+    public void Scene_clip_operation_admission_is_case_insensitive()
+    {
+        var calls = new FakeProviderCallLog();
+        var provider = CreateProvider(new FakeProviderScenarioCatalog(), calls);
+        provider.SupportedOperations = [MovieStudioOperations.SceneClip.ToUpperInvariant()];
+
+        Assert.Null(Decide(provider));
+        Assert.Equal(0, calls.Calls(FakeProviderKind.Movie));
+    }
+
 }
