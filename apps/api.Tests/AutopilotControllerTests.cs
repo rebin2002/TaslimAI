@@ -1,6 +1,8 @@
 using System.Text.Json;
+using System.Data.Common;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.Logging.Abstractions;
 using Taslim.Api.Autopilot;
 using Taslim.Api.Persistence;
@@ -41,6 +43,31 @@ public sealed class AutopilotControllerTests
         Assert.Equal(1, await db.AutopilotRuns.CountAsync());
         Assert.Equal(2, await db.AutopilotGateEvaluations.CountAsync());
         Assert.Contains(await db.AutopilotAuditEvents.ToListAsync(), item => item.Action == AutopilotAuditActions.EventDuplicateIgnored);
+    }
+
+    [Fact]
+    public async Task Concurrent_same_identity_with_different_payload_is_rejected_as_a_conflict()
+    {
+        using var host = new AutopilotTestHost();
+        await host.InstallConcurrentPayloadConflictFixtureAsync();
+
+        var submission = await host.SubmitRawAsync(
+            "bridge-race",
+            "evt-race",
+            "wave-race",
+            "task-1",
+            AutopilotTaskOutcomes.Succeeded,
+            CompleteChecks());
+
+        Assert.Equal(AutopilotIntakeOutcomes.PayloadConflict, submission.Outcome);
+        Assert.Equal("idempotency_key_payload_conflict", submission.Reason);
+
+        using var db = host.CreateContext();
+        var stored = await db.AutopilotEvents.SingleAsync();
+        Assert.Equal("winner-hash", stored.PayloadHash);
+        Assert.Contains(await db.AutopilotAuditEvents.ToListAsync(), item =>
+            item.Action == AutopilotAuditActions.EventRejected
+            && item.Reason == "idempotency_key_payload_conflict");
     }
 
     [Fact]
@@ -617,8 +644,17 @@ public sealed class AutopilotControllerTests
 
         public AutopilotCycleResult LastCycle { get; private set; } = new(true, true, "idle", null, 0, 0, 0, [], []);
 
-        public TaslimDbContext CreateContext() =>
-            new(new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connection).Options);
+        public TaslimDbContext CreateContext()
+        {
+            return new TaslimDbContext(CreateOptions().Options);
+        }
+
+        private DbContextOptionsBuilder<TaslimDbContext> CreateOptions()
+        {
+            var builder = new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connection);
+            if (conflictInterceptor is not null) builder.AddInterceptors(conflictInterceptor);
+            return builder;
+        }
 
         public async Task<AutopilotCycleResult> RunCycleAsync()
         {
@@ -711,6 +747,34 @@ public sealed class AutopilotControllerTests
             return await intake.SubmitAsync(new AutopilotIntakeRequest(null, null, payload, sourceSystem, externalEventId, AutopilotEventTypes.WaveTaskCompleted));
         }
 
+        public Task InstallConcurrentPayloadConflictFixtureAsync()
+        {
+            conflictInterceptor = new(InsertConcurrentWinnerAsync);
+            return Task.CompletedTask;
+        }
+
+        private async Task InsertConcurrentWinnerAsync()
+        {
+            using var db = CreateContext();
+            db.AutopilotEvents.Add(new AutopilotEvent
+            {
+                Id = Guid.Parse("00000000-0000-0000-0000-000000000099"),
+                EventType = AutopilotEventTypes.WaveTaskCompleted,
+                SourceSystem = "bridge-race",
+                ExternalEventId = "evt-race",
+                IdempotencyKey = "autopilot:bridge-race:evt-race",
+                PayloadHash = "winner-hash",
+                Status = AutopilotEventStatuses.Queued,
+                SignatureVerified = true,
+                ReplayProtected = true,
+                Attempt = 0,
+                ReconciliationCount = 0,
+                ReceivedAt = DateTime.UtcNow,
+                ConcurrencyToken = Guid.Parse("00000000-0000-0000-0000-000000000098"),
+            });
+            await db.SaveChangesAsync();
+        }
+
         private AutopilotOrchestrator CreateOrchestrator(TaslimDbContext db) =>
             new(db, new EfAutopilotLockService(db, Options), CreateNextWaveService(db), Options, TimeProvider.System, NullLogger<AutopilotOrchestrator>.Instance);
 
@@ -727,6 +791,60 @@ public sealed class AutopilotControllerTests
         {
             connection.Close();
             connection.Dispose();
+        }
+
+        private InjectedAutopilotConflictInterceptor? conflictInterceptor;
+    }
+
+    private sealed class InjectedAutopilotConflictInterceptor(Func<Task> insertWinner) : DbCommandInterceptor
+    {
+        private int injected;
+
+        public override async ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(
+            DbCommand command,
+            CommandEventData eventData,
+            InterceptionResult<DbDataReader> result,
+            CancellationToken cancellationToken = default)
+        {
+            await InjectWinnerIfCandidateAsync(command, cancellationToken);
+            return await base.ReaderExecutingAsync(command, eventData, result, cancellationToken);
+        }
+
+        public override async ValueTask<InterceptionResult<object>> ScalarExecutingAsync(
+            DbCommand command,
+            CommandEventData eventData,
+            InterceptionResult<object> result,
+            CancellationToken cancellationToken = default)
+        {
+            await InjectWinnerIfCandidateAsync(command, cancellationToken);
+            return await base.ScalarExecutingAsync(command, eventData, result, cancellationToken);
+        }
+
+        public override async ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(
+            DbCommand command,
+            CommandEventData eventData,
+            InterceptionResult<int> result,
+            CancellationToken cancellationToken = default)
+        {
+            await InjectWinnerIfCandidateAsync(command, cancellationToken);
+            return await base.NonQueryExecutingAsync(command, eventData, result, cancellationToken);
+        }
+
+        private async Task InjectWinnerIfCandidateAsync(DbCommand command, CancellationToken cancellationToken)
+        {
+            if (Volatile.Read(ref injected) != 0
+                || !command.CommandText.Contains("AutopilotEvents", StringComparison.OrdinalIgnoreCase))
+                return;
+            var values = command.Parameters.Cast<DbParameter>()
+                .Select(parameter => parameter.Value?.ToString() ?? string.Empty)
+                .ToArray();
+            if (!values.Contains("bridge-race", StringComparer.Ordinal)
+                || !values.Contains("evt-race", StringComparer.Ordinal)
+                || values.Contains("winner-hash", StringComparer.Ordinal)
+                || Interlocked.Exchange(ref injected, 1) != 0)
+                return;
+            await insertWinner();
+            cancellationToken.ThrowIfCancellationRequested();
         }
     }
 
