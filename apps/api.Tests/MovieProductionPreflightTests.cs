@@ -193,6 +193,10 @@ public sealed class MovieProductionPreflightTests : IClassFixture<GenerationJobs
         Assert.Contains(decision.Checks, check => check.Key == MovieProductionPreflightCheckKeys.ProviderAdmission
             && check.Required && !check.Satisfied);
         Assert.Contains(decision.Recommendations, recommendation => recommendation.Key == "choose_supported_video_profile");
+        // Provider capability, not incomplete references, is the primary
+        // blocker: extra reference work cannot make this priced intent runnable.
+        Assert.Equal(MovieProductionPreflightDecisionCodes.ExecutionIntentUnsupported, decision.Decision);
+        Assert.Equal("MOVIE_CLIP_EXECUTION_INTENT_UNSUPPORTED", decision.RejectionCode);
         Assert.False(await db.MovieClips.AnyAsync(item => item.MovieProjectId == movie.Project.Project.Id));
         Assert.False(await db.GenerationJobs.AnyAsync());
         Assert.Equal(usageBefore, await db.UsageTransactions.CountAsync());
@@ -243,10 +247,21 @@ public sealed class MovieProductionPreflightTests : IClassFixture<GenerationJobs
         Assert.Contains(decision.Checks, check =>
             check.Key == MovieProductionPreflightCheckKeys.ClipDuration
             && check.Required && check.Satisfied == !missingDurationRange);
-        if (missingDurationRange)
+        if (providerUnavailable || !missingDurationRange)
         {
+            // A disabled or Quick-Movie-only provider must be reported as the
+            // primary blocker even if expensive reference work is incomplete.
+            Assert.Equal(MovieProductionPreflightDecisionCodes.ProviderUnavailable, decision.Decision);
+            Assert.Equal("MOVIE_PROVIDER_UNAVAILABLE", decision.RejectionCode);
+            Assert.DoesNotContain(decision.Recommendations, recommendation => recommendation.Key == "shorten_production_shot");
+        }
+        else
+        {
+            // An available adapter with no verified duration range cannot
+            // advertise a supported single clip, even after confirmation.
             Assert.Equal(MovieProductionPreflightDecisionCodes.ClipDurationUnsupported, decision.Decision);
             Assert.Equal("MOVIE_CLIP_DURATION_UNSUPPORTED", decision.RejectionCode);
+            Assert.Contains(decision.Recommendations, recommendation => recommendation.Key == "shorten_production_shot");
         }
 
         Assert.Equal(clipsBefore, await db.MovieClips.CountAsync());
