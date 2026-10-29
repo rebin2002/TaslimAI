@@ -31,8 +31,10 @@ export function reduceChatStream(state: ChatStreamState, event: ChatStreamEvent)
   }
 
   if (event.type === "message.delta" && event.data.delta) {
-    const targetId = event.data.messageId ?? state.assistantId;
-    if (!targetId) return state;
+    // A delta is scoped to the assistant announced by message.started. Never
+    // let an omitted, stale, or malformed target mutate another visible row.
+    if (!state.assistantId || (event.data.messageId && event.data.messageId !== state.assistantId)) return state;
+    const targetId = state.assistantId;
     return {
       ...state,
       messages: state.messages.map(message => message.id === targetId
@@ -42,6 +44,10 @@ export function reduceChatStream(state: ChatStreamState, event: ChatStreamEvent)
   }
 
   if (event.type === "message.completed" && event.data.assistantMessage && event.data.userMessage) {
+    // Completion is also scoped to the assistant announced by message.started.
+    // A stale or misrouted terminal frame must not replace visible content or
+    // release the generating state for another assistant.
+    if (!state.assistantId || event.data.assistantMessage.id !== state.assistantId) return state;
     return {
       ...state,
       messages: upsertMessages(state.messages, [event.data.userMessage, event.data.assistantMessage]),
