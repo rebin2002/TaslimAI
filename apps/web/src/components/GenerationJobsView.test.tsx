@@ -1,7 +1,8 @@
 import { renderToStaticMarkup } from "react-dom/server";
+import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import type { GenerationJob } from "../lib/api";
-import { GenerationJobDetail, GenerationJobList, GenerationJobsView, clampGenerationProgress } from "./GenerationJobsView";
+import { GenerationJobDetail, GenerationJobList, GenerationJobsView, clampGenerationProgress, shouldResetGenerationJobSelection } from "./GenerationJobsView";
 
 vi.mock("@/components/AuthProvider", () => ({
   useAuth: () => ({ workspace: { id: "workspace-1" } }),
@@ -81,5 +82,14 @@ describe("Generation Jobs accessibility contract", () => {
     expect(html).toContain('role="status"');
     expect(html).toContain("jobs.loading");
     expect(html).toContain('type="button"');
+  });
+
+  it("does not retain a selected job across a workspace boundary", () => {
+    expect(shouldResetGenerationJobSelection("workspace-a", "workspace-b")).toBe(true);
+    expect(shouldResetGenerationJobSelection("workspace-a", "workspace-a")).toBe(false);
+
+    const source = readFileSync(new URL("./GenerationJobsView.tsx", import.meta.url), "utf8");
+    expect(source).toContain("const activeJob = current?.workspaceId === workspace?.id ? current : jobs[0] ?? null;");
+    expect(source).toContain("const selectedJob = current?.workspaceId === workspace?.id ? current : null;");
   });
 });
