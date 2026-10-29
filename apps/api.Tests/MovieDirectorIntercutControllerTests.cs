@@ -161,8 +161,33 @@ public sealed class MovieDirectorIntercutControllerTests
         candidate.ClipId = foreignClipId;
         await AssertInvalidCoverageAsync();
 
+        // Omitted and empty timeline ids resolve to the same stable, project-owned
+        // timeline. Once persisted, these implicit requests must not bypass
+        // optimistic revision checks, even though no timeline id was supplied.
+        candidate.ClipId = ownedClipId;
+        var defaultPlan = MovieIntercutPlanner.Build(requestedProjectId, request);
+        var noPersistedDefault = await controller.CreateIntercutProposal(requestedProjectId, request, CancellationToken.None);
+        Assert.IsType<OkObjectResult>(noPersistedDefault);
+        db.MovieTimelines.Add(new MovieTimeline
+        {
+            Id = defaultPlan.TimelineId, MovieProjectId = requestedProjectId,
+            CurrentRevisionNumber = 3, CreatedAt = now, UpdatedAt = now,
+        });
+        await db.SaveChangesAsync();
+
+        var implicitStale = await controller.CreateIntercutProposal(requestedProjectId, request, CancellationToken.None);
+        Assert.Equal(409, Assert.IsType<ObjectResult>(implicitStale).StatusCode);
+        request.TimelineId = Guid.Empty;
+        var explicitEmptyStale = await controller.CreateIntercutProposal(requestedProjectId, request, CancellationToken.None);
+        Assert.Equal(409, Assert.IsType<ObjectResult>(explicitEmptyStale).StatusCode);
+        request.BaseTimelineVersion = 3;
+        var currentDefault = await controller.CreateIntercutProposal(requestedProjectId, request, CancellationToken.None);
+        var currentDefaultPlan = Assert.IsType<MovieIntercutPlanDto>(Assert.IsType<OkObjectResult>(currentDefault).Value);
+        Assert.Equal(defaultPlan.TimelineId, currentDefaultPlan.TimelineId);
+        Assert.Equal(4, currentDefaultPlan.ProposedTimelineVersion);
+
         // This endpoint builds a review-only proposal. It must not persist a new timeline or revision.
-        Assert.Equal(2, await db.MovieTimelines.CountAsync());
+        Assert.Equal(3, await db.MovieTimelines.CountAsync());
         Assert.Equal(2, await db.MovieScenes.CountAsync());
         Assert.Equal(2, await db.MovieShots.CountAsync());
         Assert.Equal(2, await db.MovieClips.CountAsync());
