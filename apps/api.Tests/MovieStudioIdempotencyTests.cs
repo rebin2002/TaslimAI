@@ -221,6 +221,54 @@ public sealed class MovieStudioIdempotencyTests : IClassFixture<MovieOperational
     }
 
     [Fact]
+    public async Task Linked_clip_replay_rejects_a_job_whose_payload_targets_another_clip()
+    {
+        // An inconsistent persisted clip-to-job association must not redirect
+        // an idempotent replay to a different clip or misreport its reservation.
+        // This exercises the linked-clip fast path with a real SQLite database.
+        using var client = factory.CreateClient();
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Movie replay canonical payload identity");
+        var path = $"/api/movie-studio/shots/{fixture.Shot.Id}/generate";
+        const string canonicalKey = "movie-replay-input-target-canonical";
+        const string otherKey = "movie-replay-input-target-other";
+
+        var canonical = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
+            client, path, new { title = "Canonical payload clip" }, idempotencyKey: canonicalKey);
+        var other = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
+            client, path, new { title = "Other payload clip" }, idempotencyKey: otherKey);
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            await db.MovieClips.Where(item => item.Id == canonical.ClipId)
+                .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.GenerationJobId, (Guid?)null));
+            await db.MovieClips.Where(item => item.Id == other.ClipId)
+                .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.GenerationJobId, (Guid?)canonical.Job.Id));
+        }
+
+        using var replay = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, path, new { title = "Canonical payload clip" },
+            idempotencyKey: canonicalKey);
+        Assert.Equal(System.Net.HttpStatusCode.BadRequest, replay.StatusCode);
+        Assert.Contains("IDEMPOTENCY_KEY_REUSED",
+            await replay.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        using var verifyScope = factory.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.Null((await verifyDb.MovieClips.AsNoTracking()
+            .SingleAsync(item => item.Id == canonical.ClipId)).GenerationJobId);
+        Assert.Equal(canonical.Job.Id, (await verifyDb.MovieClips.AsNoTracking()
+            .SingleAsync(item => item.Id == other.ClipId)).GenerationJobId);
+        Assert.Equal(2, await verifyDb.GenerationJobs.CountAsync(item =>
+            item.Id == canonical.Job.Id || item.Id == other.Job.Id));
+        Assert.Single(await verifyDb.UsageTransactions.AsNoTracking()
+            .Where(item => item.RequestId == $"generation:{canonical.Job.Id:N}").ToListAsync());
+        Assert.Single(await verifyDb.UsageTransactions.AsNoTracking()
+            .Where(item => item.RequestId == $"generation:{other.Job.Id:N}").ToListAsync());
+    }
+
+    [Fact]
     public async Task Reusing_a_clip_key_with_a_different_title_is_rejected_without_an_extra_clip()
     {
         using var client = factory.CreateClient();
