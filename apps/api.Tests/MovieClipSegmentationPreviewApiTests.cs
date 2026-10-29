@@ -54,6 +54,8 @@ public sealed class MovieClipSegmentationPreviewApiTests : IClassFixture<MovieOp
         Assert.Equal(7_200, preview.Segments.Sum(segment => segment.DurationSeconds));
         Assert.Equal(0, preview.Segments[0].StartSeconds);
         Assert.Equal(3_600, preview.Segments[1].StartSeconds);
+        Assert.False(preview.CanSplitByScene);
+        Assert.Empty(preview.SceneSegments ?? []);
 
         using var scope = factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
@@ -63,6 +65,48 @@ public sealed class MovieClipSegmentationPreviewApiTests : IClassFixture<MovieOp
             .AnyAsync(job => job.WorkspaceId == owner.PersonalWorkspace.Id));
         Assert.False(await db.UsageTransactions.AsNoTracking()
             .AnyAsync(tx => tx.WorkspaceId == owner.PersonalWorkspace.Id));
+    }
+
+    [Fact]
+    public async Task Explicit_scene_boundaries_are_preserved_without_generation_or_charges()
+    {
+        using var client = factory.CreateClient();
+        var owner = await MovieOperationalFixtures.RegisterAsync(client, "Scene Preview Owner");
+        var project = await MovieOperationalFixtures.PostAsync<MovieStudioProjectResponse>(
+            client, "/api/movie-studio/projects", new
+            {
+                workspaceId = owner.PersonalWorkspace.Id,
+                mode = MovieProjectModes.Full,
+                title = "Timed scenes",
+                description = "Storyboard boundaries are not interchangeable with a clip slot.",
+                durationSeconds = 21,
+                aspectRatio = "16:9",
+                style = "cinematic",
+                language = "en",
+            });
+
+        var first = await MovieOperationalFixtures.PostAsync<MovieSceneDto>(
+            client, $"/api/movie-studio/projects/{project.Project.Id}/scenes",
+            new { title = "Opening", summary = "First chapter", durationSeconds = 10 });
+        var second = await MovieOperationalFixtures.PostAsync<MovieSceneDto>(
+            client, $"/api/movie-studio/projects/{project.Project.Id}/scenes",
+            new { title = "Closing", summary = "Second chapter", durationSeconds = 11 });
+
+        var preview = await MovieOperationalFixtures.GetAsync<MovieClipSegmentationPreviewDto>(
+            client, $"/api/movie-studio/projects/{project.Project.Id}/clip-segmentation-preview");
+
+        Assert.True(preview.CanSplitByDuration);
+        Assert.True(preview.CanSplitByScene);
+        var sceneSegments = Assert.IsAssignableFrom<IReadOnlyList<MoviePlannedSceneClipSegment>>(preview.SceneSegments);
+        Assert.Equal(2, sceneSegments.Count);
+        Assert.Equal(new MoviePlannedSceneClipSegment(first.Id, 1, 1, 0, 0, 10), sceneSegments[0]);
+        Assert.Equal(new MoviePlannedSceneClipSegment(second.Id, 2, 2, 10, 0, 11), sceneSegments[1]);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.False(await db.MovieClips.AsNoTracking().AnyAsync(clip => clip.MovieProjectId == project.Project.Id));
+        Assert.False(await db.GenerationJobs.AsNoTracking().AnyAsync(job => job.WorkspaceId == owner.PersonalWorkspace.Id));
+        Assert.False(await db.UsageTransactions.AsNoTracking().AnyAsync(tx => tx.WorkspaceId == owner.PersonalWorkspace.Id));
     }
 
     [Fact]
