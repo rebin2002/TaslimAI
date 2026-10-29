@@ -34,7 +34,9 @@ public sealed class PasswordRecoveryApiFactory : WebApplicationFactory<Program>
     };
     public RecordingEmailSender EmailSender { get; } = new();
 
-    public PasswordRecoveryApiFactory(bool recoveryEnabled = true, TimeSpan? resetTokenLifetime = null)
+    public PasswordRecoveryApiFactory() : this(recoveryEnabled: true, resetTokenLifetime: null) { }
+
+    public PasswordRecoveryApiFactory(bool recoveryEnabled, TimeSpan? resetTokenLifetime = null)
     {
         recoverySettings["PasswordRecovery:Enabled"] = recoveryEnabled ? "true" : "false";
         this.resetTokenLifetime = resetTokenLifetime;
@@ -150,7 +152,7 @@ public sealed class PasswordRecoveryTests(PasswordRecoveryApiFactory factory) : 
     [Fact]
     public async Task Actually_expired_identity_reset_token_is_rejected()
     {
-        using var expiryFactory = new PasswordRecoveryApiFactory(resetTokenLifetime: TimeSpan.FromSeconds(3));
+        using var expiryFactory = new PasswordRecoveryApiFactory(recoveryEnabled: true, resetTokenLifetime: TimeSpan.FromSeconds(3));
         var email = $"expired-{Guid.NewGuid():N}@example.test";
         using var registering = expiryFactory.CreateClient();
         Assert.Equal(HttpStatusCode.OK, (await Register(registering, email)).StatusCode);
