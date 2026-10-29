@@ -75,12 +75,36 @@ public sealed class MovieDirectorController(IMovieDirectorService director, IMov
                     throw new MovieIntercutPlanningException(MovieIntercutPlanCodes.TimelineVersionMismatch, "The intercut timeline revision has changed; refresh the timeline before planning.");
             }
 
+            // Omitted timeline IDs must resolve the project's persisted canonical timeline,
+            // which may have a non-deterministic ID. Checking only the generated fallback ID
+            // would miss an existing revision and permit a stale review proposal.
+            if (request.TimelineId.GetValueOrDefault() == Guid.Empty)
+            {
+                var canonicalTimeline = await db.MovieTimelines.AsNoTracking()
+                    .Where(item => item.MovieProjectId == movieProjectId)
+                    .Select(item => new { item.Id, item.CurrentRevisionNumber })
+                    .SingleOrDefaultAsync(cancellationToken);
+                if (canonicalTimeline is not null)
+                {
+                    if (canonicalTimeline.CurrentRevisionNumber != request.BaseTimelineVersion)
+                        throw new MovieIntercutPlanningException(MovieIntercutPlanCodes.TimelineVersionMismatch, "The intercut timeline revision has changed; refresh the timeline before planning.");
+                    // Keep the caller's request unchanged; only the review planner receives
+                    // the resolved canonical timeline identity.
+                    request = new MovieIntercutPlanRequest
+                    {
+                        TimelineId = canonicalTimeline.Id,
+                        BaseTimelineVersion = request.BaseTimelineVersion,
+                        Clips = request.Clips,
+                        RequestedClipOrder = request.RequestedClipOrder,
+                    };
+                }
+            }
+
             // Pure validation bounds the request before any database lookup; this is still
             // review-only and never enqueues, persists, publishes media, or reserves usage.
             var proposal = MovieIntercutPlanner.Build(movieProjectId, request);
-            // An omitted or empty timeline id resolves to the deterministic project
-            // timeline. It can already exist: do not bypass the same stale-revision
-            // and cross-project checks enforced for explicitly supplied timeline ids.
+            // If this project has no persisted timeline, the planner uses a deterministic
+            // fallback ID. Fail closed if that identity somehow resolves to another project.
             if (request.TimelineId.GetValueOrDefault() == Guid.Empty)
             {
                 var existingDefault = await db.MovieTimelines.AsNoTracking()
