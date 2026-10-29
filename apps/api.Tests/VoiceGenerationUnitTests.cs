@@ -23,6 +23,15 @@ public sealed class VoiceGenerationUnitTests
     }
 
     [Fact]
+    public void Malformed_persisted_input_is_rejected_before_nullable_validation()
+    {
+        var json = JsonSerializer.Serialize(new { workspaceId = Guid.NewGuid() });
+
+        Assert.False(VoiceGenerationContractMapper.TryDeserializeInput(json, out var input));
+        Assert.Null(input);
+    }
+
+    [Fact]
     public async Task Disabled_voice_generation_fails_with_safe_unavailable_exception_without_fabricating_audio()
     {
         var handler = new VoiceGenerationJobHandler(
