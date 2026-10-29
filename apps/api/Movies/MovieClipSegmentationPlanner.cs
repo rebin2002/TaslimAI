@@ -70,4 +70,6 @@ public sealed record MovieClipSegmentationPreviewDto(
     bool CanSplitByDuration,
     int? MinimumClipSeconds,
     int? MaximumClipSeconds,
-    IReadOnlyList<MoviePlannedClipSegment> Segments);
+    IReadOnlyList<MoviePlannedClipSegment> Segments,
+    bool CanSplitByScene = false,
+    IReadOnlyList<MoviePlannedSceneClipSegment>? SceneSegments = null);
