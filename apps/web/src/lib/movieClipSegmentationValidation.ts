@@ -113,8 +113,19 @@ export function isConsistentMovieClipSegmentationResponse(
   expectedProjectId: string,
   expectedDurationSeconds: number,
 ): boolean {
+  // Unavailable adapters may declare no clip range, but a half-present,
+  // negative, fractional or inverted range is malformed even when no slots
+  // are returned. Fail closed rather than treating contradictory capability
+  // metadata as a normal provider-unavailable response.
+  const min = preview?.minimumClipSeconds;
+  const max = preview?.maximumClipSeconds;
+  const declaredRangeIsConsistent = (min == null && max == null)
+    || (typeof min === "number" && typeof max === "number"
+      && Number.isSafeInteger(min) && Number.isSafeInteger(max)
+      && min >= 1 && max >= min);
   return preview !== null
     && typeof preview === "object"
+    && declaredRangeIsConsistent
     && preview.movieProjectId === expectedProjectId
     && preview.totalDurationSeconds === expectedDurationSeconds
     && Number.isSafeInteger(preview.totalDurationSeconds)
