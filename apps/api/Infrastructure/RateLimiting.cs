@@ -14,6 +14,7 @@ public static class RateLimiting
     public const string Search = "search";
     public const string ExpensiveAi = "expensive-ai";
     public const string AccountSecurity = "account-security";
+    public const string PasswordRecovery = "password-recovery";
 
     public static void Configure(RateLimiterOptions options)
     {
@@ -43,6 +44,7 @@ public static class RateLimiting
                 Search => 8,
                 ExpensiveAi => 2,
                 AccountSecurity => 1,
+                PasswordRecovery => 2,
                 _ => 0,
             };
 
@@ -124,6 +126,16 @@ public static class RateLimiting
             _ => new FixedWindowRateLimiterOptions
             {
                 PermitLimit = 5,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0,
+                AutoReplenishment = true,
+            }));
+
+        options.AddPolicy(PasswordRecovery, httpContext => RateLimitPartition.GetFixedWindowLimiter(
+            Partition("password-recovery", httpContext),
+            _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 30,
                 Window = TimeSpan.FromMinutes(1),
                 QueueLimit = 0,
                 AutoReplenishment = true,
