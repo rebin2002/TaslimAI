@@ -21,8 +21,7 @@ describe("Full Movie duration-only segmentation preview", () => {
     expect(panelSource).toContain("does not plan shots, verify continuity, price or authorize generation");
     expect(panelSource).toContain("!preview.canSplitByDuration");
     expect(panelSource).toContain("preview.segments.length");
-    expect(panelSource).toContain("result.movieProjectId !== projectId");
-    expect(panelSource).toContain("result.totalDurationSeconds !== totalDurationSeconds");
+    expect(panelSource).toContain("isConsistentMovieClipSegmentationResponse(result, projectId, totalDurationSeconds)");
   });
 
   it("retries transient preview failures through the same read-only API", () => {
@@ -45,7 +44,7 @@ describe("Full Movie duration-only segmentation preview", () => {
   it("shows only validated scene-aligned slot counts, not rendered scenes or billable jobs", () => {
     expect(apiSource).toContain("canSplitByScene?: boolean");
     expect(apiSource).toContain("sceneSegments?: Array<");
-    expect(panelSource).toContain("isConsistentMovieSceneClipSegmentation(result)");
+    expect(panelSource).toContain("isConsistentMovieClipSegmentationResponse(result, projectId, totalDurationSeconds)");
     expect(panelSource).toContain("preview.canSplitByScene && preview.sceneSegments?.length");
     expect(panelSource).toContain("labels.sceneSlots");
     expect(panelSource).toContain("labels.scenePending");
