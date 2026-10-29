@@ -513,8 +513,20 @@ public sealed class MovieProductionGenerationOrchestrator(
     {
         var movie = shot.Scene.MovieProject;
         var plan = BuildPlan(shot, request);
-        var duration = ResolveSingleClipDuration(
-            shot.DurationSeconds, shot.Scene.DurationSeconds, movie.DurationSeconds);
+        // A replay key binds the original priced clip duration. If a later
+        // edit makes the selected shot invalid as a single provider clip,
+        // treat this as changed replay intent, never as a successful replay.
+        int duration;
+        try
+        {
+            duration = ResolveSingleClipDuration(
+                shot.DurationSeconds, shot.Scene.DurationSeconds, movie.DurationSeconds);
+        }
+        catch (MovieProductionValidationException error)
+            when (error.Code == "MOVIE_CLIP_DURATION_UNSUPPORTED")
+        {
+            return false;
+        }
         var title = string.IsNullOrWhiteSpace(request.Title) ? movie.Title : request.Title.Trim();
         var guide = movie.Guide is null ? null : JsonSerializer.Serialize(new
         {
