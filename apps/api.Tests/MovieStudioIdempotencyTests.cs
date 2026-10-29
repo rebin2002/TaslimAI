@@ -298,6 +298,84 @@ public sealed class MovieStudioIdempotencyTests : IClassFixture<MovieOperational
         Assert.Equal(first.Job.Id, canonicalClip.GenerationJobId);
     }
 
+    [Fact]
+    public async Task Reusing_legacy_clip_key_after_character_card_edit_rejects_stale_continuity_without_extra_usage()
+    {
+        // A shot with a named character saves that character's card into the
+        // queued provider prompt. Changing only the card must invalidate replay
+        // even though the shot text, duration, provider cost and title are unchanged.
+        using var client = factory.CreateClient();
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Character continuity replay");
+        var key = $"movie-character-continuity-{Guid.NewGuid():N}";
+        var path = $"/api/movie-studio/shots/{fixture.Shot.Id}/generate";
+
+        using (var setup = factory.Services.CreateScope())
+        {
+            var db = setup.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var shot = await db.MovieShots.SingleAsync(item => item.Id == fixture.Shot.Id);
+            shot.Description += " Mira appears in the scene.";
+            var now = DateTime.UtcNow;
+            db.MovieCharacters.Add(new MovieCharacter
+            {
+                Id = Guid.NewGuid(),
+                MovieProjectId = fixture.Project.Project.Id,
+                Name = "Mira",
+                Description = "A character relevant to this shot.",
+                Appearance = "Amber coat and silver glasses.",
+                CreatedAt = now,
+                UpdatedAt = now,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var first = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
+            client, path, new { title = "Character continuity clip" }, idempotencyKey: key);
+        using (var check = factory.Services.CreateScope())
+        {
+            var db = check.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var job = await db.GenerationJobs.AsNoTracking().SingleAsync(item => item.Id == first.Job.Id);
+            var input = JsonSerializer.Deserialize<MovieGenerationInput>(job.InputJson);
+            Assert.NotNull(input);
+            Assert.Contains("Amber coat", input!.ContinuityGuideJson, StringComparison.Ordinal);
+        }
+
+        // An unchanged same-key retry must still resolve to the original job.
+        var replay = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
+            client, path, new { title = "Character continuity clip" }, idempotencyKey: key);
+        Assert.Equal(first.Job.Id, replay.Job.Id);
+        Assert.Equal(first.ClipId, replay.ClipId);
+
+        int usageBefore;
+        using (var edit = factory.Services.CreateScope())
+        {
+            var db = edit.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var character = await db.MovieCharacters.SingleAsync(item =>
+                item.MovieProjectId == fixture.Project.Project.Id && item.Name == "Mira");
+            character.Appearance = "Teal jacket and silver glasses.";
+            character.UpdatedAt = DateTime.UtcNow;
+            await db.SaveChangesAsync();
+            usageBefore = await db.UsageTransactions.CountAsync();
+        }
+
+        using var rejected = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, path,
+            new { title = "Character continuity clip" }, idempotencyKey: key);
+        Assert.Equal(System.Net.HttpStatusCode.BadRequest, rejected.StatusCode);
+        Assert.Contains("IDEMPOTENCY_KEY_REUSED",
+            await rejected.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        using var verify = factory.Services.CreateScope();
+        var verifyDb = verify.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.Equal(1, await verifyDb.GenerationJobs.AsNoTracking()
+            .CountAsync(item => item.IdempotencyKey == key));
+        var clip = Assert.Single(await verifyDb.MovieClips.AsNoTracking()
+            .Where(item => item.MovieProjectId == fixture.Project.Project.Id).ToListAsync());
+        Assert.Equal(first.ClipId, clip.Id);
+        Assert.Equal(first.Job.Id, clip.GenerationJobId);
+        Assert.Equal(usageBefore, await verifyDb.UsageTransactions.CountAsync());
+    }
+
     [Theory]
     [InlineData("shot-description")]
     [InlineData("shot-framing")]
