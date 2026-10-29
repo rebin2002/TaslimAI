@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using Taslim.Api.Contracts;
 
 namespace Taslim.Api.Movies;
@@ -299,11 +300,27 @@ public static class MovieIntercutPlanner
 
     private static string ComputeCandidateHash(IEnumerable<MovieIntercutCandidate> candidates, IEnumerable<Guid> requestedOrder)
     {
-        var values = candidates
-            .OrderBy(item => item.ClipId)
-            .Select(item => string.Join(":", item.ClipId.ToString("N"), item.MovieShotId.ToString("N"), item.MovieSceneId.ToString("N"), item.SceneSequence, item.ShotSequence, item.DurationSeconds.ToString(CultureInfo.InvariantCulture), item.CoverageKind, item.AnchorShotId?.ToString("N") ?? "-", item.Label ?? "-"))
-            .Concat(requestedOrder.Select(item => item.ToString("N")));
-        return Hash(string.Join("|", values));
+        // Human-readable labels can contain ':' and '|'. Delimiter-joining the
+        // candidates allowed a single label to masquerade as an extra candidate
+        // and assign two different review proposals the same deterministic ID.
+        // JSON preserves field and array boundaries, including nullable values.
+        var canonical = new
+        {
+            Candidates = candidates.OrderBy(item => item.ClipId).Select(item => new
+            {
+                item.ClipId,
+                item.MovieShotId,
+                item.MovieSceneId,
+                item.SceneSequence,
+                item.ShotSequence,
+                item.DurationSeconds,
+                item.CoverageKind,
+                item.AnchorShotId,
+                item.Label,
+            }).ToArray(),
+            RequestedClipOrder = requestedOrder.ToArray(),
+        };
+        return Hash(JsonSerializer.Serialize(canonical));
     }
 
     private static string ComputeProposalHash(Guid projectId, Guid proposalId, int baseVersion, MovieCanonicalTimelineContract timeline, IEnumerable<MovieIntercutCandidate> candidates, IEnumerable<Guid> requestedOrder) =>
