@@ -122,7 +122,9 @@ public sealed class OperationalHealthService(
         }
         catch (FileStorageUnavailableException)
         {
-            return "unconfigured";
+            // Readiness is anonymous. Do not disclose whether deployment storage
+            // configuration is absent; expose only the safe dependency state.
+            return "unavailable";
         }
         catch (OperationCanceledException) when (requestCancellationToken.IsCancellationRequested)
         {
