@@ -86,6 +86,50 @@ public sealed class MovieIntercutPlannerTests
     }
 
     [Fact]
+    public void Reordering_only_reaction_and_insert_coverage_requires_explicit_approval()
+    {
+        // The primary story order is unchanged, but the editor explicitly requested
+        // a different cut. Review-only planning must not silently ignore that edit.
+        var request = new MovieIntercutPlanRequest
+        {
+            BaseTimelineVersion = 3,
+            Clips =
+            [
+                Coverage(PrimaryOne, ShotOne, SceneOne, 1, 1, 4m, MovieIntercutCoverageKinds.Primary),
+                Coverage(Reaction, ShotThree, SceneOne, 1, 2, 2m, MovieIntercutCoverageKinds.Reaction, ShotOne),
+                Coverage(Insert, ShotTwo, SceneOne, 1, 3, 1m, MovieIntercutCoverageKinds.Insert, ShotOne),
+            ],
+            RequestedClipOrder = [PrimaryOne, Insert, Reaction],
+        };
+
+        var proposal = MovieIntercutPlanner.Build(ProjectId, request);
+        var replay = MovieIntercutPlanner.Build(ProjectId, request);
+
+        Assert.True(proposal.StoryOrderPreserved);
+        Assert.True(proposal.RequiresUserApproval);
+        Assert.Contains("requested_coverage_order_change_requires_explicit_user_approval", proposal.Findings);
+        Assert.Equal(new[] { PrimaryOne, Reaction, Insert }, proposal.ProposedTimeline.Clips.Select(item => item.ClipId));
+        Assert.Equal(proposal.ProposalId, replay.ProposalId);
+        Assert.Equal(proposal.ProvenanceHash, replay.ProvenanceHash);
+
+        var denied = MovieIntercutPlanner.ApplyUserApproval(proposal, new MovieIntercutApproval(false, "Retain the original edit."));
+        Assert.Equal(proposal.ProposedTimeline, denied);
+
+        var approved = MovieIntercutPlanner.ApplyUserApproval(proposal, new MovieIntercutApproval(true, "Approved insert before reaction for pacing."));
+        Assert.Equal(new[] { PrimaryOne, Insert, Reaction }, approved.Clips.Select(item => item.ClipId));
+        Assert.Equal(7m, approved.Clips.Sum(item => item.DurationSeconds));
+        Assert.Equal(proposal.ProposedTimeline.Version + 1, approved.Version);
+        Assert.Equal(approved.Clips.Count - 1, approved.Transitions.Count);
+
+        // Re-submitting canonical ordering is not a changed edit and must not
+        // demand needless user approval.
+        request.RequestedClipOrder = [PrimaryOne, Reaction, Insert];
+        var unchanged = MovieIntercutPlanner.Build(ProjectId, request);
+        Assert.True(unchanged.StoryOrderPreserved);
+        Assert.False(unchanged.RequiresUserApproval);
+    }
+
+    [Fact]
     public void Invalid_anchor_and_duplicate_primary_are_blocked_before_a_proposal_is_created()
     {
         var invalidAnchor = new MovieIntercutPlanRequest
