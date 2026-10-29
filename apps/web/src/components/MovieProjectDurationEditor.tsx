@@ -62,7 +62,7 @@ export function MovieProjectDurationEditor({
   const [error, setError] = useState("");
 
   const number = Number(value);
-  const valid = /^\\d+$/.test(value) && Number.isSafeInteger(number)
+  const valid = /^[0-9]+$/.test(value) && Number.isSafeInteger(number)
     && number >= 1 && number <= 7_200;
   const unchanged = valid && number === durationSeconds;
 
