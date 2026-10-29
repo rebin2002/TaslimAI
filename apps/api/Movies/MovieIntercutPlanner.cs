@@ -219,6 +219,9 @@ public static class MovieIntercutPlanner
     {
         var ids = new HashSet<Guid>();
         var shotIds = new HashSet<Guid>();
+        // Two different primary clips cannot both claim one canonical story slot.
+        // An ID-based tie breaker would produce a reproducible but incorrect story order.
+        var primaryStoryPositions = new HashSet<(int Scene, int Shot)>();
         foreach (var item in candidates)
         {
             if (item.ClipId == Guid.Empty || !ids.Add(item.ClipId))
@@ -239,6 +242,8 @@ public static class MovieIntercutPlanner
                 throw new MovieIntercutPlanningException(MovieIntercutPlanCodes.AnchorInvalid, "Primary coverage cannot use an intercut anchor.");
             if (item.IsPrimary && !shotIds.Add(item.MovieShotId))
                 throw new MovieIntercutPlanningException(MovieIntercutPlanCodes.StoryOrderInvalid, "Only one primary coverage clip may represent a canonical shot.");
+            if (item.IsPrimary && !primaryStoryPositions.Add((item.SceneSequence, item.ShotSequence)))
+                throw new MovieIntercutPlanningException(MovieIntercutPlanCodes.StoryOrderInvalid, "Primary coverage must have distinct canonical scene and shot positions.");
         }
 
         var totalDuration = candidates.Sum(item => item.DurationSeconds);
