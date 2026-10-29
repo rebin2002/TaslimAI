@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { MovieClipSegmentationPreview } from "./api";
-import { isConsistentMovieClipSegmentation, isConsistentMovieSceneClipSegmentation } from "./movieClipSegmentationValidation";
+import { isConsistentMovieClipSegmentation, isConsistentMovieSceneClipSegmentation, isConsistentMovieClipSegmentationResponse } from "./movieClipSegmentationValidation";
 
 const preview = (overrides: Partial<MovieClipSegmentationPreview> = {}): MovieClipSegmentationPreview => ({
   movieProjectId: "test-project",
@@ -159,5 +159,52 @@ describe("Movie Studio scene-aware read-only preview integrity", () => {
         timelineStartSeconds: 6, sceneOffsetSeconds: 6, durationSeconds: 5 },
     ];
     expect(isConsistentMovieSceneClipSegmentation(oneScene)).toBe(true);
+  });
+});
+
+
+describe("Movie Studio preview envelope, including unavailable adapters", () => {
+  it("accepts valid plans and a legitimately unavailable adapter without inventing clips", () => {
+    expect(isConsistentMovieClipSegmentationResponse(preview(), "test-project", 11)).toBe(true);
+    const unavailable = preview({
+      providerDeclaresSceneClipOperation: false,
+      canSplitByDuration: false,
+      minimumClipSeconds: null,
+      maximumClipSeconds: null,
+      segments: [],
+      canSplitByScene: false,
+      sceneSegments: [],
+    });
+    expect(isConsistentMovieClipSegmentationResponse(unavailable, "test-project", 11)).toBe(true);
+    expect(isConsistentMovieClipSegmentationResponse(unavailable, "other-project", 11)).toBe(false);
+    expect(isConsistentMovieClipSegmentationResponse(unavailable, "test-project", 7_200)).toBe(false);
+  });
+
+  it("rejects malformed capability flags and provider identities even on the unavailable path", () => {
+    const unavailable = preview({
+      providerDeclaresSceneClipOperation: false,
+      canSplitByDuration: false,
+      minimumClipSeconds: null,
+      maximumClipSeconds: null,
+      segments: [],
+    });
+    const malformed = [
+      { canSplitByDuration: "false" },
+      { canSplitByDuration: 0 },
+      { canSplitByDuration: null },
+      { canSplitByDuration: undefined },
+      { providerDeclaresSceneClipOperation: "false" },
+      { providerDeclaresSceneClipOperation: null },
+      { providerKey: null },
+      { providerKey: "  " },
+      { totalDurationSeconds: "11" },
+      { segments: [{ sequence: 1, startSeconds: 0, durationSeconds: 11 }] },
+      { canSplitByScene: true },
+    ] as unknown as Array<Partial<MovieClipSegmentationPreview>>;
+    for (const variant of malformed) {
+      expect(isConsistentMovieClipSegmentationResponse(
+        { ...unavailable, ...variant }, "test-project", 11,
+      )).toBe(false);
+    }
   });
 });
