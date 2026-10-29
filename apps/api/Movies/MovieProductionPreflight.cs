@@ -112,6 +112,13 @@ public sealed record MovieProductionAdaptivePlan(
 /// </summary>
 public static class MovieProductionAdaptivePlanBuilder
 {
+    // Align adaptive quality with the very same inherited clip duration used
+    // by queue admission and cost estimation. Timeline duration is not a
+    // provider-sized clip; invalid values are rejected by admission separately.
+    internal static int ResolveAdaptiveDurationSeconds(MovieShot shot) =>
+        Math.Clamp(shot.DurationSeconds ?? shot.Scene.DurationSeconds
+            ?? Math.Min(shot.Scene.MovieProject.DurationSeconds, 60), 1, 3_600);
+
     public static MovieProductionAdaptivePlan Build(MovieShot shot, string? targetResolution, string? qualityTier)
     {
         var target = string.IsNullOrWhiteSpace(targetResolution) ? MovieResolutionTiers.P1080 : targetResolution.Trim();
@@ -127,7 +134,7 @@ public static class MovieProductionAdaptivePlanBuilder
         {
             MasterTargetResolution = targetTier.Code,
             QualityTier = quality,
-            DurationSeconds = Math.Clamp(shot.DurationSeconds ?? 1, 1, 3_600),
+            DurationSeconds = ResolveAdaptiveDurationSeconds(shot),
             Importance = string.IsNullOrWhiteSpace(shot.Purpose) ? 50 : 70,
             MotionComplexity = string.IsNullOrWhiteSpace(shot.CameraMotion) ? 35 : 65,
             CameraComplexity = string.IsNullOrWhiteSpace(shot.CameraAndFraming) ? 35 : 60,
