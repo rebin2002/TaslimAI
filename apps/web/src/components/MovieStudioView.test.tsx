@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { nextMovieMode } from "./MovieStudioView";
+import { isQuickMovieProviderReady, nextMovieMode } from "./MovieStudioView";
 
 const source = readFileSync(new URL("./MovieStudioView.tsx", import.meta.url), "utf8");
 
@@ -26,5 +26,16 @@ describe("Movie Studio mode switch accessibility", () => {
     expect(source).toContain('onKeyDown={(event) => handleModeKeyDown(event, "Full")}');
     expect(source).toContain('id="movie-brief-panel" role="tabpanel"');
     expect(source).toContain('aria-labelledby={`movie-mode-tab-${mode.toLowerCase()}`}');
+  });
+});
+
+describe("Movie Studio Quick Movie provider readiness", () => {
+  it("advertises Quick Movie only when the configured provider is ready for quick_movie", () => {
+    expect(isQuickMovieProviderReady(null)).toBe(false);
+    expect(isQuickMovieProviderReady({ ready: false, supportedOperations: ["quick_movie"] })).toBe(false);
+    expect(isQuickMovieProviderReady({ ready: true, supportedOperations: [] })).toBe(false);
+    expect(isQuickMovieProviderReady({ ready: true, supportedOperations: ["scene_clip"] })).toBe(false);
+    expect(isQuickMovieProviderReady({ ready: true, supportedOperations: ["scene_clip", "quick_movie"] })).toBe(true);
+    expect(isQuickMovieProviderReady({ ready: true, supportedOperations: ["QUICK_MOVIE"] })).toBe(true);
   });
 });
