@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { isQuickMovieProviderReady, nextMovieMode } from "./MovieStudioView";
+import { isQuickMovieProviderReady, movieDraftDurationLimit, nextMovieMode } from "./MovieStudioView";
 
 const source = readFileSync(new URL("./MovieStudioView.tsx", import.meta.url), "utf8");
 
@@ -49,5 +49,23 @@ describe("Movie Studio Quick Movie provider readiness", () => {
     expect(isQuickMovieProviderReady({ ready: true, supportedOperations: ["scene_clip"] })).toBe(false);
     expect(isQuickMovieProviderReady({ ready: true, supportedOperations: ["scene_clip", "quick_movie"] })).toBe(true);
     expect(isQuickMovieProviderReady({ ready: true, supportedOperations: ["QUICK_MOVIE"] })).toBe(true);
+  });
+});
+
+// Keep 120-minute film *plans* distinct from any single provider clip.
+// Mode switching must not apply the Full timeline limit to Quick briefs.
+describe("Movie Studio project duration controls", () => {
+  it("allows two-hour Full Movie planning without expanding Quick brief limits", () => {
+    expect(movieDraftDurationLimit("Quick")).toBe(3_600);
+    expect(movieDraftDurationLimit("Full")).toBe(7_200);
+    expect(movieDraftDurationLimit("Quick")).toBe(3_600);
+    expect(source).toContain("max={movieDraftDurationLimit(mode)}");
+  });
+
+  it("preserves each mode\u0027s chosen duration for the draft-only create request", () => {
+    expect(source).toContain("useState<Record<MovieMode, number>>({ Quick: 30, Full: 30 })");
+    expect(source).toContain("value={durationByMode[mode]}");
+    expect(source).toContain("[mode]: Number(event.target.value)");
+    expect(source).toContain("durationSeconds: durationByMode[mode],");
   });
 });
