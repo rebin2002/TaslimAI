@@ -217,4 +217,95 @@ public sealed class MovieProductionProviderUnavailableTests
         Assert.Equal(0, calls.Calls(FakeProviderKind.Movie));
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Approved_render_rejects_unverified_or_non_scene_clip_adapter_without_side_effects(
+        bool missingDurationContract)
+    {
+        // Preflight and queue must share the selected adapter's declared
+        // scene-clip contract. Neither a missing duration range nor a provider
+        // that supports only Quick Movie can authorize a paid render.
+        using var factory = new MovieClipDurationApiFactory();
+        using (var setup = factory.Services.CreateScope())
+            setup.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+
+        using var client = factory.CreateClient();
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Approved render requires verified clip adapter", sceneDurationSeconds: 5);
+        var shotId = fixture.Shot.Id;
+
+        var storyboard = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
+            client, $"/api/movie-studio/shots/{shotId}/production/versions",
+            new { stage = MovieProductionStages.StoryboardCandidate, compositionJson = "{\"frame\":\"wide\"}" });
+        var approvedStoryboard = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
+            client, $"/api/movie-studio/production/versions/{storyboard.Id}/review",
+            new { approve = true });
+        var keyframe = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
+            client, $"/api/movie-studio/shots/{shotId}/production/versions",
+            new { stage = MovieProductionStages.ProductionKeyframe,
+                sourceVersionId = approvedStoryboard.Id, compositionJson = "{\"frame\":\"approved\"}" });
+        var approvedKeyframe = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
+            client, $"/api/movie-studio/production/versions/{keyframe.Id}/review",
+            new { approve = true });
+        var motion = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
+            client, $"/api/movie-studio/shots/{shotId}/production/motion-preview",
+            new { sourceVersionId = approvedKeyframe.Id });
+        var approvedMotion = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
+            client, $"/api/movie-studio/production/versions/{motion.Id}/review",
+            new { approve = true });
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var provider = Assert.IsType<FakeMovieVideoProvider>(
+            scope.ServiceProvider.GetRequiredService<IMovieVideoProvider>());
+        if (missingDurationContract)
+            provider.SceneClipDurationRange = null;
+        else
+            provider.SupportedOperations = [MovieStudioOperations.QuickMovie];
+
+        var versionsBefore = await db.MovieProductionVersions.CountAsync(item => item.MovieShotId == shotId);
+        var clipsBefore = await db.MovieClips.CountAsync();
+        var jobsBefore = await db.GenerationJobs.CountAsync();
+        var usageBefore = await db.UsageTransactions.CountAsync();
+        var expectedCode = missingDurationContract
+            ? "MOVIE_CLIP_DURATION_UNSUPPORTED" : "MOVIE_PROVIDER_UNAVAILABLE";
+        var expectedDecision = missingDurationContract
+            ? MovieProductionPreflightDecisionCodes.ClipDurationUnsupported
+            : MovieProductionPreflightDecisionCodes.ProviderUnavailable;
+        var idempotencyKey = missingDurationContract
+            ? "approved-no-clip-duration-contract" : "approved-quick-only-adapter";
+
+        using var previewResponse = await client.GetAsync(
+            $"/api/movie-studio/shots/{shotId}/production/preflight?sourceProductionVersionId={approvedMotion.Id}&targetResolution=720p&qualityTier=Standard&confirmationAccepted=true");
+        Assert.Equal(HttpStatusCode.OK, previewResponse.StatusCode);
+        var preview = (await previewResponse.Content.ReadFromJsonAsync<MovieProductionPreflightDto>())!;
+        Assert.False(preview.CanProceed);
+        Assert.Equal(expectedDecision, preview.Decision);
+        Assert.Equal(expectedCode, preview.RejectionCode);
+        Assert.Contains(preview.Checks, check =>
+            check.Key == MovieProductionPreflightCheckKeys.ProviderAdmission
+            && check.Required && !check.Satisfied);
+        Assert.Contains(preview.Checks, check =>
+            check.Key == MovieProductionPreflightCheckKeys.ClipDuration
+            && check.Required && check.Satisfied == !missingDurationContract);
+
+        using var rejected = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, $"/api/movie-studio/shots/{shotId}/production/render",
+            new { sourceVersionId = approvedMotion.Id, label = "Do not queue unverified adapter",
+                targetResolution = "720p", qualityTier = "Standard",
+                confirmationAccepted = true }, idempotencyKey: idempotencyKey);
+
+        Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
+        Assert.Contains(expectedCode,
+            await rejected.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Equal(versionsBefore, await db.MovieProductionVersions.CountAsync(item => item.MovieShotId == shotId));
+        Assert.Equal(clipsBefore, await db.MovieClips.CountAsync());
+        Assert.Equal(jobsBefore, await db.GenerationJobs.CountAsync());
+        Assert.False(await db.GenerationJobs.AnyAsync(item => item.IdempotencyKey == idempotencyKey));
+        Assert.Equal(usageBefore, await db.UsageTransactions.CountAsync());
+        Assert.Equal(0, scope.ServiceProvider.GetRequiredService<FakeProviderCallLog>()
+            .Calls(FakeProviderKind.Movie));
+    }
+
 }
