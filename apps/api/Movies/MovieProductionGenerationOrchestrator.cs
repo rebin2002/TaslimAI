@@ -164,8 +164,8 @@ public sealed class MovieProductionGenerationOrchestrator(
         // Queue admission still validates an optional custom render title.
         var renderDescription = string.IsNullOrWhiteSpace(request.Title)
             ? shot.Scene.MovieProject.Title : request.Title.Trim();
-        var minimumCreativePromptLength = MinimumProductionPromptCharacters(
-            shot, renderDescription, provider);
+        var promptPayload = BuildProductionPromptPayloads(shot, renderDescription, provider);
+        var minimumCreativePromptLength = promptPayload.MinimumCharacters;
         if (provider.SceneClipPromptMaxCharacters is { } promptCapacity
             && minimumCreativePromptLength > promptCapacity)
             throw new MovieProductionValidationException(
@@ -274,9 +274,9 @@ public sealed class MovieProductionGenerationOrchestrator(
             shot.Scene.MovieProject.Style,
             shot.Scene.MovieProject.Language,
             shot.Scene.MovieProject.AdditionalInstructions,
-            guidePayload,
-            scenePayload,
-            shotPayload,
+            promptPayload.GuideJson,
+            promptPayload.SceneJson,
+            promptPayload.ShotJson,
             null,
             null,
             null,
@@ -609,8 +609,9 @@ public sealed class MovieProductionGenerationOrchestrator(
 
     // Excludes character continuity, which both preflight and queue check
     // separately. The JSON properties and order match the video job payload.
-    internal static long MinimumProductionPromptCharacters(
-        MovieShot shot, string renderDescription, IMovieVideoProvider videoProvider)
+    internal static (long MinimumCharacters, string? GuideJson, string SceneJson, string ShotJson)
+        BuildProductionPromptPayloads(
+            MovieShot shot, string renderDescription, IMovieVideoProvider videoProvider)
     {
         var movie = shot.Scene.MovieProject;
         var guide = movie.Guide;
@@ -631,13 +632,14 @@ public sealed class MovieProductionGenerationOrchestrator(
             shot.Description, shot.Purpose, shot.Subjects,
             shot.CameraAndFraming, shot.CameraMotion, shot.DurationSeconds,
         });
-        return (long)renderDescription.Trim().Length
+        var minimumCharacters = (long)renderDescription.Trim().Length
             + (movie.Style?.Trim().Length ?? 0)
             + (movie.AdditionalInstructions?.Trim().Length ?? 0)
             + (guidePayload?.Length ?? 0)
             + scenePayload.Length
             + shotPayload.Length
             + Math.Max(0, videoProvider.SceneClipPromptFormattingOverheadCharacters);
+        return (minimumCharacters, guidePayload, scenePayload, shotPayload);
     }
 
     private static ProductionPlan BuildPlan(MovieShot shot, MovieProductionGenerationRequest request)

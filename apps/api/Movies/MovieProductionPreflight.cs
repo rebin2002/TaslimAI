@@ -236,8 +236,8 @@ public sealed class MovieProductionPreflightService(
         // A read-only, non-persisted continuity preview keeps the provider
         // prompt floor consistent with actual queue admission. Any custom title
         // supplied later remains subject to the queue's own validation.
-        var minimumPromptCharacters = MovieProductionGenerationOrchestrator.MinimumProductionPromptCharacters(
-            shot, shot.Scene.MovieProject.Title, provider);
+        var minimumPromptCharacters = MovieProductionGenerationOrchestrator.BuildProductionPromptPayloads(
+            shot, shot.Scene.MovieProject.Title, provider).MinimumCharacters;
         var continuityPreview = await continuity.BuildSnapshotForTargetAsync(
             shot.Scene.MovieProjectId, shot.Scene.Id, shot.Id,
             persist: false, cancellationToken);
