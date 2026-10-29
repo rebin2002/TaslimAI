@@ -4,6 +4,7 @@ using System.Text.Json;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Taslim.Api.Contracts;
 using Taslim.Api.Movies;
 using Taslim.Api.Persistence;
@@ -11,6 +12,38 @@ using Taslim.Api.Tests.ProviderTesting;
 using Xunit;
 
 namespace Taslim.Api.Tests;
+
+// Provider-capable, no-worker host isolates the canonical reference-package
+// failure: a missing package must remain a hard blocker even when the video
+// adapter otherwise supports the requested short clip and priced output.
+public sealed class MovieMissingReferenceWithProviderFactory : MovieOperationalApiFactory
+{
+    protected override bool WorkerEnabled => false;
+
+    protected override void ConfigureWebHost(IWebHostBuilder builder)
+    {
+        base.ConfigureWebHost(builder);
+        builder.ConfigureServices(services =>
+        {
+            services.RemoveAll<IMovieVideoProvider>();
+            services.AddSingleton<IMovieVideoProvider>(sp => new FakeMovieVideoProvider(
+                sp.GetRequiredService<FakeProviderScenarioCatalog>(),
+                sp.GetRequiredService<FakeProviderCallLog>())
+            {
+                SceneClipDurationRange = new MovieClipDurationRange(2, 10),
+            });
+            services.RemoveAll<IMovieProductionReferencePackageService>();
+            services.AddSingleton<IMovieProductionReferencePackageService, MissingPackageService>();
+        });
+    }
+
+    private sealed class MissingPackageService : IMovieProductionReferencePackageService
+    {
+        public Task<MovieProductionReferencePackageDto?> GetForShotAsync(
+            Guid userId, Guid shotId, CancellationToken cancellationToken = default) =>
+            Task.FromResult<MovieProductionReferencePackageDto?>(null);
+    }
+}
 
 public sealed class MovieProductionPreflightTests : IClassFixture<GenerationJobsNoWorkerFactory>
 {
@@ -446,6 +479,56 @@ public sealed class MovieProductionPreflightTests : IClassFixture<GenerationJobs
         Assert.Equal(explicitDuration.SourceResolution, inherited.SourceResolution);
         Assert.Equal(explicitDuration.Recommendation.QualityConfidence, inherited.Recommendation.QualityConfidence);
         Assert.Equal(explicitDuration.Recommendation.QcEscalationRequired, inherited.Recommendation.QcEscalationRequired);
+    }
+
+    [Fact]
+    public async Task Authenticated_preflight_denies_missing_reference_package_even_with_capable_provider()
+    {
+        using var isolatedFactory = new MovieMissingReferenceWithProviderFactory();
+        using (var setup = isolatedFactory.Services.CreateScope())
+            setup.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+
+        using var client = isolatedFactory.CreateClient();
+        var auth = await Register(client);
+        var project = await SendWithCsrf<MovieStudioProjectResponse>(
+            client, HttpMethod.Post, "/api/movie-studio/projects", new
+            {
+                workspaceId = auth.PersonalWorkspace.Id,
+                mode = MovieProjectModes.Full,
+                title = "Missing canonical reference package",
+                description = "Read-only preflight must fail closed without a reference package.",
+                durationSeconds = 30,
+                aspectRatio = "16:9",
+                style = "cinematic",
+                language = "en",
+            });
+        var scene = await SendWithCsrf<MovieSceneDto>(
+            client, HttpMethod.Post, $"/api/movie-studio/projects/{project.Project.Id}/scenes",
+            new { title = "Opening", summary = "An approved-format opening.", durationSeconds = 5 });
+        var shot = await SendWithCsrf<MovieShotDto>(
+            client, HttpMethod.Post, $"/api/movie-studio/scenes/{scene.Id}/shots",
+            new { description = "A stable camera view.", durationSeconds = 5 });
+
+        using var scope = isolatedFactory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var calls = scope.ServiceProvider.GetRequiredService<FakeProviderCallLog>();
+        var callsBefore = calls.Calls(FakeProviderKind.Movie);
+        var usageBefore = await db.UsageTransactions.CountAsync();
+        using var response = await client.GetAsync(
+            $"/api/movie-studio/shots/{shot.Id}/production/preflight?targetResolution=720p&qualityTier=Standard&confirmationAccepted=true");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var preflight = (await response.Content.ReadFromJsonAsync<MovieProductionPreflightDto>())!;
+        Assert.False(preflight.CanProceed);
+        Assert.Equal(MovieProductionPreflightDecisionCodes.ReferenceWorkRequired, preflight.Decision);
+        Assert.Contains(preflight.Checks, check =>
+            check.Key == MovieProductionPreflightCheckKeys.ReferencePackage
+            && check.Required && !check.Satisfied
+            && check.Detail.Contains("unavailable", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(preflight.Recommendations, recommendation => recommendation.Key == "rebuild_reference_package");
+        Assert.False(await db.MovieClips.AnyAsync(clip => clip.MovieProjectId == project.Project.Id));
+        Assert.False(await db.GenerationJobs.AnyAsync(job => job.WorkspaceId == auth.PersonalWorkspace.Id));
+        Assert.Equal(usageBefore, await db.UsageTransactions.CountAsync());
+        Assert.Equal(callsBefore, calls.Calls(FakeProviderKind.Movie));
     }
 
     private static async Task<AuthResponse> Register(HttpClient client)
