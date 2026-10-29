@@ -6,6 +6,7 @@ import { ArrowLeft, ArrowRight, Check, CircleAlert, Eye, EyeOff, Languages, Lock
 import { useLocale, localeNames, locales } from "@/components/LocaleProvider";
 import { useAuth } from "@/components/AuthProvider";
 import { api, ApiError, type PasswordPolicy } from "@/lib/api";
+import { getPasswordRecoveryAvailability } from "@/lib/passwordRecoveryAvailability";
 import { getAuthErrorTranslationKey } from "@/lib/authErrors";
 import { authSuccessPath } from "@/lib/authRedirect";
 import { BrandMark } from "@/components/BrandMark";
@@ -42,7 +43,7 @@ export function AuthForm({ mode, nextPath = null }: Readonly<{ mode: "login" | "
   useEffect(() => {
     if (isRegister) return;
     let active = true;
-    void api.passwordRecoveryAvailability()
+    void getPasswordRecoveryAvailability()
       .then(({ available }) => { if (active) setRecoveryAvailable(available === true); })
       .catch(() => { if (active) setRecoveryAvailable(false); });
     return () => { active = false; };

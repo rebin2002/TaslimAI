@@ -38,12 +38,14 @@ describe("api.login", () => {
   it("reads only the server-owned password recovery availability state", async () => {
     const fetchMock = vi.fn().mockResolvedValueOnce(response({ available: false }));
     vi.stubGlobal("fetch", fetchMock);
-    const { api } = await import("./api");
+    const { getPasswordRecoveryAvailability } = await import("./passwordRecoveryAvailability");
 
-    await expect(api.passwordRecoveryAvailability()).resolves.toEqual({ available: false });
+    await expect(getPasswordRecoveryAvailability()).resolves.toEqual({ available: false });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(new URL(String(fetchMock.mock.calls[0][0])).pathname).toBe("/api/auth/password-recovery/availability");
     expect((fetchMock.mock.calls[0][1] as RequestInit | undefined)?.method ?? "GET").toBe("GET");
+    expect((fetchMock.mock.calls[0][1] as RequestInit).credentials).toBe("include");
+    expect((fetchMock.mock.calls[0][1] as RequestInit).cache).toBe("no-store");
   });
 
   it("performs login and refreshes CSRF state after authentication", async () => {

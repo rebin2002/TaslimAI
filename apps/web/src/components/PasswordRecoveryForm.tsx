@@ -6,6 +6,7 @@ import { ArrowLeft, ArrowRight, Check, CircleAlert, LockKeyhole, Mail, Languages
 import { BrandMark } from "@/components/BrandMark";
 import { useLocale, localeNames, locales } from "@/components/LocaleProvider";
 import { api, ApiError, type PasswordPolicy } from "@/lib/api";
+import { getPasswordRecoveryAvailability } from "@/lib/passwordRecoveryAvailability";
 import { localeDirection } from "@/lib/i18n";
 
 type RecoveryMode = "request" | "reset";
@@ -39,7 +40,7 @@ export function PasswordRecoveryForm({ mode }: Readonly<{ mode: RecoveryMode }>)
 
   useEffect(() => {
     let active = true;
-    void api.passwordRecoveryAvailability()
+    void getPasswordRecoveryAvailability()
       .then(({ available }) => { if (active) setRecoveryAvailable(available === true); })
       .catch(() => { if (active) setRecoveryAvailable(false); })
       .finally(() => { if (active) setAvailabilityResolved(true); });
