@@ -286,6 +286,37 @@ public sealed class AutopilotNextWaveService(
 
                 task = claimed;
                 batch.LaunchAttempt = Math.Max(batch.LaunchAttempt, task.LaunchAttempt);
+
+                // Planning is intentionally separate from launching, so two workers can
+                // still materialize the same approved backlog item into different batches.
+                // Claim the durable item immediately before the side effect; only one
+                // launch may own it, while duplicate plans fail closed without a provider call.
+                if (!await TryClaimBacklogItemAsync(task.BacklogItemKey, waveKey, now, cancellationToken))
+                {
+                    task.Status = AutopilotWaveLaunchStatuses.Blocked;
+                    task.ReasonCode = "backlog_item_claimed";
+                    task.LastStatusDetail = "backlog_item_already_claimed_by_another_wave";
+                    task.CompletedAt = now;
+                    task.UpdatedAt = now;
+                    failed++;
+                    audit.Add(Audit(AutopilotAuditActions.NextWaveLaunchBlocked, AutopilotAuditOutcomes.Blocked,
+                        reason: task.ReasonCode,
+                        statusDetail: task.LastStatusDetail,
+                        waveKey: waveKey,
+                        taskId: task.TaskKey,
+                        attempt: task.LaunchAttempt,
+                        targetId: task.Id,
+                        dryRun: false));
+                    audit.Add(Audit(AutopilotAuditActions.HumanDecisionRequired, AutopilotAuditOutcomes.Required,
+                        reason: AutopilotHumanDecisions.RepairEscalation,
+                        statusDetail: task.ReasonCode,
+                        waveKey: waveKey,
+                        taskId: task.TaskKey,
+                        attempt: task.LaunchAttempt,
+                        targetId: task.Id,
+                        dryRun: false));
+                    continue;
+                }
                 audit.Add(Audit(AutopilotAuditActions.NextWaveLaunchAttempted, AutopilotAuditOutcomes.Recorded,
                     reason: provider.ProviderKey,
                     statusDetail: "launch_attempt_started",
@@ -319,7 +350,6 @@ public sealed class AutopilotNextWaveService(
                     task.UpdatedAt = now;
                     launched++;
                     actions.Add($"next_wave_launched:{waveKey}:{task.TaskKey}");
-                    await MarkBacklogConsumedAsync(task.BacklogItemKey, waveKey, now, cancellationToken);
                     audit.Add(Audit(AutopilotAuditActions.NextWaveLaunched, AutopilotAuditOutcomes.Succeeded,
                         reason: provider.ProviderKey,
                         statusDetail: "launched",
@@ -340,6 +370,7 @@ public sealed class AutopilotNextWaveService(
                     task.LastStatusDetail = result.StatusDetail ?? "launch_rejected";
                     task.CompletedAt = now;
                     task.UpdatedAt = now;
+                    await ReleaseBacklogItemClaimAsync(task.BacklogItemKey, waveKey, cancellationToken);
                     failed++;
                     audit.Add(Audit(AutopilotAuditActions.NextWaveLaunchFailed, AutopilotAuditOutcomes.Blocked,
                         reason: task.ReasonCode,
@@ -368,6 +399,7 @@ public sealed class AutopilotNextWaveService(
                 {
                     task.Status = AutopilotWaveLaunchStatuses.Failed;
                     task.CompletedAt = now;
+                    await ReleaseBacklogItemClaimAsync(task.BacklogItemKey, waveKey, cancellationToken);
                     failed++;
                     audit.Add(Audit(AutopilotAuditActions.NextWaveLaunchFailed, AutopilotAuditOutcomes.Blocked,
                         reason: "launch_attempts_exhausted",
@@ -390,6 +422,7 @@ public sealed class AutopilotNextWaveService(
                 {
                     task.Status = AutopilotWaveLaunchStatuses.Planned;
                     task.NextReconcileAt = now.Add(AutopilotNextWavePolicy.ComputeBackoff(task.LaunchAttempt, settings));
+                    await ReleaseBacklogItemClaimAsync(task.BacklogItemKey, waveKey, cancellationToken);
                     audit.Add(Audit(AutopilotAuditActions.NextWaveLaunchAttempted, AutopilotAuditOutcomes.Recorded,
                         reason: task.ReasonCode,
                         statusDetail: "launch_retry_scheduled",
@@ -594,6 +627,7 @@ public sealed class AutopilotNextWaveService(
         CancellationToken cancellationToken)
     {
         var items = await db.AutopilotBacklogItems
+            .AsNoTracking()
             .Where(item => item.Approved
                 && item.ConsumedByWaveKey == null
                 && item.Kind == AutopilotBacklogItemKinds.Development)
@@ -713,15 +747,39 @@ public sealed class AutopilotNextWaveService(
         return created;
     }
 
-    private async Task MarkBacklogConsumedAsync(string backlogItemKey, string waveKey, DateTime now, CancellationToken cancellationToken)
+    private async Task<bool> TryClaimBacklogItemAsync(
+        string backlogItemKey,
+        string waveKey,
+        DateTime now,
+        CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(backlogItemKey)) return;
-        await db.AutopilotBacklogItems
-            .Where(item => item.ItemKey == backlogItemKey && item.ConsumedByWaveKey == null)
+        if (string.IsNullOrWhiteSpace(backlogItemKey)) return false;
+
+        var claimed = await db.AutopilotBacklogItems
+            .Where(item => item.ItemKey == backlogItemKey
+                && item.Approved
+                && item.Kind == AutopilotBacklogItemKinds.Development
+                && item.ConsumedByWaveKey == null)
             .ExecuteUpdateAsync(setters => setters
                 .SetProperty(item => item.ConsumedByWaveKey, waveKey)
                 .SetProperty(item => item.ConsumedAt, now)
                 .SetProperty(item => item.UpdatedAt, now), cancellationToken);
+
+        return claimed == 1;
+    }
+
+    private async Task ReleaseBacklogItemClaimAsync(
+        string backlogItemKey,
+        string waveKey,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(backlogItemKey)) return;
+
+        await db.AutopilotBacklogItems
+            .Where(item => item.ItemKey == backlogItemKey && item.ConsumedByWaveKey == waveKey)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(item => item.ConsumedByWaveKey, (string?)null)
+                .SetProperty(item => item.ConsumedAt, (DateTime?)null), cancellationToken);
     }
 
     private async Task<AutopilotWaveLaunchTask?> ClaimLaunchAttemptAsync(AutopilotWaveLaunchTask task, CancellationToken cancellationToken)
