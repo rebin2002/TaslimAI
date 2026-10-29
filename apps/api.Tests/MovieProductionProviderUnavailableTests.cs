@@ -64,6 +64,12 @@ public sealed class MovieProductionProviderUnavailableTests
         Assert.Equal(HttpStatusCode.OK, preflightResponse.StatusCode);
         var preview = (await preflightResponse.Content.ReadFromJsonAsync<MovieProductionPreflightDto>())!;
         Assert.False(preview.CanProceed);
+        // The read-only endpoint must bind the documented source alias, rather
+        // than quietly losing the selected approved motion version.
+        Assert.Equal(approvedMotion.Id, preview.SourceProductionVersionId);
+        Assert.Contains(preview.Checks, check =>
+            check.Key == MovieProductionPreflightCheckKeys.MotionPreview
+            && check.Required && check.Satisfied);
         Assert.Contains(preview.Checks, check =>
             check.Key == MovieProductionPreflightCheckKeys.ProviderAdmission
             && check.Required && !check.Satisfied
@@ -71,6 +77,13 @@ public sealed class MovieProductionProviderUnavailableTests
         Assert.Contains(preview.Checks, check =>
             check.Key == MovieProductionPreflightCheckKeys.ClipDuration
             && check.Required && check.Satisfied);
+        // Conflicting source identifiers must not silently select one version.
+        // Even this invalid GET must remain provider-free and write-free.
+        using var conflictingPreview = await client.GetAsync(
+            $"/api/movie-studio/shots/{shotId}/production/preflight?sourceVersionId={Guid.NewGuid()}&sourceProductionVersionId={approvedMotion.Id}&confirmationAccepted=true");
+        Assert.Equal(HttpStatusCode.BadRequest, conflictingPreview.StatusCode);
+        Assert.Contains("MOVIE_PREFLIGHT_SOURCE_CONFLICT",
+            await conflictingPreview.Content.ReadAsStringAsync(), StringComparison.Ordinal);
         Assert.Equal(versionsBefore, await db.MovieProductionVersions.CountAsync(item => item.MovieShotId == shotId));
         Assert.Equal(transactionsBefore, await db.UsageTransactions.CountAsync());
         Assert.Equal(0, calls.Calls(FakeProviderKind.Movie));
