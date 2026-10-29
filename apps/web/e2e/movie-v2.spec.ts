@@ -51,17 +51,31 @@ test.describe("Movie Studio V2 browser smoke", () => {
     await page.goto("/create/movie");
     await expect(page.getByRole("tab", { name: /quick movie/i }).first()).toBeVisible();
     await expect(page.getByText("One brief, one output")).toBeVisible();
-    // Quick Movie exposes the small-brief hint only when the configured adapter
-    // can generate it. With an unavailable/scene-only adapter, show a blocking
-    // status instead of implying that the quick generation route is ready.
-    const quickNote = page.locator(".movie-submit-row > span");
-    await expect(quickNote).toContainText(
-      /Quick Movie stays intentionally small|Generation is currently unavailable/i,
+    // Saving a Quick brief does not create a provider job, even if the
+    // adapter cannot perform quick_movie generation.
+    await expect(page.getByText(/Quick Movie stays intentionally small/i)).toBeVisible();
+    await page.getByLabel("Describe your movie").fill("A brief-only provider-free smoke test.");
+    await expect(page.locator(".movie-submit-row button[type=submit]")).toBeEnabled();
+    await expect(page).not.toHaveURL(/\/create\/movie\/[0-9a-f-]+\/overview$/i);
+  });
+
+  test("saves a Quick Movie brief without queueing a provider generation job", async ({ authenticatedPage: page }) => {
+    await page.goto("/create/movie");
+    await page.getByLabel("Movie title").fill("Provider-free Quick Movie brief");
+    await page.getByLabel("Describe your movie").fill("A safe metadata-only movie project with no generated footage.");
+
+    const createResponse = page.waitForResponse(
+      (response) => response.url().endsWith("/api/movie-studio/projects") &&
+        response.request().method() === "POST",
     );
-    if ((await quickNote.innerText()).includes("unavailable")) {
-      await page.getByLabel("Describe your movie").fill("A short movie brief for the provider-free test.");
-      await expect(page.locator(".movie-submit-row button[type=submit]")).toBeDisabled();
-    }
+    await page.getByRole("button", { name: /save quick movie brief/i }).click();
+    const response = await createResponse;
+    expect(response.status()).toBe(202);
+    const payload = await response.json();
+    expect(payload.project.mode).toBe("Quick");
+    expect(payload.job).toBeNull();
+    await expect(page.getByText("Brief saved", { exact: true })).toBeVisible();
+    await expect(page.locator("video")).toHaveCount(0);
     await expect(page).not.toHaveURL(/\/create\/movie\/[0-9a-f-]+\/overview$/i);
   });
 
