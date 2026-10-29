@@ -46,6 +46,26 @@ public sealed class S3CompatibleStorageTests
     }
 
     [Fact]
+    public async Task Successful_get_with_null_response_stream_fails_closed_instead_of_hiding_private_file()
+    {
+        // A malformed successful response is not equivalent to the S3 object
+        // returning a verified 404. This test uses an entirely fake GET.
+        var client = new AwsS3CompatibleObjectClient(
+            (_, _) => Task.FromResult(new GetObjectResponse { ResponseStream = null! }));
+        var logger = new RecordingLogger();
+        using var service = CreateService(client, logger);
+
+        await Assert.ThrowsAsync<FileStorageOperationException>(
+            () => service.OpenReadAsync("private/sensitive-filename.pdf"));
+
+        Assert.Contains(logger.Messages, message =>
+            message.Contains("Operation=get", StringComparison.Ordinal) &&
+            message.Contains("ErrorType=InvalidDataException", StringComparison.Ordinal));
+        Assert.DoesNotContain(logger.Messages, message =>
+            message.Contains("sensitive-filename.pdf", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task Pdf_extraction_succeeds_from_a_non_seekable_s3_response_after_buffering()
     {
         var client = new AwsS3CompatibleObjectClient((_, _) => Task.FromResult(new GetObjectResponse
