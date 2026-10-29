@@ -34,4 +34,19 @@ describe("Chat presentation styles", () => {
     expect(chatStyles).toContain('[dir="rtl"] .chat-creator-handoff > div');
     expect(chatStyles).toContain("@media (prefers-reduced-motion: reduce)");
   });
+
+  it("keeps keyboard focus visible on recovery and attachment actions", () => {
+    for (const selector of [
+      ".chat-message-tools button:focus-visible",
+      ".chat-attachment-heading button:focus-visible",
+      ".chat-attachment-chip > button:focus-visible",
+      ".chat-inline-dismiss:focus-visible",
+      ".chat-stop-button:focus-visible",
+    ]) {
+      expect(chatStyles).toContain(selector);
+    }
+
+    expect(chatStyles).toContain("outline: 2px solid var(--blue);");
+    expect(chatStyles).toContain("outline-offset: 2px;");
+  });
 });
