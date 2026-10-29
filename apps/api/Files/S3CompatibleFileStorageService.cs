@@ -128,13 +128,15 @@ public sealed class S3CompatibleFileStorageService : IFileStorageService, IDispo
         var failureClass = ClassifyFailure(exception);
         if (exception is AmazonS3Exception s3Exception)
         {
+            // Provider error codes and request IDs are external strings, not
+            // trusted diagnostic categories. Do not log their raw contents:
+            // they may disclose tenant, endpoint or request-specific data.
             logger.LogError(
-                "S3-compatible storage operation failed. Operation={Operation}; StatusCode={StatusCode}; ErrorCode={ErrorCode}; ErrorType={ErrorType}; RequestId={RequestId}; FailureClass={FailureClass}",
+                "S3-compatible storage operation failed. Operation={Operation}; StatusCode={StatusCode}; ErrorType={ErrorType}; HasRequestId={HasRequestId}; FailureClass={FailureClass}",
                 operation,
                 (int)s3Exception.StatusCode,
-                s3Exception.ErrorCode,
                 exception.GetType().Name,
-                s3Exception.RequestId,
+                !string.IsNullOrWhiteSpace(s3Exception.RequestId),
                 failureClass);
             return;
         }
