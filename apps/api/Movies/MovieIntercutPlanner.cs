@@ -111,6 +111,10 @@ public static class MovieIntercutPlanner
         var canonicalOrder = OrderForStory(candidates);
         var requestedOrder = request.RequestedClipOrder?.ToArray() ?? [];
         var storyOrderChangeRequested = IsStoryOrderChangeRequested(candidates, canonicalOrder, requestedOrder);
+        // A requested change to reaction/insert placement must not be silently discarded
+        // merely because the primary story beats remain in canonical order.
+        var coverageOrderChangeRequested = requestedOrder.Length > 0
+            && !requestedOrder.SequenceEqual(canonicalOrder.Select(item => item.ClipId));
         var findings = new List<string>
         {
             "primary_coverage_follows_scene_and_shot_story_order",
@@ -122,6 +126,8 @@ public static class MovieIntercutPlanner
             findings.Add("requested_primary_order_change_requires_explicit_user_approval");
         else
             findings.Add("story_order_change_not_requested");
+        if (coverageOrderChangeRequested && !storyOrderChangeRequested)
+            findings.Add("requested_coverage_order_change_requires_explicit_user_approval");
 
         var timeline = BuildTimeline(timelineId, request.BaseTimelineVersion + 1, canonicalOrder);
         var proposalId = StableGuid("movie-intercut-proposal", movieProjectId.ToString("N"), timelineId.ToString("N"), request.BaseTimelineVersion.ToString(CultureInfo.InvariantCulture), ComputeCandidateHash(candidates, requestedOrder));
@@ -136,34 +142,36 @@ public static class MovieIntercutPlanner
             canonicalOrder.Select(item => item.ToDto()).ToArray(),
             requestedOrder,
             !storyOrderChangeRequested,
-            storyOrderChangeRequested,
+            coverageOrderChangeRequested,
             findings,
             provenanceHash);
     }
 
     /// <summary>
-    /// Applies a requested order only when the caller supplies an explicit approval reason. A
+    /// Applies a changed requested coverage order only with an explicit approval reason. A
     /// rejected approval returns the review proposal unchanged and never mutates persisted data.
     /// </summary>
     public static MovieCanonicalTimelineContract ApplyUserApproval(MovieIntercutPlanDto proposal, MovieIntercutApproval approval)
     {
         if (proposal is null) throw new ArgumentNullException(nameof(proposal));
         if (approval is null) throw new ArgumentNullException(nameof(approval));
-        if (!proposal.RequiresUserApproval || !proposal.Coverage.Any(item => item.CoverageKind == MovieIntercutCoverageKinds.Primary))
+        if (!proposal.RequiresUserApproval)
             return proposal.ProposedTimeline;
         if (!approval.Approved)
             return proposal.ProposedTimeline;
         if (string.IsNullOrWhiteSpace(approval.Reason) || approval.Reason.Trim().Length > 2_000)
             throw new MovieIntercutPlanningException(MovieIntercutPlanCodes.ApprovalRequired, "An approved story-order change requires a reason of 1 to 2,000 characters.");
 
-        var primaryIds = proposal.Coverage.Where(item => item.CoverageKind == MovieIntercutCoverageKinds.Primary).Select(item => item.ClipId).ToHashSet();
-        var requestedPrimaryIds = proposal.RequestedClipOrder.Where(primaryIds.Contains).ToArray();
-        var currentPrimaryIds = proposal.ProposedTimeline.Clips
-            .Where(item => primaryIds.Contains(item.ClipId))
+        var canonicalIds = proposal.ProposedTimeline.Clips
             .OrderBy(item => item.Sequence)
             .Select(item => item.ClipId)
             .ToArray();
-        if (requestedPrimaryIds.SequenceEqual(currentPrimaryIds))
+        var approvedOrder = proposal.RequestedClipOrder.ToArray();
+        if (approvedOrder.Length != canonicalIds.Length
+            || approvedOrder.Distinct().Count() != approvedOrder.Length
+            || !approvedOrder.ToHashSet().SetEquals(canonicalIds))
+            throw new MovieIntercutPlanningException(MovieIntercutPlanCodes.StoryOrderInvalid, "The approved order must contain each canonical proposal clip exactly once.");
+        if (approvedOrder.SequenceEqual(canonicalIds))
             return proposal.ProposedTimeline;
 
         // The request order is retained in the proposal's coverage ordering only through the
@@ -173,7 +181,6 @@ public static class MovieIntercutPlanner
         // One lookup per clip keeps approval linear for long-form films. Repeated
         // First() scans made large editorial reorders quadratic in clip count.
         var coverageByClipId = proposal.Coverage.ToDictionary(item => item.ClipId);
-        var approvedOrder = proposal.RequestedClipOrder.ToArray();
         var reordered = approvedOrder.Select(id =>
         {
             var clip = clipsById[id];
