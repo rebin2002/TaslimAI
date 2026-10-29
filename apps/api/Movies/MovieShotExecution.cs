@@ -589,7 +589,7 @@ public sealed class MovieShotExecutionService(
             .Where(entry => entry.State == EntityState.Added
                 && ((candidateKey is not null && entry.Entity.IdempotencyKey == candidateKey)
                     || (entry.Entity.JobType == GenerationJobTypes.MovieClipGenerate
-                        && InputReferencesClip(entry.Entity.InputJson, clip.Id)))
+                        && InputReferencesClip(entry.Entity.InputJson, clip.Id))))
             .ToArray())
             entry.State = EntityState.Detached;
 
