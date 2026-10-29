@@ -1227,6 +1227,7 @@ export const api = {
   getMovieBudgetDirector: (id: string) => request<MovieBudgetDirectorEstimate>(`/api/movie-studio/projects/${id}/budget-director`),
   previewMovieBudgetDirector: (id: string, input: MovieBudgetDirectorRequest) => request<MovieBudgetDirectorEstimate>(`/api/movie-studio/projects/${id}/budget-director/preview`, { method: "POST", body: JSON.stringify(input) }, true),
   getMovieProject: (id: string) => request<MovieProject>(`/api/movie-studio/projects/${id}`),
+  updateMovieProjectDuration: (id: string, durationSeconds: number) => request<MovieProject>(`/api/movie-studio/projects/${id}/duration`, { method: "PATCH", body: JSON.stringify({ durationSeconds }) }, true),
   getMovieTimeline: (id: string) => request<MovieTimeline>(`/api/movie-studio/projects/${id}/timeline`),
   getMovieTimelineTransitions: (id: string) => request<MovieTimelineTransitionEdit>(`/api/movie-studio/projects/${id}/timeline/transition-edits`),
   applyMovieTimelineTransition: (id: string, input: { timeline: MovieCanonicalTimeline; decision: MovieTimelineEditDecision }) => request<MovieTimelineTransitionEdit>(`/api/movie-studio/projects/${id}/timeline/transition-edits`, { method: "POST", body: JSON.stringify(input) }, true),
