@@ -195,10 +195,12 @@ public sealed class FileProcessingService(
         {
             logger.LogInformation("Generated stream storage started. FileId={FileId}; WorkspaceId={WorkspaceId}; StorageProvider={StorageProvider}; SizeBytes={SizeBytes}", file.Id, workspaceId, storage.ProviderKey, sizeBytes);
             await using var input = await openReadAsync(cancellationToken);
-            await using var bounded = new CountingReadStream(input, Math.Max(1, settings.MaxGeneratedVideoBytes));
+            // Propagate the known generated-stream length to non-seekable S3 PUTs.
+            // Post-upload verification must also probe EOF: the SDK may stop
+            // reading at Content-Length and otherwise hide trailing bytes.
+            await using var bounded = new CountingReadStream(input, Math.Max(1, settings.MaxGeneratedVideoBytes), sizeBytes);
             await RunStorageOperationAsync("store", token => storage.StoreAsync(storageKey, bounded, token), cancellationToken);
-            if (bounded.BytesRead != sizeBytes)
-                throw new FileUploadValidationException("Generated video output size did not match its declared size.");
+            await bounded.VerifyExactLengthAsync(sizeBytes, cancellationToken);
             var inspection = GeneratedMediaInspector.Inspect(descriptor, bounded.Prefix.Span, streamMetadata, bounded.Sha256Hex);
             file.ContentHashSha256 = bounded.Sha256Hex;
             file.ContainerFormat = inspection.ContainerFormat;
@@ -398,6 +400,19 @@ internal sealed class CountingReadStream(Stream inner, long maxBytes, long? expe
     // Uploaded file sizes are validated before storage; expose the declared length
     // to S3 without making this hash/counting stream seekable.
     internal long? ExpectedContentLength => expectedContentLength;
+    internal async Task VerifyExactLengthAsync(long expectedBytes, CancellationToken cancellationToken = default)
+    {
+        const string error = "Generated video output size did not match its declared size.";
+        if (BytesRead != expectedBytes)
+            throw new FileUploadValidationException(error);
+
+        // Content-Length may make a destination stop before reading EOF.
+        // Probe the source once to reject extra bytes and finalize its hash,
+        // while keeping the payload streamed rather than buffered.
+        var trailing = new byte[1];
+        if (await ReadAsync(trailing.AsMemory(), cancellationToken) != 0)
+            throw new FileUploadValidationException(error);
+    }
     private readonly byte[] prefix = new byte[64];
     private readonly IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
     private bool hashFinalized;
