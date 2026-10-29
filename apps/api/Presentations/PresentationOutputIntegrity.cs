@@ -14,6 +14,7 @@ public static class PresentationOutputIntegrityValidator
     private const string DrawingNamespace = "http://schemas.openxmlformats.org/drawingml/2006/main";
     private const string RelationshipsNamespace = "http://schemas.openxmlformats.org/package/2006/relationships";
     private const string OfficeRelationshipNamespace = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+    private const string OfficeDocumentRelationshipType = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument";
     private const string SlideMasterRelationshipType = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster";
     private const string SlideRelationshipType = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide";
     private const string SlideLayoutRelationshipType = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout";
@@ -56,7 +57,8 @@ public static class PresentationOutputIntegrityValidator
                 _ = archive.GetEntry(part) ?? throw new PresentationOutputIntegrityException($"The presentation package is missing required part '{part}'.");
 
             RequireRoot(ParseRequiredXml(archive, "[Content_Types].xml"), "Types", ContentTypesNamespace, "[Content_Types].xml");
-            RequireRoot(ParseRequiredXml(archive, "_rels/.rels"), "Relationships", RelationshipsNamespace, "_rels/.rels");
+            var packageRelationships = RequireRoot(ParseRequiredXml(archive, "_rels/.rels"), "Relationships", RelationshipsNamespace, "_rels/.rels");
+            RequireTargetRelationship(packageRelationships, OfficeDocumentRelationshipType, "ppt/presentation.xml", "_rels/.rels");
             RequireRoot(ParseRequiredXml(archive, "ppt/theme/theme1.xml"), "theme", DrawingNamespace, "ppt/theme/theme1.xml");
             var slideMasterRoot = RequireRoot(ParseRequiredXml(archive, "ppt/slideMasters/slideMaster1.xml"), "sldMaster", PresentationNamespace, "ppt/slideMasters/slideMaster1.xml");
             var slideMasterRelationships = RequireRoot(ParseRequiredXml(archive, "ppt/slideMasters/_rels/slideMaster1.xml.rels"), "Relationships", RelationshipsNamespace, "ppt/slideMasters/_rels/slideMaster1.xml.rels");
@@ -152,6 +154,14 @@ public static class PresentationOutputIntegrityValidator
                 && string.Equals(item.Attribute("Type")?.Value, type, StringComparison.Ordinal)
                 && string.Equals(item.Attribute("Target")?.Value, target, StringComparison.Ordinal)))
             throw new PresentationOutputIntegrityException($"The presentation package is missing relationship '{id ?? "<missing>"}' to '{target}' in '{part}'.");
+    }
+
+    private static void RequireTargetRelationship(XElement relationships, string type, string target, string part)
+    {
+        if (!relationships.Elements(XName.Get("Relationship", RelationshipsNamespace)).Any(item =>
+                string.Equals(item.Attribute("Type")?.Value, type, StringComparison.Ordinal)
+                && string.Equals(item.Attribute("Target")?.Value, target, StringComparison.Ordinal)))
+            throw new PresentationOutputIntegrityException($"The presentation package is missing a relationship to '{target}' in '{part}'.");
     }
 
     private static bool TryGetSlideNumber(string name, out int number)
