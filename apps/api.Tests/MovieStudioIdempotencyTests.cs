@@ -819,3 +819,21 @@ public sealed class MovieStudioIdempotencyTests : IClassFixture<MovieOperational
             .Where(item => item.Id == asset.Id).Select(item => item.WorkspaceId).SingleAsync());
     }
 }
+
+public sealed class MovieStudioClipJobLinkTests
+{
+    [Fact]
+    public void A_replayed_job_may_repair_an_unlinked_clip_but_never_adopt_another_jobs_clip()
+    {
+        // The initial lookup, job-creation exception and post-creation race
+        // branches must apply the same identity rule before returning a
+        // canonical clip. Different job IDs carry different usage reservations.
+        var canonicalJobId = Guid.NewGuid();
+        var foreignJobId = Guid.NewGuid();
+
+        Assert.True(MovieStudioIdempotency.IsCompatibleClipLink(null, canonicalJobId));
+        Assert.True(MovieStudioIdempotency.IsCompatibleClipLink(canonicalJobId, canonicalJobId));
+        Assert.False(MovieStudioIdempotency.IsCompatibleClipLink(foreignJobId, canonicalJobId));
+        Assert.False(MovieStudioIdempotency.IsCompatibleClipLink(Guid.Empty, canonicalJobId));
+    }
+}
