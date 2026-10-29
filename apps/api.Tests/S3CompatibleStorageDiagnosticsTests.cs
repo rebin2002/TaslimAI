@@ -200,6 +200,44 @@ public sealed class S3CompatibleStorageDiagnosticsTests
         Assert.Empty(logger.Exceptions);
     }
 
+    [Theory]
+    [InlineData("get")]
+    [InlineData("head")]
+    [InlineData("delete")]
+    public async Task Failed_private_object_operations_do_not_hide_permission_errors_or_log_identifiers(string operation)
+    {
+        // An upstream error code resembling a missing key must not turn a
+        // permission failure into a missing file, nor expose private identity.
+        const string privateMarker = "synthetic-private-storage-identity-DO-NOT-LOG";
+        var logger = new CapturingLogger();
+        var upstream = new AmazonS3Exception($"Private endpoint {privateMarker}")
+        {
+            StatusCode = HttpStatusCode.Forbidden,
+            ErrorCode = $"NoSuchKey-{privateMarker}",
+        };
+        using var storage = new S3CompatibleFileStorageService(
+            new ThrowingObjectClient(upstream),
+            Options.Create(new Taslim.Api.Files.FileOptions { S3Bucket = $"bucket-{privateMarker}" }),
+            logger);
+
+        await Assert.ThrowsAsync<FileStorageOperationException>(() => operation switch
+        {
+            "get" => storage.OpenReadAsync($"private/{privateMarker}/medical.pdf"),
+            "head" => storage.ExistsAsync($"private/{privateMarker}/medical.pdf"),
+            "delete" => storage.DeleteAsync($"private/{privateMarker}/medical.pdf"),
+            _ => throw new ArgumentOutOfRangeException(nameof(operation)),
+        });
+
+        var message = Assert.Single(logger.Messages);
+        Assert.Contains($"Operation={operation}", message, StringComparison.Ordinal);
+        Assert.Contains("StatusCode=403", message, StringComparison.Ordinal);
+        Assert.Contains("FailureClass=s3_auth_or_permission", message, StringComparison.Ordinal);
+        Assert.DoesNotContain(privateMarker, message, StringComparison.Ordinal);
+        Assert.DoesNotContain("medical.pdf", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("ErrorCode=", message, StringComparison.Ordinal);
+        Assert.Empty(logger.Exceptions);
+    }
+
     private sealed class CapturingLogger : ILogger<S3CompatibleFileStorageService>
     {
         public List<string> Messages { get; } = [];
