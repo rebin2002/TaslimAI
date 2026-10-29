@@ -22,6 +22,7 @@ namespace Taslim.Api.Tests;
 public sealed class PasswordRecoveryApiFactory : WebApplicationFactory<Program>
 {
     private readonly SqliteConnection connection = new("DataSource=:memory:");
+    private bool recoveryEnabled;
     private readonly TimeSpan? resetTokenLifetime;
     private readonly Dictionary<string, string?> recoverySettings = new()
     {
@@ -36,9 +37,9 @@ public sealed class PasswordRecoveryApiFactory : WebApplicationFactory<Program>
 
     public PasswordRecoveryApiFactory() : this(recoveryEnabled: true, resetTokenLifetime: null) { }
 
-    public PasswordRecoveryApiFactory(bool recoveryEnabled, TimeSpan? resetTokenLifetime = null)
+    internal PasswordRecoveryApiFactory(bool recoveryEnabled = true, TimeSpan? resetTokenLifetime = null)
     {
-        recoverySettings["PasswordRecovery:Enabled"] = recoveryEnabled ? "true" : "false";
+        this.recoveryEnabled = recoveryEnabled;
         this.resetTokenLifetime = resetTokenLifetime;
         connection.Open();
         using var db = new TaslimDbContext(new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connection).Options);
@@ -48,6 +49,7 @@ public sealed class PasswordRecoveryApiFactory : WebApplicationFactory<Program>
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseEnvironment("Testing");
+        recoverySettings["PasswordRecovery:Enabled"] = recoveryEnabled ? "true" : "false";
         builder.ConfigureAppConfiguration((_, configuration) => configuration.AddInMemoryCollection(recoverySettings));
         builder.ConfigureServices(services =>
         {
@@ -61,7 +63,11 @@ public sealed class PasswordRecoveryApiFactory : WebApplicationFactory<Program>
         });
     }
 
-    public void SetRecoveryEnabled(bool enabled) => recoverySettings["PasswordRecovery:Enabled"] = enabled ? "true" : "false";
+    public void SetRecoveryEnabled(bool enabled)
+    {
+        recoveryEnabled = enabled;
+        recoverySettings["PasswordRecovery:Enabled"] = enabled ? "true" : "false";
+    }
 
     protected override void Dispose(bool disposing)
     {
@@ -97,8 +103,8 @@ public sealed class PasswordRecoveryTests(PasswordRecoveryApiFactory factory) : 
     public async Task Availability_reports_only_server_readiness_and_reset_fails_closed_when_disabled()
     {
         using var disabledFactory = new PasswordRecoveryApiFactory(recoveryEnabled: false);
-        using var enabledFactory = new PasswordRecoveryApiFactory(recoveryEnabled: true);
-        using var unconfiguredFactory = new PasswordRecoveryApiFactory(recoveryEnabled: true);
+        using var enabledFactory = new PasswordRecoveryApiFactory();
+        using var unconfiguredFactory = new PasswordRecoveryApiFactory();
         unconfiguredFactory.EmailSender.SetConfigured(false);
         using var disabledClient = disabledFactory.CreateClient();
         using var enabledClient = enabledFactory.CreateClient();
@@ -152,7 +158,7 @@ public sealed class PasswordRecoveryTests(PasswordRecoveryApiFactory factory) : 
     [Fact]
     public async Task Actually_expired_identity_reset_token_is_rejected()
     {
-        using var expiryFactory = new PasswordRecoveryApiFactory(recoveryEnabled: true, resetTokenLifetime: TimeSpan.FromSeconds(3));
+        using var expiryFactory = new PasswordRecoveryApiFactory(resetTokenLifetime: TimeSpan.FromSeconds(3));
         var email = $"expired-{Guid.NewGuid():N}@example.test";
         using var registering = expiryFactory.CreateClient();
         Assert.Equal(HttpStatusCode.OK, (await Register(registering, email)).StatusCode);
