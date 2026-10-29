@@ -1110,6 +1110,18 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
         catch (GenerationJobValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
     }
 
+    [HttpPost("projects/{id:guid}/scenes/{sceneId:guid}/generation-preview")]
+    [ValidateAntiForgeryToken]
+    [EnableRateLimiting(RateLimiting.ExpensiveAi)]
+    public async Task<IActionResult> PreviewSceneGeneration(Guid id, Guid sceneId, MovieStudioGenerationRequest request, CancellationToken cancellationToken)
+    {
+        if (!ModelState.IsValid) return ApiResults.Validation(this);
+        var result = await movies.PreviewSceneGenerationAsync(GetUserId(), id, sceneId, request, cancellationToken);
+        return result is null
+            ? ApiResults.Error(this, 404, "MOVIE_SCENE_NOT_FOUND", "Movie scene not found.")
+            : Ok(result);
+    }
+
     [HttpPost("projects/{id:guid}/scenes/{sceneId:guid}/generate")]
     [ValidateAntiForgeryToken]
     [EnableRateLimiting(RateLimiting.ExpensiveAi)]

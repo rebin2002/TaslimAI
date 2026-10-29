@@ -60,6 +60,7 @@ public interface IMovieStudioService
     Task<MovieV2TakeDto?> CreateTakeFromProductionAsync(Guid userId, Guid versionId, MovieProductionTakeRequest request, CancellationToken cancellationToken);
     Task<MovieStudioGenerationResponse?> GenerateSceneAsync(Guid userId, Guid movieProjectId, Guid sceneId, MovieStudioGenerationRequest request, CancellationToken cancellationToken, string? idempotencyKey = null);
     Task<MovieStudioGenerationResponse?> GenerateShotAsync(Guid userId, Guid shotId, MovieStudioGenerationRequest request, CancellationToken cancellationToken, string? idempotencyKey = null);
+    Task<MovieSceneGenerationPreviewDto?> PreviewSceneGenerationAsync(Guid userId, Guid movieProjectId, Guid sceneId, MovieStudioGenerationRequest request, CancellationToken cancellationToken);
     Task<MovieProviderReadinessDto> ProviderReadinessAsync();
 }
 
@@ -1356,6 +1357,78 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         var scene = await db.MovieScenes.Include(item => item.MovieProject).ThenInclude(item => item.Guide).FirstOrDefaultAsync(item => item.Id == sceneId && item.MovieProjectId == movieProjectId, cancellationToken);
         if (scene is null || !await collaboration.HasPermissionAsync(userId, movieProjectId, MoviePermissions.Generate, cancellationToken)) return null;
         return await QueueClipAsync(userId, scene.MovieProject, scene, null, request, cancellationToken, idempotencyKey);
+    }
+
+    public async Task<MovieSceneGenerationPreviewDto?> PreviewSceneGenerationAsync(Guid userId, Guid movieProjectId, Guid sceneId, MovieStudioGenerationRequest request, CancellationToken cancellationToken)
+    {
+        var scene = await db.MovieScenes.Include(item => item.MovieProject)
+            .FirstOrDefaultAsync(item => item.Id == sceneId && item.MovieProjectId == movieProjectId, cancellationToken);
+        if (scene is null || !await collaboration.HasPermissionAsync(userId, movieProjectId, MoviePermissions.Generate, cancellationToken)) return null;
+
+        var movie = scene.MovieProject;
+        var durationSeconds = scene.DurationSeconds ?? Math.Min(movie.DurationSeconds, 60);
+        var sourceResolution = request.SourceResolution?.Trim() ?? string.Empty;
+        var targetResolution = request.TargetResolution?.Trim() ?? string.Empty;
+        var qualityTier = request.QualityTier?.Trim() ?? string.Empty;
+        var processingPath = request.ProcessingPath?.Trim() ?? string.Empty;
+
+        MovieSceneGenerationPreviewDto Reject(string code, string message) => new(
+            durationSeconds, sourceResolution, targetResolution, qualityTier, processingPath,
+            false, false, null, code, message);
+
+        if (request.RetryAttempts != 0 || request.UpscalePasses != 0 || request.UpscalingRequested)
+            return Reject("MOVIE_GENERATION_OPTIONS_UNSUPPORTED",
+                "This scene-generation route does not support retries or upscaling options.");
+        if (durationSeconds is < 1 or > 3600)
+            return Reject("MOVIE_CLIP_DURATION_UNSUPPORTED",
+                "A single clip must last between 1 and 3600 seconds. Split longer scenes into shorter shots.");
+        if (!provider.IsAvailable
+            || !provider.SupportedOperations.Contains(MovieStudioOperations.SceneClip, StringComparer.OrdinalIgnoreCase))
+            return Reject("MOVIE_PROVIDER_UNAVAILABLE",
+                "The selected video provider is unavailable for scene generation.");
+        if (provider.SceneClipDurationRange is not { } clipDurationRange
+            || !clipDurationRange.Supports(durationSeconds))
+            return Reject("MOVIE_CLIP_DURATION_UNSUPPORTED",
+                "The selected video provider cannot generate a single clip of this duration.");
+        if (string.IsNullOrWhiteSpace(sourceResolution)
+            || string.IsNullOrWhiteSpace(targetResolution)
+            || string.IsNullOrWhiteSpace(qualityTier)
+            || string.IsNullOrWhiteSpace(processingPath))
+            return Reject("MOVIE_CLIP_EXECUTION_INTENT_REQUIRED",
+                "Choose an explicit source resolution, output resolution, quality tier, and processing path before previewing cost.");
+        if (!string.Equals(processingPath, "native", StringComparison.OrdinalIgnoreCase))
+            return Reject("MOVIE_GENERATION_OPTIONS_UNSUPPORTED",
+                "This scene-generation route does not support upscaling or non-native processing paths.");
+        if (!provider.SupportsSceneClipCostIntent(sourceResolution, targetResolution,
+                qualityTier, processingPath, movie.AspectRatio))
+            return Reject("MOVIE_CLIP_EXECUTION_INTENT_UNSUPPORTED",
+                "This provider cannot guarantee the requested resolution, quality and processing profile. Choose a supported output profile.");
+
+        var estimate = await movieCostEstimator.EstimateAsync(
+            new MovieGenerationCostRequest(durationSeconds, sourceResolution, targetResolution,
+                qualityTier, processingPath, request.RetryAttempts, request.UpscalingRequested, request.UpscalePasses),
+            provider.Key,
+            cancellationToken: cancellationToken);
+        var guardrail = await costGuardrails.EvaluateAsync(
+            userId,
+            movie.WorkspaceId,
+            movie.ProjectId,
+            estimate.ToGenerationCostEstimate(),
+            confirmationAccepted: false,
+            cancellationToken: cancellationToken);
+        var hasKnownPrice = estimate.IsEstimated && estimate.MaximumAmountUsd.HasValue;
+        var canConfirmCost = guardrail.Allowed && hasKnownPrice;
+        var rejectionCode = canConfirmCost
+            ? null
+            : guardrail.RejectionCode ?? "MOVIE_COST_ESTIMATE_UNAVAILABLE";
+        var rejectionMessage = canConfirmCost
+            ? null
+            : guardrail.RejectionMessage ?? "A verified price is unavailable for this exact Movie clip profile; generation remains blocked.";
+
+        return new MovieSceneGenerationPreviewDto(
+            durationSeconds, sourceResolution, targetResolution, qualityTier, processingPath,
+            true, canConfirmCost, GenerationCostPreviewMapper.ToDto(guardrail),
+            rejectionCode, rejectionMessage);
     }
 
     public async Task<MovieStudioGenerationResponse?> GenerateShotAsync(Guid userId, Guid shotId, MovieStudioGenerationRequest request, CancellationToken cancellationToken, string? idempotencyKey = null)

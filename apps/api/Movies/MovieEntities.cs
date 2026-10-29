@@ -941,6 +941,17 @@ public sealed record MovieStudioProjectDto(Guid Id, Guid WorkspaceId, Guid? Proj
 public sealed record MovieStudioProjectResponse(MovieStudioProjectDto Project, GenerationJobDto? Job);
 public sealed record MovieStudioProviderResponse(MovieProviderReadinessDto Provider);
 public sealed record MovieStudioGenerationResponse(MovieStudioProjectDto Project, GenerationJobDto Job, Guid ClipId);
+public sealed record MovieSceneGenerationPreviewDto(
+    int DurationSeconds,
+    string SourceResolution,
+    string TargetResolution,
+    string QualityTier,
+    string ProcessingPath,
+    bool ExecutionProfileVerified,
+    bool CanConfirmCost,
+    GenerationCostPreviewDto? CostGuardrails,
+    string? RejectionCode,
+    string? RejectionMessage);
 public sealed record MovieGuideRevisionResponse(MovieGuideRevisionDto Revision, MovieDirectorContextDto? AuthoritativeContext);
 public sealed record MovieGuideHistoryResponse(Guid MovieGuideId, int CurrentRevisionNumber, int? LockedRevisionNumber, IReadOnlyList<MovieGuideRevisionDto> Revisions);
 
