@@ -268,6 +268,84 @@ public sealed class MovieProductionPreflightTests : IClassFixture<GenerationJobs
         Assert.Contains("blocking reference conflict", blocked.Detail, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public async Task Production_preflight_source_query_aliases_are_equivalent_and_conflicts_fail_closed()
+    {
+        // The two supported query names refer to one canonical approved
+        // production source. Matching values must be equivalent, whereas
+        // conflicting values must never silently choose a source or queue work.
+        using var isolatedFactory = new MovieClipDurationApiFactory();
+        using (var setup = isolatedFactory.Services.CreateScope())
+            setup.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+
+        using var client = isolatedFactory.CreateClient();
+        var movie = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Preflight source alias integrity", sceneDurationSeconds: 5);
+        var versionsPath = "/api/movie-studio/shots/" + movie.Shot.Id + "/production/versions";
+        var candidate = await SendWithCsrf<MovieProductionVersionDto>(
+            client, HttpMethod.Post, versionsPath,
+            new { stage = MovieProductionStages.StoryboardCandidate, compositionJson = "{\"frame\":\"wide\"}" });
+        var approvedStoryboard = await SendWithCsrf<MovieProductionVersionDto>(
+            client, HttpMethod.Post, "/api/movie-studio/production/versions/" + candidate.Id + "/review",
+            new { approve = true });
+        var keyframe = await SendWithCsrf<MovieProductionVersionDto>(
+            client, HttpMethod.Post, versionsPath,
+            new { stage = MovieProductionStages.ProductionKeyframe,
+                  sourceVersionId = approvedStoryboard.Id, compositionJson = "{\"frame\":\"approved\"}" });
+        var approvedKeyframe = await SendWithCsrf<MovieProductionVersionDto>(
+            client, HttpMethod.Post, "/api/movie-studio/production/versions/" + keyframe.Id + "/review",
+            new { approve = true });
+        var motion = await SendWithCsrf<MovieProductionVersionDto>(
+            client, HttpMethod.Post,
+            "/api/movie-studio/shots/" + movie.Shot.Id + "/production/motion-preview",
+            new { sourceVersionId = approvedKeyframe.Id });
+        var approvedMotion = await SendWithCsrf<MovieProductionVersionDto>(
+            client, HttpMethod.Post, "/api/movie-studio/production/versions/" + motion.Id + "/review",
+            new { approve = true });
+
+        using var verify = isolatedFactory.Services.CreateScope();
+        var db = verify.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var clipsBefore = await db.MovieClips.CountAsync();
+        var jobsBefore = await db.GenerationJobs.CountAsync();
+        var usageBefore = await db.UsageTransactions.CountAsync();
+        var providerLog = verify.ServiceProvider.GetRequiredService<FakeProviderCallLog>();
+        var callsBefore = providerLog.Calls(FakeProviderKind.Movie);
+
+        var url = "/api/movie-studio/shots/" + movie.Shot.Id
+            + "/production/preflight?targetResolution=720p&qualityTier=Standard&confirmationAccepted=true";
+        using var canonicalResponse = await client.GetAsync(
+            url + "&sourceVersionId=" + approvedMotion.Id);
+        using var aliasResponse = await client.GetAsync(
+            url + "&sourceProductionVersionId=" + approvedMotion.Id);
+        using var matchingResponse = await client.GetAsync(
+            url + "&sourceVersionId=" + approvedMotion.Id
+                + "&sourceProductionVersionId=" + approvedMotion.Id);
+        using var conflictResponse = await client.GetAsync(
+            url + "&sourceVersionId=" + approvedMotion.Id
+                + "&sourceProductionVersionId=" + Guid.NewGuid());
+
+        Assert.Equal(HttpStatusCode.OK, canonicalResponse.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, aliasResponse.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, matchingResponse.StatusCode);
+        var canonical = (await canonicalResponse.Content.ReadFromJsonAsync<MovieProductionPreflightDto>())!;
+        var alias = (await aliasResponse.Content.ReadFromJsonAsync<MovieProductionPreflightDto>())!;
+        var matching = (await matchingResponse.Content.ReadFromJsonAsync<MovieProductionPreflightDto>())!;
+        Assert.Equal(canonical.Decision, alias.Decision);
+        Assert.Equal(canonical.Decision, matching.Decision);
+        Assert.Equal(canonical.RejectionCode, alias.RejectionCode);
+        Assert.Equal(canonical.RejectionCode, matching.RejectionCode);
+        Assert.Equal(canonical.CanProceed, alias.CanProceed);
+        Assert.Equal(canonical.CanProceed, matching.CanProceed);
+        Assert.Equal(HttpStatusCode.BadRequest, conflictResponse.StatusCode);
+        Assert.Contains("MOVIE_PREFLIGHT_SOURCE_CONFLICT",
+            await conflictResponse.Content.ReadAsStringAsync());
+
+        Assert.Equal(clipsBefore, await db.MovieClips.CountAsync());
+        Assert.Equal(jobsBefore, await db.GenerationJobs.CountAsync());
+        Assert.Equal(usageBefore, await db.UsageTransactions.CountAsync());
+        Assert.Equal(callsBefore, providerLog.Calls(FakeProviderKind.Movie));
+    }
+
     private static async Task<AuthResponse> Register(HttpClient client)
     {
         var response = await SendWithCsrf(client, HttpMethod.Post, "/api/auth/register", new
