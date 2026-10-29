@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, type FormEvent } from "react";
+import { useState, type FormEvent } from "react";
 import { api } from "@/lib/api";
 import { useLocale } from "@/components/LocaleProvider";
 
@@ -60,15 +60,6 @@ export function MovieProjectDurationEditor({
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
-
-  // The workspace can refresh its authoritative duration or switch projects
-  // without remounting this editor. Never carry a previous project\u0027s draft
-  // value or success/error notice into another project\u0027s save operation.
-  useEffect(() => {
-    setValue(String(durationSeconds));
-    setNotice("");
-    setError("");
-  }, [projectId, durationSeconds]);
 
   const number = Number(value);
   const valid = /^[0-9]+$/.test(value) && Number.isSafeInteger(number)
