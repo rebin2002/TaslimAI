@@ -30,6 +30,7 @@ public sealed class MovieDirectorIntercutControllerTests
         var workspaceId = Guid.NewGuid();
         var requestedProjectId = Guid.NewGuid();
         var foreignProjectId = Guid.NewGuid();
+        var implicitProjectId = Guid.NewGuid();
         var foreignTimelineId = Guid.NewGuid();
         var ownedTimelineId = Guid.NewGuid();
         var ownedSceneId = Guid.NewGuid();
@@ -38,25 +39,33 @@ public sealed class MovieDirectorIntercutControllerTests
         var foreignSceneId = Guid.NewGuid();
         var foreignShotId = Guid.NewGuid();
         var foreignClipId = Guid.NewGuid();
+        var implicitSceneId = Guid.NewGuid();
+        var implicitShotId = Guid.NewGuid();
+        var implicitClipId = Guid.NewGuid();
         db.Users.Add(new ApplicationUser { Id = userId, UserName = "intercut-owner", NormalizedUserName = "INTERCUT-OWNER", DisplayName = "Intercut Owner", CreatedAt = now, UpdatedAt = now });
         db.Workspaces.Add(new Workspace { Id = workspaceId, Name = "Intercut Workspace", Slug = $"intercut-{Guid.NewGuid():N}", Type = WorkspaceType.Personal, CreatedAt = now, UpdatedAt = now });
         db.WorkspaceMembers.Add(new WorkspaceMember { Id = Guid.NewGuid(), WorkspaceId = workspaceId, UserId = userId, Role = WorkspaceRole.Owner });
         db.MovieProjects.AddRange(
             new MovieProject { Id = requestedProjectId, WorkspaceId = workspaceId, CreatedByUserId = userId, Title = "Requested", Description = "Requested.", DurationSeconds = 30, Guide = new MovieContinuityGuide { Id = Guid.NewGuid(), UpdatedAt = now }, CreatedAt = now, UpdatedAt = now },
-            new MovieProject { Id = foreignProjectId, WorkspaceId = workspaceId, CreatedByUserId = userId, Title = "Foreign", Description = "Foreign.", DurationSeconds = 30, Guide = new MovieContinuityGuide { Id = Guid.NewGuid(), UpdatedAt = now }, CreatedAt = now, UpdatedAt = now });
+            new MovieProject { Id = foreignProjectId, WorkspaceId = workspaceId, CreatedByUserId = userId, Title = "Foreign", Description = "Foreign.", DurationSeconds = 30, Guide = new MovieContinuityGuide { Id = Guid.NewGuid(), UpdatedAt = now }, CreatedAt = now, UpdatedAt = now },
+            new MovieProject { Id = implicitProjectId, WorkspaceId = workspaceId, CreatedByUserId = userId, Title = "Implicit Timeline", Description = "Implicit timeline fixture.", DurationSeconds = 30, Guide = new MovieContinuityGuide { Id = Guid.NewGuid(), UpdatedAt = now }, CreatedAt = now, UpdatedAt = now });
         db.MovieTeamMembers.Add(new MovieTeamMember { Id = Guid.NewGuid(), MovieProjectId = requestedProjectId, UserId = userId, Role = MovieTeamRoles.Producer, IsProjectOwner = true, CreatedAt = now, UpdatedAt = now });
+        db.MovieTeamMembers.Add(new MovieTeamMember { Id = Guid.NewGuid(), MovieProjectId = implicitProjectId, UserId = userId, Role = MovieTeamRoles.Producer, IsProjectOwner = true, CreatedAt = now, UpdatedAt = now });
         db.MovieTimelines.AddRange(
             new MovieTimeline { Id = foreignTimelineId, MovieProjectId = foreignProjectId, CurrentRevisionNumber = 1, CreatedAt = now, UpdatedAt = now },
             new MovieTimeline { Id = ownedTimelineId, MovieProjectId = requestedProjectId, CurrentRevisionNumber = 1, CreatedAt = now, UpdatedAt = now });
         db.MovieScenes.AddRange(
             new MovieScene { Id = ownedSceneId, MovieProjectId = requestedProjectId, Sequence = 1, Title = "Owned Scene", CreatedAt = now, UpdatedAt = now },
-            new MovieScene { Id = foreignSceneId, MovieProjectId = foreignProjectId, Sequence = 1, Title = "Foreign Scene", CreatedAt = now, UpdatedAt = now });
+            new MovieScene { Id = foreignSceneId, MovieProjectId = foreignProjectId, Sequence = 1, Title = "Foreign Scene", CreatedAt = now, UpdatedAt = now },
+            new MovieScene { Id = implicitSceneId, MovieProjectId = implicitProjectId, Sequence = 1, Title = "Implicit Scene", CreatedAt = now, UpdatedAt = now });
         db.MovieShots.AddRange(
             new MovieShot { Id = ownedShotId, MovieSceneId = ownedSceneId, Sequence = 1, Description = "Owned shot", CreatedAt = now, UpdatedAt = now },
-            new MovieShot { Id = foreignShotId, MovieSceneId = foreignSceneId, Sequence = 1, Description = "Foreign shot", CreatedAt = now, UpdatedAt = now });
+            new MovieShot { Id = foreignShotId, MovieSceneId = foreignSceneId, Sequence = 1, Description = "Foreign shot", CreatedAt = now, UpdatedAt = now },
+            new MovieShot { Id = implicitShotId, MovieSceneId = implicitSceneId, Sequence = 1, Description = "Implicit shot", CreatedAt = now, UpdatedAt = now });
         db.MovieClips.AddRange(
             new MovieClip { Id = ownedClipId, MovieProjectId = requestedProjectId, MovieSceneId = ownedSceneId, MovieShotId = ownedShotId, DurationSeconds = 2, CreatedAt = now, UpdatedAt = now },
-            new MovieClip { Id = foreignClipId, MovieProjectId = foreignProjectId, MovieSceneId = foreignSceneId, MovieShotId = foreignShotId, DurationSeconds = 2, CreatedAt = now, UpdatedAt = now });
+            new MovieClip { Id = foreignClipId, MovieProjectId = foreignProjectId, MovieSceneId = foreignSceneId, MovieShotId = foreignShotId, DurationSeconds = 2, CreatedAt = now, UpdatedAt = now },
+            new MovieClip { Id = implicitClipId, MovieProjectId = implicitProjectId, MovieSceneId = implicitSceneId, MovieShotId = implicitShotId, DurationSeconds = 2, CreatedAt = now, UpdatedAt = now });
         await db.SaveChangesAsync();
 
         var authorization = new MovieAuthorizationService(new MovieCollaborationAccess(db, new WorkspaceAccessService(db)));
@@ -164,13 +173,18 @@ public sealed class MovieDirectorIntercutControllerTests
         // Omitted and empty timeline ids resolve to the same stable, project-owned
         // timeline. Once persisted, these implicit requests must not bypass
         // optimistic revision checks, even though no timeline id was supplied.
-        candidate.ClipId = ownedClipId;
-        var defaultPlan = MovieIntercutPlanner.Build(requestedProjectId, request);
-        var noPersistedDefault = await controller.CreateIntercutProposal(requestedProjectId, request, CancellationToken.None);
+        // A MovieProject has at most one persisted MovieTimeline. Use a separate
+        // project for the missing/default-timeline scenario instead of inserting
+        // a second timeline for the already-owned project (an invalid fixture).
+        candidate.ClipId = implicitClipId;
+        candidate.MovieSceneId = implicitSceneId;
+        candidate.MovieShotId = implicitShotId;
+        var defaultPlan = MovieIntercutPlanner.Build(implicitProjectId, request);
+        var noPersistedDefault = await controller.CreateIntercutProposal(implicitProjectId, request, CancellationToken.None);
         Assert.IsType<OkObjectResult>(noPersistedDefault);
         db.MovieTimelines.Add(new MovieTimeline
         {
-            Id = defaultPlan.TimelineId, MovieProjectId = requestedProjectId,
+            Id = defaultPlan.TimelineId, MovieProjectId = implicitProjectId,
             CurrentRevisionNumber = 3, CreatedAt = now, UpdatedAt = now,
         });
         await db.SaveChangesAsync();
@@ -184,13 +198,13 @@ public sealed class MovieDirectorIntercutControllerTests
             .ToArrayAsync();
         Assert.Contains(defaultPlan.TimelineId, persistedTimelineIdsBeforeReview);
 
-        var implicitStale = await controller.CreateIntercutProposal(requestedProjectId, request, CancellationToken.None);
+        var implicitStale = await controller.CreateIntercutProposal(implicitProjectId, request, CancellationToken.None);
         Assert.Equal(409, Assert.IsType<ObjectResult>(implicitStale).StatusCode);
         request.TimelineId = Guid.Empty;
-        var explicitEmptyStale = await controller.CreateIntercutProposal(requestedProjectId, request, CancellationToken.None);
+        var explicitEmptyStale = await controller.CreateIntercutProposal(implicitProjectId, request, CancellationToken.None);
         Assert.Equal(409, Assert.IsType<ObjectResult>(explicitEmptyStale).StatusCode);
         request.BaseTimelineVersion = 3;
-        var currentDefault = await controller.CreateIntercutProposal(requestedProjectId, request, CancellationToken.None);
+        var currentDefault = await controller.CreateIntercutProposal(implicitProjectId, request, CancellationToken.None);
         var currentDefaultPlan = Assert.IsType<MovieIntercutPlanDto>(Assert.IsType<OkObjectResult>(currentDefault).Value);
         Assert.Equal(defaultPlan.TimelineId, currentDefaultPlan.TimelineId);
         Assert.Equal(4, currentDefaultPlan.ProposedTimelineVersion);
@@ -202,9 +216,10 @@ public sealed class MovieDirectorIntercutControllerTests
             .ToArrayAsync();
         Assert.Equal(persistedTimelineIdsBeforeReview, persistedTimelineIdsAfterReview);
         Assert.Equal(3, (await db.MovieTimelines.SingleAsync(item => item.Id == defaultPlan.TimelineId)).CurrentRevisionNumber);
-        Assert.Equal(2, await db.MovieScenes.CountAsync());
-        Assert.Equal(2, await db.MovieShots.CountAsync());
-        Assert.Equal(2, await db.MovieClips.CountAsync());
+        Assert.Equal(3, await db.MovieTimelines.CountAsync());
+        Assert.Equal(3, await db.MovieScenes.CountAsync());
+        Assert.Equal(3, await db.MovieShots.CountAsync());
+        Assert.Equal(3, await db.MovieClips.CountAsync());
         var persisted = await db.MovieTimelines.SingleAsync(item => item.Id == ownedTimelineId);
         Assert.Equal(1, persisted.CurrentRevisionNumber);
     }
