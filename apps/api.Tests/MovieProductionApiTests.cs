@@ -385,6 +385,40 @@ public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWork
         Assert.Equal(render.Job.Id, replay!.Job.Id);
         Assert.Equal(render.ClipId, replay.ClipId);
 
+        // A restored/reconfigured provider route cannot silently replay a
+        // canonical production job that was priced for another adapter.
+        // Exercise provider identity drift without outbound video requests.
+        var providerBoundJob = await db.GenerationJobs.SingleAsync(item => item.Id == render.Job.Id);
+        var originalInputJson = providerBoundJob.InputJson;
+        providerBoundJob.InputJson = JsonSerializer.Serialize(queuedInput with
+        {
+            SelectedProviderKey = "other-video-adapter",
+        });
+        await db.SaveChangesAsync();
+        using var changedProvider = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, renderPath, renderPayload, idempotencyKey: replayKey);
+        Assert.Equal(HttpStatusCode.BadRequest, changedProvider.StatusCode);
+        Assert.Contains("IDEMPOTENCY_KEY_REUSED",
+            await changedProvider.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        // Older jobs without adapter identity continue to replay their
+        // original canonical clip/job; this is a compatibility-only exception.
+        providerBoundJob.InputJson = JsonSerializer.Serialize(queuedInput with
+        {
+            SelectedProviderKey = null,
+        });
+        await db.SaveChangesAsync();
+        using var legacyReplay = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, renderPath, renderPayload, idempotencyKey: replayKey);
+        Assert.True(legacyReplay.IsSuccessStatusCode,
+            await legacyReplay.Content.ReadAsStringAsync());
+        var legacyResult = await legacyReplay.Content.ReadFromJsonAsync<MovieProductionRenderResponse>();
+        Assert.NotNull(legacyResult);
+        Assert.Equal(render.Job.Id, legacyResult!.Job.Id);
+        Assert.Equal(render.ClipId, legacyResult.ClipId);
+        providerBoundJob.InputJson = originalInputJson;
+        await db.SaveChangesAsync();
+
         // The same replay key cannot silently adopt a differently priced
         // output profile or a different creative title. All these negative
         // cases run against the already queued canonical job; no provider is invoked.
