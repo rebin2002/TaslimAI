@@ -259,7 +259,7 @@ public sealed class RunwayMovieVideoProvider(
         }
         else
         {
-            if (!string.Equals(settings.Model, "gen4.5", StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(settings.Model.Trim(), "gen4.5", StringComparison.OrdinalIgnoreCase))
                 throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);
             endpoint = new Uri(GetBaseUri(), "text_to_video");
         }
