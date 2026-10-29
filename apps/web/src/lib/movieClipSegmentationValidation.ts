@@ -11,7 +11,9 @@ import type { MovieClipSegmentationPreview } from "./api";
 export function isConsistentMovieClipSegmentation(preview: MovieClipSegmentationPreview): boolean {
   const min = preview.minimumClipSeconds;
   const max = preview.maximumClipSeconds;
-  if (!preview.providerDeclaresSceneClipOperation || !preview.canSplitByDuration
+  if (preview.providerDeclaresSceneClipOperation !== true
+      || preview.canSplitByDuration !== true
+      || typeof preview.providerKey !== "string" || preview.providerKey.trim().length === 0
       || !Number.isSafeInteger(preview.totalDurationSeconds)
       || preview.totalDurationSeconds < 1 || preview.totalDurationSeconds > 7_200
       || min == null || max == null
@@ -25,7 +27,8 @@ export function isConsistentMovieClipSegmentation(preview: MovieClipSegmentation
 
   let cursor = 0;
   for (const [index, segment] of preview.segments.entries()) {
-    if (!Number.isSafeInteger(segment.sequence)
+    if (segment == null || typeof segment !== "object"
+        || !Number.isSafeInteger(segment.sequence)
         || !Number.isSafeInteger(segment.startSeconds)
         || !Number.isSafeInteger(segment.durationSeconds)
         || segment.sequence !== index + 1
