@@ -100,3 +100,33 @@ export function isConsistentMovieSceneClipSegmentation(preview: MovieClipSegment
   }
   return cursor === preview.totalDurationSeconds;
 }
+
+
+/**
+ * Validate the entire read-only preview envelope, including the unavailable
+ * case. A falsy, non-boolean capability flag must not be silently interpreted
+ * as a legitimate "adapter unavailable" response in the movie workspace.
+ * This does not grant permission to queue clips or reserve usage.
+ */
+export function isConsistentMovieClipSegmentationResponse(
+  preview: MovieClipSegmentationPreview,
+  expectedProjectId: string,
+  expectedDurationSeconds: number,
+): boolean {
+  return preview !== null
+    && typeof preview === "object"
+    && preview.movieProjectId === expectedProjectId
+    && preview.totalDurationSeconds === expectedDurationSeconds
+    && Number.isSafeInteger(preview.totalDurationSeconds)
+    && preview.totalDurationSeconds >= 1
+    && preview.totalDurationSeconds <= 7_200
+    && typeof preview.providerKey === "string"
+    && preview.providerKey.trim().length > 0
+    && typeof preview.providerDeclaresSceneClipOperation === "boolean"
+    && typeof preview.canSplitByDuration === "boolean"
+    && Array.isArray(preview.segments)
+    && (preview.canSplitByDuration
+      ? isConsistentMovieClipSegmentation(preview)
+      : preview.segments.length === 0)
+    && isConsistentMovieSceneClipSegmentation(preview);
+}
