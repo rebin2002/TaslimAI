@@ -13,6 +13,7 @@ const copy = {
     loading: "Checking declared clip-duration capabilities…",
     unavailable: "A duration split is not available with the currently configured scene-clip adapter.",
     error: "The duration preview could not be loaded.",
+    retry: "Retry preview",
     slots: "Duration slots",
     runtime: "Planned runtime",
     first: "First slot",
@@ -27,6 +28,7 @@ const copy = {
     loading: "جارٍ التحقق من حدود مدة المقاطع…",
     unavailable: "لا تتوفر خطة لتقسيم المدة بإمكانات مزوّد المقاطع الحالي.",
     error: "تعذّر تحميل معاينة تقسيم المدة.",
+    retry: "إعادة محاولة المعاينة",
     slots: "أجزاء المدة",
     runtime: "المدة المخططة",
     first: "الجزء الأول",
@@ -41,6 +43,7 @@ const copy = {
     loading: "سنوورە ڕاگەیەندراوەکانی ماوەی کلیپ دەپشکنرێن…",
     unavailable: "بەپێی توانای دابینکەری ئێستا پلانی دابەشکردنی ماوە بەردەست نییە.",
     error: "نەتوانرا پێشبینینی دابەشکردنی ماوە باربکرێت.",
+    retry: "دووبارە هەوڵ بدە",
     slots: "بەشەکانی ماوە",
     runtime: "ماوەی پلانکراو",
     first: "بەشی یەکەم",
@@ -62,6 +65,7 @@ export function MovieClipSegmentationPanel({
   const labels = copy[locale] ?? copy.en;
   const [preview, setPreview] = useState<MovieClipSegmentationPreview | null>(null);
   const [error, setError] = useState(false);
+  const [retryKey, setRetryKey] = useState(0);
 
   useEffect(() => {
     let active = true;
@@ -69,15 +73,27 @@ export function MovieClipSegmentationPanel({
       if (!active) return;
       // Never display a cached plan for a different project or runtime.
       if (result.movieProjectId !== projectId || result.totalDurationSeconds !== totalDurationSeconds) {
+        setPreview(null);
         setError(true);
         return;
       }
       setPreview(result);
+      setError(false);
     }).catch(() => {
-      if (active) setError(true);
+      if (active) {
+        setPreview(null);
+        setError(true);
+      }
     });
     return () => { active = false; };
-  }, [projectId, totalDurationSeconds]);
+  }, [projectId, totalDurationSeconds, retryKey]);
+
+  function retryPreview() {
+    // Reissue only the authorized read-only preview, never a generation request.
+    setPreview(null);
+    setError(false);
+    setRetryKey((previous) => previous + 1);
+  }
 
   const valid = preview?.movieProjectId === projectId
     && preview.totalDurationSeconds === totalDurationSeconds;
@@ -89,7 +105,10 @@ export function MovieClipSegmentationPanel({
         <div><span className="movie-workspace-kicker">{labels.runtime}: {number(totalDurationSeconds)} {labels.seconds}</span><h3>{labels.title}</h3></div>
         <small>{labels.explanation}</small>
       </div>
-      {error ? <p className="movie-command-note" role="status">{labels.error}</p>
+      {error ? <div>
+          <p className="movie-command-note" role="status">{labels.error}</p>
+          <button type="button" className="movie-workspace-button" onClick={retryPreview}>{labels.retry}</button>
+        </div>
         : (!valid || !preview) ? <p className="movie-command-note" role="status">{labels.loading}</p>
           : !preview.canSplitByDuration || !preview.segments.length
             ? <p className="movie-command-note" role="status">{labels.unavailable}</p>
