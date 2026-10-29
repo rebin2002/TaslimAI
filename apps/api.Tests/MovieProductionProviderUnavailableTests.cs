@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Http.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Taslim.Api.Domain;
@@ -53,6 +54,26 @@ public sealed class MovieProductionProviderUnavailableTests
 
         scope.ServiceProvider.GetRequiredService<FakeProviderScenarioCatalog>()[FakeProviderKind.Movie] =
             FakeProviderScenario.AllProvidersUnavailable;
+
+        // The read-only preview must not claim the approved render is safe
+        // when the selected adapter becomes unavailable after source approval.
+        // A valid five-second clip remains within the duration range, so this
+        // explicitly exercises provider readiness rather than duration rejection.
+        using var preflightResponse = await client.GetAsync(
+            $"/api/movie-studio/shots/{shotId}/production/preflight?sourceProductionVersionId={approvedMotion.Id}&targetResolution=720p&qualityTier=Standard&confirmationAccepted=true");
+        Assert.Equal(HttpStatusCode.OK, preflightResponse.StatusCode);
+        var preview = (await preflightResponse.Content.ReadFromJsonAsync<MovieProductionPreflightDto>())!;
+        Assert.False(preview.CanProceed);
+        Assert.Contains(preview.Checks, check =>
+            check.Key == MovieProductionPreflightCheckKeys.ProviderAdmission
+            && check.Required && !check.Satisfied
+            && check.Detail.Contains("unavailable", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(preview.Checks, check =>
+            check.Key == MovieProductionPreflightCheckKeys.ClipDuration
+            && check.Required && check.Satisfied);
+        Assert.Equal(versionsBefore, await db.MovieProductionVersions.CountAsync(item => item.MovieShotId == shotId));
+        Assert.Equal(transactionsBefore, await db.UsageTransactions.CountAsync());
+        Assert.Equal(0, calls.Calls(FakeProviderKind.Movie));
 
         using var rejected = await MovieOperationalFixtures.SendWithCsrfAsync(
             client, HttpMethod.Post, $"/api/movie-studio/shots/{shotId}/production/render",
