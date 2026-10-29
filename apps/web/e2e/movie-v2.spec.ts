@@ -51,7 +51,17 @@ test.describe("Movie Studio V2 browser smoke", () => {
     await page.goto("/create/movie");
     await expect(page.getByRole("tab", { name: /quick movie/i }).first()).toBeVisible();
     await expect(page.getByText("One brief, one output")).toBeVisible();
-    await expect(page.getByText(/Quick Movie stays intentionally small/i)).toBeVisible();
+    // Quick Movie exposes the small-brief hint only when the configured adapter
+    // can generate it. With an unavailable/scene-only adapter, show a blocking
+    // status instead of implying that the quick generation route is ready.
+    const quickNote = page.locator(".movie-submit-row > span");
+    await expect(quickNote).toContainText(
+      /Quick Movie stays intentionally small|Generation is currently unavailable/i,
+    );
+    if ((await quickNote.innerText()).includes("unavailable")) {
+      await page.getByLabel("Describe your movie").fill("A short movie brief for the provider-free test.");
+      await expect(page.locator(".movie-submit-row button[type=submit]")).toBeDisabled();
+    }
     await expect(page).not.toHaveURL(/\/create\/movie\/[0-9a-f-]+\/overview$/i);
   });
 
