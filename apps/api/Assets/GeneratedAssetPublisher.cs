@@ -82,6 +82,12 @@ public sealed class GeneratedAssetPublisher(
         }
         if (output.Asset is not null && (storedFile is null || storedFile.Status != StoredFileStatus.Ready))
             throw new InvalidOperationException("Generated assets require a completed private stored file.");
+        if (output.Asset is not null
+            && storageResult is { WasCreated: false }
+            && string.Equals(job.JobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase)
+            && storedFile is not null
+            && !await HasCommittedReferenceAsync(storedFile.Id, cancellationToken))
+            throw new InvalidOperationException("Generated image output cannot reuse an uncommitted private file.");
 
         try
         {
@@ -157,6 +163,15 @@ public sealed class GeneratedAssetPublisher(
         }
 
         return new PreparedGenerationOutput(jobOutput, asset, createdFile, provenance);
+    }
+
+    private async Task<bool> HasCommittedReferenceAsync(Guid storedFileId, CancellationToken cancellationToken)
+    {
+        if (await db.GenerationJobOutputs.AsNoTracking().AnyAsync(output => output.StoredFileId == storedFileId, cancellationToken))
+            return true;
+        if (await db.Assets.AsNoTracking().AnyAsync(asset => asset.StoredFileId == storedFileId, cancellationToken))
+            return true;
+        return await db.GeneratedMediaProvenance.AsNoTracking().AnyAsync(item => item.StoredFileId == storedFileId, cancellationToken);
     }
 
     public async Task DiscardAsync(PreparedGenerationOutput publication, CancellationToken cancellationToken = default)
