@@ -1373,7 +1373,9 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                 // The linked-clip fast path must enforce the same request-identity
                 // boundary as job creation. Otherwise, reusing a key with a
                 // different title silently returns the first user's generation.
-                if (!MovieStudioIdempotency.MatchesRequest(existingClip.GenerationJob, movie, scene, shot, request)
+                if (!MovieStudioIdempotency.TryGetMovieClipId(existingClip.GenerationJob.InputJson, out var linkedTargetClipId)
+                    || linkedTargetClipId != existingClip.Id
+                    || !MovieStudioIdempotency.MatchesRequest(existingClip.GenerationJob, movie, scene, shot, request)
                     || !await LegacyContinuityMatchesAsync(existingClip.GenerationJob, movie, scene, shot, cancellationToken))
                     throw new GenerationJobValidationException("IDEMPOTENCY_KEY_REUSED", "This idempotency key was already used for a different generation request.");
                 return new MovieStudioGenerationResponse(
