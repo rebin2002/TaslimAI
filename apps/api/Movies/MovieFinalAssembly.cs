@@ -640,6 +640,9 @@ public sealed class MovieFinalAssemblyQualityControl
     {
         var findings = new List<string>();
         if (output.Resolution.Width != input.Profile.Width || output.Resolution.Height != input.Profile.Height) findings.Add("MOVIE_ASSEMBLY_QC_RESOLUTION_MISMATCH");
+        // Invalid runtime plans must never be accepted as successful master exports.
+        // The positive-duration fallback below is only for safe arithmetic.
+        if (input.ExpectedDurationSeconds <= 0) findings.Add("MOVIE_ASSEMBLY_QC_EXPECTED_DURATION_INVALID");
         if (output.SizeBytes <= 0) findings.Add("MOVIE_ASSEMBLY_QC_OUTPUT_EMPTY");
         if (!output.DurationMeasured) findings.Add("MOVIE_ASSEMBLY_QC_DURATION_UNMEASURED");
         if (output.DurationSeconds <= 0) findings.Add("MOVIE_ASSEMBLY_QC_DURATION_INVALID");
