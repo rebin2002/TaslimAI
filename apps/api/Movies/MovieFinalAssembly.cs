@@ -743,13 +743,16 @@ public static class FfmpegMovieFinalAssemblyCommandBuilder
             var trim = item.OutPointSeconds.HasValue
                 ? $"trim=start={Format(item.InPointSeconds)}:end={Format(item.OutPointSeconds.Value)}"
                 : $"trim=start={Format(item.InPointSeconds)}";
-            var probe = request.VideoProbes is null ? null
-                : request.VideoProbes.TryGetValue(item.AssetId, out var detected) ? detected
-                : throw new MovieFinalAssemblyExecutionException("ASSEMBLY_SOURCE_PROBE_MISSING");
-            if (probe is not null &&
-                (probe.DurationSeconds <= 0m || probe.DurationSeconds > 86_400m
-                    || item.InPointSeconds >= probe.DurationSeconds
-                    || item.OutPointSeconds is decimal end && end > probe.DurationSeconds + 0.5m))
+            // Never guess that a source has an audio stream. The real executor
+            // probes every distinct input before calling this builder; callers
+            // without that evidence must fail closed rather than emit [i:a].
+            if (request.VideoProbes is null
+                || !request.VideoProbes.TryGetValue(item.AssetId, out var probe)
+                || probe is null)
+                throw new MovieFinalAssemblyExecutionException("ASSEMBLY_SOURCE_PROBE_MISSING");
+            if (probe.DurationSeconds <= 0m || probe.DurationSeconds > 86_400m
+                || item.InPointSeconds >= probe.DurationSeconds
+                || item.OutPointSeconds is decimal end && end > probe.DurationSeconds + 0.5m)
                 throw new MovieFinalAssemblyExecutionException("ASSEMBLY_SOURCE_DURATION_INVALID");
             // FFmpeg concat requires matching geometry, pixel format and SAR
             // across every segment. Normalize *before* concat; scaling only
@@ -758,7 +761,7 @@ public static class FfmpegMovieFinalAssemblyCommandBuilder
             // Some generated MP4s have only a video stream. Never address a
             // nonexistent [i:a] pad: synthesize *bounded* timeline-length
             // silence only for those clips, preserving audio from other clips.
-            if (probe is { HasAudio: false })
+            if (!probe.HasAudio)
             {
                 var clipDuration = (item.OutPointSeconds ?? probe.DurationSeconds) - item.InPointSeconds;
                 if (clipDuration <= 0m || clipDuration > 86_400m)
