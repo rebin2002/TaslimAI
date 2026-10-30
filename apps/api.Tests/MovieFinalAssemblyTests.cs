@@ -101,12 +101,34 @@ public sealed class MovieFinalAssemblyTests
         var graph = args[Array.IndexOf(args, "-filter_complex") + 1];
 
         Assert.Equal(2, graph.Split("anullsrc=", StringSplitOptions.None).Length - 1);
-        Assert.Contains("[1:a]trim=start=0:end=2", graph, StringComparison.Ordinal);
+        Assert.Contains("[1:a]atrim=start=0:end=2", graph, StringComparison.Ordinal);
+        Assert.DoesNotContain("[1:a]trim=", graph, StringComparison.Ordinal);
         Assert.Contains("anullsrc=r=48000:cl=stereo,atrim=duration=1.5", graph, StringComparison.Ordinal);
         Assert.Contains("[3:a]asetpts=PTS-STARTPTS", graph, StringComparison.Ordinal);
         Assert.Contains("[v0][a0][v1][a1][v2][a2]concat=n=3:v=1:a=1", graph, StringComparison.Ordinal);
         Assert.Equal(5, args.Count(arg => arg == "-i"));
         Assert.Equal("4:0", args[Array.LastIndexOf(args, "-map") + 1]);
+    }
+
+    [Fact]
+    public void Sounded_video_without_explicit_out_point_uses_audio_trim_not_video_trim()
+    {
+        var video = Guid.NewGuid();
+        var input = Contract(video, null, MovieAssemblyCaptionModes.None) with
+        {
+            Timeline = [new MovieAssemblyTimelineItem(Guid.NewGuid(), video, 0, 0.5m, null, null)],
+        };
+        var request = new MovieFinalAssemblyExecutionRequest(
+            input,
+            new Dictionary<Guid, string> { [video] = "/tmp/sounded.mp4" },
+            new Dictionary<Guid, MovieFinalAssemblyVideoProbe> { [video] = new(3m, true) });
+
+        var args = FfmpegMovieFinalAssemblyCommandBuilder.Build(request, "/tmp/master.mp4").ToArray();
+        var graph = args[Array.IndexOf(args, "-filter_complex") + 1];
+
+        Assert.Contains("[0:v]trim=start=0.5,setpts=PTS-STARTPTS", graph, StringComparison.Ordinal);
+        Assert.Contains("[0:a]atrim=start=0.5,asetpts=PTS-STARTPTS", graph, StringComparison.Ordinal);
+        Assert.DoesNotContain("[0:a]trim=", graph, StringComparison.Ordinal);
     }
 
     [Fact]
