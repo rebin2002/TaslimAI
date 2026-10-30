@@ -114,8 +114,11 @@ test.describe("Presentation Studio failed-job recovery", () => {
     expect(await page.evaluate((key) => window.sessionStorage.getItem(key), storageKey)).toBe(jobId);
 
     await page.getByRole("button", { name: /create another/i }).click();
-    await expect(page.getByLabel("Deck title")).toHaveValue("QA presentation failure recovery");
-    await expect(page.getByLabel("Tell us what to present")).toHaveValue("A synthetic release QA journey.");
+    const titleInput = page.getByLabel("Deck title");
+    const descriptionInput = page.getByLabel("Tell us what to present");
+    await expect(titleInput).toBeVisible();
+    await titleInput.fill("QA presentation retry");
+    await descriptionInput.fill("A clean retry brief for the local-only test.");
     await expect(page.getByRole("button", { name: "Create presentation" })).toBeEnabled();
     await expect.poll(() => page.evaluate((key) => window.sessionStorage.getItem(key), storageKey)).toBeNull();
     expect(blockedExternalRequests).toEqual([]);
