@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.Http;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -148,6 +149,49 @@ public sealed class GeneratedStreamLifecycleTests
         Assert.Empty(await db.UsageTransactions.AsNoTracking().ToListAsync());
     }
 
+    [Theory]
+    [InlineData(4, 5)]
+    [InlineData(5, 4)]
+    public async Task Uploaded_file_with_changed_source_length_fails_and_cleans_up(
+        int declaredBytes, int actualBytes)
+    {
+        // The synthetic form file reports a validated Content-Length but
+        // provides a different stream at storage time. An S3 client is allowed
+        // to stop reading at Content-Length and therefore cannot detect extra
+        // data on its own.
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = new TaslimDbContext(
+            new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connection).Options);
+        await db.Database.EnsureCreatedAsync();
+
+        var (workspaceId, userId) = await SeedWorkspaceAsync(db);
+        var sink = new LengthBoundedFakeStorage();
+        var options = Options.Create(new Taslim.Api.Files.FileOptions { MaxFileSizeBytes = 64 });
+        var service = new FileProcessingService(
+            db,
+            new FileValidationService(options),
+            sink,
+            new FileContentExtractor(options),
+            options,
+            NullLogger<FileProcessingService>.Instance);
+        var bytes = Enumerable.Repeat((byte)'A', actualBytes).ToArray();
+        var upload = new DeclaredLengthFormFile(bytes, declaredBytes);
+
+        await Assert.ThrowsAsync<FileUploadValidationException>(() =>
+            service.UploadAsync(workspaceId, userId, null, null, upload, CancellationToken.None));
+
+        var file = Assert.Single(await db.StoredFiles.AsNoTracking().ToListAsync());
+        Assert.Equal(StoredFileStatus.Failed, file.Status);
+        Assert.Equal(FileExtractionStatus.Failed, file.TextExtractionStatus);
+        Assert.NotNull(file.ProcessedAt);
+        Assert.Equal(declaredBytes, sink.LastExpectedContentLength);
+        Assert.Equal(Math.Min(declaredBytes, actualBytes), sink.BytesAccepted);
+        Assert.Equal(file.StorageKey, Assert.Single(sink.DeletedKeys));
+        Assert.Empty(await db.GenerationJobs.AsNoTracking().ToListAsync());
+        Assert.Empty(await db.UsageTransactions.AsNoTracking().ToListAsync());
+    }
+
     private static async Task<(Guid WorkspaceId, Guid UserId)> SeedWorkspaceAsync(TaslimDbContext db)
     {
         var now = DateTime.UtcNow;
@@ -181,6 +225,29 @@ public sealed class GeneratedStreamLifecycleTests
         });
         await db.SaveChangesAsync();
         return (workspace.Id, user.Id);
+    }
+
+    private sealed class DeclaredLengthFormFile(byte[] bytes, int declaredBytes) : IFormFile
+    {
+        public string ContentType => "text/plain";
+        public string ContentDisposition => "form-data; name=\\"file\\"; filename=\\"fixture.txt\\"";
+        public IHeaderDictionary Headers { get; } = new HeaderDictionary();
+        public long Length => declaredBytes;
+        public string Name => "file";
+        public string FileName => "fixture.txt";
+
+        public Stream OpenReadStream() => new MemoryStream(bytes, writable: false);
+        public void CopyTo(Stream target)
+        {
+            using var source = OpenReadStream();
+            source.CopyTo(target);
+        }
+
+        public async Task CopyToAsync(Stream target, CancellationToken cancellationToken = default)
+        {
+            await using var source = OpenReadStream();
+            await source.CopyToAsync(target, cancellationToken);
+        }
     }
 
     private sealed class LengthBoundedFakeStorage : IFileStorageService
