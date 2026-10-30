@@ -83,7 +83,8 @@ public sealed class MovieClipQueueFailureCleanupTests : IClassFixture<MovieQueue
         var usageBefore = await db.UsageTransactions.CountAsync();
         var path = $"/api/movie-studio/shots/{fixture.Shot.Id}/generate";
         var input = new { title = "Short clip with queue failure" };
-        using (var failed = await MovieOperationalFixtures.SendWithCsrfAsync(
+        using (var failed = await MovieOperationalFixtures.SendWithConfirmedMovieQuoteAsync(
+            factory,
             client, HttpMethod.Post, path, input, idempotencyKey: key))
         {
             Assert.Equal(HttpStatusCode.InternalServerError, failed.StatusCode);
@@ -93,7 +94,8 @@ public sealed class MovieClipQueueFailureCleanupTests : IClassFixture<MovieQueue
         Assert.False(await db.GenerationJobs.AnyAsync(item => item.IdempotencyKey == key));
         Assert.Equal(usageBefore, await db.UsageTransactions.CountAsync());
 
-        using (var retried = await MovieOperationalFixtures.SendWithCsrfAsync(
+        using (var retried = await MovieOperationalFixtures.SendWithConfirmedMovieQuoteAsync(
+            factory,
             client, HttpMethod.Post, path, input, idempotencyKey: key))
             Assert.Equal(HttpStatusCode.Accepted, retried.StatusCode);
 

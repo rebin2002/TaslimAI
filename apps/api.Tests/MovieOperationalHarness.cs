@@ -11,6 +11,7 @@ using Taslim.Api.Domain;
 using Taslim.Api.Movies;
 using Taslim.Api.Persistence;
 using Taslim.Api.Tests.ProviderTesting;
+using Taslim.Api.Usage;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -386,6 +387,146 @@ public static class MovieOperationalFixtures
         return route;
     }
 
+    public static async Task<Dictionary<string, JsonElement>> BuildConfirmedMovieGenerationRequestAsync(
+        MovieOperationalApiFactory factory,
+        string path,
+        object? payload)
+    {
+        using var scope = factory.Services.CreateScope();
+        var services = scope.ServiceProvider;
+        var db = services.GetRequiredService<TaslimDbContext>();
+        var segments = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        var shotIndex = Array.IndexOf(segments, "shots");
+        MovieShot? shot = null;
+        MovieScene scene;
+        MovieProject movie;
+        if (shotIndex >= 0
+            && shotIndex + 1 < segments.Length
+            && Guid.TryParse(segments[shotIndex + 1], out var shotId))
+        {
+            shot = await db.MovieShots
+                .Include(item => item.Scene)
+                .ThenInclude(item => item.MovieProject)
+                .SingleAsync(item => item.Id == shotId);
+            scene = shot.Scene;
+            movie = scene.MovieProject;
+        }
+        else
+        {
+            var sceneIndex = Array.IndexOf(segments, "scenes");
+            if (sceneIndex < 0
+                || sceneIndex + 1 >= segments.Length
+                || !Guid.TryParse(segments[sceneIndex + 1], out var sceneId))
+                throw new ArgumentException("A Movie scene or shot generation route is required.", nameof(path));
+            scene = await db.MovieScenes
+                .Include(item => item.MovieProject)
+                .SingleAsync(item => item.Id == sceneId);
+            movie = scene.MovieProject;
+        }
+
+        var requestJson = JsonSerializer.SerializeToElement(
+            payload ?? new Dictionary<string, object?>(), JsonOptions);
+        static JsonElement GetProperty(JsonElement value, string name) =>
+            value.ValueKind == JsonValueKind.Object && value.TryGetProperty(name, out var property)
+                ? property
+                : default;
+        static string? ReadString(JsonElement value, string name) =>
+            GetProperty(value, name) is { ValueKind: JsonValueKind.String } property
+                ? property.GetString()
+                : null;
+        static int ReadInt(JsonElement value, string name, int fallback) =>
+            GetProperty(value, name) is { ValueKind: JsonValueKind.Number } property
+                && property.TryGetInt32(out var number)
+                    ? number
+                    : fallback;
+        static bool ReadBool(JsonElement value, string name, bool fallback = false) =>
+            GetProperty(value, name) is { ValueKind: JsonValueKind.True } ? true
+            : GetProperty(value, name) is { ValueKind: JsonValueKind.False } ? false
+            : fallback;
+
+        var provider = services.GetRequiredService<IMovieVideoProvider>();
+        var providerModelKey = provider.SceneClipPricingModelKey?.Trim();
+        if (string.IsNullOrWhiteSpace(providerModelKey))
+            throw new InvalidOperationException("The provider-free Movie fixture has no declared quote model.");
+        var durationSeconds = shot?.DurationSeconds
+            ?? scene.DurationSeconds
+            ?? Math.Min(movie.DurationSeconds, 60);
+        var sourceResolution = ReadString(requestJson, "sourceResolution") ?? "1080p";
+        var targetResolution = ReadString(requestJson, "targetResolution") ?? "1080p";
+        var qualityTier = ReadString(requestJson, "qualityTier") ?? movie.QualityLevel;
+        var processingPath = ReadString(requestJson, "processingPath") ?? "native";
+        var retryAttempts = ReadInt(requestJson, "retryAttempts", 0);
+        var upscalingRequested = ReadBool(requestJson, "upscalingRequested");
+        var upscalePasses = ReadInt(requestJson, "upscalePasses", 0);
+        var estimator = services.GetRequiredService<IMovieGenerationCostEstimator>();
+        var estimateRequest = new MovieGenerationCostRequest(
+            durationSeconds,
+            sourceResolution,
+            targetResolution,
+            qualityTier,
+            processingPath,
+            retryAttempts,
+            upscalingRequested,
+            upscalePasses);
+        var estimate = await estimator.EstimateAsync(
+            estimateRequest,
+            provider.Key,
+            providerModelKey);
+        if (!estimate.IsEstimated || !estimate.MaximumAmountUsd.HasValue)
+        {
+            await AddMoviePricingRouteAsync(
+                db,
+                provider.Key,
+                providerModelKey,
+                basePriceUsdPerSecondMin: 0m,
+                basePriceUsdPerSecondMax: 0m,
+                upscalePriceUsdPerSecondMin: 0m,
+                upscalePriceUsdPerSecondMax: 0m);
+            estimate = await estimator.EstimateAsync(
+                estimateRequest,
+                provider.Key,
+                providerModelKey);
+        }
+        if (!estimate.IsEstimated || estimate.MaximumAmountUsd is not { } maximumAmountUsd)
+            throw new InvalidOperationException(
+                $"The provider-free Movie test could not compute an exact quote ({estimate.Reason ?? estimate.State}).");
+
+        var confirmedRequest = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
+        if (requestJson.ValueKind == JsonValueKind.Object)
+            foreach (var property in requestJson.EnumerateObject())
+                confirmedRequest[property.Name] = property.Value.Clone();
+        confirmedRequest["confirmationAccepted"] = JsonSerializer.SerializeToElement(true, JsonOptions);
+        confirmedRequest["expectedProviderKey"] = JsonSerializer.SerializeToElement(provider.Key, JsonOptions);
+        confirmedRequest["expectedProviderModelKey"] = JsonSerializer.SerializeToElement(providerModelKey, JsonOptions);
+        confirmedRequest["expectedProviderCostUsd"] = JsonSerializer.SerializeToElement(maximumAmountUsd, JsonOptions);
+        return confirmedRequest;
+    }
+
+    public static async Task<T> PostWithConfirmedMovieQuoteAsync<T>(
+        MovieOperationalApiFactory factory,
+        HttpClient client,
+        string path,
+        object? payload,
+        MovieOperationalDiagnostics? diagnostics = null,
+        string? idempotencyKey = null)
+    {
+        var confirmedRequest = await BuildConfirmedMovieGenerationRequestAsync(factory, path, payload);
+        return await PostAsync<T>(client, path, confirmedRequest, diagnostics, idempotencyKey);
+    }
+
+    public static async Task<HttpResponseMessage> SendWithConfirmedMovieQuoteAsync(
+        MovieOperationalApiFactory factory,
+        HttpClient client,
+        HttpMethod method,
+        string path,
+        object? payload,
+        MovieOperationalDiagnostics? diagnostics = null,
+        string? idempotencyKey = null)
+    {
+        var confirmedRequest = await BuildConfirmedMovieGenerationRequestAsync(factory, path, payload);
+        return await SendWithCsrfAsync(client, method, path, confirmedRequest, diagnostics, idempotencyKey);
+    }
+
     public static async Task<MovieProductionVersionDto> CreateApprovedMotionPreviewAsync(
         HttpClient client,
         Guid shotId,
@@ -480,7 +621,7 @@ public sealed class MovieOperationalE2ETests : IClassFixture<MovieOperationalApi
         Assert.Equal(MovieProductionStages.ApprovedKeyframe, approvedKeyframe.Stage);
 
         factory.Scenarios[FakeProviderKind.Movie] = FakeProviderScenario.QueuedRunningCompleted;
-        var generated = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(client,
+        var generated = await MovieOperationalFixtures.PostWithConfirmedMovieQuoteAsync<MovieStudioGenerationResponse>(factory, client,
             $"/api/movie-studio/shots/{fixture.Shot.Id}/generate", new { title = "Deterministic shot output" }, diagnostics, "movie-operational-shot-001");
         var completedJob = await WaitForTerminalAsync(client, generated.Job.Id, diagnostics);
         Assert.Equal("Succeeded", completedJob.Status);

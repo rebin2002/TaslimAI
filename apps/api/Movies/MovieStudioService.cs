@@ -1451,15 +1451,6 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
     {
         var shot = await db.MovieShots.Include(item => item.Scene).ThenInclude(item => item.MovieProject).ThenInclude(item => item.Guide).FirstOrDefaultAsync(item => item.Id == shotId, cancellationToken);
         if (shot is null || !await collaboration.HasPermissionAsync(userId, shot.Scene.MovieProjectId, MoviePermissions.Generate, cancellationToken)) return null;
-        var readiness = MovieShotReadiness.Evaluate(shot);
-        if (!readiness.Ready) throw new MovieStudioValidationException($"Shot is not ready for generation. {readiness.Summary}");
-        await referenceReadiness.EnsureCanGenerateAsync(
-            userId,
-            shot.Id,
-            request.AllowReferenceReadinessOverride,
-            request.ReferenceReadinessOverrideReason,
-            MovieReferenceReadinessOverrideSources.LegacyShotGeneration,
-            cancellationToken);
         return await QueueClipAsync(userId, shot.Scene.MovieProject, shot.Scene, shot, request, cancellationToken, idempotencyKey);
     }
 
@@ -1545,6 +1536,22 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                     GenerationJobContractMapper.ToMovieDto(existingJob),
                     canonicalClip.Id);
             }
+        }
+        if (shot is not null)
+        {
+            // Canonical idempotent retries return above before mutable shot readiness
+            // can make a previously accepted request unreplayable.
+            var readiness = MovieShotReadiness.Evaluate(shot);
+            if (!readiness.Ready)
+                throw new MovieStudioValidationException($"Shot is not ready for generation. {readiness.Summary}");
+            await referenceReadiness.EnsureCanGenerateAsync(
+                userId,
+                shot.Id,
+                allowOverride: request.AllowReferenceReadinessOverride,
+                overrideReason: request.ReferenceReadinessOverrideReason,
+                source: MovieReferenceReadinessOverrideSources.LegacyShotGeneration,
+                cancellationToken: cancellationToken,
+                persistOverride: false);
         }
         // This legacy scene/shot route sends exactly one provider video job. It
         // has no native-to-upscaled transfer or post-provider upscaling executor.
@@ -1643,6 +1650,17 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                 "MOVIE_CLIP_PROMPT_UNSUPPORTED",
                 "The clip's character-continuity context exceeds this provider's prompt limit. Shorten the continuity details before generating.");
 
+        if (string.IsNullOrWhiteSpace(request.ExpectedProviderKey)
+            || string.IsNullOrWhiteSpace(request.ExpectedProviderModelKey)
+            || !request.ExpectedProviderCostUsd.HasValue)
+            throw new GenerationJobValidationException(
+                "MOVIE_SCENE_QUOTE_REQUIRED",
+                "Preview and confirm the current provider, model and maximum USD price before queueing a new scene or shot clip.");
+        if (!request.ConfirmationAccepted)
+            throw new GenerationJobValidationException(
+                "MOVIE_SCENE_QUOTE_CONFIRMATION_REQUIRED",
+                "Explicitly confirm the current maximum USD price before queueing a new scene or shot clip.");
+
         var estimate = await movieCostEstimator.EstimateAsync(
             new MovieGenerationCostRequest(
                 durationSeconds,
@@ -1675,6 +1693,17 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
             throw new MovieStudioCostGuardException(
                 costPreflight.RejectionCode ?? "GENERATION_CONFIRMATION_REQUIRED",
                 costPreflight.RejectionMessage ?? "Confirm the generation cost before queueing this clip.");
+        // Persist only after the provider/model/amount quote is accepted. This
+        // audit records the user's confirmed override attempt, not job completion.
+        if (shot is not null && request.AllowReferenceReadinessOverride)
+            await referenceReadiness.EnsureCanGenerateAsync(
+                userId,
+                shot.Id,
+                allowOverride: true,
+                overrideReason: request.ReferenceReadinessOverrideReason,
+                source: MovieReferenceReadinessOverrideSources.LegacyShotGeneration,
+                cancellationToken: cancellationToken,
+                persistOverride: true);
         var now = DateTime.UtcNow;
         var clip = new MovieClip
         {

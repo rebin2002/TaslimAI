@@ -98,7 +98,7 @@ public sealed class MovieWave5IntegrationE2ETests : IClassFixture<MovieWave4ApiF
         var createdTakeIds = new List<Guid>();
         for (var takeNumber = 1; takeNumber <= 3; takeNumber++)
         {
-            var generated = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(client,
+            var generated = await MovieOperationalFixtures.PostWithConfirmedMovieQuoteAsync<MovieStudioGenerationResponse>(factory, client,
                 $"/api/movie-studio/shots/{shotId}/generate", new { title = $"Last Seed economical review take {takeNumber}" },
                 idempotencyKey: $"last-seed-wave5-take-{takeNumber}");
             var terminal = await WaitForTerminalAsync(client, generated.Job.Id);

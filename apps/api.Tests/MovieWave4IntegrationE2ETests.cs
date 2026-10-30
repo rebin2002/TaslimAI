@@ -103,7 +103,7 @@ public sealed class MovieWave4IntegrationE2ETests : IClassFixture<MovieWave4ApiF
             $"/api/movie-studio/production/versions/{keyframe.Id}/review", new { approve = true, reason = "Keyframe continuity approved." });
         Assert.Equal(MovieProductionStages.ApprovedKeyframe, approvedKeyframe.Stage);
 
-        var generated = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(client,
+        var generated = await MovieOperationalFixtures.PostWithConfirmedMovieQuoteAsync<MovieStudioGenerationResponse>(factory, client,
             $"/api/movie-studio/shots/{fixture.Shot.Id}/generate", new { title = "Wave 4 selected take source" }, idempotencyKey: "wave4-selected-source");
         var generatedJob = await WaitForTerminalAsync(client, generated.Job.Id);
         Assert.Equal("Succeeded", generatedJob.Status);

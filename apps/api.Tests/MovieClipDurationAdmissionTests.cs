@@ -218,8 +218,8 @@ public sealed class MovieClipDurationAdmissionTests : IClassFixture<MovieClipDur
         using var client = factory.CreateClient();
         var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
             client, title: $"Movie supported duration {duration}", sceneDurationSeconds: duration);
-        var response = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
-            client, $"/api/movie-studio/shots/{fixture.Shot.Id}/generate",
+        var response = await MovieOperationalFixtures.PostWithConfirmedMovieQuoteAsync<MovieStudioGenerationResponse>(
+            factory, client, $"/api/movie-studio/shots/{fixture.Shot.Id}/generate",
             new { title = "Supported clip" },
             idempotencyKey: $"movie-duration-supported-{duration}");
         using var scope = factory.Services.CreateScope();
@@ -256,8 +256,8 @@ public sealed class MovieClipDurationAdmissionTests : IClassFixture<MovieClipDur
             confirmationAccepted = true,
         };
 
-        var first = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
-            client, path, requested, idempotencyKey: key);
+        var first = await MovieOperationalFixtures.PostWithConfirmedMovieQuoteAsync<MovieStudioGenerationResponse>(
+            factory, client, path, requested, idempotencyKey: key);
         using var scope = factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
         var job = await db.GenerationJobs.AsNoTracking().SingleAsync(item => item.Id == first.Job.Id);
@@ -270,8 +270,8 @@ public sealed class MovieClipDurationAdmissionTests : IClassFixture<MovieClipDur
         Assert.Equal(GenerationJobStatus.Queued, job.Status);
         var usageAfterFirst = await db.UsageTransactions.CountAsync();
 
-        var replay = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
-            client, path, requested, idempotencyKey: key);
+        var replay = await MovieOperationalFixtures.PostWithConfirmedMovieQuoteAsync<MovieStudioGenerationResponse>(
+            factory, client, path, requested, idempotencyKey: key);
         Assert.Equal(first.Job.Id, replay.Job.Id);
         Assert.Equal(first.ClipId, replay.ClipId);
         Assert.Single(await db.MovieClips.AsNoTracking()
@@ -303,8 +303,8 @@ public sealed class MovieClipDurationAdmissionTests : IClassFixture<MovieClipDur
             await db.SaveChangesAsync();
         }
 
-        var response = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
-            client, $"/api/movie-studio/shots/{fixture.Shot.Id}/generate",
+        var response = await MovieOperationalFixtures.PostWithConfirmedMovieQuoteAsync<MovieStudioGenerationResponse>(
+            factory, client, $"/api/movie-studio/shots/{fixture.Shot.Id}/generate",
             new { title = "Five-second feature film shot" },
             idempotencyKey: "feature-length-short-shot-admission");
 

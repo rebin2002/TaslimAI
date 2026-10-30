@@ -38,7 +38,11 @@ public sealed class MovieWorldTests : IClassFixture<MovieOperationalApiFactory>
         var shotUsage = await SendJson<MovieWorldUsageDto>(client, HttpMethod.Post, $"/api/movie-studio/scenes/{scene.Id}/world-usage", new { entityType = "prop", entityId = prop.Id, movieShotId = shot.Id, role = "hero prop" });
         var fact = await SendJson<MovieContinuityFactDto>(client, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/continuity-facts", new { scopeType = "scene", scopeId = scene.Id, factKey = "compass_bearing", factValue = "north-east", notes = "Must match the warehouse window direction." });
         var lockRecord = await SendJson<MovieContinuityLockDto>(client, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/continuity-locks", new { entityType = "prop", entityId = prop.Id, fieldName = "glass_damage", lockedValue = "single crack across upper-left glass", strength = "hard" });
-        var generation = await SendJson<MovieStudioGenerationResponse>(client, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/scenes/{scene.Id}/generate", new { title = "World-aware scene clip" });
+        var generation = await MovieOperationalFixtures.PostWithConfirmedMovieQuoteAsync<MovieStudioGenerationResponse>(
+            factory,
+            client,
+            $"/api/movie-studio/projects/{movie.Project.Id}/scenes/{scene.Id}/generate",
+            new { title = "World-aware scene clip" });
         using (var scope = factory.Services.CreateScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();

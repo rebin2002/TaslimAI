@@ -235,7 +235,14 @@ public sealed class MovieSceneGenerationPreviewTests
             client,
             HttpMethod.Post,
             $"/api/movie-studio/projects/{fixture.Project.Project.Id}/scenes/{fixture.Scene.Id}/generate",
-            request,
+            new
+            {
+                sourceResolution = "720p",
+                targetResolution = "720p",
+                qualityTier = "Standard",
+                processingPath = "native",
+                confirmationAccepted = true,
+            },
             idempotencyKey: idempotencyKey);
         Assert.Equal(HttpStatusCode.Accepted, replayResponse.StatusCode);
         var replay = await replayResponse.Content.ReadFromJsonAsync<MovieStudioGenerationResponse>();
@@ -382,6 +389,76 @@ public sealed class MovieSceneGenerationPreviewTests
             Assert.Equal(usageBefore, await db.UsageTransactions.CountAsync());
             Assert.Equal(0, factory.Calls.Calls(FakeProviderKind.Movie));
         }
+    }
+
+    [Fact]
+    public async Task Fresh_scene_and_shot_queue_require_complete_quote_and_explicit_confirmation()
+    {
+        using var factory = new MovieClipExactProfileApiFactory();
+        using var client = factory.CreateClient();
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Fresh legacy quote required", sceneDurationSeconds: 5);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        AddPricingRow(db, DateTime.UtcNow, "fake-model", 0.01m, 0.02m);
+        await db.SaveChangesAsync();
+        var clipsBefore = await db.MovieClips.CountAsync(item => item.MovieProjectId == fixture.Project.Project.Id);
+        var jobsBefore = await db.GenerationJobs.CountAsync();
+        var usageBefore = await db.UsageTransactions.CountAsync();
+        var snapshotsBefore = await db.MovieCharacterContinuitySnapshots.CountAsync();
+
+        using var missingTuple = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client,
+            HttpMethod.Post,
+            $"/api/movie-studio/projects/{fixture.Project.Project.Id}/scenes/{fixture.Scene.Id}/generate",
+            new { sourceResolution = "720p", targetResolution = "720p", qualityTier = "Standard", processingPath = "native", confirmationAccepted = true },
+            idempotencyKey: "missing-scene-quote-tuple");
+        Assert.Equal(HttpStatusCode.BadRequest, missingTuple.StatusCode);
+        Assert.Contains("MOVIE_SCENE_QUOTE_REQUIRED", await missingTuple.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        using var missingMaximum = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client,
+            HttpMethod.Post,
+            $"/api/movie-studio/shots/{fixture.Shot.Id}/generate",
+            new
+            {
+                sourceResolution = "720p",
+                targetResolution = "720p",
+                qualityTier = "Standard",
+                processingPath = "native",
+                confirmationAccepted = true,
+                expectedProviderKey = "fake-movie",
+                expectedProviderModelKey = "fake-model",
+            },
+            idempotencyKey: "missing-shot-quote-maximum");
+        Assert.Equal(HttpStatusCode.BadRequest, missingMaximum.StatusCode);
+        Assert.Contains("MOVIE_SCENE_QUOTE_REQUIRED", await missingMaximum.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        using var unconfirmed = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client,
+            HttpMethod.Post,
+            $"/api/movie-studio/shots/{fixture.Shot.Id}/generate",
+            new
+            {
+                sourceResolution = "720p",
+                targetResolution = "720p",
+                qualityTier = "Standard",
+                processingPath = "native",
+                confirmationAccepted = false,
+                expectedProviderKey = "fake-movie",
+                expectedProviderModelKey = "fake-model",
+                expectedProviderCostUsd = 0.10m,
+            },
+            idempotencyKey: "unconfirmed-shot-quote");
+        Assert.Equal(HttpStatusCode.BadRequest, unconfirmed.StatusCode);
+        Assert.Contains("MOVIE_SCENE_QUOTE_CONFIRMATION_REQUIRED", await unconfirmed.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        Assert.Equal(clipsBefore, await db.MovieClips.CountAsync(item => item.MovieProjectId == fixture.Project.Project.Id));
+        Assert.Equal(jobsBefore, await db.GenerationJobs.CountAsync());
+        Assert.Equal(usageBefore, await db.UsageTransactions.CountAsync());
+        Assert.Equal(snapshotsBefore, await db.MovieCharacterContinuitySnapshots.CountAsync());
+        Assert.Equal(0, factory.Calls.Calls(FakeProviderKind.Movie));
     }
 
     private static void AddPricingRow(

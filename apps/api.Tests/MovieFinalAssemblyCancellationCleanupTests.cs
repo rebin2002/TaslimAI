@@ -205,8 +205,8 @@ public sealed class MovieFinalAssemblyCancellationCleanupTests : IClassFixture<M
 
     private async Task<(Guid TakeId, Guid AssetId)> CreateFinalizedTakeAsync(HttpClient client, Guid projectId, Guid shotId)
     {
-        var generated = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
-            client,
+        var generated = await MovieOperationalFixtures.PostWithConfirmedMovieQuoteAsync<MovieStudioGenerationResponse>(
+            factory, client,
             $"/api/movie-studio/shots/{shotId}/generate",
             new { title = "Cancellation cleanup source take" },
             idempotencyKey: "assembly-cancellation-source-1");

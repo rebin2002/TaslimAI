@@ -214,8 +214,8 @@ public sealed class MovieLastSeedIntegratedAcceptanceTests : IClassFixture<Movie
         Assert.Equal(MovieProductionStages.ApprovedKeyframe, approvedKeyframe.Stage);
         Assert.Equal(storyboard.Id, keyframe.SourceVersionId);
 
-        var generated = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(client, $"/api/movie-studio/shots/{shotId}/generate", new { title = "Last Seed deterministic take source" }, idempotencyKey: "last-seed-movie-source");
-        var duplicateGenerated = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(client, $"/api/movie-studio/shots/{shotId}/generate", new { title = "Last Seed deterministic take source" }, idempotencyKey: "last-seed-movie-source");
+        var generated = await MovieOperationalFixtures.PostWithConfirmedMovieQuoteAsync<MovieStudioGenerationResponse>(factory, client, $"/api/movie-studio/shots/{shotId}/generate", new { title = "Last Seed deterministic take source" }, idempotencyKey: "last-seed-movie-source");
+        var duplicateGenerated = await MovieOperationalFixtures.PostWithConfirmedMovieQuoteAsync<MovieStudioGenerationResponse>(factory, client, $"/api/movie-studio/shots/{shotId}/generate", new { title = "Last Seed deterministic take source" }, idempotencyKey: "last-seed-movie-source");
         Assert.Equal(generated.Job.Id, duplicateGenerated.Job.Id);
         Assert.Equal(generated.ClipId, duplicateGenerated.ClipId);
         var generatedJob = await WaitForTerminalAsync(client, generated.Job.Id);

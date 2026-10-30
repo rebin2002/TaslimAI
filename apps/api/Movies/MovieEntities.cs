@@ -1072,7 +1072,8 @@ public sealed record MovieStudioGenerationRequest(
     // guardrail as the production orchestrator and refuses to queue when the
     // estimate is unavailable or an expensive estimate was not confirmed.
     bool ConfirmationAccepted = false,
-    // Optional confirmation binding copied from the read-only scene quote.
+    // Nullable for request compatibility; fresh scene/shot queue admission requires
+    // all quote fields after canonical idempotent replays have been resolved.
     // Server-side provider selection and price estimation remain authoritative.
     string? ExpectedProviderKey = null,
     string? ExpectedProviderModelKey = null,

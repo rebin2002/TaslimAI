@@ -277,8 +277,8 @@ public sealed class MovieFinalAssemblyExportE2ETests : IClassFixture<MovieFinalA
 
     private async Task<Guid> CreateFinalizedTakeAsync(HttpClient client, Guid projectId, Guid shotId, string keyPrefix)
     {
-        var generated = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
-            client,
+        var generated = await MovieOperationalFixtures.PostWithConfirmedMovieQuoteAsync<MovieStudioGenerationResponse>(
+            factory, client,
             $"/api/movie-studio/shots/{shotId}/generate",
             new { title = $"{keyPrefix} source take" },
             idempotencyKey: $"{keyPrefix}-generate");

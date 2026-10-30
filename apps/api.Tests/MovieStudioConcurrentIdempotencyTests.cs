@@ -127,21 +127,21 @@ public sealed class MovieStudioConcurrentIdempotencyTests : IClassFixture<MovieC
         const string key = "movie-barrier-different-requests-1";
         var path = $"/api/movie-studio/shots/{fixture.Shot.Id}/generate";
         factory.Gate.TargetKey = key;
+        var canonicalRequest = await MovieOperationalFixtures.BuildConfirmedMovieGenerationRequestAsync(
+            factory, path, new { title = "Canonical race clip" });
+        var conflictingRequest = await MovieOperationalFixtures.BuildConfirmedMovieGenerationRequestAsync(
+            factory, path, new { title = "Different title on same key" });
 
         // The canonical request stops after persisting its speculative clip,
         // before the generation job exists. Only then does the conflicting
         // request enter, so both definitely cross the lookup-to-create gap.
         var canonicalTask = MovieOperationalFixtures.SendWithCsrfAsync(
-            client, HttpMethod.Post, path, new { title = "Canonical race clip" },
+            client, HttpMethod.Post, path, canonicalRequest,
             idempotencyKey: key);
         await factory.Gate.FirstArrived.Task.WaitAsync(TimeSpan.FromSeconds(40));
 
         var conflictingTask = MovieOperationalFixtures.SendWithCsrfAsync(
-            client, HttpMethod.Post, path, new
-            {
-                title = "Canonical race clip",
-                targetResolution = "4k",
-            }, idempotencyKey: key);
+            client, HttpMethod.Post, path, conflictingRequest, idempotencyKey: key);
 
         await Task.WhenAll(canonicalTask, conflictingTask)
             .WaitAsync(TimeSpan.FromSeconds(90));

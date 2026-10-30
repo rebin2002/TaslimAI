@@ -209,6 +209,9 @@ function FullMovieProjectWorkspace({ projectId, module }: { projectId: string; m
 
   async function generateScene(sceneId: string, idempotencyKey: string, expectedProviderKey: string | null, expectedProviderModelKey: string | null, expectedProviderCostUsd: number | null) {
     if (!project) throw new Error("The Movie project is not available.");
+    if (!expectedProviderKey?.trim() || !expectedProviderModelKey?.trim() || expectedProviderCostUsd === null) {
+      throw new Error("Preview and confirm the current provider, model and maximum USD price before generating.");
+    }
     const result = await api.generateMovieScene(project.id, sceneId, {
       ...verifiedMovieClipProfile,
       confirmationAccepted: true,

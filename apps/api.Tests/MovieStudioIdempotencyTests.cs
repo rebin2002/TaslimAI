@@ -43,17 +43,17 @@ public sealed class MovieStudioIdempotencyTests : IClassFixture<MovieOperational
         var key = $"movie-separate-user-scope-{Guid.NewGuid():N}";
         var firstPath = $"/api/movie-studio/shots/{firstMovie.Shot.Id}/generate";
         var secondPath = $"/api/movie-studio/shots/{secondMovie.Shot.Id}/generate";
-        var first = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
-            firstClient, firstPath, new { title = "First private clip" }, idempotencyKey: key);
-        var second = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
-            secondClient, secondPath, new { title = "Second private clip" }, idempotencyKey: key);
+        var first = await MovieOperationalFixtures.PostWithConfirmedMovieQuoteAsync<MovieStudioGenerationResponse>(
+            factory, firstClient, firstPath, new { title = "First private clip" }, idempotencyKey: key);
+        var second = await MovieOperationalFixtures.PostWithConfirmedMovieQuoteAsync<MovieStudioGenerationResponse>(
+            factory, secondClient, secondPath, new { title = "Second private clip" }, idempotencyKey: key);
 
         Assert.NotEqual(first.ClipId, second.ClipId);
         Assert.NotEqual(first.Job.Id, second.Job.Id);
-        var firstReplay = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
-            firstClient, firstPath, new { title = "First private clip" }, idempotencyKey: key);
-        var secondReplay = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
-            secondClient, secondPath, new { title = "Second private clip" }, idempotencyKey: key);
+        var firstReplay = await MovieOperationalFixtures.PostWithConfirmedMovieQuoteAsync<MovieStudioGenerationResponse>(
+            factory, firstClient, firstPath, new { title = "First private clip" }, idempotencyKey: key);
+        var secondReplay = await MovieOperationalFixtures.PostWithConfirmedMovieQuoteAsync<MovieStudioGenerationResponse>(
+            factory, secondClient, secondPath, new { title = "Second private clip" }, idempotencyKey: key);
         Assert.Equal(first.ClipId, firstReplay.ClipId);
         Assert.Equal(second.ClipId, secondReplay.ClipId);
         Assert.Equal(first.Job.Id, firstReplay.Job.Id);
@@ -95,8 +95,8 @@ public sealed class MovieStudioIdempotencyTests : IClassFixture<MovieOperational
             client, title: "Second movie for shared user",
             existingOwner: firstMovie.Owner);
         const string key = "movie-cross-project-idempotency-boundary";
-        var canonical = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
-            client, $"/api/movie-studio/shots/{firstMovie.Shot.Id}/generate",
+        var canonical = await MovieOperationalFixtures.PostWithConfirmedMovieQuoteAsync<MovieStudioGenerationResponse>(
+            factory, client, $"/api/movie-studio/shots/{firstMovie.Shot.Id}/generate",
             new { title = "Canonical project clip" }, idempotencyKey: key);
 
         using var conflicting = await MovieOperationalFixtures.SendWithCsrfAsync(
@@ -130,8 +130,8 @@ public sealed class MovieStudioIdempotencyTests : IClassFixture<MovieOperational
         var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(client, title: "Movie idempotency reconciliation");
         const string idempotencyKey = "movie-clip-reconcile-1";
 
-        var first = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
-            client,
+        var first = await MovieOperationalFixtures.PostWithConfirmedMovieQuoteAsync<MovieStudioGenerationResponse>(
+            factory, client,
             $"/api/movie-studio/shots/{fixture.Shot.Id}/generate",
             new { title = "Canonical clip" },
             idempotencyKey: idempotencyKey);
@@ -147,8 +147,8 @@ public sealed class MovieStudioIdempotencyTests : IClassFixture<MovieOperational
                 .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.GenerationJobId, (Guid?)null));
         }
 
-        var replay = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
-            client,
+        var replay = await MovieOperationalFixtures.PostWithConfirmedMovieQuoteAsync<MovieStudioGenerationResponse>(
+            factory, client,
             $"/api/movie-studio/shots/{fixture.Shot.Id}/generate",
             new { title = "Canonical clip" },
             idempotencyKey: idempotencyKey);
@@ -181,10 +181,10 @@ public sealed class MovieStudioIdempotencyTests : IClassFixture<MovieOperational
         const string canonicalKey = "movie-replay-foreign-link-original";
         const string otherKey = "movie-replay-foreign-link-other";
 
-        var canonical = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
-            client, path, new { title = "Canonical clip" }, idempotencyKey: canonicalKey);
-        var other = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
-            client, path, new { title = "Other clip" }, idempotencyKey: otherKey);
+        var canonical = await MovieOperationalFixtures.PostWithConfirmedMovieQuoteAsync<MovieStudioGenerationResponse>(
+            factory, client, path, new { title = "Canonical clip" }, idempotencyKey: canonicalKey);
+        var other = await MovieOperationalFixtures.PostWithConfirmedMovieQuoteAsync<MovieStudioGenerationResponse>(
+            factory, client, path, new { title = "Other clip" }, idempotencyKey: otherKey);
         Assert.NotEqual(canonical.Job.Id, other.Job.Id);
 
         // Simulate persisted inconsistent linkage without deleting either job
@@ -233,10 +233,10 @@ public sealed class MovieStudioIdempotencyTests : IClassFixture<MovieOperational
         const string canonicalKey = "movie-replay-input-target-canonical";
         const string otherKey = "movie-replay-input-target-other";
 
-        var canonical = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
-            client, path, new { title = "Canonical payload clip" }, idempotencyKey: canonicalKey);
-        var other = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
-            client, path, new { title = "Other payload clip" }, idempotencyKey: otherKey);
+        var canonical = await MovieOperationalFixtures.PostWithConfirmedMovieQuoteAsync<MovieStudioGenerationResponse>(
+            factory, client, path, new { title = "Canonical payload clip" }, idempotencyKey: canonicalKey);
+        var other = await MovieOperationalFixtures.PostWithConfirmedMovieQuoteAsync<MovieStudioGenerationResponse>(
+            factory, client, path, new { title = "Other payload clip" }, idempotencyKey: otherKey);
 
         using (var scope = factory.Services.CreateScope())
         {
@@ -276,8 +276,8 @@ public sealed class MovieStudioIdempotencyTests : IClassFixture<MovieOperational
         const string key = "movie-clip-title-mismatch-1";
         var path = $"/api/movie-studio/shots/{fixture.Shot.Id}/generate";
 
-        var first = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
-            client, path, new { title = "Original clip" }, idempotencyKey: key);
+        var first = await MovieOperationalFixtures.PostWithConfirmedMovieQuoteAsync<MovieStudioGenerationResponse>(
+            factory, client, path, new { title = "Original clip" }, idempotencyKey: key);
 
         // Exercise the already-linked fast path. The old behavior silently
         // returned the original clip despite a materially different request.
@@ -307,8 +307,8 @@ public sealed class MovieStudioIdempotencyTests : IClassFixture<MovieOperational
         const string key = "movie-shot-duration-edit-replay-1";
         var path = $"/api/movie-studio/shots/{fixture.Shot.Id}/generate";
 
-        var first = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
-            client, path, new { title = "Canonical duration" }, idempotencyKey: key);
+        var first = await MovieOperationalFixtures.PostWithConfirmedMovieQuoteAsync<MovieStudioGenerationResponse>(
+            factory, client, path, new { title = "Canonical duration" }, idempotencyKey: key);
 
         int initialDuration;
         using (var scope = factory.Services.CreateScope())
@@ -377,8 +377,8 @@ public sealed class MovieStudioIdempotencyTests : IClassFixture<MovieOperational
             await db.SaveChangesAsync();
         }
 
-        var first = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
-            client, path, new { title = "Character continuity clip" }, idempotencyKey: key);
+        var first = await MovieOperationalFixtures.PostWithConfirmedMovieQuoteAsync<MovieStudioGenerationResponse>(
+            factory, client, path, new { title = "Character continuity clip" }, idempotencyKey: key);
         using (var check = factory.Services.CreateScope())
         {
             var db = check.ServiceProvider.GetRequiredService<TaslimDbContext>();
@@ -389,8 +389,8 @@ public sealed class MovieStudioIdempotencyTests : IClassFixture<MovieOperational
         }
 
         // An unchanged same-key retry must still resolve to the original job.
-        var replay = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
-            client, path, new { title = "Character continuity clip" }, idempotencyKey: key);
+        var replay = await MovieOperationalFixtures.PostWithConfirmedMovieQuoteAsync<MovieStudioGenerationResponse>(
+            factory, client, path, new { title = "Character continuity clip" }, idempotencyKey: key);
         Assert.Equal(first.Job.Id, replay.Job.Id);
         Assert.Equal(first.ClipId, replay.ClipId);
 
@@ -442,8 +442,8 @@ public sealed class MovieStudioIdempotencyTests : IClassFixture<MovieOperational
         var key = $"movie-creative-{editedField}-{Guid.NewGuid():N}";
         var path = $"/api/movie-studio/shots/{fixture.Shot.Id}/generate";
 
-        var first = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
-            client, path, new { title = "Canonical creative direction" }, idempotencyKey: key);
+        var first = await MovieOperationalFixtures.PostWithConfirmedMovieQuoteAsync<MovieStudioGenerationResponse>(
+            factory, client, path, new { title = "Canonical creative direction" }, idempotencyKey: key);
 
         using (var editScope = factory.Services.CreateScope())
         {
@@ -515,8 +515,8 @@ public sealed class MovieStudioIdempotencyTests : IClassFixture<MovieOperational
         const string key = "movie-job-first-conflicting-title-1";
         var path = $"/api/movie-studio/shots/{fixture.Shot.Id}/generate";
 
-        var first = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
-            client, path, new { title = "Canonical clip" }, idempotencyKey: key);
+        var first = await MovieOperationalFixtures.PostWithConfirmedMovieQuoteAsync<MovieStudioGenerationResponse>(
+            factory, client, path, new { title = "Canonical clip" }, idempotencyKey: key);
 
         // Model the job-committed/clip-link-pending interleaving. A conflicting
         // replay must reject the key, not adopt or alter the canonical clip.
@@ -563,8 +563,8 @@ public sealed class MovieStudioIdempotencyTests : IClassFixture<MovieOperational
         var key = $"movie-job-first-priced-{option}";
         var path = $"/api/movie-studio/shots/{fixture.Shot.Id}/generate";
         var originalRequest = new { title = "Canonical priced job" };
-        var first = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
-            client, path, originalRequest, idempotencyKey: key);
+        var first = await MovieOperationalFixtures.PostWithConfirmedMovieQuoteAsync<MovieStudioGenerationResponse>(
+            factory, client, path, originalRequest, idempotencyKey: key);
 
         // The canonical job has committed but the winning request has not yet
         // published the clip link. A different cost/output intent must not be
@@ -590,8 +590,8 @@ public sealed class MovieStudioIdempotencyTests : IClassFixture<MovieOperational
 
         // Replaying the *original* intent may repair the missing link; the
         // conflicting request must not consume or mutate the canonical job.
-        var replay = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
-            client, path, originalRequest, idempotencyKey: key);
+        var replay = await MovieOperationalFixtures.PostWithConfirmedMovieQuoteAsync<MovieStudioGenerationResponse>(
+            factory, client, path, originalRequest, idempotencyKey: key);
         Assert.Equal(first.Job.Id, replay.Job.Id);
         Assert.Equal(first.ClipId, replay.ClipId);
 
@@ -643,11 +643,11 @@ public sealed class MovieStudioIdempotencyTests : IClassFixture<MovieOperational
 
         // Normalization must happen before the length limit. A legitimate
         // 80-character key remains valid even with surrounding whitespace.
-        var first = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
-            client, path, new { title = "Boundary clip" },
+        var first = await MovieOperationalFixtures.PostWithConfirmedMovieQuoteAsync<MovieStudioGenerationResponse>(
+            factory, client, path, new { title = "Boundary clip" },
             idempotencyKey: $"  {key}  ");
-        var replay = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
-            client, path, new { title = "Boundary clip" }, idempotencyKey: key);
+        var replay = await MovieOperationalFixtures.PostWithConfirmedMovieQuoteAsync<MovieStudioGenerationResponse>(
+            factory, client, path, new { title = "Boundary clip" }, idempotencyKey: key);
 
         Assert.Equal(first.Job.Id, replay.Job.Id);
         Assert.Equal(first.ClipId, replay.ClipId);
@@ -679,8 +679,8 @@ public sealed class MovieStudioIdempotencyTests : IClassFixture<MovieOperational
         var key = $"movie-pricing-option-collision-{option}";
         var path = $"/api/movie-studio/shots/{fixture.Shot.Id}/generate";
 
-        var first = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
-            client, path, new { title = "Canonical priced intent" }, idempotencyKey: key);
+        var first = await MovieOperationalFixtures.PostWithConfirmedMovieQuoteAsync<MovieStudioGenerationResponse>(
+            factory, client, path, new { title = "Canonical priced intent" }, idempotencyKey: key);
 
         using (var scope = factory.Services.CreateScope())
         {
@@ -722,8 +722,8 @@ public sealed class MovieStudioIdempotencyTests : IClassFixture<MovieOperational
         using var client = factory.CreateClient();
         var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
             client, title: "Movie idempotency operation boundary");
-        var response = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
-            client, $"/api/movie-studio/shots/{fixture.Shot.Id}/generate",
+        var response = await MovieOperationalFixtures.PostWithConfirmedMovieQuoteAsync<MovieStudioGenerationResponse>(
+            factory, client, $"/api/movie-studio/shots/{fixture.Shot.Id}/generate",
             new { title = "Scene clip" }, idempotencyKey: "movie-operation-boundary-1");
 
         using var scope = factory.Services.CreateScope();
@@ -797,8 +797,8 @@ public sealed class MovieStudioIdempotencyTests : IClassFixture<MovieOperational
     {
         using var client = factory.CreateClient();
         var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(client, title: "Movie early completion");
-        var queued = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
-            client, $"/api/movie-studio/shots/{fixture.Shot.Id}/generate",
+        var queued = await MovieOperationalFixtures.PostWithConfirmedMovieQuoteAsync<MovieStudioGenerationResponse>(
+            factory, client, $"/api/movie-studio/shots/{fixture.Shot.Id}/generate",
             new { title = "Early completed clip" },
             idempotencyKey: "movie-first-completion-before-link");
 
