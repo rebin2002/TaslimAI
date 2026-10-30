@@ -230,7 +230,7 @@ public sealed class GeneratedStreamLifecycleTests
     private sealed class DeclaredLengthFormFile(byte[] bytes, int declaredBytes) : IFormFile
     {
         public string ContentType => "text/plain";
-        public string ContentDisposition => "form-data; name=\\"file\\"; filename=\\"fixture.txt\\"";
+        public string ContentDisposition => "form-data; name=\"file\"; filename=\"fixture.txt\"";
         public IHeaderDictionary Headers { get; } = new HeaderDictionary();
         public long Length => declaredBytes;
         public string Name => "file";
