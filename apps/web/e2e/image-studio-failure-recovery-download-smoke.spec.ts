@@ -76,16 +76,19 @@ test("Image Studio safely recovers from a failed job and downloads the successfu
   let localCspAdjusted = false;
   // CI serves its API over HTTP loopback; adapt only the initial test document, never app CSP.
   await page.route(new URL("/register", webOrigin).href, async (route) => {
+    const request = route.request();
+    if (request.method() !== "GET" || request.resourceType() !== "document") {
+      await route.fallback();
+      return;
+    }
     const response = await route.fetch();
-    const headers = response.headers();
     const imagePolicy = "img-src 'self' data: blob: https:";
-    const csp = headers["content-security-policy"];
+    const csp = response.headers()["content-security-policy"];
     if (!csp?.includes(imagePolicy)) {
       await route.abort();
       throw new Error("Expected the registration page CSP image directive.");
     }
-    headers["content-security-policy"] = csp.replace(imagePolicy, `${imagePolicy} ${apiOrigin}`);
-    await route.fulfill({ response, headers });
+    await route.fulfill({ response, headers: { "content-security-policy": csp.replace(imagePolicy, `${imagePolicy} ${apiOrigin}`) } });
     localCspAdjusted = true;
   });
 
