@@ -495,6 +495,58 @@ public sealed class MovieFinalAssemblyTests
     }
 
     [Fact]
+    public async Task Timed_out_final_duration_probe_is_terminated_and_fails_closed()
+    {
+        // Exercise the post-render ffprobe boundary with disposable local executables.
+        // The first invocation returns trusted-looking video metadata; the second hangs.
+        if (OperatingSystem.IsWindows()) return;
+
+        var directory = Path.Combine(Path.GetTempPath(), "taslim-duration-probe-timeout", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var probePath = Path.Combine(directory, "fake-ffprobe");
+            var renderPath = Path.Combine(directory, "fake-ffmpeg");
+            var sourcePath = Path.Combine(directory, "source.mp4");
+            await File.WriteAllTextAsync(probePath, """
+                #!/bin/sh
+                case "$*" in
+                  *"stream=codec_type:format=duration"*) printf '%s\n' '{"streams":[{"codec_type":"video"}],"format":{"duration":"3"}}' ;;
+                  *) exec sleep 30 ;;
+                esac
+                """);
+            await File.WriteAllTextAsync(renderPath, """
+                #!/bin/sh
+                for last in "$@"; do :; done
+                printf 'synthetic-master' > "$last"
+                """);
+            await File.WriteAllBytesAsync(sourcePath, [0x00]);
+            const UnixFileMode executable = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
+            File.SetUnixFileMode(probePath, executable);
+            File.SetUnixFileMode(renderPath, executable);
+
+            var videoId = Guid.NewGuid();
+            var request = new MovieFinalAssemblyExecutionRequest(
+                Contract(videoId, null, MovieAssemblyCaptionModes.None),
+                new Dictionary<Guid, string> { [videoId] = sourcePath });
+            var executor = new FfmpegMovieFinalAssemblyExecutor(Options.Create(new MovieFinalAssemblyOptions
+            {
+                Enabled = true,
+                FfmpegPath = renderPath,
+                FfprobePath = probePath,
+                ProcessTimeoutSeconds = 1,
+            }));
+
+            var error = await Assert.ThrowsAsync<MovieFinalAssemblyExecutionException>(
+                () => executor.ExecuteAsync(request, new Progress<int>(), CancellationToken.None));
+            Assert.Equal("ASSEMBLY_DURATION_MEASUREMENT_FAILED", error.Code);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+    [Fact]
     public void Assembly_idempotency_retry_classifier_rejects_unrelated_unique_conflicts()
     {
         var sqliteConflict = new DbUpdateException(
