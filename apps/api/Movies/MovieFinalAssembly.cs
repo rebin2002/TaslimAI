@@ -741,7 +741,17 @@ public static class FfmpegMovieFinalAssemblyCommandBuilder
             {
                 var item = request.Contract.AudioMixInputs[index];
                 var inputIndex = request.Contract.Timeline.Count + index;
-                filters.Add($"[{inputIndex}:a]volume={Gain(item.GainDb)}[mix{index}]");
+                // A soundtrack cue's time bounds are positions on the master timeline,
+                // not offsets into the source audio file. Trim its playable span first,
+                // then delay it to the intended timeline position before mixing.
+                var start = item.StartTimeSeconds ?? 0m;
+                var duration = item.EndTimeSeconds.HasValue
+                    ? $",atrim=duration={Format(item.EndTimeSeconds.Value - start)}"
+                    : string.Empty;
+                var delay = start > 0m
+                    ? $",adelay=delays={Math.Round(start * 1_000m, 0, MidpointRounding.AwayFromZero).ToString(CultureInfo.InvariantCulture)}:all=1"
+                    : string.Empty;
+                filters.Add($"[{inputIndex}:a]asetpts=PTS-STARTPTS{duration},volume={Gain(item.GainDb)}{delay}[mix{index}]");
                 audioLabels.Add($"[mix{index}]");
             }
             filters.Add($"{string.Concat(audioLabels)}amix=inputs={audioLabels.Count}:duration=first:dropout_transition=0[audio]");
