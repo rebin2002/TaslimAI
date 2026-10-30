@@ -662,9 +662,15 @@ public sealed class MovieFinalAssemblyQualityControl
     }
 }
 
+// Populated only by the local executor after bounded ffprobe inspection.
+// The optional value preserves standalone command-builder test compatibility;
+// real executions must supply the media probe result before rendering.
+public sealed record MovieFinalAssemblyVideoProbe(decimal DurationSeconds, bool HasAudio);
+
 public sealed record MovieFinalAssemblyExecutionRequest(
     MovieFinalAssemblyInput Contract,
-    IReadOnlyDictionary<Guid, string> SourcePaths);
+    IReadOnlyDictionary<Guid, string> SourcePaths,
+    IReadOnlyDictionary<Guid, MovieFinalAssemblyVideoProbe>? VideoProbes = null);
 
 public sealed record MovieFinalAssemblyExecutionResult(
     string FileName,
@@ -735,7 +741,28 @@ public static class FfmpegMovieFinalAssemblyCommandBuilder
             var trim = item.OutPointSeconds.HasValue
                 ? $"trim=start={Format(item.InPointSeconds)}:end={Format(item.OutPointSeconds.Value)}"
                 : $"trim=start={Format(item.InPointSeconds)}";
-            filters.Add($"[{index}:v]{trim},setpts=PTS-STARTPTS[v{index}];[{index}:a]{trim},asetpts=PTS-STARTPTS[a{index}]");
+            var probe = request.VideoProbes is null ? null
+                : request.VideoProbes.TryGetValue(item.AssetId, out var detected) ? detected
+                : throw new MovieFinalAssemblyExecutionException("ASSEMBLY_SOURCE_PROBE_MISSING");
+            if (probe is not null &&
+                (probe.DurationSeconds <= 0m || probe.DurationSeconds > 86_400m
+                    || item.InPointSeconds >= probe.DurationSeconds
+                    || item.OutPointSeconds is decimal end && end > probe.DurationSeconds + 0.5m))
+                throw new MovieFinalAssemblyExecutionException("ASSEMBLY_SOURCE_DURATION_INVALID");
+            // Some generated MP4s have only a video stream. Never address a
+            // nonexistent [i:a] pad: synthesize *bounded* timeline-length
+            // silence only for those clips, preserving audio from other clips.
+            if (probe is { HasAudio: false })
+            {
+                var clipDuration = (item.OutPointSeconds ?? probe.DurationSeconds) - item.InPointSeconds;
+                if (clipDuration <= 0m || clipDuration > 86_400m)
+                    throw new MovieFinalAssemblyExecutionException("ASSEMBLY_SOURCE_DURATION_INVALID");
+                filters.Add($"[{index}:v]{trim},setpts=PTS-STARTPTS[v{index}];anullsrc=r=48000:cl=stereo,atrim=duration={Format(clipDuration)},asetpts=PTS-STARTPTS[a{index}]");
+            }
+            else
+            {
+                filters.Add($"[{index}:v]{trim},setpts=PTS-STARTPTS[v{index}];[{index}:a]{trim},asetpts=PTS-STARTPTS[a{index}]");
+            }
         }
         var videoInputs = string.Concat(request.Contract.Timeline.Select((_, index) => $"[v{index}][a{index}]"));
         filters.Add($"{videoInputs}concat=n={request.Contract.Timeline.Count}:v=1:a=1[videoBase][timelineAudio]");
@@ -818,8 +845,12 @@ public sealed class FfmpegMovieFinalAssemblyExecutor(IOptions<MovieFinalAssembly
         try
         {
             var start = Stopwatch.GetTimestamp();
+            // Probe each distinct source once; the builder must never infer
+            // audio presence from a file extension or an assumed provider.
+            var videoProbes = await ProbeVideoSourcesAsync(request, cancellationToken);
+            var probedRequest = request with { VideoProbes = videoProbes };
             var startInfo = new ProcessStartInfo { FileName = settings.FfmpegPath, UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true, RedirectStandardOutput = true };
-            foreach (var argument in FfmpegMovieFinalAssemblyCommandBuilder.Build(request, outputPath)) startInfo.ArgumentList.Add(argument);
+            foreach (var argument in FfmpegMovieFinalAssemblyCommandBuilder.Build(probedRequest, outputPath)) startInfo.ArgumentList.Add(argument);
             using var process = new Process { StartInfo = startInfo };
             if (!process.Start()) throw new MovieFinalAssemblyExecutionException("ASSEMBLY_EXECUTION_FAILED");
             progress.Report(35);
@@ -847,6 +878,104 @@ public sealed class FfmpegMovieFinalAssemblyExecutor(IOptions<MovieFinalAssembly
         {
             TryDelete(directory);
             throw;
+        }
+    }
+
+    private async Task<IReadOnlyDictionary<Guid, MovieFinalAssemblyVideoProbe>> ProbeVideoSourcesAsync(
+        MovieFinalAssemblyExecutionRequest request, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(settings.FfprobePath)
+            || (Path.IsPathRooted(settings.FfprobePath) && !File.Exists(settings.FfprobePath)))
+            throw new MovieFinalAssemblyExecutionException("ASSEMBLY_SOURCE_PROBE_FAILED");
+
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        budget.CancelAfter(TimeSpan.FromSeconds(Math.Min(120, Math.Clamp(settings.ProcessTimeoutSeconds, 1, 86_400))));
+        var probes = new Dictionary<Guid, MovieFinalAssemblyVideoProbe>();
+        try
+        {
+            foreach (var item in request.Contract.Timeline)
+            {
+                if (probes.ContainsKey(item.AssetId)) continue;
+                if (!request.SourcePaths.TryGetValue(item.AssetId, out var sourcePath) || !File.Exists(sourcePath))
+                    throw new MovieFinalAssemblyExecutionException("ASSEMBLY_SOURCE_PATH_MISSING");
+                probes.Add(item.AssetId, await ProbeVideoSourceAsync(sourcePath, budget.Token));
+            }
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new MovieFinalAssemblyExecutionException("ASSEMBLY_SOURCE_PROBE_FAILED");
+        }
+        return probes;
+    }
+
+    private async Task<MovieFinalAssemblyVideoProbe> ProbeVideoSourceAsync(string path, CancellationToken cancellationToken)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = settings.FfprobePath,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardError = true,
+            RedirectStandardOutput = true,
+        };
+        foreach (var argument in new[] { "-v", "error", "-show_entries", "stream=codec_type:format=duration", "-of", "json", path })
+            startInfo.ArgumentList.Add(argument);
+
+        using var process = new Process { StartInfo = startInfo };
+        if (!process.Start()) throw new MovieFinalAssemblyExecutionException("ASSEMBLY_SOURCE_PROBE_FAILED");
+        try
+        {
+            var outputTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
+            var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
+            await process.WaitForExitAsync(cancellationToken).WaitAsync(TimeSpan.FromSeconds(15), cancellationToken);
+            var output = await outputTask;
+            _ = await errorTask; // Never include private source paths or probe stderr in errors.
+            if (process.ExitCode != 0 || output.Length > 65_536)
+                throw new MovieFinalAssemblyExecutionException("ASSEMBLY_SOURCE_PROBE_FAILED");
+            return ParseVideoProbeJson(output);
+        }
+        catch (TimeoutException)
+        {
+            throw new MovieFinalAssemblyExecutionException("ASSEMBLY_SOURCE_PROBE_FAILED");
+        }
+        finally
+        {
+            if (!process.HasExited)
+            {
+                try { process.Kill(entireProcessTree: true); }
+                catch (InvalidOperationException) { }
+            }
+        }
+    }
+
+    internal static MovieFinalAssemblyVideoProbe ParseVideoProbeJson(string output)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(output);
+            var root = document.RootElement;
+            if (!root.TryGetProperty("streams", out var streams) || streams.ValueKind != JsonValueKind.Array
+                || !root.TryGetProperty("format", out var format) || format.ValueKind != JsonValueKind.Object
+                || !format.TryGetProperty("duration", out var durationValue) || durationValue.ValueKind != JsonValueKind.String
+                || !decimal.TryParse(durationValue.GetString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var duration)
+                || duration <= 0m || duration > 86_400m)
+                throw new MovieFinalAssemblyExecutionException("ASSEMBLY_SOURCE_PROBE_FAILED");
+            var hasVideo = false;
+            var hasAudio = false;
+            foreach (var stream in streams.EnumerateArray())
+            {
+                if (stream.ValueKind != JsonValueKind.Object
+                    || !stream.TryGetProperty("codec_type", out var type) || type.ValueKind != JsonValueKind.String)
+                    continue;
+                hasVideo |= type.GetString() == "video";
+                hasAudio |= type.GetString() == "audio";
+            }
+            if (!hasVideo) throw new MovieFinalAssemblyExecutionException("ASSEMBLY_SOURCE_PROBE_FAILED");
+            return new(duration, hasAudio);
+        }
+        catch (JsonException)
+        {
+            throw new MovieFinalAssemblyExecutionException("ASSEMBLY_SOURCE_PROBE_FAILED");
         }
     }
 
