@@ -76,6 +76,7 @@ test("Image Studio safely recovers from a failed job and downloads the successfu
   const workspaceId = auth.personalWorkspace.id;
   const description = "A clean, minimal product image for a synthetic launch QA journey.";
   const webOrigin = new URL(process.env.E2E_WEB_URL ?? "http://localhost:3000").origin;
+  const apiOrigin = new URL(E2E_API_URL).origin;
   const createRequests: Array<{
     body: Record<string, unknown>;
     csrfToken: string | undefined;
@@ -190,7 +191,20 @@ test("Image Studio safely recovers from a failed job and downloads the successfu
     });
   });
 
+  let localCspAdjusted = false;
+  await page.route("**/create/image", async (route) => {
+    const response = await route.fetch();
+    const headers = response.headers();
+    const imagePolicy = "img-src 'self' data: blob: https:";
+    const csp = headers["content-security-policy"];
+    expect(csp).toContain(imagePolicy);
+    headers["content-security-policy"] = csp.replace(imagePolicy, `${imagePolicy} ${apiOrigin}`);
+    await route.fulfill({ response, headers });
+    localCspAdjusted = true;
+  });
+
   await page.goto("/create/image");
+  expect(localCspAdjusted).toBe(true);
   const prompt = page.getByRole("textbox", { name: "What would you like to create?" });
   await expect(prompt).toBeVisible();
   await prompt.fill(description);
