@@ -782,7 +782,7 @@ public static class FfmpegMovieFinalAssemblyCommandBuilder
         if (request.Contract.Captions.Mode == MovieAssemblyCaptionModes.BurnIn)
         {
             if (!request.Contract.Captions.AssetId.HasValue || !request.SourcePaths.TryGetValue(request.Contract.Captions.AssetId.Value, out var captionsPath)) throw new MovieFinalAssemblyExecutionException("ASSEMBLY_CAPTIONS_PATH_MISSING");
-            filters.Add($"[videoBase]subtitles=filename='{EscapeFilterValue(captionsPath)}'[captioned]");
+            filters.Add($"[videoBase]subtitles=filename={EscapeFilterValue(captionsPath)}[captioned]");
             videoLabel = "captioned";
         }
         filters.Add($"[{videoLabel}]format=yuv420p[video]");
@@ -843,7 +843,26 @@ public static class FfmpegMovieFinalAssemblyCommandBuilder
 
     private static string Format(decimal value) => value.ToString("0.###", CultureInfo.InvariantCulture);
     private static string Gain(decimal gainDb) => Math.Pow(10d, (double)gainDb / 20d).ToString("0.######", CultureInfo.InvariantCulture);
-    private static string EscapeFilterValue(string path) => path.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("'", "\\'", StringComparison.Ordinal).Replace(":", "\\:", StringComparison.Ordinal);
+    private static string EscapeFilterValue(string path)
+    {
+        // FFmpeg parses both the subtitles filename option and then the filter
+        // graph. A single escaping pass (especially within single quotes) loses
+        // literal apostrophes or colons in otherwise valid caption filenames.
+        // Structured process arguments prevent shell interpolation, but do not
+        // replace these two distinct FFmpeg escaping layers.
+        static string Escape(string value, string special)
+        {
+            var result = new StringBuilder(value.Length);
+            foreach (var character in value)
+            {
+                if (special.IndexOf(character) >= 0) result.Append('\\');
+                result.Append(character);
+            }
+            return result.ToString();
+        }
+
+        return Escape(Escape(path, "\\':"), "\\'[],;");
+    }
 }
 
 public sealed class FfmpegMovieFinalAssemblyExecutor(IOptions<MovieFinalAssemblyOptions> options) : IMovieFinalAssemblyExecutor
