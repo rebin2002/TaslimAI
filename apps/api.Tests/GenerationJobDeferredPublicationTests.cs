@@ -812,20 +812,41 @@ public sealed class GenerationJobPendingPublicationTests : IClassFixture<Generat
                 (jobId, token, initialTimestamp) = await SeedPostgresClaimGraph(db);
             }
 
+            var readyClaimers = 0;
+            var bothClaimersReady = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var startClaims = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             async Task ClaimOnFreshContext()
             {
+                if (Interlocked.Increment(ref readyClaimers) == 2)
+                    bothClaimersReady.TrySetResult(true);
+                await startClaims.Task.WaitAsync(TimeSpan.FromSeconds(20));
                 await using var db = new TaslimDbContext(options);
                 var store = new MovieVideoExecutionStore(db, Options.Create(new MovieVideoOptions()));
                 await store.ClaimApprovedProductionSubmissionAsync(jobId, token, CancellationToken.None);
             }
 
-            await Task.WhenAll(Task.Run(ClaimOnFreshContext), Task.Run(ClaimOnFreshContext));
+            var claimTasks = new[] { Task.Run(ClaimOnFreshContext), Task.Run(ClaimOnFreshContext) };
+            try
+            {
+                await bothClaimersReady.Task.WaitAsync(TimeSpan.FromSeconds(20));
+            }
+            finally
+            {
+                startClaims.TrySetResult(true);
+            }
+            await Task.WhenAll(claimTasks);
             await using (var verify = new TaslimDbContext(options))
             {
                 var version = await verify.MovieProductionVersions.AsNoTracking().SingleAsync(item => item.GenerationJobId == jobId);
-                Assert.True(version.UpdatedAt > initialTimestamp);
-                Assert.Equal(1, await verify.MovieProductionStageTransitions.CountAsync(item =>
-                    item.MovieProductionVersionId == version.Id && item.EventType == "provider_submission_claimed"));
+                Assert.True(version.UpdatedAt - initialTimestamp >= TimeSpan.FromMilliseconds(1));
+                var claimEvents = await verify.MovieProductionStageTransitions.AsNoTracking()
+                    .Where(item => item.MovieProductionVersionId == version.Id && item.EventType == "provider_submission_claimed")
+                    .ToListAsync();
+                var claimEvent = Assert.Single(claimEvents);
+                Assert.Equal(jobId, claimEvent.GenerationJobId);
+                Assert.Equal(version.MovieShotId, claimEvent.MovieShotId);
+                Assert.Equal(MovieProductionStages.ProductionRender, claimEvent.FromStage);
+                Assert.Equal(MovieProductionStages.ProductionRender, claimEvent.ToStage);
                 var firstTimestamp = version.UpdatedAt;
                 var store = new MovieVideoExecutionStore(verify, Options.Create(new MovieVideoOptions()));
                 await store.ClaimApprovedProductionSubmissionAsync(jobId, token, CancellationToken.None);
@@ -833,6 +854,12 @@ public sealed class GenerationJobPendingPublicationTests : IClassFixture<Generat
                     .Where(item => item.GenerationJobId == jobId)
                     .Select(item => item.UpdatedAt)
                     .SingleAsync());
+                var replayedClaimEvents = await verify.MovieProductionStageTransitions.AsNoTracking()
+                    .Where(item => item.MovieProductionVersionId == version.Id && item.EventType == "provider_submission_claimed")
+                    .ToListAsync();
+                var replayedClaimEvent = Assert.Single(replayedClaimEvents);
+                Assert.Equal(claimEvent.Id, replayedClaimEvent.Id);
+                Assert.Equal(claimEvent.CreatedAt, replayedClaimEvent.CreatedAt);
             }
         }
         finally
