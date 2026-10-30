@@ -72,6 +72,18 @@ public sealed class LaunchArtifactDownloadSmokeTests :
         Assert.True(png.Length > 8);
         Assert.Equal(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }, png.Take(8).ToArray());
 
+        using var anonymous = imageFactory.CreateClient();
+        using (var deniedAnonymous = await anonymous.GetAsync($"/api/assets/{asset.Id}/download"))
+        {
+            Assert.Equal(HttpStatusCode.Unauthorized, deniedAnonymous.StatusCode);
+            Assert.Null(deniedAnonymous.Content.Headers.ContentDisposition);
+        }
+        using (var deniedInline = await anonymous.GetAsync($"/api/assets/{asset.Id}/download?inline=true"))
+        {
+            Assert.Equal(HttpStatusCode.Unauthorized, deniedInline.StatusCode);
+            Assert.Null(deniedInline.Content.Headers.ContentDisposition);
+        }
+
         using var other = imageFactory.CreateClient();
         await Register(other);
         using var denied = await other.GetAsync($"/api/assets/{asset.Id}/download");
@@ -105,6 +117,14 @@ public sealed class LaunchArtifactDownloadSmokeTests :
         var docx = Assert.Single(asset.Representations, item => item.RepresentationType == AssetRepresentationTypes.Docx);
         var pdf = Assert.Single(asset.Representations, item => item.RepresentationType == AssetRepresentationTypes.Pdf);
 
+        using var anonymous = documentFactory.CreateClient();
+        foreach (var representation in asset.Representations)
+        {
+            using var deniedAnonymous = await anonymous.GetAsync($"/api/assets/{asset.Id}/representations/{representation.Id}/download");
+            Assert.Equal(HttpStatusCode.Unauthorized, deniedAnonymous.StatusCode);
+            Assert.Null(deniedAnonymous.Content.Headers.ContentDisposition);
+        }
+
         using var other = documentFactory.CreateClient();
         await Register(other);
         await AssertRepresentationDownload(owner, other, asset.Id, docx, "application/vnd.openxmlformats-officedocument.wordprocessingml.document", ".docx", "PK");
@@ -137,6 +157,13 @@ public sealed class LaunchArtifactDownloadSmokeTests :
         var asset = await LoadAsset(presentationFactory, job.Id);
         Assert.Equal(AssetTypes.Presentation, asset.AssetType);
         var pptx = Assert.Single(asset.Representations, item => item.RepresentationType == AssetRepresentationTypes.Pptx);
+
+        using var anonymous = presentationFactory.CreateClient();
+        using (var deniedAnonymous = await anonymous.GetAsync($"/api/assets/{asset.Id}/representations/{pptx.Id}/download"))
+        {
+            Assert.Equal(HttpStatusCode.Unauthorized, deniedAnonymous.StatusCode);
+            Assert.Null(deniedAnonymous.Content.Headers.ContentDisposition);
+        }
 
         using var other = presentationFactory.CreateClient();
         await Register(other);
