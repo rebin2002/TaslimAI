@@ -41,6 +41,7 @@ public sealed class MovieFinalAssemblyTests
         Assert.Equal(1, arguments.Count(item => item == audioPath));
         Assert.DoesNotContain(arguments, item => item.Contains("sh -c", StringComparison.OrdinalIgnoreCase));
         Assert.Contains("-filter_complex", arguments);
+        Assert.Contains("-nostdin", arguments); // non-interactive background worker
         Assert.Contains("[audio]", arguments.Single(item => item.Contains("amix=", StringComparison.Ordinal)));
     }
 
