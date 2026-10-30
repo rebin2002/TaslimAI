@@ -42,6 +42,8 @@ public static class GenerationJobErrorMessages
             GenerationJobErrorCodes.ResearchProviderUnavailable => "Research generation is temporarily unavailable. Please try again later.",
             GenerationJobErrorCodes.ResearchContextTooLarge => "The selected research context is too large. Choose fewer or shorter sources.",
             GenerationJobErrorCodes.ResearchOutputInvalid => "The research report was invalid. Please try again.",
+            GenerationJobErrorCodes.ResearchSourceUnavailable => "No usable research sources are available. Add or choose another source, then try again.",
+            GenerationJobErrorCodes.ResearchSourceExtractionFailed => "One or more research sources could not be read. Choose a readable source and try again.",
             GenerationJobErrorCodes.ResearchCitationValidationFailed => "The research citations were invalid. Please try again.",
             GenerationJobErrorCodes.ResearchStorageFailed => "The research report was generated but could not be saved. Please try again.",
             GenerationJobErrorCodes.ResearchRenderFailed => "The research report could not be rendered. Please try again.",
