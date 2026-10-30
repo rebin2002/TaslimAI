@@ -397,7 +397,8 @@ public sealed class MovieShotExecutionService(
             request.ReferenceReadinessOverrideReason,
             MovieReferenceReadinessOverrideSources.ShotExecution,
             cancellationToken);
-        var continuitySnapshot = await continuity.BuildSnapshotForTargetAsync(movie.Id, shot.Scene.Id, shot.Id, true, cancellationToken);
+        var continuitySnapshot = await BuildContinuitySnapshotWithConcurrencyRetryAsync(
+            movie.Id, shot.Scene.Id, shot.Id, cancellationToken);
         var worldSnapshot = await worldContinuity.ProjectAsync(movie.Id, shot.Scene.Id, shot.Id, cancellationToken);
         var now = DateTime.UtcNow;
         var candidates = new List<MovieTake>(takeCount);
@@ -634,6 +635,35 @@ public sealed class MovieShotExecutionService(
         {
             return false;
         }
+    }
+
+    private async Task<MovieCharacterContinuitySnapshotDto> BuildContinuitySnapshotWithConcurrencyRetryAsync(
+        Guid movieProjectId,
+        Guid sceneId,
+        Guid shotId,
+        CancellationToken cancellationToken)
+    {
+        const int maxAttempts = 3;
+        for (var attempt = 0; attempt < maxAttempts; attempt++)
+        {
+            try
+            {
+                return await continuity.BuildSnapshotForTargetAsync(
+                    movieProjectId, sceneId, shotId, true, cancellationToken);
+            }
+            catch (DbUpdateException) when (attempt < maxAttempts - 1)
+            {
+                // Concurrent requests can read the same next snapshot version.
+                // Detach only the failed snapshot insert, then re-read the now
+                // committed version before retrying this short-form queue path.
+                foreach (var entry in db.ChangeTracker.Entries<MovieCharacterContinuitySnapshot>()
+                    .Where(entry => entry.State == EntityState.Added)
+                    .ToArray())
+                    entry.State = EntityState.Detached;
+            }
+        }
+
+        throw new InvalidOperationException("Continuity snapshot persistence retry was exhausted.");
     }
 
     private async Task<bool> ReconcilePendingShotPlaceholdersAsync(
