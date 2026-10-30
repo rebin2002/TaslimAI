@@ -86,6 +86,7 @@ public sealed class LaunchArtifactDownloadSmokeTests :
 
         using var other = imageFactory.CreateClient();
         await Register(other);
+        await AssertAssetMetadataPrivacy(anonymous, other, asset.Id);
         using var denied = await other.GetAsync($"/api/assets/{asset.Id}/download");
         Assert.Equal(HttpStatusCode.NotFound, denied.StatusCode);
     }
@@ -127,6 +128,7 @@ public sealed class LaunchArtifactDownloadSmokeTests :
 
         using var other = documentFactory.CreateClient();
         await Register(other);
+        await AssertAssetMetadataPrivacy(anonymous, other, asset.Id);
         await AssertRepresentationDownload(owner, other, asset.Id, docx, "application/vnd.openxmlformats-officedocument.wordprocessingml.document", ".docx", "PK");
         await AssertRepresentationDownload(owner, other, asset.Id, pdf, "application/pdf", ".pdf", "%PDF-");
     }
@@ -167,8 +169,20 @@ public sealed class LaunchArtifactDownloadSmokeTests :
 
         using var other = presentationFactory.CreateClient();
         await Register(other);
+        await AssertAssetMetadataPrivacy(anonymous, other, asset.Id);
         await AssertRepresentationDownload(owner, other, asset.Id, pptx,
             "application/vnd.openxmlformats-officedocument.presentationml.presentation", ".pptx", "PK");
+    }
+
+    private static async Task AssertAssetMetadataPrivacy(HttpClient anonymous, HttpClient other, Guid assetId)
+    {
+        // The same private artifact must hide its metadata as well as its file bytes.
+        using var deniedAnonymous = await anonymous.GetAsync($"/api/assets/{assetId}");
+        Assert.Equal(HttpStatusCode.Unauthorized, deniedAnonymous.StatusCode);
+
+        // Do not disclose whether another workspace's asset exists.
+        using var deniedOther = await other.GetAsync($"/api/assets/{assetId}");
+        Assert.Equal(HttpStatusCode.NotFound, deniedOther.StatusCode);
     }
 
     private static void EnsureDatabase(WebApplicationFactory<Program> factory)
