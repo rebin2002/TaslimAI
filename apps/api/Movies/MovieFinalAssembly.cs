@@ -155,6 +155,18 @@ public sealed class MovieFinalAssemblyService(
     IMovieTimelineTransitionService transitionEdits) : IMovieFinalAssemblyService
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = false };
+    private const string AssemblyIdempotencyUniqueIndexName = "IX_MovieAssemblies_MovieProjectId_IdempotencyKey";
+
+    internal static bool IsAssemblyIdempotencyUniqueViolation(DbUpdateException exception)
+    {
+        var details = exception.ToString();
+        var isUniqueViolation = details.Contains("duplicate key", StringComparison.OrdinalIgnoreCase)
+            || details.Contains("UNIQUE constraint failed", StringComparison.OrdinalIgnoreCase)
+            || details.Contains("Cannot insert duplicate key", StringComparison.OrdinalIgnoreCase);
+        return isUniqueViolation
+            && (details.Contains(AssemblyIdempotencyUniqueIndexName, StringComparison.OrdinalIgnoreCase)
+                || details.Contains("MovieAssemblies.MovieProjectId", StringComparison.OrdinalIgnoreCase));
+    }
 
     public async Task<MovieFinalAssemblyDto?> RequestAsync(Guid userId, Guid movieProjectId, MovieFinalAssemblyRequest request, string? idempotencyKey, CancellationToken cancellationToken)
     {
@@ -219,7 +231,7 @@ public sealed class MovieFinalAssemblyService(
             var projected = await ProjectApprovedSoundtrackInputsAsync(movieProjectId, explicitAssetIds, cancellationToken);
             requestedAudioInputs = requestedAudioInputs.Concat(projected).ToArray();
         }
-        var audioInputs = await NormalizeAudioInputsAsync(movie.WorkspaceId, movie.ProjectId, requestedAudioInputs, cancellationToken);
+        var audioInputs = await NormalizeAudioInputsAsync(movie.WorkspaceId, movie.ProjectId, requestedAudioInputs, movie.DurationSeconds, cancellationToken);
         var captionAsset = await ValidateCaptionAssetAsync(movie.WorkspaceId, movie.ProjectId, captions, cancellationToken);
         var persistedTransitions = (await transitionEdits.GetLatestAsync(userId, movieProjectId, cancellationToken))?.Timeline.Transitions ?? [];
         var expectedDuration = Math.Max(1, movie.DurationSeconds);
@@ -287,7 +299,25 @@ public sealed class MovieFinalAssemblyService(
             UpdatedAt = now,
         };
         db.MovieAssemblies.Add(assembly);
-        await db.SaveChangesAsync(cancellationToken);
+        try
+        {
+            await db.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateException exception) when (IsAssemblyIdempotencyUniqueViolation(exception))
+        {
+            // The project/key unique index is the durable idempotency boundary.
+            // A concurrent identical request may have committed the winner after
+            // the initial lookup; discard the losing Added entity and replay it.
+            db.ChangeTracker.Clear();
+            var winner = await db.MovieAssemblies
+                .Include(item => item.GenerationJob).ThenInclude(item => item!.Outputs)
+                .FirstOrDefaultAsync(item => item.MovieProjectId == movieProjectId && item.IdempotencyKey == normalizedIdempotencyKey, cancellationToken);
+            if (winner is null) throw;
+            if (!string.Equals(winner.RequestFingerprint, fingerprint, StringComparison.Ordinal))
+                throw new MovieFinalAssemblyValidationException("IDEMPOTENCY_KEY_REUSED", "This idempotency key was already used for a different assembly request.");
+            await ReconcileTerminalJobAsync(winner, cancellationToken);
+            return ToDto(winner);
+        }
 
         var input = new MovieFinalAssemblyInput(
             "final_assembly",
@@ -443,7 +473,7 @@ public sealed class MovieFinalAssemblyService(
     private static bool IsTerminalAssemblyStatus(string status) =>
         status is MovieAssemblyStatuses.Ready or MovieAssemblyStatuses.Failed or MovieAssemblyStatuses.Cancelled;
 
-    private async Task<IReadOnlyList<MovieAssemblyAudioMixInput>> NormalizeAudioInputsAsync(Guid workspaceId, Guid? projectId, IReadOnlyList<MovieAssemblyAudioMixInputRequest> requests, CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<MovieAssemblyAudioMixInput>> NormalizeAudioInputsAsync(Guid workspaceId, Guid? projectId, IReadOnlyList<MovieAssemblyAudioMixInputRequest> requests, int projectDurationSeconds, CancellationToken cancellationToken)
     {
         if (requests.Count > 64) throw new MovieFinalAssemblyValidationException("ASSEMBLY_AUDIO_MIX_INVALID", "A final mix can contain at most 64 audio inputs.");
         var ids = requests.Select(item => item.AssetId).ToArray();
@@ -453,6 +483,7 @@ public sealed class MovieFinalAssemblyService(
             .Where(item => ids.Contains(item.Id) && item.WorkspaceId == workspaceId)
             .ToDictionaryAsync(item => item.Id, cancellationToken);
         var normalized = new List<MovieAssemblyAudioMixInput>(requests.Count);
+        var maxCueTime = Math.Clamp(projectDurationSeconds, 1, 7_200);
         foreach (var request in requests)
         {
             if (!assets.TryGetValue(request.AssetId, out var asset)
@@ -461,7 +492,10 @@ public sealed class MovieFinalAssemblyService(
                 || (!string.Equals(asset.AssetType, AssetTypes.Audio, StringComparison.OrdinalIgnoreCase) && !string.Equals(asset.AssetType, AssetTypes.Music, StringComparison.OrdinalIgnoreCase))
                 || asset.StoredFile?.Status != StoredFileStatus.Ready)
                 throw new MovieFinalAssemblyValidationException("ASSEMBLY_AUDIO_SOURCE_UNAVAILABLE", "Every audio mix input must be a ready audio asset in the movie workspace.");
-            if (request.GainDb is < -60m or > 12m || request.StartTimeSeconds is < 0m || request.EndTimeSeconds is <= 0m || request.EndTimeSeconds <= request.StartTimeSeconds)
+            if (request.GainDb is < -60m or > 12m
+                || (request.StartTimeSeconds < 0m || request.StartTimeSeconds >= maxCueTime)
+                || (request.EndTimeSeconds <= 0m || request.EndTimeSeconds > maxCueTime)
+                || request.EndTimeSeconds <= request.StartTimeSeconds)
                 throw new MovieFinalAssemblyValidationException("ASSEMBLY_AUDIO_MIX_INVALID", "Audio mix gain and time bounds are outside the supported range.");
             var role = string.IsNullOrWhiteSpace(request.Role) ? "music" : request.Role.Trim().ToLowerInvariant();
             if (role.Length > 40) throw new MovieFinalAssemblyValidationException("ASSEMBLY_AUDIO_MIX_INVALID", "Audio mix roles are limited to 40 characters.");
@@ -610,17 +644,33 @@ public sealed class MovieFinalAssemblyQualityControl
     {
         var findings = new List<string>();
         if (output.Resolution.Width != input.Profile.Width || output.Resolution.Height != input.Profile.Height) findings.Add("MOVIE_ASSEMBLY_QC_RESOLUTION_MISMATCH");
+        // Invalid runtime plans must never be accepted as successful master exports.
+        // The positive-duration fallback below is only for safe arithmetic.
+        if (input.ExpectedDurationSeconds is <= 0 or > 7_200) findings.Add("MOVIE_ASSEMBLY_QC_EXPECTED_DURATION_INVALID");
         if (output.SizeBytes <= 0) findings.Add("MOVIE_ASSEMBLY_QC_OUTPUT_EMPTY");
         if (!output.DurationMeasured) findings.Add("MOVIE_ASSEMBLY_QC_DURATION_UNMEASURED");
         if (output.DurationSeconds <= 0) findings.Add("MOVIE_ASSEMBLY_QC_DURATION_INVALID");
-        if (output.DurationSeconds > Math.Max(1, input.ExpectedDurationSeconds) + 5) findings.Add("MOVIE_ASSEMBLY_QC_DURATION_EXCEEDED");
+        // A short but positive measured output must not pass final-master QC:
+        // an accidentally truncated feature film would otherwise be published
+        // as ready. Allow the same five-second container timing tolerance in
+        // both directions, without rounding a missing/zero runtime into success.
+        var expectedDuration = Math.Max(1L, input.ExpectedDurationSeconds);
+        if (output.DurationSeconds > 0 && output.DurationSeconds < Math.Max(1L, expectedDuration - 5L))
+            findings.Add("MOVIE_ASSEMBLY_QC_DURATION_TRUNCATED");
+        if (output.DurationSeconds > expectedDuration + 5L) findings.Add("MOVIE_ASSEMBLY_QC_DURATION_EXCEEDED");
         return new(ContractVersion, findings.Count == 0 ? MovieFinalAssemblyQcStatuses.Passed : MovieFinalAssemblyQcStatuses.Failed, findings, output.Resolution.Width, output.Resolution.Height, output.DurationSeconds, output.OutputSha256);
     }
 }
 
+// Populated by the local executor after bounded ffprobe inspection.
+// The request may exist before probing, but the command builder now refuses
+// to render unless it has complete per-source duration/audio evidence.
+public sealed record MovieFinalAssemblyVideoProbe(decimal DurationSeconds, bool HasAudio);
+
 public sealed record MovieFinalAssemblyExecutionRequest(
     MovieFinalAssemblyInput Contract,
-    IReadOnlyDictionary<Guid, string> SourcePaths);
+    IReadOnlyDictionary<Guid, string> SourcePaths,
+    IReadOnlyDictionary<Guid, MovieFinalAssemblyVideoProbe>? VideoProbes = null);
 
 public sealed record MovieFinalAssemblyExecutionResult(
     string FileName,
@@ -663,7 +713,10 @@ public static class FfmpegMovieFinalAssemblyCommandBuilder
         ArgumentNullException.ThrowIfNull(request);
         if (string.IsNullOrWhiteSpace(outputPath)) throw new ArgumentException("An output path is required.", nameof(outputPath));
         if (request.Contract.Timeline.Count == 0) throw new MovieFinalAssemblyExecutionException("ASSEMBLY_TIMELINE_EMPTY");
-        var args = new List<string> { "-hide_banner", "-loglevel", "error", "-y" };
+        if (request.Contract.ExpectedDurationSeconds is <= 0 or > 7_200)
+            throw new MovieFinalAssemblyExecutionException("ASSEMBLY_DURATION_INVALID");
+        // Background workers must never let FFmpeg consume the process stdin.
+        var args = new List<string> { "-hide_banner", "-nostdin", "-loglevel", "error", "-y" };
         foreach (var item in request.Contract.Timeline)
         {
             if (!request.SourcePaths.TryGetValue(item.AssetId, out var path)) throw new MovieFinalAssemblyExecutionException("ASSEMBLY_SOURCE_PATH_MISSING");
@@ -674,6 +727,16 @@ public static class FfmpegMovieFinalAssemblyCommandBuilder
             if (!request.SourcePaths.TryGetValue(item.AssetId, out var path)) throw new MovieFinalAssemblyExecutionException("ASSEMBLY_AUDIO_PATH_MISSING");
             args.Add("-i"); args.Add(path);
         }
+        // FFmpeg input options must precede filter/output mapping options. In
+        // particular, registering an embedded subtitle input after -map causes
+        // FFmpeg to reject the command before assembly starts.
+        if (request.Contract.Captions.Mode == MovieAssemblyCaptionModes.Embedded
+            && request.Contract.Captions.AssetId is Guid embeddedCaptionId)
+        {
+            if (!request.SourcePaths.TryGetValue(embeddedCaptionId, out var captionsPath))
+                throw new MovieFinalAssemblyExecutionException("ASSEMBLY_CAPTIONS_PATH_MISSING");
+            args.Add("-i"); args.Add(captionsPath);
+        }
         var filters = new List<string>();
         for (var index = 0; index < request.Contract.Timeline.Count; index++)
         {
@@ -681,7 +744,41 @@ public static class FfmpegMovieFinalAssemblyCommandBuilder
             var trim = item.OutPointSeconds.HasValue
                 ? $"trim=start={Format(item.InPointSeconds)}:end={Format(item.OutPointSeconds.Value)}"
                 : $"trim=start={Format(item.InPointSeconds)}";
-            filters.Add($"[{index}:v]{trim},setpts=PTS-STARTPTS[v{index}];[{index}:a]{trim},asetpts=PTS-STARTPTS[a{index}]");
+            // Never guess that a source has an audio stream. The real executor
+            // probes every distinct input before calling this builder; callers
+            // without that evidence must fail closed rather than emit [i:a].
+            if (request.VideoProbes is null
+                || !request.VideoProbes.TryGetValue(item.AssetId, out var probe)
+                || probe is null)
+                throw new MovieFinalAssemblyExecutionException("ASSEMBLY_SOURCE_PROBE_MISSING");
+            if (probe.DurationSeconds <= 0m || probe.DurationSeconds > 86_400m
+                || item.InPointSeconds >= probe.DurationSeconds
+                || item.OutPointSeconds is decimal end && end > probe.DurationSeconds + 0.5m)
+                throw new MovieFinalAssemblyExecutionException("ASSEMBLY_SOURCE_DURATION_INVALID");
+            // FFmpeg concat requires matching geometry, pixel format and SAR
+            // across every segment. Normalize *before* concat; scaling only
+            // the concatenated master fails for mixed-resolution provider clips.
+            var normalizedVideo = $"{trim},setpts=PTS-STARTPTS,scale={request.Contract.Profile.Width}:{request.Contract.Profile.Height}:force_original_aspect_ratio=decrease,pad={request.Contract.Profile.Width}:{request.Contract.Profile.Height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p";
+            // Some generated MP4s have only a video stream. Never address a
+            // nonexistent [i:a] pad: synthesize *bounded* timeline-length
+            // silence only for those clips, preserving audio from other clips.
+            if (!probe.HasAudio)
+            {
+                var clipDuration = (item.OutPointSeconds ?? probe.DurationSeconds) - item.InPointSeconds;
+                if (clipDuration <= 0m || clipDuration > 86_400m)
+                    throw new MovieFinalAssemblyExecutionException("ASSEMBLY_SOURCE_DURATION_INVALID");
+                filters.Add($"[{index}:v]{normalizedVideo}[v{index}];anullsrc=r=48000:cl=stereo,atrim=duration={Format(clipDuration)},asetpts=PTS-STARTPTS[a{index}]");
+            }
+            else
+            {
+                // FFmpeg's trim filter only accepts video. Audio from generated
+                // clips must use atrim; applying trim to [i:a] fails the entire
+                // graph before any master can be produced.
+                var audioTrim = item.OutPointSeconds.HasValue
+                    ? $"atrim=start={Format(item.InPointSeconds)}:end={Format(item.OutPointSeconds.Value)}"
+                    : $"atrim=start={Format(item.InPointSeconds)}";
+                filters.Add($"[{index}:v]{normalizedVideo}[v{index}];[{index}:a]{audioTrim},asetpts=PTS-STARTPTS[a{index}]");
+            }
         }
         var videoInputs = string.Concat(request.Contract.Timeline.Select((_, index) => $"[v{index}][a{index}]"));
         filters.Add($"{videoInputs}concat=n={request.Contract.Timeline.Count}:v=1:a=1[videoBase][timelineAudio]");
@@ -689,10 +786,10 @@ public static class FfmpegMovieFinalAssemblyCommandBuilder
         if (request.Contract.Captions.Mode == MovieAssemblyCaptionModes.BurnIn)
         {
             if (!request.Contract.Captions.AssetId.HasValue || !request.SourcePaths.TryGetValue(request.Contract.Captions.AssetId.Value, out var captionsPath)) throw new MovieFinalAssemblyExecutionException("ASSEMBLY_CAPTIONS_PATH_MISSING");
-            filters.Add($"[videoBase]subtitles=filename='{EscapeFilterValue(captionsPath)}'[captioned]");
+            filters.Add($"[videoBase]subtitles=filename={EscapeFilterValue(captionsPath)}[captioned]");
             videoLabel = "captioned";
         }
-        filters.Add($"[{videoLabel}]scale={request.Contract.Profile.Width}:{request.Contract.Profile.Height}:force_original_aspect_ratio=decrease,pad={request.Contract.Profile.Width}:{request.Contract.Profile.Height}:(ow-iw)/2:(oh-ih)/2:color=black[video]");
+        filters.Add($"[{videoLabel}]format=yuv420p[video]");
         var audioLabel = "timelineAudio";
         if (request.Contract.AudioMixInputs.Count > 0)
         {
@@ -701,7 +798,24 @@ public static class FfmpegMovieFinalAssemblyCommandBuilder
             {
                 var item = request.Contract.AudioMixInputs[index];
                 var inputIndex = request.Contract.Timeline.Count + index;
-                filters.Add($"[{inputIndex}:a]volume={Gain(item.GainDb)}[mix{index}]");
+                // A soundtrack cue's time bounds are positions on the master timeline,
+                // not offsets into the source audio file. Trim its playable span first,
+                // then delay it to the intended timeline position before mixing.
+                // Prevent huge/untrusted decimal timing values from overflowing the
+                // millisecond delay calculation or requesting an unbounded mix.
+                var maxCueTime = Math.Clamp(request.Contract.ExpectedDurationSeconds, 1, 7_200);
+                if ((item.StartTimeSeconds < 0m || item.StartTimeSeconds >= maxCueTime)
+                    || (item.EndTimeSeconds <= 0m || item.EndTimeSeconds > maxCueTime)
+                    || item.EndTimeSeconds <= item.StartTimeSeconds)
+                    throw new MovieFinalAssemblyExecutionException("ASSEMBLY_AUDIO_MIX_INVALID");
+                var start = item.StartTimeSeconds ?? 0m;
+                var duration = item.EndTimeSeconds.HasValue
+                    ? $",atrim=duration={Format(item.EndTimeSeconds.Value - start)}"
+                    : string.Empty;
+                var delay = start > 0m
+                    ? $",adelay=delays={Math.Round(start * 1_000m, 0, MidpointRounding.AwayFromZero).ToString(CultureInfo.InvariantCulture)}:all=1"
+                    : string.Empty;
+                filters.Add($"[{inputIndex}:a]asetpts=PTS-STARTPTS{duration},volume={Gain(item.GainDb)}{delay}[mix{index}]");
                 audioLabels.Add($"[mix{index}]");
             }
             filters.Add($"{string.Concat(audioLabels)}amix=inputs={audioLabels.Count}:duration=first:dropout_transition=0[audio]");
@@ -713,8 +827,7 @@ public static class FfmpegMovieFinalAssemblyCommandBuilder
         if (request.Contract.Captions.Mode == MovieAssemblyCaptionModes.Embedded && request.Contract.Captions.AssetId.HasValue)
         {
             var captionIndex = request.Contract.Timeline.Count + request.Contract.AudioMixInputs.Count;
-            if (!request.SourcePaths.ContainsKey(request.Contract.Captions.AssetId.Value)) throw new MovieFinalAssemblyExecutionException("ASSEMBLY_CAPTIONS_PATH_MISSING");
-            args.Add("-i"); args.Add(request.SourcePaths[request.Contract.Captions.AssetId.Value]);
+            // The subtitle source is already declared with the other inputs.
             args.Add("-map"); args.Add($"{captionIndex}:0");
             args.Add("-c:s"); args.Add("mov_text");
         }
@@ -722,7 +835,11 @@ public static class FfmpegMovieFinalAssemblyCommandBuilder
         args.Add("-pix_fmt"); args.Add("yuv420p");
         args.Add("-c:a"); args.Add("aac");
         args.Add("-movflags"); args.Add("+faststart");
-        args.Add("-shortest");
+        // -shortest is unsafe with embedded subtitles: a sparse VTT stream can
+        // end at the last cue and silently truncate an otherwise complete film.
+        // Bound the output by the approved project runtime, not the shortest
+        // output stream; final-master QC still rejects truncated renders.
+        args.Add("-t"); args.Add(request.Contract.ExpectedDurationSeconds.ToString(CultureInfo.InvariantCulture));
         args.Add("-f"); args.Add("mp4");
         args.Add(outputPath);
         return args;
@@ -730,14 +847,41 @@ public static class FfmpegMovieFinalAssemblyCommandBuilder
 
     private static string Format(decimal value) => value.ToString("0.###", CultureInfo.InvariantCulture);
     private static string Gain(decimal gainDb) => Math.Pow(10d, (double)gainDb / 20d).ToString("0.######", CultureInfo.InvariantCulture);
-    private static string EscapeFilterValue(string path) => path.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("'", "\\'", StringComparison.Ordinal).Replace(":", "\\:", StringComparison.Ordinal);
+    private static string EscapeFilterValue(string path)
+    {
+        // FFmpeg parses both the subtitles filename option and then the filter
+        // graph. A single escaping pass (especially within single quotes) loses
+        // literal apostrophes or colons in otherwise valid caption filenames.
+        // Structured process arguments prevent shell interpolation, but do not
+        // replace these two distinct FFmpeg escaping layers.
+        static string Escape(string value, string special)
+        {
+            var result = new StringBuilder(value.Length);
+            foreach (var character in value)
+            {
+                if (special.IndexOf(character) >= 0) result.Append('\\');
+                result.Append(character);
+            }
+            return result.ToString();
+        }
+
+        return Escape(Escape(path, "\\':"), "\\'[],;");
+    }
 }
 
 public sealed class FfmpegMovieFinalAssemblyExecutor(IOptions<MovieFinalAssemblyOptions> options) : IMovieFinalAssemblyExecutor
 {
     private readonly MovieFinalAssemblyOptions settings = options.Value;
     public string Key => "local";
-    public bool IsAvailable => settings.Enabled && (Path.IsPathRooted(settings.FfmpegPath) ? File.Exists(settings.FfmpegPath) : !string.IsNullOrWhiteSpace(settings.FfmpegPath));
+    public bool IsAvailable => settings.Enabled
+        && IsConfiguredExecutable(settings.FfmpegPath)
+        && IsConfiguredExecutable(settings.FfprobePath);
+
+    // Both programs are required. Claiming availability with a missing
+    // ffprobe executable queues a job that cannot pass source-media preflight.
+    private static bool IsConfiguredExecutable(string? path) =>
+        !string.IsNullOrWhiteSpace(path)
+        && (!Path.IsPathRooted(path) || File.Exists(path));
 
     public async Task<MovieFinalAssemblyExecutionResult> ExecuteAsync(MovieFinalAssemblyExecutionRequest request, IProgress<int> progress, CancellationToken cancellationToken)
     {
@@ -748,15 +892,49 @@ public sealed class FfmpegMovieFinalAssemblyExecutor(IOptions<MovieFinalAssembly
         try
         {
             var start = Stopwatch.GetTimestamp();
+            // Probe each distinct source once; the builder must never infer
+            // audio presence from a file extension or an assumed provider.
+            var videoProbes = await ProbeVideoSourcesAsync(request, cancellationToken);
+            var probedRequest = request with { VideoProbes = videoProbes };
             var startInfo = new ProcessStartInfo { FileName = settings.FfmpegPath, UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true, RedirectStandardOutput = true };
-            foreach (var argument in FfmpegMovieFinalAssemblyCommandBuilder.Build(request, outputPath)) startInfo.ArgumentList.Add(argument);
+            foreach (var argument in FfmpegMovieFinalAssemblyCommandBuilder.Build(probedRequest, outputPath)) startInfo.ArgumentList.Add(argument);
             using var process = new Process { StartInfo = startInfo };
             if (!process.Start()) throw new MovieFinalAssemblyExecutionException("ASSEMBLY_EXECUTION_FAILED");
             progress.Report(35);
-            var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
-            await process.WaitForExitAsync(cancellationToken).WaitAsync(TimeSpan.FromSeconds(Math.Clamp(settings.ProcessTimeoutSeconds, 1, 86_400)), cancellationToken);
-            var error = await errorTask;
-            if (process.ExitCode != 0) throw new MovieFinalAssemblyExecutionException("ASSEMBLY_EXECUTION_FAILED", string.IsNullOrWhiteSpace(error) ? "The local assembly process failed." : "The local assembly process failed safely.");
+            try
+            {
+                var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
+                try
+                {
+                    await process.WaitForExitAsync(cancellationToken)
+                        .WaitAsync(TimeSpan.FromSeconds(Math.Clamp(settings.ProcessTimeoutSeconds, 1, 86_400)), cancellationToken);
+                }
+                catch (TimeoutException)
+                {
+                    throw new MovieFinalAssemblyExecutionException("ASSEMBLY_EXECUTION_TIMEOUT");
+                }
+                var error = await errorTask;
+                if (process.ExitCode != 0)
+                    throw new MovieFinalAssemblyExecutionException("ASSEMBLY_EXECUTION_FAILED", string.IsNullOrWhiteSpace(error) ? "The local assembly process failed." : "The local assembly process failed safely.");
+            }
+            finally
+            {
+                // WaitAsync does not stop its underlying process when it times out
+                // or the caller cancels. Never strand an FFmpeg renderer holding
+                // private inputs and CPU after the assembly job is abandoned.
+                if (!process.HasExited)
+                {
+                    try
+                    {
+                        process.Kill(entireProcessTree: true);
+                        await process.WaitForExitAsync(CancellationToken.None)
+                            .WaitAsync(TimeSpan.FromSeconds(5));
+                    }
+                    catch (InvalidOperationException) { }
+                    catch (System.ComponentModel.Win32Exception) { }
+                    catch (TimeoutException) { }
+                }
+            }
             var info = new FileInfo(outputPath);
             if (!info.Exists || info.Length <= 0 || info.Length > Math.Min(2L * 1024 * 1024 * 1024, Math.Max(1, settings.MaxOutputBytes))) throw new MovieFinalAssemblyExecutionException("ASSEMBLY_OUTPUT_INVALID");
             progress.Report(90);
@@ -777,6 +955,113 @@ public sealed class FfmpegMovieFinalAssemblyExecutor(IOptions<MovieFinalAssembly
         {
             TryDelete(directory);
             throw;
+        }
+    }
+
+    private async Task<IReadOnlyDictionary<Guid, MovieFinalAssemblyVideoProbe>> ProbeVideoSourcesAsync(
+        MovieFinalAssemblyExecutionRequest request, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(settings.FfprobePath)
+            || (Path.IsPathRooted(settings.FfprobePath) && !File.Exists(settings.FfprobePath)))
+            throw new MovieFinalAssemblyExecutionException("ASSEMBLY_SOURCE_PROBE_FAILED");
+
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        budget.CancelAfter(TimeSpan.FromSeconds(Math.Min(120, Math.Clamp(settings.ProcessTimeoutSeconds, 1, 86_400))));
+        var probes = new Dictionary<Guid, MovieFinalAssemblyVideoProbe>();
+        try
+        {
+            foreach (var item in request.Contract.Timeline)
+            {
+                if (probes.ContainsKey(item.AssetId)) continue;
+                if (!request.SourcePaths.TryGetValue(item.AssetId, out var sourcePath) || !File.Exists(sourcePath))
+                    throw new MovieFinalAssemblyExecutionException("ASSEMBLY_SOURCE_PATH_MISSING");
+                probes.Add(item.AssetId, await ProbeVideoSourceAsync(sourcePath, budget.Token));
+            }
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new MovieFinalAssemblyExecutionException("ASSEMBLY_SOURCE_PROBE_FAILED");
+        }
+        return probes;
+    }
+
+    private async Task<MovieFinalAssemblyVideoProbe> ProbeVideoSourceAsync(string path, CancellationToken cancellationToken)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = settings.FfprobePath,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardError = true,
+            RedirectStandardOutput = true,
+        };
+        foreach (var argument in new[] { "-v", "error", "-show_entries", "stream=codec_type:format=duration", "-of", "json", path })
+            startInfo.ArgumentList.Add(argument);
+
+        using var process = new Process { StartInfo = startInfo };
+        if (!process.Start()) throw new MovieFinalAssemblyExecutionException("ASSEMBLY_SOURCE_PROBE_FAILED");
+        try
+        {
+            var outputTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
+            var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
+            await process.WaitForExitAsync(cancellationToken).WaitAsync(TimeSpan.FromSeconds(15), cancellationToken);
+            var output = await outputTask;
+            _ = await errorTask; // Never include private source paths or probe stderr in errors.
+            if (process.ExitCode != 0 || output.Length > 65_536)
+                throw new MovieFinalAssemblyExecutionException("ASSEMBLY_SOURCE_PROBE_FAILED");
+            return ParseVideoProbeJson(output);
+        }
+        catch (TimeoutException)
+        {
+            throw new MovieFinalAssemblyExecutionException("ASSEMBLY_SOURCE_PROBE_FAILED");
+        }
+        finally
+        {
+            if (!process.HasExited)
+            {
+                // Reap a timed-out/cancelled ffprobe before removing the private
+                // source directory. Kill alone is not an awaited process exit.
+                try
+                {
+                    process.Kill(entireProcessTree: true);
+                    await process.WaitForExitAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
+                }
+                catch (InvalidOperationException) { }
+                catch (System.ComponentModel.Win32Exception) { }
+                catch (TimeoutException) { }
+            }
+        }
+    }
+
+    internal static MovieFinalAssemblyVideoProbe ParseVideoProbeJson(string output)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(output);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object
+                || !root.TryGetProperty("streams", out var streams) || streams.ValueKind != JsonValueKind.Array
+                || !root.TryGetProperty("format", out var format) || format.ValueKind != JsonValueKind.Object
+                || !format.TryGetProperty("duration", out var durationValue) || durationValue.ValueKind != JsonValueKind.String
+                || !decimal.TryParse(durationValue.GetString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var duration)
+                || duration <= 0m || duration > 86_400m)
+                throw new MovieFinalAssemblyExecutionException("ASSEMBLY_SOURCE_PROBE_FAILED");
+            var hasVideo = false;
+            var hasAudio = false;
+            foreach (var stream in streams.EnumerateArray())
+            {
+                if (stream.ValueKind != JsonValueKind.Object
+                    || !stream.TryGetProperty("codec_type", out var type) || type.ValueKind != JsonValueKind.String)
+                    continue;
+                hasVideo |= type.GetString() == "video";
+                hasAudio |= type.GetString() == "audio";
+            }
+            if (!hasVideo) throw new MovieFinalAssemblyExecutionException("ASSEMBLY_SOURCE_PROBE_FAILED");
+            return new(duration, hasAudio);
+        }
+        catch (JsonException)
+        {
+            throw new MovieFinalAssemblyExecutionException("ASSEMBLY_SOURCE_PROBE_FAILED");
         }
     }
 
@@ -805,14 +1090,45 @@ public sealed class FfmpegMovieFinalAssemblyExecutor(IOptions<MovieFinalAssembly
             startInfo.ArgumentList.Add(argument);
         using var process = new Process { StartInfo = startInfo };
         if (!process.Start()) throw new MovieFinalAssemblyExecutionException("ASSEMBLY_DURATION_MEASUREMENT_FAILED");
-        var outputTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
-        var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
-        await process.WaitForExitAsync(cancellationToken).WaitAsync(TimeSpan.FromSeconds(Math.Clamp(settings.ProcessTimeoutSeconds, 1, 86_400)), cancellationToken);
-        var output = (await outputTask).Trim();
-        _ = await errorTask;
-        if (process.ExitCode != 0 || !decimal.TryParse(output, NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds) || seconds <= 0m || seconds > int.MaxValue)
-            throw new MovieFinalAssemblyExecutionException("ASSEMBLY_DURATION_MEASUREMENT_FAILED");
-        return Math.Max(1, checked((int)Math.Round(seconds, MidpointRounding.AwayFromZero)));
+        try
+        {
+            var outputTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
+            var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
+            try
+            {
+                // A duration probe is a metadata operation, not a second render.
+                // Keep its budget bounded even for a two-hour Movie project.
+                await process.WaitForExitAsync(cancellationToken)
+                    .WaitAsync(TimeSpan.FromSeconds(Math.Min(15, Math.Clamp(settings.ProcessTimeoutSeconds, 1, 86_400))), cancellationToken);
+            }
+            catch (TimeoutException)
+            {
+                throw new MovieFinalAssemblyExecutionException("ASSEMBLY_DURATION_MEASUREMENT_FAILED");
+            }
+            var output = (await outputTask).Trim();
+            _ = await errorTask; // Do not disclose private output paths through probe diagnostics.
+            if (process.ExitCode != 0 || output.Length > 64
+                || !decimal.TryParse(output, NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds)
+                || seconds <= 0m || seconds > int.MaxValue)
+                throw new MovieFinalAssemblyExecutionException("ASSEMBLY_DURATION_MEASUREMENT_FAILED");
+            return Math.Max(1, checked((int)Math.Round(seconds, MidpointRounding.AwayFromZero)));
+        }
+        finally
+        {
+            // WaitAsync timeout/cancellation does not terminate ffprobe. Do not
+            // strand a child process holding private master output and CPU.
+            if (!process.HasExited)
+            {
+                try
+                {
+                    process.Kill(entireProcessTree: true);
+                    await process.WaitForExitAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
+                }
+                catch (InvalidOperationException) { }
+                catch (System.ComponentModel.Win32Exception) { }
+                catch (TimeoutException) { }
+            }
+        }
     }
 
     private static void TryDelete(string directory)
