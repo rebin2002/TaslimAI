@@ -2415,7 +2415,10 @@ internal static class MovieStudioIdempotency
             && string.Equals(input.SceneJson, MovieStudioService.SceneSnapshot(scene), StringComparison.Ordinal)
             && (shot is null
                 ? string.IsNullOrEmpty(input.ShotJson)
-                : string.Equals(input.ShotJson, MovieStudioService.ShotSnapshot(shot), StringComparison.Ordinal))
+                : string.Equals(
+                    NormalizeShotWorkflowState(input.ShotJson),
+                    NormalizeShotWorkflowState(MovieStudioService.ShotSnapshot(shot)),
+                    StringComparison.Ordinal))
             && string.Equals(input.AspectRatio, movie.AspectRatio, StringComparison.Ordinal)
             && string.Equals(input.Style, movie.Style, StringComparison.Ordinal)
             && string.Equals(input.Language, movie.Language, StringComparison.Ordinal)
@@ -2432,6 +2435,31 @@ internal static class MovieStudioIdempotency
                 || string.Equals(input.SelectedProviderModelKey, request.ExpectedProviderModelKey.Trim(), StringComparison.OrdinalIgnoreCase))
             && (!request.ExpectedProviderCostUsd.HasValue
                 || request.ExpectedProviderCostUsd.Value == job.EstimatedProviderCostUsd);
+    }
+
+    private static string NormalizeShotWorkflowState(string? snapshotJson)
+    {
+        if (string.IsNullOrWhiteSpace(snapshotJson)) return snapshotJson ?? string.Empty;
+        try
+        {
+            var snapshot = JsonNode.Parse(snapshotJson);
+            if (snapshot is JsonObject shotSnapshot
+                && shotSnapshot["productionContract"] is JsonObject productionContract)
+            {
+                // Workflow admission can change after a canonical job is accepted.
+                // It does not change the rendered shot content; all other serialized
+                // shot and production-contract fields remain part of replay identity.
+                productionContract.Remove("Status");
+                productionContract.Remove("PlanningStatus");
+                productionContract.Remove("status");
+                productionContract.Remove("planningStatus");
+            }
+            return snapshot?.ToJsonString() ?? snapshotJson;
+        }
+        catch (JsonException)
+        {
+            return snapshotJson;
+        }
     }
 
     internal static bool TryGetMovieClipId(string? inputJson, out Guid clipId)

@@ -134,6 +134,8 @@ public sealed class MovieLegacyQuoteReadinessAuditTests
         var snapshotsBefore = await db.MovieCharacterContinuitySnapshots.CountAsync();
         await db.MovieShots.Where(item => item.Id == fixture.Shot.Id)
             .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.Status, MovieShotStatuses.Archived));
+        var archivedShot = await db.MovieShots.AsNoTracking().SingleAsync(item => item.Id == fixture.Shot.Id);
+        Assert.False(MovieShotReadiness.Evaluate(archivedShot).Ready);
         factory.ReferenceReadiness.BlockReadiness = true;
 
         using var replay = await MovieOperationalFixtures.SendWithCsrfAsync(
@@ -150,6 +152,23 @@ public sealed class MovieLegacyQuoteReadinessAuditTests
 
         Assert.Equal(1, factory.ReferenceReadiness.ReadinessChecks);
         Assert.Equal(MovieShotStatuses.Archived, await db.MovieShots.Where(item => item.Id == fixture.Shot.Id).Select(item => item.Status).SingleAsync());
+        Assert.Equal(clipsBefore, await db.MovieClips.CountAsync(item => item.MovieProjectId == fixture.Project.Project.Id));
+        Assert.Equal(jobsBefore, await db.GenerationJobs.CountAsync());
+        Assert.Equal(usageBefore, await db.UsageTransactions.CountAsync());
+        Assert.Equal(snapshotsBefore, await db.MovieCharacterContinuitySnapshots.CountAsync());
+        Assert.Equal(0, factory.Calls.Calls(FakeProviderKind.Movie));
+
+        await db.MovieShots.Where(item => item.Id == fixture.Shot.Id)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.Description, "A changed creative direction."));
+        using var changedCreativeReplay = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client,
+            HttpMethod.Post,
+            path,
+            new { title = "Canonical shot replay" },
+            idempotencyKey: idempotencyKey);
+        Assert.Equal(HttpStatusCode.BadRequest, changedCreativeReplay.StatusCode);
+        Assert.Contains("IDEMPOTENCY_KEY_REUSED", await changedCreativeReplay.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Equal(1, factory.ReferenceReadiness.ReadinessChecks);
         Assert.Equal(clipsBefore, await db.MovieClips.CountAsync(item => item.MovieProjectId == fixture.Project.Project.Id));
         Assert.Equal(jobsBefore, await db.GenerationJobs.CountAsync());
         Assert.Equal(usageBefore, await db.UsageTransactions.CountAsync());
