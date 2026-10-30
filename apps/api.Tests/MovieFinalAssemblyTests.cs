@@ -483,7 +483,20 @@ public sealed class MovieFinalAssemblyTests
             "/tmp/output.mp4");
 
         var filter = arguments[Array.IndexOf(arguments.ToArray(), "-filter_complex") + 1];
-        Assert.Contains("subtitles=filename='/tmp/captions\\:english\\'s.vtt'", filter, StringComparison.Ordinal);
+        Assert.Contains("subtitles=filename=/tmp/captions\\\\:english\\\\\\'s.vtt", filter, StringComparison.Ordinal);
+
+        // Filtergraph separators require a separate escaping pass, even though
+        // the arguments are passed directly to FFmpeg without a shell.
+        var specialPath = "/tmp/my captions,act[1];.vtt";
+        var specialArguments = FfmpegMovieFinalAssemblyCommandBuilder.Build(
+            new MovieFinalAssemblyExecutionRequest(input, new Dictionary<Guid, string>
+            {
+                [videoAsset] = "/tmp/source.mp4",
+                [captionsAsset] = specialPath,
+            }),
+            "/tmp/output.mp4").ToArray();
+        var specialGraph = specialArguments[Array.IndexOf(specialArguments, "-filter_complex") + 1];
+        Assert.Contains("subtitles=filename=/tmp/my captions\\,act\\[1\\]\\;.vtt", specialGraph, StringComparison.Ordinal);
     }
 
     [Fact]
