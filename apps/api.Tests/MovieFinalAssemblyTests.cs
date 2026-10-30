@@ -395,9 +395,8 @@ public sealed class MovieFinalAssemblyTests
             var probePath = Path.Combine(directory, "fake-ffprobe");
             var renderPath = Path.Combine(directory, "fake-ffmpeg");
             var sourcePath = Path.Combine(directory, "source.mp4");
-            await File.WriteAllTextAsync(probePath,
-                "#!/bin/sh\\nprintf '%s\\\\n' '{\\\"streams\\\":[{\\\"codec_type\\\":\\\"video\\\"}],\\\"format\\\":{\\\"duration\\\":\\\"3\\\"}}'\\n");
-            await File.WriteAllTextAsync(renderPath, "#!/bin/sh\\nexec sleep 30\\n");
+            await File.WriteAllTextAsync(probePath, "#!/bin/sh\nprintf '%s\\n' '{\"streams\":[{\"codec_type\":\"video\"}],\"format\":{\"duration\":\"3\"}}'\n");
+            await File.WriteAllTextAsync(renderPath, "#!/bin/sh\nexec sleep 30\n");
             await File.WriteAllBytesAsync(sourcePath, [0x00]);
             const UnixFileMode executable = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
             File.SetUnixFileMode(probePath, executable);
