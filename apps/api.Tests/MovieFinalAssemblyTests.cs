@@ -203,6 +203,126 @@ public sealed class MovieFinalAssemblyTests
     }
 
     [Fact]
+    public async Task Real_ffmpeg_mixed_geometry_silent_and_sounded_clips_export_with_audio_and_correct_duration()
+    {
+        // Conditional local integration coverage: no provider API or production
+        // media. The test exercises the actual argument builder, ffmpeg and
+        // ffprobe with two different geometries and audio-stream layouts.
+        if (!OperatingSystem.IsLinux()
+            || !File.Exists("/usr/bin/ffmpeg")
+            || !File.Exists("/usr/bin/ffprobe")) return;
+
+        const string ffmpeg = "/usr/bin/ffmpeg";
+        const string ffprobe = "/usr/bin/ffprobe";
+        var directory = Path.Combine(Path.GetTempPath(), "taslim-assembly-real-ffmpeg", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            static async Task<string> RunToolAsync(string tool, IEnumerable<string> arguments)
+            {
+                var start = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = tool,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                };
+                foreach (var argument in arguments) start.ArgumentList.Add(argument);
+                using var process = new System.Diagnostics.Process { StartInfo = start };
+                Assert.True(process.Start());
+                var outputTask = process.StandardOutput.ReadToEndAsync();
+                var errorTask = process.StandardError.ReadToEndAsync();
+                try
+                {
+                    await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(20));
+                }
+                finally
+                {
+                    if (!process.HasExited)
+                    {
+                        process.Kill(entireProcessTree: true);
+                        await process.WaitForExitAsync();
+                    }
+                }
+                var output = await outputTask;
+                var error = await errorTask;
+                Assert.True(process.ExitCode == 0, $"Local media test process failed: {error}");
+                return output;
+            }
+
+            var silentPath = Path.Combine(directory, "silent-landscape.mp4");
+            var soundedPath = Path.Combine(directory, "sounded-portrait.mp4");
+            var outputPath = Path.Combine(directory, "master.mp4");
+            await RunToolAsync(ffmpeg,
+            [
+                "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                "color=c=red:s=320x180:r=10", "-t", "0.6", "-c:v", "mpeg4", silentPath,
+            ]);
+            await RunToolAsync(ffmpeg,
+            [
+                "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                "color=c=blue:s=180x320:r=10", "-f", "lavfi", "-i",
+                "sine=frequency=880:sample_rate=48000", "-t", "0.6",
+                "-c:v", "mpeg4", "-c:a", "aac", soundedPath,
+            ]);
+
+            var silent = Guid.NewGuid();
+            var sounded = Guid.NewGuid();
+            var probeArgs = new[] { "-v", "error", "-show_entries", "stream=codec_type:format=duration", "-of", "json" };
+            var silentJson = await RunToolAsync(ffprobe, probeArgs.Append(silentPath));
+            var soundedJson = await RunToolAsync(ffprobe, probeArgs.Append(soundedPath));
+            var silentProbe = FfmpegMovieFinalAssemblyExecutor.ParseVideoProbeJson(silentJson);
+            var soundedProbe = FfmpegMovieFinalAssemblyExecutor.ParseVideoProbeJson(soundedJson);
+            Assert.False(silentProbe.HasAudio);
+            Assert.True(soundedProbe.HasAudio);
+
+            var input = Contract(silent, null, MovieAssemblyCaptionModes.None) with
+            {
+                ResolutionProfile = "synthetic-320",
+                Profile = new MovieFinalAssemblyProfile("synthetic-320", 320, 180),
+                ExpectedDurationSeconds = 1,
+                Timeline =
+                [
+                    new MovieAssemblyTimelineItem(Guid.NewGuid(), silent, 0, 0m, 0.5m, null),
+                    new MovieAssemblyTimelineItem(Guid.NewGuid(), sounded, 1, 0m, 0.5m, null),
+                ],
+            };
+            var assemblyArgs = FfmpegMovieFinalAssemblyCommandBuilder.Build(
+                new MovieFinalAssemblyExecutionRequest(
+                    input,
+                    new Dictionary<Guid, string> { [silent] = silentPath, [sounded] = soundedPath },
+                    new Dictionary<Guid, MovieFinalAssemblyVideoProbe>
+                    {
+                        [silent] = silentProbe,
+                        [sounded] = soundedProbe,
+                    }),
+                outputPath);
+            await RunToolAsync(ffmpeg, assemblyArgs);
+
+            var masterJson = await RunToolAsync(ffprobe,
+            [
+                "-v", "error", "-show_entries", "stream=codec_type,width,height:format=duration",
+                "-of", "json", outputPath,
+            ]);
+            using var document = JsonDocument.Parse(masterJson);
+            var streams = document.RootElement.GetProperty("streams").EnumerateArray().ToArray();
+            var video = Assert.Single(streams.Where(item => item.GetProperty("codec_type").GetString() == "video"));
+            Assert.Equal(320, video.GetProperty("width").GetInt32());
+            Assert.Equal(180, video.GetProperty("height").GetInt32());
+            Assert.Single(streams.Where(item => item.GetProperty("codec_type").GetString() == "audio"));
+            var duration = decimal.Parse(
+                document.RootElement.GetProperty("format").GetProperty("duration").GetString()!,
+                System.Globalization.CultureInfo.InvariantCulture);
+            Assert.InRange(duration, 0.95m, 1.10m);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public void Sounded_video_without_explicit_out_point_uses_audio_trim_not_video_trim()
     {
         var video = Guid.NewGuid();
