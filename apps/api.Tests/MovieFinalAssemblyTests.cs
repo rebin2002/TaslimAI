@@ -655,6 +655,30 @@ public sealed class MovieFinalAssemblyTests
     }
 
     [Fact]
+    public async Task Local_assembly_is_unavailable_when_ffprobe_is_not_configured()
+    {
+        // Availability gates must reject the job before a worker attempts to
+        // materialize private media. This test uses no provider or subprocess.
+        var missingProbe = Path.Combine(Path.GetTempPath(), "taslim-missing-probe", Guid.NewGuid().ToString("N"));
+        foreach (var probePath in new[] { "", missingProbe })
+        {
+            var executor = new FfmpegMovieFinalAssemblyExecutor(Options.Create(new MovieFinalAssemblyOptions
+            {
+                Enabled = true,
+                FfmpegPath = "ffmpeg",
+                FfprobePath = probePath,
+            }));
+            Assert.False(executor.IsAvailable);
+            var videoId = Guid.NewGuid();
+            await Assert.ThrowsAsync<MovieFinalAssemblyUnavailableException>(() => executor.ExecuteAsync(
+                new MovieFinalAssemblyExecutionRequest(Contract(videoId, null, MovieAssemblyCaptionModes.None),
+                    new Dictionary<Guid, string>()),
+                new Progress<int>(),
+                CancellationToken.None));
+        }
+    }
+
+    [Fact]
     public async Task Timed_out_local_renderer_is_terminated_and_fails_with_stable_code()
     {
         // The CI runners are Unix. Use a disposable local executable instead
