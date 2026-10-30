@@ -744,6 +744,12 @@ public static class FfmpegMovieFinalAssemblyCommandBuilder
                 // A soundtrack cue's time bounds are positions on the master timeline,
                 // not offsets into the source audio file. Trim its playable span first,
                 // then delay it to the intended timeline position before mixing.
+                // Prevent huge/untrusted decimal timing values from overflowing the
+                // millisecond delay calculation or requesting an unbounded mix.
+                if (item.StartTimeSeconds is < 0m or > 86_400m
+                    || item.EndTimeSeconds is <= 0m or > 86_400m
+                    || item.EndTimeSeconds <= item.StartTimeSeconds)
+                    throw new MovieFinalAssemblyExecutionException("ASSEMBLY_AUDIO_MIX_INVALID");
                 var start = item.StartTimeSeconds ?? 0m;
                 var duration = item.EndTimeSeconds.HasValue
                     ? $",atrim=duration={Format(item.EndTimeSeconds.Value - start)}"
