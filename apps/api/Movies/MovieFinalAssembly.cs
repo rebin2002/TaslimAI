@@ -761,7 +761,13 @@ public static class FfmpegMovieFinalAssemblyCommandBuilder
             }
             else
             {
-                filters.Add($"[{index}:v]{trim},setpts=PTS-STARTPTS[v{index}];[{index}:a]{trim},asetpts=PTS-STARTPTS[a{index}]");
+                // FFmpeg's trim filter only accepts video. Audio from generated
+                // clips must use atrim; applying trim to [i:a] fails the entire
+                // graph before any master can be produced.
+                var audioTrim = item.OutPointSeconds.HasValue
+                    ? $"atrim=start={Format(item.InPointSeconds)}:end={Format(item.OutPointSeconds.Value)}"
+                    : $"atrim=start={Format(item.InPointSeconds)}";
+                filters.Add($"[{index}:v]{trim},setpts=PTS-STARTPTS[v{index}];[{index}:a]{audioTrim},asetpts=PTS-STARTPTS[a{index}]");
             }
         }
         var videoInputs = string.Concat(request.Contract.Timeline.Select((_, index) => $"[v{index}][a{index}]"));
