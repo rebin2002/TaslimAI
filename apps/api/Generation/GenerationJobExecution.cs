@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Taslim.Api.Ai;
@@ -167,10 +168,145 @@ public sealed class GenerationJobUsageService(IUsageLedgerService ledger) : IGen
 public interface IGenerationJobService
 {
     Task<GenerationJob> CreateAsync(Guid userId, CreateGenerationJobRequest request, CancellationToken cancellationToken = default, string? idempotencyKey = null, string? requestId = null, Guid? retryOfJobId = null);
+    Task<GenerationJob> CreatePendingMovieProductionAsync(Guid userId, CreateGenerationJobRequest request, string idempotencyKey, CancellationToken cancellationToken = default, string? requestId = null);
+    Task<GenerationJob?> PublishPendingMovieProductionAsync(Guid userId, Guid jobId, CancellationToken cancellationToken = default);
+    Task<bool> AbortPendingMovieProductionAsync(Guid userId, Guid jobId, CancellationToken cancellationToken = default);
     Task<GenerationJob?> RetryAsync(Guid userId, Guid jobId, CancellationToken cancellationToken = default, string? idempotencyKey = null, string? requestId = null);
     Task<GenerationJob?> GetAsync(Guid userId, Guid jobId, CancellationToken cancellationToken = default);
     Task<GenerationJobListDto?> ListAsync(Guid userId, GenerationJobFilter filter, CancellationToken cancellationToken = default);
     Task<GenerationJobCancelResult> CancelAsync(Guid userId, Guid jobId, CancellationToken cancellationToken = default);
+}
+
+internal static class GenerationJobPublicationContract
+{
+    public const string MarkerProperty = "_taslimPublicationContract";
+    public const string ApprovedMovieProductionV1 = "approved-movie-production/v1";
+    public const string LinkageIncompleteErrorCode = "MOVIE_PRODUCTION_LINK_INCOMPLETE";
+
+    public static string AddApprovedMovieProductionMarker(string inputJson, bool normalizeMovieClipId)
+    {
+        JsonObject? input;
+        try { input = JsonNode.Parse(inputJson) as JsonObject; }
+        catch (JsonException) { input = null; }
+        if (input is null)
+            throw new GenerationJobValidationException("MOVIE_PRODUCTION_TARGET_INVALID", "The approved movie production input is invalid.");
+
+        foreach (var key in input.Select(property => property.Key)
+                     .Where(key => string.Equals(key, MarkerProperty, StringComparison.OrdinalIgnoreCase))
+                     .ToArray())
+            input.Remove(key);
+
+        if (normalizeMovieClipId)
+        {
+            var clipIdProperty = input.Select(property => property.Key)
+                .FirstOrDefault(key => string.Equals(key, nameof(MovieGenerationInput.MovieClipId), StringComparison.OrdinalIgnoreCase));
+            if (clipIdProperty is null)
+                throw new GenerationJobValidationException("MOVIE_PRODUCTION_TARGET_INVALID", "The approved movie production clip is missing.");
+            input[clipIdProperty] = Guid.Empty;
+        }
+
+        input[MarkerProperty] = ApprovedMovieProductionV1;
+        return input.ToJsonString();
+    }
+
+    public static (bool HasMarker, bool IsApprovedMovieProduction) ReadMarker(string inputJson)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(inputJson);
+            if (document.RootElement.ValueKind != JsonValueKind.Object) return (false, false);
+            var found = false;
+            var isApproved = false;
+            foreach (var property in document.RootElement.EnumerateObject())
+            {
+                if (!string.Equals(property.Name, MarkerProperty, StringComparison.OrdinalIgnoreCase)) continue;
+                if (found) return (true, false);
+                found = true;
+                isApproved = property.Value.ValueKind == JsonValueKind.String
+                    && string.Equals(property.Value.GetString(), ApprovedMovieProductionV1, StringComparison.Ordinal);
+            }
+            return (found, isApproved);
+        }
+        catch (JsonException) { return (false, false); }
+    }
+
+    public static async Task<bool> HasDurableApprovedMovieLinksAsync(
+        TaslimDbContext db,
+        GenerationJob job,
+        CancellationToken cancellationToken)
+    {
+        var marker = ReadMarker(job.InputJson);
+        if (!marker.HasMarker || !marker.IsApprovedMovieProduction
+            || !string.Equals(job.JobType, GenerationJobTypes.MovieClipGenerate, StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        MovieGenerationInput? input;
+        try { input = JsonSerializer.Deserialize<MovieGenerationInput>(job.InputJson); }
+        catch (JsonException) { input = null; }
+        if (input is null
+            || !string.Equals(input.Operation, MovieStudioOperations.SceneClip, StringComparison.OrdinalIgnoreCase)
+            || input.MovieProjectId == Guid.Empty
+            || input.MovieClipId == Guid.Empty
+            || !input.MovieSceneId.HasValue || input.MovieSceneId.Value == Guid.Empty
+            || !input.MovieShotId.HasValue || input.MovieShotId.Value == Guid.Empty
+            || !input.SourceProductionVersionId.HasValue || input.SourceProductionVersionId.Value == Guid.Empty)
+            return false;
+
+        var clipExists = await db.MovieClips.AsNoTracking().AnyAsync(clip =>
+            clip.Id == input.MovieClipId
+            && clip.GenerationJobId == job.Id
+            && clip.MovieProjectId == input.MovieProjectId
+            && clip.MovieSceneId == input.MovieSceneId
+            && clip.MovieShotId == input.MovieShotId
+            && clip.MovieProject.WorkspaceId == job.WorkspaceId
+            && clip.MovieProject.ProjectId == job.ProjectId,
+            cancellationToken);
+        if (!clipExists) return false;
+
+        var sourceExists = await db.MovieProductionVersions.AsNoTracking().AnyAsync(source =>
+            source.Id == input.SourceProductionVersionId.Value
+            && source.MovieShotId == input.MovieShotId.Value
+            && source.Status == MovieProductionVersionStatuses.Approved
+            && source.MovieShot.Scene.Id == input.MovieSceneId.Value
+            && source.MovieShot.Scene.MovieProjectId == input.MovieProjectId
+            && source.MovieShot.Scene.MovieProject.WorkspaceId == job.WorkspaceId
+            && source.MovieShot.Scene.MovieProject.ProjectId == job.ProjectId,
+            cancellationToken);
+        if (!sourceExists) return false;
+
+        var linkedVersions = await db.MovieProductionVersions.AsNoTracking()
+            .Where(version => version.GenerationJobId == job.Id
+                && version.MovieShotId == input.MovieShotId.Value
+                && version.SourceVersionId == input.SourceProductionVersionId.Value
+                && version.Stage == MovieProductionStages.ProductionRender
+                && version.Status == MovieProductionVersionStatuses.PendingApproval
+                && version.CreatedByUserId == job.CreatedByUserId)
+            .Select(version => version.Id)
+            .Take(2)
+            .ToListAsync(cancellationToken);
+        if (linkedVersions.Count != 1) return false;
+
+        var expectedFromStage = await db.MovieShots.AsNoTracking()
+            .Where(shot => shot.Id == input.MovieShotId.Value
+                && shot.MovieSceneId == input.MovieSceneId.Value
+                && shot.Scene.MovieProjectId == input.MovieProjectId
+                && shot.Scene.MovieProject.WorkspaceId == job.WorkspaceId
+                && shot.Scene.MovieProject.ProjectId == job.ProjectId)
+            .Select(shot => shot.ProductionStage)
+            .SingleOrDefaultAsync(cancellationToken);
+        if (string.IsNullOrWhiteSpace(expectedFromStage)) return false;
+
+        return await db.MovieProductionStageTransitions.AsNoTracking().AnyAsync(transition =>
+            transition.GenerationJobId == job.Id
+            && transition.MovieShotId == input.MovieShotId.Value
+            && transition.MovieProductionVersionId == linkedVersions[0]
+            && transition.SourceVersionId == input.SourceProductionVersionId.Value
+            && transition.FromStage == expectedFromStage
+            && transition.ToStage == MovieProductionStages.ProductionRender
+            && transition.EventType == "created"
+            && transition.ActorUserId == job.CreatedByUserId,
+            cancellationToken);
+    }
 }
 
 public enum GenerationJobCancelResult
@@ -471,7 +607,12 @@ public sealed class GenerationJobService(
         catch (JsonException) { return null; }
     }
 
-    private async Task ValidateMovieJobTargetAsync(Guid userId, CreateGenerationJobRequest request, CancellationToken cancellationToken, Guid? retryOfJobId = null)
+    private async Task ValidateMovieJobTargetAsync(
+        Guid userId,
+        CreateGenerationJobRequest request,
+        CancellationToken cancellationToken,
+        Guid? retryOfJobId = null,
+        Guid? allowedLinkedGenerationJobId = null)
     {
         var isAssembly = string.Equals(request.JobType.Trim(), GenerationJobTypes.MovieAssembly, StringComparison.OrdinalIgnoreCase);
         var isQuickMovie = string.Equals(request.JobType.Trim(), GenerationJobTypes.MovieQuickGenerate, StringComparison.OrdinalIgnoreCase);
@@ -509,7 +650,8 @@ public sealed class GenerationJobService(
         if (clip is null || clip.MovieProjectId != input.MovieProjectId || clip.MovieProject.WorkspaceId != request.WorkspaceId
             || (isQuickMovie ? input.Operation != MovieStudioOperations.QuickMovie || input.MovieSceneId.HasValue || input.MovieShotId.HasValue
                 : input.Operation != MovieStudioOperations.SceneClip || clip.MovieSceneId != input.MovieSceneId || clip.MovieShotId != input.MovieShotId)
-            || request.ProjectId != clip.MovieProject.ProjectId || clip.GenerationJobId is not null)
+            || request.ProjectId != clip.MovieProject.ProjectId
+            || (clip.GenerationJobId is not null && clip.GenerationJobId != allowedLinkedGenerationJobId))
             throw new GenerationJobValidationException("MOVIE_JOB_TARGET_INVALID", "The movie job target does not belong to the selected project or is no longer available.");
         if (clip.MovieProject.CreatedByUserId != userId && (movieCollaboration is null || !await movieCollaboration.HasPermissionAsync(userId, clip.MovieProjectId, MoviePermissions.Generate, cancellationToken)))
             throw new GenerationJobForbiddenException();
@@ -650,10 +792,305 @@ public sealed class GenerationJobService(
                         : string.Equals(job.JobType, GenerationJobTypes.SocialGenerate, StringComparison.OrdinalIgnoreCase)
                             ? GenerationJobErrorCodes.SocialCancelled
                             : string.Equals(job.JobType, GenerationJobTypes.MusicGenerate, StringComparison.OrdinalIgnoreCase)
-                                ? GenerationJobErrorCodes.MusicCancelled
-                                : string.Equals(job.JobType, GenerationJobTypes.VoiceGenerate, StringComparison.OrdinalIgnoreCase)
-                                    ? GenerationJobErrorCodes.VoiceCancelled
-                                    : GenerationJobErrorCodes.Cancelled;
+            ? GenerationJobErrorCodes.MusicCancelled
+            : string.Equals(job.JobType, GenerationJobTypes.VoiceGenerate, StringComparison.OrdinalIgnoreCase)
+                ? GenerationJobErrorCodes.VoiceCancelled
+                : GenerationJobErrorCodes.Cancelled;
+
+    public async Task<GenerationJob> CreatePendingMovieProductionAsync(
+        Guid userId,
+        CreateGenerationJobRequest request,
+        string idempotencyKey,
+        CancellationToken cancellationToken = default,
+        string? requestId = null)
+    {
+        var normalizedKey = NormalizeIdempotencyKey(idempotencyKey);
+        if (normalizedKey is null)
+            throw new GenerationJobValidationException("IDEMPOTENCY_KEY_REQUIRED", "An idempotency key is required for approved movie production.");
+
+        var requestedJobType = request.JobType?.Trim();
+        if (string.IsNullOrWhiteSpace(requestedJobType) || !GenerationJobTypes.Supported.Contains(requestedJobType))
+            throw new GenerationJobValidationException(GenerationJobErrorCodes.TypeNotSupported, "This job type is not available.");
+        if (!string.Equals(requestedJobType, GenerationJobTypes.MovieClipGenerate, StringComparison.OrdinalIgnoreCase))
+            throw new GenerationJobValidationException("MOVIE_PRODUCTION_TARGET_INVALID", "Deferred publication is only available for approved movie production clips.");
+        if (!await access.IsMemberAsync(userId, request.WorkspaceId, cancellationToken))
+            throw new GenerationJobForbiddenException();
+        if (request.ProjectId.HasValue && !await db.Projects.AnyAsync(project => project.Id == request.ProjectId && project.WorkspaceId == request.WorkspaceId, cancellationToken))
+            throw new GenerationJobValidationException("PROJECT_NOT_IN_WORKSPACE", "The selected project is not in this workspace.");
+
+        var estimate = ValidatePendingMovieProductionEstimate(request);
+
+        MovieGenerationInput? input;
+        try { input = JsonSerializer.Deserialize<MovieGenerationInput>(request.InputJson); }
+        catch (JsonException) { input = null; }
+        if (input is null
+            || !string.Equals(input.Operation, MovieStudioOperations.SceneClip, StringComparison.OrdinalIgnoreCase)
+            || !input.MovieSceneId.HasValue || input.MovieSceneId.Value == Guid.Empty
+            || !input.MovieShotId.HasValue || input.MovieShotId.Value == Guid.Empty
+            || !input.SourceProductionVersionId.HasValue || input.SourceProductionVersionId.Value == Guid.Empty)
+            throw new GenerationJobValidationException("MOVIE_PRODUCTION_TARGET_INVALID", "The approved movie production target is invalid.");
+
+        var sourceIsApprovedForShot = await db.MovieProductionVersions.AsNoTracking().AnyAsync(source =>
+            source.Id == input.SourceProductionVersionId.Value
+            && source.MovieShotId == input.MovieShotId.Value
+            && source.Status == MovieProductionVersionStatuses.Approved
+            && source.MovieShot.Scene.Id == input.MovieSceneId.Value
+            && source.MovieShot.Scene.MovieProjectId == input.MovieProjectId
+            && source.MovieShot.Scene.MovieProject.WorkspaceId == request.WorkspaceId
+            && source.MovieShot.Scene.MovieProject.ProjectId == request.ProjectId,
+            cancellationToken);
+        if (!sourceIsApprovedForShot)
+            throw new GenerationJobValidationException("MOVIE_PRODUCTION_TARGET_INVALID", "The approved movie production source is no longer available.");
+
+        var normalizedJobType = GenerationJobTypes.Supported.First(type => string.Equals(type, requestedJobType, StringComparison.OrdinalIgnoreCase));
+        var normalizedTitle = string.IsNullOrWhiteSpace(request.Title) ? null : request.Title.Trim();
+        var inputJson = GenerationJobPublicationContract.AddApprovedMovieProductionMarker(request.InputJson, normalizeMovieClipId: false);
+        var fingerprintInputJson = GenerationJobPublicationContract.AddApprovedMovieProductionMarker(request.InputJson, normalizeMovieClipId: true);
+        var requestFingerprint = ComputePendingMovieProductionFingerprint(
+            request, normalizedJobType, normalizedTitle, fingerprintInputJson);
+
+        var existing = await db.GenerationJobs.AsNoTracking().FirstOrDefaultAsync(
+            item => item.CreatedByUserId == userId && item.IdempotencyKey == normalizedKey,
+            cancellationToken);
+        await ValidateMovieJobTargetAsync(
+            userId,
+            request,
+            cancellationToken,
+            allowedLinkedGenerationJobId: existing?.Id);
+        if (existing is not null)
+        {
+            var existingMarker = GenerationJobPublicationContract.ReadMarker(existing.InputJson);
+            if (!string.Equals(existing.RequestFingerprint, requestFingerprint, StringComparison.Ordinal)
+                || !existingMarker.HasMarker || !existingMarker.IsApprovedMovieProduction)
+                throw new GenerationJobValidationException("IDEMPOTENCY_KEY_REUSED", "This idempotency key was already used for a different generation request.");
+            return existing;
+        }
+
+        var preflight = await costGuardrails.EvaluateAsync(
+            userId,
+            request.WorkspaceId,
+            request.ProjectId,
+            estimate,
+            request.ConfirmationAccepted,
+            cancellationToken);
+        if (!preflight.Allowed)
+            throw new GenerationJobValidationException(preflight.RejectionCode ?? "GENERATION_COST_CAP_EXCEEDED", preflight.RejectionMessage ?? "This generation exceeds a configured safety limit.");
+        if (preflight.ConfirmationRequired && !request.ConfirmationAccepted)
+            throw new GenerationJobValidationException("GENERATION_CONFIRMATION_REQUIRED", "Explicit confirmation is required before queueing this generation.");
+
+        requestId ??= httpContextAccessor.HttpContext?.TraceIdentifier;
+        var now = DateTime.UtcNow;
+        var job = new GenerationJob
+        {
+            Id = Guid.NewGuid(),
+            WorkspaceId = request.WorkspaceId,
+            ProjectId = request.ProjectId,
+            CreatedByUserId = userId,
+            JobType = normalizedJobType,
+            Status = GenerationJobStatus.Pending,
+            Title = normalizedTitle,
+            InputJson = inputJson,
+            IdempotencyKey = normalizedKey,
+            RequestFingerprint = requestFingerprint,
+            RequestId = requestId,
+            EstimatedProviderCostUsd = request.EstimatedProviderCostUsd,
+            EstimatedProviderCostKnown = request.EstimatedProviderCostUsd.HasValue,
+            CostEstimateJson = request.InternalCostEstimateJson ?? request.InternalCostEstimate?.ToJson(),
+            ProgressPercent = 0,
+            CreatedAt = now,
+        };
+        db.GenerationJobs.Add(job);
+
+        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+        try
+        {
+            await db.SaveChangesAsync(cancellationToken);
+            await usage.BeginAsync(job, request.EstimatedProviderCostUsd, cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+            return job;
+        }
+        catch (DbUpdateException)
+        {
+            await transaction.RollbackAsync(CancellationToken.None);
+            db.Entry(job).State = EntityState.Detached;
+            var collisionExisting = await db.GenerationJobs.AsNoTracking().FirstOrDefaultAsync(
+                item => item.CreatedByUserId == userId && item.IdempotencyKey == normalizedKey,
+                cancellationToken);
+            if (collisionExisting is null) throw;
+            var existingMarker = GenerationJobPublicationContract.ReadMarker(collisionExisting.InputJson);
+            if (!string.Equals(collisionExisting.RequestFingerprint, requestFingerprint, StringComparison.Ordinal)
+                || !existingMarker.HasMarker || !existingMarker.IsApprovedMovieProduction)
+                throw new GenerationJobValidationException("IDEMPOTENCY_KEY_REUSED", "This idempotency key was already used for a different generation request.");
+            return collisionExisting;
+        }
+        catch
+        {
+            await transaction.RollbackAsync(CancellationToken.None);
+            db.Entry(job).State = EntityState.Detached;
+            throw;
+        }
+    }
+
+    public async Task<GenerationJob?> PublishPendingMovieProductionAsync(
+        Guid userId,
+        Guid jobId,
+        CancellationToken cancellationToken = default)
+    {
+        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+        var job = await db.GenerationJobs.AsNoTracking().FirstOrDefaultAsync(item => item.Id == jobId, cancellationToken);
+        if (job is null || job.CreatedByUserId != userId
+            || !await access.IsMemberAsync(userId, job.WorkspaceId, cancellationToken))
+        {
+            await transaction.RollbackAsync(CancellationToken.None);
+            return null;
+        }
+
+        var marker = GenerationJobPublicationContract.ReadMarker(job.InputJson);
+        if (!marker.HasMarker || !marker.IsApprovedMovieProduction
+            || !string.Equals(job.JobType, GenerationJobTypes.MovieClipGenerate, StringComparison.OrdinalIgnoreCase))
+            throw new GenerationJobValidationException("MOVIE_PRODUCTION_TARGET_INVALID", "The approved movie production job is invalid.");
+
+        if (job.Status is GenerationJobStatus.Cancelled or GenerationJobStatus.Failed)
+        {
+            await transaction.CommitAsync(cancellationToken);
+            return job;
+        }
+
+        if (!await GenerationJobPublicationContract.HasDurableApprovedMovieLinksAsync(db, job, cancellationToken))
+            throw new GenerationJobValidationException(GenerationJobPublicationContract.LinkageIncompleteErrorCode, "The approved movie production links are not durably complete.");
+
+        if (job.Status == GenerationJobStatus.Pending)
+            await queue.EnqueueAsync(job.Id, cancellationToken);
+        else if (job.Status is not (GenerationJobStatus.Queued or GenerationJobStatus.Running or GenerationJobStatus.Succeeded))
+        {
+            await transaction.RollbackAsync(CancellationToken.None);
+            return null;
+        }
+
+        var published = await db.GenerationJobs.AsNoTracking().FirstOrDefaultAsync(item => item.Id == job.Id, cancellationToken);
+        if (published is null)
+            throw new GenerationJobValidationException("MOVIE_PRODUCTION_TARGET_INVALID", "The approved movie production job is no longer available.");
+
+        await transaction.CommitAsync(cancellationToken);
+        return published;
+    }
+
+    public async Task<bool> AbortPendingMovieProductionAsync(
+        Guid userId,
+        Guid jobId,
+        CancellationToken cancellationToken = default)
+    {
+        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+        var job = await db.GenerationJobs.AsNoTracking().FirstOrDefaultAsync(item => item.Id == jobId, cancellationToken);
+        if (job is null || job.CreatedByUserId != userId
+            || !await access.IsMemberAsync(userId, job.WorkspaceId, cancellationToken))
+        {
+            await transaction.RollbackAsync(CancellationToken.None);
+            return false;
+        }
+
+        var marker = GenerationJobPublicationContract.ReadMarker(job.InputJson);
+        if (!marker.HasMarker || !marker.IsApprovedMovieProduction
+            || !string.Equals(job.JobType, GenerationJobTypes.MovieClipGenerate, StringComparison.OrdinalIgnoreCase))
+        {
+            await transaction.RollbackAsync(CancellationToken.None);
+            return false;
+        }
+
+        var now = DateTime.UtcNow;
+        var cancelled = await db.GenerationJobs
+            .Where(item => item.Id == jobId && item.CreatedByUserId == userId && item.Status == GenerationJobStatus.Pending)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(item => item.Status, GenerationJobStatus.Cancelled)
+                .SetProperty(item => item.ErrorCode, GenerationJobErrorCodes.MovieCancelled)
+                .SetProperty(item => item.ErrorMessage, "Approved movie production was aborted before publication.")
+                .SetProperty(item => item.ProgressPercent, 0)
+                .SetProperty(item => item.CancelledAt, now), cancellationToken);
+        if (cancelled == 0)
+        {
+            await transaction.RollbackAsync(CancellationToken.None);
+            return false;
+        }
+
+        var reservation = await usage.BeginAsync(job, cancellationToken: cancellationToken);
+        await usage.CancelAsync(reservation, GenerationJobErrorCodes.MovieCancelled, cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        return true;
+    }
+
+    private static string ComputePendingMovieProductionFingerprint(
+        CreateGenerationJobRequest request,
+        string jobType,
+        string? title,
+        string normalizedInputJson)
+    {
+        var baseFingerprint = ComputeRequestFingerprint(
+            request.WorkspaceId,
+            request.ProjectId,
+            jobType,
+            title,
+            normalizedInputJson,
+            request.EstimatedProviderCostUsd,
+            retryOfJobId: null);
+        var trustedEstimateJson = request.InternalCostEstimateJson ?? request.InternalCostEstimate?.ToJson();
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new
+        {
+            baseFingerprint,
+            trustedEstimateJson,
+            request.ConfirmationAccepted,
+        }))));
+    }
+
+    private static GenerationCostEstimate ValidatePendingMovieProductionEstimate(CreateGenerationJobRequest request)
+    {
+        var estimate = request.InternalCostEstimate;
+        if (estimate is null
+            || !estimate.IsKnown
+            || !estimate.AmountUsd.HasValue
+            || !request.EstimatedProviderCostUsd.HasValue
+            || !string.Equals(estimate.Currency, UsageCurrencies.Usd, StringComparison.OrdinalIgnoreCase))
+            throw new GenerationJobValidationException(
+                "COST_ESTIMATE_UNKNOWN",
+                "Approved movie production requires a known USD cost estimate.");
+
+        var maximumUsd = request.EstimatedProviderCostUsd.Value;
+        if (estimate.AmountUsd.Value < 0m || maximumUsd < 0m || estimate.AmountUsd.Value != maximumUsd)
+            throw new GenerationJobValidationException(
+                "COST_ESTIMATE_UNKNOWN",
+                "The approved movie production cost estimate does not match its persisted USD maximum.");
+
+        if (request.InternalCostEstimateJson is not null
+            && !PersistedMovieCostEstimateMatches(request.InternalCostEstimateJson, maximumUsd))
+            throw new GenerationJobValidationException(
+                "COST_ESTIMATE_UNKNOWN",
+                "The persisted approved movie cost estimate does not match its USD maximum.");
+
+        return estimate;
+    }
+
+    private static bool PersistedMovieCostEstimateMatches(string json, decimal maximumUsd)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            var root = document.RootElement;
+            return root.ValueKind == JsonValueKind.Object
+                && root.TryGetProperty(nameof(MovieGenerationCostEstimate.State), out var state)
+                && state.ValueKind == JsonValueKind.String
+                && string.Equals(state.GetString(), MovieGenerationCostEstimateStates.Estimated, StringComparison.Ordinal)
+                && root.TryGetProperty(nameof(MovieGenerationCostEstimate.MaximumAmountUsd), out var maximum)
+                && maximum.ValueKind == JsonValueKind.Number
+                && maximum.TryGetDecimal(out var persistedMaximumUsd)
+                && persistedMaximumUsd == maximumUsd
+                && root.TryGetProperty(nameof(MovieGenerationCostEstimate.Currency), out var currency)
+                && currency.ValueKind == JsonValueKind.String
+                && string.Equals(currency.GetString(), UsageCurrencies.Usd, StringComparison.OrdinalIgnoreCase);
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
 }
 
 public sealed class GenerationJobValidationException(string code, string message) : Exception(message)
@@ -929,6 +1366,26 @@ public sealed class GenerationJobWorker(
             claimedJob.Id, claimedJob.WorkspaceId, claimedJob.JobType, claimedJob.RequestId, claimedJob.RetryCount);
         try
         {
+            // Defense-in-depth after queue claim: approved Movie jobs reach Queued only through
+            // PublishPendingMovieProductionAsync after the durable-link check succeeds.
+            var publicationMarker = GenerationJobPublicationContract.ReadMarker(claimedJob.InputJson);
+            if (publicationMarker.HasMarker
+                && (!publicationMarker.IsApprovedMovieProduction
+                    || !string.Equals(claimedJob.JobType, GenerationJobTypes.MovieClipGenerate, StringComparison.OrdinalIgnoreCase)
+                    || !await GenerationJobPublicationContract.HasDurableApprovedMovieLinksAsync(db, claimedJob, stoppingToken)))
+            {
+                await FailAsync(
+                    db,
+                    usage,
+                    claimedJob,
+                    GenerationJobPublicationContract.LinkageIncompleteErrorCode,
+                    "The approved movie production links are not durably complete.",
+                    null,
+                    claimedJob.ConcurrencyToken,
+                    stoppingToken);
+                await TryNotifyAsync(() => notifications.CreateGenerationFailedAsync(claimedJob.Id, stoppingToken), claimedJob.Id, stoppingToken);
+                return;
+            }
             var handlers = scope.ServiceProvider.GetServices<IGenerationJobHandler>();
             var handler = handlers.FirstOrDefault(item => item.CanHandle(claimedJob.JobType));
             if (handler is null)
