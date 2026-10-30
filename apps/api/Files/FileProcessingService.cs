@@ -223,7 +223,9 @@ public sealed class FileProcessingService(
         }
         catch (Exception exception)
         {
-            logger.LogError(exception, "Generated stream storage failed. FileId={FileId}; WorkspaceId={WorkspaceId}; StorageProvider={StorageProvider}; FailureCategory={FailureCategory}", file.Id, workspaceId, storage.ProviderKey, exception is FileStorageUnavailableException ? "unavailable" : "operation_failed");
+            // Do not pass an arbitrary source/provider exception to structured logging:
+            // exception messages may contain signed URLs, object paths, or provider secrets.
+            logger.LogError("Generated stream storage failed. FileId={FileId}; WorkspaceId={WorkspaceId}; StorageProvider={StorageProvider}; FailureCategory={FailureCategory}", file.Id, workspaceId, storage.ProviderKey, exception is FileStorageUnavailableException ? "unavailable" : "operation_failed");
             file.Status = StoredFileStatus.Failed;
             file.ProcessedAt = DateTime.UtcNow;
             await db.SaveChangesAsync(CancellationToken.None);
