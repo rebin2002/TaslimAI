@@ -700,11 +700,11 @@ public sealed class MovieOperationalE2ETests : IClassFixture<MovieOperationalApi
         int snapshotsBeforeDirector;
         using (var beforeDirectorExecution = factory.Services.CreateScope())
         {
-            var db = beforeDirectorExecution.ServiceProvider.GetRequiredService<TaslimDbContext>();
-            jobsBeforeDirector = await db.GenerationJobs.CountAsync();
-            clipsBeforeDirector = await db.MovieClips.CountAsync(item => item.MovieProjectId == fixture.Project.Project.Id);
-            usageBeforeDirector = await db.UsageTransactions.CountAsync();
-            snapshotsBeforeDirector = await db.MovieCharacterContinuitySnapshots.CountAsync();
+            var beforeDirectorDb = beforeDirectorExecution.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            jobsBeforeDirector = await beforeDirectorDb.GenerationJobs.CountAsync();
+            clipsBeforeDirector = await beforeDirectorDb.MovieClips.CountAsync(item => item.MovieProjectId == fixture.Project.Project.Id);
+            usageBeforeDirector = await beforeDirectorDb.UsageTransactions.CountAsync();
+            snapshotsBeforeDirector = await beforeDirectorDb.MovieCharacterContinuitySnapshots.CountAsync();
         }
         var providerCallsBeforeDirector = factory.Calls.Calls(FakeProviderKind.Movie);
         factory.Scenarios[FakeProviderKind.Movie] = FakeProviderScenario.ImmediateSuccess;
@@ -715,11 +715,11 @@ public sealed class MovieOperationalE2ETests : IClassFixture<MovieOperationalApi
         Assert.Contains("exact shot-duration provider/model quote", executed.Result.SafeMessage, StringComparison.Ordinal);
         using (var afterDirectorExecution = factory.Services.CreateScope())
         {
-            var db = afterDirectorExecution.ServiceProvider.GetRequiredService<TaslimDbContext>();
-            Assert.Equal(jobsBeforeDirector, await db.GenerationJobs.CountAsync());
-            Assert.Equal(clipsBeforeDirector, await db.MovieClips.CountAsync(item => item.MovieProjectId == fixture.Project.Project.Id));
-            Assert.Equal(usageBeforeDirector, await db.UsageTransactions.CountAsync());
-            Assert.Equal(snapshotsBeforeDirector, await db.MovieCharacterContinuitySnapshots.CountAsync());
+            var afterDirectorDb = afterDirectorExecution.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            Assert.Equal(jobsBeforeDirector, await afterDirectorDb.GenerationJobs.CountAsync());
+            Assert.Equal(clipsBeforeDirector, await afterDirectorDb.MovieClips.CountAsync(item => item.MovieProjectId == fixture.Project.Project.Id));
+            Assert.Equal(usageBeforeDirector, await afterDirectorDb.UsageTransactions.CountAsync());
+            Assert.Equal(snapshotsBeforeDirector, await afterDirectorDb.MovieCharacterContinuitySnapshots.CountAsync());
         }
         Assert.Equal(providerCallsBeforeDirector, factory.Calls.Calls(FakeProviderKind.Movie));
 
