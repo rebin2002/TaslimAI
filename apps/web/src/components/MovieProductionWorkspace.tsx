@@ -96,6 +96,8 @@ export function MovieProductionWorkspace({ project, completionPercent, onRefresh
   const [pollRetry, setPollRetry] = useState(0);
   const [lastAction, setLastAction] = useState<(() => Promise<void>) | null>(null);
   const [confirmation, setConfirmation] = useState<PendingProductionConfirmation | null>(null);
+  const interactionLocked = Boolean(busyKey) || Boolean(confirmation);
+  const actionBusyKey = interactionLocked ? "__movie_production_interaction_locked__" : busyKey;
   const refreshRef = useRef(onRefresh);
   const visibleShots = model.shots.filter((item) => matchesProductionFilter(item, filter));
 
@@ -145,6 +147,7 @@ export function MovieProductionWorkspace({ project, completionPercent, onRefresh
   }
 
   async function runAction(key: string, work: () => Promise<unknown>, priceIntent?: MovieProductionPriceIntent) {
+    if (busyKey || confirmation) return;
     if (isExpensiveProductionAction(key)) {
       const copy = confirmationCopy(key);
       setConfirmation({ key, work, priceIntent, ...copy });
@@ -154,6 +157,7 @@ export function MovieProductionWorkspace({ project, completionPercent, onRefresh
   }
 
   async function prepareRender(shotId: string, sourceVersionId: string, retry: boolean, intent: ReturnType<typeof productionIntentForTier>) {
+    if (busyKey || confirmation) return;
     const key = `${shotId}:render`;
     setBusyKey(key);
     setError("");
@@ -176,7 +180,7 @@ export function MovieProductionWorkspace({ project, completionPercent, onRefresh
         work,
         priceIntent,
         title: retry ? "Confirm this production retry" : "Confirm this production pass",
-        detail: "The server checked the selected shot, adapter capability and current model-specific price. Review the maximum estimate before queueing.",
+        detail: `Quoted profile: ${intent.targetResolution} · ${intent.qualityTier}. The server checked the selected shot, adapter capability and current model-specific price. Review the maximum estimate before queueing.`,
       });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "The production quote could not be checked.");
@@ -197,7 +201,7 @@ export function MovieProductionWorkspace({ project, completionPercent, onRefresh
 
     <ProductionStageRail currentStage={model.currentStage} counts={model.counts} />
 
-    <MovieBudgetReadinessPanel project={project} workspace={model} cost={cost} selectedTier={selectedTier} onTierChange={setSelectedTier} />
+    <MovieBudgetReadinessPanel project={project} workspace={model} cost={cost} selectedTier={selectedTier} interactionLocked={interactionLocked} onTierChange={(tier) => { if (!interactionLocked) setSelectedTier(tier); }} />
     {confirmation && <section className="movie-production-confirmation" role="dialog" aria-modal="false" aria-labelledby="movie-production-confirmation-title"><div className="movie-budget-readiness-icon"><AlertTriangle size={16} /></div><div><span className="movie-workspace-kicker">Review before continuing</span><h3 id="movie-production-confirmation-title">{confirmation.title}</h3><p>{confirmation.detail}</p>{confirmation.priceIntent && <p><strong>Maximum estimated price: {new Intl.NumberFormat("en-US", { style: "currency", currency: confirmation.priceIntent.currency }).format(confirmation.priceIntent.expectedMaximumAmountUsd)}.</strong> This estimate is tied to this shot, profile and current adapter model. Queue only if you approve this amount.</p>}<div className="movie-production-confirmation-actions"><button type="button" className="movie-workspace-button is-primary" onClick={() => { const pending = confirmation; setConfirmation(null); void executeAction(pending.key, pending.work, pending.priceIntent); }}>Confirm and queue</button><button type="button" className="movie-workspace-button is-secondary" onClick={() => setConfirmation(null)}>Not now</button></div></div></section>}
 
     <div className="movie-production-summary-grid" aria-label="Production summary">
@@ -213,7 +217,7 @@ export function MovieProductionWorkspace({ project, completionPercent, onRefresh
     <section className="movie-production-shot-workspace" aria-labelledby="production-shot-list-title">
       <div className="movie-production-section-heading"><div><span className="movie-workspace-kicker">Shot review</span><h3 id="production-shot-list-title">{t("movieModule.production.title")}</h3><p>Implementation details stay behind the stage labels; you only see what needs your review next.</p></div><span className="movie-production-filter-count">{visibleShots.length} of {model.counts.shots} shots</span></div>
       <div className="movie-production-filters" role="tablist" aria-label="Filter shots">{filters.map((item) => <button key={item.id} type="button" role="tab" aria-selected={filter === item.id} className={filter === item.id ? "is-active" : ""} onClick={() => setFilter(item.id)}>{item.label}{item.id === "needs-review" && model.counts.needsReview > 0 && <span>{model.counts.needsReview}</span>}{item.id === "ready" && model.counts.readyForTimeline > 0 && <span>{model.counts.readyForTimeline}</span>}</button>)}</div>
-      {visibleShots.length ? <div className="movie-production-shot-list">{visibleShots.map((item) => <ProductionShotCard key={item.shot.id} item={item} busyKey={busyKey} selectedTier={selectedTier} adapter={adapter} onAction={runAction} onPrepareRender={prepareRender} onRegenerate={regenerateShot(item)} />)}</div> : <ProductionEmptyState filter={filter} hasShots={model.counts.shots > 0} />}
+      {visibleShots.length ? <div className="movie-production-shot-list">{visibleShots.map((item) => <ProductionShotCard key={item.shot.id} item={item} busyKey={actionBusyKey} selectedTier={selectedTier} adapter={adapter} onAction={runAction} onPrepareRender={prepareRender} onRegenerate={regenerateShot(item)} />)}</div> : <ProductionEmptyState filter={filter} hasShots={model.counts.shots > 0} />}
     </section>
 
     <TimelineReadiness model={model} />

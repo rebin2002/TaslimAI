@@ -11,6 +11,7 @@ type MovieBudgetReadinessPanelProps = {
   workspace: ProductionWorkspaceModel;
   cost?: MovieOverviewCost | null;
   selectedTier: MovieResolutionTier;
+  interactionLocked: boolean;
   onTierChange: (tier: MovieResolutionTier) => void;
 };
 
@@ -20,7 +21,7 @@ const tiers: Array<{ id: MovieResolutionTier; summary: string; detail: string }>
   { id: "Master", summary: "Prepare selected material", detail: "Reserve for locked take decisions." },
 ];
 
-export function MovieBudgetReadinessPanel({ project, workspace, cost, selectedTier, onTierChange }: MovieBudgetReadinessPanelProps) {
+export function MovieBudgetReadinessPanel({ project, workspace, cost, selectedTier, interactionLocked, onTierChange }: MovieBudgetReadinessPanelProps) {
   const plan = buildMovieBudgetReadiness({ project, workspace, cost, selectedTier });
   const selectedTierLabel = tiers.find((tier) => tier.id === selectedTier)?.summary ?? "Choose a finish";
   return (
@@ -39,7 +40,7 @@ export function MovieBudgetReadinessPanel({ project, workspace, cost, selectedTi
           const selected = tier.id === selectedTier;
           const recommended = tier.id === plan.recommendedTier;
           return (
-            <button key={tier.id} type="button" className={`movie-budget-tier ${selected ? "is-selected" : ""}`} aria-pressed={selected} onClick={() => onTierChange(tier.id)}>
+            <button key={tier.id} type="button" className={`movie-budget-tier ${selected ? "is-selected" : ""}`} aria-pressed={selected} disabled={interactionLocked} onClick={() => onTierChange(tier.id)}>
               <span className="movie-budget-tier-icon">{tier.id === "Draft" ? <Film size={15} /> : tier.id === "Upgrade" ? <Sparkles size={15} /> : <Flag size={15} />}</span>
               <span className="movie-budget-tier-copy"><strong>{tier.id}</strong><small>{tier.summary}</small><em>{tier.detail}</em></span>
               {recommended && <span className="movie-budget-recommended">Next sensible step</span>}

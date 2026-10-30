@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const workspaceSource = readFileSync(new URL("./MovieProductionWorkspace.tsx", import.meta.url), "utf8");
+const budgetPanelSource = readFileSync(new URL("./MovieBudgetReadinessPanel.tsx", import.meta.url), "utf8");
 const legacyWorkspaceSource = readFileSync(new URL("./FullMovieWorkspaceView.tsx", import.meta.url), "utf8");
 const apiSource = readFileSync(new URL("../lib/api.ts", import.meta.url), "utf8");
 
@@ -14,6 +15,15 @@ describe("Movie production quote confirmation", () => {
     expect(workspaceSource).toContain("expectedMaximumAmountUsd: priceIntent.expectedMaximumAmountUsd");
     expect(workspaceSource).toContain("expectedQuoteFingerprint: priceIntent.quoteFingerprint");
     expect(workspaceSource).toContain("confirmationAccepted: true");
+  });
+
+  it("locks the selected profile and shot actions until the displayed quote is confirmed or dismissed", () => {
+    expect(workspaceSource).toContain("const interactionLocked = Boolean(busyKey) || Boolean(confirmation);");
+    expect(workspaceSource).toContain("interactionLocked={interactionLocked}");
+    expect(workspaceSource).toContain("busyKey={actionBusyKey}");
+    expect(workspaceSource).toContain("if (busyKey || confirmation) return;");
+    expect(workspaceSource).toContain("Quoted profile: ${intent.targetResolution} · ${intent.qualityTier}");
+    expect(budgetPanelSource).toContain("disabled={interactionLocked}");
   });
 
   it("keeps the legacy production callback quote-bound and requires the same fields in the API client", () => {
