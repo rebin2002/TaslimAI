@@ -74,7 +74,7 @@ public sealed class GeneratedStreamLifecycleTests
         var (workspaceId, userId) = await SeedWorkspaceAsync(db);
         const int declaredBytes = 4;
         var sink = new LengthBoundedFakeStorage();
-        var options = Options.Create(new FileOptions { MaxGeneratedVideoBytes = 16 });
+        var options = Options.Create(new Taslim.Api.Files.FileOptions { MaxGeneratedVideoBytes = 16 });
         var service = new FileProcessingService(
             db,
             new FileValidationService(options),
@@ -118,7 +118,7 @@ public sealed class GeneratedStreamLifecycleTests
 
         var (workspaceId, userId) = await SeedWorkspaceAsync(db);
         var sink = new LengthBoundedFakeStorage { FailAfterFirstByte = true };
-        var options = Options.Create(new FileOptions { MaxGeneratedVideoBytes = 16 });
+        var options = Options.Create(new Taslim.Api.Files.FileOptions { MaxGeneratedVideoBytes = 16 });
         var service = new FileProcessingService(
             db,
             new FileValidationService(options),
