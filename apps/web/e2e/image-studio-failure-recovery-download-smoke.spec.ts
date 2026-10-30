@@ -75,6 +75,7 @@ test("Image Studio safely recovers from a failed job and downloads the successfu
   const auth = await apiJson<{ personalWorkspace: { id: string } }>(page.request, "GET", "/api/auth/me");
   const workspaceId = auth.personalWorkspace.id;
   const description = "A clean, minimal product image for a synthetic launch QA journey.";
+  const webOrigin = new URL(process.env.E2E_WEB_URL ?? "http://localhost:3000").origin;
   const createRequests: Array<{
     body: Record<string, unknown>;
     csrfToken: string | undefined;
@@ -168,7 +169,15 @@ test("Image Studio safely recovers from a failed job and downloads the successfu
 
     if (url.searchParams.get("inline") === "true") {
       previewReads += 1;
-      await route.fulfill({ status: 200, contentType: "image/png", body: generatedPng });
+      await route.fulfill({
+        status: 200,
+        contentType: "image/png",
+        headers: {
+          "access-control-allow-origin": webOrigin,
+          "access-control-allow-credentials": "true",
+        },
+        body: generatedPng,
+      });
       return;
     }
 
