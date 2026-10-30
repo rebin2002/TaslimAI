@@ -87,6 +87,36 @@ public sealed class MovieFinalAssemblyTests
     }
 
     [Fact]
+    public void Soundtrack_cue_timestamps_are_bounded_before_delay_calculation()
+    {
+        var invalidBounds = new (decimal? Start, decimal? End)[]
+        {
+            (decimal.MaxValue, null),
+            (86_401m, null),
+            (null, decimal.MaxValue),
+            (8m, 7m),
+        };
+        foreach (var (start, end) in invalidBounds)
+        {
+            var videoAsset = Guid.NewGuid();
+            var audioAsset = Guid.NewGuid();
+            var input = Contract(videoAsset, audioAsset, MovieAssemblyCaptionModes.None) with
+            {
+                AudioMixInputs = [new MovieAssemblyAudioMixInput(audioAsset, "music", -3m, start, end, true)],
+            };
+            var exception = Assert.Throws<MovieFinalAssemblyExecutionException>(() =>
+                FfmpegMovieFinalAssemblyCommandBuilder.Build(
+                    new MovieFinalAssemblyExecutionRequest(input, new Dictionary<Guid, string>
+                    {
+                        [videoAsset] = "/tmp/clip.mp4",
+                        [audioAsset] = "/tmp/cue.wav",
+                    }),
+                    "/tmp/master.mp4"));
+            Assert.Equal("ASSEMBLY_AUDIO_MIX_INVALID", exception.Code);
+        }
+    }
+
+    [Fact]
     public void Burn_in_captions_require_a_source_path_and_are_escaped_inside_the_filter_argument()
     {
         var videoAsset = Guid.NewGuid();
