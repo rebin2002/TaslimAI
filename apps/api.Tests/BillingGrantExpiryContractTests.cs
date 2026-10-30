@@ -213,8 +213,8 @@ public sealed class BillingGrantExpiryContractTests
             var attempts = await Task.WhenAll(
                 TryRecordConcurrentDebitAsync(options, workspace.Id, firstUsage.Id, "concurrency:debit:1"),
                 TryRecordConcurrentDebitAsync(options, workspace.Id, secondUsage.Id, "concurrency:debit:2"));
-            Assert.Single(attempts.Where(item => item.Result?.Created == true));
-            var rejected = Assert.Single(attempts.Where(item => item.Error is not null));
+            Assert.Single(attempts, item => item.Result?.Created == true);
+            var rejected = Assert.Single(attempts, item => item.Error is not null);
             Assert.True(IsExpectedConcurrencyRejection(rejected.Error), rejected.Error?.ToString());
 
             await using var verifyDb = new TaslimDbContext(options);
