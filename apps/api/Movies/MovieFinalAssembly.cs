@@ -944,6 +944,7 @@ public sealed class FfmpegMovieFinalAssemblyExecutor(IOptions<MovieFinalAssembly
             {
                 try { process.Kill(entireProcessTree: true); }
                 catch (InvalidOperationException) { }
+                catch (System.ComponentModel.Win32Exception) { }
             }
         }
     }
@@ -954,7 +955,8 @@ public sealed class FfmpegMovieFinalAssemblyExecutor(IOptions<MovieFinalAssembly
         {
             using var document = JsonDocument.Parse(output);
             var root = document.RootElement;
-            if (!root.TryGetProperty("streams", out var streams) || streams.ValueKind != JsonValueKind.Array
+            if (root.ValueKind != JsonValueKind.Object
+                || !root.TryGetProperty("streams", out var streams) || streams.ValueKind != JsonValueKind.Array
                 || !root.TryGetProperty("format", out var format) || format.ValueKind != JsonValueKind.Object
                 || !format.TryGetProperty("duration", out var durationValue) || durationValue.ValueKind != JsonValueKind.String
                 || !decimal.TryParse(durationValue.GetString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var duration)
