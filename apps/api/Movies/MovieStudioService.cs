@@ -61,6 +61,7 @@ public interface IMovieStudioService
     Task<MovieStudioGenerationResponse?> GenerateSceneAsync(Guid userId, Guid movieProjectId, Guid sceneId, MovieStudioGenerationRequest request, CancellationToken cancellationToken, string? idempotencyKey = null);
     Task<MovieStudioGenerationResponse?> GenerateShotAsync(Guid userId, Guid shotId, MovieStudioGenerationRequest request, CancellationToken cancellationToken, string? idempotencyKey = null);
     Task<MovieSceneGenerationPreviewDto?> PreviewSceneGenerationAsync(Guid userId, Guid movieProjectId, Guid sceneId, MovieStudioGenerationRequest request, CancellationToken cancellationToken);
+    Task<MovieSceneGenerationPreviewDto?> PreviewShotGenerationAsync(Guid userId, Guid shotId, MovieStudioGenerationRequest request, CancellationToken cancellationToken);
     Task<MovieProviderReadinessDto> ProviderReadinessAsync();
 }
 
@@ -1376,8 +1377,34 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
             .FirstOrDefaultAsync(item => item.Id == sceneId && item.MovieProjectId == movieProjectId, cancellationToken);
         if (scene is null || !await collaboration.HasPermissionAsync(userId, movieProjectId, MoviePermissions.Generate, cancellationToken)) return null;
 
-        var movie = scene.MovieProject;
-        var durationSeconds = scene.DurationSeconds ?? Math.Min(movie.DurationSeconds, 60);
+        return await PreviewClipGenerationAsync(
+            userId,
+            scene.MovieProject,
+            scene.DurationSeconds ?? Math.Min(scene.MovieProject.DurationSeconds, 60),
+            request,
+            cancellationToken);
+    }
+
+    public async Task<MovieSceneGenerationPreviewDto?> PreviewShotGenerationAsync(Guid userId, Guid shotId, MovieStudioGenerationRequest request, CancellationToken cancellationToken)
+    {
+        var shot = await db.MovieShots
+            .Include(item => item.Scene)
+            .ThenInclude(item => item.MovieProject)
+            .FirstOrDefaultAsync(item => item.Id == shotId, cancellationToken);
+        if (shot is null || !await collaboration.HasPermissionAsync(userId, shot.Scene.MovieProjectId, MoviePermissions.Generate, cancellationToken)) return null;
+
+        var movie = shot.Scene.MovieProject;
+        var durationSeconds = shot.DurationSeconds ?? shot.Scene.DurationSeconds ?? Math.Min(movie.DurationSeconds, 60);
+        return await PreviewClipGenerationAsync(userId, movie, durationSeconds, request, cancellationToken);
+    }
+
+    private async Task<MovieSceneGenerationPreviewDto> PreviewClipGenerationAsync(
+        Guid userId,
+        MovieProject movie,
+        int durationSeconds,
+        MovieStudioGenerationRequest request,
+        CancellationToken cancellationToken)
+    {
         var sourceResolution = request.SourceResolution?.Trim() ?? string.Empty;
         var targetResolution = request.TargetResolution?.Trim() ?? string.Empty;
         var qualityTier = request.QualityTier?.Trim() ?? string.Empty;
@@ -1390,14 +1417,14 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
 
         if (request.RetryAttempts != 0 || request.UpscalePasses != 0 || request.UpscalingRequested)
             return Reject("MOVIE_GENERATION_OPTIONS_UNSUPPORTED",
-                "This scene-generation route does not support retries or upscaling options.");
+                "This clip-generation route does not support retries or upscaling options.");
         if (durationSeconds is < 1 or > 3600)
             return Reject("MOVIE_CLIP_DURATION_UNSUPPORTED",
-                "A single clip must last between 1 and 3600 seconds. Split longer scenes into shorter shots.");
+                "A single clip must last between 1 and 3600 seconds. Split longer material into provider-supported clips.");
         if (!provider.IsAvailable
             || !provider.SupportedOperations.Contains(MovieStudioOperations.SceneClip, StringComparer.OrdinalIgnoreCase))
             return Reject("MOVIE_PROVIDER_UNAVAILABLE",
-                "The selected video provider is unavailable for scene generation.");
+                "The selected video provider is unavailable for clip generation.");
         if (provider.SceneClipDurationRange is not { } clipDurationRange
             || !clipDurationRange.Supports(durationSeconds))
             return Reject("MOVIE_CLIP_DURATION_UNSUPPORTED",

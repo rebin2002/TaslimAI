@@ -1130,6 +1130,18 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
             : Ok(result);
     }
 
+    [HttpPost("shots/{shotId:guid}/generation-preview")]
+    [ValidateAntiForgeryToken]
+    [EnableRateLimiting(RateLimiting.ExpensiveAi)]
+    public async Task<IActionResult> PreviewShotGeneration(Guid shotId, MovieStudioGenerationRequest request, CancellationToken cancellationToken)
+    {
+        if (!ModelState.IsValid) return ApiResults.Validation(this);
+        var result = await movies.PreviewShotGenerationAsync(GetUserId(), shotId, request, cancellationToken);
+        return result is null
+            ? ApiResults.Error(this, 404, "MOVIE_SHOT_NOT_FOUND", "Movie shot not found.")
+            : Ok(result);
+    }
+
     [HttpPost("projects/{id:guid}/scenes/{sceneId:guid}/generate")]
     [ValidateAntiForgeryToken]
     [EnableRateLimiting(RateLimiting.ExpensiveAi)]

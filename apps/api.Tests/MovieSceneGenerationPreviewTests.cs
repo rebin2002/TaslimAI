@@ -68,6 +68,97 @@ public sealed class MovieSceneGenerationPreviewTests
     }
 
     [Fact]
+    public async Task Shot_preview_uses_shot_duration_not_parent_scene_duration_and_is_read_only()
+    {
+        using var factory = new MovieClipExactProfileApiFactory();
+        using var client = factory.CreateClient();
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Distinct shot quote duration", sceneDurationSeconds: 10);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var shot = await db.MovieShots.SingleAsync(item => item.Id == fixture.Shot.Id);
+        shot.DurationSeconds = 5;
+        AddPricingRow(db, DateTime.UtcNow, "fake-model", 0.01m, 0.02m);
+        await db.SaveChangesAsync();
+        var clipsBefore = await db.MovieClips.CountAsync(item => item.MovieProjectId == fixture.Project.Project.Id);
+        var jobsBefore = await db.GenerationJobs.CountAsync();
+        var usageBefore = await db.UsageTransactions.CountAsync();
+        var snapshotsBefore = await db.MovieCharacterContinuitySnapshots.CountAsync();
+        var profile = new { sourceResolution = "720p", targetResolution = "720p", qualityTier = "Standard", processingPath = "native" };
+
+        using var sceneResponse = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client,
+            HttpMethod.Post,
+            $"/api/movie-studio/projects/{fixture.Project.Project.Id}/scenes/{fixture.Scene.Id}/generation-preview",
+            profile);
+        using var shotResponse = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client,
+            HttpMethod.Post,
+            $"/api/movie-studio/shots/{fixture.Shot.Id}/generation-preview",
+            profile);
+
+        Assert.Equal(HttpStatusCode.OK, sceneResponse.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, shotResponse.StatusCode);
+        var scenePreview = await sceneResponse.Content.ReadFromJsonAsync<MovieSceneGenerationPreviewDto>();
+        var shotPreview = await shotResponse.Content.ReadFromJsonAsync<MovieSceneGenerationPreviewDto>();
+        Assert.NotNull(scenePreview);
+        Assert.NotNull(shotPreview);
+        Assert.Equal(10, scenePreview!.DurationSeconds);
+        Assert.Equal(5, shotPreview!.DurationSeconds);
+        Assert.Equal("fake-movie", shotPreview.ProviderKey);
+        Assert.Equal("fake-model", shotPreview.ProviderModelKey);
+        Assert.True(shotPreview.CanConfirmCost);
+        Assert.Equal(0.20m, scenePreview.CostGuardrails!.EstimatedProviderCostUsd);
+        Assert.Equal(0.10m, shotPreview.CostGuardrails!.EstimatedProviderCostUsd);
+
+        Assert.Equal(clipsBefore, await db.MovieClips.CountAsync(item => item.MovieProjectId == fixture.Project.Project.Id));
+        Assert.Equal(jobsBefore, await db.GenerationJobs.CountAsync());
+        Assert.Equal(usageBefore, await db.UsageTransactions.CountAsync());
+        Assert.Equal(snapshotsBefore, await db.MovieCharacterContinuitySnapshots.CountAsync());
+        Assert.Equal(0, factory.Calls.Calls(FakeProviderKind.Movie));
+    }
+
+    [Fact]
+    public async Task Unsupported_shot_duration_preview_fails_closed_without_generation_side_effects()
+    {
+        using var factory = new MovieClipExactProfileApiFactory();
+        using var client = factory.CreateClient();
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Unsupported shot quote duration", sceneDurationSeconds: 10);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var shot = await db.MovieShots.SingleAsync(item => item.Id == fixture.Shot.Id);
+        shot.DurationSeconds = 11;
+        await db.SaveChangesAsync();
+        var clipsBefore = await db.MovieClips.CountAsync(item => item.MovieProjectId == fixture.Project.Project.Id);
+        var jobsBefore = await db.GenerationJobs.CountAsync();
+        var usageBefore = await db.UsageTransactions.CountAsync();
+        var snapshotsBefore = await db.MovieCharacterContinuitySnapshots.CountAsync();
+
+        using var response = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client,
+            HttpMethod.Post,
+            $"/api/movie-studio/shots/{fixture.Shot.Id}/generation-preview",
+            new { sourceResolution = "720p", targetResolution = "720p", qualityTier = "Standard", processingPath = "native" });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var preview = await response.Content.ReadFromJsonAsync<MovieSceneGenerationPreviewDto>();
+        Assert.NotNull(preview);
+        Assert.Equal(11, preview!.DurationSeconds);
+        Assert.False(preview.ExecutionProfileVerified);
+        Assert.False(preview.CanConfirmCost);
+        Assert.Equal("MOVIE_CLIP_DURATION_UNSUPPORTED", preview.RejectionCode);
+        Assert.Null(preview.CostGuardrails);
+        Assert.Equal(clipsBefore, await db.MovieClips.CountAsync(item => item.MovieProjectId == fixture.Project.Project.Id));
+        Assert.Equal(jobsBefore, await db.GenerationJobs.CountAsync());
+        Assert.Equal(usageBefore, await db.UsageTransactions.CountAsync());
+        Assert.Equal(snapshotsBefore, await db.MovieCharacterContinuitySnapshots.CountAsync());
+        Assert.Equal(0, factory.Calls.Calls(FakeProviderKind.Movie));
+    }
+
+    [Fact]
     public async Task Unsupported_profile_is_rejected_before_cost_quote_or_any_generation_side_effect()
     {
         using var factory = new MovieClipIntentDeniedApiFactory();
