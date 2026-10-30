@@ -44,6 +44,116 @@ public sealed class MovieFinalAssemblyTests
     }
 
     [Fact]
+    public void Silent_video_uses_bounded_generated_silence_without_losing_the_soundtrack()
+    {
+        var silent = Guid.NewGuid();
+        var soundtrack = Guid.NewGuid();
+        var input = Contract(silent, soundtrack, MovieAssemblyCaptionModes.None);
+        var request = new MovieFinalAssemblyExecutionRequest(
+            input,
+            new Dictionary<Guid, string> { [silent] = "/tmp/silent source.mp4", [soundtrack] = "/tmp/music.wav" },
+            new Dictionary<Guid, MovieFinalAssemblyVideoProbe> { [silent] = new(2.5m, false) });
+
+        var args = FfmpegMovieFinalAssemblyCommandBuilder.Build(request, "/tmp/master.mp4").ToArray();
+        var graph = args[Array.IndexOf(args, "-filter_complex") + 1];
+
+        Assert.Contains("anullsrc=r=48000:cl=stereo,atrim=duration=2.5", graph, StringComparison.Ordinal);
+        Assert.DoesNotContain("[0:a]", graph, StringComparison.Ordinal);
+        Assert.Contains("[1:a]asetpts=PTS-STARTPTS", graph, StringComparison.Ordinal);
+        Assert.Contains("[v0][a0]concat=n=1:v=1:a=1", graph, StringComparison.Ordinal);
+        Assert.Equal(2, args.Count(arg => arg == "-i")); // No unexpected input-index shift.
+    }
+
+    [Fact]
+    public void Mixed_and_repeated_silent_clips_preserve_embedded_audio_and_caption_input_indexes()
+    {
+        var silent = Guid.NewGuid();
+        var sounded = Guid.NewGuid();
+        var music = Guid.NewGuid();
+        var caption = Guid.NewGuid();
+        var input = Contract(silent, music, MovieAssemblyCaptionModes.Embedded) with
+        {
+            ExpectedDurationSeconds = 10,
+            Timeline =
+            [
+                new MovieAssemblyTimelineItem(Guid.NewGuid(), silent, 0, 0m, 2m, null),
+                new MovieAssemblyTimelineItem(Guid.NewGuid(), sounded, 1, 0m, 2m, null),
+                new MovieAssemblyTimelineItem(Guid.NewGuid(), silent, 2, 1m, 2.5m, null),
+            ],
+            Captions = new MovieAssemblyCaptions(MovieAssemblyCaptionModes.Embedded, caption, "en"),
+        };
+        var request = new MovieFinalAssemblyExecutionRequest(
+            input,
+            new Dictionary<Guid, string>
+            {
+                [silent] = "/tmp/silent.mp4",
+                [sounded] = "/tmp/sounded.mp4",
+                [music] = "/tmp/music.wav",
+                [caption] = "/tmp/captions.vtt",
+            },
+            new Dictionary<Guid, MovieFinalAssemblyVideoProbe>
+            {
+                [silent] = new(2.5m, false),
+                [sounded] = new(3m, true),
+            });
+        var args = FfmpegMovieFinalAssemblyCommandBuilder.Build(request, "/tmp/output.mp4").ToArray();
+        var graph = args[Array.IndexOf(args, "-filter_complex") + 1];
+
+        Assert.Equal(2, graph.Split("anullsrc=", StringSplitOptions.None).Length - 1);
+        Assert.Contains("[1:a]trim=start=0:end=2", graph, StringComparison.Ordinal);
+        Assert.Contains("anullsrc=r=48000:cl=stereo,atrim=duration=1.5", graph, StringComparison.Ordinal);
+        Assert.Contains("[3:a]asetpts=PTS-STARTPTS", graph, StringComparison.Ordinal);
+        Assert.Contains("[v0][a0][v1][a1][v2][a2]concat=n=3:v=1:a=1", graph, StringComparison.Ordinal);
+        Assert.Equal(5, args.Count(arg => arg == "-i"));
+        Assert.Equal("4:0", args[Array.LastIndexOf(args, "-map") + 1]);
+    }
+
+    [Fact]
+    public void Probed_video_requires_valid_source_duration_and_every_source_probe()
+    {
+        var video = Guid.NewGuid();
+        var input = Contract(video, null, MovieAssemblyCaptionModes.None);
+        foreach (var probes in new IReadOnlyDictionary<Guid, MovieFinalAssemblyVideoProbe>[]
+        {
+            new Dictionary<Guid, MovieFinalAssemblyVideoProbe>(),
+            new Dictionary<Guid, MovieFinalAssemblyVideoProbe> { [video] = new(0m, false) },
+            new Dictionary<Guid, MovieFinalAssemblyVideoProbe> { [video] = new(1m, false) },
+        })
+        {
+            var error = Assert.Throws<MovieFinalAssemblyExecutionException>(() =>
+                FfmpegMovieFinalAssemblyCommandBuilder.Build(
+                    new MovieFinalAssemblyExecutionRequest(input, new Dictionary<Guid, string> { [video] = "/tmp/clip.mp4" }, probes),
+                    "/tmp/master.mp4"));
+            Assert.Contains(error.Code, new[] { "ASSEMBLY_SOURCE_PROBE_MISSING", "ASSEMBLY_SOURCE_DURATION_INVALID" });
+        }
+    }
+
+    [Fact]
+    public void Media_probe_requires_video_and_a_bounded_measured_duration()
+    {
+        var silent = FfmpegMovieFinalAssemblyExecutor.ParseVideoProbeJson(
+            "{\"streams\":[{\"codec_type\":\"video\"}],\"format\":{\"duration\":\"2.500000\"}}");
+        var sounded = FfmpegMovieFinalAssemblyExecutor.ParseVideoProbeJson(
+            "{\"streams\":[{\"codec_type\":\"video\"},{\"codec_type\":\"audio\"}],\"format\":{\"duration\":\"3\"}}");
+        Assert.Equal(new MovieFinalAssemblyVideoProbe(2.5m, false), silent);
+        Assert.Equal(new MovieFinalAssemblyVideoProbe(3m, true), sounded);
+
+        foreach (var invalid in new[]
+        {
+            "{}",
+            "{\"streams\":[{\"codec_type\":\"audio\"}],\"format\":{\"duration\":\"3\"}}",
+            "{\"streams\":[{\"codec_type\":\"video\"}],\"format\":{\"duration\":\"N/A\"}}",
+            "{\"streams\":[{\"codec_type\":\"video\"}],\"format\":{\"duration\":\"86401\"}}",
+            "not-json",
+        })
+        {
+            var error = Assert.Throws<MovieFinalAssemblyExecutionException>(() =>
+                FfmpegMovieFinalAssemblyExecutor.ParseVideoProbeJson(invalid));
+            Assert.Equal("ASSEMBLY_SOURCE_PROBE_FAILED", error.Code);
+        }
+    }
+
+    [Fact]
     public void Soundtrack_cues_are_trimmed_to_their_duration_and_delayed_to_timeline_start()
     {
         var videoAsset = Guid.NewGuid();
