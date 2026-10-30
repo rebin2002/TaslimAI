@@ -98,7 +98,7 @@ public sealed class FileProcessingService(
         }
         catch (Exception exception)
         {
-            logger.LogError(exception, "Generated file storage failed. FileId={FileId}; WorkspaceId={WorkspaceId}; StorageProvider={StorageProvider}; FailureCategory={FailureCategory}", file.Id, workspaceId, storage.ProviderKey, exception is FileStorageUnavailableException ? "unavailable" : "operation_failed");
+            logger.LogError("Generated file storage failed. FileId={FileId}; WorkspaceId={WorkspaceId}; StorageProvider={StorageProvider}; FailureCategory={FailureCategory}", file.Id, workspaceId, storage.ProviderKey, exception is FileStorageUnavailableException ? "unavailable" : "operation_failed");
             file.Status = StoredFileStatus.Failed;
             file.ProcessedAt = DateTime.UtcNow;
             await db.SaveChangesAsync(CancellationToken.None);
@@ -110,7 +110,7 @@ public sealed class FileProcessingService(
     private async Task TryDeleteGeneratedObjectAsync(string storageKey, Guid fileId, Guid workspaceId)
     {
         try { await RunStorageOperationAsync("delete", token => storage.DeleteAsync(storageKey, token), CancellationToken.None); }
-        catch (Exception exception) { logger.LogWarning(exception, "Generated file cleanup failed. FileId={FileId}; WorkspaceId={WorkspaceId}", fileId, workspaceId); }
+        catch (Exception exception) { logger.LogWarning("Generated file cleanup failed. FileId={FileId}; WorkspaceId={WorkspaceId}; FailureCategory={FailureCategory}", fileId, workspaceId, exception is FileStorageUnavailableException ? "unavailable" : "operation_failed"); }
     }
 
     private async Task<GeneratedFileStorageResult> FinalizeGeneratedFileAsync(StoredFile file, string storageKey, CancellationToken cancellationToken)
@@ -326,9 +326,9 @@ public sealed class FileProcessingService(
             await TryDeleteGeneratedObjectAsync(storageKey, file.Id, workspaceId);
             throw;
         }
-        catch (FileStorageOperationException exception)
+        catch (FileStorageOperationException)
         {
-            logger.LogWarning(exception, "File storage operation failed. FileId={FileId}; WorkspaceId={WorkspaceId}; StorageProvider={StorageProvider}", file.Id, workspaceId, storage.ProviderKey);
+            logger.LogWarning("File storage operation failed. FileId={FileId}; WorkspaceId={WorkspaceId}; StorageProvider={StorageProvider}", file.Id, workspaceId, storage.ProviderKey);
             file.Status = StoredFileStatus.Failed;
             file.TextExtractionStatus = FileExtractionStatus.Failed;
             file.ProcessedAt = DateTime.UtcNow;
@@ -336,24 +336,24 @@ public sealed class FileProcessingService(
             await TryDeleteGeneratedObjectAsync(storageKey, file.Id, workspaceId);
             throw;
         }
-        catch (FileUploadValidationException exception)
+        catch (FileUploadValidationException)
         {
             file.Status = StoredFileStatus.Failed;
             file.TextExtractionStatus = FileExtractionStatus.Failed;
             file.ProcessedAt = DateTime.UtcNow;
             await db.SaveChangesAsync(CancellationToken.None);
             await TryDeleteGeneratedObjectAsync(storageKey, file.Id, workspaceId);
-            logger.LogWarning(exception, "File upload validation failed after storage began. FileId={FileId}; WorkspaceId={WorkspaceId}", file.Id, workspaceId);
+            logger.LogWarning("File upload validation failed after storage began. FileId={FileId}; WorkspaceId={WorkspaceId}", file.Id, workspaceId);
             throw;
         }
-        catch (Exception exception)
+        catch (Exception)
         {
             file.Status = StoredFileStatus.Failed;
             file.TextExtractionStatus = FileExtractionStatus.Failed;
             file.ProcessedAt = DateTime.UtcNow;
             await db.SaveChangesAsync(CancellationToken.None);
             await TryDeleteGeneratedObjectAsync(storageKey, file.Id, workspaceId);
-            logger.LogWarning(exception, "File processing failed without logging file contents. FileId={FileId}; WorkspaceId={WorkspaceId}", file.Id, workspaceId);
+            logger.LogWarning("File processing failed without logging file contents. FileId={FileId}; WorkspaceId={WorkspaceId}", file.Id, workspaceId);
             if (extractionStarted) return file;
             throw new FileStorageOperationException();
         }
