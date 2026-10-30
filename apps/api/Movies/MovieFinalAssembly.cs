@@ -493,8 +493,8 @@ public sealed class MovieFinalAssemblyService(
                 || asset.StoredFile?.Status != StoredFileStatus.Ready)
                 throw new MovieFinalAssemblyValidationException("ASSEMBLY_AUDIO_SOURCE_UNAVAILABLE", "Every audio mix input must be a ready audio asset in the movie workspace.");
             if (request.GainDb is < -60m or > 12m
-                || request.StartTimeSeconds is < 0m or >= maxCueTime
-                || request.EndTimeSeconds is <= 0m or > maxCueTime
+                || (request.StartTimeSeconds < 0m || request.StartTimeSeconds >= maxCueTime)
+                || (request.EndTimeSeconds <= 0m || request.EndTimeSeconds > maxCueTime)
                 || request.EndTimeSeconds <= request.StartTimeSeconds)
                 throw new MovieFinalAssemblyValidationException("ASSEMBLY_AUDIO_MIX_INVALID", "Audio mix gain and time bounds are outside the supported range.");
             var role = string.IsNullOrWhiteSpace(request.Role) ? "music" : request.Role.Trim().ToLowerInvariant();
@@ -751,8 +751,8 @@ public static class FfmpegMovieFinalAssemblyCommandBuilder
                 // Prevent huge/untrusted decimal timing values from overflowing the
                 // millisecond delay calculation or requesting an unbounded mix.
                 var maxCueTime = Math.Clamp(request.Contract.ExpectedDurationSeconds, 1, 7_200);
-                if (item.StartTimeSeconds is < 0m or >= maxCueTime
-                    || item.EndTimeSeconds is <= 0m or > maxCueTime
+                if ((item.StartTimeSeconds < 0m || item.StartTimeSeconds >= maxCueTime)
+                    || (item.EndTimeSeconds <= 0m || item.EndTimeSeconds > maxCueTime)
                     || item.EndTimeSeconds <= item.StartTimeSeconds)
                     throw new MovieFinalAssemblyExecutionException("ASSEMBLY_AUDIO_MIX_INVALID");
                 var start = item.StartTimeSeconds ?? 0m;
