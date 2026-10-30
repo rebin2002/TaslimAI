@@ -192,8 +192,16 @@ test("Image Studio safely recovers from a failed job and downloads the successfu
   });
 
   let localCspAdjusted = false;
+  // CI serves its API over HTTP loopback; adapt only this test page response, never app CSP.
   await page.route("**/create/image", async (route) => {
-    const response = await route.fetch();
+    // Preserve the synthetic browser session when fetching the page response.
+    const requestHeaders = await route.request().allHeaders();
+    const sessionCookie = requestHeaders.cookie;
+    if (!sessionCookie) {
+      await route.abort();
+      throw new Error("Expected the synthetic auth cookie on the loopback page request.");
+    }
+    const response = await route.fetch({ headers: { cookie: sessionCookie } });
     const headers = response.headers();
     const imagePolicy = "img-src 'self' data: blob: https:";
     const csp = headers["content-security-policy"];
