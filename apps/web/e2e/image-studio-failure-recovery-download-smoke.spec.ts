@@ -7,7 +7,7 @@ const successJobId = "e2e-image-provider-free-success";
 const assetId = "a694f298-5b2d-4c6a-98bc-6271ee5b5b4d";
 const privateProviderMarker = "PRIVATE_PROVIDER_DIAGNOSTIC_MUST_NOT_RENDER";
 const generatedPng = Buffer.from(
-  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/n3sAAAAASUVORK5CYII=",
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=",
   "base64",
 );
 
