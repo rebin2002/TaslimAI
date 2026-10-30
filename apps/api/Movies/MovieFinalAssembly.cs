@@ -662,9 +662,9 @@ public sealed class MovieFinalAssemblyQualityControl
     }
 }
 
-// Populated only by the local executor after bounded ffprobe inspection.
-// The optional value preserves standalone command-builder test compatibility;
-// real executions must supply the media probe result before rendering.
+// Populated by the local executor after bounded ffprobe inspection.
+// The request may exist before probing, but the command builder now refuses
+// to render unless it has complete per-source duration/audio evidence.
 public sealed record MovieFinalAssemblyVideoProbe(decimal DurationSeconds, bool HasAudio);
 
 public sealed record MovieFinalAssemblyExecutionRequest(
