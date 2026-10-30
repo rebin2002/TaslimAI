@@ -271,20 +271,26 @@ public sealed class MovieProductionGenerationOrchestrator(
             MovieReferenceReadinessOverrideSources.ProductionRender,
             cancellationToken);
 
-        var snapshot = await continuity.BuildSnapshotForTargetAsync(
-            shot.Scene.MovieProjectId,
-            shot.Scene.Id,
-            shot.Id,
-            persist: true,
-            cancellationToken);
-        // Character cards can change between the read-only preview and the
-        // snapshot committed for this clip. Recheck the exact persisted content
-        // so a raced edit cannot introduce unsupported paid prompt text.
-        if (provider.SceneClipPromptMaxCharacters is { } persistedPromptCapacity
-            && minimumCreativePromptLength + snapshot.SnapshotJson.Trim().Length > persistedPromptCapacity)
+        var maximumContinuityPromptCharacters = provider.SceneClipPromptMaxCharacters is { } currentPromptLimit
+            ? (int)Math.Max(0L, (long)currentPromptLimit - minimumCreativePromptLength)
+            : (int?)null;
+        MovieCharacterContinuitySnapshotDto snapshot;
+        try
+        {
+            snapshot = await continuity.BuildSnapshotForTargetAsync(
+                shot.Scene.MovieProjectId,
+                shot.Scene.Id,
+                shot.Id,
+                persist: true,
+                cancellationToken: cancellationToken,
+                maximumPromptCharacters: maximumContinuityPromptCharacters);
+        }
+        catch (MovieContinuityPromptLimitException)
+        {
             throw new MovieProductionValidationException(
                 "MOVIE_CLIP_PROMPT_UNSUPPORTED",
                 "The character-continuity context exceeds this provider's prompt limit. Shorten it before rendering.");
+        }
         var now = DateTime.UtcNow;
         var clip = new MovieClip
         {

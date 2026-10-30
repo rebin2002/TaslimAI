@@ -1688,14 +1688,26 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
             CreatedAt = now,
             UpdatedAt = now,
         };
-        var continuitySnapshot = await continuity.BuildSnapshotForTargetAsync(movie.Id, scene.Id, shot?.Id, true, cancellationToken);
-        // Recheck the persisted snapshot in case continuity edits raced with
-        // the read-only preview. The worker enforces the same bound again.
-        if (provider.SceneClipPromptMaxCharacters is { } persistedPromptCapacity
-            && minimumCreativePromptLength + continuitySnapshot.SnapshotJson.Trim().Length > persistedPromptCapacity)
+        var maximumContinuityPromptCharacters = provider.SceneClipPromptMaxCharacters is { } currentPromptLimit
+            ? (int)Math.Max(0L, (long)currentPromptLimit - minimumCreativePromptLength)
+            : (int?)null;
+        MovieCharacterContinuitySnapshotDto continuitySnapshot;
+        try
+        {
+            continuitySnapshot = await continuity.BuildSnapshotForTargetAsync(
+                movie.Id,
+                scene.Id,
+                shot?.Id,
+                persist: true,
+                cancellationToken: cancellationToken,
+                maximumPromptCharacters: maximumContinuityPromptCharacters);
+        }
+        catch (MovieContinuityPromptLimitException)
+        {
             throw new GenerationJobValidationException(
                 "MOVIE_CLIP_PROMPT_UNSUPPORTED",
                 "The clip's character-continuity context exceeds this provider's prompt limit. Shorten the continuity details before generating.");
+        }
         clip.ContinuitySnapshotJson = continuitySnapshot.SnapshotJson;
         clip.ContinuitySnapshotId = continuitySnapshot.SnapshotId;
         clip.ContinuitySnapshotVersion = continuitySnapshot.Version;

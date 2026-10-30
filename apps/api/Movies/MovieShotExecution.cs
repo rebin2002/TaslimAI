@@ -405,9 +405,32 @@ public sealed class MovieShotExecutionService(
             request.ReferenceReadinessOverrideReason,
             MovieReferenceReadinessOverrideSources.ShotExecution,
             cancellationToken);
-        var continuitySnapshot = await BuildContinuitySnapshotWithConcurrencyRetryAsync(
-            movie.Id, shot.Scene.Id, shot.Id, cancellationToken);
         var worldSnapshot = await worldContinuity.ProjectAsync(movie.Id, shot.Scene.Id, shot.Id, cancellationToken);
+        var worldContextJson = worldSnapshot?.ToJson();
+        var sceneJson = SceneSnapshot(shot.Scene);
+        var shotJson = ShotSnapshot(shot);
+        var minimumPromptCharacters = (long)(shot.Description?.Trim().Length ?? 0)
+            + (movie.Style?.Trim().Length ?? 0)
+            + (movie.AdditionalInstructions?.Trim().Length ?? 0)
+            + sceneJson.Trim().Length
+            + shotJson.Trim().Length
+            + (provider.SceneClipWorldContextInPrompt ? (worldContextJson?.Trim().Length ?? 0) : 0)
+            + Math.Max(0, provider.SceneClipPromptFormattingOverheadCharacters);
+        var maximumContinuityPromptCharacters = provider.SceneClipPromptMaxCharacters is { } promptLimit
+            ? (int)Math.Max(0L, (long)promptLimit - minimumPromptCharacters)
+            : (int?)null;
+        MovieCharacterContinuitySnapshotDto continuitySnapshot;
+        try
+        {
+            continuitySnapshot = await BuildContinuitySnapshotWithConcurrencyRetryAsync(
+                movie.Id, shot.Scene.Id, shot.Id, maximumContinuityPromptCharacters, cancellationToken);
+        }
+        catch (MovieContinuityPromptLimitException)
+        {
+            throw new MovieShotExecutionValidationException(
+                "MOVIE_CLIP_PROMPT_UNSUPPORTED",
+                "The shot's character-continuity context exceeds this provider's prompt limit. Shorten the continuity details before queueing.");
+        }
         var now = DateTime.UtcNow;
         var candidates = new List<MovieTake>(takeCount);
 
@@ -441,9 +464,9 @@ public sealed class MovieShotExecutionService(
                 movie.Language,
                 movie.AdditionalInstructions,
                 continuitySnapshot.SnapshotJson,
-                SceneSnapshot(shot.Scene),
-                ShotSnapshot(shot),
-                WorldContextJson: worldSnapshot?.ToJson(),
+                sceneJson,
+                shotJson,
+                WorldContextJson: worldContextJson,
                 ContinuitySnapshotHash: continuitySnapshot.SnapshotHash,
                 SourceProductionVersionId: keyframe.Id,
                 ReferencePackageJson: referencePackageJson,
@@ -650,6 +673,7 @@ public sealed class MovieShotExecutionService(
         Guid movieProjectId,
         Guid sceneId,
         Guid shotId,
+        int? maximumPromptCharacters,
         CancellationToken cancellationToken)
     {
         const int maxAttempts = 3;
@@ -658,7 +682,12 @@ public sealed class MovieShotExecutionService(
             try
             {
                 return await continuity.BuildSnapshotForTargetAsync(
-                    movieProjectId, sceneId, shotId, true, cancellationToken);
+                    movieProjectId,
+                    sceneId,
+                    shotId,
+                    persist: true,
+                    cancellationToken: cancellationToken,
+                    maximumPromptCharacters: maximumPromptCharacters);
             }
             catch (DbUpdateException) when (attempt < maxAttempts - 1)
             {

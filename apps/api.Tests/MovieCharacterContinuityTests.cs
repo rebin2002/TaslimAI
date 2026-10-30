@@ -60,6 +60,53 @@ public sealed class MovieCharacterContinuityTests
     }
 
     [Fact]
+    public async Task Snapshot_at_exact_prompt_limit_is_persisted()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        var seeded = await SeedAsync(db, "Mara waits.", "Mara waits.");
+        var service = new MovieCharacterContinuityService(db, new WorkspaceAccessService(db));
+        var preview = await service.BuildSnapshotForTargetAsync(seeded.MovieId, seeded.SceneId, seeded.ShotId, persist: false);
+
+        var persisted = await service.BuildSnapshotForTargetAsync(
+            seeded.MovieId,
+            seeded.SceneId,
+            seeded.ShotId,
+            persist: true,
+            maximumPromptCharacters: preview.SnapshotJson.Trim().Length);
+
+        Assert.NotNull(persisted.SnapshotId);
+        Assert.Equal(1, await db.MovieCharacterContinuitySnapshots.CountAsync());
+    }
+
+    [Fact]
+    public async Task Character_edit_between_preview_and_persist_rejects_without_orphan_snapshot()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        var seeded = await SeedAsync(db, "Mara waits.", "Mara waits.");
+        var service = new MovieCharacterContinuityService(db, new WorkspaceAccessService(db));
+        var preview = await service.BuildSnapshotForTargetAsync(seeded.MovieId, seeded.SceneId, seeded.ShotId, persist: false);
+
+        var mara = await db.MovieCharacters.SingleAsync(item => item.MovieProjectId == seeded.MovieId && item.Name == "Mara");
+        mara.Description = new string('x', MovieContinuitySnapshotLimits.MaxValueLength);
+        await db.SaveChangesAsync();
+        var racedSnapshot = await service.BuildSnapshotForTargetAsync(seeded.MovieId, seeded.SceneId, seeded.ShotId, persist: false);
+        Assert.True(racedSnapshot.SnapshotJson.Trim().Length > preview.SnapshotJson.Trim().Length);
+
+        await Assert.ThrowsAsync<MovieContinuityPromptLimitException>(() => service.BuildSnapshotForTargetAsync(
+            seeded.MovieId,
+            seeded.SceneId,
+            seeded.ShotId,
+            persist: true,
+            maximumPromptCharacters: preview.SnapshotJson.Trim().Length));
+
+        Assert.Equal(0, await db.MovieCharacterContinuitySnapshots.CountAsync());
+    }
+
+    [Fact]
     public async Task Cross_project_scene_is_rejected_before_projection_or_snapshot_creation()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");

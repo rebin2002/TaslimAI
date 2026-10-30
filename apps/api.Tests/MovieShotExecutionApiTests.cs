@@ -59,18 +59,21 @@ public sealed class MovieShotExecutionApiFactory : MovieOperationalApiFactory
     private readonly MovieClipDurationRange? durationRange;
     private readonly bool supportsCostIntent;
     private readonly bool supportsReferencePackageCostIntent;
+    private readonly int? sceneClipPromptMaxCharacters;
     public MovieShotExecutionPostCommitFailureGate CommitFailureGate { get; } = new();
 
-    public MovieShotExecutionApiFactory() : this(null, true, true) { }
+    public MovieShotExecutionApiFactory() : this(null, true, true, null) { }
 
     internal MovieShotExecutionApiFactory(
         MovieClipDurationRange? durationRange,
         bool supportsCostIntent = true,
-        bool supportsReferencePackageCostIntent = true)
+        bool supportsReferencePackageCostIntent = true,
+        int? sceneClipPromptMaxCharacters = null)
     {
         this.durationRange = durationRange;
         this.supportsCostIntent = supportsCostIntent;
         this.supportsReferencePackageCostIntent = supportsReferencePackageCostIntent;
+        this.sceneClipPromptMaxCharacters = sceneClipPromptMaxCharacters;
     }
 
     protected override bool WorkerEnabled => false;
@@ -93,6 +96,7 @@ public sealed class MovieShotExecutionApiFactory : MovieOperationalApiFactory
                 SceneClipDurationRange = durationRange ?? new MovieClipDurationRange(1, 3600),
                 SceneClipCostIntentSupported = supportsCostIntent,
                 ReferencePackageCostIntentSupported = supportsReferencePackageCostIntent,
+                SceneClipPromptMaxCharacters = sceneClipPromptMaxCharacters,
             });
         });
     }
@@ -585,6 +589,13 @@ public sealed class MovieShotExecutionApiTests : IClassFixture<MovieShotExecutio
         await AssertRejectedWithoutWritesAsync(unsupportedFactory, "SHOT_EXECUTION_REFERENCE_PACKAGE_UNSUPPORTED", 7, "720p", "720p", "native");
     }
 
+    [Fact]
+    public async Task Prompt_overflow_rejects_before_snapshot_clip_take_job_or_usage_reservation()
+    {
+        using var limitedFactory = new MovieShotExecutionApiFactory(null, sceneClipPromptMaxCharacters: 1);
+        await AssertRejectedWithoutWritesAsync(limitedFactory, "MOVIE_CLIP_PROMPT_UNSUPPORTED", 7, "720p", "720p", "native");
+    }
+
     private async Task AssertRejectedWithoutWritesAsync(
         MovieShotExecutionApiFactory testFactory,
         string expectedCode,
@@ -595,11 +606,12 @@ public sealed class MovieShotExecutionApiTests : IClassFixture<MovieShotExecutio
     {
         using var client = testFactory.CreateClient();
         var auth = await Register(client);
-        var (_, shot) = await CreateShot(client, auth.PersonalWorkspace.Id, "16:9", durationSeconds);
+        var (project, shot) = await CreateShot(client, auth.PersonalWorkspace.Id, "16:9", durationSeconds);
         var keyframe = await CreateApprovedKeyframe(client, shot.Id);
         int jobsBefore;
         int clipsBefore;
         int takesBefore;
+        int snapshotsBefore;
         int usageBefore;
         using (var beforeScope = testFactory.Services.CreateScope())
         {
@@ -607,6 +619,7 @@ public sealed class MovieShotExecutionApiTests : IClassFixture<MovieShotExecutio
             jobsBefore = await beforeDb.GenerationJobs.CountAsync(item => item.InputJson.Contains(shot.Id.ToString()));
             clipsBefore = await beforeDb.MovieClips.CountAsync(item => item.MovieShotId == shot.Id);
             takesBefore = await beforeDb.MovieTakes.CountAsync(item => item.MovieShotId == shot.Id);
+            snapshotsBefore = await beforeDb.MovieCharacterContinuitySnapshots.CountAsync(item => item.MovieProjectId == project.Project.Id);
             usageBefore = await beforeDb.UsageTransactions.CountAsync(item => item.WorkspaceId == auth.PersonalWorkspace.Id);
         }
 
@@ -631,6 +644,7 @@ public sealed class MovieShotExecutionApiTests : IClassFixture<MovieShotExecutio
         Assert.Equal(jobsBefore, await afterDb.GenerationJobs.CountAsync(item => item.InputJson.Contains(shot.Id.ToString())));
         Assert.Equal(clipsBefore, await afterDb.MovieClips.CountAsync(item => item.MovieShotId == shot.Id));
         Assert.Equal(takesBefore, await afterDb.MovieTakes.CountAsync(item => item.MovieShotId == shot.Id));
+        Assert.Equal(snapshotsBefore, await afterDb.MovieCharacterContinuitySnapshots.CountAsync(item => item.MovieProjectId == project.Project.Id));
         Assert.Equal(usageBefore, await afterDb.UsageTransactions.CountAsync(item => item.WorkspaceId == auth.PersonalWorkspace.Id));
     }
 
