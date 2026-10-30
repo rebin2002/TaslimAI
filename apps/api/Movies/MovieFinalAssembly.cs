@@ -854,10 +854,40 @@ public sealed class FfmpegMovieFinalAssemblyExecutor(IOptions<MovieFinalAssembly
             using var process = new Process { StartInfo = startInfo };
             if (!process.Start()) throw new MovieFinalAssemblyExecutionException("ASSEMBLY_EXECUTION_FAILED");
             progress.Report(35);
-            var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
-            await process.WaitForExitAsync(cancellationToken).WaitAsync(TimeSpan.FromSeconds(Math.Clamp(settings.ProcessTimeoutSeconds, 1, 86_400)), cancellationToken);
-            var error = await errorTask;
-            if (process.ExitCode != 0) throw new MovieFinalAssemblyExecutionException("ASSEMBLY_EXECUTION_FAILED", string.IsNullOrWhiteSpace(error) ? "The local assembly process failed." : "The local assembly process failed safely.");
+            try
+            {
+                var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
+                try
+                {
+                    await process.WaitForExitAsync(cancellationToken)
+                        .WaitAsync(TimeSpan.FromSeconds(Math.Clamp(settings.ProcessTimeoutSeconds, 1, 86_400)), cancellationToken);
+                }
+                catch (TimeoutException)
+                {
+                    throw new MovieFinalAssemblyExecutionException("ASSEMBLY_EXECUTION_TIMEOUT");
+                }
+                var error = await errorTask;
+                if (process.ExitCode != 0)
+                    throw new MovieFinalAssemblyExecutionException("ASSEMBLY_EXECUTION_FAILED", string.IsNullOrWhiteSpace(error) ? "The local assembly process failed." : "The local assembly process failed safely.");
+            }
+            finally
+            {
+                // WaitAsync does not stop its underlying process when it times out
+                // or the caller cancels. Never strand an FFmpeg renderer holding
+                // private inputs and CPU after the assembly job is abandoned.
+                if (!process.HasExited)
+                {
+                    try
+                    {
+                        process.Kill(entireProcessTree: true);
+                        await process.WaitForExitAsync(CancellationToken.None)
+                            .WaitAsync(TimeSpan.FromSeconds(5));
+                    }
+                    catch (InvalidOperationException) { }
+                    catch (System.ComponentModel.Win32Exception) { }
+                    catch (TimeoutException) { }
+                }
+            }
             var info = new FileInfo(outputPath);
             if (!info.Exists || info.Length <= 0 || info.Length > Math.Min(2L * 1024 * 1024 * 1024, Math.Max(1, settings.MaxOutputBytes))) throw new MovieFinalAssemblyExecutionException("ASSEMBLY_OUTPUT_INVALID");
             progress.Report(90);
