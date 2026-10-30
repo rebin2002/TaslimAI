@@ -643,7 +643,14 @@ public sealed class MovieFinalAssemblyQualityControl
         if (output.SizeBytes <= 0) findings.Add("MOVIE_ASSEMBLY_QC_OUTPUT_EMPTY");
         if (!output.DurationMeasured) findings.Add("MOVIE_ASSEMBLY_QC_DURATION_UNMEASURED");
         if (output.DurationSeconds <= 0) findings.Add("MOVIE_ASSEMBLY_QC_DURATION_INVALID");
-        if (output.DurationSeconds > Math.Max(1, input.ExpectedDurationSeconds) + 5) findings.Add("MOVIE_ASSEMBLY_QC_DURATION_EXCEEDED");
+        // A short but positive measured output must not pass final-master QC:
+        // an accidentally truncated feature film would otherwise be published
+        // as ready. Allow the same five-second container timing tolerance in
+        // both directions, without rounding a missing/zero runtime into success.
+        var expectedDuration = Math.Max(1L, input.ExpectedDurationSeconds);
+        if (output.DurationSeconds > 0 && output.DurationSeconds < Math.Max(1L, expectedDuration - 5L))
+            findings.Add("MOVIE_ASSEMBLY_QC_DURATION_TRUNCATED");
+        if (output.DurationSeconds > expectedDuration + 5L) findings.Add("MOVIE_ASSEMBLY_QC_DURATION_EXCEEDED");
         return new(ContractVersion, findings.Count == 0 ? MovieFinalAssemblyQcStatuses.Passed : MovieFinalAssemblyQcStatuses.Failed, findings, output.Resolution.Width, output.Resolution.Height, output.DurationSeconds, output.OutputSha256);
     }
 }
