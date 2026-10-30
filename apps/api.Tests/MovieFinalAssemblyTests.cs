@@ -79,6 +79,30 @@ public sealed class MovieFinalAssemblyTests
         Assert.Contains("MOVIE_ASSEMBLY_QC_RESOLUTION_MISMATCH", rejected.Findings);
     }
 
+    [Theory]
+    [InlineData(7_200, 1, false, "MOVIE_ASSEMBLY_QC_DURATION_TRUNCATED")]
+    [InlineData(7_200, 7_194, false, "MOVIE_ASSEMBLY_QC_DURATION_TRUNCATED")]
+    [InlineData(7_200, 7_195, true, null)]
+    [InlineData(7_200, 7_200, true, null)]
+    [InlineData(7_200, 7_205, true, null)]
+    [InlineData(7_200, 7_206, false, "MOVIE_ASSEMBLY_QC_DURATION_EXCEEDED")]
+    public void Quality_control_does_not_publish_truncated_or_oversized_feature_masters(
+        int expectedDuration, int measuredDuration, bool shouldPass, string? expectedFinding)
+    {
+        var input = Contract(Guid.NewGuid(), null, MovieAssemblyCaptionModes.None)
+            with { ExpectedDurationSeconds = expectedDuration };
+        var output = Output(input.Profile.Width, input.Profile.Height, measuredDuration);
+
+        var result = new MovieFinalAssemblyQualityControl().Evaluate(input, output);
+
+        Assert.Equal(shouldPass, result.Passed);
+        Assert.Equal(shouldPass ? MovieFinalAssemblyQcStatuses.Passed : MovieFinalAssemblyQcStatuses.Failed, result.Status);
+        if (expectedFinding is not null)
+            Assert.Contains(expectedFinding, result.Findings);
+        else
+            Assert.Empty(result.Findings);
+    }
+
     [Fact]
     public void Final_assembly_input_contains_provenance_without_provider_or_model_controls()
     {
