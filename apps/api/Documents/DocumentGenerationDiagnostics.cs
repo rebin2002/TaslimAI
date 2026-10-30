@@ -39,6 +39,7 @@ public static class DocumentGenerationFailureCodes
         AiProviderFailureCategories.UnsupportedRequest => GenerationJobErrorCodes.DocumentProviderUnsupportedRequest,
         AiProviderFailureCategories.RateLimited => GenerationJobErrorCodes.DocumentProviderRateLimited,
         AiProviderFailureCategories.Transient => GenerationJobErrorCodes.DocumentProviderTransientFailure,
+        AiProviderFailureCategories.MalformedResponse => GenerationJobErrorCodes.DocumentOutputInvalid,
         _ => GenerationJobErrorCodes.DocumentProviderUnavailable,
     };
 
