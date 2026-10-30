@@ -27,7 +27,7 @@ public sealed class MovieFinalAssemblyTests
         var audioPath = "/tmp/music $(touch /tmp/should-not-run.wav).wav";
 
         var arguments = FfmpegMovieFinalAssemblyCommandBuilder.Build(
-            new MovieFinalAssemblyExecutionRequest(input, new Dictionary<Guid, string>
+            ProbedRequest(input, new Dictionary<Guid, string>
             {
                 [videoAsset] = videoPath,
                 [audioAsset] = audioPath,
@@ -59,7 +59,7 @@ public sealed class MovieFinalAssemblyTests
             };
             var paths = new Dictionary<Guid, string> { [video] = "/tmp/clip.mp4", [caption] = "/tmp/brief.vtt" };
             var args = FfmpegMovieFinalAssemblyCommandBuilder.Build(
-                new MovieFinalAssemblyExecutionRequest(input, paths), "/tmp/master.mp4").ToArray();
+                ProbedRequest(input, paths), "/tmp/master.mp4").ToArray();
 
             // FFmpeg -shortest considers the last subtitle cue as a possible end
             // of output. Never let a one-second VTT truncate a longer master.
@@ -370,8 +370,9 @@ public sealed class MovieFinalAssemblyTests
     {
         var video = Guid.NewGuid();
         var input = Contract(video, null, MovieAssemblyCaptionModes.None);
-        foreach (var probes in new IReadOnlyDictionary<Guid, MovieFinalAssemblyVideoProbe>[]
+        foreach (var probes in new IReadOnlyDictionary<Guid, MovieFinalAssemblyVideoProbe>?[]
         {
+            null,
             new Dictionary<Guid, MovieFinalAssemblyVideoProbe>(),
             new Dictionary<Guid, MovieFinalAssemblyVideoProbe> { [video] = new(0m, false) },
             new Dictionary<Guid, MovieFinalAssemblyVideoProbe> { [video] = new(1m, false) },
@@ -379,7 +380,7 @@ public sealed class MovieFinalAssemblyTests
         {
             var error = Assert.Throws<MovieFinalAssemblyExecutionException>(() =>
                 FfmpegMovieFinalAssemblyCommandBuilder.Build(
-                    new MovieFinalAssemblyExecutionRequest(input, new Dictionary<Guid, string> { [video] = "/tmp/clip.mp4" }, probes),
+                    ProbedRequest(input, new Dictionary<Guid, string> { [video] = "/tmp/clip.mp4" }, probes),
                     "/tmp/master.mp4"));
             Assert.Contains(error.Code, new[] { "ASSEMBLY_SOURCE_PROBE_MISSING", "ASSEMBLY_SOURCE_DURATION_INVALID" });
         }
@@ -421,7 +422,7 @@ public sealed class MovieFinalAssemblyTests
             AudioMixInputs = [new MovieAssemblyAudioMixInput(audioAsset, "music", -3m, 12.5m, 19m, true)],
         };
         var arguments = FfmpegMovieFinalAssemblyCommandBuilder.Build(
-            new MovieFinalAssemblyExecutionRequest(input, new Dictionary<Guid, string>
+            ProbedRequest(input, new Dictionary<Guid, string>
             {
                 [videoAsset] = "/tmp/clip.mp4",
                 [audioAsset] = "/tmp/cue.wav",
@@ -441,7 +442,7 @@ public sealed class MovieFinalAssemblyTests
         var audioAsset = Guid.NewGuid();
         var input = Contract(videoAsset, audioAsset, MovieAssemblyCaptionModes.None);
         var arguments = FfmpegMovieFinalAssemblyCommandBuilder.Build(
-            new MovieFinalAssemblyExecutionRequest(input, new Dictionary<Guid, string>
+            ProbedRequest(input, new Dictionary<Guid, string>
             {
                 [videoAsset] = "/tmp/clip.mp4",
                 [audioAsset] = "/tmp/cue.wav",
@@ -476,7 +477,7 @@ public sealed class MovieFinalAssemblyTests
             };
             var exception = Assert.Throws<MovieFinalAssemblyExecutionException>(() =>
                 FfmpegMovieFinalAssemblyCommandBuilder.Build(
-                    new MovieFinalAssemblyExecutionRequest(input, new Dictionary<Guid, string>
+                    ProbedRequest(input, new Dictionary<Guid, string>
                     {
                         [videoAsset] = "/tmp/clip.mp4",
                         [audioAsset] = "/tmp/cue.wav",
@@ -497,7 +498,7 @@ public sealed class MovieFinalAssemblyTests
         };
 
         var arguments = FfmpegMovieFinalAssemblyCommandBuilder.Build(
-            new MovieFinalAssemblyExecutionRequest(input, new Dictionary<Guid, string>
+            ProbedRequest(input, new Dictionary<Guid, string>
             {
                 [videoAsset] = "/tmp/source.mp4",
                 [captionsAsset] = "/tmp/captions:english's.vtt",
@@ -511,7 +512,7 @@ public sealed class MovieFinalAssemblyTests
         // the arguments are passed directly to FFmpeg without a shell.
         var specialPath = "/tmp/my captions,act[1];.vtt";
         var specialArguments = FfmpegMovieFinalAssemblyCommandBuilder.Build(
-            new MovieFinalAssemblyExecutionRequest(input, new Dictionary<Guid, string>
+            ProbedRequest(input, new Dictionary<Guid, string>
             {
                 [videoAsset] = "/tmp/source.mp4",
                 [captionsAsset] = specialPath,
@@ -532,7 +533,7 @@ public sealed class MovieFinalAssemblyTests
             Captions = new MovieAssemblyCaptions(MovieAssemblyCaptionModes.Embedded, captionAsset, "en"),
         };
         var arguments = FfmpegMovieFinalAssemblyCommandBuilder.Build(
-            new MovieFinalAssemblyExecutionRequest(input, new Dictionary<Guid, string>
+            ProbedRequest(input, new Dictionary<Guid, string>
             {
                 [videoAsset] = "/tmp/clip.mp4",
                 [audioAsset] = "/tmp/music.wav",
@@ -563,7 +564,7 @@ public sealed class MovieFinalAssemblyTests
         };
         var exception = Assert.Throws<MovieFinalAssemblyExecutionException>(() =>
             FfmpegMovieFinalAssemblyCommandBuilder.Build(
-                new MovieFinalAssemblyExecutionRequest(input, new Dictionary<Guid, string>
+                ProbedRequest(input, new Dictionary<Guid, string>
                 {
                     [videoAsset] = "/tmp/clip.mp4",
                 }),
@@ -675,7 +676,7 @@ public sealed class MovieFinalAssemblyTests
 
             var videoId = Guid.NewGuid();
             var input = Contract(videoId, null, MovieAssemblyCaptionModes.None);
-            var request = new MovieFinalAssemblyExecutionRequest(input, new Dictionary<Guid, string> { [videoId] = sourcePath });
+            var request = ProbedRequest(input, new Dictionary<Guid, string> { [videoId] = sourcePath });
             var executor = new FfmpegMovieFinalAssemblyExecutor(Options.Create(new MovieFinalAssemblyOptions
             {
                 Enabled = true,
@@ -809,6 +810,12 @@ public sealed class MovieFinalAssemblyTests
         Assert.True(MovieFinalAssemblyService.IsAssemblyIdempotencyUniqueViolation(postgresConflict));
         Assert.False(MovieFinalAssemblyService.IsAssemblyIdempotencyUniqueViolation(otherConflict));
     }
+
+    private static MovieFinalAssemblyExecutionRequest ProbedRequest(
+        MovieFinalAssemblyInput input,
+        IReadOnlyDictionary<Guid, string> paths) =>
+        new(input, paths, input.Timeline.Select(item => item.AssetId).Distinct()
+            .ToDictionary(id => id, _ => new MovieFinalAssemblyVideoProbe(600m, true)));
 
     private static MovieFinalAssemblyInput Contract(Guid videoAsset, Guid? audioAsset, string captionsMode)
     {
