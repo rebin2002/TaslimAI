@@ -114,7 +114,7 @@ test("Chat normal-send retry recovers a failed stream without duplicating the us
   const errorAlert = page.locator(".chat-inline-error");
   await expect(errorAlert).toBeVisible();
   await expect(errorAlert).not.toContainText(/MOCK_INTERNAL_FAILURE_DETAIL|trace=TEST_ONLY|api.?key|secret|stack trace|exception/i);
-  await expect(page.getByText(messageText, { exact: true })).toHaveCount(1);
+  await expect(page.locator("article").filter({ hasText: messageText })).toHaveCount(1);
   const retryButton = errorAlert.getByRole("button", { name: /^retry$/i });
   await expect(retryButton).toBeVisible();
 
@@ -123,7 +123,7 @@ test("Chat normal-send retry recovers a failed stream without duplicating the us
   expect((await retryResponse).status()).toBe(200);
 
   await expect(page.getByText(assistantText, { exact: true })).toBeVisible();
-  await expect(page.getByText(messageText, { exact: true })).toHaveCount(1);
+  await expect(page.locator("article").filter({ hasText: messageText })).toHaveCount(1);
   await expect(errorAlert).toHaveCount(0);
   expect(submissions).toHaveLength(2);
   expect(submissions[1].content).toBe(messageText);
