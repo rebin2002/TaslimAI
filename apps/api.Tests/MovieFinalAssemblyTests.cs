@@ -380,7 +380,7 @@ public sealed class MovieFinalAssemblyTests
         {
             var error = Assert.Throws<MovieFinalAssemblyExecutionException>(() =>
                 FfmpegMovieFinalAssemblyCommandBuilder.Build(
-                    ProbedRequest(input, new Dictionary<Guid, string> { [video] = "/tmp/clip.mp4" }, probes),
+                    new MovieFinalAssemblyExecutionRequest(input, new Dictionary<Guid, string> { [video] = "/tmp/clip.mp4" }, probes),
                     "/tmp/master.mp4"));
             Assert.Contains(error.Code, new[] { "ASSEMBLY_SOURCE_PROBE_MISSING", "ASSEMBLY_SOURCE_DURATION_INVALID" });
         }
