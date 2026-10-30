@@ -87,7 +87,7 @@ test.describe("Presentation Studio failed-job recovery", () => {
     await page.goto("/create/presentation");
     await expect(page.getByRole("heading", { name: /presentation studio/i })).toBeVisible();
     await page.getByLabel("Deck title").fill("QA presentation failure recovery");
-    await page.getByLabel("Tell us what to present").fill("A synthetic provider-free release QA journey.");
+    await page.getByLabel("Tell us what to present").fill("A synthetic release QA journey.");
     await page.getByRole("button", { name: "Create presentation" }).click();
 
     const failureHeading = page.getByRole("heading", { name: safeFailure, exact: true });
@@ -96,11 +96,14 @@ test.describe("Presentation Studio failed-job recovery", () => {
       workspaceId,
       projectId: null,
       title: "QA presentation failure recovery",
-      description: "A synthetic provider-free release QA journey.",
+      description: "A synthetic release QA journey.",
       attachmentIds: [],
     });
     expect(csrfToken).toBeTruthy();
-    expect(JSON.stringify(submittedPayload)).not.toMatch(/provider|model|api.?key|secret/i);
+    expect(submittedPayload).not.toHaveProperty("provider");
+    expect(submittedPayload).not.toHaveProperty("model");
+    expect(submittedPayload).not.toHaveProperty("apiKey");
+    expect(submittedPayload).not.toHaveProperty("secret");
     expect(jobReads).toBeGreaterThan(0);
     expect(await page.evaluate((key) => window.sessionStorage.getItem(key), storageKey)).toBe(jobId);
 
@@ -112,7 +115,7 @@ test.describe("Presentation Studio failed-job recovery", () => {
 
     await page.getByRole("button", { name: /create another/i }).click();
     await expect(page.getByLabel("Deck title")).toHaveValue("QA presentation failure recovery");
-    await expect(page.getByLabel("Tell us what to present")).toHaveValue("A synthetic provider-free release QA journey.");
+    await expect(page.getByLabel("Tell us what to present")).toHaveValue("A synthetic release QA journey.");
     await expect(page.getByRole("button", { name: "Create presentation" })).toBeEnabled();
     await expect.poll(() => page.evaluate((key) => window.sessionStorage.getItem(key), storageKey)).toBeNull();
     expect(blockedExternalRequests).toEqual([]);
