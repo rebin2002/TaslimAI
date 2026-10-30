@@ -751,6 +751,10 @@ public static class FfmpegMovieFinalAssemblyCommandBuilder
                     || item.InPointSeconds >= probe.DurationSeconds
                     || item.OutPointSeconds is decimal end && end > probe.DurationSeconds + 0.5m))
                 throw new MovieFinalAssemblyExecutionException("ASSEMBLY_SOURCE_DURATION_INVALID");
+            // FFmpeg concat requires matching geometry, pixel format and SAR
+            // across every segment. Normalize *before* concat; scaling only
+            // the concatenated master fails for mixed-resolution provider clips.
+            var normalizedVideo = $"{trim},setpts=PTS-STARTPTS,scale={request.Contract.Profile.Width}:{request.Contract.Profile.Height}:force_original_aspect_ratio=decrease,pad={request.Contract.Profile.Width}:{request.Contract.Profile.Height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p";
             // Some generated MP4s have only a video stream. Never address a
             // nonexistent [i:a] pad: synthesize *bounded* timeline-length
             // silence only for those clips, preserving audio from other clips.
@@ -759,7 +763,7 @@ public static class FfmpegMovieFinalAssemblyCommandBuilder
                 var clipDuration = (item.OutPointSeconds ?? probe.DurationSeconds) - item.InPointSeconds;
                 if (clipDuration <= 0m || clipDuration > 86_400m)
                     throw new MovieFinalAssemblyExecutionException("ASSEMBLY_SOURCE_DURATION_INVALID");
-                filters.Add($"[{index}:v]{trim},setpts=PTS-STARTPTS[v{index}];anullsrc=r=48000:cl=stereo,atrim=duration={Format(clipDuration)},asetpts=PTS-STARTPTS[a{index}]");
+                filters.Add($"[{index}:v]{normalizedVideo}[v{index}];anullsrc=r=48000:cl=stereo,atrim=duration={Format(clipDuration)},asetpts=PTS-STARTPTS[a{index}]");
             }
             else
             {
@@ -769,7 +773,7 @@ public static class FfmpegMovieFinalAssemblyCommandBuilder
                 var audioTrim = item.OutPointSeconds.HasValue
                     ? $"atrim=start={Format(item.InPointSeconds)}:end={Format(item.OutPointSeconds.Value)}"
                     : $"atrim=start={Format(item.InPointSeconds)}";
-                filters.Add($"[{index}:v]{trim},setpts=PTS-STARTPTS[v{index}];[{index}:a]{audioTrim},asetpts=PTS-STARTPTS[a{index}]");
+                filters.Add($"[{index}:v]{normalizedVideo}[v{index}];[{index}:a]{audioTrim},asetpts=PTS-STARTPTS[a{index}]");
             }
         }
         var videoInputs = string.Concat(request.Contract.Timeline.Select((_, index) => $"[v{index}][a{index}]"));
@@ -781,7 +785,7 @@ public static class FfmpegMovieFinalAssemblyCommandBuilder
             filters.Add($"[videoBase]subtitles=filename='{EscapeFilterValue(captionsPath)}'[captioned]");
             videoLabel = "captioned";
         }
-        filters.Add($"[{videoLabel}]scale={request.Contract.Profile.Width}:{request.Contract.Profile.Height}:force_original_aspect_ratio=decrease,pad={request.Contract.Profile.Width}:{request.Contract.Profile.Height}:(ow-iw)/2:(oh-ih)/2:color=black[video]");
+        filters.Add($"[{videoLabel}]format=yuv420p[video]");
         var audioLabel = "timelineAudio";
         if (request.Contract.AudioMixInputs.Count > 0)
         {
