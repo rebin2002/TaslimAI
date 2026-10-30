@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Http;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Taslim.Api.Domain;
@@ -194,6 +195,56 @@ public sealed class GeneratedStreamLifecycleTests
         Assert.Empty(await db.UsageTransactions.AsNoTracking().ToListAsync());
     }
 
+    [Fact]
+    public async Task Generated_stream_failure_does_not_log_untrusted_exception()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = new TaslimDbContext(
+            new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connection).Options);
+        await db.Database.EnsureCreatedAsync();
+
+        var (workspaceId, userId) = await SeedWorkspaceAsync(db);
+        var sink = new LengthBoundedFakeStorage();
+        var options = Options.Create(new Taslim.Api.Files.FileOptions { MaxGeneratedVideoBytes = 16 });
+        var logger = new GeneratedStreamCaptureLogger();
+        var service = new FileProcessingService(
+            db,
+            new FileValidationService(options),
+            sink,
+            new FileContentExtractor(options),
+            options,
+            logger);
+
+        const string privateDetails = "PRIVATE_SIGNED_URL_AND_STORAGE_CREDENTIAL_MUST_NOT_APPEAR_IN_LOGS";
+        var sourceError = new InvalidOperationException(privateDetails);
+        var thrown = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            service.StoreGeneratedStreamWithResultAsync(
+                workspaceId,
+                userId,
+                projectId: null,
+                fileName: "fixture.mp4",
+                contentType: "video/mp4",
+                sizeBytes: 4,
+                openReadAsync: _ => Task.FromException<Stream>(sourceError),
+                metadataJson: null,
+                cancellationToken: CancellationToken.None));
+
+        Assert.Same(sourceError, thrown);
+        Assert.Contains(logger.Entries, entry =>
+            entry.Message.Contains("Generated stream storage failed", StringComparison.Ordinal));
+        Assert.All(logger.Entries, entry =>
+        {
+            Assert.DoesNotContain(privateDetails, entry.Message);
+            Assert.Null(entry.Exception);
+        });
+        var file = Assert.Single(await db.StoredFiles.AsNoTracking().ToListAsync());
+        Assert.Equal(StoredFileStatus.Failed, file.Status);
+        Assert.Equal(file.StorageKey, Assert.Single(sink.DeletedKeys));
+        Assert.Empty(await db.GenerationJobs.AsNoTracking().ToListAsync());
+        Assert.Empty(await db.UsageTransactions.AsNoTracking().ToListAsync());
+    }
+
     [Theory]
     [InlineData(4, 5)]
     [InlineData(5, 4)]
@@ -370,6 +421,24 @@ public sealed class GeneratedStreamLifecycleTests
         {
             await inner.DisposeAsync();
             await base.DisposeAsync();
+        }
+    }
+
+    private sealed class GeneratedStreamCaptureLogger : ILogger<FileProcessingService>
+    {
+        public List<(string Message, Exception? Exception)> Entries { get; } = [];
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            Entries.Add((formatter(state, exception), exception));
         }
     }
 }
