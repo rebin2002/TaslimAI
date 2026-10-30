@@ -103,6 +103,22 @@ public sealed class MovieFinalAssemblyTests
             Assert.Empty(result.Findings);
     }
 
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-10)]
+    public void Quality_control_rejects_missing_or_negative_expected_master_runtime(int invalidDuration)
+    {
+        var input = Contract(Guid.NewGuid(), null, MovieAssemblyCaptionModes.None)
+            with { ExpectedDurationSeconds = invalidDuration };
+        var output = Output(input.Profile.Width, input.Profile.Height, 1);
+
+        var result = new MovieFinalAssemblyQualityControl().Evaluate(input, output);
+
+        Assert.False(result.Passed);
+        Assert.Equal(MovieFinalAssemblyQcStatuses.Failed, result.Status);
+        Assert.Contains("MOVIE_ASSEMBLY_QC_EXPECTED_DURATION_INVALID", result.Findings);
+    }
+
     [Fact]
     public void Final_assembly_input_contains_provenance_without_provider_or_model_controls()
     {
