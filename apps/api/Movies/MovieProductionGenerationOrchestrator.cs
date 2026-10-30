@@ -167,15 +167,6 @@ public sealed class MovieProductionGenerationOrchestrator(
             throw new MovieProductionValidationException(
                 "MOVIE_PROVIDER_MODEL_UNVERIFIED",
                 "The selected video adapter has not declared an exact model key for pricing this production clip.");
-        if (!request.ConfirmationAccepted)
-            throw new MovieProductionValidationException(
-                "GENERATION_CONFIRMATION_REQUIRED",
-                "Review the current maximum USD quote and explicitly confirm before queueing this production render.");
-        if (!request.ExpectedMaximumAmountUsd.HasValue || request.ExpectedMaximumAmountUsd.Value < 0
-            || string.IsNullOrWhiteSpace(request.ExpectedQuoteFingerprint))
-            throw new MovieProductionValidationException(
-                "MOVIE_PRODUCTION_QUOTE_REQUIRED",
-                "Run the read-only production preflight and provide its current maximum USD quote before queueing.");
         // Share the conservative prompt floor with the read-only preflight.
         // Queue admission still validates an optional custom render title.
         var renderDescription = string.IsNullOrWhiteSpace(request.Title)
@@ -199,6 +190,16 @@ public sealed class MovieProductionGenerationOrchestrator(
             throw new MovieProductionValidationException(
                 "MOVIE_CLIP_PROMPT_UNSUPPORTED",
                 "The character-continuity context exceeds this provider's prompt limit. Shorten it before rendering.");
+
+        if (!request.ConfirmationAccepted)
+            throw new MovieProductionValidationException(
+                "GENERATION_CONFIRMATION_REQUIRED",
+                "Review the current maximum USD quote and explicitly confirm before queueing this production render.");
+        if (!request.ExpectedMaximumAmountUsd.HasValue || request.ExpectedMaximumAmountUsd.Value < 0
+            || string.IsNullOrWhiteSpace(request.ExpectedQuoteFingerprint))
+            throw new MovieProductionValidationException(
+                "MOVIE_PRODUCTION_QUOTE_REQUIRED",
+                "Run the read-only production preflight and provide its current maximum USD quote before queueing.");
 
         var preflightResult = await productionPreflight.EvaluateAsync(
             userId,
