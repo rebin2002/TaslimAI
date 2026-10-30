@@ -30,7 +30,9 @@ test.describe("Image Studio server authentication", () => {
     expect(response?.status()).toBe(200);
     await expect(page).toHaveURL(/\/create\/image$/);
     await expect(page.getByRole("heading", { name: "Image Studio" })).toBeVisible();
-    await expect(page.getByRole("textbox", { name: /describe your image/i })).toBeVisible();
+    const prompt = page.getByRole("textbox", { name: "What would you like to create?" });
+    await expect(prompt).toBeVisible();
+    await expect(prompt).toHaveAttribute("placeholder", /Describe the image you have in mind/i);
     expect(generationPosts).toEqual([]);
   });
 });
