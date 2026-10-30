@@ -718,6 +718,16 @@ public static class FfmpegMovieFinalAssemblyCommandBuilder
             if (!request.SourcePaths.TryGetValue(item.AssetId, out var path)) throw new MovieFinalAssemblyExecutionException("ASSEMBLY_AUDIO_PATH_MISSING");
             args.Add("-i"); args.Add(path);
         }
+        // FFmpeg input options must precede filter/output mapping options. In
+        // particular, registering an embedded subtitle input after -map causes
+        // FFmpeg to reject the command before assembly starts.
+        if (request.Contract.Captions.Mode == MovieAssemblyCaptionModes.Embedded
+            && request.Contract.Captions.AssetId is Guid embeddedCaptionId)
+        {
+            if (!request.SourcePaths.TryGetValue(embeddedCaptionId, out var captionsPath))
+                throw new MovieFinalAssemblyExecutionException("ASSEMBLY_CAPTIONS_PATH_MISSING");
+            args.Add("-i"); args.Add(captionsPath);
+        }
         var filters = new List<string>();
         for (var index = 0; index < request.Contract.Timeline.Count; index++)
         {
@@ -774,8 +784,7 @@ public static class FfmpegMovieFinalAssemblyCommandBuilder
         if (request.Contract.Captions.Mode == MovieAssemblyCaptionModes.Embedded && request.Contract.Captions.AssetId.HasValue)
         {
             var captionIndex = request.Contract.Timeline.Count + request.Contract.AudioMixInputs.Count;
-            if (!request.SourcePaths.ContainsKey(request.Contract.Captions.AssetId.Value)) throw new MovieFinalAssemblyExecutionException("ASSEMBLY_CAPTIONS_PATH_MISSING");
-            args.Add("-i"); args.Add(request.SourcePaths[request.Contract.Captions.AssetId.Value]);
+            // The subtitle source is already declared with the other inputs.
             args.Add("-map"); args.Add($"{captionIndex}:0");
             args.Add("-c:s"); args.Add("mov_text");
         }
