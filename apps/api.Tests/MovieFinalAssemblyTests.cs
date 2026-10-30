@@ -315,6 +315,28 @@ public sealed class MovieFinalAssemblyTests
                 document.RootElement.GetProperty("format").GetProperty("duration").GetString()!,
                 System.Globalization.CultureInfo.InvariantCulture);
             Assert.InRange(duration, 0.95m, 1.10m);
+
+            // A burn-in subtitle must still resolve a literal on-disk filename
+            // containing quotes, colons and filtergraph separators. This exposed
+            // the former single-pass escaping bug in a real local FFmpeg run.
+            var captionId = Guid.NewGuid();
+            var captionPath = Path.Combine(directory, "captions:english's test,part[1];.vtt");
+            await File.WriteAllTextAsync(captionPath,
+                "WEBVTT\n\n00:00:00.000 --> 00:00:00.400\nSafe synthetic caption\n");
+            var captionOutput = Path.Combine(directory, "burned-caption.mp4");
+            var captionInput = input with
+            {
+                Captions = new MovieAssemblyCaptions(MovieAssemblyCaptionModes.BurnIn, captionId, "en"),
+                Timeline = [new MovieAssemblyTimelineItem(Guid.NewGuid(), silent, 0, 0m, 0.5m, null)],
+            };
+            var captionArgs = FfmpegMovieFinalAssemblyCommandBuilder.Build(
+                new MovieFinalAssemblyExecutionRequest(
+                    captionInput,
+                    new Dictionary<Guid, string> { [silent] = silentPath, [captionId] = captionPath },
+                    new Dictionary<Guid, MovieFinalAssemblyVideoProbe> { [silent] = silentProbe }),
+                captionOutput);
+            await RunToolAsync(ffmpeg, captionArgs);
+            Assert.True(new FileInfo(captionOutput).Length > 0);
         }
         finally
         {
