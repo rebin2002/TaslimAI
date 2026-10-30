@@ -44,6 +44,49 @@ public sealed class MovieFinalAssemblyTests
     }
 
     [Fact]
+    public void Soundtrack_cues_are_trimmed_to_their_duration_and_delayed_to_timeline_start()
+    {
+        var videoAsset = Guid.NewGuid();
+        var audioAsset = Guid.NewGuid();
+        var input = Contract(videoAsset, audioAsset, MovieAssemblyCaptionModes.None) with
+        {
+            AudioMixInputs = [new MovieAssemblyAudioMixInput(audioAsset, "music", -3m, 12.5m, 19m, true)],
+        };
+        var arguments = FfmpegMovieFinalAssemblyCommandBuilder.Build(
+            new MovieFinalAssemblyExecutionRequest(input, new Dictionary<Guid, string>
+            {
+                [videoAsset] = "/tmp/clip.mp4",
+                [audioAsset] = "/tmp/cue.wav",
+            }),
+            "/tmp/master.mp4");
+
+        var filter = arguments[Array.IndexOf(arguments.ToArray(), "-filter_complex") + 1];
+        Assert.Contains("[1:a]asetpts=PTS-STARTPTS,atrim=duration=6.5,volume=", filter, StringComparison.Ordinal);
+        Assert.Contains(",adelay=delays=12500:all=1[mix0]", filter, StringComparison.Ordinal);
+        Assert.Contains("[timelineAudio][mix0]amix=inputs=2:duration=first", filter, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Unpositioned_soundtrack_uses_source_from_start_without_delay()
+    {
+        var videoAsset = Guid.NewGuid();
+        var audioAsset = Guid.NewGuid();
+        var input = Contract(videoAsset, audioAsset, MovieAssemblyCaptionModes.None);
+        var arguments = FfmpegMovieFinalAssemblyCommandBuilder.Build(
+            new MovieFinalAssemblyExecutionRequest(input, new Dictionary<Guid, string>
+            {
+                [videoAsset] = "/tmp/clip.mp4",
+                [audioAsset] = "/tmp/cue.wav",
+            }),
+            "/tmp/master.mp4");
+
+        var filter = arguments[Array.IndexOf(arguments.ToArray(), "-filter_complex") + 1];
+        Assert.Contains("[1:a]asetpts=PTS-STARTPTS,volume=", filter, StringComparison.Ordinal);
+        Assert.DoesNotContain("adelay=", filter, StringComparison.Ordinal);
+        Assert.DoesNotContain("atrim=duration=", filter, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Burn_in_captions_require_a_source_path_and_are_escaped_inside_the_filter_argument()
     {
         var videoAsset = Guid.NewGuid();
