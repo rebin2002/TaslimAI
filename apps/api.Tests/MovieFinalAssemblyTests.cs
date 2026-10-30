@@ -50,6 +50,7 @@ public sealed class MovieFinalAssemblyTests
         var audioAsset = Guid.NewGuid();
         var input = Contract(videoAsset, audioAsset, MovieAssemblyCaptionModes.None) with
         {
+            ExpectedDurationSeconds = 20,
             AudioMixInputs = [new MovieAssemblyAudioMixInput(audioAsset, "music", -3m, 12.5m, 19m, true)],
         };
         var arguments = FfmpegMovieFinalAssemblyCommandBuilder.Build(
@@ -93,6 +94,8 @@ public sealed class MovieFinalAssemblyTests
         {
             (decimal.MaxValue, null),
             (86_401m, null),
+            (3m, null),
+            (null, 4m),
             (null, decimal.MaxValue),
             (8m, 7m),
         };
