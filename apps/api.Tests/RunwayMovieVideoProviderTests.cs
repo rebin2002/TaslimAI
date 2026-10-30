@@ -90,8 +90,11 @@ public sealed class RunwayMovieVideoProviderTests
         Assert.Empty(handler.Requests);
     }
 
-    [Fact]
-    public async Task Unverified_Runway_model_fails_priced_scene_clip_admission_before_network_access()
+    [Theory]
+    [InlineData("unverified-model")]
+    [InlineData("seedance2_5")]
+    [InlineData("kling_4")]
+    public async Task Unverified_Runway_model_fails_priced_scene_clip_admission_before_network_access(string modelKey)
     {
         // The production queue does not promise a source image. The adapter
         // only supports its current text-only payload for the verified model.
@@ -99,11 +102,11 @@ public sealed class RunwayMovieVideoProviderTests
         var handler = new RecordingHandler(_ => throw new InvalidOperationException("No provider request is allowed."));
         var urlPolicy = new CountingProviderUrlPolicy();
         var options = EnabledOptions();
-        options.Model = "unverified-model";
+        options.Model = modelKey;
         var provider = CreateProvider(handler, options, urlPolicy);
 
         Assert.True(provider.IsAvailable);
-        Assert.Equal("unverified-model", provider.SceneClipPricingModelKey);
+        Assert.Equal(modelKey, provider.SceneClipPricingModelKey);
         Assert.False(provider.SupportsSceneClipCostIntent("720p", "720p", "Standard", "native", "16:9"));
 
         var error = await Assert.ThrowsAsync<MovieVideoProviderException>(() =>
@@ -218,12 +221,15 @@ public sealed class RunwayMovieVideoProviderTests
         Assert.False(payload.RootElement.TryGetProperty("quality", out _));
     }
 
-    [Fact]
-    public void Approved_production_admission_rejects_unverified_Runway_model()
+    [Theory]
+    [InlineData("unverified-model")]
+    [InlineData("seedance2_5")]
+    [InlineData("kling_4")]
+    public void Approved_production_admission_rejects_unverified_Runway_model(string modelKey)
     {
         var handler = new RecordingHandler(_ => throw new InvalidOperationException("No provider request is permitted."));
         var options = EnabledOptions();
-        options.Model = "unverified-model";
+        options.Model = modelKey;
         var provider = CreateProvider(handler, options);
 
         var rejection = MovieProductionGenerationOrchestrator.EvaluateProductionClipAdmission(
