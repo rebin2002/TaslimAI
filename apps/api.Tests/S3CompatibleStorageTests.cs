@@ -246,6 +246,55 @@ public sealed class S3CompatibleStorageTests
     }
 
     [Fact]
+    public async Task Pdf_upload_retries_after_s3_put_failure_without_exposing_a_failed_object()
+    {
+        // Synthetic, in-memory S3 transport only: proves API failure/retry and
+        // private readback behavior, not live R2 connectivity or credentials.
+        const string marker = "S3_PDF_RETRY_EXTRACTION_MARKER";
+        var objectClient = new FakeObjectClient { FailNextPuts = 1 };
+        using var storage = CreateService(objectClient);
+        using var factory = new StorageProviderFactory(new Dictionary<string, string?>
+        {
+            ["Files:StorageProvider"] = "S3Compatible",
+        }, storage);
+        EnsureDatabase(factory);
+        using var http = factory.CreateClient();
+        var auth = await Register(http, "Synthetic PDF PUT recovery");
+        var pdf = CreatePdf(marker);
+
+        using var rejected = await UploadPdf(http, auth.PersonalWorkspace.Id, "private-report.pdf", pdf);
+        var error = await rejected.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, rejected.StatusCode);
+        Assert.Equal("FILE_STORAGE_OPERATION_FAILED", error.GetProperty("error").GetProperty("code").GetString());
+        Assert.DoesNotContain(marker, await rejected.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        using var accepted = await UploadPdf(http, auth.PersonalWorkspace.Id, "private-report.pdf", pdf);
+        Assert.True(accepted.IsSuccessStatusCode, await accepted.Content.ReadAsStringAsync());
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var records = await db.StoredFiles.AsNoTracking().ToListAsync();
+        var failed = Assert.Single(records.Where(f => f.Status == StoredFileStatus.Failed));
+        var ready = Assert.Single(records.Where(f => f.Status == StoredFileStatus.Ready));
+        Assert.Equal(auth.PersonalWorkspace.Id, failed.WorkspaceId);
+        Assert.Equal(auth.PersonalWorkspace.Id, ready.WorkspaceId);
+        Assert.Equal(FileStorageProviders.S3Compatible, ready.StorageProvider);
+        Assert.Equal(pdf.Length, ready.SizeBytes);
+        Assert.Contains(marker, ready.ExtractedText ?? string.Empty, StringComparison.Ordinal);
+        Assert.Equal(failed.StorageKey, objectClient.LastDelete?.Key);
+        Assert.False(await storage.ExistsAsync(failed.StorageKey));
+
+        await using var readback = await storage.OpenReadAsync(ready.StorageKey);
+        Assert.NotNull(readback);
+        using var copied = new MemoryStream();
+        await readback!.CopyToAsync(copied);
+        Assert.Equal(pdf, copied.ToArray());
+        Assert.Equal(("taslim-private", ready.StorageKey), objectClient.LastPut);
+        Assert.Empty(await db.GenerationJobs.AsNoTracking().ToListAsync());
+        Assert.Empty(await db.UsageTransactions.AsNoTracking().ToListAsync());
+    }
+
+    [Fact]
     public async Task Configured_provider_operation_failure_returns_safe_operation_error_code()
     {
         using var factory = new StorageProviderFactory(new Dictionary<string, string?>
@@ -447,6 +496,18 @@ public sealed class S3CompatibleStorageTests
         return await client.SendAsync(request);
     }
 
+    private static async Task<HttpResponseMessage> UploadPdf(HttpClient client, Guid workspaceId, string fileName, byte[] pdf)
+    {
+        var csrf = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
+        using var form = new MultipartFormDataContent();
+        var body = new ByteArrayContent(pdf);
+        body.Headers.ContentType = new MediaTypeHeaderValue("application/pdf");
+        form.Add(body, "file", fileName);
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"/api/workspaces/{workspaceId}/files") { Content = form };
+        request.Headers.Add("X-CSRF-TOKEN", csrf.GetProperty("token").GetString()!);
+        return await client.SendAsync(request);
+    }
+
     private static async Task<HttpResponseMessage> SendWithCsrf(HttpClient client, HttpMethod method, string path, object payload)
     {
         var csrf = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
@@ -478,9 +539,18 @@ public sealed class S3CompatibleStorageTests
         public (string Bucket, string Key)? LastPut { get; private set; }
         public (string Bucket, string Key)? LastDelete { get; private set; }
         public Exception? Failure { get; init; }
+        public int FailNextPuts { get; set; }
 
         public async Task PutAsync(string bucket, string key, Stream content, CancellationToken cancellationToken = default)
         {
+            if (FailNextPuts > 0)
+            {
+                FailNextPuts--;
+                throw new AmazonS3Exception("synthetic transient storage failure")
+                {
+                    StatusCode = HttpStatusCode.ServiceUnavailable,
+                };
+            }
             ThrowIfConfigured();
             using var buffer = new MemoryStream();
             await content.CopyToAsync(buffer, cancellationToken);
