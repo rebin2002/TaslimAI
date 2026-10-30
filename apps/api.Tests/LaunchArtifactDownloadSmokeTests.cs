@@ -86,7 +86,7 @@ public sealed class LaunchArtifactDownloadSmokeTests :
 
         using var other = imageFactory.CreateClient();
         await Register(other);
-        await AssertAssetMetadataPrivacy(anonymous, other, asset.Id);
+        await AssertAssetMetadataPrivacy(owner, anonymous, other, asset.Id);
         using var denied = await other.GetAsync($"/api/assets/{asset.Id}/download");
         Assert.Equal(HttpStatusCode.NotFound, denied.StatusCode);
     }
@@ -128,7 +128,7 @@ public sealed class LaunchArtifactDownloadSmokeTests :
 
         using var other = documentFactory.CreateClient();
         await Register(other);
-        await AssertAssetMetadataPrivacy(anonymous, other, asset.Id);
+        await AssertAssetMetadataPrivacy(owner, anonymous, other, asset.Id);
         await AssertRepresentationDownload(owner, other, asset.Id, docx, "application/vnd.openxmlformats-officedocument.wordprocessingml.document", ".docx", "PK");
         await AssertRepresentationDownload(owner, other, asset.Id, pdf, "application/pdf", ".pdf", "%PDF-");
     }
@@ -169,13 +169,17 @@ public sealed class LaunchArtifactDownloadSmokeTests :
 
         using var other = presentationFactory.CreateClient();
         await Register(other);
-        await AssertAssetMetadataPrivacy(anonymous, other, asset.Id);
+        await AssertAssetMetadataPrivacy(owner, anonymous, other, asset.Id);
         await AssertRepresentationDownload(owner, other, asset.Id, pptx,
             "application/vnd.openxmlformats-officedocument.presentationml.presentation", ".pptx", "PK");
     }
 
-    private static async Task AssertAssetMetadataPrivacy(HttpClient anonymous, HttpClient other, Guid assetId)
+    private static async Task AssertAssetMetadataPrivacy(HttpClient owner, HttpClient anonymous, HttpClient other, Guid assetId)
     {
+        // Positive control: the owner can read the metadata while other callers cannot.
+        using var ownerResponse = await owner.GetAsync($"/api/assets/{assetId}");
+        Assert.Equal(HttpStatusCode.OK, ownerResponse.StatusCode);
+
         // The same private artifact must hide its metadata as well as its file bytes.
         using var deniedAnonymous = await anonymous.GetAsync($"/api/assets/{assetId}");
         Assert.Equal(HttpStatusCode.Unauthorized, deniedAnonymous.StatusCode);
