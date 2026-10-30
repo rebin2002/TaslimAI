@@ -371,7 +371,7 @@ public sealed class MovieProductionGenerationOrchestrator(
         // can therefore both create provisional clips and then receive the same
         // canonical job. Do not attach the losing request's clip/version to that
         // job; replay the winner after its relationship rows become visible.
-        if (normalizedKey is not null && !JobTargetsClip(job, clip.Id))
+        if (!JobTargetsClip(job, clip.Id))
         {
             db.MovieClips.Remove(clip);
             await db.SaveChangesAsync(CancellationToken.None);
@@ -718,10 +718,13 @@ public sealed class MovieProductionGenerationOrchestrator(
         }
     }
 
-    internal static string? NormalizeIdempotencyKey(string? value)
+    internal static string NormalizeIdempotencyKey(string? value)
     {
         var key = value?.Trim();
-        if (string.IsNullOrWhiteSpace(key)) return null;
+        if (string.IsNullOrWhiteSpace(key))
+            throw new MovieProductionValidationException(
+                "IDEMPOTENCY_KEY_REQUIRED",
+                "A unique Idempotency-Key header is required for approved production renders.");
         // GenerationJobService accepts at most 80 characters. Reject before
         // continuity snapshots or speculative clip/version persistence.
         if (key.Length > 80) throw new MovieProductionValidationException("IDEMPOTENCY_KEY_INVALID", "The idempotency key is too long.");

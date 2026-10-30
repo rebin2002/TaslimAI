@@ -731,6 +731,55 @@ public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWork
     }
 
     [Fact]
+    public async Task Approved_production_render_rejects_missing_idempotency_key_without_generation_writes()
+    {
+        using var fakeFactory = new MovieOperationalNoWorkerFactory();
+        using (var init = fakeFactory.Services.CreateScope())
+            init.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+        using var client = fakeFactory.CreateClient();
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Approved production missing idempotency key");
+
+        using var scope = fakeFactory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var projectId = fixture.Project.Project.Id;
+        var shotId = fixture.Shot.Id;
+        var snapshotCountBefore = await db.MovieCharacterContinuitySnapshots.CountAsync(item => item.MovieProjectId == projectId);
+        var clipCountBefore = await db.MovieClips.CountAsync(item => item.MovieProjectId == projectId);
+        var versionCountBefore = await db.MovieProductionVersions.CountAsync(item => item.MovieShotId == shotId);
+        var transitionCountBefore = await db.Set<MovieProductionStageTransition>().CountAsync();
+        var jobCountBefore = await db.GenerationJobs.CountAsync();
+        var usageCountBefore = await db.UsageTransactions.CountAsync();
+        var providerCallsBefore = fakeFactory.Calls.Calls(Taslim.Api.Tests.ProviderTesting.FakeProviderKind.Movie);
+
+        using var rejected = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client,
+            HttpMethod.Post,
+            $"/api/movie-studio/shots/{shotId}/production/render",
+            new
+            {
+                sourceVersionId = Guid.NewGuid(),
+                label = "Missing key",
+                targetResolution = "1080p",
+                qualityTier = DirectorQualityLevels.Standard,
+                confirmationAccepted = true,
+                expectedMaximumAmountUsd = 0m,
+                expectedQuoteFingerprint = "unused-without-key",
+            });
+
+        Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
+        Assert.Contains("IDEMPOTENCY_KEY_REQUIRED",
+            await rejected.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Equal(snapshotCountBefore, await db.MovieCharacterContinuitySnapshots.CountAsync(item => item.MovieProjectId == projectId));
+        Assert.Equal(clipCountBefore, await db.MovieClips.CountAsync(item => item.MovieProjectId == projectId));
+        Assert.Equal(versionCountBefore, await db.MovieProductionVersions.CountAsync(item => item.MovieShotId == shotId));
+        Assert.Equal(transitionCountBefore, await db.Set<MovieProductionStageTransition>().CountAsync());
+        Assert.Equal(jobCountBefore, await db.GenerationJobs.CountAsync());
+        Assert.Equal(usageCountBefore, await db.UsageTransactions.CountAsync());
+        Assert.Equal(providerCallsBefore, fakeFactory.Calls.Calls(Taslim.Api.Tests.ProviderTesting.FakeProviderKind.Movie));
+    }
+
+    [Fact]
     public async Task Selective_regeneration_requires_confirmation_preserves_history_and_invalidates_downstream()
     {
         // The positive execution path needs an explicitly capable synthetic adapter.
