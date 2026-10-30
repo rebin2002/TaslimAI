@@ -612,7 +612,9 @@ public sealed class MovieFinalAssemblyTests
     [Theory]
     [InlineData(0)]
     [InlineData(-10)]
-    public void Quality_control_rejects_missing_or_negative_expected_master_runtime(int invalidDuration)
+    [InlineData(7_201)]
+    [InlineData(int.MaxValue)]
+    public void Quality_control_rejects_missing_negative_or_unsupported_master_runtime(int invalidDuration)
     {
         var input = Contract(Guid.NewGuid(), null, MovieAssemblyCaptionModes.None)
             with { ExpectedDurationSeconds = invalidDuration };
