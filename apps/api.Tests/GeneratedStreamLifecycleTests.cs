@@ -15,6 +15,51 @@ namespace Taslim.Api.Tests;
 /// </summary>
 public sealed class GeneratedStreamLifecycleTests
 {
+    [Fact]
+    public async Task Empty_reads_do_not_finalize_generated_hash_before_real_eof()
+    {
+        var bytes = new byte[] { 1, 2, 3 };
+        using var source = new MemoryStream(bytes);
+        using var counted = new CountingReadStream(source, maxBytes: 3, expectedContentLength: 3);
+
+        Assert.Equal(0, counted.Read(Array.Empty<byte>(), 0, 0));
+        Assert.Equal(0, await counted.ReadAsync(Memory<byte>.Empty));
+        Assert.Null(counted.Sha256Hex);
+        Assert.Equal(0, counted.BytesRead);
+
+        var accepted = new byte[bytes.Length];
+        Assert.Equal(bytes.Length, await counted.ReadAsync(accepted.AsMemory()));
+        Assert.Equal(bytes, accepted);
+
+        // Empty SDK reads at Content-Length must neither probe source nor
+        // incorrectly finalize a hash before a genuine EOF is observed.
+        Assert.Equal(0, counted.Read(Span<byte>.Empty));
+        Assert.Equal(0, await counted.ReadAsync(Memory<byte>.Empty));
+        Assert.Null(counted.Sha256Hex);
+        Assert.Equal(bytes.Length, counted.BytesRead);
+
+        await counted.VerifyExactLengthAsync(bytes.Length);
+        Assert.Equal(Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes)), counted.Sha256Hex);
+    }
+
+    [Fact]
+    public async Task Empty_read_at_content_length_does_not_consume_excess_video_byte()
+    {
+        using var source = new MemoryStream(new byte[] { 1, 2, 3, 4 });
+        using var counted = new CountingReadStream(source, maxBytes: 3, expectedContentLength: 3);
+        var first = new byte[3];
+
+        Assert.Equal(3, await counted.ReadAsync(first.AsMemory()));
+        Assert.Equal(0, await counted.ReadAsync(Memory<byte>.Empty));
+        Assert.Equal(0, counted.Read(Span<byte>.Empty));
+        Assert.Equal(3, counted.BytesRead);
+        Assert.Null(counted.Sha256Hex);
+
+        // The real EOF probe, unlike a zero-byte SDK read, must detect the
+        // trailing payload and fail closed instead of publishing a Ready file.
+        await Assert.ThrowsAsync<InvalidDataException>(() => counted.VerifyExactLengthAsync(3));
+    }
+
     [Theory]
     [InlineData(3)]
     [InlineData(5)]
