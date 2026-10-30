@@ -231,7 +231,7 @@ public sealed class MovieFinalAssemblyService(
             var projected = await ProjectApprovedSoundtrackInputsAsync(movieProjectId, explicitAssetIds, cancellationToken);
             requestedAudioInputs = requestedAudioInputs.Concat(projected).ToArray();
         }
-        var audioInputs = await NormalizeAudioInputsAsync(movie.WorkspaceId, movie.ProjectId, requestedAudioInputs, cancellationToken);
+        var audioInputs = await NormalizeAudioInputsAsync(movie.WorkspaceId, movie.ProjectId, requestedAudioInputs, movie.DurationSeconds, cancellationToken);
         var captionAsset = await ValidateCaptionAssetAsync(movie.WorkspaceId, movie.ProjectId, captions, cancellationToken);
         var persistedTransitions = (await transitionEdits.GetLatestAsync(userId, movieProjectId, cancellationToken))?.Timeline.Transitions ?? [];
         var expectedDuration = Math.Max(1, movie.DurationSeconds);
@@ -473,7 +473,7 @@ public sealed class MovieFinalAssemblyService(
     private static bool IsTerminalAssemblyStatus(string status) =>
         status is MovieAssemblyStatuses.Ready or MovieAssemblyStatuses.Failed or MovieAssemblyStatuses.Cancelled;
 
-    private async Task<IReadOnlyList<MovieAssemblyAudioMixInput>> NormalizeAudioInputsAsync(Guid workspaceId, Guid? projectId, IReadOnlyList<MovieAssemblyAudioMixInputRequest> requests, CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<MovieAssemblyAudioMixInput>> NormalizeAudioInputsAsync(Guid workspaceId, Guid? projectId, IReadOnlyList<MovieAssemblyAudioMixInputRequest> requests, int projectDurationSeconds, CancellationToken cancellationToken)
     {
         if (requests.Count > 64) throw new MovieFinalAssemblyValidationException("ASSEMBLY_AUDIO_MIX_INVALID", "A final mix can contain at most 64 audio inputs.");
         var ids = requests.Select(item => item.AssetId).ToArray();
@@ -483,6 +483,7 @@ public sealed class MovieFinalAssemblyService(
             .Where(item => ids.Contains(item.Id) && item.WorkspaceId == workspaceId)
             .ToDictionaryAsync(item => item.Id, cancellationToken);
         var normalized = new List<MovieAssemblyAudioMixInput>(requests.Count);
+        var maxCueTime = Math.Clamp(projectDurationSeconds, 1, 7_200);
         foreach (var request in requests)
         {
             if (!assets.TryGetValue(request.AssetId, out var asset)
@@ -491,7 +492,10 @@ public sealed class MovieFinalAssemblyService(
                 || (!string.Equals(asset.AssetType, AssetTypes.Audio, StringComparison.OrdinalIgnoreCase) && !string.Equals(asset.AssetType, AssetTypes.Music, StringComparison.OrdinalIgnoreCase))
                 || asset.StoredFile?.Status != StoredFileStatus.Ready)
                 throw new MovieFinalAssemblyValidationException("ASSEMBLY_AUDIO_SOURCE_UNAVAILABLE", "Every audio mix input must be a ready audio asset in the movie workspace.");
-            if (request.GainDb is < -60m or > 12m || request.StartTimeSeconds is < 0m || request.EndTimeSeconds is <= 0m || request.EndTimeSeconds <= request.StartTimeSeconds)
+            if (request.GainDb is < -60m or > 12m
+                || request.StartTimeSeconds is < 0m or >= maxCueTime
+                || request.EndTimeSeconds is <= 0m or > maxCueTime
+                || request.EndTimeSeconds <= request.StartTimeSeconds)
                 throw new MovieFinalAssemblyValidationException("ASSEMBLY_AUDIO_MIX_INVALID", "Audio mix gain and time bounds are outside the supported range.");
             var role = string.IsNullOrWhiteSpace(request.Role) ? "music" : request.Role.Trim().ToLowerInvariant();
             if (role.Length > 40) throw new MovieFinalAssemblyValidationException("ASSEMBLY_AUDIO_MIX_INVALID", "Audio mix roles are limited to 40 characters.");
@@ -746,8 +750,9 @@ public static class FfmpegMovieFinalAssemblyCommandBuilder
                 // then delay it to the intended timeline position before mixing.
                 // Prevent huge/untrusted decimal timing values from overflowing the
                 // millisecond delay calculation or requesting an unbounded mix.
-                if (item.StartTimeSeconds is < 0m or > 86_400m
-                    || item.EndTimeSeconds is <= 0m or > 86_400m
+                var maxCueTime = Math.Clamp(request.Contract.ExpectedDurationSeconds, 1, 7_200);
+                if (item.StartTimeSeconds is < 0m or >= maxCueTime
+                    || item.EndTimeSeconds is <= 0m or > maxCueTime
                     || item.EndTimeSeconds <= item.StartTimeSeconds)
                     throw new MovieFinalAssemblyExecutionException("ASSEMBLY_AUDIO_MIX_INVALID");
                 var start = item.StartTimeSeconds ?? 0m;
