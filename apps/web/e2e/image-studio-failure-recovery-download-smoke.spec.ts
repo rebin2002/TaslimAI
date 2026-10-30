@@ -71,12 +71,29 @@ test("Image Studio safely recovers from a failed job and downloads the successfu
     await route.fallback();
   });
 
+  const webOrigin = new URL(process.env.E2E_WEB_URL ?? "http://localhost:3000").origin;
+  const apiOrigin = new URL(E2E_API_URL).origin;
+  let localCspAdjusted = false;
+  // CI serves its API over HTTP loopback; adapt only the initial test document, never app CSP.
+  await page.route(new URL("/register", webOrigin).href, async (route) => {
+    const response = await route.fetch();
+    const headers = response.headers();
+    const imagePolicy = "img-src 'self' data: blob: https:";
+    const csp = headers["content-security-policy"];
+    if (!csp?.includes(imagePolicy)) {
+      await route.abort();
+      throw new Error("Expected the registration page CSP image directive.");
+    }
+    headers["content-security-policy"] = csp.replace(imagePolicy, `${imagePolicy} ${apiOrigin}`);
+    await route.fulfill({ response, headers });
+    localCspAdjusted = true;
+  });
+
   await registerInUi(page, testUser);
+  expect(localCspAdjusted).toBe(true);
   const auth = await apiJson<{ personalWorkspace: { id: string } }>(page.request, "GET", "/api/auth/me");
   const workspaceId = auth.personalWorkspace.id;
   const description = "A clean, minimal product image for a synthetic launch QA journey.";
-  const webOrigin = new URL(process.env.E2E_WEB_URL ?? "http://localhost:3000").origin;
-  const apiOrigin = new URL(E2E_API_URL).origin;
   const createRequests: Array<{
     body: Record<string, unknown>;
     csrfToken: string | undefined;
@@ -191,28 +208,10 @@ test("Image Studio safely recovers from a failed job and downloads the successfu
     });
   });
 
-  let localCspAdjusted = false;
-  // CI serves its API over HTTP loopback; adapt only this test page response, never app CSP.
-  await page.route("**/create/image", async (route) => {
-    // Preserve the synthetic browser session when fetching the page response.
-    const requestHeaders = await route.request().allHeaders();
-    const sessionCookie = requestHeaders.cookie;
-    if (!sessionCookie) {
-      await route.abort();
-      throw new Error("Expected the synthetic auth cookie on the loopback page request.");
-    }
-    const response = await route.fetch({ headers: { cookie: sessionCookie } });
-    const headers = response.headers();
-    const imagePolicy = "img-src 'self' data: blob: https:";
-    const csp = headers["content-security-policy"];
-    expect(csp).toContain(imagePolicy);
-    headers["content-security-policy"] = csp.replace(imagePolicy, `${imagePolicy} ${apiOrigin}`);
-    await route.fulfill({ response, headers });
-    localCspAdjusted = true;
-  });
-
-  await page.goto("/create/image");
-  expect(localCspAdjusted).toBe(true);
+  await page.getByRole("navigation", { name: "Primary navigation" }).getByRole("link", { name: "Create", exact: true }).click();
+  await expect(page).toHaveURL(/\/create$/);
+  await page.getByRole("link", { name: /image/i }).click();
+  await expect(page).toHaveURL(/\/create\/image$/);
   const prompt = page.getByRole("textbox", { name: "What would you like to create?" });
   await expect(prompt).toBeVisible();
   await prompt.fill(description);
