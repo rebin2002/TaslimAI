@@ -226,10 +226,15 @@ test("authenticated Image Studio generates, previews, and downloads a local fixt
     await page.goto("/create");
     await page.locator('a[href="/create/image"]').click();
     await expect(page).toHaveURL(/\/create\/image$/);
+    const projectSelect = page.locator(".image-project-select select");
+    await expect(projectSelect).toBeEnabled({ timeout: 15_000 });
     const promptField = page.locator(".image-prompt-field textarea");
     await expect(promptField).toBeVisible();
     await promptField.fill(prompt);
-    await page.getByRole("button", { name: "Generate image", exact: true }).click();
+    const generateButton = page.getByRole("button", { name: /^Generate image/ });
+    await expect(generateButton).toBeVisible();
+    await expect(generateButton).toBeEnabled();
+    await generateButton.click();
 
     const successCanvas = page.locator(".image-success-canvas");
     await expect(successCanvas).toBeVisible({ timeout: 20_000 });
