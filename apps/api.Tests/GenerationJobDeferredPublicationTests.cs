@@ -926,7 +926,7 @@ public sealed class GenerationJobPendingPublicationTests : IClassFixture<Generat
             var strictPersistedTimestampAdvance = firstClaimTimestamp > persistedTokenBeforeClaims;
             var replayKeptTimestampAndEvent = timestampAfterReplay == firstClaimTimestamp && replayPreservedCanonicalEvent;
             stepSummaryReceipt = $"""
-            ### `Taslim.Api.Tests.GenerationJobPendingPublicationTests.Disposable_postgres_cas_claims_with_identical_preupdate_tokens_commit_once_and_replay_idempotently` — passed
+            ### `Taslim.Api.Tests.GenerationJobDeferredPublicationTests.Disposable_postgres_cas_claims_with_identical_preupdate_tokens_commit_once_and_replay_idempotently` — passed
 
 - Database provider: disposable PostgreSQL test schema.
 - CAS rendezvous before UPDATE: two distinct open transactions and connections observed the same persisted `UpdatedAt` token: **{distinctOpenTransactions && distinctOpenConnections && samePersistedTokenBeforeCas}**.
