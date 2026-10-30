@@ -1092,11 +1092,13 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         var durationSeconds = MovieProductionGenerationOrchestrator.ResolveSingleClipDuration(
             shot.DurationSeconds, shot.Scene.DurationSeconds, movie.DurationSeconds);
         EnsureSelectiveRegenerationCapability(movie, durationSeconds, shot.Description);
+        var providerModelKey = MovieStudioHelpers.Clean(provider.SceneClipPricingModelKey);
         // The server owns the estimate. Client-supplied cost fields are not trusted for
         // cap enforcement because they could otherwise be lowered to bypass a cap.
         var estimate = await movieCostEstimator.EstimateAsync(
             new MovieGenerationCostRequest(durationSeconds, "1080p", "1080p", movie.QualityLevel, "native"),
             provider.Key,
+            selectedModelKey: providerModelKey,
             cancellationToken: cancellationToken);
         var preflight = await costGuardrails.EvaluateAsync(
             userId,
@@ -1155,6 +1157,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         // Recheck at confirmation: provider availability/capabilities may change
         // after the cost preview was created, without user consent to a downgrade.
         EnsureSelectiveRegenerationCapability(movie, durationSeconds, shot.Description);
+        var providerModelKey = MovieStudioHelpers.Clean(provider.SceneClipPricingModelKey);
         var preflight = await costGuardrails.EvaluateAsync(
             userId,
             movie.WorkspaceId,
@@ -1171,6 +1174,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         var estimate = await movieCostEstimator.EstimateAsync(
             new MovieGenerationCostRequest(durationSeconds, "1080p", "1080p", movie.QualityLevel, "native"),
             provider.Key,
+            selectedModelKey: providerModelKey,
             cancellationToken: cancellationToken);
         var refreshedPreflight = await costGuardrails.EvaluateAsync(
             userId,
@@ -1211,7 +1215,8 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                 SelectiveActionType: regeneration.ActionType, SelectiveReason: regeneration.Reason,
                 SourceResolution: "1080p", TargetResolution: "1080p",
                 QualityTier: movie.QualityLevel, ProcessingPath: "native",
-                SelectedProviderKey: provider.Key)),
+                SelectedProviderKey: provider.Key,
+                SelectedProviderModelKey: providerModelKey)),
             }, cancellationToken, effectiveIdempotencyKey);
         }
         catch
@@ -1275,6 +1280,10 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
             throw new MovieProductionValidationException(
                 "REGENERATION_EXECUTION_INTENT_UNSUPPORTED",
                 "The selected provider cannot guarantee the priced 1080p quality profile for this regeneration. An explicitly supported output profile is required.");
+        if (string.IsNullOrWhiteSpace(provider.SceneClipPricingModelKey))
+            throw new MovieProductionValidationException(
+                "MOVIE_PROVIDER_MODEL_UNVERIFIED",
+                "The selected video adapter has not declared an exact model key for pricing this regeneration.");
         // The final provider prompt preserves all three creative sections.
         // Their combined trimmed lengths form a conservative lower bound:
         // headings and continuity context can only increase it. Enforce this
@@ -1371,10 +1380,11 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         var targetResolution = request.TargetResolution?.Trim() ?? string.Empty;
         var qualityTier = request.QualityTier?.Trim() ?? string.Empty;
         var processingPath = request.ProcessingPath?.Trim() ?? string.Empty;
+        var providerModelKey = MovieStudioHelpers.Clean(provider.SceneClipPricingModelKey);
 
         MovieSceneGenerationPreviewDto Reject(string code, string message) => new(
             durationSeconds, sourceResolution, targetResolution, qualityTier, processingPath,
-            false, false, null, code, message);
+            false, false, null, code, message, provider.Key, providerModelKey);
 
         if (request.RetryAttempts != 0 || request.UpscalePasses != 0 || request.UpscalingRequested)
             return Reject("MOVIE_GENERATION_OPTIONS_UNSUPPORTED",
@@ -1403,11 +1413,15 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                 qualityTier, processingPath, movie.AspectRatio))
             return Reject("MOVIE_CLIP_EXECUTION_INTENT_UNSUPPORTED",
                 "This provider cannot guarantee the requested resolution, quality and processing profile. Choose a supported output profile.");
+        if (string.IsNullOrWhiteSpace(providerModelKey))
+            return Reject("MOVIE_PROVIDER_MODEL_UNVERIFIED",
+                "The selected video adapter has not declared an exact model key for pricing this Movie clip.");
 
         var estimate = await movieCostEstimator.EstimateAsync(
             new MovieGenerationCostRequest(durationSeconds, sourceResolution, targetResolution,
                 qualityTier, processingPath, request.RetryAttempts, request.UpscalingRequested, request.UpscalePasses),
             provider.Key,
+            selectedModelKey: providerModelKey,
             cancellationToken: cancellationToken);
         var guardrail = await costGuardrails.EvaluateAsync(
             userId,
@@ -1428,7 +1442,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         return new MovieSceneGenerationPreviewDto(
             durationSeconds, sourceResolution, targetResolution, qualityTier, processingPath,
             true, canConfirmCost, GenerationCostPreviewMapper.ToDto(guardrail),
-            rejectionCode, rejectionMessage);
+            rejectionCode, rejectionMessage, provider.Key, providerModelKey);
     }
 
     public async Task<MovieStudioGenerationResponse?> GenerateShotAsync(Guid userId, Guid shotId, MovieStudioGenerationRequest request, CancellationToken cancellationToken, string? idempotencyKey = null)
@@ -1574,6 +1588,20 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
             throw new GenerationJobValidationException(
                 "MOVIE_CLIP_EXECUTION_INTENT_UNSUPPORTED",
                 "This provider cannot guarantee the requested resolution, quality and processing profile. Choose a supported output profile.");
+        var providerModelKey = MovieStudioHelpers.Clean(provider.SceneClipPricingModelKey);
+        if (string.IsNullOrWhiteSpace(providerModelKey))
+            throw new GenerationJobValidationException(
+                "MOVIE_PROVIDER_MODEL_UNVERIFIED",
+                "The selected video adapter has not declared an exact model key for pricing this Movie clip.");
+        if ((!string.IsNullOrWhiteSpace(request.ExpectedProviderKey)
+                || !string.IsNullOrWhiteSpace(request.ExpectedProviderModelKey))
+            && (string.IsNullOrWhiteSpace(request.ExpectedProviderKey)
+                || string.IsNullOrWhiteSpace(request.ExpectedProviderModelKey)
+                || !string.Equals(request.ExpectedProviderKey.Trim(), provider.Key, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(request.ExpectedProviderModelKey.Trim(), providerModelKey, StringComparison.OrdinalIgnoreCase)))
+            throw new GenerationJobValidationException(
+                "MOVIE_SCENE_QUOTE_STALE",
+                "The selected video adapter or model changed after the price preview. Preview and confirm the current quote again.");
         // Scene and shot JSON are also sent to the video adapter. Checking only
         // the readable description could reserve usage for a request whose
         // required structured direction already exceeds the provider limit.
@@ -1624,7 +1652,13 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                 request.UpscalingRequested,
                 request.UpscalePasses),
             provider.Key,
+            selectedModelKey: providerModelKey,
             cancellationToken: cancellationToken);
+        if (request.ExpectedProviderCostUsd is { } expectedProviderCostUsd
+            && estimate.MaximumAmountUsd != expectedProviderCostUsd)
+            throw new GenerationJobValidationException(
+                "MOVIE_SCENE_QUOTE_STALE",
+                "The estimated price changed after the preview. Preview and confirm the current quote again.");
         // This legacy scene/shot path previously queued paid generation without any
         // cost decision. It now applies the same shared guardrail as the production
         // orchestrator so an unavailable or unconfirmed estimate never queues a job.
@@ -1699,7 +1733,8 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                 QualityTier: qualityTier,
                 ProcessingPath: processingPath,
                 UpscalingRequested: request.UpscalingRequested,
-                SelectedProviderKey: provider.Key)),
+                SelectedProviderKey: provider.Key,
+                SelectedProviderModelKey: providerModelKey)),
             }, cancellationToken, idempotencyKey);
         }
         catch (GenerationJobValidationException exception) when (exception.Code == "IDEMPOTENCY_KEY_REUSED" && !string.IsNullOrWhiteSpace(idempotencyKey))
@@ -2347,7 +2382,13 @@ internal static class MovieStudioIdempotency
             && Normalized(input.TargetResolution, "1080p") == Normalized(request.TargetResolution, "1080p")
             && Normalized(input.QualityTier, movie.QualityLevel) == Normalized(request.QualityTier, movie.QualityLevel)
             && Normalized(input.ProcessingPath, "native") == Normalized(request.ProcessingPath, "native")
-            && input.UpscalingRequested == request.UpscalingRequested;
+            && input.UpscalingRequested == request.UpscalingRequested
+            && (string.IsNullOrWhiteSpace(request.ExpectedProviderKey)
+                || string.Equals(input.SelectedProviderKey, request.ExpectedProviderKey.Trim(), StringComparison.OrdinalIgnoreCase))
+            && (string.IsNullOrWhiteSpace(request.ExpectedProviderModelKey)
+                || string.Equals(input.SelectedProviderModelKey, request.ExpectedProviderModelKey.Trim(), StringComparison.OrdinalIgnoreCase))
+            && (!request.ExpectedProviderCostUsd.HasValue
+                || request.ExpectedProviderCostUsd.Value == job.EstimatedProviderCostUsd);
     }
 
     internal static bool TryGetMovieClipId(string? inputJson, out Guid clipId)

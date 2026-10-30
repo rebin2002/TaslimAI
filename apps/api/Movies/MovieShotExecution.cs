@@ -133,6 +133,7 @@ public sealed class MovieShotExecutionService(
         if (takeCount is < 1 or > MaximumTakes)
             throw new MovieShotExecutionValidationException("SHOT_EXECUTION_TAKE_COUNT_INVALID", $"Choose between 1 and {MaximumTakes} takes.");
         var movie = shot.Scene.MovieProject;
+        var providerModelKey = MovieStudioHelpers.Clean(provider.SceneClipPricingModelKey);
         var normalizedIdempotencyKey = NormalizeIdempotencyKey(idempotencyKey);
         var candidateKeys = Enumerable.Range(1, takeCount).Select(index => CandidateIdempotencyKey(normalizedIdempotencyKey, index)).ToArray();
         if (normalizedIdempotencyKey is not null)
@@ -206,6 +207,7 @@ public sealed class MovieShotExecutionService(
                     && string.IsNullOrWhiteSpace(input.LastFrameImageUri)
                     && input.ReferenceImages is not { Count: > 0 }
                     && input.SelectedProviderKey == provider.Key
+                    && string.Equals(input.SelectedProviderModelKey, providerModelKey, StringComparison.OrdinalIgnoreCase)
                     && input.TakeCount == takeCount
                     && job.Title == expectedTitle
                     && take.Label == expectedLabel;
@@ -282,6 +284,7 @@ public sealed class MovieShotExecutionService(
                         && string.IsNullOrWhiteSpace(input.LastFrameImageUri)
                         && input.ReferenceImages is not { Count: > 0 }
                         && input.SelectedProviderKey == provider.Key
+                        && string.Equals(input.SelectedProviderModelKey, providerModelKey, StringComparison.OrdinalIgnoreCase)
                         && input.TakeCount == takeCount
                         && job.Title == expectedTitle;
                 }
@@ -366,6 +369,10 @@ public sealed class MovieShotExecutionService(
             throw new MovieShotExecutionValidationException(
                 "SHOT_EXECUTION_REFERENCE_PACKAGE_UNSUPPORTED",
                 "The selected video provider has not verified priced execution from an approved keyframe reference package.");
+        if (string.IsNullOrWhiteSpace(providerModelKey))
+            throw new MovieShotExecutionValidationException(
+                "MOVIE_PROVIDER_MODEL_UNVERIFIED",
+                "The selected video adapter has not declared an exact model key for pricing this shot execution.");
 
         var estimate = await costEstimator.EstimateAsync(
             new MovieGenerationCostRequest(
@@ -378,6 +385,7 @@ public sealed class MovieShotExecutionService(
                 UpscalingRequested: false,
                 UpscalePasses: 0),
             provider.Key,
+            selectedModelKey: providerModelKey,
             cancellationToken: cancellationToken);
         var costPreflight = await costGuardrails.EvaluateAsync(
             userId,
@@ -447,7 +455,8 @@ public sealed class MovieShotExecutionService(
                 UpscalingRequested: false,
                 TakeNumber: index,
                 TakeCount: takeCount,
-                SelectedProviderKey: provider.Key);
+                SelectedProviderKey: provider.Key,
+                SelectedProviderModelKey: providerModelKey);
             var inputJson = JsonSerializer.Serialize(input);
             var versionNumber = (await db.MovieTakes.Where(item => item.MovieShotId == shot.Id).MaxAsync(item => (int?)item.VersionNumber, cancellationToken) ?? 0) + 1;
             var take = new MovieTake

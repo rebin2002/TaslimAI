@@ -159,6 +159,7 @@ public sealed class MovieShotExecutionApiTests : IClassFixture<MovieShotExecutio
         Assert.Equal(JsonValueKind.Null, input.RootElement.GetProperty("MasterResolution").ValueKind);
         Assert.Equal(MovieQualityLevels.Standard, input.RootElement.GetProperty("QualityTier").GetString());
         Assert.Equal("fake-movie", input.RootElement.GetProperty("SelectedProviderKey").GetString());
+        Assert.Equal("fake-model", input.RootElement.GetProperty("SelectedProviderModelKey").GetString());
         Assert.Equal("source_to_master", input.RootElement.GetProperty("ProcessingPath").GetString());
         Assert.False(input.RootElement.GetProperty("UpscalingRequested").GetBoolean());
         Assert.Contains(keyframe.Id.ToString(), input.RootElement.GetProperty("ReferencePackageJson").GetString());

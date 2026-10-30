@@ -345,6 +345,15 @@ public sealed class MovieVideoGenerationJobHandler(
             throw new MovieVideoProviderException(
                 GenerationJobErrorCodes.MovieProviderUnavailable, false,
                 "The selected video provider changed since this job was queued. Restore the original provider or reconcile the job.");
+        if (!string.IsNullOrWhiteSpace(input.SelectedProviderModelKey)
+            && !string.Equals(input.SelectedProviderModelKey, provider.SceneClipPricingModelKey, StringComparison.OrdinalIgnoreCase))
+        {
+            await executions.MarkFailedAsync(job.Id, job.ConcurrencyToken,
+                GenerationJobErrorCodes.MovieProviderUnsupportedRequest, CancellationToken.None);
+            throw new MovieVideoProviderException(
+                GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false,
+                "The selected video model changed since this job was queued. Restore the quoted model or reconcile the job.");
+        }
         if (!provider.IsAvailable || !provider.SupportedOperations.Contains(input.Operation, StringComparer.OrdinalIgnoreCase))
             throw new MovieProviderUnavailableException();
 

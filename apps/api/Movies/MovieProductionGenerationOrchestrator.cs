@@ -160,6 +160,11 @@ public sealed class MovieProductionGenerationOrchestrator(
         ValidateProductionClipAdmission(provider, durationSeconds, plan.SourceResolution,
             plan.TargetResolution, plan.QualityTier, plan.ProcessingPath,
             shot.Scene.MovieProject.AspectRatio);
+        var providerModelKey = MovieStudioHelpers.Clean(provider.SceneClipPricingModelKey);
+        if (string.IsNullOrWhiteSpace(providerModelKey))
+            throw new MovieProductionValidationException(
+                "MOVIE_PROVIDER_MODEL_UNVERIFIED",
+                "The selected video adapter has not declared an exact model key for pricing this production clip.");
         // Share the conservative prompt floor with the read-only preflight.
         // Queue admission still validates an optional custom render title.
         var renderDescription = string.IsNullOrWhiteSpace(request.Title)
@@ -216,6 +221,7 @@ public sealed class MovieProductionGenerationOrchestrator(
                 plan.QualityTier,
                 plan.ProcessingPath),
             selectedProviderKey: provider.Key,
+            selectedModelKey: providerModelKey,
             cancellationToken: cancellationToken);
         var preflight = await costGuardrails.EvaluateAsync(
             userId,
@@ -291,7 +297,8 @@ public sealed class MovieProductionGenerationOrchestrator(
             plan.QualityTier,
             snapshot.SnapshotHash,
             SelectedProviderKey: provider.Key,
-            CharacterContinuityJson: snapshot.SnapshotJson);
+            CharacterContinuityJson: snapshot.SnapshotJson,
+            SelectedProviderModelKey: providerModelKey);
 
         GenerationJob job;
         try
@@ -414,7 +421,9 @@ public sealed class MovieProductionGenerationOrchestrator(
         // Historical jobs without a bound provider retain their legacy behavior.
         if (input is null || !MatchesProductionReplay(input, shot, request)
             || (!string.IsNullOrWhiteSpace(input.SelectedProviderKey)
-                && !string.Equals(input.SelectedProviderKey, provider.Key, StringComparison.OrdinalIgnoreCase)))
+                && !string.Equals(input.SelectedProviderKey, provider.Key, StringComparison.OrdinalIgnoreCase))
+            || (!string.IsNullOrWhiteSpace(input.SelectedProviderModelKey)
+                && !string.Equals(input.SelectedProviderModelKey, provider.SceneClipPricingModelKey, StringComparison.OrdinalIgnoreCase)))
             throw new MovieProductionValidationException("IDEMPOTENCY_KEY_REUSED", "This idempotency key was already used for a different production request.");
         // For newly admitted production jobs, character continuity forms part
         // of the canonical creative request. The same replay key must not adopt

@@ -103,6 +103,7 @@ public sealed class RunwayMovieVideoProviderTests
         var provider = CreateProvider(handler, options, urlPolicy);
 
         Assert.True(provider.IsAvailable);
+        Assert.Equal("unverified-model", provider.SceneClipPricingModelKey);
         Assert.False(provider.SupportsSceneClipCostIntent("720p", "720p", "Standard", "native", "16:9"));
 
         var error = await Assert.ThrowsAsync<MovieVideoProviderException>(() =>
@@ -178,6 +179,7 @@ public sealed class RunwayMovieVideoProviderTests
             provider, durationSeconds, "720p", "720p", "Standard", "native", aspectRatio);
 
         Assert.Null(rejection);
+        Assert.Equal("gen4.5", provider.SceneClipPricingModelKey);
         // Fake HTTP only: accepted admission must serialize the same duration,
         // aspect and fixed 720p output that was admitted and priced.
         await provider.SubmitAsync(Request(durationSeconds: durationSeconds, aspectRatio: aspectRatio), CancellationToken.None);

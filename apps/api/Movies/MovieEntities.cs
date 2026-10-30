@@ -803,6 +803,9 @@ public sealed record MovieClipDurationRange(int MinimumSeconds, int MaximumSecon
 public interface IMovieVideoProvider
 {
     string Key { get; }
+    // Exact adapter model used for priced SceneClip requests. Unknown providers
+    // remain unpriceable by default; callers must not fan out across model rows.
+    string? SceneClipPricingModelKey => null;
     bool IsAvailable { get; }
     IReadOnlyCollection<string> SupportedOperations { get; }
     // Unknown adapters fail closed at legacy scene/shot admission. Implementations
@@ -909,7 +912,10 @@ public sealed record MovieGenerationInput(
     // jobs without this optional field retain their historical execution path.
     string? SelectedProviderKey = null,
     // Production renders persist the exact character context they send to video.
-    string? CharacterContinuityJson = null);
+    string? CharacterContinuityJson = null,
+    // New priced scene jobs pin the adapter model selected during admission.
+    // Older serialized jobs retain their historical execution path.
+    string? SelectedProviderModelKey = null);
 
 public sealed record MovieProviderReadinessDto(bool Ready, IReadOnlyList<string> SupportedOperations);
 
@@ -957,7 +963,9 @@ public sealed record MovieSceneGenerationPreviewDto(
     bool CanConfirmCost,
     GenerationCostPreviewDto? CostGuardrails,
     string? RejectionCode,
-    string? RejectionMessage);
+    string? RejectionMessage,
+    string? ProviderKey = null,
+    string? ProviderModelKey = null);
 public sealed record MovieGuideRevisionResponse(MovieGuideRevisionDto Revision, MovieDirectorContextDto? AuthoritativeContext);
 public sealed record MovieGuideHistoryResponse(Guid MovieGuideId, int CurrentRevisionNumber, int? LockedRevisionNumber, IReadOnlyList<MovieGuideRevisionDto> Revisions);
 
@@ -1061,7 +1069,12 @@ public sealed record MovieStudioGenerationRequest(
     // Movie generation is a paid operation. The server evaluates the same cost
     // guardrail as the production orchestrator and refuses to queue when the
     // estimate is unavailable or an expensive estimate was not confirmed.
-    bool ConfirmationAccepted = false);
+    bool ConfirmationAccepted = false,
+    // Optional confirmation binding copied from the read-only scene quote.
+    // Server-side provider selection and price estimation remain authoritative.
+    string? ExpectedProviderKey = null,
+    string? ExpectedProviderModelKey = null,
+    decimal? ExpectedProviderCostUsd = null);
 
 
 public static class MovieStudioValidation

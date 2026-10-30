@@ -207,11 +207,14 @@ function FullMovieProjectWorkspace({ projectId, module }: { projectId: string; m
     setStoryboard(next);
   }
 
-  async function generateScene(sceneId: string, idempotencyKey: string) {
+  async function generateScene(sceneId: string, idempotencyKey: string, expectedProviderKey: string | null, expectedProviderModelKey: string | null, expectedProviderCostUsd: number | null) {
     if (!project) throw new Error("The Movie project is not available.");
     const result = await api.generateMovieScene(project.id, sceneId, {
       ...verifiedMovieClipProfile,
       confirmationAccepted: true,
+      expectedProviderKey,
+      expectedProviderModelKey,
+      expectedProviderCostUsd,
     }, idempotencyKey);
     setProject(result.project);
   }
@@ -840,7 +843,7 @@ function SceneProvenanceBadges({ scene, compact = false }: { scene: MovieSceneWo
   return <span className={`movie-scene-provenance-badges ${compact ? "is-compact" : ""}`}>{badges.length ? badges.map((badge) => <span key={badge.label} className={`movie-scene-provenance is-${badge.tone}`}>{badge.label}</span>) : <span className="movie-scene-provenance is-neutral">Current plan</span>}</span>;
 }
 
-function ScenesModule({ projectId, project, presets, savingShot, onAddShot, selectedSceneId, selectedShotId, onSelectScene, onSelectShot, onGenerate, onPlanChange }: { projectId: string; project: MovieProject; presets: CinematographyPreset[]; savingShot: boolean; onAddShot: (sceneId: string, draft: ShotDesignerDraft) => Promise<boolean>; selectedSceneId: string | null; selectedShotId: string | null; onSelectScene: (sceneId: string) => void; onSelectShot: (shotId: string | null) => void; onGenerate: (sceneId: string, idempotencyKey: string) => Promise<void>; onPlanChange: (plan: MovieSceneShotPlan) => void }) {
+function ScenesModule({ projectId, project, presets, savingShot, onAddShot, selectedSceneId, selectedShotId, onSelectScene, onSelectShot, onGenerate, onPlanChange }: { projectId: string; project: MovieProject; presets: CinematographyPreset[]; savingShot: boolean; onAddShot: (sceneId: string, draft: ShotDesignerDraft) => Promise<boolean>; selectedSceneId: string | null; selectedShotId: string | null; onSelectScene: (sceneId: string) => void; onSelectShot: (shotId: string | null) => void; onGenerate: (sceneId: string, idempotencyKey: string, expectedProviderKey: string | null, expectedProviderModelKey: string | null, expectedProviderCostUsd: number | null) => Promise<void>; onPlanChange: (plan: MovieSceneShotPlan) => void }) {
   const { t } = useLocale();
   const [workspace, setWorkspace] = useState<MovieScenesWorkspace | null>(null);
   const [loading, setLoading] = useState(true);
@@ -886,7 +889,13 @@ function ScenesModule({ projectId, project, presets, savingShot, onAddShot, sele
     setQueueingScene(true);
     setError("");
     try {
-      await onGenerate(generationReview.sceneId, generationReview.idempotencyKey);
+      await onGenerate(
+        generationReview.sceneId,
+        generationReview.idempotencyKey,
+        generationReview.preview.providerKey,
+        generationReview.preview.providerModelKey,
+        generationReview.preview.costGuardrails?.estimatedProviderCostUsd ?? null,
+      );
       setGenerationReview(null);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "The clip was not queued. Review the current profile and price before retrying.");

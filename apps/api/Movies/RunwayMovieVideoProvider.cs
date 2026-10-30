@@ -31,6 +31,9 @@ public sealed class RunwayMovieVideoProvider(
     private readonly MovieVideoOptions settings = options.Value;
 
     public string Key => "runway";
+    // Price against the same configured key serialized into the actual request.
+    // SupportsSceneClipCostIntent independently fails closed unless this is gen4.5.
+    public string? SceneClipPricingModelKey => string.IsNullOrWhiteSpace(settings.Model) ? null : settings.Model.Trim();
     public bool IsAvailable => settings.Enabled
         && string.Equals(settings.ProviderKey, Key, StringComparison.OrdinalIgnoreCase)
         && !string.IsNullOrWhiteSpace(settings.ApiKey)

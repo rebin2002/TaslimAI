@@ -681,6 +681,42 @@ public sealed class MovieVideoExecutionTests
     }
 
     [Fact]
+    public async Task Worker_rejects_changed_pricing_model_before_provider_execution_or_submission()
+    {
+        var fixture = await CreateRunningMovieJobAsync(
+            "Movie quoted model drift", "Do not submit under a model different from the quote.");
+        await using var connection = fixture.Connection;
+        await using var db = fixture.Db;
+        var original = System.Text.Json.JsonSerializer.Deserialize<MovieGenerationInput>(fixture.Job.InputJson)!;
+        fixture.Job.InputJson = System.Text.Json.JsonSerializer.Serialize(original with
+        {
+            SelectedProviderKey = "guarded-scene-test",
+            SelectedProviderModelKey = "quoted-model",
+            SourceResolution = "720p",
+            TargetResolution = "720p",
+            QualityTier = DirectorQualityLevels.Standard,
+            ProcessingPath = "native",
+            MasterResolution = null,
+            DurationSeconds = 5,
+        });
+        await db.SaveChangesAsync();
+
+        var provider = new GuardedSceneMovieVideoProvider { SceneClipPricingModelKey = "current-model" };
+        var options = new MovieVideoOptions { Enabled = true, ProviderKey = provider.Key };
+        var handler = new MovieVideoGenerationJobHandler(
+            db, provider, new MovieVideoExecutionStore(db, Options.Create(options)),
+            Options.Create(options), NullLogger<MovieVideoGenerationJobHandler>.Instance);
+
+        await Assert.ThrowsAsync<MovieVideoProviderException>(
+            () => handler.ExecuteAsync(fixture.Job, new Progress<int>(), CancellationToken.None));
+
+        Assert.Equal(0, provider.SubmitCalls);
+        Assert.Empty(await db.MovieVideoProviderExecutions.AsNoTracking().ToListAsync());
+        Assert.Equal(MovieClipStatuses.Failed,
+            await db.MovieClips.AsNoTracking().Select(item => item.Status).SingleAsync());
+    }
+
+    [Fact]
     public async Task Worker_keeps_source_version_jobs_without_shot_take_on_their_existing_path()
     {
         var fixture = await CreateRunningMovieJobAsync(
@@ -1467,6 +1503,7 @@ public sealed class MovieVideoExecutionTests
             SupportsReferencePackageCostIntent = supportsReferencePackageCostIntent;
         }
         public int? SceneClipPromptMaxCharacters { get; }
+        public string? SceneClipPricingModelKey { get; set; } = "guarded-model-test";
         public bool SceneClipWorldContextInPrompt { get; }
         public int SceneClipPromptFormattingOverheadCharacters { get; }
         public bool SupportsSceneClipFrameReferences { get; }

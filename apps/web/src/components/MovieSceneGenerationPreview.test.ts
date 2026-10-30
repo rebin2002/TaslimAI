@@ -15,10 +15,15 @@ describe("Movie scene generation quote boundary", () => {
     expect(workspaceSource).toContain("Estimated provider cost (maximum)");
   });
 
-  it("requires an explicit user confirmation and reuses the quote's idempotency key", () => {
+  it("requires explicit confirmation and reuses the quote's adapter identity and idempotency key", () => {
     expect(workspaceSource).toContain('confirmationAccepted: true');
     expect(workspaceSource).toContain("Confirm estimate and queue");
-    expect(workspaceSource).toContain("onGenerate(generationReview.sceneId, generationReview.idempotencyKey)");
+    expect(workspaceSource).toContain("generationReview.preview.providerKey");
+    expect(workspaceSource).toContain("generationReview.preview.providerModelKey");
+    expect(workspaceSource).toContain("generationReview.preview.costGuardrails?.estimatedProviderCostUsd");
+    expect(workspaceSource).toContain("expectedProviderModelKey");
+    expect(apiSource).toContain("expectedProviderModelKey?: string | null");
+    expect(apiSource).toContain("expectedProviderCostUsd?: number | null");
     expect(apiSource).toContain("previewMovieSceneGeneration");
     expect(apiSource).toContain("generation-preview");
   });

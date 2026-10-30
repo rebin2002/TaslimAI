@@ -367,6 +367,8 @@ public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWork
         Assert.NotNull(queuedInput);
         Assert.Equal(scope.ServiceProvider.GetRequiredService<IMovieVideoProvider>().Key,
             queuedInput.SelectedProviderKey);
+        Assert.Equal(scope.ServiceProvider.GetRequiredService<IMovieVideoProvider>().SceneClipPricingModelKey,
+            queuedInput.SelectedProviderModelKey);
         // The previously captured character bible must travel with the job,
         // not merely live on the clip record where the provider cannot see it.
         var queuedClip = await db.MovieClips.AsNoTracking()
@@ -512,11 +514,25 @@ public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWork
         var clipsBefore = await db.MovieClips.CountAsync(item => item.MovieShotId == shot.Id);
         var ledgerBefore = await db.UsageTransactions.CountAsync();
 
-        // A restored/reconfigured provider route cannot silently replay a
-        // canonical production job that was priced for another adapter.
-        // Exercise provider identity drift without outbound video requests.
+        // A restored/reconfigured provider or model route cannot silently replay
+        // a canonical production job priced for another execution identity.
+        // Exercise both identity mismatches without outbound video requests.
         var providerBoundJob = await db.GenerationJobs.SingleAsync(item => item.Id == render.Job.Id);
         var originalInputJson = providerBoundJob.InputJson;
+        providerBoundJob.InputJson = JsonSerializer.Serialize(queuedInput with
+        {
+            SelectedProviderModelKey = "other-video-model",
+        });
+        await db.SaveChangesAsync();
+        using var changedModel = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, renderPath, renderPayload, idempotencyKey: replayKey);
+        Assert.Equal(HttpStatusCode.BadRequest, changedModel.StatusCode);
+        Assert.Contains("IDEMPOTENCY_KEY_REUSED",
+            await changedModel.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Equal(versionsBefore, await db.MovieProductionVersions.CountAsync(item => item.MovieShotId == shot.Id));
+        Assert.Equal(clipsBefore, await db.MovieClips.CountAsync(item => item.MovieShotId == shot.Id));
+        Assert.Equal(ledgerBefore, await db.UsageTransactions.CountAsync());
+
         providerBoundJob.InputJson = JsonSerializer.Serialize(queuedInput with
         {
             SelectedProviderKey = "other-video-adapter",
@@ -527,12 +543,16 @@ public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWork
         Assert.Equal(HttpStatusCode.BadRequest, changedProvider.StatusCode);
         Assert.Contains("IDEMPOTENCY_KEY_REUSED",
             await changedProvider.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Equal(versionsBefore, await db.MovieProductionVersions.CountAsync(item => item.MovieShotId == shot.Id));
+        Assert.Equal(clipsBefore, await db.MovieClips.CountAsync(item => item.MovieShotId == shot.Id));
+        Assert.Equal(ledgerBefore, await db.UsageTransactions.CountAsync());
 
         // Older jobs without adapter identity continue to replay their
         // original canonical clip/job; this is a compatibility-only exception.
         providerBoundJob.InputJson = JsonSerializer.Serialize(queuedInput with
         {
             SelectedProviderKey = null,
+            SelectedProviderModelKey = null,
         });
         await db.SaveChangesAsync();
         using var legacyReplay = await MovieOperationalFixtures.SendWithCsrfAsync(

@@ -80,6 +80,41 @@ public sealed class MovieClipPromptLimitedApiFactory : MovieOperationalApiFactor
     }
 }
 
+// Provider-free fixture whose declared contract mirrors only the Movie beta
+// profile under test; non-default output intent must fail before reservation.
+public sealed class MovieClipExactProfileApiFactory : MovieOperationalApiFactory
+{
+    private readonly string? pricingModelKey;
+
+    public MovieClipExactProfileApiFactory(string? pricingModelKey = "fake-model")
+    {
+        this.pricingModelKey = pricingModelKey;
+    }
+
+    protected override bool WorkerEnabled => false;
+
+    protected override void ConfigureWebHost(IWebHostBuilder builder)
+    {
+        base.ConfigureWebHost(builder);
+        builder.ConfigureServices(services =>
+        {
+            services.RemoveAll<IMovieVideoProvider>();
+            services.AddSingleton<IMovieVideoProvider>(sp => new FakeMovieVideoProvider(
+                sp.GetRequiredService<FakeProviderScenarioCatalog>(),
+                sp.GetRequiredService<FakeProviderCallLog>())
+            {
+                SceneClipDurationRange = new MovieClipDurationRange(2, 10),
+                SceneClipPricingModelKey = pricingModelKey,
+                RequiredSceneClipSourceResolution = "720p",
+                RequiredSceneClipTargetResolution = "720p",
+                RequiredSceneClipQualityTier = "Standard",
+                RequiredSceneClipProcessingPath = "native",
+                RequiredSceneClipAspectRatio = "16:9",
+            });
+        });
+    }
+}
+
 // Deliberately advertise a much wider fake range than real adapters. Without
 // an explicit raw-duration guard, the legacy queue path silently clamps bad
 // persisted shot/scene values to 1 or 3,600 and could queue altered work.
@@ -195,6 +230,8 @@ public sealed class MovieClipDurationAdmissionTests : IClassFixture<MovieClipDur
         var queuedInput = System.Text.Json.JsonSerializer.Deserialize<MovieGenerationInput>(queued.InputJson)!;
         Assert.Equal(scope.ServiceProvider.GetRequiredService<IMovieVideoProvider>().Key,
             queuedInput.SelectedProviderKey);
+        Assert.Equal(scope.ServiceProvider.GetRequiredService<IMovieVideoProvider>().SceneClipPricingModelKey,
+            queuedInput.SelectedProviderModelKey);
     }
 
     [Fact]
