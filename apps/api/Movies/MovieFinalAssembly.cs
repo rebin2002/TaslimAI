@@ -1007,9 +1007,16 @@ public sealed class FfmpegMovieFinalAssemblyExecutor(IOptions<MovieFinalAssembly
         {
             if (!process.HasExited)
             {
-                try { process.Kill(entireProcessTree: true); }
+                // Reap a timed-out/cancelled ffprobe before removing the private
+                // source directory. Kill alone is not an awaited process exit.
+                try
+                {
+                    process.Kill(entireProcessTree: true);
+                    await process.WaitForExitAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
+                }
                 catch (InvalidOperationException) { }
                 catch (System.ComponentModel.Win32Exception) { }
+                catch (TimeoutException) { }
             }
         }
     }
