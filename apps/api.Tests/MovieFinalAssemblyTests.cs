@@ -695,6 +695,52 @@ public sealed class MovieFinalAssemblyTests
     }
 
     [Fact]
+    public async Task Timed_out_source_probe_fails_closed_before_rendering()
+    {
+        // Local-only, provider-free test: a stalled source probe must never
+        // allow a render to start, and must fail with a stable sanitized code.
+        if (OperatingSystem.IsWindows()) return;
+
+        var directory = Path.Combine(Path.GetTempPath(), "taslim-source-probe-timeout", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var probePath = Path.Combine(directory, "fake-ffprobe");
+            var renderPath = Path.Combine(directory, "fake-ffmpeg");
+            var sourcePath = Path.Combine(directory, "source.mp4");
+            await File.WriteAllTextAsync(probePath, "#!/bin/sh\nexec sleep 30\n");
+            await File.WriteAllTextAsync(renderPath,
+                "#!/bin/sh\nprintf 'rendered' > \"$(dirname \"$0\")/render-invoked\"\n");
+            await File.WriteAllBytesAsync(sourcePath, [0x00]);
+            const UnixFileMode executable = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
+            File.SetUnixFileMode(probePath, executable);
+            File.SetUnixFileMode(renderPath, executable);
+
+            var videoId = Guid.NewGuid();
+            var request = new MovieFinalAssemblyExecutionRequest(
+                Contract(videoId, null, MovieAssemblyCaptionModes.None),
+                new Dictionary<Guid, string> { [videoId] = sourcePath });
+            var executor = new FfmpegMovieFinalAssemblyExecutor(Options.Create(new MovieFinalAssemblyOptions
+            {
+                Enabled = true,
+                FfmpegPath = renderPath,
+                FfprobePath = probePath,
+                ProcessTimeoutSeconds = 1,
+            }));
+
+            var error = await Assert.ThrowsAsync<MovieFinalAssemblyExecutionException>(
+                () => executor.ExecuteAsync(request, new Progress<int>(), CancellationToken.None)
+                    .WaitAsync(TimeSpan.FromSeconds(10)));
+            Assert.Equal("ASSEMBLY_SOURCE_PROBE_FAILED", error.Code);
+            Assert.False(File.Exists(Path.Combine(directory, "render-invoked")));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task Timed_out_final_duration_probe_is_terminated_and_fails_closed()
     {
         // Exercise the post-render ffprobe boundary with disposable local executables.
