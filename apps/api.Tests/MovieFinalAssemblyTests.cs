@@ -45,6 +45,55 @@ public sealed class MovieFinalAssemblyTests
     }
 
     [Fact]
+    public void Output_duration_is_bounded_by_project_not_sparse_embedded_subtitles()
+    {
+        var video = Guid.NewGuid();
+        var caption = Guid.NewGuid();
+        foreach (var mode in new[] { MovieAssemblyCaptionModes.None, MovieAssemblyCaptionModes.Embedded })
+        {
+            var input = Contract(video, null, mode) with
+            {
+                ExpectedDurationSeconds = 3_600,
+                Captions = new MovieAssemblyCaptions(
+                    mode, mode == MovieAssemblyCaptionModes.Embedded ? caption : null, "en"),
+            };
+            var paths = new Dictionary<Guid, string> { [video] = "/tmp/clip.mp4", [caption] = "/tmp/brief.vtt" };
+            var args = FfmpegMovieFinalAssemblyCommandBuilder.Build(
+                new MovieFinalAssemblyExecutionRequest(input, paths), "/tmp/master.mp4").ToArray();
+
+            // FFmpeg -shortest considers the last subtitle cue as a possible end
+            // of output. Never let a one-second VTT truncate a longer master.
+            Assert.DoesNotContain("-shortest", args);
+            var durationIndex = Array.IndexOf(args, "-t");
+            Assert.True(durationIndex > 0);
+            Assert.Equal("3600", args[durationIndex + 1]);
+            Assert.True(durationIndex + 1 < Array.IndexOf(args, "/tmp/master.mp4"));
+            if (mode == MovieAssemblyCaptionModes.Embedded)
+            {
+                Assert.Contains("-c:s", args);
+                Assert.Equal("1:0", args[Array.LastIndexOf(args, "-map") + 1]);
+            }
+        }
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    [InlineData(7_201)]
+    public void Output_duration_rejects_nonpositive_or_unsupported_project_runtime(int seconds)
+    {
+        var video = Guid.NewGuid();
+        var input = Contract(video, null, MovieAssemblyCaptionModes.None)
+            with { ExpectedDurationSeconds = seconds };
+        var exception = Assert.Throws<MovieFinalAssemblyExecutionException>(() =>
+            FfmpegMovieFinalAssemblyCommandBuilder.Build(
+                new MovieFinalAssemblyExecutionRequest(input,
+                    new Dictionary<Guid, string> { [video] = "/tmp/clip.mp4" }),
+                "/tmp/master.mp4"));
+        Assert.Equal("ASSEMBLY_DURATION_INVALID", exception.Code);
+    }
+
+    [Fact]
     public void Silent_video_uses_bounded_generated_silence_without_losing_the_soundtrack()
     {
         var silent = Guid.NewGuid();
