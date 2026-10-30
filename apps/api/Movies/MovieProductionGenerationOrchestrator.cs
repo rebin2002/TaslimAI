@@ -691,11 +691,8 @@ public sealed class MovieProductionGenerationOrchestrator(
         return (minimumCharacters, guidePayload, scenePayload, shotPayload);
     }
 
-    private static ProductionPlan BuildPlan(MovieShot shot, MovieProductionGenerationRequest request)
-    {
-        var plan = MovieProductionAdaptivePlanBuilder.Build(shot, request.TargetResolution, request.QualityTier);
-        return new(plan.SourceResolution, plan.TargetResolution, plan.ProcessingPath, plan.QualityTier);
-    }
+    private static MovieProductionAdaptivePlan BuildPlan(MovieShot shot, MovieProductionGenerationRequest request) =>
+        MovieProductionAdaptivePlanBuilder.Build(shot, request.TargetResolution, request.QualityTier);
 
     private async Task ReconcileFastTerminalAsync(MovieClip clip, Guid jobId, CancellationToken cancellationToken)
     {
@@ -727,5 +724,4 @@ public sealed class MovieProductionGenerationOrchestrator(
     private static string? CleanBounded(string? value, int max) =>
         string.IsNullOrWhiteSpace(value) ? null : value.Trim().Length <= max ? value.Trim() : throw new MovieProductionValidationException("PRODUCTION_LABEL_TOO_LARGE", "The production label is too long.");
 
-    private sealed record ProductionPlan(string SourceResolution, string TargetResolution, string ProcessingPath, string QualityTier);
 }
