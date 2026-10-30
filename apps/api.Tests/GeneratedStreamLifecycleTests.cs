@@ -149,6 +149,51 @@ public sealed class GeneratedStreamLifecycleTests
         Assert.Empty(await db.UsageTransactions.AsNoTracking().ToListAsync());
     }
 
+    [Fact]
+    public async Task Cancelled_generated_video_upload_fails_and_cleans_partial_private_object()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = new TaslimDbContext(
+            new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connection).Options);
+        await db.Database.EnsureCreatedAsync();
+
+        var (workspaceId, userId) = await SeedWorkspaceAsync(db);
+        using var cancellation = new CancellationTokenSource();
+        var sink = new LengthBoundedFakeStorage { CancelAfterFirstByte = cancellation };
+        var options = Options.Create(new Taslim.Api.Files.FileOptions { MaxGeneratedVideoBytes = 16 });
+        var service = new FileProcessingService(
+            db,
+            new FileValidationService(options),
+            sink,
+            new FileContentExtractor(options),
+            options,
+            NullLogger<FileProcessingService>.Instance);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            service.StoreGeneratedStreamWithResultAsync(
+                workspaceId,
+                userId,
+                projectId: null,
+                fileName: "fixture.mp4",
+                contentType: "video/mp4",
+                sizeBytes: 4,
+                openReadAsync: _ => Task.FromResult<Stream>(new NonSeekableFixtureStream([1, 2, 3, 4])),
+                metadataJson: null,
+                cancellationToken: cancellation.Token));
+
+        Assert.True(cancellation.IsCancellationRequested);
+        var file = Assert.Single(await db.StoredFiles.AsNoTracking().ToListAsync());
+        Assert.Equal(StoredFileStatus.Failed, file.Status);
+        Assert.NotNull(file.ProcessedAt);
+        Assert.Null(file.ContentHashSha256);
+        Assert.Equal(4, sink.LastExpectedContentLength);
+        Assert.Equal(1, sink.BytesAccepted);
+        Assert.Equal(file.StorageKey, Assert.Single(sink.DeletedKeys));
+        Assert.Empty(await db.GenerationJobs.AsNoTracking().ToListAsync());
+        Assert.Empty(await db.UsageTransactions.AsNoTracking().ToListAsync());
+    }
+
     [Theory]
     [InlineData(4, 5)]
     [InlineData(5, 4)]
@@ -257,6 +302,7 @@ public sealed class GeneratedStreamLifecycleTests
         public int BytesAccepted { get; private set; }
         public List<string> DeletedKeys { get; } = [];
         public bool FailAfterFirstByte { get; init; }
+        public CancellationTokenSource? CancelAfterFirstByte { get; init; }
 
         public async Task StoreAsync(string storageKey, Stream content, CancellationToken cancellationToken = default)
         {
@@ -273,6 +319,8 @@ public sealed class GeneratedStreamLifecycleTests
                 var read = await content.ReadAsync(buffer.AsMemory(), cancellationToken);
                 if (read == 0) break;
                 BytesAccepted += read;
+                if (BytesAccepted == 1)
+                    CancelAfterFirstByte?.Cancel();
                 if (FailAfterFirstByte)
                     throw new FileStorageOperationException();
             }
