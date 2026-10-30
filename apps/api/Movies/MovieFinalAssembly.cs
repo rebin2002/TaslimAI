@@ -873,7 +873,15 @@ public sealed class FfmpegMovieFinalAssemblyExecutor(IOptions<MovieFinalAssembly
 {
     private readonly MovieFinalAssemblyOptions settings = options.Value;
     public string Key => "local";
-    public bool IsAvailable => settings.Enabled && (Path.IsPathRooted(settings.FfmpegPath) ? File.Exists(settings.FfmpegPath) : !string.IsNullOrWhiteSpace(settings.FfmpegPath));
+    public bool IsAvailable => settings.Enabled
+        && IsConfiguredExecutable(settings.FfmpegPath)
+        && IsConfiguredExecutable(settings.FfprobePath);
+
+    // Both programs are required. Claiming availability with a missing
+    // ffprobe executable queues a job that cannot pass source-media preflight.
+    private static bool IsConfiguredExecutable(string? path) =>
+        !string.IsNullOrWhiteSpace(path)
+        && (!Path.IsPathRooted(path) || File.Exists(path));
 
     public async Task<MovieFinalAssemblyExecutionResult> ExecuteAsync(MovieFinalAssemblyExecutionRequest request, IProgress<int> progress, CancellationToken cancellationToken)
     {
