@@ -269,8 +269,12 @@ public sealed class FileProcessingService(
             await using (var input = new CountingReadStream(upload.OpenReadStream(), settings.MaxFileSizeBytes, validated.SizeBytes))
             {
                 await RunStorageOperationAsync("store", token => storage.StoreAsync(storageKey, input, token), cancellationToken);
-                if (input.BytesRead != validated.SizeBytes)
-                    throw new FileUploadValidationException("The uploaded file changed while it was being stored.");
+                // S3 clients can stop reading at Content-Length. Counting the
+                // accepted bytes alone cannot detect a source that grew since
+                // validation, so probe EOF before publishing the file.
+                await input.VerifyExactLengthAsync(
+                    validated.SizeBytes, cancellationToken,
+                    "The uploaded file changed while it was being stored.");
             }
 
             file.Status = StoredFileStatus.Processing;
@@ -400,9 +404,10 @@ internal sealed class CountingReadStream(Stream inner, long maxBytes, long? expe
     // Uploaded file sizes are validated before storage; expose the declared length
     // to S3 without making this hash/counting stream seekable.
     internal long? ExpectedContentLength => expectedContentLength;
-    internal async Task VerifyExactLengthAsync(long expectedBytes, CancellationToken cancellationToken = default)
+    internal async Task VerifyExactLengthAsync(
+        long expectedBytes, CancellationToken cancellationToken = default, string? errorMessage = null)
     {
-        const string error = "Generated video output size did not match its declared size.";
+        var error = errorMessage ?? "Generated video output size did not match its declared size.";
         if (BytesRead != expectedBytes)
             throw new FileUploadValidationException(error);
 
