@@ -1048,14 +1048,45 @@ public sealed class FfmpegMovieFinalAssemblyExecutor(IOptions<MovieFinalAssembly
             startInfo.ArgumentList.Add(argument);
         using var process = new Process { StartInfo = startInfo };
         if (!process.Start()) throw new MovieFinalAssemblyExecutionException("ASSEMBLY_DURATION_MEASUREMENT_FAILED");
-        var outputTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
-        var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
-        await process.WaitForExitAsync(cancellationToken).WaitAsync(TimeSpan.FromSeconds(Math.Clamp(settings.ProcessTimeoutSeconds, 1, 86_400)), cancellationToken);
-        var output = (await outputTask).Trim();
-        _ = await errorTask;
-        if (process.ExitCode != 0 || !decimal.TryParse(output, NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds) || seconds <= 0m || seconds > int.MaxValue)
-            throw new MovieFinalAssemblyExecutionException("ASSEMBLY_DURATION_MEASUREMENT_FAILED");
-        return Math.Max(1, checked((int)Math.Round(seconds, MidpointRounding.AwayFromZero)));
+        try
+        {
+            var outputTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
+            var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
+            try
+            {
+                // A duration probe is a metadata operation, not a second render.
+                // Keep its budget bounded even for a two-hour Movie project.
+                await process.WaitForExitAsync(cancellationToken)
+                    .WaitAsync(TimeSpan.FromSeconds(Math.Min(15, Math.Clamp(settings.ProcessTimeoutSeconds, 1, 86_400))), cancellationToken);
+            }
+            catch (TimeoutException)
+            {
+                throw new MovieFinalAssemblyExecutionException("ASSEMBLY_DURATION_MEASUREMENT_FAILED");
+            }
+            var output = (await outputTask).Trim();
+            _ = await errorTask; // Do not disclose private output paths through probe diagnostics.
+            if (process.ExitCode != 0 || output.Length > 64
+                || !decimal.TryParse(output, NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds)
+                || seconds <= 0m || seconds > int.MaxValue)
+                throw new MovieFinalAssemblyExecutionException("ASSEMBLY_DURATION_MEASUREMENT_FAILED");
+            return Math.Max(1, checked((int)Math.Round(seconds, MidpointRounding.AwayFromZero)));
+        }
+        finally
+        {
+            // WaitAsync timeout/cancellation does not terminate ffprobe. Do not
+            // strand a child process holding private master output and CPU.
+            if (!process.HasExited)
+            {
+                try
+                {
+                    process.Kill(entireProcessTree: true);
+                    await process.WaitForExitAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
+                }
+                catch (InvalidOperationException) { }
+                catch (System.ComponentModel.Win32Exception) { }
+                catch (TimeoutException) { }
+            }
+        }
     }
 
     private static void TryDelete(string directory)
