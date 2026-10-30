@@ -160,6 +160,49 @@ public sealed class MovieFinalAssemblyTests
     }
 
     [Fact]
+    public void Mixed_geometry_clips_are_normalized_before_concatenation()
+    {
+        // Concat rejects mismatched input width/height/SAR even when a final
+        // scale follows it. Every selected video segment must be normalized
+        // independently before it reaches the concat input pads.
+        var silent = Guid.NewGuid();
+        var sounded = Guid.NewGuid();
+        var input = Contract(silent, null, MovieAssemblyCaptionModes.None) with
+        {
+            ExpectedDurationSeconds = 2,
+            Timeline =
+            [
+                new MovieAssemblyTimelineItem(Guid.NewGuid(), silent, 0, 0m, 1m, null),
+                new MovieAssemblyTimelineItem(Guid.NewGuid(), sounded, 1, 0m, 1m, null),
+            ],
+        };
+        var request = new MovieFinalAssemblyExecutionRequest(
+            input,
+            new Dictionary<Guid, string>
+            {
+                [silent] = "/tmp/landscape.mp4",
+                [sounded] = "/tmp/portrait.mp4",
+            },
+            new Dictionary<Guid, MovieFinalAssemblyVideoProbe>
+            {
+                [silent] = new(1m, false),
+                [sounded] = new(1m, true),
+            });
+
+        var args = FfmpegMovieFinalAssemblyCommandBuilder.Build(request, "/tmp/master.mp4").ToArray();
+        var graph = args[Array.IndexOf(args, "-filter_complex") + 1];
+        var concatAt = graph.IndexOf("concat=n=2:v=1:a=1", StringComparison.Ordinal);
+
+        Assert.True(concatAt > 0);
+        Assert.Equal(2, graph.Split("scale=3840:2160:", StringSplitOptions.None).Length - 1);
+        Assert.Equal(2, graph.Split("setsar=1,format=yuv420p[v", StringSplitOptions.None).Length - 1);
+        Assert.True(graph.IndexOf("format=yuv420p[v0]", StringComparison.Ordinal) < concatAt);
+        Assert.True(graph.IndexOf("format=yuv420p[v1]", StringComparison.Ordinal) < concatAt);
+        Assert.DoesNotContain("[videoBase]scale=", graph, StringComparison.Ordinal);
+        Assert.Contains("[v0][a0][v1][a1]concat=n=2:v=1:a=1", graph, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Sounded_video_without_explicit_out_point_uses_audio_trim_not_video_trim()
     {
         var video = Guid.NewGuid();
