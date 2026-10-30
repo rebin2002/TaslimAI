@@ -435,6 +435,24 @@ public sealed class MovieOperationalE2ETests : IClassFixture<MovieOperationalApi
         Assert.NotNull(persistedClip);
         Assert.Equal(generated.Job.Id, persistedClip.GenerationJobId);
         Assert.NotNull(persistedClip.AssetId);
+        Assert.Equal(1, persistedClip.DurationSeconds);
+        Assert.Equal(MovieClipStatuses.Ready, persistedClip.Status);
+
+        // The provider-free success path must publish one canonical output and
+        // finalize precisely one generation usage record alongside the ready clip.
+        // This catches a Succeeded/Ready projection that silently loses its
+        // accounting linkage after a measured-duration publication.
+        using (var publicationScope = factory.Services.CreateScope())
+        {
+            var publicationDb = publicationScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var usage = await publicationDb.UsageTransactions.AsNoTracking()
+                .SingleAsync(item => item.GenerationJobId == generated.Job.Id);
+            Assert.Equal(UsageTransactionStatus.Completed, usage.Status);
+            Assert.Equal($"generation:{generated.Job.Id:N}", usage.RequestId);
+            var publishedOutput = await publicationDb.GenerationJobOutputs.AsNoTracking()
+                .SingleAsync(item => item.GenerationJobId == generated.Job.Id);
+            Assert.NotNull(publishedOutput.StoredFileId);
+        }
 
         var take = await MovieOperationalFixtures.PostAsync<MovieV2TakeDto>(client,
             $"/api/movie-studio/shots/{fixture.Shot.Id}/takes", new

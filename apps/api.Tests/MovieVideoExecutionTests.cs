@@ -287,6 +287,33 @@ public sealed class MovieVideoExecutionTests
         Assert.Equal(MovieClipStatuses.Failed, (await db.MovieClips.AsNoTracking().SingleAsync()).Status);
     }
 
+    [Fact]
+    public async Task Provider_output_without_duration_is_failed_before_it_can_be_published()
+    {
+        var fixture = await CreateRunningMovieJobAsync("Movie missing duration test", "A deterministic missing-duration fixture.");
+        await using var connection = fixture.Connection;
+        await using var db = fixture.Db;
+        var provider = new MissingDurationMovieVideoProvider();
+        var options = new MovieVideoOptions
+        {
+            Enabled = true,
+            ProviderKey = provider.Key,
+            MaxTransientRetries = 0,
+        };
+        var handler = new MovieVideoGenerationJobHandler(
+            db,
+            provider,
+            new MovieVideoExecutionStore(db, Options.Create(options)),
+            Options.Create(options),
+            NullLogger<MovieVideoGenerationJobHandler>.Instance);
+
+        await Assert.ThrowsAsync<MovieVideoProviderOutputException>(() => handler.ExecuteAsync(fixture.Job, new Progress<int>(), CancellationToken.None));
+
+        var execution = await db.MovieVideoProviderExecutions.AsNoTracking().SingleAsync();
+        Assert.Equal(MovieVideoExecutionStatuses.Failed, execution.Status);
+        Assert.Equal(MovieClipStatuses.Failed, (await db.MovieClips.AsNoTracking().SingleAsync()).Status);
+    }
+
     private static async Task<(SqliteConnection Connection, TaslimDbContext Db, GenerationJob Job)> CreateRunningMovieJobAsync(string title, string description)
     {
         var connection = new SqliteConnection("Data Source=:memory:");
@@ -462,5 +489,34 @@ public sealed class MovieVideoExecutionTests
             CancelCalls++;
             return Task.CompletedTask;
         }
+    }
+
+    private sealed class MissingDurationMovieVideoProvider : IMovieVideoProvider
+    {
+        public string Key => "missing-duration-test";
+        public bool IsAvailable => true;
+        public IReadOnlyCollection<string> SupportedOperations { get; } = [MovieStudioOperations.SceneClip];
+
+        public Task<MovieVideoSubmission> SubmitAsync(MovieVideoGenerationRequest request, CancellationToken cancellationToken) =>
+            Task.FromResult(new MovieVideoSubmission("provider-job"));
+
+        public Task<MovieVideoProviderStatus> GetStatusAsync(string providerJobId, CancellationToken cancellationToken) =>
+            Task.FromResult(new MovieVideoProviderStatus(MovieVideoProviderJobStatus.Succeeded, 100));
+
+        public Task<MovieVideoProviderOutput> RetrieveAsync(string providerJobId, MovieVideoProviderStatus status, CancellationToken cancellationToken) =>
+            Task.FromResult(new MovieVideoProviderOutput(
+                "video/mp4",
+                "movie.mp4",
+                4,
+                _ => Task.FromResult<Stream>(new MemoryStream([0, 1, 2, 3])),
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null));
+
+        public Task CancelAsync(string providerJobId, CancellationToken cancellationToken) => Task.CompletedTask;
     }
 }
