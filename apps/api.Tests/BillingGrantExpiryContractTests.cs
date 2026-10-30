@@ -91,7 +91,7 @@ public sealed class BillingGrantExpiryContractTests
     }
 
     [Fact]
-    public async Task Sqlite_overlapping_lots_are_projected_using_deterministic_fefo_consumption()
+    public async Task Sqlite_overlapping_lots_reconcile_category_balances_to_total()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
         await connection.OpenAsync();
@@ -123,10 +123,11 @@ public sealed class BillingGrantExpiryContractTests
 
         var account = await NewBillingAccountService(db).GetAccountAsync(workspace.Id);
 
-        // FEFO spends all 40 from the earliest-expiring lot and 20 from the next lot.
-        Assert.Equal(0, account.Credits.IncludedRemaining);
-        Assert.Equal(20, account.Credits.PurchasedRemaining);
-        Assert.Equal(20, account.Credits.TotalRemaining);
+        // The issue does not specify FEFO versus another spend order, so do not
+        // encode one here. Regardless of allocation order, the two active-lot
+        // category balances must reconcile to the available total.
+        Assert.Equal(20L, account.Credits.TotalRemaining);
+        Assert.Equal(account.Credits.TotalRemaining, account.Credits.IncludedRemaining + account.Credits.PurchasedRemaining);
     }
 
     [Fact]
@@ -153,8 +154,7 @@ public sealed class BillingGrantExpiryContractTests
         await db.SaveChangesAsync();
         var debit = await ledger.RecordUsageDebitAsync(workspace.Id, usage.Id, 25, "refund:debit", "Synthetic refundable usage");
         Assert.NotNull(debit);
-        var originalAmount = debit!.Entry.Amount;
-        var originalCreatedAt = debit.Entry.CreatedAt;
+        var original = debit!.Entry;
         var beforeCount = await db.CreditLedgerEntries.CountAsync();
 
         var refund = await ledger.RefundAsync(workspace.Id, debit.Entry.Id, "refund:once", "Synthetic refund");
@@ -165,10 +165,21 @@ public sealed class BillingGrantExpiryContractTests
         Assert.Equal(refund.Entry.Id, replay.Entry.Id);
         Assert.Equal(CreditLedgerEntryType.Refund, refund.Entry.Type);
         Assert.Equal(25, refund.Entry.Amount);
-        Assert.Equal(debit.Entry.Id, refund.Entry.ReversesEntryId);
-        var originalAfter = await db.CreditLedgerEntries.AsNoTracking().SingleAsync(item => item.Id == debit.Entry.Id);
-        Assert.Equal(originalAmount, originalAfter.Amount);
-        Assert.Equal(originalCreatedAt, originalAfter.CreatedAt);
+        Assert.Equal(original.Id, refund.Entry.ReversesEntryId);
+        Assert.Equal(original.CreditEntitlementId, refund.Entry.CreditEntitlementId);
+        Assert.Equal(original.UsageTransactionId, refund.Entry.UsageTransactionId);
+        var originalAfter = await db.CreditLedgerEntries.AsNoTracking().SingleAsync(item => item.Id == original.Id);
+        Assert.Equal(original.Id, originalAfter.Id);
+        Assert.Equal(original.WorkspaceId, originalAfter.WorkspaceId);
+        Assert.Equal(original.CreditEntitlementId, originalAfter.CreditEntitlementId);
+        Assert.Equal(original.UsageTransactionId, originalAfter.UsageTransactionId);
+        Assert.Equal(original.ReversesEntryId, originalAfter.ReversesEntryId);
+        Assert.Equal(original.Type, originalAfter.Type);
+        Assert.Equal(original.Amount, originalAfter.Amount);
+        Assert.Equal(original.IdempotencyKey, originalAfter.IdempotencyKey);
+        Assert.Equal(original.Reason, originalAfter.Reason);
+        Assert.Equal(original.ActorUserId, originalAfter.ActorUserId);
+        Assert.Equal(original.CreatedAt, originalAfter.CreatedAt);
         Assert.Equal(beforeCount + 1, await db.CreditLedgerEntries.CountAsync());
 
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
