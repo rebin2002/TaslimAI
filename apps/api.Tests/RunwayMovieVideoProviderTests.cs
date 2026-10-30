@@ -137,6 +137,32 @@ public sealed class RunwayMovieVideoProviderTests
         Assert.Equal("gen4.5", payload.RootElement.GetProperty("model").GetString());
     }
 
+    [Fact]
+    public async Task Retrieved_output_uses_the_same_normalized_model_key_as_priced_submission()
+    {
+        // Retrieval metadata feeds usage attribution. Keep it identical to the
+        // trimmed model key used by the quote and actual outbound payload.
+        var handler = new RecordingHandler(_ => throw new InvalidOperationException("No provider request is allowed."));
+        var options = EnabledOptions();
+        options.Model = " gen4.5 ";
+        var provider = CreateProvider(handler, options);
+        var status = new MovieVideoProviderStatus(
+            MovieVideoProviderJobStatus.Succeeded,
+            100,
+            "video/mp4",
+            "clip.mp4",
+            4,
+            5,
+            $"{{\"taskId\":\"{TaskId}\",\"outputUrl\":\"https://cdn.example.test/clip.mp4\",\"contentType\":\"video/mp4\",\"fileName\":\"clip.mp4\",\"sizeBytes\":4}}",
+            EstimatedCostUsd: 0.01m);
+
+        var output = await provider.RetrieveAsync(TaskId.ToString(), status, CancellationToken.None);
+
+        Assert.Equal("gen4.5", provider.SceneClipPricingModelKey);
+        Assert.Equal("gen4.5", output.ProviderModelKey);
+        Assert.Empty(handler.Requests);
+    }
+
     [Theory]
     [InlineData(1, "720p", "720p", "Standard", "native", "16:9", "MOVIE_CLIP_DURATION_UNSUPPORTED")]
     [InlineData(11, "720p", "720p", "Standard", "native", "16:9", "MOVIE_CLIP_DURATION_UNSUPPORTED")]

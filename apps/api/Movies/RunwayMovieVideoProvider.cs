@@ -186,7 +186,7 @@ public sealed class RunwayMovieVideoProvider(
             status.Currency ?? "USD",
             status.CostBasis ?? UsageCostBasis.Estimated,
             status.SafeMetadataJson,
-            settings.Model);
+            settings.Model.Trim());
     }
 
     public async Task CancelAsync(string providerJobId, CancellationToken cancellationToken)
