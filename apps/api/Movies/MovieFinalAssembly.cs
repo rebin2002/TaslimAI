@@ -715,7 +715,8 @@ public static class FfmpegMovieFinalAssemblyCommandBuilder
         if (request.Contract.Timeline.Count == 0) throw new MovieFinalAssemblyExecutionException("ASSEMBLY_TIMELINE_EMPTY");
         if (request.Contract.ExpectedDurationSeconds is <= 0 or > 7_200)
             throw new MovieFinalAssemblyExecutionException("ASSEMBLY_DURATION_INVALID");
-        var args = new List<string> { "-hide_banner", "-loglevel", "error", "-y" };
+        // Background workers must never let FFmpeg consume the process stdin.
+        var args = new List<string> { "-hide_banner", "-nostdin", "-loglevel", "error", "-y" };
         foreach (var item in request.Contract.Timeline)
         {
             if (!request.SourcePaths.TryGetValue(item.AssetId, out var path)) throw new MovieFinalAssemblyExecutionException("ASSEMBLY_SOURCE_PATH_MISSING");
