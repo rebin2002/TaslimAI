@@ -900,7 +900,14 @@ public sealed class GenerationJobWorker(
         try
         {
             using var document = JsonDocument.Parse(metadataJson);
-            return document.RootElement.TryGetProperty("durationSeconds", out var value)
+            // JsonElement accessors throw InvalidOperationException for valid JSON
+            // with the wrong shape (e.g. [], null, or a string duration). Treat
+            // untrusted provider metadata as absent rather than escaping the
+            // generation failure/cleanup flow.
+            var root = document.RootElement;
+            return root.ValueKind == JsonValueKind.Object
+                && root.TryGetProperty("durationSeconds", out var value)
+                && value.ValueKind == JsonValueKind.Number
                 && value.TryGetInt32(out var duration)
                 && duration is > 0 and <= 3_600
                 ? duration
@@ -1049,7 +1056,14 @@ public sealed class GenerationJobWorker(
                             }
                             else
                             {
-                                await movieExecutions.MarkReadyAsync(current.Id, claimedJob.ConcurrencyToken, publication?.Asset?.Id, publication?.CreatedFile?.Id, ReadDurationSeconds(publication?.Output.MetadataJson), publication?.Output.MetadataJson, stoppingToken);
+                                // Do not mark a Movie clip ready or finalize billable usage
+                                // when its stored output has no bounded measured duration.
+                                // Throwing here rolls back the completion transaction and
+                                // follows the existing failed-publication cleanup path.
+                                var measuredDuration = ReadDurationSeconds(publication?.Output.MetadataJson);
+                                if (!measuredDuration.HasValue)
+                                    throw new MovieVideoProviderOutputException();
+                                await movieExecutions.MarkReadyAsync(current.Id, claimedJob.ConcurrencyToken, publication?.Asset?.Id, publication?.CreatedFile?.Id, measuredDuration.Value, publication?.Output.MetadataJson, stoppingToken);
                             }
                         }
                         await usage.CompleteAsync(await usage.BeginAsync(current, cancellationToken: stoppingToken), result.Usage ?? new AiUsageMetadata("system", "unknown", null, null, null, 0m, 0m, 0, "completed", true), hasBillableAsset: true, cancellationToken: stoppingToken);
