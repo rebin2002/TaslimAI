@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using Taslim.Api.Movies;
 using Xunit;
 
@@ -378,6 +379,49 @@ public sealed class MovieFinalAssemblyTests
             new MovieFinalAssemblyExecutionRequest(Contract(Guid.NewGuid(), null, MovieAssemblyCaptionModes.None), new Dictionary<Guid, string>()),
             new Progress<int>(),
             CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Timed_out_local_renderer_is_terminated_and_fails_with_stable_code()
+    {
+        // The CI runners are Unix. Use a disposable local executable instead
+        // of making any paid provider call or depending on a real video export.
+        if (OperatingSystem.IsWindows()) return;
+
+        var directory = Path.Combine(Path.GetTempPath(), "taslim-assembly-timeout-test", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var probePath = Path.Combine(directory, "fake-ffprobe");
+            var renderPath = Path.Combine(directory, "fake-ffmpeg");
+            var sourcePath = Path.Combine(directory, "source.mp4");
+            await File.WriteAllTextAsync(probePath,
+                "#!/bin/sh\\nprintf '%s\\\\n' '{\\\"streams\\\":[{\\\"codec_type\\\":\\\"video\\\"}],\\\"format\\\":{\\\"duration\\\":\\\"3\\\"}}'\\n");
+            await File.WriteAllTextAsync(renderPath, "#!/bin/sh\\nexec sleep 30\\n");
+            await File.WriteAllBytesAsync(sourcePath, [0x00]);
+            const UnixFileMode executable = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
+            File.SetUnixFileMode(probePath, executable);
+            File.SetUnixFileMode(renderPath, executable);
+
+            var videoId = Guid.NewGuid();
+            var input = Contract(videoId, null, MovieAssemblyCaptionModes.None);
+            var request = new MovieFinalAssemblyExecutionRequest(input, new Dictionary<Guid, string> { [videoId] = sourcePath });
+            var executor = new FfmpegMovieFinalAssemblyExecutor(Options.Create(new MovieFinalAssemblyOptions
+            {
+                Enabled = true,
+                FfmpegPath = renderPath,
+                FfprobePath = probePath,
+                ProcessTimeoutSeconds = 1,
+            }));
+
+            var error = await Assert.ThrowsAsync<MovieFinalAssemblyExecutionException>(
+                () => executor.ExecuteAsync(request, new Progress<int>(), CancellationToken.None));
+            Assert.Equal("ASSEMBLY_EXECUTION_TIMEOUT", error.Code);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
     }
 
     [Fact]
