@@ -205,7 +205,8 @@ public sealed class GeneratedStreamLifecycleTests
         await db.Database.EnsureCreatedAsync();
 
         var (workspaceId, userId) = await SeedWorkspaceAsync(db);
-        var sink = new LengthBoundedFakeStorage();
+        const string privateDetails = "PRIVATE_SIGNED_URL_AND_STORAGE_CREDENTIAL_MUST_NOT_APPEAR_IN_LOGS";
+        var sink = new LengthBoundedFakeStorage { DeleteException = new InvalidOperationException(privateDetails) };
         var options = Options.Create(new Taslim.Api.Files.FileOptions { MaxGeneratedVideoBytes = 16 });
         var logger = new GeneratedStreamCaptureLogger();
         var service = new FileProcessingService(
@@ -216,7 +217,6 @@ public sealed class GeneratedStreamLifecycleTests
             options,
             logger);
 
-        const string privateDetails = "PRIVATE_SIGNED_URL_AND_STORAGE_CREDENTIAL_MUST_NOT_APPEAR_IN_LOGS";
         var sourceError = new InvalidOperationException(privateDetails);
         var thrown = await Assert.ThrowsAsync<InvalidOperationException>(() =>
             service.StoreGeneratedStreamWithResultAsync(
@@ -240,6 +240,105 @@ public sealed class GeneratedStreamLifecycleTests
         });
         var file = Assert.Single(await db.StoredFiles.AsNoTracking().ToListAsync());
         Assert.Equal(StoredFileStatus.Failed, file.Status);
+        Assert.Equal(file.StorageKey, Assert.Single(sink.DeletedKeys));
+        Assert.Empty(await db.GenerationJobs.AsNoTracking().ToListAsync());
+        Assert.Empty(await db.UsageTransactions.AsNoTracking().ToListAsync());
+    }
+
+
+    [Fact]
+    public async Task Buffered_generated_file_storage_and_cleanup_errors_never_log_provider_secrets()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = new TaslimDbContext(
+            new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connection).Options);
+        await db.Database.EnsureCreatedAsync();
+
+        var (workspaceId, userId) = await SeedWorkspaceAsync(db);
+        const string privateDetails = "SYNTHETIC_SIGNED_URL_AND_STORAGE_CREDENTIAL_DO_NOT_LOG";
+        var sourceError = new InvalidOperationException(privateDetails);
+        var sink = new LengthBoundedFakeStorage
+        {
+            StoreException = sourceError,
+            DeleteException = new InvalidOperationException(privateDetails),
+        };
+        var options = Options.Create(new Taslim.Api.Files.FileOptions { MaxFileSizeBytes = 64 });
+        var logger = new GeneratedStreamCaptureLogger();
+        var service = new FileProcessingService(
+            db,
+            new FileValidationService(options),
+            sink,
+            new FileContentExtractor(options),
+            options,
+            logger);
+
+        var thrown = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            service.StoreGeneratedWithResultAsync(
+                workspaceId, userId, projectId: null,
+                fileName: "fixture.txt", contentType: "text/plain",
+                content: System.Text.Encoding.UTF8.GetBytes("safe fixture"),
+                metadataJson: null, cancellationToken: CancellationToken.None));
+
+        Assert.Same(sourceError, thrown);
+        Assert.Contains(logger.Entries, entry =>
+            entry.Message.Contains("Generated file storage failed", StringComparison.Ordinal));
+        Assert.Contains(logger.Entries, entry =>
+            entry.Message.Contains("Generated file cleanup failed", StringComparison.Ordinal));
+        Assert.All(logger.Entries, entry =>
+        {
+            Assert.DoesNotContain(privateDetails, entry.Message);
+            Assert.Null(entry.Exception);
+        });
+        var file = Assert.Single(await db.StoredFiles.AsNoTracking().ToListAsync());
+        Assert.Equal(StoredFileStatus.Failed, file.Status);
+        Assert.Equal(file.StorageKey, Assert.Single(sink.DeletedKeys));
+        Assert.Empty(await db.GenerationJobs.AsNoTracking().ToListAsync());
+        Assert.Empty(await db.UsageTransactions.AsNoTracking().ToListAsync());
+    }
+
+    [Fact]
+    public async Task Failed_chat_upload_and_cleanup_do_not_log_untrusted_provider_exception()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = new TaslimDbContext(
+            new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connection).Options);
+        await db.Database.EnsureCreatedAsync();
+
+        var (workspaceId, userId) = await SeedWorkspaceAsync(db);
+        const string privateDetails = "SYNTHETIC_PRIVATE_R2_URL_AND_TOKEN_DO_NOT_LOG";
+        var sink = new LengthBoundedFakeStorage
+        {
+            StoreException = new InvalidOperationException(privateDetails),
+            DeleteException = new InvalidOperationException(privateDetails),
+        };
+        var options = Options.Create(new Taslim.Api.Files.FileOptions { MaxFileSizeBytes = 64 });
+        var logger = new GeneratedStreamCaptureLogger();
+        var service = new FileProcessingService(
+            db,
+            new FileValidationService(options),
+            sink,
+            new FileContentExtractor(options),
+            options,
+            logger);
+        var upload = new DeclaredLengthFormFile(System.Text.Encoding.UTF8.GetBytes("safe"), 4);
+
+        await Assert.ThrowsAsync<FileStorageOperationException>(() =>
+            service.UploadAsync(workspaceId, userId, null, null, upload, CancellationToken.None));
+
+        Assert.Contains(logger.Entries, entry =>
+            entry.Message.Contains("File processing failed", StringComparison.Ordinal));
+        Assert.Contains(logger.Entries, entry =>
+            entry.Message.Contains("Generated file cleanup failed", StringComparison.Ordinal));
+        Assert.All(logger.Entries, entry =>
+        {
+            Assert.DoesNotContain(privateDetails, entry.Message);
+            Assert.Null(entry.Exception);
+        });
+        var file = Assert.Single(await db.StoredFiles.AsNoTracking().ToListAsync());
+        Assert.Equal(StoredFileStatus.Failed, file.Status);
+        Assert.Equal(FileExtractionStatus.Failed, file.TextExtractionStatus);
         Assert.Equal(file.StorageKey, Assert.Single(sink.DeletedKeys));
         Assert.Empty(await db.GenerationJobs.AsNoTracking().ToListAsync());
         Assert.Empty(await db.UsageTransactions.AsNoTracking().ToListAsync());
@@ -354,9 +453,12 @@ public sealed class GeneratedStreamLifecycleTests
         public List<string> DeletedKeys { get; } = [];
         public bool FailAfterFirstByte { get; init; }
         public CancellationTokenSource? CancelAfterFirstByte { get; init; }
+        public Exception? StoreException { get; init; }
+        public Exception? DeleteException { get; init; }
 
         public async Task StoreAsync(string storageKey, Stream content, CancellationToken cancellationToken = default)
         {
+            if (StoreException is not null) throw StoreException;
             var counted = Assert.IsType<CountingReadStream>(content);
             Assert.False(content.CanSeek);
             LastExpectedContentLength = counted.ExpectedContentLength;
@@ -383,6 +485,7 @@ public sealed class GeneratedStreamLifecycleTests
         public Task DeleteAsync(string storageKey, CancellationToken cancellationToken = default)
         {
             DeletedKeys.Add(storageKey);
+            if (DeleteException is not null) throw DeleteException;
             return Task.CompletedTask;
         }
 
