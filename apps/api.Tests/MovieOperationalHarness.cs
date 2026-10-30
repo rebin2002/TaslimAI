@@ -388,7 +388,7 @@ public static class MovieOperationalFixtures
     }
 
     public static async Task<Dictionary<string, JsonElement>> BuildConfirmedMovieGenerationRequestAsync(
-        MovieOperationalApiFactory factory,
+        GenerationJobsApiFactory factory,
         string path,
         object? payload)
     {
@@ -503,7 +503,7 @@ public static class MovieOperationalFixtures
     }
 
     public static async Task<T> PostWithConfirmedMovieQuoteAsync<T>(
-        MovieOperationalApiFactory factory,
+        GenerationJobsApiFactory factory,
         HttpClient client,
         string path,
         object? payload,
@@ -515,7 +515,7 @@ public static class MovieOperationalFixtures
     }
 
     public static async Task<HttpResponseMessage> SendWithConfirmedMovieQuoteAsync(
-        MovieOperationalApiFactory factory,
+        GenerationJobsApiFactory factory,
         HttpClient client,
         HttpMethod method,
         string path,
