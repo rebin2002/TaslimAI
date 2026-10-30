@@ -1,6 +1,9 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Data.Common;
+using System.Collections.Concurrent;
+using System.Data;
+using System.Text.RegularExpressions;
 using System.Text.Json;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.EntityFrameworkCore;
@@ -786,7 +789,7 @@ public sealed class GenerationJobPendingPublicationTests : IClassFixture<Generat
     }
 
     [DisposablePostgresFact]
-    public async Task Disposable_postgres_claim_is_atomic_idempotent_and_persists_a_strict_timestamp_advance()
+    public async Task Disposable_postgres_cas_claims_with_identical_preupdate_tokens_commit_once_and_replay_idempotently()
     {
         var connectionString = Environment.GetEnvironmentVariable("ConnectionStrings__Postgres")!;
         var schema = $"claim_test_{Guid.NewGuid():N}";
@@ -799,68 +802,139 @@ public sealed class GenerationJobPendingPublicationTests : IClassFixture<Generat
             await create.ExecuteNonQueryAsync();
         }
 
+        string? stepSummaryReceipt = null;
         try
         {
             var testBuilder = new NpgsqlConnectionStringBuilder(connectionString) { SearchPath = schema };
             var options = new DbContextOptionsBuilder<TaslimDbContext>().UseNpgsql(testBuilder.ConnectionString).Options;
             Guid jobId;
             Guid token;
-            DateTime initialTimestamp;
             await using (var db = new TaslimDbContext(options))
             {
                 await db.Database.EnsureCreatedAsync();
-                (jobId, token, initialTimestamp) = await SeedPostgresClaimGraph(db);
+                (jobId, token, _) = await SeedPostgresClaimGraph(db);
             }
 
-            var readyClaimers = 0;
-            var bothClaimersReady = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            var startClaims = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            DateTime persistedTokenBeforeClaims;
+            await using (var snapshot = new TaslimDbContext(options))
+            {
+                persistedTokenBeforeClaims = await snapshot.MovieProductionVersions.AsNoTracking()
+                    .Where(item => item.GenerationJobId == jobId)
+                    .Select(item => item.UpdatedAt)
+                    .SingleAsync();
+            }
+
+            var casBarrier = new PostgreSqlVersionCasBarrierInterceptor(persistedTokenBeforeClaims);
+            var claimOptions = new DbContextOptionsBuilder<TaslimDbContext>()
+                .UseNpgsql(testBuilder.ConnectionString)
+                .AddInterceptors(casBarrier)
+                .Options;
             async Task ClaimOnFreshContext()
             {
-                if (Interlocked.Increment(ref readyClaimers) == 2)
-                    bothClaimersReady.TrySetResult(true);
-                await startClaims.Task.WaitAsync(TimeSpan.FromSeconds(20));
-                await using var db = new TaslimDbContext(options);
+                await using var db = new TaslimDbContext(claimOptions);
                 var store = new MovieVideoExecutionStore(db, Options.Create(new MovieVideoOptions()));
                 await store.ClaimApprovedProductionSubmissionAsync(jobId, token, CancellationToken.None);
             }
 
             var claimTasks = new[] { Task.Run(ClaimOnFreshContext), Task.Run(ClaimOnFreshContext) };
+            PostgreSqlVersionCasObservation[] observations;
             try
             {
-                await bothClaimersReady.Task.WaitAsync(TimeSpan.FromSeconds(20));
+                await casBarrier.WaitForBothCasCommandsAsync(TimeSpan.FromSeconds(30));
+                observations = casBarrier.Observations;
+                Assert.Equal(2, observations.Length);
+                Assert.NotSame(observations[0].Transaction, observations[1].Transaction);
+                Assert.NotSame(observations[0].Connection, observations[1].Connection);
+                Assert.All(observations, attempt => Assert.True(attempt.TransactionAndConnectionWereOpen));
+                Assert.All(observations, attempt => Assert.Equal(persistedTokenBeforeClaims, attempt.ComparedUpdatedAt));
             }
-            finally
+            catch
             {
-                startClaims.TrySetResult(true);
+                casBarrier.ReleaseCasCommands();
+                try
+                {
+                    await Task.WhenAll(claimTasks);
+                }
+                catch
+                {
+                    // Preserve the original barrier/assertion failure after observing both tasks.
+                }
+                throw;
             }
+
+            casBarrier.ReleaseCasCommands();
             await Task.WhenAll(claimTasks);
+            var affectedRows = casBarrier.AffectedRows.OrderByDescending(count => count).ToArray();
+            Assert.Equal(new[] { 1, 0 }, affectedRows);
+
+            DateTime firstClaimTimestamp;
+            Guid versionId;
+            MovieProductionStageTransition firstClaimEvent;
+            List<MovieProductionStageTransition> firstClaimEvents;
             await using (var verify = new TaslimDbContext(options))
             {
                 var version = await verify.MovieProductionVersions.AsNoTracking().SingleAsync(item => item.GenerationJobId == jobId);
-                Assert.True(version.UpdatedAt - initialTimestamp >= TimeSpan.FromMilliseconds(1));
-                var claimEvents = await verify.MovieProductionStageTransitions.AsNoTracking()
+                versionId = version.Id;
+                firstClaimTimestamp = version.UpdatedAt;
+                Assert.True(firstClaimTimestamp - persistedTokenBeforeClaims >= TimeSpan.FromMilliseconds(1));
+                Assert.True(firstClaimTimestamp > persistedTokenBeforeClaims);
+                firstClaimEvents = await verify.MovieProductionStageTransitions.AsNoTracking()
                     .Where(item => item.MovieProductionVersionId == version.Id && item.EventType == "provider_submission_claimed")
                     .ToListAsync();
-                var claimEvent = Assert.Single(claimEvents);
-                Assert.Equal(jobId, claimEvent.GenerationJobId);
-                Assert.Equal(version.MovieShotId, claimEvent.MovieShotId);
-                Assert.Equal(MovieProductionStages.ProductionRender, claimEvent.FromStage);
-                Assert.Equal(MovieProductionStages.ProductionRender, claimEvent.ToStage);
-                var firstTimestamp = version.UpdatedAt;
-                var store = new MovieVideoExecutionStore(verify, Options.Create(new MovieVideoOptions()));
+                firstClaimEvent = Assert.Single(firstClaimEvents);
+                Assert.Equal(jobId, firstClaimEvent.GenerationJobId);
+                Assert.Equal(version.MovieShotId, firstClaimEvent.MovieShotId);
+                Assert.Equal(MovieProductionStages.ProductionRender, firstClaimEvent.FromStage);
+                Assert.Equal(MovieProductionStages.ProductionRender, firstClaimEvent.ToStage);
+            }
+
+            await using (var replay = new TaslimDbContext(options))
+            {
+                var store = new MovieVideoExecutionStore(replay, Options.Create(new MovieVideoOptions()));
                 await store.ClaimApprovedProductionSubmissionAsync(jobId, token, CancellationToken.None);
-                Assert.Equal(firstTimestamp, await verify.MovieProductionVersions.AsNoTracking()
+            }
+
+            DateTime timestampAfterReplay;
+            List<MovieProductionStageTransition> replayedClaimEvents;
+            await using (var verifyReplay = new TaslimDbContext(options))
+            {
+                timestampAfterReplay = await verifyReplay.MovieProductionVersions.AsNoTracking()
                     .Where(item => item.GenerationJobId == jobId)
                     .Select(item => item.UpdatedAt)
-                    .SingleAsync());
-                var replayedClaimEvents = await verify.MovieProductionStageTransitions.AsNoTracking()
-                    .Where(item => item.MovieProductionVersionId == version.Id && item.EventType == "provider_submission_claimed")
+                    .SingleAsync();
+                replayedClaimEvents = await verifyReplay.MovieProductionStageTransitions.AsNoTracking()
+                    .Where(item => item.MovieProductionVersionId == versionId && item.EventType == "provider_submission_claimed")
                     .ToListAsync();
-                var replayedClaimEvent = Assert.Single(replayedClaimEvents);
-                Assert.Equal(claimEvent.Id, replayedClaimEvent.Id);
-                Assert.Equal(claimEvent.CreatedAt, replayedClaimEvent.CreatedAt);
             }
+
+            var replayedClaimEvent = Assert.Single(replayedClaimEvents);
+            var replayPreservedCanonicalEvent = replayedClaimEvent.Id == firstClaimEvent.Id
+                && replayedClaimEvent.CreatedAt == firstClaimEvent.CreatedAt;
+            Assert.Equal(firstClaimTimestamp, timestampAfterReplay);
+            Assert.True(replayPreservedCanonicalEvent);
+
+            var distinctOpenTransactions = observations.Length == 2
+                && !ReferenceEquals(observations[0].Transaction, observations[1].Transaction)
+                && observations.All(attempt => attempt.TransactionAndConnectionWereOpen);
+            var distinctOpenConnections = observations.Length == 2
+                && !ReferenceEquals(observations[0].Connection, observations[1].Connection)
+                && observations.All(attempt => attempt.TransactionAndConnectionWereOpen);
+            var samePersistedTokenBeforeCas = observations.Length == 2
+                && observations.All(attempt => attempt.ComparedUpdatedAt == persistedTokenBeforeClaims);
+            var oneCasWinnerAndOneLoser = affectedRows.SequenceEqual(new[] { 1, 0 });
+            var oneDurableClaimEvent = firstClaimEvents.Count == 1 && replayedClaimEvents.Count == 1;
+            var strictPersistedTimestampAdvance = firstClaimTimestamp > persistedTokenBeforeClaims;
+            var replayKeptTimestampAndEvent = timestampAfterReplay == firstClaimTimestamp && replayPreservedCanonicalEvent;
+            stepSummaryReceipt = $"""
+            ### `Taslim.Api.Tests.GenerationJobPendingPublicationTests.Disposable_postgres_cas_claims_with_identical_preupdate_tokens_commit_once_and_replay_idempotently` — passed
+
+- Database provider: disposable PostgreSQL test schema.
+- CAS rendezvous before UPDATE: two distinct open transactions and connections observed the same persisted `UpdatedAt` token: **{distinctOpenTransactions && distinctOpenConnections && samePersistedTokenBeforeCas}**.
+- Conditional UPDATE row counts, winner then loser: **{string.Join(", ", affectedRows)}**; exactly one winner and one loser: **{oneCasWinnerAndOneLoser}**.
+- Durable claim event count before and after replay: **{firstClaimEvents.Count}** / **{replayedClaimEvents.Count}**; exactly one event: **{oneDurableClaimEvent}**.
+- Persisted timestamp advanced strictly and replay preserved timestamp plus event ID/CreatedAt: **{strictPersistedTimestampAdvance}** / **{replayKeptTimestampAndEvent}**.
+
+""";
         }
         finally
         {
@@ -870,6 +944,10 @@ public sealed class GenerationJobPendingPublicationTests : IClassFixture<Generat
             drop.CommandText = $"DROP SCHEMA IF EXISTS \"{schema}\" CASCADE";
             await drop.ExecuteNonQueryAsync();
         }
+
+        var stepSummaryPath = Environment.GetEnvironmentVariable("GITHUB_STEP_SUMMARY");
+        if (stepSummaryReceipt is not null && !string.IsNullOrWhiteSpace(stepSummaryPath))
+            await File.AppendAllTextAsync(stepSummaryPath, stepSummaryReceipt);
     }
 
     private async Task ClaimSubmission(Guid jobId, Guid concurrencyToken)
@@ -1167,6 +1245,110 @@ public sealed class GenerationJobPendingPublicationTests : IClassFixture<Generat
         await db.SaveChangesAsync();
         return (jobId, token, now);
     }
+
+    private sealed class PostgreSqlVersionCasBarrierInterceptor(DateTime expectedPersistedToken) : DbCommandInterceptor
+    {
+        private static readonly Regex UpdatedAtPredicate = new(
+            "(?:\\\"?UpdatedAt\\\"?)\\s*=\\s*(?<parameter>@[A-Za-z0-9_]+|:[A-Za-z0-9_]+|\\$[0-9]+)",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        private readonly ConcurrentQueue<PostgreSqlVersionCasObservation> observations = new();
+        private readonly ConcurrentQueue<int> affectedRows = new();
+        private readonly TaskCompletionSource<bool> bothCasCommands = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<bool> releaseCasCommands = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int casCommandCount;
+
+        public PostgreSqlVersionCasObservation[] Observations => observations.ToArray();
+        public int[] AffectedRows => affectedRows.ToArray();
+
+        public Task WaitForBothCasCommandsAsync(TimeSpan timeout) => bothCasCommands.Task.WaitAsync(timeout);
+
+        public void ReleaseCasCommands() => releaseCasCommands.TrySetResult(true);
+
+        public override async ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(
+            DbCommand command,
+            CommandEventData eventData,
+            InterceptionResult<int> result,
+            CancellationToken cancellationToken = default)
+        {
+            if (!TryReadComparedUpdatedAt(command, out var comparedUpdatedAt)) return result;
+            if (comparedUpdatedAt != expectedPersistedToken)
+                throw new InvalidOperationException("The CAS predicate did not use the pre-read persisted UpdatedAt token.");
+
+            var transaction = command.Transaction ?? throw new InvalidOperationException("The version CAS must execute inside its claim transaction.");
+            var connection = command.Connection ?? throw new InvalidOperationException("The version CAS command must have an open connection.");
+            var transactionConnection = transaction.Connection;
+            observations.Enqueue(new PostgreSqlVersionCasObservation(
+                transaction,
+                connection,
+                comparedUpdatedAt,
+                transactionConnection is not null
+                    && transactionConnection.State == ConnectionState.Open
+                    && connection.State == ConnectionState.Open
+                    && ReferenceEquals(transactionConnection, connection)));
+
+            var count = Interlocked.Increment(ref casCommandCount);
+            if (count == 2) bothCasCommands.TrySetResult(true);
+            if (count > 2) throw new InvalidOperationException("Expected exactly two version CAS commands in the PostgreSQL contention test.");
+
+            await releaseCasCommands.Task.WaitAsync(cancellationToken);
+            return result;
+        }
+
+        public override ValueTask<int> NonQueryExecutedAsync(
+            DbCommand command,
+            CommandExecutedEventData eventData,
+            int result,
+            CancellationToken cancellationToken = default)
+        {
+            if (TryReadComparedUpdatedAt(command, out _)) affectedRows.Enqueue(result);
+            return ValueTask.FromResult(result);
+        }
+
+        private bool TryReadComparedUpdatedAt(DbCommand command, out DateTime comparedUpdatedAt)
+        {
+            comparedUpdatedAt = default;
+            var sql = command.CommandText;
+            if (!sql.Contains("UPDATE", StringComparison.OrdinalIgnoreCase)
+                || !sql.Contains("MovieProductionVersions", StringComparison.OrdinalIgnoreCase)
+                || !sql.Contains("UpdatedAt", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            var whereIndex = sql.IndexOf("WHERE", StringComparison.OrdinalIgnoreCase);
+            if (whereIndex < 0) return false;
+            var match = UpdatedAtPredicate.Match(sql[whereIndex..]);
+            if (!match.Success) return false;
+
+            var parameterToken = match.Groups["parameter"].Value;
+            DbParameter parameter;
+            if (parameterToken.StartsWith('$')
+                && int.TryParse(parameterToken.AsSpan(1), out var ordinal)
+                && ordinal > 0
+                && ordinal <= command.Parameters.Count)
+            {
+                parameter = (DbParameter)command.Parameters[ordinal - 1];
+            }
+            else
+            {
+                var expectedName = parameterToken.TrimStart('@', ':');
+                parameter = command.Parameters.Cast<DbParameter>().Single(item =>
+                    string.Equals(item.ParameterName.TrimStart('@', ':', '$'), expectedName, StringComparison.OrdinalIgnoreCase));
+            }
+
+            comparedUpdatedAt = parameter.Value switch
+            {
+                DateTime value => value,
+                DateTimeOffset value => value.UtcDateTime,
+                _ => throw new InvalidOperationException("The UpdatedAt CAS predicate must bind a timestamp parameter."),
+            };
+            return true;
+        }
+    }
+
+    private sealed record PostgreSqlVersionCasObservation(
+        DbTransaction Transaction,
+        DbConnection Connection,
+        DateTime ComparedUpdatedAt,
+        bool TransactionAndConnectionWereOpen);
 
     private sealed record ApprovedMovieFixture(Guid MovieProjectId, Guid SceneId, Guid ShotId, Guid SourceVersionId, Guid FirstClipId, Guid SecondClipId);
 }
