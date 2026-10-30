@@ -51,7 +51,9 @@ public sealed class S3CompatibleFileStorageService : IFileStorageService, IDispo
         {
             await client.PutAsync(settings.S3Bucket, storageKey, content, cancellationToken);
         }
-        catch (OperationCanceledException)
+        // Preserve a real caller abort; an SDK-initiated timeout with an active
+        // caller token is a storage failure, not a client cancellation.
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
         }
@@ -68,7 +70,9 @@ public sealed class S3CompatibleFileStorageService : IFileStorageService, IDispo
         {
             return await client.GetAsync(settings.S3Bucket, storageKey, cancellationToken);
         }
-        catch (OperationCanceledException)
+        // Preserve a real caller abort; an SDK-initiated timeout with an active
+        // caller token is a storage failure, not a client cancellation.
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
         }
@@ -85,7 +89,9 @@ public sealed class S3CompatibleFileStorageService : IFileStorageService, IDispo
         {
             await client.DeleteAsync(settings.S3Bucket, storageKey, cancellationToken);
         }
-        catch (OperationCanceledException)
+        // Preserve a real caller abort; an SDK-initiated timeout with an active
+        // caller token is a storage failure, not a client cancellation.
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
         }
@@ -102,7 +108,9 @@ public sealed class S3CompatibleFileStorageService : IFileStorageService, IDispo
         {
             return await client.ExistsAsync(settings.S3Bucket, storageKey, cancellationToken);
         }
-        catch (OperationCanceledException)
+        // Preserve a real caller abort; an SDK-initiated timeout with an active
+        // caller token is a storage failure, not a client cancellation.
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
         }
@@ -120,13 +128,15 @@ public sealed class S3CompatibleFileStorageService : IFileStorageService, IDispo
         var failureClass = ClassifyFailure(exception);
         if (exception is AmazonS3Exception s3Exception)
         {
+            // Provider error codes and request IDs are external strings, not
+            // trusted diagnostic categories. Do not log their raw contents:
+            // they may disclose tenant, endpoint or request-specific data.
             logger.LogError(
-                "S3-compatible storage operation failed. Operation={Operation}; StatusCode={StatusCode}; ErrorCode={ErrorCode}; ErrorType={ErrorType}; RequestId={RequestId}; FailureClass={FailureClass}",
+                "S3-compatible storage operation failed. Operation={Operation}; StatusCode={StatusCode}; ErrorType={ErrorType}; HasRequestId={HasRequestId}; FailureClass={FailureClass}",
                 operation,
                 (int)s3Exception.StatusCode,
-                s3Exception.ErrorCode,
                 exception.GetType().Name,
-                s3Exception.RequestId,
+                !string.IsNullOrWhiteSpace(s3Exception.RequestId),
                 failureClass);
             return;
         }
@@ -140,15 +150,29 @@ public sealed class S3CompatibleFileStorageService : IFileStorageService, IDispo
 
     internal static string ClassifyFailure(Exception exception)
     {
+        // Prefer a recognized transport root cause, but do not lose the outer
+        // S3 response classification when the inner exception is unrecognized.
+        // Never log exception messages, endpoints, object keys or credentials.
         if (exception.InnerException is not null)
-            return ClassifyFailure(exception.InnerException);
+        {
+            var innerClass = ClassifyFailure(exception.InnerException);
+            if (innerClass != "unknown")
+                return innerClass;
+        }
 
         return exception switch
         {
             SocketException => "network",
             AuthenticationException => "tls",
             TaskCanceledException => "timeout",
+            OperationCanceledException => "timeout",
             HttpRequestException => "transport",
+            // Status 0 means that the SDK did not expose an HTTP response.
+            // It is NOT proof of a particular network or signing root cause.
+            AmazonS3Exception s3 when (int)s3.StatusCode == 0 => "s3_no_http_response",
+            AmazonS3Exception s3 when (int)s3.StatusCode is 401 or 403 => "s3_auth_or_permission",
+            AmazonS3Exception s3 when (int)s3.StatusCode == 429 => "s3_rate_limited",
+            AmazonS3Exception s3 when (int)s3.StatusCode >= 500 => "s3_service_error",
             AmazonS3Exception => "s3_response",
             _ => "unknown",
         };
@@ -238,7 +262,12 @@ internal sealed class AwsS3CompatibleObjectClient : IS3CompatibleObjectClient
                 Key = key,
             }, cancellationToken);
 
-            if (response.ResponseStream is null) return null;
+            // A successful GET without a response body is a malformed upstream
+            // response, not proof that a private object is missing. Only a
+            // verified object-level 404 should be reported as absent.
+            if (response.ResponseStream is null)
+                throw new InvalidDataException("S3-compatible GET returned no response stream.");
+
             var stream = new ResponseOwnedStream(response.ResponseStream, response);
             response = null;
             return stream;
@@ -281,10 +310,15 @@ internal sealed class AwsS3CompatibleObjectClient : IS3CompatibleObjectClient
 
     public void Dispose() => client?.Dispose();
 
-    private static bool IsNotFound(AmazonS3Exception exception) =>
+    // Never turn an auth, transport, or bucket-configuration failure into an
+    // apparent missing private file just because the upstream error code says
+    // "NoSuchKey". Only a 404 for an object (or a generic 404 without an S3
+    // error code) proves absence. Other failures must reach safe diagnostics.
+    internal static bool IsNotFound(AmazonS3Exception exception) =>
         exception.StatusCode == System.Net.HttpStatusCode.NotFound
-        || string.Equals(exception.ErrorCode, "NoSuchKey", StringComparison.OrdinalIgnoreCase)
-        || string.Equals(exception.ErrorCode, "NotFound", StringComparison.OrdinalIgnoreCase);
+        && (string.IsNullOrWhiteSpace(exception.ErrorCode)
+            || string.Equals(exception.ErrorCode, "NoSuchKey", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(exception.ErrorCode, "NotFound", StringComparison.OrdinalIgnoreCase));
 
     private sealed class ResponseOwnedStream(Stream inner, IDisposable response) : Stream
     {
