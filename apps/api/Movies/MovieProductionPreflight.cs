@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
@@ -19,6 +21,8 @@ public static class MovieProductionPreflightDecisionCodes
     public const string ClipDurationUnsupported = "clip_duration_unsupported";
     public const string ExecutionIntentUnsupported = "execution_intent_unsupported";
     public const string PromptCapacityUnsupported = "creative_text_capacity_unsupported";
+    public const string PriceIntentUnsupported = "price_intent_unsupported";
+    public const string PriceQuoteStale = "price_quote_stale";
 }
 
 public static class MovieProductionPreflightCheckKeys
@@ -33,13 +37,16 @@ public static class MovieProductionPreflightCheckKeys
     public const string ProviderAdmission = "provider_admission";
     public const string ClipDuration = "clip_duration";
     public const string PromptCapacity = "creative_text_capacity";
+    public const string PriceIntent = "price_intent";
 }
 
 public sealed record MovieProductionPreflightRequest(
     Guid? SourceProductionVersionId = null,
     string? TargetResolution = null,
     string? QualityTier = null,
-    bool ConfirmationAccepted = false);
+    bool ConfirmationAccepted = false,
+    decimal? ExpectedMaximumAmountUsd = null,
+    string? ExpectedQuoteFingerprint = null);
 
 public sealed record MovieProductionPreflightCheckDto(
     string Key,
@@ -70,6 +77,16 @@ public sealed record MovieProductionAdaptiveResolutionDto(
     IReadOnlyList<string> ReasonCodes);
 
 /// <summary>
+/// User-safe quote identity. Provider and model keys remain server-side; the opaque
+/// fingerprint binds the displayed maximum USD amount to the selected adapter/model,
+/// adaptive profile, source version, duration and current pricing route.
+/// </summary>
+public sealed record MovieProductionPriceIntentDto(
+    decimal ExpectedMaximumAmountUsd,
+    string Currency,
+    string QuoteFingerprint);
+
+/// <summary>
 /// User-safe, read-only production hand-off decision. This is a preview only: it never
 /// creates a generation job, persists a production version, calls a provider, or charges a
 /// customer. The same service is re-evaluated immediately before a render is queued.
@@ -87,7 +104,8 @@ public sealed record MovieProductionPreflightDto(
     MovieProductionAdaptiveResolutionDto AdaptiveResolution,
     GenerationCostPreviewDto CostGuardrails,
     string? RejectionCode = null,
-    string? RejectionMessage = null);
+    string? RejectionMessage = null,
+    MovieProductionPriceIntentDto? PriceIntent = null);
 
 public interface IMovieProductionPreflightService
 {
@@ -104,6 +122,79 @@ public sealed record MovieProductionAdaptivePlan(
     string ProcessingPath,
     string QualityTier,
     AdaptiveResolution.AdaptiveResolutionDirectorRecommendation Recommendation);
+
+/// <summary>
+/// Creates a non-secret client round-trip fingerprint for a production price preview.
+/// The raw adapter/model identifiers are included only in the hash input and never returned.
+/// </summary>
+public static class MovieProductionQuoteFingerprint
+{
+    public static MovieProductionPriceIntentDto? Create(
+        Guid shotId,
+        Guid? sourceProductionVersionId,
+        string aspectRatio,
+        int durationSeconds,
+        string? providerKey,
+        string? modelKey,
+        MovieProductionAdaptivePlan plan,
+        MovieGenerationCostEstimate estimate)
+    {
+        if (string.IsNullOrWhiteSpace(providerKey)
+            || string.IsNullOrWhiteSpace(modelKey)
+            || !estimate.IsEstimated
+            || estimate.MaximumAmountUsd is not { } maximumAmountUsd
+            || !string.Equals(estimate.Currency, UsageCurrencies.Usd, StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        var canonicalQuote = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            version = "movie-production-quote-v1",
+            shotId,
+            sourceProductionVersionId,
+            aspectRatio = aspectRatio.Trim(),
+            durationSeconds,
+            providerKey = providerKey.Trim().ToUpperInvariant(),
+            modelKey = modelKey.Trim().ToUpperInvariant(),
+            plan.SourceResolution,
+            plan.TargetResolution,
+            plan.ProcessingPath,
+            plan.QualityTier,
+            estimate.State,
+            estimate.MinimumAmountUsd,
+            estimate.MaximumAmountUsd,
+            currency = estimate.Currency.Trim().ToUpperInvariant(),
+            estimate.PricingVersion,
+            estimate.PricingEffectiveAtUtc,
+            estimate.PricingSource,
+            components = estimate.Components
+                .OrderBy(item => item.Dimension, StringComparer.Ordinal)
+                .ThenBy(item => item.Quantity)
+                .ThenBy(item => item.Unit, StringComparer.Ordinal)
+                .ThenBy(item => item.MinimumUsd)
+                .ThenBy(item => item.MaximumUsd)
+                .Select(item => new
+                {
+                    item.Dimension,
+                    item.Quantity,
+                    item.Unit,
+                    item.MinimumUsd,
+                    item.MaximumUsd,
+                })
+                .ToArray(),
+        });
+        var fingerprint = Convert.ToHexString(SHA256.HashData(canonicalQuote)).ToLowerInvariant();
+        return new MovieProductionPriceIntentDto(maximumAmountUsd, UsageCurrencies.Usd, fingerprint);
+    }
+
+    public static bool Matches(
+        MovieProductionPriceIntentDto? current,
+        decimal? expectedMaximumAmountUsd,
+        string? expectedQuoteFingerprint) =>
+        current is not null
+        && expectedMaximumAmountUsd == current.ExpectedMaximumAmountUsd
+        && !string.IsNullOrWhiteSpace(expectedQuoteFingerprint)
+        && string.Equals(expectedQuoteFingerprint.Trim(), current.QuoteFingerprint, StringComparison.Ordinal);
+}
 
 /// <summary>
 /// Builds the exact adaptive plan used by both preflight and the render orchestrator.
@@ -261,10 +352,37 @@ public sealed class MovieProductionPreflightService(
         // Preserve the source duration when valid; any invalid value is a
         // read-only estimate placeholder and cannot authorize an actual render.
         var durationSeconds = Math.Clamp(selectedDuration, 1, 3_600);
-        var estimate = await costEstimator.EstimateAsync(
-            new MovieGenerationCostRequest(durationSeconds, plan.SourceResolution, plan.TargetResolution, plan.QualityTier, plan.ProcessingPath),
-            selectedProviderKey: provider.Key,
-            cancellationToken: cancellationToken);
+        var providerModelKey = string.IsNullOrWhiteSpace(provider.SceneClipPricingModelKey)
+            ? null
+            : provider.SceneClipPricingModelKey.Trim();
+        var estimate = providerModelKey is null
+            ? MovieGenerationCostEstimate.Unevaluated(MovieGenerationCostEstimateReasons.CapabilityMetadataMissing)
+            : await costEstimator.EstimateAsync(
+                new MovieGenerationCostRequest(durationSeconds, plan.SourceResolution, plan.TargetResolution, plan.QualityTier, plan.ProcessingPath),
+                selectedProviderKey: provider.Key,
+                selectedModelKey: providerModelKey,
+                cancellationToken: cancellationToken);
+        var priceIntent = admissionError is null && clipDurationAccepted
+            ? MovieProductionQuoteFingerprint.Create(
+                shot.Id, request.SourceProductionVersionId, shot.Scene.MovieProject.AspectRatio,
+                selectedDuration, provider.Key, providerModelKey, plan, estimate)
+            : null;
+        var quoteWasProvided = request.ExpectedMaximumAmountUsd.HasValue
+            || !string.IsNullOrWhiteSpace(request.ExpectedQuoteFingerprint);
+        var quoteMatches = !quoteWasProvided
+            || MovieProductionQuoteFingerprint.Matches(
+                priceIntent, request.ExpectedMaximumAmountUsd, request.ExpectedQuoteFingerprint);
+        var priceIntentSatisfied = priceIntent is not null && quoteMatches;
+        checks.Add(new MovieProductionPreflightCheckDto(
+            MovieProductionPreflightCheckKeys.PriceIntent,
+            "Exact model price quote",
+            priceIntentSatisfied,
+            true,
+            priceIntent is null
+                ? "No exact model-specific USD price route is available for this executable profile."
+                : quoteMatches
+                    ? "The maximum USD estimate is bound to the currently selected adapter, model and execution profile."
+                    : "The adapter, model, price or execution profile changed after preview; refresh the quote before queueing."));
         var guardrail = await costGuardrails.EvaluateAsync(
             userId,
             shot.Scene.MovieProject.WorkspaceId,
@@ -278,12 +396,12 @@ public sealed class MovieProductionPreflightService(
             guardrail.CanProceed,
             true,
             guardrail.CanProceed
-                ? estimate.IsEstimated && estimate.MaximumAmountUsd.HasValue
-                    ? "The server-side estimate is within the configured safety envelope."
-                    : "No priced route is available; the request remains provider-neutral and non-chargeable."
+                ? priceIntent is not null
+                    ? "The exact model-specific estimate is within the configured safety envelope."
+                    : "The request has no exact model-specific USD quote and cannot be queued."
                 : guardrail.RejectionMessage ?? "Review the server-side cost safety decision before continuing."));
 
-        var recommendations = BuildRecommendations(readiness, approvedStoryboard, approvedKeyframe, approvedMotionPreview, source, package, blockingPackageWarnings, plan, guardrail, request.ConfirmationAccepted);
+        var recommendations = BuildRecommendations(readiness, approvedStoryboard, approvedKeyframe, approvedMotionPreview, source, package, blockingPackageWarnings, plan, guardrail, request.ConfirmationAccepted, priceIntent, quoteMatches);
         if (!clipDurationAccepted && admissionError?.Code == "MOVIE_CLIP_DURATION_UNSUPPORTED")
             recommendations = recommendations.Concat([
                 new MovieProductionPreflightRecommendationDto("shorten_production_shot",
@@ -309,12 +427,16 @@ public sealed class MovieProductionPreflightService(
                     ? MovieProductionPreflightDecisionCodes.ClipDurationUnsupported
                     : admissionError?.Code == "MOVIE_CLIP_EXECUTION_INTENT_UNSUPPORTED"
                         ? MovieProductionPreflightDecisionCodes.ExecutionIntentUnsupported
+                        : quoteWasProvided && !quoteMatches
+                            ? MovieProductionPreflightDecisionCodes.PriceQuoteStale
                         : !promptFits
                             ? MovieProductionPreflightDecisionCodes.PromptCapacityUnsupported
                             : checks.Any(item => !item.Satisfied && item.Key is MovieProductionPreflightCheckKeys.Storyboard or MovieProductionPreflightCheckKeys.Keyframe or MovieProductionPreflightCheckKeys.MotionPreview or MovieProductionPreflightCheckKeys.ReferencePackage)
                             ? MovieProductionPreflightDecisionCodes.ReferenceWorkRequired
                             : !adaptiveSatisfied
                                 ? MovieProductionPreflightDecisionCodes.QualityReviewRequired
+                                : priceIntent is null
+                                    ? MovieProductionPreflightDecisionCodes.PriceIntentUnsupported
                                 : !guardrail.CanProceed && guardrail.ConfirmationRequired
                                     ? MovieProductionPreflightDecisionCodes.CostConfirmationRequired
                                     : MovieProductionPreflightDecisionCodes.CostGuardrailBlocked;
@@ -327,6 +449,10 @@ public sealed class MovieProductionPreflightService(
                     ? "Shorten creative directions or character continuity to fit the video adapter."
                 : decision == MovieProductionPreflightDecisionCodes.ReferenceWorkRequired
                     ? "Complete the recommended reference work before starting this expensive production pass."
+                    : decision == MovieProductionPreflightDecisionCodes.PriceQuoteStale
+                        ? "The selected adapter or maximum price changed after preview. Refresh the quote and review it again."
+                        : decision == MovieProductionPreflightDecisionCodes.PriceIntentUnsupported
+                            ? "Production is blocked until this exact adapter/model profile has a verified USD price route."
                     : decision is MovieProductionPreflightDecisionCodes.ProviderUnavailable or MovieProductionPreflightDecisionCodes.ExecutionIntentUnsupported
                         ? admissionError!.Message
                         : decision == MovieProductionPreflightDecisionCodes.QualityReviewRequired
@@ -339,6 +465,10 @@ public sealed class MovieProductionPreflightService(
                     ? admissionError!.Code
                 : decision == MovieProductionPreflightDecisionCodes.PromptCapacityUnsupported
                     ? "MOVIE_CLIP_PROMPT_UNSUPPORTED"
+                    : decision == MovieProductionPreflightDecisionCodes.PriceQuoteStale
+                        ? "MOVIE_PRODUCTION_QUOTE_STALE"
+                        : decision == MovieProductionPreflightDecisionCodes.PriceIntentUnsupported
+                            ? "MOVIE_PRODUCTION_PRICE_UNAVAILABLE"
                     : decision == MovieProductionPreflightDecisionCodes.CostConfirmationRequired
                         ? "GENERATION_CONFIRMATION_REQUIRED"
                         : guardrail.RejectionCode ?? "PRODUCTION_PREFLIGHT_REQUIRED";
@@ -366,7 +496,8 @@ public sealed class MovieProductionPreflightService(
                 plan.Recommendation.ReasonCodes),
             GenerationCostPreviewMapper.ToDto(guardrail),
             rejectionCode,
-            rejectionMessage);
+            rejectionMessage,
+            priceIntent);
     }
 
     // A missing canonical reference package is a blocking condition even if the
@@ -394,7 +525,9 @@ public sealed class MovieProductionPreflightService(
         IReadOnlyList<MovieProductionReferenceWarningDto> blockingWarnings,
         MovieProductionAdaptivePlan plan,
         GenerationCostPreflightResult guardrail,
-        bool confirmationAccepted)
+        bool confirmationAccepted,
+        MovieProductionPriceIntentDto? priceIntent,
+        bool quoteMatches)
     {
         var recommendations = new List<MovieProductionPreflightRecommendationDto>();
         if (!readiness.Ready)
@@ -418,6 +551,10 @@ public sealed class MovieProductionPreflightService(
             recommendations.Add(new("review_adaptive_escalation", "Review the higher-source option", plan.Recommendation.Escalation.EscalateToSourceResolution is null
                 ? "The selected source does not meet the adaptive quality floor; review QC before production."
                 : $"Review {plan.Recommendation.Escalation.EscalateToSourceResolution} as the higher-source option before production."));
+        if (priceIntent is null)
+            recommendations.Add(new("verify_model_price", "Verify the model price", "Production needs an active USD pricing route for the adapter's exact declared model and output profile."));
+        else if (!quoteMatches)
+            recommendations.Add(new("refresh_price_quote", "Refresh the production quote", "Re-run the read-only preflight and confirm the current maximum USD estimate."));
         if (!guardrail.CanProceed)
             recommendations.Add(new("review_cost_safety", confirmationAccepted ? "Resolve the cost safety block" : "Review the server-side cost safety decision", guardrail.RejectionMessage ?? "The request cannot proceed under the current cost safety settings."));
         else if (guardrail.ConfirmationRequired && !confirmationAccepted)

@@ -999,7 +999,9 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
             request.ConfirmationAccepted,
             idempotencyKey,
             request.AllowReferenceReadinessOverride,
-            request.ReferenceReadinessOverrideReason), cancellationToken);
+            request.ReferenceReadinessOverrideReason,
+            request.ExpectedMaximumAmountUsd,
+            request.ExpectedQuoteFingerprint), cancellationToken);
         if (queued is null) return null;
         var project = await GetAsync(userId, queued.Clip.MovieProjectId, cancellationToken);
         if (project is null) throw new InvalidOperationException("Movie project disappeared.");

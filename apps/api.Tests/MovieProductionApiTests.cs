@@ -339,9 +339,27 @@ public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWork
         var motion = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post, $"/api/movie-studio/shots/{shot.Id}/production/motion-preview", new { sourceVersionId = approvedKeyframe.Id });
         var approvedMotion = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post, $"/api/movie-studio/production/versions/{motion.Id}/review", new { approve = true });
 
+        using var scope = fakeFactory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var provider = scope.ServiceProvider.GetRequiredService<IMovieVideoProvider>();
+        await MovieOperationalFixtures.AddMoviePricingRouteAsync(
+            db, provider.Key, Assert.IsType<string>(provider.SceneClipPricingModelKey));
+        var quote = await client.GetFromJsonAsync<MovieProductionPreflightDto>(
+            $"/api/movie-studio/shots/{shot.Id}/production/preflight?sourceVersionId={approvedMotion.Id}&targetResolution=1080p&qualityTier=Standard");
+        var priceIntent = Assert.IsType<MovieProductionPriceIntentDto>(quote?.PriceIntent);
+
         const string replayKey = "approved-production-creative-intent";
         var renderPath = $"/api/movie-studio/shots/{shot.Id}/production/render";
-        var renderPayload = new { sourceVersionId = approvedMotion.Id, label = "Explicit render" };
+        var renderPayload = new
+        {
+            sourceVersionId = approvedMotion.Id,
+            label = "Explicit render",
+            targetResolution = "1080p",
+            qualityTier = DirectorQualityLevels.Standard,
+            confirmationAccepted = true,
+            expectedMaximumAmountUsd = priceIntent.ExpectedMaximumAmountUsd,
+            expectedQuoteFingerprint = priceIntent.QuoteFingerprint,
+        };
         using var firstResponse = await MovieOperationalFixtures.SendWithCsrfAsync(
             client, HttpMethod.Post, renderPath, renderPayload, idempotencyKey: replayKey);
         Assert.True(firstResponse.IsSuccessStatusCode, await firstResponse.Content.ReadAsStringAsync());
@@ -354,8 +372,6 @@ public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWork
         Assert.NotNull(production);
         Assert.Contains(production!.Versions, item => item.Stage == MovieProductionStages.ProductionRender && item.GenerationJobId == render.Job.Id);
         Assert.Empty(production.Takes);
-        using var scope = fakeFactory.Services.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
         Assert.Equal(0, await db.MovieTakes.CountAsync(item => item.MovieShotId == shot.Id));
 
         // An approved production render must durably bind its queued job to
@@ -369,6 +385,8 @@ public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWork
             queuedInput.SelectedProviderKey);
         Assert.Equal(scope.ServiceProvider.GetRequiredService<IMovieVideoProvider>().SceneClipPricingModelKey,
             queuedInput.SelectedProviderModelKey);
+        Assert.Equal(priceIntent.QuoteFingerprint, queuedInput.SelectedProviderQuoteFingerprint);
+        Assert.Equal(priceIntent.ExpectedMaximumAmountUsd, queuedJob.EstimatedProviderCostUsd);
         // The previously captured character bible must travel with the job,
         // not merely live on the clip record where the provider cannot see it.
         var queuedClip = await db.MovieClips.AsNoTracking()
@@ -497,19 +515,36 @@ public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWork
         var motion = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post, $"/api/movie-studio/shots/{shot.Id}/production/motion-preview", new { sourceVersionId = approvedKeyframe.Id });
         var approvedMotion = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post, $"/api/movie-studio/production/versions/{motion.Id}/review", new { approve = true });
 
+        using var scope = fakeFactory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var provider = scope.ServiceProvider.GetRequiredService<IMovieVideoProvider>();
+        await MovieOperationalFixtures.AddMoviePricingRouteAsync(
+            db, provider.Key, Assert.IsType<string>(provider.SceneClipPricingModelKey));
+        var quote = await client.GetFromJsonAsync<MovieProductionPreflightDto>(
+            $"/api/movie-studio/shots/{shot.Id}/production/preflight?sourceVersionId={approvedMotion.Id}&targetResolution=1080p&qualityTier=Standard");
+        var priceIntent = Assert.IsType<MovieProductionPriceIntentDto>(quote?.PriceIntent);
+
         const string replayKey = "approved-production-provider-continuity";
         var renderPath = $"/api/movie-studio/shots/{shot.Id}/production/render";
-        var renderPayload = new { sourceVersionId = approvedMotion.Id, label = "Explicit render" };
+        var renderPayload = new
+        {
+            sourceVersionId = approvedMotion.Id,
+            label = "Explicit render",
+            targetResolution = "1080p",
+            qualityTier = DirectorQualityLevels.Standard,
+            confirmationAccepted = true,
+            expectedMaximumAmountUsd = priceIntent.ExpectedMaximumAmountUsd,
+            expectedQuoteFingerprint = priceIntent.QuoteFingerprint,
+        };
         using var firstResponse = await MovieOperationalFixtures.SendWithCsrfAsync(
             client, HttpMethod.Post, renderPath, renderPayload, idempotencyKey: replayKey);
         Assert.True(firstResponse.IsSuccessStatusCode, await firstResponse.Content.ReadAsStringAsync());
         var render = await firstResponse.Content.ReadFromJsonAsync<MovieProductionRenderResponse>();
         Assert.NotNull(render);
-        using var scope = fakeFactory.Services.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
         var queuedJob = await db.GenerationJobs.AsNoTracking().SingleAsync(item => item.Id == render!.Job.Id);
         var queuedInput = JsonSerializer.Deserialize<MovieGenerationInput>(queuedJob.InputJson);
         Assert.NotNull(queuedInput);
+        Assert.Equal(priceIntent.QuoteFingerprint, queuedInput!.SelectedProviderQuoteFingerprint);
         var versionsBefore = await db.MovieProductionVersions.CountAsync(item => item.MovieShotId == shot.Id);
         var clipsBefore = await db.MovieClips.CountAsync(item => item.MovieShotId == shot.Id);
         var ledgerBefore = await db.UsageTransactions.CountAsync();

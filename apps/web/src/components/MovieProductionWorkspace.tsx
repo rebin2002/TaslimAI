@@ -21,7 +21,7 @@ import {
   X,
 } from "lucide-react";
 import { useLocale } from "@/components/LocaleProvider";
-import { api, type MovieOverviewCost, type MovieProductionVersion, type MovieProject, type MovieTake } from "@/lib/api";
+import { api, type MovieOverviewCost, type MovieProductionPriceIntent, type MovieProductionVersion, type MovieProject, type MovieTake } from "@/lib/api";
 import { assetFileUrl } from "@/lib/apiBase";
 import { MovieBudgetReadinessPanel } from "@/components/MovieBudgetReadinessPanel";
 import {
@@ -60,7 +60,7 @@ function createApiAdapter(): MovieProductionWorkspaceAdapter {
     createKeyframe: (shotId, sourceVersionId, compositionJson) => api.createMovieProductionVersion(shotId, { stage: "ProductionKeyframe", sourceVersionId, compositionJson, label: "Source frame" }),
     reviewVersion: (versionId, input) => api.reviewMovieProductionVersion(versionId, input),
     createMotionPreview: (shotId, sourceVersionId) => api.createMovieMotionPreview(shotId, { sourceVersionId, label: "Motion check" }),
-    queueRender: (shotId, sourceVersionId, retry, intent) => { const renderIntent = intent ?? productionIntentForTier("Master"); return api.queueMovieProductionRender(shotId, { sourceVersionId, targetResolution: renderIntent.targetResolution, qualityTier: renderIntent.qualityTier, label: retry ? "Master retry" : "Master pass" }); },
+    queueRender: (shotId, sourceVersionId, retry, intent, priceIntent, idempotencyKey) => { return api.queueMovieProductionRender(shotId, { sourceVersionId, targetResolution: intent.targetResolution, qualityTier: intent.qualityTier, label: retry ? "Master retry" : "Master pass", confirmationAccepted: true, expectedMaximumAmountUsd: priceIntent.expectedMaximumAmountUsd, expectedQuoteFingerprint: priceIntent.quoteFingerprint }, idempotencyKey); },
     createTake: (versionId) => api.createMovieTakeFromProduction(versionId, { label: "Master take" }),
     approveTake: (takeId) => api.approveMovieTake(takeId, { decision: "Approved", comment: "Take approved in Production." }),
     selectTake: (takeId) => api.selectMovieTake(takeId),
@@ -69,7 +69,7 @@ function createApiAdapter(): MovieProductionWorkspaceAdapter {
   };
 }
 
-type PendingProductionConfirmation = { key: string; work: () => Promise<unknown>; title: string; detail: string };
+type PendingProductionConfirmation = { key: string; work: () => Promise<unknown>; title: string; detail: string; priceIntent?: MovieProductionPriceIntent };
 
 function isExpensiveProductionAction(key: string) {
   return /:(keyframe|motion|render|retry|master|regenerate)(?:$|-)/.test(key);
@@ -129,10 +129,10 @@ export function MovieProductionWorkspace({ project, completionPercent, onRefresh
     await api.confirmMovieRegeneration(response.request.id, true);
   };
 
-  async function executeAction(key: string, work: () => Promise<unknown>) {
+  async function executeAction(key: string, work: () => Promise<unknown>, priceIntent?: MovieProductionPriceIntent) {
     setBusyKey(key);
     setError("");
-    setLastAction(() => async () => { await runAction(key, work); });
+    setLastAction(() => async () => { await runAction(key, work, priceIntent); });
     try {
       await work();
       await onRefresh();
@@ -144,13 +144,45 @@ export function MovieProductionWorkspace({ project, completionPercent, onRefresh
     }
   }
 
-  async function runAction(key: string, work: () => Promise<unknown>) {
+  async function runAction(key: string, work: () => Promise<unknown>, priceIntent?: MovieProductionPriceIntent) {
     if (isExpensiveProductionAction(key)) {
       const copy = confirmationCopy(key);
-      setConfirmation({ key, work, ...copy });
+      setConfirmation({ key, work, priceIntent, ...copy });
       return;
     }
     await executeAction(key, work);
+  }
+
+  async function prepareRender(shotId: string, sourceVersionId: string, retry: boolean, intent: ReturnType<typeof productionIntentForTier>) {
+    const key = `${shotId}:render`;
+    setBusyKey(key);
+    setError("");
+    try {
+      const preview = await api.getMovieProductionPreflight(shotId, {
+        sourceVersionId,
+        targetResolution: intent.targetResolution,
+        qualityTier: intent.qualityTier,
+      });
+      const onlyCostConfirmationRequired = preview.decision === "cost_confirmation_required";
+      if (!preview.priceIntent || (!preview.canProceed && !onlyCostConfirmationRequired))
+        throw new Error(preview.rejectionMessage ?? preview.summary ?? "The production quote is not ready.");
+
+      const priceIntent = preview.priceIntent;
+      const idempotencyKey = globalThis.crypto?.randomUUID?.()
+        ?? `movie-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+      const work = () => adapter.queueRender(shotId, sourceVersionId, retry, intent, priceIntent, idempotencyKey);
+      setConfirmation({
+        key,
+        work,
+        priceIntent,
+        title: retry ? "Confirm this production retry" : "Confirm this production pass",
+        detail: "The server checked the selected shot, adapter capability and current model-specific price. Review the maximum estimate before queueing.",
+      });
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "The production quote could not be checked.");
+    } finally {
+      setBusyKey("");
+    }
   }
 
   return <div className="movie-production-workspace" data-testid="movie-production-workspace">
@@ -166,7 +198,7 @@ export function MovieProductionWorkspace({ project, completionPercent, onRefresh
     <ProductionStageRail currentStage={model.currentStage} counts={model.counts} />
 
     <MovieBudgetReadinessPanel project={project} workspace={model} cost={cost} selectedTier={selectedTier} onTierChange={setSelectedTier} />
-    {confirmation && <section className="movie-production-confirmation" role="dialog" aria-modal="false" aria-labelledby="movie-production-confirmation-title"><div className="movie-budget-readiness-icon"><AlertTriangle size={16} /></div><div><span className="movie-workspace-kicker">Review before continuing</span><h3 id="movie-production-confirmation-title">{confirmation.title}</h3><p>{confirmation.detail} Nothing is charged from this planning surface.</p><div className="movie-production-confirmation-actions"><button type="button" className="movie-workspace-button is-primary" onClick={() => { const pending = confirmation; setConfirmation(null); void executeAction(pending.key, pending.work); }}>Continue</button><button type="button" className="movie-workspace-button is-secondary" onClick={() => setConfirmation(null)}>Not now</button></div></div></section>}
+    {confirmation && <section className="movie-production-confirmation" role="dialog" aria-modal="false" aria-labelledby="movie-production-confirmation-title"><div className="movie-budget-readiness-icon"><AlertTriangle size={16} /></div><div><span className="movie-workspace-kicker">Review before continuing</span><h3 id="movie-production-confirmation-title">{confirmation.title}</h3><p>{confirmation.detail}</p>{confirmation.priceIntent && <p><strong>Maximum estimated price: {new Intl.NumberFormat("en-US", { style: "currency", currency: confirmation.priceIntent.currency }).format(confirmation.priceIntent.expectedMaximumAmountUsd)}.</strong> This estimate is tied to this shot, profile and current adapter model. Queue only if you approve this amount.</p>}<div className="movie-production-confirmation-actions"><button type="button" className="movie-workspace-button is-primary" onClick={() => { const pending = confirmation; setConfirmation(null); void executeAction(pending.key, pending.work, pending.priceIntent); }}>Confirm and queue</button><button type="button" className="movie-workspace-button is-secondary" onClick={() => setConfirmation(null)}>Not now</button></div></div></section>}
 
     <div className="movie-production-summary-grid" aria-label="Production summary">
       <SummaryMetric label="Shot plan" value={`${model.counts.shotPlanReady}/${model.counts.shots}`} detail="approved intent" />
@@ -181,7 +213,7 @@ export function MovieProductionWorkspace({ project, completionPercent, onRefresh
     <section className="movie-production-shot-workspace" aria-labelledby="production-shot-list-title">
       <div className="movie-production-section-heading"><div><span className="movie-workspace-kicker">Shot review</span><h3 id="production-shot-list-title">{t("movieModule.production.title")}</h3><p>Implementation details stay behind the stage labels; you only see what needs your review next.</p></div><span className="movie-production-filter-count">{visibleShots.length} of {model.counts.shots} shots</span></div>
       <div className="movie-production-filters" role="tablist" aria-label="Filter shots">{filters.map((item) => <button key={item.id} type="button" role="tab" aria-selected={filter === item.id} className={filter === item.id ? "is-active" : ""} onClick={() => setFilter(item.id)}>{item.label}{item.id === "needs-review" && model.counts.needsReview > 0 && <span>{model.counts.needsReview}</span>}{item.id === "ready" && model.counts.readyForTimeline > 0 && <span>{model.counts.readyForTimeline}</span>}</button>)}</div>
-      {visibleShots.length ? <div className="movie-production-shot-list">{visibleShots.map((item) => <ProductionShotCard key={item.shot.id} item={item} busyKey={busyKey} selectedTier={selectedTier} adapter={adapter} onAction={runAction} onRegenerate={regenerateShot(item)} />)}</div> : <ProductionEmptyState filter={filter} hasShots={model.counts.shots > 0} />}
+      {visibleShots.length ? <div className="movie-production-shot-list">{visibleShots.map((item) => <ProductionShotCard key={item.shot.id} item={item} busyKey={busyKey} selectedTier={selectedTier} adapter={adapter} onAction={runAction} onPrepareRender={prepareRender} onRegenerate={regenerateShot(item)} />)}</div> : <ProductionEmptyState filter={filter} hasShots={model.counts.shots > 0} />}
     </section>
 
     <TimelineReadiness model={model} />
@@ -194,7 +226,7 @@ function ProductionStageRail({ currentStage, counts }: { currentStage: Productio
   return <nav className="movie-production-stage-rail" aria-label="Production stages">{stageRail.map((stage, index) => { const complete = index < activeIndex || (stage.id === "timeline" && counts.readyForTimeline > 0 && counts.readyForTimeline === counts.shots); const active = index === activeIndex; return <div className={`movie-production-stage-step ${complete ? "is-complete" : ""} ${active ? "is-active" : ""}`} key={stage.id} aria-current={active ? "step" : undefined}><span className="movie-production-stage-index">{complete ? <Check size={13} /> : String(index + 1).padStart(2, "0")}</span><div><strong>{stage.label}</strong><small>{stage.detail}</small></div>{index < stageRail.length - 1 && <ChevronRight size={13} className="movie-production-stage-arrow" aria-hidden="true" />}</div>; })}</nav>;
 }
 
-function ProductionShotCard({ item, busyKey, selectedTier, adapter, onAction, onRegenerate }: { item: ProductionWorkspaceShot; busyKey: string; selectedTier: MovieResolutionTier; adapter: MovieProductionWorkspaceAdapter; onAction: (key: string, work: () => Promise<unknown>) => Promise<void>; onRegenerate: () => Promise<void> }) {
+function ProductionShotCard({ item, busyKey, selectedTier, adapter, onAction, onPrepareRender, onRegenerate }: { item: ProductionWorkspaceShot; busyKey: string; selectedTier: MovieResolutionTier; adapter: MovieProductionWorkspaceAdapter; onAction: (key: string, work: () => Promise<unknown>) => Promise<void>; onPrepareRender: (shotId: string, sourceVersionId: string, retry: boolean, intent: ReturnType<typeof productionIntentForTier>) => Promise<void>; onRegenerate: () => Promise<void> }) {
   const { shot } = item;
   const sourceStoryboard = item.storyboard;
   const isBusy = (action: string) => busyKey === `${shot.id}:${action}`;
@@ -217,7 +249,7 @@ function ProductionShotCard({ item, busyKey, selectedTier, adapter, onAction, on
       {item.pendingKeyframe && <button type="button" className="movie-workspace-button is-primary" disabled={Boolean(busyKey)} onClick={() => void onAction(`${shot.id}:approve-keyframe`, () => adapter.reviewVersion(item.pendingKeyframe!.id, { approve: true, reason: "Source frame approved in Production." }))}>{isBusy("approve-keyframe") ? "Saving…" : "Approve source frame"}</button>}
       {item.keyframe && !item.motion && <button type="button" className="movie-workspace-button is-secondary" disabled={Boolean(busyKey)} onClick={() => void onAction(`${shot.id}:motion`, () => adapter.createMotionPreview(shot.id, item.keyframe!.id))}><Play size={14} /> Create motion check</button>}
       {item.motion?.status === "PendingApproval" && <button type="button" className="movie-workspace-button is-primary" disabled={Boolean(busyKey)} onClick={() => void onAction(`${shot.id}:approve-motion`, () => adapter.reviewVersion(item.motion!.id, { approve: true, reason: "Motion check approved in Production." }))}>{isBusy("approve-motion") ? "Saving…" : "Approve motion check"}</button>}
-      {item.motion?.status === "Approved" && (!item.render || renderFailed) && <button type="button" className="movie-workspace-button is-secondary" disabled={Boolean(busyKey)} onClick={() => void onAction(`${shot.id}:render`, () => adapter.queueRender(shot.id, item.motion!.id, Boolean(item.render && renderFailed), productionIntentForTier(selectedTier)))}><WandSparkles size={14} /> {renderFailed ? "Retry master pass" : "Create master pass"}</button>}
+      {item.motion?.status === "Approved" && (!item.render || renderFailed) && <button type="button" className="movie-workspace-button is-secondary" disabled={Boolean(busyKey)} onClick={() => void onPrepareRender(shot.id, item.motion!.id, Boolean(item.render && renderFailed), productionIntentForTier(selectedTier))}><WandSparkles size={14} /> {renderFailed ? "Retry master pass" : "Create master pass"}</button>}
       {canCreateTake && <button type="button" className="movie-workspace-button is-primary" disabled={Boolean(busyKey)} onClick={() => void onAction(`${shot.id}:take`, () => adapter.createTake(item.render!.id))}><CheckCircle2 size={14} /> Save as take</button>}
       {selectedTier === "Master" && item.selectedTake && <button type="button" className="movie-workspace-button is-finish" disabled={Boolean(busyKey) || !masterAllowed} onClick={() => void onAction(`${shot.id}:master`, () => adapter.requestMaster(item.selectedTake!.id))}><Flag size={14} /> Record master hand-off</button>}
       {renderFailed && <><button type="button" className="movie-workspace-button is-secondary" disabled={Boolean(busyKey)} onClick={() => void onAction(`${shot.id}:regenerate`, onRegenerate)}><RefreshCw size={14} /> Regenerate failed pass</button><span className="movie-production-inline-recovery"><AlertTriangle size={13} /> Review the pass note before retrying.</span></>}

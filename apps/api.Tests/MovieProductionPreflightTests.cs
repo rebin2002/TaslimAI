@@ -6,9 +6,11 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Taslim.Api.Contracts;
+using Taslim.Api.Domain;
 using Taslim.Api.Movies;
 using Taslim.Api.Persistence;
 using Taslim.Api.Tests.ProviderTesting;
+using Taslim.Api.Usage;
 using Xunit;
 
 namespace Taslim.Api.Tests;
@@ -529,6 +531,233 @@ public sealed class MovieProductionPreflightTests : IClassFixture<GenerationJobs
         Assert.False(await db.GenerationJobs.AnyAsync(job => job.WorkspaceId == auth.PersonalWorkspace.Id));
         Assert.Equal(usageBefore, await db.UsageTransactions.CountAsync());
         Assert.Equal(callsBefore, calls.Calls(FakeProviderKind.Movie));
+    }
+
+    [Fact]
+    public async Task Production_quote_binds_exact_model_and_amount_before_queue_and_replay()
+    {
+        // A fake adapter plus exact/decoy price rows exercises the real read-only
+        // preflight and queue path without starting a worker or contacting a provider.
+        using var isolatedFactory = new MovieOperationalNoWorkerFactory();
+        using (var setup = isolatedFactory.Services.CreateScope())
+            setup.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+        using var client = isolatedFactory.CreateClient();
+        var movie = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Model-bound production quote", sceneDurationSeconds: 5);
+        var approvedMotion = await MovieOperationalFixtures.CreateApprovedMotionPreviewAsync(client, movie.Shot.Id);
+
+        using var scope = isolatedFactory.Services.CreateScope();
+        var services = scope.ServiceProvider;
+        var db = services.GetRequiredService<TaslimDbContext>();
+        var provider = Assert.IsType<FakeMovieVideoProvider>(services.GetRequiredService<IMovieVideoProvider>());
+        var modelKey = Assert.IsType<string>(provider.SceneClipPricingModelKey);
+        var exactRoute = await MovieOperationalFixtures.AddMoviePricingRouteAsync(
+            db, provider.Key, modelKey, 0.01m, 0.02m, 0.01m, 0.02m);
+        _ = await MovieOperationalFixtures.AddMoviePricingRouteAsync(
+            db, provider.Key, "expensive-decoy-model", 1.00m, 2.00m, 1.00m, 2.00m);
+        // The adapter may expose incidental whitespace around an otherwise
+        // stable model key; queue and replay must canonicalize it consistently.
+        provider.SceneClipPricingModelKey = $" {modelKey} ";
+
+        var preflightPath = $"/api/movie-studio/shots/{movie.Shot.Id}/production/preflight"
+            + $"?sourceVersionId={approvedMotion.Id}&targetResolution=1080p&qualityTier=Standard";
+        var clipCountBefore = await db.MovieClips.CountAsync();
+        var jobCountBefore = await db.GenerationJobs.CountAsync();
+        var usageCountBefore = await db.UsageTransactions.CountAsync();
+        var providerCallsBefore = services.GetRequiredService<FakeProviderCallLog>().Calls(FakeProviderKind.Movie);
+
+        using var quoteResponse = await client.GetAsync(preflightPath);
+        Assert.Equal(HttpStatusCode.OK, quoteResponse.StatusCode);
+        var quote = (await quoteResponse.Content.ReadFromJsonAsync<MovieProductionPreflightDto>())!;
+        var priceIntent = Assert.IsType<MovieProductionPriceIntentDto>(quote.PriceIntent);
+        Assert.True(quote.CanProceed
+            || quote.Decision == MovieProductionPreflightDecisionCodes.CostConfirmationRequired,
+            quote.RejectionMessage ?? quote.Summary);
+        Assert.Equal("USD", priceIntent.Currency);
+        Assert.Contains(quote.Checks, check => check.Key == MovieProductionPreflightCheckKeys.PriceIntent
+            && check.Required && check.Satisfied);
+        var quoteJson = await quoteResponse.Content.ReadAsStringAsync();
+        Assert.DoesNotContain(provider.Key, quoteJson, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(modelKey, quoteJson, StringComparison.OrdinalIgnoreCase);
+
+        var estimateRequest = new MovieGenerationCostRequest(
+            5,
+            quote.AdaptiveResolution.SourceResolution,
+            quote.AdaptiveResolution.TargetResolution,
+            quote.AdaptiveResolution.QualityTier,
+            quote.AdaptiveResolution.ProcessingPath);
+        var estimator = services.GetRequiredService<IMovieGenerationCostEstimator>();
+        var selectedEstimate = await estimator.EstimateAsync(
+            estimateRequest, selectedProviderKey: provider.Key, selectedModelKey: modelKey);
+        var allModelEstimate = await estimator.EstimateAsync(
+            estimateRequest, selectedProviderKey: provider.Key);
+        var selectedMaximum = selectedEstimate.MaximumAmountUsd
+            ?? throw new InvalidOperationException("The configured exact-model route should produce an estimate.");
+        var allModelMaximum = allModelEstimate.MaximumAmountUsd
+            ?? throw new InvalidOperationException("The exact and decoy routes should produce an aggregate estimate.");
+        Assert.Equal(selectedMaximum, priceIntent.ExpectedMaximumAmountUsd);
+        Assert.True(allModelMaximum > priceIntent.ExpectedMaximumAmountUsd,
+            "The deliberately expensive decoy model must not influence the selected adapter's quote.");
+        Assert.Equal(0, providerCallsBefore);
+        Assert.Equal(0, services.GetRequiredService<FakeProviderCallLog>().Calls(FakeProviderKind.Movie));
+        Assert.Equal(clipCountBefore, await db.MovieClips.CountAsync());
+        Assert.Equal(jobCountBefore, await db.GenerationJobs.CountAsync());
+        Assert.Equal(usageCountBefore, await db.UsageTransactions.CountAsync());
+
+        var renderPath = $"/api/movie-studio/shots/{movie.Shot.Id}/production/render";
+        var oldQuotePayload = new
+        {
+            sourceVersionId = approvedMotion.Id,
+            label = "Quote-bound render",
+            targetResolution = "1080p",
+            qualityTier = DirectorQualityLevels.Standard,
+            confirmationAccepted = true,
+            expectedMaximumAmountUsd = priceIntent.ExpectedMaximumAmountUsd,
+            expectedQuoteFingerprint = priceIntent.QuoteFingerprint,
+        };
+
+        using var missingQuote = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, renderPath,
+            new { sourceVersionId = approvedMotion.Id, targetResolution = "1080p",
+                qualityTier = DirectorQualityLevels.Standard, confirmationAccepted = true },
+            idempotencyKey: "production-quote-required");
+        Assert.Equal(HttpStatusCode.BadRequest, missingQuote.StatusCode);
+        Assert.Contains("MOVIE_PRODUCTION_QUOTE_REQUIRED",
+            await missingQuote.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        using var notConfirmed = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, renderPath,
+            new { sourceVersionId = approvedMotion.Id, targetResolution = "1080p",
+                qualityTier = DirectorQualityLevels.Standard, confirmationAccepted = false,
+                expectedMaximumAmountUsd = priceIntent.ExpectedMaximumAmountUsd,
+                expectedQuoteFingerprint = priceIntent.QuoteFingerprint },
+            idempotencyKey: "production-quote-not-confirmed");
+        Assert.Equal(HttpStatusCode.BadRequest, notConfirmed.StatusCode);
+        Assert.Contains("GENERATION_CONFIRMATION_REQUIRED",
+            await notConfirmed.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        provider.SceneClipPricingModelKey = null;
+        using var missingModelPreviewResponse = await client.GetAsync(preflightPath);
+        var missingModelPreview = (await missingModelPreviewResponse.Content
+            .ReadFromJsonAsync<MovieProductionPreflightDto>())!;
+        Assert.Null(missingModelPreview.PriceIntent);
+        Assert.Contains(missingModelPreview.Checks, check =>
+            check.Key == MovieProductionPreflightCheckKeys.PriceIntent && check.Required && !check.Satisfied);
+        using var missingModelQueue = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, renderPath, oldQuotePayload,
+            idempotencyKey: "production-model-identity-required");
+        Assert.Equal(HttpStatusCode.BadRequest, missingModelQueue.StatusCode);
+        Assert.Contains("MOVIE_PROVIDER_MODEL_UNVERIFIED",
+            await missingModelQueue.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        provider.SceneClipPricingModelKey = $" {modelKey} ";
+
+        // Model drift cannot be hidden behind the same maximum amount; the opaque
+        // preflight fingerprint binds the internal adapter/model identity.
+        provider.SceneClipPricingModelKey = "changed-unpriced-model";
+        using var unpricedModelPreflightResponse = await client.GetAsync(preflightPath);
+        var unpricedModelPreflight = (await unpricedModelPreflightResponse.Content
+            .ReadFromJsonAsync<MovieProductionPreflightDto>())!;
+        Assert.Null(unpricedModelPreflight.PriceIntent);
+        Assert.Contains(unpricedModelPreflight.Checks, check =>
+            check.Key == MovieProductionPreflightCheckKeys.PriceIntent && check.Required && !check.Satisfied);
+        using var modelDrift = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, renderPath, oldQuotePayload, idempotencyKey: "production-quote-model-drift");
+        Assert.Equal(HttpStatusCode.BadRequest, modelDrift.StatusCode);
+        Assert.Contains("MOVIE_PRODUCTION_QUOTE_STALE", await modelDrift.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        provider.SceneClipPricingModelKey = modelKey;
+
+        // A route update after preview also makes the quote stale, before any
+        // continuity snapshot, clip, job or usage transaction is persisted.
+        exactRoute.BasePriceUsdPerSecondMax = 0.03m;
+        exactRoute.UpscalePriceUsdPerSecondMax = 0.03m;
+        exactRoute.UpdatedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync();
+        using var amountDrift = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, renderPath, oldQuotePayload, idempotencyKey: "production-quote-amount-drift");
+        Assert.Equal(HttpStatusCode.BadRequest, amountDrift.StatusCode);
+        Assert.Contains("MOVIE_PRODUCTION_QUOTE_STALE", await amountDrift.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Equal(clipCountBefore, await db.MovieClips.CountAsync());
+        Assert.Equal(jobCountBefore, await db.GenerationJobs.CountAsync());
+        Assert.Equal(usageCountBefore, await db.UsageTransactions.CountAsync());
+        Assert.Equal(providerCallsBefore, services.GetRequiredService<FakeProviderCallLog>().Calls(FakeProviderKind.Movie));
+
+        using var refreshedResponse = await client.GetAsync(preflightPath);
+        var refreshedQuote = (await refreshedResponse.Content.ReadFromJsonAsync<MovieProductionPreflightDto>())!;
+        var refreshedPriceIntent = Assert.IsType<MovieProductionPriceIntentDto>(refreshedQuote.PriceIntent);
+        Assert.NotEqual(priceIntent.QuoteFingerprint, refreshedPriceIntent.QuoteFingerprint);
+        var confirmedPayload = new
+        {
+            sourceVersionId = approvedMotion.Id,
+            label = "Quote-bound render",
+            targetResolution = "1080p",
+            qualityTier = DirectorQualityLevels.Standard,
+            confirmationAccepted = true,
+            expectedMaximumAmountUsd = refreshedPriceIntent.ExpectedMaximumAmountUsd,
+            expectedQuoteFingerprint = refreshedPriceIntent.QuoteFingerprint,
+        };
+        const string replayKey = "production-exact-quote-parity";
+        using var queued = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, renderPath, confirmedPayload, idempotencyKey: replayKey);
+        Assert.Equal(HttpStatusCode.Accepted, queued.StatusCode);
+        var render = (await queued.Content.ReadFromJsonAsync<MovieProductionRenderResponse>())!;
+        var queuedJob = await db.GenerationJobs.AsNoTracking().SingleAsync(item => item.Id == render.Job.Id);
+        var queuedInput = JsonSerializer.Deserialize<MovieGenerationInput>(queuedJob.InputJson);
+        Assert.NotNull(queuedInput);
+        Assert.Equal(refreshedPriceIntent.ExpectedMaximumAmountUsd, queuedJob.EstimatedProviderCostUsd);
+        Assert.Equal(modelKey, queuedInput!.SelectedProviderModelKey);
+        Assert.Equal(refreshedPriceIntent.QuoteFingerprint, queuedInput.SelectedProviderQuoteFingerprint);
+        var clipsAfterQueue = await db.MovieClips.CountAsync();
+        var jobsAfterQueue = await db.GenerationJobs.CountAsync();
+        var usageAfterQueue = await db.UsageTransactions.CountAsync();
+        Assert.Equal(clipCountBefore + 1, clipsAfterQueue);
+        Assert.Equal(jobCountBefore + 1, jobsAfterQueue);
+        Assert.Equal(usageCountBefore + 1, usageAfterQueue);
+
+        // A same-key retry of the exact confirmed quote remains idempotent even
+        // if a later route update changes today's price; it must return the
+        // canonical job without reserving again.
+        exactRoute.BasePriceUsdPerSecondMax = 0.04m;
+        exactRoute.UpscalePriceUsdPerSecondMax = 0.04m;
+        exactRoute.UpdatedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync();
+
+        using var replay = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, renderPath,
+            new
+            {
+                sourceVersionId = approvedMotion.Id,
+                label = "Quote-bound render",
+                targetResolution = "1080p",
+                qualityTier = DirectorQualityLevels.Standard,
+                confirmationAccepted = true,
+                expectedMaximumAmountUsd = refreshedPriceIntent.ExpectedMaximumAmountUsd,
+                expectedQuoteFingerprint = $" {refreshedPriceIntent.QuoteFingerprint} ",
+            }, idempotencyKey: replayKey);
+        Assert.Equal(HttpStatusCode.Accepted, replay.StatusCode);
+        var replayRender = (await replay.Content.ReadFromJsonAsync<MovieProductionRenderResponse>())!;
+        Assert.Equal(render.Job.Id, replayRender.Job.Id);
+        Assert.Equal(render.ClipId, replayRender.ClipId);
+        Assert.Equal(clipsAfterQueue, await db.MovieClips.CountAsync());
+        Assert.Equal(jobsAfterQueue, await db.GenerationJobs.CountAsync());
+        Assert.Equal(usageAfterQueue, await db.UsageTransactions.CountAsync());
+        using var changedPriceReplay = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, renderPath,
+            new
+            {
+                sourceVersionId = approvedMotion.Id,
+                label = "Quote-bound render",
+                targetResolution = "1080p",
+                qualityTier = DirectorQualityLevels.Standard,
+                confirmationAccepted = true,
+                expectedMaximumAmountUsd = refreshedPriceIntent.ExpectedMaximumAmountUsd + 0.01m,
+                expectedQuoteFingerprint = refreshedPriceIntent.QuoteFingerprint,
+            }, idempotencyKey: replayKey);
+        Assert.Equal(HttpStatusCode.BadRequest, changedPriceReplay.StatusCode);
+        Assert.Contains("IDEMPOTENCY_KEY_REUSED",
+            await changedPriceReplay.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Equal(clipsAfterQueue, await db.MovieClips.CountAsync());
+        Assert.Equal(jobsAfterQueue, await db.GenerationJobs.CountAsync());
+        Assert.Equal(usageAfterQueue, await db.UsageTransactions.CountAsync());
+        Assert.Equal(providerCallsBefore, services.GetRequiredService<FakeProviderCallLog>().Calls(FakeProviderKind.Movie));
     }
 
     private static async Task<AuthResponse> Register(HttpClient client)

@@ -345,6 +345,69 @@ public static class MovieOperationalFixtures
         return JsonSerializer.Deserialize<T>(body, JsonOptions)!;
     }
 
+    public static async Task<ProviderCapabilityPricing> AddMoviePricingRouteAsync(
+        TaslimDbContext db,
+        string providerKey,
+        string modelKey,
+        decimal basePriceUsdPerSecondMin = 0.01m,
+        decimal basePriceUsdPerSecondMax = 0.02m,
+        decimal upscalePriceUsdPerSecondMin = 0.01m,
+        decimal upscalePriceUsdPerSecondMax = 0.02m)
+    {
+        var now = DateTime.UtcNow;
+        var route = new ProviderCapabilityPricing
+        {
+            Id = Guid.NewGuid(),
+            CapabilityKey = "movie.video",
+            ProviderKey = providerKey,
+            ModelKey = modelKey,
+            SourceResolution = string.Empty,
+            TargetResolution = string.Empty,
+            QualityTier = string.Empty,
+            ProcessingPath = string.Empty,
+            SupportsUpscaling = true,
+            MaxDurationSeconds = 3_600,
+            MaxRetryAttempts = 8,
+            MaxUpscalePasses = 3,
+            BasePriceUsdPerSecondMin = basePriceUsdPerSecondMin,
+            BasePriceUsdPerSecondMax = basePriceUsdPerSecondMax,
+            UpscalePriceUsdPerSecondMin = upscalePriceUsdPerSecondMin,
+            UpscalePriceUsdPerSecondMax = upscalePriceUsdPerSecondMax,
+            Currency = UsageCurrencies.Usd,
+            PricingVersion = "movie-test-v1",
+            EffectiveAtUtc = now,
+            Source = "provider-free-movie-test",
+            IsActive = true,
+            CreatedAt = now,
+            UpdatedAt = now,
+        };
+        db.ProviderCapabilityPricings.Add(route);
+        await db.SaveChangesAsync();
+        return route;
+    }
+
+    public static async Task<MovieProductionVersionDto> CreateApprovedMotionPreviewAsync(
+        HttpClient client,
+        Guid shotId,
+        MovieOperationalDiagnostics? diagnostics = null)
+    {
+        var versionsPath = $"/api/movie-studio/shots/{shotId}/production/versions";
+        var storyboard = await PostAsync<MovieProductionVersionDto>(client, versionsPath,
+            new { stage = MovieProductionStages.StoryboardCandidate, compositionJson = "{\"frame\":\"wide\"}" }, diagnostics);
+        var approvedStoryboard = await PostAsync<MovieProductionVersionDto>(client,
+            $"/api/movie-studio/production/versions/{storyboard.Id}/review", new { approve = true }, diagnostics);
+        var keyframe = await PostAsync<MovieProductionVersionDto>(client, versionsPath,
+            new { stage = MovieProductionStages.ProductionKeyframe, sourceVersionId = approvedStoryboard.Id,
+                compositionJson = "{\"frame\":\"approved\"}" }, diagnostics);
+        var approvedKeyframe = await PostAsync<MovieProductionVersionDto>(client,
+            $"/api/movie-studio/production/versions/{keyframe.Id}/review", new { approve = true }, diagnostics);
+        var motion = await PostAsync<MovieProductionVersionDto>(client,
+            $"/api/movie-studio/shots/{shotId}/production/motion-preview",
+            new { sourceVersionId = approvedKeyframe.Id }, diagnostics);
+        return await PostAsync<MovieProductionVersionDto>(client,
+            $"/api/movie-studio/production/versions/{motion.Id}/review", new { approve = true }, diagnostics);
+    }
+
     private static MovieV2SceneDto ToV2Scene(MovieSceneDto scene) => new(
         scene.Id,
         scene.Sequence,

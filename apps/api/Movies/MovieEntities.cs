@@ -915,7 +915,9 @@ public sealed record MovieGenerationInput(
     string? CharacterContinuityJson = null,
     // New priced scene jobs pin the adapter model selected during admission.
     // Older serialized jobs retain their historical execution path.
-    string? SelectedProviderModelKey = null);
+    string? SelectedProviderModelKey = null,
+    // Approved production jobs pin the opaque quote fingerprint displayed at confirmation.
+    string? SelectedProviderQuoteFingerprint = null);
 
 public sealed record MovieProviderReadinessDto(bool Ready, IReadOnlyList<string> SupportedOperations);
 

@@ -911,7 +911,9 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
         [FromQuery] string? qualityTier,
         CancellationToken cancellationToken,
         [FromQuery] bool confirmationAccepted = false,
-        [FromQuery] Guid? sourceProductionVersionId = null)
+        [FromQuery] Guid? sourceProductionVersionId = null,
+        [FromQuery] decimal? expectedMaximumAmountUsd = null,
+        [FromQuery] string? expectedQuoteFingerprint = null)
     {
         try
         {
@@ -926,7 +928,13 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
             var result = await productionPreflight.EvaluateAsync(
                 GetUserId(),
                 shotId,
-                new MovieProductionPreflightRequest(selectedSourceId, targetResolution, qualityTier, confirmationAccepted),
+                new MovieProductionPreflightRequest(
+                    selectedSourceId,
+                    targetResolution,
+                    qualityTier,
+                    confirmationAccepted,
+                    expectedMaximumAmountUsd,
+                    expectedQuoteFingerprint),
                 cancellationToken);
             return result is null ? ApiResults.Error(this, 404, "MOVIE_SHOT_NOT_FOUND", "Movie shot not found.") : Ok(result);
         }

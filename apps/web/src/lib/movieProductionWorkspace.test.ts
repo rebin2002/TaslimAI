@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { MovieProject, MovieShot } from "@/lib/api";
 import { buildMovieProductionWorkspaceModel, createFakeMovieProductionWorkspaceAdapter, matchesProductionFilter } from "@/lib/movieProductionWorkspace";
+import { productionIntentForTier } from "@/lib/movieProductionResolution";
 
 function projectWith(overrides: Partial<MovieProject> = {}): MovieProject {
   return {
@@ -117,7 +118,8 @@ describe("movie production workspace model", () => {
   it("uses a deterministic internal fake adapter without contacting a service", async () => {
     const adapter = createFakeMovieProductionWorkspaceAdapter();
     await adapter.reviewVersion("version-1", { approve: true, reason: "Looks good." });
-    await adapter.queueRender("shot-1", "motion-1", true);
+    await adapter.queueRender("shot-1", "motion-1", true, productionIntentForTier("Master"),
+      { expectedMaximumAmountUsd: 0.25, currency: "USD", quoteFingerprint: "test-quote" }, "test-render-idempotency");
     await adapter.requestMaster("take-1");
     expect(adapter.calls).toEqual(["review:version-1", "retry:shot-1", "master:take-1"]);
   });

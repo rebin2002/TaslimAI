@@ -717,6 +717,41 @@ public sealed class MovieVideoExecutionTests
     }
 
     [Fact]
+    public async Task Worker_accepts_unchanged_model_key_with_surrounding_whitespace()
+    {
+        var fixture = await CreateRunningMovieJobAsync(
+            "Movie quoted model normalization", "Equivalent adapter model keys remain stable.");
+        await using var connection = fixture.Connection;
+        await using var db = fixture.Db;
+        var original = System.Text.Json.JsonSerializer.Deserialize<MovieGenerationInput>(fixture.Job.InputJson)!;
+        fixture.Job.InputJson = System.Text.Json.JsonSerializer.Serialize(original with
+        {
+            SelectedProviderKey = "guarded-scene-test",
+            SelectedProviderModelKey = "quoted-model",
+            SourceResolution = "720p",
+            TargetResolution = "720p",
+            QualityTier = DirectorQualityLevels.Standard,
+            ProcessingPath = "native",
+            MasterResolution = null,
+            DurationSeconds = 5,
+        });
+        await db.SaveChangesAsync();
+
+        var provider = new GuardedSceneMovieVideoProvider { SceneClipPricingModelKey = " quoted-model " };
+        var options = new MovieVideoOptions { Enabled = true, ProviderKey = provider.Key };
+        var handler = new MovieVideoGenerationJobHandler(
+            db, provider, new MovieVideoExecutionStore(db, Options.Create(options)),
+            Options.Create(options), NullLogger<MovieVideoGenerationJobHandler>.Instance);
+
+        _ = await Record.ExceptionAsync(
+            () => handler.ExecuteAsync(fixture.Job, new Progress<int>(), CancellationToken.None));
+
+        Assert.Equal(1, provider.SubmitCalls);
+        Assert.NotNull(provider.LastSubmittedRequest);
+        Assert.Single(await db.MovieVideoProviderExecutions.AsNoTracking().ToListAsync());
+    }
+
+    [Fact]
     public async Task Worker_keeps_source_version_jobs_without_shot_take_on_their_existing_path()
     {
         var fixture = await CreateRunningMovieJobAsync(

@@ -45,6 +45,12 @@ public sealed class MovieProductionLabelAdmissionTests
 
         using var scope = factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var provider = scope.ServiceProvider.GetRequiredService<IMovieVideoProvider>();
+        await MovieOperationalFixtures.AddMoviePricingRouteAsync(
+            db, provider.Key, Assert.IsType<string>(provider.SceneClipPricingModelKey));
+        var quote = await MovieOperationalFixtures.GetAsync<MovieProductionPreflightDto>(
+            client, $"/api/movie-studio/shots/{shotId}/production/preflight?sourceVersionId={approvedMotion.Id}&targetResolution=1080p&qualityTier=Standard");
+        var priceIntent = Assert.IsType<MovieProductionPriceIntentDto>(quote.PriceIntent);
         var versionsBefore = await db.MovieProductionVersions.CountAsync(item => item.MovieShotId == shotId);
         var ledgerBefore = await db.UsageTransactions.CountAsync();
         var path = $"/api/movie-studio/shots/{shotId}/production/render";
@@ -66,7 +72,10 @@ public sealed class MovieProductionLabelAdmissionTests
         var valid = await MovieOperationalFixtures.PostAsync<MovieProductionRenderResponse>(
             client, path,
             new { sourceVersionId = approvedMotion.Id, label = new string('x', 160),
-                confirmationAccepted = true }, idempotencyKey: "render-label-160-valid");
+                targetResolution = "1080p", qualityTier = DirectorQualityLevels.Standard,
+                confirmationAccepted = true,
+                expectedMaximumAmountUsd = priceIntent.ExpectedMaximumAmountUsd,
+                expectedQuoteFingerprint = priceIntent.QuoteFingerprint }, idempotencyKey: "render-label-160-valid");
         Assert.NotEqual(Guid.Empty, valid.ClipId);
         Assert.Equal(valid.Job.Id, valid.Version.GenerationJobId);
         Assert.Single(await db.MovieClips.Where(item => item.MovieShotId == shotId).ToListAsync());
@@ -193,15 +202,31 @@ public sealed class MovieProductionLabelAdmissionTests
             client, "/api/movie-studio/production/versions/" + motion.Id + "/review",
             new { approve = true });
 
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var provider = scope.ServiceProvider.GetRequiredService<IMovieVideoProvider>();
+        await MovieOperationalFixtures.AddMoviePricingRouteAsync(
+            db, provider.Key, Assert.IsType<string>(provider.SceneClipPricingModelKey));
+        var quote = await MovieOperationalFixtures.GetAsync<MovieProductionPreflightDto>(
+            client, $"/api/movie-studio/shots/{shotId}/production/preflight?sourceVersionId={approvedMotion.Id}&targetResolution=1080p&qualityTier=Standard");
+        var priceIntent = Assert.IsType<MovieProductionPriceIntentDto>(quote.PriceIntent);
+
         const string replayKey = "approved-replay-edited-feature-duration";
         var path = "/api/movie-studio/shots/" + shotId + "/production/render";
-        var request = new { sourceVersionId = approvedMotion.Id, label = "Canonical five-second render" };
+        var request = new
+        {
+            sourceVersionId = approvedMotion.Id,
+            label = "Canonical five-second render",
+            targetResolution = "1080p",
+            qualityTier = DirectorQualityLevels.Standard,
+            confirmationAccepted = true,
+            expectedMaximumAmountUsd = priceIntent.ExpectedMaximumAmountUsd,
+            expectedQuoteFingerprint = priceIntent.QuoteFingerprint,
+        };
         using var first = await MovieOperationalFixtures.SendWithCsrfAsync(
             client, HttpMethod.Post, path, request, idempotencyKey: replayKey);
         Assert.True(first.IsSuccessStatusCode, await first.Content.ReadAsStringAsync());
 
-        using var scope = factory.Services.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
         var canonicalJob = await db.GenerationJobs.AsNoTracking()
             .SingleAsync(item => item.IdempotencyKey == replayKey);
         var canonicalClip = await db.MovieClips.AsNoTracking()

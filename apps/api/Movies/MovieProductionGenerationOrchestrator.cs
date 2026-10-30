@@ -76,7 +76,9 @@ public sealed record MovieProductionGenerationRequest(
     bool ConfirmationAccepted = false,
     string? IdempotencyKey = null,
     bool AllowReferenceReadinessOverride = false,
-    string? ReferenceReadinessOverrideReason = null);
+    string? ReferenceReadinessOverrideReason = null,
+    decimal? ExpectedMaximumAmountUsd = null,
+    string? ExpectedQuoteFingerprint = null);
 
 /// <summary>
 /// This result is internal to the movie service boundary. It carries the canonical
@@ -165,6 +167,15 @@ public sealed class MovieProductionGenerationOrchestrator(
             throw new MovieProductionValidationException(
                 "MOVIE_PROVIDER_MODEL_UNVERIFIED",
                 "The selected video adapter has not declared an exact model key for pricing this production clip.");
+        if (!request.ConfirmationAccepted)
+            throw new MovieProductionValidationException(
+                "GENERATION_CONFIRMATION_REQUIRED",
+                "Review the current maximum USD quote and explicitly confirm before queueing this production render.");
+        if (!request.ExpectedMaximumAmountUsd.HasValue || request.ExpectedMaximumAmountUsd.Value < 0
+            || string.IsNullOrWhiteSpace(request.ExpectedQuoteFingerprint))
+            throw new MovieProductionValidationException(
+                "MOVIE_PRODUCTION_QUOTE_REQUIRED",
+                "Run the read-only production preflight and provide its current maximum USD quote before queueing.");
         // Share the conservative prompt floor with the read-only preflight.
         // Queue admission still validates an optional custom render title.
         var renderDescription = string.IsNullOrWhiteSpace(request.Title)
@@ -196,7 +207,9 @@ public sealed class MovieProductionGenerationOrchestrator(
                 request.ApprovedSourceVersionId,
                 request.TargetResolution,
                 request.QualityTier,
-                request.ConfirmationAccepted),
+                request.ConfirmationAccepted,
+                request.ExpectedMaximumAmountUsd,
+                request.ExpectedQuoteFingerprint),
             cancellationToken);
         if (preflightResult is null)
             return null;
@@ -204,14 +217,11 @@ public sealed class MovieProductionGenerationOrchestrator(
             throw new MovieProductionValidationException(
                 preflightResult.RejectionCode ?? "PRODUCTION_PREFLIGHT_REQUIRED",
                 preflightResult.RejectionMessage ?? preflightResult.Summary);
-
-        await referenceReadiness.EnsureCanGenerateAsync(
-            userId,
-            shot.Id,
-            request.AllowReferenceReadinessOverride,
-            request.ReferenceReadinessOverrideReason,
-            MovieReferenceReadinessOverrideSources.ProductionRender,
-            cancellationToken);
+        if (!MovieProductionQuoteFingerprint.Matches(
+                preflightResult.PriceIntent, request.ExpectedMaximumAmountUsd, request.ExpectedQuoteFingerprint))
+            throw new MovieProductionValidationException(
+                "MOVIE_PRODUCTION_QUOTE_STALE",
+                "The selected adapter or maximum USD price changed after preview. Refresh the quote before queueing.");
 
         var estimate = await costEstimator.EstimateAsync(
             new MovieGenerationCostRequest(
@@ -223,6 +233,23 @@ public sealed class MovieProductionGenerationOrchestrator(
             selectedProviderKey: provider.Key,
             selectedModelKey: providerModelKey,
             cancellationToken: cancellationToken);
+        var currentPriceIntent = MovieProductionQuoteFingerprint.Create(
+            shot.Id,
+            source!.Id,
+            shot.Scene.MovieProject.AspectRatio,
+            durationSeconds,
+            provider.Key,
+            providerModelKey,
+            plan,
+            estimate);
+        if (currentPriceIntent is null || !MovieProductionQuoteFingerprint.Matches(
+                currentPriceIntent, request.ExpectedMaximumAmountUsd, request.ExpectedQuoteFingerprint))
+            throw new MovieProductionValidationException(
+                currentPriceIntent is null ? "MOVIE_PRODUCTION_PRICE_UNAVAILABLE" : "MOVIE_PRODUCTION_QUOTE_STALE",
+                currentPriceIntent is null
+                    ? "No exact model-specific USD price route is available for this production render."
+                    : "The selected adapter or maximum USD price changed after preview. Refresh the quote before queueing.");
+        var priceIntent = currentPriceIntent;
         var preflight = await costGuardrails.EvaluateAsync(
             userId,
             shot.Scene.MovieProject.WorkspaceId,
@@ -234,6 +261,14 @@ public sealed class MovieProductionGenerationOrchestrator(
             throw new MovieProductionValidationException(
                 preflight.RejectionCode ?? "GENERATION_CONFIRMATION_REQUIRED",
                 preflight.RejectionMessage ?? "Confirm the generation cost before queueing this production request.");
+
+        await referenceReadiness.EnsureCanGenerateAsync(
+            userId,
+            shot.Id,
+            request.AllowReferenceReadinessOverride,
+            request.ReferenceReadinessOverrideReason,
+            MovieReferenceReadinessOverrideSources.ProductionRender,
+            cancellationToken);
 
         var snapshot = await continuity.BuildSnapshotForTargetAsync(
             shot.Scene.MovieProjectId,
@@ -298,7 +333,8 @@ public sealed class MovieProductionGenerationOrchestrator(
             snapshot.SnapshotHash,
             SelectedProviderKey: provider.Key,
             CharacterContinuityJson: snapshot.SnapshotJson,
-            SelectedProviderModelKey: providerModelKey);
+            SelectedProviderModelKey: providerModelKey,
+            SelectedProviderQuoteFingerprint: priceIntent.QuoteFingerprint);
 
         GenerationJob job;
         try
@@ -416,14 +452,18 @@ public sealed class MovieProductionGenerationOrchestrator(
         if (existingJob is null) return null;
         MovieGenerationInput? input = null;
         try { input = JsonSerializer.Deserialize<MovieGenerationInput>(existingJob.InputJson); } catch (JsonException) { }
+        var expectedQuoteFingerprint = request.ExpectedQuoteFingerprint?.Trim();
+        var currentProviderModelKey = MovieStudioHelpers.Clean(provider.SceneClipPricingModelKey);
         // An idempotent replay must not silently adopt a paid job from a
         // different adapter after routing or deployment configuration changes.
         // Historical jobs without a bound provider retain their legacy behavior.
         if (input is null || !MatchesProductionReplay(input, shot, request)
+            || !string.Equals(input.SelectedProviderQuoteFingerprint, expectedQuoteFingerprint, StringComparison.Ordinal)
+            || existingJob.EstimatedProviderCostUsd != request.ExpectedMaximumAmountUsd
             || (!string.IsNullOrWhiteSpace(input.SelectedProviderKey)
                 && !string.Equals(input.SelectedProviderKey, provider.Key, StringComparison.OrdinalIgnoreCase))
             || (!string.IsNullOrWhiteSpace(input.SelectedProviderModelKey)
-                && !string.Equals(input.SelectedProviderModelKey, provider.SceneClipPricingModelKey, StringComparison.OrdinalIgnoreCase)))
+                && !string.Equals(input.SelectedProviderModelKey, currentProviderModelKey, StringComparison.OrdinalIgnoreCase)))
             throw new MovieProductionValidationException("IDEMPOTENCY_KEY_REUSED", "This idempotency key was already used for a different production request.");
         // For newly admitted production jobs, character continuity forms part
         // of the canonical creative request. The same replay key must not adopt
