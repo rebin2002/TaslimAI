@@ -142,6 +142,56 @@ public sealed class MovieFinalAssemblyTests
     }
 
     [Fact]
+    public void Embedded_caption_input_is_declared_before_filter_and_stream_mapping()
+    {
+        var videoAsset = Guid.NewGuid();
+        var audioAsset = Guid.NewGuid();
+        var captionAsset = Guid.NewGuid();
+        var input = Contract(videoAsset, audioAsset, MovieAssemblyCaptionModes.Embedded) with
+        {
+            Captions = new MovieAssemblyCaptions(MovieAssemblyCaptionModes.Embedded, captionAsset, "en"),
+        };
+        var arguments = FfmpegMovieFinalAssemblyCommandBuilder.Build(
+            new MovieFinalAssemblyExecutionRequest(input, new Dictionary<Guid, string>
+            {
+                [videoAsset] = "/tmp/clip.mp4",
+                [audioAsset] = "/tmp/music.wav",
+                [captionAsset] = "/tmp/captions.vtt",
+            }),
+            "/tmp/master.mp4").ToArray();
+
+        var filterIndex = Array.IndexOf(arguments, "-filter_complex");
+        var captionPathIndex = Array.IndexOf(arguments, "/tmp/captions.vtt");
+        Assert.True(filterIndex > 0);
+        Assert.True(captionPathIndex > 0);
+        Assert.Equal("-i", arguments[captionPathIndex - 1]);
+        Assert.True(captionPathIndex < filterIndex, "All FFmpeg inputs must precede complex filters and output maps.");
+        Assert.Equal(3, arguments.Count(item => item == "-i"));
+        Assert.Equal(1, arguments.Count(item => item == "/tmp/captions.vtt"));
+        Assert.Equal("2:0", arguments[Array.LastIndexOf(arguments, "-map") + 1]);
+        Assert.Equal("mov_text", arguments[Array.IndexOf(arguments, "-c:s") + 1]);
+    }
+
+    [Fact]
+    public void Embedded_caption_missing_source_fails_before_execution()
+    {
+        var videoAsset = Guid.NewGuid();
+        var captionAsset = Guid.NewGuid();
+        var input = Contract(videoAsset, null, MovieAssemblyCaptionModes.Embedded) with
+        {
+            Captions = new MovieAssemblyCaptions(MovieAssemblyCaptionModes.Embedded, captionAsset, "en"),
+        };
+        var exception = Assert.Throws<MovieFinalAssemblyExecutionException>(() =>
+            FfmpegMovieFinalAssemblyCommandBuilder.Build(
+                new MovieFinalAssemblyExecutionRequest(input, new Dictionary<Guid, string>
+                {
+                    [videoAsset] = "/tmp/clip.mp4",
+                }),
+                "/tmp/master.mp4"));
+        Assert.Equal("ASSEMBLY_CAPTIONS_PATH_MISSING", exception.Code);
+    }
+
+    [Fact]
     public void Quality_control_accepts_exact_profile_and_rejects_wrong_resolution()
     {
         var input = Contract(Guid.NewGuid(), null, MovieAssemblyCaptionModes.None);
