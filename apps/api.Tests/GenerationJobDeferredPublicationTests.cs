@@ -1,10 +1,14 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Data.Common;
 using System.Text.Json;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Options;
+using Npgsql;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
 using Taslim.Api.Generation;
@@ -269,6 +273,8 @@ public sealed class GenerationJobDeferredPublicationTests : IClassFixture<Genera
 
 public sealed class GenerationJobPendingPublicationFactory : GenerationJobsApiFactory
 {
+    public string DatabasePathForTests => databasePath;
+
     protected override bool WorkerEnabled => false;
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
@@ -586,6 +592,269 @@ public sealed class GenerationJobPendingPublicationTests : IClassFixture<Generat
         Assert.Empty(await verifyDb.UsageTransactions.AsNoTracking().Where(item => item.UserId == userId).ToListAsync());
     }
 
+    [Fact]
+    public async Task Approved_production_submission_claim_is_atomic_and_same_job_replay_does_not_bump_timestamp()
+    {
+        var fixture = await SeedClaimableMovieJob();
+        DateTime firstClaimTimestamp;
+
+        await ClaimSubmission(fixture.JobId, fixture.ConcurrencyToken);
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var version = await db.MovieProductionVersions.AsNoTracking().SingleAsync(item => item.GenerationJobId == fixture.JobId);
+            firstClaimTimestamp = version.UpdatedAt;
+            Assert.True(firstClaimTimestamp > fixture.InitialVersionTimestamp);
+            Assert.Equal(1, await db.MovieProductionStageTransitions.CountAsync(item =>
+                item.MovieProductionVersionId == version.Id && item.EventType == "provider_submission_claimed"));
+        }
+
+        await ClaimSubmission(fixture.JobId, fixture.ConcurrencyToken);
+        using var verifyScope = factory.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var finalVersion = await verifyDb.MovieProductionVersions.AsNoTracking().SingleAsync(item => item.GenerationJobId == fixture.JobId);
+        Assert.Equal(firstClaimTimestamp, finalVersion.UpdatedAt);
+        Assert.Equal(1, await verifyDb.MovieProductionStageTransitions.CountAsync(item =>
+            item.MovieProductionVersionId == finalVersion.Id && item.EventType == "provider_submission_claimed"));
+    }
+
+    [Fact]
+    public async Task Concurrent_same_job_claims_commit_one_event_and_recover_the_same_canonical_claim()
+    {
+        var fixture = await SeedClaimableMovieJob();
+        using var start = new ManualResetEventSlim(false);
+        var first = Task.Run(async () =>
+        {
+            start.Wait();
+            await ClaimSubmission(fixture.JobId, fixture.ConcurrencyToken);
+        });
+        var second = Task.Run(async () =>
+        {
+            start.Wait();
+            await ClaimSubmission(fixture.JobId, fixture.ConcurrencyToken);
+        });
+
+        start.Set();
+        await Task.WhenAll(first, second);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var version = await db.MovieProductionVersions.AsNoTracking().SingleAsync(item => item.GenerationJobId == fixture.JobId);
+        Assert.True(version.UpdatedAt > fixture.InitialVersionTimestamp);
+        Assert.Equal(1, await db.MovieProductionStageTransitions.CountAsync(item =>
+            item.MovieProductionVersionId == version.Id && item.EventType == "provider_submission_claimed"));
+    }
+
+    [Fact]
+    public async Task Claim_recovers_when_commit_succeeds_but_the_commit_acknowledgement_is_lost()
+    {
+        var fixture = await SeedClaimableMovieJob();
+        var interceptor = new ThrowAfterCommitOnceInterceptor();
+        var options = new DbContextOptionsBuilder<TaslimDbContext>()
+            .UseSqlite($"Data Source={factory.DatabasePathForTests};Cache=Shared;Default Timeout=30")
+            .AddInterceptors(interceptor)
+            .Options;
+
+        await using (var db = new TaslimDbContext(options))
+        {
+            var store = new MovieVideoExecutionStore(db, Options.Create(new MovieVideoOptions()));
+            await store.ClaimApprovedProductionSubmissionAsync(fixture.JobId, fixture.ConcurrencyToken, CancellationToken.None);
+        }
+
+        using var verifyScope = factory.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var version = await verifyDb.MovieProductionVersions.AsNoTracking().SingleAsync(item => item.GenerationJobId == fixture.JobId);
+        Assert.True(version.UpdatedAt > fixture.InitialVersionTimestamp);
+        Assert.Equal(1, await verifyDb.MovieProductionStageTransitions.CountAsync(item =>
+            item.MovieProductionVersionId == version.Id && item.EventType == "provider_submission_claimed"));
+    }
+
+    [Theory]
+    [InlineData("clip-link")]
+    [InlineData("version-status")]
+    [InlineData("created-provenance")]
+    public async Task Approved_production_claim_fails_closed_when_the_canonical_graph_is_incomplete(string invalidPart)
+    {
+        var fixture = await SeedClaimableMovieJob();
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            if (invalidPart == "clip-link")
+                await db.MovieClips.Where(item => item.Id == fixture.ClipId)
+                    .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.GenerationJobId, (Guid?)null));
+            else if (invalidPart == "version-status")
+                await db.MovieProductionVersions.Where(item => item.GenerationJobId == fixture.JobId)
+                    .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.Status, MovieProductionVersionStatuses.Rejected));
+            else
+                await db.MovieProductionStageTransitions.Where(item => item.GenerationJobId == fixture.JobId && item.EventType == "created")
+                    .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.EventType, "updated"));
+        }
+
+        var error = await Assert.ThrowsAsync<GenerationJobValidationException>(
+            () => ClaimSubmission(fixture.JobId, fixture.ConcurrencyToken));
+        Assert.Equal("MOVIE_PRODUCTION_SUBMISSION_CLAIM_CONFLICT", error.Code);
+
+        using var verifyScope = factory.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.Empty(await verifyDb.MovieProductionStageTransitions.AsNoTracking().Where(item =>
+            item.GenerationJobId == fixture.JobId && item.EventType == "provider_submission_claimed").ToListAsync());
+    }
+
+    [Fact]
+    public async Task Unmarked_legacy_movie_job_claim_is_a_no_op()
+    {
+        using var client = factory.CreateClient();
+        var (userId, workspaceId) = await Register(client);
+        var jobId = Guid.NewGuid();
+        var token = Guid.NewGuid();
+        var now = DateTime.UtcNow;
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.GenerationJobs.Add(new GenerationJob
+            {
+                Id = jobId,
+                WorkspaceId = workspaceId,
+                CreatedByUserId = userId,
+                JobType = GenerationJobTypes.MovieClipGenerate,
+                Status = GenerationJobStatus.Running,
+                ConcurrencyToken = token,
+                InputJson = "{}",
+                CreatedAt = now,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        await ClaimSubmission(jobId, token);
+        using var verifyScope = factory.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.Empty(await verifyDb.MovieProductionStageTransitions.AsNoTracking().Where(item => item.GenerationJobId == jobId).ToListAsync());
+    }
+
+    private async Task<ClaimableMovieFixture> SeedClaimableMovieJob()
+    {
+        using var client = factory.CreateClient();
+        var (userId, workspaceId) = await Register(client);
+        var movie = await SeedApprovedMovie(workspaceId, userId);
+        GenerationJob job;
+        using (var scope = factory.Services.CreateScope())
+        {
+            var jobs = scope.ServiceProvider.GetRequiredService<IGenerationJobService>();
+            job = await jobs.CreatePendingMovieProductionAsync(
+                userId, CreateRequest(workspaceId, movie, movie.FirstClipId), $"claim-{Guid.NewGuid():N}");
+        }
+
+        DateTime initialVersionTimestamp;
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            await LinkDurableProductionRows(db, movie, job.Id, userId);
+            initialVersionTimestamp = await db.MovieProductionVersions.AsNoTracking()
+                .Where(item => item.GenerationJobId == job.Id)
+                .Select(item => item.UpdatedAt)
+                .SingleAsync();
+        }
+        using (var scope = factory.Services.CreateScope())
+        {
+            var jobs = scope.ServiceProvider.GetRequiredService<IGenerationJobService>();
+            var published = await jobs.PublishPendingMovieProductionAsync(userId, job.Id);
+            Assert.Equal(GenerationJobStatus.Queued, published!.Status);
+        }
+
+        var token = Guid.NewGuid();
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var queued = await db.GenerationJobs.SingleAsync(item => item.Id == job.Id);
+            queued.Status = GenerationJobStatus.Running;
+            queued.ConcurrencyToken = token;
+            db.MovieVideoProviderExecutions.Add(new MovieVideoProviderExecution
+            {
+                Id = Guid.NewGuid(),
+                GenerationJobId = job.Id,
+                MovieClipId = movie.FirstClipId,
+                ProviderKey = "synthetic-provider",
+                Status = MovieVideoExecutionStatuses.Submitted,
+                AttemptCount = 0,
+                CreatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        return new ClaimableMovieFixture(job.Id, token, movie.FirstClipId, initialVersionTimestamp);
+    }
+
+    [DisposablePostgresFact]
+    public async Task Disposable_postgres_claim_is_atomic_idempotent_and_persists_a_strict_timestamp_advance()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("ConnectionStrings__Postgres")!;
+        var schema = $"claim_test_{Guid.NewGuid():N}";
+        var adminBuilder = new NpgsqlConnectionStringBuilder(connectionString);
+        await using (var admin = new NpgsqlConnection(adminBuilder.ConnectionString))
+        {
+            await admin.OpenAsync();
+            await using var create = admin.CreateCommand();
+            create.CommandText = $"CREATE SCHEMA \"{schema}\"";
+            await create.ExecuteNonQueryAsync();
+        }
+
+        try
+        {
+            var testBuilder = new NpgsqlConnectionStringBuilder(connectionString) { SearchPath = schema };
+            var options = new DbContextOptionsBuilder<TaslimDbContext>().UseNpgsql(testBuilder.ConnectionString).Options;
+            Guid jobId;
+            Guid token;
+            DateTime initialTimestamp;
+            await using (var db = new TaslimDbContext(options))
+            {
+                await db.Database.EnsureCreatedAsync();
+                (jobId, token, initialTimestamp) = await SeedPostgresClaimGraph(db);
+            }
+
+            async Task ClaimOnFreshContext()
+            {
+                await using var db = new TaslimDbContext(options);
+                var store = new MovieVideoExecutionStore(db, Options.Create(new MovieVideoOptions()));
+                await store.ClaimApprovedProductionSubmissionAsync(jobId, token, CancellationToken.None);
+            }
+
+            await Task.WhenAll(Task.Run(ClaimOnFreshContext), Task.Run(ClaimOnFreshContext));
+            await using (var verify = new TaslimDbContext(options))
+            {
+                var version = await verify.MovieProductionVersions.AsNoTracking().SingleAsync(item => item.GenerationJobId == jobId);
+                Assert.True(version.UpdatedAt > initialTimestamp);
+                Assert.Equal(1, await verify.MovieProductionStageTransitions.CountAsync(item =>
+                    item.MovieProductionVersionId == version.Id && item.EventType == "provider_submission_claimed"));
+                var firstTimestamp = version.UpdatedAt;
+                var store = new MovieVideoExecutionStore(verify, Options.Create(new MovieVideoOptions()));
+                await store.ClaimApprovedProductionSubmissionAsync(jobId, token, CancellationToken.None);
+                Assert.Equal(firstTimestamp, await verify.MovieProductionVersions.AsNoTracking()
+                    .Where(item => item.GenerationJobId == jobId)
+                    .Select(item => item.UpdatedAt)
+                    .SingleAsync());
+            }
+        }
+        finally
+        {
+            await using var admin = new NpgsqlConnection(adminBuilder.ConnectionString);
+            await admin.OpenAsync();
+            await using var drop = admin.CreateCommand();
+            drop.CommandText = $"DROP SCHEMA IF EXISTS \"{schema}\" CASCADE";
+            await drop.ExecuteNonQueryAsync();
+        }
+    }
+
+    private async Task ClaimSubmission(Guid jobId, Guid concurrencyToken)
+    {
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var store = new MovieVideoExecutionStore(db, Options.Create(new MovieVideoOptions()));
+        await store.ClaimApprovedProductionSubmissionAsync(jobId, concurrencyToken, CancellationToken.None);
+    }
+
+    private sealed record ClaimableMovieFixture(Guid JobId, Guid ConcurrencyToken, Guid ClipId, DateTime InitialVersionTimestamp);
+
     private async Task<ApprovedMovieFixture> SeedApprovedMovie(Guid workspaceId, Guid userId)
     {
         var now = DateTime.UtcNow;
@@ -723,5 +992,193 @@ public sealed class GenerationJobPendingPublicationTests : IClassFixture<Generat
         return await client.SendAsync(request);
     }
 
+    private static async Task<(Guid JobId, Guid Token, DateTime InitialTimestamp)> SeedPostgresClaimGraph(TaslimDbContext db)
+    {
+        var userId = Guid.NewGuid();
+        var workspaceId = Guid.NewGuid();
+        var projectId = Guid.NewGuid();
+        var sceneId = Guid.NewGuid();
+        var shotId = Guid.NewGuid();
+        var sourceVersionId = Guid.NewGuid();
+        var clipId = Guid.NewGuid();
+        var versionId = Guid.NewGuid();
+        var jobId = Guid.NewGuid();
+        var token = Guid.NewGuid();
+        var now = DateTime.UtcNow.AddMinutes(-1);
+        const string marker = "approved-movie-production/v1";
+        var inputJson = JsonSerializer.Serialize(new
+        {
+            _taslimPublicationContract = marker,
+            Operation = MovieStudioOperations.SceneClip,
+            MovieProjectId = projectId,
+            MovieClipId = clipId,
+            MovieSceneId = sceneId,
+            MovieShotId = shotId,
+            Description = "synthetic PostgreSQL claim",
+            DurationSeconds = 8,
+            AspectRatio = "16:9",
+            Style = "cinematic",
+            Language = "en",
+            AdditionalInstructions = (string?)null,
+            ContinuityGuideJson = "{}",
+            SceneJson = "{}",
+            ShotJson = "{}",
+            SourceProductionVersionId = sourceVersionId,
+        });
+        var user = new ApplicationUser
+        {
+            Id = userId,
+            UserName = $"claim-{userId:N}@example.test",
+            NormalizedUserName = $"CLAIM-{userId:N}@EXAMPLE.TEST",
+            Email = $"claim-{userId:N}@example.test",
+            NormalizedEmail = $"CLAIM-{userId:N}@EXAMPLE.TEST",
+            SecurityStamp = Guid.NewGuid().ToString("N"),
+            ConcurrencyStamp = Guid.NewGuid().ToString("N"),
+            DisplayName = "Synthetic claim test",
+            CreatedAt = now,
+            UpdatedAt = now,
+        };
+        var workspace = new Workspace
+        {
+            Id = workspaceId,
+            Name = "Synthetic claim workspace",
+            Slug = $"claim-{workspaceId:N}",
+            Type = WorkspaceType.Personal,
+            CreatedAt = now,
+            UpdatedAt = now,
+        };
+        var movieProject = new MovieProject
+        {
+            Id = projectId,
+            WorkspaceId = workspaceId,
+            CreatedByUserId = userId,
+            Title = "Synthetic claim project",
+            Description = "Provider-free test fixture.",
+            DurationSeconds = 8,
+            CreatedAt = now,
+            UpdatedAt = now,
+            Guide = new MovieContinuityGuide { Id = Guid.NewGuid(), MovieProjectId = projectId, UpdatedAt = now },
+        };
+        var scene = new MovieScene { Id = sceneId, MovieProjectId = projectId, Sequence = 1, Title = "Scene", Summary = "Synthetic.", CreatedAt = now, UpdatedAt = now };
+        var shot = new MovieShot { Id = shotId, MovieSceneId = sceneId, Sequence = 1, ProductionStage = MovieProductionStages.MotionPreview, Description = "Synthetic shot.", CreatedAt = now, UpdatedAt = now };
+        var source = new MovieProductionVersion
+        {
+            Id = sourceVersionId,
+            MovieShotId = shotId,
+            VersionNumber = 1,
+            Stage = MovieProductionStages.MotionPreview,
+            Status = MovieProductionVersionStatuses.Approved,
+            CompositionJson = "{}",
+            CreatedByUserId = userId,
+            CreatedAt = now,
+            UpdatedAt = now,
+        };
+        var clip = new MovieClip
+        {
+            Id = clipId,
+            MovieProjectId = projectId,
+            MovieSceneId = sceneId,
+            MovieShotId = shotId,
+            GenerationJobId = jobId,
+            Status = MovieClipStatuses.Queued,
+            DurationSeconds = 8,
+            CreatedAt = now,
+            UpdatedAt = now,
+        };
+        var job = new GenerationJob
+        {
+            Id = jobId,
+            WorkspaceId = workspaceId,
+            CreatedByUserId = userId,
+            JobType = GenerationJobTypes.MovieClipGenerate,
+            Status = GenerationJobStatus.Running,
+            ConcurrencyToken = token,
+            Title = "Synthetic approved render",
+            InputJson = inputJson,
+            CreatedAt = now,
+            QueuedAt = now,
+        };
+        var version = new MovieProductionVersion
+        {
+            Id = versionId,
+            MovieShotId = shotId,
+            VersionNumber = 2,
+            Stage = MovieProductionStages.ProductionRender,
+            Status = MovieProductionVersionStatuses.PendingApproval,
+            CompositionJson = "{}",
+            SourceVersionId = sourceVersionId,
+            GenerationJobId = jobId,
+            CreatedByUserId = userId,
+            CreatedAt = now,
+            UpdatedAt = now,
+        };
+        var createdTransition = new MovieProductionStageTransition
+        {
+            Id = Guid.NewGuid(),
+            MovieShotId = shotId,
+            MovieProductionVersionId = versionId,
+            FromStage = MovieProductionStages.MotionPreview,
+            ToStage = MovieProductionStages.ProductionRender,
+            EventType = "created",
+            SourceVersionId = sourceVersionId,
+            GenerationJobId = jobId,
+            ActorUserId = userId,
+            CreatedAt = now,
+        };
+        var execution = new MovieVideoProviderExecution
+        {
+            Id = Guid.NewGuid(),
+            GenerationJobId = jobId,
+            MovieClipId = clipId,
+            ProviderKey = "synthetic-provider",
+            Status = MovieVideoExecutionStatuses.Submitted,
+            CreatedAt = now,
+            UpdatedAt = now,
+        };
+
+        db.AddRange(user, workspace, movieProject, scene, shot, source, clip, job, version, createdTransition, execution);
+        await db.SaveChangesAsync();
+        return (jobId, token, now);
+    }
+
     private sealed record ApprovedMovieFixture(Guid MovieProjectId, Guid SceneId, Guid ShotId, Guid SourceVersionId, Guid FirstClipId, Guid SecondClipId);
+}
+
+public sealed class DisposablePostgresFactAttribute : FactAttribute
+{
+    public DisposablePostgresFactAttribute()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("ConnectionStrings__Postgres");
+        if (!string.Equals(Environment.GetEnvironmentVariable("CI"), "true", StringComparison.OrdinalIgnoreCase)
+            || string.IsNullOrWhiteSpace(connectionString))
+        {
+            Skip = "Requires the disposable PostgreSQL service configured by the API CI job.";
+            return;
+        }
+
+        try
+        {
+            if (!string.Equals(new NpgsqlConnectionStringBuilder(connectionString).Database, "taslim_tests", StringComparison.Ordinal))
+                Skip = "Runs only against the disposable taslim_tests database configured by API CI.";
+        }
+        catch (ArgumentException)
+        {
+            Skip = "The API CI PostgreSQL test connection string is unavailable.";
+        }
+    }
+}
+
+public sealed class ThrowAfterCommitOnceInterceptor : DbTransactionInterceptor
+{
+    private int armed = 1;
+
+    public override Task TransactionCommittedAsync(
+        DbTransaction transaction,
+        TransactionEndEventData eventData,
+        CancellationToken cancellationToken = default)
+    {
+        if (Interlocked.Exchange(ref armed, 0) == 1)
+            throw new InvalidOperationException("Synthetic commit acknowledgement loss after durable commit.");
+        return Task.CompletedTask;
+    }
 }
