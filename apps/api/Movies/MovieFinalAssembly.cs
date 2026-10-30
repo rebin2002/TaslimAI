@@ -713,6 +713,8 @@ public static class FfmpegMovieFinalAssemblyCommandBuilder
         ArgumentNullException.ThrowIfNull(request);
         if (string.IsNullOrWhiteSpace(outputPath)) throw new ArgumentException("An output path is required.", nameof(outputPath));
         if (request.Contract.Timeline.Count == 0) throw new MovieFinalAssemblyExecutionException("ASSEMBLY_TIMELINE_EMPTY");
+        if (request.Contract.ExpectedDurationSeconds is <= 0 or > 7_200)
+            throw new MovieFinalAssemblyExecutionException("ASSEMBLY_DURATION_INVALID");
         var args = new List<string> { "-hide_banner", "-loglevel", "error", "-y" };
         foreach (var item in request.Contract.Timeline)
         {
@@ -825,7 +827,11 @@ public static class FfmpegMovieFinalAssemblyCommandBuilder
         args.Add("-pix_fmt"); args.Add("yuv420p");
         args.Add("-c:a"); args.Add("aac");
         args.Add("-movflags"); args.Add("+faststart");
-        args.Add("-shortest");
+        // -shortest is unsafe with embedded subtitles: a sparse VTT stream can
+        // end at the last cue and silently truncate an otherwise complete film.
+        // Bound the output by the approved project runtime, not the shortest
+        // output stream; final-master QC still rejects truncated renders.
+        args.Add("-t"); args.Add(request.Contract.ExpectedDurationSeconds.ToString(CultureInfo.InvariantCulture));
         args.Add("-f"); args.Add("mp4");
         args.Add(outputPath);
         return args;
