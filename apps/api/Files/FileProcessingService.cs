@@ -427,6 +427,13 @@ internal sealed class CountingReadStream(Stream inner, long maxBytes, long? expe
 
     public override int Read(byte[] buffer, int offset, int count)
     {
+        // A zero-length read is not EOF. In particular, it must not finalize
+        // the streaming hash before the SDK has read the payload.
+        if (count == 0)
+        {
+            _ = buffer.AsSpan(offset, count); // Retain range validation.
+            return 0;
+        }
         var read = inner.Read(buffer, offset, Math.Min(count, RemainingBufferSize(count)));
         Record(read, buffer.AsSpan(offset, read));
         return read;
@@ -434,6 +441,7 @@ internal sealed class CountingReadStream(Stream inner, long maxBytes, long? expe
 
     public override int Read(Span<byte> buffer)
     {
+        if (buffer.IsEmpty) return 0;
         var read = inner.Read(buffer[..Math.Min(buffer.Length, RemainingBufferSize(buffer.Length))]);
         Record(read, buffer);
         return read;
@@ -441,6 +449,13 @@ internal sealed class CountingReadStream(Stream inner, long maxBytes, long? expe
 
     public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
     {
+        // AWS SDK callers may issue an empty read even at Content-Length.
+        // Never consume a trailing source byte (or finalize SHA-256) for it.
+        if (buffer.IsEmpty)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return 0;
+        }
         if (BytesRead >= maxBytes)
         {
             var probe = new byte[1];
