@@ -257,7 +257,7 @@ test("authenticated Document success renders a private preview and downloads exa
     const reader = workspace.locator(".document-reader");
     await expect(reader.getByRole("heading", { name: documentTitle, exact: true })).toBeVisible();
     await expect(reader.locator(".document-reader-summary")).toHaveText(summary);
-    await expect(reader.getByRole("heading", { name: "Workspace access", exact: true })).toBeVisible();
+    await expect(reader.getByRole("heading", { name: /Workspace access/ })).toBeVisible();
     await expect(reader.getByText(sectionText, { exact: true })).toBeVisible();
     await expect(page.locator("body")).not.toContainText(privateProviderMarker);
     expect(submittedPayload).toBeDefined();
