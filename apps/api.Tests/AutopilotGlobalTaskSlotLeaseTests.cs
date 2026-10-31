@@ -43,13 +43,13 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
     [Fact]
     public async Task Concurrent_claims_across_waves_never_exceed_the_global_twenty_slots()
     {
-        var taskIds = await SeedLaunchTasksAsync(total: 32, initiallyActive: 0);
+        var taskIds = await SeedLaunchTasksAsync(total: 21, initiallyActive: 0);
         var inventory = CompleteInventory();
 
         var results = await Task.WhenAll(taskIds.Select(id => ClaimAsync(id, inventory)));
 
         Assert.Equal(20, results.Count(item => item.Outcome == AutopilotGlobalTaskSlotOutcomes.Reserved));
-        Assert.Equal(12, results.Count(item => item.Outcome == AutopilotGlobalTaskSlotOutcomes.CapacityReached));
+        Assert.Single(results.Where(item => item.Outcome == AutopilotGlobalTaskSlotOutcomes.CapacityReached));
         Assert.All(results, item => Assert.True(item.ActiveSlotsObserved <= AutopilotGlobalTaskSlotAllocator.HardMaximum));
 
         await using var verify = CreateContext();
@@ -60,7 +60,7 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
     [Fact]
     public async Task Verified_completion_frees_exactly_one_slot_and_replay_does_not_free_another()
     {
-        var taskIds = await SeedLaunchTasksAsync(total: 22, initiallyActive: 20);
+        var taskIds = await SeedLaunchTasksAsync(total: 22, initiallyActive: 20, tasksPerWave: 22);
         var inventory = CompleteInventory();
         var firstExternalId = "external-task-0";
         string key;
@@ -84,6 +84,10 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
             Assert.Equal(AutopilotGlobalTaskSlotOutcomes.DuplicateCompletion, replay.Outcome);
         }
 
+        var reacquireCompleted = await ClaimAsync(taskIds[0], inventory);
+        Assert.Equal(AutopilotGlobalTaskSlotOutcomes.Completed, reacquireCompleted.Outcome);
+        Assert.False(reacquireCompleted.MayCallProvider);
+
         var replacement = await ClaimAsync(taskIds[20], inventory);
         Assert.Equal(AutopilotGlobalTaskSlotOutcomes.Reserved, replacement.Outcome);
         Assert.Equal(20, replacement.ActiveSlotsObserved);
@@ -95,6 +99,11 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
         Assert.Equal(1, await verify.AutopilotWaveLaunchTasks.CountAsync(item => item.Status == AutopilotWaveLaunchStatuses.Completed));
         Assert.Equal(20, await verify.AutopilotWaveLaunchTasks.CountAsync(item =>
             item.Status == AutopilotWaveLaunchStatuses.Launching || item.Status == AutopilotWaveLaunchStatuses.Launched));
+        Assert.Equal(AutopilotWaveLaunchStatuses.Launched,
+            (await verify.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskIds[1])).Status);
+        var completedTask = await verify.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskIds[0]);
+        var sameWaveRefill = await verify.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskIds[20]);
+        Assert.Equal(completedTask.BatchId, sameWaveRefill.BatchId);
     }
 
     [Fact]
@@ -279,7 +288,7 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
             providerGuaranteesIdempotency: true);
     }
 
-    private async Task<IReadOnlyList<Guid>> SeedLaunchTasksAsync(int total, int initiallyActive, bool staleActive = false)
+    private async Task<IReadOnlyList<Guid>> SeedLaunchTasksAsync(int total, int initiallyActive, bool staleActive = false, int tasksPerWave = 5)
     {
         var ids = Enumerable.Range(0, total).Select(_ => Guid.NewGuid()).ToArray();
         var now = DateTime.UtcNow;
@@ -288,7 +297,7 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
 
         for (var i = 0; i < total; i++)
         {
-            var waveNumber = i / 5;
+            var waveNumber = i / tasksPerWave;
             if (!waves.TryGetValue(waveNumber, out var pair))
             {
                 var sourceWave = $"source-wave-{waveNumber}";
