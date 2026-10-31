@@ -126,6 +126,33 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Unmarked_inflight_launch_counts_toward_capacity_during_rolling_upgrade()
+    {
+        var taskIds = await SeedLaunchTasksAsync(total: 21, initiallyActive: 19);
+        await using (var db = CreateContext())
+        {
+            var uncertain = await db.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskIds[19]);
+            uncertain.Status = AutopilotWaveLaunchStatuses.Launching;
+            uncertain.LaunchAttempt = 1;
+            uncertain.ExternalTaskId = "unreported-provider-task";
+            uncertain.UpdatedAt = DateTime.UtcNow;
+            uncertain.ReasonCode = null;
+            await db.SaveChangesAsync();
+        }
+
+        var result = await ClaimAsync(taskIds[20], CompleteInventory());
+
+        Assert.Equal(AutopilotGlobalTaskSlotOutcomes.CapacityReached, result.Outcome);
+        Assert.Equal(20, result.ActiveSlotsObserved);
+        await using var verify = CreateContext();
+        Assert.Equal(19, await verify.AutopilotWaveLaunchTasks.CountAsync(item => item.Status == AutopilotWaveLaunchStatuses.Launched));
+        var uncertainAfter = await verify.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskIds[19]);
+        Assert.Equal(AutopilotWaveLaunchStatuses.Launching, uncertainAfter.Status);
+        Assert.Equal(AutopilotWaveLaunchStatuses.Planned,
+            (await verify.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskIds[20])).Status);
+    }
+
+    [Fact]
     public async Task Unknown_or_partial_external_occupancy_fails_closed_without_creating_a_claim()
     {
         var taskIds = await SeedLaunchTasksAsync(total: 1, initiallyActive: 0);

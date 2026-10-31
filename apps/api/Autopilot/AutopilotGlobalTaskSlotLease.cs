@@ -311,11 +311,11 @@ public sealed class AutopilotGlobalTaskSlotAllocator
             // The current controller claims a durable row immediately before it
             // calls IWaveLaunchProvider. Treat that fresh, unmarked claim as a
             // candidate, then atomically convert it into the global slot lease.
-            // Only this marker (or Launched) counts as a local reservation.
+            // All other Launching rows, marked or not, remain conservatively occupied.
             if (task.Status == AutopilotWaveLaunchStatuses.Launching && !IsGlobalSlotReservation(task))
             {
                 var staleUnreservedClaim = UtcNow() - task.UpdatedAt >= launchLease;
-                var occupiedBeforeClaim = await CountOccupiedSlotsAsync(inventory, cancellationToken);
+                var occupiedBeforeClaim = await CountOccupiedSlotsAsync(inventory, cancellationToken, task.Id);
                 if (occupiedBeforeClaim >= capacity)
                     return new(AutopilotGlobalTaskSlotOutcomes.CapacityReached, false, false, occupiedBeforeClaim, ReasonCode: "global_taslim_slot_cap_reached");
 
@@ -577,7 +577,8 @@ public sealed class AutopilotGlobalTaskSlotAllocator
 
     private async Task<int> CountOccupiedSlotsAsync(
         AutopilotGlobalTaskInventorySnapshot inventory,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Guid? excludeUnreservedLaunchTaskRowId = null)
     {
         var externalIds = inventory.ActiveTasks.Select(item => item.TaskId).Distinct(StringComparer.Ordinal).ToArray();
         var recentlyCompletedIds = externalIds.Length == 0
@@ -598,9 +599,16 @@ public sealed class AutopilotGlobalTaskSlotAllocator
             .Select(item => item.IdempotencyKey!)
             .ToHashSet(StringComparer.Ordinal);
 
-        var localActive = await db.AutopilotWaveLaunchTasks.AsNoTracking()
+        var localActiveQuery = db.AutopilotWaveLaunchTasks.AsNoTracking()
             .Where(item => item.Status == AutopilotWaveLaunchStatuses.Launched
-                || (item.Status == AutopilotWaveLaunchStatuses.Launching && item.ReasonCode == SlotReservedReason))
+                || item.Status == AutopilotWaveLaunchStatuses.Launching);
+        if (excludeUnreservedLaunchTaskRowId.HasValue)
+        {
+            var candidateId = excludeUnreservedLaunchTaskRowId.Value;
+            localActiveQuery = localActiveQuery.Where(item => item.Id != candidateId || item.Status == AutopilotWaveLaunchStatuses.Launched);
+        }
+
+        var localActive = await localActiveQuery
             .Take(MaxRowsExamined + 1)
             .ToListAsync(cancellationToken);
         if (localActive.Count > MaxRowsExamined)
