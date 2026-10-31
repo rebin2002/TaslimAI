@@ -32,6 +32,17 @@ public enum PublicFreeTierProviderOutcome
     CancelledAfterDispatch = 3,
 }
 
+/// <summary>Lifecycle state of one provider-attempt exposure reservation.</summary>
+public enum PublicFreeTierReservationState
+{
+    None = 0,
+    Reserved = 1,
+    Dispatched = 2,
+    ReconciliationRequired = 3,
+    Settled = 4,
+    Released = 5,
+}
+
 /// <summary>
 /// Conservative defaults for the public free tier. Enabled is intentionally false: a
 /// deployment must explicitly enable this only after the durable gate is integrated and
@@ -295,13 +306,25 @@ public static class PublicFreeTierPolicy
 /// <summary>
 /// Provider-cost reservation boundary for the eventual server integration. Implementations
 /// must be durable and cross-replica atomic: read all applicable user/workspace/global windows,
-/// evaluate this policy, and persist the idempotent reservation in one transaction before a
-/// provider call. An in-memory limiter or a caller-supplied snapshot is not sufficient.
+/// evaluate this policy, and persist the idempotent reservation in one transaction. A reservation
+/// only holds exposure; neither Reserved nor Decision.Allowed authorizes a provider call. The
+/// successful one-shot TryAuthorizeProviderDispatchAsync transition is the only dispatch permit.
+/// An in-memory limiter or a caller-supplied snapshot is not sufficient.
 /// </summary>
 public interface IPublicFreeTierSpendLedger
 {
     Task<PublicFreeTierReservationResult> TryReserveBeforeProviderCallAsync(
         PublicFreeTierAdmissionRequest request,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Atomically transitions an undispatched reservation to Dispatched. Only a successful
+    /// DispatchAuthorized result permits one provider invocation; a replay, race loser, or
+    /// terminal state must never authorize dispatch again. Persist this transition before I/O.
+    /// </summary>
+    Task<PublicFreeTierDispatchAuthorizationResult> TryAuthorizeProviderDispatchAsync(
+        Guid reservationId,
+        string dispatchIdempotencyKey,
         CancellationToken cancellationToken = default);
 
     Task<PublicFreeTierSettlementResult> RecordProviderOutcomeAsync(
@@ -319,11 +342,23 @@ public interface IPublicFreeTierSpendLedger
         CancellationToken cancellationToken = default);
 }
 
+/// <summary>
+/// Reserved indicates a live exposure hold, not dispatch permission. Use only the separate
+/// dispatch-authorization result to decide whether one provider call may be made.
+/// </summary>
 public sealed record PublicFreeTierReservationResult(
     bool Reserved,
     Guid? ReservationId,
     bool IsIdempotentReplay,
-    PublicFreeTierAdmissionDecision Decision);
+    PublicFreeTierAdmissionDecision Decision,
+    PublicFreeTierReservationState State = PublicFreeTierReservationState.None);
+
+/// <summary>One-shot result of the atomic Reserved-to-Dispatched state transition.</summary>
+public sealed record PublicFreeTierDispatchAuthorizationResult(
+    bool DispatchAuthorized,
+    bool IsIdempotentReplay,
+    PublicFreeTierReservationState State,
+    string Code);
 
 public sealed record PublicFreeTierSettlementResult(
     bool Applied,

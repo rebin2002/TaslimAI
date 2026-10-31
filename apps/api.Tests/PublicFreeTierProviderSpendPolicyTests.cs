@@ -310,11 +310,50 @@ public sealed class PublicFreeTierProviderSpendPolicyTests
         Assert.True(first.Reserved);
         Assert.True(replay.Reserved);
         Assert.True(replay.IsIdempotentReplay);
+        Assert.Equal(PublicFreeTierReservationState.Reserved, replay.State);
+        Assert.False(replay.Decision.Allowed);
+        Assert.Equal("PUBLIC_FREE_TIER_RESERVATION_REPLAY", replay.Decision.Code);
         Assert.Equal(first.ReservationId, replay.ReservationId);
         Assert.Equal(1, ledger.ReservationCount);
+
+        var dispatch = await ledger.TryAuthorizeProviderDispatchAsync(first.ReservationId!.Value, "provider-attempt-1");
+        var dispatchReplay = await ledger.TryAuthorizeProviderDispatchAsync(first.ReservationId.Value, "provider-attempt-1");
+        Assert.True(dispatch.DispatchAuthorized);
+        Assert.False(dispatch.IsIdempotentReplay);
+        Assert.False(dispatchReplay.DispatchAuthorized);
+        Assert.True(dispatchReplay.IsIdempotentReplay);
+        Assert.Equal(PublicFreeTierReservationState.Dispatched, dispatchReplay.State);
+
         Assert.False(conflictingReplay.Reserved);
         Assert.Equal(409, conflictingReplay.Decision.StatusCode);
         Assert.Equal("PUBLIC_FREE_TIER_IDEMPOTENCY_KEY_CONFLICT", conflictingReplay.Decision.Code);
+    }
+
+    [Fact]
+    public async Task Concurrent_duplicate_reservations_and_dispatch_authorization_are_one_shot()
+    {
+        var ledger = new AtomicTestLedger(EnabledOptions(), NowUtc);
+        var request = ValidRequest(idempotencyKey: "concurrent-same-attempt");
+
+        var admissions = await Task.WhenAll(Enumerable.Range(0, 32).Select(_ =>
+            Task.Run(() => ledger.TryReserveBeforeProviderCallAsync(request))));
+
+        var original = Assert.Single(admissions, result => !result.IsIdempotentReplay);
+        Assert.Equal(31, admissions.Count(result => result.IsIdempotentReplay));
+        Assert.Single(admissions, result => result.Decision.Allowed);
+        Assert.All(admissions, result => Assert.Equal(original.ReservationId, result.ReservationId));
+        Assert.Equal(1, ledger.ReservationCount);
+
+        var dispatches = await Task.WhenAll(Enumerable.Range(0, 32).Select(_ =>
+            Task.Run(() => ledger.TryAuthorizeProviderDispatchAsync(original.ReservationId!.Value, "concurrent-dispatch"))));
+
+        Assert.Single(dispatches, result => result.DispatchAuthorized);
+        Assert.Equal(31, dispatches.Count(result => result.IsIdempotentReplay));
+        Assert.All(dispatches.Where(result => !result.DispatchAuthorized), result =>
+        {
+            Assert.Equal(PublicFreeTierReservationState.Dispatched, result.State);
+            Assert.False(result.DispatchAuthorized);
+        });
     }
 
     [Fact]
@@ -363,9 +402,11 @@ public sealed class PublicFreeTierProviderSpendPolicyTests
         var request = ValidRequest(idempotencyKey: "failed-attempt") with { EstimatedProviderCostUsd = 0.008m };
         var reservation = await ledger.TryReserveBeforeProviderCallAsync(request);
         Assert.True(reservation.Reserved);
+        var dispatch = await ledger.TryAuthorizeProviderDispatchAsync(reservation.ReservationId!.Value, "failed-attempt-dispatch");
+        Assert.True(dispatch.DispatchAuthorized);
 
         var failed = await ledger.RecordProviderOutcomeAsync(
-            reservation.ReservationId!.Value,
+            reservation.ReservationId.Value,
             "provider-result-1",
             PublicFreeTierProviderOutcome.Failed,
             actualCostKnown: false,
@@ -398,9 +439,11 @@ public sealed class PublicFreeTierProviderSpendPolicyTests
         var ledger = new AtomicTestLedger(EnabledOptions(), NowUtc);
         var reservation = await ledger.TryReserveBeforeProviderCallAsync(
             ValidRequest(idempotencyKey: "provider-failed-known-cost") with { EstimatedProviderCostUsd = 0.009m });
+        var dispatch = await ledger.TryAuthorizeProviderDispatchAsync(reservation.ReservationId!.Value, "known-cost-dispatch");
+        Assert.True(dispatch.DispatchAuthorized);
 
         var result = await ledger.RecordProviderOutcomeAsync(
-            reservation.ReservationId!.Value,
+            reservation.ReservationId.Value,
             "provider-result-known-cost",
             PublicFreeTierProviderOutcome.Failed,
             actualCostKnown: true,
@@ -426,6 +469,137 @@ public sealed class PublicFreeTierProviderSpendPolicyTests
         Assert.True(replay.IsIdempotentReplay);
         Assert.Equal(0m, ledger.GlobalExposureUsd);
         Assert.Equal(1, ledger.UserMessagesForUtcDay);
+    }
+
+    [Fact]
+    public async Task Released_and_settled_replays_never_claim_dispatch_permission_or_live_reservation()
+    {
+        var releasedLedger = new AtomicTestLedger(EnabledOptions(), NowUtc);
+        var releasedRequest = ValidRequest(idempotencyKey: "terminal-release-replay");
+        var releasedReservation = await releasedLedger.TryReserveBeforeProviderCallAsync(releasedRequest);
+        var release = await releasedLedger.ReleaseUndispatchedAsync(releasedReservation.ReservationId!.Value, "release-terminal");
+        Assert.True(release.Applied);
+
+        var releasedReplay = await releasedLedger.TryReserveBeforeProviderCallAsync(releasedRequest);
+        var releasedDispatch = await releasedLedger.TryAuthorizeProviderDispatchAsync(releasedReservation.ReservationId.Value, "dispatch-after-release");
+        Assert.True(releasedReplay.IsIdempotentReplay);
+        Assert.False(releasedReplay.Reserved);
+        Assert.Equal(PublicFreeTierReservationState.Released, releasedReplay.State);
+        Assert.False(releasedReplay.Decision.Allowed);
+        Assert.Equal("PUBLIC_FREE_TIER_RESERVATION_RELEASED", releasedReplay.Decision.Code);
+        Assert.False(releasedDispatch.DispatchAuthorized);
+        Assert.Equal(PublicFreeTierReservationState.Released, releasedDispatch.State);
+        Assert.Equal(0m, releasedLedger.GlobalExposureUsd);
+
+        var settledLedger = new AtomicTestLedger(EnabledOptions(), NowUtc);
+        var settledRequest = ValidRequest(idempotencyKey: "terminal-settlement-replay");
+        var settledReservation = await settledLedger.TryReserveBeforeProviderCallAsync(settledRequest);
+        var dispatch = await settledLedger.TryAuthorizeProviderDispatchAsync(settledReservation.ReservationId!.Value, "settlement-dispatch");
+        Assert.True(dispatch.DispatchAuthorized);
+        var settlement = await settledLedger.RecordProviderOutcomeAsync(
+            settledReservation.ReservationId.Value,
+            "settlement-completion",
+            PublicFreeTierProviderOutcome.Succeeded,
+            actualCostKnown: true,
+            actualProviderCostUsd: 0.0005m);
+        var settlementReplay = await settledLedger.RecordProviderOutcomeAsync(
+            settledReservation.ReservationId.Value,
+            "settlement-completion",
+            PublicFreeTierProviderOutcome.Succeeded,
+            actualCostKnown: true,
+            actualProviderCostUsd: 0.0005m);
+
+        var settledReplay = await settledLedger.TryReserveBeforeProviderCallAsync(settledRequest);
+        var settledDispatch = await settledLedger.TryAuthorizeProviderDispatchAsync(settledReservation.ReservationId.Value, "settlement-dispatch");
+        Assert.True(settlement.Applied);
+        Assert.True(settlementReplay.IsIdempotentReplay);
+        Assert.True(settledReplay.IsIdempotentReplay);
+        Assert.False(settledReplay.Reserved);
+        Assert.Equal(PublicFreeTierReservationState.Settled, settledReplay.State);
+        Assert.False(settledReplay.Decision.Allowed);
+        Assert.Equal("PUBLIC_FREE_TIER_RESERVATION_SETTLED", settledReplay.Decision.Code);
+        Assert.False(settledDispatch.DispatchAuthorized);
+        Assert.Equal(PublicFreeTierReservationState.Settled, settledDispatch.State);
+    }
+
+    [Fact]
+    public async Task Dispatched_and_unknown_replays_keep_the_hold_but_never_authorize_a_second_call()
+    {
+        var ledger = new AtomicTestLedger(EnabledOptions(), NowUtc);
+        var request = ValidRequest(idempotencyKey: "dispatched-unknown-replay") with { EstimatedProviderCostUsd = 0.008m };
+        var reservation = await ledger.TryReserveBeforeProviderCallAsync(request);
+        var dispatch = await ledger.TryAuthorizeProviderDispatchAsync(reservation.ReservationId!.Value, "single-provider-dispatch");
+        Assert.True(dispatch.DispatchAuthorized);
+
+        var dispatchedReplay = await ledger.TryReserveBeforeProviderCallAsync(request);
+        var duplicateDispatch = await ledger.TryAuthorizeProviderDispatchAsync(reservation.ReservationId.Value, "single-provider-dispatch");
+        Assert.True(dispatchedReplay.Reserved);
+        Assert.Equal(PublicFreeTierReservationState.Dispatched, dispatchedReplay.State);
+        Assert.False(dispatchedReplay.Decision.Allowed);
+        Assert.False(duplicateDispatch.DispatchAuthorized);
+        Assert.True(duplicateDispatch.IsIdempotentReplay);
+
+        var unknown = await ledger.RecordProviderOutcomeAsync(
+            reservation.ReservationId.Value,
+            "unknown-provider-result",
+            PublicFreeTierProviderOutcome.Failed,
+            actualCostKnown: false,
+            actualProviderCostUsd: null);
+        var unknownReplay = await ledger.TryReserveBeforeProviderCallAsync(request);
+        var unknownDispatch = await ledger.TryAuthorizeProviderDispatchAsync(reservation.ReservationId.Value, "late-provider-dispatch");
+
+        Assert.True(unknown.ReconciliationRequired);
+        Assert.True(unknownReplay.Reserved);
+        Assert.Equal(PublicFreeTierReservationState.ReconciliationRequired, unknownReplay.State);
+        Assert.False(unknownReplay.Decision.Allowed);
+        Assert.False(unknownDispatch.DispatchAuthorized);
+        Assert.Equal(0.008m, ledger.GlobalExposureUsd);
+    }
+
+    [Fact]
+    public async Task Undispatched_release_racing_dispatch_authorization_has_exactly_one_winner()
+    {
+        for (var attempt = 0; attempt < 32; attempt++)
+        {
+            var ledger = new AtomicTestLedger(EnabledOptions(), NowUtc);
+            var request = ValidRequest(idempotencyKey: $"release-dispatch-race-{attempt}") with { EstimatedProviderCostUsd = 0.009m };
+            var reservation = await ledger.TryReserveBeforeProviderCallAsync(request);
+            var reservationId = reservation.ReservationId!.Value;
+            var start = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            var releaseTask = Task.Run(async () =>
+            {
+                await start.Task;
+                return await ledger.ReleaseUndispatchedAsync(reservationId, $"race-release-{attempt}");
+            });
+            var dispatchTask = Task.Run(async () =>
+            {
+                await start.Task;
+                return await ledger.TryAuthorizeProviderDispatchAsync(reservationId, $"race-dispatch-{attempt}");
+            });
+            start.SetResult(true);
+
+            await Task.WhenAll(releaseTask, dispatchTask);
+            var release = await releaseTask;
+            var dispatch = await dispatchTask;
+            Assert.NotEqual(release.Applied, dispatch.DispatchAuthorized);
+
+            var replay = await ledger.TryReserveBeforeProviderCallAsync(request);
+            Assert.False(replay.Decision.Allowed);
+            if (release.Applied)
+            {
+                Assert.Equal(PublicFreeTierReservationState.Released, replay.State);
+                Assert.False(replay.Reserved);
+                Assert.Equal(0m, ledger.GlobalExposureUsd);
+            }
+            else
+            {
+                Assert.True(dispatch.DispatchAuthorized);
+                Assert.Equal(PublicFreeTierReservationState.Dispatched, replay.State);
+                Assert.True(replay.Reserved);
+                Assert.Equal(0.009m, ledger.GlobalExposureUsd);
+            }
+        }
     }
 
     private static PublicFreeTierPolicyOptions EnabledOptions() => new() { Enabled = true };
@@ -527,12 +701,8 @@ public sealed class PublicFreeTierProviderSpendPolicyTests
                 if (byKey.TryGetValue(key, out var existing))
                 {
                     if (existing.Request != request)
-                        return Task.FromResult(Rejected(409, "PUBLIC_FREE_TIER_IDEMPOTENCY_KEY_CONFLICT"));
-                    return Task.FromResult(new PublicFreeTierReservationResult(
-                        true,
-                        existing.Id,
-                        true,
-                        PublicFreeTierAdmissionDecision.Allow()));
+                        return Task.FromResult(Rejected(409, "PUBLIC_FREE_TIER_IDEMPOTENCY_KEY_CONFLICT", existing.State));
+                    return Task.FromResult(ToReplay(existing));
                 }
 
                 var snapshot = CreateSnapshot(request);
@@ -547,7 +717,45 @@ public sealed class PublicFreeTierProviderSpendPolicyTests
                     true,
                     stored.Id,
                     false,
-                    PublicFreeTierAdmissionDecision.Allow()));
+                    PublicFreeTierAdmissionDecision.Allow(),
+                    PublicFreeTierReservationState.Reserved));
+            }
+        }
+
+        public Task<PublicFreeTierDispatchAuthorizationResult> TryAuthorizeProviderDispatchAsync(
+            Guid reservationId,
+            string dispatchIdempotencyKey,
+            CancellationToken cancellationToken = default)
+        {
+            lock (gate)
+            {
+                if (!byId.TryGetValue(reservationId, out var stored))
+                    return Task.FromResult(new PublicFreeTierDispatchAuthorizationResult(
+                        false, false, PublicFreeTierReservationState.None, "RESERVATION_NOT_FOUND"));
+                if (string.IsNullOrWhiteSpace(dispatchIdempotencyKey) || dispatchIdempotencyKey.Length > 200)
+                    return Task.FromResult(new PublicFreeTierDispatchAuthorizationResult(
+                        false, false, stored.State, "DISPATCH_IDEMPOTENCY_KEY_INVALID"));
+                if (stored.State == PublicFreeTierReservationState.Dispatched)
+                    return Task.FromResult(string.Equals(stored.DispatchKey, dispatchIdempotencyKey, StringComparison.Ordinal)
+                        ? new PublicFreeTierDispatchAuthorizationResult(false, true, stored.State, "IDEMPOTENT_DISPATCH_REPLAY")
+                        : new PublicFreeTierDispatchAuthorizationResult(false, false, stored.State, "PROVIDER_DISPATCH_ALREADY_AUTHORIZED"));
+                if (stored.State != PublicFreeTierReservationState.Reserved)
+                    return Task.FromResult(new PublicFreeTierDispatchAuthorizationResult(
+                        false,
+                        false,
+                        stored.State,
+                        stored.State switch
+                        {
+                            PublicFreeTierReservationState.ReconciliationRequired => "RECONCILIATION_REQUIRED",
+                            PublicFreeTierReservationState.Settled => "RESERVATION_ALREADY_SETTLED",
+                            PublicFreeTierReservationState.Released => "RESERVATION_ALREADY_RELEASED",
+                            _ => "RESERVATION_NOT_DISPATCHABLE",
+                        }));
+
+                stored.State = PublicFreeTierReservationState.Dispatched;
+                stored.DispatchKey = dispatchIdempotencyKey;
+                return Task.FromResult(new PublicFreeTierDispatchAuthorizationResult(
+                    true, false, stored.State, "DISPATCH_AUTHORIZED"));
             }
         }
 
@@ -571,22 +779,27 @@ public sealed class PublicFreeTierProviderSpendPolicyTests
                     return Task.FromResult(new PublicFreeTierSettlementResult(false, false, stored.UnknownExposure, "ACTUAL_COST_INVALID"));
                 if (!actualCostKnown && actualProviderCostUsd.HasValue)
                     return Task.FromResult(new PublicFreeTierSettlementResult(false, false, stored.UnknownExposure, "ACTUAL_COST_INVALID"));
-                if (stored.Finalized && !stored.UnknownExposure)
+                if (stored.State == PublicFreeTierReservationState.ReconciliationRequired && !actualCostKnown)
+                    return Task.FromResult(new PublicFreeTierSettlementResult(false, false, true, "RECONCILIATION_REQUIRED"));
+                if (stored.State is PublicFreeTierReservationState.Settled or PublicFreeTierReservationState.Released)
                     return Task.FromResult(new PublicFreeTierSettlementResult(false, false, false, "RESERVATION_ALREADY_FINALIZED"));
+                if (stored.State is not (PublicFreeTierReservationState.Dispatched or PublicFreeTierReservationState.ReconciliationRequired))
+                    return Task.FromResult(new PublicFreeTierSettlementResult(false, false, stored.UnknownExposure, "PROVIDER_DISPATCH_NOT_AUTHORIZED"));
 
                 stored.CompletionKeys.Add(completionIdempotencyKey, $"{outcome}:{actualCostKnown}:{actualProviderCostUsd}");
                 if (actualCostKnown)
                 {
                     stored.ExposureUsd = actualProviderCostUsd!.Value;
                     stored.UnknownExposure = false;
+                    stored.State = PublicFreeTierReservationState.Settled;
                 }
                 else
                 {
                     // Provider failure/timeout can still incur charges. Keep the full estimate
                     // reserved and block admission until a reconciliation supplies actual cost.
                     stored.UnknownExposure = true;
+                    stored.State = PublicFreeTierReservationState.ReconciliationRequired;
                 }
-                stored.Finalized = true;
                 return Task.FromResult(new PublicFreeTierSettlementResult(
                     true,
                     false,
@@ -608,13 +821,24 @@ public sealed class PublicFreeTierProviderSpendPolicyTests
                     return Task.FromResult(prior == "RELEASE_UNDISPATCHED"
                         ? new PublicFreeTierSettlementResult(true, true, false, "IDEMPOTENT_REPLAY")
                         : new PublicFreeTierSettlementResult(false, false, stored.UnknownExposure, "COMPLETION_KEY_CONFLICT"));
-                if (stored.Finalized)
-                    return Task.FromResult(new PublicFreeTierSettlementResult(false, false, stored.UnknownExposure, "RESERVATION_ALREADY_FINALIZED"));
+                if (stored.State != PublicFreeTierReservationState.Reserved)
+                    return Task.FromResult(new PublicFreeTierSettlementResult(
+                        false,
+                        false,
+                        stored.UnknownExposure,
+                        stored.State switch
+                        {
+                            PublicFreeTierReservationState.Dispatched => "PROVIDER_ALREADY_DISPATCHED",
+                            PublicFreeTierReservationState.ReconciliationRequired => "RECONCILIATION_REQUIRED",
+                            PublicFreeTierReservationState.Settled => "RESERVATION_ALREADY_FINALIZED",
+                            PublicFreeTierReservationState.Released => "RESERVATION_ALREADY_RELEASED",
+                            _ => "RESERVATION_NOT_DISPATCHABLE",
+                        }));
 
                 stored.CompletionKeys.Add(completionIdempotencyKey, "RELEASE_UNDISPATCHED");
                 stored.ExposureUsd = 0m;
                 stored.UnknownExposure = false;
-                stored.Finalized = true;
+                stored.State = PublicFreeTierReservationState.Released;
                 return Task.FromResult(new PublicFreeTierSettlementResult(true, false, false, "RELEASED"));
             }
         }
@@ -643,11 +867,38 @@ public sealed class PublicFreeTierProviderSpendPolicyTests
                 all.Count(item => item.UnknownExposure));
         }
 
-        private static PublicFreeTierReservationResult Rejected(int statusCode, string code) => new(
+        private static PublicFreeTierReservationResult ToReplay(StoredReservation stored)
+        {
+            var decision = stored.State switch
+            {
+                PublicFreeTierReservationState.Reserved => PublicFreeTierAdmissionDecision.Deny(
+                    409, "PUBLIC_FREE_TIER_RESERVATION_REPLAY", "This provider attempt is already reserved; do not dispatch from a reservation replay."),
+                PublicFreeTierReservationState.Dispatched => PublicFreeTierAdmissionDecision.Deny(
+                    409, "PUBLIC_FREE_TIER_DISPATCH_ALREADY_STARTED", "This provider attempt has already been authorized for dispatch."),
+                PublicFreeTierReservationState.ReconciliationRequired => PublicFreeTierAdmissionDecision.Deny(
+                    503, "PUBLIC_FREE_TIER_RECONCILIATION_REQUIRED", "Free AI is paused while provider usage is reconciled."),
+                PublicFreeTierReservationState.Settled => PublicFreeTierAdmissionDecision.Deny(
+                    409, "PUBLIC_FREE_TIER_RESERVATION_SETTLED", "This provider attempt is already finalized."),
+                PublicFreeTierReservationState.Released => PublicFreeTierAdmissionDecision.Deny(
+                    409, "PUBLIC_FREE_TIER_RESERVATION_RELEASED", "This provider attempt was released and cannot be dispatched."),
+                _ => PublicFreeTierAdmissionDecision.Deny(
+                    503, "PUBLIC_FREE_TIER_RESERVATION_STATE_INVALID", "Free AI usage could not be verified safely."),
+            };
+            var exposureHeld = stored.State is PublicFreeTierReservationState.Reserved
+                or PublicFreeTierReservationState.Dispatched
+                or PublicFreeTierReservationState.ReconciliationRequired;
+            return new PublicFreeTierReservationResult(exposureHeld, stored.Id, true, decision, stored.State);
+        }
+
+        private static PublicFreeTierReservationResult Rejected(
+            int statusCode,
+            string code,
+            PublicFreeTierReservationState state = PublicFreeTierReservationState.None) => new(
             false,
             null,
             false,
-            PublicFreeTierAdmissionDecision.Deny(statusCode, code, "The request could not be admitted safely."));
+            PublicFreeTierAdmissionDecision.Deny(statusCode, code, "The request could not be admitted safely."),
+            state);
 
         private sealed class StoredReservation(Guid id, PublicFreeTierAdmissionRequest request, decimal reservedUsd)
         {
@@ -655,7 +906,8 @@ public sealed class PublicFreeTierProviderSpendPolicyTests
             public PublicFreeTierAdmissionRequest Request { get; } = request;
             public decimal ExposureUsd { get; set; } = reservedUsd;
             public bool UnknownExposure { get; set; }
-            public bool Finalized { get; set; }
+            public PublicFreeTierReservationState State { get; set; } = PublicFreeTierReservationState.Reserved;
+            public string? DispatchKey { get; set; }
             public Dictionary<string, string> CompletionKeys { get; } = new(StringComparer.Ordinal);
         }
     }
