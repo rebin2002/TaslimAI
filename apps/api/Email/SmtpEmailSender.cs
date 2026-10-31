@@ -6,7 +6,7 @@ namespace Taslim.Api.Email;
 
 public sealed class SmtpEmailSender(IOptionsMonitor<SmtpEmailOptions> options) : IEmailSender
 {
-    private const int SendTimeoutMilliseconds = 15_000;
+    private const int SendTimeoutMilliseconds = PasswordRecoveryOptions.SmtpSendTimeoutSeconds * 1_000;
 
     public bool IsConfigured => options.CurrentValue.IsConfigured;
 

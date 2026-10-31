@@ -5,6 +5,10 @@ namespace Taslim.Api.Email;
 public sealed class PasswordRecoveryOptions
 {
     public const int PasswordResetTokenLifetimeMinutes = 60;
+    // A finite lease reduces short-timeout overlap; it cannot guarantee exactly-once SMTP delivery.
+    public const int SmtpSendTimeoutSeconds = 15;
+    public const int LeaseProcessingMarginSeconds = 45;
+    public const int MinimumLeaseSeconds = SmtpSendTimeoutSeconds + LeaseProcessingMarginSeconds;
 
     public bool Enabled { get; set; }
     public string PublicBaseUrl { get; set; } = string.Empty;
@@ -19,7 +23,7 @@ public sealed class PasswordRecoveryOptions
         && RequestCooldownMinutes is >= 1 and <= 1440
         && WorkerPollSeconds is >= 1 and <= 60
         && MaxDeliveryAttempts is >= 1 and <= 10
-        && LeaseSeconds is >= 15 and <= 300
+        && LeaseSeconds is >= MinimumLeaseSeconds and <= 300
         && PasswordResetLinkBuilder.IsAllowedBaseUrl(PublicBaseUrl, isProduction);
 }
 
