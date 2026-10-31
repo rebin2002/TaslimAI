@@ -1,6 +1,111 @@
 import { test, expect, loginInUi, logoutInUi, registerInUi } from "./fixtures";
+import type { Page } from "@playwright/test";
+
+async function mockRecoveryAvailability(page: Page, available: boolean) {
+  await page.route("**/api/auth/password-recovery/availability", async (route) => {
+    const appOrigin = new URL(page.url()).origin;
+    const corsHeaders = {
+      "access-control-allow-origin": appOrigin,
+      "access-control-allow-credentials": "true",
+      "access-control-allow-methods": "GET, OPTIONS",
+      "access-control-allow-headers": "content-type",
+    };
+    if (route.request().method() === "OPTIONS") {
+      await route.fulfill({ status: 204, headers: corsHeaders });
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      headers: { ...corsHeaders, "content-type": "application/json", "cache-control": "no-store" },
+      body: JSON.stringify({ available }),
+    });
+  });
+}
 
 test.describe("authentication and onboarding", () => {
+  test("login exposes a working forgot-password route", async ({ page }) => {
+    await mockRecoveryAvailability(page, true);
+    await page.goto("/login");
+    const forgotPassword = page.getByRole("link", { name: /forgot password/i });
+    await expect(forgotPassword).toBeVisible();
+    await expect(forgotPassword).toHaveAttribute("href", "/forgot-password");
+    await forgotPassword.click();
+    await expect(page).toHaveURL(/\/forgot-password$/);
+    await expect(page.getByRole("heading", { name: /reset your password/i })).toBeVisible();
+    await expect(page.getByLabel(/email/i)).toBeVisible();
+  });
+
+  test("recovery request shows the same accepted-state copy without revealing account existence", async ({ page }) => {
+    await mockRecoveryAvailability(page, true);
+    await page.goto("/login");
+    const appOrigin = new URL(page.url()).origin;
+    const corsHeaders = {
+      "access-control-allow-origin": appOrigin,
+      "access-control-allow-credentials": "true",
+      "access-control-allow-methods": "GET, POST, OPTIONS",
+      "access-control-allow-headers": "content-type, x-csrf-token",
+    };
+    await page.route("**/api/auth/csrf", (route) => route.fulfill({
+      status: 200,
+      headers: { ...corsHeaders, "content-type": "application/json" },
+      body: JSON.stringify({ token: "e2e-csrf-token" }),
+    }));
+    let submittedEmail = "";
+    await page.route("**/api/auth/password/forgot", async (route) => {
+      if (route.request().method() === "OPTIONS") {
+        await route.fulfill({ status: 204, headers: corsHeaders });
+        return;
+      }
+      submittedEmail = (route.request().postDataJSON() as { email: string }).email;
+      await route.fulfill({
+        status: 202,
+        headers: { ...corsHeaders, "content-type": "application/json" },
+        body: JSON.stringify({ message: "If an account matches that email, password reset instructions will be sent." }),
+      });
+    });
+
+    await page.getByRole("link", { name: /forgot password/i }).click();
+    await expect(page).toHaveURL(/\/forgot-password$/);
+    await expect(page.getByRole("heading", { name: /reset your password/i })).toBeVisible();
+    const emailInput = page.getByLabel(/^email$/i);
+    await emailInput.fill("recovery@example.test");
+    await expect(emailInput).toHaveValue("recovery@example.test");
+    await page.getByRole("button", { name: /send reset link/i }).click();
+    await expect(page.getByRole("status")).toContainText(/if an account matches that email/i);
+    expect(submittedEmail).toBe("recovery@example.test");
+  });
+
+  test("disabled or unavailable recovery stays unadvertised and hides request/reset forms", async ({ page }) => {
+    await mockRecoveryAvailability(page, false);
+    await page.goto("/login");
+    await expect(page.getByRole("link", { name: /forgot password/i })).toHaveCount(0);
+
+    await page.goto("/forgot-password");
+    await expect(page.getByRole("status")).toContainText(/temporarily unavailable/i);
+    await expect(page.getByLabel(/^email$/i)).toHaveCount(0);
+    await expect(page.getByRole("button", { name: /send reset link/i })).toHaveCount(0);
+
+    await page.goto("/reset-password#email=reset%40example.test&token=private-disabled-token&lang=en");
+    await expect(page).toHaveURL(/\/reset-password$/);
+    await expect(page.getByRole("status")).toContainText(/temporarily unavailable/i);
+    await expect(page.locator('input[autocomplete="new-password"]')).toHaveCount(0);
+    await expect(page.getByRole("button", { name: /reset password/i })).toBeHidden();
+    await expect(page.locator("body")).not.toContainText("private-disabled-token");
+  });
+
+  test("reset page removes fragment credentials before showing its form", async ({ page }) => {
+    await mockRecoveryAvailability(page, true);
+    const email = encodeURIComponent("reset-link@example.test");
+    const token = encodeURIComponent("private-reset-token-that-must-not-render");
+    const response = await page.goto(`/reset-password#email=${email}&token=${token}&lang=en`);
+    expect(response).not.toBeNull();
+    expect(response?.headers()["cache-control"]).toContain("no-store");
+    expect(response?.headers()["referrer-policy"]).toBe("no-referrer");
+    await expect(page).toHaveURL(/\/reset-password$/);
+    await expect(page.getByLabel(/new password/i)).toBeVisible();
+    await expect(page.locator("body")).not.toContainText("private-reset-token-that-must-not-render");
+  });
+
   test("registers a user and completes the guided onboarding flow", async ({ page, testUser }) => {
     await registerInUi(page, testUser, false);
     const onboarding = page.getByRole("dialog");
