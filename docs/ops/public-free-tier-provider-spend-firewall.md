@@ -129,6 +129,16 @@ Ten independent, read-only source audits traced route/controller entrypoints thr
 
 The cross-surface audit also found **no production speech-to-text provider path**. Standalone upscaling and the neutral video/soundtrack adapters are unavailable or dormant in the current composition; they are not counted as active paid dispatches, but any future activation requires explicit gate coverage. The direct-video HTTP adapter contains billable POST retry behavior and must not be wired without an idempotency/reservation design. Production repository defaults disable customer charging, `UsageControls.GuardrailsEnabled`, and `GenerationBudget.Enabled`; some provider feature toggles are also disabled/unconfigured in checked-in settings. These defaults are not a safety guarantee if deployment configuration enables a provider, and runtime secrets/settings were not inspected.
 
+### Actual-cost evidence from Accounts review
+
+Accounts' stage-cost addendum is recorded in the [#699 review comment](https://github.com/rebin2002/TaslimAI/pull/699#issuecomment-6548353775) and [#275 release copy](https://github.com/rebin2002/TaslimAI/pull/275#issuecomment-6548353939). This is an accounting recommendation/evidence note, not a designated reconciliation source or schema approval.
+
+- Classify `Actual` only from authoritative provider actuals or an explicitly accepted provider reconciliation feed. Classify `Estimated` only from an identified, versioned formula/tariff. Classify unpriced or possibly dispatched/ambiguous outcomes as `Unknown`; never convert missing cost to zero.
+- OpenAI Chat `ReadUsage` returns tokens with `ActualCost=null`. Token/catalog pricing may populate `UsageTransaction.ProviderCostUsd` as an estimate, and `ActualRecordedAt` is the application recording timestamp—not proof of provider actual. `ProviderCostKnown` can be true for an estimate; it is not an `Actual` discriminator.
+- Research web search has no cost field and no authoritative search-actual source is designated. A separately sourced, versioned tariff can support an `Estimated` amount; otherwise keep it `Unknown`. Report-LLM cost must be classified independently from that provider response. Do not merge Search and Report token usage into one asserted provider cost or one attempt.
+- Mubert Music returns unknown cost. After a possibly dispatched request, retain the full exposure hold and require authoritative reconciliation; do not release based only on a failed job, timeout, cancellation, or absent usage metadata.
+- Reconcile and finalize each physical provider attempt once, on its original UTC buckets, without double-counting the overlay alongside existing `UsageTransaction`/`GenerationProviderAttempt` records. This per-stage source designation remains unresolved for production.
+
 ### Fresh ownership blockers (444/444 open PR paths, zero errors)
 
 Open-PR path claims are coordination boundaries, not transfer or approval:
