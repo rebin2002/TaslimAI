@@ -107,6 +107,25 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Running_task_keeps_its_slot_after_launch_claim_lease_expires()
+    {
+        var taskIds = await SeedLaunchTasksAsync(total: 21, initiallyActive: 20);
+        await using (var db = CreateContext())
+        {
+            var active = await db.AutopilotWaveLaunchTasks
+                .Where(item => item.Status == AutopilotWaveLaunchStatuses.Launched)
+                .ToListAsync();
+            foreach (var task in active) task.UpdatedAt = DateTime.UtcNow.AddDays(-30);
+            await db.SaveChangesAsync();
+        }
+
+        var result = await ClaimAsync(taskIds[20], CompleteInventory());
+
+        Assert.Equal(AutopilotGlobalTaskSlotOutcomes.CapacityReached, result.Outcome);
+        Assert.Equal(20, result.ActiveSlotsObserved);
+    }
+
+    [Fact]
     public async Task Unknown_or_partial_external_occupancy_fails_closed_without_creating_a_claim()
     {
         var taskIds = await SeedLaunchTasksAsync(total: 1, initiallyActive: 0);
