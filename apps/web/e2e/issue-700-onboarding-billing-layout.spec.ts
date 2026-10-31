@@ -79,8 +79,7 @@ function onboardingFixture(language = "en", direction = "ltr") {
 function billingFixture(language = "en", direction = "ltr") {
   const plans: Array<[string, string, string, string, boolean]> = [
     ["Free", "Current", "No charge", "1,000 included credits", true],
-    ["Creator", "", "$9 / month", "10,000 included credits", false],
-    ["Studio", "", "$29 / month", "40,000 included credits", false],
+    ["Paid plan", "", "$9 / month", "10,000 included credits", false],
   ];
   const planMarkup = plans.map(([name, badge, price, credits, current]) => `
     <article class="billing-plan-option${current ? " current" : ""}">
@@ -102,10 +101,10 @@ function billingFixture(language = "en", direction = "ltr") {
               <div class="detail-icon" aria-hidden="true">◈</div>
             </div>
             <div class="billing-notice"><span>Plan and credit details are shown here. Charging remains disabled.</span></div>
-            <div class="billing-summary-grid">
+              <div class="billing-summary-grid">
               <div class="account-card billing-plan-card"><div class="card-title"><span class="card-title-icon">✦</span><div><h2>Current plan</h2><p>Subscription status</p></div></div><strong>Free</strong><span>No charge</span></div>
               <div class="account-card billing-credit-card"><div class="card-title"><span class="card-title-icon teal">◉</span><div><h2>Remaining credits</h2><p>Credit balance</p></div></div><strong>1,000</strong><span>1,000 included credits</span></div>
-              <div class="account-card billing-period-card"><div class="card-title"><span class="card-title-icon">◷</span><div><h2>Billing period</h2><p>Current period</p></div></div><strong>Oct 1 – Oct 31, 2026</strong><span>Next renewal: Nov 1, 2026</span></div>
+              <div class="account-card billing-period-card"><div class="card-title"><span class="card-title-icon">◷</span><div><h2>Billing period</h2><p>Current period</p></div></div><strong>Current period</strong><span>Renewal date shown in your account</span></div>
             </div>
             <div class="account-card billing-payment-status">
               <div class="card-title"><span class="card-title-icon">▤</span><div><h2>Payment status</h2><p>Customer charging status</p></div></div>
@@ -122,7 +121,7 @@ function billingFixture(language = "en", direction = "ltr") {
             </div>
             <div class="account-card">
               <div class="card-title"><span class="card-title-icon">◉</span><div><h2>Credit allowance</h2><p>Included, purchased, and adjusted credits.</p></div></div>
-              <dl class="billing-definition-list"><div><dt>Included allowance</dt><dd>1,000</dd></div><div><dt>Purchased credits</dt><dd>0</dd></div><div><dt>Corrections</dt><dd>0</dd></div></dl>
+              <dl class="billing-definition-list"><div><dt>Included allowance</dt><dd>1,000</dd></div><div><dt>Purchased credits</dt><dd>—</dd></div><div><dt>Corrections</dt><dd>—</dd></div></dl>
             </div>
             <div class="account-card billing-history">
               <div class="card-title"><span class="card-title-icon">▤</span><div><h2>Transaction history</h2><p>Recent credit ledger entries.</p></div></div>
@@ -208,15 +207,16 @@ test.describe("issue #700 onboarding and billing layout", () => {
     await loadFixture(page, billingFixture());
 
     for (const viewport of [
-      { width: 1440, height: 900, summaryColumns: 3, planColumns: 3 },
+      { width: 1440, height: 900, summaryColumns: 3, planColumns: 2 },
       { width: 768, height: 900, summaryColumns: 2, planColumns: 2 },
       { width: 375, height: 812, summaryColumns: 1, planColumns: 1 },
     ]) {
       await page.setViewportSize({ width: viewport.width, height: viewport.height });
       expect(await gridColumnCount(page.locator(".billing-summary-grid"))).toBe(viewport.summaryColumns);
-      expect(await gridColumnCount(page.locator(".billing-plan-options"))).toBe(viewport.planColumns);
+      const renderedPlanColumns = await page.locator(".billing-plan-option").evaluateAll((elements) => new Set(elements.map((element) => Math.round(element.getBoundingClientRect().x))).size);
+      expect(renderedPlanColumns).toBe(viewport.planColumns);
       await expect(page.locator(".billing-summary-grid > .account-card")).toHaveCount(3);
-      await expect(page.locator(".billing-plan-option")).toHaveCount(3);
+      await expect(page.locator(".billing-plan-option")).toHaveCount(2);
 
       const paymentStatus = page.locator(".billing-payment-status");
       const status = await boxOf(paymentStatus.locator(":scope > strong"));
@@ -234,7 +234,7 @@ test.describe("issue #700 onboarding and billing layout", () => {
       expect(price.y + price.height).toBeLessThanOrEqual(allowance.y + 1);
       expect(allowance.y + allowance.height).toBeLessThanOrEqual(planButton.y + 2);
       await expect(plan.locator("button")).toBeDisabled();
-      await expect(page.locator(".billing-plan-option button:disabled")).toHaveCount(3);
+      await expect(page.locator(".billing-plan-option button:disabled")).toHaveCount(2);
       await expect(page.locator(".billing-grid button:disabled")).toHaveCount(3);
 
       const actionButtons = page.locator(".billing-page .button-row button");
@@ -366,6 +366,6 @@ test.describe("issue #700 onboarding and billing layout", () => {
     await page.setViewportSize({ width: 1280, height: 900 });
     await page.evaluate(() => { document.documentElement.style.zoom = "1.25"; });
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(1280);
-    await expect(page.locator(".billing-plan-option")).toHaveCount(3);
+    await expect(page.locator(".billing-plan-option")).toHaveCount(2);
   });
 });
