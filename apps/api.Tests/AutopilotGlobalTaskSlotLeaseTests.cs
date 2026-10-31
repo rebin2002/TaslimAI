@@ -49,7 +49,7 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
         var results = await Task.WhenAll(taskIds.Select(id => ClaimAsync(id, inventory)));
 
         Assert.Equal(20, results.Count(item => item.Outcome == AutopilotGlobalTaskSlotOutcomes.Reserved));
-        Assert.Single(results.Where(item => item.Outcome == AutopilotGlobalTaskSlotOutcomes.CapacityReached));
+        Assert.Single(results, item => item.Outcome == AutopilotGlobalTaskSlotOutcomes.CapacityReached);
         Assert.All(results, item => Assert.True(item.ActiveSlotsObserved <= AutopilotGlobalTaskSlotAllocator.HardMaximum));
 
         await using var verify = CreateContext();
