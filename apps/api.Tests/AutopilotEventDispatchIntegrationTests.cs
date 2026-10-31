@@ -51,20 +51,27 @@ public sealed class AutopilotEventDispatchIntegrationTests
                 using var first = await PostSignedEventAsync(client, payload, eventId);
                 Assert.Equal(HttpStatusCode.Accepted, first.StatusCode);
 
-                // An identical delivery must wake/re-drive the durable queue, but
-                // cannot create a second replacement task.
-                using var duplicate = await PostSignedEventAsync(client, payload, eventId);
-                Assert.Equal(HttpStatusCode.OK, duplicate.StatusCode);
-                var duplicateBody = JsonSerializer.Deserialize<JsonElement>(await duplicate.Content.ReadAsStringAsync());
-                Assert.Equal(AutopilotIntakeOutcomes.Duplicate, duplicateBody.GetProperty("status").GetString());
-
                 var launched = await factory.Provider.LaunchReceived.Task.WaitAsync(TimeSpan.FromSeconds(8));
                 Assert.Equal("Approved replacement task", launched.Title);
+                await WaitForCompletionAndLaunchAsync(factory, eventId, TimeSpan.FromSeconds(8));
+
+                // An identical delivery must wake/re-drive the durable queue, but
+                // cannot create a second replacement task. Send it after the
+                // first worker pass settles so the SQLite test store is not
+                // contended by an HTTP duplicate and the background processor.
+                using var duplicate = await PostSignedEventAsync(client, payload, eventId);
+                var duplicateContent = await duplicate.Content.ReadAsStringAsync();
+                Assert.True(duplicate.StatusCode == HttpStatusCode.OK,
+                    $"Expected duplicate acknowledgement; received {(int)duplicate.StatusCode}: {duplicateContent}");
+                var duplicateBody = JsonSerializer.Deserialize<JsonElement>(duplicateContent);
+                Assert.Equal(AutopilotIntakeOutcomes.Duplicate, duplicateBody.GetProperty("status").GetString());
 
                 using var scope = factory.Services.CreateScope();
                 var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
                 var intake = await db.AutopilotEvents.SingleAsync(item => item.ExternalEventId == eventId);
                 Assert.Equal(AutopilotEventStatuses.Processed, intake.Status);
+                Assert.Equal(1, await db.AutopilotEvents.CountAsync(item =>
+                    item.SourceSystem == "completion-bridge" && item.ExternalEventId == eventId));
 
                 var sourceRun = await db.AutopilotRuns.SingleAsync(item => item.WaveKey == WaveKey);
                 Assert.True(sourceRun.IntegrationGatePassed);
@@ -137,6 +144,25 @@ public sealed class AutopilotEventDispatchIntegrationTests
         {
             Environment.SetEnvironmentVariable("AUTOPILOT_WEBHOOK_SECRET", previousSecret);
         }
+    }
+
+    private static async Task WaitForCompletionAndLaunchAsync(DispatchTestFactory factory, string eventId, TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            using var scope = factory.Services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var intake = await db.AutopilotEvents.SingleOrDefaultAsync(item => item.ExternalEventId == eventId);
+            var replacement = await db.AutopilotWaveLaunchTasks.SingleOrDefaultAsync();
+            if (intake?.Status == AutopilotEventStatuses.Processed
+                && replacement?.Status == AutopilotWaveLaunchStatuses.Launched)
+                return;
+
+            await Task.Delay(TimeSpan.FromMilliseconds(25));
+        }
+
+        throw new TimeoutException("The event was not processed and its approved replacement was not durably launched before the test deadline.");
     }
 
     private static AutopilotWatchdogService CreateWatchdog(DispatchTestFactory factory) =>
@@ -230,10 +256,16 @@ public sealed class AutopilotEventDispatchIntegrationTests
 
     private sealed class DispatchTestFactory : WebApplicationFactory<Program>
     {
-        private readonly SqliteConnection connection = new("DataSource=:memory:");
+        private readonly string databasePath = Path.Combine(Path.GetTempPath(), $"taslim-event-dispatch-{Guid.NewGuid():N}.db");
         public FakeWaveLaunchProvider Provider { get; } = new();
 
-        public DispatchTestFactory() => connection.Open();
+        private string ConnectionString => new SqliteConnectionStringBuilder
+        {
+            DataSource = databasePath,
+            Mode = SqliteOpenMode.ReadWriteCreate,
+            Cache = SqliteCacheMode.Shared,
+            DefaultTimeout = 30,
+        }.ToString();
 
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
@@ -241,8 +273,7 @@ public sealed class AutopilotEventDispatchIntegrationTests
             builder.ConfigureServices(services =>
             {
                 services.RemoveAll<DbContextOptions<TaslimDbContext>>();
-                services.AddSingleton(connection);
-                services.AddDbContext<TaslimDbContext>(options => options.UseSqlite(connection));
+                services.AddDbContext<TaslimDbContext>(options => options.UseSqlite(ConnectionString));
             });
             builder.ConfigureTestServices(services =>
             {
@@ -256,7 +287,10 @@ public sealed class AutopilotEventDispatchIntegrationTests
         {
             base.Dispose(disposing);
             if (disposing)
-                connection.Dispose();
+            {
+                SqliteConnection.ClearAllPools();
+                if (File.Exists(databasePath)) File.Delete(databasePath);
+            }
         }
     }
 
