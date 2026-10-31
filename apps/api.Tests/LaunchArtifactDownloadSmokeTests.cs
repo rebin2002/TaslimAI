@@ -130,7 +130,7 @@ public sealed class LaunchArtifactDownloadSmokeTests :
         }
 
         using var other = documentFactory.CreateClient();
-        await Register(other);
+        var otherAuth = await Register(other);
         await AssertAssetMetadataPrivacy(owner, anonymous, other, asset.Id);
         foreach (var representation in asset.Representations)
         {
@@ -140,6 +140,43 @@ public sealed class LaunchArtifactDownloadSmokeTests :
         }
         await AssertRepresentationDownload(owner, other, asset.Id, docx, "application/vnd.openxmlformats-officedocument.wordprocessingml.document", ".docx", "PK");
         await AssertRepresentationDownload(owner, other, asset.Id, pdf, "application/pdf", ".pdf", "%PDF-");
+        
+        // A representation identifier is scoped to its owning asset. An authorized
+        // parent asset must not become a route to another user's PDF (IDOR).
+        using var otherCreate = await SendWithCsrf(other, HttpMethod.Post, "/api/document-generation/jobs", new
+        {
+            workspaceId = otherAuth.PersonalWorkspace.Id,
+            title = "Other user's QA document",
+            prompt = "Create a different deterministic document for cross-asset access testing.",
+            language = "en",
+            outputFormat = "both",
+            tone = "professional",
+            includeTableOfContents = false,
+            attachmentIds = Array.Empty<Guid>(),
+        });
+        Assert.Equal(HttpStatusCode.Accepted, otherCreate.StatusCode);
+        var otherCreated = (await otherCreate.Content.ReadFromJsonAsync<CreateDocumentGenerationResponse>())!;
+        var otherJob = await WaitForTerminal(other, otherCreated.Job.Id);
+        Assert.Equal(GenerationJobStatus.Succeeded.ToString(), otherJob.Status);
+        var otherAsset = await LoadAsset(documentFactory, otherJob.Id);
+        var otherPdf = Assert.Single(otherAsset.Representations,
+            item => item.RepresentationType == AssetRepresentationTypes.Pdf);
+        
+        using (var otherOwnsPdf = await other.GetAsync($"/api/assets/{otherAsset.Id}/representations/{otherPdf.Id}/download"))
+            Assert.Equal(HttpStatusCode.OK, otherOwnsPdf.StatusCode);
+
+        // Both parents exist, both representation IDs exist, and each valid pair works.
+        // Neither caller may substitute the PDF ID from the other parent's record.
+        using (var mixedOwner = await owner.GetAsync($"/api/assets/{asset.Id}/representations/{otherPdf.Id}/download"))
+        {
+            Assert.Equal(HttpStatusCode.NotFound, mixedOwner.StatusCode);
+            Assert.Null(mixedOwner.Content.Headers.ContentDisposition);
+        }
+        using (var mixedOther = await other.GetAsync($"/api/assets/{otherAsset.Id}/representations/{pdf.Id}/download"))
+        {
+            Assert.Equal(HttpStatusCode.NotFound, mixedOther.StatusCode);
+            Assert.Null(mixedOther.Content.Headers.ContentDisposition);
+        }
     }
 
     [Fact]
