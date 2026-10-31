@@ -72,6 +72,28 @@ public sealed class LaunchArtifactDownloadSmokeTests :
         Assert.True(png.Length > 8);
         Assert.Equal(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }, png.Take(8).ToArray());
 
+        // Inline previews must preserve both the owner's bytes and the private auth boundary.
+        using (var ownerInline = await owner.GetAsync($"/api/assets/{asset.Id}/download?inline=true"))
+        {
+            Assert.Equal(HttpStatusCode.OK, ownerInline.StatusCode);
+            Assert.Equal("image/png", ownerInline.Content.Headers.ContentType?.MediaType);
+            Assert.Null(ownerInline.Content.Headers.ContentDisposition);
+            Assert.Equal(png, await ownerInline.Content.ReadAsByteArrayAsync());
+        }
+
+        // A legitimate partial download must work, so negative range tests cannot pass
+        // simply because the endpoint silently disables all byte-range responses.
+        using (var ownerRangeRequest = new HttpRequestMessage(HttpMethod.Get, $"/api/assets/{asset.Id}/download"))
+        {
+            ownerRangeRequest.Headers.Range = new RangeHeaderValue(0, 7);
+            using var ownerRange = await owner.SendAsync(ownerRangeRequest);
+            Assert.Equal(HttpStatusCode.PartialContent, ownerRange.StatusCode);
+            Assert.Equal(0, ownerRange.Content.Headers.ContentRange?.From);
+            Assert.Equal(7, ownerRange.Content.Headers.ContentRange?.To);
+            Assert.Equal((long)png.Length, ownerRange.Content.Headers.ContentRange?.Length);
+            Assert.Equal(png.Take(8).ToArray(), await ownerRange.Content.ReadAsByteArrayAsync());
+        }
+
         using var anonymous = imageFactory.CreateClient();
         using (var deniedAnonymous = await anonymous.GetAsync($"/api/assets/{asset.Id}/download"))
         {
@@ -86,6 +108,11 @@ public sealed class LaunchArtifactDownloadSmokeTests :
 
         using var other = imageFactory.CreateClient();
         await Register(other);
+        using (var deniedOtherInline = await other.GetAsync($"/api/assets/{asset.Id}/download?inline=true"))
+        {
+            Assert.Equal(HttpStatusCode.NotFound, deniedOtherInline.StatusCode);
+            Assert.Null(deniedOtherInline.Content.Headers.ContentDisposition);
+        }
         await AssertAssetMetadataPrivacy(owner, anonymous, other, asset.Id);
         // Authorization must precede range handling; a partial request cannot leak PNG bytes.
         await AssertDeniedPartialDownload(anonymous, $"/api/assets/{asset.Id}/download", HttpStatusCode.Unauthorized);
