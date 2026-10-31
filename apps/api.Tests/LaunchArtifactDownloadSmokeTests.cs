@@ -87,6 +87,9 @@ public sealed class LaunchArtifactDownloadSmokeTests :
         using var other = imageFactory.CreateClient();
         await Register(other);
         await AssertAssetMetadataPrivacy(owner, anonymous, other, asset.Id);
+        // Authorization must precede range handling; a partial request cannot leak PNG bytes.
+        await AssertDeniedPartialDownload(anonymous, $"/api/assets/{asset.Id}/download", HttpStatusCode.Unauthorized);
+        await AssertDeniedPartialDownload(other, $"/api/assets/{asset.Id}/download", HttpStatusCode.NotFound);
         using var denied = await other.GetAsync($"/api/assets/{asset.Id}/download");
         Assert.Equal(HttpStatusCode.NotFound, denied.StatusCode);
     }
@@ -129,6 +132,12 @@ public sealed class LaunchArtifactDownloadSmokeTests :
         using var other = documentFactory.CreateClient();
         await Register(other);
         await AssertAssetMetadataPrivacy(owner, anonymous, other, asset.Id);
+        foreach (var representation in asset.Representations)
+        {
+            var path = $"/api/assets/{asset.Id}/representations/{representation.Id}/download";
+            await AssertDeniedPartialDownload(anonymous, path, HttpStatusCode.Unauthorized);
+            await AssertDeniedPartialDownload(other, path, HttpStatusCode.NotFound);
+        }
         await AssertRepresentationDownload(owner, other, asset.Id, docx, "application/vnd.openxmlformats-officedocument.wordprocessingml.document", ".docx", "PK");
         await AssertRepresentationDownload(owner, other, asset.Id, pdf, "application/pdf", ".pdf", "%PDF-");
     }
@@ -170,6 +179,9 @@ public sealed class LaunchArtifactDownloadSmokeTests :
         using var other = presentationFactory.CreateClient();
         await Register(other);
         await AssertAssetMetadataPrivacy(owner, anonymous, other, asset.Id);
+        var downloadPath = $"/api/assets/{asset.Id}/representations/{pptx.Id}/download";
+        await AssertDeniedPartialDownload(anonymous, downloadPath, HttpStatusCode.Unauthorized);
+        await AssertDeniedPartialDownload(other, downloadPath, HttpStatusCode.NotFound);
         await AssertRepresentationDownload(owner, other, asset.Id, pptx,
             "application/vnd.openxmlformats-officedocument.presentationml.presentation", ".pptx", "PK");
     }
@@ -187,6 +199,18 @@ public sealed class LaunchArtifactDownloadSmokeTests :
         // Do not disclose whether another workspace's asset exists.
         using var deniedOther = await other.GetAsync($"/api/assets/{assetId}");
         Assert.Equal(HttpStatusCode.NotFound, deniedOther.StatusCode);
+    }
+
+    private static async Task AssertDeniedPartialDownload(HttpClient client, string path, HttpStatusCode expectedStatus)
+    {
+        // The endpoint enables byte ranges for legitimate clients. Unauthenticated or
+        // unrelated users must never receive a partial (206) response or file headers.
+        using var request = new HttpRequestMessage(HttpMethod.Get, path);
+        request.Headers.Range = new RangeHeaderValue(0, 7);
+        using var response = await client.SendAsync(request);
+        Assert.Equal(expectedStatus, response.StatusCode);
+        Assert.Null(response.Content.Headers.ContentRange);
+        Assert.Null(response.Content.Headers.ContentDisposition);
     }
 
     private static void EnsureDatabase(WebApplicationFactory<Program> factory)
