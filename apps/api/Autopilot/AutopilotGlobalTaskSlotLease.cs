@@ -238,6 +238,7 @@ public sealed class AutopilotGlobalTaskSlotAllocator
     private const int AdvisoryLockNamespace = 1_413_560_652; // ASCII "TASL"
     private const int AdvisoryLockResource = 20;
     private const int MaxRowsExamined = 10_000;
+    private const int MaxRelationalRetries = 5;
 
     // Protects a single scoped allocator/DbContext. Independent instances are
     // serialized by the relational transaction and PostgreSQL advisory lock.
@@ -286,144 +287,159 @@ public sealed class AutopilotGlobalTaskSlotAllocator
             if (!db.Database.IsRelational())
                 return new(AutopilotGlobalTaskSlotOutcomes.ReservationUnavailable, false, false, 0, ReasonCode: "relational_store_required");
 
-            await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
-            await AcquireCrossProcessFenceAsync(cancellationToken);
-
-            var task = await db.AutopilotWaveLaunchTasks.SingleOrDefaultAsync(item => item.Id == launchTaskRowId, cancellationToken);
-            if (task is null)
-                return new(AutopilotGlobalTaskSlotOutcomes.ReservationUnavailable, false, false, 0, ReasonCode: "launch_task_missing");
-
-            var expectedKey = AutopilotGlobalTaskSlotIdentity.CreateIdempotencyKey(task.WaveKey, task.TaskKey);
-            if (!string.Equals(expectedKey, idempotencyKey, StringComparison.Ordinal))
-                return new(AutopilotGlobalTaskSlotOutcomes.IdempotencyConflict, false, false, 0, ReasonCode: "launch_identity_mismatch");
-
-            var legacyKey = AutopilotNextWavePolicy.LaunchIdempotencyKey(task.WaveKey, task.TaskKey);
-            if (!string.Equals(legacyKey, expectedKey, StringComparison.Ordinal)
-                && inventory.ActiveTasks.Any(item => string.Equals(item.IdempotencyKey, legacyKey, StringComparison.Ordinal)
-                    && (string.IsNullOrWhiteSpace(task.ExternalTaskId)
-                        || !string.Equals(item.TaskId, task.ExternalTaskId, StringComparison.Ordinal))))
-                return new(AutopilotGlobalTaskSlotOutcomes.IdempotencyConflict, false, false, inventory.ActiveTasks.Count,
-                    ReasonCode: "legacy_idempotency_identity_ambiguous_requires_reconciliation");
-
-            var duplicateDatabaseIdentity = await db.AutopilotWaveLaunchTasks.AsNoTracking()
-                .AnyAsync(item => item.Id != task.Id && item.WaveKey == task.WaveKey && item.TaskKey == task.TaskKey, cancellationToken);
-            if (duplicateDatabaseIdentity)
-                return new(AutopilotGlobalTaskSlotOutcomes.IdempotencyConflict, false, false, 0, ReasonCode: "duplicate_wave_task_identity");
-
-            var inventoryMatches = inventory.ActiveTasks
-                .Where(item => string.Equals(item.IdempotencyKey, expectedKey, StringComparison.Ordinal)
-                    || (!string.IsNullOrWhiteSpace(task.ExternalTaskId)
-                        && string.Equals(item.TaskId, task.ExternalTaskId, StringComparison.Ordinal)))
-                .ToList();
-            if (inventoryMatches.Select(item => item.TaskId).Distinct(StringComparer.Ordinal).Count() > 1)
-                return new(AutopilotGlobalTaskSlotOutcomes.IdempotencyConflict, true, false, inventory.ActiveTasks.Count, ReasonCode: "multiple_external_tasks_for_idempotency_key");
-
-            if (string.Equals(task.Status, AutopilotWaveLaunchStatuses.Completed, StringComparison.OrdinalIgnoreCase))
-                return new(AutopilotGlobalTaskSlotOutcomes.Completed, false, false, 0, task.ExternalTaskId);
-
-            if (inventoryMatches.Count == 1)
+            for (var attempt = 0; ; attempt++)
             {
-                if (!string.IsNullOrWhiteSpace(task.ExternalTaskId)
-                    && !string.Equals(task.ExternalTaskId, inventoryMatches[0].TaskId, StringComparison.Ordinal))
-                    return new(AutopilotGlobalTaskSlotOutcomes.IdempotencyConflict, true, false, inventory.ActiveTasks.Count,
-                        task.ExternalTaskId, "provider_idempotency_key_returned_different_task_id");
-
-                task.ExternalTaskId = inventoryMatches[0].TaskId;
-                task.Status = AutopilotWaveLaunchStatuses.Launched;
-                task.ReasonCode = "recovered_from_authoritative_inventory";
-                task.LastStatusDetail = "existing_taslim_task_reused; no_duplicate_launch";
-                task.LaunchedAt ??= UtcNow();
-                task.UpdatedAt = UtcNow();
-                task.ConcurrencyToken = Guid.NewGuid();
-                await db.SaveChangesAsync(cancellationToken);
-                await transaction.CommitAsync(cancellationToken);
-                return new(AutopilotGlobalTaskSlotOutcomes.AlreadyActive, true, false, inventory.ActiveTasks.Count, task.ExternalTaskId);
-            }
-
-            if (string.Equals(task.Status, AutopilotWaveLaunchStatuses.Launched, StringComparison.OrdinalIgnoreCase))
-                return new(AutopilotGlobalTaskSlotOutcomes.AlreadyActive, true, false, inventory.ActiveTasks.Count, task.ExternalTaskId);
-
-            // The current controller claims a durable row immediately before it
-            // calls IWaveLaunchProvider. Treat that fresh, unmarked claim as a
-            // candidate, then atomically convert it into the global slot lease.
-            // All other Launching rows, marked or not, remain conservatively occupied.
-            if (task.Status == AutopilotWaveLaunchStatuses.Launching && !IsGlobalSlotReservation(task))
-            {
-                var staleUnreservedClaim = UtcNow() - task.UpdatedAt >= launchLease;
-                var occupiedBeforeClaim = await CountOccupiedSlotsAsync(inventory, cancellationToken, task.Id);
-                if (occupiedBeforeClaim >= capacity)
-                    return new(AutopilotGlobalTaskSlotOutcomes.CapacityReached, false, false, occupiedBeforeClaim, ReasonCode: "global_taslim_slot_cap_reached");
-
-                if (staleUnreservedClaim)
+                try
                 {
-                    // A stale unmarked claim may predate this allocator and use
-                    // the legacy truncated key. Retain the slot, but do not retry
-                    // under a new key until authoritative reconciliation binds it.
-                    task.ReasonCode = SlotReservedReason;
-                    task.LastStatusDetail = "stale_preallocator_claim_held_for_reconciliation";
+                    await using var transaction = await db.Database.BeginTransactionAsync(TransactionIsolationLevel, cancellationToken);
+                    await AcquireCrossProcessFenceAsync(cancellationToken);
+
+                    var task = await db.AutopilotWaveLaunchTasks.SingleOrDefaultAsync(item => item.Id == launchTaskRowId, cancellationToken);
+                    if (task is null)
+                        return new(AutopilotGlobalTaskSlotOutcomes.ReservationUnavailable, false, false, 0, ReasonCode: "launch_task_missing");
+
+                    var expectedKey = AutopilotGlobalTaskSlotIdentity.CreateIdempotencyKey(task.WaveKey, task.TaskKey);
+                    if (!string.Equals(expectedKey, idempotencyKey, StringComparison.Ordinal))
+                        return new(AutopilotGlobalTaskSlotOutcomes.IdempotencyConflict, false, false, 0, ReasonCode: "launch_identity_mismatch");
+
+                    var legacyKey = AutopilotNextWavePolicy.LaunchIdempotencyKey(task.WaveKey, task.TaskKey);
+                    if (!string.Equals(legacyKey, expectedKey, StringComparison.Ordinal)
+                        && inventory.ActiveTasks.Any(item => string.Equals(item.IdempotencyKey, legacyKey, StringComparison.Ordinal)
+                            && (string.IsNullOrWhiteSpace(task.ExternalTaskId)
+                                || !string.Equals(item.TaskId, task.ExternalTaskId, StringComparison.Ordinal))))
+                        return new(AutopilotGlobalTaskSlotOutcomes.IdempotencyConflict, false, false, inventory.ActiveTasks.Count,
+                            ReasonCode: "legacy_idempotency_identity_ambiguous_requires_reconciliation");
+
+                    var duplicateDatabaseIdentity = await db.AutopilotWaveLaunchTasks.AsNoTracking()
+                        .AnyAsync(item => item.Id != task.Id && item.WaveKey == task.WaveKey && item.TaskKey == task.TaskKey, cancellationToken);
+                    if (duplicateDatabaseIdentity)
+                        return new(AutopilotGlobalTaskSlotOutcomes.IdempotencyConflict, false, false, 0, ReasonCode: "duplicate_wave_task_identity");
+
+                    var inventoryMatches = inventory.ActiveTasks
+                        .Where(item => string.Equals(item.IdempotencyKey, expectedKey, StringComparison.Ordinal)
+                            || (!string.IsNullOrWhiteSpace(task.ExternalTaskId)
+                                && string.Equals(item.TaskId, task.ExternalTaskId, StringComparison.Ordinal)))
+                        .ToList();
+                    if (inventoryMatches.Select(item => item.TaskId).Distinct(StringComparer.Ordinal).Count() > 1)
+                        return new(AutopilotGlobalTaskSlotOutcomes.IdempotencyConflict, true, false, inventory.ActiveTasks.Count, ReasonCode: "multiple_external_tasks_for_idempotency_key");
+
+                    if (string.Equals(task.Status, AutopilotWaveLaunchStatuses.Completed, StringComparison.OrdinalIgnoreCase))
+                        return new(AutopilotGlobalTaskSlotOutcomes.Completed, false, false, 0, task.ExternalTaskId);
+
+                    if (inventoryMatches.Count == 1)
+                    {
+                        if (!string.IsNullOrWhiteSpace(task.ExternalTaskId)
+                            && !string.Equals(task.ExternalTaskId, inventoryMatches[0].TaskId, StringComparison.Ordinal))
+                            return new(AutopilotGlobalTaskSlotOutcomes.IdempotencyConflict, true, false, inventory.ActiveTasks.Count,
+                                task.ExternalTaskId, "provider_idempotency_key_returned_different_task_id");
+
+                        task.ExternalTaskId = inventoryMatches[0].TaskId;
+                        task.Status = AutopilotWaveLaunchStatuses.Launched;
+                        task.ReasonCode = "recovered_from_authoritative_inventory";
+                        task.LastStatusDetail = "existing_taslim_task_reused; no_duplicate_launch";
+                        task.LaunchedAt ??= UtcNow();
+                        task.UpdatedAt = UtcNow();
+                        task.ConcurrencyToken = Guid.NewGuid();
+                        await db.SaveChangesAsync(cancellationToken);
+                        await transaction.CommitAsync(cancellationToken);
+                        return new(AutopilotGlobalTaskSlotOutcomes.AlreadyActive, true, false, inventory.ActiveTasks.Count, task.ExternalTaskId);
+                    }
+
+                    if (string.Equals(task.Status, AutopilotWaveLaunchStatuses.Launched, StringComparison.OrdinalIgnoreCase))
+                        return new(AutopilotGlobalTaskSlotOutcomes.AlreadyActive, true, false, inventory.ActiveTasks.Count, task.ExternalTaskId);
+
+                    // The current controller claims a durable row immediately before it
+                    // calls IWaveLaunchProvider. Treat that fresh, unmarked claim as a
+                    // candidate, then atomically convert it into the global slot lease.
+                    // All other Launching rows, marked or not, remain conservatively occupied.
+                    if (task.Status == AutopilotWaveLaunchStatuses.Launching && !IsGlobalSlotReservation(task))
+                    {
+                        var staleUnreservedClaim = UtcNow() - task.UpdatedAt >= launchLease;
+                        var occupiedBeforeClaim = await CountOccupiedSlotsAsync(inventory, cancellationToken, task.Id);
+                        if (occupiedBeforeClaim >= capacity)
+                            return new(AutopilotGlobalTaskSlotOutcomes.CapacityReached, false, false, occupiedBeforeClaim, ReasonCode: "global_taslim_slot_cap_reached");
+
+                        if (staleUnreservedClaim)
+                        {
+                            // A stale unmarked claim may predate this allocator and use
+                            // the legacy truncated key. Retain the slot, but do not retry
+                            // under a new key until authoritative reconciliation binds it.
+                            task.ReasonCode = SlotReservedReason;
+                            task.LastStatusDetail = "stale_preallocator_claim_held_for_reconciliation";
+                            task.UpdatedAt = UtcNow();
+                            task.ConcurrencyToken = Guid.NewGuid();
+                            await db.SaveChangesAsync(cancellationToken);
+                            await transaction.CommitAsync(cancellationToken);
+                            return new(task.LaunchAttempt >= task.MaxLaunchAttempts
+                                    ? AutopilotGlobalTaskSlotOutcomes.AttemptsExhausted
+                                    : AutopilotGlobalTaskSlotOutcomes.AmbiguousLaunch,
+                                true, false, occupiedBeforeClaim + 1, task.ExternalTaskId, "stale_unmarked_claim_requires_reconciliation");
+                        }
+
+                        task.ReasonCode = SlotReservedReason;
+                        task.LastStatusDetail = $"global_slot_claimed:{occupiedBeforeClaim + 1}/{capacity}";
+                        task.ConcurrencyToken = Guid.NewGuid();
+                        await db.SaveChangesAsync(cancellationToken);
+                        await transaction.CommitAsync(cancellationToken);
+                        return new(AutopilotGlobalTaskSlotOutcomes.Reserved, true, true, occupiedBeforeClaim + 1,
+                            ReasonCode: null);
+                    }
+
+                    if (task.Status == AutopilotWaveLaunchStatuses.Launching && IsGlobalSlotReservation(task))
+                    {
+                        if (UtcNow() - task.UpdatedAt < launchLease)
+                            return new(AutopilotGlobalTaskSlotOutcomes.LaunchInProgress, true, false, inventory.ActiveTasks.Count, task.ExternalTaskId);
+
+                        if (!providerGuaranteesIdempotency)
+                            return new(AutopilotGlobalTaskSlotOutcomes.AmbiguousLaunch, true, false, inventory.ActiveTasks.Count, ReasonCode: "expired_claim_but_provider_idempotency_unverified");
+
+                        if (task.LaunchAttempt >= task.MaxLaunchAttempts)
+                            return new(AutopilotGlobalTaskSlotOutcomes.AttemptsExhausted, true, false, inventory.ActiveTasks.Count, ReasonCode: "ambiguous_retry_bound_exhausted");
+
+                        var observed = await CountOccupiedSlotsAsync(inventory, cancellationToken);
+                        if (observed > capacity)
+                            return new(AutopilotGlobalTaskSlotOutcomes.CapacityReached, true, false, observed, task.ExternalTaskId, "global_taslim_slot_cap_already_exceeded");
+                        task.LaunchAttempt++;
+                        task.UpdatedAt = UtcNow();
+                        task.ReasonCode = SlotReservedReason;
+                        task.LastStatusDetail = "slot_retained; provider_retry_requires_idempotency";
+                        task.ConcurrencyToken = Guid.NewGuid();
+                        await db.SaveChangesAsync(cancellationToken);
+                        await transaction.CommitAsync(cancellationToken);
+                        return new(AutopilotGlobalTaskSlotOutcomes.Reserved, true, true, observed, ReasonCode: "stale_launch_retried_idempotently");
+                    }
+
+                    if (task.Status != AutopilotWaveLaunchStatuses.Planned && task.Status != AutopilotWaveLaunchStatuses.Failed)
+                        return new(AutopilotGlobalTaskSlotOutcomes.InvalidTransition, false, false, inventory.ActiveTasks.Count, task.ExternalTaskId, "task_not_launchable");
+
+                    if (task.LaunchAttempt >= task.MaxLaunchAttempts)
+                        return new(AutopilotGlobalTaskSlotOutcomes.AttemptsExhausted, false, false, inventory.ActiveTasks.Count, ReasonCode: "launch_attempt_bound_exhausted");
+
+                    var occupied = await CountOccupiedSlotsAsync(inventory, cancellationToken);
+                    if (occupied >= capacity)
+                        return new(AutopilotGlobalTaskSlotOutcomes.CapacityReached, false, false, occupied, ReasonCode: "global_taslim_slot_cap_reached");
+
+                    task.Status = AutopilotWaveLaunchStatuses.Launching;
+                    task.LaunchAttempt++;
                     task.UpdatedAt = UtcNow();
+                    task.CompletedAt = null;
+                    task.ReasonCode = SlotReservedReason;
+                    task.LastStatusDetail = $"global_slot_claimed:{occupied + 1}/{capacity}";
                     task.ConcurrencyToken = Guid.NewGuid();
                     await db.SaveChangesAsync(cancellationToken);
                     await transaction.CommitAsync(cancellationToken);
-                    return new(task.LaunchAttempt >= task.MaxLaunchAttempts
-                            ? AutopilotGlobalTaskSlotOutcomes.AttemptsExhausted
-                            : AutopilotGlobalTaskSlotOutcomes.AmbiguousLaunch,
-                        true, false, occupiedBeforeClaim + 1, task.ExternalTaskId, "stale_unmarked_claim_requires_reconciliation");
+                    return new(AutopilotGlobalTaskSlotOutcomes.Reserved, true, true, occupied + 1);
                 }
+                catch (Exception exception) when (IsRetryableRelationalConflict(exception))
+                {
+                    db.ChangeTracker.Clear();
+                    if (attempt >= MaxRelationalRetries)
+                        return new(AutopilotGlobalTaskSlotOutcomes.ReservationUnavailable, false, false, 0,
+                            ReasonCode: "relational_transaction_conflict_retries_exhausted");
 
-                task.ReasonCode = SlotReservedReason;
-                task.LastStatusDetail = $"global_slot_claimed:{occupiedBeforeClaim + 1}/{capacity}";
-                task.ConcurrencyToken = Guid.NewGuid();
-                await db.SaveChangesAsync(cancellationToken);
-                await transaction.CommitAsync(cancellationToken);
-                return new(AutopilotGlobalTaskSlotOutcomes.Reserved, true, true, occupiedBeforeClaim + 1,
-                    ReasonCode: null);
+                    await Task.Delay(RetryDelay(attempt), cancellationToken);
+                }
             }
-
-            if (task.Status == AutopilotWaveLaunchStatuses.Launching && IsGlobalSlotReservation(task))
-            {
-                if (UtcNow() - task.UpdatedAt < launchLease)
-                    return new(AutopilotGlobalTaskSlotOutcomes.LaunchInProgress, true, false, inventory.ActiveTasks.Count, task.ExternalTaskId);
-
-                if (!providerGuaranteesIdempotency)
-                    return new(AutopilotGlobalTaskSlotOutcomes.AmbiguousLaunch, true, false, inventory.ActiveTasks.Count, ReasonCode: "expired_claim_but_provider_idempotency_unverified");
-
-                if (task.LaunchAttempt >= task.MaxLaunchAttempts)
-                    return new(AutopilotGlobalTaskSlotOutcomes.AttemptsExhausted, true, false, inventory.ActiveTasks.Count, ReasonCode: "ambiguous_retry_bound_exhausted");
-
-                var observed = await CountOccupiedSlotsAsync(inventory, cancellationToken);
-                if (observed > capacity)
-                    return new(AutopilotGlobalTaskSlotOutcomes.CapacityReached, true, false, observed, task.ExternalTaskId, "global_taslim_slot_cap_already_exceeded");
-                task.LaunchAttempt++;
-                task.UpdatedAt = UtcNow();
-                task.ReasonCode = SlotReservedReason;
-                task.LastStatusDetail = "slot_retained; provider_retry_requires_idempotency";
-                task.ConcurrencyToken = Guid.NewGuid();
-                await db.SaveChangesAsync(cancellationToken);
-                await transaction.CommitAsync(cancellationToken);
-                return new(AutopilotGlobalTaskSlotOutcomes.Reserved, true, true, observed, ReasonCode: "stale_launch_retried_idempotently");
-            }
-
-            if (task.Status != AutopilotWaveLaunchStatuses.Planned && task.Status != AutopilotWaveLaunchStatuses.Failed)
-                return new(AutopilotGlobalTaskSlotOutcomes.InvalidTransition, false, false, inventory.ActiveTasks.Count, task.ExternalTaskId, "task_not_launchable");
-
-            if (task.LaunchAttempt >= task.MaxLaunchAttempts)
-                return new(AutopilotGlobalTaskSlotOutcomes.AttemptsExhausted, false, false, inventory.ActiveTasks.Count, ReasonCode: "launch_attempt_bound_exhausted");
-
-            var occupied = await CountOccupiedSlotsAsync(inventory, cancellationToken);
-            if (occupied >= capacity)
-                return new(AutopilotGlobalTaskSlotOutcomes.CapacityReached, false, false, occupied, ReasonCode: "global_taslim_slot_cap_reached");
-
-            task.Status = AutopilotWaveLaunchStatuses.Launching;
-            task.LaunchAttempt++;
-            task.UpdatedAt = UtcNow();
-            task.CompletedAt = null;
-            task.ReasonCode = SlotReservedReason;
-            task.LastStatusDetail = $"global_slot_claimed:{occupied + 1}/{capacity}";
-            task.ConcurrencyToken = Guid.NewGuid();
-            await db.SaveChangesAsync(cancellationToken);
-            await transaction.CommitAsync(cancellationToken);
-            return new(AutopilotGlobalTaskSlotOutcomes.Reserved, true, true, occupied + 1);
         }
         finally
         {
@@ -444,33 +460,48 @@ public sealed class AutopilotGlobalTaskSlotAllocator
         await LocalReservationGate.WaitAsync(cancellationToken);
         try
         {
-            await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
-            await AcquireCrossProcessFenceAsync(cancellationToken);
-            var task = await db.AutopilotWaveLaunchTasks.SingleOrDefaultAsync(item => item.Id == launchTaskRowId, cancellationToken);
-            if (task is null || !MatchesKey(task, idempotencyKey))
-                return new(AutopilotGlobalTaskSlotOutcomes.IdempotencyConflict, false, false, 0, ReasonCode: "launch_identity_mismatch");
-
-            if (task.Status == AutopilotWaveLaunchStatuses.Completed)
-                return new(AutopilotGlobalTaskSlotOutcomes.Completed, false, false, 0, task.ExternalTaskId);
-            if (task.Status == AutopilotWaveLaunchStatuses.Launched)
+            for (var attempt = 0; ; attempt++)
             {
-                var sameTask = string.Equals(task.ExternalTaskId, externalTaskId.Trim(), StringComparison.Ordinal);
-                return new(sameTask ? AutopilotGlobalTaskSlotOutcomes.AlreadyActive : AutopilotGlobalTaskSlotOutcomes.IdempotencyConflict,
-                    true, false, 0, task.ExternalTaskId, sameTask ? null : "provider_returned_conflicting_task_id");
-            }
-            if (task.Status != AutopilotWaveLaunchStatuses.Launching)
-                return new(AutopilotGlobalTaskSlotOutcomes.InvalidTransition, false, false, 0, task.ExternalTaskId, "launch_claim_not_held");
+                try
+                {
+                    await using var transaction = await db.Database.BeginTransactionAsync(TransactionIsolationLevel, cancellationToken);
+                    await AcquireCrossProcessFenceAsync(cancellationToken);
+                    var task = await db.AutopilotWaveLaunchTasks.SingleOrDefaultAsync(item => item.Id == launchTaskRowId, cancellationToken);
+                    if (task is null || !MatchesKey(task, idempotencyKey))
+                        return new(AutopilotGlobalTaskSlotOutcomes.IdempotencyConflict, false, false, 0, ReasonCode: "launch_identity_mismatch");
 
-            task.ExternalTaskId = externalTaskId.Trim();
-            task.Status = AutopilotWaveLaunchStatuses.Launched;
-            task.LaunchedAt ??= UtcNow();
-            task.UpdatedAt = UtcNow();
-            task.ReasonCode = "launched";
-            task.LastStatusDetail = "external_task_identity_persisted";
-            task.ConcurrencyToken = Guid.NewGuid();
-            await db.SaveChangesAsync(cancellationToken);
-            await transaction.CommitAsync(cancellationToken);
-            return new(AutopilotGlobalTaskSlotOutcomes.AlreadyActive, true, false, 0, task.ExternalTaskId);
+                    if (task.Status == AutopilotWaveLaunchStatuses.Completed)
+                        return new(AutopilotGlobalTaskSlotOutcomes.Completed, false, false, 0, task.ExternalTaskId);
+                    if (task.Status == AutopilotWaveLaunchStatuses.Launched)
+                    {
+                        var sameTask = string.Equals(task.ExternalTaskId, externalTaskId.Trim(), StringComparison.Ordinal);
+                        return new(sameTask ? AutopilotGlobalTaskSlotOutcomes.AlreadyActive : AutopilotGlobalTaskSlotOutcomes.IdempotencyConflict,
+                            true, false, 0, task.ExternalTaskId, sameTask ? null : "provider_returned_conflicting_task_id");
+                    }
+                    if (task.Status != AutopilotWaveLaunchStatuses.Launching)
+                        return new(AutopilotGlobalTaskSlotOutcomes.InvalidTransition, false, false, 0, task.ExternalTaskId, "launch_claim_not_held");
+
+                    task.ExternalTaskId = externalTaskId.Trim();
+                    task.Status = AutopilotWaveLaunchStatuses.Launched;
+                    task.LaunchedAt ??= UtcNow();
+                    task.UpdatedAt = UtcNow();
+                    task.ReasonCode = "launched";
+                    task.LastStatusDetail = "external_task_identity_persisted";
+                    task.ConcurrencyToken = Guid.NewGuid();
+                    await db.SaveChangesAsync(cancellationToken);
+                    await transaction.CommitAsync(cancellationToken);
+                    return new(AutopilotGlobalTaskSlotOutcomes.AlreadyActive, true, false, 0, task.ExternalTaskId);
+                }
+                catch (Exception exception) when (IsRetryableRelationalConflict(exception))
+                {
+                    db.ChangeTracker.Clear();
+                    if (attempt >= MaxRelationalRetries)
+                        return new(AutopilotGlobalTaskSlotOutcomes.ReservationUnavailable, true, false, 0,
+                            externalTaskId.Trim(), "relational_transaction_conflict_retries_exhausted");
+
+                    await Task.Delay(RetryDelay(attempt), cancellationToken);
+                }
+            }
         }
         finally
         {
@@ -492,25 +523,40 @@ public sealed class AutopilotGlobalTaskSlotAllocator
         await LocalReservationGate.WaitAsync(cancellationToken);
         try
         {
-            await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
-            await AcquireCrossProcessFenceAsync(cancellationToken);
-            var task = await db.AutopilotWaveLaunchTasks.SingleOrDefaultAsync(item => item.Id == launchTaskRowId, cancellationToken);
-            if (task is null || !MatchesKey(task, idempotencyKey))
-                return new(AutopilotGlobalTaskSlotOutcomes.IdempotencyConflict, false, false, 0, ReasonCode: "launch_identity_mismatch");
-            if (task.Status == AutopilotWaveLaunchStatuses.Failed)
-                return new(AutopilotGlobalTaskSlotOutcomes.LaunchRejected, false, false, 0, task.ExternalTaskId, task.ReasonCode);
-            if (task.Status != AutopilotWaveLaunchStatuses.Launching)
-                return new(AutopilotGlobalTaskSlotOutcomes.InvalidTransition, task.Status == AutopilotWaveLaunchStatuses.Launched, false, 0, task.ExternalTaskId, "launch_claim_not_held");
+            for (var attempt = 0; ; attempt++)
+            {
+                try
+                {
+                    await using var transaction = await db.Database.BeginTransactionAsync(TransactionIsolationLevel, cancellationToken);
+                    await AcquireCrossProcessFenceAsync(cancellationToken);
+                    var task = await db.AutopilotWaveLaunchTasks.SingleOrDefaultAsync(item => item.Id == launchTaskRowId, cancellationToken);
+                    if (task is null || !MatchesKey(task, idempotencyKey))
+                        return new(AutopilotGlobalTaskSlotOutcomes.IdempotencyConflict, false, false, 0, ReasonCode: "launch_identity_mismatch");
+                    if (task.Status == AutopilotWaveLaunchStatuses.Failed)
+                        return new(AutopilotGlobalTaskSlotOutcomes.LaunchRejected, false, false, 0, task.ExternalTaskId, task.ReasonCode);
+                    if (task.Status != AutopilotWaveLaunchStatuses.Launching)
+                        return new(AutopilotGlobalTaskSlotOutcomes.InvalidTransition, task.Status == AutopilotWaveLaunchStatuses.Launched, false, 0, task.ExternalTaskId, "launch_claim_not_held");
 
-            task.Status = AutopilotWaveLaunchStatuses.Failed;
-            task.ReasonCode = SafeCode(reasonCode, "provider_rejected");
-            task.LastStatusDetail = "provider_rejected_before_task_acceptance";
-            task.CompletedAt = UtcNow();
-            task.UpdatedAt = UtcNow();
-            task.ConcurrencyToken = Guid.NewGuid();
-            await db.SaveChangesAsync(cancellationToken);
-            await transaction.CommitAsync(cancellationToken);
-            return new(AutopilotGlobalTaskSlotOutcomes.LaunchRejected, false, false, 0, task.ExternalTaskId, task.ReasonCode);
+                    task.Status = AutopilotWaveLaunchStatuses.Failed;
+                    task.ReasonCode = SafeCode(reasonCode, "provider_rejected");
+                    task.LastStatusDetail = "provider_rejected_before_task_acceptance";
+                    task.CompletedAt = UtcNow();
+                    task.UpdatedAt = UtcNow();
+                    task.ConcurrencyToken = Guid.NewGuid();
+                    await db.SaveChangesAsync(cancellationToken);
+                    await transaction.CommitAsync(cancellationToken);
+                    return new(AutopilotGlobalTaskSlotOutcomes.LaunchRejected, false, false, 0, task.ExternalTaskId, task.ReasonCode);
+                }
+                catch (Exception exception) when (IsRetryableRelationalConflict(exception))
+                {
+                    db.ChangeTracker.Clear();
+                    if (attempt >= MaxRelationalRetries)
+                        return new(AutopilotGlobalTaskSlotOutcomes.ReservationUnavailable, true, false, 0,
+                            ReasonCode: "relational_transaction_conflict_retries_exhausted");
+
+                    await Task.Delay(RetryDelay(attempt), cancellationToken);
+                }
+            }
         }
         finally
         {
@@ -528,23 +574,38 @@ public sealed class AutopilotGlobalTaskSlotAllocator
         await LocalReservationGate.WaitAsync(cancellationToken);
         try
         {
-            await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
-            await AcquireCrossProcessFenceAsync(cancellationToken);
-            var task = await db.AutopilotWaveLaunchTasks.SingleOrDefaultAsync(item => item.Id == launchTaskRowId, cancellationToken);
-            if (task is null || !MatchesKey(task, idempotencyKey))
-                return new(AutopilotGlobalTaskSlotOutcomes.IdempotencyConflict, false, false, 0, ReasonCode: "launch_identity_mismatch");
-            if (task.Status == AutopilotWaveLaunchStatuses.Launched)
-                return new(AutopilotGlobalTaskSlotOutcomes.AlreadyActive, true, false, 0, task.ExternalTaskId);
-            if (task.Status != AutopilotWaveLaunchStatuses.Launching)
-                return new(AutopilotGlobalTaskSlotOutcomes.InvalidTransition, false, false, 0, task.ExternalTaskId, "launch_claim_not_held");
+            for (var attempt = 0; ; attempt++)
+            {
+                try
+                {
+                    await using var transaction = await db.Database.BeginTransactionAsync(TransactionIsolationLevel, cancellationToken);
+                    await AcquireCrossProcessFenceAsync(cancellationToken);
+                    var task = await db.AutopilotWaveLaunchTasks.SingleOrDefaultAsync(item => item.Id == launchTaskRowId, cancellationToken);
+                    if (task is null || !MatchesKey(task, idempotencyKey))
+                        return new(AutopilotGlobalTaskSlotOutcomes.IdempotencyConflict, false, false, 0, ReasonCode: "launch_identity_mismatch");
+                    if (task.Status == AutopilotWaveLaunchStatuses.Launched)
+                        return new(AutopilotGlobalTaskSlotOutcomes.AlreadyActive, true, false, 0, task.ExternalTaskId);
+                    if (task.Status != AutopilotWaveLaunchStatuses.Launching)
+                        return new(AutopilotGlobalTaskSlotOutcomes.InvalidTransition, false, false, 0, task.ExternalTaskId, "launch_claim_not_held");
 
-            task.ReasonCode = SlotReservedReason;
-            task.LastStatusDetail = $"slot_retained_until_authoritative_reconciliation:{SafeCode(reasonCode, "provider_outcome_unknown")}";
-            task.UpdatedAt = UtcNow();
-            task.ConcurrencyToken = Guid.NewGuid();
-            await db.SaveChangesAsync(cancellationToken);
-            await transaction.CommitAsync(cancellationToken);
-            return new(AutopilotGlobalTaskSlotOutcomes.AmbiguousLaunch, true, false, 0, task.ExternalTaskId, task.ReasonCode);
+                    task.ReasonCode = SlotReservedReason;
+                    task.LastStatusDetail = $"slot_retained_until_authoritative_reconciliation:{SafeCode(reasonCode, "provider_outcome_unknown")}";
+                    task.UpdatedAt = UtcNow();
+                    task.ConcurrencyToken = Guid.NewGuid();
+                    await db.SaveChangesAsync(cancellationToken);
+                    await transaction.CommitAsync(cancellationToken);
+                    return new(AutopilotGlobalTaskSlotOutcomes.AmbiguousLaunch, true, false, 0, task.ExternalTaskId, task.ReasonCode);
+                }
+                catch (Exception exception) when (IsRetryableRelationalConflict(exception))
+                {
+                    db.ChangeTracker.Clear();
+                    if (attempt >= MaxRelationalRetries)
+                        return new(AutopilotGlobalTaskSlotOutcomes.ReservationUnavailable, true, false, 0,
+                            ReasonCode: "relational_transaction_conflict_retries_exhausted");
+
+                    await Task.Delay(RetryDelay(attempt), cancellationToken);
+                }
+            }
         }
         finally
         {
@@ -572,41 +633,56 @@ public sealed class AutopilotGlobalTaskSlotAllocator
         await LocalReservationGate.WaitAsync(cancellationToken);
         try
         {
-            await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
-            await AcquireCrossProcessFenceAsync(cancellationToken);
-            var task = await db.AutopilotWaveLaunchTasks.SingleOrDefaultAsync(item => item.Id == launchTaskRowId, cancellationToken);
-            if (task is null || !MatchesKey(task, idempotencyKey))
-                return new(AutopilotGlobalTaskSlotOutcomes.IdempotencyConflict, false, false, 0, ReasonCode: "launch_identity_mismatch");
+            for (var attempt = 0; ; attempt++)
+            {
+                try
+                {
+                    await using var transaction = await db.Database.BeginTransactionAsync(TransactionIsolationLevel, cancellationToken);
+                    await AcquireCrossProcessFenceAsync(cancellationToken);
+                    var task = await db.AutopilotWaveLaunchTasks.SingleOrDefaultAsync(item => item.Id == launchTaskRowId, cancellationToken);
+                    if (task is null || !MatchesKey(task, idempotencyKey))
+                        return new(AutopilotGlobalTaskSlotOutcomes.IdempotencyConflict, false, false, 0, ReasonCode: "launch_identity_mismatch");
 
-            var externalId = externalTaskId.Trim();
-            if (string.IsNullOrWhiteSpace(task.ExternalTaskId)
-                || !string.Equals(task.ExternalTaskId, externalId, StringComparison.Ordinal))
-                return new(AutopilotGlobalTaskSlotOutcomes.TerminalEvidenceInvalid,
-                    task.Status is AutopilotWaveLaunchStatuses.Launching or AutopilotWaveLaunchStatuses.Launched,
-                    false, 0, task.ExternalTaskId, "external_task_identity_not_bound_to_launch_row");
+                    var externalId = externalTaskId.Trim();
+                    if (string.IsNullOrWhiteSpace(task.ExternalTaskId)
+                        || !string.Equals(task.ExternalTaskId, externalId, StringComparison.Ordinal))
+                        return new(AutopilotGlobalTaskSlotOutcomes.TerminalEvidenceInvalid,
+                            task.Status is AutopilotWaveLaunchStatuses.Launching or AutopilotWaveLaunchStatuses.Launched,
+                            false, 0, task.ExternalTaskId, "external_task_identity_not_bound_to_launch_row");
 
-            var terminalEvent = await db.AutopilotEvents.AsNoTracking()
-                .SingleOrDefaultAsync(item => item.Id == terminalEventId, cancellationToken);
-            if (!HasBoundVerifiedCompletionEvidence(terminalEvent, task))
-                return new(AutopilotGlobalTaskSlotOutcomes.TerminalEvidenceInvalid,
-                    task.Status is AutopilotWaveLaunchStatuses.Launching or AutopilotWaveLaunchStatuses.Launched,
-                    false, 0, task.ExternalTaskId, "terminal_event_not_verified_for_launch_task");
+                    var terminalEvent = await db.AutopilotEvents.AsNoTracking()
+                        .SingleOrDefaultAsync(item => item.Id == terminalEventId, cancellationToken);
+                    if (!HasBoundVerifiedCompletionEvidence(terminalEvent, task))
+                        return new(AutopilotGlobalTaskSlotOutcomes.TerminalEvidenceInvalid,
+                            task.Status is AutopilotWaveLaunchStatuses.Launching or AutopilotWaveLaunchStatuses.Launched,
+                            false, 0, task.ExternalTaskId, "terminal_event_not_verified_for_launch_task");
 
-            if (task.Status == AutopilotWaveLaunchStatuses.Completed)
-                return new(AutopilotGlobalTaskSlotOutcomes.DuplicateCompletion, false, false, 0, task.ExternalTaskId);
-            if (task.Status != AutopilotWaveLaunchStatuses.Launching && task.Status != AutopilotWaveLaunchStatuses.Launched)
-                return new(AutopilotGlobalTaskSlotOutcomes.InvalidTransition, false, false, 0, task.ExternalTaskId, "task_has_no_reserved_slot");
+                    if (task.Status == AutopilotWaveLaunchStatuses.Completed)
+                        return new(AutopilotGlobalTaskSlotOutcomes.DuplicateCompletion, false, false, 0, task.ExternalTaskId);
+                    if (task.Status != AutopilotWaveLaunchStatuses.Launching && task.Status != AutopilotWaveLaunchStatuses.Launched)
+                        return new(AutopilotGlobalTaskSlotOutcomes.InvalidTransition, false, false, 0, task.ExternalTaskId, "task_has_no_reserved_slot");
 
-            task.ExternalTaskId = externalId;
-            task.Status = AutopilotWaveLaunchStatuses.Completed;
-            task.CompletedAt = UtcNow();
-            task.UpdatedAt = UtcNow();
-            task.ReasonCode = "verified_terminal_evidence";
-            task.LastStatusDetail = "slot_released_once";
-            task.ConcurrencyToken = Guid.NewGuid();
-            await db.SaveChangesAsync(cancellationToken);
-            await transaction.CommitAsync(cancellationToken);
-            return new(AutopilotGlobalTaskSlotOutcomes.Completed, false, false, 0, task.ExternalTaskId);
+                    task.ExternalTaskId = externalId;
+                    task.Status = AutopilotWaveLaunchStatuses.Completed;
+                    task.CompletedAt = UtcNow();
+                    task.UpdatedAt = UtcNow();
+                    task.ReasonCode = "verified_terminal_evidence";
+                    task.LastStatusDetail = "slot_released_once";
+                    task.ConcurrencyToken = Guid.NewGuid();
+                    await db.SaveChangesAsync(cancellationToken);
+                    await transaction.CommitAsync(cancellationToken);
+                    return new(AutopilotGlobalTaskSlotOutcomes.Completed, false, false, 0, task.ExternalTaskId);
+                }
+                catch (Exception exception) when (IsRetryableRelationalConflict(exception))
+                {
+                    db.ChangeTracker.Clear();
+                    if (attempt >= MaxRelationalRetries)
+                        return new(AutopilotGlobalTaskSlotOutcomes.ReservationUnavailable, true, false, 0,
+                            externalTaskId.Trim(), "relational_transaction_conflict_retries_exhausted");
+
+                    await Task.Delay(RetryDelay(attempt), cancellationToken);
+                }
+            }
         }
         finally
         {
@@ -683,6 +759,27 @@ public sealed class AutopilotGlobalTaskSlotAllocator
         command.CommandText = $"SELECT pg_advisory_xact_lock({AdvisoryLockNamespace}, {AdvisoryLockResource})";
         await command.ExecuteScalarAsync(cancellationToken);
     }
+
+    private IsolationLevel TransactionIsolationLevel =>
+        string.Equals(db.Database.ProviderName, "Npgsql.EntityFrameworkCore.PostgreSQL", StringComparison.Ordinal)
+            ? IsolationLevel.ReadCommitted
+            : IsolationLevel.Serializable;
+
+    private static bool IsRetryableRelationalConflict(Exception exception)
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is DbUpdateConcurrencyException)
+                return true;
+            if (current is Npgsql.PostgresException postgres
+                && (postgres.SqlState == "40001" || postgres.SqlState == "40P01"))
+                return true;
+        }
+
+        return false;
+    }
+
+    private static TimeSpan RetryDelay(int attempt) => TimeSpan.FromMilliseconds(10 * (1 << Math.Min(attempt, 4)));
 
     private bool IsAuthoritative(AutopilotGlobalTaskInventorySnapshot? inventory)
     {

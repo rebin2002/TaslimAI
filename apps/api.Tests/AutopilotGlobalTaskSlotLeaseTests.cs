@@ -51,6 +51,7 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
         Assert.Equal(20, results.Count(item => item.Outcome == AutopilotGlobalTaskSlotOutcomes.Reserved));
         Assert.Single(results, item => item.Outcome == AutopilotGlobalTaskSlotOutcomes.CapacityReached);
         Assert.All(results, item => Assert.True(item.ActiveSlotsObserved <= AutopilotGlobalTaskSlotAllocator.HardMaximum));
+        Assert.DoesNotContain(results.Where(item => item.Outcome != AutopilotGlobalTaskSlotOutcomes.Reserved), item => item.MayCallProvider);
 
         await using var verify = CreateContext();
         Assert.Equal(20, await verify.AutopilotWaveLaunchTasks.CountAsync(item =>
@@ -95,6 +96,7 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
             Assert.Equal(20, results.Count(item => item.Outcome == AutopilotGlobalTaskSlotOutcomes.Reserved));
             Assert.Single(results, item => item.Outcome == AutopilotGlobalTaskSlotOutcomes.CapacityReached);
             Assert.All(results, item => Assert.True(item.ActiveSlotsObserved <= AutopilotGlobalTaskSlotAllocator.HardMaximum));
+            Assert.DoesNotContain(results.Where(item => item.Outcome != AutopilotGlobalTaskSlotOutcomes.Reserved), item => item.MayCallProvider);
 
             await using (var verify = new TaslimDbContext(pgOptions))
                 Assert.Equal(20, await verify.AutopilotWaveLaunchTasks.CountAsync(item =>
