@@ -41,10 +41,28 @@ public sealed class ManusMovieVideoProvider(
         && TryGetBaseUri(out _);
 
     public IReadOnlyCollection<string> SupportedOperations => Operations;
+    public bool SupportsSceneClipSourceImageCostIntent => false;
+    public bool SupportsReferencePackageCostIntent => false;
+    // Mirrors the existing BuildCreateRequest duration gate.
+    public MovieClipDurationRange? SceneClipDurationRange => new(1, 30);
+    // Must use the same configured bound enforced by BuildPrompt.
+    public int? SceneClipPromptMaxCharacters => Math.Clamp(Manus.MaxPromptCharacters, 1_000, 20_000);
+    // BuildPrompt adds two mandatory direction paragraphs, duration/aspect/language
+    // metadata, section labels, and newline separators in addition to the creative
+    // fields counted by queue admission. Reserve a conservative 512 characters
+    // for that adapter formatting so near-limit jobs fail before cost reservation
+    // instead of discovering the overflow only in the worker. The verified
+    // supported-language and clip-duration metadata fit within this allowance.
+    public int SceneClipPromptFormattingOverheadCharacters => 512;
+    // BuildPrompt includes WorldContextJson as a required section.
+    public bool SceneClipWorldContextInPrompt => true;
 
     public async Task<MovieVideoSubmission> SubmitAsync(MovieVideoGenerationRequest request, CancellationToken cancellationToken)
     {
         EnsureAvailable();
+        // Reject unsupported paid execution intent before any source-image URL
+        // policy lookup (including DNS) or outbound provider request.
+        var payload = BuildCreateRequest(request);
         if (!string.IsNullOrWhiteSpace(request.SourceImageUri)
             && !request.SourceImageUri.TrimStart().StartsWith("data:image/", StringComparison.OrdinalIgnoreCase))
         {
@@ -54,7 +72,6 @@ public sealed class ManusMovieVideoProvider(
             try { await downloadUrlPolicy.EnsureSafeAsync(sourceUri, cancellationToken); }
             catch (InvalidDataException) { throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false); }
         }
-        var payload = BuildCreateRequest(request);
         var body = await SendJsonAsync(
             HttpMethod.Post,
             new Uri(GetBaseUri(), "v2/task.create"),
@@ -253,6 +270,26 @@ public sealed class ManusMovieVideoProvider(
             throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);
         if (!string.IsNullOrWhiteSpace(request.ContinuationProviderJobId))
             throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);
+        // Manus task.create accepts a descriptive prompt, not a verified
+        // resolution/quality/upscaling or multi-frame execution contract.
+        // Do not send a priced clip of either operation that cannot be
+        // faithfully executed. The Quick Movie operation must not silently
+        // discard priced intent or unsupported frame/reference controls.
+        // Legacy unpriced adapter requests remain unaffected.
+        if (request.UpscalingRequested
+                || !string.IsNullOrWhiteSpace(request.SourceResolution)
+                || !string.IsNullOrWhiteSpace(request.TargetResolution)
+                || !string.IsNullOrWhiteSpace(request.MasterResolution)
+                || !string.IsNullOrWhiteSpace(request.QualityTier)
+                || !string.IsNullOrWhiteSpace(request.ProcessingPath)
+                || !string.IsNullOrWhiteSpace(request.ReferencePackageJson)
+                || (request.Operation == MovieStudioOperations.SceneClip
+                    && !string.IsNullOrWhiteSpace(request.SourceImageUri)
+                    && !SupportsSceneClipSourceImageCostIntent)
+                || !string.IsNullOrWhiteSpace(request.FirstFrameImageUri)
+                || !string.IsNullOrWhiteSpace(request.LastFrameImageUri)
+                || request.ReferenceImages is { Count: > 0 })
+            throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);
         if (request.DurationSeconds is < 1 or > 30)
             throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);
         if (request.AspectRatio.Trim() is not ("16:9" or "9:16" or "1:1"))
@@ -286,6 +323,7 @@ public sealed class ManusMovieVideoProvider(
         };
         AddSection(sections, "Additional direction", request.AdditionalInstructions);
         AddSection(sections, "Continuity guide", request.ContinuityGuideJson);
+        AddSection(sections, "Character continuity", request.CharacterContinuityJson);
         AddSection(sections, "Scene direction", request.SceneJson);
         AddSection(sections, "Shot direction", request.ShotJson);
         AddSection(sections, "World context", request.WorldContextJson);
@@ -293,7 +331,12 @@ public sealed class ManusMovieVideoProvider(
         var maximum = Math.Clamp(Manus.MaxPromptCharacters, 1_000, 20_000);
         if (prompt.Length < 1)
             throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);
-        return prompt.Length <= maximum ? prompt : prompt[..(maximum - 3)].TrimEnd() + "...";
+        // task.create is potentially billable. Never silently trim director notes
+        // or continuity context to fit the configured limit: the shortened
+        // prompt would no longer represent the submitted creative intent.
+        if (prompt.Length > maximum)
+            throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);
+        return prompt;
     }
 
     private static object BuildImageContent(string sourceImageUri)

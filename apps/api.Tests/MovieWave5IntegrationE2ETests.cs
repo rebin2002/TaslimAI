@@ -98,7 +98,7 @@ public sealed class MovieWave5IntegrationE2ETests : IClassFixture<MovieWave4ApiF
         var createdTakeIds = new List<Guid>();
         for (var takeNumber = 1; takeNumber <= 3; takeNumber++)
         {
-            var generated = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(client,
+            var generated = await MovieOperationalFixtures.PostWithConfirmedMovieQuoteAsync<MovieStudioGenerationResponse>(factory, client,
                 $"/api/movie-studio/shots/{shotId}/generate", new { title = $"Last Seed economical review take {takeNumber}" },
                 idempotencyKey: $"last-seed-wave5-take-{takeNumber}");
             var terminal = await WaitForTerminalAsync(client, generated.Job.Id);
@@ -354,7 +354,7 @@ public sealed class MovieWave5SafetyE2ETests : IClassFixture<MovieWave5SafetyApi
     }
 
     [Fact]
-    public async Task Provider_off_last_seed_path_fails_without_asset_or_charge()
+    public async Task Provider_off_last_seed_path_is_rejected_before_job_or_charge()
     {
         using var client = factory.CreateClient();
         var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
@@ -367,23 +367,37 @@ public sealed class MovieWave5SafetyE2ETests : IClassFixture<MovieWave5SafetyApi
         Assert.False(readiness!.Provider.Ready);
         Assert.Empty(readiness.Provider.SupportedOperations);
 
-        var response = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(client,
+        const string key = "last-seed-wave5-provider-off";
+        int jobsBefore;
+        int clipsBefore;
+        int transactionsBefore;
+        using (var baselineScope = factory.Services.CreateScope())
+        {
+            var baseline = baselineScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            jobsBefore = await baseline.GenerationJobs.CountAsync();
+            clipsBefore = await baseline.MovieClips.CountAsync();
+            transactionsBefore = await baseline.UsageTransactions.CountAsync();
+        }
+
+        // No unconfigured provider operation should create a speculative clip,
+        // generation job or usage reservation.
+        using var response = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post,
             $"/api/movie-studio/shots/{fixture.Shot.Id}/generate",
             new { title = "Provider-off safety attempt" },
-            idempotencyKey: "last-seed-wave5-provider-off");
-        var failed = await WaitForTerminalAsync(client, response.Job.Id);
-        Assert.Equal(GenerationJobStatus.Failed.ToString(), failed.Status);
-        Assert.Equal(GenerationJobErrorCodes.MovieProviderUnavailable, failed.ErrorCode);
-        Assert.Empty(failed.Outputs);
+            idempotencyKey: key);
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains("MOVIE_PROVIDER_UNAVAILABLE",
+            await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
 
         using var scope = factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
-        var usage = await db.UsageTransactions.AsNoTracking().SingleAsync(item => item.GenerationJobId == response.Job.Id);
-        Assert.Equal(UsageTransactionStatus.Failed, usage.Status);
-        Assert.Equal(0m, usage.ChargedAmount);
-        Assert.False(await db.Assets.AsNoTracking().AnyAsync(item => item.SourceGenerationJobId == response.Job.Id));
-        Assert.False(await db.GenerationJobOutputs.AsNoTracking().AnyAsync(item => item.GenerationJobId == response.Job.Id));
-        Assert.Equal(0m, (await client.GetFromJsonAsync<UsageSummaryDto>($"/api/workspaces/{fixture.Owner.PersonalWorkspace.Id}/usage/summary"))!.CustomerChargedAmount);
+        Assert.Equal(jobsBefore, await db.GenerationJobs.CountAsync());
+        Assert.Equal(clipsBefore, await db.MovieClips.CountAsync());
+        Assert.Equal(transactionsBefore, await db.UsageTransactions.CountAsync());
+        Assert.False(await db.GenerationJobs.AnyAsync(item => item.IdempotencyKey == key));
+        Assert.Equal(0m, (await client.GetFromJsonAsync<UsageSummaryDto>(
+            $"/api/workspaces/{fixture.Owner.PersonalWorkspace.Id}/usage/summary"))!.CustomerChargedAmount);
     }
 
     private static async Task<GenerationJobDto> WaitForTerminalAsync(HttpClient client, Guid jobId)

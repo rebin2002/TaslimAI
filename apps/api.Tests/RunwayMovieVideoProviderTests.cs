@@ -18,6 +18,67 @@ public sealed class RunwayMovieVideoProviderTests
 {
     private static readonly Guid TaskId = Guid.Parse("8d2d2e6e-88c7-4c47-a6ab-7c6ce6e1a6a4");
 
+
+    [Theory]
+    [InlineData("source-resolution")]
+    [InlineData("target-resolution")]
+    [InlineData("master-resolution")]
+    [InlineData("quality")]
+    [InlineData("processing")]
+    [InlineData("upscaling")]
+    public async Task Quick_movie_rejects_unmapped_paid_execution_intent_before_provider_or_dns(string option)
+    {
+        // Quick Movie uses the same fixed-ratio Runway payload, not a hidden
+        // quality, resolution or upscaling executor. HTTP transport stays fake.
+        var handler = new RecordingHandler(_ => throw new InvalidOperationException("No provider request allowed."));
+        var urlPolicy = new CountingProviderUrlPolicy();
+        var provider = CreateProvider(handler, EnabledOptions(), urlPolicy);
+        var baseline = Request(sourceImageUri: "https://assets.example.test/frame.png") with
+        {
+            Operation = MovieStudioOperations.QuickMovie,
+            SourceResolution = null,
+            TargetResolution = null,
+            QualityTier = null,
+            ProcessingPath = null,
+        };
+        var request = option switch
+        {
+            "source-resolution" => baseline with { SourceResolution = "1080p" },
+            "target-resolution" => baseline with { TargetResolution = "1080p" },
+            "master-resolution" => baseline with { MasterResolution = "1080p" },
+            "quality" => baseline with { QualityTier = "Cinematic" },
+            "processing" => baseline with { ProcessingPath = "upscale" },
+            _ => baseline with { UpscalingRequested = true },
+        };
+
+        var error = await Assert.ThrowsAsync<MovieVideoProviderException>(() =>
+            provider.SubmitAsync(request, CancellationToken.None));
+
+        Assert.Equal(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, error.Code);
+        Assert.Equal(0, urlPolicy.Calls);
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
+    public async Task Unpriced_quick_movie_preserves_supported_short_video_submission()
+    {
+        var handler = new RecordingHandler(_ => JsonResponse(JsonSerializer.Serialize(new { id = TaskId })));
+        var provider = CreateProvider(handler, EnabledOptions());
+        var request = Request() with
+        {
+            Operation = MovieStudioOperations.QuickMovie,
+            SourceResolution = null,
+            TargetResolution = null,
+            QualityTier = null,
+            ProcessingPath = null,
+        };
+
+        var submitted = await provider.SubmitAsync(request, CancellationToken.None);
+
+        Assert.Equal(TaskId.ToString(), submitted.ProviderJobId);
+        Assert.EndsWith("/text_to_video", Assert.Single(handler.Requests).RequestUri!.AbsoluteUri);
+    }
+
     [Fact]
     public async Task Disabled_configuration_never_calls_Runway_and_is_unavailable()
     {
@@ -29,13 +90,171 @@ public sealed class RunwayMovieVideoProviderTests
         Assert.Empty(handler.Requests);
     }
 
+    [Theory]
+    [InlineData("unverified-model")]
+    [InlineData("seedance2_5")]
+    [InlineData("kling_4")]
+    public async Task Unverified_Runway_model_fails_priced_scene_clip_admission_before_network_access(string modelKey)
+    {
+        // The production queue does not promise a source image. The adapter
+        // only supports its current text-only payload for the verified model.
+        // Reject a different configured model before booking a priced job.
+        var handler = new RecordingHandler(_ => throw new InvalidOperationException("No provider request is allowed."));
+        var urlPolicy = new CountingProviderUrlPolicy();
+        var options = EnabledOptions();
+        options.Model = modelKey;
+        var provider = CreateProvider(handler, options, urlPolicy);
+
+        Assert.True(provider.IsAvailable);
+        Assert.Equal(modelKey, provider.SceneClipPricingModelKey);
+        Assert.False(provider.SupportsSceneClipCostIntent("720p", "720p", "Standard", "native", "16:9"));
+
+        var error = await Assert.ThrowsAsync<MovieVideoProviderException>(() =>
+            provider.SubmitAsync(Request(), CancellationToken.None));
+
+        Assert.Equal(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, error.Code);
+        Assert.Equal(0, urlPolicy.Calls);
+        Assert.Empty(handler.Requests);
+    }
+
     [Fact]
-    public async Task Submission_maps_prompt_duration_ratio_and_reference_image_without_leaking_secrets()
+    public async Task Whitespace_padded_verified_model_preserves_priced_admission_at_text_submission()
+    {
+        // The declared capability trims the configured model. Submission must
+        // use the same normalized model or a priced clip can fail after queueing.
+        // This uses a fake HTTP handler: no paid provider request is sent.
+        var handler = new RecordingHandler(_ => JsonResponse(JsonSerializer.Serialize(new { id = TaskId })));
+        var options = EnabledOptions();
+        options.Model = " gen4.5 ";
+        var provider = CreateProvider(handler, options);
+
+        Assert.True(provider.IsAvailable);
+        Assert.True(provider.SupportsSceneClipCostIntent("720p", "720p", "Standard", "native", "16:9"));
+
+        var submission = await provider.SubmitAsync(Request(), CancellationToken.None);
+
+        Assert.Equal(TaskId.ToString(), submission.ProviderJobId);
+        var outbound = Assert.Single(handler.Requests);
+        Assert.EndsWith("/text_to_video", outbound.RequestUri!.AbsoluteUri);
+        using var payload = JsonDocument.Parse(Assert.Single(handler.RequestBodies));
+        Assert.Equal("gen4.5", payload.RootElement.GetProperty("model").GetString());
+    }
+
+    [Fact]
+    public async Task Retrieved_output_uses_the_same_normalized_model_key_as_priced_submission()
+    {
+        // Retrieval metadata feeds usage attribution. Keep it identical to the
+        // trimmed model key used by the quote and actual outbound payload.
+        var handler = new RecordingHandler(_ => throw new InvalidOperationException("No provider request is allowed."));
+        var options = EnabledOptions();
+        options.Model = " gen4.5 ";
+        var provider = CreateProvider(handler, options);
+        var status = new MovieVideoProviderStatus(
+            MovieVideoProviderJobStatus.Succeeded,
+            100,
+            "video/mp4",
+            "clip.mp4",
+            4,
+            5,
+            $"{{\"taskId\":\"{TaskId}\",\"outputUrl\":\"https://cdn.example.test/clip.mp4\",\"contentType\":\"video/mp4\",\"fileName\":\"clip.mp4\",\"sizeBytes\":4}}",
+            EstimatedCostUsd: 0.01m);
+
+        var output = await provider.RetrieveAsync(TaskId.ToString(), status, CancellationToken.None);
+
+        Assert.Equal("gen4.5", provider.SceneClipPricingModelKey);
+        Assert.Equal("gen4.5", output.ProviderModelKey);
+        Assert.Empty(handler.Requests);
+    }
+
+    [Theory]
+    [InlineData(1, "720p", "720p", "Standard", "native", "16:9", "MOVIE_CLIP_DURATION_UNSUPPORTED")]
+    [InlineData(11, "720p", "720p", "Standard", "native", "16:9", "MOVIE_CLIP_DURATION_UNSUPPORTED")]
+    [InlineData(7200, "720p", "720p", "Standard", "native", "16:9", "MOVIE_CLIP_DURATION_UNSUPPORTED")]
+    [InlineData(5, "1080p", "720p", "Standard", "native", "16:9", "MOVIE_CLIP_EXECUTION_INTENT_UNSUPPORTED")]
+    [InlineData(5, "720p", "1080p", "Standard", "native", "16:9", "MOVIE_CLIP_EXECUTION_INTENT_UNSUPPORTED")]
+    [InlineData(5, "720p", "720p", "Cinematic", "native", "16:9", "MOVIE_CLIP_EXECUTION_INTENT_UNSUPPORTED")]
+    [InlineData(5, "720p", "720p", "Standard", "upscale", "16:9", "MOVIE_CLIP_EXECUTION_INTENT_UNSUPPORTED")]
+    [InlineData(5, "720p", "720p", "Standard", "native", "4:5", "MOVIE_CLIP_EXECUTION_INTENT_UNSUPPORTED")]
+    public void Approved_production_admission_rejects_unexecutable_Runway_clips_before_provider_access(
+        int durationSeconds, string sourceResolution, string targetResolution,
+        string qualityTier, string processingPath, string aspectRatio, string rejectionCode)
+    {
+        // Check the actual adapter, not a permissive fake capability flag.
+        // This shared decision is suitable for both read-only production preflight
+        // and queue admission, with no network or usage side effects.
+        var handler = new RecordingHandler(_ => throw new InvalidOperationException("No provider request is permitted."));
+        var provider = CreateProvider(handler, EnabledOptions());
+
+        var rejection = MovieProductionGenerationOrchestrator.EvaluateProductionClipAdmission(
+            provider, durationSeconds, sourceResolution, targetResolution,
+            qualityTier, processingPath, aspectRatio);
+
+        Assert.NotNull(rejection);
+        Assert.Equal(rejectionCode, rejection.Code);
+        Assert.Empty(handler.Requests);
+    }
+
+    [Theory]
+    [InlineData(2, "16:9", "1280:720")]
+    [InlineData(5, "16:9", "1280:720")]
+    [InlineData(10, "9:16", "720:1280")]
+    public async Task Approved_production_admission_matches_verified_Runway_payload_at_supported_boundaries(
+        int durationSeconds, string aspectRatio, string expectedRatio)
+    {
+        var handler = new RecordingHandler(_ => JsonResponse(JsonSerializer.Serialize(new { id = TaskId })));
+        var provider = CreateProvider(handler, EnabledOptions());
+
+        var rejection = MovieProductionGenerationOrchestrator.EvaluateProductionClipAdmission(
+            provider, durationSeconds, "720p", "720p", "Standard", "native", aspectRatio);
+
+        Assert.Null(rejection);
+        Assert.Equal("gen4.5", provider.SceneClipPricingModelKey);
+        // Fake HTTP only: accepted admission must serialize the same duration,
+        // aspect and fixed 720p output that was admitted and priced.
+        await provider.SubmitAsync(Request(durationSeconds: durationSeconds, aspectRatio: aspectRatio), CancellationToken.None);
+        Assert.EndsWith("/text_to_video", Assert.Single(handler.Requests).RequestUri!.AbsoluteUri);
+        using var payload = JsonDocument.Parse(Assert.Single(handler.RequestBodies));
+        Assert.Equal(durationSeconds, payload.RootElement.GetProperty("duration").GetInt32());
+        Assert.Equal(expectedRatio, payload.RootElement.GetProperty("ratio").GetString());
+        Assert.Equal("gen4.5", payload.RootElement.GetProperty("model").GetString());
+        Assert.False(payload.RootElement.TryGetProperty("resolution", out _));
+        Assert.False(payload.RootElement.TryGetProperty("quality", out _));
+    }
+
+    [Theory]
+    [InlineData("unverified-model")]
+    [InlineData("seedance2_5")]
+    [InlineData("kling_4")]
+    public void Approved_production_admission_rejects_unverified_Runway_model(string modelKey)
+    {
+        var handler = new RecordingHandler(_ => throw new InvalidOperationException("No provider request is permitted."));
+        var options = EnabledOptions();
+        options.Model = modelKey;
+        var provider = CreateProvider(handler, options);
+
+        var rejection = MovieProductionGenerationOrchestrator.EvaluateProductionClipAdmission(
+            provider, 5, "720p", "720p", "Standard", "native", "16:9");
+
+        Assert.NotNull(rejection);
+        Assert.Equal("MOVIE_CLIP_EXECUTION_INTENT_UNSUPPORTED", rejection.Code);
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
+    public async Task Quick_movie_image_to_video_payload_maps_prompt_duration_ratio_and_image_without_leaking_secrets()
     {
         var handler = new RecordingHandler(_ => JsonResponse($"{{\"id\":\"{TaskId}\",\"estimatedCost\":{{\"credits\":60}}}}"));
         var provider = CreateProvider(handler, EnabledOptions());
 
-        var submission = await provider.SubmitAsync(Request(sourceImageUri: "https://assets.example.test/frame.png"), CancellationToken.None);
+        var imageRequest = Request(sourceImageUri: "https://assets.example.test/frame.png") with
+        {
+            Operation = MovieStudioOperations.QuickMovie,
+            SourceResolution = null,
+            TargetResolution = null,
+            QualityTier = null,
+            ProcessingPath = null,
+        };
+        var submission = await provider.SubmitAsync(imageRequest, CancellationToken.None);
 
         Assert.Equal(TaskId.ToString(), submission.ProviderJobId);
         var request = Assert.Single(handler.Requests);
@@ -50,6 +269,184 @@ public sealed class RunwayMovieVideoProviderTests
         Assert.Equal(5, payload.RootElement.GetProperty("duration").GetInt32());
         Assert.Equal("https://assets.example.test/frame.png", payload.RootElement.GetProperty("promptImage").GetString());
         Assert.DoesNotContain("synthetic-runway-token", payload.RootElement.GetProperty("promptText").GetString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Scene_clip_source_image_rejects_before_image_host_lookup_or_provider_submission()
+    {
+        var handler = new RecordingHandler(_ => throw new InvalidOperationException("No provider request is allowed."));
+        var urlPolicy = new CountingProviderUrlPolicy();
+        var provider = CreateProvider(handler, EnabledOptions(), urlPolicy);
+
+        var error = await Assert.ThrowsAsync<MovieVideoProviderException>(() => provider.SubmitAsync(
+            Request(sourceImageUri: "https://assets.example.test/frame.png"), CancellationToken.None));
+
+        Assert.Equal(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, error.Code);
+        Assert.False(provider.SupportsSceneClipSourceImageCostIntent);
+        Assert.Equal(0, urlPolicy.Calls);
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
+    public async Task Scene_clip_reference_package_rejects_before_provider_submission()
+    {
+        var handler = new RecordingHandler(_ => throw new InvalidOperationException("No provider request is allowed."));
+        var urlPolicy = new CountingProviderUrlPolicy();
+        var provider = CreateProvider(handler, EnabledOptions(), urlPolicy);
+
+        var error = await Assert.ThrowsAsync<MovieVideoProviderException>(() => provider.SubmitAsync(
+            Request() with { ReferencePackageJson = "{\"schemaVersion\":1}" }, CancellationToken.None));
+
+        Assert.Equal(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, error.Code);
+        Assert.False(provider.SupportsReferencePackageCostIntent);
+        Assert.Equal(0, urlPolicy.Calls);
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
+    public async Task Approved_character_continuity_is_sent_with_movie_guide_in_prompt()
+    {
+        var handler = new RecordingHandler(_ => JsonResponse(JsonSerializer.Serialize(new { id = TaskId })));
+        var provider = CreateProvider(handler, EnabledOptions());
+        var characterContext = JsonSerializer.Serialize(new
+        {
+            name = "Liora",
+            wardrobe = "blue coat",
+            lockedExpression = "calm",
+        });
+
+        await provider.SubmitAsync(Request() with
+        {
+            CharacterContinuityJson = characterContext,
+        }, CancellationToken.None);
+
+        using var payload = JsonDocument.Parse(Assert.Single(handler.RequestBodies));
+        var prompt = payload.RootElement.GetProperty("promptText").GetString();
+        Assert.NotNull(prompt);
+        Assert.Contains("Continuity direction: Visual language: natural light", prompt, StringComparison.Ordinal);
+        Assert.Contains("Character continuity: ", prompt, StringComparison.Ordinal);
+        Assert.Contains(characterContext, prompt, StringComparison.Ordinal);
+        Assert.Contains("Liora", prompt, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("1080p", "720p", "Standard", "native")]
+    [InlineData("720p", "1080p", "Standard", "native")]
+    [InlineData("720p", "720p", "Cinematic", "native")]
+    [InlineData("720p", "720p", "Standard", "upscale")]
+    public async Task Unsupported_scene_clip_execution_profile_never_submits_a_billable_provider_request(
+        string sourceResolution, string targetResolution, string qualityTier, string processingPath)
+    {
+        var handler = new RecordingHandler(_ => throw new InvalidOperationException("No provider request is allowed."));
+        var urlPolicy = new CountingProviderUrlPolicy();
+        var provider = CreateProvider(handler, EnabledOptions(), urlPolicy);
+
+        var error = await Assert.ThrowsAsync<MovieVideoProviderException>(() => provider.SubmitAsync(
+            Request(sourceResolution: sourceResolution, targetResolution: targetResolution,
+                qualityTier: qualityTier, processingPath: processingPath), CancellationToken.None));
+
+        Assert.Equal(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, error.Code);
+        Assert.Equal(0, urlPolicy.Calls);
+        Assert.Empty(handler.Requests);
+    }
+
+    [Theory]
+    [InlineData("720p")]
+    [InlineData("1080p")]
+    public async Task Unsupported_master_resolution_is_rejected_before_Runway_network_access(string masterResolution)
+    {
+        // The scene-clip payload cannot enact a separate mastering step, even
+        // when its fixed 720p output otherwise matches the priced clip profile.
+        var handler = new RecordingHandler(_ => throw new InvalidOperationException("No provider request allowed."));
+        var urlPolicy = new CountingProviderUrlPolicy();
+        var provider = CreateProvider(handler, EnabledOptions(), urlPolicy);
+
+        var error = await Assert.ThrowsAsync<MovieVideoProviderException>(() => provider.SubmitAsync(
+            Request() with
+            {
+                MasterResolution = masterResolution,
+            }, CancellationToken.None));
+
+        Assert.Equal(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, error.Code);
+        Assert.Equal(0, urlPolicy.Calls);
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
+    public async Task Oversized_Runway_prompt_rejects_before_image_host_lookup_or_provider_submission()
+    {
+        // The old adapter truncated to 997 characters plus an ellipsis,
+        // silently discarding paid creative/continuity instructions.
+        var handler = new RecordingHandler(_ => throw new InvalidOperationException("No paid provider request is allowed."));
+        var urlPolicy = new CountingProviderUrlPolicy();
+        var provider = CreateProvider(handler, EnabledOptions(), urlPolicy);
+        var request = Request() with
+        {
+            AdditionalInstructions = new string('X', 1200),
+        };
+
+        var error = await Assert.ThrowsAsync<MovieVideoProviderException>(() =>
+            provider.SubmitAsync(request, CancellationToken.None));
+
+        Assert.Equal(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, error.Code);
+        Assert.Equal(0, urlPolicy.Calls);
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
+    public async Task Runway_prompt_at_exact_1000_character_boundary_preserves_all_instructions()
+    {
+        var handler = new RecordingHandler(_ => JsonResponse($"{{\"id\":\"{TaskId}\"}}"));
+        var provider = CreateProvider(handler, EnabledOptions());
+        var baseline = Request();
+
+        await provider.SubmitAsync(baseline, CancellationToken.None);
+        using var baselinePayload = JsonDocument.Parse(handler.RequestBodies.Single());
+        var baselinePrompt = baselinePayload.RootElement.GetProperty("promptText").GetString()!;
+        var instructionLength = 1000 - baselinePrompt.Length + baseline.AdditionalInstructions!.Length;
+        Assert.True(instructionLength > 0);
+        var fullInstructions = new string('X', instructionLength);
+
+        await provider.SubmitAsync(baseline with { AdditionalInstructions = fullInstructions }, CancellationToken.None);
+
+        Assert.Equal(2, handler.Requests.Count);
+        using var boundaryPayload = JsonDocument.Parse(handler.RequestBodies.Last());
+        var prompt = boundaryPayload.RootElement.GetProperty("promptText").GetString()!;
+        Assert.Equal(1000, prompt.Length);
+        Assert.Contains(fullInstructions, prompt, StringComparison.Ordinal);
+        Assert.False(prompt.EndsWith("...", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Upscaling_scene_clip_never_submits_a_billable_provider_request()
+    {
+        var handler = new RecordingHandler(_ => throw new InvalidOperationException("No provider request is allowed."));
+        var provider = CreateProvider(handler, EnabledOptions());
+
+        await Assert.ThrowsAsync<MovieVideoProviderException>(() => provider.SubmitAsync(
+            Request() with { UpscalingRequested = true }, CancellationToken.None));
+
+        Assert.Empty(handler.Requests);
+    }
+
+    [Theory]
+    [InlineData("first-frame")]
+    [InlineData("last-frame")]
+    [InlineData("reference-images")]
+    public async Task Unsupported_frame_and_reference_inputs_never_submit_a_billable_provider_request(string referenceCase)
+    {
+        var handler = new RecordingHandler(_ => throw new InvalidOperationException("No provider request is allowed."));
+        var provider = CreateProvider(handler, EnabledOptions());
+        var baseline = Request();
+        var request = referenceCase switch
+        {
+            "first-frame" => baseline with { FirstFrameImageUri = "https://assets.example.test/first.png" },
+            "last-frame" => baseline with { LastFrameImageUri = "https://assets.example.test/last.png" },
+            _ => baseline with { ReferenceImages = [new MovieVideoReferenceImage("https://assets.example.test/character.png", "character")] },
+        };
+
+        await Assert.ThrowsAsync<MovieVideoProviderException>(() => provider.SubmitAsync(request, CancellationToken.None));
+        Assert.Empty(handler.Requests);
     }
 
     [Fact]
@@ -248,6 +645,17 @@ public sealed class RunwayMovieVideoProviderTests
         public Task EnsureSafeAsync(Uri uri, CancellationToken cancellationToken = default) => Task.CompletedTask;
     }
 
+    private sealed class CountingProviderUrlPolicy : IProviderUrlPolicy
+    {
+        public int Calls { get; private set; }
+
+        public Task EnsureSafeAsync(Uri uri, CancellationToken cancellationToken = default)
+        {
+            Calls++;
+            return Task.CompletedTask;
+        }
+    }
+
     private static MovieVideoOptions EnabledOptions() => new()
     {
         Enabled = true,
@@ -265,7 +673,11 @@ public sealed class RunwayMovieVideoProviderTests
         int durationSeconds = 5,
         string aspectRatio = "16:9",
         string? sourceImageUri = null,
-        string? continuationProviderJobId = null) => new(
+        string? continuationProviderJobId = null,
+        string sourceResolution = "720p",
+        string targetResolution = "720p",
+        string qualityTier = "Standard",
+        string processingPath = "native") => new(
             MovieStudioOperations.SceneClip,
             Guid.NewGuid(),
             Guid.NewGuid(),
@@ -282,7 +694,11 @@ public sealed class RunwayMovieVideoProviderTests
             "Scene: forest",
             "Shot: slow dolly",
             sourceImageUri,
-            continuationProviderJobId);
+            continuationProviderJobId,
+            SourceResolution: sourceResolution,
+            ProcessingPath: processingPath,
+            TargetResolution: targetResolution,
+            QualityTier: qualityTier);
 
     private static HttpResponseMessage JsonResponse(string body) => new(HttpStatusCode.OK)
     {

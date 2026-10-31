@@ -13,6 +13,12 @@ public static class MovieShotExecutionOperations
     public const string ImageToVideo = "image-to-video";
 }
 
+internal static class MovieShotExecutionIntentFingerprint
+{
+    public static string Compute(string inputJson) => Convert.ToHexString(
+        System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(inputJson)));
+}
+
 public sealed class MovieShotExecutionRequest
 {
     public Guid KeyframeVersionId { get; set; }
@@ -83,6 +89,7 @@ public sealed class MovieShotExecutionService(
     IGenerationCostGuardrailService costGuardrails) : IMovieShotExecutionService
 {
     private const int MaximumTakes = 8;
+    private static readonly TimeSpan AbandonedPlaceholderAge = TimeSpan.FromHours(1);
     private const int MaximumReferencePackageCharacters = 50_000;
 
     public async Task<MovieShotExecutionResponse?> QueueAsync(
@@ -112,13 +119,6 @@ public sealed class MovieShotExecutionService(
             throw new MovieShotExecutionValidationException("SHOT_EXECUTION_DURATION_INVALID", "The shot must have a duration between 1 second and 60 minutes before production can start.");
         if (string.IsNullOrWhiteSpace(shot.Scene.MovieProject.AspectRatio))
             throw new MovieShotExecutionValidationException("SHOT_EXECUTION_ASPECT_INVALID", "The movie aspect ratio is required before production can start.");
-        await referenceReadiness.EnsureCanGenerateAsync(
-            userId,
-            shot.Id,
-            request.AllowReferenceReadinessOverride,
-            request.ReferenceReadinessOverrideReason,
-            MovieReferenceReadinessOverrideSources.ShotExecution,
-            cancellationToken);
         var qualityLevel = request.QualityLevel?.Trim() ?? string.Empty;
         if (!MovieQualityLevels.Supported.Contains(qualityLevel))
             throw new MovieShotExecutionValidationException("SHOT_EXECUTION_QUALITY_INVALID", "Choose a supported quality level.");
@@ -132,21 +132,248 @@ public sealed class MovieShotExecutionService(
         var takeCount = request.TakeCount;
         if (takeCount is < 1 or > MaximumTakes)
             throw new MovieShotExecutionValidationException("SHOT_EXECUTION_TAKE_COUNT_INVALID", $"Choose between 1 and {MaximumTakes} takes.");
+        var movie = shot.Scene.MovieProject;
+        var providerModelKey = MovieStudioHelpers.Clean(provider.SceneClipPricingModelKey);
         var normalizedIdempotencyKey = NormalizeIdempotencyKey(idempotencyKey);
         var candidateKeys = Enumerable.Range(1, takeCount).Select(index => CandidateIdempotencyKey(normalizedIdempotencyKey, index)).ToArray();
         if (normalizedIdempotencyKey is not null)
         {
+            var allCandidateKeys = Enumerable.Range(1, MaximumTakes)
+                .Select(index => CandidateIdempotencyKey(normalizedIdempotencyKey, index)!)
+                .ToArray();
             var existing = await db.MovieTakes
                 .Include(item => item.GenerationJob)
-                .Where(item => item.MovieShotId == shotId && item.GenerationJob != null && candidateKeys.Contains(item.GenerationJob.IdempotencyKey!))
+                .Include(item => item.MovieClip)
+                .Where(item => item.MovieShotId == shotId
+                    && item.GenerationJob != null
+                    && item.GenerationJob.CreatedByUserId == userId
+                    && allCandidateKeys.Contains(item.GenerationJob.IdempotencyKey!))
                 .ToListAsync(cancellationToken);
-            if (existing.Count == takeCount && existing.All(item => item.GenerationJob is not null))
-                return ToResponse(shot, keyframe.Id, durationSeconds.Value, resolution, existing.OrderBy(item => item.VersionNumber).ToArray());
+            int? StoredTakeCount(MovieTake take)
+            {
+                if (take.GenerationJob is null) return null;
+                try { return JsonSerializer.Deserialize<MovieGenerationInput>(take.GenerationJob.InputJson)?.TakeCount; }
+                catch (JsonException) { return null; }
+            }
+            bool MatchesCandidate(MovieTake take)
+            {
+                var job = take.GenerationJob;
+                var clip = take.MovieClip;
+                if (job is null || clip is null) return false;
+                MovieGenerationInput? input;
+                try { input = JsonSerializer.Deserialize<MovieGenerationInput>(job.InputJson); }
+                catch (JsonException) { return false; }
+                if (input is null || input.TakeNumber is not { } takeNumber
+                    || takeNumber < 1 || takeNumber > takeCount)
+                    return false;
+                var expectedTitle = string.IsNullOrWhiteSpace(request.Title)
+                    ? $"{movie.Title} — Take {takeNumber}"
+                    : request.Title.Trim();
+                var expectedLabel = string.IsNullOrWhiteSpace(request.Label)
+                    ? $"Take {take.VersionNumber}"
+                    : $"{request.Label.Trim()} {take.VersionNumber}";
+                return string.Equals(job.IdempotencyKey, candidateKeys[takeNumber - 1], StringComparison.Ordinal)
+                    && input.Operation == MovieStudioOperations.SceneClip
+                    && input.MovieProjectId == movie.Id
+                    && input.MovieClipId == take.MovieClipId
+                    && input.MovieSceneId == shot.Scene.Id
+                    && input.MovieShotId == shot.Id
+                    && input.DurationSeconds == durationSeconds.Value
+                    && input.AspectRatio == movie.AspectRatio
+                    && input.Description == shot.Description
+                    && input.SceneJson == SceneSnapshot(shot.Scene)
+                    && input.ShotJson == ShotSnapshot(shot)
+                    && input.ContinuityGuideJson == clip.ContinuitySnapshotJson
+                    && input.ContinuitySnapshotHash == clip.ContinuitySnapshotHash
+                    && input.Style == movie.Style
+                    && input.Language == movie.Language
+                    && input.AdditionalInstructions == movie.AdditionalInstructions
+                    && input.SourceProductionVersionId == keyframe.Id
+                    && input.ReferencePackageJson == referencePackageJson
+                    && input.SourceResolution == resolution.SourceResolution
+                    && input.TargetResolution == resolution.MasterResolution
+                    && input.MasterResolution is null
+                    && input.QualityTier == qualityLevel
+                    && input.ProcessingPath == resolution.ProcessingPath
+                    && !input.UpscalingRequested
+                    && string.IsNullOrWhiteSpace(input.SourceImageUri)
+                    && string.IsNullOrWhiteSpace(input.ContinuationProviderJobId)
+                    && input.SelectiveRegenerationId is null
+                    && string.IsNullOrWhiteSpace(input.ChangedInputsJson)
+                    && string.IsNullOrWhiteSpace(input.SelectiveActionType)
+                    && string.IsNullOrWhiteSpace(input.SelectiveReason)
+                    && string.IsNullOrWhiteSpace(input.CharacterContinuityJson)
+                    && string.IsNullOrWhiteSpace(input.FirstFrameImageUri)
+                    && string.IsNullOrWhiteSpace(input.LastFrameImageUri)
+                    && input.ReferenceImages is not { Count: > 0 }
+                    && input.SelectedProviderKey == provider.Key
+                    && string.Equals(input.SelectedProviderModelKey, providerModelKey, StringComparison.OrdinalIgnoreCase)
+                    && input.TakeCount == takeCount
+                    && job.Title == expectedTitle
+                    && take.Label == expectedLabel;
+            }
+
+            var storedBatchCounts = existing.Select(StoredTakeCount).Distinct().ToArray();
+            if (storedBatchCounts.Length == 1
+                && storedBatchCounts[0] is { } storedBatchCount
+                && storedBatchCount is >= 1 and <= MaximumTakes
+                && existing.Count == storedBatchCount)
+            {
+                if (storedBatchCount == takeCount && existing.All(MatchesCandidate))
+                    return ToResponse(shot, keyframe.Id, durationSeconds.Value, resolution, existing.OrderBy(item => item.VersionNumber).ToArray());
+                throw new MovieShotExecutionValidationException(
+                    "SHOT_EXECUTION_IDEMPOTENCY_REUSED",
+                    "This idempotency key was already used for a different shot execution request.");
+            }
             if (existing.Count > 0)
                 throw new MovieShotExecutionValidationException("SHOT_EXECUTION_IDEMPOTENCY_PARTIAL", "The requested take batch was only partially created; use the original idempotency key to retrieve it.");
+
+            // A generation job commits before its MovieTake link is saved. Also
+            // inspect the user/key boundary directly so a job-first replay or a
+            // cross-shot key reuse cannot create a second speculative clip.
+            var existingJobs = await db.GenerationJobs.AsNoTracking()
+                .Where(item => item.CreatedByUserId == userId && allCandidateKeys.Contains(item.IdempotencyKey!))
+                .ToListAsync(cancellationToken);
+            if (existingJobs.Count > 0)
+            {
+                int? StoredJobTakeCount(GenerationJob job)
+                {
+                    try { return JsonSerializer.Deserialize<MovieGenerationInput>(job.InputJson)?.TakeCount; }
+                    catch (JsonException) { return null; }
+                }
+                bool MatchesPendingRequest(GenerationJob job)
+                {
+                    MovieGenerationInput? input;
+                    try { input = JsonSerializer.Deserialize<MovieGenerationInput>(job.InputJson); }
+                    catch (JsonException) { return false; }
+                    if (input is null || input.TakeNumber is not { } takeNumber
+                        || takeNumber < 1 || takeNumber > takeCount)
+                        return false;
+                    var expectedTitle = string.IsNullOrWhiteSpace(request.Title)
+                        ? $"{movie.Title} — Take {takeNumber}"
+                        : request.Title.Trim();
+                    return string.Equals(job.IdempotencyKey, candidateKeys[takeNumber - 1], StringComparison.Ordinal)
+                        && input.Operation == MovieStudioOperations.SceneClip
+                        && input.MovieProjectId == movie.Id
+                        && input.MovieSceneId == shot.Scene.Id
+                        && input.MovieShotId == shot.Id
+                        && input.DurationSeconds == durationSeconds.Value
+                        && input.AspectRatio == movie.AspectRatio
+                        && input.Description == shot.Description
+                        && input.SceneJson == SceneSnapshot(shot.Scene)
+                        && input.ShotJson == ShotSnapshot(shot)
+                        && input.Style == movie.Style
+                        && input.Language == movie.Language
+                        && input.AdditionalInstructions == movie.AdditionalInstructions
+                        && input.SourceProductionVersionId == keyframe.Id
+                        && input.ReferencePackageJson == referencePackageJson
+                        && input.SourceResolution == resolution.SourceResolution
+                        && input.TargetResolution == resolution.MasterResolution
+                        && input.MasterResolution is null
+                        && input.QualityTier == qualityLevel
+                        && input.ProcessingPath == resolution.ProcessingPath
+                        && !input.UpscalingRequested
+                        && string.IsNullOrWhiteSpace(input.SourceImageUri)
+                        && string.IsNullOrWhiteSpace(input.ContinuationProviderJobId)
+                        && input.SelectiveRegenerationId is null
+                        && string.IsNullOrWhiteSpace(input.ChangedInputsJson)
+                        && string.IsNullOrWhiteSpace(input.SelectiveActionType)
+                        && string.IsNullOrWhiteSpace(input.SelectiveReason)
+                        && string.IsNullOrWhiteSpace(input.CharacterContinuityJson)
+                        && string.IsNullOrWhiteSpace(input.FirstFrameImageUri)
+                        && string.IsNullOrWhiteSpace(input.LastFrameImageUri)
+                        && input.ReferenceImages is not { Count: > 0 }
+                        && input.SelectedProviderKey == provider.Key
+                        && string.Equals(input.SelectedProviderModelKey, providerModelKey, StringComparison.OrdinalIgnoreCase)
+                        && input.TakeCount == takeCount
+                        && job.Title == expectedTitle;
+                }
+
+                var storedJobBatchCounts = existingJobs.Select(StoredJobTakeCount).Distinct().ToArray();
+                if (storedJobBatchCounts.Length == 1
+                    && storedJobBatchCounts[0] is { } storedJobBatchCount
+                    && storedJobBatchCount is >= 1 and <= MaximumTakes
+                    && existingJobs.Count == storedJobBatchCount)
+                {
+                    var pendingBatchMatchesRequest = storedJobBatchCount == takeCount
+                        && existingJobs.All(MatchesPendingRequest);
+                    if (pendingBatchMatchesRequest)
+                    {
+                        foreach (var job in existingJobs)
+                        {
+                            var input = JsonSerializer.Deserialize<MovieGenerationInput>(job.InputJson)!;
+                            var canonicalClip = await db.MovieClips.AsNoTracking()
+                                .SingleOrDefaultAsync(item => item.Id == input.MovieClipId, cancellationToken);
+                            if (canonicalClip is null
+                                || canonicalClip.MovieProjectId != movie.Id
+                                || canonicalClip.MovieSceneId != shot.Scene.Id
+                                || canonicalClip.MovieShotId != shot.Id
+                                || canonicalClip.ContinuitySnapshotJson != input.ContinuityGuideJson
+                                || canonicalClip.ContinuitySnapshotHash != input.ContinuitySnapshotHash
+                                || (canonicalClip.GenerationJobId.HasValue && canonicalClip.GenerationJobId.Value != job.Id))
+                            {
+                                pendingBatchMatchesRequest = false;
+                                break;
+                            }
+                        }
+                    }
+                    if (pendingBatchMatchesRequest)
+                    {
+                        if (existingJobs.All(job => job.Status is GenerationJobStatus.Pending or GenerationJobStatus.Queued or GenerationJobStatus.Running))
+                            throw new MovieShotExecutionValidationException(
+                                "SHOT_EXECUTION_IDEMPOTENCY_IN_PROGRESS",
+                                "A generation batch with this key is being linked. Retry the same request shortly.");
+                        if (existingJobs.All(job => job.Status is GenerationJobStatus.Succeeded or GenerationJobStatus.Failed or GenerationJobStatus.Cancelled))
+                            throw new MovieShotExecutionValidationException(
+                                "SHOT_EXECUTION_IDEMPOTENCY_TERMINAL",
+                                "The generation batch has already reached a terminal state. Review it before submitting a new request.");
+                        throw new MovieShotExecutionValidationException(
+                            "SHOT_EXECUTION_IDEMPOTENCY_PARTIAL",
+                            "The generation batch has mixed job states and requires reconciliation before retrying.");
+                    }
+                    throw new MovieShotExecutionValidationException(
+                        "SHOT_EXECUTION_IDEMPOTENCY_REUSED",
+                        "This idempotency key was already used for a different shot execution request.");
+                }
+                throw new MovieShotExecutionValidationException(
+                    "SHOT_EXECUTION_IDEMPOTENCY_PARTIAL",
+                    "The requested take batch was only partially created; use the original idempotency key to retrieve it.");
+            }
         }
 
-        var movie = shot.Scene.MovieProject;
+        if (await ReconcilePendingShotPlaceholdersAsync(shot.Id, candidateKeys, cancellationToken))
+            throw new MovieShotExecutionValidationException(
+                "SHOT_EXECUTION_IDEMPOTENCY_IN_PROGRESS",
+                "A candidate with this idempotency key is being prepared. Retry the same request shortly.");
+
+        if (!provider.IsAvailable
+            || !provider.SupportedOperations.Contains(MovieStudioOperations.SceneClip, StringComparer.OrdinalIgnoreCase))
+            throw new MovieShotExecutionValidationException(
+                "MOVIE_PROVIDER_UNAVAILABLE",
+                "The selected video provider is unavailable for shot execution.");
+        if (provider.SceneClipDurationRange is not { } clipDurationRange
+            || !clipDurationRange.Supports(durationSeconds.Value))
+            throw new MovieShotExecutionValidationException(
+                "MOVIE_CLIP_DURATION_UNSUPPORTED",
+                "The selected video provider cannot generate a single clip of this duration.");
+        if (!provider.SupportsSceneClipCostIntent(
+                resolution.SourceResolution,
+                resolution.MasterResolution,
+                qualityLevel,
+                resolution.ProcessingPath,
+                movie.AspectRatio))
+            throw new MovieShotExecutionValidationException(
+                "MOVIE_CLIP_EXECUTION_INTENT_UNSUPPORTED",
+                "The selected video provider cannot guarantee the requested shot resolution and processing profile.");
+        if (!provider.SupportsReferencePackageCostIntent)
+            throw new MovieShotExecutionValidationException(
+                "SHOT_EXECUTION_REFERENCE_PACKAGE_UNSUPPORTED",
+                "The selected video provider has not verified priced execution from an approved keyframe reference package.");
+        if (string.IsNullOrWhiteSpace(providerModelKey))
+            throw new MovieShotExecutionValidationException(
+                "MOVIE_PROVIDER_MODEL_UNVERIFIED",
+                "The selected video adapter has not declared an exact model key for pricing this shot execution.");
+
         var estimate = await costEstimator.EstimateAsync(
             new MovieGenerationCostRequest(
                 durationSeconds.Value,
@@ -158,6 +385,7 @@ public sealed class MovieShotExecutionService(
                 UpscalingRequested: false,
                 UpscalePasses: 0),
             provider.Key,
+            selectedModelKey: providerModelKey,
             cancellationToken: cancellationToken);
         var costPreflight = await costGuardrails.EvaluateAsync(
             userId,
@@ -170,8 +398,39 @@ public sealed class MovieShotExecutionService(
             throw new MovieShotExecutionValidationException(
                 costPreflight.RejectionCode ?? "GENERATION_CONFIRMATION_REQUIRED",
                 costPreflight.RejectionMessage ?? "Confirm the generation cost before queueing these takes.");
-        var continuitySnapshot = await continuity.BuildSnapshotForTargetAsync(movie.Id, shot.Scene.Id, shot.Id, true, cancellationToken);
+        await referenceReadiness.EnsureCanGenerateAsync(
+            userId,
+            shot.Id,
+            request.AllowReferenceReadinessOverride,
+            request.ReferenceReadinessOverrideReason,
+            MovieReferenceReadinessOverrideSources.ShotExecution,
+            cancellationToken);
         var worldSnapshot = await worldContinuity.ProjectAsync(movie.Id, shot.Scene.Id, shot.Id, cancellationToken);
+        var worldContextJson = worldSnapshot?.ToJson();
+        var sceneJson = SceneSnapshot(shot.Scene);
+        var shotJson = ShotSnapshot(shot);
+        var minimumPromptCharacters = (long)(shot.Description?.Trim().Length ?? 0)
+            + (movie.Style?.Trim().Length ?? 0)
+            + (movie.AdditionalInstructions?.Trim().Length ?? 0)
+            + sceneJson.Trim().Length
+            + shotJson.Trim().Length
+            + (provider.SceneClipWorldContextInPrompt ? (worldContextJson?.Trim().Length ?? 0) : 0)
+            + Math.Max(0, provider.SceneClipPromptFormattingOverheadCharacters);
+        var maximumContinuityPromptCharacters = provider.SceneClipPromptMaxCharacters is { } promptLimit
+            ? (int)Math.Max(0L, (long)promptLimit - minimumPromptCharacters)
+            : (int?)null;
+        MovieCharacterContinuitySnapshotDto continuitySnapshot;
+        try
+        {
+            continuitySnapshot = await BuildContinuitySnapshotWithConcurrencyRetryAsync(
+                movie.Id, shot.Scene.Id, shot.Id, maximumContinuityPromptCharacters, cancellationToken);
+        }
+        catch (MovieContinuityPromptLimitException)
+        {
+            throw new MovieShotExecutionValidationException(
+                "MOVIE_CLIP_PROMPT_UNSUPPORTED",
+                "The shot's character-continuity context exceeds this provider's prompt limit. Shorten the continuity details before queueing.");
+        }
         var now = DateTime.UtcNow;
         var candidates = new List<MovieTake>(takeCount);
 
@@ -192,9 +451,6 @@ public sealed class MovieShotExecutionService(
                 CreatedAt = now,
                 UpdatedAt = now,
             };
-            db.MovieClips.Add(clip);
-            await db.SaveChangesAsync(cancellationToken);
-
             var input = new MovieGenerationInput(
                 MovieStudioOperations.SceneClip,
                 movie.Id,
@@ -208,34 +464,23 @@ public sealed class MovieShotExecutionService(
                 movie.Language,
                 movie.AdditionalInstructions,
                 continuitySnapshot.SnapshotJson,
-                SceneSnapshot(shot.Scene),
-                ShotSnapshot(shot),
-                WorldContextJson: worldSnapshot?.ToJson(),
+                sceneJson,
+                shotJson,
+                WorldContextJson: worldContextJson,
+                ContinuitySnapshotHash: continuitySnapshot.SnapshotHash,
                 SourceProductionVersionId: keyframe.Id,
                 ReferencePackageJson: referencePackageJson,
                 SourceResolution: resolution.SourceResolution,
-                MasterResolution: resolution.MasterResolution,
+                TargetResolution: resolution.MasterResolution,
+                QualityTier: qualityLevel,
                 ProcessingPath: resolution.ProcessingPath,
+                MasterResolution: null,
                 UpscalingRequested: false,
                 TakeNumber: index,
-                TakeCount: takeCount);
-            var job = await jobs.CreateAsync(userId, new CreateGenerationJobRequest
-            {
-                WorkspaceId = movie.WorkspaceId,
-                ProjectId = movie.ProjectId,
-                JobType = GenerationJobTypes.MovieClipGenerate,
-                Title = string.IsNullOrWhiteSpace(request.Title) ? $"{movie.Title} — Take {index}" : request.Title.Trim(),
-                EstimatedProviderCostUsd = estimate.MaximumAmountUsd,
-                InternalCostEstimate = estimate.ToGenerationCostEstimate(),
-                InternalCostEstimateJson = estimate.ToJson(),
-                InputJson = JsonSerializer.Serialize(input),
-            }, cancellationToken, candidateKeys[index - 1]);
-
-            // The worker may claim immediately after CreateAsync. Detaching prevents
-            // a stale tracked job from overwriting its concurrency state when the
-            // clip and take links are persisted.
-            db.Entry(job).State = EntityState.Detached;
-            clip.GenerationJobId = job.Id;
+                TakeCount: takeCount,
+                SelectedProviderKey: provider.Key,
+                SelectedProviderModelKey: providerModelKey);
+            var inputJson = JsonSerializer.Serialize(input);
             var versionNumber = (await db.MovieTakes.Where(item => item.MovieShotId == shot.Id).MaxAsync(item => (int?)item.VersionNumber, cancellationToken) ?? 0) + 1;
             var take = new MovieTake
             {
@@ -247,7 +492,7 @@ public sealed class MovieShotExecutionService(
                 QualityLevel = qualityLevel,
                 AutoDirectorEnabled = movie.AutoDirectorEnabled,
                 MovieClipId = clip.Id,
-                GenerationJobId = job.Id,
+                GenerationJobId = null,
                 MetadataJson = JsonSerializer.Serialize(new
                 {
                     schemaVersion = 1,
@@ -255,6 +500,8 @@ public sealed class MovieShotExecutionService(
                     sourceProductionVersionId = keyframe.Id,
                     takeNumber = index,
                     takeCount,
+                    idempotencyKey = candidateKeys[index - 1],
+                    queuedInputFingerprint = MovieShotExecutionIntentFingerprint.Compute(inputJson),
                     resolution,
                     automaticUpscale = false,
                 }),
@@ -263,12 +510,100 @@ public sealed class MovieShotExecutionService(
                 CreatedAt = now,
                 UpdatedAt = now,
             };
-            db.MovieTakes.Add(take);
-            candidates.Add(take);
+            for (var allocationAttempt = 0; allocationAttempt < MaximumTakes * 2; allocationAttempt++)
+            {
+                db.MovieClips.Add(clip);
+                db.MovieTakes.Add(take);
+                try
+                {
+                    await db.SaveChangesAsync(cancellationToken);
+                    break;
+                }
+                catch (DbUpdateException)
+                {
+                    db.Entry(take).State = EntityState.Detached;
+                    db.Entry(clip).State = EntityState.Detached;
+                    var conflictingTake = await db.MovieTakes.AsNoTracking()
+                        .Where(item => item.MovieShotId == shot.Id && item.VersionNumber == versionNumber)
+                        .Select(item => new { item.Id, item.MetadataJson })
+                        .SingleOrDefaultAsync(cancellationToken);
+                    if (conflictingTake is null) throw;
+                    if (HasCandidateIdempotencyKey(conflictingTake.MetadataJson, candidateKeys[index - 1]))
+                        throw new MovieShotExecutionValidationException(
+                            "SHOT_EXECUTION_IDEMPOTENCY_IN_PROGRESS",
+                            "A candidate with this idempotency key is being prepared. Retry the same request shortly.");
+                    if (allocationAttempt == MaximumTakes * 2 - 1) throw;
+                    versionNumber = (await db.MovieTakes.Where(item => item.MovieShotId == shot.Id).MaxAsync(item => (int?)item.VersionNumber, cancellationToken) ?? 0) + 1;
+                    take.VersionNumber = versionNumber;
+                    take.Label = string.IsNullOrWhiteSpace(request.Label) ? $"Take {versionNumber}" : $"{request.Label.Trim()} {versionNumber}";
+                }
+            }
+            GenerationJob job;
+            try
+            {
+                job = await jobs.CreateAsync(userId, new CreateGenerationJobRequest
+                {
+                    WorkspaceId = movie.WorkspaceId,
+                    ProjectId = movie.ProjectId,
+                    JobType = GenerationJobTypes.MovieClipGenerate,
+                    Title = string.IsNullOrWhiteSpace(request.Title) ? $"{movie.Title} — Take {index}" : request.Title.Trim(),
+                    ConfirmationAccepted = request.ConfirmationAccepted,
+                    EstimatedProviderCostUsd = estimate.MaximumAmountUsd,
+                    InternalCostEstimate = estimate.ToGenerationCostEstimate(),
+                    InternalCostEstimateJson = estimate.ToJson(),
+                    InputJson = inputJson,
+                }, cancellationToken, candidateKeys[index - 1]);
+            }
+            catch (GenerationJobValidationException exception) when (exception.Code == "IDEMPOTENCY_KEY_REUSED")
+            {
+                bool committedJobReferencesClip;
+                try { committedJobReferencesClip = await RemoveSpeculativeClipAsync(clip, take, candidateKeys[index - 1]); }
+                catch (Exception cleanupException)
+                {
+                    throw new AggregateException("The idempotency collision and speculative MovieClip cleanup both failed.", exception, cleanupException);
+                }
+                if (committedJobReferencesClip)
+                    throw new MovieShotExecutionValidationException(
+                        "SHOT_EXECUTION_IDEMPOTENCY_IN_PROGRESS",
+                        "A generation job for this candidate already committed. Retry the same request shortly.");
+                throw new MovieShotExecutionValidationException(
+                    "SHOT_EXECUTION_IDEMPOTENCY_REUSED",
+                    "This idempotency key was already used for a different shot execution request.");
+            }
+            catch (Exception creationException)
+            {
+                bool committedJobReferencesClip;
+                try { committedJobReferencesClip = await RemoveSpeculativeClipAsync(clip, take, candidateKeys[index - 1]); }
+                catch (Exception cleanupException)
+                {
+                    throw new AggregateException("Generation job creation and speculative MovieClip cleanup both failed.", creationException, cleanupException);
+                }
+                if (committedJobReferencesClip)
+                    throw new MovieShotExecutionValidationException(
+                        "SHOT_EXECUTION_IDEMPOTENCY_IN_PROGRESS",
+                        "A generation job for this candidate already committed. Retry the same request shortly.");
+                var committedJobOwnsRequestKey = candidateKeys[index - 1] is { } candidateKey
+                    && await db.GenerationJobs.AsNoTracking().AnyAsync(
+                        item => item.CreatedByUserId == userId && item.IdempotencyKey == candidateKey,
+                        CancellationToken.None);
+                if (committedJobOwnsRequestKey)
+                    throw new MovieShotExecutionValidationException(
+                        "SHOT_EXECUTION_IDEMPOTENCY_IN_PROGRESS",
+                        "A generation job with this request key committed during reconciliation. Retry the same request shortly.");
+                throw;
+            }
+
+            // The worker may claim immediately after CreateAsync. Detaching prevents
+            // a stale tracked job from overwriting its concurrency state when the
+            // clip and take links are persisted.
+            db.Entry(job).State = EntityState.Detached;
+            clip.GenerationJobId = job.Id;
+            take.GenerationJobId = job.Id;
             await db.SaveChangesAsync(cancellationToken);
             // Attach only after persistence; otherwise EF treats the detached
             // job returned by the shared job service as a new graph node.
             take.GenerationJob = job;
+            candidates.Add(take);
         }
         return ToResponse(shot, keyframe.Id, durationSeconds.Value, resolution, candidates.ToArray());
     }
@@ -287,6 +622,172 @@ public sealed class MovieShotExecutionService(
             return new MovieShotExecutionCandidateDto(take.Id, take.MovieClipId!.Value, job.Id, position + 1, total, take.Status, GenerationJobContractMapper.ToMovieDto(job));
         }).ToArray();
         return new MovieShotExecutionResponse(shot.Id, keyframeVersionId, durationSeconds, shot.Scene.MovieProject.AspectRatio, resolution, candidates);
+    }
+
+    private async Task<bool> RemoveSpeculativeClipAsync(MovieClip clip, MovieTake take, string? candidateKey)
+    {
+        foreach (var entry in db.ChangeTracker.Entries<GenerationJob>()
+            .Where(entry => entry.State == EntityState.Added
+                && ((candidateKey is not null && entry.Entity.IdempotencyKey == candidateKey)
+                    || (entry.Entity.JobType == GenerationJobTypes.MovieClipGenerate
+                        && InputReferencesClip(entry.Entity.InputJson, clip.Id))))
+            .ToArray())
+            entry.State = EntityState.Detached;
+
+        var committedJobReferencesClip = await db.GenerationJobs.AsNoTracking()
+            .AnyAsync(job => job.JobType == GenerationJobTypes.MovieClipGenerate
+                && job.InputJson.Contains(clip.Id.ToString()), CancellationToken.None);
+        if (committedJobReferencesClip) return true;
+
+        if (db.Entry(take).State != EntityState.Detached)
+            db.MovieTakes.Remove(take);
+        if (db.Entry(clip).State != EntityState.Detached)
+            db.MovieClips.Remove(clip);
+        await db.SaveChangesAsync(CancellationToken.None);
+        return false;
+    }
+
+    private static bool InputReferencesClip(string inputJson, Guid clipId)
+    {
+        try { return JsonSerializer.Deserialize<MovieGenerationInput>(inputJson)?.MovieClipId == clipId; }
+        catch (JsonException) { return false; }
+    }
+
+    private static bool HasCandidateIdempotencyKey(string? metadataJson, string? candidateKey)
+    {
+        if (string.IsNullOrWhiteSpace(metadataJson) || string.IsNullOrWhiteSpace(candidateKey)) return false;
+        try
+        {
+            using var metadata = JsonDocument.Parse(metadataJson);
+            return metadata.RootElement.TryGetProperty("idempotencyKey", out var keyElement)
+                && keyElement.ValueKind == JsonValueKind.String
+                && string.Equals(keyElement.GetString(), candidateKey, StringComparison.Ordinal);
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    private async Task<MovieCharacterContinuitySnapshotDto> BuildContinuitySnapshotWithConcurrencyRetryAsync(
+        Guid movieProjectId,
+        Guid sceneId,
+        Guid shotId,
+        int? maximumPromptCharacters,
+        CancellationToken cancellationToken)
+    {
+        const int maxAttempts = 3;
+        for (var attempt = 0; attempt < maxAttempts; attempt++)
+        {
+            try
+            {
+                return await continuity.BuildSnapshotForTargetAsync(
+                    movieProjectId,
+                    sceneId,
+                    shotId,
+                    persist: true,
+                    cancellationToken: cancellationToken,
+                    maximumPromptCharacters: maximumPromptCharacters);
+            }
+            catch (DbUpdateException) when (attempt < maxAttempts - 1)
+            {
+                // Concurrent requests can read the same next snapshot version.
+                // Detach only the failed snapshot insert, then re-read the now
+                // committed version before retrying this short-form queue path.
+                foreach (var entry in db.ChangeTracker.Entries<MovieCharacterContinuitySnapshot>()
+                    .Where(entry => entry.State == EntityState.Added)
+                    .ToArray())
+                    entry.State = EntityState.Detached;
+            }
+        }
+
+        throw new InvalidOperationException("Continuity snapshot persistence retry was exhausted.");
+    }
+
+    private async Task<bool> ReconcilePendingShotPlaceholdersAsync(
+        Guid shotId,
+        IReadOnlyCollection<string?> candidateKeys,
+        CancellationToken cancellationToken)
+    {
+        var pendingTakes = await db.MovieTakes
+            .Where(item => item.MovieShotId == shotId
+                && item.GenerationJobId == null
+                && item.MovieClipId.HasValue
+                && item.MetadataJson != null)
+            .ToListAsync(cancellationToken);
+        var staleBefore = DateTime.UtcNow - AbandonedPlaceholderAge;
+        var hasMatchingPendingPlaceholder = false;
+        var removedPlaceholder = false;
+
+        foreach (var take in pendingTakes)
+        {
+            if (!IsShotExecutionPlaceholder(take.MetadataJson)) continue;
+            var storedKey = ReadCandidateIdempotencyKey(take.MetadataJson);
+            var keyMatchesRequest = storedKey is not null
+                && candidateKeys.Any(candidateKey => string.Equals(candidateKey, storedKey, StringComparison.Ordinal));
+            var clipId = take.MovieClipId;
+            var clip = clipId.HasValue
+                ? await db.MovieClips.SingleOrDefaultAsync(item => item.Id == clipId.Value, cancellationToken)
+                : null;
+            var referencedByJob = clipId.HasValue && await db.GenerationJobs.AsNoTracking()
+                .AnyAsync(job => job.JobType == GenerationJobTypes.MovieClipGenerate
+                    && job.InputJson.Contains(clipId.Value.ToString()), cancellationToken);
+
+            // A crash before GenerationJobService.CreateAsync leaves only this
+            // unlinked placeholder. Reclaim it after a generous lease only if
+            // no persisted job references the clip and neither row is linked.
+            if (take.CreatedAt < staleBefore
+                && take.Status == MovieTakeStatuses.Queued
+                && !referencedByJob
+                && (clip is null || clip.GenerationJobId is null))
+            {
+                db.MovieTakes.Remove(take);
+                if (clip is not null) db.MovieClips.Remove(clip);
+                removedPlaceholder = true;
+                continue;
+            }
+
+            if (keyMatchesRequest) hasMatchingPendingPlaceholder = true;
+        }
+
+        if (removedPlaceholder) await db.SaveChangesAsync(cancellationToken);
+        return hasMatchingPendingPlaceholder;
+    }
+
+    private static bool IsShotExecutionPlaceholder(string? metadataJson)
+    {
+        if (string.IsNullOrWhiteSpace(metadataJson)) return false;
+        try
+        {
+            using var metadata = JsonDocument.Parse(metadataJson);
+            return metadata.RootElement.TryGetProperty("execution", out var execution)
+                && execution.ValueKind == JsonValueKind.String
+                && string.Equals(execution.GetString(), MovieShotExecutionOperations.ImageToVideo, StringComparison.Ordinal)
+                && metadata.RootElement.TryGetProperty("queuedInputFingerprint", out var fingerprint)
+                && fingerprint.ValueKind == JsonValueKind.String
+                && fingerprint.GetString() is { Length: 64 };
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    private static string? ReadCandidateIdempotencyKey(string? metadataJson)
+    {
+        if (string.IsNullOrWhiteSpace(metadataJson)) return null;
+        try
+        {
+            using var metadata = JsonDocument.Parse(metadataJson);
+            return metadata.RootElement.TryGetProperty("idempotencyKey", out var key)
+                && key.ValueKind == JsonValueKind.String
+                ? key.GetString()
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     private static MovieShotExecutionResolutionDto NormalizeResolutionPlan(MovieShotExecutionRequest request)

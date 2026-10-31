@@ -1,5 +1,7 @@
 using System.Net;
 using System.Text;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using Taslim.Api.Movies;
 using Taslim.Api.Tests.ProviderTesting;
 using Xunit;
@@ -194,6 +196,38 @@ public sealed class DirectVideoProviderFoundationTests
         Assert.Equal(2, adapter.StatusCount);
         Assert.Equal(1, adapter.RetrieveCount);
         Assert.True((await adapter.Health.CheckAsync()).Ready);
+    }
+
+    [Fact]
+    public async Task Http_adapter_does_not_retry_billable_video_submission_on_transient_failure()
+    {
+        using var handler = new TransientVideoSubmissionHandler();
+        using var client = new HttpClient(handler);
+        var options = ConfiguredOptions();
+        options.MaxTransientRetries = 4;
+        var adapter = new DirectVideoHttpProviderAdapter(
+            client, Options.Create(options), null!,
+            NullLogger<DirectVideoHttpProviderAdapter>.Instance);
+        var request = DirectVideoRequestNormalizer.Normalize(
+            Request(), adapter.Capabilities, requestedResolution: "720p");
+
+        var failure = await Assert.ThrowsAsync<DirectVideoProviderException>(
+            () => adapter.SubmitAsync(request));
+
+        Assert.Equal(DirectVideoErrorCodes.ProviderTransientFailure, failure.Code);
+        Assert.Equal(1, handler.SubmissionCount);
+    }
+
+    private sealed class TransientVideoSubmissionHandler : HttpMessageHandler
+    {
+        public int SubmissionCount { get; private set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Assert.Equal(HttpMethod.Post, request.Method);
+            SubmissionCount++;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.ServiceUnavailable));
+        }
     }
 
     private static DirectVideoProviderOptions ConfiguredOptions() => new()

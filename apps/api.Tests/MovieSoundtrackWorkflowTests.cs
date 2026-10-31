@@ -24,6 +24,52 @@ public sealed class MovieSoundtrackWorkflowTests
     }
 
     [Fact]
+    public async Task Two_hour_film_accepts_late_soundtrack_cue_but_rejects_out_of_bounds_timing()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        var seed = await SeedAsync(db);
+        var film = await db.MovieProjects.SingleAsync(item => item.Id == seed.MovieProjectId);
+        film.DurationSeconds = 7200;
+        await db.SaveChangesAsync();
+        var service = CreateService(db, new FakeSoundtrackMediaService());
+
+        var request = new MovieSoundtrackCueRequest
+        {
+            MovieActId = seed.ActId,
+            MovieSceneId = seed.SceneId,
+            Title = "Final seconds",
+            Mood = "reflective",
+            Intensity = 40,
+            ActStartSeconds = 7190,
+            SceneStartSeconds = 0,
+            TimelineStartSeconds = 7190,
+            DurationSeconds = 10,
+        };
+        var validationErrors = new List<System.ComponentModel.DataAnnotations.ValidationResult>();
+        Assert.True(System.ComponentModel.DataAnnotations.Validator.TryValidateObject(
+            request, new System.ComponentModel.DataAnnotations.ValidationContext(request),
+            validationErrors, validateAllProperties: true),
+            string.Join("; ", validationErrors.Select(item => item.ErrorMessage)));
+
+        var cue = await service.CreateCueAsync(seed.UserId, seed.MovieProjectId, request, CancellationToken.None);
+        Assert.NotNull(cue);
+        Assert.Equal(7190m, cue!.TimelineStartSeconds);
+        Assert.Equal(10m, cue.DurationSeconds);
+        Assert.Equal(7190m, (await db.MovieSoundtrackCues.AsNoTracking().SingleAsync(item => item.Id == cue.Id)).TimelineStartSeconds);
+
+        var invalid = new MovieSoundtrackCueUpdateRequest { TimelineStartSeconds = 7201 };
+        var outOfRangeErrors = new List<System.ComponentModel.DataAnnotations.ValidationResult>();
+        Assert.False(System.ComponentModel.DataAnnotations.Validator.TryValidateObject(
+            invalid, new System.ComponentModel.DataAnnotations.ValidationContext(invalid),
+            outOfRangeErrors, validateAllProperties: true));
+        var exception = await Assert.ThrowsAsync<MovieSoundtrackValidationException>(() =>
+            service.UpdateCueAsync(seed.UserId, cue.Id, invalid, CancellationToken.None));
+        Assert.Equal("MOVIE_SOUNDTRACK_TIMING_INVALID", exception.Code);
+    }
+
+    [Fact]
     public async Task Cue_workflow_persists_hierarchy_timing_ducking_provenance_and_review_history()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");

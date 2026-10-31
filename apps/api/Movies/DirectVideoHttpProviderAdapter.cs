@@ -158,7 +158,13 @@ public sealed class DirectVideoHttpProviderAdapter(
 
     private async Task<string> SendJsonAsync(HttpMethod method, string path, object? payload, CancellationToken cancellationToken)
     {
-        var attempts = Math.Clamp(settings.MaxTransientRetries, 0, 8) + 1;
+        // Creating a video task is potentially billable. A transient POST response
+        // does not prove the remote task was not accepted; without a verified
+        // provider idempotency contract a second POST can duplicate the charge.
+        // Retry only read-only polling and metadata retrieval requests.
+        var attempts = method == HttpMethod.Get || method == HttpMethod.Head
+            ? Math.Clamp(settings.MaxTransientRetries, 0, 8) + 1
+            : 1;
         for (var attempt = 1; attempt <= attempts; attempt++)
         {
             using var request = CreateRequest(method, path, payload);

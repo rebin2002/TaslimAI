@@ -312,7 +312,12 @@ public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWork
     [Fact]
     public async Task Production_render_is_explicit_and_does_not_collapse_into_a_movie_take()
     {
-        using var client = factory.CreateClient();
+        // An approved production render needs an explicitly capable, provider-free
+        // adapter; the default unconfigured provider now correctly fails closed.
+        using var fakeFactory = new MovieOperationalNoWorkerFactory();
+        using (var init = fakeFactory.Services.CreateScope())
+            init.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+        using var client = fakeFactory.CreateClient();
         var auth = await Register(client);
         var project = await SendWithCsrf<MovieStudioProjectResponse>(client, HttpMethod.Post, "/api/movie-studio/projects", new
         {
@@ -334,22 +339,455 @@ public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWork
         var motion = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post, $"/api/movie-studio/shots/{shot.Id}/production/motion-preview", new { sourceVersionId = approvedKeyframe.Id });
         var approvedMotion = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post, $"/api/movie-studio/production/versions/{motion.Id}/review", new { approve = true });
 
-        var render = await SendWithCsrf<MovieProductionRenderResponse>(client, HttpMethod.Post, $"/api/movie-studio/shots/{shot.Id}/production/render", new { sourceVersionId = approvedMotion.Id, label = "Explicit render" });
-        Assert.Equal(render.Job.Id, render.Version.GenerationJobId);
+        using var scope = fakeFactory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var provider = scope.ServiceProvider.GetRequiredService<IMovieVideoProvider>();
+        await MovieOperationalFixtures.AddMoviePricingRouteAsync(
+            db, provider.Key, Assert.IsType<string>(provider.SceneClipPricingModelKey));
+        var quote = await client.GetFromJsonAsync<MovieProductionPreflightDto>(
+            $"/api/movie-studio/shots/{shot.Id}/production/preflight?sourceVersionId={approvedMotion.Id}&targetResolution=1080p&qualityTier=Standard");
+        var priceIntent = Assert.IsType<MovieProductionPriceIntentDto>(quote?.PriceIntent);
+
+        const string replayKey = "approved-production-creative-intent";
+        var renderPath = $"/api/movie-studio/shots/{shot.Id}/production/render";
+        var renderPayload = new
+        {
+            sourceVersionId = approvedMotion.Id,
+            label = "Explicit render",
+            targetResolution = "1080p",
+            qualityTier = DirectorQualityLevels.Standard,
+            confirmationAccepted = true,
+            expectedMaximumAmountUsd = priceIntent.ExpectedMaximumAmountUsd,
+            expectedQuoteFingerprint = priceIntent.QuoteFingerprint,
+        };
+        using var firstResponse = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, renderPath, renderPayload, idempotencyKey: replayKey);
+        Assert.True(firstResponse.IsSuccessStatusCode, await firstResponse.Content.ReadAsStringAsync());
+        var render = await firstResponse.Content.ReadFromJsonAsync<MovieProductionRenderResponse>();
+        Assert.NotNull(render);
+        Assert.Equal(render!.Job.Id, render.Version.GenerationJobId);
         Assert.NotEqual(Guid.Empty, render.ClipId);
 
         var production = await client.GetFromJsonAsync<MovieShotProductionDto>($"/api/movie-studio/shots/{shot.Id}/production");
         Assert.NotNull(production);
         Assert.Contains(production!.Versions, item => item.Stage == MovieProductionStages.ProductionRender && item.GenerationJobId == render.Job.Id);
         Assert.Empty(production.Takes);
-        using var scope = factory.Services.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
         Assert.Equal(0, await db.MovieTakes.CountAsync(item => item.MovieShotId == shot.Id));
+
+        // An approved production render must durably bind its queued job to
+        // the provider selected at admission. If runtime routing changes
+        // before the worker starts, that job must not be sent elsewhere.
+        var queuedJob = await db.GenerationJobs.AsNoTracking()
+            .SingleAsync(item => item.Id == render.Job.Id);
+        var queuedInput = JsonSerializer.Deserialize<MovieGenerationInput>(queuedJob.InputJson);
+        Assert.NotNull(queuedInput);
+        Assert.Equal(scope.ServiceProvider.GetRequiredService<IMovieVideoProvider>().Key,
+            queuedInput.SelectedProviderKey);
+        Assert.Equal(scope.ServiceProvider.GetRequiredService<IMovieVideoProvider>().SceneClipPricingModelKey,
+            queuedInput.SelectedProviderModelKey);
+        Assert.Equal(priceIntent.QuoteFingerprint, queuedInput.SelectedProviderQuoteFingerprint);
+        Assert.Equal(priceIntent.ExpectedMaximumAmountUsd, queuedJob.EstimatedProviderCostUsd);
+        // The previously captured character bible must travel with the job,
+        // not merely live on the clip record where the provider cannot see it.
+        var queuedClip = await db.MovieClips.AsNoTracking()
+            .SingleAsync(item => item.Id == render.ClipId);
+        Assert.False(string.IsNullOrWhiteSpace(queuedInput.CharacterContinuityJson));
+        Assert.Equal(queuedClip.ContinuitySnapshotJson, queuedInput.CharacterContinuityJson);
+
+        // Regression for structured prompt-budget refactors: validating the
+        // combined creative text must never drop the exact guide, scene and shot
+        // payloads subsequently handed to the video execution worker.
+        using var guidePayload = JsonDocument.Parse(Assert.IsType<string>(queuedInput.ContinuityGuideJson));
+        Assert.True(guidePayload.RootElement.TryGetProperty("VisualLanguage", out _));
+        using var scenePayload = JsonDocument.Parse(Assert.IsType<string>(queuedInput.SceneJson));
+        Assert.Equal("Dawn", scenePayload.RootElement.GetProperty("Title").GetString());
+        Assert.Equal("A quiet opening beat.", scenePayload.RootElement.GetProperty("Summary").GetString());
+        using var shotPayload = JsonDocument.Parse(Assert.IsType<string>(queuedInput.ShotJson));
+        Assert.Equal("A locked-off street wide shot.", shotPayload.RootElement.GetProperty("Description").GetString());
+
+        var versionsBefore = await db.MovieProductionVersions.CountAsync(item => item.MovieShotId == shot.Id);
+        var clipsBefore = await db.MovieClips.CountAsync(item => item.MovieShotId == shot.Id);
+        var ledgerBefore = await db.UsageTransactions.CountAsync();
+        using var replayResponse = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, renderPath, renderPayload, idempotencyKey: replayKey);
+        Assert.True(replayResponse.IsSuccessStatusCode, await replayResponse.Content.ReadAsStringAsync());
+        var replay = await replayResponse.Content.ReadFromJsonAsync<MovieProductionRenderResponse>();
+        Assert.NotNull(replay);
+        Assert.Equal(render.Job.Id, replay!.Job.Id);
+        Assert.Equal(render.ClipId, replay.ClipId);
+
+        // The same replay key cannot silently adopt a differently priced
+        // output profile or a different creative title. All these negative
+        // cases run against the already queued canonical job; no provider is invoked.
+        using var changedResolution = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, renderPath,
+            new { sourceVersionId = approvedMotion.Id, label = "Explicit render",
+                targetResolution = "720p", qualityTier = DirectorQualityLevels.Standard },
+            idempotencyKey: replayKey);
+        Assert.Equal(HttpStatusCode.BadRequest, changedResolution.StatusCode);
+        Assert.Contains("IDEMPOTENCY_KEY_REUSED",
+            await changedResolution.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        using var changedQuality = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, renderPath,
+            new { sourceVersionId = approvedMotion.Id, label = "Explicit render",
+                targetResolution = "1080p", qualityTier = DirectorQualityLevels.Cinematic },
+            idempotencyKey: replayKey);
+        Assert.Equal(HttpStatusCode.BadRequest, changedQuality.StatusCode);
+        Assert.Contains("IDEMPOTENCY_KEY_REUSED",
+            await changedQuality.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        using var changedCreativeTitle = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, renderPath,
+            new { sourceVersionId = approvedMotion.Id, label = "Explicit render",
+                title = "Different creative request" },
+            idempotencyKey: replayKey);
+        Assert.Equal(HttpStatusCode.BadRequest, changedCreativeTitle.StatusCode);
+        Assert.Contains("IDEMPOTENCY_KEY_REUSED",
+            await changedCreativeTitle.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        // A changed label, shot direction or duration cannot reuse an already
+        // priced canonical job, even if the approved source and key stay equal.
+        using var changedLabel = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, renderPath,
+            new { sourceVersionId = approvedMotion.Id, label = "Different render" },
+            idempotencyKey: replayKey);
+        Assert.Equal(HttpStatusCode.BadRequest, changedLabel.StatusCode);
+        Assert.Contains("IDEMPOTENCY_KEY_REUSED",
+            await changedLabel.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        var shotRow = await db.MovieShots.SingleAsync(item => item.Id == shot.Id);
+        var originalDescription = shotRow.Description;
+        var originalDuration = shotRow.DurationSeconds;
+        shotRow.Description = "Different shot direction after the canonical render was queued.";
+        await db.SaveChangesAsync();
+        using var changedDirection = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, renderPath, renderPayload, idempotencyKey: replayKey);
+        Assert.Equal(HttpStatusCode.BadRequest, changedDirection.StatusCode);
+        Assert.Contains("IDEMPOTENCY_KEY_REUSED",
+            await changedDirection.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        shotRow.Description = originalDescription;
+        shotRow.DurationSeconds = 25;
+        await db.SaveChangesAsync();
+        using var changedDuration = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, renderPath, renderPayload, idempotencyKey: replayKey);
+        Assert.Equal(HttpStatusCode.BadRequest, changedDuration.StatusCode);
+        Assert.Contains("IDEMPOTENCY_KEY_REUSED",
+            await changedDuration.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        // Restore the test shot after checking duration-sensitive replay.
+        shotRow.DurationSeconds = originalDuration;
+        await db.SaveChangesAsync();
+
+        Assert.Equal(versionsBefore, await db.MovieProductionVersions.CountAsync(item => item.MovieShotId == shot.Id));
+        Assert.Equal(clipsBefore, await db.MovieClips.CountAsync(item => item.MovieShotId == shot.Id));
+        Assert.Equal(1, await db.GenerationJobs.CountAsync(item => item.IdempotencyKey == replayKey));
+        Assert.Equal(ledgerBefore, await db.UsageTransactions.CountAsync());
     }
+    [Fact]
+    public async Task Approved_production_render_replay_rejects_provider_and_character_continuity_drift()
+    {
+        // Keep this independent of the other replay matrix so HTTP rate
+        // limits cannot turn an expected idempotency 400 into a 429.
+        using var fakeFactory = new MovieOperationalNoWorkerFactory();
+        using (var init = fakeFactory.Services.CreateScope())
+            init.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+        using var client = fakeFactory.CreateClient();
+        var auth = await Register(client);
+        var project = await SendWithCsrf<MovieStudioProjectResponse>(client, HttpMethod.Post, "/api/movie-studio/projects", new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            mode = MovieProjectModes.Quick,
+            title = "Explicit production",
+            description = "A render should require a deliberate action.",
+            durationSeconds = 24,
+            aspectRatio = "16:9",
+            style = "cinematic",
+            language = "en",
+        });
+        var scene = await SendWithCsrf<MovieSceneDto>(client, HttpMethod.Post, $"/api/movie-studio/projects/{project.Project.Id}/scenes", new { title = "Dawn", summary = "A quiet opening beat." });
+        var shot = await SendWithCsrf<MovieShotDto>(client, HttpMethod.Post, $"/api/movie-studio/scenes/{scene.Id}/shots", new { description = "A locked-off street wide shot." });
+        var candidate = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post, $"/api/movie-studio/shots/{shot.Id}/production/versions", new { stage = MovieProductionStages.StoryboardCandidate, compositionJson = "{\"frame\":\"wide\"}" });
+        var approvedStoryboard = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post, $"/api/movie-studio/production/versions/{candidate.Id}/review", new { approve = true });
+        var keyframe = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post, $"/api/movie-studio/shots/{shot.Id}/production/versions", new { stage = MovieProductionStages.ProductionKeyframe, sourceVersionId = approvedStoryboard.Id, compositionJson = "{\"frame\":\"keyframe\"}" });
+        var approvedKeyframe = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post, $"/api/movie-studio/production/versions/{keyframe.Id}/review", new { approve = true });
+        var motion = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post, $"/api/movie-studio/shots/{shot.Id}/production/motion-preview", new { sourceVersionId = approvedKeyframe.Id });
+        var approvedMotion = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post, $"/api/movie-studio/production/versions/{motion.Id}/review", new { approve = true });
+
+        using var scope = fakeFactory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var provider = scope.ServiceProvider.GetRequiredService<IMovieVideoProvider>();
+        await MovieOperationalFixtures.AddMoviePricingRouteAsync(
+            db, provider.Key, Assert.IsType<string>(provider.SceneClipPricingModelKey));
+        var quote = await client.GetFromJsonAsync<MovieProductionPreflightDto>(
+            $"/api/movie-studio/shots/{shot.Id}/production/preflight?sourceVersionId={approvedMotion.Id}&targetResolution=1080p&qualityTier=Standard");
+        var priceIntent = Assert.IsType<MovieProductionPriceIntentDto>(quote?.PriceIntent);
+
+        const string replayKey = "approved-production-provider-continuity";
+        var renderPath = $"/api/movie-studio/shots/{shot.Id}/production/render";
+        var renderPayload = new
+        {
+            sourceVersionId = approvedMotion.Id,
+            label = "Explicit render",
+            targetResolution = "1080p",
+            qualityTier = DirectorQualityLevels.Standard,
+            confirmationAccepted = true,
+            expectedMaximumAmountUsd = priceIntent.ExpectedMaximumAmountUsd,
+            expectedQuoteFingerprint = priceIntent.QuoteFingerprint,
+        };
+        using var firstResponse = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, renderPath, renderPayload, idempotencyKey: replayKey);
+        Assert.True(firstResponse.IsSuccessStatusCode, await firstResponse.Content.ReadAsStringAsync());
+        var render = await firstResponse.Content.ReadFromJsonAsync<MovieProductionRenderResponse>();
+        Assert.NotNull(render);
+        var queuedJob = await db.GenerationJobs.AsNoTracking().SingleAsync(item => item.Id == render!.Job.Id);
+        var queuedInput = JsonSerializer.Deserialize<MovieGenerationInput>(queuedJob.InputJson);
+        Assert.NotNull(queuedInput);
+        Assert.Equal(priceIntent.QuoteFingerprint, queuedInput!.SelectedProviderQuoteFingerprint);
+        var versionsBefore = await db.MovieProductionVersions.CountAsync(item => item.MovieShotId == shot.Id);
+        var clipsBefore = await db.MovieClips.CountAsync(item => item.MovieShotId == shot.Id);
+        var ledgerBefore = await db.UsageTransactions.CountAsync();
+
+        // A restored/reconfigured provider or model route cannot silently replay
+        // a canonical production job priced for another execution identity.
+        // Exercise both identity mismatches without outbound video requests.
+        var providerBoundJob = await db.GenerationJobs.SingleAsync(item => item.Id == render.Job.Id);
+        var originalInputJson = providerBoundJob.InputJson;
+        providerBoundJob.InputJson = JsonSerializer.Serialize(queuedInput with
+        {
+            SelectedProviderModelKey = "other-video-model",
+        });
+        await db.SaveChangesAsync();
+        using var changedModel = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, renderPath, renderPayload, idempotencyKey: replayKey);
+        Assert.Equal(HttpStatusCode.BadRequest, changedModel.StatusCode);
+        Assert.Contains("IDEMPOTENCY_KEY_REUSED",
+            await changedModel.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Equal(versionsBefore, await db.MovieProductionVersions.CountAsync(item => item.MovieShotId == shot.Id));
+        Assert.Equal(clipsBefore, await db.MovieClips.CountAsync(item => item.MovieShotId == shot.Id));
+        Assert.Equal(ledgerBefore, await db.UsageTransactions.CountAsync());
+
+        providerBoundJob.InputJson = JsonSerializer.Serialize(queuedInput with
+        {
+            SelectedProviderKey = "other-video-adapter",
+        });
+        await db.SaveChangesAsync();
+        using var changedProvider = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, renderPath, renderPayload, idempotencyKey: replayKey);
+        Assert.Equal(HttpStatusCode.BadRequest, changedProvider.StatusCode);
+        Assert.Contains("IDEMPOTENCY_KEY_REUSED",
+            await changedProvider.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Equal(versionsBefore, await db.MovieProductionVersions.CountAsync(item => item.MovieShotId == shot.Id));
+        Assert.Equal(clipsBefore, await db.MovieClips.CountAsync(item => item.MovieShotId == shot.Id));
+        Assert.Equal(ledgerBefore, await db.UsageTransactions.CountAsync());
+
+        // Older jobs without adapter identity continue to replay their
+        // original canonical clip/job; this is a compatibility-only exception.
+        providerBoundJob.InputJson = JsonSerializer.Serialize(queuedInput with
+        {
+            SelectedProviderKey = null,
+            SelectedProviderModelKey = null,
+        });
+        await db.SaveChangesAsync();
+        using var legacyReplay = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, renderPath, renderPayload, idempotencyKey: replayKey);
+        Assert.True(legacyReplay.IsSuccessStatusCode,
+            await legacyReplay.Content.ReadAsStringAsync());
+        var legacyResult = await legacyReplay.Content.ReadFromJsonAsync<MovieProductionRenderResponse>();
+        Assert.NotNull(legacyResult);
+        Assert.Equal(render.Job.Id, legacyResult!.Job.Id);
+        Assert.Equal(render.ClipId, legacyResult.ClipId);
+        providerBoundJob.InputJson = originalInputJson;
+        await db.SaveChangesAsync();
+
+        var continuity = scope.ServiceProvider.GetRequiredService<IMovieCharacterContinuityService>();
+        var originalContinuity = await continuity.BuildSnapshotForTargetAsync(
+            project.Project.Id, scene.Id, shot.Id, persist: false);
+        Assert.Equal(queuedInput.CharacterContinuityJson, originalContinuity.SnapshotJson);
+
+        // The name is present in the scene's original shot direction, so the
+        // new character card becomes relevant to the immutable render prompt.
+        db.MovieCharacters.Add(new MovieCharacter
+        {
+            Id = Guid.NewGuid(),
+            MovieProjectId = project.Project.Id,
+            Name = "Street",
+            Description = "A new character's persistent wardrobe and features.",
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+        });
+        await db.SaveChangesAsync();
+        var revisedContinuity = await continuity.BuildSnapshotForTargetAsync(
+            project.Project.Id, scene.Id, shot.Id, persist: false);
+        Assert.NotEqual(queuedInput.CharacterContinuityJson, revisedContinuity.SnapshotJson);
+
+        using var changedCharacter = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, renderPath, renderPayload, idempotencyKey: replayKey);
+        Assert.Equal(HttpStatusCode.BadRequest, changedCharacter.StatusCode);
+        Assert.Contains("IDEMPOTENCY_KEY_REUSED",
+            await changedCharacter.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        Assert.Equal(versionsBefore, await db.MovieProductionVersions.CountAsync(item => item.MovieShotId == shot.Id));
+        Assert.Equal(clipsBefore, await db.MovieClips.CountAsync(item => item.MovieShotId == shot.Id));
+        Assert.Equal(1, await db.GenerationJobs.CountAsync(item => item.IdempotencyKey == replayKey));
+        Assert.Equal(ledgerBefore, await db.UsageTransactions.CountAsync());
+    }
+
+    [Fact]
+    public async Task Approved_production_render_rejects_unsupported_clip_duration_without_creating_billable_work()
+    {
+        // Run the real HTTP queue path against a bounded in-memory provider.
+        // This must be rejected before continuity snapshots, clips, jobs, or usage reservations.
+        using var boundedFactory = new MovieClipDurationApiFactory();
+        using (var setup = boundedFactory.Services.CreateScope())
+            setup.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+        using var client = boundedFactory.CreateClient();
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Approved production duration admission", sceneDurationSeconds: 11);
+        var shotId = fixture.Shot.Id;
+
+        var storyboard = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
+            client, $"/api/movie-studio/shots/{shotId}/production/versions",
+            new { stage = MovieProductionStages.StoryboardCandidate, compositionJson = "{\"frame\":\"wide\"}" });
+        var approvedStoryboard = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
+            client, $"/api/movie-studio/production/versions/{storyboard.Id}/review", new { approve = true });
+        var keyframe = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
+            client, $"/api/movie-studio/shots/{shotId}/production/versions",
+            new { stage = MovieProductionStages.ProductionKeyframe,
+                sourceVersionId = approvedStoryboard.Id, compositionJson = "{\"frame\":\"approved\"}" });
+        var approvedKeyframe = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
+            client, $"/api/movie-studio/production/versions/{keyframe.Id}/review", new { approve = true });
+        var motion = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
+            client, $"/api/movie-studio/shots/{shotId}/production/motion-preview",
+            new { sourceVersionId = approvedKeyframe.Id });
+        var approvedMotion = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
+            client, $"/api/movie-studio/production/versions/{motion.Id}/review", new { approve = true });
+
+        using var scope = boundedFactory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var versionsBefore = await db.MovieProductionVersions.CountAsync(item => item.MovieShotId == shotId);
+        var transactionsBefore = await db.UsageTransactions.CountAsync();
+        using var rejected = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, $"/api/movie-studio/shots/{shotId}/production/render",
+            new { sourceVersionId = approvedMotion.Id, label = "Unsupported production clip",
+                confirmationAccepted = true }, idempotencyKey: "production-duration-11");
+        Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
+        Assert.Contains("MOVIE_CLIP_DURATION_UNSUPPORTED",
+            await rejected.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Equal(versionsBefore, await db.MovieProductionVersions.CountAsync(item => item.MovieShotId == shotId));
+        Assert.False(await db.MovieClips.AnyAsync(item => item.MovieProjectId == fixture.Project.Project.Id));
+        Assert.False(await db.GenerationJobs.AnyAsync(item => item.IdempotencyKey == "production-duration-11"));
+        Assert.Equal(transactionsBefore, await db.UsageTransactions.CountAsync());
+    }
+
+    [Fact]
+    public async Task Approved_production_render_rejects_unexecutable_priced_profile_without_billable_work()
+    {
+        // Use the real approved-render HTTP flow with an adapter that explicitly
+        // refuses the requested priced execution profile. No provider is invoked.
+        using var denyingFactory = new MovieClipIntentDeniedApiFactory();
+        using (var setup = denyingFactory.Services.CreateScope())
+            setup.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+        using var client = denyingFactory.CreateClient();
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Approved render priced profile admission", sceneDurationSeconds: 5);
+        var shotId = fixture.Shot.Id;
+
+        var storyboard = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
+            client, $"/api/movie-studio/shots/{shotId}/production/versions",
+            new { stage = MovieProductionStages.StoryboardCandidate, compositionJson = "{\"frame\":\"wide\"}" });
+        var approvedStoryboard = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
+            client, $"/api/movie-studio/production/versions/{storyboard.Id}/review", new { approve = true });
+        var keyframe = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
+            client, $"/api/movie-studio/shots/{shotId}/production/versions",
+            new { stage = MovieProductionStages.ProductionKeyframe,
+                sourceVersionId = approvedStoryboard.Id, compositionJson = "{\"frame\":\"approved\"}" });
+        var approvedKeyframe = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
+            client, $"/api/movie-studio/production/versions/{keyframe.Id}/review", new { approve = true });
+        var motion = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
+            client, $"/api/movie-studio/shots/{shotId}/production/motion-preview",
+            new { sourceVersionId = approvedKeyframe.Id });
+        var approvedMotion = await MovieOperationalFixtures.PostAsync<MovieProductionVersionDto>(
+            client, $"/api/movie-studio/production/versions/{motion.Id}/review", new { approve = true });
+
+        using var scope = denyingFactory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var versionsBefore = await db.MovieProductionVersions.CountAsync(item => item.MovieShotId == shotId);
+        var transactionsBefore = await db.UsageTransactions.CountAsync();
+
+        using var rejected = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, $"/api/movie-studio/shots/{shotId}/production/render",
+            new { sourceVersionId = approvedMotion.Id, targetResolution = "1080p",
+                qualityTier = DirectorQualityLevels.Cinematic, confirmationAccepted = true },
+            idempotencyKey: "production-priced-intent-rejected");
+        Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
+        Assert.Contains("MOVIE_CLIP_EXECUTION_INTENT_UNSUPPORTED",
+            await rejected.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Equal(versionsBefore, await db.MovieProductionVersions.CountAsync(item => item.MovieShotId == shotId));
+        Assert.False(await db.MovieClips.AnyAsync(item => item.MovieProjectId == fixture.Project.Project.Id));
+        Assert.False(await db.GenerationJobs.AnyAsync(item => item.IdempotencyKey == "production-priced-intent-rejected"));
+        Assert.Equal(transactionsBefore, await db.UsageTransactions.CountAsync());
+    }
+
+    [Fact]
+    public async Task Approved_production_render_rejects_missing_idempotency_key_without_generation_writes()
+    {
+        using var fakeFactory = new MovieOperationalNoWorkerFactory();
+        using (var init = fakeFactory.Services.CreateScope())
+            init.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+        using var client = fakeFactory.CreateClient();
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Approved production missing idempotency key");
+
+        using var scope = fakeFactory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var projectId = fixture.Project.Project.Id;
+        var shotId = fixture.Shot.Id;
+        var snapshotCountBefore = await db.MovieCharacterContinuitySnapshots.CountAsync(item => item.MovieProjectId == projectId);
+        var clipCountBefore = await db.MovieClips.CountAsync(item => item.MovieProjectId == projectId);
+        var versionCountBefore = await db.MovieProductionVersions.CountAsync(item => item.MovieShotId == shotId);
+        var transitionCountBefore = await db.Set<MovieProductionStageTransition>().CountAsync();
+        var jobCountBefore = await db.GenerationJobs.CountAsync();
+        var usageCountBefore = await db.UsageTransactions.CountAsync();
+        var providerCallsBefore = fakeFactory.Calls.Calls(Taslim.Api.Tests.ProviderTesting.FakeProviderKind.Movie);
+
+        using var rejected = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client,
+            HttpMethod.Post,
+            $"/api/movie-studio/shots/{shotId}/production/render",
+            new
+            {
+                sourceVersionId = Guid.NewGuid(),
+                label = "Missing key",
+                targetResolution = "1080p",
+                qualityTier = DirectorQualityLevels.Standard,
+                confirmationAccepted = true,
+                expectedMaximumAmountUsd = 0m,
+                expectedQuoteFingerprint = "unused-without-key",
+            });
+
+        Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
+        Assert.Contains("IDEMPOTENCY_KEY_REQUIRED",
+            await rejected.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Equal(snapshotCountBefore, await db.MovieCharacterContinuitySnapshots.CountAsync(item => item.MovieProjectId == projectId));
+        Assert.Equal(clipCountBefore, await db.MovieClips.CountAsync(item => item.MovieProjectId == projectId));
+        Assert.Equal(versionCountBefore, await db.MovieProductionVersions.CountAsync(item => item.MovieShotId == shotId));
+        Assert.Equal(transitionCountBefore, await db.Set<MovieProductionStageTransition>().CountAsync());
+        Assert.Equal(jobCountBefore, await db.GenerationJobs.CountAsync());
+        Assert.Equal(usageCountBefore, await db.UsageTransactions.CountAsync());
+        Assert.Equal(providerCallsBefore, fakeFactory.Calls.Calls(Taslim.Api.Tests.ProviderTesting.FakeProviderKind.Movie));
+    }
+
     [Fact]
     public async Task Selective_regeneration_requires_confirmation_preserves_history_and_invalidates_downstream()
     {
-        using var client = factory.CreateClient();
+        // The positive execution path needs an explicitly capable synthetic adapter.
+        // Real Runway/Manus are not asserted to honor 1080p regeneration intent.
+        using var fakeFactory = new MovieOperationalNoWorkerFactory();
+        using (var init = fakeFactory.Services.CreateScope())
+            init.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+        using var client = fakeFactory.CreateClient();
         var auth = await Register(client);
         var project = await SendWithCsrf<MovieStudioProjectResponse>(client, HttpMethod.Post, "/api/movie-studio/projects", new
         {
@@ -362,7 +800,7 @@ public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWork
         var downstream = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post, $"/api/movie-studio/shots/{shot.Id}/production/versions", new { stage = MovieProductionStages.ProductionKeyframe, sourceVersionId = storyboard.Id, compositionJson = "{\"frame\":\"approved\"}" });
         downstream = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post, $"/api/movie-studio/production/versions/{downstream.Id}/review", new { approve = true, reason = "Approved keyframe." });
 
-        using (var beforeConfirmation = factory.Services.CreateScope())
+        using (var beforeConfirmation = fakeFactory.Services.CreateScope())
         {
             var db = beforeConfirmation.ServiceProvider.GetRequiredService<TaslimDbContext>();
             Assert.Equal(0, await db.GenerationJobs.CountAsync(item => item.WorkspaceId == auth.PersonalWorkspace.Id));
@@ -392,7 +830,7 @@ public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWork
         Assert.Equal(GenerationJobStatus.Queued.ToString(), confirmed.Job!.Status);
         Assert.Equal(MovieTakeStatuses.Generating, confirmed.Take!.Status);
 
-        using var scope = factory.Services.CreateScope();
+        using var scope = fakeFactory.Services.CreateScope();
         var dbAfter = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
         Assert.Equal(1, await dbAfter.GenerationJobs.CountAsync(item => item.Id == confirmed.Job.Id));
         Assert.Equal(3, await dbAfter.MovieProductionVersions.CountAsync(item => item.MovieShotId == shot.Id));
@@ -402,6 +840,10 @@ public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWork
         using var input = JsonDocument.Parse(job.InputJson);
         Assert.Equal(preview.Request.Id.ToString(), input.RootElement.GetProperty("SelectiveRegenerationId").GetString());
         Assert.Contains("characterContinuity", input.RootElement.GetProperty("ChangedInputsJson").GetString());
+        Assert.Equal("1080p", input.RootElement.GetProperty("SourceResolution").GetString());
+        Assert.Equal("1080p", input.RootElement.GetProperty("TargetResolution").GetString());
+        Assert.Equal("native", input.RootElement.GetProperty("ProcessingPath").GetString());
+        Assert.False(string.IsNullOrWhiteSpace(input.RootElement.GetProperty("QualityTier").GetString()));
         Assert.Equal(0, await dbAfter.MovieVideoProviderExecutions.CountAsync(item => item.GenerationJobId == confirmed.Job.Id));
     }
     [Fact]

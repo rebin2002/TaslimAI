@@ -145,9 +145,11 @@ test.describe("Movie Studio V2 operational browser contracts", () => {
       page.getByRole("tab", { name: /quick movie/i }).first(),
     ).toBeVisible();
     await expect(page.getByText("One brief, one output")).toBeVisible();
-    await expect(
-      page.getByText(/Quick Movie stays intentionally small/i),
-    ).toBeVisible();
+    // Quick Movie project creation persists only the brief; generation
+    // capability is checked separately when a provider job is requested.
+    await expect(page.getByText(/Quick Movie stays intentionally small/i)).toBeVisible();
+    await page.getByLabel("Describe your movie").fill("A provider-free Quick Movie brief.");
+    await expect(page.locator(".movie-submit-row button[type=submit]")).toBeEnabled();
     await expect(page).not.toHaveURL(/\/create\/movie\/[0-9a-f-]+\/overview$/i);
 
     const observed = diagnostics.stop();

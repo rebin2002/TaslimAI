@@ -31,19 +31,49 @@ public sealed class RunwayMovieVideoProvider(
     private readonly MovieVideoOptions settings = options.Value;
 
     public string Key => "runway";
+    // Price against the same configured key serialized into the actual request.
+    // SupportsSceneClipCostIntent independently fails closed unless this is gen4.5.
+    public string? SceneClipPricingModelKey => string.IsNullOrWhiteSpace(settings.Model) ? null : settings.Model.Trim();
     public bool IsAvailable => settings.Enabled
         && string.Equals(settings.ProviderKey, Key, StringComparison.OrdinalIgnoreCase)
         && !string.IsNullOrWhiteSpace(settings.ApiKey)
         && !string.IsNullOrWhiteSpace(settings.Model)
         && TryGetBaseUri(out _);
     public IReadOnlyCollection<string> SupportedOperations => Operations;
+    // Mirrors the existing BuildPayload duration gate; no new provider API claim.
+    public MovieClipDurationRange? SceneClipDurationRange => new(2, 10);
+    // Must remain equal to the BuildPrompt limit below.
+    public int? SceneClipPromptMaxCharacters => 1000;
+    // BuildPrompt adds five optional field labels (91 characters total) and
+    // at most six newlines. Reserve all 97 characters during early admission
+    // so a near-limit prompt is rejected before usage can be reserved.
+    public int SceneClipPromptFormattingOverheadCharacters => 97;
+
+    // Current BuildPayload sends fixed 1280:720 or 720:1280 and does not
+    // translate paid quality/upscale tiers. Permit only the unenhanced 720p
+    // baseline, never imply a higher resolution or quality instruction.
+    // This priced scene-clip contract does not carry a source-image capability.
+    // Image-to-video remains a separate mode until its price intent is verified.
+    public bool SupportsSceneClipCostIntent(string sourceResolution, string targetResolution,
+        string qualityTier, string processingPath, string aspectRatio) =>
+        string.Equals(settings.Model?.Trim(), "gen4.5", StringComparison.OrdinalIgnoreCase)
+        && string.Equals(sourceResolution, "720p", StringComparison.OrdinalIgnoreCase)
+        && string.Equals(targetResolution, "720p", StringComparison.OrdinalIgnoreCase)
+        && string.Equals(qualityTier, DirectorQualityLevels.Standard, StringComparison.OrdinalIgnoreCase)
+        && string.Equals(processingPath, "native", StringComparison.OrdinalIgnoreCase)
+        && aspectRatio is "16:9" or "9:16";
+    public bool SupportsSceneClipSourceImageCostIntent => false;
+    public bool SupportsReferencePackageCostIntent => false;
 
     public async Task<MovieVideoSubmission> SubmitAsync(MovieVideoGenerationRequest request, CancellationToken cancellationToken)
     {
         EnsureAvailable();
+        // Reject unsupported priced profiles, frame inputs and durations before
+        // resolving any user-supplied image host. This is a local validation only;
+        // a rejected request must not trigger DNS resolution or provider traffic.
+        var payload = BuildPayload(request, out var endpoint);
         if (Uri.TryCreate(request.SourceImageUri, UriKind.Absolute, out var sourceUri) && sourceUri.Scheme == Uri.UriSchemeHttps)
             await urlPolicy.EnsureSafeAsync(sourceUri, cancellationToken);
-        var payload = BuildPayload(request, out var endpoint);
         var response = await SendJsonWithRetryAsync(HttpMethod.Post, endpoint, payload, cancellationToken);
         var task = Deserialize<RunwayTaskResponse>(response) ?? throw Failure();
         if (!Guid.TryParse(task.Id, out _)) throw Failure();
@@ -156,7 +186,7 @@ public sealed class RunwayMovieVideoProvider(
             status.Currency ?? "USD",
             status.CostBasis ?? UsageCostBasis.Estimated,
             status.SafeMetadataJson,
-            settings.Model);
+            settings.Model.Trim());
     }
 
     public async Task CancelAsync(string providerJobId, CancellationToken cancellationToken)
@@ -182,7 +212,46 @@ public sealed class RunwayMovieVideoProvider(
             throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieGenerationFailed, false);
         if (!string.IsNullOrWhiteSpace(request.ContinuationProviderJobId))
             throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);
+        if (!string.IsNullOrWhiteSpace(request.ReferencePackageJson)
+            && !SupportsReferencePackageCostIntent)
+            throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);
+        // This adapter currently serializes only SourceImageUri as promptImage.
+        // Reject other frame/reference inputs instead of silently discarding
+        // direction that may have affected the user's generation decision.
+        if (!string.IsNullOrWhiteSpace(request.FirstFrameImageUri)
+            || !string.IsNullOrWhiteSpace(request.LastFrameImageUri)
+            || request.ReferenceImages is { Count: > 0 })
+            throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);
         if (request.DurationSeconds is < 2 or > 10)
+            throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);
+        // Defence in depth: other production paths may still queue a priced
+        // scene request without legacy QueueClipAsync's admission check.
+        // Never submit a provider task for a profile this adapter cannot enact.
+        if (request.Operation == MovieStudioOperations.SceneClip
+            && (request.UpscalingRequested
+                // Runway's current payload has only a fixed 720p output ratio;
+                // MasterResolution would otherwise be accepted then discarded.
+                || !string.IsNullOrWhiteSpace(request.MasterResolution)
+                || !SupportsSceneClipCostIntent(
+                request.SourceResolution ?? string.Empty,
+                request.TargetResolution ?? string.Empty,
+                request.QualityTier ?? string.Empty,
+                request.ProcessingPath ?? string.Empty,
+                request.AspectRatio)
+                || (!string.IsNullOrWhiteSpace(request.SourceImageUri)
+                    && !SupportsSceneClipSourceImageCostIntent)))
+            throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);
+
+        // Quick Movie also uses this provider's fixed output payload. It cannot
+        // honor an independently priced resolution, quality or upscale request;
+        // refuse such requests rather than silently discarding their intent.
+        if (request.Operation == MovieStudioOperations.QuickMovie
+            && (request.UpscalingRequested
+                || !string.IsNullOrWhiteSpace(request.SourceResolution)
+                || !string.IsNullOrWhiteSpace(request.TargetResolution)
+                || !string.IsNullOrWhiteSpace(request.MasterResolution)
+                || !string.IsNullOrWhiteSpace(request.QualityTier)
+                || !string.IsNullOrWhiteSpace(request.ProcessingPath)))
             throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);
 
         var ratio = request.AspectRatio.Trim() switch
@@ -210,7 +279,7 @@ public sealed class RunwayMovieVideoProvider(
         }
         else
         {
-            if (!string.Equals(settings.Model, "gen4.5", StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(settings.Model.Trim(), "gen4.5", StringComparison.OrdinalIgnoreCase))
                 throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);
             endpoint = new Uri(GetBaseUri(), "text_to_video");
         }
@@ -226,12 +295,18 @@ public sealed class RunwayMovieVideoProvider(
             string.IsNullOrWhiteSpace(request.Style) ? null! : $"Visual style: {request.Style}",
             string.IsNullOrWhiteSpace(request.AdditionalInstructions) ? null! : request.AdditionalInstructions,
             string.IsNullOrWhiteSpace(request.ContinuityGuideJson) ? null! : $"Continuity direction: {request.ContinuityGuideJson}",
+            string.IsNullOrWhiteSpace(request.CharacterContinuityJson) ? null! : $"Character continuity: {request.CharacterContinuityJson}",
             string.IsNullOrWhiteSpace(request.SceneJson) ? null! : $"Scene direction: {request.SceneJson}",
             string.IsNullOrWhiteSpace(request.ShotJson) ? null! : $"Shot direction: {request.ShotJson}",
         };
         var prompt = string.Join("\n", visualDirection.Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => value.Trim()));
         if (prompt.Length < 1) throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);
-        return prompt.Length <= 1000 ? prompt : prompt[..997].TrimEnd() + "...";
+        // Silently truncating a paid generation prompt can drop continuity and
+        // creative directions while preserving their original priced/idempotent
+        // identity. Reject it before resolving image hosts or posting to Runway.
+        if (prompt.Length > 1000)
+            throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);
+        return prompt;
     }
 
     private MovieVideoProviderStatus MapStatus(RunwayTaskResponse task)

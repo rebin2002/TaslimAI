@@ -10,10 +10,14 @@ using Taslim.Api.Usage;
 
 namespace Taslim.Api.Movies;
 
+// Metadata-only edit. Production timeline edits must never implicitly queue a video clip.
+public sealed record MovieStudioProjectDurationRequest(int DurationSeconds);
+
 public interface IMovieStudioService
 {
     Task<MovieStudioProjectResponse?> CreateAsync(Guid userId, MovieStudioCreateRequest request, CancellationToken cancellationToken, string? idempotencyKey = null);
     Task<MovieStudioProjectDto?> GetAsync(Guid userId, Guid id, CancellationToken cancellationToken);
+    Task<MovieStudioProjectDto?> UpdateProjectDurationAsync(Guid userId, Guid id, int durationSeconds, CancellationToken cancellationToken);
     Task<MovieWorkspaceResponse?> GetWorkspaceAsync(Guid userId, Guid id, string? module, CancellationToken cancellationToken);
     Task<MovieStudioProjectShellDto?> GetShellAsync(Guid userId, Guid id, CancellationToken cancellationToken);
     Task<MovieCastDto?> GetCastAsync(Guid userId, Guid id, CancellationToken cancellationToken);
@@ -56,6 +60,8 @@ public interface IMovieStudioService
     Task<MovieV2TakeDto?> CreateTakeFromProductionAsync(Guid userId, Guid versionId, MovieProductionTakeRequest request, CancellationToken cancellationToken);
     Task<MovieStudioGenerationResponse?> GenerateSceneAsync(Guid userId, Guid movieProjectId, Guid sceneId, MovieStudioGenerationRequest request, CancellationToken cancellationToken, string? idempotencyKey = null);
     Task<MovieStudioGenerationResponse?> GenerateShotAsync(Guid userId, Guid shotId, MovieStudioGenerationRequest request, CancellationToken cancellationToken, string? idempotencyKey = null);
+    Task<MovieSceneGenerationPreviewDto?> PreviewSceneGenerationAsync(Guid userId, Guid movieProjectId, Guid sceneId, MovieStudioGenerationRequest request, CancellationToken cancellationToken);
+    Task<MovieSceneGenerationPreviewDto?> PreviewShotGenerationAsync(Guid userId, Guid shotId, MovieStudioGenerationRequest request, CancellationToken cancellationToken);
     Task<MovieProviderReadinessDto> ProviderReadinessAsync();
 }
 
@@ -113,6 +119,37 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         GenerationJobDto? job = null;
         var saved = await GetAsync(userId, movie.Id, cancellationToken);
         return saved is null ? null : new MovieStudioProjectResponse(saved, job);
+    }
+
+
+    /// <summary>
+    /// Change only the target duration of an unplanned draft. Once scene planning
+    /// begins, changing the total runtime requires an explicit timeline replan
+    /// rather than silently invalidating an existing scene/shot budget.
+    /// This path never generates clips, creates jobs or reserves usage.
+    /// </summary>
+    public async Task<MovieStudioProjectDto?> UpdateProjectDurationAsync(
+        Guid userId, Guid id, int durationSeconds, CancellationToken cancellationToken)
+    {
+        var movie = await db.MovieProjects.FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
+        if (movie is null || !await collaboration.HasPermissionAsync(userId, id, MoviePermissions.Edit, cancellationToken))
+            return null;
+
+        if (movie.Status != MovieProjectStatuses.Draft
+            || await db.MovieScenes.AnyAsync(item => item.MovieProjectId == id, cancellationToken)
+            || await db.MovieClips.AnyAsync(item => item.MovieProjectId == id, cancellationToken))
+            throw new MovieStudioValidationException(
+                "Change the runtime before scene planning or generated clips; replan an existing timeline explicitly.");
+
+        if (durationSeconds < 1 || durationSeconds > MovieStudioValidation.MaxProjectDurationSeconds)
+            throw new MovieStudioValidationException("Movie duration must be between 1 second and 120 minutes.");
+        if (movie.Mode == MovieProjectModes.Quick && durationSeconds > MovieStudioValidation.MaxQuickDurationSeconds)
+            throw new MovieStudioValidationException("Quick Movie duration must be between 1 second and 60 minutes.");
+
+        movie.DurationSeconds = durationSeconds;
+        movie.UpdatedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync(cancellationToken);
+        return await GetAsync(userId, id, cancellationToken);
     }
 
     public async Task<MovieStudioProjectDto?> GetAsync(Guid userId, Guid id, CancellationToken cancellationToken)
@@ -963,7 +1000,9 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
             request.ConfirmationAccepted,
             idempotencyKey,
             request.AllowReferenceReadinessOverride,
-            request.ReferenceReadinessOverrideReason), cancellationToken);
+            request.ReferenceReadinessOverrideReason,
+            request.ExpectedMaximumAmountUsd,
+            request.ExpectedQuoteFingerprint), cancellationToken);
         if (queued is null) return null;
         var project = await GetAsync(userId, queued.Clip.MovieProjectId, cancellationToken);
         if (project is null) throw new InvalidOperationException("Movie project disappeared.");
@@ -1053,12 +1092,16 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         if (workflowError is not null) throw new MovieProductionValidationException("PRODUCTION_STAGE_INVALID", workflowError);
 
         var movie = shot.Scene.MovieProject;
-        var durationSeconds = Math.Clamp(shot.DurationSeconds ?? shot.Scene.DurationSeconds ?? Math.Min(movie.DurationSeconds, 60), 1, 3600);
+        var durationSeconds = MovieProductionGenerationOrchestrator.ResolveSingleClipDuration(
+            shot.DurationSeconds, shot.Scene.DurationSeconds, movie.DurationSeconds);
+        EnsureSelectiveRegenerationCapability(movie, durationSeconds, shot.Description);
+        var providerModelKey = MovieStudioHelpers.Clean(provider.SceneClipPricingModelKey);
         // The server owns the estimate. Client-supplied cost fields are not trusted for
         // cap enforcement because they could otherwise be lowered to bypass a cap.
         var estimate = await movieCostEstimator.EstimateAsync(
             new MovieGenerationCostRequest(durationSeconds, "1080p", "1080p", movie.QualityLevel, "native"),
             provider.Key,
+            selectedModelKey: providerModelKey,
             cancellationToken: cancellationToken);
         var preflight = await costGuardrails.EvaluateAsync(
             userId,
@@ -1088,12 +1131,36 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         var regeneration = await RegenerationQuery().FirstOrDefaultAsync(item => item.Id == requestId, cancellationToken);
         if (regeneration is null || !await collaboration.HasPermissionAsync(userId, regeneration.MovieShot.Scene.MovieProjectId, MoviePermissions.Generate, cancellationToken)) return null;
         if (regeneration.Status == MovieRegenerationStatuses.Confirmed) return await GetRegenerationRequestAsync(userId, requestId, cancellationToken);
+        // The confirmation path writes a speculative clip before it creates the job.
+        // Reject an invalid replay key now so a shared job-validation failure
+        // cannot leave an orphaned clip or stale confirmation state.
+        if (idempotencyKey?.Trim().Length > 80)
+            throw new GenerationJobValidationException("IDEMPOTENCY_KEY_INVALID", "The idempotency key is too long.");
         if (regeneration.Status != MovieRegenerationStatuses.PendingConfirmation)
             throw new MovieProductionValidationException("REGENERATION_STALE", "This regeneration request is no longer pending confirmation.");
         if (!request.Confirm) throw new MovieProductionValidationException("REGENERATION_CONFIRMATION_REQUIRED", "Explicit confirmation is required before queuing selective regeneration.");
 
+        // The confirmed-state path above handles ordinary replays. For still-
+        // pending requests, reject any user-scoped key already claimed by a job
+        // before persisting a provisional clip or reserving usage.
+        var effectiveIdempotencyKey = string.IsNullOrWhiteSpace(idempotencyKey)
+            ? $"movie-regeneration:{requestId:N}"
+            : idempotencyKey.Trim();
+        if (await db.GenerationJobs.AsNoTracking().AnyAsync(item =>
+                item.CreatedByUserId == userId && item.IdempotencyKey == effectiveIdempotencyKey,
+                cancellationToken))
+            throw new MovieProductionValidationException(
+                "IDEMPOTENCY_KEY_REUSED",
+                "This idempotency key is already used by a generation job. Refresh the regeneration request before retrying.");
+
         var shot = regeneration.MovieShot;
         var movie = shot.Scene.MovieProject;
+        var durationSeconds = MovieProductionGenerationOrchestrator.ResolveSingleClipDuration(
+            shot.DurationSeconds, shot.Scene.DurationSeconds, movie.DurationSeconds);
+        // Recheck at confirmation: provider availability/capabilities may change
+        // after the cost preview was created, without user consent to a downgrade.
+        EnsureSelectiveRegenerationCapability(movie, durationSeconds, shot.Description);
+        var providerModelKey = MovieStudioHelpers.Clean(provider.SceneClipPricingModelKey);
         var preflight = await costGuardrails.EvaluateAsync(
             userId,
             movie.WorkspaceId,
@@ -1107,10 +1174,10 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         var workflowError = MovieProductionWorkflow.ValidateVersionCreation(regeneration.RequestedStage, source);
         if (workflowError is not null) throw new MovieProductionValidationException("PRODUCTION_STAGE_INVALID", workflowError);
         var now = DateTime.UtcNow;
-        var durationSeconds = Math.Clamp(shot.DurationSeconds ?? shot.Scene.DurationSeconds ?? Math.Min(movie.DurationSeconds, 60), 1, 3600);
         var estimate = await movieCostEstimator.EstimateAsync(
             new MovieGenerationCostRequest(durationSeconds, "1080p", "1080p", movie.QualityLevel, "native"),
             provider.Key,
+            selectedModelKey: providerModelKey,
             cancellationToken: cancellationToken);
         var refreshedPreflight = await costGuardrails.EvaluateAsync(
             userId,
@@ -1133,7 +1200,10 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         db.MovieClips.Add(clip);
         await db.SaveChangesAsync(cancellationToken);
 
-        var job = await jobs.CreateAsync(userId, new CreateGenerationJobRequest
+        GenerationJob job;
+        try
+        {
+            job = await jobs.CreateAsync(userId, new CreateGenerationJobRequest
         {
             WorkspaceId = movie.WorkspaceId, ProjectId = movie.ProjectId, JobType = GenerationJobTypes.MovieClipGenerate,
             Title = $"Selective {regeneration.ActionType} for {movie.Title}", EstimatedProviderCostUsd = regeneration.EstimatedProviderCostUsd,
@@ -1145,8 +1215,22 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                 movie.AspectRatio, movie.Style, movie.Language, movie.AdditionalInstructions, clip.ContinuitySnapshotJson,
                 SceneSnapshot(shot.Scene), ShotSnapshot(shot), WorldContextJson: await WorldContextSnapshotAsync(movie.Id, shot.Scene.Id, shot.Id, cancellationToken),
                 SelectiveRegenerationId: regeneration.Id, SourceProductionVersionId: source?.Id, ChangedInputsJson: regeneration.ChangedInputsJson,
-                SelectiveActionType: regeneration.ActionType, SelectiveReason: regeneration.Reason)),
-        }, cancellationToken, idempotencyKey ?? $"movie-regeneration:{requestId:N}");
+                SelectiveActionType: regeneration.ActionType, SelectiveReason: regeneration.Reason,
+                SourceResolution: "1080p", TargetResolution: "1080p",
+                QualityTier: movie.QualityLevel, ProcessingPath: "native",
+                SelectedProviderKey: provider.Key,
+                SelectedProviderModelKey: providerModelKey)),
+            }, cancellationToken, effectiveIdempotencyKey);
+        }
+        catch
+        {
+            // CreateAsync commits the job, usage reservation, and queue entry
+            // together. Keep the request pending and remove this speculative
+            // clip for any failure before that transaction returns.
+            db.MovieClips.Remove(clip);
+            await db.SaveChangesAsync(CancellationToken.None);
+            throw;
+        }
         clip.GenerationJobId = job.Id;
 
         var version = new MovieProductionVersion
@@ -1179,6 +1263,42 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         shot.UpdatedAt = now;
         await db.SaveChangesAsync(cancellationToken);
         return await GetRegenerationRequestAsync(userId, requestId, cancellationToken);
+    }
+
+    private void EnsureSelectiveRegenerationCapability(MovieProject movie, int durationSeconds, string description)
+    {
+        // Selective regeneration currently has a fixed 1080p/native cost profile.
+        // Never silently substitute Runway's 720p baseline or a different provider
+        // after the user reviews and confirms the priced request.
+        if (!provider.IsAvailable ||
+            !provider.SupportedOperations.Contains(MovieStudioOperations.SceneClip, StringComparer.OrdinalIgnoreCase))
+            throw new MovieProductionValidationException(
+                "REGENERATION_PROVIDER_UNAVAILABLE",
+                "The selected video provider cannot run selective regeneration at this time.");
+        if (provider.SceneClipDurationRange is not { } range || !range.Supports(durationSeconds))
+            throw new MovieProductionValidationException(
+                "REGENERATION_DURATION_UNSUPPORTED",
+                "The shot exceeds the selected provider's verified single-clip duration. Shorten the shot before requesting regeneration.");
+        if (!provider.SupportsSceneClipCostIntent("1080p", "1080p", movie.QualityLevel, "native", movie.AspectRatio))
+            throw new MovieProductionValidationException(
+                "REGENERATION_EXECUTION_INTENT_UNSUPPORTED",
+                "The selected provider cannot guarantee the priced 1080p quality profile for this regeneration. An explicitly supported output profile is required.");
+        if (string.IsNullOrWhiteSpace(provider.SceneClipPricingModelKey))
+            throw new MovieProductionValidationException(
+                "MOVIE_PROVIDER_MODEL_UNVERIFIED",
+                "The selected video adapter has not declared an exact model key for pricing this regeneration.");
+        // The final provider prompt preserves all three creative sections.
+        // Their combined trimmed lengths form a conservative lower bound:
+        // headings and continuity context can only increase it. Enforce this
+        // at both preview and confirmation before any usage reservation.
+        var minimumCreativePromptLength = (long)description.Trim().Length
+            + (string.IsNullOrWhiteSpace(movie.Style) ? 0 : movie.Style.Trim().Length)
+            + (string.IsNullOrWhiteSpace(movie.AdditionalInstructions) ? 0 : movie.AdditionalInstructions.Trim().Length);
+        if (provider.SceneClipPromptMaxCharacters is { } maximum
+            && minimumCreativePromptLength > maximum)
+            throw new MovieProductionValidationException(
+                "REGENERATION_PROMPT_UNSUPPORTED",
+                "The shot description and creative direction exceed this provider's prompt limit. Shorten them before requesting regeneration.");
     }
 
     public async Task<MovieSelectiveRegenerationResponse?> GetRegenerationRequestAsync(Guid userId, Guid requestId, CancellationToken cancellationToken)
@@ -1251,19 +1371,113 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         return await QueueClipAsync(userId, scene.MovieProject, scene, null, request, cancellationToken, idempotencyKey);
     }
 
+    public async Task<MovieSceneGenerationPreviewDto?> PreviewSceneGenerationAsync(Guid userId, Guid movieProjectId, Guid sceneId, MovieStudioGenerationRequest request, CancellationToken cancellationToken)
+    {
+        var scene = await db.MovieScenes.Include(item => item.MovieProject)
+            .FirstOrDefaultAsync(item => item.Id == sceneId && item.MovieProjectId == movieProjectId, cancellationToken);
+        if (scene is null || !await collaboration.HasPermissionAsync(userId, movieProjectId, MoviePermissions.Generate, cancellationToken)) return null;
+
+        return await PreviewClipGenerationAsync(
+            userId,
+            scene.MovieProject,
+            scene.DurationSeconds ?? Math.Min(scene.MovieProject.DurationSeconds, 60),
+            request,
+            cancellationToken);
+    }
+
+    public async Task<MovieSceneGenerationPreviewDto?> PreviewShotGenerationAsync(Guid userId, Guid shotId, MovieStudioGenerationRequest request, CancellationToken cancellationToken)
+    {
+        var shot = await db.MovieShots
+            .Include(item => item.Scene)
+            .ThenInclude(item => item.MovieProject)
+            .FirstOrDefaultAsync(item => item.Id == shotId, cancellationToken);
+        if (shot is null || !await collaboration.HasPermissionAsync(userId, shot.Scene.MovieProjectId, MoviePermissions.Generate, cancellationToken)) return null;
+
+        var movie = shot.Scene.MovieProject;
+        var durationSeconds = shot.DurationSeconds ?? shot.Scene.DurationSeconds ?? Math.Min(movie.DurationSeconds, 60);
+        return await PreviewClipGenerationAsync(userId, movie, durationSeconds, request, cancellationToken);
+    }
+
+    private async Task<MovieSceneGenerationPreviewDto> PreviewClipGenerationAsync(
+        Guid userId,
+        MovieProject movie,
+        int durationSeconds,
+        MovieStudioGenerationRequest request,
+        CancellationToken cancellationToken)
+    {
+        var sourceResolution = request.SourceResolution?.Trim() ?? string.Empty;
+        var targetResolution = request.TargetResolution?.Trim() ?? string.Empty;
+        var qualityTier = request.QualityTier?.Trim() ?? string.Empty;
+        var processingPath = request.ProcessingPath?.Trim() ?? string.Empty;
+        var providerModelKey = MovieStudioHelpers.Clean(provider.SceneClipPricingModelKey);
+
+        MovieSceneGenerationPreviewDto Reject(string code, string message) => new(
+            durationSeconds, sourceResolution, targetResolution, qualityTier, processingPath,
+            false, false, null, code, message, provider.Key, providerModelKey);
+
+        if (request.RetryAttempts != 0 || request.UpscalePasses != 0 || request.UpscalingRequested)
+            return Reject("MOVIE_GENERATION_OPTIONS_UNSUPPORTED",
+                "This clip-generation route does not support retries or upscaling options.");
+        if (durationSeconds is < 1 or > 3600)
+            return Reject("MOVIE_CLIP_DURATION_UNSUPPORTED",
+                "A single clip must last between 1 and 3600 seconds. Split longer material into provider-supported clips.");
+        if (!provider.IsAvailable
+            || !provider.SupportedOperations.Contains(MovieStudioOperations.SceneClip, StringComparer.OrdinalIgnoreCase))
+            return Reject("MOVIE_PROVIDER_UNAVAILABLE",
+                "The selected video provider is unavailable for clip generation.");
+        if (provider.SceneClipDurationRange is not { } clipDurationRange
+            || !clipDurationRange.Supports(durationSeconds))
+            return Reject("MOVIE_CLIP_DURATION_UNSUPPORTED",
+                "The selected video provider cannot generate a single clip of this duration.");
+        if (string.IsNullOrWhiteSpace(sourceResolution)
+            || string.IsNullOrWhiteSpace(targetResolution)
+            || string.IsNullOrWhiteSpace(qualityTier)
+            || string.IsNullOrWhiteSpace(processingPath))
+            return Reject("MOVIE_CLIP_EXECUTION_INTENT_REQUIRED",
+                "Choose an explicit source resolution, output resolution, quality tier, and processing path before previewing cost.");
+        if (!string.Equals(processingPath, "native", StringComparison.OrdinalIgnoreCase))
+            return Reject("MOVIE_GENERATION_OPTIONS_UNSUPPORTED",
+                "This scene-generation route does not support upscaling or non-native processing paths.");
+        if (!provider.SupportsSceneClipCostIntent(sourceResolution, targetResolution,
+                qualityTier, processingPath, movie.AspectRatio))
+            return Reject("MOVIE_CLIP_EXECUTION_INTENT_UNSUPPORTED",
+                "This provider cannot guarantee the requested resolution, quality and processing profile. Choose a supported output profile.");
+        if (string.IsNullOrWhiteSpace(providerModelKey))
+            return Reject("MOVIE_PROVIDER_MODEL_UNVERIFIED",
+                "The selected video adapter has not declared an exact model key for pricing this Movie clip.");
+
+        var estimate = await movieCostEstimator.EstimateAsync(
+            new MovieGenerationCostRequest(durationSeconds, sourceResolution, targetResolution,
+                qualityTier, processingPath, request.RetryAttempts, request.UpscalingRequested, request.UpscalePasses),
+            provider.Key,
+            selectedModelKey: providerModelKey,
+            cancellationToken: cancellationToken);
+        var guardrail = await costGuardrails.EvaluateAsync(
+            userId,
+            movie.WorkspaceId,
+            movie.ProjectId,
+            estimate.ToGenerationCostEstimate(),
+            confirmationAccepted: false,
+            cancellationToken: cancellationToken);
+        var hasKnownPrice = estimate.IsEstimated && estimate.MaximumAmountUsd.HasValue;
+        var canConfirmCost = guardrail.Allowed && hasKnownPrice;
+        var rejectionCode = canConfirmCost
+            ? null
+            : guardrail.RejectionCode ?? "MOVIE_COST_ESTIMATE_UNAVAILABLE";
+        var rejectionMessage = canConfirmCost
+            ? null
+            : guardrail.RejectionMessage ?? "A verified price is unavailable for this exact Movie clip profile; generation remains blocked.";
+
+        return new MovieSceneGenerationPreviewDto(
+            durationSeconds, sourceResolution, targetResolution, qualityTier, processingPath,
+            true, canConfirmCost, GenerationCostPreviewMapper.ToDto(guardrail),
+            rejectionCode, rejectionMessage, provider.Key, providerModelKey);
+    }
+
     public async Task<MovieStudioGenerationResponse?> GenerateShotAsync(Guid userId, Guid shotId, MovieStudioGenerationRequest request, CancellationToken cancellationToken, string? idempotencyKey = null)
     {
         var shot = await db.MovieShots.Include(item => item.Scene).ThenInclude(item => item.MovieProject).ThenInclude(item => item.Guide).FirstOrDefaultAsync(item => item.Id == shotId, cancellationToken);
         if (shot is null || !await collaboration.HasPermissionAsync(userId, shot.Scene.MovieProjectId, MoviePermissions.Generate, cancellationToken)) return null;
-        var readiness = MovieShotReadiness.Evaluate(shot);
-        if (!readiness.Ready) throw new MovieStudioValidationException($"Shot is not ready for generation. {readiness.Summary}");
-        await referenceReadiness.EnsureCanGenerateAsync(
-            userId,
-            shot.Id,
-            request.AllowReferenceReadinessOverride,
-            request.ReferenceReadinessOverrideReason,
-            MovieReferenceReadinessOverrideSources.LegacyShotGeneration,
-            cancellationToken);
         return await QueueClipAsync(userId, shot.Scene.MovieProject, shot.Scene, shot, request, cancellationToken, idempotencyKey);
     }
 
@@ -1271,9 +1485,23 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
 
     private async Task<MovieStudioGenerationResponse> QueueClipAsync(Guid userId, MovieProject movie, MovieScene scene, MovieShot? shot, MovieStudioGenerationRequest request, CancellationToken cancellationToken, string? idempotencyKey)
     {
+        // Reject malformed replay keys before writing a speculative MovieClip or
+        // building a continuity snapshot. Shared generation-job validation still
+        // enforces the identical 80-character limit at job creation.
+        if (idempotencyKey?.Trim().Length > 80)
+            throw new GenerationJobValidationException("IDEMPOTENCY_KEY_INVALID", "The idempotency key is too long.");
+
+        // This legacy path has no per-request retry-count or multi-pass upscale
+        // execution contract. Do not price work that the queued job cannot perform.
+        if (request.RetryAttempts != 0 || request.UpscalePasses != 0)
+            throw new GenerationJobValidationException(
+                "MOVIE_GENERATION_OPTIONS_UNSUPPORTED",
+                "This generation route does not support per-request retries or upscale pass counts.");
+
         if (!string.IsNullOrWhiteSpace(idempotencyKey))
         {
             var targetShotId = shot?.Id;
+            var normalizedIdempotencyKey = idempotencyKey.Trim();
             var existingClip = await db.MovieClips
                 .Include(item => item.GenerationJob)
                 .FirstOrDefaultAsync(item => item.MovieProjectId == movie.Id
@@ -1281,27 +1509,203 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                     && item.MovieShotId == targetShotId
                     && item.GenerationJob != null
                     && item.GenerationJob.CreatedByUserId == userId
-                    && item.GenerationJob.IdempotencyKey == idempotencyKey.Trim(), cancellationToken);
+                    && item.GenerationJob.IdempotencyKey == normalizedIdempotencyKey, cancellationToken);
             if (existingClip?.GenerationJob is not null)
+            {
+                // The linked-clip fast path must enforce the same request-identity
+                // boundary as job creation. Otherwise, reusing a key with a
+                // different title silently returns the first user's generation.
+                if (!MovieStudioIdempotency.TryGetMovieClipId(existingClip.GenerationJob.InputJson, out var linkedTargetClipId)
+                    || linkedTargetClipId != existingClip.Id
+                    || !MovieStudioIdempotency.MatchesRequest(existingClip.GenerationJob, movie, scene, shot, request)
+                    || !await LegacyContinuityMatchesAsync(existingClip.GenerationJob, movie, scene, shot, cancellationToken))
+                    throw new GenerationJobValidationException("IDEMPOTENCY_KEY_REUSED", "This idempotency key was already used for a different generation request.");
                 return new MovieStudioGenerationResponse(
                     await GetAsync(userId, movie.Id, cancellationToken) ?? throw new InvalidOperationException("Movie project disappeared."),
                     GenerationJobContractMapper.ToMovieDto(existingClip.GenerationJob),
                     existingClip.Id);
+            }
+
+            // A concurrent request can observe the canonical job after its
+            // transaction commits but before the winning request links the clip.
+            // Resolve that state before building a new continuity snapshot or
+            // speculative clip; the clip id is part of the job input fingerprint.
+            var existingJob = await db.GenerationJobs.AsNoTracking()
+                .FirstOrDefaultAsync(item => item.CreatedByUserId == userId && item.IdempotencyKey == normalizedIdempotencyKey, cancellationToken);
+            if (existingJob is not null)
+            {
+                MovieGenerationInput? existingInput;
+                try { existingInput = JsonSerializer.Deserialize<MovieGenerationInput>(existingJob.InputJson); }
+                catch (JsonException) { existingInput = null; }
+                if (existingInput is null
+                    || !MovieStudioIdempotency.MatchesRequest(existingJob, movie, scene, shot, request, existingInput)
+                    || !await LegacyContinuityMatchesAsync(existingJob, movie, scene, shot, cancellationToken))
+                    throw new GenerationJobValidationException("IDEMPOTENCY_KEY_REUSED", "This idempotency key was already used for a different generation request.");
+                var canonicalClip = await db.MovieClips.SingleOrDefaultAsync(item => item.Id == existingInput.MovieClipId && item.MovieProjectId == movie.Id, cancellationToken);
+                if (canonicalClip is null)
+                    throw new MovieStudioValidationException("The idempotent generation target is no longer available.");
+                // A job-first replay may repair a missing link, but it must never
+                // adopt a clip already attached to a different generation job.
+                // Otherwise, the response can pair one job's pricing/reservation
+                // with another job's clip and falsely report an idempotent replay.
+                if (!MovieStudioIdempotency.IsCompatibleClipLink(canonicalClip.GenerationJobId, existingJob.Id))
+                    throw new GenerationJobValidationException(
+                        "IDEMPOTENCY_KEY_REUSED",
+                        "The idempotent generation clip is linked to a different job.");
+                if (canonicalClip.GenerationJobId is null)
+                {
+                    canonicalClip.GenerationJobId = existingJob.Id;
+                    canonicalClip.UpdatedAt = DateTime.UtcNow;
+                    await db.SaveChangesAsync(cancellationToken);
+                }
+                return new MovieStudioGenerationResponse(
+                    await GetAsync(userId, movie.Id, cancellationToken) ?? throw new InvalidOperationException("Movie project disappeared."),
+                    GenerationJobContractMapper.ToMovieDto(existingJob),
+                    canonicalClip.Id);
+            }
         }
+        if (shot is not null)
+        {
+            // Canonical idempotent retries return above before mutable shot readiness
+            // can make a previously accepted request unreplayable.
+            var readiness = MovieShotReadiness.Evaluate(shot);
+            if (!readiness.Ready)
+                throw new MovieStudioValidationException($"Shot is not ready for generation. {readiness.Summary}");
+            await referenceReadiness.EnsureCanGenerateAsync(
+                userId,
+                shot.Id,
+                allowOverride: request.AllowReferenceReadinessOverride,
+                overrideReason: request.ReferenceReadinessOverrideReason,
+                source: MovieReferenceReadinessOverrideSources.LegacyShotGeneration,
+                cancellationToken: cancellationToken,
+                persistOverride: false);
+        }
+        // This legacy scene/shot route sends exactly one provider video job. It
+        // has no native-to-upscaled transfer or post-provider upscaling executor.
+        // Reject those options before estimating cost, persisting a clip or
+        // reserving usage, rather than charging for an unsupported processing path.
+        if (request.UpscalingRequested
+            || !string.IsNullOrWhiteSpace(request.ProcessingPath)
+                && !string.Equals(request.ProcessingPath.Trim(), "native", StringComparison.OrdinalIgnoreCase))
+            throw new GenerationJobValidationException(
+                "MOVIE_GENERATION_OPTIONS_UNSUPPORTED",
+                "This generation route does not support upscaling or non-native processing paths.");
+
         var description = shot?.Description ?? scene.Summary;
-        var durationSeconds = Math.Clamp(shot?.DurationSeconds ?? scene.DurationSeconds ?? Math.Min(movie.DurationSeconds, 60), 1, 3600);
+        var durationSeconds = shot?.DurationSeconds ?? scene.DurationSeconds ?? Math.Min(movie.DurationSeconds, 60);
+        // A single clip must not silently inherit a shortened duration from
+        // Math.Clamp. A 7,200-second movie is allowed, but an oversized shot
+        // must be split into provider-supported clips, not truncated to 3,600.
+        // Reject malformed legacy timing before pricing or persisting anything.
+        if (durationSeconds is < 1 or > 3600)
+            throw new GenerationJobValidationException(
+                "MOVIE_CLIP_DURATION_UNSUPPORTED",
+                "A single clip must last between 1 and 3600 seconds. Split longer scenes into shorter shots.");
+        // This route submits exactly one scene/shot clip, not the whole planned
+        // movie. Check the actual selected adapter before cost confirmation,
+        // speculative clip persistence, usage reservation or provider submission.
+        // Unrecognized adapters fail closed instead of guessing their limits.
+        if (!provider.IsAvailable
+            || !provider.SupportedOperations.Contains(MovieStudioOperations.SceneClip, StringComparer.OrdinalIgnoreCase))
+            throw new GenerationJobValidationException(
+                "MOVIE_PROVIDER_UNAVAILABLE",
+                "The selected video provider is unavailable for scene or shot generation.");
+        if (provider.SceneClipDurationRange is not { } clipDurationRange
+            || !clipDurationRange.Supports(durationSeconds))
+            throw new GenerationJobValidationException(
+                "MOVIE_CLIP_DURATION_UNSUPPORTED",
+                "The selected video provider cannot generate a single clip of this duration. Use a supported duration or split the scene into smaller shots.");
+        var sourceResolution = request.SourceResolution ?? "1080p";
+        var targetResolution = request.TargetResolution ?? "1080p";
+        var qualityTier = request.QualityTier ?? movie.QualityLevel;
+        var processingPath = request.ProcessingPath ?? "native";
+        if (!provider.SupportsSceneClipCostIntent(sourceResolution, targetResolution,
+                qualityTier, processingPath, movie.AspectRatio))
+            throw new GenerationJobValidationException(
+                "MOVIE_CLIP_EXECUTION_INTENT_UNSUPPORTED",
+                "This provider cannot guarantee the requested resolution, quality and processing profile. Choose a supported output profile.");
+        var providerModelKey = MovieStudioHelpers.Clean(provider.SceneClipPricingModelKey);
+        if (string.IsNullOrWhiteSpace(providerModelKey))
+            throw new GenerationJobValidationException(
+                "MOVIE_PROVIDER_MODEL_UNVERIFIED",
+                "The selected video adapter has not declared an exact model key for pricing this Movie clip.");
+        if ((!string.IsNullOrWhiteSpace(request.ExpectedProviderKey)
+                || !string.IsNullOrWhiteSpace(request.ExpectedProviderModelKey))
+            && (string.IsNullOrWhiteSpace(request.ExpectedProviderKey)
+                || string.IsNullOrWhiteSpace(request.ExpectedProviderModelKey)
+                || !string.Equals(request.ExpectedProviderKey.Trim(), provider.Key, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(request.ExpectedProviderModelKey.Trim(), providerModelKey, StringComparison.OrdinalIgnoreCase)))
+            throw new GenerationJobValidationException(
+                "MOVIE_SCENE_QUOTE_STALE",
+                "The selected video adapter or model changed after the price preview. Preview and confirm the current quote again.");
+        // Scene and shot JSON are also sent to the video adapter. Checking only
+        // the readable description could reserve usage for a request whose
+        // required structured direction already exceeds the provider limit.
+        // Cache exactly the same payloads we persist on the generation job so
+        // admission and execution cannot disagree about their lengths.
+        var sceneSnapshot = SceneSnapshot(scene);
+        var shotSnapshot = shot is null ? null : ShotSnapshot(shot);
+        // Capture before estimating cost. Manus includes this snapshot in its
+        // billable prompt, so its size must be admitted before usage is reserved.
+        // Reuse exactly this snapshot in the queued job to prevent drift.
+        var worldContextSnapshot = await WorldContextSnapshotAsync(movie.Id, scene.Id, shot?.Id, cancellationToken);
+        // Provider-specific headings and continuity snapshots add more text;
+        // this conservative lower bound rejects certain overflow before
+        // estimation, job creation, or any usage reservation.
+        var minimumCreativePromptLength = (long)description.Trim().Length
+            + (string.IsNullOrWhiteSpace(movie.Style) ? 0 : movie.Style.Trim().Length)
+            + (string.IsNullOrWhiteSpace(movie.AdditionalInstructions) ? 0 : movie.AdditionalInstructions.Trim().Length)
+            + sceneSnapshot.Length
+            + (shotSnapshot?.Length ?? 0)
+            + (provider.SceneClipWorldContextInPrompt ? worldContextSnapshot.Trim().Length : 0)
+            + Math.Max(0, provider.SceneClipPromptFormattingOverheadCharacters);
+        if (provider.SceneClipPromptMaxCharacters is { } promptCapacity
+            && minimumCreativePromptLength > promptCapacity)
+            throw new GenerationJobValidationException(
+                "MOVIE_CLIP_PROMPT_UNSUPPORTED",
+                "The scene or shot description exceeds this provider's prompt limit. Shorten the description before generating.");
+
+        // The character-continuity payload is part of the eventual provider
+        // prompt, but is generated separately from scene/shot direction.
+        // Preview it without persisting a snapshot: an oversized character
+        // bible must not trigger a priced admission or an orphan snapshot.
+        var continuityPromptPreview = await continuity.BuildSnapshotForTargetAsync(
+            movie.Id, scene.Id, shot?.Id, false, cancellationToken);
+        if (provider.SceneClipPromptMaxCharacters is { } continuityPromptCapacity
+            && minimumCreativePromptLength + continuityPromptPreview.SnapshotJson.Trim().Length > continuityPromptCapacity)
+            throw new GenerationJobValidationException(
+                "MOVIE_CLIP_PROMPT_UNSUPPORTED",
+                "The clip's character-continuity context exceeds this provider's prompt limit. Shorten the continuity details before generating.");
+
+        if (string.IsNullOrWhiteSpace(request.ExpectedProviderKey)
+            || string.IsNullOrWhiteSpace(request.ExpectedProviderModelKey)
+            || !request.ExpectedProviderCostUsd.HasValue)
+            throw new GenerationJobValidationException(
+                "MOVIE_SCENE_QUOTE_REQUIRED",
+                "Preview and confirm the current provider, model and maximum USD price before queueing a new scene or shot clip.");
+        if (!request.ConfirmationAccepted)
+            throw new GenerationJobValidationException(
+                "MOVIE_SCENE_QUOTE_CONFIRMATION_REQUIRED",
+                "Explicitly confirm the current maximum USD price before queueing a new scene or shot clip.");
+
         var estimate = await movieCostEstimator.EstimateAsync(
             new MovieGenerationCostRequest(
                 durationSeconds,
-                request.SourceResolution ?? "1080p",
-                request.TargetResolution ?? "1080p",
-                request.QualityTier ?? movie.QualityLevel,
-                request.ProcessingPath ?? "native",
+                sourceResolution,
+                targetResolution,
+                qualityTier,
+                processingPath,
                 request.RetryAttempts,
                 request.UpscalingRequested,
                 request.UpscalePasses),
             provider.Key,
+            selectedModelKey: providerModelKey,
             cancellationToken: cancellationToken);
+        if (request.ExpectedProviderCostUsd is { } expectedProviderCostUsd
+            && estimate.MaximumAmountUsd != expectedProviderCostUsd)
+            throw new GenerationJobValidationException(
+                "MOVIE_SCENE_QUOTE_STALE",
+                "The estimated price changed after the preview. Preview and confirm the current quote again.");
         // This legacy scene/shot path previously queued paid generation without any
         // cost decision. It now applies the same shared guardrail as the production
         // orchestrator so an unavailable or unconfirmed estimate never queues a job.
@@ -1316,6 +1720,17 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
             throw new MovieStudioCostGuardException(
                 costPreflight.RejectionCode ?? "GENERATION_CONFIRMATION_REQUIRED",
                 costPreflight.RejectionMessage ?? "Confirm the generation cost before queueing this clip.");
+        // Persist only after the provider/model/amount quote is accepted. This
+        // audit records the user's confirmed override attempt, not job completion.
+        if (shot is not null && request.AllowReferenceReadinessOverride)
+            await referenceReadiness.EnsureCanGenerateAsync(
+                userId,
+                shot.Id,
+                allowOverride: true,
+                overrideReason: request.ReferenceReadinessOverrideReason,
+                source: MovieReferenceReadinessOverrideSources.LegacyShotGeneration,
+                cancellationToken: cancellationToken,
+                persistOverride: true);
         var now = DateTime.UtcNow;
         var clip = new MovieClip
         {
@@ -1329,15 +1744,37 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
             CreatedAt = now,
             UpdatedAt = now,
         };
-        var continuitySnapshot = await continuity.BuildSnapshotForTargetAsync(movie.Id, scene.Id, shot?.Id, true, cancellationToken);
+        var maximumContinuityPromptCharacters = provider.SceneClipPromptMaxCharacters is { } currentPromptLimit
+            ? (int)Math.Max(0L, (long)currentPromptLimit - minimumCreativePromptLength)
+            : (int?)null;
+        MovieCharacterContinuitySnapshotDto continuitySnapshot;
+        try
+        {
+            continuitySnapshot = await continuity.BuildSnapshotForTargetAsync(
+                movie.Id,
+                scene.Id,
+                shot?.Id,
+                persist: true,
+                cancellationToken: cancellationToken,
+                maximumPromptCharacters: maximumContinuityPromptCharacters);
+        }
+        catch (MovieContinuityPromptLimitException)
+        {
+            throw new GenerationJobValidationException(
+                "MOVIE_CLIP_PROMPT_UNSUPPORTED",
+                "The clip's character-continuity context exceeds this provider's prompt limit. Shorten the continuity details before generating.");
+        }
         clip.ContinuitySnapshotJson = continuitySnapshot.SnapshotJson;
         clip.ContinuitySnapshotId = continuitySnapshot.SnapshotId;
         clip.ContinuitySnapshotVersion = continuitySnapshot.Version;
         clip.ContinuitySnapshotHash = continuitySnapshot.SnapshotHash;
         db.MovieClips.Add(clip);
         await db.SaveChangesAsync(cancellationToken);
-        var job = await jobs.CreateAsync(userId, new CreateGenerationJobRequest
+        GenerationJob job;
+        try
         {
+            job = await jobs.CreateAsync(userId, new CreateGenerationJobRequest
+            {
             WorkspaceId = movie.WorkspaceId,
             ProjectId = movie.ProjectId,
             JobType = shot is null ? GenerationJobTypes.MovieClipGenerate : GenerationJobTypes.MovieClipGenerate,
@@ -1358,16 +1795,152 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                 movie.Language,
                 movie.AdditionalInstructions,
                 clip.ContinuitySnapshotJson,
-                SceneSnapshot(scene),
-                shot is null ? null : ShotSnapshot(shot),
-                WorldContextJson: await WorldContextSnapshotAsync(movie.Id, scene.Id, shot?.Id, cancellationToken))),
-        }, cancellationToken, idempotencyKey);
+                sceneSnapshot,
+                shotSnapshot,
+                WorldContextJson: worldContextSnapshot,
+                SourceResolution: sourceResolution,
+                TargetResolution: targetResolution,
+                QualityTier: qualityTier,
+                ProcessingPath: processingPath,
+                UpscalingRequested: request.UpscalingRequested,
+                SelectedProviderKey: provider.Key,
+                SelectedProviderModelKey: providerModelKey)),
+            }, cancellationToken, idempotencyKey);
+        }
+        catch (GenerationJobValidationException exception) when (exception.Code == "IDEMPOTENCY_KEY_REUSED" && !string.IsNullOrWhiteSpace(idempotencyKey))
+        {
+            var canonicalJob = await db.GenerationJobs.AsNoTracking()
+                .FirstOrDefaultAsync(item => item.CreatedByUserId == userId && item.IdempotencyKey == idempotencyKey.Trim(), cancellationToken);
+            MovieGenerationInput? canonicalInput = null;
+            if (canonicalJob is not null)
+            {
+                try { canonicalInput = JsonSerializer.Deserialize<MovieGenerationInput>(canonicalJob.InputJson); }
+                catch (JsonException) { }
+            }
+            if (canonicalJob is null
+                || canonicalInput is null
+                || !MovieStudioIdempotency.MatchesRequest(canonicalJob, movie, scene, shot, request, canonicalInput)
+                || !await LegacyContinuityMatchesAsync(canonicalJob, movie, scene, shot, cancellationToken))
+            {
+                // A competing, different request may commit its job after our
+                // initial key lookup. Do not strand this request's persisted
+                // speculative clip when its idempotency fingerprint conflicts.
+                db.MovieClips.Remove(clip);
+                await db.SaveChangesAsync(CancellationToken.None);
+                throw;
+            }
+            var canonicalClip = await db.MovieClips.SingleOrDefaultAsync(item => item.Id == canonicalInput.MovieClipId && item.MovieProjectId == movie.Id, cancellationToken);
+            if (canonicalClip is null)
+            {
+                // The winning job's original clip may have been removed while
+                // this request was being queued. Do not strand our speculative
+                // clip without a valid canonical generation target.
+                db.MovieClips.Remove(clip);
+                await db.SaveChangesAsync(CancellationToken.None);
+                throw new MovieStudioValidationException("The idempotent generation target is no longer available.");
+            }
+            if (!MovieStudioIdempotency.IsCompatibleClipLink(canonicalClip.GenerationJobId, canonicalJob.Id))
+            {
+                // The job-creation collision path must respect the same clip/job
+                // identity boundary as the earlier job-first replay path.
+                db.MovieClips.Remove(clip);
+                await db.SaveChangesAsync(CancellationToken.None);
+                throw new GenerationJobValidationException(
+                    "IDEMPOTENCY_KEY_REUSED",
+                    "The idempotent generation clip is linked to a different job.");
+            }
+            if (canonicalClip.GenerationJobId is null)
+                canonicalClip.GenerationJobId = canonicalJob.Id;
+            db.MovieClips.Remove(clip);
+            await db.SaveChangesAsync(cancellationToken);
+            return new MovieStudioGenerationResponse(
+                await GetAsync(userId, movie.Id, cancellationToken) ?? throw new InvalidOperationException("Movie project disappeared."),
+                GenerationJobContractMapper.ToMovieDto(canonicalJob),
+                canonicalClip.Id);
+        }
+        catch
+        {
+            // CreateAsync commits the job, usage reservation, and queue entry in
+            // one transaction. Any failure leaves this speculative clip unused.
+            db.MovieClips.Remove(clip);
+            await db.SaveChangesAsync(CancellationToken.None);
+            throw;
+        }
+        // The clip is persisted before the job because the job validator needs a
+        // durable target. When two identical requests cross that boundary, the
+        // generation service correctly returns the winner's job to the loser.
+        // Reconcile the loser back to the winner's clip instead of linking the
+        // same job to a second clip row.
+        if (MovieStudioIdempotency.TryGetMovieClipId(job.InputJson, out var canonicalClipId) && canonicalClipId != clip.Id)
+        {
+            if (!await LegacyContinuityMatchesAsync(job, movie, scene, shot, cancellationToken))
+            {
+                db.MovieClips.Remove(clip);
+                await db.SaveChangesAsync(CancellationToken.None);
+                throw new GenerationJobValidationException("IDEMPOTENCY_KEY_REUSED",
+                    "This idempotency key was already used for a different generation request.");
+            }
+            var canonicalClip = await db.MovieClips.SingleOrDefaultAsync(
+                item => item.Id == canonicalClipId && item.MovieProjectId == movie.Id,
+                cancellationToken);
+            if (canonicalClip is null)
+            {
+                // The winning job's original clip may have been removed while
+                // this request was being queued. Do not strand our speculative
+                // clip without a valid canonical generation target.
+                db.MovieClips.Remove(clip);
+                await db.SaveChangesAsync(CancellationToken.None);
+                throw new MovieStudioValidationException("The idempotent generation target is no longer available.");
+            }
+            if (!MovieStudioIdempotency.IsCompatibleClipLink(canonicalClip.GenerationJobId, job.Id))
+            {
+                // A successful idempotent job response must not silently pair
+                // another generation job's clip with this job's usage reservation.
+                db.MovieClips.Remove(clip);
+                await db.SaveChangesAsync(CancellationToken.None);
+                throw new GenerationJobValidationException(
+                    "IDEMPOTENCY_KEY_REUSED",
+                    "The idempotent generation clip is linked to a different job.");
+            }
+            if (canonicalClip.GenerationJobId is null)
+            {
+                canonicalClip.GenerationJobId = job.Id;
+                canonicalClip.UpdatedAt = DateTime.UtcNow;
+            }
+            db.MovieClips.Remove(clip);
+            await db.SaveChangesAsync(cancellationToken);
+            return new MovieStudioGenerationResponse(
+                await GetAsync(userId, movie.Id, cancellationToken) ?? throw new InvalidOperationException("Movie project disappeared."),
+                GenerationJobContractMapper.ToMovieDto(job),
+                canonicalClip.Id);
+        }
         // CreateAsync queues immediately; the worker may claim the job before this
         // context links the clip. Do not keep a stale tracked job row in this save.
         db.Entry(job).State = EntityState.Detached;
         clip.GenerationJobId = job.Id;
         await db.SaveChangesAsync(cancellationToken);
         return new MovieStudioGenerationResponse(await GetAsync(userId, movie.Id, cancellationToken) ?? throw new InvalidOperationException("Movie project disappeared."), GenerationJobContractMapper.ToMovieDto(job), clip.Id);
+    }
+
+    // Legacy scene/shot clips persist the character-continuity snapshot in
+    // ContinuityGuideJson. Replaying a priced job after editing a relevant
+    // character card must not silently reuse a video with stale continuity.
+    // This preview is read-only and cannot reserve usage or call a provider.
+    private async Task<bool> LegacyContinuityMatchesAsync(
+        GenerationJob job, MovieProject movie, MovieScene scene, MovieShot? shot,
+        CancellationToken cancellationToken)
+    {
+        MovieGenerationInput? input;
+        try { input = JsonSerializer.Deserialize<MovieGenerationInput>(job.InputJson); }
+        catch (JsonException) { return false; }
+        if (input is null) return false;
+        // Older serialized jobs without this optional field retain their
+        // original replay semantics rather than being retroactively invalidated.
+        if (input.ContinuityGuideJson is null) return true;
+
+        var current = await continuity.BuildSnapshotForTargetAsync(
+            movie.Id, scene.Id, shot?.Id, persist: false, cancellationToken);
+        return string.Equals(input.ContinuityGuideJson, current.SnapshotJson, StringComparison.Ordinal);
     }
 
     private IQueryable<MovieProject> Query() => db.MovieProjects.AsNoTracking().AsSplitQuery()
@@ -1523,8 +2096,8 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         var snapshot = await worldContinuity.ProjectAsync(movieProjectId, sceneId, shotId, cancellationToken);
         return snapshot?.ToJson() ?? "{}";
     }
-    private static string SceneSnapshot(MovieScene scene) => JsonSerializer.Serialize(new { scene.Id, scene.Sequence, scene.Title, scene.Summary, scene.DurationSeconds, scene.ContinuityNotes, scene.Narration, scene.Dialogue });
-    private static string ShotSnapshot(MovieShot shot)
+    internal static string SceneSnapshot(MovieScene scene) => JsonSerializer.Serialize(new { scene.Id, scene.Sequence, scene.Title, scene.Summary, scene.DurationSeconds, scene.ContinuityNotes, scene.Narration, scene.Dialogue });
+    internal static string ShotSnapshot(MovieShot shot)
     {
         var profile = MovieShotQualityRequirementsPlanner.TryParse(shot.QualityRequirementsJson, out var stored) && stored is not null
             ? stored
@@ -1821,6 +2394,120 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
     };
 }
 
+internal static class MovieStudioIdempotency
+{
+    // Reuse a persisted clip only when it is unlinked (recoverable job-first
+    // window) or already linked to this exact generation job. Shared by all
+    // fast-path, exception and post-creation replay reconciliation branches.
+    internal static bool IsCompatibleClipLink(Guid? linkedJobId, Guid canonicalJobId) =>
+        !linkedJobId.HasValue || linkedJobId.Value == canonicalJobId;
+
+    internal static bool MatchesRequest(
+        GenerationJob job,
+        MovieProject movie,
+        MovieScene scene,
+        MovieShot? shot,
+        MovieStudioGenerationRequest request,
+        MovieGenerationInput? knownInput = null)
+    {
+        MovieGenerationInput? input = knownInput;
+        if (input is null)
+        {
+            try { input = JsonSerializer.Deserialize<MovieGenerationInput>(job.InputJson); }
+            catch (JsonException) { return false; }
+        }
+        if (input is null) return false;
+
+        static string Normalized(string? value, string fallback) =>
+            (string.IsNullOrWhiteSpace(value) ? fallback : value.Trim()).ToLowerInvariant();
+
+        // A replay after a scene/shot duration edit is a different provider-cost
+        // intent, even when the caller reuses the same key and title.
+        // Compare the source timing without clamping: changing a 3,600-second
+        // clip to 7,200 seconds cannot replay the earlier priced job.
+        var effectiveDurationSeconds =
+            shot?.DurationSeconds ?? scene.DurationSeconds ?? Math.Min(movie.DurationSeconds, 60);
+        var title = string.IsNullOrWhiteSpace(request.Title) ? movie.Title : request.Title.Trim();
+        return input.Operation == MovieStudioOperations.SceneClip
+            && input.MovieProjectId == movie.Id
+            && input.MovieSceneId == scene.Id
+            && input.MovieShotId == shot?.Id
+            && input.DurationSeconds == effectiveDurationSeconds
+            // An edited scene/shot or movie direction is a different generation
+            // request even when its duration, price settings and title match.
+            && string.Equals(input.Description, shot?.Description ?? scene.Summary, StringComparison.Ordinal)
+            // The provider receives the serialized scene/shot directions too.
+            // Reusing a key after changing those inputs must not silently
+            // return the old clip or accept the old usage reservation.
+            && string.Equals(input.SceneJson, MovieStudioService.SceneSnapshot(scene), StringComparison.Ordinal)
+            && (shot is null
+                ? string.IsNullOrEmpty(input.ShotJson)
+                : string.Equals(
+                    NormalizeShotWorkflowState(input.ShotJson),
+                    NormalizeShotWorkflowState(MovieStudioService.ShotSnapshot(shot)),
+                    StringComparison.Ordinal))
+            && string.Equals(input.AspectRatio, movie.AspectRatio, StringComparison.Ordinal)
+            && string.Equals(input.Style, movie.Style, StringComparison.Ordinal)
+            && string.Equals(input.Language, movie.Language, StringComparison.Ordinal)
+            && string.Equals(input.AdditionalInstructions, movie.AdditionalInstructions, StringComparison.Ordinal)
+            && string.Equals(job.Title, title, StringComparison.Ordinal)
+            && Normalized(input.SourceResolution, "1080p") == Normalized(request.SourceResolution, "1080p")
+            && Normalized(input.TargetResolution, "1080p") == Normalized(request.TargetResolution, "1080p")
+            && Normalized(input.QualityTier, movie.QualityLevel) == Normalized(request.QualityTier, movie.QualityLevel)
+            && Normalized(input.ProcessingPath, "native") == Normalized(request.ProcessingPath, "native")
+            && input.UpscalingRequested == request.UpscalingRequested
+            && (string.IsNullOrWhiteSpace(request.ExpectedProviderKey)
+                || string.Equals(input.SelectedProviderKey, request.ExpectedProviderKey.Trim(), StringComparison.OrdinalIgnoreCase))
+            && (string.IsNullOrWhiteSpace(request.ExpectedProviderModelKey)
+                || string.Equals(input.SelectedProviderModelKey, request.ExpectedProviderModelKey.Trim(), StringComparison.OrdinalIgnoreCase))
+            && (!request.ExpectedProviderCostUsd.HasValue
+                || request.ExpectedProviderCostUsd.Value == job.EstimatedProviderCostUsd);
+    }
+
+    private static string NormalizeShotWorkflowState(string? snapshotJson)
+    {
+        if (string.IsNullOrWhiteSpace(snapshotJson)) return snapshotJson ?? string.Empty;
+        try
+        {
+            var snapshot = JsonNode.Parse(snapshotJson);
+            if (snapshot is JsonObject shotSnapshot
+                && shotSnapshot["productionContract"] is JsonObject productionContract)
+            {
+                // Workflow admission can change after a canonical job is accepted.
+                // It does not change the rendered shot content; all other serialized
+                // shot and production-contract fields remain part of replay identity.
+                productionContract.Remove("Status");
+                productionContract.Remove("PlanningStatus");
+                productionContract.Remove("status");
+                productionContract.Remove("planningStatus");
+            }
+            return snapshot?.ToJsonString() ?? snapshotJson;
+        }
+        catch (JsonException)
+        {
+            return snapshotJson;
+        }
+    }
+
+    internal static bool TryGetMovieClipId(string? inputJson, out Guid clipId)
+    {
+        clipId = Guid.Empty;
+        if (string.IsNullOrWhiteSpace(inputJson)) return false;
+        try
+        {
+            var input = JsonSerializer.Deserialize<MovieGenerationInput>(inputJson);
+            // Never reconcile another Movie operation as a scene/shot clip, even when
+            // its serialized payload happens to carry a MovieClipId.
+            if (input is null || input.Operation != MovieStudioOperations.SceneClip || input.MovieClipId == Guid.Empty) return false;
+            clipId = input.MovieClipId;
+            return true;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+}
 public sealed class MovieStudioValidationException(string message) : Exception(message);
 /// <summary>
 /// Raised when the shared generation cost guardrail refuses to queue a paid movie

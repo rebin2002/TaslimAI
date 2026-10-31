@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using Taslim.Api.Domain;
 using Taslim.Api.Movies;
 using Xunit;
 
@@ -12,6 +13,84 @@ namespace Taslim.Api.Tests;
 public sealed class ManusMovieVideoProviderTests
 {
     private const string TaskId = "manus_task_123";
+
+
+    [Theory]
+    [InlineData("source-resolution")]
+    [InlineData("target-resolution")]
+    [InlineData("master-resolution")]
+    [InlineData("quality")]
+    [InlineData("processing")]
+    [InlineData("upscaling")]
+    [InlineData("first-frame")]
+    public async Task Quick_movie_rejects_unmapped_provider_intent_before_creating_a_Manus_task(string option)
+    {
+        // A Quick Movie request must not bypass the priced scene-clip guard.
+        // The fake transport ensures no billable Manus task is submitted.
+        var handler = new RecordingHandler(_ => throw new InvalidOperationException("No provider request allowed."));
+        var provider = CreateProvider(handler, EnabledOptions());
+        var baseline = Request() with { Operation = MovieStudioOperations.QuickMovie };
+        var request = option switch
+        {
+            "source-resolution" => baseline with { SourceResolution = "720p" },
+            "target-resolution" => baseline with { TargetResolution = "720p" },
+            "master-resolution" => baseline with { MasterResolution = "1080p" },
+            "quality" => baseline with { QualityTier = "Standard" },
+            "processing" => baseline with { ProcessingPath = "native" },
+            "upscaling" => baseline with { UpscalingRequested = true },
+            _ => baseline with { FirstFrameImageUri = "https://assets.example.test/frame.png" },
+        };
+
+        var error = await Assert.ThrowsAsync<MovieVideoProviderException>(() =>
+            provider.SubmitAsync(request, CancellationToken.None));
+
+        Assert.Equal(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, error.Code);
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
+    public async Task Unpriced_quick_movie_still_submits_with_fake_transport()
+    {
+        var handler = new RecordingHandler(_ => JsonResponse(JsonSerializer.Serialize(new { ok = true, task_id = TaskId })));
+        var provider = CreateProvider(handler, EnabledOptions());
+
+        var submitted = await provider.SubmitAsync(
+            Request() with { Operation = MovieStudioOperations.QuickMovie }, CancellationToken.None);
+
+        Assert.Equal(TaskId, submitted.ProviderJobId);
+        Assert.Single(handler.Requests);
+    }
+
+    [Fact]
+    public async Task Reference_package_rejects_before_manus_task_creation()
+    {
+        var handler = new RecordingHandler(_ => throw new InvalidOperationException("No provider request allowed."));
+        var provider = CreateProvider(handler, EnabledOptions());
+
+        var error = await Assert.ThrowsAsync<MovieVideoProviderException>(() => provider.SubmitAsync(
+            Request() with
+            {
+                ReferencePackageJson = "{\"schemaVersion\":1}",
+            }, CancellationToken.None));
+
+        Assert.Equal(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, error.Code);
+        Assert.False(provider.SupportsReferencePackageCostIntent);
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
+    public async Task Scene_clip_source_image_rejects_before_manus_task_creation()
+    {
+        var handler = new RecordingHandler(_ => throw new InvalidOperationException("No provider request allowed."));
+        var provider = CreateProvider(handler, EnabledOptions());
+
+        var error = await Assert.ThrowsAsync<MovieVideoProviderException>(() => provider.SubmitAsync(
+            Request(sourceImageUri: "https://assets.example.test/frame.png"), CancellationToken.None));
+
+        Assert.Equal(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, error.Code);
+        Assert.False(provider.SupportsSceneClipSourceImageCostIntent);
+        Assert.Empty(handler.Requests);
+    }
 
     [Fact]
     public async Task Disabled_configuration_never_calls_Manus_and_is_unavailable()
@@ -32,7 +111,11 @@ public sealed class ManusMovieVideoProviderTests
         var handler = new RecordingHandler(request => JsonResponse($"{{\"ok\":true,\"task_id\":\"{TaskId}\"}}"));
         var provider = CreateProvider(handler, EnabledOptions());
 
-        var submission = await provider.SubmitAsync(Request(sourceImageUri: "https://assets.example.test/frame.png"), CancellationToken.None);
+        var quickMovieRequest = Request(sourceImageUri: "https://assets.example.test/frame.png") with
+        {
+            Operation = MovieStudioOperations.QuickMovie,
+        };
+        var submission = await provider.SubmitAsync(quickMovieRequest, CancellationToken.None);
 
         Assert.Equal(TaskId, submission.ProviderJobId);
         var request = Assert.Single(handler.Requests);
@@ -48,6 +131,73 @@ public sealed class ManusMovieVideoProviderTests
         Assert.Contains("A camera moves slowly", content[0].GetProperty("text").GetString(), StringComparison.Ordinal);
         Assert.Equal("https://assets.example.test/frame.png", content[1].GetProperty("file_url").GetString());
         Assert.DoesNotContain("synthetic-manus-token", handler.RequestBodies.Single(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Character_continuity_text_is_forwarded_with_movie_guide_in_synthetic_prompt()
+    {
+        // The recording transport is local: this test never contacts Manus or
+        // creates a potentially billable task.
+        var handler = new RecordingHandler(_ => JsonResponse(JsonSerializer.Serialize(new
+        {
+            ok = true,
+            task_id = TaskId,
+        })));
+        var provider = CreateProvider(handler, EnabledOptions());
+        var characterContext = JsonSerializer.Serialize(new
+        {
+            name = "Liora",
+            lockedWardrobe = "blue coat",
+        });
+
+        await provider.SubmitAsync(Request() with
+        {
+            CharacterContinuityJson = characterContext,
+        }, CancellationToken.None);
+
+        using var payload = JsonDocument.Parse(Assert.Single(handler.RequestBodies));
+        var prompt = payload.RootElement.GetProperty("message")
+            .GetProperty("content")[0].GetProperty("text").GetString();
+        Assert.NotNull(prompt);
+        Assert.Contains("Continuity guide: Visual language: natural light", prompt, StringComparison.Ordinal);
+        Assert.Contains("Character continuity: ", prompt, StringComparison.Ordinal);
+        Assert.Contains(characterContext, prompt, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Declared_scene_clip_prompt_overhead_covers_all_adapter_added_text()
+    {
+        // No Manus task is created: the recording HTTP handler returns a synthetic
+        // response. Admission counts creative fields separately, so the declared
+        // formatting allowance must cover mandatory instructions, labels, and
+        // duration/aspect/language metadata before a usage reservation is made.
+        var handler = new RecordingHandler(_ => JsonResponse($"{{\"ok\":true,\"task_id\":\"{TaskId}\"}}"));
+        var provider = CreateProvider(handler, EnabledOptions());
+        var request = Request() with
+        {
+            DurationSeconds = 30,
+            Language = "zh-CN",
+            CharacterContinuityJson = JsonSerializer.Serialize(new { name = "Liora" }),
+            WorldContextJson = JsonSerializer.Serialize(new { location = "forest" }),
+        };
+
+        await provider.SubmitAsync(request, CancellationToken.None);
+
+        using var payload = JsonDocument.Parse(Assert.Single(handler.RequestBodies));
+        var prompt = payload.RootElement.GetProperty("message")
+            .GetProperty("content")[0].GetProperty("text").GetString()!;
+        var countedCreativeLength = request.Description.Trim().Length
+            + request.Style.Trim().Length
+            + request.AdditionalInstructions!.Trim().Length
+            + request.ContinuityGuideJson!.Trim().Length
+            + request.CharacterContinuityJson!.Trim().Length
+            + request.SceneJson!.Trim().Length
+            + request.ShotJson!.Trim().Length
+            + request.WorldContextJson!.Trim().Length;
+
+        Assert.InRange(prompt.Length - countedCreativeLength, 1,
+            provider.SceneClipPromptFormattingOverheadCharacters);
+        Assert.True(prompt.Length <= provider.SceneClipPromptMaxCharacters);
     }
 
     [Fact]

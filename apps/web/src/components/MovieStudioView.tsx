@@ -14,6 +14,20 @@ const styles = ["cinematic", "documentary", "animation", "commercial", "experime
 type MovieMode = "Quick" | "Full";
 const movieModes: readonly MovieMode[] = ["Quick", "Full"];
 
+// A Full Movie is a timeline plan, not one provider-submitted clip. Keep its
+// two-hour ceiling independent from the legacy Quick brief input limit.
+export function movieDraftDurationLimit(mode: MovieMode): number {
+  return mode === "Full" ? 7_200 : 3_600;
+}
+
+// Availability alone does not guarantee the configured adapter can perform
+// Quick Movie generation. A scene-clip-only adapter must not be advertised as
+// available for Quick Movie, even while full-film planning remains usable.
+export function isQuickMovieProviderReady(provider: MovieProviderReadiness | null): boolean {
+  return Boolean(provider?.ready
+    && provider.supportedOperations?.some((operation) => operation.toLowerCase() === "quick_movie"));
+}
+
 export function nextMovieMode(currentMode: MovieMode, key: string): MovieMode | null {
   const currentIndex = movieModes.indexOf(currentMode);
   if (key === "Home") return movieModes[0];
@@ -52,7 +66,10 @@ export function MovieStudioView() {
   const [job, setJob] = useState<GenerationJob | null>(null);
   const [error, setError] = useState("");
   const [working, setWorking] = useState(false);
-  const [form, setForm] = useState({ title: "", description: "", durationSeconds: 30, aspectRatio: "16:9", style: "cinematic", language: "en", projectId: searchParams.get("projectId") ?? "", additionalInstructions: "", visualLanguage: "", cameraLanguage: "", colorAndLighting: "", soundAndNarration: "", continuityRules: "" });
+  // Quick and Full are separate drafting workflows. Keep each duration when switching
+  // modes rather than leaving a two-hour Full timeline in an invalid Quick input.
+  const [durationByMode, setDurationByMode] = useState<Record<MovieMode, number>>({ Quick: 30, Full: 30 });
+  const [form, setForm] = useState({ title: "", description: "", aspectRatio: "16:9", style: "cinematic", language: "en", projectId: searchParams.get("projectId") ?? "", additionalInstructions: "", visualLanguage: "", cameraLanguage: "", colorAndLighting: "", soundAndNarration: "", continuityRules: "" });
 
   function handleModeKeyDown(event: KeyboardEvent<HTMLButtonElement>, currentMode: MovieMode) {
     const nextMode = nextMovieMode(currentMode, event.key);
@@ -73,6 +90,9 @@ export function MovieStudioView() {
   async function createMovie(event: FormEvent) {
     event.preventDefault();
     if (!workspace) return;
+    // POST /movie-studio/projects persists a draft and returns job:null for
+    // Quick and Full modes. Provider readiness must not block saving a brief.
+    // Future generation endpoints enforce provider/cost admission separately.
     setWorking(true);
     setError("");
     try {
@@ -82,7 +102,7 @@ export function MovieStudioView() {
         mode,
         title: form.title,
         description: form.description,
-        durationSeconds: Number(form.durationSeconds),
+        durationSeconds: durationByMode[mode],
         aspectRatio: form.aspectRatio,
         style: form.style,
         language: form.language,
@@ -133,7 +153,7 @@ export function MovieStudioView() {
         <div className="movie-section-heading"><span className="movie-step-index">01</span><div><p className="section-eyebrow">{t("movie.briefEyebrow")}</p><h2>{mode === "Quick" ? t("movieBody.quick.focused") : t("movieBody.quick.startPlan")}</h2></div></div>
         <label className="movie-field"><span>{t("movie.titleLabel")}</span><input value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} placeholder={t("movie.titlePlaceholder")} maxLength={160} required /></label>
         <label className="movie-field movie-field-large"><span>{t("movie.descriptionLabel")}</span><textarea value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} placeholder={t("movie.descriptionPlaceholder")} rows={6} maxLength={8000} required /><small>{form.description.length}/8000</small></label>
-        <div className="movie-control-grid"><label className="movie-field"><span>{t("movie.duration")}</span><div className="movie-input-with-suffix"><input type="number" min={1} max={3600} value={form.durationSeconds} onChange={(event) => setForm({ ...form, durationSeconds: Number(event.target.value) })} /><em>{t("movie.seconds")}</em></div></label><label className="movie-field"><span>{t("movie.aspect")}</span><select value={form.aspectRatio} onChange={(event) => setForm({ ...form, aspectRatio: event.target.value })}>{aspects.map((item) => <option key={item}>{item}</option>)}</select></label><label className="movie-field"><span>{t("movie.style")}</span><select value={form.style} onChange={(event) => setForm({ ...form, style: event.target.value })}>{styles.map((item) => <option key={item} value={item}>{t(`movie.style.${item}`)}</option>)}</select></label><label className="movie-field"><span>{t("movie.language")}</span><select value={form.language} onChange={(event) => setForm({ ...form, language: event.target.value })}><option value="en">English</option><option value="ar">العربية</option><option value="ku">کوردی</option></select></label></div>
+        <div className="movie-control-grid"><label className="movie-field"><span>{t("movie.duration")}</span><div className="movie-input-with-suffix"><input type="number" min={1} max={movieDraftDurationLimit(mode)} value={durationByMode[mode]} onChange={(event) => setDurationByMode((current) => ({ ...current, [mode]: Number(event.target.value) }))} /><em>{t("movie.seconds")}</em></div></label><label className="movie-field"><span>{t("movie.aspect")}</span><select value={form.aspectRatio} onChange={(event) => setForm({ ...form, aspectRatio: event.target.value })}>{aspects.map((item) => <option key={item}>{item}</option>)}</select></label><label className="movie-field"><span>{t("movie.style")}</span><select value={form.style} onChange={(event) => setForm({ ...form, style: event.target.value })}>{styles.map((item) => <option key={item} value={item}>{t(`movie.style.${item}`)}</option>)}</select></label><label className="movie-field"><span>{t("movie.language")}</span><select value={form.language} onChange={(event) => setForm({ ...form, language: event.target.value })}><option value="en">English</option><option value="ar">العربية</option><option value="ku">کوردی</option></select></label></div>
         <label className="movie-field"><span>{t("movie.project")}</span><select value={form.projectId} onChange={(event) => setForm({ ...form, projectId: event.target.value })}><option value="">{t("movie.noProject")}</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select><small>{t("movie.projectHint")}</small></label>
         <label className="movie-field"><span>{t("movie.instructions")}</span><textarea value={form.additionalInstructions} onChange={(event) => setForm({ ...form, additionalInstructions: event.target.value })} placeholder={t("movie.instructionsPlaceholder")} rows={3} maxLength={8000} /></label>
         {mode === "Full" && <div className="movie-continuity-form"><div className="movie-section-heading"><span className="movie-step-index">02</span><div><p className="section-eyebrow">{t("movie.guideEyebrow")}</p><h2>{t("movie.guideTitle")}</h2></div></div><p className="movie-field-note">{t("movie.guideIntro")}</p><div className="movie-control-grid"><label className="movie-field"><span>{t("movie.visualLanguage")}</span><input value={form.visualLanguage} onChange={(event) => setForm({ ...form, visualLanguage: event.target.value })} placeholder={t("movie.visualLanguagePlaceholder")} /></label><label className="movie-field"><span>{t("movie.cameraLanguage")}</span><input value={form.cameraLanguage} onChange={(event) => setForm({ ...form, cameraLanguage: event.target.value })} placeholder={t("movie.cameraLanguagePlaceholder")} /></label><label className="movie-field"><span>{t("movie.colorLighting")}</span><input value={form.colorAndLighting} onChange={(event) => setForm({ ...form, colorAndLighting: event.target.value })} placeholder={t("movie.colorLightingPlaceholder")} /></label><label className="movie-field"><span>{t("movie.soundNarration")}</span><input value={form.soundAndNarration} onChange={(event) => setForm({ ...form, soundAndNarration: event.target.value })} placeholder={t("movie.soundNarrationPlaceholder")} /></label></div><label className="movie-field"><span>{t("movie.continuityRules")}</span><textarea value={form.continuityRules} onChange={(event) => setForm({ ...form, continuityRules: event.target.value })} placeholder={t("movie.continuityRulesPlaceholder")} rows={3} /></label></div>}
@@ -148,5 +168,5 @@ function QuickMovieResult({ project, job, provider, onReset, t }: { project: Mov
   const status = quickStatus(job);
   const outputAssetId = readyAsset(project);
   const label = outputAssetId ? "Ready to review" : status === "empty" ? "Brief saved" : t(`movie.state.${status}`);
-  return <div className="movie-studio-page movie-quick-result"><div className="movie-quick-toolbar"><Link href="/create" className="movie-back-link">← {t("movie.backToStudios")}</Link><div><span>{t("movieBody.quick.brief")}</span><strong>{project.title}</strong></div><button type="button" className="movie-refine-button" onClick={onReset}>{t("movieBody.quick.createAnother")}</button></div><div className="movie-quick-layout"><main className="movie-quick-main"><span className="movie-workspace-kicker">{label}</span><h1>{project.title}</h1><p>{project.description}</p>{outputAssetId ? <div className="movie-quick-video"><video src={assetFileUrl(outputAssetId, true)} controls preload="metadata" aria-label={project.title} /><a href={assetFileUrl(outputAssetId)} className="movie-workspace-button is-primary"><Download size={14} /> {t("movieBody.quick.download")}</a></div> : <div className="movie-quick-empty"><Film size={24} /><strong>{status === "failed" ? t("movieBody.quick.noOutput") : t("movieBody.quick.willAppear")}</strong><p>{status === "failed" ? t("movieBody.quick.failedHint") : t("movieBody.quick.savedHint")}</p></div>}</main><aside className="movie-quick-inspector"><span className="movie-workspace-kicker">{t("movieBody.quick.brief")}</span><div><span>Format</span><strong>{project.aspectRatio}</strong></div><div><span>Duration</span><strong>{project.durationSeconds}s</strong></div><div><span>Style</span><strong>{project.style}</strong></div><div className="movie-quick-note"><span className="movie-live-dot" />{provider?.ready ? t("movieBody.quick.available") : t("movieBody.quick.unavailable")}</div></aside></div></div>;
+  return <div className="movie-studio-page movie-quick-result"><div className="movie-quick-toolbar"><Link href="/create" className="movie-back-link">← {t("movie.backToStudios")}</Link><div><span>{t("movieBody.quick.brief")}</span><strong>{project.title}</strong></div><button type="button" className="movie-refine-button" onClick={onReset}>{t("movieBody.quick.createAnother")}</button></div><div className="movie-quick-layout"><main className="movie-quick-main"><span className="movie-workspace-kicker">{label}</span><h1>{project.title}</h1><p>{project.description}</p>{outputAssetId ? <div className="movie-quick-video"><video src={assetFileUrl(outputAssetId, true)} controls preload="metadata" aria-label={project.title} /><a href={assetFileUrl(outputAssetId)} className="movie-workspace-button is-primary"><Download size={14} /> {t("movieBody.quick.download")}</a></div> : <div className="movie-quick-empty"><Film size={24} /><strong>{status === "failed" ? t("movieBody.quick.noOutput") : t("movieBody.quick.willAppear")}</strong><p>{status === "failed" ? t("movieBody.quick.failedHint") : t("movieBody.quick.savedHint")}</p></div>}</main><aside className="movie-quick-inspector"><span className="movie-workspace-kicker">{t("movieBody.quick.brief")}</span><div><span>Format</span><strong>{project.aspectRatio}</strong></div><div><span>Duration</span><strong>{project.durationSeconds}s</strong></div><div><span>Style</span><strong>{project.style}</strong></div><div className="movie-quick-note"><span className="movie-live-dot" />{isQuickMovieProviderReady(provider) ? t("movieBody.quick.available") : t("movieBody.quick.unavailable")}</div></aside></div></div>;
 }
