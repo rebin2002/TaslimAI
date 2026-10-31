@@ -7,6 +7,32 @@ using Taslim.Api.Persistence;
 namespace Taslim.Api.Autopilot;
 
 /// <summary>
+/// Collision-resistant stable identity shared by slot reservation and provider launch.
+/// Length-prefixing keeps the (wave, task) tuple unambiguous before hashing.
+/// </summary>
+public static class AutopilotGlobalTaskSlotIdentity
+{
+    public const string IdempotencyKeyPrefix = "autopilot:v2:";
+
+    public static string CreateIdempotencyKey(string waveKey, string taskKey)
+    {
+        if (string.IsNullOrWhiteSpace(waveKey)) throw new ArgumentException("Wave key is required.", nameof(waveKey));
+        if (string.IsNullOrWhiteSpace(taskKey)) throw new ArgumentException("Task key is required.", nameof(taskKey));
+
+        var waveBytes = System.Text.Encoding.UTF8.GetBytes(waveKey);
+        var taskBytes = System.Text.Encoding.UTF8.GetBytes(taskKey);
+        var material = new byte[sizeof(int) + waveBytes.Length + sizeof(int) + taskBytes.Length];
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32BigEndian(material.AsSpan(0, sizeof(int)), waveBytes.Length);
+        waveBytes.AsSpan().CopyTo(material.AsSpan(sizeof(int)));
+        var taskLengthOffset = sizeof(int) + waveBytes.Length;
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32BigEndian(material.AsSpan(taskLengthOffset, sizeof(int)), taskBytes.Length);
+        taskBytes.AsSpan().CopyTo(material.AsSpan(taskLengthOffset + sizeof(int)));
+        var digest = System.Security.Cryptography.SHA256.HashData(material);
+        return IdempotencyKeyPrefix + Convert.ToHexString(digest).ToLowerInvariant();
+    }
+}
+
+/// <summary>
 /// One entry from the authoritative, project-scoped Manus task listing. ScopeId
 /// is a stable Taslim ownership marker, not a user/API-key identity.
 /// </summary>
@@ -179,6 +205,7 @@ public static class AutopilotGlobalTaskSlotOutcomes
     public const string LaunchRejected = "launch_rejected";
     public const string AttemptsExhausted = "attempts_exhausted";
     public const string InvalidTransition = "invalid_transition";
+    public const string TerminalEvidenceInvalid = "terminal_evidence_invalid";
     public const string IdempotencyConflict = "idempotency_conflict";
     public const string ReservationUnavailable = "reservation_unavailable";
 }
@@ -266,9 +293,17 @@ public sealed class AutopilotGlobalTaskSlotAllocator
             if (task is null)
                 return new(AutopilotGlobalTaskSlotOutcomes.ReservationUnavailable, false, false, 0, ReasonCode: "launch_task_missing");
 
-            var expectedKey = AutopilotNextWavePolicy.LaunchIdempotencyKey(task.WaveKey, task.TaskKey);
+            var expectedKey = AutopilotGlobalTaskSlotIdentity.CreateIdempotencyKey(task.WaveKey, task.TaskKey);
             if (!string.Equals(expectedKey, idempotencyKey, StringComparison.Ordinal))
                 return new(AutopilotGlobalTaskSlotOutcomes.IdempotencyConflict, false, false, 0, ReasonCode: "launch_identity_mismatch");
+
+            var legacyKey = AutopilotNextWavePolicy.LaunchIdempotencyKey(task.WaveKey, task.TaskKey);
+            if (!string.Equals(legacyKey, expectedKey, StringComparison.Ordinal)
+                && inventory.ActiveTasks.Any(item => string.Equals(item.IdempotencyKey, legacyKey, StringComparison.Ordinal)
+                    && (string.IsNullOrWhiteSpace(task.ExternalTaskId)
+                        || !string.Equals(item.TaskId, task.ExternalTaskId, StringComparison.Ordinal))))
+                return new(AutopilotGlobalTaskSlotOutcomes.IdempotencyConflict, false, false, inventory.ActiveTasks.Count,
+                    ReasonCode: "legacy_idempotency_identity_ambiguous_requires_reconciliation");
 
             var duplicateDatabaseIdentity = await db.AutopilotWaveLaunchTasks.AsNoTracking()
                 .AnyAsync(item => item.Id != task.Id && item.WaveKey == task.WaveKey && item.TaskKey == task.TaskKey, cancellationToken);
@@ -319,36 +354,30 @@ public sealed class AutopilotGlobalTaskSlotAllocator
                 if (occupiedBeforeClaim >= capacity)
                     return new(AutopilotGlobalTaskSlotOutcomes.CapacityReached, false, false, occupiedBeforeClaim, ReasonCode: "global_taslim_slot_cap_reached");
 
-                if (staleUnreservedClaim && (!providerGuaranteesIdempotency || task.LaunchAttempt >= task.MaxLaunchAttempts))
+                if (staleUnreservedClaim)
                 {
-                    // The prior provider call may have been accepted but the
-                    // inventory may lag. Reserve conservatively and do not call
-                    // the provider until idempotency is verified by the caller.
+                    // A stale unmarked claim may predate this allocator and use
+                    // the legacy truncated key. Retain the slot, but do not retry
+                    // under a new key until authoritative reconciliation binds it.
                     task.ReasonCode = SlotReservedReason;
                     task.LastStatusDetail = "stale_preallocator_claim_held_for_reconciliation";
+                    task.UpdatedAt = UtcNow();
                     task.ConcurrencyToken = Guid.NewGuid();
                     await db.SaveChangesAsync(cancellationToken);
                     await transaction.CommitAsync(cancellationToken);
                     return new(task.LaunchAttempt >= task.MaxLaunchAttempts
                             ? AutopilotGlobalTaskSlotOutcomes.AttemptsExhausted
                             : AutopilotGlobalTaskSlotOutcomes.AmbiguousLaunch,
-                        true, false, occupiedBeforeClaim + 1, task.ExternalTaskId, "stale_claim_requires_idempotent_reconciliation");
+                        true, false, occupiedBeforeClaim + 1, task.ExternalTaskId, "stale_unmarked_claim_requires_reconciliation");
                 }
 
                 task.ReasonCode = SlotReservedReason;
-                task.LastStatusDetail = staleUnreservedClaim
-                    ? "stale_claim_retried_with_same_idempotency_key"
-                    : $"global_slot_claimed:{occupiedBeforeClaim + 1}/{capacity}";
-                if (staleUnreservedClaim)
-                {
-                    task.LaunchAttempt++;
-                    task.UpdatedAt = UtcNow();
-                }
+                task.LastStatusDetail = $"global_slot_claimed:{occupiedBeforeClaim + 1}/{capacity}";
                 task.ConcurrencyToken = Guid.NewGuid();
                 await db.SaveChangesAsync(cancellationToken);
                 await transaction.CommitAsync(cancellationToken);
                 return new(AutopilotGlobalTaskSlotOutcomes.Reserved, true, true, occupiedBeforeClaim + 1,
-                    ReasonCode: staleUnreservedClaim ? "stale_launch_retried_idempotently" : null);
+                    ReasonCode: null);
             }
 
             if (task.Status == AutopilotWaveLaunchStatuses.Launching && IsGlobalSlotReservation(task))
@@ -524,19 +553,19 @@ public sealed class AutopilotGlobalTaskSlotAllocator
     }
 
     /// <summary>
-    /// Releases exactly one durable slot only after the caller has verified
-    /// terminal evidence (for example, an authenticated signed completion event).
-    /// Replays with the same task identity are harmless.
+    /// Releases exactly one durable slot only when the persisted event is processed,
+    /// signature-verified, replay-protected, and bound to this wave/task plus its
+    /// stored external task ID. Replays with the same evidence are harmless.
     /// </summary>
     public async Task<AutopilotGlobalTaskSlotResult> CompleteVerifiedAsync(
         Guid launchTaskRowId,
         string idempotencyKey,
         string externalTaskId,
-        bool terminalEvidenceVerified,
+        Guid terminalEventId,
         CancellationToken cancellationToken = default)
     {
-        if (!terminalEvidenceVerified)
-            return new(AutopilotGlobalTaskSlotOutcomes.InvalidTransition, false, false, 0, ReasonCode: "terminal_evidence_not_verified");
+        if (terminalEventId == Guid.Empty)
+            return new(AutopilotGlobalTaskSlotOutcomes.TerminalEvidenceInvalid, false, false, 0, ReasonCode: "terminal_event_id_required");
         if (string.IsNullOrWhiteSpace(externalTaskId) || externalTaskId.Trim().Length > 200)
             return new(AutopilotGlobalTaskSlotOutcomes.InvalidTransition, false, false, 0, ReasonCode: "external_task_id_invalid");
 
@@ -550,9 +579,19 @@ public sealed class AutopilotGlobalTaskSlotAllocator
                 return new(AutopilotGlobalTaskSlotOutcomes.IdempotencyConflict, false, false, 0, ReasonCode: "launch_identity_mismatch");
 
             var externalId = externalTaskId.Trim();
-            if (task.ExternalTaskId is not null && !string.Equals(task.ExternalTaskId, externalId, StringComparison.Ordinal))
-                return new(AutopilotGlobalTaskSlotOutcomes.IdempotencyConflict, task.Status is AutopilotWaveLaunchStatuses.Launching or AutopilotWaveLaunchStatuses.Launched,
-                    false, 0, task.ExternalTaskId, "terminal_event_task_identity_mismatch");
+            if (string.IsNullOrWhiteSpace(task.ExternalTaskId)
+                || !string.Equals(task.ExternalTaskId, externalId, StringComparison.Ordinal))
+                return new(AutopilotGlobalTaskSlotOutcomes.TerminalEvidenceInvalid,
+                    task.Status is AutopilotWaveLaunchStatuses.Launching or AutopilotWaveLaunchStatuses.Launched,
+                    false, 0, task.ExternalTaskId, "external_task_identity_not_bound_to_launch_row");
+
+            var terminalEvent = await db.AutopilotEvents.AsNoTracking()
+                .SingleOrDefaultAsync(item => item.Id == terminalEventId, cancellationToken);
+            if (!HasBoundVerifiedCompletionEvidence(terminalEvent, task))
+                return new(AutopilotGlobalTaskSlotOutcomes.TerminalEvidenceInvalid,
+                    task.Status is AutopilotWaveLaunchStatuses.Launching or AutopilotWaveLaunchStatuses.Launched,
+                    false, 0, task.ExternalTaskId, "terminal_event_not_verified_for_launch_task");
+
             if (task.Status == AutopilotWaveLaunchStatuses.Completed)
                 return new(AutopilotGlobalTaskSlotOutcomes.DuplicateCompletion, false, false, 0, task.ExternalTaskId);
             if (task.Status != AutopilotWaveLaunchStatuses.Launching && task.Status != AutopilotWaveLaunchStatuses.Launched)
@@ -621,7 +660,7 @@ public sealed class AutopilotGlobalTaskSlotAllocator
                 && externalActiveIds.Contains(reservation.ExternalTaskId))
                 continue;
 
-            var key = AutopilotNextWavePolicy.LaunchIdempotencyKey(reservation.WaveKey, reservation.TaskKey);
+            var key = AutopilotGlobalTaskSlotIdentity.CreateIdempotencyKey(reservation.WaveKey, reservation.TaskKey);
             if (string.IsNullOrWhiteSpace(reservation.ExternalTaskId) && externalActiveKeys.Contains(key))
                 continue;
 
@@ -670,7 +709,38 @@ public sealed class AutopilotGlobalTaskSlotAllocator
     }
 
     private bool MatchesKey(AutopilotWaveLaunchTask task, string idempotencyKey) =>
-        string.Equals(AutopilotNextWavePolicy.LaunchIdempotencyKey(task.WaveKey, task.TaskKey), idempotencyKey, StringComparison.Ordinal);
+        string.Equals(AutopilotGlobalTaskSlotIdentity.CreateIdempotencyKey(task.WaveKey, task.TaskKey), idempotencyKey, StringComparison.Ordinal);
+
+    private static bool HasBoundVerifiedCompletionEvidence(AutopilotEvent? evidence, AutopilotWaveLaunchTask task)
+    {
+        if (evidence is null
+            || !string.Equals(evidence.EventType, AutopilotEventTypes.WaveTaskCompleted, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(evidence.Status, AutopilotEventStatuses.Processed, StringComparison.OrdinalIgnoreCase)
+            || !evidence.SignatureVerified
+            || !evidence.ReplayProtected
+            || evidence.ProcessedAt is null
+            || string.IsNullOrWhiteSpace(evidence.SourceSystem)
+            || string.IsNullOrWhiteSpace(evidence.ExternalEventId)
+            || string.IsNullOrWhiteSpace(evidence.IdempotencyKey)
+            || string.IsNullOrWhiteSpace(evidence.PayloadHash)
+            || !string.Equals(evidence.WaveKey, task.WaveKey, StringComparison.Ordinal)
+            || !string.Equals(evidence.TaskId, task.TaskKey, StringComparison.Ordinal)
+            || string.IsNullOrWhiteSpace(evidence.SignalJson))
+            return false;
+
+        try
+        {
+            var signal = System.Text.Json.JsonSerializer.Deserialize<AutopilotCompletionSignal>(evidence.SignalJson);
+            return signal is not null
+                && string.Equals(signal.WaveKey, task.WaveKey, StringComparison.Ordinal)
+                && string.Equals(signal.TaskId, task.TaskKey, StringComparison.Ordinal)
+                && AutopilotInputValidation.TryNormalizeOutcome(signal.Outcome, out _);
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return false;
+        }
+    }
 
     private static bool IsGlobalSlotReservation(AutopilotWaveLaunchTask task) =>
         task.Status == AutopilotWaveLaunchStatuses.Launched

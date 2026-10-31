@@ -58,6 +58,82 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task PostgreSql_fence_serializes_independent_allocator_contexts_when_ci_database_is_available()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("ConnectionStrings__Postgres");
+        if (string.IsNullOrWhiteSpace(baseConnectionString)) return;
+
+        var schemaName = $"slot_test_{Guid.NewGuid():N}";
+        var adminConnectionString = new Npgsql.NpgsqlConnectionStringBuilder(baseConnectionString)
+        {
+            Pooling = false,
+        }.ConnectionString;
+        await using (var connection = new Npgsql.NpgsqlConnection(adminConnectionString))
+        {
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = $"CREATE SCHEMA \"{schemaName}\"";
+            await command.ExecuteNonQueryAsync();
+        }
+
+        try
+        {
+            var scopedConnectionString = new Npgsql.NpgsqlConnectionStringBuilder(baseConnectionString)
+            {
+                SearchPath = schemaName,
+                Pooling = false,
+            }.ConnectionString;
+            var pgOptions = new DbContextOptionsBuilder<TaslimDbContext>()
+                .UseNpgsql(scopedConnectionString)
+                .Options;
+
+            await using (var db = new TaslimDbContext(pgOptions))
+                await db.Database.EnsureCreatedAsync();
+            var taskIds = await SeedLaunchTasksAsync(total: 21, initiallyActive: 0, contextOptions: pgOptions);
+            var results = await Task.WhenAll(taskIds.Select(id => ClaimAsync(id, CompleteInventory(), pgOptions)));
+
+            Assert.Equal(20, results.Count(item => item.Outcome == AutopilotGlobalTaskSlotOutcomes.Reserved));
+            Assert.Single(results, item => item.Outcome == AutopilotGlobalTaskSlotOutcomes.CapacityReached);
+            Assert.All(results, item => Assert.True(item.ActiveSlotsObserved <= AutopilotGlobalTaskSlotAllocator.HardMaximum));
+
+            await using (var verify = new TaslimDbContext(pgOptions))
+                Assert.Equal(20, await verify.AutopilotWaveLaunchTasks.CountAsync(item =>
+                    item.Status == AutopilotWaveLaunchStatuses.Launching || item.Status == AutopilotWaveLaunchStatuses.Launched));
+
+            const string externalId = "pg-external-task-0";
+            string completionKey;
+            await using (var db = new TaslimDbContext(pgOptions))
+            {
+                var task = await db.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskIds[0]);
+                completionKey = AutopilotGlobalTaskSlotIdentity.CreateIdempotencyKey(task.WaveKey, task.TaskKey);
+                var accepted = await CreateAllocator(db).RecordAcceptedAsync(taskIds[0], completionKey, externalId);
+                Assert.True(accepted.SlotHeld);
+            }
+
+            var completionEventId = await SeedCompletionEventAsync(taskIds[0], contextOptions: pgOptions);
+            var completions = await Task.WhenAll(Enumerable.Range(0, 2).Select(async _ =>
+            {
+                await using var db = new TaslimDbContext(pgOptions);
+                return await CreateAllocator(db).CompleteVerifiedAsync(taskIds[0], completionKey, externalId, completionEventId);
+            }));
+            Assert.Single(completions, item => item.Outcome == AutopilotGlobalTaskSlotOutcomes.Completed);
+            Assert.Single(completions, item => item.Outcome == AutopilotGlobalTaskSlotOutcomes.DuplicateCompletion);
+
+            await using var finalVerify = new TaslimDbContext(pgOptions);
+            Assert.Equal(19, await finalVerify.AutopilotWaveLaunchTasks.CountAsync(item =>
+                item.Status == AutopilotWaveLaunchStatuses.Launching || item.Status == AutopilotWaveLaunchStatuses.Launched));
+        }
+        finally
+        {
+            await using var connection = new Npgsql.NpgsqlConnection(adminConnectionString);
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = $"DROP SCHEMA IF EXISTS \"{schemaName}\" CASCADE";
+            await command.ExecuteNonQueryAsync();
+        }
+    }
+
+    [Fact]
     public async Task Verified_completion_frees_exactly_one_slot_and_replay_does_not_free_another()
     {
         var taskIds = await SeedLaunchTasksAsync(total: 22, initiallyActive: 20, tasksPerWave: 22);
@@ -67,20 +143,21 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
         await using (var db = CreateContext())
         {
             var first = await db.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskIds[0]);
-            key = AutopilotNextWavePolicy.LaunchIdempotencyKey(first.WaveKey, first.TaskKey);
+            key = AutopilotGlobalTaskSlotIdentity.CreateIdempotencyKey(first.WaveKey, first.TaskKey);
         }
+        var completionEventId = await SeedCompletionEventAsync(taskIds[0]);
 
         await using (var db = CreateContext())
         {
             var allocator = CreateAllocator(db);
-            var completed = await allocator.CompleteVerifiedAsync(taskIds[0], key, firstExternalId, terminalEvidenceVerified: true);
+            var completed = await allocator.CompleteVerifiedAsync(taskIds[0], key, firstExternalId, completionEventId);
             Assert.Equal(AutopilotGlobalTaskSlotOutcomes.Completed, completed.Outcome);
         }
 
         await using (var db = CreateContext())
         {
             var allocator = CreateAllocator(db);
-            var replay = await allocator.CompleteVerifiedAsync(taskIds[0], key, firstExternalId, terminalEvidenceVerified: true);
+            var replay = await allocator.CompleteVerifiedAsync(taskIds[0], key, firstExternalId, completionEventId);
             Assert.Equal(AutopilotGlobalTaskSlotOutcomes.DuplicateCompletion, replay.Outcome);
         }
 
@@ -104,6 +181,74 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
         var completedTask = await verify.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskIds[0]);
         var sameWaveRefill = await verify.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskIds[20]);
         Assert.Equal(completedTask.BatchId, sameWaveRefill.BatchId);
+    }
+
+    [Fact]
+    public async Task Queued_completion_event_cannot_release_a_slot()
+    {
+        var taskIds = await SeedLaunchTasksAsync(total: 1, initiallyActive: 1);
+        var eventId = await SeedCompletionEventAsync(taskIds[0], status: AutopilotEventStatuses.Queued);
+        string key;
+        await using (var db = CreateContext())
+        {
+            var task = await db.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskIds[0]);
+            key = AutopilotGlobalTaskSlotIdentity.CreateIdempotencyKey(task.WaveKey, task.TaskKey);
+            var result = await CreateAllocator(db).CompleteVerifiedAsync(taskIds[0], key, task.ExternalTaskId!, eventId);
+            Assert.Equal(AutopilotGlobalTaskSlotOutcomes.TerminalEvidenceInvalid, result.Outcome);
+            Assert.True(result.SlotHeld);
+        }
+
+        await using var verify = CreateContext();
+        Assert.Equal(AutopilotWaveLaunchStatuses.Launched,
+            (await verify.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskIds[0])).Status);
+    }
+
+    [Fact]
+    public async Task Unsigned_or_unreplayed_processed_completion_events_cannot_release_a_slot()
+    {
+        var taskIds = await SeedLaunchTasksAsync(total: 1, initiallyActive: 1);
+        var unsignedEventId = await SeedCompletionEventAsync(taskIds[0], signatureVerified: false);
+        var replayableEventId = await SeedCompletionEventAsync(taskIds[0], replayProtected: false);
+        string key;
+        string externalTaskId;
+        await using (var db = CreateContext())
+        {
+            var task = await db.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskIds[0]);
+            key = AutopilotGlobalTaskSlotIdentity.CreateIdempotencyKey(task.WaveKey, task.TaskKey);
+            externalTaskId = task.ExternalTaskId!;
+
+            var unsigned = await CreateAllocator(db).CompleteVerifiedAsync(taskIds[0], key, externalTaskId, unsignedEventId);
+            Assert.Equal(AutopilotGlobalTaskSlotOutcomes.TerminalEvidenceInvalid, unsigned.Outcome);
+            Assert.True(unsigned.SlotHeld);
+
+            var unreplayed = await CreateAllocator(db).CompleteVerifiedAsync(taskIds[0], key, externalTaskId, replayableEventId);
+            Assert.Equal(AutopilotGlobalTaskSlotOutcomes.TerminalEvidenceInvalid, unreplayed.Outcome);
+            Assert.True(unreplayed.SlotHeld);
+        }
+
+        await using var verify = CreateContext();
+        Assert.Equal(AutopilotWaveLaunchStatuses.Launched,
+            (await verify.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskIds[0])).Status);
+    }
+
+    [Fact]
+    public async Task Processed_completion_event_for_another_task_cannot_release_a_slot()
+    {
+        var taskIds = await SeedLaunchTasksAsync(total: 1, initiallyActive: 1);
+        var eventId = await SeedCompletionEventAsync(taskIds[0], taskKeyOverride: "different-task");
+        string key;
+        await using (var db = CreateContext())
+        {
+            var task = await db.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskIds[0]);
+            key = AutopilotGlobalTaskSlotIdentity.CreateIdempotencyKey(task.WaveKey, task.TaskKey);
+            var result = await CreateAllocator(db).CompleteVerifiedAsync(taskIds[0], key, task.ExternalTaskId!, eventId);
+            Assert.Equal(AutopilotGlobalTaskSlotOutcomes.TerminalEvidenceInvalid, result.Outcome);
+            Assert.True(result.SlotHeld);
+        }
+
+        await using var verify = CreateContext();
+        Assert.Equal(AutopilotWaveLaunchStatuses.Launched,
+            (await verify.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskIds[0])).Status);
     }
 
     [Fact]
@@ -170,19 +315,19 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
     [Fact]
     public async Task Inventory_reader_paginates_and_counts_only_the_exact_taslim_scope()
     {
-        var source = new FakePageSource(
-            new AutopilotGlobalTaskInventoryPage(ScopeId,
+        var source = new FakePageSource(ScopeId,
+            (null, new AutopilotGlobalTaskInventoryPage(ScopeId,
                 [
                     new("taslim-1", ScopeId, "running", "autopilot:w1:t1"),
                     new("other-project", "unrelated-project", "running", "other:key"),
                 ],
-                "next-page"),
-            new AutopilotGlobalTaskInventoryPage(ScopeId,
+                "next-page")),
+            ("next-page", new AutopilotGlobalTaskInventoryPage(ScopeId,
                 [
                     new("taslim-done", ScopeId, "completed", "autopilot:w1:done"),
                     new("taslim-2", ScopeId, "awaiting_input", "autopilot:w2:t2"),
                 ],
-                null));
+                null)));
         var reader = new AutopilotGlobalTaskInventoryReader(source, ScopeId);
 
         var snapshot = await reader.ReadAuthoritativeSnapshotAsync();
@@ -193,14 +338,15 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
         Assert.Equal(new[] { "taslim-1", "taslim-2" }, snapshot.ActiveTasks.Select(item => item.TaskId).ToArray());
         Assert.DoesNotContain(snapshot.ActiveTasks, item => item.TaskId == "other-project");
         Assert.DoesNotContain(snapshot.ActiveTasks, item => item.TaskId == "taslim-done");
+        Assert.Equal(2, source.PagesRead);
     }
 
     [Fact]
     public async Task Repeated_pagination_cursor_is_unknown_not_zero_occupancy()
     {
-        var source = new FakePageSource(
-            new AutopilotGlobalTaskInventoryPage(ScopeId, Array.Empty<AutopilotGlobalTaskInventoryItem>(), "same"),
-            new AutopilotGlobalTaskInventoryPage(ScopeId, Array.Empty<AutopilotGlobalTaskInventoryItem>(), "same"));
+        var source = new FakePageSource(ScopeId,
+            (null, new AutopilotGlobalTaskInventoryPage(ScopeId, Array.Empty<AutopilotGlobalTaskInventoryItem>(), "same")),
+            ("same", new AutopilotGlobalTaskInventoryPage(ScopeId, Array.Empty<AutopilotGlobalTaskInventoryItem>(), "same")));
         var reader = new AutopilotGlobalTaskInventoryReader(source, ScopeId);
 
         var snapshot = await reader.ReadAuthoritativeSnapshotAsync();
@@ -210,7 +356,19 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Stale_ambiguous_launch_keeps_its_slot_and_retries_only_with_verified_idempotency()
+    public async Task Mis_scoped_page_response_fails_closed()
+    {
+        var source = new FakePageSource(ScopeId,
+            (null, new AutopilotGlobalTaskInventoryPage("unexpected-project", Array.Empty<AutopilotGlobalTaskInventoryItem>(), null)));
+        var snapshot = await new AutopilotGlobalTaskInventoryReader(source, ScopeId).ReadAuthoritativeSnapshotAsync();
+
+        Assert.False(snapshot.IsAuthoritative);
+        Assert.Equal("inventory_scope_mismatch", snapshot.FailureCode);
+        Assert.Equal(1, source.PagesRead);
+    }
+
+    [Fact]
+    public async Task Stale_allocator_marked_launch_retries_only_with_verified_v2_idempotency()
     {
         var ids = await SeedLaunchTasksAsync(total: 2, initiallyActive: 1, staleActive: true);
         var inventory = CompleteInventory();
@@ -218,7 +376,9 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
         await using (var db = CreateContext())
         {
             var task = await db.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == ids[0]);
-            key = AutopilotNextWavePolicy.LaunchIdempotencyKey(task.WaveKey, task.TaskKey);
+            key = AutopilotGlobalTaskSlotIdentity.CreateIdempotencyKey(task.WaveKey, task.TaskKey);
+            task.ReasonCode = "global_slot_reserved";
+            await db.SaveChangesAsync();
         }
 
         await using (var db = CreateContext())
@@ -247,6 +407,38 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Stale_unmarked_legacy_claim_is_held_without_retry_under_a_new_key()
+    {
+        var ids = await SeedLaunchTasksAsync(total: 2, initiallyActive: 1, staleActive: true);
+        string key;
+        await using (var db = CreateContext())
+        {
+            var task = await db.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == ids[0]);
+            key = AutopilotGlobalTaskSlotIdentity.CreateIdempotencyKey(task.WaveKey, task.TaskKey);
+        }
+
+        await using (var db = CreateContext())
+        {
+            var result = await CreateAllocator(db).ReserveOrRecoverLaunchAsync(
+                ids[0], key, CompleteInventory(), TimeSpan.FromMinutes(5), providerGuaranteesIdempotency: true);
+            Assert.Equal(AutopilotGlobalTaskSlotOutcomes.AmbiguousLaunch, result.Outcome);
+            Assert.True(result.SlotHeld);
+            Assert.False(result.MayCallProvider);
+        }
+
+        await using (var db = CreateContext())
+        {
+            var task = await db.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == ids[0]);
+            Assert.Equal("global_slot_reserved", task.ReasonCode);
+            Assert.Equal(1, task.LaunchAttempt);
+            var replay = await CreateAllocator(db).ReserveOrRecoverLaunchAsync(
+                ids[0], key, CompleteInventory(), TimeSpan.FromMinutes(5), providerGuaranteesIdempotency: true);
+            Assert.Equal(AutopilotGlobalTaskSlotOutcomes.LaunchInProgress, replay.Outcome);
+            Assert.False(replay.MayCallProvider);
+        }
+    }
+
+    [Fact]
     public async Task Existing_provider_task_is_reused_by_the_same_idempotency_key_after_restart()
     {
         var ids = await SeedLaunchTasksAsync(total: 1, initiallyActive: 0);
@@ -254,7 +446,7 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
         await using (var db = CreateContext())
         {
             var task = await db.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == ids[0]);
-            key = AutopilotNextWavePolicy.LaunchIdempotencyKey(task.WaveKey, task.TaskKey);
+            key = AutopilotGlobalTaskSlotIdentity.CreateIdempotencyKey(task.WaveKey, task.TaskKey);
         }
 
         await using (var db = CreateContext())
@@ -290,6 +482,60 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Hashed_idempotency_identity_prevents_recovery_by_a_truncated_legacy_collision()
+    {
+        var waveKey = new string('w', 120);
+        var firstTaskKey = new string('a', 120);
+        var secondTaskKey = new string('a', 119) + "b";
+        var firstLegacyKey = AutopilotNextWavePolicy.LaunchIdempotencyKey(waveKey, firstTaskKey);
+        var secondLegacyKey = AutopilotNextWavePolicy.LaunchIdempotencyKey(waveKey, secondTaskKey);
+        Assert.Equal(firstLegacyKey, secondLegacyKey);
+
+        var firstKey = AutopilotGlobalTaskSlotIdentity.CreateIdempotencyKey(waveKey, firstTaskKey);
+        var secondKey = AutopilotGlobalTaskSlotIdentity.CreateIdempotencyKey(waveKey, secondTaskKey);
+        Assert.NotEqual(firstKey, secondKey);
+        Assert.StartsWith(AutopilotGlobalTaskSlotIdentity.IdempotencyKeyPrefix, firstKey, StringComparison.Ordinal);
+        Assert.True(firstKey.Length <= 200);
+
+        var ids = await SeedLaunchTasksAsync(total: 1, initiallyActive: 0);
+        await using (var db = CreateContext())
+        {
+            var task = await db.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == ids[0]);
+            task.WaveKey = waveKey;
+            task.TaskKey = firstTaskKey;
+            await db.SaveChangesAsync();
+        }
+
+        var inventory = new AutopilotGlobalTaskInventorySnapshot(
+            ScopeId, true, 1, false, null,
+            [new("external-for-other-task", ScopeId, "running", secondKey)]);
+        var ambiguousLegacyInventory = new AutopilotGlobalTaskInventorySnapshot(
+            ScopeId, true, 1, false, null,
+            [new("external-with-colliding-legacy-key", ScopeId, "running", firstLegacyKey)]);
+        await using (var db = CreateContext())
+        {
+            var ambiguous = await CreateAllocator(db).ReserveOrRecoverLaunchAsync(
+                ids[0], firstKey, ambiguousLegacyInventory, TimeSpan.FromMinutes(5), providerGuaranteesIdempotency: true);
+            Assert.Equal(AutopilotGlobalTaskSlotOutcomes.IdempotencyConflict, ambiguous.Outcome);
+            Assert.Equal("legacy_idempotency_identity_ambiguous_requires_reconciliation", ambiguous.ReasonCode);
+        }
+
+        await using (var db = CreateContext())
+        {
+            var result = await CreateAllocator(db).ReserveOrRecoverLaunchAsync(
+                ids[0], firstKey, inventory, TimeSpan.FromMinutes(5), providerGuaranteesIdempotency: true);
+            Assert.Equal(AutopilotGlobalTaskSlotOutcomes.Reserved, result.Outcome);
+            Assert.True(result.MayCallProvider);
+            Assert.Null(result.ExternalTaskId);
+        }
+
+        await using var verify = CreateContext();
+        var reserved = await verify.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == ids[0]);
+        Assert.Null(reserved.ExternalTaskId);
+        Assert.Equal(AutopilotWaveLaunchStatuses.Launching, reserved.Status);
+    }
+
+    [Fact]
     public async Task Fresh_controller_claim_is_promoted_to_a_global_lease_before_provider_call()
     {
         var ids = await SeedLaunchTasksAsync(total: 1, initiallyActive: 0);
@@ -300,7 +546,7 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
             task.Status = AutopilotWaveLaunchStatuses.Launching;
             task.LaunchAttempt = 1; // The existing controller claims this before calling the provider.
             task.UpdatedAt = DateTime.UtcNow;
-            key = AutopilotNextWavePolicy.LaunchIdempotencyKey(task.WaveKey, task.TaskKey);
+            key = AutopilotGlobalTaskSlotIdentity.CreateIdempotencyKey(task.WaveKey, task.TaskKey);
             await db.SaveChangesAsync();
         }
 
@@ -321,11 +567,12 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
 
     private async Task<AutopilotGlobalTaskSlotResult> ClaimAsync(
         Guid taskId,
-        AutopilotGlobalTaskInventorySnapshot inventory)
+        AutopilotGlobalTaskInventorySnapshot inventory,
+        DbContextOptions<TaslimDbContext>? contextOptions = null)
     {
-        await using var db = CreateContext();
+        await using var db = contextOptions is null ? CreateContext() : new TaslimDbContext(contextOptions);
         var task = await db.AutopilotWaveLaunchTasks.AsNoTracking().SingleAsync(item => item.Id == taskId);
-        var key = AutopilotNextWavePolicy.LaunchIdempotencyKey(task.WaveKey, task.TaskKey);
+        var key = AutopilotGlobalTaskSlotIdentity.CreateIdempotencyKey(task.WaveKey, task.TaskKey);
         return await CreateAllocator(db).ReserveOrRecoverLaunchAsync(
             taskId,
             key,
@@ -334,11 +581,16 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
             providerGuaranteesIdempotency: true);
     }
 
-    private async Task<IReadOnlyList<Guid>> SeedLaunchTasksAsync(int total, int initiallyActive, bool staleActive = false, int tasksPerWave = 5)
+    private async Task<IReadOnlyList<Guid>> SeedLaunchTasksAsync(
+        int total,
+        int initiallyActive,
+        bool staleActive = false,
+        int tasksPerWave = 5,
+        DbContextOptions<TaslimDbContext>? contextOptions = null)
     {
         var ids = Enumerable.Range(0, total).Select(_ => Guid.NewGuid()).ToArray();
         var now = DateTime.UtcNow;
-        await using var db = CreateContext();
+        await using var db = contextOptions is null ? CreateContext() : new TaslimDbContext(contextOptions);
         var waves = new Dictionary<int, (AutopilotRun Run, AutopilotWaveLaunchBatch Batch)>();
 
         for (var i = 0; i < total; i++)
@@ -418,17 +670,68 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
     private static AutopilotGlobalTaskInventorySnapshot CompleteInventory() =>
         new(ScopeId, true, 1, false, null, Array.Empty<AutopilotGlobalTaskInventoryItem>());
 
+    private async Task<Guid> SeedCompletionEventAsync(
+        Guid taskRowId,
+        string status = AutopilotEventStatuses.Processed,
+        bool signatureVerified = true,
+        bool replayProtected = true,
+        string? taskKeyOverride = null,
+        DbContextOptions<TaslimDbContext>? contextOptions = null)
+    {
+        await using var db = contextOptions is null ? CreateContext() : new TaslimDbContext(contextOptions);
+        var task = await db.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskRowId);
+        var now = DateTime.UtcNow;
+        var eventId = Guid.NewGuid();
+        var eventTaskKey = taskKeyOverride ?? task.TaskKey;
+        var signal = new AutopilotCompletionSignal
+        {
+            WaveKey = task.WaveKey,
+            TaskId = eventTaskKey,
+            Outcome = AutopilotTaskOutcomes.Succeeded,
+        };
+        db.AutopilotEvents.Add(new AutopilotEvent
+        {
+            Id = eventId,
+            EventType = AutopilotEventTypes.WaveTaskCompleted,
+            SourceSystem = "test-completion-bridge",
+            ExternalEventId = $"test-event-{eventId:N}",
+            IdempotencyKey = $"test-event-key-{eventId:N}",
+            PayloadHash = new string('a', 64),
+            Status = status,
+            SignatureVerified = signatureVerified,
+            ReplayProtected = replayProtected,
+            WaveKey = task.WaveKey,
+            TaskId = eventTaskKey,
+            ReceivedAt = now,
+            ProcessedAt = string.Equals(status, AutopilotEventStatuses.Processed, StringComparison.OrdinalIgnoreCase) ? now : null,
+            ConcurrencyToken = Guid.NewGuid(),
+            SignalJson = System.Text.Json.JsonSerializer.Serialize(signal),
+        });
+        await db.SaveChangesAsync();
+        return eventId;
+    }
+
     private TaslimDbContext CreateContext() => new(options);
 
-    private sealed class FakePageSource(params AutopilotGlobalTaskInventoryPage?[] pages) : IAutopilotGlobalTaskInventoryPageSource
+    private sealed class FakePageSource(
+        string expectedScopeId,
+        params (string? ExpectedCursor, AutopilotGlobalTaskInventoryPage? Response)[] pages) : IAutopilotGlobalTaskInventoryPageSource
     {
         private int nextPage;
+        public int PagesRead => nextPage;
 
         public Task<AutopilotGlobalTaskInventoryPage?> ReadPageAsync(string scopeId, string? cursor, CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (nextPage >= pages.Length) return Task.FromResult<AutopilotGlobalTaskInventoryPage?>(null);
-            return Task.FromResult(pages[nextPage++]);
+            if (!string.Equals(scopeId, expectedScopeId, StringComparison.Ordinal))
+                throw new InvalidOperationException("Inventory reader requested an unexpected Taslim scope.");
+            if (nextPage >= pages.Length)
+                throw new InvalidOperationException("Inventory reader requested an unexpected extra page.");
+
+            var page = pages[nextPage++];
+            if (!string.Equals(cursor, page.ExpectedCursor, StringComparison.Ordinal))
+                throw new InvalidOperationException("Inventory reader sent an unexpected pagination cursor.");
+            return Task.FromResult(page.Response);
         }
     }
 }
