@@ -1,3 +1,4 @@
+import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { resolve } from "node:path";
 
@@ -51,7 +52,7 @@ function onboardingFixture(language = "en", direction = "ltr") {
 
   return `<!doctype html>
     <html lang="${language}" dir="${direction}">
-      <head><meta name="viewport" content="width=device-width, initial-scale=1" />${fixtureBaseStyles}</head>
+      <head><meta name="viewport" content="width=device-width, initial-scale=1" /><title>Taslim.ai onboarding fixture</title>${fixtureBaseStyles}</head>
       <body>
         <div class="modal-backdrop onboarding-backdrop" role="presentation">
           <section class="onboarding-card" role="dialog" aria-modal="true" aria-labelledby="onboarding-title" tabindex="-1">
@@ -92,7 +93,7 @@ function billingFixture(language = "en", direction = "ltr") {
 
   return `<!doctype html>
     <html lang="${language}" dir="${direction}">
-      <head><meta name="viewport" content="width=device-width, initial-scale=1" />${fixtureBaseStyles}</head>
+      <head><meta name="viewport" content="width=device-width, initial-scale=1" /><title>Taslim.ai billing fixture</title>${fixtureBaseStyles}</head>
       <body>
         <main class="page-content">
           <div class="account-page billing-page">
@@ -159,6 +160,7 @@ test.describe("issue #700 onboarding and billing layout", () => {
     await loadFixture(page, onboardingFixture());
 
     for (const viewport of [
+      { width: 1920, height: 1080, columns: 2 },
       { width: 1440, height: 900, columns: 2 },
       { width: 768, height: 900, columns: 2 },
       { width: 375, height: 812, columns: 1 },
@@ -201,15 +203,23 @@ test.describe("issue #700 onboarding and billing layout", () => {
     const dialog = page.locator(".onboarding-card");
     await expect.poll(() => dialog.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
     expect(await dialog.evaluate((element) => getComputedStyle(element).overflowY)).toBe("auto");
+    await dialog.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+    await expect(page.locator(".onboarding-workflow").last()).toBeInViewport();
+    await expect(page.locator(".onboarding-actions")).toBeInViewport();
+    if (process.env.ISSUE_700_SAVE_SHOTS === "1") {
+      await page.screenshot({ path: resolve(screenshotDir, "issue-700-onboarding-after-375-bottom.png"), fullPage: true });
+    }
   });
 
   test("separates billing labels, values, and disabled actions with responsive plan and summary grids", async ({ page }) => {
     await loadFixture(page, billingFixture());
 
     for (const viewport of [
+      { width: 1920, height: 1080, summaryColumns: 3, planColumns: 2 },
       { width: 1440, height: 900, summaryColumns: 3, planColumns: 2 },
       { width: 768, height: 900, summaryColumns: 2, planColumns: 2 },
       { width: 375, height: 812, summaryColumns: 1, planColumns: 1 },
+      { width: 320, height: 812, summaryColumns: 1, planColumns: 1 },
     ]) {
       await page.setViewportSize({ width: viewport.width, height: viewport.height });
       expect(await gridColumnCount(page.locator(".billing-summary-grid"))).toBe(viewport.summaryColumns);
@@ -262,9 +272,10 @@ test.describe("issue #700 onboarding and billing layout", () => {
     }
 
     const historyScroller = page.locator(".billing-history .usage-table-wrap");
-    await page.setViewportSize({ width: 375, height: 812 });
+    await page.setViewportSize({ width: 320, height: 812 });
     await expect(historyScroller).toBeVisible();
     expect(await historyScroller.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(true);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(320);
   });
 
   test("preserves readable right-to-left layout and keyboard-visible focus for Arabic and Sorani", async ({ page }) => {
@@ -303,7 +314,7 @@ test.describe("issue #700 onboarding and billing layout", () => {
     for (const locale of locales) {
       const html = `<!doctype html>
         <html lang="${locale.code}" dir="${locale.direction}">
-          <head><meta name="viewport" content="width=device-width, initial-scale=1" />${fixtureBaseStyles}</head>
+          <head><meta name="viewport" content="width=device-width, initial-scale=1" /><title>Taslim.ai preferences fixture (${locale.code})</title>${fixtureBaseStyles}</head>
           <body>
             <div class="modal-backdrop onboarding-backdrop" role="presentation">
               <section class="onboarding-card" role="dialog" aria-modal="true" aria-labelledby="onboarding-title" tabindex="-1">
@@ -358,6 +369,24 @@ test.describe("issue #700 onboarding and billing layout", () => {
       const focusStyle = await interfaceSelector.evaluate((element) => ({ outline: getComputedStyle(element).outlineStyle, width: getComputedStyle(element).outlineWidth }));
       expect(focusStyle.outline).toBe("solid");
       expect(parseFloat(focusStyle.width)).toBeGreaterThanOrEqual(3);
+    }
+  });
+
+  test("reports no unexpected serious or critical axe violations; tracks the owner-managed progress label", async ({ page }, testInfo) => {
+    const fixtures = [
+      { html: onboardingFixture(), ownerManagedTargets: [".onboarding-progress"] },
+      { html: billingFixture(), ownerManagedTargets: [] as string[] },
+    ];
+    for (const fixture of fixtures) {
+      await loadFixture(page, fixture.html);
+      const results = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"]).analyze();
+      const seriousOrCritical = results.violations.filter((violation) => ["serious", "critical"].includes(violation.impact ?? ""));
+      // OnboardingGate.tsx is owned by #109; its generic progress div currently has an aria-label without a role.
+      // Track only that exact existing node here rather than masking other accessibility findings.
+      const ownerManagedFindings = seriousOrCritical.filter((violation) => violation.id === "aria-prohibited-attr" && violation.nodes.every((node) => node.target.some((target) => typeof target === "string" && fixture.ownerManagedTargets.includes(target))));
+      const unexpectedFindings = seriousOrCritical.filter((violation) => !ownerManagedFindings.includes(violation));
+      if (ownerManagedFindings.length) testInfo.annotations.push({ type: "known-owner-managed-a11y-gap", description: "aria-label on .onboarding-progress is owned by #109 and remains a release gate." });
+      expect(unexpectedFindings.map((violation) => ({ id: violation.id, description: violation.description, nodes: violation.nodes.length }))).toEqual([]);
     }
   });
 
