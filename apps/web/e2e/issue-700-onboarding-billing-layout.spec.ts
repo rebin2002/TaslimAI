@@ -134,6 +134,105 @@ function billingFixture(language = "en", direction = "ltr") {
     </html>`;
 }
 
+const liveWorkspace = { id: "issue-700-workspace", name: "UI Regression Workspace", slug: "issue-700-ui-regression", type: "Personal", role: "Owner" };
+
+function liveAuthResponse(onboardingCompletedAt: string | null) {
+  return {
+    user: {
+      id: "issue-700-user",
+      email: "ui-regression@example.invalid",
+      displayName: "UI Regression",
+      preferredLanguage: "en" as const,
+      personalWorkspaceId: liveWorkspace.id,
+      createdAt: "2026-10-01T00:00:00.000Z",
+      defaultGenerationLanguage: "en" as const,
+      timeZone: "UTC",
+      outputPreference: "balanced" as const,
+      includeSourceLinks: true,
+      onboardingCompletedAt,
+      onboardingIntent: null,
+      isAdmin: false,
+    },
+    personalWorkspace: liveWorkspace,
+  };
+}
+
+function liveBillingAccount() {
+  return {
+    currentPlan: { code: "free", name: "Free", monthlyPriceUsd: 0, monthlyCreditAllowance: 1_000, currency: "USD" },
+    subscription: { status: "Current", currentPeriodStart: "2026-10-01T00:00:00.000Z", currentPeriodEnd: "2026-10-31T23:59:59.000Z", nextRenewalAt: "2026-10-31T23:59:59.000Z", cancelAtPeriodEnd: false },
+    billingPeriod: { id: "issue-700-period", status: "Current", startsAt: "2026-10-01T00:00:00.000Z", endsAt: "2026-10-31T23:59:59.000Z", includedCredits: 1_000 },
+    credits: { includedGranted: 1_000, includedRemaining: 1_000, purchasedRemaining: 0, adjustmentBalance: 0, totalRemaining: 1_000 },
+    transactions: [{ id: "issue-700-grant", type: "grant", amount: 1_000, reason: "Monthly included credit allowance", createdAt: "2026-10-01T00:00:00.000Z" }],
+    availablePlans: [
+      { code: "free", name: "Free", monthlyPriceUsd: 0, monthlyCreditAllowance: 1_000, currency: "USD", isCurrent: true },
+      { code: "paid", name: "Paid plan", monthlyPriceUsd: 9, monthlyCreditAllowance: 10_000, currency: "USD", isCurrent: false },
+    ],
+    paymentStatus: { status: "disabled", provider: null, lastFailureReason: null, lastPaymentAt: null },
+    actions: { checkoutAvailable: false, upgradeAvailable: false, downgradeAvailable: false, cancelAvailable: false, disabledReason: "Customer charging is disabled on this account." },
+  };
+}
+
+type LiveApiTraffic = { apiCalls: Array<{ method: string; path: string }>; unexpectedApiCalls: string[]; externalRequests: string[] };
+
+async function interceptLiveAppApi(page: Page, onboardingCompletedAt: string | null): Promise<LiveApiTraffic> {
+  const apiCalls: LiveApiTraffic["apiCalls"] = [];
+  const unexpectedApiCalls: string[] = [];
+  const externalRequests: string[] = [];
+  const appOrigin = new URL(process.env.E2E_WEB_URL ?? "http://localhost:3000").origin;
+  const configuredApiOrigin = new URL(process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5000").origin;
+  const mockOrigins = new Set([appOrigin, configuredApiOrigin]);
+  const auth = liveAuthResponse(onboardingCompletedAt);
+
+  await page.route("**/*", async (route) => {
+    const url = new URL(route.request().url());
+    const method = route.request().method();
+    if (url.pathname.startsWith("/api/") && mockOrigins.has(url.origin)) {
+      apiCalls.push({ method, path: url.pathname });
+      if (method !== "GET") {
+        unexpectedApiCalls.push(`${method} ${url.pathname}`);
+        await route.fulfill({ status: 405, contentType: "application/json", body: JSON.stringify({ error: "mock_only_read_test" }) });
+        return;
+      }
+      let body: unknown;
+      if (url.pathname === "/api/auth/me") body = auth;
+      else if (url.pathname === "/api/notifications/unread-count") body = { unreadCount: 0 };
+      else if (url.pathname === `/api/workspaces/${liveWorkspace.id}/billing`) body = liveBillingAccount();
+      else {
+        unexpectedApiCalls.push(`${method} ${url.pathname}`);
+        await route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ error: "unmocked_test_endpoint" }) });
+        return;
+      }
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
+      return;
+    }
+    if (url.origin !== appOrigin) {
+      externalRequests.push(url.href);
+      await route.abort();
+      return;
+    }
+    await route.continue();
+  });
+
+  return { apiCalls, unexpectedApiCalls, externalRequests };
+}
+
+function expectIsolatedReadOnlyTraffic(traffic: LiveApiTraffic, allowedPaths: string[]) {
+  expect(traffic.externalRequests).toEqual([]);
+  expect(traffic.unexpectedApiCalls).toEqual([]);
+  expect(traffic.apiCalls.every(({ method }) => method === "GET")).toBe(true);
+  expect(traffic.apiCalls.every(({ path }) => allowedPaths.includes(path))).toBe(true);
+}
+
+async function assertNoUnexpectedLiveAxeFindings(page: Page, includeSelector: string, ownerManagedTargets: string[] = []) {
+  const results = await new AxeBuilder({ page }).include(includeSelector).withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"]).analyze();
+  const seriousOrCritical = results.violations.filter((violation) => ["serious", "critical"].includes(violation.impact ?? ""));
+  const ownerManaged = seriousOrCritical.filter((violation) => violation.id === "aria-prohibited-attr" && violation.nodes.length > 0 && violation.nodes.every((node) => node.target.some((target) => typeof target === "string" && ownerManagedTargets.includes(target))));
+  const unexpected = seriousOrCritical.filter((violation) => !ownerManaged.includes(violation));
+  expect(unexpected.map((violation) => ({ id: violation.id, description: violation.description, nodes: violation.nodes.length }))).toEqual([]);
+  return ownerManaged.length;
+}
+
 async function loadFixture(page: Page, html: string) {
   await page.setContent(html);
   await page.addStyleTag({ path: stylesheetPath });
@@ -388,6 +487,111 @@ test.describe("issue #700 onboarding and billing layout", () => {
       if (ownerManagedFindings.length) testInfo.annotations.push({ type: "known-owner-managed-a11y-gap", description: "aria-label on .onboarding-progress is owned by #109 and remains a release gate." });
       expect(unexpectedFindings.map((violation) => ({ id: violation.id, description: violation.description, nodes: violation.nodes.length }))).toEqual([]);
     }
+  });
+
+  test("mounts the real first-login onboarding through AppShell with intercepted read-only traffic", async ({ page }, testInfo) => {
+    const traffic = await interceptLiveAppApi(page, null);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/account/billing");
+
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toHaveAttribute("aria-modal", "true");
+    await expect(page.locator(".onboarding-progress span")).toHaveCount(3);
+    const interfaceLanguage = page.locator(".onboarding-fields select").first();
+    for (const locale of ["ar", "ku", "en"] as const) {
+      await interfaceLanguage.selectOption(locale);
+      await expect(page.locator("html")).toHaveAttribute("dir", locale === "en" ? "ltr" : "rtl");
+    }
+
+    await page.locator(".onboarding-actions .primary-button").click();
+    await page.locator(".onboarding-actions .primary-button").click();
+    await expect(page.locator(".onboarding-workflow")).toHaveCount(6);
+    const knownOnboardingA11yFindings = await assertNoUnexpectedLiveAxeFindings(page, ".onboarding-backdrop", [".onboarding-progress"]);
+    if (knownOnboardingA11yFindings) testInfo.annotations.push({ type: "known-owner-managed-a11y-gap", description: "The generic progress div aria-label remains owned by #109." });
+
+    for (const viewport of [
+      { width: 1440, height: 900, columns: 2 },
+      { width: 768, height: 900, columns: 2 },
+      { width: 375, height: 812, columns: 1 },
+      { width: 320, height: 640, columns: 1 },
+    ]) {
+      await page.setViewportSize({ width: viewport.width, height: viewport.height });
+      expect(await gridColumnCount(page.locator(".onboarding-workflow-grid"))).toBe(viewport.columns);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(viewport.width);
+      const dialogBox = await boxOf(dialog);
+      expect(Math.abs(dialogBox.x + dialogBox.width / 2 - viewport.width / 2)).toBeLessThanOrEqual(2);
+      if (process.env.ISSUE_700_SAVE_SHOTS === "1" && (viewport.width === 1440 || viewport.width === 375)) {
+        await page.screenshot({ path: resolve(screenshotDir, `issue-700-live-onboarding-after-${viewport.width}.png`), fullPage: viewport.width === 1440 });
+      }
+    }
+
+    await page.setViewportSize({ width: 375, height: 520 });
+    await dialog.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+    await expect(page.locator(".onboarding-workflow").last()).toBeInViewport();
+    await expect(page.locator(".onboarding-actions .onboarding-back")).toBeInViewport();
+    if (process.env.ISSUE_700_SAVE_SHOTS === "1") {
+      await page.screenshot({ path: resolve(screenshotDir, "issue-700-live-onboarding-after-375-bottom.png"), fullPage: false });
+    }
+
+    expect(traffic.apiCalls.some(({ path }) => path === "/api/auth/me")).toBe(true);
+    expectIsolatedReadOnlyTraffic(traffic, ["/api/auth/me", "/api/notifications/unread-count", `/api/workspaces/${liveWorkspace.id}/billing`]);
+  });
+
+  test("mounts the real Account → Plan & credits route with intercepted billing data and disabled actions", async ({ page }) => {
+    const traffic = await interceptLiveAppApi(page, "2026-10-01T00:00:00.000Z");
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/account/billing");
+    await expect(page.locator(".billing-page h1")).toHaveText("Plan & credits");
+    await expect(page.locator(".billing-plan-card > strong")).toHaveText("Free");
+    await expect(page.locator(".billing-plan-card > span")).toHaveText("No charge");
+    await expect(page.locator(".billing-plan-option")).toHaveCount(2);
+    const paidPlan = page.locator(".billing-plan-option").nth(1);
+    await expect(paidPlan.locator("div > strong")).toHaveText("Paid plan");
+    await expect(paidPlan.locator("b")).toContainText("$9");
+    await expect(paidPlan.locator(":scope > span")).toContainText("10,000");
+    await expect(page.locator(".billing-payment-status strong")).toBeVisible();
+    await expect(page.locator(".billing-payment-status small")).toHaveText("Customer charging is disabled on this account.");
+    await expect(page.locator(".billing-page button")).toHaveCount(5);
+    for (const button of await page.locator(".billing-page button").all()) await expect(button).toBeDisabled();
+    const actionGap = await page.locator(".billing-page .button-row").evaluate((element) => getComputedStyle(element).columnGap);
+    expect(parseFloat(actionGap)).toBeGreaterThanOrEqual(8);
+    await assertNoUnexpectedLiveAxeFindings(page, ".billing-page");
+    for (const locale of ["ar", "ku"]) {
+      await page.locator(".language-select select").selectOption(locale);
+      await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+      expect(await gridColumnCount(page.locator(".billing-summary-grid"))).toBe(3);
+    }
+    await page.locator(".language-select select").selectOption("en");
+    await expect(page.locator("html")).toHaveAttribute("dir", "ltr");
+
+    for (const viewport of [
+      { width: 1920, height: 1080, summaryColumns: 3, planColumns: 2 },
+      { width: 1440, height: 900, summaryColumns: 3, planColumns: 2 },
+      { width: 768, height: 900, summaryColumns: 2, planColumns: 2 },
+      { width: 375, height: 812, summaryColumns: 1, planColumns: 1 },
+      { width: 320, height: 812, summaryColumns: 1, planColumns: 1 },
+    ]) {
+      await page.setViewportSize({ width: viewport.width, height: viewport.height });
+      expect(await gridColumnCount(page.locator(".billing-summary-grid"))).toBe(viewport.summaryColumns);
+      const renderedPlanColumns = await page.locator(".billing-plan-option").evaluateAll((elements) => new Set(elements.map((element) => Math.round(element.getBoundingClientRect().x))).size);
+      expect(renderedPlanColumns).toBe(viewport.planColumns);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(viewport.width);
+      if (process.env.ISSUE_700_SAVE_SHOTS === "1" && (viewport.width === 1440 || viewport.width === 375)) {
+        await page.screenshot({ path: resolve(screenshotDir, `issue-700-live-billing-after-${viewport.width}.png`), fullPage: viewport.width === 1440 });
+      }
+    }
+
+    await page.setViewportSize({ width: 375, height: 812 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(375);
+    await page.locator(".billing-plans").scrollIntoViewIfNeeded();
+    if (process.env.ISSUE_700_SAVE_SHOTS === "1") {
+      await page.screenshot({ path: resolve(screenshotDir, "issue-700-live-billing-plans-after-375.png"), fullPage: false });
+    }
+
+    expect(traffic.apiCalls.some(({ path }) => path === `/api/workspaces/${liveWorkspace.id}/billing`)).toBe(true);
+    expectIsolatedReadOnlyTraffic(traffic, ["/api/auth/me", "/api/notifications/unread-count", `/api/workspaces/${liveWorkspace.id}/billing`]);
+    expect(traffic.apiCalls.some(({ path }) => /checkout|payments|providers/i.test(path))).toBe(false);
   });
 
   test("keeps the billing layout within the viewport at 125% zoom", async ({ page }) => {
