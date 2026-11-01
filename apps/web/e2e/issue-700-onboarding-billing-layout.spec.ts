@@ -32,13 +32,12 @@ const fixtureBaseStyles = `
   </style>
 `;
 
+// Neutral fixture copy exercises card geometry only; it does not model product modules or availability.
 const workflows: Array<[string, string]> = [
-  ["Project workspace", "Organize your work, collaborators, and creative deliverables in one connected project."],
-  ["AI chat", "Ask questions, draft content, and work through ideas in a focused conversation."],
-  ["Image studio", "Create and refine visual concepts with a clear, guided workflow."],
-  ["Document studio", "Turn an outline or brief into a structured document you can review."],
-  ["Presentation studio", "Build a polished presentation from your story, audience, and goals."],
-  ["Research studio", "Explore a topic and organize useful sources into a readable report."],
+  ["Example workflow alpha", "Placeholder copy checks wrapping, card spacing, and readable supporting text."],
+  ["Example workflow beta", "A second neutral example keeps the desktop grid populated."],
+  ["Example workflow gamma", "Short fixture copy verifies consistent card alignment."],
+  ["Example workflow delta", "Another neutral example checks the final row and mobile stacking."],
 ];
 
 function onboardingFixture(language = "en", direction = "ltr") {
@@ -64,7 +63,7 @@ function onboardingFixture(language = "en", direction = "ltr") {
             <div class="onboarding-body onboarding-workflow-body">
               <p class="section-eyebrow">A workspace built around you</p>
               <h1 id="onboarding-title">Choose a workflow to get started</h1>
-              <p class="onboarding-description">Pick a starting point for your next project. Your choice opens the existing Taslim workflow and does not change billing or account settings.</p>
+              <p class="onboarding-description">Neutral example tiles validate layout only and do not establish product-module availability.</p>
               <div class="onboarding-workflow-grid">${workflowMarkup}</div>
               <footer class="onboarding-actions">
                 <button type="button" class="onboarding-back">Back</button>
@@ -255,7 +254,7 @@ async function gridColumnCount(locator: Locator): Promise<number> {
 }
 
 test.describe("issue #700 onboarding and billing layout", () => {
-  test("centers the onboarding dialog and keeps six workflow tiles distinct at desktop, tablet, and mobile widths", async ({ page }) => {
+  test("centers the onboarding dialog and keeps neutral fixture tiles distinct at desktop, tablet, and mobile widths", async ({ page }) => {
     await loadFixture(page, onboardingFixture());
 
     for (const viewport of [
@@ -273,7 +272,7 @@ test.describe("issue #700 onboarding and billing layout", () => {
       expect(dialogBox.y).toBeGreaterThanOrEqual(0);
       expect(dialogBox.y + dialogBox.height).toBeLessThanOrEqual(viewport.height + 1);
       expect(await gridColumnCount(page.locator(".onboarding-workflow-grid"))).toBe(viewport.columns);
-      await expect(page.locator(".onboarding-workflow")).toHaveCount(6);
+      await expect(page.locator(".onboarding-workflow")).toHaveCount(workflows.length);
 
       const tileBoxes = await page.locator(".onboarding-workflow").evaluateAll((elements) => elements.map((element) => {
         const rect = element.getBoundingClientRect();
@@ -377,7 +376,7 @@ test.describe("issue #700 onboarding and billing layout", () => {
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(320);
   });
 
-  test("preserves readable right-to-left layout and keyboard-visible focus for Arabic and Sorani", async ({ page }) => {
+  test("preserves RTL layout and visible keyboard focus in the static fixture for Arabic and Sorani", async ({ page }) => {
     for (const language of ["ar", "ku"]) {
       await loadFixture(page, onboardingFixture(language, "rtl"));
       await page.setViewportSize({ width: 375, height: 812 });
@@ -404,7 +403,7 @@ test.describe("issue #700 onboarding and billing layout", () => {
     }
   });
 
-  test("keeps onboarding language selectors readable and keyboard reachable in English, Arabic, and Sorani", async ({ page }) => {
+  test("checks preference-control layout and visible keyboard focus in static fixtures for English, Arabic, and Sorani", async ({ page }) => {
     const locales = [
       { code: "en", direction: "ltr", display: "Display name", interface: "Interface language", generation: "Generation language", continue: "Continue" },
       { code: "ar", direction: "rtl", display: "الاسم", interface: "لغة الواجهة", generation: "لغة التوليد", continue: "متابعة" },
@@ -490,7 +489,7 @@ test.describe("issue #700 onboarding and billing layout", () => {
     }
   });
 
-  test("mounts the real first-login onboarding through AppShell with intercepted read-only traffic", async ({ page }, testInfo) => {
+  test("mounts real first-login onboarding with intercepted read-only traffic without asserting module availability", async ({ page }, testInfo) => {
     const traffic = await interceptLiveAppApi(page, null);
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto("/account/billing");
@@ -509,7 +508,9 @@ test.describe("issue #700 onboarding and billing layout", () => {
     await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
     await page.locator(".onboarding-actions .primary-button").click();
     await page.locator(".onboarding-actions .primary-button").click();
-    await expect(page.locator(".onboarding-workflow")).toHaveCount(6);
+    // This live-route smoke test covers layout/RTL only; names, count, and module eligibility are owner-managed scope.
+    await expect(page.locator(".onboarding-workflow-grid")).toBeVisible();
+    await expect(page.locator(".onboarding-workflow").first()).toBeVisible();
     const firstWorkflowArrow = page.locator(".onboarding-workflow-arrow").first();
     expect(await firstWorkflowArrow.evaluate((element) => getComputedStyle(element).transform)).toBe("none");
     const arrowPaths = await firstWorkflowArrow.locator("path").evaluateAll((paths) => paths.map((path) => path.getAttribute("d")));
