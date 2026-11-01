@@ -86,16 +86,40 @@ public sealed record WaylPaymentVerification(
     public bool CanGrantCredits => false;
 }
 
-public sealed record WaylWebhookReceipt(
-    string EventId,
-    string ReferenceId,
-    string EventName,
-    string? PaymentStatus,
-    int? TotalIqd,
-    WaylPaymentState State,
-    string PayloadSha256,
-    WaylReplayDisposition ReplayDisposition)
+/// <summary>
+/// A parsed receipt created only after raw-body HMAC verification. Its constructor is internal
+/// so external callers cannot fabricate a receipt that claims signature verification.
+/// </summary>
+public sealed class WaylWebhookReceipt
 {
+    internal WaylWebhookReceipt(
+        string eventId,
+        string referenceId,
+        string eventName,
+        string? paymentStatus,
+        int? totalIqd,
+        WaylPaymentState state,
+        string payloadSha256,
+        WaylReplayDisposition replayDisposition)
+    {
+        EventId = eventId;
+        ReferenceId = referenceId;
+        EventName = eventName;
+        PaymentStatus = paymentStatus;
+        TotalIqd = totalIqd;
+        State = state;
+        PayloadSha256 = payloadSha256;
+        ReplayDisposition = replayDisposition;
+    }
+
+    public string EventId { get; }
+    public string ReferenceId { get; }
+    public string EventName { get; }
+    public string? PaymentStatus { get; }
+    public int? TotalIqd { get; }
+    public WaylPaymentState State { get; }
+    public string PayloadSha256 { get; }
+    public WaylReplayDisposition ReplayDisposition { get; }
     public bool SignatureVerified => true;
     public bool RequiresAuthenticatedApiVerification => State is WaylPaymentState.Complete or WaylPaymentState.Delivered;
 }
@@ -194,6 +218,10 @@ public sealed class WaylPaymentProvider
     public const string WebhookSignatureHeader = "x-wayl-signature-256";
     private const int MaximumWebhookBytes = 262_144;
     private const int MinimumWebhookSecretLength = 10;
+    private const int ReferenceGateStripeCount = 64;
+    private static readonly SemaphoreSlim[] referenceGateStripes = Enumerable.Range(0, ReferenceGateStripeCount)
+        .Select(static _ => new SemaphoreSlim(1, 1))
+        .ToArray();
 
     private readonly HttpClient httpClient;
     private readonly IWaylIqdPriceCalculator priceCalculator;
@@ -202,7 +230,6 @@ public sealed class WaylPaymentProvider
     private readonly string? webhookSecret;
     private readonly string? redirectionUrl;
     private readonly IWaylWebhookReplayGuard replayGuard;
-    private readonly ConcurrentDictionary<string, SemaphoreSlim> referenceGates = new(StringComparer.Ordinal);
     private readonly JsonSerializerOptions jsonOptions = new(JsonSerializerDefaults.Web);
 
     public WaylPaymentProvider(
@@ -273,7 +300,11 @@ public sealed class WaylPaymentProvider
         if (totalIqd <= 0)
             throw new InvalidOperationException("The server-side IQD price must be a positive integer.");
 
-        var gate = referenceGates.GetOrAdd(referenceId, static _ => new SemaphoreSlim(1, 1));
+        // Fixed stripes bound process memory regardless of the number of distinct order IDs.
+        // Hash collisions only serialize unrelated local requests; durable cross-replica
+        // idempotency remains the canonical checkout/payment service's responsibility.
+        var gateIndex = (StringComparer.Ordinal.GetHashCode(referenceId) & int.MaxValue) % referenceGateStripes.Length;
+        var gate = referenceGateStripes[gateIndex];
         await gate.WaitAsync(cancellationToken);
         try
         {

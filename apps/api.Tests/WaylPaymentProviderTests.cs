@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Net;
+using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -108,6 +109,32 @@ public sealed class WaylPaymentProviderTests
     }
 
     [Fact]
+    public async Task Many_unique_reference_ids_use_local_fake_HTTP_and_complete_with_bounded_gate_pool()
+    {
+        const int orderCount = 128;
+        var handler = new StubHttpMessageHandler(async (request, cancellationToken) =>
+        {
+            AssertAuthenticated(request);
+            if (request.Method == HttpMethod.Get)
+                return new HttpResponseMessage(HttpStatusCode.NotFound);
+
+            using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(cancellationToken));
+            var referenceId = body.RootElement.GetProperty("referenceId").GetString()!;
+            return LinkResponse(HttpStatusCode.Created, referenceId, "10000", "IQD", "Created", HostedUrl);
+        });
+        using var httpClient = new HttpClient(handler);
+        var provider = NewProvider(httpClient, new FakePriceCalculator(10_000));
+
+        var sessions = await Task.WhenAll(Enumerable.Range(0, orderCount).Select(index =>
+            provider.CreateCheckoutAsync(new WaylCheckoutCommand($"local-order-{index:D4}", "pro", "Taslim Pro"))));
+
+        Assert.Equal(orderCount, sessions.Length);
+        Assert.Equal(orderCount, sessions.Select(session => session.ReferenceId).Distinct(StringComparer.Ordinal).Count());
+        Assert.Equal(orderCount, handler.Requests.Count(request => request.Method == HttpMethod.Post));
+        Assert.Equal(orderCount * 2, handler.Requests.Count);
+    }
+
+    [Fact]
     public async Task Duplicate_reference_conflict_is_reconciled_by_authenticated_lookup()
     {
         var linkExists = false;
@@ -131,6 +158,32 @@ public sealed class WaylPaymentProviderTests
         Assert.Equal(new Uri(HostedUrl), result.HostedCheckoutUrl);
         Assert.Equal(3, handler.Requests.Count);
         Assert.Equal(1, handler.Requests.Count(request => request.Method == HttpMethod.Post));
+    }
+
+    [Fact]
+    public async Task Failed_mocked_create_releases_gate_for_a_same_reference_retry()
+    {
+        var postCount = 0;
+        var handler = new StubHttpMessageHandler((request, _) =>
+        {
+            AssertAuthenticated(request);
+            if (request.Method == HttpMethod.Get)
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
+
+            var attempt = Interlocked.Increment(ref postCount);
+            return Task.FromResult(attempt == 1
+                ? new HttpResponseMessage(HttpStatusCode.InternalServerError)
+                : LinkResponse(HttpStatusCode.Created, ReferenceId, "10000", "IQD", "Created", HostedUrl));
+        });
+        using var httpClient = new HttpClient(handler);
+        var provider = NewProvider(httpClient, new FakePriceCalculator(10_000));
+        var command = new WaylCheckoutCommand(ReferenceId, "pro", "Taslim Pro");
+
+        await Assert.ThrowsAsync<HttpRequestException>(() => provider.CreateCheckoutAsync(command));
+        var retry = await provider.CreateCheckoutAsync(command);
+
+        Assert.Equal(2, postCount);
+        Assert.False(retry.ReusedExistingReference);
     }
 
     [Fact]
@@ -223,6 +276,12 @@ public sealed class WaylPaymentProviderTests
         Assert.Equal(WaylReplayDisposition.FirstSeen, first.ReplayDisposition);
         Assert.Equal(WaylReplayDisposition.Duplicate, duplicate.ReplayDisposition);
         Assert.Equal(WaylReplayDisposition.EventIdConflict, conflict.ReplayDisposition);
+    }
+
+    [Fact]
+    public void Verified_webhook_receipt_has_no_public_constructor()
+    {
+        Assert.Empty(typeof(WaylWebhookReceipt).GetConstructors(BindingFlags.Public | BindingFlags.Instance));
     }
 
     [Fact]
