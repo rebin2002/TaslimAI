@@ -1,3 +1,23 @@
+using System.Collections.Concurrent;
+using System.Net;
+using System.Net.Http.Json;
+using System.Runtime.CompilerServices;
+using System.Text.Json;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using Taslim.Api.Ai;
+using Taslim.Api.Contracts;
+using Taslim.Api.Domain;
+using Taslim.Api.Documents;
+using Taslim.Api.Generation;
+using Taslim.Api.Images;
+using Taslim.Api.Movies;
+using Taslim.Api.Persistence;
+using Taslim.Api.Presentations;
+using Taslim.Api.Resilience;
+using Taslim.Api.Tests.ProviderTesting;
 using Taslim.Api.Usage;
 using Xunit;
 
@@ -911,4 +931,676 @@ public sealed class PublicFreeTierProviderSpendPolicyTests
             public Dictionary<string, string> CompletionKeys { get; } = new(StringComparer.Ordinal);
         }
     }
+}
+
+
+/// <summary>
+/// Provider-free route-level regression for exhausted Free-tier budgets. All provider seams are
+/// replaced with deterministic fakes; this verifies runtime wiring rather than the pure policy.
+/// </summary>
+public sealed class PublicFreeTierRuntimeNegativeAcceptanceTests
+{
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+
+    [Fact]
+    public async Task Synthetic_exhausted_free_budget_must_reject_before_every_fake_provider_dispatch()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"taslim-free-tier-negative-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+
+        var observations = new List<DispatchObservation>();
+        var policyControls = EvaluatePolicyControls();
+        Assert.Equal("PUBLIC_FREE_TIER_USER_DAILY_SPEND_LIMIT", policyControls.UserCapCode);
+        Assert.Equal("PUBLIC_FREE_TIER_GLOBAL_DAILY_SPEND_LIMIT", policyControls.GlobalCapCode);
+
+        using var factory = new NegativeRuntimeApiFactory(root);
+        using var startupScope = factory.Services.CreateScope();
+        await startupScope.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreatedAsync();
+        var activeGuard = factory.Services.GetRequiredService<IProviderCostGuard>().GetType().Name;
+
+        // Route-auth negative control: one fresh test host per module avoids interpreting an
+        // anonymous-IP rate-limit response as authorization enforcement.
+        foreach (var module in Modules)
+            observations.Add(await RunUnauthenticatedAsync(root, module));
+
+        // Each newly registered workspace is provisioned on the canonical Free plan; the test
+        // marks its address confirmed so the only relevant missing gate is spend admission.
+        observations.AddRange(await RunChatAsync(factory));
+        observations.AddRange(await RunImageAsync(factory));
+        observations.AddRange(await RunDocumentAsync(factory));
+        observations.AddRange(await RunPresentationAsync(factory));
+        observations.AddRange(await RunMovieAsync(factory));
+
+        var userBudgetFailures = observations.Where(item => item.Scenario == "user_daily_cap_exhausted"
+            && (item.LedgerReserveDelta < 1 || item.ProviderCallDelta != 0 || item.DispatchAuthorizationDelta != 0 || item.CreditLedgerEntryDelta != 0
+                || item.StatusCodes.Any(status => status < 400))).ToArray();
+        var globalConcurrentFailures = observations.Where(item => item.Scenario == "global_daily_cap_exhausted_concurrent_retry"
+            && (item.LedgerReserveDelta < 1 || item.ProviderCallDelta != 0 || item.DispatchAuthorizationDelta != 0 || item.CreditLedgerEntryDelta != 0
+                || item.StatusCodes.Any(status => status < 400))).ToArray();
+        var anonymousFailures = observations.Where(item => item.Scenario == "unauthenticated"
+            && (item.StatusCodes.Any(status => status is not (401 or 403)) || item.ProviderCallDelta != 0 || item.LedgerReserveDelta != 0)).ToArray();
+
+        var chargedAmount = await SumCustomerChargesAsync(factory, null);
+        var egressAttempts = factory.EgressAttempts.Count;
+        var report = new NegativeAcceptanceReport(
+            Environment.GetEnvironmentVariable("GITHUB_SHA") ?? "local",
+            activeGuard,
+            "Synthetic ledger denies exhausted per-user/global budgets; all provider adapters are fakes; IHttpClientFactory blocks outbound requests.",
+            policyControls,
+            observations,
+            userBudgetFailures.Length,
+            globalConcurrentFailures.Length,
+            anonymousFailures.Length,
+            chargedAmount,
+            egressAttempts);
+        await File.WriteAllTextAsync(Path.Combine(root, "negative-acceptance-report.json"), JsonSerializer.Serialize(report, JsonOptions));
+        await File.WriteAllTextAsync(Path.Combine(root, "negative-acceptance-summary.md"), RenderSummary(report));
+
+        var failureSummary = JsonSerializer.Serialize(new
+        {
+            userBudgetFailures,
+            globalConcurrentFailures,
+            anonymousFailures,
+            report.RuntimeProviderCostGuard,
+            report.ChargedAmountUsd,
+            report.BlockedOutboundHttpAttempts,
+        }, JsonOptions);
+        Assert.Equal(0m, chargedAmount);
+        Assert.Equal(0, egressAttempts);
+        Assert.True(userBudgetFailures.Length == 0 && globalConcurrentFailures.Length == 0 && anonymousFailures.Length == 0,
+            "NEGATIVE ACCEPTANCE RED: real module dispatch did not fail closed. Full report: " + Path.Combine(root, "negative-acceptance-report.json") + " Details=" + failureSummary);
+    }
+
+    private static string[] Modules => ["Chat", "Image", "Document", "Presentation", "Movie"];
+
+    private static async Task<IReadOnlyList<DispatchObservation>> RunChatAsync(NegativeRuntimeApiFactory factory)
+    {
+        using var client = factory.CreateClient();
+        var auth = await RegisterAsync(client, "Chat");
+        await ConfirmFreeAccountAsync(factory, auth);
+
+        var result = new List<DispatchObservation>();
+        var firstConversation = await CreateConversationAsync(client, auth.PersonalWorkspace.Id);
+        factory.Ledger.SetDenialCode("PUBLIC_FREE_TIER_USER_DAILY_SPEND_LIMIT");
+        result.Add(await ObserveAsync(factory, client, "Chat", "user_daily_cap_exhausted", auth.PersonalWorkspace.Id,
+            () => SendOneAsync(client, HttpMethod.Post, $"/api/conversations/{firstConversation.Id}/messages", new
+            {
+                content = "Synthetic spend-cap rejection probe.", requestId = "chat-user-cap-probe-01",
+            }), () => factory.Calls.Get("Chat")));
+
+        var retryConversation = await CreateConversationAsync(client, auth.PersonalWorkspace.Id);
+        factory.Ledger.SetDenialCode("PUBLIC_FREE_TIER_GLOBAL_DAILY_SPEND_LIMIT");
+        result.Add(await ObserveAsync(factory, client, "Chat", "global_daily_cap_exhausted_concurrent_retry", auth.PersonalWorkspace.Id,
+            () => SendPairAsync(client, HttpMethod.Post, $"/api/conversations/{retryConversation.Id}/messages", new
+            {
+                content = "Synthetic concurrent retry probe.", requestId = "chat-global-race-02",
+            }, null), () => factory.Calls.Get("Chat")));
+        return result;
+    }
+
+    private static async Task<IReadOnlyList<DispatchObservation>> RunImageAsync(NegativeRuntimeApiFactory factory)
+    {
+        using var client = factory.CreateClient();
+        var auth = await RegisterAsync(client, "Image");
+        await ConfirmFreeAccountAsync(factory, auth);
+        var result = new List<DispatchObservation>();
+        object payload = new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            title = "Synthetic firewall image",
+            description = "A small deterministic test image on a pale blue background.",
+            style = "product",
+            aspectRatio = "square",
+            quality = "standard",
+            mood = "calm",
+            background = "plain",
+        };
+        factory.Ledger.SetDenialCode("PUBLIC_FREE_TIER_USER_DAILY_SPEND_LIMIT");
+        result.Add(await ObserveAsync(factory, client, "Image", "user_daily_cap_exhausted", auth.PersonalWorkspace.Id,
+            () => SendOneAsync(client, HttpMethod.Post, "/api/image-generation/jobs", payload, "image-user-cap-01"),
+            () => factory.Calls.Get("Image")));
+        factory.Ledger.SetDenialCode("PUBLIC_FREE_TIER_GLOBAL_DAILY_SPEND_LIMIT");
+        result.Add(await ObserveAsync(factory, client, "Image", "global_daily_cap_exhausted_concurrent_retry", auth.PersonalWorkspace.Id,
+            () => SendPairAsync(client, HttpMethod.Post, "/api/image-generation/jobs", payload, "image-global-race-02"),
+            () => factory.Calls.Get("Image")));
+        return result;
+    }
+
+    private static async Task<IReadOnlyList<DispatchObservation>> RunDocumentAsync(NegativeRuntimeApiFactory factory)
+    {
+        using var client = factory.CreateClient();
+        var auth = await RegisterAsync(client, "Document");
+        await ConfirmFreeAccountAsync(factory, auth);
+        var result = new List<DispatchObservation>();
+        object payload = new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            title = "Synthetic launch brief",
+            prompt = "Create a concise launch brief for a local provider-free safety test.",
+            description = "A bounded synthetic document request.",
+            documentType = "report",
+            length = "short",
+            audience = "test reviewers",
+            additionalInstructions = "Use concise, safe language.",
+            attachmentIds = Array.Empty<Guid>(),
+            language = "en",
+            outputFormat = "both",
+            tone = "professional",
+            includeTableOfContents = false,
+        };
+        factory.Ledger.SetDenialCode("PUBLIC_FREE_TIER_USER_DAILY_SPEND_LIMIT");
+        result.Add(await ObserveAsync(factory, client, "Document", "user_daily_cap_exhausted", auth.PersonalWorkspace.Id,
+            () => SendOneAsync(client, HttpMethod.Post, "/api/document-generation/jobs", payload, "document-user-cap-01"),
+            () => factory.Calls.Get("Document")));
+        factory.Ledger.SetDenialCode("PUBLIC_FREE_TIER_GLOBAL_DAILY_SPEND_LIMIT");
+        result.Add(await ObserveAsync(factory, client, "Document", "global_daily_cap_exhausted_concurrent_retry", auth.PersonalWorkspace.Id,
+            () => SendPairAsync(client, HttpMethod.Post, "/api/document-generation/jobs", payload, "document-global-race-02"),
+            () => factory.Calls.Get("Document")));
+        return result;
+    }
+
+    private static async Task<IReadOnlyList<DispatchObservation>> RunPresentationAsync(NegativeRuntimeApiFactory factory)
+    {
+        using var client = factory.CreateClient();
+        var auth = await RegisterAsync(client, "Presentation");
+        await ConfirmFreeAccountAsync(factory, auth);
+        var result = new List<DispatchObservation>();
+        object payload = new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            title = "Synthetic safety briefing",
+            description = "A provider-free synthetic acceptance request.",
+            presentationType = "business",
+            length = "standard",
+            tone = "professional",
+            language = "ku",
+            includeAgenda = true,
+            includeClosingNextSteps = true,
+            attachmentIds = Array.Empty<Guid>(),
+        };
+        factory.Ledger.SetDenialCode("PUBLIC_FREE_TIER_USER_DAILY_SPEND_LIMIT");
+        result.Add(await ObserveAsync(factory, client, "Presentation", "user_daily_cap_exhausted", auth.PersonalWorkspace.Id,
+            () => SendOneAsync(client, HttpMethod.Post, "/api/presentation-generation/jobs", payload, "presentation-user-cap-01"),
+            () => factory.Calls.Get("Presentation")));
+        factory.Ledger.SetDenialCode("PUBLIC_FREE_TIER_GLOBAL_DAILY_SPEND_LIMIT");
+        result.Add(await ObserveAsync(factory, client, "Presentation", "global_daily_cap_exhausted_concurrent_retry", auth.PersonalWorkspace.Id,
+            () => SendPairAsync(client, HttpMethod.Post, "/api/presentation-generation/jobs", payload, "presentation-global-race-02"),
+            () => factory.Calls.Get("Presentation")));
+        return result;
+    }
+
+    private static async Task<IReadOnlyList<DispatchObservation>> RunMovieAsync(NegativeRuntimeApiFactory factory)
+    {
+        using var client = factory.CreateClient();
+        var result = new List<DispatchObservation>();
+        var firstFixture = await MovieOperationalFixtures.CreateFullMovieAsync(client, title: "Free-tier negative Movie probe");
+        await ConfirmFreeAccountAsync(factory, firstFixture.Owner);
+        factory.Ledger.SetDenialCode("PUBLIC_FREE_TIER_USER_DAILY_SPEND_LIMIT");
+        result.Add(await ObserveAsync(factory, client, "Movie", "user_daily_cap_exhausted", firstFixture.Owner.PersonalWorkspace.Id,
+            () => SendOneAsync(client, HttpMethod.Post, $"/api/movie-studio/shots/{firstFixture.Shot.Id}/generate", new { title = "Synthetic Movie provider call" }, "movie-user-cap-01"),
+            () => factory.Calls.Get("Movie")));
+
+        // A fresh Free account/project makes this a new provider attempt rather than a replay of
+        // the already-completed first request; two same-key calls race through the real route.
+        var retryFixture = await MovieOperationalFixtures.CreateFullMovieAsync(client, title: "Free-tier concurrent Movie retry probe");
+        await ConfirmFreeAccountAsync(factory, retryFixture.Owner);
+        factory.Ledger.SetDenialCode("PUBLIC_FREE_TIER_GLOBAL_DAILY_SPEND_LIMIT");
+        result.Add(await ObserveAsync(factory, client, "Movie", "global_daily_cap_exhausted_concurrent_retry", retryFixture.Owner.PersonalWorkspace.Id,
+            () => SendPairAsync(client, HttpMethod.Post, $"/api/movie-studio/shots/{retryFixture.Shot.Id}/generate", new { title = "Synthetic concurrent Movie retry" }, "movie-global-race-02"),
+            () => factory.Calls.Get("Movie")));
+        return result;
+    }
+
+    private static async Task<DispatchObservation> RunUnauthenticatedAsync(string root, string module)
+    {
+        using var factory = new NegativeRuntimeApiFactory(root);
+        using var client = factory.CreateClient();
+        var randomId = Guid.NewGuid();
+        var (method, path, payload, key) = module switch
+        {
+            "Chat" => (HttpMethod.Post, $"/api/conversations/{randomId}/messages", (object)new { content = "anonymous synthetic probe", requestId = "anon-chat-01" }, (string?)null),
+            "Image" => (HttpMethod.Post, "/api/image-generation/jobs", (object)new { workspaceId = randomId, title = "anon", description = "anonymous synthetic probe", style = "product", aspectRatio = "square", quality = "standard", mood = "calm", background = "plain" }, (string?)"anon-image-01"),
+            "Document" => (HttpMethod.Post, "/api/document-generation/jobs", (object)new { workspaceId = randomId, title = "anon", prompt = "anonymous synthetic probe", description = "anonymous synthetic probe", attachmentIds = Array.Empty<Guid>(), language = "en", outputFormat = "both", tone = "professional" }, (string?)"anon-document-01"),
+            "Presentation" => (HttpMethod.Post, "/api/presentation-generation/jobs", (object)new { workspaceId = randomId, title = "anon", description = "anonymous synthetic probe", presentationType = "business", length = "standard", tone = "professional", language = "ku", attachmentIds = Array.Empty<Guid>() }, (string?)"anon-presentation-01"),
+            _ => (HttpMethod.Post, $"/api/movie-studio/shots/{randomId}/generate", (object)new { title = "anonymous synthetic probe" }, (string?)"anon-movie-01"),
+        };
+        var before = factory.Calls.Get(module);
+        var reserveBefore = factory.Ledger.ReserveCalls;
+        var response = await SendOneAsync(client, method, path, payload, key);
+        var status = response[0].StatusCode;
+        var error = response[0].ErrorCode;
+        var providerDelta = factory.Calls.Get(module) - before;
+        return new DispatchObservation(module, "unauthenticated", [status], error is null ? Array.Empty<string>() : [error], providerDelta,
+            factory.Ledger.ReserveCalls - reserveBefore, 0,
+            0, 0m, false, factory.DatabasePath);
+    }
+
+    private static async Task<DispatchObservation> ObserveAsync(
+        NegativeRuntimeApiFactory factory,
+        HttpClient client,
+        string module,
+        string scenario,
+        Guid workspaceId,
+        Func<Task<ResponseInfo[]>> send,
+        Func<int> providerCalls)
+    {
+        var providerBefore = providerCalls();
+        var reserveBefore = factory.Ledger.ReserveCalls;
+        var dispatchBefore = factory.Ledger.DispatchAuthorizationCalls;
+        var creditBefore = await CountCreditEntriesAsync(factory, workspaceId);
+        var responses = await send();
+        var jobIds = responses.Where(item => item.JobId.HasValue).Select(item => item.JobId!.Value).Distinct().ToArray();
+        foreach (var jobId in jobIds) await WaitForTerminalAsync(client, jobId);
+        var providerDelta = providerCalls() - providerBefore;
+        var reserveDelta = factory.Ledger.ReserveCalls - reserveBefore;
+        var dispatchDelta = factory.Ledger.DispatchAuthorizationCalls - dispatchBefore;
+        var creditDelta = await CountCreditEntriesAsync(factory, workspaceId) - creditBefore;
+        var charged = await SumCustomerChargesAsync(factory, workspaceId);
+        var isFree = await IsActiveFreeSubscriptionAsync(factory, workspaceId);
+        var emailConfirmed = await IsWorkspaceEmailConfirmedAsync(factory, workspaceId);
+        return new DispatchObservation(module, scenario,
+            responses.Select(item => item.StatusCode).ToArray(),
+            responses.Select(item => item.ErrorCode).Where(item => item is not null).Cast<string>().ToArray(),
+            providerDelta, reserveDelta, dispatchDelta, creditDelta, charged, isFree, factory.DatabasePath, emailConfirmed);
+    }
+
+    private static async Task<ResponseInfo[]> SendOneAsync(HttpClient client, HttpMethod method, string path, object? payload, string? idempotencyKey = null)
+    {
+        using var request = await CreateRequestAsync(client, method, path, payload, idempotencyKey);
+        using var response = await client.SendAsync(request);
+        return [await ReadResponseAsync(response, client)];
+    }
+
+    private static async Task<ResponseInfo[]> SendPairAsync(HttpClient client, HttpMethod method, string path, object? payload, string? idempotencyKey)
+    {
+        var token = await GetCsrfTokenAsync(client);
+        using var first = CreateRequest(method, path, payload, token, idempotencyKey);
+        using var second = CreateRequest(method, path, payload, token, idempotencyKey);
+        using var responses = new ResponsePair(await Task.WhenAll(client.SendAsync(first), client.SendAsync(second)));
+        return [await ReadResponseAsync(responses.First, client), await ReadResponseAsync(responses.Second, client)];
+    }
+
+    private static async Task<HttpRequestMessage> CreateRequestAsync(HttpClient client, HttpMethod method, string path, object? payload, string? idempotencyKey)
+    {
+        var token = await GetCsrfTokenAsync(client);
+        return CreateRequest(method, path, payload, token, idempotencyKey);
+    }
+
+    private static HttpRequestMessage CreateRequest(HttpMethod method, string path, object? payload, string token, string? idempotencyKey)
+    {
+        var request = new HttpRequestMessage(method, path);
+        request.Headers.Add("X-CSRF-TOKEN", token);
+        if (!string.IsNullOrWhiteSpace(idempotencyKey)) request.Headers.Add("Idempotency-Key", idempotencyKey);
+        if (payload is not null) request.Content = JsonContent.Create(payload);
+        return request;
+    }
+
+    private static async Task<ResponseInfo> ReadResponseAsync(HttpResponseMessage response, HttpClient client)
+    {
+        var body = await response.Content.ReadAsStringAsync();
+        string? errorCode = null;
+        Guid? jobId = null;
+        try
+        {
+            using var json = JsonDocument.Parse(body);
+            var root = json.RootElement;
+            if (root.TryGetProperty("error", out var error) && error.TryGetProperty("code", out var code)) errorCode = code.GetString();
+            if (root.TryGetProperty("job", out var job) && job.ValueKind == JsonValueKind.Object && job.TryGetProperty("id", out var id))
+                jobId = id.ValueKind == JsonValueKind.String && Guid.TryParse(id.GetString(), out var parsed) ? parsed : null;
+        }
+        catch (JsonException) { }
+        return new ResponseInfo((int)response.StatusCode, errorCode, jobId, body, null);
+    }
+
+    private static async Task<string> GetCsrfTokenAsync(HttpClient client)
+    {
+        var csrf = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
+        return csrf.GetProperty("token").GetString()!;
+    }
+
+    private static async Task<AuthResponse> RegisterAsync(HttpClient client, string module)
+    {
+        var response = (await SendOneAsync(client, HttpMethod.Post, "/api/auth/register", new
+        {
+            displayName = $"Negative {module} Tester",
+            email = $"negative-{module.ToLowerInvariant()}-{Guid.NewGuid():N}@example.com",
+            password = "StrongPassword!123",
+            preferredLanguage = "en",
+        }))[0];
+        Assert.Equal(200, response.StatusCode);
+        return JsonSerializer.Deserialize<AuthResponse>(response.Body, JsonOptions)!;
+    }
+
+    private static async Task<ConversationDto> CreateConversationAsync(HttpClient client, Guid workspaceId)
+    {
+        var response = (await SendOneAsync(client, HttpMethod.Post, $"/api/workspaces/{workspaceId}/conversations", new { }))[0];
+        Assert.InRange(response.StatusCode, 200, 299);
+        return JsonSerializer.Deserialize<ConversationDto>(response.Body, JsonOptions)!;
+    }
+
+    private static async Task ConfirmFreeAccountAsync(NegativeRuntimeApiFactory factory, AuthResponse auth)
+    {
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var user = await db.Users.SingleAsync(item => item.Id == auth.User.Id);
+        user.EmailConfirmed = true;
+        await db.SaveChangesAsync();
+        var subscription = await db.Subscriptions.Include(item => item.Plan).SingleAsync(item => item.WorkspaceId == auth.PersonalWorkspace.Id);
+        Assert.Equal("free", subscription.Plan.Code);
+        Assert.Equal(SubscriptionStatus.Active, subscription.Status);
+    }
+
+    private static async Task<bool> IsActiveFreeSubscriptionAsync(NegativeRuntimeApiFactory factory, Guid workspaceId)
+    {
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        return await db.Subscriptions.Include(item => item.Plan).AnyAsync(item => item.WorkspaceId == workspaceId
+            && item.Status == SubscriptionStatus.Active && item.Plan.Code == "free");
+    }
+
+    private static async Task<bool> IsWorkspaceEmailConfirmedAsync(NegativeRuntimeApiFactory factory, Guid workspaceId)
+    {
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var userId = await db.WorkspaceMembers.Where(item => item.WorkspaceId == workspaceId)
+            .Select(item => item.UserId).FirstAsync();
+        return await db.Users.Where(item => item.Id == userId).Select(item => item.EmailConfirmed).SingleAsync();
+    }
+
+    private static async Task<bool> IsEmailConfirmedAsync(NegativeRuntimeApiFactory factory, Guid userId)
+    {
+        if (userId == Guid.Empty) return false;
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        return await db.Users.Where(item => item.Id == userId).Select(item => item.EmailConfirmed).SingleAsync();
+    }
+
+    private static async Task<int> CountCreditEntriesAsync(NegativeRuntimeApiFactory factory, Guid workspaceId)
+    {
+        using var scope = factory.Services.CreateScope();
+        return await scope.ServiceProvider.GetRequiredService<TaslimDbContext>().CreditLedgerEntries.CountAsync(item => item.WorkspaceId == workspaceId);
+    }
+
+    private static async Task<decimal> SumCustomerChargesAsync(NegativeRuntimeApiFactory factory, Guid? workspaceId)
+    {
+        using var scope = factory.Services.CreateScope();
+        var usage = scope.ServiceProvider.GetRequiredService<TaslimDbContext>().UsageTransactions.AsNoTracking();
+        if (workspaceId.HasValue) usage = usage.Where(item => item.WorkspaceId == workspaceId.Value);
+        return (await usage.Select(item => item.ChargedAmount).ToListAsync()).Sum();
+    }
+
+    private static async Task WaitForTerminalAsync(HttpClient client, Guid jobId)
+    {
+        for (var attempt = 0; attempt < 160; attempt++)
+        {
+            var statusResponse = await client.GetAsync($"/api/generation/jobs/{jobId}");
+            if (statusResponse.StatusCode == HttpStatusCode.NotFound) throw new InvalidOperationException($"Generation job {jobId} was not visible to its owner.");
+            var statusBody = await statusResponse.Content.ReadAsStringAsync();
+            using var json = JsonDocument.Parse(statusBody);
+            var status = json.RootElement.GetProperty("status").GetString();
+            if (status is "Succeeded" or "Failed" or "Cancelled") return;
+            await Task.Delay(25);
+        }
+        throw new TimeoutException($"Generation job {jobId} did not reach terminal state.");
+    }
+
+    private static async Task<int> GetCreditCountAsync(NegativeRuntimeApiFactory factory, Guid workspaceId) => await CountCreditEntriesAsync(factory, workspaceId);
+
+    private static PolicyControlObservation EvaluatePolicyControls()
+    {
+        var options = new PublicFreeTierPolicyOptions { Enabled = true };
+        var now = DateTimeOffset.UtcNow;
+        var day = DateOnly.FromDateTime(now.UtcDateTime);
+        var week = day.AddDays(-(((int)day.DayOfWeek + 6) % 7));
+        var month = new DateOnly(day.Year, day.Month, 1);
+        var userId = Guid.NewGuid();
+        var workspaceId = Guid.NewGuid();
+        var request = new PublicFreeTierAdmissionRequest(true, userId, workspaceId, true, true, true, true,
+            PublicFreeTierPlan.Free, PublicFreeTierCapability.TextChat, 10, 64, 0.01m, "USD", "synthetic-v1", "policy-control");
+        var userCapped = Snapshot(userId, workspaceId, now, day, week, month,
+            options.MaxProviderSpendPerUserPerUtcDayUsd, 0m);
+        var globalCapped = Snapshot(userId, workspaceId, now, day, week, month,
+            0m, options.MaxGlobalProviderSpendPerUtcDayUsd);
+        var userDecision = PublicFreeTierPolicy.Evaluate(request, userCapped, options, now);
+        var globalDecision = PublicFreeTierPolicy.Evaluate(request, globalCapped, options, now);
+        return new PolicyControlObservation(userDecision.Allowed, userDecision.Code, globalDecision.Allowed, globalDecision.Code);
+    }
+
+    private static PublicFreeTierExposureSnapshot Snapshot(Guid userId, Guid workspaceId, DateTimeOffset now,
+        DateOnly day, DateOnly week, DateOnly month, decimal userDaily, decimal globalDaily) =>
+        new(userId, workspaceId, now, day, week, month, 0, 0, userDaily, 0m, 0m, 0m, globalDaily, 0m, 0);
+
+    private static string RenderSummary(NegativeAcceptanceReport report)
+    {
+        var lines = new List<string>
+        {
+            "# Free-tier provider-spend negative acceptance",
+            "",
+            $"- Tested source head: `{report.Head}`",
+            $"- Runtime IProviderCostGuard registration: `{report.RuntimeProviderCostGuard}`",
+            $"- Synthetic policy controls: user cap `{report.PolicyControls.UserCapCode}`; global cap `{report.PolicyControls.GlobalCapCode}` (both denied by the pure policy).",
+            $"- Provider-free execution: {report.EgressNote}",
+            $"- Runtime customer charge total: ${report.ChargedAmountUsd:0.000000} USD; blocked outbound HTTP attempts: {report.BlockedOutboundHttpAttempts}.",
+            $"- Failing user-cap module cases: {report.UserBudgetFailureCount}; failing global/concurrent cases: {report.GlobalConcurrentFailureCount}; failing unauth cases: {report.UnauthenticatedFailureCount}.",
+            "",
+            "| Module | Scenario | HTTP status(es) | Error code(s) | Fake provider delta | ledger reserve delta | customer credit-entry delta | active Free plan | email confirmed |",
+            "|---|---|---:|---|---:|---:|---:|---|---|",
+        };
+        foreach (var item in report.Observations)
+            lines.Add($"| {item.Module} | {item.Scenario} | {string.Join(",", item.StatusCodes)} | {string.Join(",", item.ErrorCodes)} | {item.ProviderCallDelta} | {item.LedgerReserveDelta} | {item.CreditLedgerEntryDelta} | {item.IsActiveFreePlan} | {item.EmailConfirmed} |");
+        lines.Add("");
+        lines.Add("An authenticated exhausted-budget case is a positive safety result only if the synthetic ledger was called, every request was rejected before provider invocation, and the customer credit ledger was unchanged. Unauthenticated requests should receive 401/403 before either ledger or provider. This report is provider-free and does not enable or alter production code/configuration.");
+        return string.Join(Environment.NewLine, lines);
+    }
+
+    private sealed record ResponseInfo(int StatusCode, string? ErrorCode, Guid? JobId, string Body, Guid? UserId);
+    private sealed record DispatchObservation(string Module, string Scenario, int[] StatusCodes, string[] ErrorCodes,
+        int ProviderCallDelta, int LedgerReserveDelta, int DispatchAuthorizationDelta, int CreditLedgerEntryDelta,
+        decimal ChargedAmountUsd, bool IsActiveFreePlan, string DatabasePath, bool EmailConfirmed = false);
+    private sealed record PolicyControlObservation(bool UserCapAllowed, string UserCapCode, bool GlobalCapAllowed, string GlobalCapCode);
+    private sealed record NegativeAcceptanceReport(string Head, string RuntimeProviderCostGuard, string EgressNote,
+        PolicyControlObservation PolicyControls, IReadOnlyList<DispatchObservation> Observations,
+        int UserBudgetFailureCount, int GlobalConcurrentFailureCount, int UnauthenticatedFailureCount,
+        decimal ChargedAmountUsd, int BlockedOutboundHttpAttempts);
+
+    private sealed class ResponsePair : IDisposable
+    {
+        public ResponsePair(HttpResponseMessage[] responses) { First = responses[0]; Second = responses[1]; }
+        public HttpResponseMessage First { get; }
+        public HttpResponseMessage Second { get; }
+        public void Dispose() { First.Dispose(); Second.Dispose(); }
+    }
+}
+
+internal sealed class NegativeRuntimeApiFactory : GenerationJobsApiFactory
+{
+    private readonly string root;
+    public ProviderDispatchCounters Calls { get; } = new();
+    public ExhaustedLedgerProbe Ledger { get; } = new();
+    public ConcurrentBag<string> EgressAttempts { get; } = new();
+    public string DatabasePath => databasePath;
+
+    public NegativeRuntimeApiFactory(string root) => this.root = Path.GetFullPath(root);
+
+    protected override void ConfigureWebHost(IWebHostBuilder builder)
+    {
+        base.ConfigureWebHost(builder);
+        builder.UseSetting("GenerationJobs:WorkerEnabled", "true");
+        builder.UseSetting("GenerationJobs:PollIntervalMilliseconds", "100");
+        builder.UseSetting("Logging:LogLevel:Default", "Warning");
+        builder.UseSetting("Logging:LogLevel:Microsoft", "Warning");
+        builder.UseSetting("Logging:LogLevel:Microsoft.EntityFrameworkCore.Database.Command", "Warning");
+        builder.UseSetting("UsageControls:GuardrailsEnabled", "false");
+        builder.UseSetting("GenerationBudget:Enabled", "false");
+        builder.UseSetting("Billing:CustomerChargingEnabled", "false");
+        builder.UseSetting("Ai:OpenAI:Enabled", "false");
+        builder.UseSetting("Ai:AllowMockProvider", "false");
+        builder.UseSetting("ImageGeneration:Enabled", "true");
+        builder.UseSetting("ImageGeneration:ProviderKey", "synthetic-image");
+        builder.UseSetting("DocumentGeneration:Enabled", "true");
+        builder.UseSetting("PresentationGeneration:Enabled", "true");
+        builder.UseSetting("MovieVideo:Enabled", "true");
+        builder.UseSetting("MovieVideo:ProviderKey", "fake-movie");
+        builder.UseSetting("MovieVideo:StatusPollIntervalSeconds", "0");
+        builder.UseSetting("MovieVideo:MaxStatusPolls", "3");
+        builder.UseSetting("Files:StorageProvider", "Local");
+        builder.UseSetting("Files:LocalRootPath", Path.Combine(root, "files"));
+
+        builder.ConfigureServices(services =>
+        {
+            services.AddSingleton(Calls);
+            services.AddSingleton(Ledger);
+            services.AddSingleton<IPublicFreeTierSpendLedger>(sp => sp.GetRequiredService<ExhaustedLedgerProbe>());
+
+            services.RemoveAll<IChatCompletionService>();
+            services.AddSingleton<IChatCompletionService>(sp => new CountingChatCompletionService(sp.GetRequiredService<ProviderDispatchCounters>()));
+
+            services.RemoveAll<IImageGenerationProvider>();
+            services.AddSingleton<IImageGenerationProvider>(sp => new CountingImageProvider(sp.GetRequiredService<ProviderDispatchCounters>()));
+
+            services.RemoveAll<IDocumentGenerationProvider>();
+            services.AddSingleton<IDocumentGenerationProvider>(sp => new CountingDocumentProvider(sp.GetRequiredService<ProviderDispatchCounters>()));
+
+            services.RemoveAll<IPresentationGenerationProvider>();
+            services.AddSingleton<IPresentationGenerationProvider>(sp => new CountingPresentationProvider(sp.GetRequiredService<ProviderDispatchCounters>()));
+
+            services.RemoveAll<IMovieVideoProvider>();
+            services.AddSingleton(new FakeProviderScenarioCatalog());
+            services.AddSingleton(new FakeProviderCallLog());
+            services.AddSingleton<IMovieVideoProvider>(sp => new CountingMovieVideoProvider(
+                sp.GetRequiredService<ProviderDispatchCounters>(),
+                sp.GetRequiredService<FakeProviderScenarioCatalog>(),
+                sp.GetRequiredService<FakeProviderCallLog>()));
+
+            services.RemoveAll<IHttpClientFactory>();
+            services.AddSingleton<IHttpClientFactory>(sp => new NoEgressHttpClientFactory(sp.GetRequiredService<ConcurrentBag<string>>()));
+            services.AddSingleton(EgressAttempts);
+        });
+    }
+}
+
+internal sealed class ProviderDispatchCounters
+{
+    private readonly ConcurrentDictionary<string, int> values = new(StringComparer.Ordinal);
+    public void Record(string module) => values.AddOrUpdate(module, 1, (_, value) => value + 1);
+    public int Get(string module) => values.TryGetValue(module, out var value) ? value : 0;
+}
+
+internal sealed class ExhaustedLedgerProbe : IPublicFreeTierSpendLedger
+{
+    private int reserveCalls;
+    private int dispatchAuthorizationCalls;
+    private string denialCode = "PUBLIC_FREE_TIER_USER_DAILY_SPEND_LIMIT";
+    public int ReserveCalls => Volatile.Read(ref reserveCalls);
+    public int DispatchAuthorizationCalls => Volatile.Read(ref dispatchAuthorizationCalls);
+    public void SetDenialCode(string code) => Volatile.Write(ref denialCode, code);
+
+    public Task<PublicFreeTierReservationResult> TryReserveBeforeProviderCallAsync(PublicFreeTierAdmissionRequest request, CancellationToken cancellationToken = default)
+    {
+        Interlocked.Increment(ref reserveCalls);
+        var code = Volatile.Read(ref denialCode);
+        return Task.FromResult(new PublicFreeTierReservationResult(false, null, false,
+            PublicFreeTierAdmissionDecision.Deny(429, code, "Synthetic exhausted-budget sentinel: deny before provider I/O."), PublicFreeTierReservationState.None));
+    }
+
+    public Task<PublicFreeTierDispatchAuthorizationResult> TryAuthorizeProviderDispatchAsync(Guid reservationId, string dispatchIdempotencyKey, CancellationToken cancellationToken = default)
+    {
+        Interlocked.Increment(ref dispatchAuthorizationCalls);
+        return Task.FromResult(new PublicFreeTierDispatchAuthorizationResult(false, false, PublicFreeTierReservationState.None, "SYNTHETIC_DENY"));
+    }
+
+    public Task<PublicFreeTierSettlementResult> RecordProviderOutcomeAsync(Guid reservationId, string completionIdempotencyKey, PublicFreeTierProviderOutcome outcome, bool actualCostKnown, decimal? actualProviderCostUsd, CancellationToken cancellationToken = default) =>
+        Task.FromResult(new PublicFreeTierSettlementResult(false, false, true, "SYNTHETIC_DENY"));
+
+    public Task<PublicFreeTierSettlementResult> ReleaseUndispatchedAsync(Guid reservationId, string completionIdempotencyKey, CancellationToken cancellationToken = default) =>
+        Task.FromResult(new PublicFreeTierSettlementResult(false, false, true, "SYNTHETIC_DENY"));
+}
+
+internal sealed class NoEgressHttpClientFactory(ConcurrentBag<string> attempts) : IHttpClientFactory
+{
+    public HttpClient CreateClient(string name) => new(new BlockAllOutboundHandler(attempts), disposeHandler: true);
+}
+
+internal sealed class BlockAllOutboundHandler(ConcurrentBag<string> attempts) : HttpMessageHandler
+{
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        attempts.Add($"{request.Method} {request.RequestUri}");
+        throw new InvalidOperationException("Outbound HTTP is forbidden in the synthetic acceptance harness.");
+    }
+}
+
+internal sealed class CountingChatCompletionService(ProviderDispatchCounters calls) : IChatCompletionService
+{
+    private static readonly AiUsageMetadata Usage = new("synthetic-chat", "synthetic-chat-v1", 12, null, 8, 0.001m, 0.001m, 1, "completed", false, PricingVersion: "synthetic-v1", Currency: "USD", CostBasis: UsageCostBasis.Estimated);
+
+    public async Task<AiGenerationResult> CompleteAsync(AiChatRequest request, CancellationToken cancellationToken = default)
+    {
+        calls.Record("Chat");
+        await Task.Delay(35, cancellationToken);
+        return new AiGenerationResult("Synthetic provider-free response.", Usage);
+    }
+
+    public async IAsyncEnumerable<AiStreamEvent> StreamAsync(AiChatRequest request, [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        calls.Record("Chat");
+        await Task.Delay(35, cancellationToken);
+        yield return new AiMessageDelta("Synthetic provider-free response.");
+        yield return new AiMessageCompleted(Usage);
+    }
+}
+
+internal sealed class CountingImageProvider(ProviderDispatchCounters calls) : IImageGenerationProvider, IImageGenerationProviderReadiness
+{
+    private static readonly byte[] Png = Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=");
+    public string Key => "synthetic-image";
+    public bool IsAvailable => true;
+    public Task<ImageProviderResult> GenerateAsync(ImageGenerationInput request, ImagePromptBuildResult prompt, CancellationToken cancellationToken = default)
+    {
+        calls.Record("Image");
+        return Task.FromResult(new ImageProviderResult(Png, "image/png", "png", 1, 1,
+            new ImageProviderUsage(12, 12, null, 8, 0.001m, CostBasis: UsageCostBasis.Estimated)));
+    }
+}
+
+internal sealed class CountingDocumentProvider(ProviderDispatchCounters calls) : IDocumentGenerationProvider
+{
+    private readonly DeterministicDocumentProvider inner = new();
+    public Task<DocumentProviderResult> GenerateAsync(DocumentGenerationPrompt prompt, DocumentGenerationOptions options, CancellationToken cancellationToken = default)
+    {
+        calls.Record("Document");
+        return inner.GenerateAsync(prompt, options, cancellationToken);
+    }
+}
+
+internal sealed class CountingPresentationProvider(ProviderDispatchCounters calls) : IPresentationGenerationProvider
+{
+    private readonly DeterministicPresentationProvider inner = new();
+    public Task<PresentationProviderResult> GenerateAsync(PresentationGenerationPrompt prompt, PresentationGenerationOptions options, CancellationToken cancellationToken = default)
+    {
+        calls.Record("Presentation");
+        return inner.GenerateAsync(prompt, options, cancellationToken);
+    }
+}
+
+internal sealed class CountingMovieVideoProvider : IMovieVideoProvider
+{
+    private readonly ProviderDispatchCounters calls;
+    private readonly FakeMovieVideoProvider inner;
+    public CountingMovieVideoProvider(ProviderDispatchCounters calls, FakeProviderScenarioCatalog scenarios, FakeProviderCallLog log)
+    {
+        this.calls = calls;
+        inner = new FakeMovieVideoProvider(scenarios, log);
+    }
+    public string Key => inner.Key;
+    public bool IsAvailable => inner.IsAvailable;
+    public IReadOnlyCollection<string> SupportedOperations => inner.SupportedOperations;
+    public async Task<MovieVideoSubmission> SubmitAsync(MovieVideoGenerationRequest request, CancellationToken cancellationToken)
+    {
+        calls.Record("Movie");
+        return await inner.SubmitAsync(request, cancellationToken);
+    }
+    public Task<MovieVideoProviderStatus> GetStatusAsync(string providerJobId, CancellationToken cancellationToken) => inner.GetStatusAsync(providerJobId, cancellationToken);
+    public Task<MovieVideoProviderOutput> RetrieveAsync(string providerJobId, MovieVideoProviderStatus status, CancellationToken cancellationToken) => inner.RetrieveAsync(providerJobId, status, cancellationToken);
+    public Task CancelAsync(string providerJobId, CancellationToken cancellationToken) => inner.CancelAsync(providerJobId, cancellationToken);
 }
