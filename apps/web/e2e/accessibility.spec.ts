@@ -149,18 +149,37 @@ test.describe("basic accessibility smoke", () => {
         expect(await dialog.evaluate((element) => element.contains(document.activeElement))).toBe(true);
       };
 
+      const skip = dialog.locator(".onboarding-skip");
+      const next = dialog.locator(".onboarding-actions .primary-button");
+      await skip.focus();
+      await page.keyboard.press("Shift+Tab");
+      await expect(next).toBeFocused();
+      await page.keyboard.press("Tab");
+      await expect(skip).toBeFocused();
+      await page.keyboard.press("Escape");
+      await expect(dialog).toBeVisible();
+      expect(await dialog.evaluate((element) => element.contains(document.activeElement))).toBe(true);
+
       await dialog.locator(".onboarding-fields select").first().selectOption(profile.locale);
       await expect(page.locator("html")).toHaveAttribute("lang", profile.lang);
       await expect(page.locator("html")).toHaveAttribute("dir", profile.dir);
-      const next = dialog.locator(".onboarding-actions .primary-button");
       await next.click();
       await assertProgressAndFocus(2);
       await next.click();
       await assertProgressAndFocus(3);
 
       const workflowNames = await dialog.locator(".onboarding-workflow strong").allTextContents();
-      expect(workflowNames).toHaveLength(5);
-      expect(workflowNames).not.toContain(translate(profile.locale, "onboarding.workflow.research.title"));
+      expect(workflowNames.map((name) => name.trim()).sort()).toEqual([
+        translate(profile.locale, "onboarding.workflow.chat.title"),
+        translate(profile.locale, "onboarding.workflow.image.title"),
+        translate(profile.locale, "onboarding.workflow.document.title"),
+        translate(profile.locale, "onboarding.workflow.presentation.title"),
+        translate(profile.locale, "navigation.movieStudio"),
+      ].sort());
+      await expect(dialog.locator(".onboarding-workflow")).toHaveCount(5);
+      await expect(dialog.locator(".onboarding-workflow").filter({ hasText: translate(profile.locale, "navigation.movieStudio") }))
+        .toContainText(translate(profile.locale, "movieBody.quick.oneBrief"));
+      await expect(dialog.locator("a[href^='/create/']")).toHaveCount(0);
 
       await dialog.locator(".onboarding-actions .onboarding-back").click();
       await assertProgressAndFocus(2);
