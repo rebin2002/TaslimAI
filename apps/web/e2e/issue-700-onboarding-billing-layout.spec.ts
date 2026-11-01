@@ -609,4 +609,132 @@ test.describe("issue #700 onboarding and billing layout", () => {
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(1280);
     await expect(page.locator(".billing-plan-option")).toHaveCount(2);
   });
+
+  test("enforces first-login beta choices and modal keyboard accessibility for a mocked Free account", async ({ page }, testInfo) => {
+    test.setTimeout(60_000);
+    const traffic = await interceptLiveAppApi(page, null);
+    let releaseAuth!: () => void;
+    let markAuthRequested!: () => void;
+    const authRequested = new Promise<void>((resolveAuth) => { markAuthRequested = resolveAuth; });
+    const authGate = new Promise<void>((release) => { releaseAuth = release; });
+    let shouldDelayAuth = true;
+    let onboardingCompletedAt: string | null = null;
+    let csrfMockCount = 0;
+    let completionMockCount = 0;
+
+    // Hold only the synthetic first-login response long enough to focus the real
+    // AppShell link which should regain focus if the modal closes.
+    await page.route("**/api/auth/me", async (route) => {
+      if (shouldDelayAuth) {
+        shouldDelayAuth = false;
+        markAuthRequested();
+        await authGate;
+      }
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(liveAuthResponse(onboardingCompletedAt)) });
+    });
+    await page.route("**/api/auth/csrf", async (route) => {
+      csrfMockCount += 1;
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ token: "issue-700-synthetic-csrf" }) });
+    });
+    await page.route("**/api/auth/onboarding/complete", async (route) => {
+      completionMockCount += 1;
+      onboardingCompletedAt = "2026-11-01T00:00:00.000Z";
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(liveAuthResponse(onboardingCompletedAt)) });
+    });
+
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/account/billing");
+    await authRequested;
+    const appShellOpener = page.getByRole("link", { name: "Create", exact: true });
+    await expect(appShellOpener).toBeVisible();
+    await appShellOpener.focus();
+    await expect(appShellOpener).toBeFocused();
+    releaseAuth();
+
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toBeVisible();
+    const dialogContainsFocus = () => dialog.evaluate((element) => element.contains(document.activeElement));
+    expect.soft(await dialogContainsFocus(), ".onboarding-card must receive/contain focus on first-login open").toBe(true);
+
+    const progress = dialog.locator(".onboarding-progress");
+    const assertAccessibleProgress = async (step: number) => {
+      const state = await progress.evaluate((element) => ({
+        role: element.getAttribute("role"),
+        min: element.getAttribute("aria-valuemin"),
+        max: element.getAttribute("aria-valuemax"),
+        now: element.getAttribute("aria-valuenow"),
+        label: element.getAttribute("aria-label"),
+      }));
+      expect.soft(state, `.onboarding-progress must expose step ${step} with progressbar semantics`).toEqual({
+        role: "progressbar",
+        min: "1",
+        max: "3",
+        now: String(step),
+        label: expect.any(String),
+      });
+    };
+
+    await assertAccessibleProgress(1);
+    const skip = dialog.locator(".onboarding-skip");
+    await skip.focus();
+    await page.keyboard.press("Shift+Tab");
+    expect.soft(await dialogContainsFocus(), ".onboarding-card must contain focus after Shift+Tab from its first control").toBe(true);
+
+    const next = dialog.locator(".onboarding-actions .primary-button");
+    await next.click();
+    await assertAccessibleProgress(2);
+    expect.soft(await dialogContainsFocus(), ".onboarding-card must contain focus after onboarding step 1 to 2").toBe(true);
+    await next.click();
+    await assertAccessibleProgress(3);
+    expect.soft(await dialogContainsFocus(), ".onboarding-card must contain focus after onboarding step 2 to 3").toBe(true);
+
+    const workflowNames = (await dialog.locator(".onboarding-workflow strong").allTextContents()).map((name) => name.trim()).sort();
+    expect.soft(workflowNames, ".onboarding-workflow strong must expose only Chat, Image, Document, Presentation, and Movie").toEqual([
+      "Create a document",
+      "Create a presentation",
+      "Create an image",
+      "Movie Studio",
+      "Talk to Taslim",
+    ].sort());
+    const selectableExcluded = await dialog.locator(".onboarding-workflow").filter({ hasText: /Research|Social|Music|Voice/i }).allTextContents();
+    expect.soft(selectableExcluded, ".onboarding-workflow must not expose Research, Social, Music, or Voice choices").toEqual([]);
+    const onboardingForbiddenLinks = await dialog.locator("a[href^='/create/']").evaluateAll((elements) => elements.map((element) => (element as HTMLAnchorElement).getAttribute("href")));
+    expect.soft(onboardingForbiddenLinks, ".onboarding-card a[href^='/create/'] must not advertise excluded module routes").toEqual([]);
+
+    const onboardingScreenshotPath = testInfo.outputPath("issue-700-free-onboarding-beta-access-current.png");
+    await page.screenshot({ path: onboardingScreenshotPath, fullPage: true });
+    await testInfo.attach("issue-700-free-onboarding-beta-access-current", { path: onboardingScreenshotPath, contentType: "image/png" });
+
+    await skip.focus();
+    await page.keyboard.press("Escape");
+    const dismissedByEscape = !(await dialog.isVisible());
+    expect.soft(dismissedByEscape, ".onboarding-card must close on Escape").toBe(true);
+    if (dismissedByEscape) {
+      expect.soft(await appShellOpener.evaluate((element) => document.activeElement === element), "a[href='/create'] must regain focus after Escape closes onboarding").toBe(true);
+    } else {
+      // The mocked completion is only a local, synthetic close path used to check
+      // focus restoration and then follow the actual advertised Create link.
+      await skip.click();
+      await expect(dialog).toBeHidden();
+      expect.soft(completionMockCount, "POST /api/auth/onboarding/complete must be intercepted as a synthetic close action").toBe(1);
+      expect.soft(csrfMockCount, "GET /api/auth/csrf must be intercepted with a synthetic token").toBeGreaterThanOrEqual(1);
+      expect.soft(await appShellOpener.evaluate((element) => document.activeElement === element), "a[href='/create'] must regain focus after Skip closes onboarding").toBe(true);
+    }
+
+    await appShellOpener.click();
+    await expect(page).toHaveURL(/\/create\/?$/);
+    const advertisedStudioHrefs = await page.locator("a.studio-card[href^='/create/']").evaluateAll((elements) => elements.map((element) => (element as HTMLAnchorElement).pathname).sort());
+    expect.soft(advertisedStudioHrefs, "a.studio-card[href^='/create/'] must advertise only Image, Document, Presentation, and short-form Movie").toEqual([
+      "/create/document",
+      "/create/image",
+      "/create/movie",
+      "/create/presentation",
+    ].sort());
+    for (const excludedPath of ["/create/research", "/create/social", "/create/music", "/create/voice"]) {
+      expect.soft(await page.locator(`a.studio-card[href='${excludedPath}']`).count(), `a.studio-card[href='${excludedPath}'] must not make the excluded module reachable`).toBe(0);
+    }
+    expect.soft(await page.locator("a.studio-chat-link[href='/chat']").count(), "a.studio-chat-link[href='/chat'] must advertise allowed Chat").toBe(1);
+    expect.soft(traffic.externalRequests, "network requests outside the local app/test API must remain blocked").toEqual([]);
+    expect.soft(traffic.unexpectedApiCalls, "only explicitly mocked synthetic API routes may be contacted").toEqual([]);
+  });
 });
