@@ -953,10 +953,6 @@
   line-height: 1.6;
 }
 
-[dir="rtl"] .onboarding-workflow-arrow {
-  transform: scaleX(-1);
-}
-
 [dir="rtl"] .onboarding-actions .primary-button,
 [dir="rtl"] .onboarding-skip,
 [dir="rtl"] .onboarding-back {

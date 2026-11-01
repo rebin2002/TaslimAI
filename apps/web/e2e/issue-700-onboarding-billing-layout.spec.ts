@@ -46,7 +46,7 @@ function onboardingFixture(language = "en", direction = "ltr") {
     <button type="button" class="onboarding-workflow">
       <span class="onboarding-workflow-icon" aria-hidden="true">◇</span>
       <span><strong>${title}</strong><small>${description}</small></span>
-      <span class="onboarding-workflow-arrow" aria-hidden="true">→</span>
+      <span class="onboarding-workflow-arrow" aria-hidden="true">${direction === "rtl" ? "←" : "→"}</span>
     </button>
   `).join("");
 
@@ -385,7 +385,8 @@ test.describe("issue #700 onboarding and billing layout", () => {
       expect(await page.evaluate(() => document.documentElement.dir)).toBe("rtl");
       expect(await gridColumnCount(page.locator(".onboarding-workflow-grid"))).toBe(1);
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(375);
-      expect(await page.locator(".onboarding-workflow-arrow").first().evaluate((element) => getComputedStyle(element).transform)).not.toBe("none");
+      await expect(page.locator(".onboarding-workflow-arrow").first()).toHaveText("←");
+      expect(await page.locator(".onboarding-workflow-arrow").first().evaluate((element) => getComputedStyle(element).transform)).toBe("none");
 
       await page.keyboard.press("Tab");
       await expect(page.locator(":focus")).toHaveClass(/onboarding-skip/);
@@ -504,9 +505,15 @@ test.describe("issue #700 onboarding and billing layout", () => {
       await expect(page.locator("html")).toHaveAttribute("dir", locale === "en" ? "ltr" : "rtl");
     }
 
+    await interfaceLanguage.selectOption("ku");
+    await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
     await page.locator(".onboarding-actions .primary-button").click();
     await page.locator(".onboarding-actions .primary-button").click();
     await expect(page.locator(".onboarding-workflow")).toHaveCount(6);
+    const firstWorkflowArrow = page.locator(".onboarding-workflow-arrow").first();
+    expect(await firstWorkflowArrow.evaluate((element) => getComputedStyle(element).transform)).toBe("none");
+    const arrowPaths = await firstWorkflowArrow.locator("path").evaluateAll((paths) => paths.map((path) => path.getAttribute("d")));
+    expect(arrowPaths).toContain("M19 12H5");
     const knownOnboardingA11yFindings = await assertNoUnexpectedLiveAxeFindings(page, ".onboarding-backdrop", [".onboarding-progress"]);
     if (knownOnboardingA11yFindings) testInfo.annotations.push({ type: "known-owner-managed-a11y-gap", description: "The generic progress div aria-label remains owned by #109." });
 
