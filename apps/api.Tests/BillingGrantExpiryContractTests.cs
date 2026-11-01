@@ -224,6 +224,53 @@ public sealed class BillingGrantExpiryContractTests
         }
     }
 
+    [Fact]
+    public async Task Sqlite_post_expiry_refund_replay_is_durable_across_context_restarts_without_charging()
+    {
+        var databasePath = Path.Combine(Path.GetTempPath(), $"issue330-refund-replay-{Guid.NewGuid():N}.db");
+        var connectionString = new SqliteConnectionStringBuilder
+        {
+            DataSource = databasePath,
+            Pooling = false,
+        }.ToString();
+
+        try
+        {
+            var options = new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connectionString).Options;
+            await AssertDurablePostExpiryRefundReplayAsync(options);
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            if (File.Exists(databasePath)) File.Delete(databasePath);
+        }
+    }
+
+    [FactWhenEnvironmentVariablePresent("ConnectionStrings__Postgres")]
+    public async Task Postgres_post_expiry_refund_replay_is_durable_across_context_restarts_without_charging()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("ConnectionStrings__Postgres");
+        if (string.IsNullOrWhiteSpace(connectionString))
+            throw new InvalidOperationException("The PostgreSQL test skip attribute did not detect the missing test connection.");
+
+        var connection = CreateDisposablePostgresConnection(connectionString);
+        var schema = $"issue330_durable_refund_{Guid.NewGuid():N}";
+        await using var adminConnection = new NpgsqlConnection(connectionString);
+        await adminConnection.OpenAsync();
+        await CreateSchemaAsync(adminConnection, schema);
+
+        try
+        {
+            connection.SearchPath = schema;
+            var options = new DbContextOptionsBuilder<TaslimDbContext>().UseNpgsql(connection.ConnectionString).Options;
+            await AssertDurablePostExpiryRefundReplayAsync(options);
+        }
+        finally
+        {
+            await DropSchemaAsync(adminConnection, schema);
+        }
+    }
+
     [FactWhenEnvironmentVariablePresent("ConnectionStrings__Postgres")]
     public async Task Postgres_concurrent_debits_cannot_overdraw_one_synthetic_grant()
     {
@@ -472,6 +519,120 @@ public sealed class BillingGrantExpiryContractTests
         item.Id, item.WorkspaceId, item.BillingPeriodId, item.Type, item.GrantedCredits, item.GrantedAt,
         item.ExpiresAt, item.IdempotencyKey, item.SourceReference, item.CreatedAt);
 
+    private static async Task AssertDurablePostExpiryRefundReplayAsync(DbContextOptions<TaslimDbContext> options)
+    {
+        const string refundKey = "durable:refund:old";
+        const string refundReason = "Synthetic durable post-expiry refund";
+        var workspace = NewWorkspace();
+        var user = NewUser();
+        Guid oldDebitId;
+        Guid laterDebitId;
+        Guid originalRefundId;
+        Guid oldEntitlementId;
+        Guid laterEntitlementId;
+        int originalRowCount;
+        long balanceAfterFirstRefund;
+        CreditLedgerRowSnapshot persistedRefund;
+        List<CreditLedgerRowSnapshot> originalRows;
+        CreditEntitlementSnapshot oldEntitlementBefore;
+        CreditEntitlementSnapshot laterEntitlementBefore;
+
+        await using (var db = new TaslimDbContext(options))
+        {
+            await db.Database.EnsureCreatedAsync();
+            db.Workspaces.Add(workspace);
+            db.Users.Add(user);
+            await db.SaveChangesAsync();
+
+            var ledger = NewChargingDisabledLedger(db);
+            var now = DateTime.UtcNow;
+            var oldGrant = await ledger.GrantAsync(
+                workspace.Id, CreditEntitlementType.IncludedMonthly, 100,
+                "durable:grant:old", "Synthetic old included grant", expiresAt: now.AddDays(1));
+            oldEntitlementId = oldGrant.Entry.CreditEntitlementId
+                ?? throw new InvalidOperationException("The synthetic old grant must have an entitlement.");
+
+            var oldUsage = NewCompletedUsage(workspace.Id, user.Id, "durable:usage:old");
+            db.UsageTransactions.Add(oldUsage);
+            await db.SaveChangesAsync();
+            var oldDebit = NewAttributedSyntheticDebit(
+                workspace.Id, oldEntitlementId, oldUsage.Id, "durable:debit:old", now);
+            db.CreditLedgerEntries.Add(oldDebit);
+            await db.SaveChangesAsync();
+            oldDebitId = oldDebit.Id;
+
+            var oldEntitlement = await db.CreditEntitlements.SingleAsync(item => item.Id == oldEntitlementId);
+            oldEntitlement.ExpiresAt = DateTime.UtcNow.AddMinutes(-1);
+            await db.SaveChangesAsync();
+
+            var laterGrant = await ledger.GrantAsync(
+                workspace.Id, CreditEntitlementType.IncludedMonthly, 50,
+                "durable:grant:new", "Synthetic later included grant", expiresAt: now.AddDays(30));
+            laterEntitlementId = laterGrant.Entry.CreditEntitlementId
+                ?? throw new InvalidOperationException("The synthetic later grant must have an entitlement.");
+            var laterUsage = NewCompletedUsage(workspace.Id, user.Id, "durable:usage:new");
+            db.UsageTransactions.Add(laterUsage);
+            await db.SaveChangesAsync();
+            var laterDebit = NewAttributedSyntheticDebit(
+                workspace.Id, laterEntitlementId, laterUsage.Id, "durable:debit:new", now);
+            db.CreditLedgerEntries.Add(laterDebit);
+            await db.SaveChangesAsync();
+            laterDebitId = laterDebit.Id;
+
+            originalRows = await CaptureLedgerRowsAsync(db, workspace.Id);
+            originalRowCount = originalRows.Count;
+            oldEntitlementBefore = CaptureEntitlement(await db.CreditEntitlements.AsNoTracking()
+                .SingleAsync(item => item.Id == oldEntitlementId));
+            laterEntitlementBefore = CaptureEntitlement(await db.CreditEntitlements.AsNoTracking()
+                .SingleAsync(item => item.Id == laterEntitlementId));
+
+            var first = await ledger.RefundAsync(workspace.Id, oldDebitId, refundKey, refundReason);
+            Assert.True(first.Created);
+            Assert.Equal(CreditLedgerEntryType.Refund, first.Entry.Type);
+            Assert.Equal(-oldDebit.Amount, first.Entry.Amount);
+            Assert.Equal(0, oldDebit.Amount + first.Entry.Amount);
+            Assert.Equal(oldDebitId, first.Entry.ReversesEntryId);
+            originalRefundId = first.Entry.Id;
+
+            var afterFirst = await CaptureLedgerRowsAsync(db, workspace.Id);
+            Assert.Equal(originalRowCount + 1, afterFirst.Count);
+            persistedRefund = Assert.Single(afterFirst, item => item.Id == originalRefundId);
+            balanceAfterFirstRefund = await GetSignedLedgerBalanceAsync(db, workspace.Id);
+        }
+
+        // A new context (and for SQLite a fresh file-backed connection) represents
+        // a process restart/lost response followed by an idempotent retry.
+        await using (var db = new TaslimDbContext(options))
+        {
+            var ledger = NewChargingDisabledLedger(db);
+            var replay = await ledger.RefundAsync(workspace.Id, oldDebitId, refundKey, refundReason);
+            Assert.False(replay.Created);
+            Assert.Equal(originalRefundId, replay.Entry.Id);
+            Assert.Equal(persistedRefund, Assert.Single(await CaptureLedgerRowsAsync(db, workspace.Id),
+                item => item.Id == originalRefundId));
+            Assert.Equal(balanceAfterFirstRefund, await GetSignedLedgerBalanceAsync(db, workspace.Id));
+
+            await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                ledger.RefundAsync(workspace.Id, oldDebitId, refundKey, "Conflicting synthetic reason"));
+            await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                ledger.RefundAsync(workspace.Id, laterDebitId, refundKey, refundReason));
+            await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                ledger.RefundAsync(workspace.Id, oldDebitId, "durable:refund:second", "Second synthetic refund"));
+
+            var finalRows = await CaptureLedgerRowsAsync(db, workspace.Id);
+            Assert.Equal(originalRowCount + 1, finalRows.Count);
+            var finalById = finalRows.ToDictionary(item => item.Id);
+            foreach (var original in originalRows)
+                Assert.Equal(original, finalById[original.Id]);
+            Assert.Equal(persistedRefund, finalById[originalRefundId]);
+            Assert.Equal(balanceAfterFirstRefund, await GetSignedLedgerBalanceAsync(db, workspace.Id));
+            Assert.Equal(oldEntitlementBefore, CaptureEntitlement(await db.CreditEntitlements.AsNoTracking()
+                .SingleAsync(item => item.Id == oldEntitlementId)));
+            Assert.Equal(laterEntitlementBefore, CaptureEntitlement(await db.CreditEntitlements.AsNoTracking()
+                .SingleAsync(item => item.Id == laterEntitlementId)));
+        }
+    }
+
     private static async Task AddBillingProjectionFixtureAsync(TaslimDbContext db, Workspace workspace, DateTime now)
     {
         var plan = new Plan
@@ -504,6 +665,9 @@ public sealed class BillingGrantExpiryContractTests
 
     private static CreditLedgerService NewChargingEnabledLedger(TaslimDbContext db) =>
         new(db, Options.Create(new BillingOptions { CustomerChargingEnabled = true }));
+
+    private static CreditLedgerService NewChargingDisabledLedger(TaslimDbContext db) =>
+        new(db, Options.Create(new BillingOptions { CustomerChargingEnabled = false }));
 
     private static NpgsqlConnectionStringBuilder CreateDisposablePostgresConnection(string connectionString)
     {
