@@ -5,8 +5,10 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging.Abstractions;
 using Taslim.Api.Autopilot;
 using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
@@ -275,6 +277,56 @@ public sealed class AutopilotEndpointTests : IClassFixture<TaslimApiFactory>
             && item.ActorUserId is null);
     }
 
+    [Fact]
+    public async Task Pending_completion_events_are_drained_in_bounded_pages_before_next_wave_launch()
+    {
+        using var host = new EventDrainTestHost();
+        await host.SubmitCompletionAsync("wave-order-1");
+        await host.SubmitCompletionAsync("wave-order-2");
+
+        var result = await host.ProcessPendingEventsAsync();
+
+        Assert.Equal(2, result.EventsProcessed);
+        var eventStatusesAtPoll = Assert.Single(host.NextWaves.ReconcileEventStatusSnapshots);
+        var eventStatusesAtLaunch = Assert.Single(host.NextWaves.LaunchEventStatusSnapshots);
+        Assert.Equal(2, eventStatusesAtPoll.Length);
+        Assert.Equal(2, eventStatusesAtLaunch.Length);
+        Assert.All(eventStatusesAtPoll, status => Assert.Equal(AutopilotEventStatuses.Processed, status));
+        Assert.All(eventStatusesAtLaunch, status => Assert.Equal(AutopilotEventStatuses.Processed, status));
+    }
+
+    [Fact]
+    public async Task Manual_reconcile_drains_completion_events_before_poll_or_launch()
+    {
+        using var host = new EventDrainTestHost();
+        await host.SubmitCompletionAsync("wave-manual-order-1");
+        await host.SubmitCompletionAsync("wave-manual-order-2");
+
+        var result = await host.ReconcileAsync("manual-order-test");
+
+        Assert.Equal(2, result.EventsProcessed);
+        var eventStatusesAtPoll = Assert.Single(host.NextWaves.ReconcileEventStatusSnapshots);
+        var eventStatusesAtLaunch = Assert.Single(host.NextWaves.LaunchEventStatusSnapshots);
+        Assert.Equal(2, eventStatusesAtPoll.Length);
+        Assert.Equal(2, eventStatusesAtLaunch.Length);
+        Assert.All(eventStatusesAtPoll, status => Assert.Equal(AutopilotEventStatuses.Processed, status));
+        Assert.All(eventStatusesAtLaunch, status => Assert.Equal(AutopilotEventStatuses.Processed, status));
+    }
+
+    [Fact]
+    public async Task Backoff_or_other_unprocessed_event_defers_next_wave_launch()
+    {
+        using var host = new EventDrainTestHost();
+        await host.SubmitCompletionAsync("wave-backoff-order");
+        await host.SetOnlyEventBackoffAsync(DateTime.UtcNow.AddMinutes(5));
+
+        var result = await host.ProcessPendingEventsAsync();
+
+        Assert.Equal("drain_deferred", result.Outcome);
+        Assert.Empty(host.NextWaves.ReconcileEventStatusSnapshots);
+        Assert.Empty(host.NextWaves.LaunchEventStatusSnapshots);
+    }
+
     private static string Payload(string waveKey, string taskId) => JsonSerializer.Serialize(new
     {
         waveKey,
@@ -328,6 +380,146 @@ public sealed class AutopilotEndpointTests : IClassFixture<TaslimApiFactory>
         request.Headers.Add("X-CSRF-TOKEN", csrf.GetProperty("token").GetString()!);
         if (payload is not null) request.Content = JsonContent.Create(payload);
         return await client.SendAsync(request);
+    }
+
+    private sealed class EventDrainTestHost : IDisposable
+    {
+        private const string BaseSha = "8bc3999d8a27f047e253a1f8832bd76e5c6dcb9a";
+        private const string CandidateSha = "1111111111111111111111111111111111111111";
+        private readonly SqliteConnection connection = new("DataSource=:memory:");
+        private readonly AutopilotOptions options = new()
+        {
+            Enabled = true,
+            DryRun = true,
+            SimulationMode = true,
+            RequireSignedEvents = false,
+            MaxConcurrency = 1,
+        };
+
+        public EventDrainTestHost()
+        {
+            connection.Open();
+            options.Normalize();
+            using var db = CreateContext();
+            db.Database.EnsureCreated();
+        }
+
+        public RecordingNextWaveService NextWaves { get; } = new();
+
+        private TaslimDbContext CreateContext() =>
+            new(new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connection).Options);
+
+        public async Task SubmitCompletionAsync(string waveKey)
+        {
+            using var db = CreateContext();
+            var signal = new AutopilotCompletionSignal
+            {
+                WaveKey = waveKey,
+                TaskId = $"task-{waveKey}",
+                Outcome = AutopilotTaskOutcomes.Succeeded,
+                Branch = "feature/autopilot-event-drain-test",
+                BaseSha = BaseSha,
+                CandidateSha = CandidateSha,
+                ExpectedTaskCount = 1,
+                Checks = PassingChecks(),
+            };
+            var intake = new AutopilotEventIntake(
+                db,
+                new AutopilotEventAuthenticator(options),
+                new EfAutopilotAuditLog(db),
+                options,
+                TimeProvider.System);
+            var result = await intake.SubmitAsync(new AutopilotIntakeRequest(
+                null,
+                null,
+                JsonSerializer.Serialize(signal),
+                "event-drain-test",
+                $"evt-{Guid.NewGuid():N}",
+                AutopilotEventTypes.WaveTaskCompleted));
+
+            Assert.Equal(AutopilotIntakeOutcomes.Accepted, result.Outcome);
+        }
+
+        public async Task SetOnlyEventBackoffAsync(DateTime nextAttemptAt)
+        {
+            using var db = CreateContext();
+            var intakeEvent = await db.AutopilotEvents.SingleAsync();
+            intakeEvent.Status = AutopilotEventStatuses.Queued;
+            intakeEvent.NextAttemptAt = nextAttemptAt;
+            await db.SaveChangesAsync();
+        }
+
+        public async Task<AutopilotCycleResult> ProcessPendingEventsAsync()
+        {
+            using var db = CreateContext();
+            NextWaves.Attach(db);
+            return await CreateOrchestrator(db).ProcessPendingEventsAsync();
+        }
+
+        public async Task<AutopilotCycleResult> ReconcileAsync(string reason)
+        {
+            using var db = CreateContext();
+            NextWaves.Attach(db);
+            return await CreateOrchestrator(db).ReconcileAsync(reason);
+        }
+
+        private AutopilotOrchestrator CreateOrchestrator(TaslimDbContext db) =>
+            new(
+                db,
+                new EfAutopilotLockService(db, options),
+                NextWaves,
+                options,
+                TimeProvider.System,
+                NullLogger<AutopilotOrchestrator>.Instance);
+
+        private static Dictionary<string, bool> PassingChecks() => new(StringComparer.OrdinalIgnoreCase)
+        {
+            [AutopilotChecks.Build] = true,
+            [AutopilotChecks.UnitTests] = true,
+            [AutopilotChecks.Typecheck] = true,
+            [AutopilotChecks.Lint] = true,
+            [AutopilotChecks.BrowserE2E] = true,
+            [AutopilotChecks.Migrations] = true,
+            [AutopilotChecks.Security] = true,
+            [AutopilotChecks.Accounting] = true,
+            [AutopilotChecks.IntegrationComplete] = true,
+        };
+
+        public void Dispose()
+        {
+            connection.Close();
+            connection.Dispose();
+        }
+    }
+
+    private sealed class RecordingNextWaveService : IAutopilotNextWaveService
+    {
+        private TaslimDbContext? db;
+
+        public List<string[]> LaunchEventStatusSnapshots { get; } = [];
+
+        public List<string[]> ReconcileEventStatusSnapshots { get; } = [];
+
+        public void Attach(TaslimDbContext context) => db = context;
+
+        public async Task<AutopilotNextWaveCycleResult> TryLaunchNextWavesAsync(CancellationToken cancellationToken = default)
+        {
+            LaunchEventStatusSnapshots.Add(await ReadStatusesAsync(cancellationToken));
+            return AutopilotNextWaveCycleResult.Idle("test", "provider_not_configured");
+        }
+
+        public async Task<AutopilotNextWaveCycleResult> ReconcileLaunchesAsync(CancellationToken cancellationToken = default)
+        {
+            ReconcileEventStatusSnapshots.Add(await ReadStatusesAsync(cancellationToken));
+            return AutopilotNextWaveCycleResult.Idle("test", "provider_not_configured");
+        }
+
+        private Task<string[]> ReadStatusesAsync(CancellationToken cancellationToken) =>
+            db!.AutopilotEvents.AsNoTracking()
+                .OrderBy(item => item.ReceivedAt)
+                .ThenBy(item => item.Id)
+                .Select(item => item.Status)
+                .ToArrayAsync(cancellationToken);
     }
 
     private sealed class ChunkedReadStream(byte[] data, int chunkSize) : Stream
