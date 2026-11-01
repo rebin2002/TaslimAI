@@ -350,6 +350,27 @@ public sealed class PublicFreeTierProviderSpendPolicyTests
     }
 
     [Fact]
+    public async Task Dispatched_reservation_cannot_be_reauthorized_with_a_different_dispatch_key()
+    {
+        var ledger = new AtomicTestLedger(EnabledOptions(), NowUtc);
+        var reservation = await ledger.TryReserveBeforeProviderCallAsync(
+            ValidRequest(idempotencyKey: "dispatch-key-rebinding") with { EstimatedProviderCostUsd = 0.008m });
+
+        Assert.True(reservation.Reserved);
+        var dispatch = await ledger.TryAuthorizeProviderDispatchAsync(reservation.ReservationId!.Value, "physical-attempt-1");
+        var rekeyedDispatch = await ledger.TryAuthorizeProviderDispatchAsync(reservation.ReservationId.Value, "physical-attempt-2");
+
+        Assert.True(dispatch.DispatchAuthorized);
+        Assert.False(dispatch.IsIdempotentReplay);
+        Assert.False(rekeyedDispatch.DispatchAuthorized);
+        Assert.False(rekeyedDispatch.IsIdempotentReplay);
+        Assert.Equal(PublicFreeTierReservationState.Dispatched, rekeyedDispatch.State);
+        Assert.Equal("PROVIDER_DISPATCH_ALREADY_AUTHORIZED", rekeyedDispatch.Code);
+        Assert.Equal(1, ledger.ReservationCount);
+        Assert.Equal(0.008m, ledger.GlobalExposureUsd);
+    }
+
+    [Fact]
     public async Task Concurrent_duplicate_reservations_and_dispatch_authorization_are_one_shot()
     {
         var ledger = new AtomicTestLedger(EnabledOptions(), NowUtc);
