@@ -3,6 +3,12 @@ import { apiJson } from "./fixtures";
 import { seedMovieOperationalRecords } from "./movie-v2-operational-fixtures";
 import type { MovieProductionVersion, MovieProject } from "../src/lib/api";
 
+function deferred() {
+  let resolve: (() => void) | undefined;
+  const promise = new Promise<void>((complete) => { resolve = complete; });
+  return { promise, resolve: () => resolve?.() };
+}
+
 test("keeps the quoted production profile fixed while confirmation is pending", async ({ authenticatedPage: page }) => {
   await page.goto("/create/movie");
   await page.getByRole("tab", { name: /full movie/i }).first().click();
@@ -40,7 +46,11 @@ test("keeps the quoted production profile fixed while confirmation is pending", 
     if (route.request().method() !== "GET") return route.continue();
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(project) });
   });
+  const preflightStarted = deferred();
+  const allowPreflightResponse = deferred();
   await page.route(`**/api/movie-studio/shots/${fixture.shotId}/production/preflight**`, async (route) => {
+    preflightStarted.resolve();
+    await allowPreflightResponse.promise;
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -66,9 +76,19 @@ test("keeps the quoted production profile fixed while confirmation is pending", 
   await expect(upgradeTier).toHaveAttribute("aria-pressed", "true");
   await page.getByRole("button", { name: "Create master pass" }).click();
 
+  await preflightStarted.promise;
+  try {
+    await expect(upgradeTier).toBeDisabled();
+    await expect(tierGroup.getByRole("button", { name: /Master/ })).toBeDisabled();
+    expect(queuedInput).toBeNull();
+  } finally {
+    allowPreflightResponse.resolve();
+  }
+
   const confirmation = page.getByRole("dialog", { name: "Confirm this production pass" });
   await expect(confirmation).toBeVisible();
   await expect(confirmation).toContainText("Quoted profile: 1080p · Cinematic");
+  expect(queuedInput).toBeNull();
   await expect(tierGroup.getByRole("button", { name: /Master/ })).toBeDisabled();
   await expect(page.getByRole("button", { name: "Create master pass" })).toBeDisabled();
   await expect(confirmation.getByRole("button", { name: "Confirm and queue" })).toBeEnabled();
