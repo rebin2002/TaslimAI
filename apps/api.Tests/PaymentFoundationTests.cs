@@ -130,6 +130,16 @@ public sealed class PaymentFoundationTests
         Assert.False(result.Accepted);
         Assert.Equal("PAYMENT_PROVIDER_UNCONFIGURED", result.Code);
         Assert.Empty(await db.PaymentEvents.ToListAsync());
+        Assert.Empty(await db.PaymentAttempts.ToListAsync());
+        Assert.Empty(await db.CheckoutSessions.ToListAsync());
+        Assert.Empty(await db.PaymentRefunds.ToListAsync());
+        Assert.Empty(await db.CreditLedgerEntries.ToListAsync());
+        Assert.Empty(await db.CreditEntitlements.ToListAsync());
+        Assert.Empty(await db.BillingPeriods.ToListAsync());
+        Assert.Empty(await db.SubscriptionLifecycleEvents.ToListAsync());
+        Assert.Equal(0, provider.SignatureVerifier.CallCount);
+        Assert.Equal(0, provider.ParseCallCount);
+        Assert.Equal(0, provider.CheckoutCreateCallCount);
     }
 
     [Fact]
@@ -316,6 +326,94 @@ public sealed class PaymentFoundationTests
         Assert.Equal(PaymentAttemptStatus.Succeeded, (await db.PaymentAttempts.SingleAsync(item => item.Id == attempt.Id)).Status);
         Assert.Equal("pay-1", (await db.PaymentAttempts.SingleAsync(item => item.Id == attempt.Id)).ProviderPaymentReference);
         Assert.Single(await db.PaymentEvents.ToListAsync());
+    }
+
+    [Fact]
+    public async Task Concurrent_same_event_webhook_deliveries_apply_only_one_renewal_and_credit_grant()
+    {
+        var databaseName = $"payment-webhook-concurrency-{Guid.NewGuid():N}";
+        var connectionString = new SqliteConnectionStringBuilder
+        {
+            DataSource = databaseName,
+            Mode = SqliteOpenMode.Memory,
+            Cache = SqliteCacheMode.Shared,
+            DefaultTimeout = 15,
+        }.ToString();
+        await using var anchor = new SqliteConnection(connectionString);
+        await anchor.OpenAsync();
+
+        var workspace = NewWorkspace();
+        var plan = new Plan
+        {
+            Id = Guid.NewGuid(), Code = $"concurrent-{Guid.NewGuid():N}", Name = "Concurrent replay test plan",
+            MonthlyCreditAllowance = 100, Currency = "USD", IsActive = true, SortOrder = 99,
+            CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+        };
+        var subscription = NewSubscription(workspace.Id, plan.Id);
+        subscription.BillingProvider = "fake";
+        subscription.ProviderSubscriptionReference = "sub-concurrent-replay";
+        PaymentAttempt attempt;
+        DateTime periodStart;
+        DateTime periodEnd;
+        await using (var setupDb = CreateDb(anchor))
+        {
+            setupDb.Workspaces.Add(workspace);
+            setupDb.Plans.Add(plan);
+            setupDb.Subscriptions.Add(subscription);
+            await setupDb.SaveChangesAsync();
+            attempt = await NewLifecycle(setupDb).RecordPaymentAttemptAsync(
+                workspace.Id, "fake", "attempt:concurrent-replay", 9, "USD", subscriptionId: subscription.Id);
+            periodStart = subscription.CurrentPeriodEnd;
+            periodEnd = periodStart.AddMonths(1);
+        }
+
+        await using var connectionA = new SqliteConnection(connectionString);
+        await using var connectionB = new SqliteConnection(connectionString);
+        await connectionA.OpenAsync();
+        await connectionB.OpenAsync();
+        await using var dbA = CreateDb(connectionA);
+        await using var dbB = CreateDb(connectionB);
+        var providerEvent = new ProviderPaymentEvent(
+            "evt-concurrent-replay", PaymentEventType.RenewalSucceeded, workspace.Id, subscription.Id, null, attempt.Id,
+            "pay-concurrent-replay", 9, "USD", DateTime.UtcNow, "Renewal succeeded.",
+            "sub-concurrent-replay", periodStart, periodEnd, false);
+        var providerA = new FakePaymentProvider(providerEvent);
+        var providerB = new FakePaymentProvider(providerEvent);
+        var verifier = new TwoCallPaymentSettlementVerifier();
+        var settings = Options.Create(new BillingOptions { CustomerChargingEnabled = true, Provider = "fake" });
+        var serviceA = new PaymentWebhookService(dbA, [providerA], NewLifecycle(dbA), settings,
+            NullLogger<PaymentWebhookService>.Instance, [verifier]);
+        var serviceB = new PaymentWebhookService(dbB, [providerB], NewLifecycle(dbB), settings,
+            NullLogger<PaymentWebhookService>.Instance, [verifier]);
+        const string rawPayload = "{\"event\":\"evt-concurrent-replay\"}";
+
+        var results = await Task.WhenAll(
+            serviceA.ProcessAsync("fake", rawPayload, "valid"),
+            serviceB.ProcessAsync("fake", rawPayload, "valid"));
+
+        Assert.All(results, result => Assert.True(result.Accepted));
+        Assert.Single(results, result => !result.Duplicate);
+        Assert.Single(results, result => result.Duplicate);
+        Assert.Equal(2, verifier.CallCount);
+        Assert.Equal(1, providerA.SignatureVerifier.CallCount);
+        Assert.Equal(1, providerB.SignatureVerifier.CallCount);
+        Assert.Equal(1, providerA.ParseCallCount);
+        Assert.Equal(1, providerB.ParseCallCount);
+        Assert.Equal(0, providerA.CheckoutCreateCallCount + providerB.CheckoutCreateCallCount);
+
+        var savedAttempt = await dbA.PaymentAttempts.AsNoTracking().SingleAsync(item => item.Id == attempt.Id);
+        Assert.Equal(PaymentAttemptStatus.Succeeded, savedAttempt.Status);
+        Assert.Equal("pay-concurrent-replay", savedAttempt.ProviderPaymentReference);
+        var savedSubscription = await dbA.Subscriptions.AsNoTracking().SingleAsync(item => item.Id == subscription.Id);
+        Assert.Equal(periodEnd, savedSubscription.CurrentPeriodEnd);
+        var paymentEvent = await dbA.PaymentEvents.AsNoTracking().SingleAsync(item => item.ProviderEventReference == "evt-concurrent-replay");
+        Assert.Equal(PaymentEventStatus.Processed, paymentEvent.Status);
+        Assert.Single(await dbA.BillingPeriods.AsNoTracking().ToListAsync());
+        Assert.Single(await dbA.CreditEntitlements.AsNoTracking().ToListAsync());
+        var grant = Assert.Single(await dbA.CreditLedgerEntries.AsNoTracking().ToListAsync());
+        Assert.Equal(CreditLedgerEntryType.Grant, grant.Type);
+        Assert.Equal(100, grant.Amount);
+        Assert.Empty(await dbA.PaymentRefunds.AsNoTracking().ToListAsync());
     }
 
     [Fact]
@@ -804,6 +902,33 @@ public sealed class PaymentFoundationTests
                     CompletedAt: DateTime.UtcNow,
                     ProviderConfirmsFundsSettledOrAvailable: true);
             return Task.FromResult(result);
+        }
+    }
+
+    private sealed class TwoCallPaymentSettlementVerifier : IPaymentSettlementVerifier
+    {
+        private readonly TaskCompletionSource<bool> bothCalls = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int callCount;
+
+        public string ProviderKey => "fake";
+        public int CallCount => Volatile.Read(ref callCount);
+
+        public async Task<PaymentSettlementVerification> VerifyAsync(
+            PaymentAttempt attempt,
+            CheckoutSession? checkoutSession,
+            ProviderPaymentEvent providerEvent,
+            CancellationToken cancellationToken = default)
+        {
+            if (Interlocked.Increment(ref callCount) == 2)
+                bothCalls.TrySetResult(true);
+            await bothCalls.Task.WaitAsync(TimeSpan.FromSeconds(15), cancellationToken);
+            return new PaymentSettlementVerification(
+                ProviderReportsCompleted: true,
+                ProviderPaymentReference: providerEvent.ProviderPaymentReference,
+                Amount: attempt.Amount,
+                Currency: attempt.Currency,
+                CompletedAt: DateTime.UtcNow,
+                ProviderConfirmsFundsSettledOrAvailable: true);
         }
     }
 
