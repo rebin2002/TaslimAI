@@ -142,6 +142,104 @@ public sealed class PaymentFoundationTests
         Assert.Equal(0, provider.CheckoutCreateCallCount);
     }
 
+    [Theory]
+    [InlineData("other-provider", "sub-real")]
+    [InlineData("fake", "sub-unrelated")]
+    [InlineData("fake", null)]
+    public async Task Cancellation_webhook_rejects_unbound_provider_subscription_identity(
+        string storedBillingProvider,
+        string? eventProviderSubscriptionReference)
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        var workspace = NewWorkspace();
+        var plan = DefaultPlanCatalog.All.Single(item => item.Code == "pro");
+        var subscription = NewSubscription(workspace.Id, plan.Id);
+        subscription.BillingProvider = storedBillingProvider;
+        subscription.ProviderSubscriptionReference = "sub-real";
+        db.Workspaces.Add(workspace);
+        db.Subscriptions.Add(subscription);
+        await db.SaveChangesAsync();
+        var originalPeriodStart = subscription.CurrentPeriodStart;
+        var originalPeriodEnd = subscription.CurrentPeriodEnd;
+        var providerEvent = new ProviderPaymentEvent(
+            $"evt-cancel-unbound-{Guid.NewGuid():N}", PaymentEventType.SubscriptionCancelled,
+            workspace.Id, subscription.Id, null, null, null, null, "USD", DateTime.UtcNow,
+            "Provider cancellation callback.", eventProviderSubscriptionReference, null, null, false);
+        var provider = new FakePaymentProvider(providerEvent);
+        var service = new PaymentWebhookService(
+            db, [provider], NewLifecycle(db),
+            Options.Create(new BillingOptions { CustomerChargingEnabled = true, Provider = "fake" }),
+            NullLogger<PaymentWebhookService>.Instance);
+
+        var result = await service.ProcessAsync(
+            "fake", $"{{\"event\":\"{providerEvent.ProviderEventReference}\"}}", "valid");
+
+        Assert.False(result.Accepted);
+        Assert.Equal("WEBHOOK_PROCESSING_FAILED", result.Code);
+        var unchanged = await db.Subscriptions.AsNoTracking().SingleAsync(item => item.Id == subscription.Id);
+        Assert.Equal(SubscriptionStatus.Active, unchanged.Status);
+        Assert.Equal(originalPeriodStart, unchanged.CurrentPeriodStart);
+        Assert.Equal(originalPeriodEnd, unchanged.CurrentPeriodEnd);
+        Assert.False(unchanged.CancelAtPeriodEnd);
+        Assert.Empty(await db.SubscriptionLifecycleEvents.ToListAsync());
+        var savedEvent = await db.PaymentEvents.AsNoTracking().SingleAsync();
+        Assert.Equal(PaymentEventStatus.Rejected, savedEvent.Status);
+        Assert.Equal("The verified event was recorded but its domain transition was not applied.", savedEvent.FailureReason);
+        Assert.Empty(await db.PaymentAttempts.ToListAsync());
+        Assert.Empty(await db.PaymentRefunds.ToListAsync());
+        Assert.Empty(await db.CreditLedgerEntries.ToListAsync());
+        Assert.Equal(1, provider.SignatureVerifier.CallCount);
+        Assert.Equal(1, provider.ParseCallCount);
+        Assert.Equal(0, provider.CheckoutCreateCallCount);
+    }
+
+    [Fact]
+    public async Task Cancellation_webhook_with_matching_provider_binding_is_replay_idempotent()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        var workspace = NewWorkspace();
+        var plan = DefaultPlanCatalog.All.Single(item => item.Code == "pro");
+        var subscription = NewSubscription(workspace.Id, plan.Id);
+        subscription.BillingProvider = "fake";
+        subscription.ProviderSubscriptionReference = "sub-real";
+        db.Workspaces.Add(workspace);
+        db.Subscriptions.Add(subscription);
+        await db.SaveChangesAsync();
+        var providerEvent = new ProviderPaymentEvent(
+            "evt-cancel-bound", PaymentEventType.SubscriptionCancelled,
+            workspace.Id, subscription.Id, null, null, null, null, "USD", DateTime.UtcNow,
+            "Provider cancellation callback.", "sub-real", null, null, false);
+        var provider = new FakePaymentProvider(providerEvent);
+        var service = new PaymentWebhookService(
+            db, [provider], NewLifecycle(db),
+            Options.Create(new BillingOptions { CustomerChargingEnabled = true, Provider = "fake" }),
+            NullLogger<PaymentWebhookService>.Instance);
+        const string rawPayload = "{\"event\":\"evt-cancel-bound\"}";
+
+        var first = await service.ProcessAsync("fake", rawPayload, "valid");
+        var duplicate = await service.ProcessAsync("fake", rawPayload, "valid");
+
+        Assert.True(first.Accepted);
+        Assert.False(first.Duplicate);
+        Assert.True(duplicate.Accepted);
+        Assert.True(duplicate.Duplicate);
+        Assert.Equal(SubscriptionStatus.Cancelled,
+            (await db.Subscriptions.AsNoTracking().SingleAsync(item => item.Id == subscription.Id)).Status);
+        var lifecycleEvent = Assert.Single(await db.SubscriptionLifecycleEvents.AsNoTracking().ToListAsync());
+        Assert.Equal(SubscriptionLifecycleEventType.Cancelled, lifecycleEvent.Type);
+        Assert.Equal(PaymentEventStatus.Processed,
+            (await db.PaymentEvents.AsNoTracking().SingleAsync()).Status);
+        Assert.Equal(2, provider.SignatureVerifier.CallCount);
+        Assert.Equal(2, provider.ParseCallCount);
+        Assert.Empty(await db.PaymentAttempts.ToListAsync());
+        Assert.Empty(await db.PaymentRefunds.ToListAsync());
+        Assert.Empty(await db.CreditLedgerEntries.ToListAsync());
+    }
+
     [Fact]
     public async Task Payment_attempts_are_idempotent_and_failed_subscription_becomes_past_due()
     {
@@ -164,6 +262,149 @@ public sealed class PaymentFoundationTests
         Assert.Equal(PaymentAttemptStatus.Failed, duplicate.Status);
         Assert.Equal(SubscriptionStatus.PastDue, (await db.Subscriptions.SingleAsync(item => item.Id == subscription.Id)).Status);
         Assert.Single(await db.SubscriptionLifecycleEvents.ToListAsync());
+    }
+
+    [Theory]
+    [InlineData(PaymentEventType.PaymentFailed, true)]
+    [InlineData(PaymentEventType.PaymentFailed, false)]
+    [InlineData(PaymentEventType.RenewalFailed, true)]
+    [InlineData(PaymentEventType.RenewalFailed, false)]
+    public async Task Stale_subscription_payment_failure_after_newer_funding_fails_closed(
+        PaymentEventType failureType,
+        bool includeStaleCycle)
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        var workspace = NewWorkspace();
+        var plan = new Plan
+        {
+            Id = Guid.NewGuid(), Code = $"stale-failure-{Guid.NewGuid():N}", Name = "Stale failure test plan",
+            MonthlyCreditAllowance = 100, Currency = "USD", IsActive = true, SortOrder = 99,
+            CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+        };
+        var subscription = NewSubscription(workspace.Id, plan.Id);
+        subscription.BillingProvider = "fake";
+        subscription.ProviderSubscriptionReference = "sub-failure-cycle";
+        db.Workspaces.Add(workspace);
+        db.Plans.Add(plan);
+        db.Subscriptions.Add(subscription);
+        await db.SaveChangesAsync();
+        var lifecycle = NewLifecycle(db);
+        var attemptedPeriodStart = subscription.CurrentPeriodEnd;
+        var attemptedPeriodEnd = attemptedPeriodStart.AddMonths(1);
+        var olderAttempt = await lifecycle.RecordPaymentAttemptAsync(
+            workspace.Id, "fake", "attempt:old-cycle", 9, "USD", subscriptionId: subscription.Id,
+            providerPaymentReference: "pay-old-cycle");
+
+        await lifecycle.RenewSubscriptionAsync(workspace.Id, subscription.Id,
+            attemptedPeriodStart, attemptedPeriodEnd, "renewal:funded-current-cycle", "A newer payment funded this cycle.");
+        var newerSucceededAttempt = await lifecycle.RecordPaymentAttemptAsync(
+            workspace.Id, "fake", "attempt:new-cycle", 9, "USD", PaymentAttemptStatus.Succeeded,
+            subscriptionId: subscription.Id, providerPaymentReference: "pay-new-cycle");
+        var ledgerCountBefore = await db.CreditLedgerEntries.CountAsync();
+        var ledgerBalanceBefore = await db.CreditLedgerEntries.SumAsync(item => item.Amount);
+        var providerEvent = new ProviderPaymentEvent(
+            $"evt-stale-failure-{Guid.NewGuid():N}", failureType,
+            workspace.Id, subscription.Id, null, olderAttempt.Id, "pay-old-cycle", 9, "USD", DateTime.UtcNow,
+            "Older payment attempt failed late.", "sub-failure-cycle",
+            includeStaleCycle ? attemptedPeriodStart : null,
+            includeStaleCycle ? attemptedPeriodEnd : null,
+            false);
+        var provider = new FakePaymentProvider(providerEvent);
+        var service = new PaymentWebhookService(
+            db, [provider], lifecycle,
+            Options.Create(new BillingOptions { CustomerChargingEnabled = true, Provider = "fake" }),
+            NullLogger<PaymentWebhookService>.Instance);
+        var rawPayload = $"{{\"event\":\"{providerEvent.ProviderEventReference}\"}}";
+
+        var result = await service.ProcessAsync("fake", rawPayload, "valid");
+        var replay = await service.ProcessAsync("fake", rawPayload, "valid");
+
+        Assert.False(result.Accepted);
+        Assert.Equal("WEBHOOK_PROCESSING_FAILED", result.Code);
+        Assert.True(replay.Duplicate);
+        Assert.Equal(PaymentAttemptStatus.Created,
+            (await db.PaymentAttempts.AsNoTracking().SingleAsync(item => item.Id == olderAttempt.Id)).Status);
+        Assert.Equal(PaymentAttemptStatus.Succeeded,
+            (await db.PaymentAttempts.AsNoTracking().SingleAsync(item => item.Id == newerSucceededAttempt.Id)).Status);
+        var currentSubscription = await db.Subscriptions.AsNoTracking().SingleAsync(item => item.Id == subscription.Id);
+        Assert.Equal(SubscriptionStatus.Active, currentSubscription.Status);
+        Assert.Equal(attemptedPeriodStart, currentSubscription.CurrentPeriodStart);
+        Assert.Equal(attemptedPeriodEnd, currentSubscription.CurrentPeriodEnd);
+        Assert.Equal(1, await db.PaymentEvents.CountAsync());
+        Assert.Equal(PaymentEventStatus.Rejected, (await db.PaymentEvents.AsNoTracking().SingleAsync()).Status);
+        var lifecycleEvents = await db.SubscriptionLifecycleEvents.AsNoTracking().ToListAsync();
+        Assert.Single(lifecycleEvents);
+        Assert.Equal(SubscriptionLifecycleEventType.Renewed, lifecycleEvents[0].Type);
+        Assert.Single(await db.BillingPeriods.ToListAsync());
+        Assert.Single(await db.CreditEntitlements.ToListAsync());
+        Assert.Equal(ledgerCountBefore, await db.CreditLedgerEntries.CountAsync());
+        Assert.Equal(ledgerBalanceBefore, await db.CreditLedgerEntries.SumAsync(item => item.Amount));
+        Assert.Empty(await db.PaymentRefunds.ToListAsync());
+        Assert.Equal(2, provider.SignatureVerifier.CallCount);
+        Assert.Equal(2, provider.ParseCallCount);
+        Assert.Equal(0, provider.CheckoutCreateCallCount);
+    }
+
+    [Fact]
+    public async Task Current_due_renewal_failure_keeps_past_due_behavior_and_replay_is_idempotent()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        var workspace = NewWorkspace();
+        var plan = new Plan
+        {
+            Id = Guid.NewGuid(), Code = $"current-failure-{Guid.NewGuid():N}", Name = "Current failure test plan",
+            MonthlyCreditAllowance = 100, Currency = "USD", IsActive = true, SortOrder = 99,
+            CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+        };
+        var subscription = NewSubscription(workspace.Id, plan.Id);
+        subscription.BillingProvider = "fake";
+        subscription.ProviderSubscriptionReference = "sub-current-due";
+        db.Workspaces.Add(workspace);
+        db.Plans.Add(plan);
+        db.Subscriptions.Add(subscription);
+        await db.SaveChangesAsync();
+        var lifecycle = NewLifecycle(db);
+        var periodStart = subscription.CurrentPeriodEnd;
+        var periodEnd = periodStart.AddMonths(1);
+        var attempt = await lifecycle.RecordPaymentAttemptAsync(
+            workspace.Id, "fake", "attempt:current-due", 9, "USD", subscriptionId: subscription.Id,
+            providerPaymentReference: "pay-current-due");
+        var providerEvent = new ProviderPaymentEvent(
+            "evt-current-due-failure", PaymentEventType.RenewalFailed,
+            workspace.Id, subscription.Id, null, attempt.Id, "pay-current-due", 9, "USD", DateTime.UtcNow,
+            "Currently due renewal failed.", "sub-current-due", periodStart, periodEnd, false);
+        var provider = new FakePaymentProvider(providerEvent);
+        var service = new PaymentWebhookService(
+            db, [provider], lifecycle,
+            Options.Create(new BillingOptions { CustomerChargingEnabled = true, Provider = "fake" }),
+            NullLogger<PaymentWebhookService>.Instance);
+        const string rawPayload = "{\"event\":\"evt-current-due-failure\"}";
+
+        var first = await service.ProcessAsync("fake", rawPayload, "valid");
+        var duplicate = await service.ProcessAsync("fake", rawPayload, "valid");
+
+        Assert.True(first.Accepted);
+        Assert.False(first.Duplicate);
+        Assert.True(duplicate.Accepted);
+        Assert.True(duplicate.Duplicate);
+        Assert.Equal(PaymentAttemptStatus.Failed,
+            (await db.PaymentAttempts.AsNoTracking().SingleAsync(item => item.Id == attempt.Id)).Status);
+        Assert.Equal(SubscriptionStatus.PastDue,
+            (await db.Subscriptions.AsNoTracking().SingleAsync(item => item.Id == subscription.Id)).Status);
+        var lifecycleEvent = Assert.Single(await db.SubscriptionLifecycleEvents.AsNoTracking().ToListAsync());
+        Assert.Equal(SubscriptionLifecycleEventType.PaymentFailed, lifecycleEvent.Type);
+        Assert.Equal(PaymentEventStatus.Processed,
+            (await db.PaymentEvents.AsNoTracking().SingleAsync()).Status);
+        Assert.Empty(await db.BillingPeriods.ToListAsync());
+        Assert.Empty(await db.CreditEntitlements.ToListAsync());
+        Assert.Empty(await db.CreditLedgerEntries.ToListAsync());
+        Assert.Equal(2, provider.SignatureVerifier.CallCount);
+        Assert.Equal(2, provider.ParseCallCount);
+        Assert.Equal(0, provider.CheckoutCreateCallCount);
     }
 
     [Fact]
