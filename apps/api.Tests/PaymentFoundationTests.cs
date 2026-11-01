@@ -37,18 +37,76 @@ public sealed class PaymentFoundationTests
         var provider = new FakePaymentProvider(new ProviderPaymentEvent(
             "evt-disabled", PaymentEventType.PaymentSucceeded, null, null, null, null, "pay-disabled", 9, "USD",
             DateTime.UtcNow, "Payment succeeded.", null, null, null, false));
+        var settlementVerifier = new FakePaymentSettlementVerifier();
         var service = new PaymentWebhookService(
             db,
             [provider],
             NewLifecycle(db),
             Options.Create(new BillingOptions { CustomerChargingEnabled = false, Provider = "fake" }),
-            NullLogger<PaymentWebhookService>.Instance);
+            NullLogger<PaymentWebhookService>.Instance,
+            [settlementVerifier]);
 
         var result = await service.ProcessAsync("fake", "{\"event\":\"evt-disabled\"}", "invalid");
 
         Assert.False(result.Accepted);
         Assert.Equal("PAYMENT_WEBHOOK_DISABLED", result.Code);
         Assert.Empty(await db.PaymentEvents.ToListAsync());
+        Assert.Empty(await db.PaymentAttempts.ToListAsync());
+        Assert.Empty(await db.CheckoutSessions.ToListAsync());
+        Assert.Empty(await db.PaymentRefunds.ToListAsync());
+        Assert.Empty(await db.CreditLedgerEntries.ToListAsync());
+        Assert.Empty(await db.CreditEntitlements.ToListAsync());
+        Assert.Empty(await db.BillingPeriods.ToListAsync());
+        Assert.Empty(await db.SubscriptionLifecycleEvents.ToListAsync());
+        Assert.Equal(0, provider.SignatureVerifier.CallCount);
+        Assert.Equal(0, provider.ParseCallCount);
+        Assert.Equal(0, provider.CheckoutCreateCallCount);
+        Assert.Equal(0, settlementVerifier.CallCount);
+    }
+
+    [Fact]
+    public async Task Webhook_rejects_invalid_signature_before_parsing_or_payment_side_effects()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        var workspace = NewWorkspace();
+        db.Workspaces.Add(workspace);
+        await db.SaveChangesAsync();
+        var lifecycle = NewLifecycle(db);
+        var attempt = await lifecycle.RecordPaymentAttemptAsync(workspace.Id, "fake", "attempt:invalid-signature", 9, "USD");
+        var provider = new FakePaymentProvider(new ProviderPaymentEvent(
+            "evt-invalid-signature", PaymentEventType.PaymentSucceeded, workspace.Id, null, null, attempt.Id,
+            "pay-invalid-signature", 9, "USD", DateTime.UtcNow, "Payment succeeded.", null, null, null, false));
+        var settlementVerifier = new FakePaymentSettlementVerifier();
+        var service = new PaymentWebhookService(
+            db,
+            [provider],
+            lifecycle,
+            Options.Create(new BillingOptions { CustomerChargingEnabled = true, Provider = "fake" }),
+            NullLogger<PaymentWebhookService>.Instance,
+            [settlementVerifier]);
+
+        var result = await service.ProcessAsync("fake", "{\"event\":\"evt-invalid-signature\"}", "invalid");
+
+        Assert.False(result.Accepted);
+        Assert.Equal("WEBHOOK_SIGNATURE_INVALID", result.Code);
+        Assert.False(result.Duplicate);
+        Assert.Equal(1, provider.SignatureVerifier.CallCount);
+        Assert.Equal(0, provider.ParseCallCount);
+        Assert.Equal(0, provider.CheckoutCreateCallCount);
+        Assert.Equal(0, settlementVerifier.CallCount);
+        var unchangedAttempt = await db.PaymentAttempts.AsNoTracking().SingleAsync(item => item.Id == attempt.Id);
+        Assert.Equal(PaymentAttemptStatus.Created, unchangedAttempt.Status);
+        Assert.Null(unchangedAttempt.ProviderPaymentReference);
+        Assert.Single(await db.PaymentAttempts.ToListAsync());
+        Assert.Empty(await db.PaymentEvents.ToListAsync());
+        Assert.Empty(await db.CheckoutSessions.ToListAsync());
+        Assert.Empty(await db.PaymentRefunds.ToListAsync());
+        Assert.Empty(await db.CreditLedgerEntries.ToListAsync());
+        Assert.Empty(await db.CreditEntitlements.ToListAsync());
+        Assert.Empty(await db.BillingPeriods.ToListAsync());
+        Assert.Empty(await db.SubscriptionLifecycleEvents.ToListAsync());
     }
 
     [Fact]
@@ -704,10 +762,22 @@ public sealed class PaymentFoundationTests
     private sealed class FakePaymentProvider(ProviderPaymentEvent paymentEvent) : IPaymentProvider
     {
         public string Key => "fake";
-        public IWebhookSignatureVerifier WebhookSignatureVerifier { get; } = new AcceptingSignatureVerifier();
-        public Task<ProviderCheckoutSessionResult> CreateCheckoutSessionAsync(ProviderCheckoutRequest request, CancellationToken cancellationToken = default) =>
-            Task.FromResult(new ProviderCheckoutSessionResult("session-1", "https://example.test/checkout/session-1", DateTime.UtcNow.AddMinutes(30)));
-        public ProviderPaymentEvent ParseWebhook(string rawPayload) => paymentEvent;
+        public AcceptingSignatureVerifier SignatureVerifier { get; } = new();
+        public IWebhookSignatureVerifier WebhookSignatureVerifier => SignatureVerifier;
+        public int CheckoutCreateCallCount { get; private set; }
+        public int ParseCallCount { get; private set; }
+
+        public Task<ProviderCheckoutSessionResult> CreateCheckoutSessionAsync(ProviderCheckoutRequest request, CancellationToken cancellationToken = default)
+        {
+            CheckoutCreateCallCount++;
+            return Task.FromResult(new ProviderCheckoutSessionResult("session-1", "https://example.test/checkout/session-1", DateTime.UtcNow.AddMinutes(30)));
+        }
+
+        public ProviderPaymentEvent ParseWebhook(string rawPayload)
+        {
+            ParseCallCount++;
+            return paymentEvent;
+        }
     }
 
     private sealed class FakePaymentSettlementVerifier(
@@ -739,7 +809,13 @@ public sealed class PaymentFoundationTests
 
     private sealed class AcceptingSignatureVerifier : IWebhookSignatureVerifier
     {
-        public bool Verify(string rawPayload, string signature) => signature == "valid";
+        public int CallCount { get; private set; }
+
+        public bool Verify(string rawPayload, string signature)
+        {
+            CallCount++;
+            return signature == "valid";
+        }
     }
 
     private sealed class NullNotificationEventWriter : INotificationEventWriter
