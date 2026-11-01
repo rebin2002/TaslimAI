@@ -659,6 +659,15 @@ public sealed class PaymentWebhookService(
                         throw new InvalidOperationException("The checkout session does not match the recorded payment attempt.");
                     if (parsed.SubscriptionId.HasValue && parsed.SubscriptionId != linkedAttempt.SubscriptionId)
                         throw new InvalidOperationException("The subscription does not match the recorded payment attempt.");
+                    if ((parsed.Type is PaymentEventType.PaymentFailed or PaymentEventType.RenewalFailed)
+                        && linkedAttempt.SubscriptionId.HasValue
+                        && parsed.SubscriptionId != linkedAttempt.SubscriptionId)
+                        throw new InvalidOperationException("The failed payment event did not bind to the subscription recorded on the payment attempt.");
+                    if ((parsed.Type is PaymentEventType.PaymentFailed or PaymentEventType.RenewalFailed)
+                        && linkedAttempt.SubscriptionId.HasValue
+                        && (string.IsNullOrWhiteSpace(linkedAttempt.ProviderPaymentReference)
+                            || !string.Equals(linkedAttempt.ProviderPaymentReference, parsed.ProviderPaymentReference, StringComparison.Ordinal)))
+                        throw new InvalidOperationException("The failed payment event did not match a previously recorded provider payment reference.");
                     if (!string.IsNullOrWhiteSpace(parsed.ProviderPaymentReference))
                     {
                         var normalizedProviderReference = parsed.ProviderPaymentReference.Trim();
@@ -730,12 +739,53 @@ public sealed class PaymentWebhookService(
                         break;
                     case PaymentEventType.PaymentFailed:
                     case PaymentEventType.RenewalFailed:
-                        if (parsed.WorkspaceId.HasValue && parsed.PaymentAttemptId.HasValue)
-                            await lifecycle.MarkPaymentFailedAsync(parsed.WorkspaceId.Value, parsed.PaymentAttemptId.Value, "PROVIDER_PAYMENT_FAILED", parsed.Reason ?? "Provider payment failed.", cancellationToken);
+                        if (parsed.WorkspaceId.HasValue && parsed.PaymentAttemptId.HasValue && linkedAttempt is not null)
+                        {
+                            if (linkedAttempt.SubscriptionId.HasValue || parsed.Type == PaymentEventType.RenewalFailed)
+                            {
+                                var workspaceId = parsed.WorkspaceId.Value;
+                                var subscriptionId = parsed.SubscriptionId
+                                    ?? throw new InvalidOperationException("The subscription-linked failure event omitted its subscription reference.");
+                                if (linkedAttempt.SubscriptionId != subscriptionId)
+                                    throw new InvalidOperationException("The failed payment attempt does not belong to the referenced subscription.");
+
+                                var subscription = await db.Subscriptions.SingleOrDefaultAsync(
+                                    item => item.Id == subscriptionId && item.WorkspaceId == workspaceId, cancellationToken)
+                                    ?? throw new InvalidOperationException("The failed payment subscription was not found in the workspace.");
+                                if (!string.Equals(subscription.BillingProvider, provider.Key, StringComparison.OrdinalIgnoreCase))
+                                    throw new InvalidOperationException("The subscription billing provider does not match the failed payment event provider.");
+                                if (string.IsNullOrWhiteSpace(subscription.ProviderSubscriptionReference)
+                                    || !string.Equals(subscription.ProviderSubscriptionReference, parsed.ProviderSubscriptionReference, StringComparison.Ordinal))
+                                    throw new InvalidOperationException("The provider subscription reference does not match the stored subscription.");
+                                if (!parsed.Amount.HasValue || parsed.Amount.Value != linkedAttempt.Amount
+                                    || !string.Equals(parsed.Currency, linkedAttempt.Currency, StringComparison.OrdinalIgnoreCase))
+                                    throw new InvalidOperationException("The failed payment amount or currency does not match the recorded attempt.");
+
+                                var periodStart = parsed.PeriodStart
+                                    ?? throw new InvalidOperationException("The subscription-linked failure event omitted its period start.");
+                                var periodEnd = parsed.PeriodEnd
+                                    ?? throw new InvalidOperationException("The subscription-linked failure event omitted its period end.");
+                                if (periodStart != subscription.CurrentPeriodEnd || periodEnd <= periodStart)
+                                    throw new InvalidOperationException("The failed payment does not correlate to the subscription's currently due renewal period.");
+                            }
+
+                            await lifecycle.MarkPaymentFailedAsync(parsed.WorkspaceId.Value, parsed.PaymentAttemptId.Value,
+                                "PROVIDER_PAYMENT_FAILED", parsed.Reason ?? "Provider payment failed.", cancellationToken);
+                        }
                         break;
                     case PaymentEventType.SubscriptionCancelled:
                         if (parsed.WorkspaceId.HasValue && parsed.SubscriptionId.HasValue)
+                        {
+                            var subscription = await db.Subscriptions.SingleOrDefaultAsync(
+                                item => item.Id == parsed.SubscriptionId.Value && item.WorkspaceId == parsed.WorkspaceId.Value, cancellationToken)
+                                ?? throw new InvalidOperationException("The cancelled subscription was not found in the workspace.");
+                            if (!string.Equals(subscription.BillingProvider, provider.Key, StringComparison.OrdinalIgnoreCase))
+                                throw new InvalidOperationException("The subscription billing provider does not match the cancellation event provider.");
+                            if (string.IsNullOrWhiteSpace(subscription.ProviderSubscriptionReference)
+                                || !string.Equals(subscription.ProviderSubscriptionReference, parsed.ProviderSubscriptionReference, StringComparison.Ordinal))
+                                throw new InvalidOperationException("The provider subscription reference does not match the stored subscription.");
                             await lifecycle.CancelSubscriptionAsync(parsed.WorkspaceId.Value, parsed.SubscriptionId.Value, parsed.Reason ?? "Provider cancelled the subscription.", cancellationToken);
+                        }
                         break;
                 }
 
@@ -830,9 +880,17 @@ public sealed class PaymentWebhookService(
                 Require(parsed.PaymentAttemptId, "payment attempt");
                 break;
             case PaymentEventType.PaymentFailed:
-            case PaymentEventType.RenewalFailed:
                 Require(parsed.WorkspaceId, "workspace");
                 Require(parsed.PaymentAttemptId, "payment attempt");
+                break;
+            case PaymentEventType.RenewalFailed:
+                Require(parsed.WorkspaceId, "workspace");
+                Require(parsed.SubscriptionId, "subscription");
+                Require(parsed.PaymentAttemptId, "payment attempt");
+                RequireText(parsed.ProviderPaymentReference, "provider payment");
+                RequireText(parsed.ProviderSubscriptionReference, "provider subscription");
+                if (!parsed.PeriodStart.HasValue || !parsed.PeriodEnd.HasValue)
+                    throw new InvalidOperationException("The renewal failure event did not include a complete billing period.");
                 break;
             case PaymentEventType.RenewalSucceeded:
                 Require(parsed.WorkspaceId, "workspace");
@@ -846,6 +904,7 @@ public sealed class PaymentWebhookService(
             case PaymentEventType.SubscriptionCancelled:
                 Require(parsed.WorkspaceId, "workspace");
                 Require(parsed.SubscriptionId, "subscription");
+                RequireText(parsed.ProviderSubscriptionReference, "provider subscription");
                 break;
             default:
                 throw new InvalidOperationException("The verified payment event type is not supported by the billing foundation.");
