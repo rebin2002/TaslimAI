@@ -641,6 +641,9 @@ test.describe("issue #700 onboarding and billing layout", () => {
       onboardingCompletedAt = "2026-11-01T00:00:00.000Z";
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(liveAuthResponse(onboardingCompletedAt)) });
     });
+    await page.route(`**/api/workspaces/${liveWorkspace.id}/projects*`, async (route) => {
+      await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+    });
 
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto("/account/billing");
