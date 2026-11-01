@@ -111,6 +111,72 @@ public sealed class ManusBridgeCompletionSecurityContractTests : IClassFixture<T
         }
     }
 
+    [Fact]
+    public async Task Reused_event_id_with_different_wave_and_task_identity_is_rejected_without_mutation()
+    {
+        var previousSecret = Environment.GetEnvironmentVariable(SecretEnvironmentVariable);
+        Environment.SetEnvironmentVariable(SecretEnvironmentVariable, TestSecret);
+        var eventId = $"evt-identity-conflict-{Guid.NewGuid():N}";
+        var originalWaveKey = $"wave-original-{Guid.NewGuid():N}";
+        var originalTaskId = $"task-original-{Guid.NewGuid():N}";
+        var conflictingWaveKey = $"wave-conflicting-{Guid.NewGuid():N}";
+        var conflictingTaskId = $"task-conflicting-{Guid.NewGuid():N}";
+        try
+        {
+            using var client = factory.CreateClient();
+            var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture);
+            var originalPayload = CompletionPayload(originalWaveKey, originalTaskId, "succeeded");
+            var conflictingPayload = CompletionPayload(conflictingWaveKey, conflictingTaskId, "failed");
+
+            using var originalRequest = CreateRequest(
+                eventId,
+                timestamp,
+                Sign(TestSecret, timestamp, originalPayload),
+                originalPayload);
+            using var originalResponse = await client.SendAsync(originalRequest);
+            Assert.Equal(HttpStatusCode.Accepted, originalResponse.StatusCode);
+
+            // A valid signature cannot make an existing event ID mean a different
+            // wave/task. The first durable receipt remains immutable.
+            using var conflictingRequest = CreateRequest(
+                eventId,
+                timestamp,
+                Sign(TestSecret, timestamp, conflictingPayload),
+                conflictingPayload);
+            using var conflictingResponse = await client.SendAsync(conflictingRequest);
+            Assert.Equal(HttpStatusCode.BadRequest, conflictingResponse.StatusCode);
+            using (var error = JsonDocument.Parse(await conflictingResponse.Content.ReadAsStringAsync()))
+            {
+                Assert.Equal("AUTOPILOT_EVENT_REJECTED", error.RootElement.GetProperty("error").GetProperty("code").GetString());
+            }
+
+            using var scope = factory.Services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var storedEvents = await db.AutopilotEvents
+                .Where(item => item.SourceSystem == Source && item.ExternalEventId == eventId)
+                .ToListAsync();
+            var stored = Assert.Single(storedEvents);
+            Assert.Equal(originalPayload, stored.SignalJson);
+            Assert.Equal(originalWaveKey, stored.WaveKey);
+            Assert.Equal(originalTaskId, stored.TaskId);
+            Assert.Equal(AutopilotEventStatuses.Queued, stored.Status);
+            Assert.True(stored.SignatureVerified);
+            Assert.True(stored.ReplayProtected);
+
+            Assert.Empty(await db.AutopilotRuns.Where(item =>
+                item.WaveKey == originalWaveKey || item.WaveKey == conflictingWaveKey).ToListAsync());
+            Assert.Empty(await db.AutopilotWaveTasks.Where(item =>
+                item.WaveKey == originalWaveKey || item.WaveKey == conflictingWaveKey
+                || item.TaskId == originalTaskId || item.TaskId == conflictingTaskId).ToListAsync());
+            Assert.Empty(await db.AutopilotGateEvaluations.Where(item =>
+                item.WaveKey == originalWaveKey || item.WaveKey == conflictingWaveKey).ToListAsync());
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(SecretEnvironmentVariable, previousSecret);
+        }
+    }
+
     private async Task AssertNoStoredEventAsync(string eventId)
     {
         using var scope = factory.Services.CreateScope();
