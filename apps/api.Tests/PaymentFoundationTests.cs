@@ -1068,7 +1068,144 @@ public sealed class PaymentFoundationTests
         Assert.Equal(SubscriptionStatus.Active, (await db.Subscriptions.AsNoTracking().SingleAsync(item => item.Id == subscription.Id)).Status);
         Assert.Empty(await db.BillingPeriods.ToListAsync());
         Assert.Empty(await db.SubscriptionLifecycleEvents.ToListAsync());
-        Assert.Equal(PaymentEventStatus.Rejected, (await db.PaymentEvents.SingleAsync()).Status);
+        Assert.Equal(PaymentEventStatus.Received, (await db.PaymentEvents.SingleAsync()).Status);
+    }
+
+    [Fact]
+    public async Task Verified_renewal_retries_same_event_after_credit_repair_and_grants_once()
+    {
+        var databasePath = Path.Combine(Path.GetTempPath(), $"payment-renewal-retry-{Guid.NewGuid():N}.db");
+        var connectionString = new SqliteConnectionStringBuilder
+        {
+            DataSource = databasePath,
+            Pooling = false,
+        }.ToString();
+        var options = new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connectionString).Options;
+        var workspace = NewWorkspace();
+        var plan = new Plan
+        {
+            Id = Guid.NewGuid(), Code = $"repairable-renewal-{Guid.NewGuid():N}", Name = "Repairable renewal fixture",
+            MonthlyCreditAllowance = 0, Currency = "USD", IsActive = true, SortOrder = 99,
+            CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+        };
+        var subscription = NewSubscription(workspace.Id, plan.Id);
+        subscription.BillingProvider = "fake";
+        subscription.ProviderSubscriptionReference = "sub-renewal-retry";
+        var periodStart = subscription.CurrentPeriodEnd;
+        var periodEnd = periodStart.AddMonths(1);
+        var occurredAt = DateTime.UtcNow;
+        const string rawPayload = "{\"event\":\"evt-renewal-retry-repair\"}";
+        const string signature = "valid";
+        var paymentAttemptId = Guid.Empty;
+        PaymentEventStatus? eventStatusAfterFailure = null;
+
+        try
+        {
+            await using (var db = new TaslimDbContext(options))
+            {
+                await db.Database.EnsureCreatedAsync();
+                db.Workspaces.Add(workspace);
+                db.Plans.Add(plan);
+                db.Subscriptions.Add(subscription);
+                await db.SaveChangesAsync();
+                var lifecycle = NewLifecycle(db);
+                var attempt = await lifecycle.RecordPaymentAttemptAsync(
+                    workspace.Id, "fake", "attempt:renewal-retry-repair", 9, "USD", subscriptionId: subscription.Id);
+                paymentAttemptId = attempt.Id;
+                var providerEvent = new ProviderPaymentEvent(
+                    "evt-renewal-retry-repair", PaymentEventType.RenewalSucceeded, workspace.Id, subscription.Id,
+                    null, attempt.Id, "pay-renewal-retry-repair", 9, "USD", occurredAt,
+                    "Synthetic renewal succeeded.", "sub-renewal-retry", periodStart, periodEnd, false);
+                var firstVerifier = new FakePaymentSettlementVerifier();
+                // Local-only fake provider/verifier configuration; this test performs no checkout or network request.
+                var service = new PaymentWebhookService(
+                    db, [new FakePaymentProvider(providerEvent)], lifecycle,
+                    Options.Create(new BillingOptions { CustomerChargingEnabled = true, Provider = "fake" }),
+                    NullLogger<PaymentWebhookService>.Instance, [firstVerifier]);
+
+                var first = await service.ProcessAsync("fake", rawPayload, signature);
+                Assert.False(first.Accepted);
+                Assert.False(first.Duplicate);
+                Assert.Equal("WEBHOOK_PROCESSING_FAILED", first.Code);
+                Assert.Equal(1, firstVerifier.CallCount);
+                var unchangedAttempt = await db.PaymentAttempts.AsNoTracking().SingleAsync(item => item.Id == attempt.Id);
+                Assert.Equal(PaymentAttemptStatus.Created, unchangedAttempt.Status);
+                Assert.Null(unchangedAttempt.ProviderPaymentReference);
+                var unchangedSubscription = await db.Subscriptions.AsNoTracking().SingleAsync(item => item.Id == subscription.Id);
+                Assert.Equal(SubscriptionStatus.Active, unchangedSubscription.Status);
+                Assert.Equal(periodStart, unchangedSubscription.CurrentPeriodEnd);
+                Assert.Empty(await db.BillingPeriods.ToListAsync());
+                Assert.Empty(await db.CreditLedgerEntries.ToListAsync());
+                Assert.Empty(await db.CreditEntitlements.ToListAsync());
+                Assert.Empty(await db.SubscriptionLifecycleEvents.ToListAsync());
+                eventStatusAfterFailure = (await db.PaymentEvents.AsNoTracking().SingleAsync()).Status;
+            }
+
+            await using (var db = new TaslimDbContext(options))
+            {
+                var repairedPlan = await db.Plans.SingleAsync(item => item.Id == plan.Id);
+                repairedPlan.MonthlyCreditAllowance = 100;
+                await db.SaveChangesAsync();
+
+                var providerEvent = new ProviderPaymentEvent(
+                    "evt-renewal-retry-repair", PaymentEventType.RenewalSucceeded, workspace.Id, subscription.Id,
+                    null, paymentAttemptId, "pay-renewal-retry-repair", 9, "USD", occurredAt,
+                    "Synthetic renewal succeeded.", "sub-renewal-retry", periodStart, periodEnd, false);
+                var retryVerifier = new FakePaymentSettlementVerifier();
+                var retryService = new PaymentWebhookService(
+                    db, [new FakePaymentProvider(providerEvent)], NewLifecycle(db),
+                    Options.Create(new BillingOptions { CustomerChargingEnabled = true, Provider = "fake" }),
+                    NullLogger<PaymentWebhookService>.Instance, [retryVerifier]);
+
+                var retry = await retryService.ProcessAsync("fake", rawPayload, signature);
+                Assert.True(retry.Accepted);
+                Assert.False(retry.Duplicate);
+                Assert.Equal("WEBHOOK_PROCESSED", retry.Code);
+                Assert.Equal(1, retryVerifier.CallCount);
+                Assert.Equal(PaymentEventStatus.Received, eventStatusAfterFailure);
+                var processedEvent = await db.PaymentEvents.AsNoTracking().SingleAsync();
+                Assert.Equal(PaymentEventStatus.Processed, processedEvent.Status);
+                Assert.Null(processedEvent.FailureReason);
+                Assert.Equal(PaymentAttemptStatus.Succeeded,
+                    (await db.PaymentAttempts.AsNoTracking().SingleAsync(item => item.Id == paymentAttemptId)).Status);
+                Assert.Equal(periodEnd,
+                    (await db.Subscriptions.AsNoTracking().SingleAsync(item => item.Id == subscription.Id)).CurrentPeriodEnd);
+                Assert.Single(await db.BillingPeriods.ToListAsync());
+                Assert.Single(await db.CreditEntitlements.ToListAsync());
+                var grant = Assert.Single(await db.CreditLedgerEntries.ToListAsync());
+                Assert.Equal(100L, grant.Amount);
+                Assert.Equal(CreditLedgerEntryType.Grant, grant.Type);
+                Assert.Single(await db.SubscriptionLifecycleEvents.ToListAsync());
+            }
+
+            await using (var db = new TaslimDbContext(options))
+            {
+                var providerEvent = new ProviderPaymentEvent(
+                    "evt-renewal-retry-repair", PaymentEventType.RenewalSucceeded, workspace.Id, subscription.Id,
+                    null, paymentAttemptId, "pay-renewal-retry-repair", 9, "USD", occurredAt,
+                    "Synthetic renewal succeeded.", "sub-renewal-retry", periodStart, periodEnd, false);
+                var replayVerifier = new FakePaymentSettlementVerifier();
+                var replayService = new PaymentWebhookService(
+                    db, [new FakePaymentProvider(providerEvent)], NewLifecycle(db),
+                    Options.Create(new BillingOptions { CustomerChargingEnabled = true, Provider = "fake" }),
+                    NullLogger<PaymentWebhookService>.Instance, [replayVerifier]);
+
+                var duplicate = await replayService.ProcessAsync("fake", rawPayload, signature);
+                Assert.True(duplicate.Accepted);
+                Assert.True(duplicate.Duplicate);
+                Assert.Equal("WEBHOOK_DUPLICATE", duplicate.Code);
+                Assert.Equal(0, replayVerifier.CallCount);
+                Assert.Single(await db.BillingPeriods.ToListAsync());
+                Assert.Single(await db.CreditEntitlements.ToListAsync());
+                var grant = Assert.Single(await db.CreditLedgerEntries.ToListAsync());
+                Assert.Equal(100L, grant.Amount);
+                Assert.Single(await db.SubscriptionLifecycleEvents.ToListAsync());
+            }
+        }
+        finally
+        {
+            if (File.Exists(databasePath)) File.Delete(databasePath);
+        }
     }
 
     private static TaslimDbContext CreateDb(SqliteConnection connection)

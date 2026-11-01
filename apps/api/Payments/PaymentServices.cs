@@ -641,6 +641,7 @@ public sealed class PaymentWebhookService(
             paymentEvent = await db.PaymentEvents.SingleAsync(item => item.Id == paymentEventId, cancellationToken);
             var domainSavepointName = $"payment_webhook_domain_{Guid.NewGuid():N}";
             await db.Database.CurrentTransaction!.CreateSavepointAsync(domainSavepointName, cancellationToken);
+            var retryableRenewalTransitionFailure = false;
 
             try
             {
@@ -734,7 +735,20 @@ public sealed class PaymentWebhookService(
                                 throw new InvalidOperationException("The payment attempt has already been consumed or is terminal.");
                             await lifecycle.MarkPaymentSucceededAsync(workspaceId, paymentAttemptId, parsed.Reason ?? "Provider payment succeeded.", cancellationToken);
                             if (parsed.Type == PaymentEventType.RenewalSucceeded && parsed.SubscriptionId is Guid subscriptionId && parsed.PeriodStart is DateTime periodStart && parsed.PeriodEnd is DateTime periodEnd)
-                                await lifecycle.RenewSubscriptionAsync(workspaceId, subscriptionId, periodStart, periodEnd, $"webhook:{paymentEvent.Id}", parsed.Reason ?? "Provider renewal succeeded.", cancellationToken);
+                            {
+                                try
+                                {
+                                    await lifecycle.RenewSubscriptionAsync(workspaceId, subscriptionId, periodStart, periodEnd,
+                                        $"webhook:{paymentEvent.Id}", parsed.Reason ?? "Provider renewal succeeded.", cancellationToken);
+                                }
+                                catch (Exception renewalException) when (renewalException is InvalidOperationException or ArgumentException)
+                                {
+                                    // The event is verified and its correlation checks have passed. Keep it retryable
+                                    // when the local renewal transition fails; never ack an unapplied grant as a duplicate.
+                                    retryableRenewalTransitionFailure = true;
+                                    throw;
+                                }
+                            }
                         }
                         break;
                     case PaymentEventType.PaymentFailed:
@@ -793,6 +807,7 @@ public sealed class PaymentWebhookService(
                 paymentEvent.SubscriptionId = parsed.SubscriptionId;
                 paymentEvent.CheckoutSessionId = parsed.CheckoutSessionId;
                 paymentEvent.PaymentAttemptId = parsed.PaymentAttemptId;
+                paymentEvent.FailureReason = null;
                 paymentEvent.Status = PaymentEventStatus.Processed;
                 paymentEvent.ProcessedAt = DateTime.UtcNow;
                 await db.SaveChangesAsync(cancellationToken);
@@ -805,7 +820,9 @@ public sealed class PaymentWebhookService(
                 await db.Database.CurrentTransaction!.RollbackToSavepointAsync(domainSavepointName, CancellationToken.None);
                 db.ChangeTracker.Clear();
                 var rejectedEvent = await db.PaymentEvents.SingleAsync(item => item.Id == paymentEventId, CancellationToken.None);
-                rejectedEvent.Status = PaymentEventStatus.Rejected;
+                rejectedEvent.Status = retryableRenewalTransitionFailure
+                    ? PaymentEventStatus.Received
+                    : PaymentEventStatus.Rejected;
                 rejectedEvent.FailureReason = "The verified event was recorded but its domain transition was not applied.";
                 await db.SaveChangesAsync(CancellationToken.None);
                 if (ownsTransition) await transition!.CommitAsync(CancellationToken.None);
