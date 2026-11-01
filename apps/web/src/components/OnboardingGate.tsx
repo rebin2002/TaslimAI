@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   ArrowLeft,
@@ -35,6 +35,10 @@ const workflowIcons: Record<OnboardingIntent, LucideIcon> = {
 
 type OnboardingStep = "preferences" | "tour" | "workflow";
 
+// The first-run launch set contains five modules. Research remains defined for
+// its existing route/API but is not offered until its separate launch gate is approved.
+const onboardingChoices = onboardingWorkflowDefinitions.filter((workflow) => workflow.intent !== "research");
+
 export function OnboardingGate() {
   const { user } = useAuth();
 
@@ -54,9 +58,16 @@ function OnboardingFlow({ user }: Readonly<{ user: User }>) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const showOnboarding = shouldShowOnboarding(user);
+  const stepHeadingRef = useRef<HTMLHeadingElement | null>(null);
   // Onboarding is a blocking workflow with an explicit Skip action; Escape
   // keeps focus inside instead of silently submitting that choice.
   const dialogRef = useDialogAccessibility(showOnboarding, () => undefined);
+
+  useLayoutEffect(() => {
+    // Replacing a step unmounts its focused controls. Move focus into the new
+    // step synchronously so it cannot fall back to BODY between steps.
+    stepHeadingRef.current?.focus();
+  }, [step]);
 
   if (!showOnboarding) return null;
   const steps: OnboardingStep[] = ["preferences", "tour", "workflow"];
@@ -89,13 +100,13 @@ function OnboardingFlow({ user }: Readonly<{ user: User }>) {
           <button type="button" className="onboarding-skip" onClick={() => void finish()} disabled={saving}>{t("onboarding.skip")}</button>
         </header>
 
-        <div className="onboarding-progress" aria-label={t("onboarding.progress", { current: String(currentStep), total: String(steps.length) })}>
+        <div className="onboarding-progress" role="progressbar" aria-label={t("onboarding.progress", { current: String(currentStep), total: String(steps.length) })} aria-valuemin={1} aria-valuemax={steps.length} aria-valuenow={currentStep}>
           {steps.map((item, index) => <span key={item} className={index < currentStep ? "is-complete" : ""} />)}
         </div>
 
         {step === "preferences" && <div className="onboarding-body">
           <p className="section-eyebrow">{t("onboarding.eyebrow")}</p>
-          <h1 id="onboarding-title">{t("onboarding.preferencesTitle")}</h1>
+          <h1 ref={stepHeadingRef} id="onboarding-title" tabIndex={-1}>{t("onboarding.preferencesTitle")}</h1>
           <p className="onboarding-description">{t("onboarding.preferencesDescription")}</p>
           <div className="onboarding-fields">
             <label><span>{t("onboarding.displayName")}</span><input data-dialog-autofocus value={displayName} maxLength={120} onChange={(event) => setDisplayName(event.target.value)} placeholder={t("onboarding.displayNamePlaceholder")} autoComplete="name" /></label>
@@ -107,7 +118,7 @@ function OnboardingFlow({ user }: Readonly<{ user: User }>) {
 
         {step === "tour" && <div className="onboarding-body">
           <p className="section-eyebrow">{t("onboarding.tourEyebrow")}</p>
-          <h1 id="onboarding-title">{t("onboarding.tourTitle")}</h1>
+          <h1 ref={stepHeadingRef} id="onboarding-title" tabIndex={-1}>{t("onboarding.tourTitle")}</h1>
           <p className="onboarding-description">{t("onboarding.tourDescription")}</p>
           <div className="onboarding-intro-grid">
             <article><span className="onboarding-intro-icon is-project"><FolderKanban size={19} /></span><div><h2>{t("onboarding.projectsTitle")}</h2><p>{t("onboarding.projectsDescription")}</p></div></article>
@@ -119,10 +130,10 @@ function OnboardingFlow({ user }: Readonly<{ user: User }>) {
 
         {step === "workflow" && <div className="onboarding-body onboarding-workflow-body">
           <p className="section-eyebrow">{t("onboarding.workflowEyebrow")}</p>
-          <h1 id="onboarding-title">{t("create.title")}</h1>
+          <h1 ref={stepHeadingRef} id="onboarding-title" tabIndex={-1}>{t("create.title")}</h1>
           <p className="onboarding-description">{t("onboarding.workflowDescription")}</p>
           <div className="onboarding-workflow-grid">
-            {onboardingWorkflowDefinitions.map((workflow) => {
+            {onboardingChoices.map((workflow) => {
               const Icon = workflowIcons[workflow.intent];
               return <button type="button" key={workflow.intent} className="onboarding-workflow" onClick={() => void finish(workflow.intent, workflow.href)} disabled={saving}>
                 <span className="onboarding-workflow-icon"><Icon size={19} /></span>
