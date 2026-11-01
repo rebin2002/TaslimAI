@@ -136,7 +136,7 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Verified_completion_frees_exactly_one_slot_and_replay_does_not_free_another()
+    public async Task Exact_task_detail_terminal_receipt_releases_one_slot_and_replay_does_not_free_another()
     {
         var taskIds = await SeedLaunchTasksAsync(total: 22, initiallyActive: 20, tasksPerWave: 22);
         var inventory = CompleteInventory();
@@ -183,6 +183,116 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
         var completedTask = await verify.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskIds[0]);
         var sameWaveRefill = await verify.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskIds[20]);
         Assert.Equal(completedTask.BatchId, sameWaveRefill.BatchId);
+    }
+
+    [Fact]
+    public async Task Hmac_outcome_alone_blocked_and_ask_events_cannot_release_a_slot()
+    {
+        var taskIds = await SeedLaunchTasksAsync(total: 1, initiallyActive: 1);
+        var successWithoutReceipt = await SeedCompletionEventAsync(taskIds[0], includeTaskDetailReceipt: false);
+        var blockedWithReceipt = await SeedCompletionEventAsync(taskIds[0], outcome: AutopilotTaskOutcomes.Blocked);
+        var askOutcome = await SeedCompletionEventAsync(taskIds[0], outcome: "ask");
+        string key;
+        string externalTaskId;
+
+        await using (var db = CreateContext())
+        {
+            var task = await db.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskIds[0]);
+            key = AutopilotGlobalTaskSlotIdentity.CreateIdempotencyKey(task.WaveKey, task.TaskKey);
+            externalTaskId = task.ExternalTaskId!;
+            var allocator = CreateAllocator(db);
+
+            foreach (var eventId in new[] { successWithoutReceipt, blockedWithReceipt, askOutcome })
+            {
+                var result = await allocator.CompleteVerifiedAsync(taskIds[0], key, externalTaskId, eventId);
+                Assert.Equal(AutopilotGlobalTaskSlotOutcomes.TerminalEvidenceInvalid, result.Outcome);
+                Assert.True(result.SlotHeld);
+                Assert.False(result.MayCallProvider);
+            }
+        }
+
+        await using var verify = CreateContext();
+        Assert.Equal(AutopilotWaveLaunchStatuses.Launched,
+            (await verify.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskIds[0])).Status);
+    }
+
+    [Fact]
+    public async Task Ask_nonterminal_mismatched_and_background_task_detail_receipts_cannot_release_a_slot()
+    {
+        var taskIds = await SeedLaunchTasksAsync(total: 1, initiallyActive: 1);
+        var askReceipt = await SeedCompletionEventAsync(taskIds[0], taskDetailStopReason: "ask");
+        var runningTask = await SeedCompletionEventAsync(taskIds[0], taskDetailAgentStatus: "running");
+        var backgroundJobs = await SeedCompletionEventAsync(taskIds[0], taskDetailHasRunningBackgroundJobs: true);
+        var differentTask = await SeedCompletionEventAsync(taskIds[0], taskDetailTaskIdOverride: "another-external-task");
+        string key;
+        string externalTaskId;
+
+        await using (var db = CreateContext())
+        {
+            var task = await db.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskIds[0]);
+            key = AutopilotGlobalTaskSlotIdentity.CreateIdempotencyKey(task.WaveKey, task.TaskKey);
+            externalTaskId = task.ExternalTaskId!;
+            var allocator = CreateAllocator(db);
+
+            foreach (var eventId in new[] { askReceipt, runningTask, backgroundJobs, differentTask })
+            {
+                var result = await allocator.CompleteVerifiedAsync(taskIds[0], key, externalTaskId, eventId);
+                Assert.Equal(AutopilotGlobalTaskSlotOutcomes.TerminalEvidenceInvalid, result.Outcome);
+                Assert.True(result.SlotHeld);
+                Assert.False(result.MayCallProvider);
+            }
+        }
+
+        await using var verify = CreateContext();
+        Assert.Equal(AutopilotWaveLaunchStatuses.Launched,
+            (await verify.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskIds[0])).Status);
+    }
+
+    [Fact]
+    public async Task Deterministic_provider_rejection_releases_one_reserved_slot()
+    {
+        var taskIds = await SeedLaunchTasksAsync(total: 21, initiallyActive: 19);
+        var reservation = await ClaimAsync(taskIds[19], CompleteInventory());
+        Assert.Equal(AutopilotGlobalTaskSlotOutcomes.Reserved, reservation.Outcome);
+        Assert.True(reservation.MayCallProvider);
+        string key;
+
+        await using (var db = CreateContext())
+        {
+            var task = await db.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskIds[19]);
+            key = AutopilotGlobalTaskSlotIdentity.CreateIdempotencyKey(task.WaveKey, task.TaskKey);
+            var rejected = await CreateAllocator(db).RecordRejectedAsync(taskIds[19], key, "provider_rejected");
+            Assert.Equal(AutopilotGlobalTaskSlotOutcomes.LaunchRejected, rejected.Outcome);
+            Assert.False(rejected.SlotHeld);
+            Assert.False(rejected.MayCallProvider);
+        }
+
+        var replacement = await ClaimAsync(taskIds[20], CompleteInventory());
+        Assert.Equal(AutopilotGlobalTaskSlotOutcomes.Reserved, replacement.Outcome);
+        Assert.True(replacement.MayCallProvider);
+    }
+
+    [Fact]
+    public async Task Ambiguous_provider_outcome_retains_the_reserved_slot_until_reconciliation()
+    {
+        var taskIds = await SeedLaunchTasksAsync(total: 21, initiallyActive: 19);
+        var reservation = await ClaimAsync(taskIds[19], CompleteInventory());
+        Assert.Equal(AutopilotGlobalTaskSlotOutcomes.Reserved, reservation.Outcome);
+        string key;
+
+        await using (var db = CreateContext())
+        {
+            var task = await db.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskIds[19]);
+            key = AutopilotGlobalTaskSlotIdentity.CreateIdempotencyKey(task.WaveKey, task.TaskKey);
+            var ambiguous = await CreateAllocator(db).RecordAmbiguousAsync(taskIds[19], key);
+            Assert.Equal(AutopilotGlobalTaskSlotOutcomes.AmbiguousLaunch, ambiguous.Outcome);
+            Assert.True(ambiguous.SlotHeld);
+            Assert.False(ambiguous.MayCallProvider);
+        }
+
+        var blocked = await ClaimAsync(taskIds[20], CompleteInventory());
+        Assert.Equal(AutopilotGlobalTaskSlotOutcomes.CapacityReached, blocked.Outcome);
+        Assert.False(blocked.MayCallProvider);
     }
 
     [Fact]
@@ -678,18 +788,31 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
         bool signatureVerified = true,
         bool replayProtected = true,
         string? taskKeyOverride = null,
-        DbContextOptions<TaslimDbContext>? contextOptions = null)
+        DbContextOptions<TaslimDbContext>? contextOptions = null,
+        string outcome = AutopilotTaskOutcomes.Succeeded,
+        bool includeTaskDetailReceipt = true,
+        string? taskDetailTaskIdOverride = null,
+        string taskDetailAgentStatus = "stopped",
+        string taskDetailStopReason = "finish",
+        bool? taskDetailHasRunningBackgroundJobs = false)
     {
         await using var db = contextOptions is null ? CreateContext() : new TaslimDbContext(contextOptions);
         var task = await db.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskRowId);
         var now = DateTime.UtcNow;
         var eventId = Guid.NewGuid();
         var eventTaskKey = taskKeyOverride ?? task.TaskKey;
+        var receipt = new AutopilotGlobalTaskDetailTerminalReceipt(
+            AutopilotGlobalTaskDetailTerminalReceipt.RequiredKind,
+            taskDetailTaskIdOverride ?? task.ExternalTaskId,
+            taskDetailAgentStatus,
+            taskDetailStopReason,
+            taskDetailHasRunningBackgroundJobs);
         var signal = new AutopilotCompletionSignal
         {
             WaveKey = task.WaveKey,
             TaskId = eventTaskKey,
-            Outcome = AutopilotTaskOutcomes.Succeeded,
+            Outcome = outcome,
+            Evidence = includeTaskDetailReceipt ? System.Text.Json.JsonSerializer.Serialize(receipt) : null,
         };
         db.AutopilotEvents.Add(new AutopilotEvent
         {

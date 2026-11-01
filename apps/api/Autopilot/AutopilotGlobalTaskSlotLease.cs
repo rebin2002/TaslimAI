@@ -42,6 +42,22 @@ public sealed record AutopilotGlobalTaskInventoryItem(
     string Status,
     string? IdempotencyKey);
 
+/// <summary>
+/// Versioned receipt embedded in the signed completion signal's evidence field.
+/// The producer must obtain it from an authoritative task.detail read; this
+/// allocator only validates the persisted, signature-verified receipt and does
+/// not fetch provider details itself.
+/// </summary>
+public sealed record AutopilotGlobalTaskDetailTerminalReceipt(
+    [property: System.Text.Json.Serialization.JsonPropertyName("kind")] string? Kind,
+    [property: System.Text.Json.Serialization.JsonPropertyName("task_id")] string? TaskId,
+    [property: System.Text.Json.Serialization.JsonPropertyName("agent_status")] string? AgentStatus,
+    [property: System.Text.Json.Serialization.JsonPropertyName("stop_reason")] string? StopReason,
+    [property: System.Text.Json.Serialization.JsonPropertyName("has_running_background_jobs")] bool? HasRunningBackgroundJobs)
+{
+    public const string RequiredKind = "taslim.manus.task_detail_terminal_receipt.v1";
+}
+
 /// <summary>A single page from the external inventory endpoint.</summary>
 public sealed record AutopilotGlobalTaskInventoryPage(
     string QueryScopeId,
@@ -652,7 +668,7 @@ public sealed class AutopilotGlobalTaskSlotAllocator
 
                     var terminalEvent = await db.AutopilotEvents.AsNoTracking()
                         .SingleOrDefaultAsync(item => item.Id == terminalEventId, cancellationToken);
-                    if (!HasBoundVerifiedCompletionEvidence(terminalEvent, task))
+                    if (!HasBoundVerifiedCompletionEvidence(terminalEvent, task, externalId))
                         return new(AutopilotGlobalTaskSlotOutcomes.TerminalEvidenceInvalid,
                             task.Status is AutopilotWaveLaunchStatuses.Launching or AutopilotWaveLaunchStatuses.Launched,
                             false, 0, task.ExternalTaskId, "terminal_event_not_verified_for_launch_task");
@@ -808,7 +824,10 @@ public sealed class AutopilotGlobalTaskSlotAllocator
     private bool MatchesKey(AutopilotWaveLaunchTask task, string idempotencyKey) =>
         string.Equals(AutopilotGlobalTaskSlotIdentity.CreateIdempotencyKey(task.WaveKey, task.TaskKey), idempotencyKey, StringComparison.Ordinal);
 
-    private static bool HasBoundVerifiedCompletionEvidence(AutopilotEvent? evidence, AutopilotWaveLaunchTask task)
+    private static bool HasBoundVerifiedCompletionEvidence(
+        AutopilotEvent? evidence,
+        AutopilotWaveLaunchTask task,
+        string externalTaskId)
     {
         if (evidence is null
             || !string.Equals(evidence.EventType, AutopilotEventTypes.WaveTaskCompleted, StringComparison.OrdinalIgnoreCase)
@@ -828,10 +847,35 @@ public sealed class AutopilotGlobalTaskSlotAllocator
         try
         {
             var signal = System.Text.Json.JsonSerializer.Deserialize<AutopilotCompletionSignal>(evidence.SignalJson);
-            return signal is not null
-                && string.Equals(signal.WaveKey, task.WaveKey, StringComparison.Ordinal)
-                && string.Equals(signal.TaskId, task.TaskKey, StringComparison.Ordinal)
-                && AutopilotInputValidation.TryNormalizeOutcome(signal.Outcome, out _);
+            if (signal is null
+                || !string.Equals(signal.WaveKey, task.WaveKey, StringComparison.Ordinal)
+                || !string.Equals(signal.TaskId, task.TaskKey, StringComparison.Ordinal)
+                || !AutopilotInputValidation.TryNormalizeOutcome(signal.Outcome, out var normalizedOutcome)
+                || string.Equals(normalizedOutcome, AutopilotTaskOutcomes.Blocked, StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            return HasBoundTaskDetailTerminalReceipt(signal.Evidence, externalTaskId);
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return false;
+        }
+    }
+
+    private static bool HasBoundTaskDetailTerminalReceipt(string? evidenceJson, string externalTaskId)
+    {
+        if (string.IsNullOrWhiteSpace(evidenceJson) || evidenceJson.Length > 4096)
+            return false;
+
+        try
+        {
+            var receipt = System.Text.Json.JsonSerializer.Deserialize<AutopilotGlobalTaskDetailTerminalReceipt>(evidenceJson);
+            return receipt is not null
+                && string.Equals(receipt.Kind, AutopilotGlobalTaskDetailTerminalReceipt.RequiredKind, StringComparison.Ordinal)
+                && string.Equals(receipt.TaskId, externalTaskId, StringComparison.Ordinal)
+                && string.Equals(receipt.AgentStatus, "stopped", StringComparison.OrdinalIgnoreCase)
+                && string.Equals(receipt.StopReason, "finish", StringComparison.OrdinalIgnoreCase)
+                && receipt.HasRunningBackgroundJobs == false;
         }
         catch (System.Text.Json.JsonException)
         {
