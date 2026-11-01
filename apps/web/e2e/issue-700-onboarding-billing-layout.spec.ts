@@ -610,7 +610,7 @@ test.describe("issue #700 onboarding and billing layout", () => {
     await expect(page.locator(".billing-plan-option")).toHaveCount(2);
   });
 
-  test("enforces first-login beta choices and modal keyboard accessibility for a mocked Free account", async ({ page }, testInfo) => {
+  test("checks first-login beta chooser presentation and modal keyboard accessibility for a mocked Free account", async ({ page }, testInfo) => {
     test.setTimeout(60_000);
     const traffic = await interceptLiveAppApi(page, null);
     let releaseAuth!: () => void;
@@ -679,11 +679,12 @@ test.describe("issue #700 onboarding and billing layout", () => {
 
     await assertAccessibleProgress(1);
     const skip = dialog.locator(".onboarding-skip");
+    const next = dialog.locator(".onboarding-actions .primary-button");
     await skip.focus();
     await page.keyboard.press("Shift+Tab");
-    expect.soft(await dialogContainsFocus(), ".onboarding-card must contain focus after Shift+Tab from its first control").toBe(true);
-
-    const next = dialog.locator(".onboarding-actions .primary-button");
+    expect.soft(await next.evaluate((element) => document.activeElement === element), "Shift+Tab from the first dialog control must wrap to its last control").toBe(true);
+    await page.keyboard.press("Tab");
+    expect.soft(await skip.evaluate((element) => document.activeElement === element), "Tab from the last dialog control must wrap to its first control").toBe(true);
     await next.click();
     await assertAccessibleProgress(2);
     expect.soft(await dialogContainsFocus(), ".onboarding-card must contain focus after onboarding step 1 to 2").toBe(true);
@@ -710,32 +711,40 @@ test.describe("issue #700 onboarding and billing layout", () => {
 
     await skip.focus();
     await page.keyboard.press("Escape");
-    const dismissedByEscape = !(await dialog.isVisible());
-    expect.soft(dismissedByEscape, ".onboarding-card must close on Escape").toBe(true);
-    if (dismissedByEscape) {
-      expect.soft(await appShellOpener.evaluate((element) => document.activeElement === element), "a[href='/create'] must regain focus after Escape closes onboarding").toBe(true);
-    } else {
-      // The mocked completion is only a local, synthetic close path used to check
-      // focus restoration and then follow the actual advertised Create link.
-      await skip.click();
-      await expect(dialog).toBeHidden();
-      expect.soft(completionMockCount, "POST /api/auth/onboarding/complete must be intercepted as a synthetic close action").toBe(1);
-      expect.soft(csrfMockCount, "GET /api/auth/csrf must be intercepted with a synthetic token").toBeGreaterThanOrEqual(1);
-      expect.soft(await appShellOpener.evaluate((element) => document.activeElement === element), "a[href='/create'] must regain focus after Skip closes onboarding").toBe(true);
-    }
+    expect.soft(await dialog.isVisible(), "Escape must not silently dismiss or submit blocking onboarding").toBe(true);
+    expect.soft(await dialogContainsFocus(), "Escape must leave keyboard focus contained by the open dialog").toBe(true);
+    // Skip is the explicit, mocked close action used to verify opener focus restoration.
+    await skip.click();
+    await expect(dialog).toBeHidden();
+    expect.soft(completionMockCount, "POST /api/auth/onboarding/complete must be intercepted as a synthetic close action").toBe(1);
+    expect.soft(csrfMockCount, "GET /api/auth/csrf must be intercepted with a synthetic token").toBeGreaterThanOrEqual(1);
+    expect.soft(await appShellOpener.evaluate((element) => document.activeElement === element), "a[href='/create'] must regain focus after Skip closes onboarding").toBe(true);
 
     await appShellOpener.click();
     await expect(page).toHaveURL(/\/create\/?$/);
-    const advertisedStudioHrefs = await page.locator("a.studio-card[href^='/create/']").evaluateAll((elements) => elements.map((element) => (element as HTMLAnchorElement).pathname).sort());
-    expect.soft(advertisedStudioHrefs, "a.studio-card[href^='/create/'] must advertise only Image, Document, Presentation, and short-form Movie").toEqual([
-      "/create/document",
-      "/create/image",
-      "/create/movie",
-      "/create/presentation",
-    ].sort());
-    for (const excludedPath of ["/create/research", "/create/social", "/create/music", "/create/voice"]) {
-      expect.soft(await page.locator(`a.studio-card[href='${excludedPath}']`).count(), `a.studio-card[href='${excludedPath}'] must not make the excluded module reachable`).toBe(0);
+    for (const width of [375, 768, 1440]) {
+      await page.setViewportSize({ width, height: 900 });
+      const visibleStudioHrefs = await page.locator("a.studio-card[href^='/create/']").evaluateAll((elements) => elements
+        .filter((element) => {
+          const link = element as HTMLAnchorElement;
+          const style = window.getComputedStyle(link);
+          return style.display !== "none" && style.visibility !== "hidden" && link.getClientRects().length > 0;
+        })
+        .map((element) => (element as HTMLAnchorElement).pathname)
+        .sort());
+      expect.soft(visibleStudioHrefs, `visible a.studio-card[href^='/create/'] links at ${width}px must be only Image, Document, Presentation, and short-form Movie`).toEqual([
+        "/create/document",
+        "/create/image",
+        "/create/movie",
+        "/create/presentation",
+      ].sort());
+      for (const excludedPath of ["/create/research", "/create/social", "/create/music", "/create/voice", "/create/health", "/personal/health", "/health"]) {
+        expect.soft(await page.locator(`a.studio-card[href='${excludedPath}']`).isVisible(), `a.studio-card[href='${excludedPath}'] must not be visible in the beta chooser at ${width}px`).toBe(false);
+      }
+      expect.soft(await page.evaluate(() => document.documentElement.scrollWidth), `Create chooser must not overflow horizontally at ${width}px`).toBeLessThanOrEqual(width);
     }
+    await expect(page.locator(".studio-category:has(a.studio-card[href='/create/social'])")).toBeHidden();
+    await expect(page.locator(".studio-chooser-count")).toBeHidden();
     expect.soft(await page.locator("a.studio-chat-link[href='/chat']").count(), "a.studio-chat-link[href='/chat'] must advertise allowed Chat").toBe(1);
     expect.soft(traffic.externalRequests, "network requests outside the local app/test API must remain blocked").toEqual([]);
     expect.soft(traffic.unexpectedApiCalls, "only explicitly mocked synthetic API routes may be contacted").toEqual([]);

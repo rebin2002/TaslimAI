@@ -953,6 +953,25 @@
   line-height: 1.6;
 }
 
+/* Beta Studio chooser presentation only; this does not secure direct routes or APIs. */
+.app-shell .studio-chooser a.studio-card[href="/create/research"],
+.app-shell .studio-chooser a.studio-card[href="/create/social"],
+.app-shell .studio-chooser a.studio-card[href="/create/music"],
+.app-shell .studio-chooser a.studio-card[href="/create/voice"],
+.app-shell .studio-chooser a.studio-card[href="/create/health"],
+.app-shell .studio-chooser a.studio-card[href="/personal/health"],
+.app-shell .studio-chooser a.studio-card[href="/health"] {
+  display: none;
+}
+
+.app-shell .studio-chooser .studio-category:has(> .studio-card-grid > a.studio-card[href="/create/social"]:only-child) {
+  display: none;
+}
+
+.app-shell .studio-chooser:not(.studio-chooser-compact) .studio-chooser-heading .studio-chooser-count {
+  display: none;
+}
+
 [dir="rtl"] .onboarding-actions .primary-button,
 [dir="rtl"] .onboarding-skip,
 [dir="rtl"] .onboarding-back {
