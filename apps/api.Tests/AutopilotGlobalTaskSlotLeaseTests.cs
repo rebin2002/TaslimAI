@@ -217,6 +217,40 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Ambiguous_processed_completion_without_task_detail_keeps_all_slots_and_denies_replacement()
+    {
+        var taskIds = await SeedLaunchTasksAsync(total: 21, initiallyActive: 20);
+        var eventId = await SeedCompletionEventAsync(taskIds[0], includeTaskDetailReceipt: false);
+        string key;
+        string externalTaskId;
+
+        await using (var db = CreateContext())
+        {
+            var task = await db.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskIds[0]);
+            key = AutopilotGlobalTaskSlotIdentity.CreateIdempotencyKey(task.WaveKey, task.TaskKey);
+            externalTaskId = task.ExternalTaskId!;
+
+            var completion = await CreateAllocator(db).CompleteVerifiedAsync(taskIds[0], key, externalTaskId, eventId);
+            Assert.Equal(AutopilotGlobalTaskSlotOutcomes.TerminalEvidenceInvalid, completion.Outcome);
+            Assert.True(completion.SlotHeld);
+            Assert.False(completion.MayCallProvider);
+        }
+
+        var replacement = await ClaimAsync(taskIds[20], CompleteInventory());
+        Assert.Equal(AutopilotGlobalTaskSlotOutcomes.CapacityReached, replacement.Outcome);
+        Assert.False(replacement.MayCallProvider);
+        Assert.Equal(20, replacement.ActiveSlotsObserved);
+
+        await using var verify = CreateContext();
+        Assert.Equal(20, await verify.AutopilotWaveLaunchTasks.CountAsync(item =>
+            item.Status == AutopilotWaveLaunchStatuses.Launching || item.Status == AutopilotWaveLaunchStatuses.Launched));
+        Assert.Equal(AutopilotWaveLaunchStatuses.Launched,
+            (await verify.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskIds[0])).Status);
+        Assert.Equal(AutopilotWaveLaunchStatuses.Planned,
+            (await verify.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskIds[20])).Status);
+    }
+
+    [Fact]
     public async Task Ask_nonterminal_mismatched_and_background_task_detail_receipts_cannot_release_a_slot()
     {
         var taskIds = await SeedLaunchTasksAsync(total: 1, initiallyActive: 1);
