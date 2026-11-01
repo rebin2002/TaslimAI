@@ -30,6 +30,10 @@ internal sealed class AutopilotCycleContext
 
     public int EventsSkipped { get; set; }
 
+    public HashSet<Guid> DeferredRunIds { get; } = [];
+
+    public HashSet<Guid> RecoveredRunIds { get; } = [];
+
     public string Outcome { get; set; } = "idle";
 
     public string? Reason { get; set; }
@@ -56,7 +60,7 @@ public interface IAutopilotOrchestrator
 
     Task<AutopilotControlSnapshot> GetControlAsync(CancellationToken cancellationToken = default);
 
-    Task<AutopilotControlSnapshot> SetControlAsync(bool? paused, bool? killSwitch, Guid? actorUserId, string reason, CancellationToken cancellationToken = default);
+    Task<AutopilotControlSnapshot> SetControlAsync(bool? paused, bool? killSwitch, Guid? actorUserId, string reason, string? requestId = null, CancellationToken cancellationToken = default);
 }
 
 public sealed class AutopilotOrchestrator(
@@ -75,32 +79,35 @@ public sealed class AutopilotOrchestrator(
         var control = await EnsureControlAsync(cancellationToken);
         if (!await CanRunAsync(control, context, cancellationToken)) return context.ToResult(settings);
 
-        var now = UtcNow();
-        var pending = await db.AutopilotEvents.AsNoTracking()
-            .Where(item => item.Status == AutopilotEventStatuses.Queued
-                || item.Status == AutopilotEventStatuses.Received)
-            .Where(item => item.NextAttemptAt == null || item.NextAttemptAt <= now)
-            .OrderBy(item => item.ReceivedAt)
-            .Take(Math.Max(1, settings.MaxConcurrency))
-            .Select(item => item.Id)
-            .ToListAsync(cancellationToken);
-
-        if (pending.Count == 0)
+        await DrainPendingEventsAsync(context, cancellationToken);
+        if (await HasUnprocessedEventsAsync(cancellationToken))
         {
-            context.Outcome = "idle";
-            context.Reason = "no_pending_events";
+            context.Outcome = "drain_deferred";
+            context.Reason = "unprocessed_completion_events_remain";
             return context.ToResult(settings);
         }
 
-        var processed = 0;
-        foreach (var eventId in pending)
+        await AdvanceDeferredRunsAsync(context, cancellationToken);
+        if (await HasUnprocessedEventsAsync(cancellationToken))
         {
-            var result = await ProcessEventInternalAsync(eventId, context, cancellationToken);
-            if (result) processed++;
+            context.Outcome = "drain_deferred";
+            context.Reason = "completion_event_arrived_before_launch";
+            return context.ToResult(settings);
         }
 
-        context.Outcome = processed > 0 ? "cycles_completed" : "idle";
-        context.Reason ??= processed > 0 ? null : "no_events_advanced";
+        // Also run on an empty queue: after a crash between event commit and
+        // release/launch, the existing service can recover processed events here.
+        MergeNextWave(context, await nextWaves.ReconcileLaunchesAsync(cancellationToken));
+        if (await HasUnprocessedEventsAsync(cancellationToken))
+        {
+            context.Outcome = "drain_deferred";
+            context.Reason = "completion_event_arrived_before_launch";
+            return context.ToResult(settings);
+        }
+        MergeNextWave(context, await nextWaves.TryLaunchNextWavesAsync(cancellationToken));
+
+        context.Outcome = context.EventsProcessed > 0 ? "cycles_completed" : "idle";
+        context.Reason ??= context.EventsProcessed > 0 ? null : "no_pending_events";
         return context.ToResult(settings);
     }
 
@@ -111,6 +118,35 @@ public sealed class AutopilotOrchestrator(
         if (!await CanRunAsync(control, context, cancellationToken)) return context.ToResult(settings);
         context.EventsExamined = 1;
         await ProcessEventInternalAsync(eventId, context, cancellationToken);
+
+        if (context.EventsProcessed > 0)
+        {
+            await DrainPendingEventsAsync(context, cancellationToken);
+            if (await HasUnprocessedEventsAsync(cancellationToken))
+            {
+                context.Outcome = "drain_deferred";
+                context.Reason = "unprocessed_completion_events_remain";
+                return context.ToResult(settings);
+            }
+
+            await AdvanceDeferredRunsAsync(context, cancellationToken);
+            if (await HasUnprocessedEventsAsync(cancellationToken))
+            {
+                context.Outcome = "drain_deferred";
+                context.Reason = "completion_event_arrived_before_launch";
+                return context.ToResult(settings);
+            }
+
+            MergeNextWave(context, await nextWaves.ReconcileLaunchesAsync(cancellationToken));
+            if (await HasUnprocessedEventsAsync(cancellationToken))
+            {
+                context.Outcome = "drain_deferred";
+                context.Reason = "completion_event_arrived_before_launch";
+                return context.ToResult(settings);
+            }
+            MergeNextWave(context, await nextWaves.TryLaunchNextWavesAsync(cancellationToken));
+        }
+
         context.Outcome = context.EventsProcessed > 0 ? "cycle_completed" : context.Outcome;
         return context.ToResult(settings);
     }
@@ -180,8 +216,23 @@ public sealed class AutopilotOrchestrator(
         if (staleEvents.Count > 0 || expiredClaims.Count > 0)
             await FlushAsync(context, cancellationToken);
 
+        context.EventsExamined += staleEvents.Count + expiredClaims.Count;
+        context.EventsProcessed += recovered;
+        context.Reason = reason;
+
+        // Recover durable completions before re-driving stalled runs or checking
+        // next-wave eligibility. A per-query page is bounded by MaxConcurrency;
+        // the loop does not launch until no queued/received work remains.
+        await DrainPendingEventsAsync(context, cancellationToken);
+        if (await HasUnprocessedEventsAsync(cancellationToken))
+        {
+            context.Outcome = "reconciliation_deferred";
+            context.Reason = "unprocessed_completion_events_remain";
+            return context.ToResult(settings);
+        }
+
         // A wave whose tasks are all terminal but whose run never advanced means the
-        // completion event was lost. Re-drive the run state machine from evidence.
+        // completion event was lost. Re-drive it only after the durable queue drain.
         var stalledRuns = await db.AutopilotRuns
             .Where(item => item.State == AutopilotRunStates.AwaitingEvents || item.State == AutopilotRunStates.InProgress)
             .Where(item => item.LastEventAt != null && item.LastEventAt < staleBefore)
@@ -195,27 +246,85 @@ public sealed class AutopilotOrchestrator(
                 .AnyAsync(item => item.WaveKey == run.WaveKey
                     && !AutopilotEventStatuses.Terminal.Contains(item.Status), cancellationToken);
             if (hasPendingEvent) continue;
-
-            await AdvanceRunAsync(run, context, recovered: true, cancellationToken);
-            await FlushAsync(context, cancellationToken);
+            context.DeferredRunIds.Add(run.Id);
+            context.RecoveredRunIds.Add(run.Id);
         }
 
-        context.EventsExamined = staleEvents.Count + expiredClaims.Count;
-        context.EventsProcessed = recovered;
-        context.Reason = reason;
+        await AdvanceDeferredRunsAsync(context, cancellationToken);
+        if (await HasUnprocessedEventsAsync(cancellationToken))
+        {
+            context.Outcome = "reconciliation_deferred";
+            context.Reason = "completion_event_arrived_before_launch";
+            return context.ToResult(settings);
+        }
 
-        // Bounded follow-on wave pass: launch what a gate-green wave is entitled to
-        // launch, then reconcile anything already launched (missed webhooks and
-        // restarts). Both steps are bounded and respect the kill switch.
-        MergeNextWave(context, await nextWaves.TryLaunchNextWavesAsync(cancellationToken));
+        // Poll/reconcile only after completion intake is drained, then make one
+        // next-wave pass. This path is shared by the administrator /reconcile route.
         MergeNextWave(context, await nextWaves.ReconcileLaunchesAsync(cancellationToken));
+        if (await HasUnprocessedEventsAsync(cancellationToken))
+        {
+            context.Outcome = "reconciliation_deferred";
+            context.Reason = "completion_event_arrived_before_launch";
+            return context.ToResult(settings);
+        }
+        MergeNextWave(context, await nextWaves.TryLaunchNextWavesAsync(cancellationToken));
 
-        var processedCycle = await ProcessPendingEventsAsync(cancellationToken);
-        context.Outcome = recovered > 0 || processedCycle.EventsProcessed > 0 ? "reconciled" : "no_reconciliation_needed";
-        foreach (var action in processedCycle.PlannedActions) context.PlannedActions.Add(action);
-        foreach (var id in processedCycle.AuditedEventIds) context.AuditedEventIds.Add(id);
-        context.EventsProcessed += processedCycle.EventsProcessed;
+        context.Outcome = recovered > 0 || context.EventsProcessed > 0 ? "reconciled" : "no_reconciliation_needed";
         return context.ToResult(settings);
+    }
+
+    private async Task DrainPendingEventsAsync(AutopilotCycleContext context, CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            var now = UtcNow();
+            var pending = await db.AutopilotEvents.AsNoTracking()
+                .Where(item => item.Status == AutopilotEventStatuses.Queued
+                    || item.Status == AutopilotEventStatuses.Received)
+                .Where(item => item.NextAttemptAt == null || item.NextAttemptAt <= now)
+                .OrderBy(item => item.ReceivedAt)
+                .ThenBy(item => item.Id)
+                .Take(Math.Max(1, settings.MaxConcurrency))
+                .Select(item => item.Id)
+                .ToListAsync(cancellationToken);
+
+            if (pending.Count == 0) return;
+            foreach (var eventId in pending)
+                await ProcessEventInternalAsync(eventId, context, cancellationToken);
+        }
+    }
+
+    private Task<bool> HasUnprocessedEventsAsync(CancellationToken cancellationToken) =>
+        db.AutopilotEvents.AsNoTracking()
+            .AnyAsync(item => item.Status != AutopilotEventStatuses.Processed
+                && item.Status != AutopilotEventStatuses.DuplicateIgnored
+                && item.Status != AutopilotEventStatuses.RejectedUnsigned
+                && item.Status != AutopilotEventStatuses.RejectedReplay
+                && item.Status != AutopilotEventStatuses.RejectedInvalid
+                && item.Status != AutopilotEventStatuses.Failed, cancellationToken);
+
+    private async Task AdvanceDeferredRunsAsync(AutopilotCycleContext context, CancellationToken cancellationToken)
+    {
+        if (context.DeferredRunIds.Count == 0) return;
+        var runIds = context.DeferredRunIds.ToArray();
+        var runs = await db.AutopilotRuns
+            .Where(item => runIds.Contains(item.Id))
+            .OrderBy(item => item.UpdatedAt)
+            .ToListAsync(cancellationToken);
+
+        foreach (var run in runs)
+        {
+            var previousRunState = run.State;
+            await AdvanceRunAsync(run, context, context.RecoveredRunIds.Contains(run.Id), cancellationToken);
+            await FlushAsync(context, cancellationToken);
+            if (!string.Equals(previousRunState, run.State, StringComparison.OrdinalIgnoreCase))
+                logger.LogInformation(
+                    "Autopilot run advanced. WaveKey={WaveKey}; From={From}; To={To}; Branch={Branch}; CandidateSha={CandidateSha}; DryRun={DryRun}",
+                    run.WaveKey, previousRunState, run.State, run.Branch, run.CandidateSha, settings.DryRun);
+        }
+
+        context.DeferredRunIds.Clear();
+        context.RecoveredRunIds.Clear();
     }
 
     private static void MergeNextWave(AutopilotCycleContext context, AutopilotNextWaveCycleResult result)
@@ -229,7 +338,7 @@ public sealed class AutopilotOrchestrator(
         return Snapshot(control);
     }
 
-    public async Task<AutopilotControlSnapshot> SetControlAsync(bool? paused, bool? killSwitch, Guid? actorUserId, string reason, CancellationToken cancellationToken = default)
+    public async Task<AutopilotControlSnapshot> SetControlAsync(bool? paused, bool? killSwitch, Guid? actorUserId, string reason, string? requestId = null, CancellationToken cancellationToken = default)
     {
         var control = await EnsureControlAsync(cancellationToken);
         if (paused.HasValue) control.Paused = paused.Value;
@@ -243,6 +352,7 @@ public sealed class AutopilotOrchestrator(
             reason: reason,
             statusDetail: $"paused={control.Paused};killSwitch={control.KillSwitchEngaged}",
             actorUserId: actorUserId,
+            requestId: requestId,
             dryRun: settings.DryRun));
         await db.SaveChangesAsync(cancellationToken);
         return Snapshot(control);
@@ -470,7 +580,6 @@ public sealed class AutopilotOrchestrator(
         task.UpdatedAt = now;
 
         var previousTaskState = task.State;
-        var previousRunState = run.State;
 
         switch (outcome)
         {
@@ -606,15 +715,10 @@ public sealed class AutopilotOrchestrator(
             targetId: intakeEvent.Id,
             dryRun: settings.DryRun));
 
-        // Persist the run/task evidence before the state machine reads it back.
+        // Commit the exact completion before any run-advance or launch side effect.
+        // The cycle advances affected runs only after every due event is drained.
         await FlushAsync(context, cancellationToken);
-        await AdvanceRunAsync(run, context, recovered: false, cancellationToken);
-        await FlushAsync(context, cancellationToken);
-
-        if (!string.Equals(previousRunState, run.State, StringComparison.OrdinalIgnoreCase))
-            logger.LogInformation(
-                "Autopilot run advanced. WaveKey={WaveKey}; From={From}; To={To}; Branch={Branch}; CandidateSha={CandidateSha}; DryRun={DryRun}",
-                run.WaveKey, previousRunState, run.State, run.Branch, run.CandidateSha, settings.DryRun);
+        context.DeferredRunIds.Add(run.Id);
     }
 
     private async Task AdvanceRunAsync(AutopilotRun run, AutopilotCycleContext context, bool recovered, CancellationToken cancellationToken)
@@ -831,7 +935,6 @@ public sealed class AutopilotOrchestrator(
                 dryRun: true));
             await EvaluateNextWaveEligibilityAsync(run, context, cancellationToken);
             await FlushAsync(context, cancellationToken);
-            MergeNextWave(context, await nextWaves.TryLaunchNextWavesAsync(cancellationToken));
             return;
         }
 
@@ -881,7 +984,6 @@ public sealed class AutopilotOrchestrator(
         // The production release stays a human decision; the next *development*
         // batch may still start when the operator has explicitly allowed it.
         await FlushAsync(context, cancellationToken);
-        MergeNextWave(context, await nextWaves.TryLaunchNextWavesAsync(cancellationToken));
     }
 
     private async Task EvaluateNextWaveEligibilityAsync(AutopilotRun run, AutopilotCycleContext context, CancellationToken cancellationToken)
