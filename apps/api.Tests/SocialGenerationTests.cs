@@ -151,6 +151,123 @@ public sealed class SocialGenerationTests : IClassFixture<SocialGenerationApiFac
     }
 
     [Fact]
+    public async Task No_project_social_jobs_are_creator_private_to_workspace_members_but_project_jobs_remain_shared()
+    {
+        using var owner = factory.CreateClient();
+        var ownerAuth = await Register(owner);
+        using var member = factory.CreateClient();
+        var memberAuth = await Register(member);
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.WorkspaceMembers.Add(new WorkspaceMember
+            {
+                Id = Guid.NewGuid(),
+                WorkspaceId = ownerAuth.PersonalWorkspace.Id,
+                UserId = memberAuth.User.Id,
+                Role = WorkspaceRole.Member,
+                JoinedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var noProjectResponse = await SendWithCsrf(owner, new
+        {
+            workspaceId = ownerAuth.PersonalWorkspace.Id,
+            prompt = "Create a creator-private launch announcement.",
+            socialType = "announcement",
+            platform = "linkedin",
+            tone = "professional",
+            language = "en",
+            assetIds = Array.Empty<Guid>(),
+            attachmentIds = Array.Empty<Guid>(),
+        }, idempotencyKey: $"social-private-{Guid.NewGuid():N}");
+        Assert.Equal(HttpStatusCode.Accepted, noProjectResponse.StatusCode);
+        var noProjectJob = (await noProjectResponse.Content.ReadFromJsonAsync<CreateSocialGenerationResponse>())!.Job;
+        var ownerResult = await WaitForTerminal(owner, noProjectJob.Id);
+        Assert.Equal("Succeeded", ownerResult.Status);
+        Assert.Contains("posts", ownerResult.ResultJson);
+
+        var memberDirect = await member.GetAsync($"/api/generation/jobs/{noProjectJob.Id}");
+        Assert.Equal(HttpStatusCode.NotFound, memberDirect.StatusCode);
+        Assert.DoesNotContain("posts", await memberDirect.Content.ReadAsStringAsync(), StringComparison.OrdinalIgnoreCase);
+
+        var memberList = await member.GetFromJsonAsync<GenerationJobListDto>($"/api/generation/jobs?workspaceId={ownerAuth.PersonalWorkspace.Id}&jobType={GenerationJobTypes.SocialGenerate}&pageSize=100");
+        Assert.NotNull(memberList);
+        Assert.Equal(0, memberList!.TotalCount);
+        Assert.Empty(memberList.Items);
+
+        var projectResponse = await SendWithCsrf(owner, new { name = "Shared social project" }, $"/api/workspaces/{ownerAuth.PersonalWorkspace.Id}/projects", $"social-project-{Guid.NewGuid():N}");
+        Assert.Equal(HttpStatusCode.Created, projectResponse.StatusCode);
+        var project = (await projectResponse.Content.ReadFromJsonAsync<ProjectDto>())!;
+        var projectJobResponse = await SendWithCsrf(owner, new
+        {
+            workspaceId = ownerAuth.PersonalWorkspace.Id,
+            projectId = project.Id,
+            prompt = "Create a project-scoped launch announcement.",
+            socialType = "announcement",
+            platform = "linkedin",
+            tone = "professional",
+            language = "en",
+            assetIds = Array.Empty<Guid>(),
+            attachmentIds = Array.Empty<Guid>(),
+        }, idempotencyKey: $"social-project-job-{Guid.NewGuid():N}");
+        Assert.Equal(HttpStatusCode.Accepted, projectJobResponse.StatusCode);
+        var projectJob = (await projectJobResponse.Content.ReadFromJsonAsync<CreateSocialGenerationResponse>())!.Job;
+        Assert.Equal("Succeeded", (await WaitForTerminal(owner, projectJob.Id)).Status);
+
+        var memberProjectJob = await member.GetFromJsonAsync<GenerationJobDto>($"/api/generation/jobs/{projectJob.Id}");
+        Assert.NotNull(memberProjectJob);
+        Assert.Contains("posts", memberProjectJob!.ResultJson);
+        var memberProjectList = await member.GetFromJsonAsync<GenerationJobListDto>($"/api/generation/jobs?workspaceId={ownerAuth.PersonalWorkspace.Id}&projectId={project.Id}&jobType={GenerationJobTypes.SocialGenerate}");
+        Assert.NotNull(memberProjectList);
+        Assert.Equal(1, memberProjectList!.TotalCount);
+        Assert.Equal(projectJob.Id, Assert.Single(memberProjectList.Items).Id);
+
+        var retryJobId = Guid.NewGuid();
+        var cancelJobId = Guid.NewGuid();
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var now = DateTime.UtcNow;
+            db.GenerationJobs.AddRange(
+                new GenerationJob
+                {
+                    Id = retryJobId,
+                    WorkspaceId = ownerAuth.PersonalWorkspace.Id,
+                    CreatedByUserId = ownerAuth.User.Id,
+                    JobType = GenerationJobTypes.SocialGenerate,
+                    Status = GenerationJobStatus.Failed,
+                    InputJson = "{}",
+                    ResultJson = "{\"posts\":[{\"body\":\"creator-private-retry-result\"}]}",
+                    CreatedAt = now,
+                    FailedAt = now,
+                },
+                new GenerationJob
+                {
+                    Id = cancelJobId,
+                    WorkspaceId = ownerAuth.PersonalWorkspace.Id,
+                    CreatedByUserId = ownerAuth.User.Id,
+                    JobType = GenerationJobTypes.SocialGenerate,
+                    Status = GenerationJobStatus.Queued,
+                    InputJson = "{}",
+                    ResultJson = "{\"posts\":[{\"body\":\"creator-private-cancel-result\"}]}",
+                    CreatedAt = now,
+                    QueuedAt = now,
+                });
+            await db.SaveChangesAsync();
+        }
+
+        var retry = await SendJobActionWithCsrf(member, HttpMethod.Post, $"/api/generation/jobs/{retryJobId}/retry");
+        Assert.Equal(HttpStatusCode.NotFound, retry.StatusCode);
+        Assert.DoesNotContain("creator-private-retry-result", await retry.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        var cancel = await SendJobActionWithCsrf(member, HttpMethod.Post, $"/api/generation/jobs/{cancelJobId}/cancel");
+        Assert.Equal(HttpStatusCode.Forbidden, cancel.StatusCode);
+        Assert.DoesNotContain("creator-private-cancel-result", await cancel.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Social_job_cannot_use_another_members_conversation_private_source()
     {
         using var owner = factory.CreateClient();
@@ -258,6 +375,14 @@ public sealed class SocialGenerationTests : IClassFixture<SocialGenerationApiFac
         request.Headers.Add("X-CSRF-TOKEN", csrf.GetProperty("token").GetString()!);
         if (idempotencyKey is not null) request.Headers.Add("Idempotency-Key", idempotencyKey);
         request.Content = JsonContent.Create(payload);
+        return await client.SendAsync(request);
+    }
+
+    private static async Task<HttpResponseMessage> SendJobActionWithCsrf(HttpClient client, HttpMethod method, string path)
+    {
+        var csrf = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
+        using var request = new HttpRequestMessage(method, path);
+        request.Headers.Add("X-CSRF-TOKEN", csrf.GetProperty("token").GetString()!);
         return await client.SendAsync(request);
     }
 
