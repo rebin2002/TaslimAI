@@ -1,3 +1,4 @@
+using System.Net.Mail;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -78,6 +79,68 @@ public sealed class PasswordResetEmailWorkerLeaseExpiryTests
             Assert.Equal(2, final.AttemptCount);
             Assert.Null(final.LeaseExpiresAt);
             Assert.Null(final.LastFailureCode);
+            Assert.Equal(2, sender.AcceptedDeliveries);
+        }
+        finally
+        {
+            sender.ReleaseFirstResponse.TrySetResult(true);
+            if (recoveryStarted) await StopWorkerAsync(recoveryWorker);
+            if (firstStarted) await StopWorkerAsync(firstWorker);
+        }
+    }
+
+    [Fact]
+    public async Task Late_smtp_failure_from_expired_worker_cannot_overwrite_newer_delivery()
+    {
+        using var factory = new WorkerLeaseTestApiFactory();
+        var clock = new ManualClock(DateTimeOffset.UtcNow);
+        var firstWorkerClock = new TrackingTimeProvider(clock);
+        var recoveryWorkerClock = new TrackingTimeProvider(clock);
+        var sender = new SlowAcceptingEmailSender(failFirstResponse: true);
+        var logger = new FailureSignalLogger();
+        var userId = await CreateUserAndQueueAsync(factory, clock.UtcNow.UtcDateTime);
+        var firstWorker = CreateWorker(factory, sender, firstWorkerClock, logger);
+        var recoveryWorker = CreateWorker(factory, sender, recoveryWorkerClock, logger);
+        var firstStarted = false;
+        var recoveryStarted = false;
+
+        try
+        {
+            await firstWorker.StartAsync(CancellationToken.None);
+            firstStarted = true;
+            await sender.FirstSendAccepted.Task.WaitAsync(WaitLimit);
+
+            clock.Advance(TimeSpan.FromSeconds(PasswordRecoveryOptions.MinimumLeaseSeconds + 1));
+            await recoveryWorker.StartAsync(CancellationToken.None);
+            recoveryStarted = true;
+            await sender.SecondSendCompleted.Task.WaitAsync(WaitLimit);
+
+            var delivered = await WaitForDeliveredAsync(factory, userId);
+            Assert.Equal(PasswordResetDeliveryStates.Delivered, delivered.Status);
+            Assert.Equal(2, delivered.AttemptCount);
+            Assert.Null(delivered.LeaseExpiresAt);
+
+            // SMTP accepted the first message, but its late response is a failure.
+            // The stale worker must not revert worker 2's committed Delivered row.
+            sender.ReleaseFirstResponse.TrySetResult(true);
+            await sender.FirstSendFailureThrown.Task.WaitAsync(WaitLimit);
+            await sender.FirstSendCompleted.Task.WaitAsync(WaitLimit);
+            var warning = await logger.FailureWarningLogged.Task.WaitAsync(WaitLimit);
+            Assert.Contains("FailureCode=SMTP_DELIVERY_FAILED", warning, StringComparison.Ordinal);
+            Assert.Contains("Attempt=1", warning, StringComparison.Ordinal);
+            Assert.DoesNotContain("Synthetic delayed SMTP failure", warning, StringComparison.Ordinal);
+
+            await StopWorkerAsync(firstWorker);
+            firstStarted = false;
+            await StopWorkerAsync(recoveryWorker);
+            recoveryStarted = false;
+
+            var final = await ReadEntryAsync(factory, userId);
+            Assert.Equal(PasswordResetDeliveryStates.Delivered, final.Status);
+            Assert.Equal(2, final.AttemptCount);
+            Assert.Null(final.LeaseExpiresAt);
+            Assert.Null(final.LastFailureCode);
+            Assert.Equal(delivered.NextAttemptAt, final.NextAttemptAt);
             Assert.Equal(2, sender.AcceptedDeliveries);
         }
         finally
@@ -226,14 +289,18 @@ public sealed class PasswordResetEmailWorkerLeaseExpiryTests
 
     private sealed class SlowAcceptingEmailSender : IEmailSender
     {
+        private readonly bool failFirstResponse;
         private int attempts;
         private int acceptedDeliveries;
         private int activeSends;
         private int maximumConcurrentSends;
 
+        public SlowAcceptingEmailSender(bool failFirstResponse = false) => this.failFirstResponse = failFirstResponse;
+
         public bool IsConfigured => true;
         public TaskCompletionSource<bool> FirstSendAccepted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource<bool> FirstSendCompleted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<bool> FirstSendFailureThrown { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource<bool> SecondSendCompleted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource<bool> ReleaseFirstResponse { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public int AcceptedDeliveries => Volatile.Read(ref acceptedDeliveries);
@@ -257,7 +324,14 @@ public sealed class PasswordResetEmailWorkerLeaseExpiryTests
             try
             {
                 if (attempt == 1)
+                {
                     await ReleaseFirstResponse.Task.WaitAsync(cancellationToken);
+                    if (failFirstResponse)
+                    {
+                        FirstSendFailureThrown.TrySetResult(true);
+                        throw new SmtpException("Synthetic delayed SMTP failure after acceptance.");
+                    }
+                }
                 else if (attempt == 2)
                     SecondSendCompleted.TrySetResult(true);
             }
@@ -278,6 +352,28 @@ public sealed class PasswordResetEmailWorkerLeaseExpiryTests
                 if (Interlocked.CompareExchange(ref maximumConcurrentSends, candidate, observed) == observed)
                     return;
             }
+        }
+    }
+
+    private sealed class FailureSignalLogger : ILogger<PasswordResetEmailWorker>
+    {
+        public TaskCompletionSource<string> FailureWarningLogged { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            var message = formatter(state, exception);
+            if (logLevel == LogLevel.Warning
+                && message.StartsWith("Password reset email delivery attempt failed.", StringComparison.Ordinal))
+                FailureWarningLogged.TrySetResult(message);
         }
     }
 
