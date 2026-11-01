@@ -187,6 +187,43 @@ public sealed class BillingGrantExpiryContractTests
         Assert.Equal(beforeCount + 1, await db.CreditLedgerEntries.CountAsync());
     }
 
+    [Fact]
+    public async Task Sqlite_post_expiry_refund_replay_is_append_only_and_source_isolated()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connection).Options;
+        await using var db = new TaslimDbContext(options);
+
+        await AssertPostExpiryRefundReplayIsolationAsync(db);
+    }
+
+    [FactWhenEnvironmentVariablePresent("ConnectionStrings__Postgres")]
+    public async Task Postgres_post_expiry_refund_replay_is_append_only_and_source_isolated()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("ConnectionStrings__Postgres");
+        if (string.IsNullOrWhiteSpace(connectionString))
+            throw new InvalidOperationException("The PostgreSQL test skip attribute did not detect the missing test connection.");
+
+        var connection = CreateDisposablePostgresConnection(connectionString);
+        var schema = $"issue330_postexpiry_refund_{Guid.NewGuid():N}";
+        await using var adminConnection = new NpgsqlConnection(connectionString);
+        await adminConnection.OpenAsync();
+        await CreateSchemaAsync(adminConnection, schema);
+
+        try
+        {
+            connection.SearchPath = schema;
+            var options = new DbContextOptionsBuilder<TaslimDbContext>().UseNpgsql(connection.ConnectionString).Options;
+            await using var db = new TaslimDbContext(options);
+            await AssertPostExpiryRefundReplayIsolationAsync(db);
+        }
+        finally
+        {
+            await DropSchemaAsync(adminConnection, schema);
+        }
+    }
+
     [FactWhenEnvironmentVariablePresent("ConnectionStrings__Postgres")]
     public async Task Postgres_concurrent_debits_cannot_overdraw_one_synthetic_grant()
     {
@@ -306,6 +343,134 @@ public sealed class BillingGrantExpiryContractTests
         Assert.Equal(1, await db.CreditLedgerEntries.CountAsync(item =>
             item.Type == CreditLedgerEntryType.Debit && item.UsageTransactionId == newUsage.Id));
     }
+
+    private static async Task AssertPostExpiryRefundReplayIsolationAsync(TaslimDbContext db)
+    {
+        await db.Database.EnsureCreatedAsync();
+
+        var now = DateTime.UtcNow;
+        var workspace = NewWorkspace();
+        var user = NewUser();
+        db.Workspaces.Add(workspace);
+        db.Users.Add(user);
+        await db.SaveChangesAsync();
+
+        var ledger = NewChargingEnabledLedger(db);
+        var oldGrant = await ledger.GrantAsync(
+            workspace.Id, CreditEntitlementType.IncludedMonthly, 100,
+            "postexpiry:grant:old", "Synthetic old included grant", expiresAt: now.AddDays(1));
+        var oldEntitlementId = oldGrant.Entry.CreditEntitlementId
+            ?? throw new InvalidOperationException("The synthetic old grant must have an entitlement.");
+
+        var oldUsage = NewCompletedUsage(workspace.Id, user.Id, "postexpiry:usage:old");
+        db.UsageTransactions.Add(oldUsage);
+        await db.SaveChangesAsync();
+        var oldDebit = NewAttributedSyntheticDebit(
+            workspace.Id, oldEntitlementId, oldUsage.Id, "postexpiry:debit:old", now);
+        db.CreditLedgerEntries.Add(oldDebit);
+        await db.SaveChangesAsync();
+
+        var oldEntitlement = await db.CreditEntitlements.SingleAsync(item => item.Id == oldEntitlementId);
+        oldEntitlement.ExpiresAt = DateTime.UtcNow.AddMinutes(-1);
+        await db.SaveChangesAsync();
+
+        var laterGrant = await ledger.GrantAsync(
+            workspace.Id, CreditEntitlementType.IncludedMonthly, 50,
+            "postexpiry:grant:new", "Synthetic later-period included grant", expiresAt: now.AddDays(30));
+        var laterEntitlementId = laterGrant.Entry.CreditEntitlementId
+            ?? throw new InvalidOperationException("The synthetic later grant must have an entitlement.");
+        var laterUsage = NewCompletedUsage(workspace.Id, user.Id, "postexpiry:usage:new");
+        db.UsageTransactions.Add(laterUsage);
+        await db.SaveChangesAsync();
+        var laterDebit = NewAttributedSyntheticDebit(
+            workspace.Id, laterEntitlementId, laterUsage.Id, "postexpiry:debit:new", now);
+        db.CreditLedgerEntries.Add(laterDebit);
+        await db.SaveChangesAsync();
+
+        var oldEntitlementBefore = CaptureEntitlement(await db.CreditEntitlements.AsNoTracking()
+            .SingleAsync(item => item.Id == oldEntitlementId));
+        var laterEntitlementBefore = CaptureEntitlement(await db.CreditEntitlements.AsNoTracking()
+            .SingleAsync(item => item.Id == laterEntitlementId));
+        var originalRows = await CaptureLedgerRowsAsync(db, workspace.Id);
+        var originalCount = originalRows.Count;
+        var signedBalanceBefore = await GetSignedLedgerBalanceAsync(db, workspace.Id);
+
+        // The synthetic debit is attributed to the expired source lot so this test
+        // isolates refund/replay behavior from the separate debit-allocation defect.
+        const string refundKey = "postexpiry:refund:old";
+        const string refundReason = "Synthetic post-expiry refund";
+        var refund = await ledger.RefundAsync(workspace.Id, oldDebit.Id, refundKey, refundReason);
+
+        Assert.True(refund.Created);
+        Assert.Equal(CreditLedgerEntryType.Refund, refund.Entry.Type);
+        Assert.Equal(-oldDebit.Amount, refund.Entry.Amount);
+        Assert.Equal(0, oldDebit.Amount + refund.Entry.Amount);
+        Assert.Equal(oldDebit.Id, refund.Entry.ReversesEntryId);
+        Assert.Equal(oldDebit.UsageTransactionId, refund.Entry.UsageTransactionId);
+
+        var afterFirstRows = await CaptureLedgerRowsAsync(db, workspace.Id);
+        Assert.Equal(originalCount + 1, afterFirstRows.Count);
+        var signedBalanceAfterFirst = await GetSignedLedgerBalanceAsync(db, workspace.Id);
+        Assert.Equal(signedBalanceBefore + refund.Entry.Amount, signedBalanceAfterFirst);
+
+        var persistedRefund = Assert.Single(afterFirstRows, item => item.Id == refund.Entry.Id);
+        var replay = await ledger.RefundAsync(workspace.Id, oldDebit.Id, refundKey, refundReason);
+        Assert.False(replay.Created);
+        Assert.Equal(refund.Entry.Id, replay.Entry.Id);
+        Assert.Equal(signedBalanceAfterFirst, await GetSignedLedgerBalanceAsync(db, workspace.Id));
+
+        // A key bound to the expired grant's debit cannot be replayed against a
+        // different debit from the later entitlement.
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            ledger.RefundAsync(workspace.Id, laterDebit.Id, refundKey, refundReason));
+        // A second idempotency key also cannot compensate the same original twice.
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            ledger.RefundAsync(workspace.Id, oldDebit.Id, "postexpiry:refund:second", "Second synthetic refund"));
+
+        var finalRows = await CaptureLedgerRowsAsync(db, workspace.Id);
+        Assert.Equal(originalCount + 1, finalRows.Count);
+        Assert.Equal(signedBalanceAfterFirst, await GetSignedLedgerBalanceAsync(db, workspace.Id));
+        var finalById = finalRows.ToDictionary(item => item.Id);
+        foreach (var original in originalRows)
+            Assert.Equal(original, finalById[original.Id]);
+        Assert.Equal(persistedRefund, finalById[refund.Entry.Id]);
+        Assert.Equal(oldEntitlementBefore, CaptureEntitlement(await db.CreditEntitlements.AsNoTracking()
+            .SingleAsync(item => item.Id == oldEntitlementId)));
+        Assert.Equal(laterEntitlementBefore, CaptureEntitlement(await db.CreditEntitlements.AsNoTracking()
+            .SingleAsync(item => item.Id == laterEntitlementId)));
+    }
+
+    private static CreditLedgerEntry NewAttributedSyntheticDebit(
+        Guid workspaceId, Guid entitlementId, Guid usageTransactionId, string idempotencyKey, DateTime createdAt) => new()
+    {
+        Id = Guid.NewGuid(),
+        WorkspaceId = workspaceId,
+        CreditEntitlementId = entitlementId,
+        UsageTransactionId = usageTransactionId,
+        Type = CreditLedgerEntryType.Debit,
+        Amount = -25,
+        IdempotencyKey = idempotencyKey,
+        Reason = "Synthetic attributed usage debit",
+        CreatedAt = createdAt,
+    };
+
+    private static async Task<long> GetSignedLedgerBalanceAsync(TaslimDbContext db, Guid workspaceId) =>
+        await db.CreditLedgerEntries.Where(item => item.WorkspaceId == workspaceId)
+            .Select(item => (long?)item.Amount).SumAsync() ?? 0;
+
+    private static async Task<List<CreditLedgerRowSnapshot>> CaptureLedgerRowsAsync(TaslimDbContext db, Guid workspaceId)
+    {
+        var rows = await db.CreditLedgerEntries.AsNoTracking()
+            .Where(item => item.WorkspaceId == workspaceId)
+            .ToListAsync();
+        return rows.Select(item => new CreditLedgerRowSnapshot(
+            item.Id, item.WorkspaceId, item.CreditEntitlementId, item.UsageTransactionId, item.ReversesEntryId,
+            item.Type, item.Amount, item.IdempotencyKey, item.Reason, item.ActorUserId, item.CreatedAt)).ToList();
+    }
+
+    private static CreditEntitlementSnapshot CaptureEntitlement(CreditEntitlement item) => new(
+        item.Id, item.WorkspaceId, item.BillingPeriodId, item.Type, item.GrantedCredits, item.GrantedAt,
+        item.ExpiresAt, item.IdempotencyKey, item.SourceReference, item.CreatedAt);
 
     private static async Task AddBillingProjectionFixtureAsync(TaslimDbContext db, Workspace workspace, DateTime now)
     {
@@ -428,6 +593,16 @@ public sealed class BillingGrantExpiryContractTests
         IsBillable = true,
         CreatedAt = DateTime.UtcNow,
     };
+
+    private sealed record CreditLedgerRowSnapshot(
+        Guid Id, Guid WorkspaceId, Guid? CreditEntitlementId, Guid? UsageTransactionId,
+        Guid? ReversesEntryId, CreditLedgerEntryType Type, long Amount, string IdempotencyKey,
+        string Reason, Guid? ActorUserId, DateTime CreatedAt);
+
+    private sealed record CreditEntitlementSnapshot(
+        Guid Id, Guid WorkspaceId, Guid? BillingPeriodId, CreditEntitlementType Type,
+        long GrantedCredits, DateTime GrantedAt, DateTime? ExpiresAt, string IdempotencyKey,
+        string? SourceReference, DateTime CreatedAt);
 }
 
 [AttributeUsage(AttributeTargets.Method)]
