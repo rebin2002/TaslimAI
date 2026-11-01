@@ -119,6 +119,16 @@ test.describe("basic accessibility smoke", () => {
       const dialog = page.getByRole("dialog");
       await expect(dialog).toBeVisible();
       await expect(dialog.locator("[data-dialog-autofocus]")).toBeFocused();
+      await page.evaluate(() => {
+        const outside = document.createElement("button");
+        outside.type = "button";
+        outside.dataset.onboardingFocusProbe = "true";
+        outside.textContent = "Outside focus probe";
+        document.body.appendChild(outside);
+        outside.focus();
+      });
+      expect(await dialog.evaluate((element) => element.contains(document.activeElement))).toBe(true);
+      await page.locator("[data-onboarding-focus-probe]").evaluate((element) => element.remove());
       const progress = dialog.getByRole("progressbar");
       const heading = dialog.locator("#onboarding-title");
       const assertProgressAndFocus = async (step: number) => {
