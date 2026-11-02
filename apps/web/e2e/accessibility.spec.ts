@@ -315,7 +315,9 @@ test.describe("basic accessibility smoke", () => {
 
         const completedAt = "2026-11-02T00:00:00.000Z";
         expect(traffic.state).toMatchObject({ completedAt, onboardingIntent: target.intent ?? null });
+        const authMeResponseCountBeforeReload = traffic.authMeResponses.length;
         await page.reload();
+        await expect.poll(() => traffic.authMeResponses.length).toBeGreaterThan(authMeResponseCountBeforeReload);
         await expect(page).toHaveURL((url) => url.pathname === target.destination);
         await expect(page.getByRole("dialog")).toHaveCount(0);
         expect(traffic.authMeResponses.length).toBeGreaterThanOrEqual(2);
