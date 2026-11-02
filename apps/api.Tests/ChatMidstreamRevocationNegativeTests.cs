@@ -86,6 +86,88 @@ public sealed class ChatMidstreamRevocationNegativeTests : IClassFixture<ChatRev
     }
 
     [Fact]
+    public async Task Session_revocation_during_regeneration_stream_stops_provider_delta_before_completion()
+    {
+        factory.Provider.BeginScenario(pauseAfterFirstDelta: false);
+        var email = $"chat-regenerate-revoke-{Guid.NewGuid():N}@example.test";
+        using var streamingSession = factory.CreateClient();
+        var auth = await Register(streamingSession, email);
+        using var revokingSession = factory.CreateClient();
+        await Login(revokingSession, email);
+        var conversation = await CreateConversation(streamingSession, auth.PersonalWorkspace.Id);
+        var initialBody = await StartStream(streamingSession, conversation.Id);
+        var assistantId = ExtractEventData(initialBody, "message.completed").RootElement.GetProperty("assistantMessage").GetProperty("id").GetGuid();
+
+        factory.Provider.BeginScenario(pauseAfterFirstDelta: true);
+        var requestId = Guid.NewGuid().ToString("N");
+        var regenerationTask = StartRegeneration(streamingSession, conversation.Id, assistantId, requestId);
+        await factory.Provider.FirstDeltaObserved.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        var revoke = await SendWithCsrf(revokingSession, HttpMethod.Post, "/api/auth/sessions/revoke", null);
+        Assert.Equal(HttpStatusCode.OK, revoke.StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await streamingSession.GetAsync("/api/auth/me")).StatusCode);
+        factory.Provider.Release();
+
+        var body = await regenerationTask;
+        var evidence = await ReadEvidence(conversation.Id, requestId);
+        Assert.DoesNotContain("after-revocation", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("event: message.completed", body, StringComparison.Ordinal);
+        Assert.NotEqual(ChatMessageStatus.Completed, evidence.AssistantStatus);
+        Assert.Equal(0, evidence.CompletedUsage);
+    }
+
+    [Fact]
+    public async Task Workspace_membership_removal_during_regeneration_stream_stops_provider_delta_before_completion()
+    {
+        factory.Provider.BeginScenario(pauseAfterFirstDelta: false);
+        using var streamingSession = factory.CreateClient();
+        var auth = await Register(streamingSession, $"chat-regenerate-membership-{Guid.NewGuid():N}@example.test");
+        var conversation = await CreateConversation(streamingSession, auth.PersonalWorkspace.Id);
+        var initialBody = await StartStream(streamingSession, conversation.Id);
+        var assistantId = ExtractEventData(initialBody, "message.completed").RootElement.GetProperty("assistantMessage").GetProperty("id").GetGuid();
+
+        factory.Provider.BeginScenario(pauseAfterFirstDelta: true);
+        var requestId = Guid.NewGuid().ToString("N");
+        var regenerationTask = StartRegeneration(streamingSession, conversation.Id, assistantId, requestId);
+        await factory.Provider.FirstDeltaObserved.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var membership = await db.WorkspaceMembers.SingleAsync(item => item.WorkspaceId == auth.PersonalWorkspace.Id && item.UserId == auth.User.Id);
+            db.WorkspaceMembers.Remove(membership);
+            await db.SaveChangesAsync();
+        }
+
+        Assert.Equal(HttpStatusCode.NotFound, (await streamingSession.GetAsync($"/api/conversations/{conversation.Id}/messages")).StatusCode);
+        factory.Provider.Release();
+
+        var body = await regenerationTask;
+        var evidence = await ReadEvidence(conversation.Id, requestId);
+        Assert.DoesNotContain("after-revocation", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("event: message.completed", body, StringComparison.Ordinal);
+        Assert.NotEqual(ChatMessageStatus.Completed, evidence.AssistantStatus);
+        Assert.Equal(0, evidence.CompletedUsage);
+    }
+
+    [Fact]
+    public async Task Pre_revocation_regeneration_stream_control_completes_and_finalizes_usage()
+    {
+        factory.Provider.BeginScenario(pauseAfterFirstDelta: false);
+        using var client = factory.CreateClient();
+        var auth = await Register(client, $"chat-regenerate-control-{Guid.NewGuid():N}@example.test");
+        var conversation = await CreateConversation(client, auth.PersonalWorkspace.Id);
+        var initialBody = await StartStream(client, conversation.Id);
+        var assistantId = ExtractEventData(initialBody, "message.completed").RootElement.GetProperty("assistantMessage").GetProperty("id").GetGuid();
+        var requestId = Guid.NewGuid().ToString("N");
+
+        var body = await StartRegeneration(client, conversation.Id, assistantId, requestId);
+        var evidence = await ReadEvidence(conversation.Id, requestId);
+        Assert.Contains("event: message.delta", body);
+        Assert.Contains("event: message.completed", body);
+        Assert.Equal(ChatMessageStatus.Completed, evidence.AssistantStatus);
+        Assert.Equal(1, evidence.CompletedUsage);
+    }
+
+    [Fact]
     public async Task Pre_revocation_stream_control_completes_and_finalizes_usage()
     {
         factory.Provider.BeginScenario(pauseAfterFirstDelta: false);
@@ -114,13 +196,33 @@ public sealed class ChatMidstreamRevocationNegativeTests : IClassFixture<ChatRev
         return await response.Content.ReadAsStringAsync();
     }
 
-    private async Task<(ChatMessageStatus? AssistantStatus, int CompletedUsage)> ReadEvidence(Guid conversationId)
+    private static async Task<string> StartRegeneration(HttpClient client, Guid conversationId, Guid assistantId, string requestId)
+    {
+        var response = await SendWithCsrf(client, HttpMethod.Post, $"/api/conversations/{conversationId}/messages/{assistantId}/regenerate", new { requestId });
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        return await response.Content.ReadAsStringAsync();
+    }
+
+    private async Task<(ChatMessageStatus? AssistantStatus, int CompletedUsage)> ReadEvidence(Guid conversationId, string? requestId = null)
     {
         using var scope = factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
-        var assistant = await db.ChatMessages.SingleOrDefaultAsync(item => item.ConversationId == conversationId && item.Role == ChatMessageRole.Assistant);
-        var usage = await db.UsageTransactions.Where(item => item.ConversationId == conversationId).ToListAsync();
+        var assistant = await db.ChatMessages
+            .Where(item => item.ConversationId == conversationId && item.Role == ChatMessageRole.Assistant)
+            .OrderByDescending(item => item.Sequence)
+            .FirstOrDefaultAsync();
+        var usageQuery = db.UsageTransactions.Where(item => item.ConversationId == conversationId);
+        if (requestId is not null) usageQuery = usageQuery.Where(item => item.RequestId == requestId);
+        var usage = await usageQuery.ToListAsync();
         return (assistant?.Status, usage.Count(item => item.Status == UsageTransactionStatus.Completed));
+    }
+
+    private static JsonDocument ExtractEventData(string body, string eventName)
+    {
+        var block = body.Split("\n\n", StringSplitOptions.RemoveEmptyEntries)
+            .First(item => item.StartsWith($"event: {eventName}\n", StringComparison.Ordinal));
+        var dataLine = block.Split('\n').Single(line => line.StartsWith("data: ", StringComparison.Ordinal));
+        return JsonDocument.Parse(dataLine[6..]);
     }
 
     private static async Task<AuthResponse> Register(HttpClient client, string email)
