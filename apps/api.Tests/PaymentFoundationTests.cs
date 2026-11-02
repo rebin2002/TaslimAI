@@ -620,7 +620,7 @@ public sealed class PaymentFoundationTests
             "sub-concurrent-replay", periodStart, periodEnd, false);
         var providerA = new FakePaymentProvider(providerEvent);
         var providerB = new FakePaymentProvider(providerEvent);
-        var verifier = new TwoCallPaymentSettlementVerifier();
+        var verifier = new FakePaymentSettlementVerifier();
         var settings = Options.Create(new BillingOptions { CustomerChargingEnabled = true, Provider = "fake" });
         var serviceA = new PaymentWebhookService(dbA, [providerA], NewLifecycle(dbA), settings,
             NullLogger<PaymentWebhookService>.Instance, [verifier]);
@@ -635,7 +635,7 @@ public sealed class PaymentFoundationTests
         Assert.All(results, result => Assert.True(result.Accepted));
         Assert.Single(results, result => !result.Duplicate);
         Assert.Single(results, result => result.Duplicate);
-        Assert.Equal(2, verifier.CallCount);
+        Assert.Equal(1, verifier.CallCount);
         Assert.Equal(1, providerA.SignatureVerifier.CallCount);
         Assert.Equal(1, providerB.SignatureVerifier.CallCount);
         Assert.Equal(1, providerA.ParseCallCount);
@@ -655,6 +655,116 @@ public sealed class PaymentFoundationTests
         Assert.Equal(CreditLedgerEntryType.Grant, grant.Type);
         Assert.Equal(100, grant.Amount);
         Assert.Empty(await dbA.PaymentRefunds.AsNoTracking().ToListAsync());
+    }
+
+    [Fact]
+    public async Task Concurrent_same_event_replays_call_settlement_verifier_once_while_claim_is_held()
+    {
+        var databasePath = Path.Combine(Path.GetTempPath(), $"payment-webhook-fanout-{Guid.NewGuid():N}.db");
+        var verifier = new BlockingCountingPaymentSettlementVerifier();
+        var start = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task<WebhookProcessingResult>[] tasks = [];
+        try
+        {
+            var connectionString = new SqliteConnectionStringBuilder
+            {
+                DataSource = databasePath,
+                Pooling = false,
+                DefaultTimeout = 30,
+            }.ToString();
+            var workspace = NewWorkspace();
+            var plan = new Plan
+            {
+                Id = Guid.NewGuid(), Code = $"fanout-{Guid.NewGuid():N}", Name = "Verifier fanout test plan",
+                MonthlyCreditAllowance = 100, Currency = "USD", IsActive = true, SortOrder = 99,
+                CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+            };
+            var subscription = NewSubscription(workspace.Id, plan.Id);
+            subscription.BillingProvider = "fake";
+            subscription.ProviderSubscriptionReference = "sub-verifier-fanout";
+            PaymentAttempt attempt;
+            DateTime periodStart;
+            DateTime periodEnd;
+            await using (var setupConnection = new SqliteConnection(connectionString))
+            {
+                await setupConnection.OpenAsync();
+                await using var journalModeCommand = setupConnection.CreateCommand();
+                journalModeCommand.CommandText = "PRAGMA journal_mode=WAL;";
+                await journalModeCommand.ExecuteNonQueryAsync();
+                await using var setupDb = CreateDb(setupConnection);
+                await setupDb.Database.EnsureCreatedAsync();
+                setupDb.Workspaces.Add(workspace);
+                setupDb.Plans.Add(plan);
+                setupDb.Subscriptions.Add(subscription);
+                await setupDb.SaveChangesAsync();
+                attempt = await NewLifecycle(setupDb).RecordPaymentAttemptAsync(
+                    workspace.Id, "fake", "attempt:verifier-fanout", 9, "USD", subscriptionId: subscription.Id);
+                periodStart = subscription.CurrentPeriodEnd;
+                periodEnd = periodStart.AddMonths(1);
+            }
+
+            const int deliveryCount = 20;
+            const string rawPayload = "{\"event\":\"evt-verifier-fanout\"}";
+            var occurredAt = DateTime.UtcNow;
+            var settings = Options.Create(new BillingOptions { CustomerChargingEnabled = true, Provider = "fake" });
+            using var ready = new CountdownEvent(deliveryCount);
+            tasks = Enumerable.Range(0, deliveryCount).Select(async _ =>
+            {
+                ready.Signal();
+                await start.Task.WaitAsync(TimeSpan.FromSeconds(10));
+                await using var connection = new SqliteConnection(connectionString);
+                await connection.OpenAsync();
+                await using var db = CreateDb(connection);
+                var providerEvent = new ProviderPaymentEvent(
+                    "evt-verifier-fanout", PaymentEventType.RenewalSucceeded, workspace.Id, subscription.Id, null, attempt.Id,
+                    "pay-verifier-fanout", 9, "USD", occurredAt, "Synthetic renewal succeeded.",
+                    "sub-verifier-fanout", periodStart, periodEnd, false);
+                var service = new PaymentWebhookService(db, [new FakePaymentProvider(providerEvent)], NewLifecycle(db), settings,
+                    NullLogger<PaymentWebhookService>.Instance, [verifier]);
+                return await service.ProcessAsync("fake", rawPayload, "valid");
+            }).ToArray();
+
+            Assert.True(ready.Wait(TimeSpan.FromSeconds(10)), "All replay workers should reach the common start gate.");
+            start.TrySetResult(true);
+            await verifier.FirstCall.WaitAsync(TimeSpan.FromSeconds(10));
+            await Task.Delay(TimeSpan.FromMilliseconds(300));
+            var callsWhileFirstVerificationBlocked = verifier.CallCount;
+            verifier.Release();
+            var results = await Task.WhenAll(tasks);
+
+            Assert.All(results, result => Assert.True(result.Accepted));
+            Assert.Single(results, result => !result.Duplicate);
+            Assert.Equal(deliveryCount - 1, results.Count(result => result.Duplicate));
+            Assert.Equal(1, callsWhileFirstVerificationBlocked);
+            Assert.Equal(1, verifier.CallCount);
+
+            await using (var finalConnection = new SqliteConnection(connectionString))
+            {
+                await finalConnection.OpenAsync();
+                await using var finalDb = CreateDb(finalConnection);
+                Assert.Equal(PaymentAttemptStatus.Succeeded,
+                    (await finalDb.PaymentAttempts.AsNoTracking().SingleAsync(item => item.Id == attempt.Id)).Status);
+                Assert.Equal(PaymentEventStatus.Processed,
+                    (await finalDb.PaymentEvents.AsNoTracking().SingleAsync(item => item.ProviderEventReference == "evt-verifier-fanout")).Status);
+                Assert.Single(await finalDb.BillingPeriods.AsNoTracking().ToListAsync());
+                Assert.Single(await finalDb.CreditEntitlements.AsNoTracking().ToListAsync());
+                var grant = Assert.Single(await finalDb.CreditLedgerEntries.AsNoTracking().ToListAsync());
+                Assert.Equal(CreditLedgerEntryType.Grant, grant.Type);
+                Assert.Equal(100, grant.Amount);
+            }
+
+        }
+        finally
+        {
+            start.TrySetResult(true);
+            verifier.Release();
+            try { await Task.WhenAll(tasks); } catch { }
+            foreach (var suffix in new[] { "", "-wal", "-shm" })
+            {
+                var path = databasePath + suffix;
+                if (File.Exists(path)) File.Delete(path);
+            }
+        }
     }
 
     [Fact]
@@ -696,6 +806,73 @@ public sealed class PaymentFoundationTests
         Assert.Equal(PaymentAttemptStatus.Succeeded, (await db.PaymentAttempts.SingleAsync(item => item.Id == attempt.Id)).Status);
         Assert.Equal(PaymentEventStatus.Processed, (await db.PaymentEvents.SingleAsync()).Status);
         Assert.Equal(2, verifier.CallCount);
+    }
+
+    [Fact]
+    public async Task Settlement_verifier_exception_keeps_event_retryable_without_ledger_mutation()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        var workspace = NewWorkspace();
+        var plan = new Plan
+        {
+            Id = Guid.NewGuid(), Code = $"verifier-error-{Guid.NewGuid():N}", Name = "Verifier exception recovery plan",
+            MonthlyCreditAllowance = 100, Currency = "USD", IsActive = true, SortOrder = 99,
+            CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+        };
+        var subscription = NewSubscription(workspace.Id, plan.Id);
+        subscription.BillingProvider = "fake";
+        subscription.ProviderSubscriptionReference = "sub-verifier-error";
+        db.Workspaces.Add(workspace);
+        db.Plans.Add(plan);
+        db.Subscriptions.Add(subscription);
+        await db.SaveChangesAsync();
+
+        var lifecycle = NewLifecycle(db);
+        var attempt = await lifecycle.RecordPaymentAttemptAsync(
+            workspace.Id, "fake", "attempt:verifier-error", 9, "USD", subscriptionId: subscription.Id);
+        var periodStart = subscription.CurrentPeriodEnd;
+        var periodEnd = periodStart.AddMonths(1);
+        var occurredAt = DateTime.UtcNow;
+        var providerEvent = new ProviderPaymentEvent(
+            "evt-verifier-error", PaymentEventType.RenewalSucceeded, workspace.Id, subscription.Id, null, attempt.Id,
+            "pay-verifier-error", 9, "USD", occurredAt, "Synthetic renewal succeeded.",
+            "sub-verifier-error", periodStart, periodEnd, false);
+        const string rawPayload = "{\"event\":\"evt-verifier-error\"}";
+        var options = Options.Create(new BillingOptions { CustomerChargingEnabled = true, Provider = "fake" });
+        var failedVerifier = new FakePaymentSettlementVerifier((_, _, _) =>
+            throw new InvalidOperationException("synthetic verifier failure"));
+        var failedService = new PaymentWebhookService(
+            db, [new FakePaymentProvider(providerEvent)], lifecycle, options,
+            NullLogger<PaymentWebhookService>.Instance, [failedVerifier]);
+
+        var failed = await failedService.ProcessAsync("fake", rawPayload, "valid");
+
+        Assert.False(failed.Accepted);
+        Assert.Equal("WEBHOOK_PROCESSING_FAILED", failed.Code);
+        Assert.Equal(PaymentEventStatus.Received, (await db.PaymentEvents.SingleAsync()).Status);
+        Assert.Equal(PaymentAttemptStatus.Created, (await db.PaymentAttempts.SingleAsync(item => item.Id == attempt.Id)).Status);
+        Assert.Equal(periodStart, (await db.Subscriptions.SingleAsync(item => item.Id == subscription.Id)).CurrentPeriodEnd);
+        Assert.Empty(await db.BillingPeriods.ToListAsync());
+        Assert.Empty(await db.CreditEntitlements.ToListAsync());
+        Assert.Empty(await db.CreditLedgerEntries.ToListAsync());
+
+        var retryVerifier = new FakePaymentSettlementVerifier();
+        var retryService = new PaymentWebhookService(
+            db, [new FakePaymentProvider(providerEvent)], lifecycle, options,
+            NullLogger<PaymentWebhookService>.Instance, [retryVerifier]);
+        var retried = await retryService.ProcessAsync("fake", rawPayload, "valid");
+
+        Assert.True(retried.Accepted);
+        Assert.Equal(PaymentEventStatus.Processed, (await db.PaymentEvents.SingleAsync()).Status);
+        Assert.Equal(PaymentAttemptStatus.Succeeded, (await db.PaymentAttempts.SingleAsync(item => item.Id == attempt.Id)).Status);
+        Assert.Equal(periodEnd, (await db.Subscriptions.SingleAsync(item => item.Id == subscription.Id)).CurrentPeriodEnd);
+        Assert.Single(await db.BillingPeriods.ToListAsync());
+        Assert.Single(await db.CreditEntitlements.ToListAsync());
+        Assert.Single(await db.CreditLedgerEntries.ToListAsync());
+        Assert.Equal(1, failedVerifier.CallCount);
+        Assert.Equal(1, retryVerifier.CallCount);
     }
 
     [Fact]
@@ -1283,13 +1460,17 @@ public sealed class PaymentFoundationTests
         }
     }
 
-    private sealed class TwoCallPaymentSettlementVerifier : IPaymentSettlementVerifier
+    private sealed class BlockingCountingPaymentSettlementVerifier : IPaymentSettlementVerifier
     {
-        private readonly TaskCompletionSource<bool> bothCalls = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<bool> firstCall = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<bool> released = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private int callCount;
 
         public string ProviderKey => "fake";
         public int CallCount => Volatile.Read(ref callCount);
+        public Task FirstCall => firstCall.Task;
+
+        public void Release() => released.TrySetResult(true);
 
         public async Task<PaymentSettlementVerification> VerifyAsync(
             PaymentAttempt attempt,
@@ -1297,9 +1478,9 @@ public sealed class PaymentFoundationTests
             ProviderPaymentEvent providerEvent,
             CancellationToken cancellationToken = default)
         {
-            if (Interlocked.Increment(ref callCount) == 2)
-                bothCalls.TrySetResult(true);
-            await bothCalls.Task.WaitAsync(TimeSpan.FromSeconds(15), cancellationToken);
+            Interlocked.Increment(ref callCount);
+            firstCall.TrySetResult(true);
+            await released.Task.WaitAsync(TimeSpan.FromSeconds(30), cancellationToken);
             return new PaymentSettlementVerification(
                 ProviderReportsCompleted: true,
                 ProviderPaymentReference: providerEvent.ProviderPaymentReference,

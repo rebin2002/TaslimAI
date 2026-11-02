@@ -572,6 +572,9 @@ public sealed class PaymentWebhookService(
                 item.Id == parsed.CheckoutSessionId.Value && (!parsed.WorkspaceId.HasValue || item.WorkspaceId == parsed.WorkspaceId.Value), cancellationToken))
             return new(false, false, "PAYMENT_REFERENCE_PENDING", paymentEvent.Id, "The referenced checkout session is not available yet.");
 
+        PaymentAttempt? settlementAttempt = null;
+        CheckoutSession? settlementCheckoutSession = null;
+        IPaymentSettlementVerifier? settlementVerifier = null;
         var settlementVerified = false;
         if ((parsed.Type is PaymentEventType.PaymentSucceeded or PaymentEventType.RenewalSucceeded)
             && parsed.WorkspaceId.HasValue && parsed.PaymentAttemptId.HasValue)
@@ -594,11 +597,9 @@ public sealed class PaymentWebhookService(
                 var verifier = settlementVerifierList.SingleOrDefault(item => item.ProviderKey.Equals(provider.Key, StringComparison.OrdinalIgnoreCase));
                 if (verifier is null)
                     return new(false, false, "PAYMENT_SETTLEMENT_VERIFIER_UNCONFIGURED", paymentEvent.Id, "A provider API verifier is required before a payment can be marked successful.");
-
-                var verification = await verifier.VerifyAsync(attempt, checkoutSession, parsed, cancellationToken);
-                settlementVerified = IsMatchingProviderCompletion(verification, attempt, checkoutSession, parsed);
-                if (!settlementVerified)
-                    return new(false, false, "PAYMENT_SETTLEMENT_UNVERIFIED", paymentEvent.Id, verification.Reason ?? "The authenticated provider lookup did not confirm a matching completed payment with final funds available.");
+                settlementAttempt = attempt;
+                settlementCheckoutSession = checkoutSession;
+                settlementVerifier = verifier;
             }
         }
 
@@ -613,9 +614,10 @@ public sealed class PaymentWebhookService(
         var paymentEventId = paymentEvent.Id;
         try
         {
-            // This conditional status update is the durable per-event claim. The temporary
-            // Processed value is uncommitted until the domain transition completes; a crash rolls
-            // it back to Received, which a later provider retry can safely claim again.
+            // This conditional update holds the per-event claim inside the transaction. Keep
+            // settlement verification below it so concurrent exact replays do not fan out lookups.
+            // The temporary Processed value is uncommitted until the domain transition completes;
+            // a crash rolls it back to Received, which a later provider retry can safely claim again.
             var claimed = await db.PaymentEvents
                 .Where(item => item.Id == paymentEventId && item.Status == PaymentEventStatus.Received)
                 .ExecuteUpdateAsync(updates => updates.SetProperty(item => item.Status, PaymentEventStatus.Processed), cancellationToken);
@@ -641,10 +643,32 @@ public sealed class PaymentWebhookService(
             paymentEvent = await db.PaymentEvents.SingleAsync(item => item.Id == paymentEventId, cancellationToken);
             var domainSavepointName = $"payment_webhook_domain_{Guid.NewGuid():N}";
             await db.Database.CurrentTransaction!.CreateSavepointAsync(domainSavepointName, cancellationToken);
+            var retryableSettlementVerificationFailure = false;
             var retryableRenewalTransitionFailure = false;
 
             try
             {
+                if (settlementAttempt is not null && settlementVerifier is not null)
+                {
+                    retryableSettlementVerificationFailure = true;
+                    var verification = await settlementVerifier.VerifyAsync(
+                        settlementAttempt, settlementCheckoutSession, parsed, cancellationToken);
+                    settlementVerified = IsMatchingProviderCompletion(
+                        verification, settlementAttempt, settlementCheckoutSession, parsed);
+                    if (!settlementVerified)
+                    {
+                        await db.Database.CurrentTransaction!.RollbackToSavepointAsync(domainSavepointName, CancellationToken.None);
+                        db.ChangeTracker.Clear();
+                        var pendingEvent = await db.PaymentEvents.SingleAsync(item => item.Id == paymentEventId, CancellationToken.None);
+                        pendingEvent.Status = PaymentEventStatus.Received;
+                        await db.SaveChangesAsync(CancellationToken.None);
+                        if (ownsTransition) await transition!.CommitAsync(CancellationToken.None);
+                        return new(false, false, "PAYMENT_SETTLEMENT_UNVERIFIED", pendingEvent.Id,
+                            verification.Reason ?? "The authenticated provider lookup did not confirm a matching completed payment with final funds available.");
+                    }
+                    retryableSettlementVerificationFailure = false;
+                }
+
                 ValidateProviderEventShape(parsed);
                 if ((parsed.Type is PaymentEventType.PaymentSucceeded or PaymentEventType.RenewalSucceeded) && !settlementVerified)
                     throw new InvalidOperationException("The payment was not confirmed by an authenticated provider API lookup.");
@@ -817,21 +841,35 @@ public sealed class PaymentWebhookService(
             }
             catch (Exception exception) when (exception is InvalidOperationException or ArgumentException)
             {
+                if (IsPostgresSerializationFailure(exception))
+                    throw;
+
                 await db.Database.CurrentTransaction!.RollbackToSavepointAsync(domainSavepointName, CancellationToken.None);
                 db.ChangeTracker.Clear();
                 var rejectedEvent = await db.PaymentEvents.SingleAsync(item => item.Id == paymentEventId, CancellationToken.None);
-                rejectedEvent.Status = retryableRenewalTransitionFailure
+                rejectedEvent.Status = retryableSettlementVerificationFailure || retryableRenewalTransitionFailure
                     ? PaymentEventStatus.Received
                     : PaymentEventStatus.Rejected;
-                rejectedEvent.FailureReason = "The verified event was recorded but its domain transition was not applied.";
+                rejectedEvent.FailureReason = retryableSettlementVerificationFailure
+                    ? "Provider settlement verification could not be completed; the event remains retryable."
+                    : "The verified event was recorded but its domain transition was not applied.";
                 await db.SaveChangesAsync(CancellationToken.None);
                 if (ownsTransition) await transition!.CommitAsync(CancellationToken.None);
                 logger.LogError(exception, "Verified payment webhook could not be applied. EventId={EventId}", paymentEventId);
                 return new(false, false, "WEBHOOK_PROCESSING_FAILED", rejectedEvent.Id, rejectedEvent.FailureReason);
             }
         }
-        catch
+        catch (Exception exception)
         {
+            var serializationFailure = IsPostgresSerializationFailure(exception);
+            if (!ownsTransition && serializationFailure)
+            {
+                logger.LogWarning(exception,
+                    "Payment webhook hit a PostgreSQL serialization conflict in a caller-owned transaction; the outer transaction must be retried. EventId={EventId}",
+                    paymentEventId);
+                throw;
+            }
+
             if (ownsTransition)
             {
                 await transition!.RollbackAsync(CancellationToken.None);
@@ -839,6 +877,21 @@ public sealed class PaymentWebhookService(
             }
             else
                 await db.Database.CurrentTransaction!.RollbackToSavepointAsync(claimSavepointName, CancellationToken.None);
+
+            if (serializationFailure)
+            {
+                db.ChangeTracker.Clear();
+                var currentEvent = await db.PaymentEvents.AsNoTracking()
+                    .SingleOrDefaultAsync(item => item.Id == paymentEventId, CancellationToken.None);
+                if (currentEvent is null)
+                    return new(false, false, "WEBHOOK_EVENT_UNAVAILABLE", paymentEventId,
+                        "The durable payment event could not be reloaded after a concurrent claim.");
+
+                return ResolveExistingEvent(currentEvent, payloadHash, provider.Key)
+                    ?? new(false, false, "WEBHOOK_EVENT_RETRY_REQUIRED", currentEvent.Id,
+                        "A concurrent delivery left the event pending; retry after reconciliation.");
+            }
+
             throw;
         }
     }
@@ -856,6 +909,18 @@ public sealed class PaymentWebhookService(
 
         logger.LogInformation("Duplicate payment webhook ignored. ProviderKey={ProviderKey}; PaymentEventId={PaymentEventId}; Status={Status}", providerKey, existing.Id, existing.Status);
         return new(true, true, "WEBHOOK_DUPLICATE", existing.Id, "The already-recorded payment event was not applied twice.");
+    }
+
+    private static bool IsPostgresSerializationFailure(Exception exception)
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is Npgsql.PostgresException postgresException
+                && string.Equals(postgresException.SqlState, "40001", StringComparison.Ordinal))
+                return true;
+        }
+
+        return false;
     }
 
     private static bool IsMatchingProviderCompletion(
