@@ -1766,6 +1766,14 @@ public sealed class PaymentFoundationTests
         public static async Task<DisposablePaymentTestDatabase> CreateAsync()
         {
             var postgresTestConnection = Environment.GetEnvironmentVariable("PAYMENT_FANOUT_TEST_POSTGRES");
+            var isGithubActionsTestService = false;
+            if (string.IsNullOrWhiteSpace(postgresTestConnection)
+                && string.Equals(Environment.GetEnvironmentVariable("GITHUB_ACTIONS"), "true", StringComparison.OrdinalIgnoreCase))
+            {
+                postgresTestConnection = Environment.GetEnvironmentVariable("ConnectionStrings__Postgres");
+                isGithubActionsTestService = !string.IsNullOrWhiteSpace(postgresTestConnection);
+            }
+
             if (string.IsNullOrWhiteSpace(postgresTestConnection))
             {
                 var databasePath = Path.Combine(Path.GetTempPath(), $"payment-webhook-followup-{Guid.NewGuid():N}.db");
@@ -1792,13 +1800,25 @@ public sealed class PaymentFoundationTests
             }
 
             var baseBuilder = new NpgsqlConnectionStringBuilder(postgresTestConnection);
-            if (!string.Equals(baseBuilder.Host, "127.0.0.1", StringComparison.OrdinalIgnoreCase)
-                || baseBuilder.Port != 55433
-                || !string.Equals(baseBuilder.Database, "taslim_tests", StringComparison.Ordinal)
-                || !string.Equals(baseBuilder.Username, "taslim", StringComparison.Ordinal)
-                || !string.IsNullOrWhiteSpace(baseBuilder.Password))
+            var isExplicitDisposableLocalCluster =
+                string.Equals(baseBuilder.Host, "127.0.0.1", StringComparison.OrdinalIgnoreCase)
+                && baseBuilder.Port == 55433
+                && string.Equals(baseBuilder.Database, "taslim_tests", StringComparison.Ordinal)
+                && string.Equals(baseBuilder.Username, "taslim", StringComparison.Ordinal)
+                && string.IsNullOrWhiteSpace(baseBuilder.Password);
+            var isGithubActionsDisposableService = isGithubActionsTestService
+                && string.Equals(Environment.GetEnvironmentVariable("GITHUB_ACTIONS"), "true", StringComparison.OrdinalIgnoreCase)
+                && string.Equals(baseBuilder.Host, "localhost", StringComparison.OrdinalIgnoreCase)
+                && baseBuilder.Port == 5432
+                && string.Equals(baseBuilder.Database, "taslim_tests", StringComparison.Ordinal)
+                && string.Equals(baseBuilder.Username, "taslim", StringComparison.Ordinal)
+                && string.Equals(baseBuilder.Password, "change-me", StringComparison.Ordinal);
+            if (isGithubActionsTestService && !isGithubActionsDisposableService)
                 throw new InvalidOperationException(
-                    "PAYMENT_FANOUT_TEST_POSTGRES must target the passwordless disposable 127.0.0.1:55433/taslim_tests test cluster; the value is not logged.");
+                    "GitHub Actions supplied a non-matching PostgreSQL test fixture; failing closed rather than silently using SQLite.");
+            if (!isExplicitDisposableLocalCluster && !isGithubActionsDisposableService)
+                throw new InvalidOperationException(
+                    "PostgreSQL contention tests require either the exact passwordless disposable 127.0.0.1:55433 test cluster or the exact GitHub Actions localhost:5432/taslim_tests fixture; the connection value is not logged.");
 
             baseBuilder.Pooling = false;
             baseBuilder.Timeout = 5;
