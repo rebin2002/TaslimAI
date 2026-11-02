@@ -119,6 +119,44 @@ public sealed class MusicGenerationSongContractTests : IClassFixture<MusicSongCa
     }
 
     [Theory]
+    [InlineData("ku", "sorani", "[TEST ONLY] ڕۆژ — کوردی")]
+    [InlineData("ar", "iraqi_baghdadi", "[TEST ONLY] بغداد — عراقي")]
+    public void Unicode_lyrics_lines_and_section_order_are_preserved_verbatim_by_contract_mapper(
+        string lyricsLanguage,
+        string lyricsDialect,
+        string lyricLine)
+    {
+        var request = new MusicGenerationRequest
+        {
+            Description = "Synthetic Unicode contract fixture",
+            Purpose = "Test request mapping only",
+            Genre = "folk",
+            Mood = "calm",
+            DurationSeconds = 60,
+            CreationMode = MusicGenerationValues.SongWithVocalsMode,
+            VocalPreference = MusicGenerationValues.Vocal,
+            Language = "en",
+            LyricsLanguage = lyricsLanguage,
+            LyricsDialect = lyricsDialect,
+            LyricsRightsConfirmed = true,
+            Lyrics =
+            [
+                new MusicLyricsSection("verse", [lyricLine]),
+                new MusicLyricsSection("chorus", ["[TEST ONLY] repeated section"]),
+            ],
+        };
+
+        var mapped = MusicGenerationContractMapper.ToInput(request);
+
+        Assert.Equal(lyricsLanguage, mapped.LyricsLanguage);
+        Assert.Equal(lyricsDialect, mapped.LyricsDialect);
+        Assert.NotNull(mapped.Lyrics);
+        Assert.Equal(new[] { "verse", "chorus" }, mapped.Lyrics.Select(section => section!.Section));
+        Assert.Equal(lyricLine, Assert.IsType<string>(Assert.Single(mapped.Lyrics[0]!.Lines!)));
+        Assert.Equal("[TEST ONLY] repeated section", Assert.IsType<string>(Assert.Single(mapped.Lyrics[1]!.Lines!)));
+    }
+
+    [Theory]
     [InlineData("en", null)]
     [InlineData("ar", "iraqi_baghdadi")]
     [InlineData("ar", "iraqi_mosul")]
@@ -200,8 +238,13 @@ public sealed class MusicGenerationSongContractTests : IClassFixture<MusicSongCa
         Assert.Equal(GenerationJobErrorCodes.MusicRequestInvalid, exception.Code);
     }
 
-    [Fact]
-    public async Task Unsupported_lyric_song_fails_before_cost_preflight_job_creation_or_provider_call()
+    [Theory]
+    [InlineData("ku", "sorani", "[TEST ONLY] ڕۆژ — کوردی")]
+    [InlineData("ar", "iraqi_baghdadi", "[TEST ONLY] بغداد — عراقي")]
+    public async Task Unsupported_lyric_song_fails_before_cost_preflight_job_creation_or_provider_call(
+        string lyricsLanguage,
+        string lyricsDialect,
+        string lyricLine)
     {
         using var client = factory.CreateClient();
         var auth = await Register(client, $"music-song-{Guid.NewGuid():N}@example.com");
@@ -216,12 +259,12 @@ public sealed class MusicGenerationSongContractTests : IClassFixture<MusicSongCa
             creationMode = "song_with_vocals",
             vocalPreference = "vocal",
             language = "en",
-            lyricsLanguage = "ku",
-            lyricsDialect = "sorani",
+            lyricsLanguage,
+            lyricsDialect,
             lyricsRightsConfirmed = true,
             lyrics = new[]
             {
-                new { section = "verse", lines = new[] { "SYNTHETIC TEST FIXTURE ONLY" } },
+                new { section = "verse", lines = new[] { lyricLine } },
                 new { section = "chorus", lines = new[] { "SYNTHETIC TEST FIXTURE ONLY" } },
             },
         });
