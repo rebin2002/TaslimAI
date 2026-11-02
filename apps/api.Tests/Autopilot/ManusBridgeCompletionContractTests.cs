@@ -3,8 +3,11 @@ using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Taslim.Api.Autopilot;
 using Taslim.Api.Persistence;
 using Xunit;
@@ -206,6 +209,125 @@ public sealed class ManusBridgeCompletionContractTests : IClassFixture<TaslimApi
         }
     }
 
+    [Fact]
+    public async Task Twenty_concurrent_identical_signed_deliveries_persist_at_most_one_queued_event()
+    {
+        var previousSecret = Environment.GetEnvironmentVariable(SecretEnvironmentVariable);
+        Environment.SetEnvironmentVariable(SecretEnvironmentVariable, TestSecret);
+        var source = "completion-bridge-concurrent-contract-test";
+        var eventId = $"evt-concurrent-identical-{Guid.NewGuid():N}";
+        var waveKey = $"wave-concurrent-identical-{Guid.NewGuid():N}";
+        var taskId = $"task-concurrent-identical-{Guid.NewGuid():N}";
+        try
+        {
+            using var factory = new DisposableSqliteFactory();
+            using (var setupScope = factory.Services.CreateScope())
+                setupScope.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+
+            using var client = factory.CreateClient();
+            var payload = JsonSerializer.Serialize(new { waveKey, taskId, outcome = "succeeded" });
+            var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture);
+            var signature = Sign(TestSecret, timestamp, payload);
+            var responses = await Task.WhenAll(Enumerable.Range(0, 20).Select(async _ =>
+            {
+                using var request = CreateSignedRequest(source, eventId, timestamp, signature, payload);
+                using var response = await client.SendAsync(request);
+                return (response.StatusCode, Body: await response.Content.ReadAsStringAsync());
+            }));
+
+            Assert.Equal(1, responses.Count(item => item.StatusCode == HttpStatusCode.Accepted));
+            Assert.Contains(responses, item => item.StatusCode == HttpStatusCode.OK);
+            Assert.All(responses, item => Assert.Contains(item.StatusCode, new[]
+            {
+                HttpStatusCode.Accepted,
+                HttpStatusCode.OK,
+                HttpStatusCode.TooManyRequests,
+            }));
+
+            using var scope = factory.Services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var stored = Assert.Single(await db.AutopilotEvents.Where(item =>
+                item.SourceSystem == source && item.ExternalEventId == eventId).ToListAsync());
+            Assert.Equal(payload, stored.SignalJson);
+            Assert.Equal(AutopilotEventStatuses.Queued, stored.Status);
+            Assert.True(stored.SignatureVerified);
+            Assert.True(stored.ReplayProtected);
+            Assert.Empty(await db.AutopilotRuns.Where(item => item.WaveKey == waveKey).ToListAsync());
+            Assert.Empty(await db.AutopilotWaveTasks.Where(item =>
+                item.WaveKey == waveKey || item.TaskId == taskId).ToListAsync());
+            Assert.Empty(await db.AutopilotGateEvaluations.Where(item => item.WaveKey == waveKey).ToListAsync());
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(SecretEnvironmentVariable, previousSecret);
+        }
+    }
+
+    [Fact]
+    public async Task Twenty_concurrent_conflicting_retries_cannot_rewrite_the_first_event()
+    {
+        var previousSecret = Environment.GetEnvironmentVariable(SecretEnvironmentVariable);
+        Environment.SetEnvironmentVariable(SecretEnvironmentVariable, TestSecret);
+        var source = "completion-bridge-concurrent-contract-test";
+        var eventId = $"evt-concurrent-conflict-{Guid.NewGuid():N}";
+        var originalWaveKey = $"wave-concurrent-original-{Guid.NewGuid():N}";
+        var originalTaskId = $"task-concurrent-original-{Guid.NewGuid():N}";
+        var conflictingWaveKey = $"wave-concurrent-conflict-{Guid.NewGuid():N}";
+        var conflictingTaskId = $"task-concurrent-conflict-{Guid.NewGuid():N}";
+        try
+        {
+            using var factory = new DisposableSqliteFactory();
+            using (var setupScope = factory.Services.CreateScope())
+                setupScope.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+
+            using var client = factory.CreateClient();
+            var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture);
+            var originalPayload = JsonSerializer.Serialize(new { waveKey = originalWaveKey, taskId = originalTaskId, outcome = "succeeded" });
+            using (var firstRequest = CreateSignedRequest(
+                source, eventId, timestamp, Sign(TestSecret, timestamp, originalPayload), originalPayload))
+            using (var firstResponse = await client.SendAsync(firstRequest))
+            {
+                Assert.Equal(HttpStatusCode.Accepted, firstResponse.StatusCode);
+            }
+
+            var conflictingPayload = JsonSerializer.Serialize(new { waveKey = conflictingWaveKey, taskId = conflictingTaskId, outcome = "failed" });
+            var conflictingSignature = Sign(TestSecret, timestamp, conflictingPayload);
+            var responses = await Task.WhenAll(Enumerable.Range(0, 20).Select(async _ =>
+            {
+                using var request = CreateSignedRequest(source, eventId, timestamp, conflictingSignature, conflictingPayload);
+                using var response = await client.SendAsync(request);
+                return (response.StatusCode, Body: await response.Content.ReadAsStringAsync());
+            }));
+
+            Assert.Contains(responses, item => item.StatusCode == HttpStatusCode.BadRequest);
+            Assert.All(responses, item => Assert.Contains(item.StatusCode, new[]
+            {
+                HttpStatusCode.BadRequest,
+                HttpStatusCode.TooManyRequests,
+            }));
+
+            using var scope = factory.Services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var stored = Assert.Single(await db.AutopilotEvents.Where(item =>
+                item.SourceSystem == source && item.ExternalEventId == eventId).ToListAsync());
+            Assert.Equal(originalPayload, stored.SignalJson);
+            Assert.Equal(originalWaveKey, stored.WaveKey);
+            Assert.Equal(originalTaskId, stored.TaskId);
+            Assert.Equal(AutopilotEventStatuses.Queued, stored.Status);
+            Assert.Empty(await db.AutopilotRuns.Where(item =>
+                item.WaveKey == originalWaveKey || item.WaveKey == conflictingWaveKey).ToListAsync());
+            Assert.Empty(await db.AutopilotWaveTasks.Where(item =>
+                item.WaveKey == originalWaveKey || item.WaveKey == conflictingWaveKey
+                || item.TaskId == originalTaskId || item.TaskId == conflictingTaskId).ToListAsync());
+            Assert.Empty(await db.AutopilotGateEvaluations.Where(item =>
+                item.WaveKey == originalWaveKey || item.WaveKey == conflictingWaveKey).ToListAsync());
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(SecretEnvironmentVariable, previousSecret);
+        }
+    }
+
     private static HttpRequestMessage CreateSignedRequest(
         string source,
         string eventId,
@@ -242,5 +364,27 @@ public sealed class ManusBridgeCompletionContractTests : IClassFixture<TaslimApi
         Assert.Empty(await db.AutopilotWaveTasks.Where(item =>
             item.WaveKey == waveKey || item.TaskId == taskId).ToListAsync());
         Assert.Empty(await db.AutopilotGateEvaluations.Where(item => item.WaveKey == waveKey).ToListAsync());
+    }
+
+    private sealed class DisposableSqliteFactory : WebApplicationFactory<Program>
+    {
+        private readonly string databasePath = Path.Combine(Path.GetTempPath(), $"taslim-completion-contract-{Guid.NewGuid():N}.sqlite");
+
+        protected override void ConfigureWebHost(IWebHostBuilder builder)
+        {
+            builder.UseEnvironment("Testing");
+            builder.ConfigureServices(services =>
+            {
+                services.RemoveAll<DbContextOptions<TaslimDbContext>>();
+                services.AddDbContext<TaslimDbContext>(options =>
+                    options.UseSqlite($"Data Source={databasePath};Default Timeout=30"));
+            });
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            base.Dispose(disposing);
+            if (disposing && File.Exists(databasePath)) File.Delete(databasePath);
+        }
     }
 }
