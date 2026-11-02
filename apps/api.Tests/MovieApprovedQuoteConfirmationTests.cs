@@ -84,6 +84,91 @@ public sealed class MovieApprovedQuoteConfirmationTests
     }
 
     [Fact]
+    public async Task Fresh_clip_quote_rejects_a_different_models_pricing_route_before_any_write()
+    {
+        // A route for the same provider but a different model must never price
+        // or authorize this selected model. The worker is disabled; this test
+        // exercises admission only and cannot call a video provider.
+        using var factory = new MovieOperationalNoWorkerFactory();
+        using (var setup = factory.Services.CreateScope())
+            setup.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+        using var client = factory.CreateClient();
+        var movie = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Reject other-model pricing", sceneDurationSeconds: 5);
+
+        string providerKey;
+        string selectedModelKey;
+        int durationSeconds;
+        int snapshotsBefore;
+        int clipsBefore;
+        int jobsBefore;
+        int usageBefore;
+        int providerCallsBefore;
+        using (var scope = factory.Services.CreateScope())
+        {
+            var services = scope.ServiceProvider;
+            var db = services.GetRequiredService<TaslimDbContext>();
+            var provider = services.GetRequiredService<IMovieVideoProvider>();
+            providerKey = provider.Key;
+            selectedModelKey = Assert.IsType<string>(provider.SceneClipPricingModelKey);
+            var differentModelKey = selectedModelKey + "-unverified";
+            await MovieOperationalFixtures.AddMoviePricingRouteAsync(
+                db, providerKey, differentModelKey,
+                basePriceUsdPerSecondMin: 0.01m,
+                basePriceUsdPerSecondMax: 0.02m);
+
+            durationSeconds = await db.MovieShots.AsNoTracking()
+                .Where(item => item.Id == movie.Shot.Id)
+                .Select(item => item.DurationSeconds ?? item.Scene.DurationSeconds ?? 60)
+                .SingleAsync();
+            snapshotsBefore = await db.MovieCharacterContinuitySnapshots.CountAsync(
+                item => item.MovieProjectId == movie.Project.Project.Id);
+            clipsBefore = await db.MovieClips.CountAsync(
+                item => item.MovieProjectId == movie.Project.Project.Id);
+            jobsBefore = await db.GenerationJobs.CountAsync();
+            usageBefore = await db.UsageTransactions.CountAsync();
+            providerCallsBefore = services.GetRequiredService<FakeProviderCallLog>()
+                .Calls(FakeProviderKind.Movie);
+        }
+
+        // This amount exactly matches the other model's $0.02/second route.
+        var wrongModelMaximumUsd = durationSeconds * 0.02m;
+        using var rejected = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client,
+            HttpMethod.Post,
+            $"/api/movie-studio/shots/{movie.Shot.Id}/generate",
+            new
+            {
+                title = "Do not queue using another model's quote",
+                sourceResolution = "1080p",
+                targetResolution = "1080p",
+                qualityTier = DirectorQualityLevels.Standard,
+                processingPath = "native",
+                confirmationAccepted = true,
+                expectedProviderKey = providerKey,
+                expectedProviderModelKey = selectedModelKey,
+                expectedProviderCostUsd = wrongModelMaximumUsd,
+            },
+            idempotencyKey: "movie-wrong-model-price-must-not-queue");
+
+        Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
+        Assert.Contains("MOVIE_SCENE_QUOTE_STALE",
+            await rejected.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        using var verify = factory.Services.CreateScope();
+        var verifyServices = verify.ServiceProvider;
+        var verifyDb = verifyServices.GetRequiredService<TaslimDbContext>();
+        Assert.Equal(snapshotsBefore, await verifyDb.MovieCharacterContinuitySnapshots.CountAsync(
+            item => item.MovieProjectId == movie.Project.Project.Id));
+        Assert.Equal(clipsBefore, await verifyDb.MovieClips.CountAsync(
+            item => item.MovieProjectId == movie.Project.Project.Id));
+        Assert.Equal(jobsBefore, await verifyDb.GenerationJobs.CountAsync());
+        Assert.Equal(usageBefore, await verifyDb.UsageTransactions.CountAsync());
+        Assert.Equal(providerCallsBefore, verifyServices.GetRequiredService<FakeProviderCallLog>()
+            .Calls(FakeProviderKind.Movie));
+    }
+
+    [Fact]
     public async Task Replay_with_missing_canonical_version_fails_closed_without_duplicate_reservation_or_clip()
     {
         using var factory = new MovieOperationalNoWorkerFactory();
