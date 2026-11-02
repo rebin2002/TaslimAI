@@ -271,6 +271,53 @@ public sealed class BillingGrantExpiryContractTests
         }
     }
 
+    [Fact]
+    public async Task Sqlite_grant_replay_with_submicrosecond_expiry_is_idempotent_across_context_restarts_without_charging()
+    {
+        var databasePath = Path.Combine(Path.GetTempPath(), $"issue330-grant-replay-{Guid.NewGuid():N}.db");
+        var connectionString = new SqliteConnectionStringBuilder
+        {
+            DataSource = databasePath,
+            Pooling = false,
+        }.ToString();
+
+        try
+        {
+            var options = new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connectionString).Options;
+            await AssertDurableGrantReplayAsync(options);
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            if (File.Exists(databasePath)) File.Delete(databasePath);
+        }
+    }
+
+    [FactWhenEnvironmentVariablePresent("ConnectionStrings__Postgres")]
+    public async Task Postgres_grant_replay_with_submicrosecond_expiry_is_idempotent_across_context_restarts_without_charging()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("ConnectionStrings__Postgres");
+        if (string.IsNullOrWhiteSpace(connectionString))
+            throw new InvalidOperationException("The PostgreSQL test skip attribute did not detect the missing test connection.");
+
+        var connection = CreateDisposablePostgresConnection(connectionString);
+        var schema = $"issue330_durable_grant_{Guid.NewGuid():N}";
+        await using var adminConnection = new NpgsqlConnection(connectionString);
+        await adminConnection.OpenAsync();
+        await CreateSchemaAsync(adminConnection, schema);
+
+        try
+        {
+            connection.SearchPath = schema;
+            var options = new DbContextOptionsBuilder<TaslimDbContext>().UseNpgsql(connection.ConnectionString).Options;
+            await AssertDurableGrantReplayAsync(options);
+        }
+        finally
+        {
+            await DropSchemaAsync(adminConnection, schema);
+        }
+    }
+
     [FactWhenEnvironmentVariablePresent("ConnectionStrings__Postgres")]
     public async Task Postgres_concurrent_debits_cannot_overdraw_one_synthetic_grant()
     {
@@ -630,6 +677,76 @@ public sealed class BillingGrantExpiryContractTests
                 .SingleAsync(item => item.Id == oldEntitlementId)));
             Assert.Equal(laterEntitlementBefore, CaptureEntitlement(await db.CreditEntitlements.AsNoTracking()
                 .SingleAsync(item => item.Id == laterEntitlementId)));
+        }
+    }
+
+    private static async Task AssertDurableGrantReplayAsync(DbContextOptions<TaslimDbContext> options)
+    {
+        const long credits = 25;
+        const string reason = "Synthetic durable grant replay";
+        var workspace = NewWorkspace();
+        var idempotencyKey = $"durable:grant:{Guid.NewGuid():N}";
+        var sourceReference = $"synthetic:grant:{Guid.NewGuid():N}";
+        // PostgreSQL persists timestamps at microsecond precision. Preserve a
+        // deliberate 100 ns remainder to test replay of the exact same request.
+        var expiryTicks = DateTime.UtcNow.AddDays(30).Ticks;
+        var expiresAt = new DateTime(expiryTicks - expiryTicks % 10 + 1, DateTimeKind.Utc);
+        Assert.Equal(1, expiresAt.Ticks % 10);
+        Guid grantEntryId;
+        Guid entitlementId;
+
+        await using (var firstDb = new TaslimDbContext(options))
+        {
+            await firstDb.Database.EnsureCreatedAsync();
+            firstDb.Workspaces.Add(workspace);
+            await firstDb.SaveChangesAsync();
+
+            var first = await NewChargingDisabledLedger(firstDb).GrantAsync(
+                workspace.Id,
+                CreditEntitlementType.AdministrativeCorrection,
+                credits,
+                idempotencyKey,
+                reason,
+                expiresAt,
+                sourceReference: sourceReference);
+
+            Assert.True(first.Created);
+            Assert.Equal(CreditLedgerEntryType.AdministrativeCorrection, first.Entry.Type);
+            Assert.Equal(credits, first.Entry.Amount);
+            grantEntryId = first.Entry.Id;
+            entitlementId = first.Entry.CreditEntitlementId
+                ?? throw new InvalidOperationException("The synthetic grant must be linked to its entitlement.");
+        }
+
+        await using (var replayDb = new TaslimDbContext(options))
+        {
+            var ledger = NewChargingDisabledLedger(replayDb);
+            var replay = await ledger.GrantAsync(
+                workspace.Id,
+                CreditEntitlementType.AdministrativeCorrection,
+                credits,
+                idempotencyKey,
+                reason,
+                expiresAt,
+                sourceReference: sourceReference);
+
+            Assert.False(replay.Created);
+            Assert.Equal(grantEntryId, replay.Entry.Id);
+            Assert.Equal(entitlementId, replay.Entry.CreditEntitlementId);
+            Assert.Single(await replayDb.CreditEntitlements.Where(item => item.WorkspaceId == workspace.Id).ToListAsync());
+            Assert.Single(await replayDb.CreditLedgerEntries.Where(item => item.WorkspaceId == workspace.Id).ToListAsync());
+
+            await Assert.ThrowsAsync<InvalidOperationException>(() => ledger.GrantAsync(
+                workspace.Id,
+                CreditEntitlementType.AdministrativeCorrection,
+                credits + 1,
+                idempotencyKey,
+                reason,
+                expiresAt,
+                sourceReference: sourceReference));
+
+            Assert.Single(await replayDb.CreditEntitlements.Where(item => item.WorkspaceId == workspace.Id).ToListAsync());
+            Assert.Single(await replayDb.CreditLedgerEntries.Where(item => item.WorkspaceId == workspace.Id).ToListAsync());
         }
     }
 
