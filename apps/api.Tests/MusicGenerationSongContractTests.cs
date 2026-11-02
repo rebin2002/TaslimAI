@@ -72,6 +72,10 @@ public sealed class MusicGenerationSongContractTests : IClassFixture<MusicSongCa
         var unverifiedSuno = MusicGenerationCapabilityCatalog.ForProvider("suno");
         Assert.False(unverifiedSuno.SupportsInstrumental);
         Assert.False(unverifiedSuno.SupportsLyricsToVocals);
+        Assert.False(unverifiedSuno.SupportsAudioReferenceConditioning);
+        Assert.False(unverifiedSuno.SupportsVideoAudioReference);
+        Assert.False(unverifiedSuno.SupportsAuthorizedCoverOrRearrangement);
+        Assert.False(unverifiedSuno.SupportsRealSingerVoiceCloning);
         Assert.Empty(unverifiedSuno.SupportedLyricsLanguages);
         Assert.Empty(unverifiedSuno.SupportedLyricsDialects);
         Assert.False(MusicGenerationCapabilityCatalog.ForProvider("unconfigured").SupportsInstrumental);
