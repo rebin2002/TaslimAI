@@ -434,15 +434,61 @@ public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerSer
     }
 }
 
+/// <summary>
+/// A provider's authenticated API lookup result. ProviderReportsCompleted and CompletedAt alone
+/// are not proof of final funds. The final-funds flag must only be true when the provider API
+/// affirmatively confirms its final captured/settled/available-to-merchant state; never infer it
+/// from a completed checkout link or timestamp.
+/// </summary>
+public sealed record PaymentSettlementVerification(
+    bool ProviderReportsCompleted,
+    string? ProviderPaymentReference,
+    decimal? Amount,
+    string? Currency,
+    DateTime? CompletedAt,
+    string? Reason = null,
+    bool ProviderConfirmsFundsSettledOrAvailable = false);
+
+public interface IPaymentSettlementVerifier
+{
+    string ProviderKey { get; }
+
+    Task<PaymentSettlementVerification> VerifyAsync(
+        PaymentAttempt attempt,
+        CheckoutSession? checkoutSession,
+        ProviderPaymentEvent providerEvent,
+        CancellationToken cancellationToken = default);
+}
+
 public sealed class PaymentWebhookService(
     TaslimDbContext db,
     IEnumerable<IPaymentProvider> providers,
     IPaymentLifecycleService lifecycle,
-    ILogger<PaymentWebhookService> logger) : IPaymentWebhookService
+    IOptions<BillingOptions> options,
+    ILogger<PaymentWebhookService> logger,
+    IEnumerable<IPaymentSettlementVerifier>? settlementVerifiers = null) : IPaymentWebhookService
 {
+    private readonly BillingOptions settings = options.Value;
+    private readonly IPaymentSettlementVerifier[] settlementVerifierList = settlementVerifiers?.ToArray() ?? [];
+
     public async Task<WebhookProcessingResult> ProcessAsync(string providerKey, string rawPayload, string signature, CancellationToken cancellationToken = default)
     {
-        var provider = providers.SingleOrDefault(item => item.Key.Equals(providerKey, StringComparison.OrdinalIgnoreCase));
+        var configuredProvider = settings.Provider?.Trim();
+        if (!settings.CustomerChargingEnabled)
+        {
+            logger.LogInformation("Payment webhook rejected because customer charging is disabled. ProviderKey={ProviderKey}", providerKey);
+            return new(false, false, "PAYMENT_WEBHOOK_DISABLED", null, "Customer charging is intentionally disabled.");
+        }
+
+        if (string.IsNullOrWhiteSpace(configuredProvider)
+            || string.Equals(configuredProvider, "unconfigured", StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(configuredProvider, providerKey.Trim(), StringComparison.OrdinalIgnoreCase))
+        {
+            logger.LogWarning("Payment webhook rejected because the provider is not the selected launch provider. ProviderKey={ProviderKey}; ConfiguredProvider={ConfiguredProvider}", providerKey, configuredProvider ?? "none");
+            return new(false, false, "PAYMENT_PROVIDER_UNCONFIGURED", null, "The payment provider is not configured.");
+        }
+
+        var provider = providers.SingleOrDefault(item => item.Key.Equals(configuredProvider, StringComparison.OrdinalIgnoreCase));
         if (provider is null)
         {
             logger.LogWarning("Payment webhook rejected because provider is unconfigured. ProviderKey={ProviderKey}", providerKey);
@@ -465,106 +511,445 @@ public sealed class PaymentWebhookService(
             return new(false, false, "WEBHOOK_PAYLOAD_INVALID", null, "The payment event payload is invalid.");
         }
 
-        var duplicate = await db.PaymentEvents.SingleOrDefaultAsync(item => item.Provider == provider.Key && item.ProviderEventReference == parsed.ProviderEventReference, cancellationToken);
-        if (duplicate is not null)
+        if (string.IsNullOrWhiteSpace(parsed.ProviderEventReference) || parsed.ProviderEventReference.Length > 240 || parsed.ProviderEventReference.Any(char.IsControl))
+            return new(false, false, "WEBHOOK_EVENT_REFERENCE_INVALID", null, "The provider event reference is invalid.");
+
+        var payloadHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(rawPayload)));
+        PaymentEvent paymentEvent;
+        var existingEvent = await db.PaymentEvents.AsNoTracking().SingleOrDefaultAsync(item => item.Provider == provider.Key && item.ProviderEventReference == parsed.ProviderEventReference, cancellationToken);
+        if (existingEvent is not null)
         {
-            logger.LogInformation("Duplicate payment webhook ignored. ProviderKey={ProviderKey}; PaymentEventId={PaymentEventId}; Status={Status}", provider.Key, duplicate.Id, duplicate.Status);
-            return new(true, true, "WEBHOOK_DUPLICATE", duplicate.Id, "The already-recorded payment event was not applied twice.");
+            var existingDisposition = ResolveExistingEvent(existingEvent, payloadHash, provider.Key);
+            if (existingDisposition is not null)
+                return existingDisposition;
+            paymentEvent = existingEvent;
+        }
+        else
+        {
+            paymentEvent = new PaymentEvent
+            {
+                Id = Guid.NewGuid(), Provider = provider.Key, ProviderEventReference = parsed.ProviderEventReference,
+                Type = parsed.Type, Status = PaymentEventStatus.Received,
+                // Do not attach untrusted provider-supplied IDs to local foreign keys before
+                // verifying that they exist. The signed raw payload preserves the original IDs.
+                WorkspaceId = null, SubscriptionId = null, CheckoutSessionId = null, PaymentAttemptId = null,
+                PayloadHash = payloadHash,
+                PayloadJson = rawPayload.Length > 100_000 ? rawPayload[..100_000] : rawPayload,
+                SignatureVerified = true, Reason = parsed.Reason, OccurredAt = parsed.OccurredAt, ReceivedAt = DateTime.UtcNow,
+            };
+            db.PaymentEvents.Add(paymentEvent);
+            try
+            {
+                await db.SaveChangesAsync(cancellationToken);
+            }
+            catch (DbUpdateException)
+            {
+                db.ChangeTracker.Clear();
+                var concurrentEvent = await db.PaymentEvents.AsNoTracking().SingleOrDefaultAsync(
+                    item => item.Provider == provider.Key && item.ProviderEventReference == parsed.ProviderEventReference,
+                    CancellationToken.None);
+                if (concurrentEvent is null)
+                    throw;
+                var concurrentDisposition = ResolveExistingEvent(concurrentEvent, payloadHash, provider.Key);
+                if (concurrentDisposition is not null)
+                    return concurrentDisposition;
+                paymentEvent = concurrentEvent;
+            }
+            logger.LogInformation("Signed payment webhook receipt persisted. ProviderKey={ProviderKey}; PaymentEventId={PaymentEventId}; EventType={EventType}", provider.Key, paymentEvent.Id, paymentEvent.Type);
         }
 
-        var paymentEvent = new PaymentEvent
+        // Keep an authenticated but locally unresolvable event in Received so a later provider
+        // retry can succeed if the corresponding local object is created or restored.
+        if (parsed.WorkspaceId.HasValue && !await db.Workspaces.AsNoTracking().AnyAsync(item => item.Id == parsed.WorkspaceId.Value, cancellationToken))
+            return new(false, false, "PAYMENT_REFERENCE_PENDING", paymentEvent.Id, "The referenced workspace is not available yet.");
+        if (parsed.PaymentAttemptId.HasValue && !await db.PaymentAttempts.AsNoTracking().AnyAsync(item =>
+                item.Id == parsed.PaymentAttemptId.Value && (!parsed.WorkspaceId.HasValue || item.WorkspaceId == parsed.WorkspaceId.Value), cancellationToken))
+            return new(false, false, "PAYMENT_REFERENCE_PENDING", paymentEvent.Id, "The referenced payment attempt is not available yet.");
+        if (parsed.SubscriptionId.HasValue && !await db.Subscriptions.AsNoTracking().AnyAsync(item =>
+                item.Id == parsed.SubscriptionId.Value && (!parsed.WorkspaceId.HasValue || item.WorkspaceId == parsed.WorkspaceId.Value), cancellationToken))
+            return new(false, false, "PAYMENT_REFERENCE_PENDING", paymentEvent.Id, "The referenced subscription is not available yet.");
+        if (parsed.CheckoutSessionId.HasValue && !await db.CheckoutSessions.AsNoTracking().AnyAsync(item =>
+                item.Id == parsed.CheckoutSessionId.Value && (!parsed.WorkspaceId.HasValue || item.WorkspaceId == parsed.WorkspaceId.Value), cancellationToken))
+            return new(false, false, "PAYMENT_REFERENCE_PENDING", paymentEvent.Id, "The referenced checkout session is not available yet.");
+
+        PaymentAttempt? settlementAttempt = null;
+        CheckoutSession? settlementCheckoutSession = null;
+        IPaymentSettlementVerifier? settlementVerifier = null;
+        var settlementVerified = false;
+        if ((parsed.Type is PaymentEventType.PaymentSucceeded or PaymentEventType.RenewalSucceeded)
+            && parsed.WorkspaceId.HasValue && parsed.PaymentAttemptId.HasValue)
         {
-            Id = Guid.NewGuid(), Provider = provider.Key, ProviderEventReference = parsed.ProviderEventReference,
-            Type = parsed.Type, Status = PaymentEventStatus.Received, WorkspaceId = parsed.WorkspaceId,
-            SubscriptionId = parsed.SubscriptionId, CheckoutSessionId = parsed.CheckoutSessionId, PaymentAttemptId = parsed.PaymentAttemptId,
-            PayloadHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(rawPayload))),
-            PayloadJson = rawPayload.Length > 100_000 ? rawPayload[..100_000] : rawPayload,
-            SignatureVerified = true, Reason = parsed.Reason, OccurredAt = parsed.OccurredAt, ReceivedAt = DateTime.UtcNow,
-        };
-        db.PaymentEvents.Add(paymentEvent);
-        await db.SaveChangesAsync(cancellationToken);
-        logger.LogInformation("Payment webhook recorded. ProviderKey={ProviderKey}; PaymentEventId={PaymentEventId}; EventType={EventType}; SignatureVerified={SignatureVerified}", provider.Key, paymentEvent.Id, paymentEvent.Type, paymentEvent.SignatureVerified);
+            var attempt = await db.PaymentAttempts.AsNoTracking().SingleOrDefaultAsync(item =>
+                item.Id == parsed.PaymentAttemptId.Value && item.WorkspaceId == parsed.WorkspaceId.Value, cancellationToken);
+            if (attempt is not null
+                && string.Equals(attempt.Provider, provider.Key, StringComparison.OrdinalIgnoreCase)
+                && parsed.Amount == attempt.Amount
+                && string.Equals(parsed.Currency, attempt.Currency, StringComparison.OrdinalIgnoreCase)
+                && (attempt.ProviderPaymentReference is null || string.Equals(attempt.ProviderPaymentReference, parsed.ProviderPaymentReference, StringComparison.Ordinal)))
+            {
+                CheckoutSession? checkoutSession = null;
+                if (attempt.CheckoutSessionId.HasValue)
+                    checkoutSession = await db.CheckoutSessions.AsNoTracking().SingleOrDefaultAsync(item =>
+                        item.Id == attempt.CheckoutSessionId.Value && item.WorkspaceId == attempt.WorkspaceId, cancellationToken);
+                if (attempt.CheckoutSessionId.HasValue && checkoutSession is null)
+                    return new(false, false, "PAYMENT_CHECKOUT_SESSION_UNAVAILABLE", paymentEvent.Id, "The payment attempt's checkout session could not be verified.");
+
+                var verifier = settlementVerifierList.SingleOrDefault(item => item.ProviderKey.Equals(provider.Key, StringComparison.OrdinalIgnoreCase));
+                if (verifier is null)
+                    return new(false, false, "PAYMENT_SETTLEMENT_VERIFIER_UNCONFIGURED", paymentEvent.Id, "A provider API verifier is required before a payment can be marked successful.");
+                settlementAttempt = attempt;
+                settlementCheckoutSession = checkoutSession;
+                settlementVerifier = verifier;
+            }
+        }
 
         var ownsTransition = db.Database.CurrentTransaction is null;
         await using var transition = ownsTransition
             ? await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken)
             : null;
-        var savepointName = $"payment_webhook_{Guid.NewGuid():N}";
+        var claimSavepointName = $"payment_webhook_claim_{Guid.NewGuid():N}";
         if (!ownsTransition)
-            await db.Database.CurrentTransaction!.CreateSavepointAsync(savepointName, cancellationToken);
+            await db.Database.CurrentTransaction!.CreateSavepointAsync(claimSavepointName, cancellationToken);
 
+        var paymentEventId = paymentEvent.Id;
         try
         {
-            ValidateProviderEventShape(parsed);
-            PaymentAttempt? linkedAttempt = null;
-            if (parsed.PaymentAttemptId.HasValue)
+            // This conditional update holds the per-event claim inside the transaction. Keep
+            // settlement verification below it so concurrent exact replays do not fan out lookups.
+            // The temporary Processed value is uncommitted until the domain transition completes;
+            // a crash rolls it back to Received, which a later provider retry can safely claim again.
+            var claimed = await db.PaymentEvents
+                .Where(item => item.Id == paymentEventId && item.Status == PaymentEventStatus.Received)
+                .ExecuteUpdateAsync(updates => updates.SetProperty(item => item.Status, PaymentEventStatus.Processed), cancellationToken);
+            if (claimed != 1)
             {
-                linkedAttempt = await db.PaymentAttempts.SingleOrDefaultAsync(item =>
-                    item.Id == parsed.PaymentAttemptId.Value && item.WorkspaceId == parsed.WorkspaceId!.Value, cancellationToken)
-                    ?? throw new InvalidOperationException("The payment attempt referenced by the event was not found.");
-                if (!string.Equals(linkedAttempt.Provider, provider.Key, StringComparison.OrdinalIgnoreCase))
-                    throw new InvalidOperationException("The payment attempt provider does not match the webhook provider.");
-                if (!string.IsNullOrWhiteSpace(parsed.ProviderPaymentReference))
+                if (ownsTransition)
                 {
-                    if (linkedAttempt.ProviderPaymentReference is not null &&
-                        !string.Equals(linkedAttempt.ProviderPaymentReference, parsed.ProviderPaymentReference, StringComparison.Ordinal))
-                        throw new InvalidOperationException("The provider payment reference does not match the recorded payment attempt.");
-                    linkedAttempt.ProviderPaymentReference ??= parsed.ProviderPaymentReference.Trim();
+                    await transition!.RollbackAsync(CancellationToken.None);
+                    await transition.DisposeAsync();
                 }
+                else
+                    await db.Database.CurrentTransaction!.RollbackToSavepointAsync(claimSavepointName, CancellationToken.None);
+
+                db.ChangeTracker.Clear();
+                var currentEvent = await db.PaymentEvents.AsNoTracking().SingleOrDefaultAsync(item => item.Id == paymentEventId, CancellationToken.None);
+                if (currentEvent is null)
+                    return new(false, false, "WEBHOOK_EVENT_UNAVAILABLE", paymentEventId, "The durable payment event could not be reloaded.");
+                return ResolveExistingEvent(currentEvent, payloadHash, provider.Key)
+                    ?? new(false, false, "WEBHOOK_EVENT_RETRY_REQUIRED", currentEvent.Id, "The event remains pending and must be retried.");
             }
-            switch (parsed.Type)
+
+            db.ChangeTracker.Clear();
+            paymentEvent = await db.PaymentEvents.SingleAsync(item => item.Id == paymentEventId, cancellationToken);
+            var domainSavepointName = $"payment_webhook_domain_{Guid.NewGuid():N}";
+            await db.Database.CurrentTransaction!.CreateSavepointAsync(domainSavepointName, cancellationToken);
+            var retryableSettlementVerificationFailure = false;
+            var retryableRenewalTransitionFailure = false;
+
+            try
             {
-                case PaymentEventType.PaymentSucceeded:
-                case PaymentEventType.RenewalSucceeded when parsed.PaymentAttemptId.HasValue:
-                    if (linkedAttempt is not null)
+                if (settlementAttempt is not null && settlementVerifier is not null)
+                {
+                    retryableSettlementVerificationFailure = true;
+                    var verification = await settlementVerifier.VerifyAsync(
+                        settlementAttempt, settlementCheckoutSession, parsed, cancellationToken);
+                    settlementVerified = IsMatchingProviderCompletion(
+                        verification, settlementAttempt, settlementCheckoutSession, parsed);
+                    if (!settlementVerified)
                     {
-                        var workspaceId = parsed.WorkspaceId ?? throw new InvalidOperationException("The payment event did not include a valid workspace reference.");
-                        var paymentAttemptId = parsed.PaymentAttemptId ?? throw new InvalidOperationException("The payment event did not include a valid payment attempt reference.");
-                        if (parsed.Amount.HasValue && parsed.Amount.Value != linkedAttempt.Amount || !string.Equals(parsed.Currency, linkedAttempt.Currency, StringComparison.OrdinalIgnoreCase))
-                            throw new InvalidOperationException("The provider payment amount or currency does not match the recorded payment attempt.");
-                        await lifecycle.MarkPaymentSucceededAsync(workspaceId, paymentAttemptId, parsed.Reason ?? "Provider payment succeeded.", cancellationToken);
-                        if (parsed.Type == PaymentEventType.RenewalSucceeded && parsed.SubscriptionId is Guid subscriptionId && parsed.PeriodStart is DateTime periodStart && parsed.PeriodEnd is DateTime periodEnd)
-                            await lifecycle.RenewSubscriptionAsync(workspaceId, subscriptionId, periodStart, periodEnd, $"webhook:{paymentEvent.Id}", parsed.Reason ?? "Provider renewal succeeded.", cancellationToken);
+                        await db.Database.CurrentTransaction!.RollbackToSavepointAsync(domainSavepointName, CancellationToken.None);
+                        db.ChangeTracker.Clear();
+                        var pendingEvent = await db.PaymentEvents.SingleAsync(item => item.Id == paymentEventId, CancellationToken.None);
+                        pendingEvent.Status = PaymentEventStatus.Received;
+                        await db.SaveChangesAsync(CancellationToken.None);
+                        if (ownsTransition) await transition!.CommitAsync(CancellationToken.None);
+                        return new(false, false, "PAYMENT_SETTLEMENT_UNVERIFIED", pendingEvent.Id,
+                            verification.Reason ?? "The authenticated provider lookup did not confirm a matching completed payment with final funds available.");
                     }
-                    break;
-                case PaymentEventType.PaymentFailed:
-                case PaymentEventType.RenewalFailed:
-                    if (parsed.WorkspaceId.HasValue && parsed.PaymentAttemptId.HasValue)
-                        await lifecycle.MarkPaymentFailedAsync(parsed.WorkspaceId.Value, parsed.PaymentAttemptId.Value, "PROVIDER_PAYMENT_FAILED", parsed.Reason ?? "Provider payment failed.", cancellationToken);
-                    break;
-                case PaymentEventType.SubscriptionCancelled:
-                    if (parsed.WorkspaceId.HasValue && parsed.SubscriptionId.HasValue)
-                        await lifecycle.CancelSubscriptionAsync(parsed.WorkspaceId.Value, parsed.SubscriptionId.Value, parsed.Reason ?? "Provider cancelled the subscription.", cancellationToken);
-                    break;
-                case PaymentEventType.RenewalSucceeded when parsed.SubscriptionId.HasValue && parsed.WorkspaceId.HasValue && parsed.PeriodStart.HasValue && parsed.PeriodEnd.HasValue:
-                    await lifecycle.RenewSubscriptionAsync(parsed.WorkspaceId.Value, parsed.SubscriptionId.Value, parsed.PeriodStart.Value, parsed.PeriodEnd.Value, $"webhook:{paymentEvent.Id}", parsed.Reason ?? "Provider renewal succeeded.", cancellationToken);
-                    break;
+                    retryableSettlementVerificationFailure = false;
+                }
+
+                ValidateProviderEventShape(parsed);
+                if ((parsed.Type is PaymentEventType.PaymentSucceeded or PaymentEventType.RenewalSucceeded) && !settlementVerified)
+                    throw new InvalidOperationException("The payment was not confirmed by an authenticated provider API lookup.");
+                PaymentAttempt? linkedAttempt = null;
+                if (parsed.PaymentAttemptId.HasValue)
+                {
+                    linkedAttempt = await db.PaymentAttempts.SingleOrDefaultAsync(item =>
+                        item.Id == parsed.PaymentAttemptId.Value && item.WorkspaceId == parsed.WorkspaceId!.Value, cancellationToken)
+                        ?? throw new InvalidOperationException("The payment attempt referenced by the event was not found.");
+                    if (!string.Equals(linkedAttempt.Provider, provider.Key, StringComparison.OrdinalIgnoreCase))
+                        throw new InvalidOperationException("The payment attempt provider does not match the webhook provider.");
+                    if (parsed.CheckoutSessionId.HasValue && parsed.CheckoutSessionId != linkedAttempt.CheckoutSessionId)
+                        throw new InvalidOperationException("The checkout session does not match the recorded payment attempt.");
+                    if (parsed.SubscriptionId.HasValue && parsed.SubscriptionId != linkedAttempt.SubscriptionId)
+                        throw new InvalidOperationException("The subscription does not match the recorded payment attempt.");
+                    if ((parsed.Type is PaymentEventType.PaymentFailed or PaymentEventType.RenewalFailed)
+                        && linkedAttempt.SubscriptionId.HasValue
+                        && parsed.SubscriptionId != linkedAttempt.SubscriptionId)
+                        throw new InvalidOperationException("The failed payment event did not bind to the subscription recorded on the payment attempt.");
+                    if ((parsed.Type is PaymentEventType.PaymentFailed or PaymentEventType.RenewalFailed)
+                        && linkedAttempt.SubscriptionId.HasValue
+                        && (string.IsNullOrWhiteSpace(linkedAttempt.ProviderPaymentReference)
+                            || !string.Equals(linkedAttempt.ProviderPaymentReference, parsed.ProviderPaymentReference, StringComparison.Ordinal)))
+                        throw new InvalidOperationException("The failed payment event did not match a previously recorded provider payment reference.");
+                    if (!string.IsNullOrWhiteSpace(parsed.ProviderPaymentReference))
+                    {
+                        var normalizedProviderReference = parsed.ProviderPaymentReference.Trim();
+                        var normalizedProviderKey = linkedAttempt.Provider.ToUpperInvariant();
+                        var referenceAlreadyBound = await db.PaymentAttempts.AsNoTracking().AnyAsync(item =>
+                            item.Id != linkedAttempt.Id
+                            && item.Provider.ToUpper() == normalizedProviderKey
+                            && item.ProviderPaymentReference == normalizedProviderReference, cancellationToken);
+                        if (referenceAlreadyBound)
+                            throw new InvalidOperationException("The provider payment reference is already attached to another payment attempt.");
+                        if (linkedAttempt.ProviderPaymentReference is not null &&
+                            !string.Equals(linkedAttempt.ProviderPaymentReference, normalizedProviderReference, StringComparison.Ordinal))
+                            throw new InvalidOperationException("The provider payment reference does not match the recorded payment attempt.");
+                        linkedAttempt.ProviderPaymentReference ??= normalizedProviderReference;
+                    }
+                }
+
+                if (parsed.Type == PaymentEventType.RenewalSucceeded)
+                {
+                    var workspaceId = parsed.WorkspaceId!.Value;
+                    var subscriptionId = parsed.SubscriptionId!.Value;
+                    var subscription = await db.Subscriptions.SingleOrDefaultAsync(item => item.Id == subscriptionId && item.WorkspaceId == workspaceId, cancellationToken)
+                        ?? throw new InvalidOperationException("The subscription referenced by the renewal event was not found in the workspace.");
+                    if (!string.Equals(subscription.BillingProvider, provider.Key, StringComparison.OrdinalIgnoreCase))
+                        throw new InvalidOperationException("The subscription billing provider does not match the renewal event provider.");
+                    if (string.IsNullOrWhiteSpace(subscription.ProviderSubscriptionReference)
+                        || !string.Equals(subscription.ProviderSubscriptionReference, parsed.ProviderSubscriptionReference, StringComparison.Ordinal))
+                        throw new InvalidOperationException("The provider subscription reference does not match the stored subscription.");
+                    if (linkedAttempt is null || linkedAttempt.Status == PaymentAttemptStatus.Succeeded)
+                        throw new InvalidOperationException("The renewal payment attempt has already been consumed.");
+                    var periodStart = parsed.PeriodStart ?? throw new InvalidOperationException("The renewal event omitted its period start.");
+                    var periodEnd = parsed.PeriodEnd ?? throw new InvalidOperationException("The renewal event omitted its period end.");
+                    if (periodStart != subscription.CurrentPeriodEnd || periodEnd <= periodStart)
+                        throw new InvalidOperationException("The renewal period does not advance from the subscription's current period end.");
+                }
+
+                switch (parsed.Type)
+                {
+                    case PaymentEventType.PaymentSucceeded:
+                    case PaymentEventType.RenewalSucceeded when parsed.PaymentAttemptId.HasValue:
+                        if (linkedAttempt is not null)
+                        {
+                            var workspaceId = parsed.WorkspaceId ?? throw new InvalidOperationException("The payment event did not include a valid workspace reference.");
+                            var paymentAttemptId = parsed.PaymentAttemptId ?? throw new InvalidOperationException("The payment event did not include a valid payment attempt reference.");
+                            if (!parsed.Amount.HasValue || parsed.Amount.Value != linkedAttempt.Amount || !string.Equals(parsed.Currency, linkedAttempt.Currency, StringComparison.OrdinalIgnoreCase))
+                                throw new InvalidOperationException("The provider payment amount or currency does not match the recorded payment attempt.");
+                            var succeededAt = DateTime.UtcNow;
+                            var attemptClaimed = await db.PaymentAttempts
+                                .Where(item => item.Id == paymentAttemptId && item.WorkspaceId == workspaceId
+                                    && item.Provider == linkedAttempt.Provider
+                                    && item.Status != PaymentAttemptStatus.Succeeded
+                                    && item.Status != PaymentAttemptStatus.Failed
+                                    && item.Status != PaymentAttemptStatus.Cancelled
+                                    && item.Status != PaymentAttemptStatus.PartiallyRefunded
+                                    && item.Status != PaymentAttemptStatus.Refunded)
+                                .ExecuteUpdateAsync(updates => updates
+                                    .SetProperty(item => item.Status, PaymentAttemptStatus.Succeeded)
+                                    .SetProperty(item => item.ProviderPaymentReference, parsed.ProviderPaymentReference!.Trim())
+                                    .SetProperty(item => item.FailureCode, (string?)null)
+                                    .SetProperty(item => item.FailureReason, (string?)null)
+                                    .SetProperty(item => item.SucceededAt, succeededAt)
+                                    .SetProperty(item => item.UpdatedAt, succeededAt), cancellationToken);
+                            if (attemptClaimed != 1)
+                                throw new InvalidOperationException("The payment attempt has already been consumed or is terminal.");
+                            await lifecycle.MarkPaymentSucceededAsync(workspaceId, paymentAttemptId, parsed.Reason ?? "Provider payment succeeded.", cancellationToken);
+                            if (parsed.Type == PaymentEventType.RenewalSucceeded && parsed.SubscriptionId is Guid subscriptionId && parsed.PeriodStart is DateTime periodStart && parsed.PeriodEnd is DateTime periodEnd)
+                            {
+                                try
+                                {
+                                    await lifecycle.RenewSubscriptionAsync(workspaceId, subscriptionId, periodStart, periodEnd,
+                                        $"webhook:{paymentEvent.Id}", parsed.Reason ?? "Provider renewal succeeded.", cancellationToken);
+                                }
+                                catch (Exception renewalException) when (renewalException is InvalidOperationException or ArgumentException)
+                                {
+                                    // The event is verified and its correlation checks have passed. Keep it retryable
+                                    // when the local renewal transition fails; never ack an unapplied grant as a duplicate.
+                                    retryableRenewalTransitionFailure = true;
+                                    throw;
+                                }
+                            }
+                        }
+                        break;
+                    case PaymentEventType.PaymentFailed:
+                    case PaymentEventType.RenewalFailed:
+                        if (parsed.WorkspaceId.HasValue && parsed.PaymentAttemptId.HasValue && linkedAttempt is not null)
+                        {
+                            if (linkedAttempt.SubscriptionId.HasValue || parsed.Type == PaymentEventType.RenewalFailed)
+                            {
+                                var workspaceId = parsed.WorkspaceId.Value;
+                                var subscriptionId = parsed.SubscriptionId
+                                    ?? throw new InvalidOperationException("The subscription-linked failure event omitted its subscription reference.");
+                                if (linkedAttempt.SubscriptionId != subscriptionId)
+                                    throw new InvalidOperationException("The failed payment attempt does not belong to the referenced subscription.");
+
+                                var subscription = await db.Subscriptions.SingleOrDefaultAsync(
+                                    item => item.Id == subscriptionId && item.WorkspaceId == workspaceId, cancellationToken)
+                                    ?? throw new InvalidOperationException("The failed payment subscription was not found in the workspace.");
+                                if (!string.Equals(subscription.BillingProvider, provider.Key, StringComparison.OrdinalIgnoreCase))
+                                    throw new InvalidOperationException("The subscription billing provider does not match the failed payment event provider.");
+                                if (string.IsNullOrWhiteSpace(subscription.ProviderSubscriptionReference)
+                                    || !string.Equals(subscription.ProviderSubscriptionReference, parsed.ProviderSubscriptionReference, StringComparison.Ordinal))
+                                    throw new InvalidOperationException("The provider subscription reference does not match the stored subscription.");
+                                if (!parsed.Amount.HasValue || parsed.Amount.Value != linkedAttempt.Amount
+                                    || !string.Equals(parsed.Currency, linkedAttempt.Currency, StringComparison.OrdinalIgnoreCase))
+                                    throw new InvalidOperationException("The failed payment amount or currency does not match the recorded attempt.");
+
+                                var periodStart = parsed.PeriodStart
+                                    ?? throw new InvalidOperationException("The subscription-linked failure event omitted its period start.");
+                                var periodEnd = parsed.PeriodEnd
+                                    ?? throw new InvalidOperationException("The subscription-linked failure event omitted its period end.");
+                                if (periodStart != subscription.CurrentPeriodEnd || periodEnd <= periodStart)
+                                    throw new InvalidOperationException("The failed payment does not correlate to the subscription's currently due renewal period.");
+                            }
+
+                            await lifecycle.MarkPaymentFailedAsync(parsed.WorkspaceId.Value, parsed.PaymentAttemptId.Value,
+                                "PROVIDER_PAYMENT_FAILED", parsed.Reason ?? "Provider payment failed.", cancellationToken);
+                        }
+                        break;
+                    case PaymentEventType.SubscriptionCancelled:
+                        if (parsed.WorkspaceId.HasValue && parsed.SubscriptionId.HasValue)
+                        {
+                            var subscription = await db.Subscriptions.SingleOrDefaultAsync(
+                                item => item.Id == parsed.SubscriptionId.Value && item.WorkspaceId == parsed.WorkspaceId.Value, cancellationToken)
+                                ?? throw new InvalidOperationException("The cancelled subscription was not found in the workspace.");
+                            if (!string.Equals(subscription.BillingProvider, provider.Key, StringComparison.OrdinalIgnoreCase))
+                                throw new InvalidOperationException("The subscription billing provider does not match the cancellation event provider.");
+                            if (string.IsNullOrWhiteSpace(subscription.ProviderSubscriptionReference)
+                                || !string.Equals(subscription.ProviderSubscriptionReference, parsed.ProviderSubscriptionReference, StringComparison.Ordinal))
+                                throw new InvalidOperationException("The provider subscription reference does not match the stored subscription.");
+                            await lifecycle.CancelSubscriptionAsync(parsed.WorkspaceId.Value, parsed.SubscriptionId.Value, parsed.Reason ?? "Provider cancelled the subscription.", cancellationToken);
+                        }
+                        break;
+                }
+
+                paymentEvent.WorkspaceId = parsed.WorkspaceId;
+                paymentEvent.SubscriptionId = parsed.SubscriptionId;
+                paymentEvent.CheckoutSessionId = parsed.CheckoutSessionId;
+                paymentEvent.PaymentAttemptId = parsed.PaymentAttemptId;
+                paymentEvent.FailureReason = null;
+                paymentEvent.Status = PaymentEventStatus.Processed;
+                paymentEvent.ProcessedAt = DateTime.UtcNow;
+                await db.SaveChangesAsync(cancellationToken);
+                if (ownsTransition) await transition!.CommitAsync(cancellationToken);
+                logger.LogInformation("Payment webhook processed. ProviderKey={ProviderKey}; PaymentEventId={PaymentEventId}; EventType={EventType}; Status={Status}", provider.Key, paymentEvent.Id, paymentEvent.Type, paymentEvent.Status);
+                return new(true, false, "WEBHOOK_PROCESSED", paymentEvent.Id, null);
             }
-            paymentEvent.Status = PaymentEventStatus.Processed;
-            paymentEvent.ProcessedAt = DateTime.UtcNow;
-            await db.SaveChangesAsync(cancellationToken);
-            if (ownsTransition) await transition!.CommitAsync(cancellationToken);
-            logger.LogInformation("Payment webhook processed. ProviderKey={ProviderKey}; PaymentEventId={PaymentEventId}; EventType={EventType}; Status={Status}", provider.Key, paymentEvent.Id, paymentEvent.Type, paymentEvent.Status);
-            return new(true, false, "WEBHOOK_PROCESSED", paymentEvent.Id, null);
+            catch (Exception exception) when (exception is InvalidOperationException or ArgumentException)
+            {
+                if (IsPostgresSerializationFailure(exception))
+                    throw;
+
+                await db.Database.CurrentTransaction!.RollbackToSavepointAsync(domainSavepointName, CancellationToken.None);
+                db.ChangeTracker.Clear();
+                var rejectedEvent = await db.PaymentEvents.SingleAsync(item => item.Id == paymentEventId, CancellationToken.None);
+                rejectedEvent.Status = retryableSettlementVerificationFailure || retryableRenewalTransitionFailure
+                    ? PaymentEventStatus.Received
+                    : PaymentEventStatus.Rejected;
+                rejectedEvent.FailureReason = retryableSettlementVerificationFailure
+                    ? "Provider settlement verification could not be completed; the event remains retryable."
+                    : "The verified event was recorded but its domain transition was not applied.";
+                await db.SaveChangesAsync(CancellationToken.None);
+                if (ownsTransition) await transition!.CommitAsync(CancellationToken.None);
+                logger.LogError(exception, "Verified payment webhook could not be applied. EventId={EventId}", paymentEventId);
+                return new(false, false, "WEBHOOK_PROCESSING_FAILED", rejectedEvent.Id, rejectedEvent.FailureReason);
+            }
         }
         catch (Exception exception)
         {
+            var serializationFailure = IsPostgresSerializationFailure(exception);
+            if (!ownsTransition && serializationFailure)
+            {
+                logger.LogWarning(exception,
+                    "Payment webhook hit a PostgreSQL serialization conflict in a caller-owned transaction; the outer transaction must be retried. EventId={EventId}",
+                    paymentEventId);
+                throw;
+            }
+
             if (ownsTransition)
             {
                 await transition!.RollbackAsync(CancellationToken.None);
                 await transition.DisposeAsync();
             }
             else
-                await db.Database.CurrentTransaction!.RollbackToSavepointAsync(savepointName, CancellationToken.None);
+                await db.Database.CurrentTransaction!.RollbackToSavepointAsync(claimSavepointName, CancellationToken.None);
 
-            db.ChangeTracker.Clear();
-            var rejectedEvent = await db.PaymentEvents.SingleAsync(item => item.Id == paymentEvent.Id, CancellationToken.None);
-            rejectedEvent.Status = PaymentEventStatus.Rejected;
-            rejectedEvent.FailureReason = "The verified event was recorded but its domain transition was not applied.";
-            await db.SaveChangesAsync(CancellationToken.None);
-            logger.LogError(exception, "Verified payment webhook could not be applied. EventId={EventId}", paymentEvent.Id);
-            return new(false, false, "WEBHOOK_PROCESSING_FAILED", rejectedEvent.Id, rejectedEvent.FailureReason);
+            if (serializationFailure)
+            {
+                db.ChangeTracker.Clear();
+                var currentEvent = await db.PaymentEvents.AsNoTracking()
+                    .SingleOrDefaultAsync(item => item.Id == paymentEventId, CancellationToken.None);
+                if (currentEvent is null)
+                    return new(false, false, "WEBHOOK_EVENT_UNAVAILABLE", paymentEventId,
+                        "The durable payment event could not be reloaded after a concurrent claim.");
+
+                return ResolveExistingEvent(currentEvent, payloadHash, provider.Key)
+                    ?? new(false, false, "WEBHOOK_EVENT_RETRY_REQUIRED", currentEvent.Id,
+                        "A concurrent delivery left the event pending; retry after reconciliation.");
+            }
+
+            throw;
         }
+    }
+
+    private WebhookProcessingResult? ResolveExistingEvent(PaymentEvent existing, string payloadHash, string providerKey)
+    {
+        if (!string.Equals(existing.PayloadHash, payloadHash, StringComparison.Ordinal))
+        {
+            logger.LogWarning("Provider event reference was reused with a different signed payload. ProviderKey={ProviderKey}; PaymentEventId={PaymentEventId}", providerKey, existing.Id);
+            return new(false, false, "WEBHOOK_EVENT_REFERENCE_CONFLICT", existing.Id, "The provider event reference already exists with a different payload.");
+        }
+
+        if (existing.Status == PaymentEventStatus.Received)
+            return null;
+
+        logger.LogInformation("Duplicate payment webhook ignored. ProviderKey={ProviderKey}; PaymentEventId={PaymentEventId}; Status={Status}", providerKey, existing.Id, existing.Status);
+        return new(true, true, "WEBHOOK_DUPLICATE", existing.Id, "The already-recorded payment event was not applied twice.");
+    }
+
+    private static bool IsPostgresSerializationFailure(Exception exception)
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is Npgsql.PostgresException postgresException
+                && string.Equals(postgresException.SqlState, "40001", StringComparison.Ordinal))
+                return true;
+        }
+
+        return false;
+    }
+
+    private static bool IsMatchingProviderCompletion(
+        PaymentSettlementVerification verification,
+        PaymentAttempt attempt,
+        CheckoutSession? checkoutSession,
+        ProviderPaymentEvent providerEvent)
+    {
+        if (!verification.ProviderReportsCompleted
+            || !verification.ProviderConfirmsFundsSettledOrAvailable
+            || !verification.CompletedAt.HasValue
+            || verification.CompletedAt.Value == default)
+            return false;
+        if (string.IsNullOrWhiteSpace(providerEvent.ProviderPaymentReference)
+            || !string.Equals(verification.ProviderPaymentReference, providerEvent.ProviderPaymentReference, StringComparison.Ordinal)
+            || attempt.ProviderPaymentReference is not null && !string.Equals(attempt.ProviderPaymentReference, verification.ProviderPaymentReference, StringComparison.Ordinal))
+            return false;
+        if (!providerEvent.Amount.HasValue || providerEvent.Amount.Value != attempt.Amount || verification.Amount != attempt.Amount)
+            return false;
+        if (!string.Equals(providerEvent.Currency, attempt.Currency, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(verification.Currency, attempt.Currency, StringComparison.OrdinalIgnoreCase))
+            return false;
+        if (checkoutSession is not null &&
+            (checkoutSession.WorkspaceId != attempt.WorkspaceId ||
+             !string.Equals(checkoutSession.Provider, attempt.Provider, StringComparison.OrdinalIgnoreCase) ||
+             checkoutSession.Amount != attempt.Amount ||
+             !string.Equals(checkoutSession.Currency, attempt.Currency, StringComparison.OrdinalIgnoreCase)))
+            return false;
+        return true;
     }
 
     private static void ValidateProviderEventShape(ProviderPaymentEvent parsed)
@@ -577,21 +962,31 @@ public sealed class PaymentWebhookService(
                 Require(parsed.PaymentAttemptId, "payment attempt");
                 break;
             case PaymentEventType.PaymentFailed:
-            case PaymentEventType.RenewalFailed:
                 Require(parsed.WorkspaceId, "workspace");
                 Require(parsed.PaymentAttemptId, "payment attempt");
+                break;
+            case PaymentEventType.RenewalFailed:
+                Require(parsed.WorkspaceId, "workspace");
+                Require(parsed.SubscriptionId, "subscription");
+                Require(parsed.PaymentAttemptId, "payment attempt");
+                RequireText(parsed.ProviderPaymentReference, "provider payment");
+                RequireText(parsed.ProviderSubscriptionReference, "provider subscription");
+                if (!parsed.PeriodStart.HasValue || !parsed.PeriodEnd.HasValue)
+                    throw new InvalidOperationException("The renewal failure event did not include a complete billing period.");
                 break;
             case PaymentEventType.RenewalSucceeded:
                 Require(parsed.WorkspaceId, "workspace");
                 Require(parsed.SubscriptionId, "subscription");
+                Require(parsed.PaymentAttemptId, "payment attempt");
                 if (!parsed.PeriodStart.HasValue || !parsed.PeriodEnd.HasValue)
                     throw new InvalidOperationException("The renewal event did not include a complete billing period.");
-                if (parsed.PaymentAttemptId.HasValue)
-                    RequireText(parsed.ProviderPaymentReference, "provider payment");
+                RequireText(parsed.ProviderPaymentReference, "provider payment");
+                RequireText(parsed.ProviderSubscriptionReference, "provider subscription");
                 break;
             case PaymentEventType.SubscriptionCancelled:
                 Require(parsed.WorkspaceId, "workspace");
                 Require(parsed.SubscriptionId, "subscription");
+                RequireText(parsed.ProviderSubscriptionReference, "provider subscription");
                 break;
             default:
                 throw new InvalidOperationException("The verified payment event type is not supported by the billing foundation.");
