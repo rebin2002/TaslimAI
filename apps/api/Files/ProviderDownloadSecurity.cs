@@ -54,19 +54,29 @@ public sealed class ProviderUrlPolicy : IProviderUrlPolicy
         {
             var first = bytes[0];
             var second = bytes[1];
+            var third = bytes[2];
             return first == 0
                 || first == 10
                 || first == 127
+                || (first == 100 && second is >= 64 and <= 127)
                 || (first == 169 && second == 254)
                 || (first == 172 && second is >= 16 and <= 31)
+                || (first == 192 && second == 0 && third == 0)
+                || (first == 192 && second == 0 && third == 2)
                 || (first == 192 && second == 168)
+                || (first == 198 && second is >= 18 and <= 19)
+                || (first == 198 && second == 51 && third == 100)
+                || (first == 203 && second == 0 && third == 113)
                 || first >= 224;
         }
 
-        // IPv6 unique-local (fc00::/7), link-local (fe80::/10), multicast,
-        // documentation/unspecified ranges, and loopback are not fetch targets.
+        // IPv6 unique-local (fc00::/7), link-local/site-local (fe80::/10 and
+        // fec0::/10), multicast, and documentation (2001:db8::/32) are not
+        // fetch targets.
         return (bytes[0] & 0xFE) == 0xFC
             || (bytes[0] == 0xFE && (bytes[1] & 0xC0) == 0x80)
+            || (bytes[0] == 0xFE && (bytes[1] & 0xC0) == 0xC0)
+            || (bytes[0] == 0x20 && bytes[1] == 0x01 && bytes[2] == 0x0D && bytes[3] == 0xB8)
             || bytes[0] >= 0xFC;
     }
 }

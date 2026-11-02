@@ -89,6 +89,7 @@ public sealed class MovieProductionReferencesTests : IClassFixture<TaslimApiFact
         Assert.Contains(package.Props, item => item.PropId == prop.Id);
         Assert.NotNull(package.Keyframe);
         Assert.Equal(MovieProductionStages.ApprovedKeyframe, package.Keyframe!.Stage);
+        Assert.Contains(package.Warnings, item => item.Code == "approved_keyframe_blocking_asset_missing" && item.Severity == "attention");
         Assert.Equal(64, package.Keyframe.ContentHash.Length);
         Assert.Equal(64, package.PackageHash.Length);
         Assert.All(package.Characters, item => Assert.Equal(64, item.Provenance.SourceHash.Length));
@@ -96,6 +97,11 @@ public sealed class MovieProductionReferencesTests : IClassFixture<TaslimApiFact
         Assert.DoesNotContain("provider", json, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("model", json, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("prompt", json, StringComparison.OrdinalIgnoreCase);
+
+        var preflightResponse = await client.GetAsync($"/api/movie-studio/shots/{shot.Id}/production/preflight?targetResolution=1080p&qualityTier=Standard");
+        Assert.Equal(HttpStatusCode.OK, preflightResponse.StatusCode);
+        var preflight = (await preflightResponse.Content.ReadFromJsonAsync<MovieProductionPreflightDto>())!;
+        Assert.Contains(preflight.Checks, item => item.Key == MovieProductionPreflightCheckKeys.ReferencePackage && !item.Satisfied);
 
         using var outsider = factory.CreateClient();
         await Register(outsider, "Reference Package Outsider");

@@ -310,7 +310,7 @@ public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWork
         Assert.Equal(HttpStatusCode.Forbidden, forbiddenReview.StatusCode);
     }
     [Fact]
-    public async Task Production_render_is_explicit_and_does_not_collapse_into_a_movie_take()
+    public async Task Production_render_requires_a_renderable_approved_keyframe_and_does_not_create_a_movie_take()
     {
         using var client = factory.CreateClient();
         var auth = await Register(client);
@@ -334,13 +334,14 @@ public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWork
         var motion = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post, $"/api/movie-studio/shots/{shot.Id}/production/motion-preview", new { sourceVersionId = approvedKeyframe.Id });
         var approvedMotion = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post, $"/api/movie-studio/production/versions/{motion.Id}/review", new { approve = true });
 
-        var render = await SendWithCsrf<MovieProductionRenderResponse>(client, HttpMethod.Post, $"/api/movie-studio/shots/{shot.Id}/production/render", new { sourceVersionId = approvedMotion.Id, label = "Explicit render" });
-        Assert.Equal(render.Job.Id, render.Version.GenerationJobId);
-        Assert.NotEqual(Guid.Empty, render.ClipId);
+        using var renderResponse = await SendWithCsrf(client, HttpMethod.Post, $"/api/movie-studio/shots/{shot.Id}/production/render", new { sourceVersionId = approvedMotion.Id, label = "Explicit render" });
+        Assert.Equal(HttpStatusCode.BadRequest, renderResponse.StatusCode);
+        using var renderError = JsonDocument.Parse(await renderResponse.Content.ReadAsStringAsync());
+        Assert.Equal("PRODUCTION_PREFLIGHT_REQUIRED", renderError.RootElement.GetProperty("error").GetProperty("code").GetString());
 
         var production = await client.GetFromJsonAsync<MovieShotProductionDto>($"/api/movie-studio/shots/{shot.Id}/production");
         Assert.NotNull(production);
-        Assert.Contains(production!.Versions, item => item.Stage == MovieProductionStages.ProductionRender && item.GenerationJobId == render.Job.Id);
+        Assert.DoesNotContain(production!.Versions, item => item.Stage == MovieProductionStages.ProductionRender);
         Assert.Empty(production.Takes);
         using var scope = factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
