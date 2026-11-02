@@ -6,6 +6,7 @@ using System.Text.Json;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Taslim.Api.Autopilot;
@@ -328,6 +329,86 @@ public sealed class ManusBridgeCompletionContractTests : IClassFixture<TaslimApi
         }
     }
 
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    [InlineData(5)]
+    [InlineData(6)]
+    [InlineData(7)]
+    [InlineData(8)]
+    [InlineData(9)]
+    [InlineData(10)]
+    [InlineData(11)]
+    [InlineData(12)]
+    [InlineData(13)]
+    [InlineData(14)]
+    [InlineData(15)]
+    [InlineData(16)]
+    [InlineData(17)]
+    [InlineData(18)]
+    [InlineData(19)]
+    [InlineData(20)]
+    public async Task Concurrent_first_deliveries_with_same_event_id_and_different_signed_bodies_reject_the_conflict(int attempt)
+    {
+        var previousSecret = Environment.GetEnvironmentVariable(SecretEnvironmentVariable);
+        Environment.SetEnvironmentVariable(SecretEnvironmentVariable, TestSecret);
+        var source = "completion-bridge-initial-race-contract-test";
+        var eventId = $"evt-initial-conflict-race-{attempt}-{Guid.NewGuid():N}";
+        var waveA = $"wave-initial-race-a-{Guid.NewGuid():N}";
+        var taskA = $"task-initial-race-a-{Guid.NewGuid():N}";
+        var waveB = $"wave-initial-race-b-{Guid.NewGuid():N}";
+        var taskB = $"task-initial-race-b-{Guid.NewGuid():N}";
+        try
+        {
+            using var factory = new DisposableSqliteFactory();
+            using (var setupScope = factory.Services.CreateScope())
+                setupScope.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+
+            using var client = factory.CreateClient();
+            var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture);
+            var payloadA = JsonSerializer.Serialize(new { waveKey = waveA, taskId = taskA, outcome = "succeeded" });
+            var payloadB = JsonSerializer.Serialize(new { waveKey = waveB, taskId = taskB, outcome = "failed" });
+            factory.InsertBarrier.ArmForNextTwoEventSaves();
+
+            var submissions = new[]
+            {
+                (Payload: payloadA, Signature: Sign(TestSecret, timestamp, payloadA)),
+                (Payload: payloadB, Signature: Sign(TestSecret, timestamp, payloadB)),
+            };
+            var responses = await Task.WhenAll(submissions.Select(async submission =>
+            {
+                using var request = CreateSignedRequest(source, eventId, timestamp, submission.Signature, submission.Payload);
+                using var response = await client.SendAsync(request);
+                return (response.StatusCode, Body: await response.Content.ReadAsStringAsync());
+            }));
+
+            using var scope = factory.Services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var stored = Assert.Single(await db.AutopilotEvents.Where(item =>
+                item.SourceSystem == source && item.ExternalEventId == eventId).ToListAsync());
+            Assert.Contains(stored.SignalJson, new[] { payloadA, payloadB });
+            Assert.Equal(AutopilotEventStatuses.Queued, stored.Status);
+            Assert.True(stored.SignatureVerified);
+            Assert.True(stored.ReplayProtected);
+            Assert.Empty(await db.AutopilotRuns.Where(item => item.WaveKey == waveA || item.WaveKey == waveB).ToListAsync());
+            Assert.Empty(await db.AutopilotWaveTasks.Where(item =>
+                item.WaveKey == waveA || item.WaveKey == waveB || item.TaskId == taskA || item.TaskId == taskB).ToListAsync());
+            Assert.Empty(await db.AutopilotGateEvaluations.Where(item => item.WaveKey == waveA || item.WaveKey == waveB).ToListAsync());
+
+            var outcomeSummary = string.Join(" | ", responses.Select(item => $"{(int)item.StatusCode} {item.StatusCode}: {item.Body}"));
+            Assert.True(responses.Count(item => item.StatusCode == HttpStatusCode.Accepted) == 1
+                && responses.Count(item => item.StatusCode == HttpStatusCode.BadRequest) == 1
+                && !responses.Any(item => item.StatusCode == HttpStatusCode.OK),
+                $"Attempt {attempt}: expected one accepted receipt and a conflict rejection, never a duplicate acknowledgement; interceptor arrivals={factory.InsertBarrier.ArrivalCount}; outcomes={outcomeSummary}");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(SecretEnvironmentVariable, previousSecret);
+        }
+    }
+
     private static HttpRequestMessage CreateSignedRequest(
         string source,
         string eventId,
@@ -369,6 +450,7 @@ public sealed class ManusBridgeCompletionContractTests : IClassFixture<TaslimApi
     private sealed class DisposableSqliteFactory : WebApplicationFactory<Program>
     {
         private readonly string databasePath = Path.Combine(Path.GetTempPath(), $"taslim-completion-contract-{Guid.NewGuid():N}.sqlite");
+        public FirstTwoEventInsertsBarrier InsertBarrier { get; } = new();
 
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
@@ -377,7 +459,7 @@ public sealed class ManusBridgeCompletionContractTests : IClassFixture<TaslimApi
             {
                 services.RemoveAll<DbContextOptions<TaslimDbContext>>();
                 services.AddDbContext<TaslimDbContext>(options =>
-                    options.UseSqlite($"Data Source={databasePath};Default Timeout=30"));
+                    options.UseSqlite($"Data Source={databasePath};Default Timeout=30").AddInterceptors(InsertBarrier));
             });
         }
 
@@ -386,5 +468,53 @@ public sealed class ManusBridgeCompletionContractTests : IClassFixture<TaslimApi
             base.Dispose(disposing);
             if (disposing && File.Exists(databasePath)) File.Delete(databasePath);
         }
+    }
+
+    private sealed class FirstTwoEventInsertsBarrier : SaveChangesInterceptor
+    {
+        private TaskCompletionSource<bool> gate = NewGate();
+        private int arrivalCount;
+        private int armed;
+
+        public int ArrivalCount => Volatile.Read(ref arrivalCount);
+
+        public void ArmForNextTwoEventSaves()
+        {
+            Interlocked.Exchange(ref arrivalCount, 0);
+            gate = NewGate();
+            Volatile.Write(ref armed, 1);
+        }
+
+        public override async ValueTask<InterceptionResult<int>> SavingChangesAsync(
+            DbContextEventData eventData,
+            InterceptionResult<int> result,
+            CancellationToken cancellationToken = default)
+        {
+            var context = eventData.Context;
+            if (Volatile.Read(ref armed) == 0
+                || context is null
+                || !context.ChangeTracker.Entries<AutopilotEvent>().Any(entry => entry.State == EntityState.Added))
+            {
+                return result;
+            }
+
+            var arrival = Interlocked.Increment(ref arrivalCount);
+            if (arrival <= 2)
+            {
+                var currentGate = Volatile.Read(ref gate);
+                if (arrival == 2)
+                {
+                    Volatile.Write(ref armed, 0);
+                    currentGate.TrySetResult(true);
+                }
+
+                await currentGate.Task.WaitAsync(TimeSpan.FromSeconds(15), cancellationToken);
+            }
+
+            return result;
+        }
+
+        private static TaskCompletionSource<bool> NewGate() =>
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 }
