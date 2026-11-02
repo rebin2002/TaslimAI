@@ -298,6 +298,27 @@ public sealed class WaylPaymentProviderTests
         Assert.Equal(WaylPaymentState.Pending, accepted.State);
     }
 
+    [Fact]
+    public void Missing_and_malformed_signatures_are_rejected_without_consuming_event_id()
+    {
+        var handler = new StubHttpMessageHandler((_, _) => throw new Xunit.Sdk.XunitException("Webhook verification must not make HTTP calls."));
+        using var httpClient = new HttpClient(handler);
+        var provider = NewProvider(httpClient, new FakePriceCalculator(10_000));
+        var body = Encoding.UTF8.GetBytes("{\"id\":\"evt-missing-malformed\",\"event\":\"order.updated\",\"referenceId\":\"taslim-test-order-001\",\"paymentStatus\":\"Pending\",\"total\":10000}");
+
+        foreach (var signature in new string?[] { null, string.Empty, new string('z', 64) })
+        {
+            Assert.False(provider.VerifyWebhookSignature(body, signature));
+            Assert.Throws<InvalidOperationException>(() => provider.ReceiveSignedWebhook(body, signature));
+        }
+
+        var accepted = provider.ReceiveSignedWebhook(body, Sign(body));
+
+        Assert.Equal(WaylReplayDisposition.FirstSeen, accepted.ReplayDisposition);
+        Assert.Equal(WaylPaymentState.Pending, accepted.State);
+        Assert.Empty(handler.Requests);
+    }
+
     [Theory]
     [InlineData("Requested", WaylPaymentState.RefundRequested)]
     [InlineData("Refunded", WaylPaymentState.Refunded)]
