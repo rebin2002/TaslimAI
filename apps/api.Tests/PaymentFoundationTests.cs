@@ -2,6 +2,7 @@ using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using Npgsql;
 using Taslim.Api.Billing;
 using Taslim.Api.Domain;
 using Taslim.Api.Notifications;
@@ -768,6 +769,305 @@ public sealed class PaymentFoundationTests
     }
 
     [Fact]
+    public async Task Signed_cross_workspace_renewals_fail_closed_and_are_audited_without_account_mutation()
+    {
+        await using var testDatabase = await DisposablePaymentTestDatabase.CreateAsync();
+        var workspaceA = NewWorkspace();
+        var workspaceB = NewWorkspace();
+        var plan = NewTestPlan("cross");
+        var subscriptionA = NewSubscription(workspaceA.Id, plan.Id);
+        subscriptionA.BillingProvider = "fake";
+        subscriptionA.ProviderSubscriptionReference = "sub-cross-a";
+        var subscriptionB = NewSubscription(workspaceB.Id, plan.Id);
+        subscriptionB.BillingProvider = "fake";
+        subscriptionB.ProviderSubscriptionReference = "sub-cross-b";
+        var subscriptionAPeriodStart = subscriptionA.CurrentPeriodEnd;
+        var subscriptionAPeriodEnd = subscriptionAPeriodStart.AddMonths(1);
+        PaymentAttempt attemptA;
+        PaymentAttempt attemptB;
+
+        await using (var setupDb = new TaslimDbContext(testDatabase.Options))
+        {
+            setupDb.Workspaces.AddRange(workspaceA, workspaceB);
+            setupDb.Plans.Add(plan);
+            setupDb.Subscriptions.AddRange(subscriptionA, subscriptionB);
+            await setupDb.SaveChangesAsync();
+            var lifecycle = NewLifecycle(setupDb);
+            attemptA = await lifecycle.RecordPaymentAttemptAsync(
+                workspaceA.Id, "fake", "attempt:cross-workspace-a", 9, "USD", subscriptionId: subscriptionA.Id);
+            attemptB = await lifecycle.RecordPaymentAttemptAsync(
+                workspaceB.Id, "fake", "attempt:cross-workspace-b", 9, "USD", subscriptionId: subscriptionB.Id);
+        }
+
+        var scenarios = new[]
+        {
+            new CrossWorkspaceRenewalScenario("evt-cross-attempt", attemptA, subscriptionA),
+            new CrossWorkspaceRenewalScenario("evt-cross-subscription", attemptB, subscriptionA),
+        };
+        var verifier = new FakePaymentSettlementVerifier();
+        var providers = new List<FakePaymentProvider>();
+        foreach (var scenario in scenarios)
+        {
+            var rawPayload = $"{{\"event\":\"{scenario.EventReference}\",\"workspaceId\":\"{workspaceB.Id:D}\",\"subscriptionId\":\"{scenario.Subscription.Id:D}\",\"paymentAttemptId\":\"{scenario.Attempt.Id:D}\"}}";
+            var providerEvent = new ProviderPaymentEvent(
+                scenario.EventReference, PaymentEventType.RenewalSucceeded, workspaceB.Id, scenario.Subscription.Id,
+                null, scenario.Attempt.Id, $"pay-{scenario.EventReference}", scenario.Attempt.Amount, scenario.Attempt.Currency,
+                DateTime.UtcNow, "Synthetic signed cross-workspace renewal.", scenario.Subscription.ProviderSubscriptionReference,
+                subscriptionAPeriodStart, subscriptionAPeriodEnd, false);
+            var provider = new FakePaymentProvider(providerEvent);
+            providers.Add(provider);
+            await using var db = new TaslimDbContext(testDatabase.Options);
+            var service = new PaymentWebhookService(
+                db, [provider], NewLifecycle(db),
+                Options.Create(new BillingOptions { CustomerChargingEnabled = true, Provider = "fake" }),
+                NullLogger<PaymentWebhookService>.Instance, [verifier]);
+
+            var result = await service.ProcessAsync("fake", rawPayload, "valid");
+
+            Assert.False(result.Accepted);
+            Assert.False(result.Duplicate);
+            Assert.Equal("PAYMENT_REFERENCE_PENDING", result.Code);
+            Assert.Equal(1, provider.SignatureVerifier.CallCount);
+            Assert.Equal(1, provider.ParseCallCount);
+            Assert.Equal(0, verifier.CallCount);
+        }
+
+        await using var auditDb = new TaslimDbContext(testDatabase.Options);
+        var auditEvents = await auditDb.PaymentEvents.AsNoTracking().OrderBy(item => item.ProviderEventReference).ToListAsync();
+        Assert.Equal(2, auditEvents.Count);
+        foreach (var scenario in scenarios)
+        {
+            var rawPayload = $"{{\"event\":\"{scenario.EventReference}\",\"workspaceId\":\"{workspaceB.Id:D}\",\"subscriptionId\":\"{scenario.Subscription.Id:D}\",\"paymentAttemptId\":\"{scenario.Attempt.Id:D}\"}}";
+            var saved = Assert.Single(auditEvents, item => item.ProviderEventReference == scenario.EventReference);
+            Assert.Equal(PaymentEventStatus.Received, saved.Status);
+            Assert.True(saved.SignatureVerified);
+            Assert.Null(saved.WorkspaceId);
+            Assert.Null(saved.SubscriptionId);
+            Assert.Null(saved.PaymentAttemptId);
+            Assert.Null(saved.CheckoutSessionId);
+            Assert.Equal(rawPayload, saved.PayloadJson);
+            Assert.False(string.IsNullOrWhiteSpace(saved.PayloadHash));
+            Assert.Null(saved.ProcessedAt);
+        }
+
+        var savedAttempts = await auditDb.PaymentAttempts.AsNoTracking().OrderBy(item => item.Id).ToListAsync();
+        Assert.Equal(2, savedAttempts.Count);
+        Assert.All(savedAttempts, item =>
+        {
+            Assert.Equal(PaymentAttemptStatus.Created, item.Status);
+            Assert.Null(item.ProviderPaymentReference);
+            Assert.Null(item.CreditLedgerEntryId);
+            Assert.Null(item.SucceededAt);
+        });
+        var savedSubscriptions = await auditDb.Subscriptions.AsNoTracking().OrderBy(item => item.Id).ToListAsync();
+        Assert.Equal(2, savedSubscriptions.Count);
+        Assert.All(savedSubscriptions, item => Assert.Equal(SubscriptionStatus.Active, item.Status));
+        Assert.Equal(subscriptionAPeriodStart, savedSubscriptions.Single(item => item.Id == subscriptionA.Id).CurrentPeriodEnd);
+        Assert.Empty(await auditDb.BillingPeriods.AsNoTracking().ToListAsync());
+        Assert.Empty(await auditDb.CreditEntitlements.AsNoTracking().ToListAsync());
+        Assert.Empty(await auditDb.CreditLedgerEntries.AsNoTracking().ToListAsync());
+        Assert.Empty(await auditDb.PaymentRefunds.AsNoTracking().ToListAsync());
+        Assert.Empty(await auditDb.SubscriptionLifecycleEvents.AsNoTracking().ToListAsync());
+        Assert.Equal(2, providers.Count);
+        Assert.Equal(0, verifier.CallCount);
+    }
+
+    [Fact]
+    public async Task Verifier_timeout_releases_claim_and_same_event_retry_grants_exactly_once()
+    {
+        await using var testDatabase = await DisposablePaymentTestDatabase.CreateAsync();
+        var workspace = NewWorkspace();
+        var plan = NewTestPlan("timeout");
+        var subscription = NewSubscription(workspace.Id, plan.Id);
+        subscription.BillingProvider = "fake";
+        subscription.ProviderSubscriptionReference = "sub-timeout-retry";
+        var periodStart = subscription.CurrentPeriodEnd;
+        var periodEnd = periodStart.AddMonths(1);
+        var occurredAt = DateTime.UtcNow;
+        const string eventReference = "evt-verifier-timeout-retry";
+        const string signature = "valid";
+        PaymentAttempt attempt;
+        await using (var setupDb = new TaslimDbContext(testDatabase.Options))
+        {
+            setupDb.Workspaces.Add(workspace);
+            setupDb.Plans.Add(plan);
+            setupDb.Subscriptions.Add(subscription);
+            await setupDb.SaveChangesAsync();
+            attempt = await NewLifecycle(setupDb).RecordPaymentAttemptAsync(
+                workspace.Id, "fake", "attempt:verifier-timeout-retry", 9, "USD", subscriptionId: subscription.Id);
+        }
+
+        var rawPayload = $"{{\"event\":\"{eventReference}\",\"workspaceId\":\"{workspace.Id:D}\",\"subscriptionId\":\"{subscription.Id:D}\",\"paymentAttemptId\":\"{attempt.Id:D}\"}}";
+        var providerEvent = new ProviderPaymentEvent(
+            eventReference, PaymentEventType.RenewalSucceeded, workspace.Id, subscription.Id, null, attempt.Id,
+            "pay-verifier-timeout-retry", 9, "USD", occurredAt, "Synthetic renewal succeeded.",
+            "sub-timeout-retry", periodStart, periodEnd, false);
+        var verifier = new CancelFirstThenSuccessfulPaymentSettlementVerifier();
+        var settings = Options.Create(new BillingOptions { CustomerChargingEnabled = true, Provider = "fake" });
+        var firstProvider = new FakePaymentProvider(providerEvent);
+        FakePaymentProvider? concurrentProvider = null;
+        WebhookProcessingResult? concurrentResult = null;
+        Task<WebhookProcessingResult>? firstTask = null;
+        Task<WebhookProcessingResult>? concurrentTask = null;
+        using (var cancellation = new CancellationTokenSource())
+        {
+            using var concurrentCancellation = new CancellationTokenSource();
+            await using var firstDb = new TaslimDbContext(testDatabase.Options);
+            await using var concurrentDb = new TaslimDbContext(testDatabase.Options);
+            var firstService = new PaymentWebhookService(
+                firstDb, [firstProvider], NewLifecycle(firstDb), settings,
+                NullLogger<PaymentWebhookService>.Instance, [verifier]);
+            try
+            {
+                var firstRequest = firstService.ProcessAsync("fake", rawPayload, signature, cancellation.Token);
+                firstTask = firstRequest;
+                await verifier.FirstCallStarted.WaitAsync(TimeSpan.FromSeconds(10));
+                Assert.Equal(1, verifier.CallCount);
+
+                await using (var heldDb = new TaslimDbContext(testDatabase.Options))
+                {
+                    var visibleEvent = await heldDb.PaymentEvents.AsNoTracking().SingleAsync(item => item.ProviderEventReference == eventReference);
+                    Assert.Equal(PaymentEventStatus.Received, visibleEvent.Status);
+                    Assert.Null(visibleEvent.WorkspaceId);
+                    Assert.Empty(await heldDb.BillingPeriods.AsNoTracking().ToListAsync());
+                    Assert.Empty(await heldDb.CreditEntitlements.AsNoTracking().ToListAsync());
+                    Assert.Empty(await heldDb.CreditLedgerEntries.AsNoTracking().ToListAsync());
+                }
+
+                if (testDatabase.UsesPostgres)
+                {
+                    var concurrentParsed = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                    concurrentProvider = new FakePaymentProvider(providerEvent, concurrentParsed);
+                    var concurrentService = new PaymentWebhookService(
+                        concurrentDb, [concurrentProvider], NewLifecycle(concurrentDb), settings,
+                        NullLogger<PaymentWebhookService>.Instance, [verifier]);
+                    var concurrentRequest = concurrentService.ProcessAsync("fake", rawPayload, signature, concurrentCancellation.Token);
+                    concurrentTask = concurrentRequest;
+                    await concurrentParsed.Task.WaitAsync(TimeSpan.FromSeconds(10));
+                    await testDatabase.WaitForPostgresLockWaitAsync(TimeSpan.FromSeconds(10));
+                    Assert.False(concurrentRequest.IsCompleted,
+                        "A same-event delivery should remain blocked on the verifier-held claim.");
+                    Assert.Equal(1, verifier.CallCount);
+                }
+
+                cancellation.CancelAfter(TimeSpan.FromMilliseconds(150));
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+                    await firstRequest.WaitAsync(TimeSpan.FromSeconds(10)));
+                if (concurrentTask is not null)
+                    concurrentResult = await concurrentTask.WaitAsync(TimeSpan.FromSeconds(10));
+            }
+            finally
+            {
+                cancellation.Cancel();
+                concurrentCancellation.Cancel();
+                await ObserveTaskCompletionAsync(firstTask);
+                await ObserveTaskCompletionAsync(concurrentTask);
+            }
+        }
+        Assert.Equal(1, firstProvider.SignatureVerifier.CallCount);
+        Assert.Equal(1, firstProvider.ParseCallCount);
+        if (concurrentProvider is not null)
+        {
+            Assert.Equal(1, concurrentProvider.SignatureVerifier.CallCount);
+            Assert.Equal(1, concurrentProvider.ParseCallCount);
+        }
+        if (concurrentResult is { Accepted: true })
+        {
+            Assert.False(concurrentResult.Duplicate);
+            Assert.Equal("WEBHOOK_PROCESSED", concurrentResult.Code);
+        }
+        else if (concurrentResult is not null)
+        {
+            Assert.Equal("WEBHOOK_EVENT_RETRY_REQUIRED", concurrentResult.Code);
+        }
+
+        if (concurrentResult is null || !concurrentResult.Accepted)
+        {
+            await using var afterCancelDb = new TaslimDbContext(testDatabase.Options);
+            var received = await afterCancelDb.PaymentEvents.AsNoTracking().SingleAsync(item => item.ProviderEventReference == eventReference);
+            Assert.Equal(PaymentEventStatus.Received, received.Status);
+            Assert.True(received.SignatureVerified);
+            Assert.Null(received.WorkspaceId);
+            Assert.Null(received.SubscriptionId);
+            Assert.Null(received.PaymentAttemptId);
+            Assert.Null(received.CheckoutSessionId);
+            Assert.Equal(rawPayload, received.PayloadJson);
+            Assert.Null(received.ProcessedAt);
+            var unchangedAttempt = await afterCancelDb.PaymentAttempts.AsNoTracking().SingleAsync(item => item.Id == attempt.Id);
+            Assert.Equal(PaymentAttemptStatus.Created, unchangedAttempt.Status);
+            Assert.Null(unchangedAttempt.ProviderPaymentReference);
+            var unchangedSubscription = await afterCancelDb.Subscriptions.AsNoTracking().SingleAsync(item => item.Id == subscription.Id);
+            Assert.Equal(SubscriptionStatus.Active, unchangedSubscription.Status);
+            Assert.Equal(periodStart, unchangedSubscription.CurrentPeriodEnd);
+            Assert.Empty(await afterCancelDb.BillingPeriods.AsNoTracking().ToListAsync());
+            Assert.Empty(await afterCancelDb.CreditEntitlements.AsNoTracking().ToListAsync());
+            Assert.Empty(await afterCancelDb.CreditLedgerEntries.AsNoTracking().ToListAsync());
+            Assert.Empty(await afterCancelDb.SubscriptionLifecycleEvents.AsNoTracking().ToListAsync());
+        }
+
+        var retryProvider = new FakePaymentProvider(providerEvent);
+        WebhookProcessingResult retry;
+        await using (var retryDb = new TaslimDbContext(testDatabase.Options))
+        {
+            var retryService = new PaymentWebhookService(
+                retryDb, [retryProvider], NewLifecycle(retryDb), settings,
+                NullLogger<PaymentWebhookService>.Instance, [verifier]);
+            retry = await retryService.ProcessAsync("fake", rawPayload, signature)
+                .WaitAsync(TimeSpan.FromSeconds(10));
+        }
+        Assert.True(retry.Accepted);
+        var concurrentReplayProcessed = concurrentResult?.Accepted == true;
+        Assert.Equal(concurrentReplayProcessed, retry.Duplicate);
+        Assert.Equal(concurrentReplayProcessed ? "WEBHOOK_DUPLICATE" : "WEBHOOK_PROCESSED", retry.Code);
+        Assert.Equal(2, verifier.CallCount);
+        Assert.Equal(1, retryProvider.SignatureVerifier.CallCount);
+        Assert.Equal(1, retryProvider.ParseCallCount);
+
+        await using (var duplicateDb = new TaslimDbContext(testDatabase.Options))
+        {
+            var duplicateProvider = new FakePaymentProvider(providerEvent);
+            var duplicateService = new PaymentWebhookService(
+                duplicateDb, [duplicateProvider], NewLifecycle(duplicateDb), settings,
+                NullLogger<PaymentWebhookService>.Instance, [verifier]);
+            var duplicate = await duplicateService.ProcessAsync("fake", rawPayload, signature)
+                .WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.True(duplicate.Accepted);
+            Assert.True(duplicate.Duplicate);
+            Assert.Equal("WEBHOOK_DUPLICATE", duplicate.Code);
+            Assert.Equal(2, verifier.CallCount);
+        }
+
+        await using var finalDb = new TaslimDbContext(testDatabase.Options);
+        var processedEvent = await finalDb.PaymentEvents.AsNoTracking().SingleAsync(item => item.ProviderEventReference == eventReference);
+        Assert.Equal(PaymentEventStatus.Processed, processedEvent.Status);
+        Assert.Equal(workspace.Id, processedEvent.WorkspaceId);
+        Assert.Equal(subscription.Id, processedEvent.SubscriptionId);
+        Assert.Equal(attempt.Id, processedEvent.PaymentAttemptId);
+        Assert.Null(processedEvent.FailureReason);
+        var succeededAttempt = await finalDb.PaymentAttempts.AsNoTracking().SingleAsync(item => item.Id == attempt.Id);
+        Assert.Equal(PaymentAttemptStatus.Succeeded, succeededAttempt.Status);
+        Assert.Equal("pay-verifier-timeout-retry", succeededAttempt.ProviderPaymentReference);
+        Assert.Equal(periodEnd, (await finalDb.Subscriptions.AsNoTracking().SingleAsync(item => item.Id == subscription.Id)).CurrentPeriodEnd);
+        var billingPeriod = Assert.Single(await finalDb.BillingPeriods.AsNoTracking().ToListAsync());
+        Assert.Equal(subscription.Id, billingPeriod.SubscriptionId);
+        Assert.Equal(periodStart, billingPeriod.StartsAt);
+        Assert.Equal(periodEnd, billingPeriod.EndsAt);
+        Assert.Equal(100L, billingPeriod.IncludedCredits);
+        var entitlement = Assert.Single(await finalDb.CreditEntitlements.AsNoTracking().ToListAsync());
+        Assert.Equal(workspace.Id, entitlement.WorkspaceId);
+        Assert.Equal(billingPeriod.Id, entitlement.BillingPeriodId);
+        Assert.Equal(CreditEntitlementType.IncludedMonthly, entitlement.Type);
+        Assert.Equal(100L, entitlement.GrantedCredits);
+        var grant = Assert.Single(await finalDb.CreditLedgerEntries.AsNoTracking().ToListAsync());
+        Assert.Equal(workspace.Id, grant.WorkspaceId);
+        Assert.Equal(entitlement.Id, grant.CreditEntitlementId);
+        Assert.Equal(CreditLedgerEntryType.Grant, grant.Type);
+        Assert.Equal(100L, grant.Amount);
+        Assert.Single(await finalDb.SubscriptionLifecycleEvents.AsNoTracking().ToListAsync());
+        Assert.Empty(await finalDb.PaymentRefunds.AsNoTracking().ToListAsync());
+    }
+
+    [Fact]
     public async Task Pending_webhook_is_durable_and_retries_after_provider_API_reports_completion()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
@@ -1412,7 +1712,182 @@ public sealed class PaymentFoundationTests
         };
     }
 
-    private sealed class FakePaymentProvider(ProviderPaymentEvent paymentEvent) : IPaymentProvider
+    private static Plan NewTestPlan(string prefix) => new()
+    {
+        Id = Guid.NewGuid(), Code = $"{prefix}-{Guid.NewGuid():N}", Name = "Synthetic payment test plan",
+        MonthlyCreditAllowance = 100, Currency = "USD", IsActive = true, SortOrder = 99,
+        CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+    };
+
+    private static async Task ObserveTaskCompletionAsync(Task? task)
+    {
+        if (task is null) return;
+        try
+        {
+            await task.WaitAsync(TimeSpan.FromSeconds(10));
+        }
+        catch
+        {
+            // The test's primary assertion owns the failure; drain/cancel tasks here to avoid leakage.
+        }
+    }
+
+    private sealed record CrossWorkspaceRenewalScenario(
+        string EventReference,
+        PaymentAttempt Attempt,
+        Subscription Subscription);
+
+    private sealed class DisposablePaymentTestDatabase : IAsyncDisposable
+    {
+        private readonly string? sqlitePath;
+        private readonly string? postgresBaseConnectionString;
+        private readonly string? postgresSchema;
+        private readonly string? postgresApplicationName;
+
+        private DisposablePaymentTestDatabase(
+            DbContextOptions<TaslimDbContext> options,
+            string? sqlitePath,
+            string? postgresBaseConnectionString,
+            string? postgresSchema,
+            bool usesPostgres,
+            string? postgresApplicationName)
+        {
+            Options = options;
+            this.sqlitePath = sqlitePath;
+            this.postgresBaseConnectionString = postgresBaseConnectionString;
+            this.postgresSchema = postgresSchema;
+            this.postgresApplicationName = postgresApplicationName;
+            UsesPostgres = usesPostgres;
+        }
+
+        public DbContextOptions<TaslimDbContext> Options { get; }
+        public bool UsesPostgres { get; }
+
+        public static async Task<DisposablePaymentTestDatabase> CreateAsync()
+        {
+            var postgresTestConnection = Environment.GetEnvironmentVariable("PAYMENT_FANOUT_TEST_POSTGRES");
+            if (string.IsNullOrWhiteSpace(postgresTestConnection))
+            {
+                var databasePath = Path.Combine(Path.GetTempPath(), $"payment-webhook-followup-{Guid.NewGuid():N}.db");
+                var sqliteConnectionString = new SqliteConnectionStringBuilder
+                {
+                    DataSource = databasePath,
+                    Pooling = false,
+                    DefaultTimeout = 30,
+                }.ToString();
+                var sqliteOptions = new DbContextOptionsBuilder<TaslimDbContext>()
+                    .UseSqlite(sqliteConnectionString)
+                    .Options;
+                try
+                {
+                    await using var db = new TaslimDbContext(sqliteOptions);
+                    await db.Database.EnsureCreatedAsync();
+                    return new DisposablePaymentTestDatabase(sqliteOptions, databasePath, null, null, false, null);
+                }
+                catch
+                {
+                    DeleteSqliteFiles(databasePath);
+                    throw;
+                }
+            }
+
+            var baseBuilder = new NpgsqlConnectionStringBuilder(postgresTestConnection);
+            if (!string.Equals(baseBuilder.Host, "127.0.0.1", StringComparison.OrdinalIgnoreCase)
+                || baseBuilder.Port != 55433
+                || !string.Equals(baseBuilder.Database, "taslim_tests", StringComparison.Ordinal)
+                || !string.Equals(baseBuilder.Username, "taslim", StringComparison.Ordinal)
+                || !string.IsNullOrWhiteSpace(baseBuilder.Password))
+                throw new InvalidOperationException(
+                    "PAYMENT_FANOUT_TEST_POSTGRES must target the passwordless disposable 127.0.0.1:55433/taslim_tests test cluster; the value is not logged.");
+
+            baseBuilder.Pooling = false;
+            baseBuilder.Timeout = 5;
+            baseBuilder.CommandTimeout = 5;
+            var adminConnectionString = baseBuilder.ConnectionString;
+            var schema = $"payment_followup_{Guid.NewGuid():N}";
+            var applicationName = $"p255_{Guid.NewGuid():N}";
+            await using (var adminConnection = new NpgsqlConnection(adminConnectionString))
+            {
+                await adminConnection.OpenAsync();
+                await using var createSchema = adminConnection.CreateCommand();
+                createSchema.CommandText = $"CREATE SCHEMA \"{schema}\"";
+                await createSchema.ExecuteNonQueryAsync();
+            }
+
+            var scopedBuilder = new NpgsqlConnectionStringBuilder(adminConnectionString)
+            {
+                SearchPath = schema,
+                ApplicationName = applicationName,
+                Pooling = false,
+                Timeout = 15,
+                CommandTimeout = 30,
+            };
+            var postgresOptions = new DbContextOptionsBuilder<TaslimDbContext>()
+                .UseNpgsql(scopedBuilder.ConnectionString)
+                .Options;
+            try
+            {
+                await using var db = new TaslimDbContext(postgresOptions);
+                await db.Database.EnsureCreatedAsync();
+                return new DisposablePaymentTestDatabase(postgresOptions, null, adminConnectionString, schema, true, applicationName);
+            }
+            catch
+            {
+                await DropPostgresSchemaAsync(adminConnectionString, schema);
+                throw;
+            }
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            if (postgresBaseConnectionString is not null && postgresSchema is not null)
+                await DropPostgresSchemaAsync(postgresBaseConnectionString, postgresSchema);
+            if (sqlitePath is not null)
+                DeleteSqliteFiles(sqlitePath);
+        }
+
+        public async Task WaitForPostgresLockWaitAsync(TimeSpan timeout)
+        {
+            if (!UsesPostgres || postgresBaseConnectionString is null || postgresApplicationName is null)
+                throw new InvalidOperationException("The PostgreSQL lock-wait observer requires the dedicated disposable test fixture.");
+
+            var deadline = DateTime.UtcNow + timeout;
+            await using var connection = new NpgsqlConnection(postgresBaseConnectionString);
+            await connection.OpenAsync();
+            while (DateTime.UtcNow < deadline)
+            {
+                await using var command = connection.CreateCommand();
+                command.CommandText = "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND application_name = @applicationName AND state = 'active' AND wait_event_type = 'Lock' AND query ILIKE '%PaymentEvents%')";
+                command.Parameters.AddWithValue("applicationName", postgresApplicationName);
+                if (Equals(await command.ExecuteScalarAsync(), true)) return;
+                await Task.Delay(TimeSpan.FromMilliseconds(25));
+            }
+
+            throw new TimeoutException("The same-event request did not enter a PostgreSQL PaymentEvents lock wait within the bounded interval.");
+        }
+
+        private static async Task DropPostgresSchemaAsync(string connectionString, string schema)
+        {
+            await using var connection = new NpgsqlConnection(connectionString);
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = $"DROP SCHEMA IF EXISTS \"{schema}\" CASCADE";
+            await command.ExecuteNonQueryAsync();
+        }
+
+        private static void DeleteSqliteFiles(string databasePath)
+        {
+            foreach (var suffix in new[] { "", "-wal", "-shm" })
+            {
+                var path = databasePath + suffix;
+                if (File.Exists(path)) File.Delete(path);
+            }
+        }
+    }
+
+    private sealed class FakePaymentProvider(
+        ProviderPaymentEvent paymentEvent,
+        TaskCompletionSource<bool>? parseSignal = null) : IPaymentProvider
     {
         public string Key => "fake";
         public AcceptingSignatureVerifier SignatureVerifier { get; } = new();
@@ -1429,6 +1904,7 @@ public sealed class PaymentFoundationTests
         public ProviderPaymentEvent ParseWebhook(string rawPayload)
         {
             ParseCallCount++;
+            parseSignal?.TrySetResult(true);
             return paymentEvent;
         }
     }
@@ -1481,6 +1957,39 @@ public sealed class PaymentFoundationTests
             Interlocked.Increment(ref callCount);
             firstCall.TrySetResult(true);
             await released.Task.WaitAsync(TimeSpan.FromSeconds(30), cancellationToken);
+            return new PaymentSettlementVerification(
+                ProviderReportsCompleted: true,
+                ProviderPaymentReference: providerEvent.ProviderPaymentReference,
+                Amount: attempt.Amount,
+                Currency: attempt.Currency,
+                CompletedAt: DateTime.UtcNow,
+                ProviderConfirmsFundsSettledOrAvailable: true);
+        }
+    }
+
+    private sealed class CancelFirstThenSuccessfulPaymentSettlementVerifier : IPaymentSettlementVerifier
+    {
+        private readonly TaskCompletionSource<bool> firstCallStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int callCount;
+
+        public string ProviderKey => "fake";
+        public int CallCount => Volatile.Read(ref callCount);
+        public Task FirstCallStarted => firstCallStarted.Task;
+
+        public async Task<PaymentSettlementVerification> VerifyAsync(
+            PaymentAttempt attempt,
+            CheckoutSession? checkoutSession,
+            ProviderPaymentEvent providerEvent,
+            CancellationToken cancellationToken = default)
+        {
+            var currentCall = Interlocked.Increment(ref callCount);
+            if (currentCall == 1)
+            {
+                firstCallStarted.TrySetResult(true);
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
             return new PaymentSettlementVerification(
                 ProviderReportsCompleted: true,
                 ProviderPaymentReference: providerEvent.ProviderPaymentReference,
