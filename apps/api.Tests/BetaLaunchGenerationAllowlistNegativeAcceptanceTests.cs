@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
@@ -12,6 +13,7 @@ using Taslim.Api.Generation;
 using Taslim.Api.Persistence;
 using Taslim.Api.Usage;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace Taslim.Api.Tests;
 
@@ -38,18 +40,15 @@ public sealed class BetaLaunchGenerationAllowlistNegativeAcceptanceTests : IClas
         using var client = factory.CreateClient();
         var auth = await Register(client, $"beta-negative-{jobType}-{Guid.NewGuid():N}@example.com");
         var idempotencyKey = $"beta-negative-{jobType}-{Guid.NewGuid():N}";
-
         var response = await SendWithCsrf(client, HttpMethod.Post, "/api/generation/jobs", new
         {
             workspaceId = auth.PersonalWorkspace.Id,
             jobType,
             inputJson = "{}",
         }, idempotencyKey);
-
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
         var body = await response.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal("BETA_MODULE_NOT_AVAILABLE", body.GetProperty("error").GetProperty("code").GetString());
-
         using var scope = factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
         Assert.False(await db.GenerationJobs.AsNoTracking().AnyAsync(item => item.CreatedByUserId == auth.User.Id && item.IdempotencyKey == idempotencyKey));
@@ -61,7 +60,6 @@ public sealed class BetaLaunchGenerationAllowlistNegativeAcceptanceTests : IClas
     {
         using var client = factory.CreateClient();
         var auth = await Register(client, $"beta-controls-{Guid.NewGuid():N}@example.com");
-
         foreach (var jobType in new[] { GenerationJobTypes.DocumentGenerate, GenerationJobTypes.PresentationGenerate })
         {
             var response = await SendWithCsrf(client, HttpMethod.Post, "/api/generation/jobs", new
@@ -70,7 +68,6 @@ public sealed class BetaLaunchGenerationAllowlistNegativeAcceptanceTests : IClas
                 jobType,
                 inputJson = "{}",
             }, $"beta-control-{jobType}-{Guid.NewGuid():N}");
-
             Assert.Equal(HttpStatusCode.Created, response.StatusCode);
         }
     }
@@ -115,31 +112,43 @@ public sealed class BetaLaunchReplayFactory : GenerationJobsApiFactory
     }
 }
 
+public sealed record BetaLaunchReplayObservation(int HandlerCalls, int BudgetBeginCalls, int ProviderCalls, int UsageTransactionCount, int ProviderAttemptCount);
+
 public sealed class BetaLaunchReplayProbe
 {
-    public int HandlerCalls => Volatile.Read(ref handlerCalls);
-    public int BudgetBeginCalls => Volatile.Read(ref budgetBeginCalls);
-    public int ProviderCalls => Volatile.Read(ref providerCalls);
+    private readonly ConcurrentDictionary<Guid, ReplayCounters> counters = new();
 
-    private int handlerCalls;
-    private int budgetBeginCalls;
-    private int providerCalls;
+    public void RecordHandler(Guid jobId) => counters.GetOrAdd(jobId, _ => new()).HandlerCalls++;
+    public void RecordBudgetBegin(Guid jobId) => counters.GetOrAdd(jobId, _ => new()).BudgetBeginCalls++;
+    public void RecordProvider(Guid jobId) => counters.GetOrAdd(jobId, _ => new()).ProviderCalls++;
 
-    public void RecordHandler() => Interlocked.Increment(ref handlerCalls);
-    public void RecordBudgetBegin() => Interlocked.Increment(ref budgetBeginCalls);
-    public void RecordProvider() => Interlocked.Increment(ref providerCalls);
+    public BetaLaunchReplayObservation Snapshot(Guid jobId)
+    {
+        var value = counters.TryGetValue(jobId, out var current) ? current : new ReplayCounters();
+        return new(value.HandlerCalls, value.BudgetBeginCalls, value.ProviderCalls, 0, 0);
+    }
+
+    private sealed class ReplayCounters
+    {
+        public int HandlerCalls;
+        public int BudgetBeginCalls;
+        public int ProviderCalls;
+    }
 }
 
 public sealed class BetaLaunchReplayHandler(BetaLaunchReplayProbe probe) : IGenerationJobHandler
 {
     public bool CanHandle(string jobType) =>
         string.Equals(jobType, GenerationJobTypes.SystemTest, StringComparison.OrdinalIgnoreCase)
-        || string.Equals(jobType, GenerationJobTypes.ResearchGenerate, StringComparison.OrdinalIgnoreCase);
+        || string.Equals(jobType, GenerationJobTypes.ResearchGenerate, StringComparison.OrdinalIgnoreCase)
+        || string.Equals(jobType, GenerationJobTypes.SocialGenerate, StringComparison.OrdinalIgnoreCase)
+        || string.Equals(jobType, GenerationJobTypes.VoiceGenerate, StringComparison.OrdinalIgnoreCase)
+        || string.Equals(jobType, GenerationJobTypes.MusicGenerate, StringComparison.OrdinalIgnoreCase);
 
     public Task<GenerationHandlerResult> ExecuteAsync(GenerationJob job, IProgress<int> progress, CancellationToken cancellationToken)
     {
-        probe.RecordHandler();
-        probe.RecordProvider();
+        probe.RecordHandler(job.Id);
+        probe.RecordProvider(job.Id);
         progress.Report(100);
         return Task.FromResult(new GenerationHandlerResult(
             "{\"message\":\"synthetic provider-free replay\"}",
@@ -152,7 +161,7 @@ public sealed class BetaLaunchReplayBudget(BetaLaunchReplayProbe probe) : IGener
 {
     public Task<GenerationProviderAttempt> BeginAttemptAsync(GenerationJob job, string provider, string? model, GenerationCostEstimate estimate, CancellationToken cancellationToken = default)
     {
-        probe.RecordBudgetBegin();
+        probe.RecordBudgetBegin(job.Id);
         return Task.FromResult(new GenerationProviderAttempt
         {
             Id = Guid.NewGuid(),
@@ -174,49 +183,87 @@ public sealed class BetaLaunchReplayBudget(BetaLaunchReplayProbe probe) : IGener
 public sealed class BetaLaunchWorkerReplayTests : IClassFixture<BetaLaunchReplayFactory>
 {
     private readonly BetaLaunchReplayFactory factory;
+    private readonly ITestOutputHelper output;
 
-    public BetaLaunchWorkerReplayTests(BetaLaunchReplayFactory factory)
+    public BetaLaunchWorkerReplayTests(BetaLaunchReplayFactory factory, ITestOutputHelper output)
     {
         this.factory = factory;
+        this.output = output;
         using var scope = factory.Services.CreateScope();
         scope.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
     }
 
-    [Fact]
-    public async Task Queued_excluded_job_is_rejected_before_attempt_handler_provider_or_billable_usage()
+    [Theory]
+    [InlineData(GenerationJobTypes.ResearchGenerate)]
+    [InlineData(GenerationJobTypes.SocialGenerate)]
+    [InlineData(GenerationJobTypes.VoiceGenerate)]
+    [InlineData(GenerationJobTypes.MusicGenerate)]
+    public async Task Queued_and_recovered_excluded_jobs_are_rejected_before_attempt_handler_provider_or_billable_usage(string excludedJobType)
     {
         using var client = factory.CreateClient();
-        var auth = await Register(client, $"beta-replay-{Guid.NewGuid():N}@example.com");
-        var excludedId = Guid.NewGuid();
+        var auth = await Register(client, $"beta-replay-{excludedJobType}-{Guid.NewGuid():N}@example.com");
+        var queuedExcludedId = Guid.NewGuid();
+        var recoveredExcludedId = Guid.NewGuid();
         var controlId = Guid.NewGuid();
-
+        var now = DateTime.UtcNow;
         using (var scope = factory.Services.CreateScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
-            var now = DateTime.UtcNow;
             db.GenerationJobs.AddRange(
-                NewQueuedJob(excludedId, auth, GenerationJobTypes.ResearchGenerate, now),
-                NewQueuedJob(controlId, auth, GenerationJobTypes.SystemTest, now.AddMilliseconds(1)));
+                NewQueuedJob(queuedExcludedId, auth, excludedJobType, now),
+                NewExpiredRunningJob(recoveredExcludedId, auth, excludedJobType, now.AddMilliseconds(1)),
+                NewQueuedJob(controlId, auth, GenerationJobTypes.SystemTest, now.AddMilliseconds(2)));
             await db.SaveChangesAsync();
         }
 
-        var excluded = await WaitForTerminal(client, excludedId);
+        var queuedExcluded = await WaitForTerminal(client, queuedExcludedId);
+        var recoveredExcluded = await WaitForTerminal(client, recoveredExcludedId);
         var control = await WaitForTerminal(client, controlId);
 
-        Assert.Equal("Failed", excluded.Status);
-        Assert.Equal("BETA_MODULE_NOT_AVAILABLE", excluded.ErrorCode);
+        // Capture all per-job side effects before asserting terminal status or error code.
+        var queuedObservation = await Observe(queuedExcludedId);
+        var recoveredObservation = await Observe(recoveredExcludedId);
+        var controlObservation = await Observe(controlId);
+        output.WriteLine($"Excluded queued {queuedExcludedId}: {Format(queuedObservation)}");
+        output.WriteLine($"Excluded recovered {recoveredExcludedId}: {Format(recoveredObservation)}");
+        output.WriteLine($"Positive system.test control {controlId}: {Format(controlObservation)}");
+
+        AssertNoSideEffects(queuedObservation);
+        AssertNoSideEffects(recoveredObservation);
+        Assert.Equal(1, controlObservation.HandlerCalls);
+        Assert.Equal(1, controlObservation.BudgetBeginCalls);
+        Assert.Equal(1, controlObservation.ProviderCalls);
+
+        Assert.Equal("Failed", queuedExcluded.Status);
+        Assert.Equal("BETA_MODULE_NOT_AVAILABLE", queuedExcluded.ErrorCode);
+        Assert.Equal("Failed", recoveredExcluded.Status);
+        Assert.Equal("BETA_MODULE_NOT_AVAILABLE", recoveredExcluded.ErrorCode);
         Assert.Equal("Failed", control.Status);
         Assert.Equal(GenerationJobErrorCodes.NoBillableAsset, control.ErrorCode);
+    }
 
+    private async Task<BetaLaunchReplayObservation> Observe(Guid jobId)
+    {
         var probe = factory.Services.GetRequiredService<BetaLaunchReplayProbe>();
-        Assert.Equal(1, probe.HandlerCalls);
-        Assert.Equal(1, probe.BudgetBeginCalls);
-        Assert.Equal(1, probe.ProviderCalls);
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        return probe.Snapshot(jobId) with
+        {
+            UsageTransactionCount = await db.UsageTransactions.AsNoTracking().CountAsync(item => item.GenerationJobId == jobId),
+            ProviderAttemptCount = await db.GenerationProviderAttempts.AsNoTracking().CountAsync(item => item.GenerationJobId == jobId),
+        };
+    }
 
-        using var verifyScope = factory.Services.CreateScope();
-        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
-        Assert.False(await verifyDb.UsageTransactions.AsNoTracking().AnyAsync(item => item.GenerationJobId == excludedId));
-        Assert.False(await verifyDb.GenerationProviderAttempts.AsNoTracking().AnyAsync(item => item.GenerationJobId == excludedId));
+    private static string Format(BetaLaunchReplayObservation observation) =>
+        $"handler={observation.HandlerCalls}, budgetBegin={observation.BudgetBeginCalls}, provider={observation.ProviderCalls}, usageTransactions={observation.UsageTransactionCount}, providerAttempts={observation.ProviderAttemptCount}";
+
+    private static void AssertNoSideEffects(BetaLaunchReplayObservation observation)
+    {
+        Assert.Equal(0, observation.HandlerCalls);
+        Assert.Equal(0, observation.BudgetBeginCalls);
+        Assert.Equal(0, observation.ProviderCalls);
+        Assert.Equal(0, observation.UsageTransactionCount);
+        Assert.Equal(0, observation.ProviderAttemptCount);
     }
 
     private static GenerationJob NewQueuedJob(Guid id, AuthResponse auth, string jobType, DateTime queuedAt) => new()
@@ -229,6 +276,21 @@ public sealed class BetaLaunchWorkerReplayTests : IClassFixture<BetaLaunchReplay
         InputJson = "{}",
         CreatedAt = queuedAt,
         QueuedAt = queuedAt,
+        RequestId = $"generation:{id:N}",
+    };
+
+    private static GenerationJob NewExpiredRunningJob(Guid id, AuthResponse auth, string jobType, DateTime createdAt) => new()
+    {
+        Id = id,
+        WorkspaceId = auth.PersonalWorkspace.Id,
+        CreatedByUserId = auth.User.Id,
+        JobType = jobType,
+        Status = GenerationJobStatus.Running,
+        InputJson = "{}",
+        CreatedAt = createdAt,
+        StartedAt = createdAt,
+        ClaimExpiresAt = DateTime.UtcNow.AddMinutes(-1),
+        ConcurrencyToken = Guid.NewGuid(),
         RequestId = $"generation:{id:N}",
     };
 
@@ -247,7 +309,7 @@ public sealed class BetaLaunchWorkerReplayTests : IClassFixture<BetaLaunchReplay
 
     private static async Task<GenerationJobDto> WaitForTerminal(HttpClient client, Guid id)
     {
-        for (var attempt = 0; attempt < 120; attempt++)
+        for (var attempt = 0; attempt < 160; attempt++)
         {
             var job = await client.GetFromJsonAsync<GenerationJobDto>($"/api/generation/jobs/{id}");
             Assert.NotNull(job);
