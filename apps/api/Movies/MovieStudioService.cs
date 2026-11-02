@@ -1747,29 +1747,33 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         var maximumContinuityPromptCharacters = provider.SceneClipPromptMaxCharacters is { } currentPromptLimit
             ? (int)Math.Max(0L, (long)currentPromptLimit - minimumCreativePromptLength)
             : (int?)null;
-        MovieCharacterContinuitySnapshotDto continuitySnapshot;
-        try
+        await using (var snapshotAndClipTransaction = await db.Database.BeginTransactionAsync(cancellationToken))
         {
-            continuitySnapshot = await continuity.BuildSnapshotForTargetAsync(
-                movie.Id,
-                scene.Id,
-                shot?.Id,
-                persist: true,
-                cancellationToken: cancellationToken,
-                maximumPromptCharacters: maximumContinuityPromptCharacters);
+            MovieCharacterContinuitySnapshotDto continuitySnapshot;
+            try
+            {
+                continuitySnapshot = await continuity.BuildSnapshotForTargetAsync(
+                    movie.Id,
+                    scene.Id,
+                    shot?.Id,
+                    persist: true,
+                    cancellationToken: cancellationToken,
+                    maximumPromptCharacters: maximumContinuityPromptCharacters);
+            }
+            catch (MovieContinuityPromptLimitException)
+            {
+                throw new GenerationJobValidationException(
+                    "MOVIE_CLIP_PROMPT_UNSUPPORTED",
+                    "The clip's character-continuity context exceeds this provider's prompt limit. Shorten the continuity details before generating.");
+            }
+            clip.ContinuitySnapshotJson = continuitySnapshot.SnapshotJson;
+            clip.ContinuitySnapshotId = continuitySnapshot.SnapshotId;
+            clip.ContinuitySnapshotVersion = continuitySnapshot.Version;
+            clip.ContinuitySnapshotHash = continuitySnapshot.SnapshotHash;
+            db.MovieClips.Add(clip);
+            await db.SaveChangesAsync(cancellationToken);
+            await snapshotAndClipTransaction.CommitAsync(cancellationToken);
         }
-        catch (MovieContinuityPromptLimitException)
-        {
-            throw new GenerationJobValidationException(
-                "MOVIE_CLIP_PROMPT_UNSUPPORTED",
-                "The clip's character-continuity context exceeds this provider's prompt limit. Shorten the continuity details before generating.");
-        }
-        clip.ContinuitySnapshotJson = continuitySnapshot.SnapshotJson;
-        clip.ContinuitySnapshotId = continuitySnapshot.SnapshotId;
-        clip.ContinuitySnapshotVersion = continuitySnapshot.Version;
-        clip.ContinuitySnapshotHash = continuitySnapshot.SnapshotHash;
-        db.MovieClips.Add(clip);
-        await db.SaveChangesAsync(cancellationToken);
         GenerationJob job;
         try
         {
@@ -1825,8 +1829,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                 // A competing, different request may commit its job after our
                 // initial key lookup. Do not strand this request's persisted
                 // speculative clip when its idempotency fingerprint conflicts.
-                db.MovieClips.Remove(clip);
-                await db.SaveChangesAsync(CancellationToken.None);
+                await DiscardSpeculativeClipAsync(clip, CancellationToken.None);
                 throw;
             }
             var canonicalClip = await db.MovieClips.SingleOrDefaultAsync(item => item.Id == canonicalInput.MovieClipId && item.MovieProjectId == movie.Id, cancellationToken);
@@ -1835,24 +1838,21 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                 // The winning job's original clip may have been removed while
                 // this request was being queued. Do not strand our speculative
                 // clip without a valid canonical generation target.
-                db.MovieClips.Remove(clip);
-                await db.SaveChangesAsync(CancellationToken.None);
+                await DiscardSpeculativeClipAsync(clip, CancellationToken.None);
                 throw new MovieStudioValidationException("The idempotent generation target is no longer available.");
             }
             if (!MovieStudioIdempotency.IsCompatibleClipLink(canonicalClip.GenerationJobId, canonicalJob.Id))
             {
                 // The job-creation collision path must respect the same clip/job
                 // identity boundary as the earlier job-first replay path.
-                db.MovieClips.Remove(clip);
-                await db.SaveChangesAsync(CancellationToken.None);
+                await DiscardSpeculativeClipAsync(clip, CancellationToken.None);
                 throw new GenerationJobValidationException(
                     "IDEMPOTENCY_KEY_REUSED",
                     "The idempotent generation clip is linked to a different job.");
             }
             if (canonicalClip.GenerationJobId is null)
                 canonicalClip.GenerationJobId = canonicalJob.Id;
-            db.MovieClips.Remove(clip);
-            await db.SaveChangesAsync(cancellationToken);
+            await DiscardSpeculativeClipAsync(clip, cancellationToken);
             return new MovieStudioGenerationResponse(
                 await GetAsync(userId, movie.Id, cancellationToken) ?? throw new InvalidOperationException("Movie project disappeared."),
                 GenerationJobContractMapper.ToMovieDto(canonicalJob),
@@ -1862,8 +1862,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         {
             // CreateAsync commits the job, usage reservation, and queue entry in
             // one transaction. Any failure leaves this speculative clip unused.
-            db.MovieClips.Remove(clip);
-            await db.SaveChangesAsync(CancellationToken.None);
+            await DiscardSpeculativeClipAsync(clip, CancellationToken.None);
             throw;
         }
         // The clip is persisted before the job because the job validator needs a
@@ -1875,8 +1874,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         {
             if (!await LegacyContinuityMatchesAsync(job, movie, scene, shot, cancellationToken))
             {
-                db.MovieClips.Remove(clip);
-                await db.SaveChangesAsync(CancellationToken.None);
+                await DiscardSpeculativeClipAsync(clip, CancellationToken.None);
                 throw new GenerationJobValidationException("IDEMPOTENCY_KEY_REUSED",
                     "This idempotency key was already used for a different generation request.");
             }
@@ -1888,16 +1886,14 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                 // The winning job's original clip may have been removed while
                 // this request was being queued. Do not strand our speculative
                 // clip without a valid canonical generation target.
-                db.MovieClips.Remove(clip);
-                await db.SaveChangesAsync(CancellationToken.None);
+                await DiscardSpeculativeClipAsync(clip, CancellationToken.None);
                 throw new MovieStudioValidationException("The idempotent generation target is no longer available.");
             }
             if (!MovieStudioIdempotency.IsCompatibleClipLink(canonicalClip.GenerationJobId, job.Id))
             {
                 // A successful idempotent job response must not silently pair
                 // another generation job's clip with this job's usage reservation.
-                db.MovieClips.Remove(clip);
-                await db.SaveChangesAsync(CancellationToken.None);
+                await DiscardSpeculativeClipAsync(clip, CancellationToken.None);
                 throw new GenerationJobValidationException(
                     "IDEMPOTENCY_KEY_REUSED",
                     "The idempotent generation clip is linked to a different job.");
@@ -1907,8 +1903,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                 canonicalClip.GenerationJobId = job.Id;
                 canonicalClip.UpdatedAt = DateTime.UtcNow;
             }
-            db.MovieClips.Remove(clip);
-            await db.SaveChangesAsync(cancellationToken);
+            await DiscardSpeculativeClipAsync(clip, cancellationToken);
             return new MovieStudioGenerationResponse(
                 await GetAsync(userId, movie.Id, cancellationToken) ?? throw new InvalidOperationException("Movie project disappeared."),
                 GenerationJobContractMapper.ToMovieDto(job),
@@ -1920,6 +1915,36 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         clip.GenerationJobId = job.Id;
         await db.SaveChangesAsync(cancellationToken);
         return new MovieStudioGenerationResponse(await GetAsync(userId, movie.Id, cancellationToken) ?? throw new InvalidOperationException("Movie project disappeared."), GenerationJobContractMapper.ToMovieDto(job), clip.Id);
+    }
+
+    private async Task DiscardSpeculativeClipAsync(MovieClip clip, CancellationToken cancellationToken)
+    {
+        await using var transaction = await db.Database.BeginTransactionAsync(
+            System.Data.IsolationLevel.Serializable, cancellationToken);
+        if (clip.ContinuitySnapshotId is { } snapshotId)
+        {
+            // Snapshots can also be created independently or retained by a
+            // production version. Remove only this speculative clip's snapshot
+            // when no other durable Movie record still references it.
+            var referencedByAnotherClip = await db.MovieClips.AsNoTracking()
+                .AnyAsync(item => item.Id != clip.Id && item.ContinuitySnapshotId == snapshotId, cancellationToken);
+            var referencedByProductionVersion = await db.MovieProductionVersions.AsNoTracking()
+                .AnyAsync(item => item.ContinuitySnapshotId == snapshotId, cancellationToken);
+            var referencedByProductionKit = await db.MovieProductionKitReferences.AsNoTracking()
+                .AnyAsync(item => item.ReferenceType == MovieProductionKitReferenceTypes.ContinuitySnapshot
+                    && item.SourceId == snapshotId, cancellationToken);
+            if (!referencedByAnotherClip && !referencedByProductionVersion && !referencedByProductionKit)
+            {
+                var snapshot = await db.MovieCharacterContinuitySnapshots
+                    .SingleOrDefaultAsync(item => item.Id == snapshotId, cancellationToken);
+                if (snapshot is not null)
+                    db.MovieCharacterContinuitySnapshots.Remove(snapshot);
+            }
+        }
+
+        db.MovieClips.Remove(clip);
+        await db.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
     }
 
     // Legacy scene/shot clips persist the character-continuity snapshot in

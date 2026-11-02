@@ -111,9 +111,58 @@ public sealed class MovieClipCollisionGenerationJobService(
         inner.CancelAsync(userId, jobId, cancellationToken);
 }
 
+public sealed class MovieContinuitySnapshotFailureGate
+{
+    private int failAfterNextPersist;
+    private int failuresTriggered;
+
+    public bool FailureTriggered => Volatile.Read(ref failuresTriggered) > 0;
+
+    public void FailAfterNextPersist() => Interlocked.Exchange(ref failAfterNextPersist, 1);
+
+    public void ThrowIfArmed()
+    {
+        if (Interlocked.Exchange(ref failAfterNextPersist, 0) == 1)
+        {
+            Interlocked.Increment(ref failuresTriggered);
+            throw new MovieContinuityPromptLimitException();
+        }
+    }
+}
+
+public sealed class MovieContinuitySnapshotFailureService(
+    IMovieCharacterContinuityService inner,
+    MovieContinuitySnapshotFailureGate failureGate) : IMovieCharacterContinuityService
+{
+    public Task<MovieCharacterContinuityProjectionDto?> ProjectAsync(
+        Guid userId, Guid movieProjectId, Guid? sceneId, Guid? shotId,
+        CancellationToken cancellationToken = default) =>
+        inner.ProjectAsync(userId, movieProjectId, sceneId, shotId, cancellationToken);
+
+    public Task<MovieCharacterContinuitySnapshotDto?> BuildSnapshotAsync(
+        Guid userId, Guid movieProjectId, Guid? sceneId, Guid? shotId,
+        CancellationToken cancellationToken = default) =>
+        inner.BuildSnapshotAsync(userId, movieProjectId, sceneId, shotId, cancellationToken);
+
+    public Task<MovieCharacterContinuitySnapshotDto?> GetSnapshotAsync(
+        Guid userId, Guid snapshotId, CancellationToken cancellationToken = default) =>
+        inner.GetSnapshotAsync(userId, snapshotId, cancellationToken);
+
+    public async Task<MovieCharacterContinuitySnapshotDto> BuildSnapshotForTargetAsync(
+        Guid movieProjectId, Guid? sceneId, Guid? shotId, bool persist,
+        CancellationToken cancellationToken = default, int? maximumPromptCharacters = null)
+    {
+        var snapshot = await inner.BuildSnapshotForTargetAsync(
+            movieProjectId, sceneId, shotId, persist, cancellationToken, maximumPromptCharacters);
+        if (persist) failureGate.ThrowIfArmed();
+        return snapshot;
+    }
+}
+
 public sealed class MovieClipCollisionApiFactory : MovieOperationalApiFactory
 {
     public MovieClipCreationCollisionGate Gate { get; } = new();
+    public MovieContinuitySnapshotFailureGate SnapshotFailure { get; } = new();
     protected override bool WorkerEnabled => false;
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
@@ -129,6 +178,12 @@ public sealed class MovieClipCollisionApiFactory : MovieOperationalApiFactory
                 new MovieClipCollisionGenerationJobService(
                     ActivatorUtilities.CreateInstance<GenerationJobService>(sp),
                     sp.GetRequiredService<MovieClipCreationCollisionGate>()));
+            services.RemoveAll<IMovieCharacterContinuityService>();
+            services.AddSingleton(SnapshotFailure);
+            services.AddScoped<IMovieCharacterContinuityService>(sp =>
+                new MovieContinuitySnapshotFailureService(
+                    ActivatorUtilities.CreateInstance<MovieCharacterContinuityService>(sp),
+                    sp.GetRequiredService<MovieContinuitySnapshotFailureGate>()));
         });
     }
 }
@@ -158,6 +213,23 @@ public sealed class MovieStudioConcurrentIdempotencyTests : IClassFixture<MovieC
         var conflictingRequest = await MovieOperationalFixtures.BuildConfirmedMovieGenerationRequestAsync(
             factory, path, new { title = "Different title on same key" });
 
+        List<Guid> snapshotsBefore;
+        int usageBefore;
+        int jobsBefore;
+        int clipsBefore;
+        using (var baselineScope = factory.Services.CreateScope())
+        {
+            var db = baselineScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            snapshotsBefore = await db.MovieCharacterContinuitySnapshots.AsNoTracking()
+                .Where(item => item.MovieProjectId == fixture.Project.Project.Id)
+                .Select(item => item.Id).ToListAsync();
+            usageBefore = await db.UsageTransactions.CountAsync();
+            jobsBefore = await db.GenerationJobs.CountAsync();
+            clipsBefore = await db.MovieClips.CountAsync(
+                item => item.MovieProjectId == fixture.Project.Project.Id);
+        }
+        var providerCallsBefore = factory.Calls.Calls(FakeProviderKind.Movie);
+
         // The canonical request stops after persisting its speculative clip,
         // before the generation job exists. Only then does the conflicting
         // request enter, so both definitely cross the lookup-to-create gap.
@@ -173,26 +245,132 @@ public sealed class MovieStudioConcurrentIdempotencyTests : IClassFixture<MovieC
             .WaitAsync(TimeSpan.FromSeconds(90));
         using var canonical = await canonicalTask;
         using var conflicting = await conflictingTask;
+        var canonicalBody = await canonical.Content.ReadAsStringAsync();
+        var conflictingBody = await conflicting.Content.ReadAsStringAsync();
         Assert.Equal(System.Net.HttpStatusCode.Accepted, canonical.StatusCode);
         Assert.Equal(System.Net.HttpStatusCode.BadRequest, conflicting.StatusCode);
-        Assert.Contains("IDEMPOTENCY_KEY_REUSED",
-            await conflicting.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Contains("IDEMPOTENCY_KEY_REUSED", conflictingBody, StringComparison.Ordinal);
 
-        using var scope = factory.Services.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
-        var job = Assert.Single(await db.GenerationJobs.AsNoTracking()
-            .Where(item => item.IdempotencyKey == key).ToListAsync());
-        Assert.Equal("Canonical race clip", job.Title);
-        var canonicalClip = Assert.Single(await db.MovieClips.AsNoTracking()
-            .Where(item => item.MovieProjectId == fixture.Project.Project.Id).ToListAsync());
-        Assert.Equal(job.Id, canonicalClip.GenerationJobId);
+        using var canonicalJson = JsonDocument.Parse(canonicalBody);
+        var responseJobId = canonicalJson.RootElement.GetProperty("job").GetProperty("id").GetGuid();
+        var responseClipId = canonicalJson.RootElement.GetProperty("clipId").GetGuid();
 
-        // The losing request must not reserve credits or mutate the winner's
-        // reservation. The real usage service uses generation:{job-id} as its
-        // idempotent transaction request id; only the canonical job has one.
-        var usage = await db.UsageTransactions.AsNoTracking()
-            .Where(item => item.RequestId == $"generation:{job.Id:N}").ToListAsync();
-        Assert.Single(usage);
+        Guid canonicalJobId;
+        Guid canonicalClipId;
+        Guid canonicalSnapshotId;
+        int usageAfterCollision;
+        int jobsAfterCollision;
+        int clipsAfterCollision;
+        List<Guid> snapshotsAfterCollision;
+        using (var collisionScope = factory.Services.CreateScope())
+        {
+            var db = collisionScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var job = Assert.Single(await db.GenerationJobs.AsNoTracking()
+                .Where(item => item.IdempotencyKey == key).ToListAsync());
+            Assert.Equal("Canonical race clip", job.Title);
+            canonicalJobId = job.Id;
+            Assert.Equal(canonicalJobId, responseJobId);
+
+            var clip = Assert.Single(await db.MovieClips.AsNoTracking()
+                .Where(item => item.MovieProjectId == fixture.Project.Project.Id).ToListAsync());
+            canonicalClipId = clip.Id;
+            Assert.Equal(canonicalClipId, responseClipId);
+            Assert.Equal(canonicalJobId, clip.GenerationJobId);
+
+            var snapshotsForShot = await db.MovieCharacterContinuitySnapshots.AsNoTracking()
+                .Where(item => item.MovieProjectId == fixture.Project.Project.Id
+                    && item.MovieShotId == fixture.Shot.Id)
+                .ToListAsync();
+            var canonicalSnapshot = Assert.Single(snapshotsForShot);
+            canonicalSnapshotId = canonicalSnapshot.Id;
+            Assert.Equal((Guid?)canonicalSnapshotId, clip.ContinuitySnapshotId);
+
+            var usage = await db.UsageTransactions.AsNoTracking()
+                .Where(item => item.RequestId == $"generation:{canonicalJobId:N}").ToListAsync();
+            Assert.Single(usage);
+            usageAfterCollision = await db.UsageTransactions.CountAsync();
+            jobsAfterCollision = await db.GenerationJobs.CountAsync();
+            clipsAfterCollision = await db.MovieClips.CountAsync(
+                item => item.MovieProjectId == fixture.Project.Project.Id);
+            snapshotsAfterCollision = await db.MovieCharacterContinuitySnapshots.AsNoTracking()
+                .Where(item => item.MovieProjectId == fixture.Project.Project.Id)
+                .Select(item => item.Id).ToListAsync();
+        }
+
+        using (var replay = await MovieOperationalFixtures.SendWithCsrfAsync(
+                   client, HttpMethod.Post, path, canonicalRequest, idempotencyKey: key))
+        {
+            Assert.Equal(System.Net.HttpStatusCode.Accepted, replay.StatusCode);
+            using var replayJson = JsonDocument.Parse(await replay.Content.ReadAsStringAsync());
+            Assert.Equal(canonicalJobId,
+                replayJson.RootElement.GetProperty("job").GetProperty("id").GetGuid());
+            Assert.Equal(canonicalClipId,
+                replayJson.RootElement.GetProperty("clipId").GetGuid());
+        }
+
+        int usageAfterReplay;
+        int jobsAfterReplay;
+        int clipsAfterReplay;
+        List<Guid> snapshotsAfterReplay;
+        int orphanedNewSnapshots;
+        using (var replayScope = factory.Services.CreateScope())
+        {
+            var db = replayScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var finalJob = Assert.Single(await db.GenerationJobs.AsNoTracking()
+                .Where(item => item.IdempotencyKey == key).ToListAsync());
+            Assert.Equal(canonicalJobId, finalJob.Id);
+            var finalClip = Assert.Single(await db.MovieClips.AsNoTracking()
+                .Where(item => item.MovieProjectId == fixture.Project.Project.Id).ToListAsync());
+            Assert.Equal(canonicalClipId, finalClip.Id);
+            Assert.Equal(canonicalJobId, finalClip.GenerationJobId);
+            Assert.Equal((Guid?)canonicalSnapshotId, finalClip.ContinuitySnapshotId);
+
+            var usage = await db.UsageTransactions.AsNoTracking()
+                .Where(item => item.RequestId == $"generation:{canonicalJobId:N}").ToListAsync();
+            Assert.Single(usage);
+            usageAfterReplay = await db.UsageTransactions.CountAsync();
+            jobsAfterReplay = await db.GenerationJobs.CountAsync();
+            clipsAfterReplay = await db.MovieClips.CountAsync(
+                item => item.MovieProjectId == fixture.Project.Project.Id);
+            snapshotsAfterReplay = await db.MovieCharacterContinuitySnapshots.AsNoTracking()
+                .Where(item => item.MovieProjectId == fixture.Project.Project.Id)
+                .Select(item => item.Id).ToListAsync();
+
+            var retainedSnapshotIds = new HashSet<Guid>();
+            foreach (var id in await db.MovieClips.AsNoTracking()
+                         .Where(item => item.MovieProjectId == fixture.Project.Project.Id
+                             && item.ContinuitySnapshotId != null)
+                         .Select(item => item.ContinuitySnapshotId!.Value).ToListAsync())
+                retainedSnapshotIds.Add(id);
+            foreach (var id in await db.MovieProductionVersions.AsNoTracking()
+                         .Where(item => item.MovieShotId == fixture.Shot.Id
+                             && item.ContinuitySnapshotId != null)
+                         .Select(item => item.ContinuitySnapshotId!.Value).ToListAsync())
+                retainedSnapshotIds.Add(id);
+            foreach (var id in await db.MovieProductionKitReferences.AsNoTracking()
+                         .Where(item => item.ReferenceType == MovieProductionKitReferenceTypes.ContinuitySnapshot)
+                         .Select(item => item.SourceId).ToListAsync())
+                retainedSnapshotIds.Add(id);
+
+            var newSnapshotIds = snapshotsAfterReplay.Except(snapshotsBefore).ToArray();
+            orphanedNewSnapshots = newSnapshotIds.Count(id => !retainedSnapshotIds.Contains(id));
+            Assert.Single(newSnapshotIds);
+            Assert.Single(snapshotsAfterCollision.Except(snapshotsBefore));
+            Assert.Equal(snapshotsAfterCollision.OrderBy(id => id), snapshotsAfterReplay.OrderBy(id => id));
+            Assert.Equal(0, orphanedNewSnapshots);
+        }
+
+        // The losing request must neither persist a second snapshot nor create
+        // another job/reservation; replay must preserve the winner unchanged.
+        Assert.Equal(1, jobsAfterReplay - jobsBefore);
+        Assert.Equal(1, clipsAfterReplay - clipsBefore);
+        Assert.Equal(1, usageAfterReplay - usageBefore);
+        Assert.Equal(usageAfterCollision, usageAfterReplay);
+        Assert.Equal(jobsAfterCollision, jobsAfterReplay);
+        Assert.Equal(clipsAfterCollision, clipsAfterReplay);
+        Assert.Equal(0, orphanedNewSnapshots);
+        Assert.Equal(0, providerCallsBefore);
+        Assert.Equal(0, factory.Calls.Calls(FakeProviderKind.Movie));
     }
 
     [Fact]
@@ -245,12 +423,61 @@ public sealed class MovieStudioConcurrentIdempotencyTests : IClassFixture<MovieC
             .Where(item => item.MovieProjectId == fixture.Project.Project.Id).ToListAsync());
         Assert.Equal(firstClipId, clip.Id);
         Assert.Equal(job.Id, clip.GenerationJobId);
+        var snapshots = await db.MovieCharacterContinuitySnapshots.AsNoTracking()
+            .Where(item => item.MovieProjectId == fixture.Project.Project.Id
+                && item.MovieShotId == fixture.Shot.Id)
+            .ToListAsync();
+        var canonicalSnapshot = Assert.Single(snapshots);
+        Assert.Equal((Guid?)canonicalSnapshot.Id, clip.ContinuitySnapshotId);
         using var input = JsonDocument.Parse(job.InputJson);
         Assert.Equal(clip.Id, input.RootElement.GetProperty("MovieClipId").GetGuid());
         var usage = await db.UsageTransactions.AsNoTracking()
             .Where(item => item.GenerationJobId == job.Id).ToListAsync();
         Assert.Single(usage);
         Assert.Equal($"generation:{job.Id:N}", usage[0].RequestId);
+        Assert.Equal(0, factory.Calls.Calls(FakeProviderKind.Movie));
+    }
+
+    [Fact]
+    public async Task Failure_after_snapshot_save_rolls_back_before_speculative_clip_persistence()
+    {
+        using var client = factory.CreateClient();
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Movie snapshot rollback boundary");
+        var path = $"/api/movie-studio/shots/{fixture.Shot.Id}/generate";
+        var request = await MovieOperationalFixtures.BuildConfirmedMovieGenerationRequestAsync(
+            factory, path, new { title = "Snapshot rollback clip" });
+        var clipsBefore = 0;
+        var snapshotsBefore = 0;
+        var jobsBefore = 0;
+        var usageBefore = 0;
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            clipsBefore = await db.MovieClips.CountAsync(
+                item => item.MovieProjectId == fixture.Project.Project.Id);
+            snapshotsBefore = await db.MovieCharacterContinuitySnapshots.CountAsync(
+                item => item.MovieProjectId == fixture.Project.Project.Id);
+            jobsBefore = await db.GenerationJobs.CountAsync();
+            usageBefore = await db.UsageTransactions.CountAsync();
+        }
+
+        factory.SnapshotFailure.FailAfterNextPersist();
+        using var response = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, path, request);
+        Assert.Equal(System.Net.HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains("MOVIE_CLIP_PROMPT_UNSUPPORTED",
+            await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.True(factory.SnapshotFailure.FailureTriggered);
+
+        using var verificationScope = factory.Services.CreateScope();
+        var verificationDb = verificationScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.Equal(clipsBefore, await verificationDb.MovieClips.CountAsync(
+            item => item.MovieProjectId == fixture.Project.Project.Id));
+        Assert.Equal(snapshotsBefore, await verificationDb.MovieCharacterContinuitySnapshots.CountAsync(
+            item => item.MovieProjectId == fixture.Project.Project.Id));
+        Assert.Equal(jobsBefore, await verificationDb.GenerationJobs.CountAsync());
+        Assert.Equal(usageBefore, await verificationDb.UsageTransactions.CountAsync());
         Assert.Equal(0, factory.Calls.Calls(FakeProviderKind.Movie));
     }
 }
