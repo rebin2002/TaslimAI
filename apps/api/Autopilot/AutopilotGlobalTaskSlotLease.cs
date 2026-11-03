@@ -46,14 +46,16 @@ public sealed record AutopilotGlobalTaskInventoryItem(
 /// Versioned receipt embedded in the signed completion signal's evidence field.
 /// The producer must obtain it from an authoritative task.detail read; this
 /// allocator only validates the persisted, signature-verified receipt and does
-/// not fetch provider details itself.
+/// not fetch provider details itself. The receipt event_id must exactly match
+/// the persisted event's ExternalEventId before a slot can be released.
 /// </summary>
 public sealed record AutopilotGlobalTaskDetailTerminalReceipt(
     [property: System.Text.Json.Serialization.JsonPropertyName("kind")] string? Kind,
     [property: System.Text.Json.Serialization.JsonPropertyName("task_id")] string? TaskId,
     [property: System.Text.Json.Serialization.JsonPropertyName("agent_status")] string? AgentStatus,
     [property: System.Text.Json.Serialization.JsonPropertyName("stop_reason")] string? StopReason,
-    [property: System.Text.Json.Serialization.JsonPropertyName("has_running_background_jobs")] bool? HasRunningBackgroundJobs)
+    [property: System.Text.Json.Serialization.JsonPropertyName("has_running_background_jobs")] bool? HasRunningBackgroundJobs,
+    [property: System.Text.Json.Serialization.JsonPropertyName("event_id")] string? EventId)
 {
     public const string RequiredKind = "taslim.manus.task_detail_terminal_receipt.v1";
 }
@@ -1066,7 +1068,7 @@ public sealed class AutopilotGlobalTaskSlotAllocator
                 || string.Equals(normalizedOutcome, AutopilotTaskOutcomes.Blocked, StringComparison.OrdinalIgnoreCase))
                 return false;
 
-            return HasBoundTaskDetailTerminalReceipt(signal.Evidence, externalTaskId);
+            return HasBoundTaskDetailTerminalReceipt(signal.Evidence, externalTaskId, evidence.ExternalEventId);
         }
         catch (System.Text.Json.JsonException)
         {
@@ -1074,7 +1076,7 @@ public sealed class AutopilotGlobalTaskSlotAllocator
         }
     }
 
-    private static bool HasBoundTaskDetailTerminalReceipt(string? evidenceJson, string externalTaskId)
+    private static bool HasBoundTaskDetailTerminalReceipt(string? evidenceJson, string externalTaskId, string externalEventId)
     {
         if (string.IsNullOrWhiteSpace(evidenceJson) || evidenceJson.Length > 4096)
             return false;
@@ -1085,6 +1087,7 @@ public sealed class AutopilotGlobalTaskSlotAllocator
             return receipt is not null
                 && string.Equals(receipt.Kind, AutopilotGlobalTaskDetailTerminalReceipt.RequiredKind, StringComparison.Ordinal)
                 && string.Equals(receipt.TaskId, externalTaskId, StringComparison.Ordinal)
+                && string.Equals(receipt.EventId, externalEventId, StringComparison.Ordinal)
                 && string.Equals(receipt.AgentStatus, "stopped", StringComparison.OrdinalIgnoreCase)
                 && string.Equals(receipt.StopReason, "finish", StringComparison.OrdinalIgnoreCase)
                 && receipt.HasRunningBackgroundJobs == false;

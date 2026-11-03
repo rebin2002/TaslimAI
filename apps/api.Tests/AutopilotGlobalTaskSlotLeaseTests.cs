@@ -186,6 +186,45 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Terminal_receipt_event_id_must_match_the_persisted_event_identity()
+    {
+        var taskIds = await SeedLaunchTasksAsync(total: 21, initiallyActive: 20);
+        var mismatchedEventId = await SeedCompletionEventAsync(
+            taskIds[0], taskDetailEventIdOverride: "different-signed-event-id");
+        var missingEventId = await SeedCompletionEventAsync(taskIds[0], includeTaskDetailEventId: false);
+        string key;
+        string externalTaskId;
+
+        await using (var db = CreateContext())
+        {
+            var task = await db.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskIds[0]);
+            key = AutopilotGlobalTaskSlotIdentity.CreateIdempotencyKey(task.WaveKey, task.TaskKey);
+            externalTaskId = task.ExternalTaskId!;
+            var allocator = CreateAllocator(db);
+
+            foreach (var eventId in new[] { mismatchedEventId, missingEventId })
+            {
+                var result = await allocator.CompleteVerifiedAsync(taskIds[0], key, externalTaskId, eventId);
+                Assert.Equal(AutopilotGlobalTaskSlotOutcomes.TerminalEvidenceInvalid, result.Outcome);
+                Assert.True(result.SlotHeld);
+                Assert.False(result.MayCallProvider);
+            }
+        }
+
+        var replacement = await ClaimAsync(taskIds[20], CompleteInventory());
+        Assert.Equal(AutopilotGlobalTaskSlotOutcomes.CapacityReached, replacement.Outcome);
+        Assert.False(replacement.SlotHeld);
+        Assert.False(replacement.MayCallProvider);
+        Assert.Equal(20, replacement.ActiveSlotsObserved);
+
+        await using var verify = CreateContext();
+        Assert.Equal(20, await verify.AutopilotWaveLaunchTasks.CountAsync(item =>
+            item.Status == AutopilotWaveLaunchStatuses.Launching || item.Status == AutopilotWaveLaunchStatuses.Launched));
+        Assert.Equal(AutopilotWaveLaunchStatuses.Launched,
+            (await verify.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskIds[0])).Status);
+    }
+
+    [Fact]
     public async Task Hmac_outcome_alone_blocked_and_ask_events_cannot_release_a_slot()
     {
         var taskIds = await SeedLaunchTasksAsync(total: 1, initiallyActive: 1);
@@ -1026,19 +1065,23 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
         string? taskDetailTaskIdOverride = null,
         string taskDetailAgentStatus = "stopped",
         string taskDetailStopReason = "finish",
-        bool? taskDetailHasRunningBackgroundJobs = false)
+        bool? taskDetailHasRunningBackgroundJobs = false,
+        string? taskDetailEventIdOverride = null,
+        bool includeTaskDetailEventId = true)
     {
         await using var db = contextOptions is null ? CreateContext() : new TaslimDbContext(contextOptions);
         var task = await db.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskRowId);
         var now = DateTime.UtcNow;
         var eventId = Guid.NewGuid();
+        var externalEventId = $"test-event-{eventId:N}";
         var eventTaskKey = taskKeyOverride ?? task.TaskKey;
         var receipt = new AutopilotGlobalTaskDetailTerminalReceipt(
             AutopilotGlobalTaskDetailTerminalReceipt.RequiredKind,
             taskDetailTaskIdOverride ?? task.ExternalTaskId,
             taskDetailAgentStatus,
             taskDetailStopReason,
-            taskDetailHasRunningBackgroundJobs);
+            taskDetailHasRunningBackgroundJobs,
+            includeTaskDetailEventId ? taskDetailEventIdOverride ?? externalEventId : null);
         var signal = new AutopilotCompletionSignal
         {
             WaveKey = task.WaveKey,
@@ -1051,7 +1094,7 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
             Id = eventId,
             EventType = AutopilotEventTypes.WaveTaskCompleted,
             SourceSystem = "test-completion-bridge",
-            ExternalEventId = $"test-event-{eventId:N}",
+            ExternalEventId = externalEventId,
             IdempotencyKey = $"test-event-key-{eventId:N}",
             PayloadHash = new string('a', 64),
             Status = status,
