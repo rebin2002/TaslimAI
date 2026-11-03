@@ -617,19 +617,21 @@ test.describe("issue #700 onboarding and billing layout", () => {
     let markAuthRequested!: () => void;
     const authRequested = new Promise<void>((resolveAuth) => { markAuthRequested = resolveAuth; });
     const authGate = new Promise<void>((release) => { releaseAuth = release; });
-    let shouldDelayAuth = true;
+    let didSignalAuthRequest = false;
     let onboardingCompletedAt: string | null = null;
     let csrfMockCount = 0;
     let completionMockCount = 0;
 
-    // Hold only the synthetic first-login response long enough to focus the real
-    // AppShell link which should regain focus if the modal closes.
+    // Hold synthetic first-login responses long enough to focus the real AppShell
+    // link which should regain focus if the modal closes.
     await page.route("**/api/auth/me", async (route) => {
-      if (shouldDelayAuth) {
-        shouldDelayAuth = false;
+      if (!didSignalAuthRequest) {
+        didSignalAuthRequest = true;
         markAuthRequested();
-        await authGate;
       }
+      // React may issue concurrent auth refreshes; hold every response so none
+      // can mount the modal before the opener focus precondition is established.
+      await authGate;
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(liveAuthResponse(onboardingCompletedAt)) });
     });
     await page.route("**/api/auth/csrf", async (route) => {
@@ -718,7 +720,7 @@ test.describe("issue #700 onboarding and billing layout", () => {
     await expect(dialog).toBeHidden();
     expect.soft(completionMockCount, "POST /api/auth/onboarding/complete must be intercepted as a synthetic close action").toBe(1);
     expect.soft(csrfMockCount, "GET /api/auth/csrf must be intercepted with a synthetic token").toBeGreaterThanOrEqual(1);
-    expect.soft(await appShellOpener.evaluate((element) => document.activeElement === element), "a[href='/create'] must regain focus after Skip closes onboarding").toBe(true);
+    await expect.soft(appShellOpener, "a[href='/create'] must regain focus after Skip closes onboarding").toBeFocused();
 
     await appShellOpener.click();
     await expect(page).toHaveURL(/\/create\/?$/);
