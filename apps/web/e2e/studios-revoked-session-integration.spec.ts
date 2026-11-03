@@ -5,6 +5,8 @@ import { test, expect, apiJson, E2E_API_URL, loginInUi, registerInUi, type TestU
 const webUrl = process.env.E2E_WEB_URL ?? "http://localhost:3000";
 const syntheticSessionMode = process.env.E2E_SYNTHETIC_AUTH === "1";
 const requireProductionPrefetch = process.env.E2E_EXPECT_PRODUCTION_PREFETCH === "1";
+const responseBodyReadTimeoutMs = 5_000;
+const responseBodyReadTimeoutMarker = "<response-body-read-timeout>";
 const conversationId = "11111111-1111-4111-8111-111111111111";
 const stamp = "7F3A";
 const privateMarkers = [
@@ -76,6 +78,8 @@ type RequestRow = {
   accountAtRequest?: AccountState;
   status?: number;
   body?: Promise<string>;
+  bodyReadStatus?: "read" | "timeout" | "error";
+  bodyReadError?: string;
   failure?: string;
 };
 
@@ -102,10 +106,14 @@ function isLoopback(hostname: string) {
 
 function isProtectedRead(method: string, path: string) {
   return method === "GET" && (
-    path.startsWith("/api/workspaces/")
+    path === "/api/workspaces"
+    || path.startsWith("/api/workspaces/")
     || path.startsWith("/api/conversations/")
     || path.startsWith("/api/assets")
     || path.startsWith("/api/files")
+    || path === "/api/generation/jobs"
+    || path.startsWith("/api/generation/jobs/")
+    || path.startsWith("/api/research-generation/jobs/")
     || /^\/api\/projects\/[^/]+(?:\/overview)?\/?$/i.test(path)
   );
 }
@@ -144,8 +152,25 @@ function observePage(page: Page, monitor: Monitor, accountAtRequest?: () => Acco
         && candidate.method === request.method() && candidate.url === request.url());
     if (!row) return;
     row.status = response.status();
-    if (row.rsc || isProtectedRead(row.method, row.path)) {
-      row.body = response.text().catch(() => "<unreadable-response-body>");
+    if ((row.rsc || isProtectedRead(row.method, row.path)) && !row.body) {
+      row.body = new Promise(resolve => {
+        let settled = false;
+        const timer: { handle?: ReturnType<typeof setTimeout> } = {};
+        const finish = (status: "read" | "timeout" | "error", body: string) => {
+          if (settled) return;
+          settled = true;
+          if (timer.handle) clearTimeout(timer.handle);
+          row.bodyReadStatus = status;
+          resolve(body);
+        };
+        timer.handle = setTimeout(() => finish("timeout", responseBodyReadTimeoutMarker), responseBodyReadTimeoutMs);
+        void response.text()
+          .then(body => finish("read", body))
+          .catch(error => {
+            row.bodyReadError = (error instanceof Error ? error.message : String(error)).slice(0, 180);
+            finish("error", "<unreadable-response-body>");
+          });
+      });
     }
   };
   page.on("response", response => captureResponse(response.request(), response));
@@ -782,8 +807,18 @@ test("exact Chat chargeable POST paths are observed and blocked before API/provi
     await page.goto("/");
 
     for (const path of chargeableChatPostPaths) expect(isGenerationPost("POST", path), `${path} must be classified as chargeable Chat dispatch`).toBe(true);
-    expect(isProtectedRead("GET", "/api/projects/project-private-route-probe")).toBe(true);
-    expect(isProtectedRead("GET", "/api/projects/project-private-route-probe/overview")).toBe(true);
+    const privateReadPaths = [
+      "/api/workspaces",
+      "/api/projects/project-private-route-probe",
+      "/api/projects/project-private-route-probe/overview",
+      "/api/generation/jobs",
+      "/api/generation/jobs/job-private-route-probe",
+      "/api/research-generation/jobs/job-private-route-probe/sources",
+      "/api/research-generation/jobs/job-private-route-probe/sources/export",
+      "/api/assets/asset-private-route-probe/representations/representation-private-route-probe/download",
+    ];
+    for (const path of privateReadPaths) expect(isProtectedRead("GET", path), `${path} must be classified as a private read`).toBe(true);
+    expect(isProtectedRead("POST", "/api/generation/jobs")).toBe(false);
 
     const probeResults = await Promise.all(chargeableChatPostPaths.map(path => page.evaluate(async ({ requestPath }) => {
       try {
@@ -979,39 +1014,52 @@ for (const studio of studios) {
       expect.soft(tabBMarkersAfterBLogin, `${studio.name} Account A content remained visible in the second tab after Account B login`).toEqual([]);
 
       const historyLeakAudit: Array<{ tab: string; step: string; aMarkers: string[] }> = [];
+      const readCapturedBodiesSince = async (rowStart: number) => {
+        const bodies = monitor.rows.slice(rowStart).filter(row => row.body).map(row => row.body!);
+        await Promise.all(bodies);
+      };
       const assertNoAccountA = async (tab: string, page: Page, step: string) => {
         const markers = await visibleAccountMarkers(page, "A", studio);
         historyLeakAudit.push({ tab, step, aMarkers: markers });
         expect.soft(markers, `${studio.name} Account A marker visible in ${tab} at ${step} after Account B login`).toEqual([]);
       };
 
+      const accountBRequestStart = monitor.rows.length;
       const accountBResponse = await pageA.goto(pathB);
       expect(accountBResponse?.status()).toBe(200);
       await expect.poll(async () => (await markerText(pageA)).includes(bMarker), { timeout: 15_000 }).toBe(true);
+      await readCapturedBodiesSince(accountBRequestStart);
       await assertNoAccountA("tab A", pageA, "Account B Studio load");
 
-      await pageB.goBack({ waitUntil: "domcontentloaded" }).catch(() => null);
-      await pageB.waitForTimeout(150);
-      await assertNoAccountA("tab B", pageB, "back");
-      await pageB.goForward({ waitUntil: "domcontentloaded" }).catch(() => null);
-      await pageB.waitForTimeout(200);
-      await assertNoAccountA("tab B", pageB, "forward");
-      await pageB.reload({ waitUntil: "domcontentloaded" }).catch(() => null);
-      await pageB.waitForTimeout(200);
-      await assertNoAccountA("tab B", pageB, "reload");
+      const historyNavigationAudit: Array<{ tab: string; step: string; before: string; after: string; completed: boolean; error?: string }> = [];
+      const revisitHistory = async (tab: string, page: Page, step: "back" | "forward" | "reload", navigate: () => Promise<unknown>) => {
+        const before = page.url();
+        const rowStart = monitor.rows.length;
+        let error: string | undefined;
+        try {
+          await navigate();
+        } catch (caught) {
+          error = caught instanceof Error ? caught.message : String(caught);
+        }
+        await page.waitForTimeout(150);
+        await readCapturedBodiesSince(rowStart);
+        const after = page.url();
+        const completed = !error && (step === "reload" || before !== after);
+        historyNavigationAudit.push({ tab, step, before, after, completed, error });
+        expect.soft(completed, `${studio.name} ${tab} ${step} history navigation must complete`).toBe(true);
+        await assertNoAccountA(tab, page, step);
+      };
+
+      await revisitHistory("tab B", pageB, "back", () => pageB.goBack({ waitUntil: "commit", timeout: 8_000 }));
+      await revisitHistory("tab B", pageB, "forward", () => pageB.goForward({ waitUntil: "commit", timeout: 8_000 }));
+      await revisitHistory("tab B", pageB, "reload", () => pageB.reload({ waitUntil: "commit", timeout: 8_000 }));
       await pageB.goto(pathB);
       await expect.poll(async () => (await markerText(pageB)).includes(bMarker), { timeout: 15_000 }).toBe(true);
       await assertNoAccountA("tab B", pageB, "Account B Studio load");
 
-      await pageA.goBack({ waitUntil: "domcontentloaded" }).catch(() => null);
-      await pageA.waitForTimeout(150);
-      await assertNoAccountA("tab A", pageA, "back");
-      await pageA.goForward({ waitUntil: "domcontentloaded" }).catch(() => null);
-      await pageA.waitForTimeout(200);
-      await assertNoAccountA("tab A", pageA, "forward");
-      await pageA.reload({ waitUntil: "domcontentloaded" }).catch(() => null);
-      await pageA.waitForTimeout(200);
-      await assertNoAccountA("tab A", pageA, "reload");
+      await revisitHistory("tab A", pageA, "back", () => pageA.goBack({ waitUntil: "commit", timeout: 8_000 }));
+      await revisitHistory("tab A", pageA, "forward", () => pageA.goForward({ waitUntil: "commit", timeout: 8_000 }));
+      await revisitHistory("tab A", pageA, "reload", () => pageA.reload({ waitUntil: "commit", timeout: 8_000 }));
 
       await pageA.waitForTimeout(300);
       await pageB.waitForTimeout(300);
@@ -1031,13 +1079,17 @@ for (const studio of studios) {
         targetsAccountA(row)
         || (row.accountAtRequest === "loggedOut" && row.path === pathA)
       ));
-      const privateResponseLeaks: Array<{ path: string; status?: number; markers: string[] }> = [];
-      for (const row of afterLogoutRows) {
-        if (!row.body) continue;
-        const body = await row.body;
+      const capturedResponseBodies = await Promise.all(afterLogoutRows.filter(row => row.body).map(async row => ({
+        row,
+        body: await row.body!,
+      })));
+      const privateResponseLeaks = capturedResponseBodies.flatMap(({ row, body }) => {
         const markers = aMarkers.filter(marker => body.includes(marker));
-        if (markers.length > 0) privateResponseLeaks.push({ path: row.path, status: row.status, markers });
-      }
+        return markers.length > 0 ? [{ path: row.path, status: row.status, markers }] : [];
+      });
+      const privateResponseBodyReadFailures = capturedResponseBodies
+        .filter(({ row }) => row.bodyReadStatus !== "read")
+        .map(({ row }) => ({ path: row.path, status: row.status, bodyReadStatus: row.bodyReadStatus, error: row.bodyReadError }));
       const chargeablePostsAfterLogout = afterLogoutRows.filter(row => isGenerationPost(row.method, row.path)).map(row => ({ path: row.path, time: row.time }));
       let providerPostsAfter: number | undefined;
       if (syntheticSessionMode) {
@@ -1064,12 +1116,14 @@ for (const studio of studios) {
         accountAMarkersAfterBLogin: { tabA: tabAMarkersAfterBLogin, tabB: tabBMarkersAfterBLogin },
         accountBMarkerVisible: { tabA: (await markerText(pageA)).includes(bMarker), tabB: (await markerText(pageB)).includes(bMarker) },
         historyLeakAudit,
+        historyNavigationAudit,
         aProtectedGetAttemptsAfterLogout: aProtectedGetAttempts.map(row => ({ path: row.path, status: row.status, accountAtRequest: row.accountAtRequest, failure: row.failure })),
         correctlyDeniedAProtectedGetResponses: deniedAProtectedGets.length,
         nonDeniedAProtectedGetResponses: nonDeniedAProtectedGets.map(row => ({ path: row.path, status: row.status })),
         unresolvedAProtectedGetAttempts: unresolvedAProtectedGets.map(row => ({ path: row.path, failure: row.failure })),
         strictAFlightPrefetchAttemptsAfterLogout: aFlightPrefetches.map(row => ({ path: row.path, status: row.status, accountAtRequest: row.accountAtRequest })),
         privateAResponseLeaks: privateResponseLeaks,
+        privateResponseBodyReadFailures,
         chargeableChatOrProviderPostsAfterLogout: chargeablePostsAfterLogout,
         allChargeableChatOrProviderPosts: monitor.generationPosts,
         blockedChargeablePosts: monitor.blockedGenerationPosts,
@@ -1080,8 +1134,10 @@ for (const studio of studios) {
       console.log(`STUDIOS_ACCOUNT_SWITCH_EVIDENCE ${JSON.stringify(evidence)}`);
 
       expect.soft(privateResponseLeaks, "Account A private content must not appear in any API or Flight response after logout").toEqual([]);
+      expect.soft(privateResponseBodyReadFailures, "Every post-logout API/Flight response body must be fully readable before claiming no private marker leak").toEqual([]);
       expect.soft(nonDeniedAProtectedGets.map(row => ({ path: row.path, status: row.status })), "Any post-logout Account A protected GET reaching the API must be denied with 401/403").toEqual([]);
-      expect.soft(unresolvedAProtectedGets.map(row => row.path), "Account A protected GET attempts must have an observable denial response").toEqual([]);
+      expect.soft(unresolvedAProtectedGets.map(row => row.path), "Every observed Account A protected GET attempt must have an observable response").toEqual([]);
+      expect.soft(historyNavigationAudit.every(row => row.completed), "Back, forward, and reload must complete in both tabs after Account B login").toBe(true);
       expect.soft(aProtectedGetAttempts.map(row => ({ path: row.path, status: row.status })), "Strict contract: zero Account A protected GET attempts after observed logout, separate from correct 401/403 denial").toEqual([]);
       expect.soft(aFlightPrefetches.map(row => ({ path: row.path, status: row.status })), "Strict contract: zero Account A Flight/Link prefetches after observed logout/account switch").toEqual([]);
       expect.soft(monitor.generationPosts, "No chargeable Chat or provider POST is allowed in the account-switch flow").toEqual([]);
