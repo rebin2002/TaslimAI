@@ -488,6 +488,204 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Manus_task_list_adapter_uses_creator_scope_and_paginates_waiting_and_stopped_tasks_as_active()
+    {
+        var requests = new List<Uri>();
+        var handler = new FakeHttpHandler((request, cancellationToken) =>
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var uri = Assert.IsType<Uri>(request.RequestUri);
+            requests.Add(uri);
+            Assert.Equal("https", uri.Scheme);
+            Assert.Equal("api.manus.ai", uri.Host);
+            Assert.Equal("/v2/task.list", uri.AbsolutePath);
+            Assert.Equal("Bearer", request.Headers.Authorization?.Scheme);
+            Assert.Equal("unit-test-token", request.Headers.Authorization?.Parameter);
+            Assert.False(request.Headers.Contains("x-manus-api-key"));
+
+            var query = ParseQuery(uri);
+            Assert.Equal("100", query["limit"]);
+            Assert.Equal("desc", query["order"]);
+            Assert.False(query.ContainsKey("sort"));
+            Assert.Equal("all", query["scope"]);
+            Assert.Equal("taslim-open-app-id", query["oauth_client_id"]);
+            Assert.False(query.ContainsKey("api_key_id"));
+
+            var json = requests.Count switch
+            {
+                1 => """{"ok":true,"data":[{"id":"task-waiting","status":"waiting"},{"id":"task-stopped-ask","status":"stopped","has_running_background_jobs":false}],"has_more":true,"next_cursor":"cursor/2"}""",
+                2 => """{"ok":true,"data":[{"id":"task-running","status":"running"},{"id":"task-completed","status":"completed"}],"has_more":false}""",
+                _ => throw new InvalidOperationException("Unexpected extra page request."),
+            };
+
+            if (requests.Count == 1) Assert.False(query.ContainsKey("cursor"));
+            else Assert.Equal("cursor/2", query["cursor"]);
+            return Task.FromResult(JsonResponse(json));
+        });
+        using var source = new ManusTaskListInventoryPageSource(
+            () => "unit-test-token",
+            ScopeId,
+            "taslim-open-app-id",
+            creatorIdentityVerified: true,
+            AutopilotManusTaskListCredentialKind.OAuthBearer,
+            testHandler: handler);
+
+        var snapshot = await new AutopilotGlobalTaskInventoryReader(source, ScopeId).ReadAuthoritativeSnapshotAsync();
+
+        Assert.True(snapshot.IsAuthoritative);
+        Assert.Equal(2, snapshot.PagesRead);
+        Assert.Equal(new[] { "task-running", "task-stopped-ask", "task-waiting" }, snapshot.ActiveTasks.Select(item => item.TaskId).ToArray());
+        Assert.Equal(2, requests.Count);
+    }
+
+    [Fact]
+    public async Task Manus_task_list_adapter_fails_closed_for_missing_credentials_or_truncated_pages()
+    {
+        var noCredentialHandler = new FakeHttpHandler((_, _) => throw new InvalidOperationException("Must not call without a credential."));
+        using (var noCredentialSource = new ManusTaskListInventoryPageSource(
+            () => null,
+            ScopeId,
+            "taslim-api-key-id",
+            creatorIdentityVerified: true,
+            AutopilotManusTaskListCredentialKind.ApiKey,
+            testHandler: noCredentialHandler))
+        {
+            var noCredentialSnapshot = await new AutopilotGlobalTaskInventoryReader(noCredentialSource, ScopeId).ReadAuthoritativeSnapshotAsync();
+            Assert.False(noCredentialSnapshot.IsAuthoritative);
+        }
+
+        var truncatedHandler = new FakeHttpHandler((request, _) =>
+        {
+            var query = ParseQuery(request.RequestUri!);
+            Assert.Equal("100", query["limit"]);
+            Assert.Equal("desc", query["order"]);
+            Assert.Equal("taslim-api-key-id", query["api_key_id"]);
+            Assert.False(query.ContainsKey("oauth_client_id"));
+            Assert.Null(request.Headers.Authorization);
+            Assert.Equal("unit-test-api-key", request.Headers.GetValues("x-manus-api-key").Single());
+            return Task.FromResult(JsonResponse("""{"ok":true,"data":[],"has_more":true}"""));
+        });
+        using var truncatedSource = new ManusTaskListInventoryPageSource(
+            () => "unit-test-api-key",
+            ScopeId,
+            "taslim-api-key-id",
+            creatorIdentityVerified: true,
+            AutopilotManusTaskListCredentialKind.ApiKey,
+            testHandler: truncatedHandler);
+
+        var truncated = await new AutopilotGlobalTaskInventoryReader(truncatedSource, ScopeId).ReadAuthoritativeSnapshotAsync();
+
+        Assert.False(truncated.IsAuthoritative);
+        Assert.Equal("inventory_page_invalid", truncated.FailureCode);
+    }
+
+    [Fact]
+    public async Task Manus_task_list_unverified_creator_identity_and_page_timeout_are_unknown_not_empty_inventory()
+    {
+        var unverifiedCalls = 0;
+        var unverifiedHandler = new FakeHttpHandler((_, _) =>
+        {
+            unverifiedCalls++;
+            return Task.FromResult(JsonResponse("""{"ok":true,"data":[],"has_more":false}"""));
+        });
+        using (var unverifiedSource = new ManusTaskListInventoryPageSource(
+            () => "unit-test-token",
+            ScopeId,
+            "unverified-or-mistyped-creator-id",
+            creatorIdentityVerified: false,
+            AutopilotManusTaskListCredentialKind.OAuthBearer,
+            testHandler: unverifiedHandler))
+        {
+            var unverified = await new AutopilotGlobalTaskInventoryReader(unverifiedSource, ScopeId).ReadAuthoritativeSnapshotAsync();
+            Assert.False(unverified.IsAuthoritative);
+            Assert.Equal("inventory_page_invalid", unverified.FailureCode);
+            Assert.Empty(unverified.ActiveTasks);
+        }
+        Assert.Equal(0, unverifiedCalls);
+
+        var absentIdentityCalls = 0;
+        var absentIdentityHandler = new FakeHttpHandler((_, _) =>
+        {
+            absentIdentityCalls++;
+            return Task.FromResult(JsonResponse("""{"ok":true,"data":[],"has_more":false}"""));
+        });
+        using (var absentIdentitySource = new ManusTaskListInventoryPageSource(
+            () => "unit-test-token",
+            ScopeId,
+            creatorId: null,
+            creatorIdentityVerified: true,
+            AutopilotManusTaskListCredentialKind.OAuthBearer,
+            testHandler: absentIdentityHandler))
+        {
+            var absentIdentity = await new AutopilotGlobalTaskInventoryReader(absentIdentitySource, ScopeId).ReadAuthoritativeSnapshotAsync();
+            Assert.False(absentIdentity.IsAuthoritative);
+            Assert.Equal("inventory_page_invalid", absentIdentity.FailureCode);
+            Assert.Empty(absentIdentity.ActiveTasks);
+        }
+        Assert.Equal(0, absentIdentityCalls);
+
+        var timeoutCalls = 0;
+        var timeoutHandler = new FakeHttpHandler(async (_, cancellationToken) =>
+        {
+            Interlocked.Increment(ref timeoutCalls);
+            await Task.Delay(System.Threading.Timeout.InfiniteTimeSpan, cancellationToken);
+            return JsonResponse("""{"ok":true,"data":[],"has_more":false}""");
+        });
+        using var timeoutSource = new ManusTaskListInventoryPageSource(
+            () => "unit-test-token",
+            ScopeId,
+            "verified-open-app-id",
+            creatorIdentityVerified: true,
+            AutopilotManusTaskListCredentialKind.OAuthBearer,
+            pageTimeout: TimeSpan.FromMilliseconds(50),
+            testHandler: timeoutHandler);
+
+        var timedOut = await new AutopilotGlobalTaskInventoryReader(timeoutSource, ScopeId).ReadAuthoritativeSnapshotAsync();
+
+        Assert.False(timedOut.IsAuthoritative);
+        Assert.Equal("inventory_page_invalid", timedOut.FailureCode);
+        Assert.Empty(timedOut.ActiveTasks);
+        Assert.Equal(1, timeoutCalls);
+    }
+
+    [Fact]
+    public async Task Verified_completion_deduplicates_stopped_inventory_for_only_its_exact_task()
+    {
+        var taskIds = await SeedLaunchTasksAsync(total: 22, initiallyActive: 20);
+        var stoppedInventory = new AutopilotGlobalTaskInventorySnapshot(
+            ScopeId,
+            true,
+            1,
+            false,
+            null,
+            Enumerable.Range(0, 20)
+                .Select(index => new AutopilotGlobalTaskInventoryItem($"external-task-{index}", ScopeId, "stopped", null))
+                .ToArray());
+        var completionEventId = await SeedCompletionEventAsync(taskIds[0]);
+        string idempotencyKey;
+        string externalTaskId;
+
+        await using (var db = CreateContext())
+        {
+            var task = await db.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskIds[0]);
+            idempotencyKey = AutopilotGlobalTaskSlotIdentity.CreateIdempotencyKey(task.WaveKey, task.TaskKey);
+            externalTaskId = task.ExternalTaskId!;
+            var completion = await CreateAllocator(db).CompleteVerifiedAsync(
+                taskIds[0], idempotencyKey, externalTaskId, completionEventId);
+            Assert.Equal(AutopilotGlobalTaskSlotOutcomes.Completed, completion.Outcome);
+        }
+
+        var replacement = await ClaimAsync(taskIds[20], stoppedInventory);
+        Assert.Equal(AutopilotGlobalTaskSlotOutcomes.Reserved, replacement.Outcome);
+        Assert.Equal(20, replacement.ActiveSlotsObserved);
+        Assert.True(replacement.MayCallProvider);
+
+        var excess = await ClaimAsync(taskIds[21], stoppedInventory);
+        Assert.Equal(AutopilotGlobalTaskSlotOutcomes.CapacityReached, excess.Outcome);
+        Assert.False(excess.MayCallProvider);
+    }
+
+    [Fact]
     public async Task Repeated_pagination_cursor_is_unknown_not_zero_occupancy()
     {
         var source = new FakePageSource(ScopeId,
@@ -871,6 +1069,25 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
     }
 
     private TaslimDbContext CreateContext() => new(options);
+
+    private static Dictionary<string, string> ParseQuery(Uri uri) => uri.Query
+        .TrimStart('?')
+        .Split('&', StringSplitOptions.RemoveEmptyEntries)
+        .Select(pair => pair.Split('=', 2))
+        .ToDictionary(pair => Uri.UnescapeDataString(pair[0]), pair => Uri.UnescapeDataString(pair[1]), StringComparer.Ordinal);
+
+    private static System.Net.Http.HttpResponseMessage JsonResponse(string json) => new(System.Net.HttpStatusCode.OK)
+    {
+        Content = new System.Net.Http.StringContent(json, System.Text.Encoding.UTF8, "application/json"),
+    };
+
+    private sealed class FakeHttpHandler(
+        Func<System.Net.Http.HttpRequestMessage, CancellationToken, Task<System.Net.Http.HttpResponseMessage>> responder) : System.Net.Http.HttpMessageHandler
+    {
+        protected override Task<System.Net.Http.HttpResponseMessage> SendAsync(
+            System.Net.Http.HttpRequestMessage request,
+            CancellationToken cancellationToken) => responder(request, cancellationToken);
+    }
 
     private sealed class FakePageSource(
         string expectedScopeId,
