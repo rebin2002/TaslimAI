@@ -71,6 +71,7 @@ public sealed class PasswordRecoveryEmailDeliveryEndToEndTests
 
             var userId = await FindUserIdAsync(factory, email);
 
+            var firstRequestStartedAt = DateTime.UtcNow;
             using var knownRequestClient = factory.CreateClient();
             using var unknownRequestClient = factory.CreateClient();
             using var knownResponse = await ForgotAsync(knownRequestClient, email);
@@ -84,7 +85,7 @@ public sealed class PasswordRecoveryEmailDeliveryEndToEndTests
             Assert.Equal(email, firstMessage.Recipient, ignoreCase: true);
             Assert.Contains("From: \"Taslim E2E\" <password-reset@example.test>", firstMessage.RawMessage, StringComparison.OrdinalIgnoreCase);
             var firstToken = ExtractToken(firstMessage.RawMessage, email);
-            await WaitForDeliveryAsync(factory, userId, DateTime.UtcNow.AddSeconds(-5));
+            await WaitForDeliveryAsync(factory, userId, firstRequestStartedAt);
             Assert.Equal(1, smtp.CapturedCount); // Unknown addresses produce no SMTP delivery.
 
             using (var scope = factory.Services.CreateScope())
@@ -96,6 +97,7 @@ public sealed class PasswordRecoveryEmailDeliveryEndToEndTests
                 await db.SaveChangesAsync();
             }
 
+            var secondRequestStartedAt = DateTime.UtcNow;
             using var secondRequestClient = factory.CreateClient();
             using var secondRequestResponse = await ForgotAsync(secondRequestClient, email);
             Assert.Equal(HttpStatusCode.Accepted, secondRequestResponse.StatusCode);
@@ -104,7 +106,7 @@ public sealed class PasswordRecoveryEmailDeliveryEndToEndTests
             Assert.Equal(email, secondMessage.Recipient, ignoreCase: true);
             var secondToken = ExtractToken(secondMessage.RawMessage, email);
             Assert.NotEqual(firstToken, secondToken);
-            await WaitForDeliveryAsync(factory, userId, DateTime.UtcNow.AddSeconds(-5));
+            await WaitForDeliveryAsync(factory, userId, secondRequestStartedAt);
 
             Assert.True(await IsResetTokenValidAsync(factory, email, firstToken));
             Assert.True(await IsResetTokenValidAsync(factory, email, secondToken));
@@ -139,13 +141,14 @@ public sealed class PasswordRecoveryEmailDeliveryEndToEndTests
                 await db.SaveChangesAsync();
             }
 
+            var expiryRequestStartedAt = DateTime.UtcNow;
             using var expiryRequestClient = factory.CreateClient();
             using var expiryRequest = await ForgotAsync(expiryRequestClient, email);
             Assert.Equal(HttpStatusCode.Accepted, expiryRequest.StatusCode);
             var expiryMessage = await smtp.WaitForMessageAsync(2, WaitLimit);
             var expiryToken = ExtractToken(expiryMessage.RawMessage, email);
             Assert.True(await IsResetTokenValidAsync(factory, email, expiryToken));
-            await WaitForDeliveryAsync(factory, userId, DateTime.UtcNow.AddSeconds(-5));
+            await WaitForDeliveryAsync(factory, userId, expiryRequestStartedAt);
 
             await Task.Delay(TokenLifetime + TimeSpan.FromMilliseconds(500));
             using var expiredClient = factory.CreateClient();
@@ -205,7 +208,14 @@ public sealed class PasswordRecoveryEmailDeliveryEndToEndTests
                 return;
             await Task.Delay(40);
         }
-        throw new Xunit.Sdk.XunitException("Timed out waiting for the synthetic reset-email outbox delivery.");
+        using var diagnosticScope = factory.Services.CreateScope();
+        var diagnosticDb = diagnosticScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var finalEntry = await diagnosticDb.PasswordResetEmailOutbox.AsNoTracking().SingleAsync(item => item.UserId == userId);
+        throw new Xunit.Sdk.XunitException(
+            $"Timed out waiting for the synthetic reset-email outbox delivery. Status={finalEntry.Status}; " +
+            $"AttemptCount={finalEntry.AttemptCount}; FailureCode={finalEntry.LastFailureCode ?? "none"}; " +
+            $"LastRequestedAt={finalEntry.LastRequestedAt:O}; RequestedAfter={requestedAfter:O}; " +
+            $"LeaseExpiresAt={finalEntry.LeaseExpiresAt:O}; NextAttemptAt={finalEntry.NextAttemptAt:O}.");
     }
 
     private static string ExtractToken(string rawMessage, string expectedEmail)
@@ -293,7 +303,8 @@ public sealed class PasswordRecoveryEmailDeliveryEndToEndTests
 
     private sealed class SmtpRecoveryApiFactory : WebApplicationFactory<Program>
     {
-        private readonly SqliteConnection connection = new("DataSource=:memory:");
+        private readonly string databasePath = Path.Combine(Path.GetTempPath(), $"taslim-smtp-recovery-{Guid.NewGuid():N}.db");
+        private readonly string connectionString;
         private readonly int smtpPort;
         private readonly TimeSpan tokenLifetime;
 
@@ -301,9 +312,21 @@ public sealed class PasswordRecoveryEmailDeliveryEndToEndTests
         {
             this.smtpPort = smtpPort;
             this.tokenLifetime = tokenLifetime;
+            connectionString = new SqliteConnectionStringBuilder
+            {
+                DataSource = databasePath,
+                Pooling = false,
+                DefaultTimeout = 30,
+            }.ToString();
+            using var connection = new SqliteConnection(connectionString);
             connection.Open();
             using var db = new TaslimDbContext(new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connection).Options);
             db.Database.EnsureCreated();
+            using var command = connection.CreateCommand();
+            command.CommandText = "PRAGMA journal_mode=WAL;";
+            var journalMode = Convert.ToString(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
+            if (!string.Equals(journalMode, "wal", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("The disposable SMTP E2E SQLite database did not enable WAL mode.");
         }
 
         protected override void ConfigureWebHost(IWebHostBuilder builder)
@@ -330,8 +353,7 @@ public sealed class PasswordRecoveryEmailDeliveryEndToEndTests
             builder.ConfigureServices(services =>
             {
                 services.RemoveAll<DbContextOptions<TaslimDbContext>>();
-                services.AddSingleton(connection);
-                services.AddDbContext<TaslimDbContext>(options => options.UseSqlite(connection));
+                services.AddDbContext<TaslimDbContext>(options => options.UseSqlite(connectionString));
                 services.PostConfigure<DataProtectionTokenProviderOptions>(options => options.TokenLifespan = tokenLifetime);
             });
         }
@@ -339,7 +361,11 @@ public sealed class PasswordRecoveryEmailDeliveryEndToEndTests
         protected override void Dispose(bool disposing)
         {
             base.Dispose(disposing);
-            if (disposing) connection.Dispose();
+            if (disposing)
+            {
+                foreach (var suffix in new[] { "", "-shm", "-wal" })
+                    File.Delete(databasePath + suffix);
+            }
         }
     }
 
