@@ -3,6 +3,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Taslim.Api.Movies;
 using Taslim.Api.Persistence;
+using Taslim.Api.Tests.ProviderTesting;
 using Xunit;
 
 namespace Taslim.Api.Tests;
@@ -403,6 +404,64 @@ public sealed class MovieProjectDurationBoundaryTests : IClassFixture<MovieOpera
         var fetched = await MovieOperationalFixtures.GetAsync<MovieStudioProjectDto>(
             client, $"/api/movie-studio/projects/{created.Project.Id}");
         Assert.Equal(600, fetched.DurationSeconds);
+    }
+
+    [Fact]
+    public async Task Duration_edit_after_legacy_clip_without_scene_or_shot_preserves_runtime()
+    {
+        using var client = factory.CreateClient();
+        var owner = await MovieOperationalFixtures.RegisterAsync(client, "Legacy Clip Duration Owner");
+        var created = await MovieOperationalFixtures.PostAsync<MovieStudioProjectResponse>(
+            client, "/api/movie-studio/projects", new
+            {
+                workspaceId = owner.PersonalWorkspace.Id,
+                mode = MovieProjectModes.Full,
+                title = "Legacy clip locks project runtime",
+                description = "Existing clip rows must not be orphaned by a draft runtime edit.",
+                durationSeconds = 60,
+                aspectRatio = "16:9",
+                style = "cinematic",
+                language = "en",
+            });
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            Assert.False(await db.MovieScenes.AnyAsync(item => item.MovieProjectId == created.Project.Id));
+            Assert.False(await db.MovieShots.AnyAsync(item => item.Scene.MovieProjectId == created.Project.Id));
+            var now = DateTime.UtcNow;
+            db.MovieClips.Add(new MovieClip
+            {
+                Id = Guid.NewGuid(),
+                MovieProjectId = created.Project.Id,
+                Status = MovieClipStatuses.Planned,
+                DurationSeconds = 5,
+                CreatedAt = now,
+                UpdatedAt = now,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        using var rejected = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Patch, $"/api/movie-studio/projects/{created.Project.Id}/duration",
+            new { durationSeconds = 120 });
+        Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
+        Assert.Contains("generated clips", await rejected.Content.ReadAsStringAsync(), StringComparison.OrdinalIgnoreCase);
+
+        var fetched = await MovieOperationalFixtures.GetAsync<MovieStudioProjectDto>(
+            client, $"/api/movie-studio/projects/{created.Project.Id}");
+        Assert.Equal(60, fetched.DurationSeconds);
+        using var verifyScope = factory.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var persistedClip = await verifyDb.MovieClips.AsNoTracking()
+            .SingleAsync(item => item.MovieProjectId == created.Project.Id);
+        Assert.Null(persistedClip.MovieSceneId);
+        Assert.Null(persistedClip.MovieShotId);
+        Assert.False(await verifyDb.GenerationJobs.AsNoTracking()
+            .AnyAsync(item => item.WorkspaceId == owner.PersonalWorkspace.Id));
+        Assert.False(await verifyDb.UsageTransactions.AsNoTracking()
+            .AnyAsync(item => item.WorkspaceId == owner.PersonalWorkspace.Id));
+        Assert.Equal(0, factory.Calls.Calls(FakeProviderKind.Movie));
     }
 
 }
