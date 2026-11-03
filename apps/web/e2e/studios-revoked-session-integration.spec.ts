@@ -369,7 +369,6 @@ for (const studio of studios) {
     const context = await browser.newContext({ baseURL: webUrl, ignoreHTTPSErrors: syntheticSessionMode, viewport: { width: 1365, height: 900 } });
     const monitor = makeMonitor();
     let revoked = false;
-    let pageBPrefetchBlocker: ((route: Route) => Promise<void>) | undefined;
     try {
       await addExternalEgressBlock(context, monitor);
       const pageA = await context.newPage();
@@ -385,35 +384,17 @@ for (const studio of studios) {
 
       const pageB = await context.newPage();
       observePage(pageB, monitor);
-      if (studio.navKind === "link") {
-        pageBPrefetchBlocker = async route => {
-          const url = new URL(route.request().url());
-          if (url.pathname === studio.path && url.searchParams.has("_rsc") && isPrefetch(route.request())) {
-            await route.abort("blockedbyclient");
-            return;
-          }
-          await route.fallback();
-        };
-        await pageB.route("**/*", pageBPrefetchBlocker);
-      }
-      const pageBResponse = await pageB.goto(studio.path);
+      const pageBResponse = await pageB.goto(studio.sourcePath);
       expect(pageBResponse?.status()).toBe(200);
-      await expect.poll(async () => (await markerText(pageB)).includes(studio.markers[0]), { timeout: 15_000 }).toBe(true);
-
-      await pageA.goto(studio.sourcePath);
-      await pageB.goto(studio.sourcePath);
-      const controlA = await targetControl(pageA, studio);
       const controlB = await targetControl(pageB, studio);
-      await expect(controlA).toBeVisible();
       await expect(controlB).toBeVisible();
 
       let preRevocationPrefetches = 0;
       if (studio.navKind === "link") {
-        await controlA.hover();
-        await pageA.waitForTimeout(900);
+        await controlB.hover();
+        await pageB.waitForTimeout(900);
         preRevocationPrefetches = monitor.rows.filter(row => row.path === studio.path && row.rsc && row.prefetch).length;
         if (requireProductionPrefetch) expect(preRevocationPrefetches).toBeGreaterThan(0);
-        if (pageBPrefetchBlocker) await pageB.unroute("**/*", pageBPrefetchBlocker);
       } else {
         test.info().annotations.push({ type: "navigation-shape", description: "Chat conversation selection uses router.push from a button rather than a Next Link; this case exercises the real client transition and browser history, not native Link prefetch for the dynamic conversation URL." });
       }
@@ -443,10 +424,11 @@ for (const studio of studios) {
       const deniedControlBody = await deniedControl.text();
       for (const marker of privateMarkers) expect(deniedControlBody).not.toContain(marker);
 
-      if (studio.navKind === "link") {
-        await controlB.hover();
-        await pageB.waitForTimeout(700);
-      }
+      const activeTabMarkers = await noPrivateMarkerVisible(pageA, studio);
+      const secondTabMarkers = await noPrivateMarkerVisible(pageB, studio);
+      expect.soft(activeTabMarkers, `${studio.name} private state remained visible in the already-open tab immediately after session revocation`).toEqual([]);
+      expect.soft(secondTabMarkers, `${studio.name} private state remained visible in the second tab immediately after session revocation`).toEqual([]);
+
       await controlB.click();
       await pageB.waitForTimeout(500);
       const afterNavigation = await noPrivateMarkerVisible(pageB, studio);
@@ -475,7 +457,16 @@ for (const studio of studios) {
 
       const pageC = await context.newPage();
       observePage(pageC, monitor);
-      await pageC.goto(studio.path);
+      if (studio.navKind === "link") {
+        await pageC.goto(studio.sourcePath);
+        const controlC = await targetControl(pageC, studio);
+        await expect(controlC).toBeVisible();
+        await controlC.hover();
+        await pageC.waitForTimeout(700);
+        await controlC.click();
+      } else {
+        await pageC.goto(studio.path);
+      }
       await pageC.waitForTimeout(250);
       expect.soft(await noPrivateMarkerVisible(pageC, studio), `${studio.name} marker visible in a new tab after revocation`).toEqual([]);
 
@@ -505,6 +496,8 @@ for (const studio of studios) {
         syntheticLocalAuth: syntheticSessionMode,
         initialAuthorizedStatus: authorizedResponse?.status(),
         privateMarkerVisibleBeforeRevocation: true,
+        activeTabMarkersImmediatelyAfterRevocation: activeTabMarkers,
+        secondTabMarkersImmediatelyAfterRevocation: secondTabMarkers,
         preRevocationNativeLinkPrefetches: preRevocationPrefetches,
         nativeLinkPrefetchApplicable: studio.navKind === "link",
         explicitRevokedApiControlStatus: deniedControl.status(),
