@@ -1,5 +1,6 @@
 import { test, expect, loginInUi, logoutInUi, registerInUi } from "./fixtures";
 import type { Page } from "@playwright/test";
+import { translate, type Locale } from "../src/lib/i18n";
 
 async function mockRecoveryAvailability(page: Page, available: boolean) {
   await page.route("**/api/auth/password-recovery/availability", async (route) => {
@@ -114,10 +115,34 @@ test.describe("authentication and onboarding", () => {
     await onboarding.getByRole("button", { name: /continue/i }).click();
     await expect(onboarding.locator("#onboarding-title")).toBeVisible();
     await onboarding.getByRole("button", { name: /choose .*action/i }).click();
-    await onboarding.getByRole("button").filter({ hasText: /project/i }).click();
+    const pageLocale = (await page.locator("html").getAttribute("lang")) ?? "en";
+    const chatTitle = translate(pageLocale as Locale, "onboarding.workflow.chat.title");
+    const chatChoice = onboarding.getByRole("button").filter({ hasText: chatTitle });
+    await expect(chatChoice).toHaveCount(1);
+    await expect(chatChoice).toBeVisible();
+    const completionResponsePromise = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return url.pathname === "/api/auth/onboarding/complete" && response.request().method() === "POST";
+    });
+    await chatChoice.click();
+    const completionResponse = await completionResponsePromise;
+    expect(completionResponse.ok()).toBe(true);
+    expect(await completionResponse.request().headerValue("x-csrf-token")).toBeTruthy();
+    expect(completionResponse.request().postDataJSON()).toMatchObject({ intent: "chat" });
     await expect(onboarding).toBeHidden();
-    await expect(page).toHaveURL(/\/projects/);
-    await expect(page.getByRole("heading", { name: /projects/i })).toBeVisible();
+    await expect(page).toHaveURL(/\/chat$/);
+    const persistedMePromise = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return url.pathname === "/api/auth/me" && response.request().method() === "GET";
+    });
+    await page.reload();
+    const persistedMeResponse = await persistedMePromise;
+    expect(persistedMeResponse.ok()).toBe(true);
+    const persistedMe = await persistedMeResponse.json() as { user?: { onboardingCompletedAt?: string | null; onboardingIntent?: string | null } };
+    expect(persistedMe.user?.onboardingCompletedAt).toBeTruthy();
+    expect(persistedMe.user?.onboardingIntent).toBe("chat");
+    await expect(page).toHaveURL(/\/chat$/);
+    await expect(page.getByRole("dialog")).toHaveCount(0);
   });
 
   test("logs in, bypasses completed onboarding, and logs out", async ({ page, testUser }) => {
