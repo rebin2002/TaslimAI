@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
@@ -65,7 +66,7 @@ public interface IMovieStudioService
     Task<MovieProviderReadinessDto> ProviderReadinessAsync();
 }
 
-public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessService access, MovieCollaborationAccess collaboration, IGenerationJobService jobs, IMovieVideoProvider provider, IMovieCharacterContinuityService continuity, MovieWorldContinuityProjector worldContinuity, IMovieGenerationCostEstimator movieCostEstimator, IGenerationCostGuardrailService costGuardrails, IMovieProductionGenerationOrchestrator productionOrchestrator, IMovieReferenceReadinessService referenceReadiness) : IMovieStudioService
+public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessService access, MovieCollaborationAccess collaboration, IGenerationJobService jobs, IMovieVideoProvider provider, IMovieCharacterContinuityService continuity, MovieWorldContinuityProjector worldContinuity, IMovieGenerationCostEstimator movieCostEstimator, IGenerationCostGuardrailService costGuardrails, IMovieProductionGenerationOrchestrator productionOrchestrator, IMovieReferenceReadinessService referenceReadiness, ILogger<MovieStudioService> logger) : IMovieStudioService
 {
     public async Task<MovieStudioProjectResponse?> CreateAsync(Guid userId, MovieStudioCreateRequest request, CancellationToken cancellationToken, string? idempotencyKey = null)
     {
@@ -1829,7 +1830,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                 // A competing, different request may commit its job after our
                 // initial key lookup. Do not strand this request's persisted
                 // speculative clip when its idempotency fingerprint conflicts.
-                await DiscardSpeculativeClipAsync(clip, CancellationToken.None);
+                await TryDiscardSpeculativeClipAsync(clip, CancellationToken.None);
                 throw;
             }
             var canonicalClip = await db.MovieClips.SingleOrDefaultAsync(item => item.Id == canonicalInput.MovieClipId && item.MovieProjectId == movie.Id, cancellationToken);
@@ -1862,7 +1863,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         {
             // CreateAsync commits the job, usage reservation, and queue entry in
             // one transaction. Any failure leaves this speculative clip unused.
-            await DiscardSpeculativeClipAsync(clip, CancellationToken.None);
+            await TryDiscardSpeculativeClipAsync(clip, CancellationToken.None);
             throw;
         }
         // The clip is persisted before the job because the job validator needs a
@@ -1915,6 +1916,27 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         clip.GenerationJobId = job.Id;
         await db.SaveChangesAsync(cancellationToken);
         return new MovieStudioGenerationResponse(await GetAsync(userId, movie.Id, cancellationToken) ?? throw new InvalidOperationException("Movie project disappeared."), GenerationJobContractMapper.ToMovieDto(job), clip.Id);
+    }
+
+    private async Task TryDiscardSpeculativeClipAsync(MovieClip clip, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await DiscardSpeculativeClipAsync(clip, cancellationToken);
+        }
+        catch (Exception cleanupException)
+        {
+            try
+            {
+                logger.LogError(
+                    "Failed to discard a speculative Movie clip while preserving the original request error. Cleanup exception type: {CleanupExceptionType}.",
+                    cleanupException.GetType().Name);
+            }
+            catch
+            {
+                // Logging must not replace the original generation or validation error.
+            }
+        }
     }
 
     private async Task DiscardSpeculativeClipAsync(MovieClip clip, CancellationToken cancellationToken)
