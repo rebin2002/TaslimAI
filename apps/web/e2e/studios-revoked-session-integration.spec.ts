@@ -7,6 +7,7 @@ const syntheticSessionMode = process.env.E2E_SYNTHETIC_AUTH === "1";
 const requireProductionPrefetch = process.env.E2E_EXPECT_PRODUCTION_PREFETCH === "1";
 const responseBodyReadTimeoutMs = 5_000;
 const responseBodyReadTimeoutMarker = "<response-body-read-timeout>";
+const maxCapturedResponseBodyBytes = 2 * 1024 * 1024;
 const conversationId = "11111111-1111-4111-8111-111111111111";
 const stamp = "7F3A";
 const privateMarkers = [
@@ -77,10 +78,19 @@ type RequestRow = {
   navigation: boolean;
   accountAtRequest?: AccountState;
   status?: number;
+  responseUrl?: string;
+  responseTime?: number;
+  settledAt?: number;
+  contentType?: string;
+  bodyBytes?: number;
   body?: Promise<string>;
-  bodyReadStatus?: "read" | "timeout" | "error";
+  bodyReadStatus?: "pending" | "read" | "timeout" | "error";
+  bodyCaptureSource?: "response-body-api" | "route-fetch";
   bodyReadError?: string;
   failure?: string;
+  requestCompletion?: Promise<void>;
+  markRequestComplete?: () => void;
+  completeBodyRead?: (status: "read" | "timeout" | "error", body: string, error?: string, bodyBytes?: number) => void;
 };
 
 type Monitor = {
@@ -128,6 +138,157 @@ function isPrefetch(request: Request) {
   return headers["next-router-prefetch"] === "1" || /prefetch/i.test(headers.purpose ?? "");
 }
 
+function isResponseBodyCandidate(row: Pick<RequestRow, "rsc" | "method" | "path">) {
+  return row.rsc || isProtectedRead(row.method, row.path);
+}
+
+function responseCrossedBoundary(row: RequestRow, signalAt: number) {
+  return row.time >= signalAt
+    || (row.responseTime !== undefined && row.responseTime >= signalAt)
+    || (row.settledAt !== undefined && row.settledAt >= signalAt);
+}
+
+function findObservedRequest(monitor: Monitor, request: Request) {
+  return findObservedRequestWithSettlement(monitor, request, false);
+}
+
+function findObservedRequestWithSettlement(monitor: Monitor, request: Request, includeSettled: boolean) {
+  return monitor.byRequest.get(request)
+    ?? [...monitor.rows].reverse().find(candidate => (includeSettled || candidate.settledAt === undefined)
+      && candidate.method === request.method() && candidate.url === request.url());
+}
+
+function beginResponseBodyCapture(row: RequestRow) {
+  if (row.body) return;
+  let resolveBody!: (body: string) => void;
+  row.bodyReadStatus = "pending";
+  row.bodyCaptureSource = "response-body-api";
+  row.body = new Promise(resolve => { resolveBody = resolve; });
+  let settled = false;
+  const timer: { handle?: ReturnType<typeof setTimeout> } = {};
+  const finish = (status: "read" | "timeout" | "error", body: string, error?: string, bodyBytes?: number) => {
+    if (settled) return;
+    settled = true;
+    if (timer.handle) clearTimeout(timer.handle);
+    row.bodyReadStatus = status;
+    row.bodyReadError = error?.slice(0, 180);
+    row.bodyBytes = bodyBytes;
+    row.completeBodyRead = undefined;
+    resolveBody(body);
+  };
+  row.completeBodyRead = finish;
+  timer.handle = setTimeout(
+    () => finish("timeout", responseBodyReadTimeoutMarker, `response body capture exceeded ${responseBodyReadTimeoutMs}ms`),
+    responseBodyReadTimeoutMs,
+  );
+}
+
+function settleResponseBodyCapture(row: RequestRow, status: "read" | "timeout" | "error", body: string, error?: string, bodyBytes?: number) {
+  if (row.bodyReadStatus !== undefined && row.bodyReadStatus !== "pending") return;
+  if (row.completeBodyRead) {
+    row.completeBodyRead(status, body, error, bodyBytes);
+    return;
+  }
+  row.bodyReadStatus = status;
+  row.bodyReadError = error?.slice(0, 180);
+  row.bodyBytes = bodyBytes;
+  row.body = Promise.resolve(body);
+}
+
+function recordRouteFetchedBody(row: RequestRow, status: "read" | "timeout" | "error", body: string, error?: string, bodyBytes?: number) {
+  if (row.completeBodyRead) row.completeBodyRead(status, body, error, bodyBytes);
+  else {
+    row.bodyReadStatus = status;
+    row.bodyReadError = error?.slice(0, 180);
+    row.bodyBytes = bodyBytes;
+    row.body = Promise.resolve(body);
+  }
+  row.bodyCaptureSource = "route-fetch";
+  row.completeBodyRead = undefined;
+}
+
+async function collectResponseBodies(rows: RequestRow[]) {
+  const candidates = rows.filter(isResponseBodyCandidate);
+  return Promise.all(candidates.map(async row => {
+    if (!row.body && row.requestCompletion) {
+      const timer: { handle?: ReturnType<typeof setTimeout> } = {};
+      const completed = await Promise.race([
+        row.requestCompletion.then(() => true),
+        new Promise<boolean>(resolve => {
+          timer.handle = setTimeout(() => resolve(false), responseBodyReadTimeoutMs);
+        }),
+      ]);
+      if (timer.handle) clearTimeout(timer.handle);
+      if (!completed && !row.body) {
+        settleResponseBodyCapture(row, "error", "<unreadable-response-body>", "request did not complete before the bounded response-capture deadline");
+      }
+    }
+    if (!row.body) {
+      settleResponseBodyCapture(row, "error", "<unreadable-response-body>", "no response body or request-failure event was captured");
+    }
+    return { row, body: await row.body! };
+  }));
+}
+
+async function continueWithCapturedResponse(route: Route, monitor: Monitor) {
+  const row = findObservedRequestWithSettlement(monitor, route.request(), true);
+  if (!row || !isResponseBodyCandidate(row)) {
+    await route.continue();
+    return;
+  }
+
+  let response: Awaited<ReturnType<Route["fetch"]>>;
+  try {
+    response = await route.fetch({ timeout: responseBodyReadTimeoutMs });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    row.responseTime = performance.now();
+    row.settledAt = row.responseTime;
+    recordRouteFetchedBody(row, "error", "<unreadable-response-body>", `route.fetch response capture: ${detail}`);
+    row.markRequestComplete?.();
+    await route.continue();
+    return;
+  }
+
+  row.status = response.status();
+  row.responseUrl = response.url();
+  row.responseTime = performance.now();
+  row.contentType = response.headers()["content-type"];
+  const contentLength = Number(response.headers()["content-length"]);
+  let bodyBytes: Buffer | undefined;
+  if (Number.isFinite(contentLength) && contentLength > maxCapturedResponseBodyBytes) {
+    recordRouteFetchedBody(row, "error", "<unreadable-response-body>", `response body content-length ${contentLength} exceeds ${maxCapturedResponseBodyBytes} byte capture limit`);
+  } else {
+    const timer: { handle?: ReturnType<typeof setTimeout> } = {};
+    const bodyResult = await Promise.race([
+      response.body().then(bytes => ({ kind: "body" as const, bytes })).catch(error => ({ kind: "error" as const, error })),
+      new Promise<{ kind: "timeout" }>(resolve => {
+        timer.handle = setTimeout(() => resolve({ kind: "timeout" }), responseBodyReadTimeoutMs);
+      }),
+    ]);
+    if (timer.handle) clearTimeout(timer.handle);
+    if (bodyResult.kind === "timeout") {
+      recordRouteFetchedBody(row, "timeout", responseBodyReadTimeoutMarker, `route-fetched response body exceeded ${responseBodyReadTimeoutMs}ms`);
+    } else if (bodyResult.kind === "error") {
+      const detail = bodyResult.error instanceof Error ? bodyResult.error.message : String(bodyResult.error);
+      recordRouteFetchedBody(row, "error", "<unreadable-response-body>", `route-fetched response body: ${detail}`);
+    } else if (bodyResult.bytes.byteLength > maxCapturedResponseBodyBytes) {
+      recordRouteFetchedBody(row, "error", "<unreadable-response-body>", `response body ${bodyResult.bytes.byteLength} bytes exceeds ${maxCapturedResponseBodyBytes} byte capture limit`);
+    } else {
+      bodyBytes = bodyResult.bytes;
+      recordRouteFetchedBody(row, "read", bodyBytes.toString("utf8"), undefined, bodyBytes.byteLength);
+    }
+  }
+
+  row.settledAt = performance.now();
+  row.markRequestComplete?.();
+  try {
+    await route.fulfill(bodyBytes ? { response, body: bodyBytes } : { response });
+  } catch (error) {
+    row.failure = `route.fulfill after bounded capture: ${(error instanceof Error ? error.message : String(error)).slice(0, 180)}`;
+  }
+}
+
 function observePage(page: Page, monitor: Monitor, accountAtRequest?: () => AccountState) {
   page.on("request", request => {
     const parsed = new URL(request.url());
@@ -142,51 +303,81 @@ function observePage(page: Page, monitor: Monitor, accountAtRequest?: () => Acco
       navigation: request.isNavigationRequest(),
       accountAtRequest: accountAtRequest?.(),
     };
+    row.requestCompletion = new Promise(resolve => { row.markRequestComplete = resolve; });
     monitor.rows.push(row);
     monitor.byRequest.set(request, row);
     if (isGenerationPost(row.method, row.path)) monitor.generationPosts.push(row.path);
   });
   const captureResponse = (request: Request, response: import("@playwright/test").Response) => {
-    const row = monitor.byRequest.get(request)
-      ?? [...monitor.rows].reverse().find(candidate => candidate.status === undefined
-        && candidate.method === request.method() && candidate.url === request.url());
+    const row = findObservedRequest(monitor, request);
     if (!row) return;
     row.status = response.status();
-    if ((row.rsc || isProtectedRead(row.method, row.path)) && !row.body) {
-      row.body = new Promise(resolve => {
-        let settled = false;
-        const timer: { handle?: ReturnType<typeof setTimeout> } = {};
-        const finish = (status: "read" | "timeout" | "error", body: string) => {
-          if (settled) return;
-          settled = true;
-          if (timer.handle) clearTimeout(timer.handle);
-          row.bodyReadStatus = status;
-          resolve(body);
-        };
-        timer.handle = setTimeout(() => finish("timeout", responseBodyReadTimeoutMarker), responseBodyReadTimeoutMs);
-        void response.text()
-          .then(body => finish("read", body))
-          .catch(error => {
-            row.bodyReadError = (error instanceof Error ? error.message : String(error)).slice(0, 180);
-            finish("error", "<unreadable-response-body>");
-          });
-      });
-    }
+    row.responseUrl = response.url();
+    row.responseTime = performance.now();
+    row.contentType = response.headers()["content-type"];
+    if (isResponseBodyCandidate(row)) beginResponseBodyCapture(row);
   };
   page.on("response", response => captureResponse(response.request(), response));
   page.on("requestfinished", async request => {
-    const row = monitor.byRequest.get(request)
-      ?? [...monitor.rows].reverse().find(candidate => candidate.status === undefined
-        && candidate.method === request.method() && candidate.url === request.url());
-    if (!row || row.status !== undefined) return;
-    const response = await request.response();
-    if (response) captureResponse(request, response);
+    const row = findObservedRequest(monitor, request);
+    if (!row) return;
+    row.settledAt = performance.now();
+    let response: import("@playwright/test").Response | null = null;
+    try {
+      response = await request.response();
+    } catch (error) {
+      row.bodyReadError = (error instanceof Error ? error.message : String(error)).slice(0, 180);
+    }
+    if (response) {
+      captureResponse(request, response);
+      if (isResponseBodyCandidate(row) && row.bodyReadStatus === "pending") {
+        const contentLength = Number(response.headers()["content-length"]);
+        if (Number.isFinite(contentLength) && contentLength > maxCapturedResponseBodyBytes) {
+          settleResponseBodyCapture(row, "error", "<unreadable-response-body>", `response body content-length ${contentLength} exceeds ${maxCapturedResponseBodyBytes} byte capture limit`);
+        } else {
+          try {
+            const timer: { handle?: ReturnType<typeof setTimeout> } = {};
+            const bodyResult = await Promise.race([
+              response.body().then(bytes => ({ kind: "body" as const, bytes })).catch(error => ({ kind: "error" as const, error })),
+              new Promise<{ kind: "timeout" }>(resolve => {
+                timer.handle = setTimeout(() => resolve({ kind: "timeout" }), responseBodyReadTimeoutMs);
+              }),
+            ]);
+            if (timer.handle) clearTimeout(timer.handle);
+            if (bodyResult.kind === "timeout") {
+              settleResponseBodyCapture(row, "timeout", responseBodyReadTimeoutMarker, `response.body after requestfinished exceeded ${responseBodyReadTimeoutMs}ms`);
+            } else if (bodyResult.kind === "error") {
+              const detail = bodyResult.error instanceof Error ? bodyResult.error.message : String(bodyResult.error);
+              settleResponseBodyCapture(row, "error", "<unreadable-response-body>", `response.body after requestfinished: ${detail}`);
+            } else {
+              const bytes = bodyResult.bytes;
+              if (bytes.byteLength > maxCapturedResponseBodyBytes) {
+                settleResponseBodyCapture(row, "error", "<unreadable-response-body>", `response body ${bytes.byteLength} bytes exceeds ${maxCapturedResponseBodyBytes} byte capture limit`);
+              } else {
+                settleResponseBodyCapture(row, "read", bytes.toString("utf8"), undefined, bytes.byteLength);
+              }
+            }
+          } catch (error) {
+            const detail = error instanceof Error ? error.message : String(error);
+            settleResponseBodyCapture(row, "error", "<unreadable-response-body>", `response.body after requestfinished: ${detail}`);
+          }
+        }
+      }
+    } else if (isResponseBodyCandidate(row)) {
+      settleResponseBodyCapture(row, "error", "<unreadable-response-body>", "requestfinished event had no readable response");
+    }
+    row.markRequestComplete?.();
   });
   page.on("requestfailed", request => {
-    const row = monitor.byRequest.get(request)
-      ?? [...monitor.rows].reverse().find(candidate => candidate.status === undefined
-        && candidate.method === request.method() && candidate.url === request.url());
-    if (row) row.failure = request.failure()?.errorText ?? "request failed";
+    const row = findObservedRequest(monitor, request);
+    if (!row) return;
+    row.failure = request.failure()?.errorText ?? "request failed";
+    row.settledAt = performance.now();
+    if (isResponseBodyCandidate(row)) {
+      beginResponseBodyCapture(row);
+      settleResponseBodyCapture(row, "error", "<unreadable-response-body>", `request failed before a complete response body: ${row.failure}`);
+    }
+    row.markRequestComplete?.();
   });
 }
 
@@ -386,7 +577,7 @@ function jsonResponse(route: Route, body: unknown) {
 }
 
 async function installLocalOnlyRoutes(context: BrowserContext, monitor: Monitor, studio: StudioCase, workspaceId: string, isRevoked: () => boolean) {
-  await context.route("**/api/**", async route => {
+  await context.route("**/*", async route => {
     const request = route.request();
     const url = new URL(request.url());
     if (!isLoopback(url.hostname)) {
@@ -397,9 +588,12 @@ async function installLocalOnlyRoutes(context: BrowserContext, monitor: Monitor,
 
     if (isGenerationPost(request.method(), url.pathname)) {
       monitor.generationPosts.push(url.pathname);
+      monitor.blockedGenerationPosts.push(url.pathname);
       await route.abort("blockedbyclient");
       return;
     }
+
+    if (syntheticSessionMode) return continueWithCapturedResponse(route, monitor);
 
     if (isRevoked() || !isProtectedRead(request.method(), url.pathname)) {
       await route.continue();
@@ -465,7 +659,11 @@ async function installAccountSwitchNetworkGuard(
       await route.abort("blockedbyclient");
       return;
     }
-    if (syntheticSessionMode || request.method() !== "GET" || !isProtectedRead(request.method(), url.pathname)) {
+    if (syntheticSessionMode) {
+      await continueWithCapturedResponse(route, monitor);
+      return;
+    }
+    if (request.method() !== "GET" || !isProtectedRead(request.method(), url.pathname)) {
       await route.continue();
       return;
     }
@@ -614,13 +812,21 @@ for (const studio of studios) {
   });
 
   test(`${studio.name}: authorized private state is denied after revocation across navigation, history, reload, and a second tab`, async ({ browser, request, testUser }) => {
-    test.setTimeout(120_000);
+    test.setTimeout(180_000);
     assertLoopback(webUrl, "E2E_WEB_URL");
     assertLoopback(E2E_API_URL, "E2E_API_URL");
     const context = await browser.newContext({ baseURL: webUrl, ignoreHTTPSErrors: syntheticSessionMode, viewport: { width: 1365, height: 900 } });
     const monitor = makeMonitor();
+    let providerPostsBefore: number | undefined;
+    let providerPostsAfter: number | undefined;
     let revoked = false;
     try {
+      for (const path of chargeableChatPostPaths) expect(isGenerationPost("POST", path), `${path} must remain classified as a chargeable Chat POST in remote-revocation coverage`).toBe(true);
+      if (syntheticSessionMode) {
+        const before = await request.get(`${E2E_API_URL}/__test__/summary`);
+        expect(before.status()).toBe(200);
+        providerPostsBefore = (await before.json() as { generationPosts: number }).generationPosts;
+      }
       await addExternalEgressBlock(context, monitor);
       const pageA = await context.newPage();
       const token = await createSession(pageA, request, testUser);
@@ -642,9 +848,11 @@ for (const studio of studios) {
 
       let preRevocationPrefetches = 0;
       if (studio.navKind === "link") {
+        const positivePrefetchStart = monitor.rows.length;
         await controlB.hover();
         await pageB.waitForTimeout(900);
         preRevocationPrefetches = monitor.rows.filter(row => row.path === studio.path && row.rsc && row.prefetch).length;
+        await collectResponseBodies(monitor.rows.slice(positivePrefetchStart));
         if (requireProductionPrefetch) expect(preRevocationPrefetches).toBeGreaterThan(0);
       } else {
         test.info().annotations.push({ type: "navigation-shape", description: "Chat conversation selection uses router.push from a button rather than a Next Link; this case exercises the real client transition and browser history, not native Link prefetch for the dynamic conversation URL." });
@@ -665,6 +873,7 @@ for (const studio of studios) {
       expect((await pageA.request.get(`${E2E_API_URL}/api/auth/me`)).status()).toBe(401);
       revoked = true;
       monitor.revokedAt = performance.now();
+      const flushPostRevocationBodies = async () => collectResponseBodies(monitor.rows.filter(row => responseCrossedBoundary(row, monitor.revokedAt)));
 
       // Independent control: the local auth API must deny the old cookie. This
       // explicit test request is not counted as an automatic browser request.
@@ -684,27 +893,34 @@ for (const studio of studios) {
       await pageB.waitForTimeout(500);
       const afterNavigation = await noPrivateMarkerVisible(pageB, studio);
       expect.soft(afterNavigation, `${studio.name} marker visible after revoked-session client navigation`).toEqual([]);
+      await flushPostRevocationBodies();
 
       await pageA.goBack({ waitUntil: "domcontentloaded" }).catch(() => null);
       await pageA.waitForTimeout(250);
       expect.soft(await noPrivateMarkerVisible(pageA, studio), `${studio.name} marker visible after back`).toEqual([]);
+      await flushPostRevocationBodies();
       await pageA.goForward({ waitUntil: "domcontentloaded" }).catch(() => null);
       await pageA.waitForTimeout(250);
       expect.soft(await noPrivateMarkerVisible(pageA, studio), `${studio.name} marker visible after forward`).toEqual([]);
+      await flushPostRevocationBodies();
 
       await pageB.goBack({ waitUntil: "domcontentloaded" }).catch(() => null);
       await pageB.waitForTimeout(200);
       expect.soft(await noPrivateMarkerVisible(pageB, studio), `${studio.name} marker visible in second-tab back history`).toEqual([]);
+      await flushPostRevocationBodies();
       await pageB.goForward({ waitUntil: "domcontentloaded" }).catch(() => null);
       await pageB.waitForTimeout(200);
       expect.soft(await noPrivateMarkerVisible(pageB, studio), `${studio.name} marker visible in second-tab forward history`).toEqual([]);
+      await flushPostRevocationBodies();
 
       await pageA.reload({ waitUntil: "domcontentloaded" }).catch(() => null);
       await pageA.waitForTimeout(250);
       expect.soft(await noPrivateMarkerVisible(pageA, studio), `${studio.name} marker visible after reload`).toEqual([]);
+      await flushPostRevocationBodies();
       await pageB.reload({ waitUntil: "domcontentloaded" }).catch(() => null);
       await pageB.waitForTimeout(250);
       expect.soft(await noPrivateMarkerVisible(pageB, studio), `${studio.name} marker visible after second-tab reload`).toEqual([]);
+      await flushPostRevocationBodies();
 
       const pageC = await context.newPage();
       observePage(pageC, monitor);
@@ -712,20 +928,24 @@ for (const studio of studios) {
         await pageC.goto(studio.sourcePath);
         const controlC = await targetControl(pageC, studio);
         await expect(controlC).toBeVisible();
+        await flushPostRevocationBodies();
         await controlC.hover();
         await pageC.waitForTimeout(700);
+        await flushPostRevocationBodies();
         await controlC.click();
       } else {
         await pageC.goto(studio.path);
       }
       await pageC.waitForTimeout(250);
       expect.soft(await noPrivateMarkerVisible(pageC, studio), `${studio.name} marker visible in a new tab after revocation`).toEqual([]);
+      await flushPostRevocationBodies();
 
       // Allow in-flight responses to settle before classifying the two contracts.
       await pageA.waitForTimeout(400);
       await pageB.waitForTimeout(400);
       await pageC.waitForTimeout(200);
       const afterRevokeRows = monitor.rows.filter(row => row.time >= monitor.revokedAt);
+      const afterRevokeResponseRows = monitor.rows.filter(row => responseCrossedBoundary(row, monitor.revokedAt));
       const protectedGets = afterRevokeRows.filter(row => isProtectedRead(row.method, row.path));
       const completedProtectedGets = protectedGets.filter(row => row.status !== undefined);
       const correctlyDenied = completedProtectedGets.filter(row => row.status === 401 || row.status === 403);
@@ -733,14 +953,41 @@ for (const studio of studios) {
       const targetPrefetches = studio.navKind === "link"
         ? afterRevokeRows.filter(row => row.path === studio.path && row.rsc && row.prefetch)
         : [];
-      const privateResponseBodies: Array<{ path: string; status?: number }> = [];
-      const rscResponseAudit: Array<{ path: string; status?: number; prefetch: boolean; privateMarker: boolean }> = [];
-      for (const row of afterRevokeRows) {
-        if (!row.body) continue;
-        const body = await row.body;
-        const hasPrivateMarker = privateMarkers.some(marker => body.includes(marker));
-        if (row.rsc) rscResponseAudit.push({ path: row.path, status: row.status, prefetch: row.prefetch, privateMarker: hasPrivateMarker });
-        if (hasPrivateMarker) privateResponseBodies.push({ path: row.path, status: row.status });
+      const protectedGetResponses = afterRevokeResponseRows.filter(row => isProtectedRead(row.method, row.path));
+      const nonDeniedProtectedGetResponses = protectedGetResponses.filter(row => row.status !== undefined && row.status !== 401 && row.status !== 403);
+      const unresolvedProtectedGetResponses = protectedGetResponses.filter(row => row.status === undefined);
+      const targetPrefetchResponses = studio.navKind === "link"
+        ? afterRevokeResponseRows.filter(row => row.path === studio.path && row.rsc && row.prefetch)
+        : [];
+      const capturedResponseBodies = await collectResponseBodies(afterRevokeResponseRows);
+      const privateResponseBodies = capturedResponseBodies.flatMap(({ row, body }) => {
+        const markers = privateMarkers.filter(marker => body.includes(marker));
+        return markers.length > 0 ? [{ path: row.path, responseUrl: row.responseUrl, status: row.status, markers }] : [];
+      });
+      const responseBodyCaptureAudit = capturedResponseBodies.map(({ row, body }) => ({
+        requestUrl: row.url,
+        responseUrl: row.responseUrl,
+        method: row.method,
+        status: row.status,
+        responseTime: row.responseTime,
+        settledAt: row.settledAt,
+        contentType: row.contentType,
+        bodyReadStatus: row.bodyReadStatus,
+        bodyCaptureSource: row.bodyCaptureSource,
+        bodyBytes: row.bodyBytes,
+        privateMarker: row.bodyReadStatus === "read" ? privateMarkers.some(marker => body.includes(marker)) : null,
+        networkFailure: row.failure,
+      }));
+      const responseBodyReadFailures = capturedResponseBodies
+        .filter(({ row }) => row.bodyReadStatus !== "read")
+        .map(({ row }) => ({ path: row.path, requestUrl: row.url, responseUrl: row.responseUrl, status: row.status, contentType: row.contentType, bodyReadStatus: row.bodyReadStatus, bodyCaptureSource: row.bodyCaptureSource, bodyBytes: row.bodyBytes, error: row.bodyReadError, failure: row.failure }));
+      const rscResponseAudit = capturedResponseBodies
+        .filter(({ row }) => row.rsc)
+        .map(({ row, body }) => ({ path: row.path, requestUrl: row.url, responseUrl: row.responseUrl, status: row.status, responseTime: row.responseTime, settledAt: row.settledAt, prefetch: row.prefetch, bodyReadStatus: row.bodyReadStatus, bodyCaptureSource: row.bodyCaptureSource, bodyBytes: row.bodyBytes, privateMarker: row.bodyReadStatus === "read" ? privateMarkers.some(marker => body.includes(marker)) : null }));
+      if (syntheticSessionMode) {
+        const summary = await request.get(`${E2E_API_URL}/__test__/summary`);
+        expect(summary.status()).toBe(200);
+        providerPostsAfter = (await summary.json() as { generationPosts: number }).generationPosts;
       }
       const evidence = {
         studio: studio.name,
@@ -756,10 +1003,21 @@ for (const studio of studios) {
         correctlyDeniedProtectedGetResponses: correctlyDenied.length,
         postRevocationProtectedGetResponses: completedProtectedGets.map(row => ({ path: row.path, status: row.status })),
         nonDeniedProtectedGetResponses: nonDenied.map(row => ({ path: row.path, status: row.status })),
+        postSignalProtectedGetResponses: protectedGetResponses.map(row => ({ path: row.path, responseUrl: row.responseUrl, status: row.status, responseTime: row.responseTime, settledAt: row.settledAt })),
+        nonDeniedProtectedGetResponsesAfterSignal: nonDeniedProtectedGetResponses.map(row => ({ path: row.path, responseUrl: row.responseUrl, status: row.status })),
+        unresolvedProtectedGetResponsesAfterSignal: unresolvedProtectedGetResponses.map(row => ({ path: row.path, url: row.url, responseUrl: row.responseUrl, failure: row.failure })),
         postRevocationTargetPrefetches: targetPrefetches.map(row => ({ path: row.path, status: row.status })),
+        postRevocationTargetPrefetchResponses: targetPrefetchResponses.map(row => ({ path: row.path, responseUrl: row.responseUrl, status: row.status, responseTime: row.responseTime, settledAt: row.settledAt })),
         postRevocationRscResponses: rscResponseAudit,
         privateResponseBodies,
+        responseBodyCaptureAudit,
+        routeFetchCapturedResponseBodies: responseBodyCaptureAudit.filter(row => row.bodyCaptureSource === "route-fetch").length,
+        responseBodyReadFailures,
+        exactChargeableChatPaths: chargeableChatPostPaths,
         generationPosts: monitor.generationPosts,
+        blockedGenerationPosts: monitor.blockedGenerationPosts,
+        syntheticProviderDispatchCountBefore: providerPostsBefore,
+        syntheticProviderDispatchCountAfter: providerPostsAfter,
         blockedExternalAttempts: monitor.externalAttempts,
       };
       console.log(`STUDIOS_REVOKED_SESSION_EVIDENCE ${JSON.stringify(evidence)}`);
@@ -767,14 +1025,19 @@ for (const studio of studios) {
       // HTTP authorization is a separate invariant from avoiding stale calls.
       expect.soft(nonDenied.map(row => ({ path: row.path, status: row.status })), "Any post-revocation protected GET that reaches the local API must be denied with 401/403.").toEqual([]);
       expect.soft(privateResponseBodies, "No private marker may be served in a post-revocation API or Flight response.").toEqual([]);
+      expect.soft(responseBodyReadFailures, "Every post-revocation API/Flight response body must be captured; unreadable bodies cannot support a privacy PASS.").toEqual([]);
+      expect.soft(nonDeniedProtectedGetResponses.map(row => ({ path: row.path, responseUrl: row.responseUrl, status: row.status })), "Every protected GET response crossing the revocation boundary must be denied with 401/403.").toEqual([]);
+      expect.soft(unresolvedProtectedGetResponses.map(row => ({ path: row.path, url: row.url, failure: row.failure })), "Every protected GET response crossing the revocation boundary must have an observable status.").toEqual([]);
       expect.soft(monitor.generationPosts, "No generation/provider POST is allowed in this auth regression.").toEqual([]);
       expect.soft(monitor.externalAttempts, "All browser egress outside loopback is blocked and should remain unused.").toEqual([]);
+      if (syntheticSessionMode) expect.soft(providerPostsAfter, "The synthetic API provider-dispatch counter must remain unchanged across revocation.").toBe(providerPostsBefore);
 
       // The next two are intentionally stricter performance/privacy contracts:
       // correctly denied 401/403 requests above still fail these zero-request checks.
       expect.soft(protectedGets.map(row => ({ path: row.path, status: row.status })), "Strict contract: zero protected API GET attempts after revocation (separate from 401/403 denial).").toEqual([]);
       if (studio.navKind === "link" && requireProductionPrefetch) {
         expect.soft(targetPrefetches.map(row => row.status), "Strict contract: zero target Link prefetches after revocation.").toEqual([]);
+        expect.soft(targetPrefetchResponses.map(row => row.status), "Strict contract: zero target Link prefetch responses delivered after revocation, including in-flight prefetches.").toEqual([]);
       }
     } finally {
       await context.close();
@@ -896,6 +1159,7 @@ for (const studio of studios) {
         providerPostsBefore = (await before.json() as { generationPosts: number }).generationPosts;
       }
       await installAccountSwitchNetworkGuard(context, monitor, studio, () => activeAccount, workspaceIds);
+      for (const path of chargeableChatPostPaths) expect(isGenerationPost("POST", path), `${path} must remain classified as a chargeable Chat POST in A/B coverage`).toBe(true);
       if (syntheticSessionMode) {
         await context.route("**/api/projects/project-private-account-a**", async route => {
           const request = route.request();
@@ -984,6 +1248,7 @@ for (const studio of studios) {
       expect(logoutResponse.status()).toBe(200);
       expect(logoutSignalAt).toBeGreaterThan(0);
       await expect(pageA).toHaveURL(/\/login(?:\?.*)?$/);
+      await collectResponseBodies(monitor.rows.filter(row => responseCrossedBoundary(row, logoutSignalAt)));
 
       const tabAMarkersAtLogout = await visibleAccountMarkers(pageA, "A", studio);
       const tabBMarkersAtLogout = await visibleAccountMarkers(pageB, "A", studio);
@@ -1015,8 +1280,7 @@ for (const studio of studios) {
 
       const historyLeakAudit: Array<{ tab: string; step: string; aMarkers: string[] }> = [];
       const readCapturedBodiesSince = async (rowStart: number) => {
-        const bodies = monitor.rows.slice(rowStart).filter(row => row.body).map(row => row.body!);
-        await Promise.all(bodies);
+        await collectResponseBodies(monitor.rows.slice(rowStart));
       };
       const assertNoAccountA = async (tab: string, page: Page, step: string) => {
         const markers = await visibleAccountMarkers(page, "A", studio);
@@ -1064,33 +1328,55 @@ for (const studio of studios) {
       await pageA.waitForTimeout(300);
       await pageB.waitForTimeout(300);
       const afterLogoutRows = monitor.rows.filter(row => row.time >= logoutSignalAt);
+      const afterLogoutResponseRows = monitor.rows.filter(row => responseCrossedBoundary(row, logoutSignalAt));
       const targetsAccountA = (row: RequestRow) => {
-        const url = new URL(row.url);
-        const pathSegments = url.pathname.split("/").map(segment => decodeURIComponent(segment));
+        const urls = [row.url, row.responseUrl].filter((value): value is string => Boolean(value)).map(value => new URL(value));
         const aIds = [workspaceIds.A, accountProjectIds.A, accountConversationIds.A].filter(Boolean);
-        return aIds.some(id => pathSegments.includes(id) || url.searchParams.get("workspaceId") === id);
+        return urls.some(url => {
+          const pathSegments = url.pathname.split("/").map(segment => decodeURIComponent(segment));
+          return aIds.some(id => pathSegments.includes(id) || url.searchParams.get("workspaceId") === id);
+        });
       };
       const aProtectedGetAttempts = afterLogoutRows.filter(row => isProtectedRead(row.method, row.path)
         && (targetsAccountA(row) || row.accountAtRequest === "A" || row.accountAtRequest === "loggedOut"));
-      const deniedAProtectedGets = aProtectedGetAttempts.filter(row => row.status === 401 || row.status === 403);
-      const nonDeniedAProtectedGets = aProtectedGetAttempts.filter(row => row.status !== undefined && row.status !== 401 && row.status !== 403);
+      const aProtectedGetResponses = afterLogoutResponseRows.filter(row => isProtectedRead(row.method, row.path)
+        && (targetsAccountA(row) || row.accountAtRequest === "A" || row.accountAtRequest === "loggedOut"));
+      const deniedAProtectedGets = aProtectedGetResponses.filter(row => row.status === 401 || row.status === 403);
+      const nonDeniedAProtectedGets = aProtectedGetResponses.filter(row => row.status !== undefined && row.status !== 401 && row.status !== 403);
       const unresolvedAProtectedGets = aProtectedGetAttempts.filter(row => row.status === undefined);
+      const unresolvedAProtectedGetResponses = aProtectedGetResponses.filter(row => row.status === undefined);
       const aFlightPrefetches = afterLogoutRows.filter(row => row.rsc && row.prefetch && (
         targetsAccountA(row)
         || (row.accountAtRequest === "loggedOut" && row.path === pathA)
       ));
-      const capturedResponseBodies = await Promise.all(afterLogoutRows.filter(row => row.body).map(async row => ({
-        row,
-        body: await row.body!,
-      })));
+      const aFlightPrefetchResponses = afterLogoutResponseRows.filter(row => row.rsc && row.prefetch && (
+        targetsAccountA(row)
+        || (row.accountAtRequest === "loggedOut" && row.path === pathA)
+      ));
+      const capturedResponseBodies = await collectResponseBodies(afterLogoutResponseRows);
       const privateResponseLeaks = capturedResponseBodies.flatMap(({ row, body }) => {
         const markers = aMarkers.filter(marker => body.includes(marker));
-        return markers.length > 0 ? [{ path: row.path, status: row.status, markers }] : [];
+        return markers.length > 0 ? [{ path: row.path, responseUrl: row.responseUrl, status: row.status, responseTime: row.responseTime, settledAt: row.settledAt, markers }] : [];
       });
+      const responseBodyCaptureAudit = capturedResponseBodies.map(({ row, body }) => ({
+        requestUrl: row.url,
+        responseUrl: row.responseUrl,
+        method: row.method,
+        status: row.status,
+        responseTime: row.responseTime,
+        settledAt: row.settledAt,
+        contentType: row.contentType,
+        bodyReadStatus: row.bodyReadStatus,
+        bodyCaptureSource: row.bodyCaptureSource,
+        bodyBytes: row.bodyBytes,
+        accountAtRequest: row.accountAtRequest,
+        privateAMarker: row.bodyReadStatus === "read" ? aMarkers.some(marker => body.includes(marker)) : null,
+        networkFailure: row.failure,
+      }));
       const privateResponseBodyReadFailures = capturedResponseBodies
         .filter(({ row }) => row.bodyReadStatus !== "read")
-        .map(({ row }) => ({ path: row.path, status: row.status, bodyReadStatus: row.bodyReadStatus, error: row.bodyReadError }));
-      const chargeablePostsAfterLogout = afterLogoutRows.filter(row => isGenerationPost(row.method, row.path)).map(row => ({ path: row.path, time: row.time }));
+        .map(({ row }) => ({ path: row.path, requestUrl: row.url, responseUrl: row.responseUrl, status: row.status, responseTime: row.responseTime, settledAt: row.settledAt, contentType: row.contentType, bodyBytes: row.bodyBytes, bodyReadStatus: row.bodyReadStatus, bodyCaptureSource: row.bodyCaptureSource, error: row.bodyReadError, failure: row.failure }));
+      const chargeablePostsAfterLogout = afterLogoutResponseRows.filter(row => isGenerationPost(row.method, row.path)).map(row => ({ path: row.path, requestUrl: row.url, responseUrl: row.responseUrl, accountAtRequest: row.accountAtRequest, status: row.status, time: row.time, responseTime: row.responseTime, settledAt: row.settledAt }));
       let providerPostsAfter: number | undefined;
       if (syntheticSessionMode) {
         const summary = await request.get(`${E2E_API_URL}/__test__/summary`);
@@ -1119,11 +1405,19 @@ for (const studio of studios) {
         historyNavigationAudit,
         aProtectedGetAttemptsAfterLogout: aProtectedGetAttempts.map(row => ({ path: row.path, status: row.status, accountAtRequest: row.accountAtRequest, failure: row.failure })),
         correctlyDeniedAProtectedGetResponses: deniedAProtectedGets.length,
-        nonDeniedAProtectedGetResponses: nonDeniedAProtectedGets.map(row => ({ path: row.path, status: row.status })),
+        aProtectedGetResponsesCrossingLogout: aProtectedGetResponses.map(row => ({ path: row.path, requestUrl: row.url, responseUrl: row.responseUrl, status: row.status, accountAtRequest: row.accountAtRequest, responseTime: row.responseTime, settledAt: row.settledAt })),
+        nonDeniedAProtectedGetResponses: nonDeniedAProtectedGets.map(row => ({ path: row.path, responseUrl: row.responseUrl, status: row.status })),
         unresolvedAProtectedGetAttempts: unresolvedAProtectedGets.map(row => ({ path: row.path, failure: row.failure })),
+        unresolvedAProtectedGetResponsesAfterLogout: unresolvedAProtectedGetResponses.map(row => ({ path: row.path, url: row.url, responseUrl: row.responseUrl, failure: row.failure })),
         strictAFlightPrefetchAttemptsAfterLogout: aFlightPrefetches.map(row => ({ path: row.path, status: row.status, accountAtRequest: row.accountAtRequest })),
+        aFlightPrefetchResponsesDeliveredAfterLogout: aFlightPrefetchResponses.map(row => ({ path: row.path, responseUrl: row.responseUrl, status: row.status, accountAtRequest: row.accountAtRequest, responseTime: row.responseTime, settledAt: row.settledAt })),
         privateAResponseLeaks: privateResponseLeaks,
+        responseBodyCaptureAudit,
+        routeFetchCapturedResponseBodies: responseBodyCaptureAudit.filter(row => row.bodyCaptureSource === "route-fetch").length,
         privateResponseBodyReadFailures,
+        responseBodyCandidateCount: capturedResponseBodies.length,
+        readableResponseBodyCount: capturedResponseBodies.filter(({ row }) => row.bodyReadStatus === "read").length,
+        exactChargeableChatPaths: chargeableChatPostPaths,
         chargeableChatOrProviderPostsAfterLogout: chargeablePostsAfterLogout,
         allChargeableChatOrProviderPosts: monitor.generationPosts,
         blockedChargeablePosts: monitor.blockedGenerationPosts,
@@ -1135,12 +1429,15 @@ for (const studio of studios) {
 
       expect.soft(privateResponseLeaks, "Account A private content must not appear in any API or Flight response after logout").toEqual([]);
       expect.soft(privateResponseBodyReadFailures, "Every post-logout API/Flight response body must be fully readable before claiming no private marker leak").toEqual([]);
+      expect.soft(unresolvedAProtectedGetResponses.map(row => ({ path: row.path, url: row.url, failure: row.failure })), "Every Account A protected GET response crossing logout must have an observable status").toEqual([]);
       expect.soft(nonDeniedAProtectedGets.map(row => ({ path: row.path, status: row.status })), "Any post-logout Account A protected GET reaching the API must be denied with 401/403").toEqual([]);
       expect.soft(unresolvedAProtectedGets.map(row => row.path), "Every observed Account A protected GET attempt must have an observable response").toEqual([]);
       expect.soft(historyNavigationAudit.every(row => row.completed), "Back, forward, and reload must complete in both tabs after Account B login").toBe(true);
       expect.soft(aProtectedGetAttempts.map(row => ({ path: row.path, status: row.status })), "Strict contract: zero Account A protected GET attempts after observed logout, separate from correct 401/403 denial").toEqual([]);
       expect.soft(aFlightPrefetches.map(row => ({ path: row.path, status: row.status })), "Strict contract: zero Account A Flight/Link prefetches after observed logout/account switch").toEqual([]);
+      expect.soft(aFlightPrefetchResponses.map(row => ({ path: row.path, responseUrl: row.responseUrl, status: row.status })), "Strict contract: no Account A Flight/Link prefetch response may be delivered after logout, including one started earlier").toEqual([]);
       expect.soft(monitor.generationPosts, "No chargeable Chat or provider POST is allowed in the account-switch flow").toEqual([]);
+      expect.soft(chargeablePostsAfterLogout, "No chargeable Chat/provider POST may cross the observed logout boundary").toEqual([]);
       expect.soft(monitor.externalAttempts, "All browser egress outside loopback is blocked and should remain unused").toEqual([]);
       expect.soft(monitor.blockedGenerationPosts, "The account-switch flow must not trigger a blocked chargeable/provider POST").toEqual([]);
     } finally {
