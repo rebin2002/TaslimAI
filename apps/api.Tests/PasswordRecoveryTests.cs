@@ -299,6 +299,88 @@ public sealed class PasswordRecoveryTests(PasswordRecoveryApiFactory factory) : 
     }
 
     [Fact]
+    public async Task Reset_with_valid_identity_token_and_wrong_csrf_preserves_token_and_account_state()
+    {
+        using var csrfFactory = new PasswordRecoveryApiFactory();
+        var email = $"csrf-reset-{Guid.NewGuid():N}@example.test";
+        const string oldPassword = "StrongPassword!123";
+        const string newPassword = "EvenStronger!123";
+
+        using var registering = csrfFactory.CreateClient();
+        Assert.Equal(HttpStatusCode.OK, (await Register(registering, email)).StatusCode);
+        using var existingSession = csrfFactory.CreateClient();
+        Assert.Equal(HttpStatusCode.OK, (await Login(existingSession, email, oldPassword)).StatusCode);
+
+        using var requestClient = csrfFactory.CreateClient();
+        Assert.Equal(HttpStatusCode.Accepted, (await Forgot(requestClient, email)).StatusCode);
+        var sent = await WaitForEmailAsync(csrfFactory.EmailSender, email);
+        var fragment = new Uri(ExtractResetUrl(sent.Body)).Fragment.TrimStart('#');
+        var values = fragment.Split('&', StringSplitOptions.RemoveEmptyEntries)
+            .Select(part => part.Split('=', 2))
+            .ToDictionary(pair => Uri.UnescapeDataString(pair[0]), pair => Uri.UnescapeDataString(pair[1]), StringComparer.Ordinal);
+        var token = values["token"];
+
+        using (var scope = csrfFactory.Services.CreateScope())
+        {
+            var userManager = scope.ServiceProvider.GetRequiredService<UserManager<ApplicationUser>>();
+            var user = await userManager.FindByEmailAsync(email);
+            Assert.NotNull(user);
+            Assert.True(await userManager.VerifyUserTokenAsync(
+                user!,
+                userManager.Options.Tokens.PasswordResetTokenProvider,
+                UserManager<ApplicationUser>.ResetPasswordTokenPurpose,
+                token));
+        }
+
+        // The target browser has its own antiforgery cookie, but the supplied
+        // request token belongs to another client. The valid reset token must
+        // not reach or mutate the reset action when CSRF validation fails.
+        using var targetClient = csrfFactory.CreateClient();
+        _ = await GetCsrf(targetClient);
+        using var otherClient = csrfFactory.CreateClient();
+        var otherClientRequestToken = await GetCsrf(otherClient);
+        using var wrongCsrfRequest = new HttpRequestMessage(HttpMethod.Post, "/api/auth/password/reset")
+        {
+            Content = JsonContent.Create(new { email, token, newPassword }),
+        };
+        wrongCsrfRequest.Headers.Add("X-CSRF-TOKEN", otherClientRequestToken);
+        var rejected = await targetClient.SendAsync(wrongCsrfRequest);
+        Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
+        Assert.Equal("CSRF_VALIDATION_FAILED", (await rejected.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error").GetProperty("code").GetString());
+        Assert.False(rejected.Headers.Contains("Set-Cookie"));
+        Assert.Equal(HttpStatusCode.OK, (await existingSession.GetAsync("/api/auth/me")).StatusCode);
+
+        using (var scope = csrfFactory.Services.CreateScope())
+        {
+            var userManager = scope.ServiceProvider.GetRequiredService<UserManager<ApplicationUser>>();
+            var user = await userManager.FindByEmailAsync(email);
+            Assert.NotNull(user);
+            Assert.True(await userManager.CheckPasswordAsync(user!, oldPassword));
+            Assert.False(await userManager.CheckPasswordAsync(user!, newPassword));
+            Assert.True(await userManager.VerifyUserTokenAsync(
+                user!,
+                userManager.Options.Tokens.PasswordResetTokenProvider,
+                UserManager<ApplicationUser>.ResetPasswordTokenPurpose,
+                token));
+        }
+
+        // The same reset token remains valid and succeeds with the correct
+        // browser-bound CSRF pair, proving the rejected request did not consume it.
+        using var validResetClient = csrfFactory.CreateClient();
+        var reset = await Reset(validResetClient, email, token, newPassword);
+        Assert.Equal(HttpStatusCode.OK, reset.StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await existingSession.GetAsync("/api/auth/me")).StatusCode);
+        using (var scope = csrfFactory.Services.CreateScope())
+        {
+            var userManager = scope.ServiceProvider.GetRequiredService<UserManager<ApplicationUser>>();
+            var user = await userManager.FindByEmailAsync(email);
+            Assert.NotNull(user);
+            Assert.False(await userManager.CheckPasswordAsync(user!, oldPassword));
+            Assert.True(await userManager.CheckPasswordAsync(user!, newPassword));
+        }
+    }
+
+    [Fact]
     public async Task Reset_requires_csrf_rejects_invalid_tokens_and_consumes_valid_token_once_without_signing_in()
     {
         var tokenOptions = factory.Services.GetRequiredService<IOptions<DataProtectionTokenProviderOptions>>();
