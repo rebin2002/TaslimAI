@@ -166,6 +166,16 @@ public sealed class AutopilotNextWaveLaunchTests
         Assert.Equal(3, host.Provider.LaunchCalls);
         await host.LaunchAsync();
         Assert.Equal(3, host.Provider.LaunchCalls);
+
+        var duplicate = await host.SubmitSignedCompletionAsync(
+            completedTask.WaveKey,
+            completedTask.TaskKey,
+            expectedTaskCount: 2,
+            evidence: receipt,
+            externalEventId: "test-refill-completion-1");
+        Assert.Equal(AutopilotIntakeOutcomes.Duplicate, duplicate.Outcome);
+        await host.RunCycleAsync();
+        Assert.Equal(3, host.Provider.LaunchCalls);
     }
 
     [Fact]
