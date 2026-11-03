@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { BrowserContext, Locator, Page, Request, Route } from "@playwright/test";
-import { test, expect, apiJson, E2E_API_URL, registerInUi, type TestUser } from "./fixtures";
+import { test, expect, apiJson, E2E_API_URL, loginInUi, registerInUi, type TestUser } from "./fixtures";
 
 const webUrl = process.env.E2E_WEB_URL ?? "http://localhost:3000";
 const syntheticSessionMode = process.env.E2E_SYNTHETIC_AUTH === "1";
@@ -25,6 +25,9 @@ type StudioCase = {
   assetType: "document" | "image" | "presentation";
   markers: string[];
 };
+
+type TestAccount = "A" | "B";
+type AccountState = TestAccount | "loggedOut";
 
 const studios: StudioCase[] = [
   {
@@ -70,6 +73,7 @@ type RequestRow = {
   rsc: boolean;
   prefetch: boolean;
   navigation: boolean;
+  accountAtRequest?: AccountState;
   status?: number;
   body?: Promise<string>;
 };
@@ -79,6 +83,7 @@ type Monitor = {
   byRequest: Map<Request, RequestRow>;
   externalAttempts: string[];
   generationPosts: string[];
+  blockedGenerationPosts: string[];
   revokedAt: number;
 };
 
@@ -100,11 +105,13 @@ function isProtectedRead(method: string, path: string) {
     || path.startsWith("/api/conversations/")
     || path.startsWith("/api/assets")
     || path.startsWith("/api/files")
+    || /^\/api\/projects\/[^/]+(?:\/overview)?\/?$/i.test(path)
   );
 }
 
 function isGenerationPost(method: string, path: string) {
-  return method === "POST" && /generation|provider|inference/i.test(path);
+  const chargeableChatPath = /^\/api\/conversations\/[^/]+\/messages(?:\/stream|\/[^/]+\/regenerate)?\/?$/i.test(path);
+  return method === "POST" && (chargeableChatPath || /generation|provider|inference/i.test(path));
 }
 
 function isPrefetch(request: Request) {
@@ -112,7 +119,7 @@ function isPrefetch(request: Request) {
   return headers["next-router-prefetch"] === "1" || /prefetch/i.test(headers.purpose ?? "");
 }
 
-function observePage(page: Page, monitor: Monitor) {
+function observePage(page: Page, monitor: Monitor, accountAtRequest?: () => AccountState) {
   page.on("request", request => {
     const parsed = new URL(request.url());
     const row: RequestRow = {
@@ -120,10 +127,11 @@ function observePage(page: Page, monitor: Monitor) {
       url: request.url(),
       path: parsed.pathname,
       method: request.method(),
-      time: Date.now(),
+      time: performance.now(),
       rsc: parsed.searchParams.has("_rsc"),
       prefetch: isPrefetch(request),
       navigation: request.isNavigationRequest(),
+      accountAtRequest: accountAtRequest?.(),
     };
     monitor.rows.push(row);
     monitor.byRequest.set(request, row);
@@ -211,6 +219,120 @@ function privateConversation(workspaceId: string) {
   };
 }
 
+const accountProjectIds: Record<TestAccount, string> = {
+  A: "project-private-account-a",
+  B: "project-private-account-b",
+};
+const accountConversationIds: Record<TestAccount, string> = {
+  A: conversationId,
+  B: "22222222-2222-4222-8222-222222222222",
+};
+
+function accountMarker(account: TestAccount, label: string) {
+  return `ACCOUNT_${account}_PRIVATE_${label}_SENTINEL_${stamp}`;
+}
+
+function accountStudioMarker(account: TestAccount, studio: StudioCase) {
+  return accountMarker(account, studio.name.toUpperCase());
+}
+
+function accountMarkers(account: TestAccount, studio: StudioCase) {
+  return [
+    accountStudioMarker(account, studio),
+    accountMarker(account, "PROJECT"),
+    `${accountMarker(account, "FILE")}.pdf`,
+    accountMarker(account, "CHAT_BODY"),
+  ];
+}
+
+function accountStudioPath(account: TestAccount, studio: StudioCase) {
+  return studio.name === "Chat" ? `/chat/${accountConversationIds[account]}` : studio.path;
+}
+
+function privateAccountProject(workspaceId: string, account: TestAccount) {
+  return {
+    id: accountProjectIds[account],
+    workspaceId,
+    name: accountMarker(account, "PROJECT"),
+    description: "Synthetic account-specific private project for the logout/login regression.",
+    instructions: null,
+    contextNotes: null,
+    type: "Business",
+    status: "Active",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    archivedAt: null,
+  };
+}
+
+function privateAccountFile(workspaceId: string, account: TestAccount) {
+  return {
+    id: `file-private-account-${account.toLowerCase()}`,
+    workspaceId,
+    projectId: accountProjectIds[account],
+    conversationId: null,
+    originalFileName: `${accountMarker(account, "FILE")}.pdf`,
+    contentType: "application/pdf",
+    extension: ".pdf",
+    sizeBytes: 32,
+    storageProvider: "Synthetic",
+    status: "Ready",
+    textExtractionStatus: "Ready",
+    extractedTextLength: 12,
+    createdAt: new Date().toISOString(),
+    processedAt: new Date().toISOString(),
+  };
+}
+
+function privateAccountAsset(workspaceId: string, assetType: StudioCase["assetType"], account: TestAccount) {
+  const name = accountMarker(account, assetType.toUpperCase());
+  return {
+    id: `asset-${assetType}-account-${account.toLowerCase()}`,
+    workspaceId,
+    projectId: accountProjectIds[account],
+    projectName: accountMarker(account, "PROJECT"),
+    name,
+    description: "Synthetic, account-specific private asset; no backing provider is used.",
+    assetType,
+    mimeType: "application/vnd.taslim.synthetic",
+    status: "Active",
+    hasFile: false,
+    canPreview: false,
+    fileSizeBytes: 0,
+    sourceStudio: assetType,
+    sourceJobTitle: name,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    archivedAt: null,
+    representations: [],
+  };
+}
+
+function privateAccountConversation(workspaceId: string, account: TestAccount) {
+  return {
+    id: accountConversationIds[account],
+    workspaceId,
+    projectId: accountProjectIds[account],
+    title: accountMarker(account, "CHAT"),
+    status: "Active",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    lastMessageAt: new Date().toISOString(),
+  };
+}
+
+function privateAccountMessages(account: TestAccount) {
+  return [{
+    id: `message-private-account-${account.toLowerCase()}`,
+    conversationId: accountConversationIds[account],
+    role: "Assistant",
+    content: accountMarker(account, "CHAT_BODY"),
+    status: "Completed",
+    createdAt: new Date().toISOString(),
+    sequence: 1,
+  }];
+}
+
 function jsonResponse(route: Route, body: unknown) {
   return route.fulfill({
     status: 200,
@@ -279,12 +401,77 @@ async function addExternalEgressBlock(context: BrowserContext, monitor: Monitor)
   });
 }
 
+async function installAccountSwitchNetworkGuard(
+  context: BrowserContext,
+  monitor: Monitor,
+  studio: StudioCase,
+  activeAccount: () => AccountState,
+  workspaceIds: Record<TestAccount, string>,
+) {
+  await context.route("**/*", async route => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (["http:", "https:"].includes(url.protocol) && !isLoopback(url.hostname)) {
+      monitor.externalAttempts.push(url.href);
+      await route.abort("blockedbyclient");
+      return;
+    }
+    if (isGenerationPost(request.method(), url.pathname)) {
+      monitor.generationPosts.push(url.pathname);
+      monitor.blockedGenerationPosts.push(url.pathname);
+      await route.abort("blockedbyclient");
+      return;
+    }
+    if (syntheticSessionMode || request.method() !== "GET" || !isProtectedRead(request.method(), url.pathname)) {
+      await route.continue();
+      return;
+    }
+
+    const account = activeAccount();
+    if (account === "loggedOut") {
+      await route.continue();
+      return;
+    }
+    const workspaceId = workspaceIds[account];
+    if (!workspaceId) {
+      await route.continue();
+      return;
+    }
+    const project = privateAccountProject(workspaceId, account);
+    const conversation = privateAccountConversation(workspaceId, account);
+    if (url.pathname === `/api/workspaces/${workspaceId}/conversations`) return jsonResponse(route, [conversation]);
+    if (url.pathname === `/api/conversations/${conversation.id}`) return jsonResponse(route, conversation);
+    if (url.pathname === `/api/conversations/${conversation.id}/messages`) return jsonResponse(route, privateAccountMessages(account));
+    if (url.pathname === `/api/workspaces/${workspaceId}/projects`) {
+      return jsonResponse(route, url.searchParams.get("status") === "Archived" ? [] : [project]);
+    }
+    if (url.pathname === `/api/projects/${project.id}`) return jsonResponse(route, project);
+    if (url.pathname === `/api/projects/${project.id}/overview`) {
+      return jsonResponse(route, {
+        project,
+        workspace: { id: workspaceId, name: `Account ${account} synthetic workspace`, slug: workspaceId, type: "Personal", role: "Owner" },
+        counts: { files: 1, assets: 1, conversations: 1, activity: 0 },
+        conversations: [conversation],
+        recentActivity: [],
+      });
+    }
+    if (url.pathname === `/api/workspaces/${workspaceId}/files`) return jsonResponse(route, [privateAccountFile(workspaceId, account)]);
+    if (url.pathname === `/api/workspaces/${workspaceId}/assets` || url.pathname === "/api/assets") {
+      const asset = privateAccountAsset(workspaceId, studio.assetType, account);
+      return jsonResponse(route, { items: [asset], page: 1, pageSize: 6, totalCount: 1, totalPages: 1 });
+    }
+    await route.continue();
+  });
+}
+
 async function createSession(page: Page, request: import("@playwright/test").APIRequestContext, testUser: TestUser) {
   assertLoopback(webUrl, "E2E_WEB_URL");
   assertLoopback(E2E_API_URL, "E2E_API_URL");
   if (syntheticSessionMode) {
     const token = `synthetic-${randomUUID()}`;
-    const response = await request.post(`${E2E_API_URL}/__test__/session`, { data: { token, displayName: "Synthetic Integration Owner" } });
+    const response = await request.post(`${E2E_API_URL}/__test__/session`, {
+      data: { token, displayName: testUser.displayName, email: testUser.email, password: testUser.password, accountKey: "A" },
+    });
     expect(response.status()).toBe(201);
     await page.context().addCookies([{ name: "taslim.auth", value: token, url: webUrl, httpOnly: true, sameSite: "Lax" }]);
     return token;
@@ -295,13 +482,22 @@ async function createSession(page: Page, request: import("@playwright/test").API
   return cookie.value;
 }
 
+async function seedSyntheticAccount(request: import("@playwright/test").APIRequestContext, user: TestUser, account: TestAccount) {
+  const token = `synthetic-${account.toLowerCase()}-${randomUUID()}`;
+  const response = await request.post(`${E2E_API_URL}/__test__/session`, {
+    data: { token, displayName: user.displayName, email: user.email, password: user.password, accountKey: account },
+  });
+  expect(response.status()).toBe(201);
+  return token;
+}
+
 async function targetControl(page: Page, studio: StudioCase): Promise<Locator> {
   if (studio.navKind === "chat-button") return page.getByRole("button", { name: new RegExp(`PRIVATE_CHAT_SENTINEL_${stamp}`) }).first();
   return page.locator(`a[href="${studio.path}"]`).first();
 }
 
 function makeMonitor(): Monitor {
-  return { rows: [], byRequest: new Map(), externalAttempts: [], generationPosts: [], revokedAt: 0 };
+  return { rows: [], byRequest: new Map(), externalAttempts: [], generationPosts: [], blockedGenerationPosts: [], revokedAt: 0 };
 }
 
 async function markerText(page: Page) {
@@ -311,6 +507,18 @@ async function markerText(page: Page) {
 async function noPrivateMarkerVisible(page: Page, studio: StudioCase) {
   const text = await markerText(page);
   return studio.markers.filter(marker => text.includes(marker));
+}
+
+async function visibleAccountMarkers(page: Page, account: TestAccount, studio: StudioCase) {
+  const text = await markerText(page);
+  return accountMarkers(account, studio).filter(marker => text.includes(marker));
+}
+
+async function accountTargetControl(page: Page, studio: StudioCase, account: TestAccount): Promise<Locator> {
+  if (studio.navKind === "chat-button") {
+    return page.getByRole("button", { name: new RegExp(accountStudioMarker(account, studio)) }).first();
+  }
+  return page.locator(`a[href="${accountStudioPath(account, studio)}"]`).first();
 }
 
 for (const studio of studios) {
@@ -413,7 +621,7 @@ for (const studio of studios) {
       await context.addCookies([priorCookie]);
       expect((await pageA.request.get(`${E2E_API_URL}/api/auth/me`)).status()).toBe(401);
       revoked = true;
-      monitor.revokedAt = Date.now();
+      monitor.revokedAt = performance.now();
 
       // Independent control: the local auth API must deny the old cookie. This
       // explicit test request is not counted as an automatic browser request.
@@ -531,6 +739,317 @@ for (const studio of studios) {
   });
 }
 
+const chargeableChatPostPaths = [
+  `/api/conversations/${conversationId}/messages`,
+  `/api/conversations/${conversationId}/messages/stream`,
+  `/api/conversations/${conversationId}/messages/message-private-guard-probe/regenerate`,
+];
+
+test("exact Chat chargeable POST paths are observed and blocked before API/provider dispatch", async ({ browser, request }) => {
+  test.setTimeout(60_000);
+  assertLoopback(webUrl, "E2E_WEB_URL");
+  assertLoopback(E2E_API_URL, "E2E_API_URL");
+  const context = await browser.newContext({ baseURL: webUrl, ignoreHTTPSErrors: syntheticSessionMode, viewport: { width: 1365, height: 900 } });
+  const monitor = makeMonitor();
+  let providerPostsBefore: number | undefined;
+  try {
+    if (syntheticSessionMode) {
+      const before = await request.get(`${E2E_API_URL}/__test__/summary`);
+      expect(before.status()).toBe(200);
+      providerPostsBefore = (await before.json() as { generationPosts: number }).generationPosts;
+    }
+    await installAccountSwitchNetworkGuard(context, monitor, studios[0], () => "loggedOut", { A: "", B: "" });
+    const page = await context.newPage();
+    observePage(page, monitor);
+    await page.goto("/");
+
+    for (const path of chargeableChatPostPaths) expect(isGenerationPost("POST", path), `${path} must be classified as chargeable Chat dispatch`).toBe(true);
+    expect(isProtectedRead("GET", "/api/projects/project-private-route-probe")).toBe(true);
+    expect(isProtectedRead("GET", "/api/projects/project-private-route-probe/overview")).toBe(true);
+
+    const probeResults = await Promise.all(chargeableChatPostPaths.map(path => page.evaluate(async ({ base, requestPath }) => {
+      try {
+        await fetch(`${base}${requestPath}`, {
+          method: "POST",
+          mode: "cors",
+          credentials: "omit",
+          headers: { "Content-Type": "text/plain" },
+          body: "synthetic route-guard probe only",
+        });
+        return "unexpected-response";
+      } catch {
+        return "blocked-before-dispatch";
+      }
+    }, { base: E2E_API_URL, requestPath: path })));
+    expect(probeResults).toEqual(chargeableChatPostPaths.map(() => "blocked-before-dispatch"));
+    expect([...new Set(monitor.blockedGenerationPosts)].sort()).toEqual([...chargeableChatPostPaths].sort());
+    expect([...new Set(monitor.generationPosts)].sort()).toEqual([...chargeableChatPostPaths].sort());
+    expect(monitor.externalAttempts).toEqual([]);
+
+    let providerPostsAfter: number | undefined;
+    if (syntheticSessionMode) {
+      const after = await request.get(`${E2E_API_URL}/__test__/summary`);
+      expect(after.status()).toBe(200);
+      providerPostsAfter = (await after.json() as { generationPosts: number }).generationPosts;
+      expect(providerPostsAfter).toBe(providerPostsBefore);
+    }
+    console.log(`STUDIOS_CHAT_CHARGEABLE_GUARD_EVIDENCE ${JSON.stringify({ paths: chargeableChatPostPaths, browserAttemptsBlocked: [...new Set(monitor.blockedGenerationPosts)].sort(), syntheticProviderDispatchCountBefore: providerPostsBefore, syntheticProviderDispatchCountAfter: providerPostsAfter, blockedExternalAttempts: monitor.externalAttempts })}`);
+  } finally {
+    await context.close();
+  }
+});
+
+for (const studio of studios) {
+  test(`${studio.name}: account A logout and account B login isolate both tabs and history`, async ({ browser, request, testUser }) => {
+    test.setTimeout(180_000);
+    assertLoopback(webUrl, "E2E_WEB_URL");
+    assertLoopback(E2E_API_URL, "E2E_API_URL");
+    const accountBUser: TestUser = {
+      displayName: "Synthetic Account B",
+      email: `e2e+account-b-${randomUUID()}@example.test`,
+      password: testUser.password,
+    };
+    if (syntheticSessionMode) {
+      await seedSyntheticAccount(request, accountBUser, "B");
+    } else {
+      const setupContext = await browser.newContext({ baseURL: webUrl, viewport: { width: 1365, height: 900 } });
+      const setupMonitor = makeMonitor();
+      try {
+        await installAccountSwitchNetworkGuard(setupContext, setupMonitor, studio, () => "loggedOut", { A: "", B: "" });
+        const setupPage = await setupContext.newPage();
+        await registerInUi(setupPage, accountBUser, false);
+        await apiJson(setupPage.request, "POST", "/api/auth/logout");
+        expect(setupMonitor.generationPosts).toEqual([]);
+        expect(setupMonitor.externalAttempts).toEqual([]);
+      } finally {
+        await setupContext.close();
+      }
+    }
+
+    const context = await browser.newContext({ baseURL: webUrl, ignoreHTTPSErrors: syntheticSessionMode, viewport: { width: 1365, height: 900 } });
+    const monitor = makeMonitor();
+    const workspaceIds: Record<TestAccount, string> = { A: "", B: "" };
+    let activeAccount: AccountState = "A";
+    let logoutSignalAt = 0;
+    let loginSignalAt = 0;
+    let providerPostsBefore: number | undefined;
+    const pathA = accountStudioPath("A", studio);
+    const pathB = accountStudioPath("B", studio);
+    const aMarkers = accountMarkers("A", studio);
+    const bMarker = accountStudioMarker("B", studio);
+    try {
+      if (syntheticSessionMode) {
+        const before = await request.get(`${E2E_API_URL}/__test__/summary`);
+        expect(before.status()).toBe(200);
+        providerPostsBefore = (await before.json() as { generationPosts: number }).generationPosts;
+      }
+      await installAccountSwitchNetworkGuard(context, monitor, studio, () => activeAccount, workspaceIds);
+      const pageA = await context.newPage();
+      const pageB = await context.newPage();
+      observePage(pageA, monitor, () => activeAccount);
+      observePage(pageB, monitor, () => activeAccount);
+
+      await createSession(pageA, request, testUser);
+      const authA = await apiJson<{ user: { email: string }; personalWorkspace: { id: string } }>(pageA.request, "GET", "/api/auth/me");
+      workspaceIds.A = authA.personalWorkspace.id;
+      expect(authA.user.email).toBe(testUser.email);
+
+      const accountAResponse = await pageA.goto(pathA);
+      expect(accountAResponse?.status()).toBe(200);
+      await expect.poll(async () => (await markerText(pageA)).includes(accountStudioMarker("A", studio)), { timeout: 15_000 }).toBe(true);
+      if (syntheticSessionMode) {
+        const projectReadPaths = [
+          `/api/projects/${accountProjectIds.A}`,
+          `/api/projects/${accountProjectIds.A}/overview`,
+        ];
+        const projectReadResults = await Promise.all(projectReadPaths.map(routePath => pageA.evaluate(async ({ apiBase, path }) => {
+          const response = await fetch(`${apiBase}${path}`, { credentials: "include" });
+          return { status: response.status, body: await response.text() };
+        }, { apiBase: E2E_API_URL, path: routePath })));
+        expect(projectReadResults.map(result => result.status)).toEqual([200, 200]);
+        for (const result of projectReadResults) expect(result.body).toContain(accountMarker("A", "PROJECT"));
+        const observedProjectReadPaths = monitor.rows
+          .filter(row => row.method === "GET" && projectReadPaths.includes(row.path))
+          .map(row => row.path)
+          .sort();
+        expect(observedProjectReadPaths).toEqual([...projectReadPaths].sort());
+      }
+
+      await pageB.goto(studio.sourcePath);
+      const aTarget = await accountTargetControl(pageB, studio, "A");
+      await expect(aTarget).toBeVisible();
+      let preLogoutPrefetches = 0;
+      if (studio.navKind === "link") {
+        await aTarget.hover();
+        await pageB.waitForTimeout(900);
+        preLogoutPrefetches = monitor.rows.filter(row => row.path === pathA && row.rsc && row.prefetch && row.accountAtRequest === "A").length;
+        if (requireProductionPrefetch) expect(preLogoutPrefetches).toBeGreaterThan(0);
+      } else {
+        test.info().annotations.push({ type: "navigation-shape", description: "Chat uses a client button/router transition for the conversation route; the positive native-Link prefetch control applies to Document, Image, and Presentation." });
+      }
+      await aTarget.click();
+      await expect.poll(async () => (await markerText(pageB)).includes(accountStudioMarker("A", studio)), { timeout: 15_000 }).toBe(true);
+
+      await pageA.locator('a[href="/account"]').first().click();
+      await expect(pageA).toHaveURL(/\/account(?:\?|$)/);
+      const logoutResponsePromise = pageA.waitForResponse(response => {
+        const url = new URL(response.url());
+        const isLogoutResponse = response.request().method() === "POST" && url.pathname === "/api/auth/logout";
+        if (isLogoutResponse) {
+          logoutSignalAt = performance.now();
+          activeAccount = "loggedOut";
+        }
+        return isLogoutResponse;
+      });
+      await pageA.locator("button.security-logout").click();
+      const logoutResponse = await logoutResponsePromise;
+      expect(logoutResponse.status()).toBe(200);
+      expect(logoutSignalAt).toBeGreaterThan(0);
+      await expect(pageA).toHaveURL(/\/login(?:\?.*)?$/);
+
+      const tabAMarkersAtLogout = await visibleAccountMarkers(pageA, "A", studio);
+      const tabBMarkersAtLogout = await visibleAccountMarkers(pageB, "A", studio);
+      expect.soft(tabAMarkersAtLogout, `${studio.name} Account A content remained in tab A after observed logout`).toEqual([]);
+      expect.soft(tabBMarkersAtLogout, `${studio.name} Account A content remained in tab B after observed logout`).toEqual([]);
+
+      const loginResponsePromise = pageA.waitForResponse(response => {
+        const url = new URL(response.url());
+        const isLoginResponse = response.request().method() === "POST" && url.pathname === "/api/auth/login";
+        if (isLoginResponse) {
+          loginSignalAt = performance.now();
+          activeAccount = "B";
+        }
+        return isLoginResponse;
+      });
+      await loginInUi(pageA, accountBUser);
+      const loginResponse = await loginResponsePromise;
+      expect(loginResponse.status()).toBe(200);
+      expect(loginSignalAt).toBeGreaterThan(logoutSignalAt);
+      const authB = await apiJson<{ user: { email: string }; personalWorkspace: { id: string } }>(pageA.request, "GET", "/api/auth/me");
+      workspaceIds.B = authB.personalWorkspace.id;
+      expect(authB.user.email).toBe(accountBUser.email);
+      expect(workspaceIds.B).not.toBe(workspaceIds.A);
+
+      const tabAMarkersAfterBLogin = await visibleAccountMarkers(pageA, "A", studio);
+      const tabBMarkersAfterBLogin = await visibleAccountMarkers(pageB, "A", studio);
+      expect.soft(tabAMarkersAfterBLogin, `${studio.name} Account A content appeared in Account B tab A after login`).toEqual([]);
+      expect.soft(tabBMarkersAfterBLogin, `${studio.name} Account A content remained visible in the second tab after Account B login`).toEqual([]);
+
+      const historyLeakAudit: Array<{ tab: string; step: string; aMarkers: string[] }> = [];
+      const assertNoAccountA = async (tab: string, page: Page, step: string) => {
+        const markers = await visibleAccountMarkers(page, "A", studio);
+        historyLeakAudit.push({ tab, step, aMarkers: markers });
+        expect.soft(markers, `${studio.name} Account A marker visible in ${tab} at ${step} after Account B login`).toEqual([]);
+      };
+
+      const accountBResponse = await pageA.goto(pathB);
+      expect(accountBResponse?.status()).toBe(200);
+      await expect.poll(async () => (await markerText(pageA)).includes(bMarker), { timeout: 15_000 }).toBe(true);
+      await assertNoAccountA("tab A", pageA, "Account B Studio load");
+
+      await pageB.goBack({ waitUntil: "domcontentloaded" }).catch(() => null);
+      await pageB.waitForTimeout(150);
+      await assertNoAccountA("tab B", pageB, "back");
+      await pageB.goForward({ waitUntil: "domcontentloaded" }).catch(() => null);
+      await pageB.waitForTimeout(200);
+      await assertNoAccountA("tab B", pageB, "forward");
+      await pageB.reload({ waitUntil: "domcontentloaded" }).catch(() => null);
+      await pageB.waitForTimeout(200);
+      await assertNoAccountA("tab B", pageB, "reload");
+      await pageB.goto(pathB);
+      await expect.poll(async () => (await markerText(pageB)).includes(bMarker), { timeout: 15_000 }).toBe(true);
+      await assertNoAccountA("tab B", pageB, "Account B Studio load");
+
+      await pageA.goBack({ waitUntil: "domcontentloaded" }).catch(() => null);
+      await pageA.waitForTimeout(150);
+      await assertNoAccountA("tab A", pageA, "back");
+      await pageA.goForward({ waitUntil: "domcontentloaded" }).catch(() => null);
+      await pageA.waitForTimeout(200);
+      await assertNoAccountA("tab A", pageA, "forward");
+      await pageA.reload({ waitUntil: "domcontentloaded" }).catch(() => null);
+      await pageA.waitForTimeout(200);
+      await assertNoAccountA("tab A", pageA, "reload");
+
+      await pageA.waitForTimeout(300);
+      await pageB.waitForTimeout(300);
+      const afterLogoutRows = monitor.rows.filter(row => row.time >= logoutSignalAt);
+      const targetsAccountA = (row: RequestRow) => {
+        const url = new URL(row.url);
+        const pathSegments = url.pathname.split("/").map(segment => decodeURIComponent(segment));
+        const aIds = [workspaceIds.A, accountProjectIds.A, accountConversationIds.A].filter(Boolean);
+        return aIds.some(id => pathSegments.includes(id) || url.searchParams.get("workspaceId") === id);
+      };
+      const aProtectedGetAttempts = afterLogoutRows.filter(row => isProtectedRead(row.method, row.path)
+        && (targetsAccountA(row) || row.accountAtRequest === "A" || row.accountAtRequest === "loggedOut"));
+      const deniedAProtectedGets = aProtectedGetAttempts.filter(row => row.status === 401 || row.status === 403);
+      const nonDeniedAProtectedGets = aProtectedGetAttempts.filter(row => row.status !== undefined && row.status !== 401 && row.status !== 403);
+      const unresolvedAProtectedGets = aProtectedGetAttempts.filter(row => row.status === undefined);
+      const aFlightPrefetches = afterLogoutRows.filter(row => row.rsc && row.prefetch && (
+        targetsAccountA(row)
+        || (row.accountAtRequest === "loggedOut" && row.path === pathA)
+      ));
+      const privateResponseLeaks: Array<{ path: string; status?: number; markers: string[] }> = [];
+      for (const row of afterLogoutRows) {
+        if (!row.body) continue;
+        const body = await row.body;
+        const markers = aMarkers.filter(marker => body.includes(marker));
+        if (markers.length > 0) privateResponseLeaks.push({ path: row.path, status: row.status, markers });
+      }
+      const chargeablePostsAfterLogout = afterLogoutRows.filter(row => isGenerationPost(row.method, row.path)).map(row => ({ path: row.path, time: row.time }));
+      let providerPostsAfter: number | undefined;
+      if (syntheticSessionMode) {
+        const summary = await request.get(`${E2E_API_URL}/__test__/summary`);
+        expect(summary.status()).toBe(200);
+        providerPostsAfter = (await summary.json() as { generationPosts: number }).generationPosts;
+        expect.soft(providerPostsAfter).toBe(providerPostsBefore);
+      }
+      const evidence = {
+        studio: studio.name,
+        syntheticLocalAuthAndApi: syntheticSessionMode,
+        accountAWorkspaceId: workspaceIds.A,
+        accountBWorkspaceId: workspaceIds.B,
+        initialAccountAStatus: accountAResponse?.status(),
+        accountBStatus: accountBResponse?.status(),
+        accountAMarkerBeforeLogout: accountStudioMarker("A", studio),
+        accountBMarkerAfterLogin: bMarker,
+        preLogoutPositiveNativeLinkPrefetches: preLogoutPrefetches,
+        logoutResponseStatus: logoutResponse.status(),
+        logoutObservedAt: logoutSignalAt,
+        accountBLoginStatus: loginResponse.status(),
+        accountBLoginObservedAt: loginSignalAt,
+        accountAMarkersAtLogout: { tabA: tabAMarkersAtLogout, tabB: tabBMarkersAtLogout },
+        accountAMarkersAfterBLogin: { tabA: tabAMarkersAfterBLogin, tabB: tabBMarkersAfterBLogin },
+        accountBMarkerVisible: { tabA: (await markerText(pageA)).includes(bMarker), tabB: (await markerText(pageB)).includes(bMarker) },
+        historyLeakAudit,
+        aProtectedGetAttemptsAfterLogout: aProtectedGetAttempts.map(row => ({ path: row.path, status: row.status, accountAtRequest: row.accountAtRequest })),
+        correctlyDeniedAProtectedGetResponses: deniedAProtectedGets.length,
+        nonDeniedAProtectedGetResponses: nonDeniedAProtectedGets.map(row => ({ path: row.path, status: row.status })),
+        unresolvedAProtectedGetAttempts: unresolvedAProtectedGets.map(row => row.path),
+        strictAFlightPrefetchAttemptsAfterLogout: aFlightPrefetches.map(row => ({ path: row.path, status: row.status, accountAtRequest: row.accountAtRequest })),
+        privateAResponseLeaks: privateResponseLeaks,
+        chargeableChatOrProviderPostsAfterLogout: chargeablePostsAfterLogout,
+        allChargeableChatOrProviderPosts: monitor.generationPosts,
+        blockedChargeablePosts: monitor.blockedGenerationPosts,
+        syntheticProviderDispatchCountBefore: providerPostsBefore,
+        syntheticProviderDispatchCountAfter: providerPostsAfter,
+        blockedExternalAttempts: monitor.externalAttempts,
+      };
+      console.log(`STUDIOS_ACCOUNT_SWITCH_EVIDENCE ${JSON.stringify(evidence)}`);
+
+      expect.soft(privateResponseLeaks, "Account A private content must not appear in any API or Flight response after logout").toEqual([]);
+      expect.soft(nonDeniedAProtectedGets.map(row => ({ path: row.path, status: row.status })), "Any post-logout Account A protected GET reaching the API must be denied with 401/403").toEqual([]);
+      expect.soft(unresolvedAProtectedGets.map(row => row.path), "Account A protected GET attempts must have an observable denial response").toEqual([]);
+      expect.soft(aProtectedGetAttempts.map(row => ({ path: row.path, status: row.status })), "Strict contract: zero Account A protected GET attempts after observed logout, separate from correct 401/403 denial").toEqual([]);
+      expect.soft(aFlightPrefetches.map(row => ({ path: row.path, status: row.status })), "Strict contract: zero Account A Flight/Link prefetches after observed logout/account switch").toEqual([]);
+      expect.soft(monitor.generationPosts, "No chargeable Chat or provider POST is allowed in the account-switch flow").toEqual([]);
+      expect.soft(monitor.externalAttempts, "All browser egress outside loopback is blocked and should remain unused").toEqual([]);
+      expect.soft(monitor.blockedGenerationPosts, "The account-switch flow must not trigger a blocked chargeable/provider POST").toEqual([]);
+    } finally {
+      await context.close();
+    }
+  });
+}
+
 for (const studio of studios) {
   test(`${studio.name}: explicit same-tab logout clears private state and stops post-signal protected requests`, async ({ browser, request, testUser }) => {
     test.setTimeout(90_000);
@@ -539,6 +1058,7 @@ for (const studio of studios) {
     const context = await browser.newContext({ baseURL: webUrl, ignoreHTTPSErrors: syntheticSessionMode, viewport: { width: 1365, height: 900 } });
     const monitor = makeMonitor();
     let revoked = false;
+    let logoutSignalAt = 0;
     try {
       await addExternalEgressBlock(context, monitor);
       const page = await context.newPage();
@@ -554,17 +1074,22 @@ for (const studio of studios) {
       await expect(page).toHaveURL(/\/account(?:\?|$)/);
       const logoutResponsePromise = page.waitForResponse(response => {
         const url = new URL(response.url());
-        return response.request().method() === "POST" && url.pathname === "/api/auth/logout";
+        const isLogoutResponse = response.request().method() === "POST" && url.pathname === "/api/auth/logout";
+        if (isLogoutResponse) {
+          logoutSignalAt = performance.now();
+          revoked = true;
+        }
+        return isLogoutResponse;
       });
       await page.locator("button.security-logout").click();
       const logoutResponse = await logoutResponsePromise;
       expect(logoutResponse.status()).toBe(200);
-      revoked = true;
       await expect(page).toHaveURL(/\/login(?:\?.*)?$/);
 
       // This is the positive, same-tab logout signal. The old out-of-band
       // revocation cases above remain independent and intentionally strict.
-      const signalAt = Date.now();
+      const signalAt = logoutSignalAt;
+      expect(signalAt).toBeGreaterThan(0);
       await page.waitForTimeout(500);
       const afterSignalRows = monitor.rows.filter(row => row.time >= signalAt);
       const postSignalProtectedGets = afterSignalRows.filter(row => isProtectedRead(row.method, row.path));
