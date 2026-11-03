@@ -76,6 +76,7 @@ type RequestRow = {
   accountAtRequest?: AccountState;
   status?: number;
   body?: Promise<string>;
+  failure?: string;
 };
 
 type Monitor = {
@@ -137,13 +138,30 @@ function observePage(page: Page, monitor: Monitor, accountAtRequest?: () => Acco
     monitor.byRequest.set(request, row);
     if (isGenerationPost(row.method, row.path)) monitor.generationPosts.push(row.path);
   });
-  page.on("response", response => {
-    const row = monitor.byRequest.get(response.request());
+  const captureResponse = (request: Request, response: import("@playwright/test").Response) => {
+    const row = monitor.byRequest.get(request)
+      ?? [...monitor.rows].reverse().find(candidate => candidate.status === undefined
+        && candidate.method === request.method() && candidate.url === request.url());
     if (!row) return;
     row.status = response.status();
     if (row.rsc || isProtectedRead(row.method, row.path)) {
       row.body = response.text().catch(() => "<unreadable-response-body>");
     }
+  };
+  page.on("response", response => captureResponse(response.request(), response));
+  page.on("requestfinished", async request => {
+    const row = monitor.byRequest.get(request)
+      ?? [...monitor.rows].reverse().find(candidate => candidate.status === undefined
+        && candidate.method === request.method() && candidate.url === request.url());
+    if (!row || row.status !== undefined) return;
+    const response = await request.response();
+    if (response) captureResponse(request, response);
+  });
+  page.on("requestfailed", request => {
+    const row = monitor.byRequest.get(request)
+      ?? [...monitor.rows].reverse().find(candidate => candidate.status === undefined
+        && candidate.method === request.method() && candidate.url === request.url());
+    if (row) row.failure = request.failure()?.errorText ?? "request failed";
   });
 }
 
@@ -1046,10 +1064,10 @@ for (const studio of studios) {
         accountAMarkersAfterBLogin: { tabA: tabAMarkersAfterBLogin, tabB: tabBMarkersAfterBLogin },
         accountBMarkerVisible: { tabA: (await markerText(pageA)).includes(bMarker), tabB: (await markerText(pageB)).includes(bMarker) },
         historyLeakAudit,
-        aProtectedGetAttemptsAfterLogout: aProtectedGetAttempts.map(row => ({ path: row.path, status: row.status, accountAtRequest: row.accountAtRequest })),
+        aProtectedGetAttemptsAfterLogout: aProtectedGetAttempts.map(row => ({ path: row.path, status: row.status, accountAtRequest: row.accountAtRequest, failure: row.failure })),
         correctlyDeniedAProtectedGetResponses: deniedAProtectedGets.length,
         nonDeniedAProtectedGetResponses: nonDeniedAProtectedGets.map(row => ({ path: row.path, status: row.status })),
-        unresolvedAProtectedGetAttempts: unresolvedAProtectedGets.map(row => row.path),
+        unresolvedAProtectedGetAttempts: unresolvedAProtectedGets.map(row => ({ path: row.path, failure: row.failure })),
         strictAFlightPrefetchAttemptsAfterLogout: aFlightPrefetches.map(row => ({ path: row.path, status: row.status, accountAtRequest: row.accountAtRequest })),
         privateAResponseLeaks: privateResponseLeaks,
         chargeableChatOrProviderPostsAfterLogout: chargeablePostsAfterLogout,
