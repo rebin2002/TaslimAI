@@ -56,9 +56,10 @@ public static class MusicGenerationCapabilityCatalog
         {
             "mubert" => InstrumentalOnly,
             "stable-audio" => InstrumentalOnly,
-            // Suno has an official API platform, but its API schema, account
-            // entitlement, commercial rights and dialect quality are unverified.
-            "suno" => Unsupported,
+            // SunoAPI.org is a third-party service. Its public materials do not
+            // establish Taslim's multi-tenant rights or dialect quality; no
+            // reviewed adapter is currently available.
+            "suno" or "sunoapi-org" => Unsupported,
             // The API integration tests replace this key with a deterministic
             // local fake; it is not an upstream or production capability.
             "test" => InstrumentalOnly,

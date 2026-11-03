@@ -78,14 +78,17 @@ public sealed class MusicGenerationSongContractTests : IClassFixture<MusicSongCa
         Assert.False(unverifiedSuno.SupportsRealSingerVoiceCloning);
         Assert.Empty(unverifiedSuno.SupportedLyricsLanguages);
         Assert.Empty(unverifiedSuno.SupportedLyricsDialects);
+        Assert.Same(unverifiedSuno, MusicGenerationCapabilityCatalog.ForProvider("sunoapi-org"));
         Assert.False(MusicGenerationCapabilityCatalog.ForProvider("unconfigured").SupportsInstrumental);
     }
 
-    [Fact]
-    public void Unverified_suno_provider_is_unavailable_before_instrumental_generation()
+    [Theory]
+    [InlineData("suno")]
+    [InlineData("sunoapi-org")]
+    public void Unverified_suno_provider_identifiers_are_unavailable_before_instrumental_generation(string providerKey)
     {
         var exception = Assert.Throws<MusicRequestValidationException>(() =>
-            MusicGenerationRequestValidator.Validate(InstrumentalInput(), Options("suno")));
+            MusicGenerationRequestValidator.Validate(InstrumentalInput(), Options(providerKey)));
 
         Assert.Equal(GenerationJobErrorCodes.MusicProviderUnavailable, exception.Code);
     }
