@@ -81,6 +81,8 @@ public sealed class MovieClipQueueFailureCleanupTests : IClassFixture<MovieQueue
         using var scope = factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
         var usageBefore = await db.UsageTransactions.CountAsync();
+        var snapshotsBefore = await db.MovieCharacterContinuitySnapshots.CountAsync(
+            item => item.MovieProjectId == fixture.Project.Project.Id);
         var path = $"/api/movie-studio/shots/{fixture.Shot.Id}/generate";
         var input = new { title = "Short clip with queue failure" };
         using (var failed = await MovieOperationalFixtures.SendWithConfirmedMovieQuoteAsync(
@@ -91,6 +93,8 @@ public sealed class MovieClipQueueFailureCleanupTests : IClassFixture<MovieQueue
         }
 
         Assert.False(await db.MovieClips.AnyAsync(item => item.MovieProjectId == fixture.Project.Project.Id));
+        Assert.Equal(snapshotsBefore, await db.MovieCharacterContinuitySnapshots.CountAsync(
+            item => item.MovieProjectId == fixture.Project.Project.Id));
         Assert.False(await db.GenerationJobs.AnyAsync(item => item.IdempotencyKey == key));
         Assert.Equal(usageBefore, await db.UsageTransactions.CountAsync());
 
@@ -102,6 +106,14 @@ public sealed class MovieClipQueueFailureCleanupTests : IClassFixture<MovieQueue
         var job = await db.GenerationJobs.SingleAsync(item => item.IdempotencyKey == key);
         var clip = await db.MovieClips.SingleAsync(item => item.MovieProjectId == fixture.Project.Project.Id);
         Assert.Equal(job.Id, clip.GenerationJobId);
+        var retainedSnapshotId = clip.ContinuitySnapshotId
+            ?? throw new InvalidOperationException("The committed clip has no continuity snapshot.");
+        Assert.True(await db.MovieCharacterContinuitySnapshots.AsNoTracking().AnyAsync(
+            item => item.Id == retainedSnapshotId
+                && item.MovieProjectId == fixture.Project.Project.Id
+                && item.MovieShotId == fixture.Shot.Id));
+        Assert.Equal(snapshotsBefore + 1, await db.MovieCharacterContinuitySnapshots.CountAsync(
+            item => item.MovieProjectId == fixture.Project.Project.Id));
         Assert.Single(await db.UsageTransactions.AsNoTracking()
             .Where(item => item.RequestId == $"generation:{job.Id:N}").ToListAsync());
     }
