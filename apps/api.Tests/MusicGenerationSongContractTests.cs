@@ -55,6 +55,7 @@ public sealed class MusicGenerationSongContractTests : IClassFixture<MusicSongCa
             Assert.False(capabilities.SupportsLyricsToVocals);
             Assert.False(capabilities.SupportsAudioReferenceConditioning);
             Assert.False(capabilities.SupportsVideoAudioReference);
+            Assert.False(capabilities.SupportsAuthorizedWorkspaceReferences);
             Assert.False(capabilities.SupportsAuthorizedCoverOrRearrangement);
             Assert.False(capabilities.SupportsRealSingerVoiceCloning);
             Assert.Empty(capabilities.SupportedLyricsLanguages);
@@ -74,6 +75,7 @@ public sealed class MusicGenerationSongContractTests : IClassFixture<MusicSongCa
         Assert.False(unverifiedSuno.SupportsLyricsToVocals);
         Assert.False(unverifiedSuno.SupportsAudioReferenceConditioning);
         Assert.False(unverifiedSuno.SupportsVideoAudioReference);
+        Assert.False(unverifiedSuno.SupportsAuthorizedWorkspaceReferences);
         Assert.False(unverifiedSuno.SupportsAuthorizedCoverOrRearrangement);
         Assert.False(unverifiedSuno.SupportsRealSingerVoiceCloning);
         Assert.Empty(unverifiedSuno.SupportedLyricsLanguages);
@@ -125,6 +127,33 @@ public sealed class MusicGenerationSongContractTests : IClassFixture<MusicSongCa
         Assert.DoesNotContain("singerId", JsonSerializer.Serialize(input), StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public void Private_reference_contract_maps_only_asset_id_and_media_type()
+    {
+        var assetId = Guid.NewGuid();
+        var request = new MusicGenerationRequest
+        {
+            Description = "Synthetic reference contract only",
+            Purpose = "Test metadata mapping only",
+            Genre = "folk",
+            Mood = "calm",
+            DurationSeconds = 60,
+            ReferenceAssets = [new MusicReferenceAsset("audio", assetId)],
+            ReferenceRightsConfirmed = true,
+        };
+
+        var input = MusicGenerationContractMapper.ToInput(request);
+
+        var reference = Assert.IsType<MusicReferenceAsset>(Assert.Single(input.ReferenceAssets!));
+        Assert.Equal(assetId, reference.AssetId);
+        Assert.Equal("audio", reference.MediaType);
+        Assert.True(input.ReferenceRightsConfirmed);
+        var serialized = JsonSerializer.Serialize(input);
+        Assert.Contains(assetId.ToString(), serialized, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("audioUrl", serialized, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("videoUrl", serialized, StringComparison.OrdinalIgnoreCase);
+    }
+
     [Theory]
     [InlineData("ku", "sorani", "[TEST ONLY] ڕۆژ — کوردی")]
     [InlineData("ar", "iraqi_baghdadi", "[TEST ONLY] بغداد — عراقي")]
@@ -161,6 +190,21 @@ public sealed class MusicGenerationSongContractTests : IClassFixture<MusicSongCa
         Assert.Equal(new[] { "verse", "chorus" }, mapped.Lyrics.Select(section => section!.Section));
         Assert.Equal(lyricLine, Assert.IsType<string>(Assert.Single(mapped.Lyrics[0]!.Lines!)));
         Assert.Equal("[TEST ONLY] repeated section", Assert.IsType<string>(Assert.Single(mapped.Lyrics[1]!.Lines!)));
+    }
+
+    [Theory]
+    [InlineData("sorani_erbil", "[TEST ONLY] هەولێر — سۆرانی")]
+    [InlineData("sorani_sulaymaniyah", "[TEST ONLY] سلێمانی — سۆرانی")]
+    public void Sorani_regional_tags_accept_native_script_but_remain_provider_disabled(string dialect, string lyricLine)
+    {
+        var request = SongInput(lyricsLanguage: "ku", lyricsDialect: dialect, line: lyricLine);
+
+        Assert.Equal("ku", MusicGenerationValues.LyricsDialectLanguages[dialect]);
+        Assert.Equal(lyricLine, Assert.IsType<string>(Assert.Single(request.Lyrics![0]!.Lines!)));
+        var exception = Assert.Throws<MusicRequestValidationException>(() =>
+            MusicGenerationRequestValidator.Validate(request, Options("sunoapi-org")));
+
+        Assert.Equal(GenerationJobErrorCodes.MusicVocalPreferenceUnsupported, exception.Code);
     }
 
     [Theory]
@@ -245,11 +289,57 @@ public sealed class MusicGenerationSongContractTests : IClassFixture<MusicSongCa
         Assert.Equal(GenerationJobErrorCodes.MusicRequestInvalid, exception.Code);
     }
 
+    [Fact]
+    public void Reference_assets_require_rights_private_asset_ids_and_supported_media_types()
+    {
+        var noAttestation = InstrumentalInput() with
+        {
+            ReferenceAssets = [new MusicReferenceAsset("audio", Guid.NewGuid())],
+        };
+        Assert.Equal(GenerationJobErrorCodes.MusicRequestInvalid,
+            Assert.Throws<MusicRequestValidationException>(() =>
+                MusicGenerationRequestValidator.Validate(noAttestation, Options("test"))).Code);
+
+        var emptyAssetId = InstrumentalInput() with
+        {
+            ReferenceAssets = [new MusicReferenceAsset("audio", Guid.Empty)],
+            ReferenceRightsConfirmed = true,
+        };
+        Assert.Equal(GenerationJobErrorCodes.MusicRequestInvalid,
+            Assert.Throws<MusicRequestValidationException>(() =>
+                MusicGenerationRequestValidator.Validate(emptyAssetId, Options("test"))).Code);
+
+        var duplicateAssetId = Guid.NewGuid();
+        var duplicates = InstrumentalInput() with
+        {
+            ReferenceAssets =
+            [
+                new MusicReferenceAsset("audio", duplicateAssetId),
+                new MusicReferenceAsset("video", duplicateAssetId),
+            ],
+            ReferenceRightsConfirmed = true,
+        };
+        Assert.Equal(GenerationJobErrorCodes.MusicRequestInvalid,
+            Assert.Throws<MusicRequestValidationException>(() =>
+                MusicGenerationRequestValidator.Validate(duplicates, Options("test"))).Code);
+
+        var unsupportedMediaType = InstrumentalInput() with
+        {
+            ReferenceAssets = [new MusicReferenceAsset("url", Guid.NewGuid())],
+            ReferenceRightsConfirmed = true,
+        };
+        Assert.Equal(GenerationJobErrorCodes.MusicRequestInvalid,
+            Assert.Throws<MusicRequestValidationException>(() =>
+                MusicGenerationRequestValidator.Validate(unsupportedMediaType, Options("test"))).Code);
+    }
+
     [Theory]
     [InlineData("ku", "sorani", "[TEST ONLY] ڕۆژ — کوردی")]
     [InlineData("ar", "iraqi_baghdadi", "[TEST ONLY] بغداد — عراقي")]
     [InlineData("ar", "iraqi_mosul", "[TEST ONLY] الموصل — عربي")]
     [InlineData("ar", "iraqi_basra", "[TEST ONLY] البصرة — عربي")]
+    [InlineData("ku", "sorani_erbil", "[TEST ONLY] هەولێر — سۆرانی")]
+    [InlineData("ku", "sorani_sulaymaniyah", "[TEST ONLY] سلێمانی — سۆرانی")]
     public async Task Unsupported_lyric_song_fails_before_cost_preflight_job_creation_or_provider_call(
         string lyricsLanguage,
         string lyricsDialect,
@@ -281,6 +371,40 @@ public sealed class MusicGenerationSongContractTests : IClassFixture<MusicSongCa
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
         var body = await response.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal(GenerationJobErrorCodes.MusicVocalPreferenceUnsupported, body.GetProperty("error").GetProperty("code").GetString());
+        Assert.Equal(0, factory.Services.GetRequiredService<CountingUsageCostControl>().PreflightCalls);
+        Assert.Equal(0, factory.Services.GetRequiredService<NoCallMusicProvider>().Calls);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.False(await db.GenerationJobs.AsNoTracking().AnyAsync(item => item.CreatedByUserId == auth.User.Id));
+        Assert.False(await db.UsageTransactions.AsNoTracking().AnyAsync(item => item.UserId == auth.User.Id));
+    }
+
+    [Theory]
+    [InlineData("audio")]
+    [InlineData("video")]
+    public async Task Unsupported_reference_assets_fail_before_cost_preflight_job_creation_or_provider_call(string mediaType)
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, $"music-reference-{Guid.NewGuid():N}@example.com");
+        var response = await SendWithCsrf(client, new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            description = "An instrumental music cue guided by an owned reference",
+            purpose = "Synthetic reference authorization and no-charge test",
+            genre = "ambient",
+            mood = "calm",
+            durationSeconds = 60,
+            creationMode = "instrumental",
+            vocalPreference = "instrumental",
+            language = "en",
+            referenceRightsConfirmed = true,
+            referenceAssets = new[] { new { mediaType, assetId = Guid.NewGuid() } },
+        });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(GenerationJobErrorCodes.MusicProviderUnavailable, body.GetProperty("error").GetProperty("code").GetString());
         Assert.Equal(0, factory.Services.GetRequiredService<CountingUsageCostControl>().PreflightCalls);
         Assert.Equal(0, factory.Services.GetRequiredService<NoCallMusicProvider>().Calls);
 

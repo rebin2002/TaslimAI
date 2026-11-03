@@ -30,6 +30,8 @@ public static class MusicGenerationValues
     public static readonly IReadOnlyDictionary<string, string> LyricsDialectLanguages = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
     {
         ["sorani"] = "ku",
+        ["sorani_erbil"] = "ku",
+        ["sorani_sulaymaniyah"] = "ku",
         ["iraqi_baghdadi"] = "ar",
         ["iraqi_mosul"] = "ar",
         ["iraqi_basra"] = "ar",
@@ -94,6 +96,10 @@ public sealed class MusicGenerationRequest
 
     public bool LyricsRightsConfirmed { get; set; }
 
+    public IReadOnlyList<MusicReferenceAsset?>? ReferenceAssets { get; set; }
+
+    public bool ReferenceRightsConfirmed { get; set; }
+
     [StringLength(160)]
     public string? Title { get; set; }
 
@@ -108,6 +114,10 @@ public sealed record CreateMusicGenerationResponse(GenerationJobDto Job);
 public sealed record MusicLyricsSection(
     string? Section,
     IReadOnlyList<string?>? Lines);
+
+public sealed record MusicReferenceAsset(
+    string? MediaType,
+    Guid AssetId);
 
 public sealed record MusicGenerationInput(
     string Description,
@@ -124,7 +134,9 @@ public sealed record MusicGenerationInput(
     IReadOnlyList<MusicLyricsSection?>? Lyrics = null,
     string? LyricsLanguage = null,
     bool LyricsRightsConfirmed = false,
-    string? LyricsDialect = null);
+    string? LyricsDialect = null,
+    IReadOnlyList<MusicReferenceAsset?>? ReferenceAssets = null,
+    bool ReferenceRightsConfirmed = false);
 
 public sealed record MusicProviderUsage(
     int? InputTokens,
@@ -160,7 +172,9 @@ public static class MusicGenerationContractMapper
         request.Lyrics,
         Normalize(request.LyricsLanguage, 10)?.ToLowerInvariant(),
         request.LyricsRightsConfirmed,
-        Normalize(request.LyricsDialect, 40)?.ToLowerInvariant());
+        Normalize(request.LyricsDialect, 40)?.ToLowerInvariant(),
+        request.ReferenceAssets,
+        request.ReferenceRightsConfirmed);
 
     private static string? Normalize(string? value, int maxLength)
     {

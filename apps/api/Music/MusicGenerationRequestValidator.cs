@@ -5,6 +5,7 @@ namespace Taslim.Api.Music;
 
 public static class MusicGenerationRequestValidator
 {
+    private const int MaxReferenceAssets = 10;
     private const int MaxLyricsSections = 24;
     private const int MaxLyricsLinesPerSection = 30;
     private const int MaxLyricsLineCharacters = 200;
@@ -42,6 +43,7 @@ public static class MusicGenerationRequestValidator
             throw new MusicRequestValidationException(GenerationJobErrorCodes.MusicRequestInvalid, "The selected music creation mode is not supported.");
 
         var capabilities = MusicGenerationCapabilityCatalog.ForProvider(options.ProviderKey);
+        ValidateReferenceAssets(request, capabilities);
         if (string.Equals(mode, MusicGenerationValues.InstrumentalMode, StringComparison.OrdinalIgnoreCase))
         {
             if (!capabilities.SupportsInstrumental)
@@ -68,6 +70,48 @@ public static class MusicGenerationRequestValidator
         if (!string.IsNullOrWhiteSpace(lyricsDialect)
             && !capabilities.SupportedLyricsDialects.Contains(lyricsDialect, StringComparer.OrdinalIgnoreCase))
             throw new MusicRequestValidationException(GenerationJobErrorCodes.MusicLanguageUnsupported, "The configured music provider does not support this lyrics dialect.");
+    }
+
+    private static void ValidateReferenceAssets(
+        MusicGenerationInput request,
+        MusicGenerationProviderCapabilities capabilities)
+    {
+        var references = request.ReferenceAssets;
+        if (references is null || references.Count == 0)
+        {
+            if (request.ReferenceRightsConfirmed)
+                throw new MusicRequestValidationException(GenerationJobErrorCodes.MusicRequestInvalid, "Reference rights confirmation requires at least one reference asset.");
+            return;
+        }
+
+        if (!request.ReferenceRightsConfirmed)
+            throw new MusicRequestValidationException(GenerationJobErrorCodes.MusicRequestInvalid, "Confirm that you have the necessary rights to each reference asset.");
+        if (references.Count > MaxReferenceAssets)
+            throw new MusicRequestValidationException(GenerationJobErrorCodes.MusicRequestInvalid, "Too many reference assets were supplied.");
+
+        var assetIds = new HashSet<Guid>();
+        var hasAudio = false;
+        var hasVideo = false;
+        foreach (var reference in references)
+        {
+            if (reference is null || reference.AssetId == Guid.Empty
+                || (!string.Equals(reference.MediaType, "audio", StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(reference.MediaType, "video", StringComparison.OrdinalIgnoreCase))
+                || !assetIds.Add(reference.AssetId))
+            {
+                throw new MusicRequestValidationException(GenerationJobErrorCodes.MusicRequestInvalid, "A reference must identify a unique private audio or video asset.");
+            }
+
+            hasAudio |= string.Equals(reference.MediaType, "audio", StringComparison.OrdinalIgnoreCase);
+            hasVideo |= string.Equals(reference.MediaType, "video", StringComparison.OrdinalIgnoreCase);
+        }
+
+        if ((hasAudio && !capabilities.SupportsAudioReferenceConditioning)
+            || (hasVideo && !capabilities.SupportsVideoAudioReference)
+            || !capabilities.SupportsAuthorizedWorkspaceReferences)
+        {
+            throw new MusicRequestValidationException(GenerationJobErrorCodes.MusicProviderUnavailable, "Reference assets are not enabled for the configured provider and workspace authorization path.");
+        }
     }
 
     private static void ValidateLyrics(MusicGenerationInput request)
