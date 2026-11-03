@@ -967,13 +967,14 @@ public sealed class AutopilotNextWaveLaunchTests
                 "wave-x-next", "bl-1", "Add workspace audit export", "bounded instructions", CandidateSha, Branch,
                 AutopilotNextWavePolicy.LaunchIdempotencyKey("wave-x-next", "bl-1"));
 
+            const string nativeTaskId = "ABCDEFGHIJKLMNOPQRSTUV";
             handler.Respond = _ => new HttpResponseMessage(HttpStatusCode.OK)
             {
-                Content = new StringContent("{\"task\":{\"id\":\"bridge-task-77\",\"status\":\"queued\"}}"),
+                Content = new StringContent(JsonSerializer.Serialize(new { ok = true, task_id = nativeTaskId })),
             };
             var launched = await provider.LaunchTaskAsync(request);
             Assert.True(launched.IsLaunched);
-            Assert.Equal("bridge-task-77", launched.ExternalTaskId);
+            Assert.Equal(nativeTaskId, launched.ExternalTaskId);
 
             // The credential is only ever sent as an Authorization header.
             var recorded = Assert.Single(handler.Requests);
@@ -981,6 +982,10 @@ public sealed class AutopilotNextWaveLaunchTests
             Assert.Equal("https://bridge.example.test/v1/tasks", recorded.Uri);
             Assert.Equal($"Bearer {sentinel}", recorded.Authorization);
             Assert.Equal(request.IdempotencyKey, recorded.IdempotencyKey);
+            using var requestBody = JsonDocument.Parse(recorded.Body);
+            Assert.Equal(request.WaveKey, requestBody.RootElement.GetProperty("waveKey").GetString());
+            Assert.Equal(request.TaskKey, requestBody.RootElement.GetProperty("taskKey").GetString());
+            Assert.Equal(request.IdempotencyKey, requestBody.RootElement.GetProperty("idempotencyKey").GetString());
             Assert.DoesNotContain(sentinel, recorded.Body);
 
             // A transient failure is reported as unavailable, never as success.
