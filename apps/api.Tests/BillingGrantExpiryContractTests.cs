@@ -188,6 +188,84 @@ public sealed class BillingGrantExpiryContractTests
     }
 
     [Fact]
+    public async Task Sqlite_debit_replay_is_durable_across_context_restarts_and_rejects_rebinding()
+    {
+        var databasePath = Path.Combine(Path.GetTempPath(), $"issue330-debit-replay-{Guid.NewGuid():N}.db");
+        var connectionString = new SqliteConnectionStringBuilder
+        {
+            DataSource = databasePath,
+            Pooling = false,
+        }.ToString();
+        var options = new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connectionString).Options;
+        var workspace = NewWorkspace();
+        var user = NewUser();
+        var usage = NewCompletedUsage(workspace.Id, user.Id, "debit-replay:usage");
+        var otherUsage = NewCompletedUsage(workspace.Id, user.Id, "debit-replay:other-usage");
+        const string idempotencyKey = "debit-replay:stable-key";
+        const string reason = "Synthetic durable debit replay";
+        Guid debitId;
+
+        try
+        {
+            await using (var db = new TaslimDbContext(options))
+            {
+                await db.Database.EnsureCreatedAsync();
+                db.Workspaces.Add(workspace);
+                db.Users.Add(user);
+                db.UsageTransactions.AddRange(usage, otherUsage);
+                await db.SaveChangesAsync();
+
+                var ledger = NewChargingEnabledLedger(db);
+                await ledger.GrantAsync(
+                    workspace.Id, CreditEntitlementType.Purchased, 100,
+                    "debit-replay:grant", "Synthetic replay test grant", expiresAt: DateTime.UtcNow.AddDays(30));
+                var first = await ledger.RecordUsageDebitAsync(
+                    workspace.Id, usage.Id, 25, idempotencyKey, reason);
+
+                Assert.NotNull(first);
+                Assert.True(first.Created);
+                Assert.Equal(-25, first.Entry.Amount);
+                debitId = first.Entry.Id;
+                Assert.Equal(2, await db.CreditLedgerEntries.CountAsync());
+            }
+
+            // A fresh context models a lost response/process restart after commit.
+            await using (var db = new TaslimDbContext(options))
+            {
+                var ledger = NewChargingEnabledLedger(db);
+                var replay = await ledger.RecordUsageDebitAsync(
+                    workspace.Id, usage.Id, 25, idempotencyKey, reason);
+
+                Assert.NotNull(replay);
+                Assert.False(replay.Created);
+                Assert.Equal(debitId, replay.Entry.Id);
+                Assert.Equal(-25, replay.Entry.Amount);
+
+                await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                    ledger.RecordUsageDebitAsync(workspace.Id, usage.Id, 30, idempotencyKey, reason));
+                await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                    ledger.RecordUsageDebitAsync(workspace.Id, otherUsage.Id, 25, idempotencyKey, reason));
+                await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                    ledger.RecordUsageDebitAsync(workspace.Id, usage.Id, 25, "debit-replay:second-key", reason));
+
+                Assert.Equal(2, await db.CreditLedgerEntries.CountAsync());
+                var persisted = await db.CreditLedgerEntries.AsNoTracking()
+                    .SingleAsync(entry => entry.Id == debitId);
+                Assert.Equal(CreditLedgerEntryType.Debit, persisted.Type);
+                Assert.Equal(workspace.Id, persisted.WorkspaceId);
+                Assert.Equal(usage.Id, persisted.UsageTransactionId);
+                Assert.Equal(idempotencyKey, persisted.IdempotencyKey);
+                Assert.Equal(-25, persisted.Amount);
+            }
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            if (File.Exists(databasePath)) File.Delete(databasePath);
+        }
+    }
+
+    [Fact]
     public async Task Sqlite_post_expiry_refund_replay_is_append_only_and_source_isolated()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
