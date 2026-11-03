@@ -530,3 +530,63 @@ for (const studio of studios) {
     }
   });
 }
+
+for (const studio of studios) {
+  test(`${studio.name}: explicit same-tab logout clears private state and stops post-signal protected requests`, async ({ browser, request, testUser }) => {
+    test.setTimeout(90_000);
+    assertLoopback(webUrl, "E2E_WEB_URL");
+    assertLoopback(E2E_API_URL, "E2E_API_URL");
+    const context = await browser.newContext({ baseURL: webUrl, ignoreHTTPSErrors: syntheticSessionMode, viewport: { width: 1365, height: 900 } });
+    const monitor = makeMonitor();
+    let revoked = false;
+    try {
+      await addExternalEgressBlock(context, monitor);
+      const page = await context.newPage();
+      const token = await createSession(page, request, testUser);
+      const auth = await apiJson<{ personalWorkspace: { id: string } }>(page.request, "GET", "/api/auth/me");
+      await installLocalOnlyRoutes(context, monitor, studio, auth.personalWorkspace.id, () => revoked);
+      observePage(page, monitor);
+
+      const authorizedResponse = await page.goto(studio.path);
+      expect(authorizedResponse?.status()).toBe(200);
+      await expect.poll(async () => (await markerText(page)).includes(studio.markers[0]), { timeout: 15_000 }).toBe(true);
+      await page.locator('a[href="/account"]').first().click();
+      await expect(page).toHaveURL(/\/account(?:\?|$)/);
+      const logoutResponsePromise = page.waitForResponse(response => {
+        const url = new URL(response.url());
+        return response.request().method() === "POST" && url.pathname === "/api/auth/logout";
+      });
+      await page.locator("button.security-logout").click();
+      const logoutResponse = await logoutResponsePromise;
+      expect(logoutResponse.status()).toBe(200);
+      revoked = true;
+      await expect(page).toHaveURL(/\/login(?:\?.*)?$/);
+
+      // This is the positive, same-tab logout signal. The old out-of-band
+      // revocation cases above remain independent and intentionally strict.
+      const signalAt = Date.now();
+      await page.waitForTimeout(500);
+      const afterSignalRows = monitor.rows.filter(row => row.time >= signalAt);
+      const postSignalProtectedGets = afterSignalRows.filter(row => isProtectedRead(row.method, row.path));
+      const postSignalTargetPrefetches = afterSignalRows.filter(row => row.path === studio.path && row.rsc && row.prefetch);
+      const privateResponseBodies: Array<{ path: string; status?: number }> = [];
+      for (const row of afterSignalRows) {
+        if (!row.body) continue;
+        const body = await row.body;
+        if (privateMarkers.some(marker => body.includes(marker))) privateResponseBodies.push({ path: row.path, status: row.status });
+      }
+      const visibleMarkers = await noPrivateMarkerVisible(page, studio);
+      console.log(`STUDIOS_EXPLICIT_LOGOUT_EVIDENCE ${JSON.stringify({ studio: studio.name, syntheticLocalAuth: syntheticSessionMode, logoutStatus: logoutResponse.status(), postSignalProtectedGets: postSignalProtectedGets.map(row => ({ path: row.path, status: row.status })), postSignalTargetPrefetches: postSignalTargetPrefetches.map(row => ({ path: row.path, status: row.status })), privateResponseBodies, visibleMarkers, generationPosts: monitor.generationPosts, blockedExternalAttempts: monitor.externalAttempts })}`);
+
+      expect(visibleMarkers, `${studio.name} private marker remained visible after explicit same-tab logout completed`).toEqual([]);
+      expect(postSignalProtectedGets.map(row => ({ path: row.path, status: row.status })), `${studio.name} issued a protected GET after the explicit logout signal`).toEqual([]);
+      expect(postSignalTargetPrefetches.map(row => ({ path: row.path, status: row.status })), `${studio.name} prefetched its private route after the explicit logout signal`).toEqual([]);
+      expect(privateResponseBodies, `${studio.name} served private data in a response after the explicit logout signal`).toEqual([]);
+      expect(monitor.generationPosts, "No generation/provider POST is allowed in this auth regression.").toEqual([]);
+      expect(monitor.externalAttempts, "All browser egress outside loopback is blocked and should remain unused.").toEqual([]);
+      expect(token).toBeTruthy();
+    } finally {
+      await context.close();
+    }
+  });
+}
