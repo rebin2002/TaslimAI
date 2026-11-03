@@ -73,6 +73,215 @@ public interface IAutopilotGlobalTaskInventoryPageSource
         CancellationToken cancellationToken = default);
 }
 
+/// <summary>Credential identity used to restrict Manus task.list to one creator.</summary>
+public enum AutopilotManusTaskListCredentialKind
+{
+    ApiKey,
+    OAuthBearer,
+}
+
+/// <summary>
+/// Reads one explicitly creator-scoped page from the official Manus v2 task.list API.
+/// This adapter requires a dedicated Taslim API-key ID or OAuth-client ID, an explicit
+/// source-backed identity attestation, and an injected credential provider. It deliberately
+/// has no unscoped-list mode and does not read environment variables or register itself in DI.
+/// </summary>
+public sealed class ManusTaskListInventoryPageSource : IAutopilotGlobalTaskInventoryPageSource, IDisposable
+{
+    public const int PageSize = 100;
+    private const int MaximumResponseBytes = 1_000_000;
+    private const int MaximumCursorLength = 2_048;
+    private static readonly TimeSpan DefaultPageTimeout = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan MaximumPageTimeout = TimeSpan.FromSeconds(30);
+    private static readonly Uri TaskListEndpoint = new("https://api.manus.ai/v2/task.list", UriKind.Absolute);
+
+    private readonly HttpClient http;
+    private readonly Func<string?> credentialProvider;
+    private readonly string taslimScopeId;
+    private readonly string creatorId;
+    private readonly string creatorFilterName;
+    private readonly bool creatorIdentityVerified;
+    private readonly TimeSpan pageTimeout;
+
+    /// <param name="creatorIdentityVerified">True only after the exact creator ID is independently verified from the Taslim Bridge source/configuration.</param>
+    public ManusTaskListInventoryPageSource(
+        Func<string?> credentialProvider,
+        string taslimScopeId,
+        string? creatorId,
+        bool creatorIdentityVerified,
+        AutopilotManusTaskListCredentialKind credentialKind,
+        TimeSpan? pageTimeout = null,
+        HttpMessageHandler? testHandler = null)
+    {
+        this.credentialProvider = credentialProvider ?? throw new ArgumentNullException(nameof(credentialProvider));
+        this.taslimScopeId = string.IsNullOrWhiteSpace(taslimScopeId)
+            ? throw new ArgumentException("A stable Taslim inventory scope is required.", nameof(taslimScopeId))
+            : taslimScopeId.Trim();
+        this.creatorId = creatorId?.Trim() ?? string.Empty;
+        this.creatorIdentityVerified = creatorIdentityVerified
+            && !string.IsNullOrWhiteSpace(this.creatorId)
+            && this.creatorId.Length <= 200;
+        this.pageTimeout = pageTimeout ?? DefaultPageTimeout;
+        if (this.pageTimeout <= TimeSpan.Zero || this.pageTimeout > MaximumPageTimeout)
+            throw new ArgumentOutOfRangeException(nameof(pageTimeout), $"Page timeout must be positive and at most {MaximumPageTimeout}.");
+
+        // The production default refuses redirects, so x-manus-api-key cannot be
+        // forwarded to another origin. Tests inject a deterministic fake handler only.
+        http = new HttpClient(testHandler ?? new HttpClientHandler { AllowAutoRedirect = false }, disposeHandler: true)
+        {
+            Timeout = System.Threading.Timeout.InfiniteTimeSpan,
+        };
+        creatorFilterName = credentialKind switch
+        {
+            AutopilotManusTaskListCredentialKind.ApiKey => "api_key_id",
+            AutopilotManusTaskListCredentialKind.OAuthBearer => "oauth_client_id",
+            _ => throw new ArgumentOutOfRangeException(nameof(credentialKind)),
+        };
+    }
+
+    public async Task<AutopilotGlobalTaskInventoryPage?> ReadPageAsync(
+        string scopeId,
+        string? cursor,
+        CancellationToken cancellationToken = default)
+    {
+        // Manus returns an empty successful list for an unknown creator ID. Do not
+        // convert that response into zero occupancy unless the exact ID was verified
+        // against the Taslim Bridge source/configuration by the integrator.
+        if (!creatorIdentityVerified
+            || !string.Equals(scopeId, taslimScopeId, StringComparison.Ordinal)
+            || (cursor is not null && (string.IsNullOrWhiteSpace(cursor) || cursor.Length > MaximumCursorLength)))
+            return null;
+
+        var credential = credentialProvider()?.Trim();
+        if (string.IsNullOrWhiteSpace(credential) || credential.Any(char.IsWhiteSpace))
+            return null;
+
+        var query = new List<string>
+        {
+            "limit=100",
+            "order=desc",
+            "scope=all",
+            $"{creatorFilterName}={Uri.EscapeDataString(creatorId)}",
+        };
+        if (cursor is not null) query.Add($"cursor={Uri.EscapeDataString(cursor)}");
+        var requestUri = new UriBuilder(TaskListEndpoint) { Query = string.Join('&', query) }.Uri;
+
+        using var request = new HttpRequestMessage(HttpMethod.Get, requestUri);
+        if (creatorFilterName == "api_key_id")
+            request.Headers.TryAddWithoutValidation("x-manus-api-key", credential);
+        else
+            request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", credential);
+
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(pageTimeout);
+        var pageToken = deadline.Token;
+
+        try
+        {
+            using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, pageToken);
+            if (!response.IsSuccessStatusCode) return null;
+            var payload = await ReadBoundedAsync(response.Content, pageToken);
+            if (payload is null) return null;
+
+            using var document = System.Text.Json.JsonDocument.Parse(payload);
+            var root = document.RootElement;
+            if (root.ValueKind != System.Text.Json.JsonValueKind.Object
+                || !root.TryGetProperty("ok", out var ok)
+                || ok.ValueKind != System.Text.Json.JsonValueKind.True
+                || !root.TryGetProperty("data", out var tasks)
+                || tasks.ValueKind != System.Text.Json.JsonValueKind.Array
+                || !root.TryGetProperty("has_more", out var hasMoreElement)
+                || (hasMoreElement.ValueKind != System.Text.Json.JsonValueKind.True
+                    && hasMoreElement.ValueKind != System.Text.Json.JsonValueKind.False))
+                return null;
+
+            var hasMore = hasMoreElement.GetBoolean();
+            string? nextCursor = null;
+            if (root.TryGetProperty("next_cursor", out var cursorElement)
+                && cursorElement.ValueKind != System.Text.Json.JsonValueKind.Null)
+            {
+                if (cursorElement.ValueKind != System.Text.Json.JsonValueKind.String) return null;
+                nextCursor = cursorElement.GetString();
+            }
+
+            if (hasMore != (nextCursor is not null)
+                || (nextCursor is not null && (string.IsNullOrWhiteSpace(nextCursor) || nextCursor.Length > MaximumCursorLength)))
+                return null;
+
+            var items = new List<AutopilotGlobalTaskInventoryItem>();
+            foreach (var task in tasks.EnumerateArray())
+            {
+                if (task.ValueKind != System.Text.Json.JsonValueKind.Object
+                    || !task.TryGetProperty("id", out var idElement)
+                    || idElement.ValueKind != System.Text.Json.JsonValueKind.String
+                    || string.IsNullOrWhiteSpace(idElement.GetString())
+                    || !task.TryGetProperty("status", out var statusElement)
+                    || statusElement.ValueKind != System.Text.Json.JsonValueKind.String
+                    || string.IsNullOrWhiteSpace(statusElement.GetString()))
+                    return null;
+
+                bool? hasRunningBackgroundJobs = null;
+                if (task.TryGetProperty("has_running_background_jobs", out var backgroundElement))
+                {
+                    if (backgroundElement.ValueKind is not (System.Text.Json.JsonValueKind.True or System.Text.Json.JsonValueKind.False))
+                        return null;
+                    hasRunningBackgroundJobs = backgroundElement.GetBoolean();
+                }
+
+                var taskId = idElement.GetString()!.Trim();
+                var status = ConservativelyNormalizeStatus(statusElement.GetString()!, hasRunningBackgroundJobs);
+                items.Add(new AutopilotGlobalTaskInventoryItem(taskId, taslimScopeId, status, null));
+            }
+
+            return new AutopilotGlobalTaskInventoryPage(taslimScopeId, items, nextCursor);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return null;
+        }
+        catch (HttpRequestException)
+        {
+            return null;
+        }
+        catch (IOException)
+        {
+            return null;
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return null;
+        }
+    }
+
+    public void Dispose() => http.Dispose();
+
+    private static string ConservativelyNormalizeStatus(string status, bool? hasRunningBackgroundJobs)
+    {
+        var normalized = status.Trim().ToLowerInvariant();
+        if (hasRunningBackgroundJobs == true) return "running";
+        if (normalized is "waiting" or "stopped") return normalized;
+        if (normalized == "error" && hasRunningBackgroundJobs is null) return "unknown";
+        return normalized;
+    }
+
+    private static async Task<byte[]?> ReadBoundedAsync(HttpContent content, CancellationToken cancellationToken)
+    {
+        if (content.Headers.ContentLength > MaximumResponseBytes) return null;
+        await using var stream = await content.ReadAsStreamAsync(cancellationToken);
+        using var buffer = new MemoryStream();
+        var chunk = new byte[8_192];
+        while (true)
+        {
+            var read = await stream.ReadAsync(chunk.AsMemory(), cancellationToken);
+            if (read == 0) break;
+            if (buffer.Length + read > MaximumResponseBytes) return null;
+            buffer.Write(chunk, 0, read);
+        }
+
+        return buffer.ToArray();
+    }
+}
+
 /// <summary>
 /// A complete active-task snapshot. Partial pages are never represented as
 /// authoritative and therefore cannot grant capacity.
@@ -193,15 +402,18 @@ public sealed class AutopilotGlobalTaskInventoryReader(
     private static InventoryStatus NormalizeStatus(string? value)
     {
         var status = (value ?? string.Empty).Trim().ToLowerInvariant();
+        // Manus task_stopped may mean either finish or ask. task.list has no stop_reason,
+        // so stopped tasks stay occupied until exact locally verified completion evidence
+        // allows CountOccupiedSlotsAsync to reconcile that specific task ID.
         return status switch
         {
             "queued" or "pending" or "created" or "accepted" or "scheduled"
                 or "running" or "in_progress" or "in-progress" or "processing" or "started" or "active"
-                or "blocked" or "awaiting_input" or "awaiting_approval" or "needs_input" or "requires_human"
+                or "waiting" or "stopped" or "blocked" or "awaiting_input" or "awaiting_approval" or "needs_input" or "requires_human"
                 => InventoryStatus.Active,
             "completed" or "complete" or "succeeded" or "success" or "done" or "finished"
                 or "failed" or "failure" or "error" or "errored" or "timed_out" or "timeout"
-                or "cancelled" or "canceled" or "stopped" or "aborted" or "killed" or "terminated"
+                or "cancelled" or "canceled" or "aborted" or "killed" or "terminated"
                 => InventoryStatus.Terminal,
             _ => InventoryStatus.Unknown,
         };
@@ -893,7 +1105,7 @@ public sealed class AutopilotGlobalTaskSlotAllocator
     {
         "queued" or "pending" or "created" or "accepted" or "scheduled" or "running"
             or "in_progress" or "in-progress" or "processing" or "started" or "active"
-            or "blocked" or "awaiting_input" or "awaiting_approval" or "needs_input" or "requires_human" => true,
+            or "waiting" or "stopped" or "blocked" or "awaiting_input" or "awaiting_approval" or "needs_input" or "requires_human" => true,
         _ => false,
     };
 
