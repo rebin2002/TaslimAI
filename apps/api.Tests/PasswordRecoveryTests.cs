@@ -378,6 +378,11 @@ public sealed class PasswordRecoveryTests(PasswordRecoveryApiFactory factory) : 
             Assert.False(await userManager.CheckPasswordAsync(user!, oldPassword));
             Assert.True(await userManager.CheckPasswordAsync(user!, newPassword));
         }
+
+        using var replayClient = csrfFactory.CreateClient();
+        var replay = await Reset(replayClient, email, token, "AnotherStrong!456");
+        Assert.Equal(HttpStatusCode.BadRequest, replay.StatusCode);
+        Assert.Equal("PASSWORD_RESET_INVALID", (await replay.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error").GetProperty("code").GetString());
     }
 
     [Fact]
