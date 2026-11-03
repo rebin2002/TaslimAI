@@ -245,6 +245,8 @@ public sealed class MusicGenerationSongContractTests : IClassFixture<MusicSongCa
     [Theory]
     [InlineData("ku", "sorani", "[TEST ONLY] ڕۆژ — کوردی")]
     [InlineData("ar", "iraqi_baghdadi", "[TEST ONLY] بغداد — عراقي")]
+    [InlineData("ar", "iraqi_mosul", "[TEST ONLY] الموصل — عربي")]
+    [InlineData("ar", "iraqi_basra", "[TEST ONLY] البصرة — عربي")]
     public async Task Unsupported_lyric_song_fails_before_cost_preflight_job_creation_or_provider_call(
         string lyricsLanguage,
         string lyricsDialect,
