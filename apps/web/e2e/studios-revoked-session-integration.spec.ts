@@ -767,12 +767,11 @@ test("exact Chat chargeable POST paths are observed and blocked before API/provi
     expect(isProtectedRead("GET", "/api/projects/project-private-route-probe")).toBe(true);
     expect(isProtectedRead("GET", "/api/projects/project-private-route-probe/overview")).toBe(true);
 
-    const probeResults = await Promise.all(chargeableChatPostPaths.map(path => page.evaluate(async ({ base, requestPath }) => {
+    const probeResults = await Promise.all(chargeableChatPostPaths.map(path => page.evaluate(async ({ requestPath }) => {
       try {
-        await fetch(`${base}${requestPath}`, {
+        await fetch(requestPath, {
           method: "POST",
-          mode: "cors",
-          credentials: "omit",
+          credentials: "same-origin",
           headers: { "Content-Type": "text/plain" },
           body: "synthetic route-guard probe only",
         });
@@ -780,7 +779,7 @@ test("exact Chat chargeable POST paths are observed and blocked before API/provi
       } catch {
         return "blocked-before-dispatch";
       }
-    }, { base: E2E_API_URL, requestPath: path })));
+    }, { requestPath: path })));
     expect(probeResults).toEqual(chargeableChatPostPaths.map(() => "blocked-before-dispatch"));
     expect([...new Set(monitor.blockedGenerationPosts)].sort()).toEqual([...chargeableChatPostPaths].sort());
     expect([...new Set(monitor.generationPosts)].sort()).toEqual([...chargeableChatPostPaths].sort());
@@ -844,6 +843,32 @@ for (const studio of studios) {
         providerPostsBefore = (await before.json() as { generationPosts: number }).generationPosts;
       }
       await installAccountSwitchNetworkGuard(context, monitor, studio, () => activeAccount, workspaceIds);
+      if (syntheticSessionMode) {
+        await context.route("**/api/projects/project-private-account-a**", async route => {
+          const request = route.request();
+          if (request.method() !== "GET") return route.continue();
+          if (activeAccount !== "A" || !workspaceIds.A) {
+            return route.fulfill({
+              status: 403,
+              contentType: "application/json; charset=utf-8",
+              headers: { "cache-control": "no-store, private" },
+              body: JSON.stringify({ error: { code: "PROJECT_ACCESS_REVOKED" } }),
+            });
+          }
+          const project = privateAccountProject(workspaceIds.A, "A");
+          const url = new URL(request.url());
+          if (url.pathname.endsWith("/overview")) {
+            return jsonResponse(route, {
+              project,
+              workspace: { id: workspaceIds.A, name: "Synthetic Account A Workspace", slug: workspaceIds.A, type: "Personal", role: "Owner" },
+              counts: { files: 1, assets: 1, conversations: 1, activity: 0 },
+              conversations: [privateAccountConversation(workspaceIds.A, "A")],
+              recentActivity: [],
+            });
+          }
+          return jsonResponse(route, project);
+        });
+      }
       const pageA = await context.newPage();
       const pageB = await context.newPage();
       observePage(pageA, monitor, () => activeAccount);
@@ -862,10 +887,10 @@ for (const studio of studios) {
           `/api/projects/${accountProjectIds.A}`,
           `/api/projects/${accountProjectIds.A}/overview`,
         ];
-        const projectReadResults = await Promise.all(projectReadPaths.map(routePath => pageA.evaluate(async ({ apiBase, path }) => {
-          const response = await fetch(`${apiBase}${path}`, { credentials: "include" });
+        const projectReadResults = await Promise.all(projectReadPaths.map(routePath => pageA.evaluate(async ({ path }) => {
+          const response = await fetch(path, { credentials: "same-origin" });
           return { status: response.status, body: await response.text() };
-        }, { apiBase: E2E_API_URL, path: routePath })));
+        }, { path: routePath })));
         expect(projectReadResults.map(result => result.status)).toEqual([200, 200]);
         for (const result of projectReadResults) expect(result.body).toContain(accountMarker("A", "PROJECT"));
         const observedProjectReadPaths = monitor.rows
