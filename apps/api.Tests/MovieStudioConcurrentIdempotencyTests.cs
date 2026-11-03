@@ -374,6 +374,191 @@ public sealed class MovieStudioConcurrentIdempotencyTests : IClassFixture<MovieC
     }
 
     [Fact]
+    public async Task Conflicting_same_key_preserves_original_error_when_loser_cleanup_fails()
+    {
+        using var client = factory.CreateClient();
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Movie cleanup failure idempotency collision");
+        var key = $"movie-cleanup-failure-different-requests-{Guid.NewGuid():N}";
+        var path = $"/api/movie-studio/shots/{fixture.Shot.Id}/generate";
+        factory.Gate.Register(key);
+        var canonicalRequest = await MovieOperationalFixtures.BuildConfirmedMovieGenerationRequestAsync(
+            factory, path, new { title = "Cleanup failure canonical winner" });
+        var conflictingRequest = await MovieOperationalFixtures.BuildConfirmedMovieGenerationRequestAsync(
+            factory, path, new { title = "Cleanup failure conflicting loser" });
+
+        var jobsBefore = 0;
+        var usageBefore = 0;
+        var clipsBefore = 0;
+        var snapshotsBefore = 0;
+        using (var baselineScope = factory.Services.CreateScope())
+        {
+            var db = baselineScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            jobsBefore = await db.GenerationJobs.CountAsync();
+            usageBefore = await db.UsageTransactions.CountAsync();
+            clipsBefore = await db.MovieClips.CountAsync(
+                item => item.MovieProjectId == fixture.Project.Project.Id);
+            snapshotsBefore = await db.MovieCharacterContinuitySnapshots.CountAsync(
+                item => item.MovieProjectId == fixture.Project.Project.Id);
+        }
+        var providerCallsBefore = factory.Calls.Calls(FakeProviderKind.Movie);
+
+        // Force the losing, still-unlinked speculative clip's cleanup DELETE to
+        // fail. This test factory owns a private SQLite database.
+        using (var triggerScope = factory.Services.CreateScope())
+        {
+            var db = triggerScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            await db.Database.ExecuteSqlRawAsync(
+                "CREATE TRIGGER \"FailMovieClipCleanup\" BEFORE DELETE ON \"MovieClips\" "
+                + "WHEN OLD.\"GenerationJobId\" IS NULL "
+                + "BEGIN SELECT RAISE(ABORT, 'injected speculative clip cleanup failure'); END;");
+        }
+
+        HttpResponseMessage? canonicalResponse = null;
+        HttpResponseMessage? conflictingResponse = null;
+        Exception? canonicalTransportFailure = null;
+        Exception? conflictingTransportFailure = null;
+        var conflictingBody = string.Empty;
+        Guid? responseJobId = null;
+        Guid? responseClipId = null;
+        int jobsAfter = 0;
+        int usageAfter = 0;
+        int clipsAfter = 0;
+        int snapshotsAfter = 0;
+        int jobsForKey = 0;
+        int usagesForCanonicalJob = 0;
+        int canonicalClipCount = 0;
+        Guid? canonicalJobId = null;
+        Guid? canonicalClipId = null;
+        Guid? canonicalSnapshotId = null;
+        Guid? canonicalClipJobId = null;
+        string? canonicalJobTitle = null;
+        bool canonicalSnapshotExists = false;
+
+        try
+        {
+            var canonicalTask = MovieOperationalFixtures.SendWithCsrfAsync(
+                client, HttpMethod.Post, path, canonicalRequest, idempotencyKey: key);
+            await factory.Gate.WaitForFirstArrivalAsync(key).WaitAsync(TimeSpan.FromSeconds(40));
+            var conflictingTask = MovieOperationalFixtures.SendWithCsrfAsync(
+                client, HttpMethod.Post, path, conflictingRequest, idempotencyKey: key);
+
+            var bothRequests = Task.WhenAll(canonicalTask, conflictingTask);
+            try
+            {
+                await bothRequests.WaitAsync(TimeSpan.FromSeconds(90));
+            }
+            catch when (bothRequests.IsCompleted)
+            {
+                // Capture a TestServer transport exception below so every
+                // canonical persistence invariant is still inspected.
+            }
+
+            if (canonicalTask.IsCompletedSuccessfully)
+                canonicalResponse = await canonicalTask;
+            else
+                canonicalTransportFailure = canonicalTask.Exception?.GetBaseException();
+            if (conflictingTask.IsCompletedSuccessfully)
+                conflictingResponse = await conflictingTask;
+            else
+                conflictingTransportFailure = conflictingTask.Exception?.GetBaseException();
+            if (conflictingResponse is not null)
+                conflictingBody = await conflictingResponse.Content.ReadAsStringAsync();
+
+            using var verificationScope = factory.Services.CreateScope();
+            var verificationDb = verificationScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var matchingJobs = await verificationDb.GenerationJobs.AsNoTracking()
+                .Where(item => item.IdempotencyKey == key).ToListAsync();
+            jobsForKey = matchingJobs.Count;
+            var canonicalJob = matchingJobs.FirstOrDefault();
+            if (canonicalJob is not null)
+            {
+                canonicalJobId = canonicalJob.Id;
+                canonicalJobTitle = canonicalJob.Title;
+                var canonicalClips = await verificationDb.MovieClips.AsNoTracking()
+                    .Where(item => item.MovieProjectId == fixture.Project.Project.Id
+                        && item.GenerationJobId == canonicalJob.Id).ToListAsync();
+                canonicalClipCount = canonicalClips.Count;
+                var canonicalClip = canonicalClips.FirstOrDefault();
+                if (canonicalClip is not null)
+                {
+                    canonicalClipId = canonicalClip.Id;
+                    canonicalClipJobId = canonicalClip.GenerationJobId;
+                    canonicalSnapshotId = canonicalClip.ContinuitySnapshotId;
+                    if (canonicalSnapshotId is Guid snapshotId)
+                        canonicalSnapshotExists = await verificationDb.MovieCharacterContinuitySnapshots
+                            .AsNoTracking().AnyAsync(item => item.Id == snapshotId
+                                && item.MovieProjectId == fixture.Project.Project.Id
+                                && item.MovieShotId == fixture.Shot.Id);
+                }
+                usagesForCanonicalJob = await verificationDb.UsageTransactions.AsNoTracking()
+                    .CountAsync(item => item.GenerationJobId == canonicalJob.Id);
+            }
+
+            jobsAfter = await verificationDb.GenerationJobs.CountAsync();
+            usageAfter = await verificationDb.UsageTransactions.CountAsync();
+            clipsAfter = await verificationDb.MovieClips.CountAsync(
+                item => item.MovieProjectId == fixture.Project.Project.Id);
+            snapshotsAfter = await verificationDb.MovieCharacterContinuitySnapshots.CountAsync(
+                item => item.MovieProjectId == fixture.Project.Project.Id);
+
+            if (canonicalResponse is not null && canonicalResponse.IsSuccessStatusCode)
+            {
+                using var responseJson = JsonDocument.Parse(
+                    await canonicalResponse.Content.ReadAsStringAsync());
+                responseJobId = responseJson.RootElement.GetProperty("job").GetProperty("id").GetGuid();
+                responseClipId = responseJson.RootElement.GetProperty("clipId").GetGuid();
+            }
+        }
+        finally
+        {
+            using var cleanupScope = factory.Services.CreateScope();
+            var cleanupDb = cleanupScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            await cleanupDb.Database.ExecuteSqlRawAsync(
+                "DROP TRIGGER IF EXISTS \"FailMovieClipCleanup\";");
+        }
+
+        var originalErrorPreserved = conflictingResponse?.StatusCode
+                == System.Net.HttpStatusCode.BadRequest
+            && conflictingBody.Contains("IDEMPOTENCY_KEY_REUSED", StringComparison.Ordinal);
+        var canonicalReplyPreserved = canonicalResponse?.StatusCode
+                == System.Net.HttpStatusCode.Accepted
+            && responseJobId == canonicalJobId
+            && responseClipId == canonicalClipId;
+        var canonicalRecordsPreserved = jobsForKey == 1
+            && jobsAfter == jobsBefore + 1
+            && canonicalJobTitle == "Cleanup failure canonical winner"
+            && canonicalClipCount == 1
+            && canonicalClipJobId == canonicalJobId
+            && canonicalSnapshotId.HasValue
+            && canonicalSnapshotExists;
+        var oneReservationPreserved = usageAfter == usageBefore + 1
+            && usagesForCanonicalJob == 1;
+        var failedCleanupWasExercised = clipsAfter == clipsBefore + 2
+            && snapshotsAfter == snapshotsBefore + 2;
+        var providerCallsUnchanged = factory.Calls.Calls(FakeProviderKind.Movie)
+            == providerCallsBefore;
+
+        var details = $"canonicalStatus={(int?)canonicalResponse?.StatusCode}, "
+            + $"conflictingStatus={(int?)conflictingResponse?.StatusCode}, "
+            + $"conflictingBody={conflictingBody}, "
+            + $"canonicalTransportFailure={canonicalTransportFailure?.GetType().Name}, "
+            + $"conflictingTransportFailure={conflictingTransportFailure?.GetType().Name}, "
+            + $"jobsForKey={jobsForKey}/{jobsBefore + 1}, canonicalClips={canonicalClipCount}, "
+            + $"canonicalJob={canonicalJobId}, canonicalClip={canonicalClipId}, "
+            + $"canonicalSnapshot={canonicalSnapshotId}, snapshotExists={canonicalSnapshotExists}, "
+            + $"usageDelta={usageAfter - usageBefore}, "
+            + $"clipDelta={clipsAfter - clipsBefore}, snapshotDelta={snapshotsAfter - snapshotsBefore}, "
+            + $"providerCalls={factory.Calls.Calls(FakeProviderKind.Movie) - providerCallsBefore}";
+
+        canonicalResponse?.Dispose();
+        conflictingResponse?.Dispose();
+        Assert.True(originalErrorPreserved && canonicalReplyPreserved
+            && canonicalRecordsPreserved && oneReservationPreserved
+            && failedCleanupWasExercised && providerCallsUnchanged, details);
+    }
+
+    [Fact]
     public async Task Simultaneous_identical_same_key_replays_one_canonical_clip_job_and_usage_reservation()
     {
         using var client = factory.CreateClient();
