@@ -1,6 +1,6 @@
 "use client";
 
-import { useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { useRouter } from "next/navigation";
 import {
   ArrowLeft,
@@ -69,12 +69,26 @@ const onboardingChoices: OnboardingChoice[] = [
 
 export function OnboardingGate() {
   const { user } = useAuth();
+  const isOpen = Boolean(user && shouldShowOnboarding(user));
+  const openerRef = useRef<HTMLElement | null>(null);
 
-  if (!user || !shouldShowOnboarding(user)) return null;
-  return <OnboardingFlow key={user.id} user={user} />;
+  useEffect(() => {
+    if (isOpen) return;
+    const rememberOpener = (event: FocusEvent) => {
+      const target = event.target;
+      if (target instanceof HTMLElement && target !== document.body && !target.closest('[role="dialog"]')) {
+        openerRef.current = target;
+      }
+    };
+    document.addEventListener("focusin", rememberOpener, true);
+    return () => document.removeEventListener("focusin", rememberOpener, true);
+  }, [isOpen]);
+
+  if (!user || !isOpen) return null;
+  return <OnboardingFlow key={user.id} user={user} openerRef={openerRef} />;
 }
 
-function OnboardingFlow({ user }: Readonly<{ user: User }>) {
+function OnboardingFlow({ user, openerRef }: Readonly<{ user: User; openerRef: RefObject<HTMLElement | null> }>) {
   const { completeOnboarding } = useAuth();
   const { locale, setLocale, t } = useLocale();
   const router = useRouter();
@@ -87,9 +101,9 @@ function OnboardingFlow({ user }: Readonly<{ user: User }>) {
   const [error, setError] = useState("");
   const showOnboarding = shouldShowOnboarding(user);
   const stepHeadingRef = useRef<HTMLHeadingElement | null>(null);
-  // Onboarding is a blocking workflow with an explicit Skip action; Escape
-  // keeps focus inside instead of silently submitting that choice.
-  const dialogRef = useDialogAccessibility(showOnboarding, () => undefined);
+  // Onboarding is blocking: Escape keeps focus inside, and the parent gate's
+  // saved opener survives the auth response that first mounts this dialog.
+  const dialogRef = useDialogAccessibility(showOnboarding, () => undefined, openerRef);
 
   useLayoutEffect(() => {
     // Replacing a step unmounts its focused controls. Move focus into the new
