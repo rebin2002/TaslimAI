@@ -18,7 +18,11 @@ namespace Taslim.Api.Controllers;
 [AllowAnonymous]
 [IgnoreAntiforgeryToken]
 [Route("api/autopilot")]
-public sealed class AutopilotIntakeController(IAutopilotEventIntake intake, AutopilotOptions options) : ControllerBase
+public sealed class AutopilotIntakeController(
+    IAutopilotEventIntake intake,
+    AutopilotOptions options,
+    IAutopilotLockService locks,
+    ILogger<AutopilotIntakeController> logger) : ControllerBase
 {
     public const string SignatureHeader = "X-Autopilot-Signature";
     public const string TimestampHeader = "X-Autopilot-Timestamp";
@@ -32,6 +36,7 @@ public sealed class AutopilotIntakeController(IAutopilotEventIntake intake, Auto
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status413RequestEntityTooLarge)]
+    [ProducesResponseType(StatusCodes.Status503ServiceUnavailable)]
     public async Task<IActionResult> Submit(CancellationToken cancellationToken)
     {
         var payloadResult = await ReadPayloadAsync(Request.Body, options.MaxEventPayloadCharacters, cancellationToken);
@@ -44,17 +49,48 @@ public sealed class AutopilotIntakeController(IAutopilotEventIntake intake, Auto
         if (!HasValidManusBridgeReceiptEventIdBinding(payloadResult.Payload, source, externalEventId, eventType))
             return ApiResults.Error(this, StatusCodes.Status400BadRequest, "AUTOPILOT_EVENT_REJECTED", "The event was rejected.");
 
-        var result = await intake.SubmitAsync(new AutopilotIntakeRequest(
-            Request.Headers[SignatureHeader].ToString(),
-            Request.Headers[TimestampHeader].ToString(),
-            payloadResult.Payload,
-            source,
-            externalEventId,
-            eventType,
-            HttpContext.TraceIdentifier), cancellationToken);
+        var fence = await locks.AcquireAsync(
+            AutopilotCompletionLaunchFence.ResourceKey,
+            "autopilot-event-intake",
+            cancellationToken);
+        if (!fence.IsAcquired)
+            return ApiResults.Error(this, StatusCodes.Status503ServiceUnavailable,
+                "AUTOPILOT_EVENT_RETRY", "The event was not accepted; retry the same event ID and payload.");
+
+        AutopilotIntakeResult result;
+        var fenceReleased = false;
+        try
+        {
+            result = await intake.SubmitAsync(new AutopilotIntakeRequest(
+                Request.Headers[SignatureHeader].ToString(),
+                Request.Headers[TimestampHeader].ToString(),
+                payloadResult.Payload,
+                source,
+                externalEventId,
+                eventType,
+                HttpContext.TraceIdentifier), cancellationToken);
+        }
+        finally
+        {
+            try
+            {
+                fenceReleased = await locks.ReleaseAsync(fence, CancellationToken.None);
+            }
+            catch (Exception exception)
+            {
+                logger.LogError(exception, "Autopilot intake fence release failed. EventId={EventId}", externalEventId);
+            }
+        }
 
         if (result.Outcome is AutopilotIntakeOutcomes.Accepted or AutopilotIntakeOutcomes.Duplicate)
             AutopilotEventDispatchSignal.NotifyCommittedEvent();
+
+        if (!fenceReleased)
+        {
+            logger.LogError("Autopilot intake lost its completion/launch fence before acknowledgement. EventId={EventId}", externalEventId);
+            return ApiResults.Error(this, StatusCodes.Status503ServiceUnavailable,
+                "AUTOPILOT_EVENT_RETRY", "The event acknowledgement is uncertain; retry the same event ID and payload.");
+        }
 
         return result.Outcome switch
         {

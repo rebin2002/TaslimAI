@@ -145,8 +145,8 @@ public sealed class AutopilotEventDispatchIntegrationTests
                 await WaitForReceiptRefillAsync(factory, eventId, TimeSpan.FromSeconds(8));
 
                 // Duplicate delivery cannot release another slot or create a second refill.
-                using var duplicate = await PostSignedEventAsync(
-                    client, payload, eventId, ManusBridgeWaveLaunchProvider.Key);
+                using var duplicate = await PostSignedEventWithFenceRetryAsync(
+                    client, payload, eventId, ManusBridgeWaveLaunchProvider.Key, TimeSpan.FromSeconds(8));
                 Assert.Equal(HttpStatusCode.OK, duplicate.StatusCode);
                 using var duplicateBody = JsonDocument.Parse(await duplicate.Content.ReadAsStringAsync());
                 Assert.Equal(AutopilotIntakeOutcomes.Duplicate,
@@ -321,6 +321,110 @@ public sealed class AutopilotEventDispatchIntegrationTests
             Assert.Equal(eventId, persisted.ExternalEventId);
             Assert.Equal(AutopilotEventStatuses.Queued, persisted.Status);
             Assert.True(persisted.SignatureVerified);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("AUTOPILOT_WEBHOOK_SECRET", previousSecret);
+        }
+    }
+
+    [Fact]
+    public async Task Signed_intake_returns_retryable_without_persistence_while_launch_fence_is_held()
+    {
+        var previousSecret = Environment.GetEnvironmentVariable("AUTOPILOT_WEBHOOK_SECRET");
+        Environment.SetEnvironmentVariable("AUTOPILOT_WEBHOOK_SECRET", SigningSecret);
+        try
+        {
+            using var factory = new DispatchTestFactory();
+            using var client = factory.CreateClient();
+            using (var scope = factory.Services.CreateScope())
+            {
+                var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+                await db.Database.EnsureCreatedAsync();
+            }
+
+            var eventId = $"evt-fence-retry-{Guid.NewGuid():N}";
+            var payload = BridgeV4TerminalReceiptCompletionPayload(eventId, "ABCDEFGHIJKLMNOPQRSTUV");
+            AutopilotLockHandle heldFence;
+            using (var launchScope = factory.Services.CreateScope())
+            {
+                var locks = launchScope.ServiceProvider.GetRequiredService<IAutopilotLockService>();
+                heldFence = await locks.AcquireAsync(
+                    AutopilotCompletionLaunchFence.ResourceKey,
+                    "synthetic-next-wave-launch");
+                Assert.True(heldFence.IsAcquired);
+
+                using var contended = await PostSignedEventAsync(
+                    client, payload, eventId, ManusBridgeWaveLaunchProvider.Key);
+                Assert.Equal(HttpStatusCode.ServiceUnavailable, contended.StatusCode);
+                var error = await contended.Content.ReadAsStringAsync();
+                Assert.Contains("AUTOPILOT_EVENT_RETRY", error, StringComparison.Ordinal);
+
+                using var verify = factory.Services.CreateScope();
+                var db = verify.ServiceProvider.GetRequiredService<TaslimDbContext>();
+                Assert.Empty(await db.AutopilotEvents.ToListAsync());
+
+                Assert.True(await locks.ReleaseAsync(heldFence));
+            }
+
+            using (var retried = await PostSignedEventAsync(
+                client, payload, eventId, ManusBridgeWaveLaunchProvider.Key))
+            {
+                Assert.Equal(HttpStatusCode.Accepted, retried.StatusCode);
+            }
+
+            using (var verify = factory.Services.CreateScope())
+            {
+                var db = verify.ServiceProvider.GetRequiredService<TaslimDbContext>();
+                var persisted = await db.AutopilotEvents.SingleAsync();
+                Assert.Equal(eventId, persisted.ExternalEventId);
+                Assert.Equal(AutopilotEventStatuses.Queued, persisted.Status);
+                Assert.True(persisted.SignatureVerified);
+                Assert.True(persisted.ReplayProtected);
+            }
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("AUTOPILOT_WEBHOOK_SECRET", previousSecret);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Signed_intake_release_uncertainty_returns_retryable_and_same_id_retry_does_not_duplicate(bool throwOnRelease)
+    {
+        var previousSecret = Environment.GetEnvironmentVariable("AUTOPILOT_WEBHOOK_SECRET");
+        Environment.SetEnvironmentVariable("AUTOPILOT_WEBHOOK_SECRET", SigningSecret);
+        try
+        {
+            using var factory = new DispatchTestFactory
+            {
+                LockServiceOverride = _ => new ReleaseFailureLockService(throwOnRelease),
+            };
+            using var client = factory.CreateClient();
+            using (var scope = factory.Services.CreateScope())
+            {
+                var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+                await db.Database.EnsureCreatedAsync();
+            }
+
+            var eventId = $"evt-fence-release-uncertain-{Guid.NewGuid():N}";
+            var payload = BridgeV4TerminalReceiptCompletionPayload(eventId, "ABCDEFGHIJKLMNOPQRSTUV");
+            using (var first = await PostSignedEventAsync(client, payload, eventId, ManusBridgeWaveLaunchProvider.Key))
+                Assert.Equal(HttpStatusCode.ServiceUnavailable, first.StatusCode);
+
+            using (var retry = await PostSignedEventAsync(client, payload, eventId, ManusBridgeWaveLaunchProvider.Key))
+                Assert.Equal(HttpStatusCode.ServiceUnavailable, retry.StatusCode);
+
+            using var verify = factory.Services.CreateScope();
+            var persistedDb = verify.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var saved = await persistedDb.AutopilotEvents.SingleAsync(item => item.ExternalEventId == eventId);
+            Assert.Equal(AutopilotEventStatuses.Queued, saved.Status);
+            Assert.True(saved.SignatureVerified);
+            Assert.True(saved.ReplayProtected);
+            Assert.Equal(1, await persistedDb.AutopilotEvents.CountAsync(item =>
+                item.SourceSystem == ManusBridgeWaveLaunchProvider.Key && item.ExternalEventId == eventId));
         }
         finally
         {
@@ -699,6 +803,25 @@ public sealed class AutopilotEventDispatchIntegrationTests
         return await client.PostAsync("/api/autopilot/events", content);
     }
 
+    private static async Task<HttpResponseMessage> PostSignedEventWithFenceRetryAsync(
+        HttpClient client,
+        string payload,
+        string eventId,
+        string source,
+        TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            var response = await PostSignedEventAsync(client, payload, eventId, source);
+            if (response.StatusCode != HttpStatusCode.ServiceUnavailable) return response;
+            response.Dispose();
+            await Task.Delay(TimeSpan.FromMilliseconds(50));
+        }
+
+        throw new TimeoutException("The same signed event ID did not receive an acknowledgement after temporary launch-fence contention.");
+    }
+
     private static string ComputeSignature(string timestamp, string payload)
     {
         using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(SigningSecret));
@@ -709,6 +832,7 @@ public sealed class AutopilotEventDispatchIntegrationTests
     {
         private readonly string databasePath = Path.Combine(Path.GetTempPath(), $"taslim-event-dispatch-{Guid.NewGuid():N}.db");
         public FakeWaveLaunchProvider Provider { get; } = new();
+        public Func<TaslimDbContext, IAutopilotLockService>? LockServiceOverride { get; init; }
 
         private string ConnectionString => new SqliteConnectionStringBuilder
         {
@@ -739,6 +863,11 @@ public sealed class AutopilotEventDispatchIntegrationTests
                 services.AddScoped(provider => new AutopilotGlobalTaskInventoryReader(
                     provider.GetRequiredService<IAutopilotGlobalTaskInventoryPageSource>(),
                     "taslim-autopilot-test-scope"));
+                if (LockServiceOverride is not null)
+                {
+                    services.RemoveAll<IAutopilotLockService>();
+                    services.AddScoped(provider => LockServiceOverride(provider.GetRequiredService<TaslimDbContext>()));
+                }
             });
         }
 
@@ -761,6 +890,19 @@ public sealed class AutopilotEventDispatchIntegrationTests
             CancellationToken cancellationToken = default) =>
             Task.FromResult<AutopilotGlobalTaskInventoryPage?>(
                 new AutopilotGlobalTaskInventoryPage(scopeId, Array.Empty<AutopilotGlobalTaskInventoryItem>(), null));
+    }
+
+    private sealed class ReleaseFailureLockService(bool throwOnRelease) : IAutopilotLockService
+    {
+        public Task<AutopilotLockHandle> AcquireAsync(string resourceKey, string heldBy, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new AutopilotLockHandle(
+                resourceKey, "synthetic-owner-token", 1, true, heldBy, DateTime.UtcNow.AddMinutes(10)));
+
+        public Task<bool> ReleaseAsync(AutopilotLockHandle handle, CancellationToken cancellationToken = default)
+        {
+            if (throwOnRelease) throw new InvalidOperationException("Synthetic release failure.");
+            return Task.FromResult(false);
+        }
     }
 
     private sealed class FakeWaveLaunchProvider : IWaveLaunchProvider

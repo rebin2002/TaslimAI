@@ -33,3 +33,26 @@ public static class AutopilotEventDispatchSignal
     public static Task<bool> WaitForEventOrTimeoutAsync(TimeSpan timeout, CancellationToken cancellationToken) =>
         PendingWakeup.WaitAsync(timeout, cancellationToken);
 }
+
+/// <summary>
+/// Shared inter-process fence between durable signed-event intake and a next-wave
+/// provider create. Intake holds it through commit; launch holds it from its final
+/// queue check through durable provider-outcome persistence.
+/// </summary>
+public static class AutopilotCompletionLaunchFence
+{
+    public const string ResourceKey = "autopilot:completion-launch-fence";
+
+    // Reserve two minutes beyond the configured HTTP timeout for allocator and
+    // outcome persistence, plus one minute for reservation/setup before create.
+    // The current lock service has no renewal operation.
+    public const int PersistenceSafetyMarginSeconds = 120;
+    public const int ReservationSetupMarginSeconds = 60;
+
+    public static int RequiredLeaseMinutes(int bridgeTimeoutSeconds)
+    {
+        var boundedTimeout = Math.Clamp(bridgeTimeoutSeconds, 5, 120);
+        var requiredSeconds = boundedTimeout + PersistenceSafetyMarginSeconds + ReservationSetupMarginSeconds;
+        return Math.Max(1, (requiredSeconds + 59) / 60);
+    }
+}

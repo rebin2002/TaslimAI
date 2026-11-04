@@ -745,6 +745,208 @@ public sealed class AutopilotNextWaveLaunchTests
     }
 
     [Fact]
+    public async Task Late_signed_completion_committed_during_inventory_blocks_provider_until_event_is_processed()
+    {
+        using var host = new Host(options =>
+        {
+            options.DryRun = false;
+            options.SimulationMode = false;
+            options.AllowNextWaveLaunch = true;
+            options.AllowNextWaveLaunchWhenReleasePending = true;
+            options.MaxLaunchBatchesPerCycle = 32;
+            options.MaxTasksPerWave = 1;
+        });
+        await host.SeedGlobalSlotContendersAsync(22);
+        Assert.Equal(20, (await host.LaunchAsync()).TasksLaunched);
+        Assert.Equal(20, host.Provider.LaunchCalls);
+
+        AutopilotWaveLaunchTask firstCompletion;
+        using (var db = host.CreateContext())
+        {
+            firstCompletion = await db.AutopilotWaveLaunchTasks
+                .Where(item => item.Status == AutopilotWaveLaunchStatuses.Launched)
+                .OrderBy(item => item.TaskKey)
+                .FirstAsync();
+        }
+        const string firstEventId = "fence-race-first-completion";
+        var firstReceipt = JsonSerializer.Serialize(new AutopilotGlobalTaskDetailTerminalReceipt(
+            AutopilotGlobalTaskDetailTerminalReceipt.RequiredKind,
+            firstCompletion.ExternalTaskId,
+            "stopped", "finish", false, firstEventId));
+        Assert.Equal(AutopilotIntakeOutcomes.Accepted, (await host.SubmitSignedCompletionAsync(
+            firstCompletion.WaveKey, firstCompletion.TaskKey, 1, firstReceipt, firstEventId)).Outcome);
+        using (var db = host.CreateContext())
+        {
+            var saved = await db.AutopilotEvents.SingleAsync(item => item.ExternalEventId == firstEventId);
+            saved.Status = AutopilotEventStatuses.Processed;
+            saved.ProcessedAt = host.Time.GetUtcNow().UtcDateTime;
+            await db.SaveChangesAsync();
+        }
+        Assert.Equal(1, (await host.LaunchAsync()).TasksLaunched);
+        Assert.Equal(21, host.Provider.LaunchCalls);
+
+        AutopilotWaveLaunchTask lateCompletion;
+        using (var db = host.CreateContext())
+        {
+            lateCompletion = await db.AutopilotWaveLaunchTasks
+                .Where(item => item.Status == AutopilotWaveLaunchStatuses.Launched && item.Id != firstCompletion.Id)
+                .OrderBy(item => item.TaskKey)
+                .FirstAsync();
+        }
+        const string lateEventId = "fence-race-late-completion";
+        var lateReceipt = JsonSerializer.Serialize(new AutopilotGlobalTaskDetailTerminalReceipt(
+            AutopilotGlobalTaskDetailTerminalReceipt.RequiredKind,
+            lateCompletion.ExternalTaskId,
+            "stopped", "finish", false, lateEventId));
+        var injected = 0;
+        host.InventorySource.AsyncPageResolver = async (scopeId, _, cancellationToken) =>
+        {
+            if (Interlocked.Exchange(ref injected, 1) == 0)
+            {
+                var accepted = await host.SubmitSignedCompletionAsync(
+                    lateCompletion.WaveKey, lateCompletion.TaskKey, 1, lateReceipt, lateEventId);
+                Assert.Equal(AutopilotIntakeOutcomes.Accepted, accepted.Outcome);
+            }
+            return new AutopilotGlobalTaskInventoryPage(scopeId, Array.Empty<AutopilotGlobalTaskInventoryItem>(), null);
+        };
+
+        var deferred = await host.LaunchAsync();
+        host.InventorySource.AsyncPageResolver = null;
+        Assert.Equal(21, host.Provider.LaunchCalls);
+        Assert.Contains(deferred.PlannedActions, item => item.Contains("completion_event_pending", StringComparison.Ordinal));
+        using (var db = host.CreateContext())
+        {
+            var pending = await db.AutopilotEvents.SingleAsync(item => item.ExternalEventId == lateEventId);
+            Assert.Equal(AutopilotEventStatuses.Queued, pending.Status);
+            Assert.True(pending.SignatureVerified);
+            Assert.True(pending.ReplayProtected);
+            var deferredTasks = await db.AutopilotWaveLaunchTasks
+                .Where(item => item.Status == AutopilotWaveLaunchStatuses.Planned)
+                .ToListAsync();
+            Assert.NotEmpty(deferredTasks);
+            Assert.All(deferredTasks, item => Assert.Equal(0, item.LaunchAttempt));
+            foreach (var deferredTask in deferredTasks)
+            {
+                var deferredBacklog = await db.AutopilotBacklogItems.SingleAsync(item => item.ItemKey == deferredTask.BacklogItemKey);
+                Assert.Null(deferredBacklog.ConsumedByWaveKey);
+            }
+            Assert.Equal(20, await db.AutopilotWaveLaunchTasks.CountAsync(item =>
+                item.Status == AutopilotWaveLaunchStatuses.Launching || item.Status == AutopilotWaveLaunchStatuses.Launched));
+        }
+
+        using (var db = host.CreateContext())
+        {
+            var pending = await db.AutopilotEvents.SingleAsync(item => item.ExternalEventId == lateEventId);
+            pending.Status = AutopilotEventStatuses.Processed;
+            pending.ProcessedAt = host.Time.GetUtcNow().UtcDateTime;
+            await db.SaveChangesAsync();
+        }
+        var recovered = await host.LaunchAsync();
+        Assert.Equal(1, recovered.TasksLaunched);
+        Assert.Equal(22, host.Provider.LaunchCalls);
+        using (var db = host.CreateContext())
+        {
+            var processed = await db.AutopilotEvents.SingleAsync(item => item.ExternalEventId == lateEventId);
+            Assert.Equal(AutopilotEventStatuses.Processed, processed.Status);
+            Assert.True(processed.SignatureVerified);
+            Assert.True(processed.ReplayProtected);
+            Assert.Equal(20, await db.AutopilotWaveLaunchTasks.CountAsync(item =>
+                item.Status == AutopilotWaveLaunchStatuses.Launching || item.Status == AutopilotWaveLaunchStatuses.Launched));
+            Assert.Equal(AutopilotWaveLaunchStatuses.Completed,
+                (await db.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == lateCompletion.Id)).Status);
+        }
+    }
+
+    [Fact]
+    public async Task Live_launch_fails_closed_when_fence_lease_is_shorter_than_bridge_timeout_and_margin()
+    {
+        using var host = new Host(options =>
+        {
+            options.DryRun = false;
+            options.SimulationMode = false;
+            options.AllowNextWaveLaunch = true;
+            options.AllowNextWaveLaunchWhenReleasePending = true;
+            options.LockLeaseMinutes = 1;
+            options.BridgeTimeoutSeconds = 120;
+        });
+        await host.AddBacklogAsync("bl-short-launch-fence", "Do not launch under an expiring fence");
+        await host.GreenRunAsync("wave-short-launch-fence");
+
+        using (var db = host.CreateContext())
+        {
+            Assert.Empty(await db.AutopilotWaveLaunchTasks.ToListAsync());
+            var backlog = await db.AutopilotBacklogItems.SingleAsync(item => item.ItemKey == "bl-short-launch-fence");
+            Assert.Null(backlog.ConsumedByWaveKey);
+        }
+        Assert.Equal(0, host.Provider.LaunchCalls);
+    }
+
+    [Fact]
+    public async Task Provider_is_not_called_when_acquired_fence_nears_expiry_and_reservation_is_retained()
+    {
+        using var host = new Host(options =>
+        {
+            options.DryRun = false;
+            options.SimulationMode = false;
+            options.AllowNextWaveLaunch = true;
+            options.AllowNextWaveLaunchWhenReleasePending = true;
+            options.BridgeTimeoutSeconds = 120;
+        }, lockServiceOverride: new NearExpiryLockService());
+        await host.AddBacklogAsync("bl-near-expiry-fence", "Do not create after the launch fence is nearly expired");
+        await host.GreenRunAsync("wave-near-expiry-fence");
+
+        Assert.Equal(0, host.Provider.LaunchCalls);
+        using (var db = host.CreateContext())
+        {
+            var task = await db.AutopilotWaveLaunchTasks.SingleAsync();
+            Assert.Equal(AutopilotWaveLaunchStatuses.Launching, task.Status);
+            Assert.Contains("completion_launch_fence_near_expiry_before_provider_call",
+                task.LastStatusDetail, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public async Task Provider_create_holds_the_shared_completion_fence_until_outcome_is_persisted()
+    {
+        using var host = new Host(options =>
+        {
+            options.DryRun = false;
+            options.SimulationMode = false;
+            options.AllowNextWaveLaunch = true;
+            options.AllowNextWaveLaunchWhenReleasePending = true;
+        });
+        await host.AddBacklogAsync("bl-fence-held-through-provider", "Hold the shared fence across create");
+        var intakeCouldAcquireFenceDuringCreate = true;
+        host.Provider.BeforeReturnAsync = async (_, _, cancellationToken) =>
+        {
+            using var contenderDb = host.CreateContext();
+            var contenderLocks = new EfAutopilotLockService(contenderDb, host.Options);
+            var contender = await contenderLocks.AcquireAsync(
+                AutopilotCompletionLaunchFence.ResourceKey,
+                "synthetic-concurrent-intake",
+                cancellationToken);
+            intakeCouldAcquireFenceDuringCreate = contender.IsAcquired;
+            if (contender.IsAcquired)
+                await contenderLocks.ReleaseAsync(contender, cancellationToken);
+        };
+
+        await host.GreenRunAsync("wave-fence-held-through-provider");
+        Assert.False(intakeCouldAcquireFenceDuringCreate);
+        Assert.Equal(1, host.Provider.LaunchCalls);
+        using (var db = host.CreateContext())
+        {
+            Assert.Equal(AutopilotWaveLaunchStatuses.Launched,
+                (await db.AutopilotWaveLaunchTasks.SingleAsync()).Status);
+            var locks = new EfAutopilotLockService(db, host.Options);
+            var released = await locks.AcquireAsync(
+                AutopilotCompletionLaunchFence.ResourceKey,
+                "synthetic-post-launch-intake");
+            Assert.True(released.IsAcquired);
+            Assert.True(await locks.ReleaseAsync(released));
+        }
+    }
+
+    [Fact]
     public async Task Mis_scoped_inventory_never_grants_capacity_or_calls_provider()
     {
         using var host = new Host(options =>
@@ -1993,11 +2195,32 @@ public sealed class AutopilotNextWaveLaunchTests
         public Func<string, string?, AutopilotGlobalTaskInventoryPage?> PageResolver { get; set; } =
             (scopeId, _) => new AutopilotGlobalTaskInventoryPage(scopeId, Array.Empty<AutopilotGlobalTaskInventoryItem>(), null);
 
+        public Func<string, string?, CancellationToken, Task<AutopilotGlobalTaskInventoryPage?>>? AsyncPageResolver { get; set; }
+
         public Task<AutopilotGlobalTaskInventoryPage?> ReadPageAsync(
             string scopeId,
             string? cursor,
             CancellationToken cancellationToken = default) =>
-            Task.FromResult(PageResolver(scopeId, cursor));
+            AsyncPageResolver is null
+                ? Task.FromResult(PageResolver(scopeId, cursor))
+                : AsyncPageResolver(scopeId, cursor, cancellationToken);
+    }
+
+    private sealed class NearExpiryLockService : IAutopilotLockService
+    {
+        private long fencingToken;
+
+        public Task<AutopilotLockHandle> AcquireAsync(string resourceKey, string heldBy, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new AutopilotLockHandle(
+                resourceKey,
+                Guid.NewGuid().ToString("N"),
+                Interlocked.Increment(ref fencingToken),
+                true,
+                heldBy,
+                DateTime.UtcNow.AddSeconds(1)));
+
+        public Task<bool> ReleaseAsync(AutopilotLockHandle handle, CancellationToken cancellationToken = default) =>
+            Task.FromResult(true);
     }
 
     private sealed class Host : IDisposable
@@ -2007,15 +2230,18 @@ public sealed class AutopilotNextWaveLaunchTests
         private readonly DbContextOptions<TaslimDbContext> contextOptions;
         private readonly bool enableGlobalSlotServices;
         private readonly IWaveLaunchProvider? launchProviderOverride;
+        private readonly IAutopilotLockService? lockServiceOverride;
 
         public Host(
             Action<AutopilotOptions>? configure = null,
             bool enableGlobalSlotServices = true,
             DbContextOptions<TaslimDbContext>? databaseOptions = null,
-            IWaveLaunchProvider? launchProviderOverride = null)
+            IWaveLaunchProvider? launchProviderOverride = null,
+            IAutopilotLockService? lockServiceOverride = null)
         {
             this.enableGlobalSlotServices = enableGlobalSlotServices;
             this.launchProviderOverride = launchProviderOverride;
+            this.lockServiceOverride = lockServiceOverride;
             if (databaseOptions is null)
             {
                 connection = new SqliteConnection("DataSource=:memory:");
@@ -2458,11 +2684,15 @@ public sealed class AutopilotNextWaveLaunchTests
             var inventory = enableGlobalSlotServices
                 ? new AutopilotGlobalTaskInventoryReader(InventorySource, TestTaslimScopeId)
                 : null;
-            return new(db, Options, launchProviderOverride ?? Provider, CreateIntake(db), Time, NullLogger<AutopilotNextWaveService>.Instance, allocator, inventory);
+            return new(db, Options, launchProviderOverride ?? Provider, CreateIntake(db), Time,
+                NullLogger<AutopilotNextWaveService>.Instance, CreateLockService(db), allocator, inventory);
         }
 
         private AutopilotOrchestrator CreateOrchestrator(TaslimDbContext db) =>
-            new(db, new EfAutopilotLockService(db, Options), CreateNextWaveService(db), Options, Time, NullLogger<AutopilotOrchestrator>.Instance);
+            new(db, CreateLockService(db), CreateNextWaveService(db), Options, Time, NullLogger<AutopilotOrchestrator>.Instance);
+
+        private IAutopilotLockService CreateLockService(TaslimDbContext db) =>
+            lockServiceOverride ?? new EfAutopilotLockService(db, Options);
 
         public void Dispose()
         {
