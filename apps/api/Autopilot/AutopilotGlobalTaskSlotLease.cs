@@ -33,8 +33,9 @@ public static class AutopilotGlobalTaskSlotIdentity
 }
 
 /// <summary>
-/// One entry from the authoritative, project-scoped Manus task listing. ScopeId
-/// is a stable Taslim ownership marker, not a user/API-key identity.
+/// One entry from an authoritative inventory universe. ScopeId identifies the
+/// coverage universe, not task ownership: the Bridge user-wide source deliberately
+/// includes every visible task (including unrelated creators and UI tasks).
 /// </summary>
 public sealed record AutopilotGlobalTaskInventoryItem(
     string TaskId,
@@ -73,6 +74,16 @@ public interface IAutopilotGlobalTaskInventoryPageSource
         string scopeId,
         string? cursor,
         CancellationToken cancellationToken = default);
+}
+
+/// <summary>
+/// Explicit scope label for the optional Bridge inventory adapter. This is one
+/// authenticated Manus user's visible task universe, not Taslim-only and not a
+/// team-wide inventory. The source is intentionally not registered in DI.
+/// </summary>
+public static class AutopilotGlobalTaskInventoryScopeIds
+{
+    public const string ManusBridgeAuthenticatedUserWide = "manus-bridge:authenticated-user-wide";
 }
 
 /// <summary>Credential identity used to restrict Manus task.list to one creator.</summary>
@@ -266,9 +277,12 @@ public sealed class ManusTaskListInventoryPageSource : IAutopilotGlobalTaskInven
         return normalized;
     }
 
-    private static async Task<byte[]?> ReadBoundedAsync(HttpContent content, CancellationToken cancellationToken)
+    internal static async Task<byte[]?> ReadBoundedAsync(
+        HttpContent content,
+        CancellationToken cancellationToken,
+        int maximumResponseBytes = MaximumResponseBytes)
     {
-        if (content.Headers.ContentLength > MaximumResponseBytes) return null;
+        if (content.Headers.ContentLength > maximumResponseBytes) return null;
         await using var stream = await content.ReadAsStreamAsync(cancellationToken);
         using var buffer = new MemoryStream();
         var chunk = new byte[8_192];
@@ -276,7 +290,7 @@ public sealed class ManusTaskListInventoryPageSource : IAutopilotGlobalTaskInven
         {
             var read = await stream.ReadAsync(chunk.AsMemory(), cancellationToken);
             if (read == 0) break;
-            if (buffer.Length + read > MaximumResponseBytes) return null;
+            if (buffer.Length + read > maximumResponseBytes) return null;
             buffer.Write(chunk, 0, read);
         }
 
@@ -285,8 +299,232 @@ public sealed class ManusTaskListInventoryPageSource : IAutopilotGlobalTaskInven
 }
 
 /// <summary>
-/// A complete active-task snapshot. Partial pages are never represented as
-/// authoritative and therefore cannot grant capacity.
+/// Optional page source for Bridge's aggregated GET /v1/tasks endpoint. It reads
+/// the complete inventory visible to the Bridge's authenticated Manus API-key user,
+/// including UI tasks and tasks from unrelated API keys, and counts those entries
+/// conservatively. It cannot establish team-wide visibility or attribute tasks to
+/// Taslim. A caller must use ManusBridgeAuthenticatedUserWide as the inventory
+/// scope; Taslim-only or team-wide scope labels fail closed. This adapter is not
+/// registered in DI pending source-backed deployment credential binding.
+/// </summary>
+public sealed class ManusBridgeUserWideTaskInventoryPageSource : IAutopilotGlobalTaskInventoryPageSource, IDisposable
+{
+    public const int MaximumAggregateResponseBytes = 16 * 1024 * 1024;
+    public const int MaximumTasks = 10_000;
+    private static readonly TimeSpan DefaultRequestTimeout = TimeSpan.FromSeconds(120);
+    private static readonly TimeSpan MaximumRequestTimeout = TimeSpan.FromSeconds(120);
+    private const string RequiredTasksPath = "/v1/tasks";
+
+    private readonly HttpClient http;
+    private readonly Func<string?> bridgeTokenProvider;
+    private readonly Uri tasksEndpoint;
+    private readonly TimeSpan requestTimeout;
+
+    public ManusBridgeUserWideTaskInventoryPageSource(
+        Func<string?> bridgeTokenProvider,
+        Uri tasksEndpoint,
+        TimeSpan? requestTimeout = null,
+        HttpMessageHandler? testHandler = null)
+    {
+        this.bridgeTokenProvider = bridgeTokenProvider ?? throw new ArgumentNullException(nameof(bridgeTokenProvider));
+        if (tasksEndpoint is null
+            || !tasksEndpoint.IsAbsoluteUri
+            || !string.Equals(tasksEndpoint.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(tasksEndpoint.AbsolutePath, RequiredTasksPath, StringComparison.Ordinal)
+            || !string.IsNullOrEmpty(tasksEndpoint.Query)
+            || !string.IsNullOrEmpty(tasksEndpoint.Fragment)
+            || !string.IsNullOrEmpty(tasksEndpoint.UserInfo))
+            throw new ArgumentException("Bridge inventory endpoint must be HTTPS /v1/tasks with no query, fragment, or user-info.", nameof(tasksEndpoint));
+
+        this.tasksEndpoint = tasksEndpoint;
+        this.requestTimeout = requestTimeout ?? DefaultRequestTimeout;
+        if (this.requestTimeout <= TimeSpan.Zero || this.requestTimeout > MaximumRequestTimeout)
+            throw new ArgumentOutOfRangeException(nameof(requestTimeout), $"Request timeout must be positive and at most {MaximumRequestTimeout}.");
+
+        // Do not forward the Bridge bearer token through redirects.
+        http = new HttpClient(testHandler ?? new HttpClientHandler { AllowAutoRedirect = false }, disposeHandler: true)
+        {
+            Timeout = System.Threading.Timeout.InfiniteTimeSpan,
+        };
+    }
+
+    public async Task<AutopilotGlobalTaskInventoryPage?> ReadPageAsync(
+        string scopeId,
+        string? cursor,
+        CancellationToken cancellationToken = default)
+    {
+        // Bridge aggregates its own cursor traversal and rejects query parameters.
+        // Refuse Taslim-only/team labels rather than claiming the full response was
+        // creator-filtered or visible across all Manus users.
+        if (!string.Equals(
+                scopeId,
+                AutopilotGlobalTaskInventoryScopeIds.ManusBridgeAuthenticatedUserWide,
+                StringComparison.Ordinal)
+            || cursor is not null)
+            return null;
+
+        var token = bridgeTokenProvider()?.Trim();
+        if (string.IsNullOrWhiteSpace(token) || !IsValidBearerToken(token))
+            return null;
+
+        using var request = new HttpRequestMessage(HttpMethod.Get, tasksEndpoint);
+        request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+        request.Headers.Accept.ParseAdd("application/json");
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(requestTimeout);
+        var requestToken = deadline.Token;
+
+        try
+        {
+            using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, requestToken);
+            if (response.StatusCode != System.Net.HttpStatusCode.OK) return null;
+            var payload = await ManusTaskListInventoryPageSource.ReadBoundedAsync(
+                response.Content,
+                requestToken,
+                MaximumAggregateResponseBytes);
+            if (payload is null) return null;
+
+            using var document = System.Text.Json.JsonDocument.Parse(payload);
+            var root = document.RootElement;
+            if (root.ValueKind != System.Text.Json.JsonValueKind.Object
+                || ContainsDuplicateJsonProperties(root)
+                || !root.TryGetProperty("ok", out var ok)
+                || ok.ValueKind != System.Text.Json.JsonValueKind.True
+                || !root.TryGetProperty("data", out var tasks)
+                || tasks.ValueKind != System.Text.Json.JsonValueKind.Array
+                || tasks.GetArrayLength() > MaximumTasks
+                || !root.TryGetProperty("has_more", out var hasMore)
+                || hasMore.ValueKind != System.Text.Json.JsonValueKind.False
+                || root.TryGetProperty("next_cursor", out _))
+                return null;
+
+            var items = new List<AutopilotGlobalTaskInventoryItem>(tasks.GetArrayLength());
+            var seenIds = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var task in tasks.EnumerateArray())
+            {
+                if (task.ValueKind != System.Text.Json.JsonValueKind.Object
+                    || !task.TryGetProperty("id", out var idElement)
+                    || idElement.ValueKind != System.Text.Json.JsonValueKind.String
+                    || !task.TryGetProperty("status", out var statusElement)
+                    || statusElement.ValueKind != System.Text.Json.JsonValueKind.String)
+                    return null;
+
+                var taskId = idElement.GetString()?.Trim() ?? string.Empty;
+                if (taskId.Length != 22 || taskId.Any(character => !char.IsAsciiLetterOrDigit(character)) || !seenIds.Add(taskId))
+                    return null;
+
+                bool? hasRunningBackgroundJobs = null;
+                if (task.TryGetProperty("has_running_background_jobs", out var backgroundElement))
+                {
+                    if (backgroundElement.ValueKind is not (System.Text.Json.JsonValueKind.True or System.Text.Json.JsonValueKind.False))
+                        return null;
+                    hasRunningBackgroundJobs = backgroundElement.GetBoolean();
+                }
+
+                var status = NormalizeBridgeTaskStatus(statusElement.GetString() ?? string.Empty, hasRunningBackgroundJobs);
+                if (status is null) return null;
+
+                // Creator metadata is deliberately ignored: all visible tasks are
+                // counted; this response makes no Taslim-only ownership assertion.
+                items.Add(new AutopilotGlobalTaskInventoryItem(
+                    taskId,
+                    AutopilotGlobalTaskInventoryScopeIds.ManusBridgeAuthenticatedUserWide,
+                    status,
+                    null));
+            }
+
+            return new AutopilotGlobalTaskInventoryPage(
+                AutopilotGlobalTaskInventoryScopeIds.ManusBridgeAuthenticatedUserWide,
+                items,
+                null);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return null;
+        }
+        catch (HttpRequestException)
+        {
+            return null;
+        }
+        catch (IOException)
+        {
+            return null;
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return null;
+        }
+    }
+
+    public void Dispose() => http.Dispose();
+
+    private static string? NormalizeBridgeTaskStatus(string status, bool? hasRunningBackgroundJobs)
+    {
+        var normalized = status.Trim().ToLowerInvariant();
+        if (hasRunningBackgroundJobs == true) return "running";
+        if (normalized.Length == 0 || (normalized == "error" && hasRunningBackgroundJobs is null)) return null;
+
+        return normalized switch
+        {
+            "queued" or "pending" or "created" or "accepted" or "scheduled"
+                or "running" or "in_progress" or "in-progress" or "processing" or "started" or "active"
+                or "waiting" or "stopped" or "blocked" or "awaiting_input" or "awaiting_approval" or "needs_input" or "requires_human"
+                or "completed" or "complete" or "succeeded" or "success" or "done" or "finished"
+                or "failed" or "failure" or "error" or "errored" or "timed_out" or "timeout"
+                or "cancelled" or "canceled" or "aborted" or "killed" or "terminated"
+                => normalized,
+            _ => null,
+        };
+    }
+
+    private static bool IsValidBearerToken(string token)
+    {
+        var paddingStarted = false;
+        var sawPayload = false;
+        foreach (var character in token)
+        {
+            if (character == '=')
+            {
+                if (!sawPayload) return false;
+                paddingStarted = true;
+                continue;
+            }
+
+            if (paddingStarted
+                || !(char.IsAsciiLetterOrDigit(character) || "-._~+/".IndexOf(character) >= 0))
+                return false;
+            sawPayload = true;
+        }
+
+        return sawPayload;
+    }
+
+    private static bool ContainsDuplicateJsonProperties(System.Text.Json.JsonElement element)
+    {
+        if (element.ValueKind == System.Text.Json.JsonValueKind.Object)
+        {
+            var propertyNames = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var property in element.EnumerateObject())
+            {
+                if (!propertyNames.Add(property.Name) || ContainsDuplicateJsonProperties(property.Value))
+                    return true;
+            }
+        }
+        else if (element.ValueKind == System.Text.Json.JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray())
+            {
+                if (ContainsDuplicateJsonProperties(item)) return true;
+            }
+        }
+
+        return false;
+    }
+}
+
+/// <summary>
+/// A complete active-task snapshot for its declared inventory universe. Partial
+/// pages are never represented as authoritative and therefore cannot grant capacity.
 /// </summary>
 public sealed record AutopilotGlobalTaskInventorySnapshot(
     string ScopeId,
@@ -301,9 +539,11 @@ public sealed record AutopilotGlobalTaskInventorySnapshot(
 }
 
 /// <summary>
-/// Reads every page of the configured Taslim scope. It rejects a failed,
+/// Reads every page of the configured inventory universe. It rejects a failed,
 /// repeated, truncated, mis-scoped, malformed, or status-ambiguous listing rather
-/// than interpreting an unknown external occupancy as zero.
+/// than interpreting an unknown external occupancy as zero. Sources may represent
+/// a narrower Taslim scope or a conservative authenticated-user-wide scope; they
+/// must never relabel user-wide results as creator-filtered Taslim-only inventory.
 /// </summary>
 public sealed class AutopilotGlobalTaskInventoryReader(
     IAutopilotGlobalTaskInventoryPageSource source,
@@ -351,7 +591,9 @@ public sealed class AutopilotGlobalTaskInventoryReader(
                 if (string.IsNullOrWhiteSpace(item.TaskId) || string.IsNullOrWhiteSpace(item.ScopeId))
                     return AutopilotGlobalTaskInventorySnapshot.Unknown(taslimScopeId, "inventory_task_identity_or_scope_missing", pagesRead);
 
-                // Other projects in a tenant-wide listing are deliberately ignored.
+                // Items from other declared inventory universes are deliberately ignored.
+                // The Bridge user-wide source labels every visible task with its
+                // dedicated user-wide scope, so unrelated creators remain counted.
                 if (!string.Equals(item.ScopeId, taslimScopeId, StringComparison.Ordinal))
                     continue;
 
