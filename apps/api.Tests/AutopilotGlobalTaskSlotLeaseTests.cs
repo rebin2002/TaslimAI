@@ -687,6 +687,157 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
         Assert.Equal(1, timeoutCalls);
     }
 
+    [Theory]
+    [InlineData(19, 1)]
+    [InlineData(20, 0)]
+    public async Task Bridge_user_wide_inventory_counts_all_creators_and_stopped_background_jobs_before_claims(
+        int externalActiveCount,
+        int expectedReservations)
+    {
+        var scope = AutopilotGlobalTaskInventoryScopeIds.ManusBridgeAuthenticatedUserWide;
+        var taskIds = await SeedLaunchTasksAsync(total: 2, initiallyActive: 0, tasksPerWave: 2);
+        var requestCount = 0;
+        var handler = new FakeHttpHandler((request, cancellationToken) =>
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Interlocked.Increment(ref requestCount);
+            Assert.Equal(System.Net.Http.HttpMethod.Get, request.Method);
+            Assert.Equal(new Uri("https://bridge.example/v1/tasks"), request.RequestUri);
+            Assert.Equal("Bearer", request.Headers.Authorization?.Scheme);
+            Assert.Equal("bridge-test-token", request.Headers.Authorization?.Parameter);
+            Assert.Empty(request.RequestUri!.Query);
+            Assert.False(request.Headers.Contains("x-manus-api-key"));
+            return Task.FromResult(JsonResponse(BuildBridgeInventoryPayload(externalActiveCount)));
+        });
+        using var source = new ManusBridgeUserWideTaskInventoryPageSource(
+            () => "bridge-test-token",
+            new Uri("https://bridge.example/v1/tasks"),
+            requestTimeout: TimeSpan.FromSeconds(2),
+            testHandler: handler);
+        var inventory = await new AutopilotGlobalTaskInventoryReader(source, scope).ReadAuthoritativeSnapshotAsync();
+
+        Assert.True(inventory.IsAuthoritative);
+        Assert.Equal(scope, inventory.ScopeId);
+        Assert.Equal(1, inventory.PagesRead);
+        Assert.False(inventory.HasMorePages);
+        Assert.Equal(externalActiveCount, inventory.ActiveTasks.Count);
+        Assert.Equal("running", inventory.ActiveTasks.Single(item => item.TaskId == BridgeNativeTaskId(0)).Status);
+        if (externalActiveCount > 1)
+            Assert.Equal("stopped", inventory.ActiveTasks.Single(item => item.TaskId == BridgeNativeTaskId(1)).Status);
+        Assert.Equal(1, requestCount);
+
+        var results = await Task.WhenAll(taskIds.Select(id => ClaimAsync(id, inventory, allocatorScopeId: scope)));
+        var fakeProviderCalls = results.Count(result => result.MayCallProvider);
+        Assert.Equal(expectedReservations, results.Count(result => result.Outcome == AutopilotGlobalTaskSlotOutcomes.Reserved));
+        Assert.Equal(2 - expectedReservations, results.Count(result => result.Outcome == AutopilotGlobalTaskSlotOutcomes.CapacityReached));
+        Assert.All(results, result => Assert.True(result.ActiveSlotsObserved <= AutopilotGlobalTaskSlotAllocator.HardMaximum));
+        Assert.Equal(20, results.Max(result => result.ActiveSlotsObserved));
+        Assert.Equal(expectedReservations, fakeProviderCalls);
+
+        await using var verify = CreateContext();
+        Assert.Equal(expectedReservations, await verify.AutopilotWaveLaunchTasks.CountAsync(item =>
+            item.Status == AutopilotWaveLaunchStatuses.Launching || item.Status == AutopilotWaveLaunchStatuses.Launched));
+    }
+
+    [Fact]
+    public async Task Bridge_user_wide_inventory_rejects_unproven_taslim_or_team_scope_without_http_request()
+    {
+        var calls = 0;
+        var handler = new FakeHttpHandler((_, _) =>
+        {
+            Interlocked.Increment(ref calls);
+            return Task.FromResult(JsonResponse(BuildBridgeInventoryPayload(0)));
+        });
+        using var source = new ManusBridgeUserWideTaskInventoryPageSource(
+            () => "bridge-test-token",
+            new Uri("https://bridge.example/v1/tasks"),
+            testHandler: handler);
+
+        foreach (var unprovenScope in new[] { ScopeId, "manus-team-wide", "" })
+        {
+            var snapshot = await new AutopilotGlobalTaskInventoryReader(source, unprovenScope).ReadAuthoritativeSnapshotAsync();
+            Assert.False(snapshot.IsAuthoritative);
+            Assert.Equal(string.IsNullOrWhiteSpace(unprovenScope) ? "inventory_scope_missing" : "inventory_page_invalid", snapshot.FailureCode);
+            Assert.Empty(snapshot.ActiveTasks);
+        }
+
+        Assert.Equal(0, calls);
+        var launchTaskIds = await SeedLaunchTasksAsync(total: 1, initiallyActive: 0);
+        var unknownInventory = await new AutopilotGlobalTaskInventoryReader(source, ScopeId).ReadAuthoritativeSnapshotAsync();
+        var claim = await ClaimAsync(launchTaskIds[0], unknownInventory);
+        Assert.Equal(AutopilotGlobalTaskSlotOutcomes.InventoryUnknown, claim.Outcome);
+        Assert.False(claim.MayCallProvider);
+        Assert.Equal(0, calls);
+    }
+
+    [Fact]
+    public async Task Bridge_user_wide_inventory_fails_closed_on_non_200_malformed_partial_duplicate_or_unknown_status()
+    {
+        var nativeId = BridgeNativeTaskId(0);
+        var invalidResponses = new (System.Net.HttpStatusCode Status, string Body)[]
+        {
+            (System.Net.HttpStatusCode.BadGateway, "{\"ok\":false,\"error\":\"task_inventory_incomplete\"}"),
+            (System.Net.HttpStatusCode.OK, "{not-json"),
+            (System.Net.HttpStatusCode.OK, "{\"ok\":false,\"ok\":true,\"data\":[],\"has_more\":false}"),
+            (System.Net.HttpStatusCode.OK, "{\"ok\":true,\"data\":[],\"has_more\":true,\"next_cursor\":\"page-2\"}"),
+            (System.Net.HttpStatusCode.OK, "{\"ok\":true,\"data\":[],\"has_more\":false,\"next_cursor\":null}"),
+            (System.Net.HttpStatusCode.OK, $"{{\"ok\":true,\"data\":[{{\"id\":\"{nativeId}\",\"status\":\"running\"}},{{\"id\":\"{nativeId}\",\"status\":\"waiting\"}}],\"has_more\":false}}"),
+            (System.Net.HttpStatusCode.OK, $"{{\"ok\":true,\"data\":[{{\"id\":\"{nativeId}\",\"status\":\"future_status\"}}],\"has_more\":false}}"),
+            (System.Net.HttpStatusCode.OK, $"{{\"ok\":true,\"data\":[{{\"id\":\"{nativeId}\",\"status\":\"stopped\",\"has_running_background_jobs\":\"false\"}}],\"has_more\":false}}"),
+        };
+
+        foreach (var invalid in invalidResponses)
+        {
+            using var source = new ManusBridgeUserWideTaskInventoryPageSource(
+                () => "bridge-test-token",
+                new Uri("https://bridge.example/v1/tasks"),
+                requestTimeout: TimeSpan.FromSeconds(2),
+                testHandler: new FakeHttpHandler((_, _) => Task.FromResult(JsonResponse(invalid.Body, invalid.Status))));
+            var snapshot = await new AutopilotGlobalTaskInventoryReader(
+                source,
+                AutopilotGlobalTaskInventoryScopeIds.ManusBridgeAuthenticatedUserWide).ReadAuthoritativeSnapshotAsync();
+
+            Assert.False(snapshot.IsAuthoritative);
+            Assert.Empty(snapshot.ActiveTasks);
+        }
+    }
+
+    [Fact]
+    public async Task Bridge_user_wide_inventory_timeout_and_missing_token_are_unknown_not_zero()
+    {
+        var tokenCalls = 0;
+        var missingTokenHandler = new FakeHttpHandler((_, _) => throw new InvalidOperationException("Must not request without Bridge token."));
+        using (var missingTokenSource = new ManusBridgeUserWideTaskInventoryPageSource(
+            () => { Interlocked.Increment(ref tokenCalls); return null; },
+            new Uri("https://bridge.example/v1/tasks"),
+            testHandler: missingTokenHandler))
+        {
+            var missing = await new AutopilotGlobalTaskInventoryReader(
+                missingTokenSource,
+                AutopilotGlobalTaskInventoryScopeIds.ManusBridgeAuthenticatedUserWide).ReadAuthoritativeSnapshotAsync();
+            Assert.False(missing.IsAuthoritative);
+            Assert.Empty(missing.ActiveTasks);
+        }
+
+        var timeoutHandler = new FakeHttpHandler(async (_, cancellationToken) =>
+        {
+            await Task.Delay(System.Threading.Timeout.InfiniteTimeSpan, cancellationToken);
+            return JsonResponse(BuildBridgeInventoryPayload(0));
+        });
+        using var timeoutSource = new ManusBridgeUserWideTaskInventoryPageSource(
+            () => "bridge-test-token",
+            new Uri("https://bridge.example/v1/tasks"),
+            requestTimeout: TimeSpan.FromMilliseconds(50),
+            testHandler: timeoutHandler);
+        var timedOut = await new AutopilotGlobalTaskInventoryReader(
+            timeoutSource,
+            AutopilotGlobalTaskInventoryScopeIds.ManusBridgeAuthenticatedUserWide).ReadAuthoritativeSnapshotAsync();
+
+        Assert.False(timedOut.IsAuthoritative);
+        Assert.Empty(timedOut.ActiveTasks);
+        Assert.Equal(1, tokenCalls);
+    }
+
     [Fact]
     public async Task Verified_completion_deduplicates_stopped_inventory_for_only_its_exact_task()
     {
@@ -1179,12 +1330,13 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
     private async Task<AutopilotGlobalTaskSlotResult> ClaimAsync(
         Guid taskId,
         AutopilotGlobalTaskInventorySnapshot inventory,
-        DbContextOptions<TaslimDbContext>? contextOptions = null)
+        DbContextOptions<TaslimDbContext>? contextOptions = null,
+        string? allocatorScopeId = null)
     {
         await using var db = contextOptions is null ? CreateContext() : new TaslimDbContext(contextOptions);
         var task = await db.AutopilotWaveLaunchTasks.AsNoTracking().SingleAsync(item => item.Id == taskId);
         var key = AutopilotGlobalTaskSlotIdentity.CreateIdempotencyKey(task.WaveKey, task.TaskKey);
-        return await CreateAllocator(db).ReserveOrRecoverLaunchAsync(
+        return await CreateAllocator(db, allocatorScopeId).ReserveOrRecoverLaunchAsync(
             taskId,
             key,
             inventory,
@@ -1275,8 +1427,8 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
         return ids;
     }
 
-    private AutopilotGlobalTaskSlotAllocator CreateAllocator(TaslimDbContext db) =>
-        new(db, ScopeId, TimeProvider.System, AutopilotGlobalTaskSlotAllocator.HardMaximum);
+    private AutopilotGlobalTaskSlotAllocator CreateAllocator(TaslimDbContext db, string? allocatorScopeId = null) =>
+        new(db, allocatorScopeId ?? ScopeId, TimeProvider.System, AutopilotGlobalTaskSlotAllocator.HardMaximum);
 
     private static AutopilotGlobalTaskInventorySnapshot CompleteInventory() =>
         new(ScopeId, true, 1, false, null, Array.Empty<AutopilotGlobalTaskInventoryItem>());
@@ -1347,7 +1499,35 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
         .Select(pair => pair.Split('=', 2))
         .ToDictionary(pair => Uri.UnescapeDataString(pair[0]), pair => Uri.UnescapeDataString(pair[1]), StringComparer.Ordinal);
 
-    private static System.Net.Http.HttpResponseMessage JsonResponse(string json) => new(System.Net.HttpStatusCode.OK)
+    private static string BuildBridgeInventoryPayload(int taskCount)
+    {
+        var tasks = Enumerable.Range(0, taskCount).Select(index =>
+        {
+            var task = new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["id"] = BridgeNativeTaskId(index),
+                ["status"] = index < 2 ? "stopped" : index % 2 == 0 ? "running" : "waiting",
+                ["created_by_api_key"] = index % 3 == 2 ? null : new { id = $"api-key-{index % 2}", name = $"creator-{index % 2}" },
+            };
+            if (index == 0) task["has_running_background_jobs"] = true;
+            else if (index == 1) task["has_running_background_jobs"] = false;
+            return task;
+        }).ToArray();
+
+        return System.Text.Json.JsonSerializer.Serialize(new
+        {
+            ok = true,
+            request_id = "synthetic-bridge-inventory",
+            data = tasks,
+            has_more = false,
+        });
+    }
+
+    private static string BridgeNativeTaskId(int index) => index.ToString("D22", System.Globalization.CultureInfo.InvariantCulture);
+
+    private static System.Net.Http.HttpResponseMessage JsonResponse(
+        string json,
+        System.Net.HttpStatusCode statusCode = System.Net.HttpStatusCode.OK) => new(statusCode)
     {
         Content = new System.Net.Http.StringContent(json, System.Text.Encoding.UTF8, "application/json"),
     };
