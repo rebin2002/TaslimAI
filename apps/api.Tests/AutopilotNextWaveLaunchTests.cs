@@ -770,6 +770,50 @@ public sealed class AutopilotNextWaveLaunchTests
     }
 
     [Fact]
+    public async Task Incomplete_paginated_inventory_never_grants_capacity_or_calls_provider()
+    {
+        using var host = new Host(options =>
+        {
+            options.DryRun = false;
+            options.SimulationMode = false;
+            options.AllowNextWaveLaunch = true;
+            options.AllowNextWaveLaunchWhenReleasePending = true;
+        });
+        var requestedCursors = new List<string?>();
+        host.InventorySource.PageResolver = (scopeId, cursor) =>
+        {
+            requestedCursors.Add(cursor);
+            if (cursor is null)
+                return new AutopilotGlobalTaskInventoryPage(scopeId,
+                    [new AutopilotGlobalTaskInventoryItem("external-running-task", scopeId, "running", null)],
+                    "page-2");
+
+            Assert.Equal("page-2", cursor);
+            return null;
+        };
+        await host.AddBacklogAsync("bl-incomplete-inventory", "Do not launch from a partial global snapshot");
+
+        await host.GreenRunAsync("wave-incomplete-inventory");
+
+        Assert.Equal(new string?[] { null, "page-2" }, requestedCursors);
+        using (var db = host.CreateContext())
+        {
+            var task = await db.AutopilotWaveLaunchTasks.SingleAsync();
+            Assert.Equal(AutopilotWaveLaunchStatuses.Planned, task.Status);
+            Assert.Equal(0, task.LaunchAttempt);
+            Assert.Equal("inventory_page_invalid", task.ReasonCode);
+            Assert.Null(task.ExternalTaskId);
+            var backlog = await db.AutopilotBacklogItems.SingleAsync(item => item.ItemKey == "bl-incomplete-inventory");
+            Assert.Null(backlog.ConsumedByWaveKey);
+            Assert.Contains(await db.AutopilotAuditEvents.ToListAsync(), item =>
+                item.Action == AutopilotAuditActions.NextWaveLaunchBlocked
+                && item.Reason == "inventory_page_invalid"
+                && item.StatusDetail == "provider_call_denied");
+        }
+        Assert.Equal(0, host.Provider.LaunchCalls);
+    }
+
+    [Fact]
     public async Task Dry_run_simulation_never_performs_an_external_call()
     {
         using var host = new Host(options => options.AllowNextWaveLaunch = true);
