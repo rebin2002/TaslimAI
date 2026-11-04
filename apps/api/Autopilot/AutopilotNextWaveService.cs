@@ -59,6 +59,10 @@ public sealed class AutopilotNextWaveService(
     private readonly AutopilotOptions settings = options;
     private const string VerifiedCompletionRefillReason = "verified_completion_refill";
     private const int MaxCompletionEventsPerCycle = 1000;
+    private const string RejectedClaimRecoveryMarker = "provider_rejected_before_task_acceptance";
+    private const string RejectedClaimReleasedMarker = "provider_rejected_claim_released";
+    private const long RepairEscalationAdvisoryLockKey = 0x4155544F52455041L;
+    private static readonly SemaphoreSlim LocalRepairEscalationGate = new(1, 1);
 
     public async Task<AutopilotNextWaveCycleResult> TryLaunchNextWavesAsync(CancellationToken cancellationToken = default)
     {
@@ -93,6 +97,7 @@ public sealed class AutopilotNextWaveService(
         // durable, processed event with the allocator's exact Task Detail receipt
         // can release a slot or create a one-for-one refill batch.
         await ProcessVerifiedCompletionsAsync(now, cancellationToken);
+        await RepairRejectedBacklogClaimsAsync(now, audit, actions, cancellationToken);
 
         // Capacity-denied tasks stay Planned. Select their source runs before
         // older runs whose launch batches have no runnable work, or a bounded
@@ -306,7 +311,9 @@ public sealed class AutopilotNextWaveService(
             foreach (var candidate in tasks)
             {
                 var task = candidate;
+                var deterministicRejection = IsDeterministicProviderRejection(task);
                 var retryable = task.Status == AutopilotWaveLaunchStatuses.Failed
+                    && !deterministicRejection
                     && task.LaunchAttempt < Math.Max(0, settings.MaxLaunchAttempts);
                 var launchable = task.Status == AutopilotWaveLaunchStatuses.Planned || retryable;
                 if (!launchable) continue;
@@ -432,6 +439,12 @@ public sealed class AutopilotNextWaveService(
                         attempt: task.LaunchAttempt,
                         targetId: task.Id,
                         dryRun: false));
+                    if (reservation.Outcome != AutopilotGlobalTaskSlotOutcomes.CapacityReached)
+                    {
+                        await AddRepairEscalationOnceAsync(audit,
+                            $"global_slot_reservation_requires_operator_review:{reservation.ReasonCode ?? reservation.Outcome}",
+                            waveKey, task.TaskKey, task.LaunchAttempt, task.Id, false, cancellationToken);
+                    }
                     continue;
                 }
 
@@ -470,6 +483,9 @@ public sealed class AutopilotNextWaveService(
                             attempt: task.LaunchAttempt,
                             targetId: task.Id,
                             dryRun: false));
+                        await AddRepairEscalationOnceAsync(audit,
+                            "provider_claimed_success_without_external_identity; slot_and_backlog_claim_retained",
+                            waveKey, task.TaskKey, task.LaunchAttempt, task.Id, false, cancellationToken);
                         continue;
                     }
 
@@ -509,14 +525,23 @@ public sealed class AutopilotNextWaveService(
                         : 0;
                     task = await ReloadLaunchTaskFreshAsync(task.Id, cancellationToken)
                         ?? throw new InvalidOperationException("The durable launch row disappeared after provider acceptance.");
+                    if (task.Status == AutopilotWaveLaunchStatuses.Completed)
+                    {
+                        await EnsureCompletionRefillBatchAsync(task, now, cancellationToken);
+                        launched++;
+                        actions.Add($"next_wave_launched:{waveKey}:{task.TaskKey}:completed_before_ack");
+                        continue;
+                    }
+
                     if (metadataUpdated != 1
                         || task.Status != AutopilotWaveLaunchStatuses.Launched
                         || !string.Equals(task.ExternalTaskId, result.ExternalTaskId, StringComparison.Ordinal))
                     {
-                        if (task.Status == AutopilotWaveLaunchStatuses.Completed)
-                            await EnsureCompletionRefillBatchAsync(task, now, cancellationToken);
                         blocked++;
                         actions.Add($"next_wave_blocked:{waveKey}:accepted_identity_state_changed_slot_retained");
+                        await AddRepairEscalationOnceAsync(audit,
+                            "accepted_provider_identity_or_state_changed; slot_and_backlog_claim_retained",
+                            waveKey, task.TaskKey, task.LaunchAttempt, task.Id, false, cancellationToken);
                         continue;
                     }
 
@@ -557,6 +582,9 @@ public sealed class AutopilotNextWaveService(
                         // backlog item available to a second provider call.
                         blocked++;
                         actions.Add($"next_wave_blocked:{waveKey}:rejection_persistence_ambiguous");
+                        await AddRepairEscalationOnceAsync(audit,
+                            "provider_rejection_persistence_ambiguous; slot_and_backlog_claim_retained",
+                            waveKey, task.TaskKey, task.LaunchAttempt, task.Id, false, cancellationToken);
                         continue;
                     }
                     if (rejected.Outcome != AutopilotGlobalTaskSlotOutcomes.LaunchRejected
@@ -564,46 +592,96 @@ public sealed class AutopilotNextWaveService(
                     {
                         blocked++;
                         actions.Add($"next_wave_blocked:{waveKey}:rejection_state_uncertain");
+                        await AddRepairEscalationOnceAsync(audit,
+                            "provider_rejection_state_uncertain; no_backlog_claim_release",
+                            waveKey, task.TaskKey, task.LaunchAttempt, task.Id, false, cancellationToken);
                         continue;
                     }
 
                     var rejectionToken = Guid.NewGuid();
-                    var rejectionUpdated = await db.AutopilotWaveLaunchTasks
-                        .Where(item => item.Id == task.Id
-                            && item.Status == AutopilotWaveLaunchStatuses.Failed
-                            && item.ConcurrencyToken == task.ConcurrencyToken)
-                        .ExecuteUpdateAsync(setters => setters
-                            .SetProperty(item => item.ReasonCode, result.ReasonCode ?? "launch_rejected")
-                            .SetProperty(item => item.LastStatusDetail, result.StatusDetail ?? "launch_rejected")
-                            .SetProperty(item => item.CompletedAt, now)
+                    var rejectionRaced = false;
+                    var claimReleaseMismatch = false;
+                    await using (var rejectionTransaction = await db.Database.BeginTransactionAsync(cancellationToken))
+                    {
+                        var rejectionUpdated = await db.AutopilotWaveLaunchTasks
+                            .Where(item => item.Id == task.Id
+                                && item.Status == AutopilotWaveLaunchStatuses.Failed
+                                && item.ConcurrencyToken == task.ConcurrencyToken)
+                            .ExecuteUpdateAsync(setters => setters
+                                .SetProperty(item => item.ReasonCode, result.ReasonCode ?? "launch_rejected")
+                                .SetProperty(item => item.LastStatusDetail, RejectedClaimReleasedMarker)
+                                .SetProperty(item => item.CompletedAt, now)
                             .SetProperty(item => item.UpdatedAt, now)
                             .SetProperty(item => item.ConcurrencyToken, rejectionToken), cancellationToken);
-                    if (rejectionUpdated != 1)
+                        if (rejectionUpdated != 1)
+                        {
+                            await rejectionTransaction.RollbackAsync(cancellationToken);
+                            rejectionRaced = true;
+                        }
+                        else
+                        {
+                            // RecordRejectedAsync and this service transaction are separate.
+                            // The allocator's durable marker is also scanned on restart if
+                            // this exact-owner release cannot be completed.
+                            var releasedClaims = await ReleaseBacklogItemClaimAsync(task.BacklogItemKey, waveKey, cancellationToken);
+                            if (releasedClaims != 1)
+                            {
+                                await rejectionTransaction.RollbackAsync(cancellationToken);
+                                claimReleaseMismatch = true;
+                            }
+                            else
+                            {
+                                db.AutopilotAuditEvents.Add(Audit(AutopilotAuditActions.NextWaveLaunchFailed, AutopilotAuditOutcomes.Blocked,
+                                    reason: result.ReasonCode ?? "provider_rejected",
+                                    statusDetail: RejectedClaimReleasedMarker,
+                                    waveKey: waveKey,
+                                    taskId: task.TaskKey,
+                                    attempt: task.LaunchAttempt,
+                                    targetId: task.Id,
+                                    dryRun: false));
+                                await AddRepairEscalationOnceAsync(audit,
+                                    result.ReasonCode ?? "provider_rejected",
+                                    waveKey, task.TaskKey, task.LaunchAttempt, task.Id, false, cancellationToken);
+                                await rejectionTransaction.CommitAsync(cancellationToken);
+                            }
+                        }
+                    }
+
+                    if (rejectionRaced)
                     {
+                        task = await ReloadLaunchTaskFreshAsync(task.Id, cancellationToken)
+                            ?? throw new InvalidOperationException("The durable launch row disappeared after rejection race.");
+                        if (task.Status == AutopilotWaveLaunchStatuses.Completed)
+                        {
+                            await EnsureCompletionRefillBatchAsync(task, now, cancellationToken);
+                            launched++;
+                            actions.Add($"next_wave_rejected_after_verified_completion:{waveKey}:{task.TaskKey}");
+                            continue;
+                        }
+
                         blocked++;
                         actions.Add($"next_wave_blocked:{waveKey}:rejection_raced_with_completion");
+                        await AddRepairEscalationOnceAsync(audit,
+                            "deterministic_rejection_transition_raced; backlog_claim_not_released",
+                            waveKey, task.TaskKey, task.LaunchAttempt, task.Id, false, cancellationToken);
                         continue;
                     }
+
+                    if (claimReleaseMismatch)
+                    {
+                        task = await ReloadLaunchTaskFreshAsync(task.Id, cancellationToken)
+                            ?? throw new InvalidOperationException("The durable launch row disappeared after claim-release mismatch.");
+                        blocked++;
+                        actions.Add($"next_wave_blocked:{waveKey}:rejected_backlog_claim_owner_mismatch");
+                        await AddRepairEscalationOnceAsync(audit,
+                            "deterministic_rejection_backlog_claim_not_owned; recovery_marker_retained",
+                            waveKey, task.TaskKey, task.LaunchAttempt, task.Id, false, cancellationToken);
+                        continue;
+                    }
+
                     task = await ReloadLaunchTaskFreshAsync(task.Id, cancellationToken)
                         ?? throw new InvalidOperationException("The durable launch row disappeared after rejection persistence.");
-                    await ReleaseBacklogItemClaimAsync(task.BacklogItemKey, waveKey, cancellationToken);
                     failed++;
-                    audit.Add(Audit(AutopilotAuditActions.NextWaveLaunchFailed, AutopilotAuditOutcomes.Blocked,
-                        reason: task.ReasonCode,
-                        statusDetail: task.LastStatusDetail,
-                        waveKey: waveKey,
-                        taskId: task.TaskKey,
-                        attempt: task.LaunchAttempt,
-                        targetId: task.Id,
-                        dryRun: false));
-                    audit.Add(Audit(AutopilotAuditActions.HumanDecisionRequired, AutopilotAuditOutcomes.Required,
-                        reason: AutopilotHumanDecisions.RepairEscalation,
-                        statusDetail: task.ReasonCode,
-                        waveKey: waveKey,
-                        taskId: task.TaskKey,
-                        attempt: task.LaunchAttempt,
-                        targetId: task.Id,
-                        dryRun: false));
                     continue;
                 }
 
@@ -675,6 +753,7 @@ public sealed class AutopilotNextWaveService(
             return AutopilotNextWaveCycleResult.Idle("paused", "controller_paused");
 
         await ProcessVerifiedCompletionsAsync(now, cancellationToken);
+        await RepairRejectedBacklogClaimsAsync(now, audit, actions, cancellationToken);
 
         // A stale launch claim may represent a Bridge task created before a worker
         // crash. Only complete authoritative inventory may reconcile it; absent that
@@ -691,6 +770,9 @@ public sealed class AutopilotNextWaveService(
             if (globalTaskSlots is null || globalTaskInventory is null)
             {
                 stale.LastStatusDetail = "stale_launch_claim_held; authoritative_inventory_not_configured";
+                await AddRepairEscalationOnceAsync(audit,
+                    "stale_launch_claim_held; authoritative_inventory_not_configured",
+                    stale.WaveKey, stale.TaskKey, stale.LaunchAttempt, stale.Id, settings.DryRun, cancellationToken);
                 continue;
             }
 
@@ -704,13 +786,19 @@ public sealed class AutopilotNextWaveService(
                 cancellationToken);
             if (reservation.Outcome == AutopilotGlobalTaskSlotOutcomes.AlreadyActive)
             {
-                actions.Add($"next_wave_recovered:{stale.WaveKey}:{stale.TaskKey}:inventory");
+                var pollScheduled = await ScheduleRecoveredLaunchPollAsync(stale, now, audit, cancellationToken);
+                actions.Add(pollScheduled
+                    ? $"next_wave_recovered:{stale.WaveKey}:{stale.TaskKey}:inventory_poll_scheduled"
+                    : $"next_wave_recovered:{stale.WaveKey}:{stale.TaskKey}:inventory_repair_required");
             }
             else
             {
                 stale.LastStatusDetail = reservation.SlotHeld
                     ? "stale_launch_claim_held_until_authoritative_reconciliation"
                     : $"stale_launch_claim_not_retried:{reservation.ReasonCode ?? reservation.Outcome}";
+                await AddRepairEscalationOnceAsync(audit,
+                    stale.LastStatusDetail,
+                    stale.WaveKey, stale.TaskKey, stale.LaunchAttempt, stale.Id, settings.DryRun, cancellationToken);
             }
             audit.Add(Audit(AutopilotAuditActions.NextWaveReconciled, AutopilotAuditOutcomes.Recorded,
                 reason: reservation.ReasonCode ?? reservation.Outcome,
@@ -752,17 +840,39 @@ public sealed class AutopilotNextWaveService(
                     ? "reconcile_exhausted; global_slot_retained_pending_verified_receipt"
                     : task.LastStatusDetail;
                 var updatedToken = Guid.NewGuid();
-                var updated = await db.AutopilotWaveLaunchTasks
-                    .Where(item => item.Id == task.Id
-                        && item.Status == AutopilotWaveLaunchStatuses.Launched
-                        && item.ConcurrencyToken == task.ConcurrencyToken)
-                    .ExecuteUpdateAsync(setters => setters
-                        .SetProperty(item => item.ReconcileCount, nextReconcileCount)
-                        .SetProperty(item => item.UpdatedAt, now)
-                        .SetProperty(item => item.ReasonCode, reasonCode)
-                        .SetProperty(item => item.NextReconcileAt, nextReconcileAt)
-                        .SetProperty(item => item.LastStatusDetail, lastStatusDetail)
-                        .SetProperty(item => item.ConcurrencyToken, updatedToken), cancellationToken);
+                int updated;
+                await using (var transaction = await db.Database.BeginTransactionAsync(cancellationToken))
+                {
+                    updated = await db.AutopilotWaveLaunchTasks
+                        .Where(item => item.Id == task.Id
+                            && item.Status == AutopilotWaveLaunchStatuses.Launched
+                            && item.ConcurrencyToken == task.ConcurrencyToken)
+                        .ExecuteUpdateAsync(setters => setters
+                            .SetProperty(item => item.ReconcileCount, nextReconcileCount)
+                            .SetProperty(item => item.UpdatedAt, now)
+                            .SetProperty(item => item.ReasonCode, reasonCode)
+                            .SetProperty(item => item.NextReconcileAt, nextReconcileAt)
+                            .SetProperty(item => item.LastStatusDetail, lastStatusDetail)
+                            .SetProperty(item => item.ConcurrencyToken, updatedToken), cancellationToken);
+                    if (updated == 1 && exhausted)
+                    {
+                        db.AutopilotAuditEvents.Add(Audit(AutopilotAuditActions.NextWaveReconciled,
+                            AutopilotAuditOutcomes.Blocked,
+                            reason: "reconcile_exhausted",
+                            statusDetail: reasonCode,
+                            waveKey: task.WaveKey,
+                            taskId: task.TaskKey,
+                            attempt: task.LaunchAttempt,
+                            targetId: task.Id,
+                            dryRun: settings.DryRun));
+                        await AddRepairEscalationOnceAsync(null,
+                            "reconcile_exhausted; verified_terminal_receipt_or_operator_repair_required",
+                            task.WaveKey, task.TaskKey, task.LaunchAttempt, task.Id, settings.DryRun, cancellationToken);
+                    }
+
+                    if (updated == 1) await transaction.CommitAsync(cancellationToken);
+                    else await transaction.RollbackAsync(cancellationToken);
+                }
                 if (updated != 1)
                 {
                     actions.Add($"next_wave_reconcile_raced_with_completion:{task.WaveKey}:{task.TaskKey}");
@@ -770,21 +880,6 @@ public sealed class AutopilotNextWaveService(
                 else if (exhausted)
                 {
                     actions.Add($"next_wave_reconcile_exhausted:{task.WaveKey}:{task.TaskKey}");
-                    audit.Add(Audit(AutopilotAuditActions.NextWaveReconciled, AutopilotAuditOutcomes.Blocked,
-                        reason: "reconcile_exhausted",
-                        statusDetail: reasonCode,
-                        waveKey: task.WaveKey,
-                        taskId: task.TaskKey,
-                        attempt: task.LaunchAttempt,
-                        targetId: task.Id,
-                        dryRun: settings.DryRun));
-                    audit.Add(Audit(AutopilotAuditActions.HumanDecisionRequired, AutopilotAuditOutcomes.Required,
-                        reason: AutopilotHumanDecisions.RepairEscalation,
-                        statusDetail: "reconcile_exhausted",
-                        waveKey: task.WaveKey,
-                        taskId: task.TaskKey,
-                        targetId: task.Id,
-                        dryRun: settings.DryRun));
                 }
                 else if (nextReconcileCount == 1)
                 {
@@ -802,9 +897,63 @@ public sealed class AutopilotNextWaveService(
                 continue;
             }
 
-            // Terminal state observed by polling. The derived completion event is
-            // deliberately evidence-free and unsigned: it can only ever escalate to
-            // a human, never satisfy a gate.
+            // Provider status is not terminal proof for slot release. Persist the
+            // poll count/state first; do not enqueue an internal event unless this
+            // task's compare-and-swap wins over any concurrent receipt transition.
+            var terminalPollCount = task.ReconcileCount + 1;
+            var terminalPollExhausted = terminalPollCount >= task.MaxReconciles;
+            var terminalPollDetail = terminalPollExhausted
+                ? "reconcile_exhausted; global_slot_retained_pending_verified_receipt"
+                : $"polling_fallback:{Bounded(state.Status, 40)}; slot_retained_pending_verified_receipt";
+            var terminalPollAt = terminalPollExhausted
+                ? task.NextReconcileAt
+                : now.Add(AutopilotNextWavePolicy.ComputeBackoff(terminalPollCount, settings));
+            var pollToken = Guid.NewGuid();
+            int pollUpdated;
+            await using (var transaction = await db.Database.BeginTransactionAsync(cancellationToken))
+            {
+                pollUpdated = await db.AutopilotWaveLaunchTasks
+                    .Where(item => item.Id == task.Id
+                        && item.Status == AutopilotWaveLaunchStatuses.Launched
+                        && item.ConcurrencyToken == task.ConcurrencyToken)
+                    .ExecuteUpdateAsync(setters => setters
+                        .SetProperty(item => item.ReconcileCount, terminalPollCount)
+                        .SetProperty(item => item.ExternalRef, state.ExternalRef)
+                        .SetProperty(item => item.ReasonCode, $"polled_{state.Status}")
+                        .SetProperty(item => item.LastStatusDetail, terminalPollDetail)
+                        .SetProperty(item => item.NextReconcileAt, terminalPollAt)
+                        .SetProperty(item => item.UpdatedAt, now)
+                        .SetProperty(item => item.ConcurrencyToken, pollToken), cancellationToken);
+                if (pollUpdated == 1 && terminalPollExhausted)
+                {
+                    db.AutopilotAuditEvents.Add(Audit(AutopilotAuditActions.NextWaveReconciled,
+                        AutopilotAuditOutcomes.Blocked,
+                        reason: "reconcile_exhausted",
+                        statusDetail: $"terminal_poll:{state.Status};verified_receipt_required",
+                        waveKey: task.WaveKey,
+                        taskId: task.TaskKey,
+                        attempt: task.LaunchAttempt,
+                        targetId: task.Id,
+                        dryRun: settings.DryRun));
+                    await AddRepairEscalationOnceAsync(null,
+                        "terminal_poll_reconcile_exhausted; verified_terminal_receipt_or_operator_repair_required",
+                        task.WaveKey, task.TaskKey, task.LaunchAttempt, task.Id, settings.DryRun, cancellationToken);
+                }
+
+                if (pollUpdated == 1) await transaction.CommitAsync(cancellationToken);
+                else await transaction.RollbackAsync(cancellationToken);
+            }
+            if (pollUpdated != 1)
+            {
+                actions.Add($"next_wave_poll_raced_with_completion:{task.WaveKey}:{task.TaskKey}");
+                if (batch is not null) await RefreshBatchFromDatabaseAsync(batch, now, cancellationToken);
+                continue;
+            }
+
+            // The queued internal record is a diagnostic only (the orchestrator
+            // must never apply an unsigned polling observation as task completion).
+            // Inserting only after the CAS also prevents an orphan poll event when
+            // an authoritative receipt has already completed the launch row.
             var signal = BuildPollDerivedSignal(task, state, batch);
             var submission = await intake.SubmitInternalAsync(
                 new AutopilotInternalSignalRequest(
@@ -814,38 +963,25 @@ public sealed class AutopilotNextWaveService(
                     signal,
                     "polling_fallback"),
                 cancellationToken);
+            if (submission.Outcome is not (AutopilotIntakeOutcomes.Accepted or AutopilotIntakeOutcomes.Duplicate))
+                actions.Add($"next_wave_poll_event_not_queued:{task.WaveKey}:{task.TaskKey}:{submission.Outcome}");
 
-            // Provider status is not terminal proof for slot release. The compare-
-            // and-swap also prevents this poll result overwriting a concurrent
-            // receipt-driven Completed transition.
-            var pollToken = Guid.NewGuid();
-            var pollUpdated = await db.AutopilotWaveLaunchTasks
-                .Where(item => item.Id == task.Id
-                    && item.Status == AutopilotWaveLaunchStatuses.Launched
-                    && item.ConcurrencyToken == task.ConcurrencyToken)
-                .ExecuteUpdateAsync(setters => setters
-                    .SetProperty(item => item.ReconcileCount, task.ReconcileCount + 1)
-                    .SetProperty(item => item.ExternalRef, state.ExternalRef)
-                    .SetProperty(item => item.ReasonCode, $"polled_{state.Status}")
-                    .SetProperty(item => item.LastStatusDetail, $"polling_fallback:{submission.Outcome}; slot_retained_pending_verified_receipt")
-                    .SetProperty(item => item.NextReconcileAt, now.Add(AutopilotNextWavePolicy.ComputeBackoff(task.ReconcileCount + 1, settings)))
-                    .SetProperty(item => item.UpdatedAt, now)
-                    .SetProperty(item => item.ConcurrencyToken, pollToken), cancellationToken);
-            if (pollUpdated != 1)
-            {
-                actions.Add($"next_wave_poll_raced_with_completion:{task.WaveKey}:{task.TaskKey}");
-                if (batch is not null) await RefreshBatchFromDatabaseAsync(batch, now, cancellationToken);
-                continue;
-            }
             actions.Add($"next_wave_reconciled:{task.WaveKey}:{task.TaskKey}:{state.Status}");
-            audit.Add(Audit(AutopilotAuditActions.NextWaveReconciled, AutopilotAuditOutcomes.Recorded,
-                reason: $"polled_{state.Status}",
-                statusDetail: $"polling_fallback:{submission.Outcome}; slot_retained_pending_verified_receipt",
-                waveKey: task.WaveKey,
-                taskId: task.TaskKey,
-                attempt: task.LaunchAttempt,
-                targetId: task.Id,
-                dryRun: settings.DryRun));
+            if (terminalPollExhausted)
+            {
+                actions.Add($"next_wave_reconcile_exhausted:{task.WaveKey}:{task.TaskKey}");
+            }
+            else
+            {
+                audit.Add(Audit(AutopilotAuditActions.NextWaveReconciled, AutopilotAuditOutcomes.Recorded,
+                    reason: $"polled_{state.Status}",
+                    statusDetail: terminalPollDetail,
+                    waveKey: task.WaveKey,
+                    taskId: task.TaskKey,
+                    attempt: task.LaunchAttempt,
+                    targetId: task.Id,
+                    dryRun: settings.DryRun));
+            }
             if (batch is not null) await RefreshBatchFromDatabaseAsync(batch, now, cancellationToken);
         }
 
@@ -906,16 +1042,21 @@ public sealed class AutopilotNextWaveService(
             if (completion.Outcome is not (AutopilotGlobalTaskSlotOutcomes.Completed
                 or AutopilotGlobalTaskSlotOutcomes.DuplicateCompletion))
             {
-                db.AutopilotAuditEvents.Add(Audit(
-                    AutopilotAuditActions.NextWaveReconciled,
-                    AutopilotAuditOutcomes.Blocked,
-                    reason: completion.ReasonCode ?? completion.Outcome,
-                    statusDetail: "processed_event_did_not_release_slot; terminal_receipt_required",
-                    waveKey: task.WaveKey,
-                    taskId: task.TaskKey,
-                    attempt: task.LaunchAttempt,
-                    targetId: intakeEvent.Id,
-                    dryRun: settings.DryRun));
+                var failureDetail = $"processed_completion_requires_repair:{completion.ReasonCode ?? completion.Outcome}";
+                if (await AddRepairEscalationOnceAsync(null, failureDetail,
+                        task.WaveKey, task.TaskKey, task.LaunchAttempt, intakeEvent.Id, settings.DryRun, cancellationToken))
+                {
+                    db.AutopilotAuditEvents.Add(Audit(
+                        AutopilotAuditActions.NextWaveReconciled,
+                        AutopilotAuditOutcomes.Blocked,
+                        reason: completion.ReasonCode ?? completion.Outcome,
+                        statusDetail: "processed_event_did_not_release_slot; terminal_receipt_required",
+                        waveKey: task.WaveKey,
+                        taskId: task.TaskKey,
+                        attempt: task.LaunchAttempt,
+                        targetId: intakeEvent.Id,
+                        dryRun: settings.DryRun));
+                }
                 continue;
             }
 
@@ -957,7 +1098,7 @@ public sealed class AutopilotNextWaveService(
             return;
         }
 
-        var refillWaveKey = Bounded($"{completedTask.WaveKey}-refill-{completedTask.Id:N}", 120);
+        var refillWaveKey = BuildCompletionRefillWaveKey(completedTask.WaveKey, completedTask.Id);
         if (await db.AutopilotWaveLaunchBatches.AsNoTracking().AnyAsync(item =>
                 item.SourceRunId == sourceBatch.SourceRunId && item.WaveKey == refillWaveKey,
                 cancellationToken))
@@ -1122,6 +1263,152 @@ public sealed class AutopilotNextWaveService(
                 .SetProperty(item => item.ConcurrencyToken, token), cancellationToken);
     }
 
+    private async Task<bool> ScheduleRecoveredLaunchPollAsync(
+        AutopilotWaveLaunchTask stale,
+        DateTime now,
+        List<AutopilotAuditEvent> audit,
+        CancellationToken cancellationToken)
+    {
+        var recovered = await ReloadLaunchTaskFreshAsync(stale.Id, cancellationToken);
+        if (recovered is null
+            || recovered.Status != AutopilotWaveLaunchStatuses.Launched
+            || string.IsNullOrWhiteSpace(recovered.ExternalTaskId))
+        {
+            await AddRepairEscalationOnceAsync(audit,
+                "inventory_recovery_did_not_persist_launch_identity; slot_remains_held",
+                stale.WaveKey, stale.TaskKey, stale.LaunchAttempt, stale.Id, settings.DryRun, cancellationToken);
+            return false;
+        }
+
+        var canPoll = recovered.ReconcileCount < recovered.MaxReconciles;
+        var nextPollAt = canPoll
+            ? now.Add(AutopilotNextWavePolicy.ComputeBackoff(recovered.ReconcileCount + 1, settings))
+            : (DateTime?)null;
+        var statusDetail = canPoll
+            ? "recovered_from_authoritative_inventory;bounded_poll_scheduled"
+            : "recovered_from_authoritative_inventory;polling_exhausted;repair_required";
+        var token = Guid.NewGuid();
+        await using (var scheduleTransaction = await db.Database.BeginTransactionAsync(cancellationToken))
+        {
+            var updated = await db.AutopilotWaveLaunchTasks
+                .Where(item => item.Id == recovered.Id
+                    && item.Status == AutopilotWaveLaunchStatuses.Launched
+                    && item.ConcurrencyToken == recovered.ConcurrencyToken)
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(item => item.NextReconcileAt, nextPollAt)
+                    .SetProperty(item => item.LastStatusDetail, statusDetail)
+                    .SetProperty(item => item.UpdatedAt, now)
+                    .SetProperty(item => item.ConcurrencyToken, token), cancellationToken);
+            if (updated == 1)
+            {
+                if (!canPoll)
+                {
+                    await AddRepairEscalationOnceAsync(audit,
+                        "inventory_recovered_launch_polling_exhausted; verified_receipt_or_operator_repair_required",
+                        stale.WaveKey, stale.TaskKey, stale.LaunchAttempt, stale.Id, settings.DryRun, cancellationToken);
+                }
+                await scheduleTransaction.CommitAsync(cancellationToken);
+                return canPoll;
+            }
+
+            await scheduleTransaction.RollbackAsync(cancellationToken);
+        }
+
+        var latest = await ReloadLaunchTaskFreshAsync(stale.Id, cancellationToken);
+        if (latest?.Status == AutopilotWaveLaunchStatuses.Completed)
+            return false;
+
+        await AddRepairEscalationOnceAsync(audit,
+            "inventory_recovered_launch_poll_schedule_raced; slot_remains_held",
+            stale.WaveKey, stale.TaskKey, stale.LaunchAttempt, stale.Id, settings.DryRun, cancellationToken);
+        return false;
+    }
+
+    private async Task<int> RepairRejectedBacklogClaimsAsync(
+        DateTime now,
+        List<AutopilotAuditEvent> audit,
+        List<string> actions,
+        CancellationToken cancellationToken)
+    {
+        // RecordRejectedAsync commits the definitive no-create result before the
+        // service can release the backlog claim. If the process stops in that gap,
+        // its exact durable marker is sufficient to retry only the claim release.
+        var pending = await db.AutopilotWaveLaunchTasks
+            .AsNoTracking()
+            .Where(item => item.Status == AutopilotWaveLaunchStatuses.Failed
+                && item.ExternalTaskId == null
+                && item.LastStatusDetail == RejectedClaimRecoveryMarker)
+            .OrderBy(item => item.CompletedAt)
+            .Take(Math.Max(1, settings.MaxLaunchReconciliations))
+            .ToListAsync(cancellationToken);
+
+        var repaired = 0;
+        foreach (var task in pending)
+        {
+            if (string.IsNullOrWhiteSpace(task.WaveKey) || string.IsNullOrWhiteSpace(task.BacklogItemKey))
+            {
+                await AddRepairEscalationOnceAsync(audit,
+                    "deterministic_rejection_claim_recovery_missing_backlog_identity",
+                    task.WaveKey, task.TaskKey, task.LaunchAttempt, task.Id, settings.DryRun, cancellationToken);
+                continue;
+            }
+
+            var claimReleaseMismatch = false;
+            await using (var transaction = await db.Database.BeginTransactionAsync(cancellationToken))
+            {
+                var token = Guid.NewGuid();
+                var claimed = await db.AutopilotWaveLaunchTasks
+                    .Where(item => item.Id == task.Id
+                        && item.Status == AutopilotWaveLaunchStatuses.Failed
+                        && item.ExternalTaskId == null
+                        && item.ConcurrencyToken == task.ConcurrencyToken
+                        && item.LastStatusDetail == RejectedClaimRecoveryMarker)
+                    .ExecuteUpdateAsync(setters => setters
+                        .SetProperty(item => item.LastStatusDetail, RejectedClaimReleasedMarker)
+                        .SetProperty(item => item.UpdatedAt, now)
+                        .SetProperty(item => item.ConcurrencyToken, token), cancellationToken);
+                if (claimed != 1)
+                {
+                    await transaction.RollbackAsync(cancellationToken);
+                    continue;
+                }
+
+                var releasedClaims = await ReleaseBacklogItemClaimAsync(task.BacklogItemKey, task.WaveKey, cancellationToken);
+                if (releasedClaims != 1)
+                {
+                    await transaction.RollbackAsync(cancellationToken);
+                    claimReleaseMismatch = true;
+                }
+                else
+                {
+                    db.AutopilotAuditEvents.Add(Audit(AutopilotAuditActions.NextWaveLaunchFailed, AutopilotAuditOutcomes.Blocked,
+                        reason: task.ReasonCode ?? "provider_rejected",
+                        statusDetail: "deterministic_rejection_claim_recovered_after_interruption",
+                        waveKey: task.WaveKey,
+                        taskId: task.TaskKey,
+                        attempt: task.LaunchAttempt,
+                        targetId: task.Id,
+                        dryRun: settings.DryRun));
+                    await AddRepairEscalationOnceAsync(audit,
+                        "deterministic_rejection_claim_recovered_after_interruption",
+                        task.WaveKey, task.TaskKey, task.LaunchAttempt, task.Id, settings.DryRun, cancellationToken);
+                    await transaction.CommitAsync(cancellationToken);
+                    repaired++;
+                    actions.Add($"next_wave_recovered_rejected_backlog_claim:{task.WaveKey}:{task.TaskKey}");
+                }
+            }
+
+            if (claimReleaseMismatch)
+            {
+                await AddRepairEscalationOnceAsync(audit,
+                    "deterministic_rejection_backlog_claim_not_owned; recovery_marker_retained",
+                    task.WaveKey, task.TaskKey, task.LaunchAttempt, task.Id, settings.DryRun, cancellationToken);
+            }
+        }
+
+        return repaired;
+    }
+
     // -----------------------------------------------------------------------
     // Planning
     // -----------------------------------------------------------------------
@@ -1255,14 +1542,14 @@ public sealed class AutopilotNextWaveService(
         return created;
     }
 
-    private async Task ReleaseBacklogItemClaimAsync(
+    private async Task<int> ReleaseBacklogItemClaimAsync(
         string backlogItemKey,
         string waveKey,
         CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(backlogItemKey)) return;
+        if (string.IsNullOrWhiteSpace(backlogItemKey)) return 0;
 
-        await db.AutopilotBacklogItems
+        return await db.AutopilotBacklogItems
             .Where(item => item.ItemKey == backlogItemKey && item.ConsumedByWaveKey == waveKey)
             .ExecuteUpdateAsync(setters => setters
                 .SetProperty(item => item.ConsumedByWaveKey, (string?)null)
@@ -1279,6 +1566,8 @@ public sealed class AutopilotNextWaveService(
             .Where(item => item.Id == task.Id
                 && item.ConcurrencyToken == task.ConcurrencyToken
                 && (item.Status == AutopilotWaveLaunchStatuses.Planned || item.Status == AutopilotWaveLaunchStatuses.Failed)
+                && item.LastStatusDetail != RejectedClaimRecoveryMarker
+                && item.LastStatusDetail != RejectedClaimReleasedMarker
                 && item.LaunchAttempt < maxAttempts)
             .ExecuteUpdateAsync(setters => setters
                 .SetProperty(item => item.Status, AutopilotWaveLaunchStatuses.Launching)
@@ -1339,18 +1628,17 @@ public sealed class AutopilotNextWaveService(
         new()
         {
             WaveKey = task.WaveKey,
-            TaskId = string.IsNullOrWhiteSpace(task.ExternalTaskId) ? task.TaskKey : task.ExternalTaskId,
-            Outcome = state.IsSuccess
-                ? AutopilotTaskOutcomes.Succeeded
-                : state.Status == WaveLaunchTaskStates.Blocked || state.Status == WaveLaunchTaskStates.Cancelled
-                    ? AutopilotTaskOutcomes.Blocked
-                    : AutopilotTaskOutcomes.Failed,
-            FailureClass = state.IsSuccess ? AutopilotFailureClasses.None : AutopilotFailureClasses.Unknown,
+            TaskId = task.TaskKey,
+            // task.list/task-state polling has no authoritative stop_reason or
+            // background-job flag. Even a provider-reported terminal success is
+            // not completion evidence and must not advance a gate.
+            Outcome = AutopilotTaskOutcomes.Blocked,
+            FailureClass = AutopilotFailureClasses.Unknown,
             Attempt = task.LaunchAttempt,
             Evidence = $"polling_fallback:{Bounded(state.Status, 40)}",
             Checks = null,
-            RequiresHumanDecision = !state.IsSuccess,
-            HumanDecisionKind = state.IsSuccess ? null : AutopilotHumanDecisions.RepairEscalation,
+            RequiresHumanDecision = true,
+            HumanDecisionKind = AutopilotHumanDecisions.RepairEscalation,
             ExpectedTaskCount = batch is { TaskCount: > 0 } ? batch.TaskCount : null,
             WaveComplete = false,
         };
@@ -1433,6 +1721,10 @@ public sealed class AutopilotNextWaveService(
     private static string BuildInstructions(AutopilotWaveLaunchTask task) =>
         Bounded($"Deliver the approved backlog item '{task.Title}'. Wave: {task.WaveKey}. Task: {task.TaskKey}. " +
                 "Open a pull request; do not merge, do not release, and do not enable charging or paid providers.", 4000);
+
+    private static bool IsDeterministicProviderRejection(AutopilotWaveLaunchTask task) =>
+        string.Equals(task.LastStatusDetail, RejectedClaimRecoveryMarker, StringComparison.Ordinal)
+        || string.Equals(task.LastStatusDetail, RejectedClaimReleasedMarker, StringComparison.Ordinal);
 
     // -----------------------------------------------------------------------
     // Batch helpers
@@ -1583,6 +1875,106 @@ public sealed class AutopilotNextWaveService(
             .FirstOrDefaultAsync(item => item.ControlKey == AutopilotControlState.SingletonKey, cancellationToken)
         ?? new AutopilotControlState { Id = Guid.NewGuid(), ControlKey = AutopilotControlState.SingletonKey, UpdatedAt = UtcNow() };
 
+    private async Task<bool> AddRepairEscalationOnceAsync(
+        List<AutopilotAuditEvent>? audit,
+        string statusDetail,
+        string? waveKey,
+        string? taskId,
+        int attempt,
+        Guid? targetId,
+        bool dryRun,
+        CancellationToken cancellationToken)
+    {
+        await LocalRepairEscalationGate.WaitAsync(cancellationToken);
+        try
+        {
+            if (db.Database.CurrentTransaction is null)
+            {
+                await using var transaction = await db.Database.BeginTransactionAsync(
+                    db.Database.IsNpgsql()
+                        ? System.Data.IsolationLevel.ReadCommitted
+                        : System.Data.IsolationLevel.Serializable,
+                    cancellationToken);
+                await AcquireRepairEscalationFenceAsync(cancellationToken);
+                var inserted = await PersistRepairEscalationIfMissingAsync(
+                    audit, statusDetail, waveKey, taskId, attempt, targetId, dryRun, cancellationToken);
+                await transaction.CommitAsync(cancellationToken);
+                return inserted;
+            }
+
+            await AcquireRepairEscalationFenceAsync(cancellationToken);
+            return await PersistRepairEscalationIfMissingAsync(
+                audit, statusDetail, waveKey, taskId, attempt, targetId, dryRun, cancellationToken);
+        }
+        finally
+        {
+            LocalRepairEscalationGate.Release();
+        }
+    }
+
+    private async Task AcquireRepairEscalationFenceAsync(CancellationToken cancellationToken)
+    {
+        if (db.Database.IsNpgsql())
+        {
+            await db.Database.ExecuteSqlRawAsync(
+                $"SELECT pg_advisory_xact_lock({RepairEscalationAdvisoryLockKey})",
+                cancellationToken);
+        }
+    }
+
+    private async Task<bool> PersistRepairEscalationIfMissingAsync(
+        List<AutopilotAuditEvent>? audit,
+        string statusDetail,
+        string? waveKey,
+        string? taskId,
+        int attempt,
+        Guid? targetId,
+        bool dryRun,
+        CancellationToken cancellationToken)
+    {
+        bool Matches(AutopilotAuditEvent item) =>
+            item.Action == AutopilotAuditActions.HumanDecisionRequired
+            && item.Reason == AutopilotHumanDecisions.RepairEscalation
+            && item.StatusDetail == statusDetail
+            && item.TargetId == targetId;
+
+        // Persist escalation immediately, in the same transaction as a terminal
+        // hold/recovery transition when the caller already owns one. This closes
+        // the crash window between committing the held state and flushing audit.
+        audit?.RemoveAll(item => Matches(item));
+
+        if (db.AutopilotAuditEvents.Local.Any(Matches))
+        {
+            await db.SaveChangesAsync(cancellationToken);
+            return false;
+        }
+
+        if (targetId.HasValue && await db.AutopilotAuditEvents.AsNoTracking().AnyAsync(item =>
+                item.Action == AutopilotAuditActions.HumanDecisionRequired
+                    && item.Reason == AutopilotHumanDecisions.RepairEscalation
+                    && item.StatusDetail == statusDetail
+                    && item.TargetId == targetId,
+                cancellationToken))
+        {
+            await db.SaveChangesAsync(cancellationToken);
+            return false;
+        }
+
+        var escalation = Audit(
+            AutopilotAuditActions.HumanDecisionRequired,
+            AutopilotAuditOutcomes.Required,
+            reason: AutopilotHumanDecisions.RepairEscalation,
+            statusDetail: statusDetail,
+            waveKey: waveKey,
+            taskId: taskId,
+            attempt: attempt,
+            targetId: targetId,
+            dryRun: dryRun);
+        db.AutopilotAuditEvents.Add(escalation);
+        await db.SaveChangesAsync(cancellationToken);
+        return true;
+    }
+
     private static AutopilotAuditEvent Audit(
         string action,
         string outcome,
@@ -1612,6 +2004,17 @@ public sealed class AutopilotNextWaveService(
     }
 
     private DateTime UtcNow() => timeProvider.GetUtcNow().UtcDateTime;
+
+    private static string BuildCompletionRefillWaveKey(string sourceWaveKey, Guid completedTaskId)
+    {
+        // Keep the globally unique source task ID at the end. Truncating the
+        // whole concatenated key could erase it for 120-character wave keys and
+        // collapse multiple sibling completions into the same refill batch.
+        var suffix = $"-refill-{completedTaskId:N}";
+        var prefixLength = Math.Max(0, AutopilotNextWavePolicy.MaxWaveKeyLength - suffix.Length);
+        var prefix = sourceWaveKey.Length <= prefixLength ? sourceWaveKey : sourceWaveKey[..prefixLength];
+        return prefix + suffix;
+    }
 
     private static string Bounded(string? value, int max)
     {

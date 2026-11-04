@@ -446,6 +446,33 @@ public sealed class AutopilotOrchestrator(
             return false;
         }
 
+        if (string.Equals(intakeEvent.SourceSystem, AutopilotInternalSignalSources.Polling, StringComparison.OrdinalIgnoreCase)
+            && !intakeEvent.SignatureVerified
+            && !intakeEvent.ReplayProtected)
+        {
+            // Polling lacks task_detail.stop_reason and the background-job flag.
+            // It is useful for diagnostics, but must not create/update a wave task,
+            // mark it succeeded, or move a run through an integration/release gate.
+            intakeEvent.Status = AutopilotEventStatuses.Processed;
+            intakeEvent.ProcessedAt = now;
+            intakeEvent.Reason = "polling_status_not_completion_evidence";
+            Record(context, AutopilotAuditFactory.Create(
+                AutopilotAuditActions.EventProcessed,
+                AutopilotAuditOutcomes.Blocked,
+                reason: "polling_status_not_completion_evidence",
+                statusDetail: "unsigned_poll_observation_ignored_for_gates",
+                waveKey: signal.WaveKey,
+                taskId: signal.TaskId,
+                targetId: intakeEvent.Id,
+                dryRun: settings.DryRun));
+            await FlushAsync(context, cancellationToken);
+            context.EventsProcessed++;
+            context.AuditedEventIds.Add(intakeEvent.Id);
+            context.Outcome = "polling_observation_only";
+            context.Reason = "verified_terminal_receipt_or_operator_repair_required";
+            return true;
+        }
+
         var lockHandle = await locks.AcquireAsync(EfAutopilotLockService.WaveResource(signal.WaveKey!), "autopilot-controller", cancellationToken);
         if (!lockHandle.IsAcquired)
         {
