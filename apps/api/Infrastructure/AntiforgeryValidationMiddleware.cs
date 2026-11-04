@@ -21,7 +21,10 @@ public sealed class AntiforgeryValidationMiddleware(
             || HttpMethods.IsPut(context.Request.Method)
             || HttpMethods.IsPatch(context.Request.Method)
             || HttpMethods.IsDelete(context.Request.Method);
-        var isAnonymousAuthenticationEndpoint = context.Request.Path.Value is "/api/auth/login" or "/api/auth/register";
+        var isAnonymousAuthenticationEndpoint = context.Request.Path.Value is "/api/auth/login"
+            or "/api/auth/register"
+            or "/api/auth/password/forgot"
+            or "/api/auth/password/reset";
         var hasExplicitAntiforgeryExemption = context.GetEndpoint()?.Metadata.GetMetadata<IgnoreAntiforgeryTokenAttribute>() is not null;
 
         if (endpointRequiresAntiforgery

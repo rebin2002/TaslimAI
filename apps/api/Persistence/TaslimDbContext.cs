@@ -155,6 +155,7 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
     public DbSet<DirectorDecision> DirectorDecisions => Set<DirectorDecision>();
     public DbSet<DirectorHistoryEvent> DirectorHistoryEvents => Set<DirectorHistoryEvent>();
     public DbSet<DataProtectionKey> DataProtectionKeys => Set<DataProtectionKey>();
+    public DbSet<PasswordResetEmailOutboxEntry> PasswordResetEmailOutbox => Set<PasswordResetEmailOutboxEntry>();
 
     protected override void OnModelCreating(ModelBuilder builder)
     {
@@ -171,6 +172,21 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.Property(user => user.OnboardingIntent).HasMaxLength(50);
             entity.Property(user => user.CreatedAt).IsRequired();
             entity.Property(user => user.UpdatedAt).IsRequired();
+        });
+
+        builder.Entity<PasswordResetEmailOutboxEntry>(entity =>
+        {
+            entity.ToTable("PasswordResetEmailOutbox");
+            entity.HasKey(item => item.UserId);
+            entity.Property(item => item.LastRequestedAt).IsConcurrencyToken().IsRequired();
+            entity.Property(item => item.NextAttemptAt).IsRequired();
+            entity.Property(item => item.LeaseExpiresAt).IsConcurrencyToken();
+            entity.Property(item => item.Status).HasMaxLength(20).IsRequired();
+            entity.Property(item => item.AttemptCount).IsRequired();
+            entity.Property(item => item.LastFailureCode).HasMaxLength(80);
+            entity.HasIndex(item => new { item.Status, item.NextAttemptAt });
+            entity.HasIndex(item => item.LeaseExpiresAt);
+            entity.HasOne<ApplicationUser>().WithMany().HasForeignKey(item => item.UserId).OnDelete(DeleteBehavior.Cascade);
         });
 
         builder.Entity<Workspace>(entity =>
