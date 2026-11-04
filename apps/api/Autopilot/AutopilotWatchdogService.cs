@@ -81,11 +81,11 @@ public sealed class AutopilotWatchdogService(
 
     /// <summary>
     /// Drains the due durable completion queue in bounded batches before the
-    /// explicit reconciliation call. If the bounded drain limit is reached,
-    /// another coalesced wake is queued so work is not stranded until the hourly
-    /// fallback. Processing an individual final event can itself advance its run
-    /// and ask the orchestrator to launch; strict drain-all-before-any-launch
-    /// requires the owner-held orchestrator to defer that internal side effect.
+    /// explicit reconciliation call. Explicit event-drain or run-advance budget
+    /// deferrals are re-driven immediately within this separately bounded pass;
+    /// if the pass itself reaches its limit, another coalesced wake is queued so
+    /// remaining work is not stranded until the hourly fallback. Future-backoff
+    /// and Processing rows remain fail-closed without a hot retry loop.
     /// </summary>
     public async Task RunReconciliationAsync(string reason, CancellationToken cancellationToken)
     {
@@ -98,7 +98,9 @@ public sealed class AutopilotWatchdogService(
         {
             var result = await orchestrator.ProcessPendingEventsAsync(cancellationToken);
             drainedEvents += result.EventsExamined;
-            if (result.EventsExamined < batchSize)
+            var budgetDeferred = result.Outcome == "drain_deferred"
+                && (result.Reason is "completion_event_drain_budget_exhausted" or "completion_run_advancement_deferred");
+            if (!budgetDeferred && result.EventsExamined < batchSize)
                 break;
 
             if (batch == MaxDrainBatchesPerPass - 1)
