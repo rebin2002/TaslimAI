@@ -113,8 +113,8 @@ public sealed class AutopilotEventDispatchIntegrationTests
             await watchdog.StartAsync(stop.Token);
             try
             {
-                var payload = TerminalReceiptCompletionPayload();
                 var eventId = $"evt-receipt-refill-{Guid.NewGuid():N}";
+                var payload = TerminalReceiptCompletionPayload(eventId);
                 using var response = await PostSignedEventAsync(client, payload, eventId);
                 Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
 
@@ -446,14 +446,15 @@ public sealed class AutopilotEventDispatchIntegrationTests
         waveComplete = true,
     });
 
-    private static string TerminalReceiptCompletionPayload()
+    private static string TerminalReceiptCompletionPayload(string eventId)
     {
         var receipt = JsonSerializer.Serialize(new AutopilotGlobalTaskDetailTerminalReceipt(
             AutopilotGlobalTaskDetailTerminalReceipt.RequiredKind,
             "synthetic-native-task-detail-id",
             "stopped",
             "finish",
-            false));
+            false,
+            eventId));
         return JsonSerializer.Serialize(new
         {
             waveKey = WaveKey,

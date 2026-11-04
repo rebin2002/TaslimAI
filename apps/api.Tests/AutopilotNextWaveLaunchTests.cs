@@ -111,18 +111,20 @@ public sealed class AutopilotNextWaveLaunchTests
             completedTask = launched[0];
         }
 
+        const string eventId = "test-refill-completion-1";
         var receipt = JsonSerializer.Serialize(new AutopilotGlobalTaskDetailTerminalReceipt(
             AutopilotGlobalTaskDetailTerminalReceipt.RequiredKind,
             completedTask.ExternalTaskId,
             "stopped",
             "finish",
-            false));
+            false,
+            eventId));
         var submitted = await host.SubmitSignedCompletionAsync(
             completedTask.WaveKey,
             completedTask.TaskKey,
             expectedTaskCount: 2,
             evidence: receipt,
-            externalEventId: "test-refill-completion-1");
+            externalEventId: eventId);
         Assert.Equal(AutopilotIntakeOutcomes.Accepted, submitted.Outcome);
 
         // The orchestrator drains and commits the signed event; the immediate
@@ -226,23 +228,25 @@ public sealed class AutopilotNextWaveLaunchTests
                 .OrderBy(item => item.TaskKey)
                 .FirstAsync();
         }
+        const string eventId = "test-restart-refill-completion";
         var receipt = JsonSerializer.Serialize(new AutopilotGlobalTaskDetailTerminalReceipt(
             AutopilotGlobalTaskDetailTerminalReceipt.RequiredKind,
             taskToComplete.ExternalTaskId,
             "stopped",
             "finish",
-            false));
+            false,
+            eventId));
         var submitted = await host.SubmitSignedCompletionAsync(
             taskToComplete.WaveKey,
             taskToComplete.TaskKey,
             expectedTaskCount: 2,
             evidence: receipt,
-            externalEventId: "test-restart-refill-completion");
+            externalEventId: eventId);
         Assert.Equal(AutopilotIntakeOutcomes.Accepted, submitted.Outcome);
 
         using (var db = host.CreateContext())
         {
-            var terminalEvent = await db.AutopilotEvents.SingleAsync(item => item.ExternalEventId == "test-restart-refill-completion");
+            var terminalEvent = await db.AutopilotEvents.SingleAsync(item => item.ExternalEventId == eventId);
             terminalEvent.Status = AutopilotEventStatuses.Processed;
             terminalEvent.ProcessedAt = host.Time.GetUtcNow().UtcDateTime;
             await db.SaveChangesAsync();
@@ -386,13 +390,14 @@ public sealed class AutopilotNextWaveLaunchTests
             await db.SaveChangesAsync();
         }
 
+        const string eventId = "test-capacity-refill-verified-completion";
         var receipt = JsonSerializer.Serialize(new AutopilotGlobalTaskDetailTerminalReceipt(
             AutopilotGlobalTaskDetailTerminalReceipt.RequiredKind,
             taskToComplete.ExternalTaskId,
             "stopped",
             "finish",
-            false));
-        const string eventId = "test-capacity-refill-verified-completion";
+            false,
+            eventId));
         var submitted = await host.SubmitSignedCompletionAsync(
             taskToComplete.WaveKey,
             taskToComplete.TaskKey,
@@ -611,6 +616,10 @@ public sealed class AutopilotNextWaveLaunchTests
             Assert.Contains(await db.AutopilotAuditEvents.ToListAsync(),
                 item => item.Action == AutopilotAuditActions.NextWaveLaunchBlocked
                     && item.StatusDetail == "global_slot_retained_until_authoritative_reconciliation");
+            Assert.Contains(await db.AutopilotAuditEvents.ToListAsync(),
+                item => item.Action == AutopilotAuditActions.HumanDecisionRequired
+                    && item.Reason == AutopilotHumanDecisions.RepairEscalation
+                    && item.StatusDetail == "ambiguous_provider_outcome_requires_authoritative_reconciliation");
         }
 
         // Time and repeated cycles cannot free the lease or duplicate the task.
@@ -618,6 +627,110 @@ public sealed class AutopilotNextWaveLaunchTests
         await host.LaunchAsync();
         await host.LaunchAsync();
         Assert.Equal(1, host.Provider.LaunchCalls);
+    }
+
+    [Fact]
+    public async Task Bridge_http_502_task_creation_ambiguous_holds_slot_and_never_retries_create()
+    {
+        const string tokenVariable = "TASLIM_EVENT_REFILL_TEST_BRIDGE_TOKEN";
+        var previousToken = Environment.GetEnvironmentVariable(tokenVariable);
+        Environment.SetEnvironmentVariable(tokenVariable, "synthetic-test-bridge-token");
+        try
+        {
+            const string bridgeBaseUrl = "https://bridge.example.test";
+            var providerSettings = new AutopilotOptions
+            {
+                Enabled = true,
+                DryRun = false,
+                AllowNextWaveLaunch = true,
+                BridgeBaseUrl = bridgeBaseUrl,
+                BridgeTokenEnvironmentVariable = tokenVariable,
+            };
+            providerSettings.Normalize();
+            var handler = new StubBridgeHandler
+            {
+                Respond = _ => new HttpResponseMessage(HttpStatusCode.BadGateway)
+                {
+                    Content = new StringContent("{\"error\":\"task_creation_ambiguous\"}"),
+                },
+            };
+            using var http = new HttpClient(handler);
+            var bridge = new ManusBridgeWaveLaunchProvider(http, providerSettings);
+            Assert.True(bridge.IsConfigured);
+
+            using var host = new Host(options =>
+            {
+                options.DryRun = false;
+                options.SimulationMode = false;
+                options.AllowNextWaveLaunch = true;
+                options.AllowNextWaveLaunchWhenReleasePending = true;
+                options.BridgeBaseUrl = bridgeBaseUrl;
+                options.BridgeTokenEnvironmentVariable = tokenVariable;
+            }, launchProviderOverride: bridge);
+            await host.AddBacklogAsync("bl-ambiguous-502", "Do not duplicate an uncertain Manus task");
+
+            await host.GreenRunAsync("wave-ambiguous-502");
+            Assert.Equal(1, handler.Requests.Count(item => item.Method == HttpMethod.Post));
+
+            using (var db = host.CreateContext())
+            {
+                var task = await db.AutopilotWaveLaunchTasks.SingleAsync();
+                Assert.Equal(AutopilotWaveLaunchStatuses.Launching, task.Status);
+                Assert.Equal(1, task.LaunchAttempt);
+                Assert.Equal("global_slot_reserved", task.ReasonCode);
+                Assert.Null(task.ExternalTaskId);
+                var backlog = await db.AutopilotBacklogItems.SingleAsync(item => item.ItemKey == "bl-ambiguous-502");
+                Assert.Equal(task.WaveKey, backlog.ConsumedByWaveKey);
+            }
+
+            host.Time.Advance(TimeSpan.FromHours(1));
+            await host.LaunchAsync();
+            await host.ReconcileLaunchesAsync();
+            host.Time.Advance(TimeSpan.FromDays(2));
+            await host.LaunchAsync();
+
+            Assert.Single(handler.Requests);
+            Assert.Equal(HttpMethod.Post, handler.Requests.Single().Method);
+            using (var db = host.CreateContext())
+            {
+                var task = await db.AutopilotWaveLaunchTasks.SingleAsync();
+                Assert.Equal(AutopilotWaveLaunchStatuses.Launching, task.Status);
+                Assert.Equal(1, task.LaunchAttempt);
+                Assert.Contains(await db.AutopilotAuditEvents.ToListAsync(), item =>
+                    item.Action == AutopilotAuditActions.HumanDecisionRequired
+                    && item.Reason == AutopilotHumanDecisions.RepairEscalation);
+            }
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(tokenVariable, previousToken);
+        }
+    }
+
+    [Fact]
+    public async Task Definitive_provider_rejection_releases_only_its_backlog_claim()
+    {
+        using var host = new Host(options =>
+        {
+            options.DryRun = false;
+            options.AllowNextWaveLaunch = true;
+            options.AllowNextWaveLaunchWhenReleasePending = true;
+        });
+        await host.AddBacklogAsync("bl-definitive-rejection", "Retry only after a definitive no-create response");
+        host.Provider.Results.Enqueue(WaveLaunchProviderResult.Rejected("bridge_status_400"));
+
+        await host.GreenRunAsync("wave-definitive-rejection");
+
+        using var db = host.CreateContext();
+        var task = await db.AutopilotWaveLaunchTasks.SingleAsync();
+        Assert.Equal(AutopilotWaveLaunchStatuses.Failed, task.Status);
+        Assert.Equal("bridge_status_400", task.ReasonCode);
+        var backlog = await db.AutopilotBacklogItems.SingleAsync(item => item.ItemKey == "bl-definitive-rejection");
+        Assert.Null(backlog.ConsumedByWaveKey);
+        Assert.Equal(1, host.Provider.LaunchCalls);
+        Assert.Contains(await db.AutopilotAuditEvents.ToListAsync(), item =>
+            item.Action == AutopilotAuditActions.HumanDecisionRequired
+            && item.Reason == AutopilotHumanDecisions.RepairEscalation);
     }
 
     [Fact]
@@ -1201,13 +1314,16 @@ public sealed class AutopilotNextWaveLaunchTests
         private readonly SqliteConnection? connection;
         private readonly DbContextOptions<TaslimDbContext> contextOptions;
         private readonly bool enableGlobalSlotServices;
+        private readonly IWaveLaunchProvider? launchProviderOverride;
 
         public Host(
             Action<AutopilotOptions>? configure = null,
             bool enableGlobalSlotServices = true,
-            DbContextOptions<TaslimDbContext>? databaseOptions = null)
+            DbContextOptions<TaslimDbContext>? databaseOptions = null,
+            IWaveLaunchProvider? launchProviderOverride = null)
         {
             this.enableGlobalSlotServices = enableGlobalSlotServices;
+            this.launchProviderOverride = launchProviderOverride;
             if (databaseOptions is null)
             {
                 connection = new SqliteConnection("DataSource=:memory:");
@@ -1457,25 +1573,27 @@ public sealed class AutopilotNextWaveLaunchTests
                 Assert.True(accepted.SlotHeld);
             }
 
+            var eventId = $"ack-race-{request.TaskKey}";
             var receipt = JsonSerializer.Serialize(new AutopilotGlobalTaskDetailTerminalReceipt(
                 AutopilotGlobalTaskDetailTerminalReceipt.RequiredKind,
                 externalTaskId,
                 "stopped",
                 "finish",
-                false));
+                false,
+                eventId));
             var submitted = await SubmitSignedCompletionAsync(
                 request.WaveKey,
                 request.TaskKey,
                 expectedTaskCount: 1,
                 evidence: receipt,
-                externalEventId: $"ack-race-{request.TaskKey}");
+                externalEventId: eventId);
             Assert.Equal(AutopilotIntakeOutcomes.Accepted, submitted.Outcome);
 
             Guid terminalEventId;
             using (var db = CreateContext())
             {
                 var terminalEvent = await db.AutopilotEvents.SingleAsync(item =>
-                    item.ExternalEventId == $"ack-race-{request.TaskKey}", cancellationToken);
+                    item.ExternalEventId == eventId, cancellationToken);
                 Assert.True(terminalEvent.SignatureVerified);
                 Assert.True(terminalEvent.ReplayProtected);
                 terminalEvent.Status = AutopilotEventStatuses.Processed;
@@ -1613,7 +1731,7 @@ public sealed class AutopilotNextWaveLaunchTests
             var inventory = enableGlobalSlotServices
                 ? new AutopilotGlobalTaskInventoryReader(InventorySource, TestTaslimScopeId)
                 : null;
-            return new(db, Options, Provider, CreateIntake(db), Time, NullLogger<AutopilotNextWaveService>.Instance, allocator, inventory);
+            return new(db, Options, launchProviderOverride ?? Provider, CreateIntake(db), Time, NullLogger<AutopilotNextWaveService>.Instance, allocator, inventory);
         }
 
         private AutopilotOrchestrator CreateOrchestrator(TaslimDbContext db) =>

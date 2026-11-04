@@ -635,6 +635,14 @@ public sealed class AutopilotNextWaveService(
                     attempt: task.LaunchAttempt,
                     targetId: task.Id,
                     dryRun: false));
+                audit.Add(Audit(AutopilotAuditActions.HumanDecisionRequired, AutopilotAuditOutcomes.Required,
+                    reason: AutopilotHumanDecisions.RepairEscalation,
+                    statusDetail: "ambiguous_provider_outcome_requires_authoritative_reconciliation",
+                    waveKey: waveKey,
+                    taskId: task.TaskKey,
+                    attempt: task.LaunchAttempt,
+                    targetId: task.Id,
+                    dryRun: false));
             }
 
             await RefreshBatchFromDatabaseAsync(batch, now, cancellationToken);
