@@ -782,6 +782,176 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
             item.Status == AutopilotWaveLaunchStatuses.Launching || item.Status == AutopilotWaveLaunchStatuses.Launched));
     }
 
+    [Theory]
+    [InlineData(19)]
+    [InlineData(20)]
+    public async Task Concurrent_claims_count_resumed_background_task_and_partial_inventory_fails_closed(int initialExternalActiveCount)
+    {
+        var taskIds = await SeedLaunchTasksAsync(total: 26, initiallyActive: initialExternalActiveCount, tasksPerWave: 26);
+        string resumedExternalTaskId;
+        string siblingExternalTaskId;
+        string siblingCompletionKey;
+        await using (var db = CreateContext())
+        {
+            var resumed = await db.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskIds[0]);
+            var sibling = await db.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskIds[1]);
+            resumedExternalTaskId = resumed.ExternalTaskId!;
+            siblingExternalTaskId = sibling.ExternalTaskId!;
+            siblingCompletionKey = AutopilotGlobalTaskSlotIdentity.CreateIdempotencyKey(sibling.WaveKey, sibling.TaskKey);
+        }
+
+        var firstCompletionEventId = await SeedCompletionEventAsync(taskIds[0]);
+        await using (var db = CreateContext())
+        {
+            var completed = await CreateAllocator(db).CompleteVerifiedAsync(
+                taskIds[0],
+                AutopilotGlobalTaskSlotIdentity.CreateIdempotencyKey(
+                    (await db.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskIds[0])).WaveKey,
+                    (await db.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskIds[0])).TaskKey),
+                resumedExternalTaskId,
+                firstCompletionEventId);
+            Assert.Equal(AutopilotGlobalTaskSlotOutcomes.Completed, completed.Outcome);
+        }
+
+        var resumedBackgroundJobs = false;
+        var siblingIsStopped = false;
+        var firstPageCount = (initialExternalActiveCount + 1) / 2;
+        var handler = new FakeHttpHandler((request, cancellationToken) =>
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var query = ParseQuery(Assert.IsType<Uri>(request.RequestUri));
+            var secondPage = query.TryGetValue("cursor", out var cursor);
+            if (secondPage) Assert.Equal("page-2", cursor);
+            else Assert.False(query.ContainsKey("cursor"));
+
+            var start = secondPage ? firstPageCount : 0;
+            var end = secondPage ? initialExternalActiveCount : firstPageCount;
+            var data = Enumerable.Range(start, end - start)
+                .Select(index => new
+                {
+                    id = $"external-task-{index}",
+                    status = index == 0 || (index == 1 && siblingIsStopped) ? "stopped" : "running",
+                    has_running_background_jobs = index == 0 && resumedBackgroundJobs,
+                })
+                .ToArray();
+            var hasMore = end < initialExternalActiveCount;
+            var payload = System.Text.Json.JsonSerializer.Serialize(new
+            {
+                ok = true,
+                data,
+                has_more = hasMore,
+                next_cursor = hasMore ? "page-2" : null,
+            });
+            return Task.FromResult(JsonResponse(payload));
+        });
+        using var pageSource = new ManusTaskListInventoryPageSource(
+            () => "unit-test-token",
+            ScopeId,
+            "verified-test-creator-id",
+            creatorIdentityVerified: true,
+            AutopilotManusTaskListCredentialKind.OAuthBearer,
+            pageTimeout: TimeSpan.FromSeconds(2),
+            testHandler: handler);
+        var reader = new AutopilotGlobalTaskInventoryReader(pageSource, ScopeId);
+
+        var previouslyStoppedInventory = await reader.ReadAuthoritativeSnapshotAsync();
+        Assert.True(previouslyStoppedInventory.IsAuthoritative);
+        Assert.Equal(initialExternalActiveCount, previouslyStoppedInventory.ActiveTasks.Count);
+        Assert.Equal("stopped", previouslyStoppedInventory.ActiveTasks.Single(item => item.TaskId == resumedExternalTaskId).Status);
+
+        resumedBackgroundJobs = true;
+        var resumedInventory = await reader.ReadAuthoritativeSnapshotAsync();
+        Assert.True(resumedInventory.IsAuthoritative);
+        Assert.Equal(2, resumedInventory.PagesRead);
+        Assert.Equal(initialExternalActiveCount, resumedInventory.ActiveTasks.Count);
+        Assert.Equal("running", resumedInventory.ActiveTasks.Single(item => item.TaskId == resumedExternalTaskId).Status);
+
+        var fakeProviderCalls = 0;
+        async Task<(Guid TaskId, AutopilotGlobalTaskSlotResult Result, bool ProviderCalled)> ClaimAndFakeProviderAsync(
+            Guid taskId,
+            AutopilotGlobalTaskInventorySnapshot inventory)
+        {
+            var result = await ClaimAsync(taskId, inventory);
+            var providerCalled = result.MayCallProvider;
+            if (providerCalled) Interlocked.Increment(ref fakeProviderCalls);
+            return (taskId, result, providerCalled);
+        }
+
+        var raceClaimIds = new[] { taskIds[initialExternalActiveCount], taskIds[initialExternalActiveCount + 1] };
+        var raceResults = await Task.WhenAll(raceClaimIds.Select(id => ClaimAndFakeProviderAsync(id, resumedInventory)));
+        var expectedRaceAdmissions = 20 - initialExternalActiveCount;
+        Assert.Equal(expectedRaceAdmissions, raceResults.Count(item => item.Result.Outcome == AutopilotGlobalTaskSlotOutcomes.Reserved));
+        Assert.Equal(2 - expectedRaceAdmissions, raceResults.Count(item => item.Result.Outcome == AutopilotGlobalTaskSlotOutcomes.CapacityReached));
+        Assert.All(raceResults, item => Assert.Equal(item.Result.MayCallProvider, item.ProviderCalled));
+        Assert.All(raceResults, item => Assert.True(item.Result.ActiveSlotsObserved <= AutopilotGlobalTaskSlotAllocator.HardMaximum));
+        Assert.Equal(20, raceResults.Max(item => item.Result.ActiveSlotsObserved));
+        Assert.Equal(expectedRaceAdmissions, fakeProviderCalls);
+
+        var partialPageSource = new FakePageSource(ScopeId,
+            (null, new AutopilotGlobalTaskInventoryPage(ScopeId,
+                [new AutopilotGlobalTaskInventoryItem(resumedExternalTaskId, ScopeId, "running", null)],
+                "page-2")),
+            ("page-2", null));
+        var partialInventory = await new AutopilotGlobalTaskInventoryReader(partialPageSource, ScopeId).ReadAuthoritativeSnapshotAsync();
+        Assert.False(partialInventory.IsAuthoritative);
+        Assert.Equal("inventory_page_invalid", partialInventory.FailureCode);
+        Assert.Equal(2, partialInventory.PagesRead);
+        Assert.Empty(partialInventory.ActiveTasks);
+
+        var unknownClaimIds = new[] { taskIds[initialExternalActiveCount + 2], taskIds[initialExternalActiveCount + 3] };
+        var unknownResults = await Task.WhenAll(unknownClaimIds.Select(id => ClaimAndFakeProviderAsync(id, partialInventory)));
+        Assert.All(unknownResults, item => Assert.Equal(AutopilotGlobalTaskSlotOutcomes.InventoryUnknown, item.Result.Outcome));
+        Assert.All(unknownResults, item => Assert.False(item.Result.MayCallProvider));
+        Assert.All(unknownResults, item => Assert.False(item.ProviderCalled));
+        Assert.Equal(expectedRaceAdmissions, fakeProviderCalls);
+
+        var siblingCompletionEventId = await SeedCompletionEventAsync(taskIds[1]);
+        await using (var db = CreateContext())
+        {
+            var completed = await CreateAllocator(db).CompleteVerifiedAsync(
+                taskIds[1], siblingCompletionKey, siblingExternalTaskId, siblingCompletionEventId);
+            Assert.Equal(AutopilotGlobalTaskSlotOutcomes.Completed, completed.Outcome);
+        }
+
+        siblingIsStopped = true;
+        var postTerminalInventory = await reader.ReadAuthoritativeSnapshotAsync();
+        Assert.True(postTerminalInventory.IsAuthoritative);
+        Assert.Equal("running", postTerminalInventory.ActiveTasks.Single(item => item.TaskId == resumedExternalTaskId).Status);
+        Assert.Equal("stopped", postTerminalInventory.ActiveTasks.Single(item => item.TaskId == siblingExternalTaskId).Status);
+
+        var refill = await ClaimAndFakeProviderAsync(taskIds[24], postTerminalInventory);
+        Assert.Equal(AutopilotGlobalTaskSlotOutcomes.Reserved, refill.Result.Outcome);
+        Assert.Equal(20, refill.Result.ActiveSlotsObserved);
+        Assert.True(refill.Result.MayCallProvider);
+        Assert.True(refill.ProviderCalled);
+
+        await using (var db = CreateContext())
+        {
+            var duplicate = await CreateAllocator(db).CompleteVerifiedAsync(
+                taskIds[1], siblingCompletionKey, siblingExternalTaskId, siblingCompletionEventId);
+            Assert.Equal(AutopilotGlobalTaskSlotOutcomes.DuplicateCompletion, duplicate.Outcome);
+        }
+
+        var noDuplicateRefill = await ClaimAndFakeProviderAsync(taskIds[25], postTerminalInventory);
+        Assert.Equal(AutopilotGlobalTaskSlotOutcomes.CapacityReached, noDuplicateRefill.Result.Outcome);
+        Assert.Equal(20, noDuplicateRefill.Result.ActiveSlotsObserved);
+        Assert.False(noDuplicateRefill.Result.MayCallProvider);
+        Assert.False(noDuplicateRefill.ProviderCalled);
+        Assert.Equal(expectedRaceAdmissions + 1, fakeProviderCalls);
+
+        await using var verify = CreateContext();
+        Assert.Equal(AutopilotWaveLaunchStatuses.Completed,
+            (await verify.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskIds[0])).Status);
+        Assert.Equal(AutopilotWaveLaunchStatuses.Completed,
+            (await verify.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskIds[1])).Status);
+        Assert.Equal(AutopilotWaveLaunchStatuses.Launching,
+            (await verify.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskIds[24])).Status);
+        Assert.Equal(AutopilotWaveLaunchStatuses.Planned,
+            (await verify.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskIds[25])).Status);
+        Assert.Equal(19, await verify.AutopilotWaveLaunchTasks.CountAsync(item =>
+            item.Status == AutopilotWaveLaunchStatuses.Launching || item.Status == AutopilotWaveLaunchStatuses.Launched));
+    }
+
     [Fact]
     public async Task Repeated_pagination_cursor_is_unknown_not_zero_occupancy()
     {
