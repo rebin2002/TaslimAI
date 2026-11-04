@@ -342,12 +342,27 @@ public sealed class AutopilotEndpointTests : IClassFixture<TaslimApiFactory>
         await barrier.AcquireEntered.Task.WaitAsync(TimeSpan.FromSeconds(10));
 
         var producerStart = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var sqliteWriteGate = new SemaphoreSlim(1, 1);
         var dueProducers = Enumerable.Range(0, 3).Select(_ => Task.Run(async () =>
         {
             await producerStart.Task;
             var eventIds = new List<string>();
             for (var index = 0; index < 2; index++)
-                eventIds.Add(await host.SubmitCompletionAsync(waveKey));
+            {
+                // Producer tasks are concurrent, but serialize writes against
+                // this shared-cache SQLite fixture (its per-connection EF
+                // functions cannot be registered concurrently while statements
+                // are active). Production durability is not simulated here.
+                await sqliteWriteGate.WaitAsync();
+                try
+                {
+                    eventIds.Add(await host.SubmitCompletionAsync(waveKey));
+                }
+                finally
+                {
+                    sqliteWriteGate.Release();
+                }
+            }
             return eventIds;
         })).ToArray();
         producerStart.SetResult(true);
