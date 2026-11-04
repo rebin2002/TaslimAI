@@ -106,7 +106,8 @@ public sealed class AutopilotEventDispatchIntegrationTests
             using var factory = new DispatchTestFactory();
             using var client = factory.CreateClient();
             ConfigureLiveFakePosture(factory);
-            await SeedLaunchedTaskAndActiveSiblingAsync(factory);
+            const string nativeTaskId = "ABCDEFGHIJKLMNOPQRSTUV";
+            await SeedLaunchedTaskAndActiveSiblingAsync(factory, nativeTaskId);
 
             using var stop = new CancellationTokenSource();
             var watchdog = CreateWatchdog(factory);
@@ -114,8 +115,29 @@ public sealed class AutopilotEventDispatchIntegrationTests
             try
             {
                 var eventId = $"evt-receipt-refill-{Guid.NewGuid():N}";
-                var payload = TerminalReceiptCompletionPayload(eventId);
-                using var response = await PostSignedEventAsync(client, payload, eventId);
+                var payload = BridgeV4TerminalReceiptCompletionPayload(eventId, nativeTaskId);
+                using (var payloadDocument = JsonDocument.Parse(payload))
+                {
+                    var root = payloadDocument.RootElement;
+                    Assert.Equal(new[] { "evidence", "outcome", "taskId", "waveKey" },
+                        root.EnumerateObject().Select(property => property.Name)
+                            .OrderBy(name => name, StringComparer.Ordinal).ToArray());
+                    Assert.Equal(WaveKey, root.GetProperty("waveKey").GetString());
+                    Assert.Equal("finished-task-1", root.GetProperty("taskId").GetString());
+                    Assert.Equal(AutopilotTaskOutcomes.Succeeded, root.GetProperty("outcome").GetString());
+                    Assert.False(root.TryGetProperty("checks", out _));
+                    var receiptJson = root.GetProperty("evidence").GetString();
+                    Assert.False(string.IsNullOrWhiteSpace(receiptJson));
+                    using var receiptDocument = JsonDocument.Parse(receiptJson!);
+                    var receipt = receiptDocument.RootElement;
+                    Assert.Equal(nativeTaskId, receipt.GetProperty("task_id").GetString());
+                    Assert.Equal(eventId, receipt.GetProperty("event_id").GetString());
+                    Assert.Equal("stopped", receipt.GetProperty("agent_status").GetString());
+                    Assert.Equal("finish", receipt.GetProperty("stop_reason").GetString());
+                    Assert.False(receipt.GetProperty("has_running_background_jobs").GetBoolean());
+                }
+                using var response = await PostSignedEventAsync(
+                    client, payload, eventId, ManusBridgeWaveLaunchProvider.Key);
                 Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
 
                 var launched = await WaitForProviderLaunchOrExplainAsync(factory, eventId, TimeSpan.FromSeconds(8));
@@ -123,19 +145,31 @@ public sealed class AutopilotEventDispatchIntegrationTests
                 await WaitForReceiptRefillAsync(factory, eventId, TimeSpan.FromSeconds(8));
 
                 // Duplicate delivery cannot release another slot or create a second refill.
-                using var duplicate = await PostSignedEventAsync(client, payload, eventId);
+                using var duplicate = await PostSignedEventAsync(
+                    client, payload, eventId, ManusBridgeWaveLaunchProvider.Key);
                 Assert.Equal(HttpStatusCode.OK, duplicate.StatusCode);
+                using var duplicateBody = JsonDocument.Parse(await duplicate.Content.ReadAsStringAsync());
+                Assert.Equal(AutopilotIntakeOutcomes.Duplicate,
+                    duplicateBody.RootElement.GetProperty("status").GetString());
+                var duplicatePersistedEventId = duplicateBody.RootElement.GetProperty("eventId").GetGuid();
 
                 using var scope = factory.Services.CreateScope();
                 var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+                Assert.Equal(1, await db.AutopilotEvents.CountAsync(item =>
+                    item.SourceSystem == ManusBridgeWaveLaunchProvider.Key && item.ExternalEventId == eventId));
                 var intake = await db.AutopilotEvents.SingleAsync(item => item.ExternalEventId == eventId);
                 Assert.Equal(AutopilotEventStatuses.Processed, intake.Status);
+                Assert.Equal(ManusBridgeWaveLaunchProvider.Key, intake.SourceSystem);
+                Assert.Equal(eventId, intake.ExternalEventId);
+                Assert.Equal(duplicatePersistedEventId, intake.Id);
+                Assert.True(intake.SignatureVerified);
+                Assert.True(intake.ReplayProtected);
 
                 var completed = await db.AutopilotWaveLaunchTasks.SingleAsync(item => item.TaskKey == "finished-task-1");
                 Assert.Equal(AutopilotWaveLaunchStatuses.Completed, completed.Status);
                 Assert.Equal("verified_terminal_evidence", completed.ReasonCode);
                 Assert.Equal("verified_completion_refill_created", completed.LastStatusDetail);
-                Assert.Equal("synthetic-native-task-detail-id", completed.ExternalTaskId);
+                Assert.Equal(nativeTaskId, completed.ExternalTaskId);
 
                 var sibling = await db.AutopilotWaveLaunchTasks.SingleAsync(item => item.TaskKey == "active-sibling-1");
                 Assert.Equal(AutopilotWaveLaunchStatuses.Launched, sibling.Status);
@@ -409,7 +443,7 @@ public sealed class AutopilotEventDispatchIntegrationTests
         await db.SaveChangesAsync();
     }
 
-    private static async Task SeedLaunchedTaskAndActiveSiblingAsync(DispatchTestFactory factory)
+    private static async Task SeedLaunchedTaskAndActiveSiblingAsync(DispatchTestFactory factory, string nativeTaskId)
     {
         const string backlogKey = "backlog-receipt-refill-1";
         await EnsureDatabaseAndApproveOneBacklogItemAsync(factory, backlogKey);
@@ -491,7 +525,7 @@ public sealed class AutopilotEventDispatchIntegrationTests
                 Id = Guid.NewGuid(), BatchId = batchId, SourceRunId = parentRunId,
                 SourceWaveKey = ParentWaveKey, WaveKey = WaveKey,
                 TaskKey = "finished-task-1", Title = "Finished synthetic task", BacklogItemKey = "prior-item-1",
-                ExternalTaskId = "synthetic-native-task-detail-id", Status = AutopilotWaveLaunchStatuses.Launched,
+                ExternalTaskId = nativeTaskId, Status = AutopilotWaveLaunchStatuses.Launched,
                 Branch = "feature/synthetic-wave", BaseSha = CandidateSha, DryRun = false,
                 LaunchAttempt = 1, MaxLaunchAttempts = 3, MaxReconciles = 24,
                 CreatedAt = now, UpdatedAt = now, LaunchedAt = now, ConcurrencyToken = Guid.NewGuid(),
@@ -591,6 +625,29 @@ public sealed class AutopilotEventDispatchIntegrationTests
             false,
             eventId));
         return TerminalReceiptCompletionPayloadWithEvidence(receipt);
+    }
+
+    private static string BridgeV4TerminalReceiptCompletionPayload(string eventId, string nativeTaskId)
+    {
+        var receipt = JsonSerializer.Serialize(new
+        {
+            kind = AutopilotGlobalTaskDetailTerminalReceipt.RequiredKind,
+            task_id = nativeTaskId,
+            agent_status = "stopped",
+            stop_reason = "finish",
+            has_running_background_jobs = false,
+            event_id = eventId,
+        });
+
+        // Bridge v4 relays only verified task identity/outcome/evidence. It does
+        // not invent CI checks or send the native ID as the logical signal taskId.
+        return JsonSerializer.Serialize(new
+        {
+            waveKey = WaveKey,
+            taskId = "finished-task-1",
+            outcome = AutopilotTaskOutcomes.Succeeded,
+            evidence = receipt,
+        });
     }
 
     private static string TerminalReceiptCompletionPayloadWithEvidence(string receipt) =>
