@@ -2,6 +2,7 @@
 import { useNotificationUnreadCount } from "@/components/ActivityBell";
 import { AppHeader } from "@/components/AppHeader";
 import { MobileNav } from "@/components/MobileNav";
+import "../app/onboarding-billing-ui.css";
 import { useLocale } from "@/components/LocaleProvider";
 
 export function AppShell({ children }: Readonly<{ children: React.ReactNode }>) {
