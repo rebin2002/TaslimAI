@@ -59,7 +59,7 @@ function onboardingFixture(language = "en", direction = "ltr") {
               <div class="onboarding-brand"><span class="onboarding-brand-mark" aria-hidden="true">✦</span><span>Taslim.ai</span></div>
               <button type="button" class="onboarding-skip">Skip for now</button>
             </header>
-            <div class="onboarding-progress" aria-label="Step 3 of 3"><span class="is-complete"></span><span class="is-complete"></span><span class="is-complete"></span></div>
+            <div class="onboarding-progress" role="progressbar" aria-label="Step 3 of 3" aria-valuemin="1" aria-valuemax="3" aria-valuenow="3"><span class="is-complete"></span><span class="is-complete"></span><span class="is-complete"></span></div>
             <div class="onboarding-body onboarding-workflow-body">
               <p class="section-eyebrow">A workspace built around you</p>
               <h1 id="onboarding-title">Choose a workflow to get started</h1>
@@ -223,13 +223,10 @@ function expectIsolatedReadOnlyTraffic(traffic: LiveApiTraffic, allowedPaths: st
   expect(traffic.apiCalls.every(({ path }) => allowedPaths.includes(path))).toBe(true);
 }
 
-async function assertNoUnexpectedLiveAxeFindings(page: Page, includeSelector: string, ownerManagedTargets: string[] = []) {
+async function assertNoSeriousOrCriticalAxeViolations(page: Page, includeSelector: string) {
   const results = await new AxeBuilder({ page }).include(includeSelector).withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"]).analyze();
   const seriousOrCritical = results.violations.filter((violation) => ["serious", "critical"].includes(violation.impact ?? ""));
-  const ownerManaged = seriousOrCritical.filter((violation) => violation.id === "aria-prohibited-attr" && violation.nodes.length > 0 && violation.nodes.every((node) => node.target.some((target) => typeof target === "string" && ownerManagedTargets.includes(target))));
-  const unexpected = seriousOrCritical.filter((violation) => !ownerManaged.includes(violation));
-  expect(unexpected.map((violation) => ({ id: violation.id, description: violation.description, nodes: violation.nodes.length }))).toEqual([]);
-  return ownerManaged.length;
+  expect(seriousOrCritical.map((violation) => ({ id: violation.id, description: violation.description, nodes: violation.nodes.length }))).toEqual([]);
 }
 
 async function loadFixture(page: Page, html: string) {
@@ -418,7 +415,7 @@ test.describe("issue #700 onboarding and billing layout", () => {
             <div class="modal-backdrop onboarding-backdrop" role="presentation">
               <section class="onboarding-card" role="dialog" aria-modal="true" aria-labelledby="onboarding-title" tabindex="-1">
                 <header class="onboarding-header"><div class="onboarding-brand"><span class="onboarding-brand-mark" aria-hidden="true">✦</span><span>Taslim.ai</span></div><button type="button" class="onboarding-skip">Skip for now</button></header>
-                <div class="onboarding-progress" aria-label="Step 1 of 3"><span class="is-complete"></span><span></span><span></span></div>
+                <div class="onboarding-progress" role="progressbar" aria-label="Step 1 of 3" aria-valuemin="1" aria-valuemax="3" aria-valuenow="1"><span class="is-complete"></span><span></span><span></span></div>
                 <div class="onboarding-body">
                   <p class="section-eyebrow">Personalize your workspace</p>
                   <h1 id="onboarding-title">Set up your preferences</h1>
@@ -471,25 +468,17 @@ test.describe("issue #700 onboarding and billing layout", () => {
     }
   });
 
-  test("reports no unexpected serious or critical axe violations; tracks the owner-managed progress label", async ({ page }, testInfo) => {
-    const fixtures = [
-      { html: onboardingFixture(), ownerManagedTargets: [".onboarding-progress"] },
-      { html: billingFixture(), ownerManagedTargets: [] as string[] },
-    ];
+  test("reports no serious or critical axe violations in onboarding and billing fixtures", async ({ page }) => {
+    const fixtures = [onboardingFixture(), billingFixture()];
     for (const fixture of fixtures) {
-      await loadFixture(page, fixture.html);
+      await loadFixture(page, fixture);
       const results = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"]).analyze();
       const seriousOrCritical = results.violations.filter((violation) => ["serious", "critical"].includes(violation.impact ?? ""));
-      // OnboardingGate.tsx is owned by #109; its generic progress div currently has an aria-label without a role.
-      // Track only that exact existing node here rather than masking other accessibility findings.
-      const ownerManagedFindings = seriousOrCritical.filter((violation) => violation.id === "aria-prohibited-attr" && violation.nodes.every((node) => node.target.some((target) => typeof target === "string" && fixture.ownerManagedTargets.includes(target))));
-      const unexpectedFindings = seriousOrCritical.filter((violation) => !ownerManagedFindings.includes(violation));
-      if (ownerManagedFindings.length) testInfo.annotations.push({ type: "known-owner-managed-a11y-gap", description: "aria-label on .onboarding-progress is owned by #109 and remains a release gate." });
-      expect(unexpectedFindings.map((violation) => ({ id: violation.id, description: violation.description, nodes: violation.nodes.length }))).toEqual([]);
+      expect(seriousOrCritical.map((violation) => ({ id: violation.id, description: violation.description, nodes: violation.nodes.length }))).toEqual([]);
     }
   });
 
-  test("mounts real first-login onboarding with intercepted read-only traffic without asserting module availability", async ({ page }, testInfo) => {
+  test("mounts real first-login onboarding with intercepted read-only traffic without asserting module availability", async ({ page }) => {
     const traffic = await interceptLiveAppApi(page, null);
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto("/account/billing");
@@ -508,15 +497,14 @@ test.describe("issue #700 onboarding and billing layout", () => {
     await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
     await page.locator(".onboarding-actions .primary-button").click();
     await page.locator(".onboarding-actions .primary-button").click();
-    // This live-route smoke test covers layout/RTL only; names, count, and module eligibility are owner-managed scope.
+    // This smoke test covers layout/RTL; the focused Free-account test below checks choices and modal behavior.
     await expect(page.locator(".onboarding-workflow-grid")).toBeVisible();
     await expect(page.locator(".onboarding-workflow").first()).toBeVisible();
     const firstWorkflowArrow = page.locator(".onboarding-workflow-arrow").first();
     expect(await firstWorkflowArrow.evaluate((element) => getComputedStyle(element).transform)).toBe("none");
     const arrowPaths = await firstWorkflowArrow.locator("path").evaluateAll((paths) => paths.map((path) => path.getAttribute("d")));
     expect(arrowPaths).toContain("M19 12H5");
-    const knownOnboardingA11yFindings = await assertNoUnexpectedLiveAxeFindings(page, ".onboarding-backdrop", [".onboarding-progress"]);
-    if (knownOnboardingA11yFindings) testInfo.annotations.push({ type: "known-owner-managed-a11y-gap", description: "The generic progress div aria-label remains owned by #109." });
+    await assertNoSeriousOrCriticalAxeViolations(page, ".onboarding-backdrop");
 
     for (const viewport of [
       { width: 1440, height: 900, columns: 2 },
@@ -564,7 +552,7 @@ test.describe("issue #700 onboarding and billing layout", () => {
     for (const button of await page.locator(".billing-page button").all()) await expect(button).toBeDisabled();
     const actionGap = await page.locator(".billing-page .button-row").evaluate((element) => getComputedStyle(element).columnGap);
     expect(parseFloat(actionGap)).toBeGreaterThanOrEqual(8);
-    await assertNoUnexpectedLiveAxeFindings(page, ".billing-page");
+    await assertNoSeriousOrCriticalAxeViolations(page, ".billing-page");
     for (const locale of ["ar", "ku"]) {
       await page.locator(".language-select select").selectOption(locale);
       await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
