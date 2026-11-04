@@ -333,6 +333,66 @@ public sealed class AutopilotEventDispatchIntegrationTests
         }
     }
 
+    [Theory]
+    [InlineData("unsigned", 401)]
+    [InlineData("bad_mac", 401)]
+    [InlineData("malformed_timestamp", 401)]
+    [InlineData("stale_timestamp", 400)]
+    [InlineData("out_of_range_timestamp", 400)]
+    public async Task Invalid_signature_or_timestamp_is_rejected_before_fence_acquisition(string mode, int expectedStatus)
+    {
+        var previousSecret = Environment.GetEnvironmentVariable("AUTOPILOT_WEBHOOK_SECRET");
+        Environment.SetEnvironmentVariable("AUTOPILOT_WEBHOOK_SECRET", SigningSecret);
+        try
+        {
+            var locks = new CountingLockService();
+            using var factory = new DispatchTestFactory
+            {
+                LockServiceOverride = _ => locks,
+            };
+            using var client = factory.CreateClient();
+            using (var setup = factory.Services.CreateScope())
+                await setup.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreatedAsync();
+
+            var eventId = $"evt-auth-preflight-{mode}-{Guid.NewGuid():N}";
+            var payload = CompletionPayload();
+            var timestamp = mode switch
+            {
+                "malformed_timestamp" => "not-a-unix-timestamp",
+                "stale_timestamp" => DateTimeOffset.UtcNow.AddHours(-1).ToUnixTimeSeconds().ToString(),
+                "out_of_range_timestamp" => "9223372036854775807",
+                _ => DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString(),
+            };
+            using var content = new StringContent(payload, Encoding.UTF8, "application/json");
+            content.Headers.Add("X-Autopilot-Source", "completion-bridge");
+            content.Headers.Add("X-Autopilot-Event-Id", eventId);
+            content.Headers.Add("X-Autopilot-Event-Type", AutopilotEventTypes.WaveTaskCompleted);
+            content.Headers.Add("X-Autopilot-Timestamp", timestamp);
+            if (!string.Equals(mode, "unsigned", StringComparison.Ordinal))
+            {
+                var signature = string.Equals(mode, "bad_mac", StringComparison.Ordinal)
+                    ? new string('0', 64)
+                    : ComputeSignature(timestamp, payload);
+                content.Headers.Add("X-Autopilot-Signature", $"sha256={signature}");
+            }
+
+            using (var response = await client.PostAsync("/api/autopilot/events", content))
+            {
+                Assert.Equal((HttpStatusCode)expectedStatus, response.StatusCode);
+            }
+
+            Assert.Equal(0, locks.AcquireCalls);
+            using var verify = factory.Services.CreateScope();
+            var db = verify.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            Assert.Empty(await db.AutopilotEvents.ToListAsync());
+            Assert.Empty(await db.AutopilotAuditEvents.ToListAsync());
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("AUTOPILOT_WEBHOOK_SECRET", previousSecret);
+        }
+    }
+
     [Fact]
     public async Task Signed_intake_returns_retryable_without_persistence_while_launch_fence_is_held()
     {
@@ -963,6 +1023,26 @@ public sealed class AutopilotEventDispatchIntegrationTests
 
         public Task<bool> ReleaseAsync(AutopilotLockHandle handle, CancellationToken cancellationToken = default) =>
             Task.FromResult(false);
+    }
+
+    private sealed class CountingLockService : IAutopilotLockService
+    {
+        private int acquireCalls;
+
+        public int AcquireCalls => Volatile.Read(ref acquireCalls);
+
+        public Task<AutopilotLockHandle> AcquireAsync(
+            string resourceKey,
+            string heldBy,
+            CancellationToken cancellationToken = default)
+        {
+            Interlocked.Increment(ref acquireCalls);
+            return Task.FromResult(new AutopilotLockHandle(
+                resourceKey, Guid.NewGuid().ToString("N"), acquireCalls, true, heldBy, DateTime.UtcNow.AddMinutes(10)));
+        }
+
+        public Task<bool> ReleaseAsync(AutopilotLockHandle handle, CancellationToken cancellationToken = default) =>
+            Task.FromResult(true);
     }
 
     private sealed class FakeWaveLaunchProvider : IWaveLaunchProvider

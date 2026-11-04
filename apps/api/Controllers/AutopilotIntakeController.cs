@@ -20,6 +20,7 @@ namespace Taslim.Api.Controllers;
 [Route("api/autopilot")]
 public sealed class AutopilotIntakeController(
     IAutopilotEventIntake intake,
+    IAutopilotEventAuthenticator authenticator,
     AutopilotOptions options,
     IAutopilotLockService locks,
     ILogger<AutopilotIntakeController> logger,
@@ -48,6 +49,37 @@ public sealed class AutopilotIntakeController(
         var source = Request.Headers[SourceHeader].ToString();
         var externalEventId = Request.Headers[EventIdHeader].ToString();
         var eventType = Request.Headers[EventTypeHeader].ToString();
+
+        if (string.IsNullOrWhiteSpace(source.Trim())
+            || string.IsNullOrWhiteSpace(externalEventId.Trim())
+            || !AutopilotEventTypes.Supported.Contains(eventType.Trim()))
+            return ApiResults.Error(this, StatusCodes.Status400BadRequest, "AUTOPILOT_EVENT_REJECTED", "The event was rejected.");
+
+        AutopilotSignatureResult verification;
+        try
+        {
+            // Reuse the intake's common HMAC/timestamp verifier before acquiring
+            // the shared launch fence. SubmitAsync verifies again while holding
+            // the fence before persistence, so this is only an admission preflight.
+            verification = authenticator.Verify(
+                Request.Headers[SignatureHeader].ToString(),
+                Request.Headers[TimestampHeader].ToString(),
+                payloadResult.Payload,
+                DateTime.UtcNow);
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            return ApiResults.Error(this, StatusCodes.Status400BadRequest, "AUTOPILOT_EVENT_REJECTED", "The event was rejected.");
+        }
+
+        if (!verification.Valid)
+        {
+            if (string.Equals(verification.FailureReason, "timestamp_out_of_tolerance", StringComparison.Ordinal))
+                return ApiResults.Error(this, StatusCodes.Status400BadRequest, "AUTOPILOT_EVENT_REJECTED", "The event was rejected.");
+
+            return Unauthorized(new { error = new { code = "AUTOPILOT_EVENT_UNAUTHENTICATED", message = "The event could not be authenticated." } });
+        }
+
         if (!HasValidManusBridgeReceiptEventIdBinding(payloadResult.Payload, source, externalEventId, eventType))
             return ApiResults.Error(this, StatusCodes.Status400BadRequest, "AUTOPILOT_EVENT_REJECTED", "The event was rejected.");
 
