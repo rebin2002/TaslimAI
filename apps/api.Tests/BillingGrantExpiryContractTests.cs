@@ -266,6 +266,72 @@ public sealed class BillingGrantExpiryContractTests
     }
 
     [Fact]
+    public async Task Sqlite_same_credit_debit_idempotency_key_is_isolated_per_workspace()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connection).Options;
+        await using var db = new TaslimDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+
+        var firstWorkspace = NewWorkspace();
+        var secondWorkspace = NewWorkspace();
+        var firstUser = NewUser();
+        var secondUser = NewUser();
+        var firstUsage = NewCompletedUsage(firstWorkspace.Id, firstUser.Id, "workspace-replay:first-usage");
+        var secondUsage = NewCompletedUsage(secondWorkspace.Id, secondUser.Id, "workspace-replay:second-usage");
+        db.Workspaces.AddRange(firstWorkspace, secondWorkspace);
+        db.Users.AddRange(firstUser, secondUser);
+        db.UsageTransactions.AddRange(firstUsage, secondUsage);
+        await db.SaveChangesAsync();
+
+        var ledger = NewChargingEnabledLedger(db);
+        const string grantKey = "workspace-replay:grant";
+        const string debitKey = "workspace-replay:debit";
+        const string reason = "Synthetic workspace-scoped debit replay";
+        var firstGrant = await ledger.GrantAsync(
+            firstWorkspace.Id, CreditEntitlementType.Purchased, 100,
+            grantKey, reason, expiresAt: DateTime.UtcNow.AddDays(30));
+        var secondGrant = await ledger.GrantAsync(
+            secondWorkspace.Id, CreditEntitlementType.Purchased, 100,
+            grantKey, reason, expiresAt: DateTime.UtcNow.AddDays(30));
+
+        Assert.True(firstGrant.Created);
+        Assert.True(secondGrant.Created);
+        Assert.NotEqual(firstGrant.Entry.Id, secondGrant.Entry.Id);
+
+        var firstDebit = await ledger.RecordUsageDebitAsync(
+            firstWorkspace.Id, firstUsage.Id, 25, debitKey, reason);
+        var secondDebit = await ledger.RecordUsageDebitAsync(
+            secondWorkspace.Id, secondUsage.Id, 25, debitKey, reason);
+
+        Assert.NotNull(firstDebit);
+        Assert.NotNull(secondDebit);
+        Assert.True(firstDebit.Created);
+        Assert.True(secondDebit.Created);
+        Assert.NotEqual(firstDebit.Entry.Id, secondDebit.Entry.Id);
+        Assert.Equal(firstWorkspace.Id, firstDebit.Entry.WorkspaceId);
+        Assert.Equal(secondWorkspace.Id, secondDebit.Entry.WorkspaceId);
+
+        var firstReplay = await ledger.RecordUsageDebitAsync(
+            firstWorkspace.Id, firstUsage.Id, 25, debitKey, reason);
+        var secondReplay = await ledger.RecordUsageDebitAsync(
+            secondWorkspace.Id, secondUsage.Id, 25, debitKey, reason);
+
+        Assert.NotNull(firstReplay);
+        Assert.NotNull(secondReplay);
+        Assert.False(firstReplay.Created);
+        Assert.False(secondReplay.Created);
+        Assert.Equal(firstDebit.Entry.Id, firstReplay.Entry.Id);
+        Assert.Equal(secondDebit.Entry.Id, secondReplay.Entry.Id);
+        Assert.Equal(firstUsage.Id, firstReplay.Entry.UsageTransactionId);
+        Assert.Equal(secondUsage.Id, secondReplay.Entry.UsageTransactionId);
+        Assert.Equal(4, await db.CreditLedgerEntries.CountAsync());
+        Assert.Equal(1, await db.CreditLedgerEntries.CountAsync(item => item.WorkspaceId == firstWorkspace.Id && item.Type == CreditLedgerEntryType.Debit));
+        Assert.Equal(1, await db.CreditLedgerEntries.CountAsync(item => item.WorkspaceId == secondWorkspace.Id && item.Type == CreditLedgerEntryType.Debit));
+    }
+
+    [Fact]
     public async Task Sqlite_post_expiry_refund_replay_is_append_only_and_source_isolated()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
