@@ -55,9 +55,11 @@ public sealed class AutopilotNextWaveService(
     ILogger<AutopilotNextWaveService> logger,
     IAutopilotLockService? locks = null,
     AutopilotGlobalTaskSlotAllocator? globalTaskSlots = null,
-    AutopilotGlobalTaskInventoryReader? globalTaskInventory = null) : IAutopilotNextWaveService
+    AutopilotGlobalTaskInventoryReader? globalTaskInventory = null,
+    Action? notifyCommittedEvent = null) : IAutopilotNextWaveService
 {
     private readonly AutopilotOptions settings = options;
+    private readonly Action eventNotifier = notifyCommittedEvent ?? AutopilotEventDispatchSignal.NotifyCommittedEvent;
     private const string VerifiedCompletionRefillReason = "verified_completion_refill";
     private const int MaxCompletionEventsPerCycle = 1000;
     private const string RejectedClaimRecoveryMarker = "provider_rejected_before_task_acceptance";
@@ -560,7 +562,74 @@ public sealed class AutopilotNextWaveService(
                     batch.Branch,
                     idempotencyKey);
 
-                var result = await provider.LaunchTaskAsync(request, cancellationToken);
+                WaveLaunchProviderResult result;
+                try
+                {
+                    result = await provider.LaunchTaskAsync(request, cancellationToken);
+                }
+                catch (Exception exception)
+                {
+                    // A thrown transport/cancellation error does not prove that
+                    // the remote create failed. Persist the held reservation
+                    // without the caller token so cancellation cannot erase the
+                    // ambiguity record or make the backlog eligible for retry.
+                    var callerCanceled = exception is OperationCanceledException
+                        && cancellationToken.IsCancellationRequested;
+                    var exceptionReason = exception is OperationCanceledException
+                        ? "provider_call_canceled_ambiguous"
+                        : "provider_call_exception_ambiguous";
+                    logger.LogError(
+                        "Autopilot provider call threw after a durable claim; retaining the global slot. WaveKey={WaveKey}; TaskKey={TaskKey}; ExceptionType={ExceptionType}",
+                        waveKey, task.TaskKey, exception.GetType().Name);
+
+                    var ambiguousException = await globalTaskSlots!.RecordAmbiguousAsync(
+                        task.Id,
+                        idempotencyKey,
+                        exceptionReason,
+                        CancellationToken.None);
+                    task = await ReloadLaunchTaskFreshAsync(task.Id, CancellationToken.None)
+                        ?? throw new InvalidOperationException("The durable launch row disappeared after a thrown provider call.");
+                    if (task.Status == AutopilotWaveLaunchStatuses.Completed)
+                    {
+                        await EnsureCompletionRefillBatchAsync(task, now, CancellationToken.None);
+                        actions.Add($"next_wave_provider_exception_after_verified_completion:{waveKey}:{task.TaskKey}");
+                        if (callerCanceled)
+                        {
+                            await FlushAsync(audit, CancellationToken.None);
+                            throw;
+                        }
+
+                        continue;
+                    }
+
+                    blocked++;
+                    actions.Add($"next_wave_blocked:{waveKey}:ambiguous_provider_exception");
+                    audit.Add(Audit(AutopilotAuditActions.NextWaveLaunchBlocked, AutopilotAuditOutcomes.Blocked,
+                        reason: ambiguousException.ReasonCode ?? exceptionReason,
+                        statusDetail: ambiguousException.SlotHeld
+                            ? "global_slot_retained_until_authoritative_reconciliation"
+                            : "launch_state_uncertain; backlog_claim_retained_no_retry",
+                        waveKey: waveKey,
+                        taskId: task.TaskKey,
+                        attempt: task.LaunchAttempt,
+                        targetId: task.Id,
+                        dryRun: false));
+                    audit.Add(Audit(AutopilotAuditActions.HumanDecisionRequired, AutopilotAuditOutcomes.Required,
+                        reason: AutopilotHumanDecisions.RepairEscalation,
+                        statusDetail: "ambiguous_provider_outcome_requires_authoritative_reconciliation",
+                        waveKey: waveKey,
+                        taskId: task.TaskKey,
+                        attempt: task.LaunchAttempt,
+                        targetId: task.Id,
+                        dryRun: false));
+                    if (callerCanceled)
+                    {
+                        await FlushAsync(audit, CancellationToken.None);
+                        throw;
+                    }
+
+                    continue;
+                }
                 if (result.IsLaunched)
                 {
                     if (string.IsNullOrWhiteSpace(result.ExternalTaskId))
@@ -1058,16 +1127,29 @@ public sealed class AutopilotNextWaveService(
             }
             else
             {
-                await using var pollFenceRelease = new CompletionLaunchFenceRelease(lockService, pollFence, logger);
-                var submission = await intake.SubmitInternalAsync(
-                    new AutopilotInternalSignalRequest(
-                        AutopilotInternalSignalSources.Polling,
-                        PollEventId(task.ExternalTaskId, state.Status),
-                        AutopilotEventTypes.WaveTaskCompleted,
-                        signal,
-                        "polling_fallback"),
-                    cancellationToken);
-                if (submission.Outcome is not (AutopilotIntakeOutcomes.Accepted or AutopilotIntakeOutcomes.Duplicate))
+                AutopilotIntakeResult submission;
+                bool pollFenceReleased;
+                await using (var pollFenceRelease = new CompletionLaunchFenceRelease(lockService, pollFence, logger))
+                {
+                    submission = await intake.SubmitInternalAsync(
+                        new AutopilotInternalSignalRequest(
+                            AutopilotInternalSignalSources.Polling,
+                            PollEventId(task.ExternalTaskId, state.Status),
+                            AutopilotEventTypes.WaveTaskCompleted,
+                            signal,
+                            "polling_fallback"),
+                        cancellationToken);
+                    pollFenceReleased = await pollFenceRelease.ReleaseAsync();
+                }
+
+                if (submission.Outcome is AutopilotIntakeOutcomes.Accepted or AutopilotIntakeOutcomes.Duplicate)
+                {
+                    if (pollFenceReleased)
+                        eventNotifier();
+                    else
+                        actions.Add($"next_wave_poll_event_wake_deferred:{task.WaveKey}:{task.TaskKey}:fence_release_uncertain");
+                }
+                else
                     actions.Add($"next_wave_poll_event_not_queued:{task.WaveKey}:{task.TaskKey}:{submission.Outcome}");
             }
 
@@ -2168,11 +2250,15 @@ public sealed class AutopilotNextWaveService(
         AutopilotLockHandle handle,
         ILogger logger) : IAsyncDisposable
     {
-        public async ValueTask DisposeAsync()
+        private bool? releaseResult;
+
+        public async ValueTask<bool> ReleaseAsync()
         {
+            if (releaseResult.HasValue) return releaseResult.Value;
             try
             {
-                if (!await locks.ReleaseAsync(handle, CancellationToken.None))
+                releaseResult = await locks.ReleaseAsync(handle, CancellationToken.None);
+                if (!releaseResult.Value)
                     logger.LogError("Autopilot completion/launch fence release lost ownership. Resource={ResourceKey}; FencingToken={FencingToken}",
                         handle.ResourceKey, handle.FencingToken);
             }
@@ -2180,7 +2266,12 @@ public sealed class AutopilotNextWaveService(
             {
                 logger.LogError(exception, "Autopilot completion/launch fence release failed. Resource={ResourceKey}; FencingToken={FencingToken}",
                     handle.ResourceKey, handle.FencingToken);
+                releaseResult = false;
             }
+
+            return releaseResult.Value;
         }
+
+        public async ValueTask DisposeAsync() => _ = await ReleaseAsync();
     }
 }

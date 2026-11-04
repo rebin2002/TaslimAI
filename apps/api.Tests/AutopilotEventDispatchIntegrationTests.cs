@@ -295,7 +295,11 @@ public sealed class AutopilotEventDispatchIntegrationTests
         Environment.SetEnvironmentVariable("AUTOPILOT_WEBHOOK_SECRET", SigningSecret);
         try
         {
-            using var factory = new DispatchTestFactory();
+            var wakeCalls = 0;
+            using var factory = new DispatchTestFactory
+            {
+                NotifyCommittedEventOverride = () => Interlocked.Increment(ref wakeCalls),
+            };
             using var client = factory.CreateClient();
             using (var setupScope = factory.Services.CreateScope())
             {
@@ -314,6 +318,7 @@ public sealed class AutopilotEventDispatchIntegrationTests
             {
                 Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
             }
+            Assert.Equal(1, Volatile.Read(ref wakeCalls));
 
             using var scope = factory.Services.CreateScope();
             var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
@@ -389,6 +394,43 @@ public sealed class AutopilotEventDispatchIntegrationTests
         }
     }
 
+    [Fact]
+    public async Task Signed_intake_lock_acquire_exception_returns_retryable_without_persistence()
+    {
+        var previousSecret = Environment.GetEnvironmentVariable("AUTOPILOT_WEBHOOK_SECRET");
+        Environment.SetEnvironmentVariable("AUTOPILOT_WEBHOOK_SECRET", SigningSecret);
+        try
+        {
+            using var factory = new DispatchTestFactory
+            {
+                LockServiceOverride = _ => new AcquireFailureLockService(),
+            };
+            using var client = factory.CreateClient();
+            using (var scope = factory.Services.CreateScope())
+            {
+                var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+                await db.Database.EnsureCreatedAsync();
+            }
+
+            var eventId = $"evt-fence-acquire-failure-{Guid.NewGuid():N}";
+            var payload = BridgeV4TerminalReceiptCompletionPayload(eventId, "ABCDEFGHIJKLMNOPQRSTUV");
+            using (var response = await PostSignedEventAsync(
+                client, payload, eventId, ManusBridgeWaveLaunchProvider.Key))
+            {
+                Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+                Assert.Contains("AUTOPILOT_EVENT_RETRY", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+            }
+
+            using var verify = factory.Services.CreateScope();
+            var persistedDb = verify.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            Assert.Empty(await persistedDb.AutopilotEvents.ToListAsync());
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("AUTOPILOT_WEBHOOK_SECRET", previousSecret);
+        }
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -398,9 +440,11 @@ public sealed class AutopilotEventDispatchIntegrationTests
         Environment.SetEnvironmentVariable("AUTOPILOT_WEBHOOK_SECRET", SigningSecret);
         try
         {
+            var wakeCalls = 0;
             using var factory = new DispatchTestFactory
             {
                 LockServiceOverride = _ => new ReleaseFailureLockService(throwOnRelease),
+                NotifyCommittedEventOverride = () => Interlocked.Increment(ref wakeCalls),
             };
             using var client = factory.CreateClient();
             using (var scope = factory.Services.CreateScope())
@@ -425,6 +469,7 @@ public sealed class AutopilotEventDispatchIntegrationTests
             Assert.True(saved.ReplayProtected);
             Assert.Equal(1, await persistedDb.AutopilotEvents.CountAsync(item =>
                 item.SourceSystem == ManusBridgeWaveLaunchProvider.Key && item.ExternalEventId == eventId));
+            Assert.Equal(0, Volatile.Read(ref wakeCalls));
         }
         finally
         {
@@ -833,6 +878,7 @@ public sealed class AutopilotEventDispatchIntegrationTests
         private readonly string databasePath = Path.Combine(Path.GetTempPath(), $"taslim-event-dispatch-{Guid.NewGuid():N}.db");
         public FakeWaveLaunchProvider Provider { get; } = new();
         public Func<TaslimDbContext, IAutopilotLockService>? LockServiceOverride { get; init; }
+        public Action? NotifyCommittedEventOverride { get; init; }
 
         private string ConnectionString => new SqliteConnectionStringBuilder
         {
@@ -868,6 +914,8 @@ public sealed class AutopilotEventDispatchIntegrationTests
                     services.RemoveAll<IAutopilotLockService>();
                     services.AddScoped(provider => LockServiceOverride(provider.GetRequiredService<TaslimDbContext>()));
                 }
+                if (NotifyCommittedEventOverride is not null)
+                    services.AddSingleton(NotifyCommittedEventOverride);
             });
         }
 
@@ -903,6 +951,18 @@ public sealed class AutopilotEventDispatchIntegrationTests
             if (throwOnRelease) throw new InvalidOperationException("Synthetic release failure.");
             return Task.FromResult(false);
         }
+    }
+
+    private sealed class AcquireFailureLockService : IAutopilotLockService
+    {
+        public Task<AutopilotLockHandle> AcquireAsync(
+            string resourceKey,
+            string heldBy,
+            CancellationToken cancellationToken = default) =>
+            Task.FromException<AutopilotLockHandle>(new InvalidOperationException("Synthetic lock-store failure."));
+
+        public Task<bool> ReleaseAsync(AutopilotLockHandle handle, CancellationToken cancellationToken = default) =>
+            Task.FromResult(false);
     }
 
     private sealed class FakeWaveLaunchProvider : IWaveLaunchProvider

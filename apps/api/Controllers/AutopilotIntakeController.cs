@@ -22,8 +22,10 @@ public sealed class AutopilotIntakeController(
     IAutopilotEventIntake intake,
     AutopilotOptions options,
     IAutopilotLockService locks,
-    ILogger<AutopilotIntakeController> logger) : ControllerBase
+    ILogger<AutopilotIntakeController> logger,
+    Action? notifyCommittedEvent = null) : ControllerBase
 {
+    private readonly Action eventNotifier = notifyCommittedEvent ?? AutopilotEventDispatchSignal.NotifyCommittedEvent;
     public const string SignatureHeader = "X-Autopilot-Signature";
     public const string TimestampHeader = "X-Autopilot-Timestamp";
     public const string SourceHeader = "X-Autopilot-Source";
@@ -49,10 +51,23 @@ public sealed class AutopilotIntakeController(
         if (!HasValidManusBridgeReceiptEventIdBinding(payloadResult.Payload, source, externalEventId, eventType))
             return ApiResults.Error(this, StatusCodes.Status400BadRequest, "AUTOPILOT_EVENT_REJECTED", "The event was rejected.");
 
-        var fence = await locks.AcquireAsync(
-            AutopilotCompletionLaunchFence.ResourceKey,
-            "autopilot-event-intake",
-            cancellationToken);
+        AutopilotLockHandle fence;
+        try
+        {
+            fence = await locks.AcquireAsync(
+                AutopilotCompletionLaunchFence.ResourceKey,
+                "autopilot-event-intake",
+                cancellationToken);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            logger.LogError(
+                "Autopilot intake fence acquisition failed. EventId={EventId}; ExceptionType={ExceptionType}",
+                externalEventId, exception.GetType().Name);
+            return ApiResults.Error(this, StatusCodes.Status503ServiceUnavailable,
+                "AUTOPILOT_EVENT_RETRY", "The event was not accepted; retry the same event ID and payload.");
+        }
+
         if (!fence.IsAcquired)
             return ApiResults.Error(this, StatusCodes.Status503ServiceUnavailable,
                 "AUTOPILOT_EVENT_RETRY", "The event was not accepted; retry the same event ID and payload.");
@@ -82,15 +97,15 @@ public sealed class AutopilotIntakeController(
             }
         }
 
-        if (result.Outcome is AutopilotIntakeOutcomes.Accepted or AutopilotIntakeOutcomes.Duplicate)
-            AutopilotEventDispatchSignal.NotifyCommittedEvent();
-
         if (!fenceReleased)
         {
             logger.LogError("Autopilot intake lost its completion/launch fence before acknowledgement. EventId={EventId}", externalEventId);
             return ApiResults.Error(this, StatusCodes.Status503ServiceUnavailable,
                 "AUTOPILOT_EVENT_RETRY", "The event acknowledgement is uncertain; retry the same event ID and payload.");
         }
+
+        if (result.Outcome is AutopilotIntakeOutcomes.Accepted or AutopilotIntakeOutcomes.Duplicate)
+            eventNotifier();
 
         return result.Outcome switch
         {

@@ -1095,6 +1095,78 @@ public sealed class AutopilotNextWaveLaunchTests
         Assert.Equal(1, host.Provider.LaunchCalls);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Provider_exception_or_timeout_is_persisted_as_ambiguous_and_never_retried(bool timeoutLike)
+    {
+        using var host = new Host(options =>
+        {
+            options.DryRun = false;
+            options.AllowNextWaveLaunch = true;
+            options.AllowNextWaveLaunchWhenReleasePending = true;
+        });
+        await host.AddBacklogAsync("bl-provider-throw", "Retain claim after provider throws");
+        host.Provider.LaunchExceptionFactory = _ => timeoutLike
+            ? new OperationCanceledException("synthetic provider timeout")
+            : new HttpRequestException("synthetic transport loss after possible create");
+
+        await host.GreenRunAsync("wave-provider-throw");
+
+        Assert.Equal(1, host.Provider.LaunchCalls);
+        using (var db = host.CreateContext())
+        {
+            var task = await db.AutopilotWaveLaunchTasks.SingleAsync();
+            Assert.Equal(AutopilotWaveLaunchStatuses.Launching, task.Status);
+            Assert.Equal("global_slot_reserved", task.ReasonCode);
+            Assert.StartsWith("slot_retained_until_authoritative_reconciliation:provider_call_", task.LastStatusDetail);
+            Assert.Equal("wave-provider-throw-next",
+                (await db.AutopilotBacklogItems.SingleAsync(item => item.ItemKey == "bl-provider-throw")).ConsumedByWaveKey);
+            Assert.Contains(await db.AutopilotAuditEvents.ToListAsync(), item =>
+                item.Action == AutopilotAuditActions.HumanDecisionRequired
+                && item.Reason == AutopilotHumanDecisions.RepairEscalation
+                && item.StatusDetail == "ambiguous_provider_outcome_requires_authoritative_reconciliation");
+        }
+
+        host.Time.Advance(TimeSpan.FromDays(1));
+        await host.LaunchAsync();
+        Assert.Equal(1, host.Provider.LaunchCalls);
+    }
+
+    [Fact]
+    public async Task Caller_cancellation_during_provider_call_persists_ambiguous_state_before_propagating()
+    {
+        using var host = new Host(options =>
+        {
+            options.DryRun = false;
+            options.AllowNextWaveLaunch = false;
+            options.AllowNextWaveLaunchWhenReleasePending = true;
+        });
+        await host.AddBacklogAsync("bl-provider-cancel", "Retain claim when caller cancels create");
+        await host.GreenRunAsync("wave-provider-cancel");
+        host.Options.AllowNextWaveLaunch = true;
+
+        using var cancellation = new CancellationTokenSource();
+        host.Provider.LaunchExceptionFactory = _ =>
+        {
+            cancellation.Cancel();
+            return new OperationCanceledException(cancellation.Token);
+        };
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => host.LaunchAsync(cancellation.Token));
+
+        Assert.Equal(1, host.Provider.LaunchCalls);
+        using var db = host.CreateContext();
+        var task = await db.AutopilotWaveLaunchTasks.SingleAsync();
+        Assert.Equal(AutopilotWaveLaunchStatuses.Launching, task.Status);
+        Assert.StartsWith("slot_retained_until_authoritative_reconciliation:provider_call_canceled_ambiguous", task.LastStatusDetail);
+        Assert.Equal("wave-provider-cancel-next",
+            (await db.AutopilotBacklogItems.SingleAsync(item => item.ItemKey == "bl-provider-cancel")).ConsumedByWaveKey);
+        Assert.Contains(await db.AutopilotAuditEvents.ToListAsync(), item =>
+            item.Action == AutopilotAuditActions.HumanDecisionRequired
+            && item.Reason == AutopilotHumanDecisions.RepairEscalation);
+    }
+
     [Fact]
     public async Task Bridge_http_502_task_creation_ambiguous_holds_slot_and_never_retries_create()
     {
@@ -1821,6 +1893,73 @@ public sealed class AutopilotNextWaveLaunchTests
     }
 
     [Fact]
+    public async Task Poll_diagnostic_commit_notifies_event_dispatch_after_the_event_is_durable()
+    {
+        var wakeCalls = 0;
+        var durableAtWake = 0;
+        Host? hostReference = null;
+        using var host = new Host(options =>
+        {
+            options.DryRun = false;
+            options.AllowNextWaveLaunch = true;
+            options.AllowNextWaveLaunchWhenReleasePending = true;
+        }, notifyCommittedEvent: () =>
+        {
+            Interlocked.Increment(ref wakeCalls);
+            using var db = hostReference!.CreateContext();
+            if (db.AutopilotEvents.Any(item => item.SourceSystem == AutopilotInternalSignalSources.Polling))
+                Interlocked.Increment(ref durableAtWake);
+        });
+        hostReference = host;
+        await host.AddBacklogAsync("bl-poll-wake", "Verify internal poll event wake");
+        await host.GreenRunAsync("wave-poll-wake");
+
+        host.Provider.StateResolver = _ => new WaveLaunchTaskState(
+            WaveLaunchTaskStates.Succeeded, IsTerminal: true, IsSuccess: true, ExternalRef: "poll-ref", StatusDetail: "synthetic poll success");
+        host.Time.Advance(TimeSpan.FromMinutes(45));
+        var result = await host.ReconcileLaunchesAsync();
+
+        Assert.Equal(1, result.TasksReconciled);
+        Assert.Equal(1, Volatile.Read(ref wakeCalls));
+        Assert.Equal(1, Volatile.Read(ref durableAtWake));
+        using var verify = host.CreateContext();
+        var diagnostic = await verify.AutopilotEvents.SingleAsync(item =>
+            item.SourceSystem == AutopilotInternalSignalSources.Polling);
+        Assert.Equal(AutopilotEventStatuses.Queued, diagnostic.Status);
+        Assert.False(diagnostic.SignatureVerified);
+        Assert.False(diagnostic.ReplayProtected);
+        Assert.Equal(1, host.Provider.LaunchCalls);
+    }
+
+    [Fact]
+    public async Task Poll_diagnostic_with_uncertain_fence_release_is_durable_but_not_signaled()
+    {
+        var wakeCalls = 0;
+        using var host = new Host(options =>
+        {
+            options.DryRun = false;
+            options.AllowNextWaveLaunch = true;
+            options.AllowNextWaveLaunchWhenReleasePending = true;
+        }, lockServiceOverride: new CompletionFenceReleaseFailureLockService(),
+            notifyCommittedEvent: () => Interlocked.Increment(ref wakeCalls));
+        await host.AddBacklogAsync("bl-poll-wake-release", "Verify wake waits for fence release");
+        await host.GreenRunAsync("wave-poll-wake-release");
+
+        host.Provider.StateResolver = _ => new WaveLaunchTaskState(
+            WaveLaunchTaskStates.Succeeded, IsTerminal: true, IsSuccess: true, ExternalRef: "poll-ref", StatusDetail: "synthetic poll success");
+        host.Time.Advance(TimeSpan.FromMinutes(45));
+        var result = await host.ReconcileLaunchesAsync();
+
+        Assert.Equal(1, result.TasksReconciled);
+        Assert.Equal(0, Volatile.Read(ref wakeCalls));
+        using var verify = host.CreateContext();
+        var diagnostic = await verify.AutopilotEvents.SingleAsync(item =>
+            item.SourceSystem == AutopilotInternalSignalSources.Polling);
+        Assert.Equal(AutopilotEventStatuses.Queued, diagnostic.Status);
+        Assert.Equal(1, host.Provider.LaunchCalls);
+    }
+
+    [Fact]
     public async Task Queued_unsigned_poll_observation_does_not_block_verified_receipt_refill()
     {
         using var host = new Host(options =>
@@ -2164,6 +2303,8 @@ public sealed class AutopilotNextWaveLaunchTests
 
         public Func<string, CancellationToken, Task>? BeforeStateReturnAsync { get; set; }
 
+        public Func<CancellationToken, Exception>? LaunchExceptionFactory { get; set; }
+
         public async Task<WaveLaunchProviderResult> LaunchTaskAsync(WaveLaunchProviderRequest request, CancellationToken cancellationToken = default)
         {
             WaveLaunchProviderResult result;
@@ -2175,6 +2316,9 @@ public sealed class AutopilotNextWaveLaunchTests
                     ? Results.Dequeue()
                     : WaveLaunchProviderResult.Launched($"ext-{request.TaskKey}");
             }
+
+            if (LaunchExceptionFactory is not null)
+                throw LaunchExceptionFactory(cancellationToken);
 
             if (BeforeReturnAsync is not null && result.IsLaunched && result.ExternalTaskId is not null)
                 await BeforeReturnAsync(request, result.ExternalTaskId, cancellationToken);
@@ -2223,6 +2367,29 @@ public sealed class AutopilotNextWaveLaunchTests
             Task.FromResult(true);
     }
 
+    private sealed class CompletionFenceReleaseFailureLockService : IAutopilotLockService
+    {
+        private long fencingToken;
+
+        public Task<AutopilotLockHandle> AcquireAsync(
+            string resourceKey,
+            string heldBy,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(new AutopilotLockHandle(
+                resourceKey,
+                Guid.NewGuid().ToString("N"),
+                Interlocked.Increment(ref fencingToken),
+                true,
+                heldBy,
+                DateTime.UtcNow.AddMinutes(10)));
+
+        public Task<bool> ReleaseAsync(AutopilotLockHandle handle, CancellationToken cancellationToken = default) =>
+            Task.FromResult(!string.Equals(
+                handle.ResourceKey,
+                AutopilotCompletionLaunchFence.ResourceKey,
+                StringComparison.Ordinal));
+    }
+
     private sealed class Host : IDisposable
     {
         private const string TestTaslimScopeId = "taslim-autopilot-test-scope";
@@ -2231,17 +2398,20 @@ public sealed class AutopilotNextWaveLaunchTests
         private readonly bool enableGlobalSlotServices;
         private readonly IWaveLaunchProvider? launchProviderOverride;
         private readonly IAutopilotLockService? lockServiceOverride;
+        private readonly Action? notifyCommittedEvent;
 
         public Host(
             Action<AutopilotOptions>? configure = null,
             bool enableGlobalSlotServices = true,
             DbContextOptions<TaslimDbContext>? databaseOptions = null,
             IWaveLaunchProvider? launchProviderOverride = null,
-            IAutopilotLockService? lockServiceOverride = null)
+            IAutopilotLockService? lockServiceOverride = null,
+            Action? notifyCommittedEvent = null)
         {
             this.enableGlobalSlotServices = enableGlobalSlotServices;
             this.launchProviderOverride = launchProviderOverride;
             this.lockServiceOverride = lockServiceOverride;
+            this.notifyCommittedEvent = notifyCommittedEvent;
             if (databaseOptions is null)
             {
                 connection = new SqliteConnection("DataSource=:memory:");
@@ -2283,10 +2453,10 @@ public sealed class AutopilotNextWaveLaunchTests
             return await CreateOrchestrator(db).ProcessPendingEventsAsync();
         }
 
-        public async Task<AutopilotNextWaveCycleResult> LaunchAsync()
+        public async Task<AutopilotNextWaveCycleResult> LaunchAsync(CancellationToken cancellationToken = default)
         {
             using var db = CreateContext();
-            return await CreateNextWaveService(db).TryLaunchNextWavesAsync();
+            return await CreateNextWaveService(db).TryLaunchNextWavesAsync(cancellationToken);
         }
 
         public async Task<AutopilotNextWaveCycleResult> ReconcileLaunchesAsync()
@@ -2685,7 +2855,7 @@ public sealed class AutopilotNextWaveLaunchTests
                 ? new AutopilotGlobalTaskInventoryReader(InventorySource, TestTaslimScopeId)
                 : null;
             return new(db, Options, launchProviderOverride ?? Provider, CreateIntake(db), Time,
-                NullLogger<AutopilotNextWaveService>.Instance, CreateLockService(db), allocator, inventory);
+                NullLogger<AutopilotNextWaveService>.Instance, CreateLockService(db), allocator, inventory, notifyCommittedEvent);
         }
 
         private AutopilotOrchestrator CreateOrchestrator(TaslimDbContext db) =>
