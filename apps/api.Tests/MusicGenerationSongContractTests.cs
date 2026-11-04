@@ -414,6 +414,40 @@ public sealed class MusicGenerationSongContractTests : IClassFixture<MusicSongCa
         Assert.False(await db.UsageTransactions.AsNoTracking().AnyAsync(item => item.UserId == auth.User.Id));
     }
 
+    [Theory]
+    [InlineData("audio")]
+    [InlineData("video")]
+    public async Task Reference_assets_without_rights_attestation_fail_before_cost_preflight_job_creation_or_provider_call(string mediaType)
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, $"music-reference-rights-{Guid.NewGuid():N}@example.com");
+        var response = await SendWithCsrf(client, new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            description = "A synthetic reference-rights test only",
+            purpose = "Verify missing reference consent cannot create a charge or job",
+            genre = "ambient",
+            mood = "calm",
+            durationSeconds = 60,
+            creationMode = "instrumental",
+            vocalPreference = "instrumental",
+            language = "en",
+            referenceRightsConfirmed = false,
+            referenceAssets = new[] { new { mediaType, assetId = Guid.NewGuid() } },
+        });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(GenerationJobErrorCodes.MusicRequestInvalid, body.GetProperty("error").GetProperty("code").GetString());
+        Assert.Equal(0, factory.Services.GetRequiredService<CountingUsageCostControl>().PreflightCalls);
+        Assert.Equal(0, factory.Services.GetRequiredService<NoCallMusicProvider>().Calls);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.False(await db.GenerationJobs.AsNoTracking().AnyAsync(item => item.CreatedByUserId == auth.User.Id));
+        Assert.False(await db.UsageTransactions.AsNoTracking().AnyAsync(item => item.UserId == auth.User.Id));
+    }
+
     private static MusicGenerationOptions Options(string providerKey) => new() { ProviderKey = providerKey };
 
     private static MusicGenerationInput InstrumentalInput() => new(
