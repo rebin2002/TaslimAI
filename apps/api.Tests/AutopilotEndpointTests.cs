@@ -329,7 +329,7 @@ public sealed class AutopilotEndpointTests : IClassFixture<TaslimApiFactory>
     }
 
     [Fact]
-    public async Task Sustained_arrivals_exhaust_a_whole_cycle_budget_and_backoff_blocks_launch_until_recovery()
+    public async Task Sustained_multi_producer_arrivals_exhaust_a_whole_cycle_budget_and_backoff_blocks_launch_until_recovery()
     {
         using var host = new EventDrainTestHost();
         var waveKey = "wave-continuous-arrivals";
@@ -341,15 +341,21 @@ public sealed class AutopilotEndpointTests : IClassFixture<TaslimApiFactory>
         var firstCycleTask = host.ProcessPendingEventsAsync();
         await barrier.AcquireEntered.Task.WaitAsync(TimeSpan.FromSeconds(10));
 
-        var delayedEventId = await Task.Run(async () =>
+        var producerStart = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var dueProducers = Enumerable.Range(0, 3).Select(_ => Task.Run(async () =>
         {
-            for (var index = 0; index < 6; index++)
-                await host.SubmitCompletionAsync(waveKey);
+            await producerStart.Task;
+            var eventIds = new List<string>();
+            for (var index = 0; index < 2; index++)
+                eventIds.Add(await host.SubmitCompletionAsync(waveKey));
+            return eventIds;
+        })).ToArray();
+        producerStart.SetResult(true);
+        var producedEventIds = await Task.WhenAll(dueProducers).WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal(6, producedEventIds.SelectMany(ids => ids).Distinct(StringComparer.Ordinal).Count());
 
-            var id = await host.SubmitCompletionAsync(waveKey);
-            await host.SetEventBackoffAsync(id, host.Clock.GetUtcNow().UtcDateTime.AddMinutes(5));
-            return id;
-        }).WaitAsync(TimeSpan.FromSeconds(10));
+        var delayedEventId = await host.SubmitCompletionAsync(waveKey);
+        await host.SetEventBackoffAsync(delayedEventId, host.Clock.GetUtcNow().UtcDateTime.AddMinutes(5));
 
         barrier.ReleaseGate.TrySetResult(true);
         var firstCycle = await firstCycleTask.WaitAsync(TimeSpan.FromSeconds(10));

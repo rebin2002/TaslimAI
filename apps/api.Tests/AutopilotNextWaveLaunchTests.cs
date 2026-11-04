@@ -892,9 +892,13 @@ public sealed class AutopilotNextWaveLaunchTests
             await host.GreenRunAsync("wave-ambiguous-502");
             Assert.Equal(1, handler.Requests.Count(item => item.Method == HttpMethod.Post));
 
+            string lateWaveKey;
+            string lateTaskKey;
             using (var db = host.CreateContext())
             {
                 var task = await db.AutopilotWaveLaunchTasks.SingleAsync();
+                lateWaveKey = task.WaveKey;
+                lateTaskKey = task.TaskKey;
                 Assert.Equal(AutopilotWaveLaunchStatuses.Launching, task.Status);
                 Assert.Equal(1, task.LaunchAttempt);
                 Assert.Equal("global_slot_reserved", task.ReasonCode);
@@ -902,6 +906,48 @@ public sealed class AutopilotNextWaveLaunchTests
                 var backlog = await db.AutopilotBacklogItems.SingleAsync(item => item.ItemKey == "bl-ambiguous-502");
                 Assert.Equal(task.WaveKey, backlog.ConsumedByWaveKey);
             }
+
+            // A late signed terminal callback cannot supply the missing durable
+            // native-ID mapping after an ambiguous create; keep the reservation.
+            const string lateNativeTaskId = "1234567890123456789012";
+            const string lateEventId = "late-receipt-after-ambiguous-502";
+            var lateReceipt = JsonSerializer.Serialize(new AutopilotGlobalTaskDetailTerminalReceipt(
+                AutopilotGlobalTaskDetailTerminalReceipt.RequiredKind,
+                lateNativeTaskId,
+                "stopped",
+                "finish",
+                false,
+                lateEventId));
+            var lateSubmission = await host.SubmitSignedCompletionAsync(
+                lateWaveKey,
+                lateTaskKey,
+                expectedTaskCount: 1,
+                evidence: lateReceipt,
+                externalEventId: lateEventId);
+            Assert.Equal(AutopilotIntakeOutcomes.Accepted, lateSubmission.Outcome);
+            await host.RunCycleAsync();
+
+            using (var db = host.CreateContext())
+            {
+                var task = await db.AutopilotWaveLaunchTasks.SingleAsync();
+                Assert.Equal(AutopilotWaveLaunchStatuses.Launching, task.Status);
+                Assert.Equal(1, task.LaunchAttempt);
+                Assert.Equal("global_slot_reserved", task.ReasonCode);
+                Assert.Null(task.ExternalTaskId);
+                var lateEvent = await db.AutopilotEvents.SingleAsync(item => item.ExternalEventId == lateEventId);
+                Assert.Equal(AutopilotEventStatuses.Processed, lateEvent.Status);
+                Assert.Equal(lateEventId, lateEvent.ExternalEventId);
+            }
+            Assert.Single(handler.Requests);
+
+            var duplicateLateEvent = await host.SubmitSignedCompletionAsync(
+                lateWaveKey,
+                lateTaskKey,
+                expectedTaskCount: 1,
+                evidence: lateReceipt,
+                externalEventId: lateEventId);
+            Assert.Equal(AutopilotIntakeOutcomes.Duplicate, duplicateLateEvent.Outcome);
+            await host.RunCycleAsync();
 
             host.Time.Advance(TimeSpan.FromHours(1));
             await host.LaunchAsync();
