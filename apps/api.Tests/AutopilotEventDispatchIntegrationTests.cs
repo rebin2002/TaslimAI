@@ -160,6 +160,141 @@ public sealed class AutopilotEventDispatchIntegrationTests
     }
 
     [Fact]
+    public async Task Manus_bridge_receipt_event_id_mismatch_or_absence_is_rejected_before_persistence()
+    {
+        var previousSecret = Environment.GetEnvironmentVariable("AUTOPILOT_WEBHOOK_SECRET");
+        Environment.SetEnvironmentVariable("AUTOPILOT_WEBHOOK_SECRET", SigningSecret);
+        try
+        {
+            using var factory = new DispatchTestFactory();
+            using var client = factory.CreateClient();
+            using (var scope = factory.Services.CreateScope())
+            {
+                var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+                await db.Database.EnsureCreatedAsync();
+            }
+
+            var headerEventId = $"evt-bridge-header-{Guid.NewGuid():N}";
+            var mismatchedPayload = TerminalReceiptCompletionPayload($"evt-bridge-body-{Guid.NewGuid():N}");
+            using (var mismatch = await PostSignedEventAsync(
+                client,
+                mismatchedPayload,
+                headerEventId,
+                ManusBridgeWaveLaunchProvider.Key))
+            {
+                Assert.Equal(HttpStatusCode.BadRequest, mismatch.StatusCode);
+            }
+
+            var missingEventId = $"evt-bridge-missing-{Guid.NewGuid():N}";
+            var missingPayload = TerminalReceiptCompletionPayload(string.Empty);
+            using (var missing = await PostSignedEventAsync(
+                client,
+                missingPayload,
+                missingEventId,
+                ManusBridgeWaveLaunchProvider.Key))
+            {
+                Assert.Equal(HttpStatusCode.BadRequest, missing.StatusCode);
+            }
+
+            var missingPropertyEventId = $"evt-bridge-no-property-{Guid.NewGuid():N}";
+            var receiptWithoutEventIdProperty = $$"""{"kind":"{{AutopilotGlobalTaskDetailTerminalReceipt.RequiredKind}}","task_id":"synthetic-native-task-detail-id","agent_status":"stopped","stop_reason":"finish","has_running_background_jobs":false}""";
+            var payloadWithoutEventIdProperty = TerminalReceiptCompletionPayloadWithEvidence(receiptWithoutEventIdProperty);
+            using (var missingProperty = await PostSignedEventAsync(
+                client,
+                payloadWithoutEventIdProperty,
+                missingPropertyEventId,
+                ManusBridgeWaveLaunchProvider.Key))
+            {
+                Assert.Equal(HttpStatusCode.BadRequest, missingProperty.StatusCode);
+            }
+
+            var duplicateEventId = $"evt-bridge-duplicate-{Guid.NewGuid():N}";
+            var duplicateReceipt = $$"""{"kind":"{{AutopilotGlobalTaskDetailTerminalReceipt.RequiredKind}}","task_id":"synthetic-native-task-detail-id","agent_status":"stopped","stop_reason":"finish","has_running_background_jobs":false,"event_id":"different-id","event_id":"{{duplicateEventId}}"}""";
+            var duplicatePayload = TerminalReceiptCompletionPayloadWithEvidence(duplicateReceipt);
+            using (var duplicate = await PostSignedEventAsync(
+                client,
+                duplicatePayload,
+                duplicateEventId,
+                ManusBridgeWaveLaunchProvider.Key))
+            {
+                Assert.Equal(HttpStatusCode.BadRequest, duplicate.StatusCode);
+            }
+
+            using (var scope = factory.Services.CreateScope())
+            {
+                var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+                Assert.Empty(await db.AutopilotEvents.ToListAsync());
+            }
+
+            var matchedEventId = $"evt-bridge-matched-{Guid.NewGuid():N}";
+            var matchedPayload = TerminalReceiptCompletionPayload(matchedEventId);
+            using (var matched = await PostSignedEventAsync(
+                client,
+                matchedPayload,
+                matchedEventId,
+                ManusBridgeWaveLaunchProvider.Key))
+            {
+                Assert.Equal(HttpStatusCode.Accepted, matched.StatusCode);
+            }
+
+            using (var scope = factory.Services.CreateScope())
+            {
+                var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+                var persisted = await db.AutopilotEvents.SingleAsync();
+                Assert.Equal(ManusBridgeWaveLaunchProvider.Key, persisted.SourceSystem);
+                Assert.Equal(matchedEventId, persisted.ExternalEventId);
+                Assert.Equal(AutopilotEventStatuses.Queued, persisted.Status);
+                Assert.True(persisted.SignatureVerified);
+                Assert.True(persisted.ReplayProtected);
+            }
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("AUTOPILOT_WEBHOOK_SECRET", previousSecret);
+        }
+    }
+
+    [Fact]
+    public async Task Manus_bridge_non_success_signal_with_plain_evidence_remains_eligible_for_signed_intake()
+    {
+        var previousSecret = Environment.GetEnvironmentVariable("AUTOPILOT_WEBHOOK_SECRET");
+        Environment.SetEnvironmentVariable("AUTOPILOT_WEBHOOK_SECRET", SigningSecret);
+        try
+        {
+            using var factory = new DispatchTestFactory();
+            using var client = factory.CreateClient();
+            using (var setupScope = factory.Services.CreateScope())
+            {
+                var setupDb = setupScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+                await setupDb.Database.EnsureCreatedAsync();
+            }
+
+            var eventId = $"evt-bridge-failure-{Guid.NewGuid():N}";
+            var payload = BridgeFailureCompletionPayload("synthetic native task failure details");
+
+            using (var response = await PostSignedEventAsync(
+                client,
+                payload,
+                eventId,
+                ManusBridgeWaveLaunchProvider.Key))
+            {
+                Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+            }
+
+            using var scope = factory.Services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var persisted = await db.AutopilotEvents.SingleAsync();
+            Assert.Equal(eventId, persisted.ExternalEventId);
+            Assert.Equal(AutopilotEventStatuses.Queued, persisted.Status);
+            Assert.True(persisted.SignatureVerified);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("AUTOPILOT_WEBHOOK_SECRET", previousSecret);
+        }
+    }
+
+    [Fact]
     public async Task Startup_recovery_processes_committed_event_if_process_died_before_wake_signal()
     {
         var previousSecret = Environment.GetEnvironmentVariable("AUTOPILOT_WEBHOOK_SECRET");
@@ -455,7 +590,11 @@ public sealed class AutopilotEventDispatchIntegrationTests
             "finish",
             false,
             eventId));
-        return JsonSerializer.Serialize(new
+        return TerminalReceiptCompletionPayloadWithEvidence(receipt);
+    }
+
+    private static string TerminalReceiptCompletionPayloadWithEvidence(string receipt) =>
+        JsonSerializer.Serialize(new
         {
             waveKey = WaveKey,
             taskId = "finished-task-1",
@@ -469,13 +608,33 @@ public sealed class AutopilotEventDispatchIntegrationTests
             expectedTaskCount = 2,
             waveComplete = false,
         });
-    }
 
-    private static async Task<HttpResponseMessage> PostSignedEventAsync(HttpClient client, string payload, string eventId)
+    private static string BridgeFailureCompletionPayload(string evidence) =>
+        JsonSerializer.Serialize(new
+        {
+            waveKey = WaveKey,
+            taskId = "finished-task-1",
+            outcome = AutopilotTaskOutcomes.Failed,
+            failureClass = AutopilotFailureClasses.Infrastructure,
+            branch = "feature/synthetic-wave",
+            baseSha = BaseSha,
+            candidateSha = CandidateSha,
+            attempt = 1,
+            evidence,
+            checks = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase),
+            expectedTaskCount = 2,
+            waveComplete = false,
+        });
+
+    private static async Task<HttpResponseMessage> PostSignedEventAsync(
+        HttpClient client,
+        string payload,
+        string eventId,
+        string source = "completion-bridge")
     {
         var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString();
         using var content = new StringContent(payload, Encoding.UTF8, "application/json");
-        content.Headers.Add("X-Autopilot-Source", "completion-bridge");
+        content.Headers.Add("X-Autopilot-Source", source);
         content.Headers.Add("X-Autopilot-Event-Id", eventId);
         content.Headers.Add("X-Autopilot-Event-Type", AutopilotEventTypes.WaveTaskCompleted);
         content.Headers.Add("X-Autopilot-Timestamp", timestamp);
