@@ -76,6 +76,10 @@ public sealed class PublicFreeTierProviderSpendPolicyTests
         Assert.DoesNotContain(
             typeof(PublicFreeTierAdmissionRequest).GetProperties(),
             property => property.Name.Contains("Credit", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(
+            typeof(IPublicFreeTierSpendLedger).GetMethods(),
+            method => method.Name.Contains("Credit", StringComparison.OrdinalIgnoreCase)
+                || method.Name.Contains("Refund", StringComparison.OrdinalIgnoreCase));
         Assert.True(Evaluate(request: request).Allowed);
     }
 
@@ -437,6 +441,38 @@ public sealed class PublicFreeTierProviderSpendPolicyTests
     }
 
     [Fact]
+    public async Task Workspace_spend_caps_are_isolated_for_the_same_user()
+    {
+        var options = EnabledOptions();
+        options.MaxChatMessagesPerUserPerUtcDay = 10;
+        options.MaxChatMessagesPerUserPerUtcWeek = 10;
+        options.MaxProviderSpendPerWorkspacePerUtcDayUsd = 0.001m;
+        options.MaxProviderSpendPerWorkspacePerUtcMonthUsd = 0.001m;
+        var ledger = new AtomicTestLedger(options, NowUtc);
+
+        var firstWorkspace = await ledger.TryReserveBeforeProviderCallAsync(ValidRequest(
+            userId: UserId,
+            workspaceId: WorkspaceId,
+            idempotencyKey: "same-user-workspace-one") with { EstimatedProviderCostUsd = 0.001m });
+        var secondWorkspaceId = Guid.NewGuid();
+        var secondWorkspace = await ledger.TryReserveBeforeProviderCallAsync(ValidRequest(
+            userId: UserId,
+            workspaceId: secondWorkspaceId,
+            idempotencyKey: "same-user-workspace-two") with { EstimatedProviderCostUsd = 0.001m });
+        var overFirstWorkspaceCap = await ledger.TryReserveBeforeProviderCallAsync(ValidRequest(
+            userId: UserId,
+            workspaceId: WorkspaceId,
+            idempotencyKey: "same-user-workspace-one-over-cap") with { EstimatedProviderCostUsd = 0.001m });
+
+        Assert.True(firstWorkspace.Reserved);
+        Assert.True(secondWorkspace.Reserved);
+        Assert.False(overFirstWorkspaceCap.Reserved);
+        Assert.Equal("PUBLIC_FREE_TIER_WORKSPACE_DAILY_SPEND_LIMIT", overFirstWorkspaceCap.Decision.Code);
+        Assert.Equal(2, ledger.ReservationCount);
+        Assert.Equal(0.002m, ledger.GlobalExposureUsd);
+    }
+
+    [Fact]
     public async Task Failed_provider_call_keeps_unknown_estimate_until_reconciled()
     {
         var ledger = new AtomicTestLedger(EnabledOptions(), NowUtc);
@@ -493,6 +529,50 @@ public sealed class PublicFreeTierProviderSpendPolicyTests
         Assert.True(result.Applied);
         Assert.False(result.ReconciliationRequired);
         Assert.Equal(0.004m, ledger.GlobalExposureUsd);
+        Assert.Equal(0, ledger.UnknownExposureCount);
+    }
+
+    [Fact]
+    public async Task Settlement_replay_or_late_completion_cannot_refund_provider_exposure()
+    {
+        var ledger = new AtomicTestLedger(EnabledOptions(), NowUtc);
+        var reservation = await ledger.TryReserveBeforeProviderCallAsync(
+            ValidRequest(idempotencyKey: "settlement-no-refund") with { EstimatedProviderCostUsd = 0.009m });
+        var dispatch = await ledger.TryAuthorizeProviderDispatchAsync(reservation.ReservationId!.Value, "settlement-no-refund-dispatch");
+        Assert.True(dispatch.DispatchAuthorized);
+
+        var settled = await ledger.RecordProviderOutcomeAsync(
+            reservation.ReservationId.Value,
+            "authoritative-provider-actual",
+            PublicFreeTierProviderOutcome.Succeeded,
+            actualCostKnown: true,
+            actualProviderCostUsd: 0.006m);
+        var replay = await ledger.RecordProviderOutcomeAsync(
+            reservation.ReservationId.Value,
+            "authoritative-provider-actual",
+            PublicFreeTierProviderOutcome.Succeeded,
+            actualCostKnown: true,
+            actualProviderCostUsd: 0.006m);
+        var conflictingReplay = await ledger.RecordProviderOutcomeAsync(
+            reservation.ReservationId.Value,
+            "authoritative-provider-actual",
+            PublicFreeTierProviderOutcome.Succeeded,
+            actualCostKnown: true,
+            actualProviderCostUsd: 0m);
+        var lateAdjustment = await ledger.RecordProviderOutcomeAsync(
+            reservation.ReservationId.Value,
+            "late-adjustment-must-not-refund-provider-cost",
+            PublicFreeTierProviderOutcome.Succeeded,
+            actualCostKnown: true,
+            actualProviderCostUsd: 0m);
+
+        Assert.True(settled.Applied);
+        Assert.True(replay.IsIdempotentReplay);
+        Assert.False(conflictingReplay.Applied);
+        Assert.Equal("COMPLETION_KEY_CONFLICT", conflictingReplay.Code);
+        Assert.False(lateAdjustment.Applied);
+        Assert.Equal("RESERVATION_ALREADY_FINALIZED", lateAdjustment.Code);
+        Assert.Equal(0.006m, ledger.GlobalExposureUsd);
         Assert.Equal(0, ledger.UnknownExposureCount);
     }
 
