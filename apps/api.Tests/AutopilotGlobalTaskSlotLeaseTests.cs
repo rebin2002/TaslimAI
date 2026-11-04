@@ -724,6 +724,64 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
         Assert.False(excess.MayCallProvider);
     }
 
+    [Theory]
+    [InlineData("running")]
+    [InlineData("waiting")]
+    public async Task Locally_completed_task_resumed_as_running_or_waiting_still_occupies_its_global_slot(string resumedStatus)
+    {
+        var taskIds = await SeedLaunchTasksAsync(total: 22, initiallyActive: 20, tasksPerWave: 22);
+        string resumedExternalTaskId;
+        string completionKey;
+        await using (var db = CreateContext())
+        {
+            var task = await db.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskIds[0]);
+            resumedExternalTaskId = task.ExternalTaskId!;
+            completionKey = AutopilotGlobalTaskSlotIdentity.CreateIdempotencyKey(task.WaveKey, task.TaskKey);
+        }
+
+        var completionEventId = await SeedCompletionEventAsync(taskIds[0]);
+        await using (var db = CreateContext())
+        {
+            var completion = await CreateAllocator(db).CompleteVerifiedAsync(
+                taskIds[0], completionKey, resumedExternalTaskId, completionEventId);
+            Assert.Equal(AutopilotGlobalTaskSlotOutcomes.Completed, completion.Outcome);
+        }
+
+        var resumedInventory = new AutopilotGlobalTaskInventorySnapshot(
+            ScopeId,
+            true,
+            1,
+            false,
+            null,
+            Enumerable.Range(0, 20)
+                .Select(index => new AutopilotGlobalTaskInventoryItem(
+                    index == 0 ? resumedExternalTaskId : $"external-task-{index}",
+                    ScopeId,
+                    index == 0 ? resumedStatus : "running",
+                    null))
+                .ToArray());
+
+        var fakeProviderLaunches = 0;
+        var claim = await ClaimAsync(taskIds[20], resumedInventory);
+        if (claim.MayCallProvider) fakeProviderLaunches++;
+
+        Assert.Equal(AutopilotGlobalTaskSlotOutcomes.CapacityReached, claim.Outcome);
+        Assert.Equal(20, claim.ActiveSlotsObserved);
+        Assert.False(claim.MayCallProvider);
+        Assert.Equal(0, fakeProviderLaunches);
+
+        await using var verify = CreateContext();
+        var completedTask = await verify.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskIds[0]);
+        var unlaunchedFollowUp = await verify.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskIds[20]);
+        Assert.Equal(AutopilotWaveLaunchStatuses.Completed, completedTask.Status);
+        Assert.Equal(resumedExternalTaskId, completedTask.ExternalTaskId);
+        Assert.Equal(AutopilotWaveLaunchStatuses.Planned, unlaunchedFollowUp.Status);
+        Assert.Equal(0, unlaunchedFollowUp.LaunchAttempt);
+        Assert.Null(unlaunchedFollowUp.ExternalTaskId);
+        Assert.Equal(19, await verify.AutopilotWaveLaunchTasks.CountAsync(item =>
+            item.Status == AutopilotWaveLaunchStatuses.Launching || item.Status == AutopilotWaveLaunchStatuses.Launched));
+    }
+
     [Fact]
     public async Task Repeated_pagination_cursor_is_unknown_not_zero_occupancy()
     {

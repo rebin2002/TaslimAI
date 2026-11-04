@@ -935,8 +935,11 @@ public sealed class AutopilotGlobalTaskSlotAllocator
                 .Select(item => item.ExternalTaskId!)
                 .ToListAsync(cancellationToken)).ToHashSet(StringComparer.Ordinal);
 
+        // A local verified completion only deduplicates an external ID while Manus
+        // still reports it stopped; a resumed running/waiting task occupies capacity again.
         var externalActive = inventory.ActiveTasks
-            .Where(item => !recentlyCompletedIds.Contains(item.TaskId))
+            .Where(item => !recentlyCompletedIds.Contains(item.TaskId)
+                || !string.Equals(item.Status, "stopped", StringComparison.OrdinalIgnoreCase))
             .ToList();
         var externalActiveIds = externalActive.Select(item => item.TaskId).ToHashSet(StringComparer.Ordinal);
         var externalActiveKeys = externalActive
