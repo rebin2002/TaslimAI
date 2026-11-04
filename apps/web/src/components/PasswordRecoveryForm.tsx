@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { type FormEvent, useEffect, useMemo, useState } from "react";
+import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, ArrowRight, Check, CircleAlert, LockKeyhole, Mail, Languages } from "lucide-react";
 import { BrandMark } from "@/components/BrandMark";
 import { useLocale, localeNames, locales } from "@/components/LocaleProvider";
@@ -37,6 +37,8 @@ export function PasswordRecoveryForm({ mode }: Readonly<{ mode: RecoveryMode }>)
   const [recoveryAvailable, setRecoveryAvailable] = useState(false);
   const [availabilityResolved, setAvailabilityResolved] = useState(false);
   const isReset = mode === "reset";
+  const resetFragmentRef = useRef<string | null>(null);
+  const resetFragmentProcessedRef = useRef(false);
 
   useEffect(() => {
     let active = true;
@@ -48,9 +50,13 @@ export function PasswordRecoveryForm({ mode }: Readonly<{ mode: RecoveryMode }>)
   }, []);
 
   useEffect(() => {
-    if (!isReset) return;
+    if (!isReset || resetFragmentProcessedRef.current) return;
     let active = true;
-    const fragment = new URLSearchParams(window.location.hash.slice(1));
+    // React Strict Mode replays effects in development after the first setup
+    // has scrubbed the URL. Keep the original fragment in memory until the
+    // active setup consumes it, then discard it.
+    if (resetFragmentRef.current === null) resetFragmentRef.current = window.location.hash;
+    const fragment = new URLSearchParams(resetFragmentRef.current.slice(1));
     const linkEmail = fragment.get("email") ?? "";
     const linkToken = fragment.get("token") ?? "";
     const linkLanguage = fragment.get("lang");
@@ -61,6 +67,8 @@ export function PasswordRecoveryForm({ mode }: Readonly<{ mode: RecoveryMode }>)
     window.history.replaceState(window.history.state, "", window.location.pathname);
     void Promise.resolve().then(() => {
       if (!active) return;
+      resetFragmentProcessedRef.current = true;
+      resetFragmentRef.current = null;
       if (linkLanguage === "en" || linkLanguage === "ar" || linkLanguage === "ku")
         setLocale(linkLanguage, { source: "account" });
       setEmail(linkEmail);

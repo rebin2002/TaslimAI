@@ -103,7 +103,7 @@ test.describe("authentication and onboarding", () => {
     expect(response?.headers()["cache-control"]).toContain("no-store");
     expect(response?.headers()["referrer-policy"]).toBe("no-referrer");
     await expect(page).toHaveURL(/\/reset-password$/);
-    await expect(page.getByLabel(/new password/i)).toBeVisible();
+    await expect(page.locator('input[autocomplete="new-password"]').first()).toBeVisible();
     await expect(page.locator("body")).not.toContainText("private-reset-token-that-must-not-render");
   });
 
