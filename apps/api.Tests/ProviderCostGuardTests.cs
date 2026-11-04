@@ -49,6 +49,30 @@ public sealed class ProviderCostGuardTests
     }
 
     [Fact]
+    public async Task Cost_guard_denial_is_checked_for_every_fallback_before_any_provider_attempt()
+    {
+        var store = new RecordingStore();
+        var guard = new DelegateCostGuard(_ => new ProviderCostGuardDecision(false, "PUBLIC_FREE_TIER_BUDGET_EXHAUSTED"));
+        var unpricedProvider = new CountingProvider(new ProviderRoutingProfile(EstimatedCostUsd: null));
+        var pricedFallback = new CountingProvider(new ProviderRoutingProfile(EstimatedCostUsd: 0.01m));
+
+        var result = await Create(store, guard, maxProviders: 2).ExecuteAsync(
+            Guid.NewGuid(), Guid.NewGuid(),
+            new ProviderRouteRequirements("synthetic.generate", AllowFallback: true),
+            "denied-fallback-attempt",
+            "synthetic input",
+            [unpricedProvider, pricedFallback]);
+
+        Assert.Equal(ProviderAttemptResultCategory.CostGuardRejected, result.Category);
+        Assert.Equal("PUBLIC_FREE_TIER_BUDGET_EXHAUSTED", result.ErrorCode);
+        Assert.Equal(2, guard.Calls);
+        Assert.Equal(0, result.AttemptCount);
+        Assert.Equal(0, unpricedProvider.Calls);
+        Assert.Equal(0, pricedFallback.Calls);
+        Assert.Equal(0, store.StartAttemptCalls);
+    }
+
+    [Fact]
     public async Task Cost_guard_storage_failure_stops_before_provider_invocation_and_attempt_recording()
     {
         var store = new RecordingStore();
@@ -66,10 +90,10 @@ public sealed class ProviderCostGuardTests
         Assert.Equal(0, store.StartAttemptCalls);
     }
 
-    private static ProviderResilienceOrchestrator Create(RecordingStore store, IProviderCostGuard guard) =>
+    private static ProviderResilienceOrchestrator Create(RecordingStore store, IProviderCostGuard guard, int maxProviders = 1) =>
         new(store, guard, Options.Create(new ProviderResilienceOptions
         {
-            MaxProviders = 1,
+            MaxProviders = maxProviders,
             MaxRetriesPerProvider = 0,
             InitialBackoffMilliseconds = 0,
             MaxBackoffMilliseconds = 0,

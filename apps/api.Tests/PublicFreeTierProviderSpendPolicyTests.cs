@@ -577,6 +577,33 @@ public sealed class PublicFreeTierProviderSpendPolicyTests
     }
 
     [Fact]
+    public async Task Concurrent_conflicting_settlements_apply_one_actual_cost_without_exposure_erosion()
+    {
+        var ledger = new AtomicTestLedger(EnabledOptions(), NowUtc);
+        var reservation = await ledger.TryReserveBeforeProviderCallAsync(
+            ValidRequest(idempotencyKey: "settlement-race") with { EstimatedProviderCostUsd = 0.009m });
+        Assert.True(reservation.Reserved);
+        var dispatch = await ledger.TryAuthorizeProviderDispatchAsync(reservation.ReservationId!.Value, "settlement-race-dispatch");
+        Assert.True(dispatch.DispatchAuthorized);
+
+        var reports = Enumerable.Range(1, 24)
+            .Select(index => (Key: $"settlement-report-{index}", ActualCost: index * 0.001m))
+            .ToArray();
+        var completions = await Task.WhenAll(reports.Select(report => Task.Run(async () =>
+            (report.ActualCost, Result: await ledger.RecordProviderOutcomeAsync(
+                reservation.ReservationId.Value,
+                report.Key,
+                PublicFreeTierProviderOutcome.Succeeded,
+                actualCostKnown: true,
+                actualProviderCostUsd: report.ActualCost)))));
+
+        var winner = Assert.Single(completions, completion => completion.Result.Applied);
+        Assert.Equal(23, completions.Count(completion => completion.Result.Code == "RESERVATION_ALREADY_FINALIZED"));
+        Assert.Equal(winner.ActualCost, ledger.GlobalExposureUsd);
+        Assert.Equal(0, ledger.UnknownExposureCount);
+    }
+
+    [Fact]
     public async Task Proven_undispatched_request_releases_cost_reservation_idempotently()
     {
         var ledger = new AtomicTestLedger(EnabledOptions(), NowUtc);
