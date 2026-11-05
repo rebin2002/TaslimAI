@@ -33,23 +33,21 @@ next_wave_classify_ref() {
   local expected_base="${7:-}"
   local billing_stack_base="fix/billing-accounting-foundations-20261005"
   local search_asset_base="fix/search-asset-deep-links-20261005"
+  local global_slot_stack_base="feature/autopilot-global-task-slot-leases-20261031"
 
   if [[ "$event_name" == "pull_request" ]]; then
-    # The billing foundation and Search -> Notifications stack roots are
+    # The billing, Search -> Notifications, and global-slot refill stack roots are
     # intentionally stacked so each dependent PR can be reviewed and gated
     # independently. Keep the exact stack roots allowlisted; a branch name
     # that merely resembles a billing branch must still fail closed.
-    if [[ "$base_ref" != "$expected_base" && "$base_ref" != "$expected_branch" && "$base_ref" != "$billing_stack_base" && "$base_ref" != "$search_asset_base" ]]; then
+    if [[ "$base_ref" != "$expected_base" && "$base_ref" != "$expected_branch" && "$base_ref" != "$billing_stack_base" && "$base_ref" != "$search_asset_base" && "$base_ref" != "$global_slot_stack_base" ]]; then
       printf 'unexpected pull request base: %s\n' "${base_ref:-<none>}" >&2
       return 1
     fi
-    case "$github_ref" in
-      refs/pull/*/merge | refs/pull/*/head) ;;
-      *)
+    if [[ ! "$github_ref" =~ ^refs/pull/[1-9][0-9]*/(merge|head)$ ]]; then
         printf 'pull request gate must run on a pull request ref: %s\n' "${github_ref:-<none>}" >&2
         return 1
-        ;;
-    esac
+    fi
     printf '  event: pull_request\n'
     printf '  base branch: %s\n' "$base_ref"
     printf '  head branch: %s\n' "${head_ref:-<none>}"

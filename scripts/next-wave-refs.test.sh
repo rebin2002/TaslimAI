@@ -71,5 +71,20 @@ check "pull request with no base is refused" \
 check "pull request event that is not on a pull request ref is refused" \
   deny pull_request refs/heads/main main feature/x ""
 
+check "exact global-slot stack merge ref is allowed" \
+  allow pull_request refs/pull/718/merge feature/autopilot-global-task-slot-leases-20261031 feature/taslim-global-slot-refill-stack ""
+check "exact global-slot stack head ref is allowed" \
+  allow pull_request refs/pull/718/head feature/autopilot-global-task-slot-leases-20261031 feature/taslim-global-slot-refill-stack ""
+check "global-slot stack suffix lookalike is refused" \
+  deny pull_request refs/pull/718/merge feature/autopilot-global-task-slot-leases-20261031-unreviewed feature/taslim-global-slot-refill-stack ""
+check "global-slot stack truncated lookalike is refused" \
+  deny pull_request refs/pull/718/head feature/autopilot-global-task-slot-leases-2026103 feature/taslim-global-slot-refill-stack ""
+check "global-slot stack push context remains refused" \
+  deny push refs/heads/feature/autopilot-global-task-slot-leases-20261031 "" "" feature/autopilot-global-task-slot-leases-20261031
+for invalid_ref in refs/pull/not-a-number/merge refs/pull/718/extra/merge refs/pull/0/head refs/pull/718/merge/extra; do
+  check "malformed pull ref is refused: $invalid_ref" \
+    deny pull_request "$invalid_ref" feature/autopilot-global-task-slot-leases-20261031 feature/taslim-global-slot-refill-stack ""
+done
+
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 [[ $fail -eq 0 ]]
