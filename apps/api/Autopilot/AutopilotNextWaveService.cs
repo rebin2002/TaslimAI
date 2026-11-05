@@ -2139,7 +2139,7 @@ public sealed class AutopilotNextWaveService(
     {
         if (db.Database.IsNpgsql())
         {
-            await db.Database.ExecuteSqlRawAsync(
+            await db.Database.ExecuteSqlInterpolatedAsync(
                 $"SELECT pg_advisory_xact_lock({RepairEscalationAdvisoryLockKey})",
                 cancellationToken);
         }
