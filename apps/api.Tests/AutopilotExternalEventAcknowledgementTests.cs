@@ -3,21 +3,25 @@ using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Taslim.Api.Autopilot;
 using Taslim.Api.Persistence;
 using Xunit;
 
 namespace Taslim.Api.Tests;
 
-public sealed class AutopilotExternalEventAcknowledgementTests : IClassFixture<TaslimApiFactory>
+public sealed class AutopilotExternalEventAcknowledgementTests : IClassFixture<AutopilotAcknowledgementFactory>
 {
     private const string SecretVariable = "AUTOPILOT_WEBHOOK_SECRET";
     private const string Secret = "provider-free-external-ack-contract-secret";
-    private readonly TaslimApiFactory factory;
+    private readonly AutopilotAcknowledgementFactory factory;
 
-    public AutopilotExternalEventAcknowledgementTests(TaslimApiFactory factory)
+    public AutopilotExternalEventAcknowledgementTests(AutopilotAcknowledgementFactory factory)
     {
         this.factory = factory;
         using var client = factory.CreateClient();
@@ -125,5 +129,34 @@ public sealed class AutopilotExternalEventAcknowledgementTests : IClassFixture<T
         request.Headers.Add("X-Autopilot-Timestamp", timestamp);
         request.Headers.Add("X-Autopilot-Signature", $"sha256={Convert.ToHexString(signature).ToLowerInvariant()}");
         return request;
+    }
+}
+
+// Each request/context owns its SQLite connection. Sharing one opened connection
+// lets request-scope cleanup race EF's per-connection function registration.
+public sealed class AutopilotAcknowledgementFactory : WebApplicationFactory<Program>
+{
+    private readonly string databasePath = Path.Combine(Path.GetTempPath(), $"taslim-ack-{Guid.NewGuid():N}.sqlite");
+
+    protected override void ConfigureWebHost(IWebHostBuilder builder)
+    {
+        builder.UseEnvironment("Testing");
+        builder.ConfigureAppConfiguration((_, configuration) => configuration.AddInMemoryCollection(
+            new Dictionary<string, string?> { ["Autopilot:WatchdogEnabled"] = "false" }));
+        builder.ConfigureServices(services =>
+        {
+            services.RemoveAll<DbContextOptions<TaslimDbContext>>();
+            services.AddDbContext<TaslimDbContext>(options => options.UseSqlite($"Data Source={databasePath};Default Timeout=30"));
+        });
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        base.Dispose(disposing);
+        if (disposing)
+        {
+            foreach (var suffix in new[] { "", "-wal", "-shm" })
+                if (File.Exists(databasePath + suffix)) File.Delete(databasePath + suffix);
+        }
     }
 }
