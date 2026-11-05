@@ -491,6 +491,48 @@ public sealed class AutopilotEventDispatchIntegrationTests
         }
     }
 
+    [Fact]
+    public async Task Signed_intake_does_not_persist_when_acquired_fence_has_expired()
+    {
+        var previousSecret = Environment.GetEnvironmentVariable("AUTOPILOT_WEBHOOK_SECRET");
+        Environment.SetEnvironmentVariable("AUTOPILOT_WEBHOOK_SECRET", SigningSecret);
+        try
+        {
+            var expiredLocks = new ExpiredFenceLockService();
+            var wakeCalls = 0;
+            using var factory = new DispatchTestFactory
+            {
+                LockServiceOverride = _ => expiredLocks,
+                NotifyCommittedEventOverride = () => Interlocked.Increment(ref wakeCalls),
+            };
+            using var client = factory.CreateClient();
+            using (var scope = factory.Services.CreateScope())
+            {
+                var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+                await db.Database.EnsureCreatedAsync();
+            }
+
+            var eventId = $"evt-expired-intake-fence-{Guid.NewGuid():N}";
+            var payload = BridgeV4TerminalReceiptCompletionPayload(eventId, "ABCDEFGHIJKLMNOPQRSTUV");
+            using (var response = await PostSignedEventAsync(client, payload, eventId, ManusBridgeWaveLaunchProvider.Key))
+            {
+                Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+                Assert.Contains("AUTOPILOT_EVENT_RETRY", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+            }
+
+            using var verify = factory.Services.CreateScope();
+            var persistedDb = verify.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            Assert.Empty(await persistedDb.AutopilotEvents.ToListAsync());
+            Assert.Equal(1, expiredLocks.AcquireCalls);
+            Assert.Equal(1, expiredLocks.RenewCalls);
+            Assert.Equal(0, Volatile.Read(ref wakeCalls));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("AUTOPILOT_WEBHOOK_SECRET", previousSecret);
+        }
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -1000,17 +1042,45 @@ public sealed class AutopilotEventDispatchIntegrationTests
                 new AutopilotGlobalTaskInventoryPage(scopeId, Array.Empty<AutopilotGlobalTaskInventoryItem>(), null));
     }
 
-    private sealed class ReleaseFailureLockService(bool throwOnRelease) : IAutopilotLockService
+    private sealed class ReleaseFailureLockService(bool throwOnRelease) : IAutopilotLockService, IAutopilotLockLeaseRenewalService
     {
         public Task<AutopilotLockHandle> AcquireAsync(string resourceKey, string heldBy, CancellationToken cancellationToken = default) =>
             Task.FromResult(new AutopilotLockHandle(
                 resourceKey, "synthetic-owner-token", 1, true, heldBy, DateTime.UtcNow.AddMinutes(10)));
+
+        public Task<AutopilotLockHandle> RenewAsync(AutopilotLockHandle handle, CancellationToken cancellationToken = default) =>
+            Task.FromResult(handle with { ExpiresAt = DateTime.UtcNow.AddMinutes(10) });
 
         public Task<bool> ReleaseAsync(AutopilotLockHandle handle, CancellationToken cancellationToken = default)
         {
             if (throwOnRelease) throw new InvalidOperationException("Synthetic release failure.");
             return Task.FromResult(false);
         }
+    }
+
+    private sealed class ExpiredFenceLockService : IAutopilotLockService, IAutopilotLockLeaseRenewalService
+    {
+        private int acquireCalls;
+        private int renewCalls;
+
+        public int AcquireCalls => Volatile.Read(ref acquireCalls);
+        public int RenewCalls => Volatile.Read(ref renewCalls);
+
+        public Task<AutopilotLockHandle> AcquireAsync(string resourceKey, string heldBy, CancellationToken cancellationToken = default)
+        {
+            Interlocked.Increment(ref acquireCalls);
+            return Task.FromResult(new AutopilotLockHandle(
+                resourceKey, "expired-owner-token", 7, true, heldBy, DateTime.UtcNow.AddSeconds(-1)));
+        }
+
+        public Task<AutopilotLockHandle> RenewAsync(AutopilotLockHandle handle, CancellationToken cancellationToken = default)
+        {
+            Interlocked.Increment(ref renewCalls);
+            return Task.FromResult(AutopilotLockHandle.NotAcquired(handle.ResourceKey, null, handle.ExpiresAt));
+        }
+
+        public Task<bool> ReleaseAsync(AutopilotLockHandle handle, CancellationToken cancellationToken = default) =>
+            Task.FromResult(false);
     }
 
     private sealed class AcquireFailureLockService : IAutopilotLockService

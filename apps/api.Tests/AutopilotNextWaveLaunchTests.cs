@@ -694,6 +694,49 @@ public sealed class AutopilotNextWaveLaunchTests
                 options.MaxLaunchBatchesPerCycle = 32;
                 options.MaxTasksPerWave = 1;
             }, databaseOptions: contextOptions);
+            var fenceResource = $"autopilot:pg-fence-test:{Guid.NewGuid():N}";
+            AutopilotLockHandle firstOwner;
+            using (var firstDb = host.CreateContext())
+            {
+                firstOwner = await new EfAutopilotLockService(firstDb, host.Options)
+                    .AcquireAsync(fenceResource, "pg-fence-first-owner");
+            }
+            Assert.True(firstOwner.IsAcquired);
+
+            using (var expireDb = host.CreateContext())
+            {
+                await expireDb.Database.ExecuteSqlInterpolatedAsync($"""
+                    UPDATE "AutopilotLocks"
+                    SET "ExpiresAt" = clock_timestamp() - interval '1 second'
+                    WHERE "ResourceKey" = {fenceResource}
+                    """);
+            }
+
+            AutopilotLockHandle secondOwner;
+            using (var secondDb = host.CreateContext())
+            {
+                secondOwner = await new EfAutopilotLockService(secondDb, host.Options)
+                    .AcquireAsync(fenceResource, "pg-fence-second-owner");
+            }
+            Assert.True(secondOwner.IsAcquired);
+            Assert.True(secondOwner.FencingToken > firstOwner.FencingToken);
+
+            using (var staleDb = host.CreateContext())
+            {
+                var staleService = new EfAutopilotLockService(staleDb, host.Options);
+                Assert.False((await staleService.RenewAsync(firstOwner)).IsAcquired);
+                Assert.False(await staleService.ReleaseAsync(firstOwner));
+            }
+
+            using (var currentDb = host.CreateContext())
+            {
+                var currentService = new EfAutopilotLockService(currentDb, host.Options);
+                var renewedOwner = await currentService.RenewAsync(secondOwner);
+                Assert.True(renewedOwner.IsAcquired);
+                Assert.Equal(secondOwner.FencingToken, renewedOwner.FencingToken);
+                Assert.True(await currentService.ReleaseAsync(renewedOwner));
+            }
+
             await host.SeedGlobalSlotContendersAsync(21);
 
             await Task.WhenAll(Enumerable.Range(0, 4).Select(_ => host.LaunchAsync()));
@@ -882,7 +925,7 @@ public sealed class AutopilotNextWaveLaunchTests
     }
 
     [Fact]
-    public async Task Provider_is_not_called_when_acquired_fence_nears_expiry_and_reservation_is_retained()
+    public async Task Provider_is_not_called_and_claim_resets_when_acquired_fence_cannot_be_renewed()
     {
         using var host = new Host(options =>
         {
@@ -899,10 +942,289 @@ public sealed class AutopilotNextWaveLaunchTests
         using (var db = host.CreateContext())
         {
             var task = await db.AutopilotWaveLaunchTasks.SingleAsync();
-            Assert.Equal(AutopilotWaveLaunchStatuses.Launching, task.Status);
-            Assert.Contains("completion_launch_fence_near_expiry_before_provider_call",
-                task.LastStatusDetail, StringComparison.Ordinal);
+            Assert.Equal(AutopilotWaveLaunchStatuses.Planned, task.Status);
+            Assert.Equal(0, task.LaunchAttempt);
+            Assert.Equal("completion_launch_fence_renewal_unavailable; no_provider_call", task.LastStatusDetail);
+            var backlog = await db.AutopilotBacklogItems.SingleAsync(item => item.ItemKey == "bl-near-expiry-fence");
+            Assert.Null(backlog.ConsumedByWaveKey);
         }
+    }
+
+    [Fact]
+    public async Task Expired_fence_cannot_be_renewed_or_released_after_takeover_and_token_increases()
+    {
+        using var host = new Host();
+        var resourceKey = AutopilotCompletionLaunchFence.ResourceKey;
+        AutopilotLockHandle staleHandle;
+        using (var db = host.CreateContext())
+        {
+            staleHandle = await new EfAutopilotLockService(db, host.Options, host.Time)
+                .AcquireAsync(resourceKey, "first-holder");
+        }
+        Assert.True(staleHandle.IsAcquired);
+
+        using (var db = host.CreateContext())
+        {
+            var expiredAt = new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+            var changed = await db.AutopilotLocks
+                .Where(item => item.ResourceKey == resourceKey)
+                .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.ExpiresAt, expiredAt));
+            Assert.Equal(1, changed);
+        }
+
+        using (var db = host.CreateContext())
+        {
+            var locks = new EfAutopilotLockService(db, host.Options, host.Time);
+            Assert.False((await locks.RenewAsync(staleHandle)).IsAcquired);
+        }
+
+        AutopilotLockHandle currentHandle;
+        using (var db = host.CreateContext())
+        {
+            currentHandle = await new EfAutopilotLockService(db, host.Options, host.Time)
+                .AcquireAsync(resourceKey, "second-holder");
+        }
+        Assert.True(currentHandle.IsAcquired);
+        Assert.Equal(staleHandle.FencingToken + 1, currentHandle.FencingToken);
+
+        using (var db = host.CreateContext())
+        {
+            var locks = new EfAutopilotLockService(db, host.Options, host.Time);
+            Assert.False(await locks.ReleaseAsync(staleHandle));
+            Assert.False((await locks.RenewAsync(staleHandle)).IsAcquired);
+
+            var renewedCurrent = await locks.RenewAsync(currentHandle);
+            Assert.True(renewedCurrent.IsAcquired);
+            Assert.Equal(currentHandle.FencingToken, renewedCurrent.FencingToken);
+            Assert.True(renewedCurrent.ExpiresAt > host.Time.GetUtcNow().UtcDateTime);
+            Assert.True(await locks.ReleaseAsync(renewedCurrent));
+        }
+    }
+
+    [Fact]
+    public async Task Renewal_store_operation_canceled_without_stop_request_marks_fence_lost()
+    {
+        var locks = new RenewalStoreCancellationLockService();
+        var handle = await locks.AcquireAsync(AutopilotCompletionLaunchFence.ResourceKey, "heartbeat-test");
+        Assert.True(handle.IsAcquired);
+
+        var heartbeat = await AutopilotLockLeaseHeartbeat.StartAsync(
+            locks,
+            handle,
+            TimeSpan.FromMilliseconds(5),
+            NullLogger<AutopilotNextWaveService>.Instance,
+            CancellationToken.None);
+        Assert.NotNull(heartbeat);
+        await using var scope = heartbeat!;
+        var lost = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var registration = scope.LeaseLostToken.Register(() => lost.TrySetResult(true));
+
+        await lost.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.True(scope.IsLost);
+        Assert.Equal(2, locks.RenewCalls);
+        Assert.False(await scope.RenewNowAsync(CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Provider_is_not_called_when_immediate_pre_call_renewal_loses_fence()
+    {
+        var probe = new FenceScopeProbe { LoseOnScopedRenewCall = 2 };
+        using var host = new Host(options =>
+        {
+            options.DryRun = false;
+            options.SimulationMode = false;
+            options.AllowNextWaveLaunch = true;
+            options.AllowNextWaveLaunchWhenReleasePending = true;
+        }, lockServiceOverride: new FenceScopeProbeLockService(probe, scoped: false),
+            completionFenceRenewalInterval: TimeSpan.FromSeconds(30));
+        await host.SeedGlobalSlotContendersAsync(1);
+        using var renewalProvider = new ServiceCollection()
+            .AddScoped<IAutopilotLockService>(_ => new FenceScopeProbeLockService(probe, scoped: true))
+            .BuildServiceProvider();
+
+        await host.LaunchAsync(fenceRenewalScopeFactory: renewalProvider.GetRequiredService<IServiceScopeFactory>());
+        Assert.Equal(0, host.Provider.LaunchCalls);
+        using (var db = host.CreateContext())
+        {
+            var launch = await db.AutopilotWaveLaunchTasks.SingleAsync();
+            Assert.Equal(AutopilotWaveLaunchStatuses.Launching, launch.Status);
+            Assert.Null(launch.ExternalTaskId);
+            Assert.Contains("completion_launch_fence_renewal_failed_before_provider_call",
+                launch.LastStatusDetail, StringComparison.Ordinal);
+            var backlog = await db.AutopilotBacklogItems.SingleAsync(item => item.ItemKey == launch.BacklogItemKey);
+            Assert.Equal(launch.WaveKey, backlog.ConsumedByWaveKey);
+        }
+
+        await host.LaunchAsync(fenceRenewalScopeFactory: renewalProvider.GetRequiredService<IServiceScopeFactory>());
+        Assert.Equal(0, host.Provider.LaunchCalls);
+    }
+
+    [Fact]
+    public async Task Provider_is_not_called_when_successful_renewal_has_insufficient_server_time_remaining()
+    {
+        var probe = new FenceScopeProbe { RenewalDuration = TimeSpan.FromSeconds(30) };
+        using var host = new Host(options =>
+        {
+            options.DryRun = false;
+            options.SimulationMode = false;
+            options.AllowNextWaveLaunch = true;
+            options.AllowNextWaveLaunchWhenReleasePending = true;
+        }, lockServiceOverride: new FenceScopeProbeLockService(probe, scoped: false),
+            completionFenceRenewalInterval: TimeSpan.FromSeconds(30));
+        await host.SeedGlobalSlotContendersAsync(1);
+        using var renewalProvider = new ServiceCollection()
+            .AddScoped<IAutopilotLockService>(_ => new FenceScopeProbeLockService(probe, scoped: true))
+            .BuildServiceProvider();
+
+        await host.LaunchAsync(fenceRenewalScopeFactory: renewalProvider.GetRequiredService<IServiceScopeFactory>());
+
+        Assert.Equal(0, host.Provider.LaunchCalls);
+        using var db = host.CreateContext();
+        var launch = await db.AutopilotWaveLaunchTasks.SingleAsync();
+        Assert.Equal(AutopilotWaveLaunchStatuses.Launching, launch.Status);
+        Assert.Null(launch.ExternalTaskId);
+        Assert.Contains("completion_launch_fence_renewal_failed_before_provider_call",
+            launch.LastStatusDetail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Fence_loss_after_durable_provider_result_stops_later_work_items()
+    {
+        var probe = new FenceScopeProbe { LoseOnScopedRenewCall = 4 };
+        using var host = new Host(options =>
+        {
+            options.DryRun = false;
+            options.SimulationMode = false;
+            options.AllowNextWaveLaunch = true;
+            options.AllowNextWaveLaunchWhenReleasePending = true;
+        }, lockServiceOverride: new FenceScopeProbeLockService(probe, scoped: false),
+            completionFenceRenewalInterval: TimeSpan.FromSeconds(30));
+        await host.SeedGlobalSlotContendersAsync(2);
+        using var renewalProvider = new ServiceCollection()
+            .AddScoped<IAutopilotLockService>(_ => new FenceScopeProbeLockService(probe, scoped: true))
+            .BuildServiceProvider();
+
+        var result = await host.LaunchAsync(
+            fenceRenewalScopeFactory: renewalProvider.GetRequiredService<IServiceScopeFactory>());
+
+        Assert.Equal(1, host.Provider.LaunchCalls);
+        Assert.Equal(1, result.TasksLaunched);
+        using var db = host.CreateContext();
+        var statuses = await db.AutopilotWaveLaunchTasks.Select(item => item.Status).ToListAsync();
+        Assert.Single(statuses, status => status == AutopilotWaveLaunchStatuses.Launched);
+        Assert.Single(statuses, status => status == AutopilotWaveLaunchStatuses.Planned);
+        Assert.Equal(0, probe.ScopedReleaseCalls);
+    }
+
+    [Fact]
+    public async Task Lost_fence_renewal_during_provider_call_makes_late_success_ambiguous_and_never_retries()
+    {
+        var expiringLock = new ExpireDuringProviderLockService();
+        using var host = new Host(options =>
+        {
+            options.DryRun = false;
+            options.SimulationMode = false;
+            options.AllowNextWaveLaunch = true;
+            options.AllowNextWaveLaunchWhenReleasePending = true;
+        }, lockServiceOverride: expiringLock, completionFenceRenewalInterval: TimeSpan.FromMilliseconds(5));
+        await host.AddBacklogAsync("bl-fence-lost-in-provider", "Retain the reservation if the fence expires");
+        host.Provider.BeforeReturnAsync = async (_, _, _) =>
+        {
+            expiringLock.BeginLeaseLoss();
+            await expiringLock.LeaseLost.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        };
+
+        await host.GreenRunAsync("wave-fence-lost-in-provider");
+        Assert.Equal(1, host.Provider.LaunchCalls);
+        using (var db = host.CreateContext())
+        {
+            var launch = await db.AutopilotWaveLaunchTasks.SingleAsync();
+            Assert.Equal(AutopilotWaveLaunchStatuses.Launching, launch.Status);
+            Assert.Null(launch.ExternalTaskId);
+            Assert.Contains("completion_launch_fence_lost_ambiguous", launch.LastStatusDetail, StringComparison.Ordinal);
+        }
+
+        await host.LaunchAsync();
+        Assert.Equal(1, host.Provider.LaunchCalls);
+        using (var db = host.CreateContext())
+        {
+            var launch = await db.AutopilotWaveLaunchTasks.SingleAsync();
+            Assert.Equal(AutopilotWaveLaunchStatuses.Launching, launch.Status);
+            Assert.Null(launch.ExternalTaskId);
+        }
+    }
+
+    [Fact]
+    public async Task Cancellation_after_successful_provider_response_persists_launch_and_reconcile_metadata()
+    {
+        using var host = new Host(options =>
+        {
+            options.DryRun = false;
+            options.SimulationMode = false;
+            options.AllowNextWaveLaunch = true;
+            options.AllowNextWaveLaunchWhenReleasePending = true;
+        });
+        await host.SeedGlobalSlotContendersAsync(1);
+        using var cancellation = new CancellationTokenSource();
+        host.Provider.AfterProviderResultAsync = (_, _, _) =>
+        {
+            cancellation.Cancel();
+            return Task.CompletedTask;
+        };
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => host.LaunchAsync(cancellation.Token));
+        Assert.Equal(1, host.Provider.LaunchCalls);
+        using (var db = host.CreateContext())
+        {
+            var launch = await db.AutopilotWaveLaunchTasks.SingleAsync();
+            Assert.Equal(AutopilotWaveLaunchStatuses.Launched, launch.Status);
+            Assert.Equal($"ext-{launch.TaskKey}", launch.ExternalTaskId);
+            Assert.Equal("awaiting_signed_completion_event", launch.LastStatusDetail);
+            Assert.NotNull(launch.NextReconcileAt);
+            var backlog = await db.AutopilotBacklogItems.SingleAsync(item => item.ItemKey == launch.BacklogItemKey);
+            Assert.Equal(launch.WaveKey, backlog.ConsumedByWaveKey);
+            Assert.Contains(await db.AutopilotAuditEvents.ToListAsync(), item =>
+                item.Action == AutopilotAuditActions.NextWaveLaunched && item.TargetId == launch.Id);
+        }
+
+        await host.LaunchAsync();
+        Assert.Equal(1, host.Provider.LaunchCalls);
+    }
+
+    [Fact]
+    public async Task Cancellation_after_definitive_rejection_persists_rejection_and_releases_claim()
+    {
+        using var host = new Host(options =>
+        {
+            options.DryRun = false;
+            options.SimulationMode = false;
+            options.AllowNextWaveLaunch = true;
+            options.AllowNextWaveLaunchWhenReleasePending = true;
+        });
+        await host.SeedGlobalSlotContendersAsync(1);
+        host.Provider.Results.Enqueue(WaveLaunchProviderResult.Rejected("bridge_status_400"));
+        using var cancellation = new CancellationTokenSource();
+        host.Provider.AfterProviderResultAsync = (_, _, _) =>
+        {
+            cancellation.Cancel();
+            return Task.CompletedTask;
+        };
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => host.LaunchAsync(cancellation.Token));
+        Assert.Equal(1, host.Provider.LaunchCalls);
+        using (var db = host.CreateContext())
+        {
+            var launch = await db.AutopilotWaveLaunchTasks.SingleAsync();
+            Assert.Equal(AutopilotWaveLaunchStatuses.Failed, launch.Status);
+            Assert.Equal("bridge_status_400", launch.ReasonCode);
+            var backlog = await db.AutopilotBacklogItems.SingleAsync(item => item.ItemKey == launch.BacklogItemKey);
+            Assert.Null(backlog.ConsumedByWaveKey);
+            Assert.Contains(await db.AutopilotAuditEvents.ToListAsync(), item =>
+                item.Action == AutopilotAuditActions.NextWaveLaunchFailed && item.TargetId == launch.Id);
+        }
+
+        await host.LaunchAsync();
+        Assert.Equal(1, host.Provider.LaunchCalls);
     }
 
     [Fact]
@@ -917,9 +1239,15 @@ public sealed class AutopilotNextWaveLaunchTests
         });
         await host.AddBacklogAsync("bl-fence-held-through-provider", "Hold the shared fence across create");
         var intakeCouldAcquireFenceDuringCreate = true;
+        var fenceDiagnostic = "not reached";
         host.Provider.BeforeReturnAsync = async (_, _, cancellationToken) =>
         {
             using var contenderDb = host.CreateContext();
+            var currentFence = await contenderDb.AutopilotLocks.AsNoTracking()
+                .SingleOrDefaultAsync(item => item.ResourceKey == AutopilotCompletionLaunchFence.ResourceKey, cancellationToken);
+            fenceDiagnostic = currentFence is null
+                ? "fence row missing"
+                : $"heldBy={currentFence.HeldBy}; expires={currentFence.ExpiresAt:o}; now={DateTime.UtcNow:o}; token={currentFence.FencingToken}";
             var contenderLocks = new EfAutopilotLockService(contenderDb, host.Options);
             var contender = await contenderLocks.AcquireAsync(
                 AutopilotCompletionLaunchFence.ResourceKey,
@@ -931,19 +1259,61 @@ public sealed class AutopilotNextWaveLaunchTests
         };
 
         await host.GreenRunAsync("wave-fence-held-through-provider");
-        Assert.False(intakeCouldAcquireFenceDuringCreate);
         Assert.Equal(1, host.Provider.LaunchCalls);
+        Assert.False(intakeCouldAcquireFenceDuringCreate, $"{fenceDiagnostic}; providerCalls={host.Provider.LaunchCalls}");
         using (var db = host.CreateContext())
         {
             Assert.Equal(AutopilotWaveLaunchStatuses.Launched,
                 (await db.AutopilotWaveLaunchTasks.SingleAsync()).Status);
+            var remainingFence = await db.AutopilotLocks.AsNoTracking()
+                .SingleAsync(item => item.ResourceKey == AutopilotCompletionLaunchFence.ResourceKey);
             var locks = new EfAutopilotLockService(db, host.Options);
             var released = await locks.AcquireAsync(
                 AutopilotCompletionLaunchFence.ResourceKey,
                 "synthetic-post-launch-intake");
-            Assert.True(released.IsAcquired);
+            Assert.True(released.IsAcquired,
+                $"heldBy={remainingFence.HeldBy}; ownerToken={remainingFence.OwnerToken}; fencingToken={remainingFence.FencingToken}; expiry={remainingFence.ExpiresAt:o}; now={DateTime.UtcNow:o}");
             Assert.True(await locks.ReleaseAsync(released));
         }
+    }
+
+    [Fact]
+    public async Task Launch_renews_fence_in_isolated_scope_and_releases_after_result_persistence()
+    {
+        var probe = new FenceScopeProbe();
+        using var host = new Host(options =>
+        {
+            options.DryRun = false;
+            options.SimulationMode = false;
+            options.AllowNextWaveLaunch = true;
+            options.AllowNextWaveLaunchWhenReleasePending = true;
+        }, lockServiceOverride: new FenceScopeProbeLockService(probe, scoped: false),
+            completionFenceRenewalInterval: TimeSpan.FromMilliseconds(5));
+        await host.SeedGlobalSlotContendersAsync(1);
+        probe.ReadPersistedLaunchStatus = async () =>
+        {
+            using var db = host.CreateContext();
+            return await db.AutopilotWaveLaunchTasks
+                .Select(item => item.Status)
+                .SingleAsync();
+        };
+
+        using var renewalProvider = new ServiceCollection()
+            .AddScoped<IAutopilotLockService>(_ => new FenceScopeProbeLockService(probe, scoped: true))
+            .BuildServiceProvider();
+        host.Provider.BeforeReturnAsync = async (_, _, cancellationToken) =>
+            await Task.Delay(TimeSpan.FromMilliseconds(60), cancellationToken);
+
+        var result = await host.LaunchAsync(
+            fenceRenewalScopeFactory: renewalProvider.GetRequiredService<IServiceScopeFactory>());
+
+        Assert.Equal(1, result.TasksLaunched);
+        Assert.Equal(1, host.Provider.LaunchCalls);
+        Assert.Equal(0, probe.OuterRenewCalls);
+        Assert.True(probe.ScopedRenewCalls >= 2,
+            $"Expected initial plus periodic renewal in child scope; renewals={probe.ScopedRenewCalls}.");
+        Assert.Equal(1, probe.ScopedReleaseCalls);
+        Assert.Equal(AutopilotWaveLaunchStatuses.Launched, probe.StatusObservedAtRelease);
     }
 
     [Fact]
@@ -2301,6 +2671,8 @@ public sealed class AutopilotNextWaveLaunchTests
 
         public Func<WaveLaunchProviderRequest, string, CancellationToken, Task>? BeforeReturnAsync { get; set; }
 
+        public Func<WaveLaunchProviderRequest, WaveLaunchProviderResult, CancellationToken, Task>? AfterProviderResultAsync { get; set; }
+
         public Func<string, CancellationToken, Task>? BeforeStateReturnAsync { get; set; }
 
         public Func<CancellationToken, Exception>? LaunchExceptionFactory { get; set; }
@@ -2322,6 +2694,8 @@ public sealed class AutopilotNextWaveLaunchTests
 
             if (BeforeReturnAsync is not null && result.IsLaunched && result.ExternalTaskId is not null)
                 await BeforeReturnAsync(request, result.ExternalTaskId, cancellationToken);
+            if (AfterProviderResultAsync is not null)
+                await AfterProviderResultAsync(request, result, cancellationToken);
             return result;
         }
 
@@ -2350,7 +2724,95 @@ public sealed class AutopilotNextWaveLaunchTests
                 : AsyncPageResolver(scopeId, cursor, cancellationToken);
     }
 
-    private sealed class NearExpiryLockService : IAutopilotLockService
+    private sealed class FenceScopeProbe
+    {
+        public object Gate { get; } = new();
+        public bool Held { get; set; }
+        public long FencingToken { get; set; }
+        public string? OwnerToken { get; set; }
+        public int OuterRenewCalls;
+        public int ScopedRenewCalls;
+        public int ScopedReleaseCalls;
+        public int LoseOnScopedRenewCall { get; set; }
+        public TimeSpan? RenewalDuration { get; set; }
+        public string? StatusObservedAtRelease { get; set; }
+        public Func<Task<string>>? ReadPersistedLaunchStatus { get; set; }
+    }
+
+    private sealed class FenceScopeProbeLockService(FenceScopeProbe probe, bool scoped)
+        : IAutopilotLockService, IAutopilotLockLeaseRenewalService
+    {
+        public Task<AutopilotLockHandle> AcquireAsync(
+            string resourceKey,
+            string heldBy,
+            CancellationToken cancellationToken = default)
+        {
+            lock (probe.Gate)
+            {
+                if (probe.Held)
+                    return Task.FromResult(AutopilotLockHandle.NotAcquired(resourceKey, "probe-holder", DateTime.UtcNow.AddMinutes(1)));
+                probe.Held = true;
+                probe.OwnerToken = Guid.NewGuid().ToString("N");
+                probe.FencingToken++;
+                return Task.FromResult(new AutopilotLockHandle(
+                    resourceKey, probe.OwnerToken, probe.FencingToken, true, heldBy, DateTime.UtcNow.AddMinutes(1)));
+            }
+        }
+
+        public Task<AutopilotLockHandle> RenewAsync(
+            AutopilotLockHandle handle,
+            CancellationToken cancellationToken = default)
+        {
+            var scopedRenewCall = 0;
+            if (scoped) scopedRenewCall = Interlocked.Increment(ref probe.ScopedRenewCalls);
+            else Interlocked.Increment(ref probe.OuterRenewCalls);
+
+            if (scoped && probe.LoseOnScopedRenewCall == scopedRenewCall)
+            {
+                lock (probe.Gate) probe.Held = false;
+                return Task.FromResult(AutopilotLockHandle.NotAcquired(handle.ResourceKey, "newer-probe-holder", handle.ExpiresAt));
+            }
+
+            lock (probe.Gate)
+            {
+                if (!probe.Held
+                    || probe.FencingToken != handle.FencingToken
+                    || !string.Equals(probe.OwnerToken, handle.OwnerToken, StringComparison.Ordinal))
+                    return Task.FromResult(AutopilotLockHandle.NotAcquired(handle.ResourceKey, "probe-stale", handle.ExpiresAt));
+                var renewedAt = DateTime.UtcNow;
+                return Task.FromResult(handle with
+                {
+                    ExpiresAt = renewedAt.Add(probe.RenewalDuration ?? TimeSpan.FromMinutes(10)),
+                    LeaseServerTimeUtc = renewedAt,
+                });
+            }
+        }
+
+        public async Task<bool> ReleaseAsync(
+            AutopilotLockHandle handle,
+            CancellationToken cancellationToken = default)
+        {
+            lock (probe.Gate)
+            {
+                if (!probe.Held
+                    || probe.FencingToken != handle.FencingToken
+                    || !string.Equals(probe.OwnerToken, handle.OwnerToken, StringComparison.Ordinal))
+                    return false;
+                probe.Held = false;
+            }
+
+            if (scoped)
+            {
+                Interlocked.Increment(ref probe.ScopedReleaseCalls);
+                var readStatus = probe.ReadPersistedLaunchStatus;
+                if (readStatus is not null)
+                    probe.StatusObservedAtRelease = await readStatus();
+            }
+            return true;
+        }
+    }
+
+    private sealed class NearExpiryLockService : IAutopilotLockService, IAutopilotLockLeaseRenewalService
     {
         private long fencingToken;
 
@@ -2361,13 +2823,85 @@ public sealed class AutopilotNextWaveLaunchTests
                 Interlocked.Increment(ref fencingToken),
                 true,
                 heldBy,
-                DateTime.UtcNow.AddSeconds(1)));
+                DateTime.UtcNow.AddSeconds(-1)));
+
+        public Task<AutopilotLockHandle> RenewAsync(AutopilotLockHandle handle, CancellationToken cancellationToken = default) =>
+            Task.FromResult(AutopilotLockHandle.NotAcquired(handle.ResourceKey, null, handle.ExpiresAt));
 
         public Task<bool> ReleaseAsync(AutopilotLockHandle handle, CancellationToken cancellationToken = default) =>
-            Task.FromResult(true);
+            Task.FromResult(false);
     }
 
-    private sealed class CompletionFenceReleaseFailureLockService : IAutopilotLockService
+    private sealed class ExpireDuringProviderLockService : IAutopilotLockService, IAutopilotLockLeaseRenewalService
+    {
+        private int renewCalls;
+        private int leaseLossEnabled;
+        private long fencingToken;
+
+        public TaskCompletionSource<bool> LeaseLost { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public void BeginLeaseLoss() => Volatile.Write(ref leaseLossEnabled, 1);
+
+        public Task<AutopilotLockHandle> AcquireAsync(string resourceKey, string heldBy, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new AutopilotLockHandle(
+                resourceKey,
+                Guid.NewGuid().ToString("N"),
+                Interlocked.Increment(ref fencingToken),
+                true,
+                heldBy,
+                DateTime.UtcNow.AddMinutes(5)));
+
+        public Task<AutopilotLockHandle> RenewAsync(AutopilotLockHandle handle, CancellationToken cancellationToken = default)
+        {
+            Interlocked.Increment(ref renewCalls);
+            if (Volatile.Read(ref leaseLossEnabled) == 0)
+            {
+                var renewedAt = DateTime.UtcNow;
+                return Task.FromResult(handle with
+                {
+                    ExpiresAt = renewedAt.AddMinutes(5),
+                    LeaseServerTimeUtc = renewedAt,
+                });
+            }
+
+            LeaseLost.TrySetResult(true);
+            return Task.FromResult(AutopilotLockHandle.NotAcquired(handle.ResourceKey, "newer-owner", handle.ExpiresAt));
+        }
+
+        public Task<bool> ReleaseAsync(AutopilotLockHandle handle, CancellationToken cancellationToken = default) =>
+            Task.FromResult(false);
+    }
+
+    private sealed class RenewalStoreCancellationLockService : IAutopilotLockService, IAutopilotLockLeaseRenewalService
+    {
+        private int renewCalls;
+
+        public int RenewCalls => Volatile.Read(ref renewCalls);
+
+        public Task<AutopilotLockHandle> AcquireAsync(string resourceKey, string heldBy, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new AutopilotLockHandle(
+                resourceKey, "heartbeat-test-token", 1, true, heldBy, DateTime.UtcNow.AddMinutes(5)));
+
+        public Task<AutopilotLockHandle> RenewAsync(AutopilotLockHandle handle, CancellationToken cancellationToken = default)
+        {
+            if (Interlocked.Increment(ref renewCalls) == 1)
+            {
+                var renewedAt = DateTime.UtcNow;
+                return Task.FromResult(handle with
+                {
+                    ExpiresAt = renewedAt.AddMinutes(5),
+                    LeaseServerTimeUtc = renewedAt,
+                });
+            }
+
+            return Task.FromException<AutopilotLockHandle>(new OperationCanceledException("Synthetic renewal-store timeout."));
+        }
+
+        public Task<bool> ReleaseAsync(AutopilotLockHandle handle, CancellationToken cancellationToken = default) =>
+            Task.FromResult(false);
+    }
+
+    private sealed class CompletionFenceReleaseFailureLockService : IAutopilotLockService, IAutopilotLockLeaseRenewalService
     {
         private long fencingToken;
 
@@ -2382,6 +2916,16 @@ public sealed class AutopilotNextWaveLaunchTests
                 true,
                 heldBy,
                 DateTime.UtcNow.AddMinutes(10)));
+
+        public Task<AutopilotLockHandle> RenewAsync(AutopilotLockHandle handle, CancellationToken cancellationToken = default)
+        {
+            var renewedAt = DateTime.UtcNow;
+            return Task.FromResult(handle with
+            {
+                ExpiresAt = renewedAt.AddMinutes(10),
+                LeaseServerTimeUtc = renewedAt,
+            });
+        }
 
         public Task<bool> ReleaseAsync(AutopilotLockHandle handle, CancellationToken cancellationToken = default) =>
             Task.FromResult(!string.Equals(
@@ -2399,6 +2943,9 @@ public sealed class AutopilotNextWaveLaunchTests
         private readonly IWaveLaunchProvider? launchProviderOverride;
         private readonly IAutopilotLockService? lockServiceOverride;
         private readonly Action? notifyCommittedEvent;
+        private readonly TimeSpan? completionFenceRenewalInterval;
+        private readonly object renewalServiceProvidersGate = new();
+        private readonly List<ServiceProvider> renewalServiceProviders = [];
 
         public Host(
             Action<AutopilotOptions>? configure = null,
@@ -2406,12 +2953,14 @@ public sealed class AutopilotNextWaveLaunchTests
             DbContextOptions<TaslimDbContext>? databaseOptions = null,
             IWaveLaunchProvider? launchProviderOverride = null,
             IAutopilotLockService? lockServiceOverride = null,
-            Action? notifyCommittedEvent = null)
+            Action? notifyCommittedEvent = null,
+            TimeSpan? completionFenceRenewalInterval = null)
         {
             this.enableGlobalSlotServices = enableGlobalSlotServices;
             this.launchProviderOverride = launchProviderOverride;
             this.lockServiceOverride = lockServiceOverride;
             this.notifyCommittedEvent = notifyCommittedEvent;
+            this.completionFenceRenewalInterval = completionFenceRenewalInterval;
             if (databaseOptions is null)
             {
                 connection = new SqliteConnection("DataSource=:memory:");
@@ -2453,10 +3002,12 @@ public sealed class AutopilotNextWaveLaunchTests
             return await CreateOrchestrator(db).ProcessPendingEventsAsync();
         }
 
-        public async Task<AutopilotNextWaveCycleResult> LaunchAsync(CancellationToken cancellationToken = default)
+        public async Task<AutopilotNextWaveCycleResult> LaunchAsync(
+            CancellationToken cancellationToken = default,
+            IServiceScopeFactory? fenceRenewalScopeFactory = null)
         {
             using var db = CreateContext();
-            return await CreateNextWaveService(db).TryLaunchNextWavesAsync(cancellationToken);
+            return await CreateNextWaveService(db, fenceRenewalScopeFactory).TryLaunchNextWavesAsync(cancellationToken);
         }
 
         public async Task<AutopilotNextWaveCycleResult> ReconcileLaunchesAsync()
@@ -2846,8 +3397,11 @@ public sealed class AutopilotNextWaveLaunchTests
         private AutopilotEventIntake CreateIntake(TaslimDbContext db) =>
             new(db, new AutopilotEventAuthenticator(Options), new EfAutopilotAuditLog(db), Options, Time);
 
-        private AutopilotNextWaveService CreateNextWaveService(TaslimDbContext db)
+        private AutopilotNextWaveService CreateNextWaveService(
+            TaslimDbContext db,
+            IServiceScopeFactory? fenceRenewalScopeFactory = null)
         {
+            fenceRenewalScopeFactory ??= CreateRenewalScopeFactory();
             var allocator = enableGlobalSlotServices
                 ? new AutopilotGlobalTaskSlotAllocator(db, TestTaslimScopeId, Time)
                 : null;
@@ -2855,17 +3409,36 @@ public sealed class AutopilotNextWaveLaunchTests
                 ? new AutopilotGlobalTaskInventoryReader(InventorySource, TestTaslimScopeId)
                 : null;
             return new(db, Options, launchProviderOverride ?? Provider, CreateIntake(db), Time,
-                NullLogger<AutopilotNextWaveService>.Instance, CreateLockService(db), allocator, inventory, notifyCommittedEvent);
+                NullLogger<AutopilotNextWaveService>.Instance, CreateLockService(db), allocator, inventory,
+                notifyCommittedEvent, completionFenceRenewalInterval, fenceRenewalScopeFactory);
+        }
+
+        private IServiceScopeFactory CreateRenewalScopeFactory()
+        {
+            var provider = new ServiceCollection()
+                .AddScoped<TaslimDbContext>(_ => CreateContext())
+                .AddScoped<IAutopilotLockService>(services => lockServiceOverride
+                    ?? new EfAutopilotLockService(services.GetRequiredService<TaslimDbContext>(), Options, Time))
+                .BuildServiceProvider();
+            lock (renewalServiceProvidersGate)
+                renewalServiceProviders.Add(provider);
+            return provider.GetRequiredService<IServiceScopeFactory>();
         }
 
         private AutopilotOrchestrator CreateOrchestrator(TaslimDbContext db) =>
             new(db, CreateLockService(db), CreateNextWaveService(db), Options, Time, NullLogger<AutopilotOrchestrator>.Instance);
 
         private IAutopilotLockService CreateLockService(TaslimDbContext db) =>
-            lockServiceOverride ?? new EfAutopilotLockService(db, Options);
+            lockServiceOverride ?? new EfAutopilotLockService(db, Options, Time);
 
         public void Dispose()
         {
+            lock (renewalServiceProvidersGate)
+            {
+                foreach (var provider in renewalServiceProviders)
+                    provider.Dispose();
+                renewalServiceProviders.Clear();
+            }
             connection?.Close();
             connection?.Dispose();
         }

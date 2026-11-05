@@ -35,9 +35,10 @@ public static class AutopilotEventDispatchSignal
 }
 
 /// <summary>
-/// Shared inter-process fence between durable signed-event intake and a next-wave
-/// provider create. Intake holds it through commit; launch holds it from its final
-/// queue check through durable provider-outcome persistence.
+/// Shared inter-process lease between durable signed-event intake and a next-wave
+/// provider create. Launch renews the owner/token lease during the provider call,
+/// aborts on renewal loss, and revalidates before accepting the provider response.
+/// Renewal cannot replace downstream token checks or service-boundary coordination.
 /// </summary>
 public static class AutopilotCompletionLaunchFence
 {
@@ -45,9 +46,14 @@ public static class AutopilotCompletionLaunchFence
 
     // Reserve two minutes beyond the configured HTTP timeout for allocator and
     // outcome persistence, plus one minute for reservation/setup before create.
-    // The current lock service has no renewal operation.
     public const int PersistenceSafetyMarginSeconds = 120;
     public const int ReservationSetupMarginSeconds = 60;
+
+    public static TimeSpan RenewalInterval(int leaseMinutes)
+    {
+        var leaseSeconds = Math.Max(60L, (long)Math.Max(1, leaseMinutes) * 60);
+        return TimeSpan.FromSeconds(Math.Clamp((int)(leaseSeconds / 3), 1, 30));
+    }
 
     public static int RequiredLeaseMinutes(int bridgeTimeoutSeconds)
     {

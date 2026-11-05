@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Taslim.Api.Persistence;
 
 namespace Taslim.Api.Autopilot;
@@ -56,10 +57,14 @@ public sealed class AutopilotNextWaveService(
     IAutopilotLockService? locks = null,
     AutopilotGlobalTaskSlotAllocator? globalTaskSlots = null,
     AutopilotGlobalTaskInventoryReader? globalTaskInventory = null,
-    Action? notifyCommittedEvent = null) : IAutopilotNextWaveService
+    Action? notifyCommittedEvent = null,
+    TimeSpan? completionFenceRenewalInterval = null,
+    IServiceScopeFactory? fenceRenewalScopeFactory = null) : IAutopilotNextWaveService
 {
     private readonly AutopilotOptions settings = options;
     private readonly Action eventNotifier = notifyCommittedEvent ?? AutopilotEventDispatchSignal.NotifyCommittedEvent;
+    private readonly TimeSpan fenceRenewalInterval = completionFenceRenewalInterval
+        ?? AutopilotCompletionLaunchFence.RenewalInterval(options.LockLeaseMinutes);
     private const string VerifiedCompletionRefillReason = "verified_completion_refill";
     private const int MaxCompletionEventsPerCycle = 1000;
     private const string RejectedClaimRecoveryMarker = "provider_rejected_before_task_acceptance";
@@ -69,7 +74,7 @@ public sealed class AutopilotNextWaveService(
 
     public async Task<AutopilotNextWaveCycleResult> TryLaunchNextWavesAsync(CancellationToken cancellationToken = default)
     {
-        var lockService = locks ?? new EfAutopilotLockService(db, settings);
+        var lockService = locks ?? new EfAutopilotLockService(db, settings, timeProvider);
         var audit = new List<AutopilotAuditEvent>();
         var actions = new List<string>();
         var now = UtcNow();
@@ -166,9 +171,22 @@ public sealed class AutopilotNextWaveService(
         var simulated = 0;
         var blocked = 0;
         var failed = 0;
+        var completionFenceLostDuringLaunchCycle = false;
 
         foreach (var workItem in workItems)
         {
+            if (completionFenceLostDuringLaunchCycle)
+            {
+                blocked++;
+                actions.Add($"next_wave_deferred:{workItem.WaveKey}:completion_launch_fence_lost_after_durable_outcome");
+                audit.Add(Audit(AutopilotAuditActions.NextWaveLaunchBlocked, AutopilotAuditOutcomes.Blocked,
+                    reason: "completion_launch_fence_lost_after_durable_outcome",
+                    statusDetail: "current_provider_outcome_persisted; no_further_provider_calls_this_cycle",
+                    waveKey: workItem.WaveKey,
+                    dryRun: false));
+                break;
+            }
+
             var run = workItem.Run;
             examined++;
             var waveKey = workItem.WaveKey;
@@ -320,6 +338,12 @@ public sealed class AutopilotNextWaveService(
 
             foreach (var candidate in tasks)
             {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    await FlushAsync(audit, CancellationToken.None);
+                    cancellationToken.ThrowIfCancellationRequested();
+                }
+
                 var task = candidate;
                 var deterministicRejection = IsDeterministicProviderRejection(task);
                 var retryable = task.Status == AutopilotWaveLaunchStatuses.Failed
@@ -410,7 +434,44 @@ public sealed class AutopilotNextWaveService(
                     continue;
                 }
 
-                await using var completionFenceRelease = new CompletionLaunchFenceRelease(lockService, completionFence, logger);
+                var fenceHeartbeatLease = await StartFenceHeartbeatAsync(
+                    lockService, completionFence, "next-wave-launch");
+                if (fenceHeartbeatLease.Heartbeat is null)
+                {
+                    try { _ = await lockService.ReleaseAsync(completionFence, CancellationToken.None); }
+                    catch (Exception releaseException)
+                    {
+                        logger.LogError(releaseException,
+                            "Autopilot launch fence release failed after initial heartbeat renewal was unavailable. Resource={ResourceKey}; FencingToken={FencingToken}",
+                            completionFence.ResourceKey, completionFence.FencingToken);
+                    }
+                    var reset = await ResetClaimedLaunchForFenceAsync(
+                        task, waveKey, "completion_launch_fence_renewal_unavailable",
+                        "completion_launch_fence_renewal_unavailable; no_provider_call", now, cancellationToken);
+                    blocked++;
+                    actions.Add($"next_wave_deferred:{waveKey}:completion_launch_fence_renewal_unavailable");
+                    audit.Add(Audit(AutopilotAuditActions.NextWaveLaunchBlocked, AutopilotAuditOutcomes.Blocked,
+                        reason: "completion_launch_fence_renewal_unavailable",
+                        statusDetail: reset ? "claim_released_no_provider_call" : "claim_reset_uncertain_backlog_claim_retained",
+                        waveKey: waveKey,
+                        taskId: task.TaskKey,
+                        attempt: task.LaunchAttempt,
+                        targetId: task.Id,
+                        dryRun: false));
+                    if (!reset)
+                        await AddRepairEscalationOnceAsync(audit,
+                            "completion_launch_fence_renewal_unavailable_and_claim_reset_uncertain",
+                            waveKey, task.TaskKey, task.LaunchAttempt, task.Id, false, cancellationToken);
+                    continue;
+                }
+
+                var completionFenceHeartbeatScope = fenceHeartbeatLease.Heartbeat;
+                await using var completionFenceRelease = new CompletionLaunchFenceRelease(
+                    fenceHeartbeatLease.LockService,
+                    completionFenceHeartbeatScope,
+                    fenceHeartbeatLease.RenewalScope,
+                    logger,
+                    () => completionFenceLostDuringLaunchCycle = true);
                 if (await HasNonterminalCompletionEventsAsync(cancellationToken))
                 {
                     var reset = await ResetClaimedLaunchForFenceAsync(
@@ -514,22 +575,32 @@ public sealed class AutopilotNextWaveService(
                 var requiredFenceRemainder = TimeSpan.FromSeconds(
                     Math.Clamp(settings.BridgeTimeoutSeconds, 5, 120)
                     + AutopilotCompletionLaunchFence.PersistenceSafetyMarginSeconds);
-                if (completionFence.ExpiresAt is null
-                    || completionFence.ExpiresAt.Value - DateTime.UtcNow < requiredFenceRemainder)
+                var configuredFenceRemainder = TimeSpan.FromMinutes(Math.Max(1, settings.LockLeaseMinutes));
+                var fenceRenewedBeforeProvider = !completionFenceHeartbeatScope.IsLost
+                    && await completionFenceHeartbeatScope.RenewNowAsync(CancellationToken.None)
+                    && !completionFenceHeartbeatScope.IsLost;
+                var renewedFenceHandle = completionFenceHeartbeatScope.CurrentHandle;
+                var actualFenceRemainder = renewedFenceHandle.ExpiresAt is DateTime leaseExpiry
+                    && renewedFenceHandle.LeaseServerTimeUtc is DateTime leaseServerTime
+                    ? leaseExpiry - leaseServerTime
+                    : TimeSpan.Zero;
+                if (!fenceRenewedBeforeProvider
+                    || actualFenceRemainder < requiredFenceRemainder
+                    || configuredFenceRemainder < requiredFenceRemainder)
                 {
                     var held = await globalTaskSlots!.RecordAmbiguousAsync(
                         task.Id,
                         idempotencyKey,
-                        "completion_launch_fence_near_expiry_before_provider_call",
-                        cancellationToken);
-                    task = await ReloadLaunchTaskFreshAsync(task.Id, cancellationToken)
+                        "completion_launch_fence_renewal_failed_before_provider_call",
+                        CancellationToken.None);
+                    task = await ReloadLaunchTaskFreshAsync(task.Id, CancellationToken.None)
                         ?? throw new InvalidOperationException("The durable launch row disappeared while retaining an expiring-fence reservation.");
                     blocked++;
-                    actions.Add($"next_wave_blocked:{waveKey}:completion_launch_fence_near_expiry");
+                    actions.Add($"next_wave_blocked:{waveKey}:completion_launch_fence_renewal_failed");
                     audit.Add(Audit(AutopilotAuditActions.NextWaveLaunchBlocked, AutopilotAuditOutcomes.Blocked,
-                        reason: held.ReasonCode ?? "completion_launch_fence_near_expiry_before_provider_call",
+                        reason: held.ReasonCode ?? "completion_launch_fence_renewal_failed_before_provider_call",
                         statusDetail: held.SlotHeld
-                            ? "slot_retained_no_provider_call_fence_near_expiry"
+                            ? "slot_retained_no_provider_call_fence_renewal_failed"
                             : "launch_state_uncertain_no_provider_call",
                         waveKey: waveKey,
                         taskId: task.TaskKey,
@@ -537,8 +608,8 @@ public sealed class AutopilotNextWaveService(
                         targetId: task.Id,
                         dryRun: false));
                     await AddRepairEscalationOnceAsync(audit,
-                        "completion_launch_fence_near_expiry_before_provider_call; operator_reconciliation_required",
-                        waveKey, task.TaskKey, task.LaunchAttempt, task.Id, false, cancellationToken);
+                        "completion_launch_fence_renewal_failed_before_provider_call; operator_reconciliation_required",
+                        waveKey, task.TaskKey, task.LaunchAttempt, task.Id, false, CancellationToken.None);
                     continue;
                 }
 
@@ -563,21 +634,33 @@ public sealed class AutopilotNextWaveService(
                     idempotencyKey);
 
                 WaveLaunchProviderResult result;
+                using var providerCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+                    cancellationToken,
+                    completionFenceHeartbeatScope.LeaseLostToken);
                 try
                 {
-                    result = await provider.LaunchTaskAsync(request, cancellationToken);
+                    if (completionFenceHeartbeatScope.IsLost)
+                        throw new InvalidOperationException("completion_launch_fence_lost_before_provider_call");
+                    providerCancellation.Token.ThrowIfCancellationRequested();
+                    result = await provider.LaunchTaskAsync(request, providerCancellation.Token);
+                    if (!await completionFenceHeartbeatScope.RenewNowAsync(CancellationToken.None))
+                        throw new InvalidOperationException("completion_launch_fence_lost_after_provider_response");
                 }
                 catch (Exception exception)
                 {
+                    if (!completionFenceHeartbeatScope.IsLost)
+                        _ = await completionFenceHeartbeatScope.RenewNowAsync(CancellationToken.None);
                     // A thrown transport/cancellation error does not prove that
                     // the remote create failed. Persist the held reservation
                     // without the caller token so cancellation cannot erase the
                     // ambiguity record or make the backlog eligible for retry.
                     var callerCanceled = exception is OperationCanceledException
                         && cancellationToken.IsCancellationRequested;
-                    var exceptionReason = exception is OperationCanceledException
-                        ? "provider_call_canceled_ambiguous"
-                        : "provider_call_exception_ambiguous";
+                    var exceptionReason = completionFenceHeartbeatScope.IsLost
+                        ? "completion_launch_fence_lost_ambiguous"
+                        : exception is OperationCanceledException
+                            ? "provider_call_canceled_ambiguous"
+                            : "provider_call_exception_ambiguous";
                     logger.LogError(
                         "Autopilot provider call threw after a durable claim; retaining the global slot. WaveKey={WaveKey}; TaskKey={TaskKey}; ExceptionType={ExceptionType}",
                         waveKey, task.TaskKey, exception.GetType().Name);
@@ -630,6 +713,7 @@ public sealed class AutopilotNextWaveService(
 
                     continue;
                 }
+                var outcomePersistenceToken = CancellationToken.None;
                 if (result.IsLaunched)
                 {
                     if (string.IsNullOrWhiteSpace(result.ExternalTaskId))
@@ -646,24 +730,24 @@ public sealed class AutopilotNextWaveService(
                             dryRun: false));
                         await AddRepairEscalationOnceAsync(audit,
                             "provider_claimed_success_without_external_identity; slot_and_backlog_claim_retained",
-                            waveKey, task.TaskKey, task.LaunchAttempt, task.Id, false, cancellationToken);
+                            waveKey, task.TaskKey, task.LaunchAttempt, task.Id, false, outcomePersistenceToken);
                         continue;
                     }
 
-                    task = await ReloadLaunchTaskFreshAsync(task.Id, cancellationToken)
+                    task = await ReloadLaunchTaskFreshAsync(task.Id, outcomePersistenceToken)
                         ?? throw new InvalidOperationException("The durable launch row disappeared before acceptance persistence.");
                     var accepted = await globalTaskSlots!.RecordAcceptedAsync(
                         task.Id,
                         idempotencyKey,
                         result.ExternalTaskId,
-                        cancellationToken);
-                    task = await ReloadLaunchTaskFreshAsync(task.Id, cancellationToken)
+                        outcomePersistenceToken);
+                    task = await ReloadLaunchTaskFreshAsync(task.Id, outcomePersistenceToken)
                         ?? throw new InvalidOperationException("The durable launch row disappeared after provider acceptance.");
                     if (task.Status == AutopilotWaveLaunchStatuses.Completed)
                     {
                         // A valid receipt may race with this response handler. The
                         // terminal transition wins; never write Launched over it.
-                        await EnsureCompletionRefillBatchAsync(task, now, cancellationToken);
+                        await EnsureCompletionRefillBatchAsync(task, now, outcomePersistenceToken);
                         launched++;
                         actions.Add($"next_wave_launched:{waveKey}:{task.TaskKey}:completed_before_ack");
                         continue;
@@ -682,13 +766,13 @@ public sealed class AutopilotNextWaveService(
                                 .SetProperty(item => item.LastStatusDetail, "awaiting_signed_completion_event")
                                 .SetProperty(item => item.NextReconcileAt, now.AddMinutes(Math.Max(5, settings.PollingFallbackAfterMinutes)))
                                 .SetProperty(item => item.UpdatedAt, now)
-                                .SetProperty(item => item.ConcurrencyToken, metadataToken), cancellationToken)
+                                .SetProperty(item => item.ConcurrencyToken, metadataToken), outcomePersistenceToken)
                         : 0;
-                    task = await ReloadLaunchTaskFreshAsync(task.Id, cancellationToken)
+                    task = await ReloadLaunchTaskFreshAsync(task.Id, outcomePersistenceToken)
                         ?? throw new InvalidOperationException("The durable launch row disappeared after provider acceptance.");
                     if (task.Status == AutopilotWaveLaunchStatuses.Completed)
                     {
-                        await EnsureCompletionRefillBatchAsync(task, now, cancellationToken);
+                        await EnsureCompletionRefillBatchAsync(task, now, outcomePersistenceToken);
                         launched++;
                         actions.Add($"next_wave_launched:{waveKey}:{task.TaskKey}:completed_before_ack");
                         continue;
@@ -702,7 +786,7 @@ public sealed class AutopilotNextWaveService(
                         actions.Add($"next_wave_blocked:{waveKey}:accepted_identity_state_changed_slot_retained");
                         await AddRepairEscalationOnceAsync(audit,
                             "accepted_provider_identity_or_state_changed; slot_and_backlog_claim_retained",
-                            waveKey, task.TaskKey, task.LaunchAttempt, task.Id, false, cancellationToken);
+                            waveKey, task.TaskKey, task.LaunchAttempt, task.Id, false, outcomePersistenceToken);
                         continue;
                     }
 
@@ -727,12 +811,12 @@ public sealed class AutopilotNextWaveService(
                         task.Id,
                         idempotencyKey,
                         result.ReasonCode ?? "provider_rejected",
-                        cancellationToken);
-                    task = await ReloadLaunchTaskFreshAsync(task.Id, cancellationToken)
+                        outcomePersistenceToken);
+                    task = await ReloadLaunchTaskFreshAsync(task.Id, outcomePersistenceToken)
                         ?? throw new InvalidOperationException("The durable launch row disappeared after provider rejection.");
                     if (task.Status == AutopilotWaveLaunchStatuses.Completed)
                     {
-                        await EnsureCompletionRefillBatchAsync(task, now, cancellationToken);
+                        await EnsureCompletionRefillBatchAsync(task, now, outcomePersistenceToken);
                         blocked++;
                         actions.Add($"next_wave_rejected_after_verified_completion:{waveKey}:{task.TaskKey}");
                         continue;
@@ -745,7 +829,7 @@ public sealed class AutopilotNextWaveService(
                         actions.Add($"next_wave_blocked:{waveKey}:rejection_persistence_ambiguous");
                         await AddRepairEscalationOnceAsync(audit,
                             "provider_rejection_persistence_ambiguous; slot_and_backlog_claim_retained",
-                            waveKey, task.TaskKey, task.LaunchAttempt, task.Id, false, cancellationToken);
+                            waveKey, task.TaskKey, task.LaunchAttempt, task.Id, false, outcomePersistenceToken);
                         continue;
                     }
                     if (rejected.Outcome != AutopilotGlobalTaskSlotOutcomes.LaunchRejected
@@ -755,14 +839,14 @@ public sealed class AutopilotNextWaveService(
                         actions.Add($"next_wave_blocked:{waveKey}:rejection_state_uncertain");
                         await AddRepairEscalationOnceAsync(audit,
                             "provider_rejection_state_uncertain; no_backlog_claim_release",
-                            waveKey, task.TaskKey, task.LaunchAttempt, task.Id, false, cancellationToken);
+                            waveKey, task.TaskKey, task.LaunchAttempt, task.Id, false, outcomePersistenceToken);
                         continue;
                     }
 
                     var rejectionToken = Guid.NewGuid();
                     var rejectionRaced = false;
                     var claimReleaseMismatch = false;
-                    await using (var rejectionTransaction = await db.Database.BeginTransactionAsync(cancellationToken))
+                    await using (var rejectionTransaction = await db.Database.BeginTransactionAsync(outcomePersistenceToken))
                     {
                         var rejectionUpdated = await db.AutopilotWaveLaunchTasks
                             .Where(item => item.Id == task.Id
@@ -773,10 +857,10 @@ public sealed class AutopilotNextWaveService(
                                 .SetProperty(item => item.LastStatusDetail, RejectedClaimReleasedMarker)
                                 .SetProperty(item => item.CompletedAt, now)
                             .SetProperty(item => item.UpdatedAt, now)
-                            .SetProperty(item => item.ConcurrencyToken, rejectionToken), cancellationToken);
+                            .SetProperty(item => item.ConcurrencyToken, rejectionToken), outcomePersistenceToken);
                         if (rejectionUpdated != 1)
                         {
-                            await rejectionTransaction.RollbackAsync(cancellationToken);
+                            await rejectionTransaction.RollbackAsync(outcomePersistenceToken);
                             rejectionRaced = true;
                         }
                         else
@@ -784,10 +868,10 @@ public sealed class AutopilotNextWaveService(
                             // RecordRejectedAsync and this service transaction are separate.
                             // The allocator's durable marker is also scanned on restart if
                             // this exact-owner release cannot be completed.
-                            var releasedClaims = await ReleaseBacklogItemClaimAsync(task.BacklogItemKey, waveKey, cancellationToken);
+                            var releasedClaims = await ReleaseBacklogItemClaimAsync(task.BacklogItemKey, waveKey, outcomePersistenceToken);
                             if (releasedClaims != 1)
                             {
-                                await rejectionTransaction.RollbackAsync(cancellationToken);
+                                await rejectionTransaction.RollbackAsync(outcomePersistenceToken);
                                 claimReleaseMismatch = true;
                             }
                             else
@@ -802,19 +886,19 @@ public sealed class AutopilotNextWaveService(
                                     dryRun: false));
                                 await AddRepairEscalationOnceAsync(audit,
                                     result.ReasonCode ?? "provider_rejected",
-                                    waveKey, task.TaskKey, task.LaunchAttempt, task.Id, false, cancellationToken);
-                                await rejectionTransaction.CommitAsync(cancellationToken);
+                                    waveKey, task.TaskKey, task.LaunchAttempt, task.Id, false, outcomePersistenceToken);
+                                await rejectionTransaction.CommitAsync(outcomePersistenceToken);
                             }
                         }
                     }
 
                     if (rejectionRaced)
                     {
-                        task = await ReloadLaunchTaskFreshAsync(task.Id, cancellationToken)
+                        task = await ReloadLaunchTaskFreshAsync(task.Id, outcomePersistenceToken)
                             ?? throw new InvalidOperationException("The durable launch row disappeared after rejection race.");
                         if (task.Status == AutopilotWaveLaunchStatuses.Completed)
                         {
-                            await EnsureCompletionRefillBatchAsync(task, now, cancellationToken);
+                            await EnsureCompletionRefillBatchAsync(task, now, outcomePersistenceToken);
                             launched++;
                             actions.Add($"next_wave_rejected_after_verified_completion:{waveKey}:{task.TaskKey}");
                             continue;
@@ -824,23 +908,23 @@ public sealed class AutopilotNextWaveService(
                         actions.Add($"next_wave_blocked:{waveKey}:rejection_raced_with_completion");
                         await AddRepairEscalationOnceAsync(audit,
                             "deterministic_rejection_transition_raced; backlog_claim_not_released",
-                            waveKey, task.TaskKey, task.LaunchAttempt, task.Id, false, cancellationToken);
+                            waveKey, task.TaskKey, task.LaunchAttempt, task.Id, false, outcomePersistenceToken);
                         continue;
                     }
 
                     if (claimReleaseMismatch)
                     {
-                        task = await ReloadLaunchTaskFreshAsync(task.Id, cancellationToken)
+                        task = await ReloadLaunchTaskFreshAsync(task.Id, outcomePersistenceToken)
                             ?? throw new InvalidOperationException("The durable launch row disappeared after claim-release mismatch.");
                         blocked++;
                         actions.Add($"next_wave_blocked:{waveKey}:rejected_backlog_claim_owner_mismatch");
                         await AddRepairEscalationOnceAsync(audit,
                             "deterministic_rejection_backlog_claim_not_owned; recovery_marker_retained",
-                            waveKey, task.TaskKey, task.LaunchAttempt, task.Id, false, cancellationToken);
+                            waveKey, task.TaskKey, task.LaunchAttempt, task.Id, false, outcomePersistenceToken);
                         continue;
                     }
 
-                    task = await ReloadLaunchTaskFreshAsync(task.Id, cancellationToken)
+                    task = await ReloadLaunchTaskFreshAsync(task.Id, outcomePersistenceToken)
                         ?? throw new InvalidOperationException("The durable launch row disappeared after rejection persistence.");
                     failed++;
                     continue;
@@ -853,12 +937,12 @@ public sealed class AutopilotNextWaveService(
                     task.Id,
                     idempotencyKey,
                     result.ReasonCode ?? "launch_outcome_unknown",
-                    cancellationToken);
-                task = await ReloadLaunchTaskFreshAsync(task.Id, cancellationToken)
+                    outcomePersistenceToken);
+                task = await ReloadLaunchTaskFreshAsync(task.Id, outcomePersistenceToken)
                     ?? throw new InvalidOperationException("The durable launch row disappeared after an ambiguous provider result.");
                 if (task.Status == AutopilotWaveLaunchStatuses.Completed)
                 {
-                    await EnsureCompletionRefillBatchAsync(task, now, cancellationToken);
+                    await EnsureCompletionRefillBatchAsync(task, now, outcomePersistenceToken);
                     actions.Add($"next_wave_ambiguous_response_after_verified_completion:{waveKey}:{task.TaskKey}");
                     continue;
                 }
@@ -884,12 +968,14 @@ public sealed class AutopilotNextWaveService(
                     dryRun: false));
             }
 
-            await RefreshBatchFromDatabaseAsync(batch, now, cancellationToken);
+            await RefreshBatchFromDatabaseAsync(batch, now, CancellationToken.None);
             planned += tasks.Count;
-            await FlushAsync(audit, cancellationToken);
+            await FlushAsync(audit, CancellationToken.None);
+            cancellationToken.ThrowIfCancellationRequested();
         }
 
-        await FlushAsync(audit, cancellationToken);
+        await FlushAsync(audit, CancellationToken.None);
+        cancellationToken.ThrowIfCancellationRequested();
 
         var outcome = launched > 0 || simulated > 0 ? "next_wave_processed" : blocked > 0 ? "next_wave_blocked" : "next_wave_idle";
         logger.LogInformation(
@@ -901,7 +987,7 @@ public sealed class AutopilotNextWaveService(
 
     public async Task<AutopilotNextWaveCycleResult> ReconcileLaunchesAsync(CancellationToken cancellationToken = default)
     {
-        var lockService = locks ?? new EfAutopilotLockService(db, settings);
+        var lockService = locks ?? new EfAutopilotLockService(db, settings, timeProvider);
         var audit = new List<AutopilotAuditEvent>();
         var actions = new List<string>();
         var now = UtcNow();
@@ -1127,30 +1213,70 @@ public sealed class AutopilotNextWaveService(
             }
             else
             {
-                AutopilotIntakeResult submission;
-                bool pollFenceReleased;
-                await using (var pollFenceRelease = new CompletionLaunchFenceRelease(lockService, pollFence, logger))
+                var pollHeartbeatLease = await StartFenceHeartbeatAsync(lockService, pollFence, "polling-intake");
+                if (pollHeartbeatLease.Heartbeat is null)
                 {
-                    submission = await intake.SubmitInternalAsync(
-                        new AutopilotInternalSignalRequest(
-                            AutopilotInternalSignalSources.Polling,
-                            PollEventId(task.ExternalTaskId, state.Status),
-                            AutopilotEventTypes.WaveTaskCompleted,
-                            signal,
-                            "polling_fallback"),
-                        cancellationToken);
-                    pollFenceReleased = await pollFenceRelease.ReleaseAsync();
-                }
-
-                if (submission.Outcome is AutopilotIntakeOutcomes.Accepted or AutopilotIntakeOutcomes.Duplicate)
-                {
-                    if (pollFenceReleased)
-                        eventNotifier();
-                    else
-                        actions.Add($"next_wave_poll_event_wake_deferred:{task.WaveKey}:{task.TaskKey}:fence_release_uncertain");
+                    try { _ = await lockService.ReleaseAsync(pollFence, CancellationToken.None); }
+                    catch (Exception releaseException)
+                    {
+                        logger.LogError(releaseException,
+                            "Autopilot polling fence release failed after heartbeat initialization failed. Resource={ResourceKey}; FencingToken={FencingToken}",
+                            pollFence.ResourceKey, pollFence.FencingToken);
+                    }
+                    actions.Add($"next_wave_poll_event_deferred:{task.WaveKey}:{task.TaskKey}:fence_renewal_unavailable");
                 }
                 else
-                    actions.Add($"next_wave_poll_event_not_queued:{task.WaveKey}:{task.TaskKey}:{submission.Outcome}");
+                {
+                    var pollHeartbeat = pollHeartbeatLease.Heartbeat;
+                    await using var pollFenceRelease = new CompletionLaunchFenceRelease(
+                        pollHeartbeatLease.LockService,
+                        pollHeartbeat,
+                        pollHeartbeatLease.RenewalScope,
+                        logger);
+                    AutopilotIntakeResult? submission = null;
+                    await pollHeartbeat.StopRenewalLoopAsync();
+                    if (!pollHeartbeat.IsLost
+                        && lockService is IAutopilotLockLeaseRenewalService requestScopeRenewal)
+                    {
+                        await using var pollTransaction = await db.Database.BeginTransactionAsync(cancellationToken);
+                        var transactionFence = await requestScopeRenewal.RenewAsync(pollFence, cancellationToken);
+                        if (transactionFence.IsAcquired
+                            && transactionFence.FencingToken == pollFence.FencingToken
+                            && string.Equals(transactionFence.OwnerToken, pollFence.OwnerToken, StringComparison.Ordinal))
+                        {
+                            submission = await intake.SubmitInternalAsync(
+                                new AutopilotInternalSignalRequest(
+                                    AutopilotInternalSignalSources.Polling,
+                                    PollEventId(task.ExternalTaskId, state.Status),
+                                    AutopilotEventTypes.WaveTaskCompleted,
+                                    signal,
+                                    "polling_fallback"),
+                                cancellationToken);
+                            await pollTransaction.CommitAsync(cancellationToken);
+                        }
+                        else
+                        {
+                            await pollTransaction.RollbackAsync(CancellationToken.None);
+                            actions.Add($"next_wave_poll_event_deferred:{task.WaveKey}:{task.TaskKey}:fence_lost_before_persistence");
+                        }
+                    }
+                    else
+                    {
+                        actions.Add($"next_wave_poll_event_deferred:{task.WaveKey}:{task.TaskKey}:fence_renewal_unavailable");
+                    }
+
+                    var pollFenceReleased = await pollFenceRelease.ReleaseAsync();
+
+                    if (submission?.Outcome is AutopilotIntakeOutcomes.Accepted or AutopilotIntakeOutcomes.Duplicate)
+                    {
+                        if (pollFenceReleased)
+                            eventNotifier();
+                        else
+                            actions.Add($"next_wave_poll_event_wake_deferred:{task.WaveKey}:{task.TaskKey}:fence_release_uncertain");
+                    }
+                    else if (submission is not null)
+                        actions.Add($"next_wave_poll_event_not_queued:{task.WaveKey}:{task.TaskKey}:{submission.Outcome}");
+                }
             }
 
             actions.Add($"next_wave_reconciled:{task.WaveKey}:{task.TaskKey}:{state.Status}");
@@ -2245,10 +2371,67 @@ public sealed class AutopilotNextWaveService(
         return candidate.Length <= max ? candidate : candidate[..max];
     }
 
+    private async Task<FenceHeartbeatLease> StartFenceHeartbeatAsync(
+        IAutopilotLockService fallbackLocks,
+        AutopilotLockHandle handle,
+        string operation)
+    {
+        if (fenceRenewalScopeFactory is null)
+        {
+            logger.LogError(
+                "Autopilot cannot renew a completion/launch fence without an isolated dependency-injection scope. Operation={Operation}; Resource={ResourceKey}; FencingToken={FencingToken}",
+                operation, handle.ResourceKey, handle.FencingToken);
+            return new FenceHeartbeatLease(null, fallbackLocks, null);
+        }
+
+        IServiceScope? renewalScope = null;
+        var renewalLocks = fallbackLocks;
+        try
+        {
+            renewalScope = fenceRenewalScopeFactory?.CreateScope();
+            if (renewalScope is not null)
+                renewalLocks = renewalScope.ServiceProvider.GetRequiredService<IAutopilotLockService>();
+
+            var heartbeat = await AutopilotLockLeaseHeartbeat.StartAsync(
+                renewalLocks,
+                handle,
+                fenceRenewalInterval,
+                logger,
+                CancellationToken.None);
+            if (heartbeat is null)
+            {
+                renewalScope?.Dispose();
+                renewalScope = null;
+            }
+
+            return new FenceHeartbeatLease(renewalScope, renewalLocks, heartbeat);
+        }
+        catch (Exception exception)
+        {
+            try { renewalScope?.Dispose(); }
+            catch (Exception disposeException)
+            {
+                logger.LogError(disposeException,
+                    "Autopilot isolated fence-renewal scope disposal failed. Operation={Operation}", operation);
+            }
+            logger.LogError(exception,
+                "Autopilot could not initialize an isolated fence-renewal heartbeat. Operation={Operation}; Resource={ResourceKey}; FencingToken={FencingToken}",
+                operation, handle.ResourceKey, handle.FencingToken);
+            return new FenceHeartbeatLease(null, fallbackLocks, null);
+        }
+    }
+
+    private sealed record FenceHeartbeatLease(
+        IServiceScope? RenewalScope,
+        IAutopilotLockService LockService,
+        AutopilotLockLeaseHeartbeat? Heartbeat);
+
     private sealed class CompletionLaunchFenceRelease(
         IAutopilotLockService locks,
-        AutopilotLockHandle handle,
-        ILogger logger) : IAsyncDisposable
+        AutopilotLockLeaseHeartbeat heartbeat,
+        IServiceScope? renewalScope,
+        ILogger logger,
+        Action? onLeaseLost = null) : IAsyncDisposable
     {
         private bool? releaseResult;
 
@@ -2257,21 +2440,39 @@ public sealed class AutopilotNextWaveService(
             if (releaseResult.HasValue) return releaseResult.Value;
             try
             {
-                releaseResult = await locks.ReleaseAsync(handle, CancellationToken.None);
+                await heartbeat.StopRenewalLoopAsync();
+                releaseResult = !heartbeat.IsLost
+                    && await heartbeat.RenewNowAsync(CancellationToken.None)
+                    && await locks.ReleaseAsync(heartbeat.CurrentHandle, CancellationToken.None);
                 if (!releaseResult.Value)
+                {
+                    onLeaseLost?.Invoke();
                     logger.LogError("Autopilot completion/launch fence release lost ownership. Resource={ResourceKey}; FencingToken={FencingToken}",
-                        handle.ResourceKey, handle.FencingToken);
+                        heartbeat.CurrentHandle.ResourceKey, heartbeat.CurrentHandle.FencingToken);
+                }
             }
             catch (Exception exception)
             {
+                onLeaseLost?.Invoke();
                 logger.LogError(exception, "Autopilot completion/launch fence release failed. Resource={ResourceKey}; FencingToken={FencingToken}",
-                    handle.ResourceKey, handle.FencingToken);
+                    heartbeat.CurrentHandle.ResourceKey, heartbeat.CurrentHandle.FencingToken);
                 releaseResult = false;
             }
 
             return releaseResult.Value;
         }
 
-        public async ValueTask DisposeAsync() => _ = await ReleaseAsync();
+        public async ValueTask DisposeAsync()
+        {
+            try
+            {
+                _ = await ReleaseAsync();
+            }
+            finally
+            {
+                try { await heartbeat.DisposeAsync(); }
+                finally { renewalScope?.Dispose(); }
+            }
+        }
     }
 }
