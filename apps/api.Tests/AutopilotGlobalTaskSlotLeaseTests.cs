@@ -9,6 +9,7 @@ namespace Taslim.Api.Tests;
 public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
 {
     private const string ScopeId = "taslimai-autopilot";
+    private const string ExpectedBridgeManusUserId = "manus-user-verified";
     private readonly string databasePath = Path.Combine(Path.GetTempPath(), $"taslim-global-slots-{Guid.NewGuid():N}.db");
     private readonly DbContextOptions<TaslimDbContext> options;
 
@@ -712,6 +713,7 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
         using var source = new ManusBridgeUserWideTaskInventoryPageSource(
             () => "bridge-test-token",
             new Uri("https://bridge.example/v1/tasks"),
+            ExpectedBridgeManusUserId,
             requestTimeout: TimeSpan.FromSeconds(2),
             testHandler: handler);
         var inventory = await new AutopilotGlobalTaskInventoryReader(source, scope).ReadAuthoritativeSnapshotAsync();
@@ -751,6 +753,7 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
         using var source = new ManusBridgeUserWideTaskInventoryPageSource(
             () => "bridge-test-token",
             new Uri("https://bridge.example/v1/tasks"),
+            ExpectedBridgeManusUserId,
             testHandler: handler);
 
         foreach (var unprovenScope in new[] { ScopeId, "manus-team-wide", "" })
@@ -776,14 +779,14 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
         var nativeId = BridgeNativeTaskId(0);
         var invalidResponses = new (System.Net.HttpStatusCode Status, string Body)[]
         {
-            (System.Net.HttpStatusCode.BadGateway, "{\"ok\":false,\"error\":\"task_inventory_incomplete\"}"),
+            (System.Net.HttpStatusCode.BadGateway, "{\"manus_user_id\":\"manus-user-verified\",\"ok\":false,\"error\":\"task_inventory_incomplete\"}"),
             (System.Net.HttpStatusCode.OK, "{not-json"),
-            (System.Net.HttpStatusCode.OK, "{\"ok\":false,\"ok\":true,\"data\":[],\"has_more\":false}"),
-            (System.Net.HttpStatusCode.OK, "{\"ok\":true,\"data\":[],\"has_more\":true,\"next_cursor\":\"page-2\"}"),
-            (System.Net.HttpStatusCode.OK, "{\"ok\":true,\"data\":[],\"has_more\":false,\"next_cursor\":null}"),
-            (System.Net.HttpStatusCode.OK, $"{{\"ok\":true,\"data\":[{{\"id\":\"{nativeId}\",\"status\":\"running\"}},{{\"id\":\"{nativeId}\",\"status\":\"waiting\"}}],\"has_more\":false}}"),
-            (System.Net.HttpStatusCode.OK, $"{{\"ok\":true,\"data\":[{{\"id\":\"{nativeId}\",\"status\":\"future_status\"}}],\"has_more\":false}}"),
-            (System.Net.HttpStatusCode.OK, $"{{\"ok\":true,\"data\":[{{\"id\":\"{nativeId}\",\"status\":\"stopped\",\"has_running_background_jobs\":\"false\"}}],\"has_more\":false}}"),
+            (System.Net.HttpStatusCode.OK, "{\"manus_user_id\":\"manus-user-verified\",\"ok\":false,\"ok\":true,\"data\":[],\"has_more\":false}"),
+            (System.Net.HttpStatusCode.OK, "{\"manus_user_id\":\"manus-user-verified\",\"ok\":true,\"data\":[],\"has_more\":true,\"next_cursor\":\"page-2\"}"),
+            (System.Net.HttpStatusCode.OK, "{\"manus_user_id\":\"manus-user-verified\",\"ok\":true,\"data\":[],\"has_more\":false,\"next_cursor\":null}"),
+            (System.Net.HttpStatusCode.OK, $"{{\"manus_user_id\":\"manus-user-verified\",\"ok\":true,\"data\":[{{\"id\":\"{nativeId}\",\"status\":\"running\"}},{{\"id\":\"{nativeId}\",\"status\":\"waiting\"}}],\"has_more\":false}}"),
+            (System.Net.HttpStatusCode.OK, $"{{\"manus_user_id\":\"manus-user-verified\",\"ok\":true,\"data\":[{{\"id\":\"{nativeId}\",\"status\":\"future_status\"}}],\"has_more\":false}}"),
+            (System.Net.HttpStatusCode.OK, $"{{\"manus_user_id\":\"manus-user-verified\",\"ok\":true,\"data\":[{{\"id\":\"{nativeId}\",\"status\":\"stopped\",\"has_running_background_jobs\":\"false\"}}],\"has_more\":false}}"),
         };
 
         foreach (var invalid in invalidResponses)
@@ -791,6 +794,7 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
             using var source = new ManusBridgeUserWideTaskInventoryPageSource(
                 () => "bridge-test-token",
                 new Uri("https://bridge.example/v1/tasks"),
+                ExpectedBridgeManusUserId,
                 requestTimeout: TimeSpan.FromSeconds(2),
                 testHandler: new FakeHttpHandler((_, _) => Task.FromResult(JsonResponse(invalid.Body, invalid.Status))));
             var snapshot = await new AutopilotGlobalTaskInventoryReader(
@@ -810,6 +814,7 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
         using (var missingTokenSource = new ManusBridgeUserWideTaskInventoryPageSource(
             () => { Interlocked.Increment(ref tokenCalls); return null; },
             new Uri("https://bridge.example/v1/tasks"),
+            ExpectedBridgeManusUserId,
             testHandler: missingTokenHandler))
         {
             var missing = await new AutopilotGlobalTaskInventoryReader(
@@ -827,6 +832,7 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
         using var timeoutSource = new ManusBridgeUserWideTaskInventoryPageSource(
             () => "bridge-test-token",
             new Uri("https://bridge.example/v1/tasks"),
+            ExpectedBridgeManusUserId,
             requestTimeout: TimeSpan.FromMilliseconds(50),
             testHandler: timeoutHandler);
         var timedOut = await new AutopilotGlobalTaskInventoryReader(
@@ -836,6 +842,49 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
         Assert.False(timedOut.IsAuthoritative);
         Assert.Empty(timedOut.ActiveTasks);
         Assert.Equal(1, tokenCalls);
+    }
+
+    [Fact]
+    public async Task Bridge_user_wide_inventory_requires_matching_account_identity_before_capacity_or_provider_authorization()
+    {
+        var launchTaskIds = await SeedLaunchTasksAsync(total: 1, initiallyActive: 0);
+        var payloads = new[]
+        {
+            BuildBridgeInventoryPayload(0, reportedManusUserId: "different-manus-user"),
+            BuildBridgeInventoryPayload(0, includeManusUserId: false),
+            BuildBridgeInventoryPayload(0, reportedManusUserId: null),
+            "{\"ok\":true,\"manus_user_id\":17,\"data\":[],\"has_more\":false}",
+        };
+        var fakeProviderCalls = 0;
+
+        foreach (var payload in payloads)
+        {
+            using var source = new ManusBridgeUserWideTaskInventoryPageSource(
+                () => "bridge-test-token",
+                new Uri("https://bridge.example/v1/tasks"),
+                ExpectedBridgeManusUserId,
+                testHandler: new FakeHttpHandler((_, _) => Task.FromResult(JsonResponse(payload))));
+            var snapshot = await new AutopilotGlobalTaskInventoryReader(
+                source,
+                AutopilotGlobalTaskInventoryScopeIds.ManusBridgeAuthenticatedUserWide).ReadAuthoritativeSnapshotAsync();
+
+            Assert.False(snapshot.IsAuthoritative);
+            Assert.Empty(snapshot.ActiveTasks);
+            Assert.Equal("inventory_page_invalid", snapshot.FailureCode);
+            var claim = await ClaimAsync(
+                launchTaskIds[0],
+                snapshot,
+                allocatorScopeId: AutopilotGlobalTaskInventoryScopeIds.ManusBridgeAuthenticatedUserWide);
+            Assert.Equal(AutopilotGlobalTaskSlotOutcomes.InventoryUnknown, claim.Outcome);
+            Assert.False(claim.MayCallProvider);
+            if (claim.MayCallProvider) Interlocked.Increment(ref fakeProviderCalls);
+        }
+
+        await using var verify = CreateContext();
+        var row = await verify.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == launchTaskIds[0]);
+        Assert.Equal(AutopilotWaveLaunchStatuses.Planned, row.Status);
+        Assert.Equal(0, row.LaunchAttempt);
+        Assert.Equal(0, fakeProviderCalls);
     }
 
     [Fact]
@@ -1499,7 +1548,10 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
         .Select(pair => pair.Split('=', 2))
         .ToDictionary(pair => Uri.UnescapeDataString(pair[0]), pair => Uri.UnescapeDataString(pair[1]), StringComparer.Ordinal);
 
-    private static string BuildBridgeInventoryPayload(int taskCount)
+    private static string BuildBridgeInventoryPayload(
+        int taskCount,
+        string? reportedManusUserId = ExpectedBridgeManusUserId,
+        bool includeManusUserId = true)
     {
         var tasks = Enumerable.Range(0, taskCount).Select(index =>
         {
@@ -1514,13 +1566,16 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
             return task;
         }).ToArray();
 
-        return System.Text.Json.JsonSerializer.Serialize(new
+        var payload = new Dictionary<string, object?>(StringComparer.Ordinal)
         {
-            ok = true,
-            request_id = "synthetic-bridge-inventory",
-            data = tasks,
-            has_more = false,
-        });
+            ["ok"] = true,
+            ["request_id"] = "synthetic-bridge-inventory",
+            ["data"] = tasks,
+            ["has_more"] = false,
+        };
+        if (includeManusUserId) payload["manus_user_id"] = reportedManusUserId;
+
+        return System.Text.Json.JsonSerializer.Serialize(payload);
     }
 
     private static string BridgeNativeTaskId(int index) => index.ToString("D22", System.Globalization.CultureInfo.InvariantCulture);

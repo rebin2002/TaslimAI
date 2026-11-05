@@ -305,7 +305,10 @@ public sealed class ManusTaskListInventoryPageSource : IAutopilotGlobalTaskInven
 /// conservatively. It cannot establish team-wide visibility or attribute tasks to
 /// Taslim. A caller must use ManusBridgeAuthenticatedUserWide as the inventory
 /// scope; Taslim-only or team-wide scope labels fail closed. This adapter is not
-/// registered in DI pending source-backed deployment credential binding.
+/// registered in DI pending source-backed deployment credential binding. Its Bridge
+/// response must include `manus_user_id` obtained from official user.me using the
+/// same Manus API key used by task.list and task.create, and that value must match
+/// the explicitly configured expected Manus user ID.
 /// </summary>
 public sealed class ManusBridgeUserWideTaskInventoryPageSource : IAutopilotGlobalTaskInventoryPageSource, IDisposable
 {
@@ -318,15 +321,24 @@ public sealed class ManusBridgeUserWideTaskInventoryPageSource : IAutopilotGloba
     private readonly HttpClient http;
     private readonly Func<string?> bridgeTokenProvider;
     private readonly Uri tasksEndpoint;
+    private readonly string expectedManusUserId;
     private readonly TimeSpan requestTimeout;
 
     public ManusBridgeUserWideTaskInventoryPageSource(
         Func<string?> bridgeTokenProvider,
         Uri tasksEndpoint,
+        string expectedManusUserId,
         TimeSpan? requestTimeout = null,
         HttpMessageHandler? testHandler = null)
     {
         this.bridgeTokenProvider = bridgeTokenProvider ?? throw new ArgumentNullException(nameof(bridgeTokenProvider));
+        if (string.IsNullOrWhiteSpace(expectedManusUserId)
+            || expectedManusUserId.Length > 256
+            || expectedManusUserId.Any(char.IsWhiteSpace)
+            || expectedManusUserId.Any(char.IsControl))
+            throw new ArgumentException("Expected Manus user ID must be explicitly configured and contain no whitespace or control characters.", nameof(expectedManusUserId));
+
+        this.expectedManusUserId = expectedManusUserId;
         if (tasksEndpoint is null
             || !tasksEndpoint.IsAbsoluteUri
             || !string.Equals(tasksEndpoint.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
@@ -390,6 +402,9 @@ public sealed class ManusBridgeUserWideTaskInventoryPageSource : IAutopilotGloba
                 || ContainsDuplicateJsonProperties(root)
                 || !root.TryGetProperty("ok", out var ok)
                 || ok.ValueKind != System.Text.Json.JsonValueKind.True
+                || !root.TryGetProperty("manus_user_id", out var manusUserIdElement)
+                || manusUserIdElement.ValueKind != System.Text.Json.JsonValueKind.String
+                || !string.Equals(manusUserIdElement.GetString(), expectedManusUserId, StringComparison.Ordinal)
                 || !root.TryGetProperty("data", out var tasks)
                 || tasks.ValueKind != System.Text.Json.JsonValueKind.Array
                 || tasks.GetArrayLength() > MaximumTasks
