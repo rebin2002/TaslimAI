@@ -135,6 +135,37 @@ public sealed class DocumentGenerationTests : IClassFixture<DocumentGenerationAp
     }
 
     [Fact]
+    public async Task Document_job_honors_docx_only_output_format()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client);
+        var response = await SendWithCsrf(client, HttpMethod.Post, "/api/document-generation/jobs", new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            description = "Create a concise professional report as an editable document.",
+            documentType = "report",
+            length = "standard",
+            tone = "professional",
+            language = "en",
+            attachmentIds = Array.Empty<Guid>(),
+            outputFormat = "docx",
+        });
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        var created = (await response.Content.ReadFromJsonAsync<CreateDocumentGenerationResponse>())!;
+        var job = await WaitForTerminal(client, created.Job.Id);
+        Assert.Equal(GenerationJobStatus.Succeeded.ToString(), job.Status);
+        var output = Assert.Single(job.Outputs);
+        Assert.NotNull(output.StoredFileId);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var asset = await db.Assets.Include(item => item.Representations).ThenInclude(item => item.StoredFile).SingleAsync(item => item.SourceGenerationJobId == created.Job.Id);
+        var representation = Assert.Single(asset.Representations);
+        Assert.Equal(AssetRepresentationTypes.Docx, representation.RepresentationType);
+        Assert.Contains("wordprocessingml", representation.StoredFile.ContentType, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task Document_request_rejects_unsupported_format_and_missing_source_before_queueing()
     {
         using var client = factory.CreateClient();

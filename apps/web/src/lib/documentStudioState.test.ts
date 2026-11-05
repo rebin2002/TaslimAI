@@ -122,6 +122,24 @@ describe("Document Studio state", () => {
     expect(parseDocumentJobResult(completed)).toBeNull();
   });
 
+  it("reads legacy PascalCase persisted sections while the API writes camelCase", () => {
+    const completed = job("Succeeded", false, {
+      resultJson: JSON.stringify({
+        AssetId: "00000000-0000-4000-8000-000000000010",
+        DocumentType: "document",
+        Title: "Legacy report",
+        Summary: "Legacy summary",
+        Sections: [{ Heading: "Overview", Blocks: [{ Type: "paragraph", Text: "Legacy text" }, { Type: "table", Rows: [{ Cells: ["A", "B"] }] }] }],
+        Representations: [{ Id: "00000000-0000-4000-8000-000000000011", Type: "docx", FileName: "report.docx", ContentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" }],
+      }),
+    });
+
+    const parsed = parseDocumentJobResult(completed);
+    expect(parsed).toMatchObject({ assetId: "00000000-0000-4000-8000-000000000010", title: "Legacy report" });
+    expect(parsed?.sections?.[0].blocks[1].rows?.[0].cells).toEqual(["A", "B"]);
+    expect(parsed?.representations).toHaveLength(1);
+  });
+
   it("represents a succeeded job without an optional result as recoverable", () => {
     const completed = job("Succeeded");
     expect(documentPresentationState(completed, null)).toBe("completed-unavailable");

@@ -20,6 +20,23 @@ const rooms: { id: Room; label: string; icon: typeof MapPin; hint: string }[] = 
 
 const emptyForm: FormState = { name: "", description: "", visualContinuityNotes: "", category: "", environmentType: "practical", movieLocationId: "", visualDescription: "", timeOfDay: "", weather: "", continuityNotes: "", referenceAssetId: "" };
 
+export function movieWorldProjectSwitchReset() {
+  return {
+    data: null as WorldData | null,
+    room: "locations" as Room,
+    selectedId: null as string | null,
+    form: { ...emptyForm },
+    editing: false,
+    creating: false,
+    saving: false,
+    addingReference: false,
+    referenceName: "",
+    referenceKind: "moodboard",
+    referenceAssetId: "",
+    error: "",
+  };
+}
+
 function formFor(room: Room, selected: Entity): FormState {
   if (room === "locations") { const location = selected as MovieLocation; return { ...emptyForm, name: location.name, description: location.description, visualContinuityNotes: location.visualContinuityNotes ?? "", referenceAssetId: location.referenceAssetId ?? "" }; }
   if (room === "sets") { const set = selected as MovieSet; return { ...emptyForm, name: set.name, description: set.description, environmentType: set.environmentType, movieLocationId: set.movieLocationId ?? "", visualDescription: set.visualDescription ?? "", timeOfDay: set.timeOfDay ?? "", weather: set.weather ?? "", continuityNotes: set.continuityNotes ?? "", referenceAssetId: set.referenceAssetId ?? "" }; }
@@ -50,10 +67,26 @@ export function MovieWorldWorkspace({ projectId }: { projectId: string }) {
     let mounted = true;
     void api.getMovieWorld(projectId).then((result) => {
       if (!mounted) return;
+      const reset = movieWorldProjectSwitchReset();
       setData(result);
+      setRoom(reset.room);
+      setSelectedId(reset.selectedId);
+      setForm(reset.form);
+      setEditing(reset.editing);
+      setCreating(reset.creating);
+      setSaving(reset.saving);
+      setAddingReference(reset.addingReference);
+      setReferenceName(reset.referenceName);
+      setReferenceKind(reset.referenceKind);
+      setReferenceAssetId(reset.referenceAssetId);
+      setError(reset.error);
       const first = result.world.locations[0];
       if (first) { setSelectedId(first.id); setForm(formFor("locations", first)); }
-    }).catch((cause) => mounted && setError(cause instanceof Error ? cause.message : "The World room could not be loaded."));
+    }).catch((cause) => {
+      if (!mounted) return;
+      setSaving(false);
+      setError(cause instanceof Error ? cause.message : "The World room could not be loaded.");
+    });
     return () => { mounted = false; };
   }, [projectId]);
 
@@ -112,7 +145,7 @@ export function MovieWorldWorkspace({ projectId }: { projectId: string }) {
     finally { setSaving(false); }
   }
 
-  if (!data) return <div className="movie-world-loading"><span className="loading-spinner" /><p>{error || t("movieBody.loading")}</p></div>;
+  if (!data || data.movieProjectId !== projectId) return <div className="movie-world-loading"><span className="loading-spinner" /><p>{error || t("movieBody.loading")}</p></div>;
 
   const usages = data.usageDetails.filter((usage) => usage.entityType === (room === "locations" ? "location" : room === "sets" ? "set" : "prop") && usage.entityId === selected?.id);
   const refs = data.world.references;

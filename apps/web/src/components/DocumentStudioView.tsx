@@ -42,6 +42,7 @@ const extensions = [".pdf", ".docx", ".txt", ".md", ".csv", ".xlsx"];
 type DocumentType = "auto" | "report" | "proposal" | "business_letter" | "company_profile" | "meeting_minutes" | "article" | "general";
 type DocumentLength = "short" | "standard" | "detailed";
 type DocumentLanguage = "auto" | "en" | "ar" | "ku";
+type DocumentOutputFormat = "docx" | "pdf" | "both";
 type DocumentTone = "professional" | "formal" | "friendly" | "persuasive" | "neutral";
 
 function formatAssetDate(value: string, locale: string) {
@@ -89,6 +90,7 @@ export function DocumentStudioView() {
   const [audience, setAudience] = useState("");
   const [additionalInstructions, setAdditionalInstructions] = useState("");
   const [language, setLanguage] = useState<DocumentLanguage>("auto");
+  const [outputFormat, setOutputFormat] = useState<DocumentOutputFormat>("both");
   const [tone, setTone] = useState<DocumentTone>("professional");
   const [includeTableOfContents, setIncludeTableOfContents] = useState(true);
   const [current, setCurrent] = useState<GenerationJob | null>(null);
@@ -164,6 +166,7 @@ export function DocumentStudioView() {
     setAudience("");
     setAdditionalInstructions("");
     setLanguage("auto");
+    setOutputFormat("both");
     setTone("professional");
     setIncludeTableOfContents(true);
     setPollRetry(0);
@@ -253,7 +256,7 @@ export function DocumentStudioView() {
     restoreJobId.current = null;
     clearDocumentActiveJobId(workspaceId);
     try {
-      const job = await api.createDocumentGenerationJob({ workspaceId, projectId: projectId || null, title: title.trim() || null, description: prompt.trim(), documentType, length, audience: audience.trim() || null, additionalInstructions: additionalInstructions.trim() || null, attachmentIds: selected, language, tone, includeTableOfContents });
+      const job = await api.createDocumentGenerationJob({ workspaceId, projectId: projectId || null, title: title.trim() || null, description: prompt.trim(), documentType, length, audience: audience.trim() || null, additionalInstructions: additionalInstructions.trim() || null, attachmentIds: selected, language, outputFormat, tone, includeTableOfContents });
       if (workspaceGeneration.current !== workspaceVersion || observedWorkspaceId.current !== workspaceId || !isRestorableDocumentJob(job, workspaceId)) return;
       activeJobId.current = job.id;
       activeAssetId.current = parseDocumentJobResult(job)?.assetId ?? null;
@@ -387,6 +390,7 @@ export function DocumentStudioView() {
           <label className="document-field document-field-primary"><span>{t("document.descriptionLabel")}</span><textarea id="document-brief" aria-describedby="document-brief-count" value={prompt} onChange={(event) => setPrompt(event.target.value)} maxLength={8000} placeholder={t("document.descriptionPlaceholder")} required /><small id="document-brief-count">{prompt.length}/8000</small></label>
           <div className="document-field-row"><label className="document-field"><span>{t("document.type")}</span><select value={documentType} onChange={(event) => setDocumentType(event.target.value as DocumentType)}><option value="auto">{t("document.typeAuto")}</option><option value="report">{t("document.typeReport")}</option><option value="proposal">{t("document.typeProposal")}</option><option value="business_letter">{t("document.typeLetter")}</option><option value="company_profile">{t("document.typeProfile")}</option><option value="meeting_minutes">{t("document.typeMinutes")}</option><option value="article">{t("document.typeArticle")}</option><option value="general">{t("document.typeGeneral")}</option></select></label><label className="document-field"><span>{t("document.length")}</span><select value={length} onChange={(event) => setLength(event.target.value as DocumentLength)}><option value="short">{t("document.lengthShort")}</option><option value="standard">{t("document.lengthStandard")}</option><option value="detailed">{t("document.lengthDetailed")}</option></select></label></div>
           <div className="document-field-row"><label className="document-field"><span>{t("document.tone")}</span><select value={tone} onChange={(event) => setTone(event.target.value as DocumentTone)}><option value="professional">{t("document.toneProfessional")}</option><option value="formal">{t("document.toneFormal")}</option><option value="friendly">{t("document.toneFriendly")}</option><option value="persuasive">{t("document.tonePersuasive")}</option><option value="neutral">{t("document.toneNeutral")}</option></select></label><label className="document-field"><span>{t("document.language")}</span><select value={language} onChange={(event) => setLanguage(event.target.value as DocumentLanguage)}><option value="auto">{t("document.languageAuto")}</option><option value="en">{t("document.languageEnglish")}</option><option value="ar">{t("document.languageArabic")}</option><option value="ku">{t("document.languageKurdish")}</option></select></label></div>
+          <div className="document-field-row"><label className="document-field"><span>{t("document.outputFormat")}</span><select id="document-output-format" value={outputFormat} onChange={(event) => setOutputFormat(event.target.value as DocumentOutputFormat)}><option value="both">{t("document.outputBoth")}</option><option value="docx">{t("document.outputDocx")}</option><option value="pdf">{t("document.outputPdf")}</option></select></label></div>
           <label className="document-field"><span>{t("document.project")}</span><select id="document-project" value={projectId} onChange={(event) => setProjectId(event.target.value)} disabled={loadingSources}><option value="">{t("document.noProject")}</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label>
           <details className="document-advanced"><summary>{t("document.advanced")}</summary><div className="document-advanced-grid"><label className="document-field"><span>{t("document.titleLabel")}</span><input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={160} placeholder={t("document.titlePlaceholder")} /></label><label className="document-field"><span>{t("document.audience")}</span><input value={audience} onChange={(event) => setAudience(event.target.value)} maxLength={400} placeholder={t("document.audiencePlaceholder")} /></label><label className="document-field document-advanced-wide"><span>{t("document.additionalInstructions")}</span><textarea value={additionalInstructions} onChange={(event) => setAdditionalInstructions(event.target.value)} maxLength={3000} placeholder={t("document.additionalInstructionsPlaceholder")} /></label></div></details>
           <div className="document-brief-footer"><label className="document-checkbox"><input type="checkbox" checked={includeTableOfContents} onChange={(event) => setIncludeTableOfContents(event.target.checked)} /> <span>{t("document.includeContents")}</span></label><button className="primary-button document-generate-button" type="submit" disabled={working || prompt.trim().length < 3} aria-busy={working}><Sparkles size={15} /> {working ? t("document.working") : t("document.generate")}</button></div>

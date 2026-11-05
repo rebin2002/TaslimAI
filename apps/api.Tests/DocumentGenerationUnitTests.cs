@@ -81,6 +81,33 @@ public sealed class DocumentGenerationUnitTests
     }
 
     [Fact]
+    public void Persisted_result_uses_camel_case_for_generated_sections()
+    {
+        var draft = new DocumentDraft
+        {
+            Title = "Report",
+            Summary = "Summary",
+            Sections = [new DocumentSection
+            {
+                Heading = "Overview",
+                Blocks = [new DocumentBlock { Type = DocumentBlockTypes.Paragraph, Text = "Text" }],
+            }],
+        };
+
+        using var result = System.Text.Json.JsonDocument.Parse(DocumentGenerationContractMapper.SerializeResult("document", draft.Title, "en", draft.Summary, draft.Sections));
+        var root = result.RootElement;
+        var section = root.GetProperty("sections")[0];
+        var block = section.GetProperty("blocks")[0];
+
+        Assert.Equal("Overview", section.GetProperty("heading").GetString());
+        Assert.Equal("paragraph", block.GetProperty("type").GetString());
+        Assert.Equal("Text", block.GetProperty("text").GetString());
+        Assert.False(root.TryGetProperty("Sections", out _));
+        Assert.False(section.TryGetProperty("Heading", out _));
+        Assert.False(block.TryGetProperty("Type", out _));
+    }
+
+    [Fact]
     public void Draft_validator_rejects_null_nested_values_and_unbounded_cells()
     {
         var options = new DocumentGenerationOptions { MaxBlockCharacters = 20 };

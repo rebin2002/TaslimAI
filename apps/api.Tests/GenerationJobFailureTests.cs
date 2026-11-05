@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
@@ -69,10 +70,49 @@ public sealed class GenerationJobFailureTests : IClassFixture<GenerationJobFailu
         Assert.False(await db.Assets.AsNoTracking().AnyAsync(item => item.SourceGenerationJobId == job.Id));
         Assert.False(await db.GenerationJobOutputs.AsNoTracking().AnyAsync(item => item.GenerationJobId == job.Id));
         Assert.False(await db.StoredFiles.AsNoTracking().AnyAsync(item => item.WorkspaceId == auth.PersonalWorkspace.Id));
-        var notifications = await client.GetFromJsonAsync<JsonElement>($"/api/notifications?workspaceId={auth.PersonalWorkspace.Id}");
-        var notification = Assert.Single(notifications.GetProperty("items").EnumerateArray());
+        // Failure status and usage are committed before the best-effort notification
+        // event is written. Observe that bounded eventual-consistency boundary while
+        // preserving the exact single-notification assertion.
+        var notification = await WaitForFailureNotificationAsync(client, auth.PersonalWorkspace.Id, job.Id);
         Assert.Equal("generation.failed", notification.GetProperty("type").GetString());
         Assert.Contains("/activity", notification.GetProperty("destination").GetString());
+    }
+
+    private static async Task<JsonElement> WaitForFailureNotificationAsync(HttpClient client, Guid workspaceId, Guid jobId)
+    {
+        var deadline = Stopwatch.GetTimestamp() + (long)(Stopwatch.Frequency * TimeSpan.FromSeconds(5).TotalSeconds);
+        string lastResponse = "<no response>";
+        while (Stopwatch.GetTimestamp() < deadline)
+        {
+            using var response = await client.GetAsync($"/api/notifications?workspaceId={workspaceId}");
+            lastResponse = await response.Content.ReadAsStringAsync();
+            if (response.IsSuccessStatusCode)
+            {
+                using var document = JsonDocument.Parse(lastResponse);
+                var items = document.RootElement.GetProperty("items")
+                    .EnumerateArray()
+                    .Select(item => item.Clone())
+                    .ToArray();
+                if (items.Length > 1) _ = Assert.Single(items);
+                if (items.Length == 1)
+                {
+                    var notification = items[0];
+                    if (notification.TryGetProperty("type", out var type)
+                        && type.GetString() == "generation.failed"
+                        && notification.TryGetProperty("generationJobId", out var notificationJobId)
+                        && notificationJobId.ValueKind == JsonValueKind.String
+                        && Guid.TryParse(notificationJobId.GetString(), out var parsedJobId)
+                        && parsedJobId == jobId)
+                    {
+                        return notification;
+                    }
+                }
+            }
+            await Task.Delay(100);
+        }
+
+        throw new Xunit.Sdk.XunitException(
+            $"Timed out waiting for generation.failed notification for job {jobId}. Last response: {lastResponse}");
     }
 
     private static async Task<AuthResponse> Register(HttpClient client)

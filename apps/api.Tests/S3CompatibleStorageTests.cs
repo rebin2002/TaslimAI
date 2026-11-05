@@ -154,6 +154,36 @@ public sealed class S3CompatibleStorageTests
     }
 
     [Fact]
+    public async Task Timed_out_storage_operation_fails_closed_with_safe_error_and_failed_lifecycle()
+    {
+        var storage = new TimeoutStorageService();
+        using var factory = new StorageProviderFactory(new Dictionary<string, string?>
+        {
+            ["Files:StorageProvider"] = "S3Compatible",
+            ["Files:StorageOperationTimeoutSeconds"] = "1",
+        }, storage);
+        EnsureDatabase(factory);
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Storage timeout");
+
+        var response = await Upload(client, auth.PersonalWorkspace.Id, "brief.txt", "content");
+        var responseBody = await response.Content.ReadAsStringAsync();
+        var error = JsonSerializer.Deserialize<JsonElement>(responseBody);
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Equal("FILE_STORAGE_OPERATION_FAILED", error.GetProperty("error").GetProperty("code").GetString());
+        Assert.DoesNotContain("timed out", await response.Content.ReadAsStringAsync(), StringComparison.OrdinalIgnoreCase);
+        Assert.True(storage.StoreWasCancelled);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var stored = Assert.Single(await db.StoredFiles.AsNoTracking().ToListAsync());
+        Assert.Equal(StoredFileStatus.Failed, stored.Status);
+        Assert.Equal(FileExtractionStatus.Failed, stored.TextExtractionStatus);
+        Assert.NotNull(stored.ProcessedAt);
+    }
+
+    [Fact]
     public async Task Unexpected_upload_processing_failure_does_not_return_created_failed_file()
     {
         using var factory = new StorageProviderFactory(new Dictionary<string, string?>
@@ -208,6 +238,20 @@ public sealed class S3CompatibleStorageTests
 
         var service = factory.Services.GetRequiredService<IFileStorageService>();
         Assert.IsType<LocalFileStorageService>(service);
+    }
+
+    [Fact]
+    public void Storage_operation_timeout_is_bound_and_clamped_to_safe_limits()
+    {
+        using var factory = new StorageProviderFactory(new Dictionary<string, string?>
+        {
+            ["Files:StorageOperationTimeoutSeconds"] = "0",
+        });
+
+        var options = factory.Services.GetRequiredService<IOptions<FileOptions>>().Value;
+
+        Assert.Equal(0, options.StorageOperationTimeoutSeconds);
+        Assert.Equal(TimeSpan.FromSeconds(1), options.StorageOperationTimeout);
     }
 
     [Fact]
@@ -364,6 +408,29 @@ public sealed class S3CompatibleStorageTests
         public Task<Stream?> OpenReadAsync(string storageKey, CancellationToken cancellationToken = default) => throw failure;
         public Task DeleteAsync(string storageKey, CancellationToken cancellationToken = default) => throw failure;
         public Task<bool> ExistsAsync(string storageKey, CancellationToken cancellationToken = default) => throw failure;
+    }
+
+    private sealed class TimeoutStorageService : IFileStorageService
+    {
+        public string ProviderKey => FileStorageProviders.S3Compatible;
+        public bool StoreWasCancelled { get; private set; }
+
+        public async Task StoreAsync(string storageKey, Stream content, CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                StoreWasCancelled = true;
+                throw;
+            }
+        }
+
+        public Task<Stream?> OpenReadAsync(string storageKey, CancellationToken cancellationToken = default) => Task.FromResult<Stream?>(null);
+        public Task DeleteAsync(string storageKey, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task<bool> ExistsAsync(string storageKey, CancellationToken cancellationToken = default) => Task.FromResult(false);
     }
 
     private sealed class StorageProviderFactory(IReadOnlyDictionary<string, string?> values, IFileStorageService? storageOverride = null) : WebApplicationFactory<Program>
