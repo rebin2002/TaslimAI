@@ -60,7 +60,12 @@ public sealed class AutopilotEventDispatchIntegrationTests
                 // cannot create a second replacement task. Send it after the
                 // first worker pass settles so the SQLite test store is not
                 // contended by an HTTP duplicate and the background processor.
-                using var duplicate = await PostSignedEventAsync(client, payload, eventId);
+                using var duplicate = await PostSignedEventWithFenceRetryAsync(
+                    client,
+                    payload,
+                    eventId,
+                    "completion-bridge",
+                    TimeSpan.FromSeconds(8));
                 var duplicateContent = await duplicate.Content.ReadAsStringAsync();
                 Assert.True(duplicate.StatusCode == HttpStatusCode.OK,
                     $"Expected duplicate acknowledgement; received {(int)duplicate.StatusCode}: {duplicateContent}");
