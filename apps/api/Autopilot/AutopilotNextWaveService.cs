@@ -69,6 +69,8 @@ public sealed class AutopilotNextWaveService(
     private const int MaxCompletionEventsPerCycle = 1000;
     private const string RejectedClaimRecoveryMarker = "provider_rejected_before_task_acceptance";
     private const string RejectedClaimReleasedMarker = "provider_rejected_claim_released";
+    private const string UnverifiedProviderRejectionReason = "provider_rejection_unverified";
+    private const string UnverifiedProviderRejectionDetailPrefix = "provider_rejection_unverified_no_create_proof:";
     private const long RepairEscalationAdvisoryLockKey = 0x4155544F52455041L;
     private static readonly SemaphoreSlim LocalRepairEscalationGate = new(1, 1);
 
@@ -831,12 +833,19 @@ public sealed class AutopilotNextWaveService(
                     }
                     if (rejected.SlotHeld)
                     {
-                        // Persistence uncertainty must not free capacity or make the
-                        // backlog item available to a second provider call.
+                        // A caller-supplied rejection is not proof that no external
+                        // task was created; keep both the slot and backlog claim held.
+                        var unverifiedNoCreateProof = string.Equals(
+                            rejected.ReasonCode,
+                            "provider_rejection_no_verified_no_create_proof",
+                            StringComparison.Ordinal);
+                        var holdDetail = unverifiedNoCreateProof
+                            ? "provider_rejection_unverified_no_create_proof; slot_and_backlog_claim_retained"
+                            : "provider_rejection_transition_unverified; slot_and_backlog_claim_retained";
                         blocked++;
-                        actions.Add($"next_wave_blocked:{waveKey}:rejection_persistence_ambiguous");
+                        actions.Add($"next_wave_blocked:{waveKey}:rejection_held");
                         await AddRepairEscalationOnceAsync(audit,
-                            "provider_rejection_persistence_ambiguous; slot_and_backlog_claim_retained",
+                            holdDetail,
                             waveKey, task.TaskKey, task.LaunchAttempt, task.Id, false, outcomePersistenceToken);
                         continue;
                     }
@@ -1025,9 +1034,12 @@ public sealed class AutopilotNextWaveService(
         {
             if (globalTaskSlots is null || globalTaskInventory is null)
             {
-                stale.LastStatusDetail = "stale_launch_claim_held; authoritative_inventory_not_configured";
+                var holdDetail = PreserveUnverifiedProviderRejectionDetail(
+                    stale,
+                    "stale_launch_claim_held; authoritative_inventory_not_configured");
+                stale.LastStatusDetail = holdDetail;
                 await AddRepairEscalationOnceAsync(audit,
-                    "stale_launch_claim_held; authoritative_inventory_not_configured",
+                    holdDetail,
                     stale.WaveKey, stale.TaskKey, stale.LaunchAttempt, stale.Id, settings.DryRun, cancellationToken);
                 continue;
             }
@@ -1049,9 +1061,10 @@ public sealed class AutopilotNextWaveService(
             }
             else
             {
-                stale.LastStatusDetail = reservation.SlotHeld
+                var holdDetail = reservation.SlotHeld
                     ? "stale_launch_claim_held_until_authoritative_reconciliation"
                     : $"stale_launch_claim_not_retried:{reservation.ReasonCode ?? reservation.Outcome}";
+                stale.LastStatusDetail = PreserveUnverifiedProviderRejectionDetail(stale, holdDetail);
                 await AddRepairEscalationOnceAsync(audit,
                     stale.LastStatusDetail,
                     stale.WaveKey, stale.TaskKey, stale.LaunchAttempt, stale.Id, settings.DryRun, cancellationToken);
@@ -2078,6 +2091,18 @@ public sealed class AutopilotNextWaveService(
     private static string BuildInstructions(AutopilotWaveLaunchTask task) =>
         Bounded($"Deliver the approved backlog item '{task.Title}'. Wave: {task.WaveKey}. Task: {task.TaskKey}. " +
                 "Open a pull request; do not merge, do not release, and do not enable charging or paid providers.", 4000);
+
+    private static string PreserveUnverifiedProviderRejectionDetail(
+        AutopilotWaveLaunchTask task,
+        string fallbackDetail)
+    {
+        if (!string.Equals(task.ReasonCode, UnverifiedProviderRejectionReason, StringComparison.Ordinal))
+            return fallbackDetail;
+
+        return task.LastStatusDetail?.StartsWith(UnverifiedProviderRejectionDetailPrefix, StringComparison.Ordinal) == true
+            ? task.LastStatusDetail
+            : $"{UnverifiedProviderRejectionDetailPrefix}unknown";
+    }
 
     private static bool IsDeterministicProviderRejection(AutopilotWaveLaunchTask task) =>
         string.Equals(task.LastStatusDetail, RejectedClaimRecoveryMarker, StringComparison.Ordinal)

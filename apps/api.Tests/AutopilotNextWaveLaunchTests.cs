@@ -1343,7 +1343,7 @@ public sealed class AutopilotNextWaveLaunchTests
     }
 
     [Fact]
-    public async Task Cancellation_after_definitive_rejection_persists_rejection_and_releases_claim()
+    public async Task Cancellation_after_unverified_rejection_persists_hold_and_retains_claim()
     {
         using var host = new Host(options =>
         {
@@ -1366,12 +1366,15 @@ public sealed class AutopilotNextWaveLaunchTests
         using (var db = host.CreateContext())
         {
             var launch = await db.AutopilotWaveLaunchTasks.SingleAsync();
-            Assert.Equal(AutopilotWaveLaunchStatuses.Failed, launch.Status);
-            Assert.Equal("bridge_status_400", launch.ReasonCode);
+            Assert.Equal(AutopilotWaveLaunchStatuses.Launching, launch.Status);
+            Assert.Equal("provider_rejection_unverified", launch.ReasonCode);
+            Assert.Contains("provider_rejection_unverified_no_create_proof:", launch.LastStatusDetail, StringComparison.Ordinal);
             var backlog = await db.AutopilotBacklogItems.SingleAsync(item => item.ItemKey == launch.BacklogItemKey);
-            Assert.Null(backlog.ConsumedByWaveKey);
+            Assert.Equal(launch.WaveKey, backlog.ConsumedByWaveKey);
             Assert.Contains(await db.AutopilotAuditEvents.ToListAsync(), item =>
-                item.Action == AutopilotAuditActions.NextWaveLaunchFailed && item.TargetId == launch.Id);
+                item.Action == AutopilotAuditActions.HumanDecisionRequired
+                && item.StatusDetail == "provider_rejection_unverified_no_create_proof; slot_and_backlog_claim_retained"
+                && item.TargetId == launch.Id);
         }
 
         await host.LaunchAsync();
@@ -1813,7 +1816,7 @@ public sealed class AutopilotNextWaveLaunchTests
     }
 
     [Fact]
-    public async Task Definitive_provider_rejection_releases_only_its_backlog_claim()
+    public async Task Unverified_provider_rejection_holds_slot_and_backlog_claim_without_replacement()
     {
         using var host = new Host(options =>
         {
@@ -1828,96 +1831,77 @@ public sealed class AutopilotNextWaveLaunchTests
 
         using var db = host.CreateContext();
         var task = await db.AutopilotWaveLaunchTasks.SingleAsync();
-        Assert.Equal(AutopilotWaveLaunchStatuses.Failed, task.Status);
-        Assert.Equal("bridge_status_400", task.ReasonCode);
+        Assert.Equal(AutopilotWaveLaunchStatuses.Launching, task.Status);
+        Assert.Equal(1, task.LaunchAttempt);
+        Assert.Equal("provider_rejection_unverified", task.ReasonCode);
+        Assert.Contains("provider_rejection_unverified_no_create_proof:", task.LastStatusDetail, StringComparison.Ordinal);
         var backlog = await db.AutopilotBacklogItems.SingleAsync(item => item.ItemKey == "bl-definitive-rejection");
-        Assert.Null(backlog.ConsumedByWaveKey);
+        Assert.Equal(task.WaveKey, backlog.ConsumedByWaveKey);
         Assert.Equal(1, host.Provider.LaunchCalls);
         Assert.Contains(await db.AutopilotAuditEvents.ToListAsync(), item =>
             item.Action == AutopilotAuditActions.HumanDecisionRequired
-            && item.Reason == AutopilotHumanDecisions.RepairEscalation);
+            && item.Reason == AutopilotHumanDecisions.RepairEscalation
+            && item.StatusDetail == "provider_rejection_unverified_no_create_proof; slot_and_backlog_claim_retained"
+            && item.TargetId == task.Id);
+
+        await host.GreenRunAsync("wave-definitive-rejection-replay");
+        Assert.Equal(1, host.Provider.LaunchCalls);
+        Assert.Equal(1, await db.AutopilotWaveLaunchTasks.CountAsync());
     }
 
     [Fact]
-    public async Task Restart_recovers_backlog_claim_release_after_durable_provider_rejection_without_provider_call()
+    public async Task Restart_after_unverified_rejection_keeps_slot_and_backlog_claim_held()
     {
         using var host = new Host(options =>
         {
             options.DryRun = false;
-            options.SimulationMode = false;
             options.AllowNextWaveLaunch = true;
+            options.AllowNextWaveLaunchWhenReleasePending = true;
             options.MaxLaunchAttempts = 3;
         });
-        await host.SeedGlobalSlotContendersAsync(2);
+        await host.AddBacklogAsync("bl-rejection-restart", "Hold this approved task after an unverified rejection");
+        host.Provider.Results.Enqueue(WaveLaunchProviderResult.Rejected("bridge_status_400"));
+        await host.GreenRunAsync("wave-rejection-restart");
 
         Guid rejectedTaskId;
         string rejectedWaveKey;
         using (var db = host.CreateContext())
         {
-            var rejected = await db.AutopilotWaveLaunchTasks.SingleAsync(item => item.TaskKey == "cap-task-00");
+            var rejected = await db.AutopilotWaveLaunchTasks.SingleAsync();
             rejectedTaskId = rejected.Id;
             rejectedWaveKey = rejected.WaveKey;
-            rejected.Status = AutopilotWaveLaunchStatuses.Launching;
-            rejected.LaunchAttempt = 1;
-            rejected.MaxLaunchAttempts = 3;
-            rejected.ReasonCode = "global_slot_reserved";
-            rejected.LastStatusDetail = null;
-            rejected.ExternalTaskId = null;
-            rejected.CompletedAt = null;
-            rejected.UpdatedAt = host.Time.GetUtcNow().UtcDateTime;
-            rejected.ConcurrencyToken = Guid.NewGuid();
-
-            var otherFailed = await db.AutopilotWaveLaunchTasks.SingleAsync(item => item.TaskKey == "cap-task-01");
-            otherFailed.Status = AutopilotWaveLaunchStatuses.Failed;
-            otherFailed.LaunchAttempt = 1;
-            otherFailed.MaxLaunchAttempts = 1;
-            otherFailed.LastStatusDetail = "unrelated_failure";
-
-            var rejectedBacklog = await db.AutopilotBacklogItems.SingleAsync(item => item.ItemKey == "bl-cap-00");
-            rejectedBacklog.ConsumedByWaveKey = rejectedWaveKey;
-            rejectedBacklog.ConsumedAt = host.Time.GetUtcNow().UtcDateTime;
-            var otherBacklog = await db.AutopilotBacklogItems.SingleAsync(item => item.ItemKey == "bl-cap-01");
-            otherBacklog.ConsumedByWaveKey = "another-wave-owner";
-            otherBacklog.ConsumedAt = host.Time.GetUtcNow().UtcDateTime;
-
-            await db.SaveChangesAsync();
-        }
-
-        var rejectedResult = await host.RecordRejectedAsync(rejectedTaskId, "bridge_status_400");
-        Assert.Equal(AutopilotGlobalTaskSlotOutcomes.LaunchRejected, rejectedResult.Outcome);
-        using (var db = host.CreateContext())
-        {
-            var rejected = await db.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == rejectedTaskId);
-            Assert.Equal(AutopilotWaveLaunchStatuses.Failed, rejected.Status);
-            Assert.Equal("provider_rejected_before_task_acceptance", rejected.LastStatusDetail);
+            Assert.Equal(AutopilotWaveLaunchStatuses.Launching, rejected.Status);
+            Assert.Equal("provider_rejection_unverified", rejected.ReasonCode);
+            Assert.Equal("provider_rejection_unverified_no_create_proof:bridge_status_400", rejected.LastStatusDetail);
             Assert.Equal(rejectedWaveKey,
-                (await db.AutopilotBacklogItems.SingleAsync(item => item.ItemKey == "bl-cap-00")).ConsumedByWaveKey);
+                (await db.AutopilotBacklogItems.SingleAsync(item => item.ItemKey == "bl-rejection-restart")).ConsumedByWaveKey);
         }
+        Assert.Equal(1, host.Provider.LaunchCalls);
 
-        // The allocator's durable rejection has committed, but the service-side
-        // backlog release has not yet run: this is the process-crash boundary.
-        await host.LaunchAsync();
-        await host.LaunchAsync();
+        // Simulate process restart after the launch lease expires. Stale
+        // reconciliation must retain the original proof marker and never recreate.
+        host.Options.LockLeaseMinutes = 1;
+        host.Time.Advance(TimeSpan.FromMinutes(2));
+        await host.ReconcileLaunchesAsync();
+        await host.ReconcileLaunchesAsync();
 
         using (var db = host.CreateContext())
         {
             var recovered = await db.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == rejectedTaskId);
-            Assert.Equal(AutopilotWaveLaunchStatuses.Failed, recovered.Status);
+            Assert.Equal(AutopilotWaveLaunchStatuses.Launching, recovered.Status);
             Assert.Equal(1, recovered.LaunchAttempt);
-            Assert.Equal("provider_rejected_claim_released", recovered.LastStatusDetail);
-            Assert.Null((await db.AutopilotBacklogItems.SingleAsync(item => item.ItemKey == "bl-cap-00")).ConsumedByWaveKey);
-            Assert.Equal("another-wave-owner", (await db.AutopilotBacklogItems.SingleAsync(item => item.ItemKey == "bl-cap-01")).ConsumedByWaveKey);
-            Assert.Contains(await db.AutopilotAuditEvents.ToListAsync(), item =>
-                item.Action == AutopilotAuditActions.HumanDecisionRequired
-                && item.Reason == AutopilotHumanDecisions.RepairEscalation
-                && item.StatusDetail == "deterministic_rejection_claim_recovered_after_interruption");
+            Assert.Equal("provider_rejection_unverified", recovered.ReasonCode);
+            Assert.Equal("provider_rejection_unverified_no_create_proof:bridge_status_400", recovered.LastStatusDetail);
+            Assert.Equal(rejectedWaveKey,
+                (await db.AutopilotBacklogItems.SingleAsync(item => item.ItemKey == "bl-rejection-restart")).ConsumedByWaveKey);
+            Assert.Equal(1, await db.AutopilotWaveLaunchTasks.CountAsync());
         }
 
-        Assert.Equal(0, host.Provider.LaunchCalls);
+        Assert.Equal(1, host.Provider.LaunchCalls);
     }
 
     [Fact]
-    public async Task Rejected_claim_recovery_keeps_marker_and_escalates_if_backlog_owner_changed()
+    public async Task Unverified_rejection_never_releases_backlog_claim_owned_by_another_wave()
     {
         using var host = new Host(options =>
         {
@@ -1925,6 +1909,7 @@ public sealed class AutopilotNextWaveLaunchTests
             options.SimulationMode = false;
             options.AllowNextWaveLaunch = true;
             options.MaxLaunchAttempts = 3;
+            options.LockLeaseMinutes = 1;
         });
         await host.SeedGlobalSlotContendersAsync(2);
 
@@ -1951,23 +1936,22 @@ public sealed class AutopilotNextWaveLaunchTests
         }
 
         var rejectedResult = await host.RecordRejectedAsync(rejectedTaskId, "bridge_status_400");
-        Assert.Equal(AutopilotGlobalTaskSlotOutcomes.LaunchRejected, rejectedResult.Outcome);
-        await host.LaunchAsync();
-        await host.LaunchAsync();
+        Assert.Equal(AutopilotGlobalTaskSlotOutcomes.AmbiguousLaunch, rejectedResult.Outcome);
+        Assert.True(rejectedResult.SlotHeld);
+        Assert.False(rejectedResult.MayCallProvider);
+        host.Time.Advance(TimeSpan.FromMinutes(2));
+        await host.ReconcileLaunchesAsync();
+        await host.ReconcileLaunchesAsync();
 
         using (var db = host.CreateContext())
         {
             var rejected = await db.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == rejectedTaskId);
-            Assert.Equal(AutopilotWaveLaunchStatuses.Failed, rejected.Status);
+            Assert.Equal(AutopilotWaveLaunchStatuses.Launching, rejected.Status);
             Assert.Equal(1, rejected.LaunchAttempt);
-            Assert.Equal("provider_rejected_before_task_acceptance", rejected.LastStatusDetail);
+            Assert.Equal("provider_rejection_unverified", rejected.ReasonCode);
+            Assert.Equal("provider_rejection_unverified_no_create_proof:bridge_status_400", rejected.LastStatusDetail);
             Assert.Equal("another-wave-owner",
                 (await db.AutopilotBacklogItems.SingleAsync(item => item.ItemKey == "bl-cap-00")).ConsumedByWaveKey);
-            Assert.Contains(await db.AutopilotAuditEvents.ToListAsync(), item =>
-                item.Action == AutopilotAuditActions.HumanDecisionRequired
-                && item.Reason == AutopilotHumanDecisions.RepairEscalation
-                && item.StatusDetail == "deterministic_rejection_backlog_claim_not_owned; recovery_marker_retained"
-                && item.TargetId == rejectedTaskId);
         }
 
         Assert.Equal(0, host.Provider.LaunchCalls);
