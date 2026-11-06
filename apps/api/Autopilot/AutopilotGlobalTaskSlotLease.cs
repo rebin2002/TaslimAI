@@ -709,8 +709,9 @@ public sealed record AutopilotGlobalTaskSlotResult(
 /// <summary>
 /// Atomically claims and maintains the single global Taslim task cap across all
 /// waves and API processes. It uses the already-durable AutopilotWaveLaunchTask
-/// row as the reservation: Launching and Launched hold one slot; Completed and a
-/// deterministic provider rejection release it. PostgreSQL transaction advisory
+/// row as the reservation: Launching and Launched hold one slot; only verified
+/// terminal completion releases it. Provider rejection strings are not proof of
+/// no-create and retain their slot. PostgreSQL transaction advisory
 /// locking serializes independent processes; serializable transactions are also
 /// used for relational providers and SQLite tests.
 ///
@@ -722,6 +723,7 @@ public sealed class AutopilotGlobalTaskSlotAllocator
 {
     public const int HardMaximum = 20;
     private const string SlotReservedReason = "global_slot_reserved";
+    private const string UnverifiedProviderRejectionReason = "provider_rejection_unverified";
     private const int AdvisoryLockNamespace = 1_413_560_652; // ASCII "TASL"
     private const int AdvisoryLockResource = 20;
     private const int MaxRowsExamined = 10_000;
@@ -877,6 +879,10 @@ public sealed class AutopilotGlobalTaskSlotAllocator
                         if (UtcNow() - task.UpdatedAt < launchLease)
                             return new(AutopilotGlobalTaskSlotOutcomes.LaunchInProgress, true, false, inventory.ActiveTasks.Count, task.ExternalTaskId);
 
+                        if (string.Equals(task.ReasonCode, UnverifiedProviderRejectionReason, StringComparison.Ordinal))
+                            return new(AutopilotGlobalTaskSlotOutcomes.AmbiguousLaunch, true, false, inventory.ActiveTasks.Count,
+                                task.ExternalTaskId, "provider_rejection_requires_authoritative_reconciliation");
+
                         if (!providerGuaranteesIdempotency)
                             return new(AutopilotGlobalTaskSlotOutcomes.AmbiguousLaunch, true, false, inventory.ActiveTasks.Count, ReasonCode: "expired_claim_but_provider_idempotency_unverified");
 
@@ -997,9 +1003,10 @@ public sealed class AutopilotGlobalTaskSlotAllocator
     }
 
     /// <summary>
-    /// A deterministic provider rejection proves no external task was accepted,
-    /// so the durable reservation can be released. Network timeouts are not
-    /// deterministic and must use RecordAmbiguousAsync instead.
+    /// The caller-supplied reason code is not proof that no task was created.
+    /// Until a trusted no-create proof path exists, retain the durable reservation
+    /// as ambiguous. The signature is retained for callers, but the string never
+    /// authorizes release or a same-key retry.
     /// </summary>
     public async Task<AutopilotGlobalTaskSlotResult> RecordRejectedAsync(
         Guid launchTaskRowId,
@@ -1017,22 +1024,25 @@ public sealed class AutopilotGlobalTaskSlotAllocator
                     await using var transaction = await db.Database.BeginTransactionAsync(TransactionIsolationLevel, cancellationToken);
                     await AcquireCrossProcessFenceAsync(cancellationToken);
                     var task = await db.AutopilotWaveLaunchTasks.SingleOrDefaultAsync(item => item.Id == launchTaskRowId, cancellationToken);
-                    if (task is null || !MatchesKey(task, idempotencyKey))
+                    if (task is null)
                         return new(AutopilotGlobalTaskSlotOutcomes.IdempotencyConflict, false, false, 0, ReasonCode: "launch_identity_mismatch");
+                    if (!MatchesKey(task, idempotencyKey))
+                        return new(AutopilotGlobalTaskSlotOutcomes.IdempotencyConflict,
+                            task.Status == AutopilotWaveLaunchStatuses.Launching || task.Status == AutopilotWaveLaunchStatuses.Launched,
+                            false, 0, task.ExternalTaskId, "launch_identity_mismatch");
                     if (task.Status == AutopilotWaveLaunchStatuses.Failed)
                         return new(AutopilotGlobalTaskSlotOutcomes.LaunchRejected, false, false, 0, task.ExternalTaskId, task.ReasonCode);
                     if (task.Status != AutopilotWaveLaunchStatuses.Launching)
                         return new(AutopilotGlobalTaskSlotOutcomes.InvalidTransition, task.Status == AutopilotWaveLaunchStatuses.Launched, false, 0, task.ExternalTaskId, "launch_claim_not_held");
 
-                    task.Status = AutopilotWaveLaunchStatuses.Failed;
-                    task.ReasonCode = SafeCode(reasonCode, "provider_rejected");
-                    task.LastStatusDetail = "provider_rejected_before_task_acceptance";
-                    task.CompletedAt = UtcNow();
+                    task.ReasonCode = UnverifiedProviderRejectionReason;
+                    task.LastStatusDetail = $"provider_rejection_unverified_no_create_proof:{SafeCode(reasonCode, "unknown")}";
                     task.UpdatedAt = UtcNow();
                     task.ConcurrencyToken = Guid.NewGuid();
                     await db.SaveChangesAsync(cancellationToken);
                     await transaction.CommitAsync(cancellationToken);
-                    return new(AutopilotGlobalTaskSlotOutcomes.LaunchRejected, false, false, 0, task.ExternalTaskId, task.ReasonCode);
+                    return new(AutopilotGlobalTaskSlotOutcomes.AmbiguousLaunch, true, false, 0,
+                        task.ExternalTaskId, "provider_rejection_no_verified_no_create_proof");
                 }
                 catch (Exception exception) when (IsRetryableRelationalConflict(exception))
                 {
@@ -1074,6 +1084,9 @@ public sealed class AutopilotGlobalTaskSlotAllocator
                         return new(AutopilotGlobalTaskSlotOutcomes.AlreadyActive, true, false, 0, task.ExternalTaskId);
                     if (task.Status != AutopilotWaveLaunchStatuses.Launching)
                         return new(AutopilotGlobalTaskSlotOutcomes.InvalidTransition, false, false, 0, task.ExternalTaskId, "launch_claim_not_held");
+                    if (string.Equals(task.ReasonCode, UnverifiedProviderRejectionReason, StringComparison.Ordinal))
+                        return new(AutopilotGlobalTaskSlotOutcomes.AmbiguousLaunch, true, false, 0, task.ExternalTaskId,
+                            "provider_rejection_requires_authoritative_reconciliation");
 
                     task.ReasonCode = SlotReservedReason;
                     task.LastStatusDetail = $"slot_retained_until_authoritative_reconciliation:{SafeCode(reasonCode, "provider_outcome_unknown")}";
@@ -1360,7 +1373,8 @@ public sealed class AutopilotGlobalTaskSlotAllocator
 
     private static bool IsGlobalSlotReservation(AutopilotWaveLaunchTask task) =>
         task.Status == AutopilotWaveLaunchStatuses.Launched
-        || (task.Status == AutopilotWaveLaunchStatuses.Launching && task.ReasonCode == SlotReservedReason);
+        || (task.Status == AutopilotWaveLaunchStatuses.Launching
+            && (task.ReasonCode == SlotReservedReason || task.ReasonCode == UnverifiedProviderRejectionReason));
 
     private DateTime UtcNow() => clock.GetUtcNow().UtcDateTime;
 
