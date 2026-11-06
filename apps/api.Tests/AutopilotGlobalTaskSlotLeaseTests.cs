@@ -776,11 +776,15 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
     [Fact]
     public async Task Bridge_user_wide_inventory_fails_closed_on_non_200_malformed_partial_duplicate_or_unknown_status()
     {
+        var scope = AutopilotGlobalTaskInventoryScopeIds.ManusBridgeAuthenticatedUserWide;
         var nativeId = BridgeNativeTaskId(0);
         var invalidResponses = new (System.Net.HttpStatusCode Status, string Body)[]
         {
             (System.Net.HttpStatusCode.BadGateway, "{\"manus_user_id\":\"manus-user-verified\",\"ok\":false,\"error\":\"task_inventory_incomplete\"}"),
+            (System.Net.HttpStatusCode.OK, ""),
             (System.Net.HttpStatusCode.OK, "{not-json"),
+            (System.Net.HttpStatusCode.OK, "{\"ok\":true,\"data\":[],\"has_more\":false}"),
+            (System.Net.HttpStatusCode.OK, "{\"manus_user_id\":\"different-manus-user\",\"ok\":true,\"data\":[],\"has_more\":false}"),
             (System.Net.HttpStatusCode.OK, "{\"manus_user_id\":\"manus-user-verified\",\"ok\":false,\"ok\":true,\"data\":[],\"has_more\":false}"),
             (System.Net.HttpStatusCode.OK, "{\"manus_user_id\":\"manus-user-verified\",\"ok\":true,\"data\":[],\"has_more\":true,\"next_cursor\":\"page-2\"}"),
             (System.Net.HttpStatusCode.OK, "{\"manus_user_id\":\"manus-user-verified\",\"ok\":true,\"data\":[],\"has_more\":false,\"next_cursor\":null}"),
@@ -788,9 +792,13 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
             (System.Net.HttpStatusCode.OK, $"{{\"manus_user_id\":\"manus-user-verified\",\"ok\":true,\"data\":[{{\"id\":\"{nativeId}\",\"status\":\"future_status\"}}],\"has_more\":false}}"),
             (System.Net.HttpStatusCode.OK, $"{{\"manus_user_id\":\"manus-user-verified\",\"ok\":true,\"data\":[{{\"id\":\"{nativeId}\",\"status\":\"stopped\",\"has_running_background_jobs\":\"false\"}}],\"has_more\":false}}"),
         };
+        var taskIds = await SeedLaunchTasksAsync(total: invalidResponses.Length, initiallyActive: 0, tasksPerWave: invalidResponses.Length);
+        var claims = new List<AutopilotGlobalTaskSlotResult>(invalidResponses.Length);
+        var fakeProviderCalls = 0;
 
-        foreach (var invalid in invalidResponses)
+        for (var index = 0; index < invalidResponses.Length; index++)
         {
+            var invalid = invalidResponses[index];
             using var source = new ManusBridgeUserWideTaskInventoryPageSource(
                 () => "bridge-test-token",
                 new Uri("https://bridge.example/v1/tasks"),
@@ -798,17 +806,58 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
                 requestTimeout: TimeSpan.FromSeconds(2),
                 testHandler: new FakeHttpHandler((_, _) => Task.FromResult(JsonResponse(invalid.Body, invalid.Status))));
             var snapshot = await new AutopilotGlobalTaskInventoryReader(
-                source,
-                AutopilotGlobalTaskInventoryScopeIds.ManusBridgeAuthenticatedUserWide).ReadAuthoritativeSnapshotAsync();
+                source, scope).ReadAuthoritativeSnapshotAsync();
 
             Assert.False(snapshot.IsAuthoritative);
             Assert.Empty(snapshot.ActiveTasks);
+            var claim = await ClaimAsync(taskIds[index], snapshot, allocatorScopeId: scope);
+            if (claim.MayCallProvider) fakeProviderCalls++;
+            claims.Add(claim);
         }
+
+        Assert.All(claims, claim => Assert.Equal(AutopilotGlobalTaskSlotOutcomes.InventoryUnknown, claim.Outcome));
+        Assert.All(claims, claim => Assert.False(claim.MayCallProvider));
+        Assert.Equal(0, fakeProviderCalls);
+
+        await using var verify = CreateContext();
+        var launchRows = await verify.AutopilotWaveLaunchTasks
+            .Where(item => taskIds.Contains(item.Id))
+            .ToArrayAsync();
+        Assert.Equal(invalidResponses.Length, launchRows.Length);
+        Assert.All(launchRows, row => Assert.Equal(AutopilotWaveLaunchStatuses.Planned, row.Status));
+        Assert.All(launchRows, row => Assert.Equal(0, row.LaunchAttempt));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData(" ")]
+    [InlineData("manus user id")]
+    [InlineData("manus\nuser-id")]
+    public void Bridge_user_wide_inventory_rejects_missing_or_malformed_expected_account_identity_before_http(string? expectedUserId)
+    {
+        var requests = 0;
+        var handler = new FakeHttpHandler((_, _) =>
+        {
+            Interlocked.Increment(ref requests);
+            return Task.FromResult(JsonResponse(BuildBridgeInventoryPayload(0)));
+        });
+
+        var exception = Assert.Throws<ArgumentException>(() => new ManusBridgeUserWideTaskInventoryPageSource(
+            () => "bridge-test-token",
+            new Uri("https://bridge.example/v1/tasks"),
+            expectedUserId!,
+            testHandler: handler));
+
+        Assert.Equal("expectedManusUserId", exception.ParamName);
+        Assert.Equal(0, requests);
     }
 
     [Fact]
     public async Task Bridge_user_wide_inventory_timeout_and_missing_token_are_unknown_not_zero()
     {
+        var scope = AutopilotGlobalTaskInventoryScopeIds.ManusBridgeAuthenticatedUserWide;
+        var taskIds = await SeedLaunchTasksAsync(total: 2, initiallyActive: 0, tasksPerWave: 2);
         var tokenCalls = 0;
         var missingTokenHandler = new FakeHttpHandler((_, _) => throw new InvalidOperationException("Must not request without Bridge token."));
         using (var missingTokenSource = new ManusBridgeUserWideTaskInventoryPageSource(
@@ -818,10 +867,12 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
             testHandler: missingTokenHandler))
         {
             var missing = await new AutopilotGlobalTaskInventoryReader(
-                missingTokenSource,
-                AutopilotGlobalTaskInventoryScopeIds.ManusBridgeAuthenticatedUserWide).ReadAuthoritativeSnapshotAsync();
+                missingTokenSource, scope).ReadAuthoritativeSnapshotAsync();
             Assert.False(missing.IsAuthoritative);
             Assert.Empty(missing.ActiveTasks);
+            var claim = await ClaimAsync(taskIds[0], missing, allocatorScopeId: scope);
+            Assert.Equal(AutopilotGlobalTaskSlotOutcomes.InventoryUnknown, claim.Outcome);
+            Assert.False(claim.MayCallProvider);
         }
 
         var timeoutHandler = new FakeHttpHandler(async (_, cancellationToken) =>
@@ -836,12 +887,22 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
             requestTimeout: TimeSpan.FromMilliseconds(50),
             testHandler: timeoutHandler);
         var timedOut = await new AutopilotGlobalTaskInventoryReader(
-            timeoutSource,
-            AutopilotGlobalTaskInventoryScopeIds.ManusBridgeAuthenticatedUserWide).ReadAuthoritativeSnapshotAsync();
+            timeoutSource, scope).ReadAuthoritativeSnapshotAsync();
 
         Assert.False(timedOut.IsAuthoritative);
         Assert.Empty(timedOut.ActiveTasks);
         Assert.Equal(1, tokenCalls);
+        var timeoutClaim = await ClaimAsync(taskIds[1], timedOut, allocatorScopeId: scope);
+        Assert.Equal(AutopilotGlobalTaskSlotOutcomes.InventoryUnknown, timeoutClaim.Outcome);
+        Assert.False(timeoutClaim.MayCallProvider);
+
+        await using var verify = CreateContext();
+        var launchRows = await verify.AutopilotWaveLaunchTasks
+            .Where(item => taskIds.Contains(item.Id))
+            .ToArrayAsync();
+        Assert.Equal(2, launchRows.Length);
+        Assert.All(launchRows, row => Assert.Equal(AutopilotWaveLaunchStatuses.Planned, row.Status));
+        Assert.All(launchRows, row => Assert.Equal(0, row.LaunchAttempt));
     }
 
     [Fact]
