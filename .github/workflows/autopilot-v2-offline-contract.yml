@@ -1,0 +1,59 @@
+# Provider-free and read-only; never consume live provider credentials.
+# Runs the integration-owned golden-byte fixture; NOT proof of live Node/C# interoperability.
+name: Autopilot v2 offline signing contract
+
+on:
+  pull_request:
+    paths:
+      - "scripts/verify-autopilot-v2-contract-vectors.py"
+      - ".github/workflows/autopilot-v2-offline-contract.yml"
+  push:
+    branches: [main]
+    paths:
+      - "scripts/verify-autopilot-v2-contract-vectors.py"
+      - ".github/workflows/autopilot-v2-offline-contract.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  offline-v2:
+    name: Offline golden bytes (no providers)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      PYTHONOPTIMIZE: "0"
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify deterministic v2 envelope and rejection tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/verify-autopilot-v2-contract-vectors.py
+          python3 scripts/verify-autopilot-v2-contract-vectors.py --emit-json > "$RUNNER_TEMP/autopilot-v2-vectors.json"
+          python3 - "$RUNNER_TEMP/autopilot-v2-vectors.json" <<'PY'
+          import base64
+          import hashlib
+          import hmac
+          import json
+          import pathlib
+          import sys
+
+          fixture = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          assert fixture["schema"] == "taslim.autopilot.signed-completion-v2.vectors.v1"
+          vectors = fixture["vectors"]
+          assert len(vectors) == 12
+          assert len({v["name"] for v in vectors}) == 12
+          key = fixture["syntheticSecretUtf8"].encode("utf-8")
+          assert len(key) >= 32
+          for vector in vectors:
+              body = base64.b64decode(vector["bodyBase64"], validate=True)
+              frame = base64.b64decode(vector["signedFrameBase64"], validate=True)
+              assert 1 <= len(body) <= 65536
+              actual_mac = "sha256=" + hmac.new(key, frame, hashlib.sha256).hexdigest()
+              assert hmac.compare_digest(actual_mac, vector["expectedSignature"]), vector["name"]
+          print("PASS: 12 offline vector exports and expected signatures")
+          PY
