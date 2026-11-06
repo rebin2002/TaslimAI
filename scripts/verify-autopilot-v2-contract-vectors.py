@@ -63,6 +63,34 @@ def verify_fixture() -> None:
         "mutated_body": (TIMESTAMP, SOURCE, EVENT_TYPE, EXTERNAL_ID, BODY + b" "),
     }
     assert set(vectors) == set(EXPECTED)
+    # Pin the exact byte frame, not just a digest. Node and C# must sign the
+    # same metadata/sha256 envelope with no implicit CRLF or JSON re-encoding.
+    golden_frame = (
+        b"taslim-autopilot-v2\\n"
+        b"1800000000\\n"
+        b"12:manus-bridge\\n"
+        b"19:wave.task.completed\\n"
+        b"24:evt-offline-contract-001\\n"
+        b"4b4c6edc50d912025d95dc1b9559417970dbd5490c2835987210061798ace3b9\\n"
+    )
+    assert canonical_v2_bytes(TIMESTAMP, SOURCE, EVENT_TYPE, EXTERNAL_ID, BODY) == golden_frame
+    # Inclusive bound checks guard cross-runtime off-by-one differences:
+    # 12 timestamp digits, 200 ASCII metadata bytes and 65,536 exact body bytes.
+    assert canonical_v2_bytes("9" * 12, SOURCE, EVENT_TYPE, EXTERNAL_ID, BODY)
+    assert canonical_v2_bytes(TIMESTAMP, "s" * 200, EVENT_TYPE, EXTERNAL_ID, BODY)
+    assert canonical_v2_bytes(TIMESTAMP, SOURCE, EVENT_TYPE, EXTERNAL_ID, b"x" * 65536)
+    for invalid_timestamp in ("9" * 13, "-1800000000", "1800000000\\r\\n"):
+        try:
+            canonical_v2_bytes(invalid_timestamp, SOURCE, EVENT_TYPE, EXTERNAL_ID, BODY)
+            raise AssertionError("out-of-bounds or injected timestamp accepted")
+        except ValueError:
+            pass
+    for invalid_metadata in ("s" * 201, "manus-bridge\\r\\nX-Injected: x", "manus-bridg\\u00e9"):
+        try:
+            canonical_v2_bytes(TIMESTAMP, invalid_metadata, EVENT_TYPE, EXTERNAL_ID, BODY)
+            raise AssertionError("out-of-bounds or injected metadata accepted")
+        except ValueError:
+            pass
     for name, arguments in vectors.items():
         actual = signature(*arguments)
         assert hmac.compare_digest(actual, EXPECTED[name]), (name, actual)
@@ -152,7 +180,7 @@ def verify_fixture() -> None:
         RAW_BODY_ENCODING_GOLDEN["unicode_escaped"][0]
     ), "unicode_json_semantics"
     assert RAW_BODY_ENCODING_GOLDEN["unicode"][1] != RAW_BODY_ENCODING_GOLDEN["unicode_escaped"][1]
-    print("PASS: 6 signed-metadata vectors, 6 raw-body byte golden vectors, 3 v1 replay invariants, 4 timestamps, 6 identities, 2 body lengths (offline only)")
+    print("PASS: canonical v2 byte frame and bounds, 6 signed-metadata vectors, 6 raw-body byte goldens, 3 v1 replay invariants, rejection cases (offline only)")
 
 if __name__ == "__main__":
     verify_fixture()
