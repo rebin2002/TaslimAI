@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Security.Cryptography;
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
@@ -70,6 +71,13 @@ public sealed class AutopilotNextWaveLaunchTests
         Assert.Equal(2, host.Provider.LaunchCalls);
         Assert.Equal(2, host.Provider.Requests.Select(request => request.IdempotencyKey).Distinct().Count());
         Assert.All(host.Provider.Requests, request => Assert.Equal(CandidateSha, request.BaseSha));
+        var launchEpochs = host.Provider.Requests.Select(request => request.FencingToken).ToArray();
+        Assert.All(launchEpochs, token => Assert.True(token > 0));
+        Assert.Equal(launchEpochs.Length, launchEpochs.Distinct().Count());
+        Assert.Equal(launchEpochs.OrderBy(token => token), launchEpochs);
+        var persistedFence = await db.AutopilotLocks.SingleAsync(item =>
+            item.ResourceKey == AutopilotCompletionLaunchFence.ResourceKey);
+        Assert.Equal(launchEpochs[^1], persistedFence.FencingToken);
 
         // The approved work is consumed exactly once, and the release stays human.
         var backlog = await db.AutopilotBacklogItems.ToListAsync();
@@ -765,6 +773,149 @@ public sealed class AutopilotNextWaveLaunchTests
             command.CommandText = $"DROP SCHEMA IF EXISTS \"{schemaName}\" CASCADE";
             await command.ExecuteNonQueryAsync();
         }
+    }
+
+    [Fact]
+    public async Task Completion_launch_fence_is_exclusive_and_expiry_fenced_across_postgres_testhost_processes()
+    {
+        if (string.Equals(Environment.GetEnvironmentVariable("TASLIM_AUTOPILOT_FENCE_PROCESS_WORKER"), "1", StringComparison.Ordinal))
+        {
+            await RunPostgresFenceProcessWorkerAsync();
+            return;
+        }
+
+        var baseConnectionString = Environment.GetEnvironmentVariable("ConnectionStrings__Postgres");
+        if (string.IsNullOrWhiteSpace(baseConnectionString))
+        {
+            var runningInCi = IsTruthyEnvironmentVariable("CI") || IsTruthyEnvironmentVariable("GITHUB_ACTIONS");
+            Assert.False(runningInCi, "CI must provide disposable PostgreSQL so this inter-process fence test executes rather than silently returning.");
+            return;
+        }
+        if (!OperatingSystem.IsLinux())
+        {
+            var runningInCi = IsTruthyEnvironmentVariable("CI") || IsTruthyEnvironmentVariable("GITHUB_ACTIONS");
+            Assert.False(runningInCi, "The PostgreSQL subprocess fence proof requires Linux process ancestry and a private 0700 temp directory.");
+            return;
+        }
+
+        var schemaName = $"completion_fence_process_{Guid.NewGuid():N}";
+        var adminConnectionString = new Npgsql.NpgsqlConnectionStringBuilder(baseConnectionString)
+        {
+            Pooling = false,
+        }.ConnectionString;
+        var workerDirectory = Path.Combine(Path.GetTempPath(), $"taslim-fence-process-{Guid.NewGuid():N}");
+        Exception? primaryFailure = null;
+        try
+        {
+            Directory.CreateDirectory(workerDirectory);
+            File.SetUnixFileMode(workerDirectory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            await using (var connection = new Npgsql.NpgsqlConnection(adminConnectionString))
+            {
+                await connection.OpenAsync();
+                await using var command = connection.CreateCommand();
+                command.CommandText = $"CREATE SCHEMA \"{schemaName}\"";
+                await command.ExecuteNonQueryAsync();
+            }
+
+            var scopedConnectionString = new Npgsql.NpgsqlConnectionStringBuilder(baseConnectionString)
+            {
+                SearchPath = schemaName,
+                Pooling = false,
+            }.ConnectionString;
+            var contextOptions = new DbContextOptionsBuilder<TaslimDbContext>()
+                .UseNpgsql(scopedConnectionString)
+                .Options;
+            using var host = new Host(databaseOptions: contextOptions);
+            var resourceKey = $"autopilot:completion-launch-process-test:{Guid.NewGuid():N}";
+
+            var initialContenders = await RunPostgresFenceProcessesAsync(
+                scopedConnectionString, resourceKey, "initial", 2, workerDirectory);
+            Assert.Equal(2, initialContenders.Length);
+            Assert.Equal(2, initialContenders.Select(item => item.WorkerProcessId).Distinct().Count());
+            var firstOwner = Assert.Single(initialContenders, item => item.Acquired);
+            Assert.Equal(1, firstOwner.FencingToken);
+            Console.WriteLine($"POSTGRES_FENCE_INITIAL pids={string.Join(',', initialContenders.Select(item => item.WorkerProcessId))} acquired=1 token={firstOwner.FencingToken}");
+
+            using (var expireDb = host.CreateContext())
+            {
+                var expired = await expireDb.Database.ExecuteSqlInterpolatedAsync($"""
+                    UPDATE "AutopilotLocks"
+                    SET "ExpiresAt" = clock_timestamp() - interval '1 second'
+                    WHERE "ResourceKey" = {resourceKey}
+                    """);
+                Assert.Equal(1, expired);
+            }
+
+            var takeoverContender = Assert.Single(await RunPostgresFenceProcessesAsync(
+                scopedConnectionString, resourceKey, "takeover", 1, workerDirectory));
+            Assert.True(takeoverContender.Acquired);
+            Assert.True(takeoverContender.FencingToken > firstOwner.FencingToken);
+            Console.WriteLine($"POSTGRES_FENCE_TAKEOVER pid={takeoverContender.WorkerProcessId} token={takeoverContender.FencingToken} staleToken={firstOwner.FencingToken}");
+
+            var staleHandle = firstOwner.ToHandle(resourceKey);
+            using (var staleDb = host.CreateContext())
+            {
+                var staleLocks = new EfAutopilotLockService(staleDb, host.Options);
+                Assert.False((await staleLocks.RenewAsync(staleHandle)).IsAcquired);
+                Assert.False(await staleLocks.ReleaseAsync(staleHandle));
+            }
+
+            var currentHandle = takeoverContender.ToHandle(resourceKey);
+            using (var currentDb = host.CreateContext())
+            {
+                var currentLocks = new EfAutopilotLockService(currentDb, host.Options);
+                var renewed = await currentLocks.RenewAsync(currentHandle);
+                Assert.True(renewed.IsAcquired);
+                Assert.Equal(takeoverContender.FencingToken, renewed.FencingToken);
+                Assert.True(await currentLocks.ReleaseAsync(renewed));
+            }
+        }
+        catch (Exception exception)
+        {
+            primaryFailure = exception;
+        }
+
+        var cleanupFailures = await CleanupPostgresFenceTestAsync(adminConnectionString, schemaName, workerDirectory);
+        if (primaryFailure is not null)
+        {
+            if (cleanupFailures.Count > 0)
+                throw new AggregateException("PostgreSQL fence test and schema/temp cleanup both failed.", [primaryFailure, .. cleanupFailures]);
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primaryFailure).Throw();
+        }
+        if (cleanupFailures.Count > 0)
+            throw new AggregateException("PostgreSQL fence schema/temp cleanup failed.", cleanupFailures);
+    }
+
+    private static async Task<List<Exception>> CleanupPostgresFenceTestAsync(
+        string adminConnectionString,
+        string schemaName,
+        string workerDirectory)
+    {
+        var failures = new List<Exception>();
+        try
+        {
+            await using var connection = new Npgsql.NpgsqlConnection(adminConnectionString);
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = $"DROP SCHEMA IF EXISTS \"{schemaName}\" CASCADE";
+            await command.ExecuteNonQueryAsync();
+        }
+        catch (Exception exception)
+        {
+            failures.Add(exception);
+        }
+
+        try
+        {
+            if (Directory.Exists(workerDirectory))
+                Directory.Delete(workerDirectory, recursive: true);
+        }
+        catch (Exception exception)
+        {
+            failures.Add(exception);
+        }
+
+        return failures;
     }
 
     [Fact]
@@ -2477,7 +2628,10 @@ public sealed class AutopilotNextWaveLaunchTests
 
             var request = new WaveLaunchProviderRequest(
                 "wave-x-next", "bl-1", "Add workspace audit export", "bounded instructions", CandidateSha, Branch,
-                AutopilotNextWavePolicy.LaunchIdempotencyKey("wave-x-next", "bl-1"));
+                AutopilotNextWavePolicy.LaunchIdempotencyKey("wave-x-next", "bl-1"))
+            {
+                FencingToken = 1_234_567_890_123,
+            };
 
             const string nativeTaskId = "ABCDEFGHIJKLMNOPQRSTUV";
             handler.Respond = _ => new HttpResponseMessage(HttpStatusCode.OK)
@@ -2494,11 +2648,26 @@ public sealed class AutopilotNextWaveLaunchTests
             Assert.Equal("https://bridge.example.test/v1/tasks", recorded.Uri);
             Assert.Equal($"Bearer {sentinel}", recorded.Authorization);
             Assert.Equal(request.IdempotencyKey, recorded.IdempotencyKey);
+            Assert.Equal("1234567890123", recorded.FencingToken);
+            using var providerRequestJson = JsonDocument.Parse(JsonSerializer.Serialize(request));
+            Assert.False(providerRequestJson.RootElement.TryGetProperty(nameof(WaveLaunchProviderRequest.FencingToken), out _));
+            Assert.False(providerRequestJson.RootElement.TryGetProperty("fencingToken", out _));
             using var requestBody = JsonDocument.Parse(recorded.Body);
             Assert.Equal(request.WaveKey, requestBody.RootElement.GetProperty("waveKey").GetString());
             Assert.Equal(request.TaskKey, requestBody.RootElement.GetProperty("taskKey").GetString());
             Assert.Equal(request.IdempotencyKey, requestBody.RootElement.GetProperty("idempotencyKey").GetString());
+            Assert.False(requestBody.RootElement.TryGetProperty("fencingToken", out _));
+            Assert.False(requestBody.RootElement.TryGetProperty("fencing_token", out _));
             Assert.DoesNotContain(sentinel, recorded.Body);
+
+            var requestsBeforeInvalidEpochs = handler.Requests.Count;
+            var missingEpoch = await provider.LaunchTaskAsync(request with { FencingToken = 0 });
+            var negativeEpoch = await provider.LaunchTaskAsync(request with { FencingToken = -1 });
+            Assert.Equal(WaveLaunchProviderOutcomes.Rejected, missingEpoch.Outcome);
+            Assert.Equal("bridge_fencing_token_invalid", missingEpoch.ReasonCode);
+            Assert.Equal(WaveLaunchProviderOutcomes.Rejected, negativeEpoch.Outcome);
+            Assert.Equal("bridge_fencing_token_invalid", negativeEpoch.ReasonCode);
+            Assert.Equal(requestsBeforeInvalidEpochs, handler.Requests.Count);
 
             // A transient failure is reported as unavailable, never as success.
             handler.Respond = _ => new HttpResponseMessage(HttpStatusCode.ServiceUnavailable);
@@ -2621,7 +2790,7 @@ public sealed class AutopilotNextWaveLaunchTests
         public void Advance(TimeSpan delta) => now = now.Add(delta);
     }
 
-    private sealed record RecordedBridgeCall(HttpMethod Method, string Uri, string? Authorization, string? IdempotencyKey, string Body);
+    private sealed record RecordedBridgeCall(HttpMethod Method, string Uri, string? Authorization, string? IdempotencyKey, string? FencingToken, string Body);
 
     private sealed class StubBridgeHandler : HttpMessageHandler
     {
@@ -2640,6 +2809,7 @@ public sealed class AutopilotNextWaveLaunchTests
                 request.RequestUri!.ToString(),
                 request.Headers.Authorization?.ToString(),
                 request.Headers.TryGetValues("Idempotency-Key", out var values) ? string.Join(',', values) : null,
+                request.Headers.TryGetValues("X-Taslim-Fencing-Token", out var fencingValues) ? string.Join(',', fencingValues) : null,
                 body));
             return Task.FromResult(Respond(request));
         }
@@ -3442,6 +3612,425 @@ public sealed class AutopilotNextWaveLaunchTests
             connection?.Close();
             connection?.Dispose();
         }
+    }
+
+    private static async Task RunPostgresFenceProcessWorkerAsync()
+    {
+        var connectionString = await Console.In.ReadLineAsync()
+            ?? throw new InvalidOperationException("Missing scoped PostgreSQL test connection input.");
+        var resourceKey = RequiredFenceWorkerEnvironment("TASLIM_AUTOPILOT_FENCE_RESOURCE");
+        var heldBy = RequiredFenceWorkerEnvironment("TASLIM_AUTOPILOT_FENCE_HELD_BY");
+        var readyPath = RequiredFenceWorkerEnvironment("TASLIM_AUTOPILOT_FENCE_READY_PATH");
+        var startGatePath = RequiredFenceWorkerEnvironment("TASLIM_AUTOPILOT_FENCE_START_GATE");
+        var resultPath = RequiredFenceWorkerEnvironment("TASLIM_AUTOPILOT_FENCE_RESULT_PATH");
+        var options = new DbContextOptionsBuilder<TaslimDbContext>().UseNpgsql(connectionString).Options;
+        await using var db = new TaslimDbContext(options);
+        await db.Database.OpenConnectionAsync();
+        var workerPid = Environment.ProcessId;
+        var readyTemporaryPath = $"{readyPath}.{workerPid}.tmp";
+        await File.WriteAllTextAsync(readyTemporaryPath, workerPid.ToString());
+        File.Move(readyTemporaryPath, readyPath, overwrite: true);
+        await WaitForFenceFileAsync(startGatePath, TimeSpan.FromSeconds(45));
+
+        var autopilotOptions = new AutopilotOptions();
+        autopilotOptions.Normalize();
+        var handle = await new EfAutopilotLockService(db, autopilotOptions)
+            .AcquireAsync(resourceKey, heldBy);
+        var result = new PostgresFenceWorkerResult(
+            workerPid,
+            handle.IsAcquired,
+            handle.OwnerToken,
+            handle.FencingToken,
+            handle.HeldBy,
+            handle.ExpiresAt,
+            handle.LeaseServerTimeUtc);
+        await File.WriteAllTextAsync(resultPath, JsonSerializer.Serialize(result));
+        Console.WriteLine($"POSTGRES_FENCE_CHILD pid={workerPid} heldBy={heldBy} acquired={result.Acquired} token={result.FencingToken}");
+    }
+
+    private static async Task<PostgresFenceWorkerResult[]> RunPostgresFenceProcessesAsync(
+        string connectionString,
+        string resourceKey,
+        string phase,
+        int processCount,
+        string workerDirectory)
+    {
+        var roundDirectory = Path.Combine(workerDirectory, phase);
+        Directory.CreateDirectory(roundDirectory);
+        var startGatePath = Path.Combine(roundDirectory, "start");
+        var projectPath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../Taslim.Api.Tests.csproj"));
+        if (!File.Exists(projectPath))
+            throw new FileNotFoundException("Could not locate the API test project for the PostgreSQL child-process fence test.", projectPath);
+        var workers = new List<PostgresFenceWorkerProcess>();
+        var cleanupFailures = new List<Exception>();
+        Exception? primaryFailure = null;
+        PostgresFenceWorkerResult[]? processResults = null;
+
+        try
+        {
+            for (var index = 0; index < processCount; index++)
+            {
+                var readyPath = Path.Combine(roundDirectory, $"worker-{index}.ready");
+                var resultPath = Path.Combine(roundDirectory, $"worker-{index}.json");
+                var heldBy = $"pg-fence-{phase}-{index}";
+                var startInfo = new ProcessStartInfo("dotnet")
+                {
+                    WorkingDirectory = Path.GetDirectoryName(projectPath)!,
+                    UseShellExecute = false,
+                    RedirectStandardInput = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true,
+                };
+                var configuration = Directory.GetParent(AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar))?.Name ?? "Debug";
+                startInfo.ArgumentList.Add("test");
+                startInfo.ArgumentList.Add(projectPath);
+                startInfo.ArgumentList.Add("--no-build");
+                startInfo.ArgumentList.Add("--no-restore");
+                startInfo.ArgumentList.Add("--configuration");
+                startInfo.ArgumentList.Add(configuration);
+                startInfo.ArgumentList.Add("--filter");
+                startInfo.ArgumentList.Add("FullyQualifiedName~Taslim.Api.Tests.AutopilotNextWaveLaunchTests.Completion_launch_fence_is_exclusive_and_expiry_fenced_across_postgres_testhost_processes");
+                startInfo.ArgumentList.Add("--logger");
+                startInfo.ArgumentList.Add("console;verbosity=quiet");
+                foreach (var name in startInfo.Environment.Keys.Where(name =>
+                    name.StartsWith("ConnectionStrings", StringComparison.OrdinalIgnoreCase)
+                    || name.Contains("DATABASE", StringComparison.OrdinalIgnoreCase)
+                    || name.Contains("DB_", StringComparison.OrdinalIgnoreCase)
+                    || name.Contains("CONNSTR", StringComparison.OrdinalIgnoreCase)
+                    || name.Contains("CONNECTIONSTRING", StringComparison.OrdinalIgnoreCase)
+                    || name.Contains("POSTGRES", StringComparison.OrdinalIgnoreCase)
+                    || name.Contains("NPGSQL", StringComparison.OrdinalIgnoreCase)
+                    || name.StartsWith("PG", StringComparison.OrdinalIgnoreCase)
+                    || name.Contains("SQL", StringComparison.OrdinalIgnoreCase)
+                    || name.Contains("KEY", StringComparison.OrdinalIgnoreCase)
+                    || name.Contains("TOKEN", StringComparison.OrdinalIgnoreCase)
+                    || name.Contains("SECRET", StringComparison.OrdinalIgnoreCase)
+                    || name.Contains("PASSWORD", StringComparison.OrdinalIgnoreCase)
+                    || name.Contains("CREDENTIAL", StringComparison.OrdinalIgnoreCase)).ToArray())
+                    startInfo.Environment.Remove(name);
+                startInfo.Environment["TASLIM_AUTOPILOT_FENCE_PROCESS_WORKER"] = "1";
+                startInfo.Environment["TASLIM_AUTOPILOT_FENCE_RESOURCE"] = resourceKey;
+                startInfo.Environment["TASLIM_AUTOPILOT_FENCE_HELD_BY"] = heldBy;
+                startInfo.Environment["TASLIM_AUTOPILOT_FENCE_READY_PATH"] = readyPath;
+                startInfo.Environment["TASLIM_AUTOPILOT_FENCE_START_GATE"] = startGatePath;
+                startInfo.Environment["TASLIM_AUTOPILOT_FENCE_RESULT_PATH"] = resultPath;
+
+                var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
+                try
+                {
+                    if (!process.Start())
+                        throw new InvalidOperationException($"Could not start PostgreSQL fence worker {index} for phase {phase}.");
+                    await process.StandardInput.WriteLineAsync(connectionString);
+                    await process.StandardInput.FlushAsync();
+                    process.StandardInput.Close();
+                    workers.Add(new PostgresFenceWorkerProcess(
+                        process,
+                        readyPath,
+                        resultPath,
+                        process.StandardOutput.ReadToEndAsync(),
+                        process.StandardError.ReadToEndAsync()));
+                }
+                catch (Exception startFailure)
+                {
+                    var startupCleanupFailures = new List<Exception>();
+                    await AttemptKillAndWaitAsync(process, "startup-launcher", startupCleanupFailures);
+                    try
+                    {
+                        process.Dispose();
+                    }
+                    catch (Exception disposeException)
+                    {
+                        startupCleanupFailures.Add(disposeException);
+                    }
+                    if (startupCleanupFailures.Count > 0)
+                        throw new AggregateException("PostgreSQL fence worker startup and cleanup both failed.", [startFailure, .. startupCleanupFailures]);
+                    throw;
+                }
+            }
+
+            for (var index = 0; index < workers.Count; index++)
+            {
+                var worker = workers[index];
+                var testHostPid = await WaitForFenceWorkerReadyAsync(worker, TimeSpan.FromSeconds(45));
+                workers[index] = worker with { WorkerTestHostProcessId = testHostPid };
+            }
+            await File.WriteAllTextAsync(startGatePath, "go");
+
+            using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60)))
+            {
+                try
+                {
+                    await Task.WhenAll(workers.Select(worker => worker.Process.WaitForExitAsync(timeout.Token)));
+                }
+                catch (OperationCanceledException exception)
+                {
+                    throw new TimeoutException($"PostgreSQL fence workers did not exit in phase {phase}.", exception);
+                }
+            }
+
+            var results = new List<PostgresFenceWorkerResult>(workers.Count);
+            foreach (var worker in workers)
+            {
+                var standardOutput = await worker.StandardOutput;
+                var standardError = await worker.StandardError;
+                if (worker.Process.ExitCode != 0)
+                    throw new InvalidOperationException($"PostgreSQL fence child PID {worker.Process.Id} exited {worker.Process.ExitCode}. stdout={standardOutput}\nstderr={standardError}");
+                if (!File.Exists(worker.ResultPath))
+                    throw new InvalidOperationException($"PostgreSQL fence child PID {worker.Process.Id} exited without a result file. stdout={standardOutput}\nstderr={standardError}");
+
+                var result = JsonSerializer.Deserialize<PostgresFenceWorkerResult>(await File.ReadAllTextAsync(worker.ResultPath));
+                if (result is null || result.WorkerProcessId != worker.WorkerTestHostProcessId)
+                    throw new InvalidOperationException($"PostgreSQL fence child PID {worker.Process.Id} produced an invalid result. stdout={standardOutput}\nstderr={standardError}");
+                results.Add(result);
+            }
+
+            processResults = results.ToArray();
+        }
+        catch (Exception exception)
+        {
+            primaryFailure = exception;
+        }
+        finally
+        {
+            foreach (var worker in workers)
+            {
+                try
+                {
+                    await CleanupPostgresFenceWorkerAsync(worker);
+                }
+                catch (Exception cleanupException)
+                {
+                    cleanupFailures.Add(cleanupException);
+                }
+                finally
+                {
+                    try
+                    {
+                        worker.Process.Dispose();
+                    }
+                    catch (Exception disposeException)
+                    {
+                        cleanupFailures.Add(disposeException);
+                    }
+                }
+            }
+        }
+
+        if (primaryFailure is not null)
+        {
+            if (cleanupFailures.Count > 0)
+                throw new AggregateException("PostgreSQL fence child test and process cleanup failed.", [primaryFailure, .. cleanupFailures]);
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primaryFailure).Throw();
+        }
+        if (cleanupFailures.Count > 0)
+            throw new AggregateException("PostgreSQL fence child process cleanup failed.", cleanupFailures);
+        return processResults ?? throw new InvalidOperationException("PostgreSQL fence child processes produced no result.");
+    }
+
+    private static async Task<int> WaitForFenceWorkerReadyAsync(PostgresFenceWorkerProcess worker, TimeSpan timeout)
+    {
+        var timer = Stopwatch.StartNew();
+        while (!File.Exists(worker.ReadyPath))
+        {
+            if (worker.Process.HasExited)
+            {
+                var standardOutput = await worker.StandardOutput;
+                var standardError = await worker.StandardError;
+                throw new InvalidOperationException($"PostgreSQL fence child PID {worker.Process.Id} exited before its barrier. stdout={standardOutput}\nstderr={standardError}");
+            }
+            if (timer.Elapsed >= timeout)
+                throw new TimeoutException($"PostgreSQL fence child PID {worker.Process.Id} did not reach its start barrier.");
+            await Task.Delay(TimeSpan.FromMilliseconds(20));
+        }
+
+        var readyText = await File.ReadAllTextAsync(worker.ReadyPath);
+        if (!int.TryParse(readyText, out var testHostPid) || testHostPid <= 0)
+            throw new InvalidOperationException($"PostgreSQL fence child PID {worker.Process.Id} wrote an invalid testhost PID.");
+        if (OperatingSystem.IsLinux() && !IsLinuxProcessDescendantOf(testHostPid, worker.Process.Id))
+            throw new InvalidOperationException($"PostgreSQL fence testhost PID {testHostPid} is not a descendant of its launched process PID {worker.Process.Id}.");
+        return testHostPid;
+    }
+
+    private static bool IsLinuxProcessDescendantOf(int processId, int ancestorProcessId)
+    {
+        var currentProcessId = processId;
+        for (var depth = 0; depth < 32; depth++)
+        {
+            var statusPath = $"/proc/{currentProcessId}/status";
+            if (!File.Exists(statusPath))
+                return false;
+            var parentLine = File.ReadLines(statusPath)
+                .FirstOrDefault(line => line.StartsWith("PPid:", StringComparison.Ordinal));
+            if (parentLine is null || !int.TryParse(parentLine.AsSpan("PPid:".Length).Trim(), out var parentProcessId))
+                return false;
+            if (parentProcessId == ancestorProcessId)
+                return true;
+            if (parentProcessId <= 1 || parentProcessId == currentProcessId)
+                return false;
+            currentProcessId = parentProcessId;
+        }
+        return false;
+    }
+
+    private static async Task CleanupPostgresFenceWorkerAsync(PostgresFenceWorkerProcess worker)
+    {
+        var failures = new List<Exception>();
+        var testHostPid = worker.WorkerTestHostProcessId;
+        if (testHostPid <= 0)
+        {
+            try
+            {
+                if (!File.Exists(worker.ReadyPath))
+                    failures.Add(new FileNotFoundException("No ready file was available to identify the PostgreSQL fence testhost for cleanup.", worker.ReadyPath));
+                else if (!int.TryParse(await File.ReadAllTextAsync(worker.ReadyPath), out testHostPid) || testHostPid <= 0)
+                    failures.Add(new InvalidDataException("The PostgreSQL fence testhost ready file did not contain a valid PID."));
+            }
+            catch (Exception exception)
+            {
+                failures.Add(exception);
+            }
+        }
+
+        if (testHostPid > 0)
+        {
+            Process? testHost = null;
+            try
+            {
+                testHost = Process.GetProcessById(testHostPid);
+            }
+            catch (ArgumentException)
+            {
+                // The recorded testhost PID no longer exists, so there is no process left to clean.
+                Console.Error.WriteLine($"POSTGRES_FENCE_TESTHOST_ALREADY_EXITED pid={testHostPid}");
+            }
+            catch (Exception exception)
+            {
+                if (testHost is not null && IsProcessKnownExited(testHost))
+                    Console.Error.WriteLine($"POSTGRES_FENCE_TESTHOST_EXITED_DURING_CLEANUP pid={testHostPid}");
+                else
+                    failures.Add(exception);
+            }
+            try
+            {
+                if (testHost is not null)
+                    await AttemptKillAndWaitAsync(testHost, "testhost", failures);
+            }
+            catch (Exception cleanupException)
+            {
+                failures.Add(cleanupException);
+            }
+            finally
+            {
+                if (testHost is not null)
+                {
+                    try
+                    {
+                        testHost.Dispose();
+                    }
+                    catch (Exception disposeException)
+                    {
+                        failures.Add(disposeException);
+                    }
+                }
+            }
+        }
+
+        await AttemptKillAndWaitAsync(worker.Process, "launcher", failures);
+
+        if (failures.Count > 0)
+            throw new AggregateException("One or more PostgreSQL fence child processes could not be cleaned up.", failures);
+    }
+
+    private static async Task AttemptKillAndWaitAsync(Process process, string role, List<Exception> failures)
+    {
+        try
+        {
+            if (process.HasExited)
+                Console.Error.WriteLine($"POSTGRES_FENCE_PROCESS_ALREADY_EXITED role={role} pid={process.Id}");
+            else
+                process.Kill(entireProcessTree: true);
+        }
+        catch (Exception killException)
+        {
+            if (IsProcessKnownExited(process))
+                Console.Error.WriteLine($"POSTGRES_FENCE_PROCESS_EXITED_DURING_KILL role={role}");
+            else
+                failures.Add(killException);
+        }
+
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await process.WaitForExitAsync(timeout.Token);
+        }
+        catch (Exception waitException)
+        {
+            if (IsProcessKnownExited(process))
+                Console.Error.WriteLine($"POSTGRES_FENCE_PROCESS_EXITED_DURING_WAIT role={role}");
+            else
+                failures.Add(waitException);
+        }
+    }
+
+    private static bool IsProcessKnownExited(Process process)
+    {
+        try
+        {
+            return process.HasExited;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool IsTruthyEnvironmentVariable(string name)
+    {
+        var value = Environment.GetEnvironmentVariable(name);
+        return string.Equals(value, "true", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(value, "1", StringComparison.Ordinal);
+    }
+
+    private static async Task WaitForFenceFileAsync(string path, TimeSpan timeout)
+    {
+        var timer = Stopwatch.StartNew();
+        while (!File.Exists(path))
+        {
+            if (timer.Elapsed >= timeout)
+                throw new TimeoutException($"Timed out waiting for PostgreSQL fence barrier file '{Path.GetFileName(path)}'.");
+            await Task.Delay(TimeSpan.FromMilliseconds(20));
+        }
+    }
+
+    private static string RequiredFenceWorkerEnvironment(string name) =>
+        Environment.GetEnvironmentVariable(name)
+        ?? throw new InvalidOperationException($"Required PostgreSQL fence worker environment value '{name}' is missing.");
+
+    private sealed record PostgresFenceWorkerProcess(
+        Process Process,
+        string ReadyPath,
+        string ResultPath,
+        Task<string> StandardOutput,
+        Task<string> StandardError)
+    {
+        public int WorkerTestHostProcessId { get; init; }
+    }
+
+    private sealed record PostgresFenceWorkerResult(
+        int WorkerProcessId,
+        bool Acquired,
+        string OwnerToken,
+        long FencingToken,
+        string? HeldBy,
+        DateTime? ExpiresAt,
+        DateTime? LeaseServerTimeUtc)
+    {
+        public AutopilotLockHandle ToHandle(string resourceKey) =>
+            new(resourceKey, OwnerToken, FencingToken, Acquired, HeldBy, ExpiresAt)
+            {
+                LeaseServerTimeUtc = LeaseServerTimeUtc,
+            };
     }
 
     private static Dictionary<string, bool> CompleteChecks() => new(StringComparer.OrdinalIgnoreCase)

@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text;
@@ -45,6 +46,9 @@ public sealed class ManusBridgeWaveLaunchProvider : IWaveLaunchProvider
 
     public async Task<WaveLaunchProviderResult> LaunchTaskAsync(WaveLaunchProviderRequest request, CancellationToken cancellationToken = default)
     {
+        if (request.FencingToken <= 0)
+            return WaveLaunchProviderResult.Rejected("bridge_fencing_token_invalid", "A positive fencing epoch is required before the bridge can be called.");
+
         if (!TryResolveBaseUri(out var baseUri))
             return WaveLaunchProviderResult.Unavailable("bridge_not_configured", "No bridge base URL is configured.");
 
@@ -69,6 +73,7 @@ public sealed class ManusBridgeWaveLaunchProvider : IWaveLaunchProvider
         };
         message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
         message.Headers.TryAddWithoutValidation("Idempotency-Key", request.IdempotencyKey);
+        message.Headers.TryAddWithoutValidation("X-Taslim-Fencing-Token", request.FencingToken.ToString(CultureInfo.InvariantCulture));
 
         try
         {

@@ -580,25 +580,30 @@ public sealed class AutopilotNextWaveService(
                     && await completionFenceHeartbeatScope.RenewNowAsync(CancellationToken.None)
                     && !completionFenceHeartbeatScope.IsLost;
                 var renewedFenceHandle = completionFenceHeartbeatScope.CurrentHandle;
+                var fencingToken = renewedFenceHandle.FencingToken;
                 var actualFenceRemainder = renewedFenceHandle.ExpiresAt is DateTime leaseExpiry
                     && renewedFenceHandle.LeaseServerTimeUtc is DateTime leaseServerTime
                     ? leaseExpiry - leaseServerTime
                     : TimeSpan.Zero;
                 if (!fenceRenewedBeforeProvider
+                    || fencingToken <= 0
                     || actualFenceRemainder < requiredFenceRemainder
                     || configuredFenceRemainder < requiredFenceRemainder)
                 {
+                    var fenceFailureReason = fencingToken <= 0
+                        ? "completion_launch_fence_token_invalid_before_provider_call"
+                        : "completion_launch_fence_renewal_failed_before_provider_call";
                     var held = await globalTaskSlots!.RecordAmbiguousAsync(
                         task.Id,
                         idempotencyKey,
-                        "completion_launch_fence_renewal_failed_before_provider_call",
+                        fenceFailureReason,
                         CancellationToken.None);
                     task = await ReloadLaunchTaskFreshAsync(task.Id, CancellationToken.None)
                         ?? throw new InvalidOperationException("The durable launch row disappeared while retaining an expiring-fence reservation.");
                     blocked++;
                     actions.Add($"next_wave_blocked:{waveKey}:completion_launch_fence_renewal_failed");
                     audit.Add(Audit(AutopilotAuditActions.NextWaveLaunchBlocked, AutopilotAuditOutcomes.Blocked,
-                        reason: held.ReasonCode ?? "completion_launch_fence_renewal_failed_before_provider_call",
+                        reason: held.ReasonCode ?? fenceFailureReason,
                         statusDetail: held.SlotHeld
                             ? "slot_retained_no_provider_call_fence_renewal_failed"
                             : "launch_state_uncertain_no_provider_call",
@@ -608,7 +613,7 @@ public sealed class AutopilotNextWaveService(
                         targetId: task.Id,
                         dryRun: false));
                     await AddRepairEscalationOnceAsync(audit,
-                        "completion_launch_fence_renewal_failed_before_provider_call; operator_reconciliation_required",
+                        $"{fenceFailureReason}; operator_reconciliation_required",
                         waveKey, task.TaskKey, task.LaunchAttempt, task.Id, false, CancellationToken.None);
                     continue;
                 }
@@ -631,7 +636,10 @@ public sealed class AutopilotNextWaveService(
                     BuildInstructions(task),
                     batch.BaseSha,
                     batch.Branch,
-                    idempotencyKey);
+                    idempotencyKey)
+                {
+                    FencingToken = fencingToken,
+                };
 
                 WaveLaunchProviderResult result;
                 using var providerCancellation = CancellationTokenSource.CreateLinkedTokenSource(
