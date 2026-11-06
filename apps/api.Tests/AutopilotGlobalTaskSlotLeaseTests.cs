@@ -322,28 +322,108 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
             (await verify.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskIds[0])).Status);
     }
 
-    [Fact]
-    public async Task Deterministic_provider_rejection_releases_one_reserved_slot()
+    [Theory]
+    [InlineData("http_502")]
+    [InlineData("timeout")]
+    [InlineData("http_409")]
+    [InlineData("provider_rejected")]
+    [InlineData("definitive_no_create")]
+    [InlineData("unrecognized_reason")]
+    public async Task Unverified_rejection_reason_never_releases_slot_or_authorizes_a_retry(string reasonCode)
     {
         var taskIds = await SeedLaunchTasksAsync(total: 21, initiallyActive: 19);
-        var reservation = await ClaimAsync(taskIds[19], CompleteInventory());
+        var inventory = CompleteInventory();
+        var reservation = await ClaimAsync(taskIds[19], inventory);
         Assert.Equal(AutopilotGlobalTaskSlotOutcomes.Reserved, reservation.Outcome);
         Assert.True(reservation.MayCallProvider);
-        string key;
 
+        string key;
         await using (var db = CreateContext())
         {
             var task = await db.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskIds[19]);
             key = AutopilotGlobalTaskSlotIdentity.CreateIdempotencyKey(task.WaveKey, task.TaskKey);
-            var rejected = await CreateAllocator(db).RecordRejectedAsync(taskIds[19], key, "provider_rejected");
-            Assert.Equal(AutopilotGlobalTaskSlotOutcomes.LaunchRejected, rejected.Outcome);
-            Assert.False(rejected.SlotHeld);
+            var rejected = await CreateAllocator(db).RecordRejectedAsync(taskIds[19], key, reasonCode);
+            Assert.Equal(AutopilotGlobalTaskSlotOutcomes.AmbiguousLaunch, rejected.Outcome);
+            Assert.True(rejected.SlotHeld);
             Assert.False(rejected.MayCallProvider);
+
+            var repeatedRejection = await CreateAllocator(db).RecordRejectedAsync(taskIds[19], key, reasonCode);
+            Assert.Equal(AutopilotGlobalTaskSlotOutcomes.AmbiguousLaunch, repeatedRejection.Outcome);
+            Assert.True(repeatedRejection.SlotHeld);
+            Assert.False(repeatedRejection.MayCallProvider);
+
+            var laterAmbiguous = await CreateAllocator(db).RecordAmbiguousAsync(taskIds[19], key, "http_502");
+            Assert.Equal(AutopilotGlobalTaskSlotOutcomes.AmbiguousLaunch, laterAmbiguous.Outcome);
+            Assert.True(laterAmbiguous.SlotHeld);
+            Assert.False(laterAmbiguous.MayCallProvider);
         }
 
-        var replacement = await ClaimAsync(taskIds[20], CompleteInventory());
-        Assert.Equal(AutopilotGlobalTaskSlotOutcomes.Reserved, replacement.Outcome);
-        Assert.True(replacement.MayCallProvider);
+        // A process restart/lease expiry cannot turn this unverified result into
+        // permission for another provider call, even when the caller asserts
+        // that same-key provider idempotency is available.
+        await using (var db = CreateContext())
+        {
+            var row = await db.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskIds[19]);
+            row.UpdatedAt = DateTime.UtcNow.AddHours(-1);
+            await db.SaveChangesAsync();
+        }
+
+        var replay = await ClaimAsync(taskIds[19], inventory);
+        Assert.Equal(AutopilotGlobalTaskSlotOutcomes.AmbiguousLaunch, replay.Outcome);
+        Assert.True(replay.SlotHeld);
+        Assert.False(replay.MayCallProvider);
+
+        var twentyFirst = await ClaimAsync(taskIds[20], inventory);
+        Assert.Equal(AutopilotGlobalTaskSlotOutcomes.CapacityReached, twentyFirst.Outcome);
+        Assert.False(twentyFirst.MayCallProvider);
+        Assert.Equal(20, twentyFirst.ActiveSlotsObserved);
+
+        await using var verify = CreateContext();
+        var retained = await verify.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskIds[19]);
+        Assert.Equal(AutopilotWaveLaunchStatuses.Launching, retained.Status);
+        Assert.Equal(1, retained.LaunchAttempt);
+        Assert.Null(retained.CompletedAt);
+        Assert.Equal("provider_rejection_unverified", retained.ReasonCode);
+        Assert.Contains("no_create_proof", retained.LastStatusDetail, StringComparison.Ordinal);
+        Assert.Equal(20, await verify.AutopilotWaveLaunchTasks.CountAsync(item =>
+            item.Status == AutopilotWaveLaunchStatuses.Launching || item.Status == AutopilotWaveLaunchStatuses.Launched));
+    }
+
+    [Fact]
+    public async Task Conflicting_rejection_identity_cannot_release_a_held_slot_or_allow_replacement()
+    {
+        var taskIds = await SeedLaunchTasksAsync(total: 21, initiallyActive: 19);
+        var inventory = CompleteInventory();
+        var reservation = await ClaimAsync(taskIds[19], inventory);
+        Assert.Equal(AutopilotGlobalTaskSlotOutcomes.Reserved, reservation.Outcome);
+
+        string key;
+        await using (var db = CreateContext())
+        {
+            var task = await db.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskIds[19]);
+            key = AutopilotGlobalTaskSlotIdentity.CreateIdempotencyKey(task.WaveKey, task.TaskKey);
+            var conflict = await CreateAllocator(db).RecordRejectedAsync(taskIds[19], key + "-conflict", "definitive_no_create");
+            Assert.Equal(AutopilotGlobalTaskSlotOutcomes.IdempotencyConflict, conflict.Outcome);
+            Assert.True(conflict.SlotHeld);
+            Assert.False(conflict.MayCallProvider);
+        }
+
+        var sameTaskRetry = await ClaimAsync(taskIds[19], inventory);
+        Assert.Equal(AutopilotGlobalTaskSlotOutcomes.LaunchInProgress, sameTaskRetry.Outcome);
+        Assert.True(sameTaskRetry.SlotHeld);
+        Assert.False(sameTaskRetry.MayCallProvider);
+        var replacement = await ClaimAsync(taskIds[20], inventory);
+        Assert.Equal(AutopilotGlobalTaskSlotOutcomes.CapacityReached, replacement.Outcome);
+        Assert.False(replacement.MayCallProvider);
+
+        await using var verify = CreateContext();
+        var row = await verify.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskIds[19]);
+        Assert.Equal(AutopilotWaveLaunchStatuses.Launching, row.Status);
+        Assert.Equal(1, row.LaunchAttempt);
+        Assert.Null(row.CompletedAt);
+        Assert.Equal("global_slot_reserved", row.ReasonCode);
+        Assert.Equal(20, await verify.AutopilotWaveLaunchTasks.CountAsync(item =>
+            item.Status == AutopilotWaveLaunchStatuses.Launching || item.Status == AutopilotWaveLaunchStatuses.Launched));
     }
 
     [Fact]
