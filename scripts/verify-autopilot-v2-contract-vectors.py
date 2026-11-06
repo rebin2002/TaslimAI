@@ -66,12 +66,12 @@ def verify_fixture() -> None:
     # Pin the exact byte frame, not just a digest. Node and C# must sign the
     # same metadata/sha256 envelope with no implicit CRLF or JSON re-encoding.
     golden_frame = (
-        b"taslim-autopilot-v2\\n"
-        b"1800000000\\n"
-        b"12:manus-bridge\\n"
-        b"19:wave.task.completed\\n"
-        b"24:evt-offline-contract-001\\n"
-        b"4b4c6edc50d912025d95dc1b9559417970dbd5490c2835987210061798ace3b9\\n"
+        b"taslim-autopilot-v2\n"
+        b"1800000000\n"
+        b"12:manus-bridge\n"
+        b"19:wave.task.completed\n"
+        b"24:evt-offline-contract-001\n"
+        b"4b4c6edc50d912025d95dc1b9559417970dbd5490c2835987210061798ace3b9\n"
     )
     assert canonical_v2_bytes(TIMESTAMP, SOURCE, EVENT_TYPE, EXTERNAL_ID, BODY) == golden_frame
     # Inclusive bound checks guard cross-runtime off-by-one differences:
@@ -79,13 +79,13 @@ def verify_fixture() -> None:
     assert canonical_v2_bytes("9" * 12, SOURCE, EVENT_TYPE, EXTERNAL_ID, BODY)
     assert canonical_v2_bytes(TIMESTAMP, "s" * 200, EVENT_TYPE, EXTERNAL_ID, BODY)
     assert canonical_v2_bytes(TIMESTAMP, SOURCE, EVENT_TYPE, EXTERNAL_ID, b"x" * 65536)
-    for invalid_timestamp in ("9" * 13, "-1800000000", "1800000000\\r\\n"):
+    for invalid_timestamp in ("9" * 13, "-1800000000", "1800000000\r\n"):
         try:
             canonical_v2_bytes(invalid_timestamp, SOURCE, EVENT_TYPE, EXTERNAL_ID, BODY)
             raise AssertionError("out-of-bounds or injected timestamp accepted")
         except ValueError:
             pass
-    for invalid_metadata in ("s" * 201, "manus-bridge\\r\\nX-Injected: x", "manus-bridg\\u00e9"):
+    for invalid_metadata in ("s" * 201, "manus-bridge\r\nX-Injected: x", "manus-bridg\u00e9"):
         try:
             canonical_v2_bytes(TIMESTAMP, invalid_metadata, EVENT_TYPE, EXTERNAL_ID, BODY)
             raise AssertionError("out-of-bounds or injected metadata accepted")
