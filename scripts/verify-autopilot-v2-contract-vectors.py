@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import re
 
 SECRET = b"offline-only-taslim-autopilot-v2-test-key"  # synthetic test key, not a live secret
@@ -110,7 +111,48 @@ def verify_fixture() -> None:
             raise AssertionError("invalid signed body length accepted")
         except ValueError:
             pass
-    print("PASS: 6 fixed v2 vectors; 3 v1 header-replay invariants; 4 timestamps, 6 identities, 2 body lengths rejected (offline only)")
+    # Raw-body canonicalization must never turn distinct byte sequences into
+    # the same signed event. These pairs decode to equivalent JSON objects but
+    # MUST carry different HMACs. Independent Node/C# owners should pin the
+    # same golden digests against exact ingress bytes, without JSON re-encoding.
+    RAW_BODY_ENCODING_GOLDEN = {
+        "reordered": (
+            b'{"outcome":"succeeded","taskId":"task-1","waveKey":"wave-test"}',
+            "2e352141ebd3b5067b868817b6e7e0ac92f6263e5c45e232ac17bd34f17546d1",
+        ),
+        "escaped_key": (
+            BODY.replace(b'"taskId"', b'"\\u0074askId"'),
+            "9d3563ad03dc74f13f3b986f4ee7b1beef315e9e1ee4489d3a7a837a9fe4c2cb",
+        ),
+        "whitespace": (
+            b'{ "waveKey": "wave-test", "taskId": "task-1", "outcome": "succeeded" }',
+            "899cf9bf8f77906c7693ac5d6c31480874f54af5ddfab0c7e468c2914f5313d2",
+        ),
+        "trailing_crlf": (
+            BODY + b"\r\n",
+            "5187ba82c95ad62d29d0f4a248fa295fb6007a28ede8914c3c57c78272bbd3d3",
+        ),
+        "unicode": (
+            b'{"waveKey":"wave-\xc3\xa9","taskId":"task-1","outcome":"succeeded"}',
+            "d2bd912210c69be5d48746b82319666f395b6ca30bb4df9442d9d2aab7d8a2ef",
+        ),
+        "unicode_escaped": (
+            b'{"waveKey":"wave-\\u00e9","taskId":"task-1","outcome":"succeeded"}',
+            "63f82ca904d1f2a8e977aaec49c1d333feb836a54640b383d285556421861df8",
+        ),
+    }
+    original_object = json.loads(BODY)
+    for name, (raw, golden) in RAW_BODY_ENCODING_GOLDEN.items():
+        actual = signature(TIMESTAMP, SOURCE, EVENT_TYPE, EXTERNAL_ID, raw)
+        assert hmac.compare_digest(actual, golden), ("raw_body_golden", name, actual)
+        assert not hmac.compare_digest(actual, EXPECTED["unchanged"]), ("body_reencoded", name)
+        if name not in ("unicode", "unicode_escaped"):
+            assert json.loads(raw) == original_object, ("semantic_json_changed", name)
+    assert json.loads(RAW_BODY_ENCODING_GOLDEN["unicode"][0]) == json.loads(
+        RAW_BODY_ENCODING_GOLDEN["unicode_escaped"][0]
+    ), "unicode_json_semantics"
+    assert RAW_BODY_ENCODING_GOLDEN["unicode"][1] != RAW_BODY_ENCODING_GOLDEN["unicode_escaped"][1]
+    print("PASS: 6 signed-metadata vectors, 6 raw-body byte golden vectors, 3 v1 replay invariants, 4 timestamps, 6 identities, 2 body lengths (offline only)")
 
 if __name__ == "__main__":
     verify_fixture()
