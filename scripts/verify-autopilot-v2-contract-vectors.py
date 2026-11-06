@@ -67,17 +67,50 @@ def verify_fixture() -> None:
         assert hmac.compare_digest(actual, EXPECTED[name]), (name, actual)
         if name != "unchanged":
             assert not hmac.compare_digest(actual, EXPECTED["unchanged"]), name
+    # The legacy v1 MAC authenticates only the timestamp and raw body. Changing
+    # source/type/external event ID headers cannot change that MAC. Pin this
+    # dangerous difference until the actual Node publisher and C# receiver both
+    # require the metadata-bound v2 contract (see #345/#718, Bridge #1/#2).
     legacy_v1 = hmac.new(SECRET,
         (TIMESTAMP + "." + BODY.decode("utf-8")).encode("utf-8"),
         hashlib.sha256).hexdigest()
     assert not hmac.compare_digest(legacy_v1, EXPECTED["unchanged"])
+    for changed in (
+        (TIMESTAMP, "other-bridge", EVENT_TYPE, EXTERNAL_ID, BODY),
+        (TIMESTAMP, SOURCE, "wave.task.failed", EXTERNAL_ID, BODY),
+        (TIMESTAMP, SOURCE, EVENT_TYPE, "evt-other", BODY),
+    ):
+        replayed_v1 = hmac.new(SECRET,
+            (changed[0] + "." + changed[4].decode("utf-8")).encode("utf-8"),
+            hashlib.sha256).hexdigest()
+        assert hmac.compare_digest(replayed_v1, legacy_v1), "unexpected v1 metadata binding"
+        assert not hmac.compare_digest(signature(*changed), EXPECTED["unchanged"]), "v2 must bind header identity"
     for invalid_ts in ("01800000000", "+1800000000", "1800000000 ", "0"):
         try:
             canonical_v2_bytes(invalid_ts, SOURCE, EVENT_TYPE, EXTERNAL_ID, BODY)
             raise AssertionError("invalid timestamp accepted")
         except ValueError:
             pass
-    print("PASS: 6 fixed v2 HMAC vectors; legacy-v1 mismatch; 4 timestamp rejects (offline only)")
+    for source, kind, event_id in (
+        ("", EVENT_TYPE, EXTERNAL_ID),
+        ("other bridge", EVENT_TYPE, EXTERNAL_ID),
+        (SOURCE, "", EXTERNAL_ID),
+        (SOURCE, "event/type", EXTERNAL_ID),
+        (SOURCE, EVENT_TYPE, "evt/other"),
+        (SOURCE, EVENT_TYPE, EXTERNAL_ID + "\\n"),
+    ):
+        try:
+            canonical_v2_bytes(TIMESTAMP, source, kind, event_id, BODY)
+            raise AssertionError("invalid signed identity accepted")
+        except ValueError:
+            pass
+    for invalid_body in (b"", b"x" * 65537):
+        try:
+            canonical_v2_bytes(TIMESTAMP, SOURCE, EVENT_TYPE, EXTERNAL_ID, invalid_body)
+            raise AssertionError("invalid signed body length accepted")
+        except ValueError:
+            pass
+    print("PASS: 6 fixed v2 vectors; 3 v1 header-replay invariants; 4 timestamps, 6 identities, 2 body lengths rejected (offline only)")
 
 if __name__ == "__main__":
     verify_fixture()
