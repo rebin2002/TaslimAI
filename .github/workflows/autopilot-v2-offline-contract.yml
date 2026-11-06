@@ -6,11 +6,13 @@ on:
   pull_request:
     paths:
       - "scripts/verify-autopilot-v2-contract-vectors.py"
+      - "scripts/verify-autopilot-v2-node-contract.mjs"
       - ".github/workflows/autopilot-v2-offline-contract.yml"
   push:
     branches: [main]
     paths:
       - "scripts/verify-autopilot-v2-contract-vectors.py"
+      - "scripts/verify-autopilot-v2-node-contract.mjs"
       - ".github/workflows/autopilot-v2-offline-contract.yml"
 
 permissions:
@@ -57,3 +59,9 @@ jobs:
               assert hmac.compare_digest(actual_mac, vector["expectedSignature"]), vector["name"]
           print("PASS: 12 offline vector exports and expected signatures")
           PY
+      - name: Independently reconstruct and verify 12 vectors in Node.js
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --version
+          node scripts/verify-autopilot-v2-node-contract.mjs "$RUNNER_TEMP/autopilot-v2-vectors.json"
