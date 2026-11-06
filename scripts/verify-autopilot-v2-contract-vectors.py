@@ -7,7 +7,9 @@ script alone does not prove receiver ingress, replay, admission or live refill.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
+import sys
 import hmac
 import json
 import re
@@ -53,7 +55,7 @@ def signature(timestamp: str, source: str, event_type: str,
         canonical_v2_bytes(timestamp, source, event_type, external_id, body),
         hashlib.sha256).hexdigest()
 
-def verify_fixture() -> None:
+def verify_fixture(*, emit_status: bool = True) -> tuple[dict, dict]:
     vectors = {
         "unchanged": (TIMESTAMP, SOURCE, EVENT_TYPE, EXTERNAL_ID, BODY),
         "mutated_source": (TIMESTAMP, "other-bridge", EVENT_TYPE, EXTERNAL_ID, BODY),
@@ -180,7 +182,59 @@ def verify_fixture() -> None:
         RAW_BODY_ENCODING_GOLDEN["unicode_escaped"][0]
     ), "unicode_json_semantics"
     assert RAW_BODY_ENCODING_GOLDEN["unicode"][1] != RAW_BODY_ENCODING_GOLDEN["unicode_escaped"][1]
-    print("PASS: canonical v2 byte frame and bounds, 6 signed-metadata vectors, 6 raw-body byte goldens, 3 v1 replay invariants, rejection cases (offline only)")
+    if emit_status:
+        print("PASS: canonical v2 byte frame and bounds, 6 signed-metadata vectors, 6 raw-body byte goldens, 3 v1 replay invariants, rejection cases (offline only)")
+    return vectors, RAW_BODY_ENCODING_GOLDEN
+
+def machine_readable_fixture() -> dict:
+    """Produce a deterministic, provider-free interchange fixture for actual Node/C# tests.
+
+    This is a vector *input*, not a claim that Bridge or TaslimAI verified it.
+    Consumers must recompute the MAC using their own production signing code.
+    """
+    vectors, raw_goldens = verify_fixture(emit_status=False)
+    items = []
+    for name, fields in vectors.items():
+        timestamp, source, event_type, external_id, body = fields
+        items.append({
+            "name": name,
+            "timestamp": timestamp,
+            "source": source,
+            "eventType": event_type,
+            "externalEventId": external_id,
+            "bodyBase64": base64.b64encode(body).decode("ascii"),
+            "signedFrameBase64": base64.b64encode(
+                canonical_v2_bytes(timestamp, source, event_type, external_id, body)
+            ).decode("ascii"),
+            "expectedSignature": "sha256=" + EXPECTED[name],
+        })
+    for name, (body, expected) in raw_goldens.items():
+        items.append({
+            "name": "raw_" + name,
+            "timestamp": TIMESTAMP,
+            "source": SOURCE,
+            "eventType": EVENT_TYPE,
+            "externalEventId": EXTERNAL_ID,
+            "bodyBase64": base64.b64encode(body).decode("ascii"),
+            "signedFrameBase64": base64.b64encode(
+                canonical_v2_bytes(TIMESTAMP, SOURCE, EVENT_TYPE, EXTERNAL_ID, body)
+            ).decode("ascii"),
+            "expectedSignature": "sha256=" + expected,
+        })
+    assert len(items) == 12
+    assert len({item["name"] for item in items}) == len(items)
+    return {
+        "schema": "taslim.autopilot.signed-completion-v2.vectors.v1",
+        "disclaimer": "Offline test data only; independent Node/C# runtime verification still required.",
+        "syntheticSecretUtf8": SECRET.decode("ascii"),
+        "vectors": items,
+    }
+
 
 if __name__ == "__main__":
-    verify_fixture()
+    if sys.argv[1:] == ["--emit-json"]:
+        print(json.dumps(machine_readable_fixture(), indent=2, sort_keys=True))
+    elif len(sys.argv) == 1:
+        verify_fixture()
+    else:
+        raise SystemExit("usage: verify-autopilot-v2-contract-vectors.py [--emit-json]")
