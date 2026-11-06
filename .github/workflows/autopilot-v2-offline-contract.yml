@@ -7,12 +7,14 @@ on:
     paths:
       - "scripts/verify-autopilot-v2-contract-vectors.py"
       - "scripts/verify-autopilot-v2-node-contract.mjs"
+      - "scripts/AutopilotV2Contracts/**"
       - ".github/workflows/autopilot-v2-offline-contract.yml"
   push:
     branches: [main]
     paths:
       - "scripts/verify-autopilot-v2-contract-vectors.py"
       - "scripts/verify-autopilot-v2-node-contract.mjs"
+      - "scripts/AutopilotV2Contracts/**"
       - ".github/workflows/autopilot-v2-offline-contract.yml"
 
 permissions:
@@ -65,3 +67,12 @@ jobs:
           set -euo pipefail
           node --version
           node scripts/verify-autopilot-v2-node-contract.mjs "$RUNNER_TEMP/autopilot-v2-vectors.json"
+      - name: Set up .NET 8 (synthetic HMAC contract only)
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Independently reconstruct and verify 12 vectors in C#/.NET 8
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet run --configuration Release --project scripts/AutopilotV2Contracts/AutopilotV2Contracts.csproj -- "$RUNNER_TEMP/autopilot-v2-vectors.json"
