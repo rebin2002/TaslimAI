@@ -53,6 +53,8 @@ async function applyLocale(page: Page, locale: keyof typeof languageTags, label:
   await language.selectOption(locale);
   await expect
     .poll(() => page.evaluate(() => {
+      const languagePackKey = Object.keys(window.localStorage).find((key) => key.startsWith("taslim-language-pack"));
+      if (languagePackKey) return window.localStorage.getItem(languagePackKey);
       const accountKey = Object.keys(window.localStorage).find((key) => key.startsWith("taslim-locale:user:"));
       return accountKey ? window.localStorage.getItem(accountKey) : window.localStorage.getItem("taslim-locale");
     }))

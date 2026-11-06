@@ -350,13 +350,19 @@ public sealed class MovieCaptionService(
         var project = await db.MovieProjects.AsNoTracking().FirstOrDefaultAsync(item => item.Id == movieProjectId, cancellationToken);
         if (project is null || !await collaboration.HasPermissionAsync(userId, movieProjectId, MoviePermissions.Edit, cancellationToken)) return null;
         ValidateDocument(document, project.DurationSeconds);
+        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
         var track = await CreateTrackAsync(userId, movieProjectId, new MovieCaptionTrackRequest
         {
             Name = request.Name, Language = request.Language, IsRtl = request.IsRtl, TrackType = request.TrackType,
             MovieAssemblyId = request.MovieAssemblyId, IsDefault = request.IsDefault, Status = request.Status,
             SourceFormat = format, SourceFileName = request.SourceFileName,
         }, cancellationToken);
-        if (track is null) return null;
+        if (track is null)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return null;
+        }
+
         var entity = await db.MovieCaptionTracks.FirstAsync(item => item.Id == track.Id, cancellationToken);
         var now = DateTime.UtcNow;
         var importedCues = document.Cues.Select((cue, index) => new MovieCaptionCue
@@ -367,6 +373,7 @@ public sealed class MovieCaptionService(
         db.MovieCaptionCues.AddRange(importedCues);
         entity.UpdatedAt = now;
         await db.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
         return (await GetTrackAsync(userId, entity.Id, cancellationToken))!;
     }
 
