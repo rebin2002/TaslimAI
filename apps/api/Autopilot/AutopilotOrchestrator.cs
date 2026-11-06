@@ -75,12 +75,14 @@ public sealed class AutopilotOrchestrator(
     IAutopilotNextWaveService nextWaves,
     AutopilotOptions options,
     TimeProvider timeProvider,
-    ILogger<AutopilotOrchestrator> logger) : IAutopilotOrchestrator
+    ILogger<AutopilotOrchestrator> logger,
+    Action? notifyCommittedEvent = null) : IAutopilotOrchestrator
 {
     private const int MaxEventDrainPagesPerCycle = 4;
     private const int MaxDeferredRunAdvancesPerCycle = 100;
     private const string PendingRunAdvanceStatusDetail = "completion_event_pending_advance:";
     private readonly AutopilotOptions settings = options;
+    private readonly Action eventNotifier = notifyCommittedEvent ?? AutopilotEventDispatchSignal.NotifyCommittedEvent;
 
     public async Task<AutopilotCycleResult> ProcessPendingEventsAsync(CancellationToken cancellationToken = default)
     {
@@ -444,6 +446,7 @@ public sealed class AutopilotOrchestrator(
     public async Task<AutopilotControlSnapshot> SetControlAsync(bool? paused, bool? killSwitch, Guid? actorUserId, string reason, string? requestId = null, CancellationToken cancellationToken = default)
     {
         var control = await EnsureControlAsync(cancellationToken);
+        var wasBlocked = control.Paused || control.KillSwitchEngaged;
         if (paused.HasValue) control.Paused = paused.Value;
         if (killSwitch.HasValue) control.KillSwitchEngaged = killSwitch.Value;
         control.LastReason = reason;
@@ -458,6 +461,8 @@ public sealed class AutopilotOrchestrator(
             requestId: requestId,
             dryRun: settings.DryRun));
         await db.SaveChangesAsync(cancellationToken);
+        if (settings.Enabled && wasBlocked && !control.Paused && !control.KillSwitchEngaged)
+            eventNotifier();
         return Snapshot(control);
     }
 

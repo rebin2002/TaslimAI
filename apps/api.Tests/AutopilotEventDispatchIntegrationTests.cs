@@ -8,9 +8,12 @@ using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
-using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Taslim.Api.Autopilot;
 using Taslim.Api.Persistence;
@@ -99,6 +102,136 @@ public sealed class AutopilotEventDispatchIntegrationTests
         {
                 Environment.SetEnvironmentVariable("AUTOPILOT_WEBHOOK_SECRET", previousSecret);
         }
+    }
+
+    [Theory]
+    [InlineData("pause")]
+    [InlineData("kill-switch")]
+    public async Task Watchdog_requeues_blocked_completion_wake_when_control_becomes_eligible(string blockedBy)
+    {
+        var previousSecret = Environment.GetEnvironmentVariable("AUTOPILOT_WEBHOOK_SECRET");
+        Environment.SetEnvironmentVariable("AUTOPILOT_WEBHOOK_SECRET", SigningSecret);
+        var wakeCalls = 0;
+        Action notifyCommittedEvent = () =>
+        {
+            Interlocked.Increment(ref wakeCalls);
+            AutopilotEventDispatchSignal.NotifyCommittedEvent();
+        };
+        try
+        {
+            using var factory = new DispatchTestFactory { NotifyCommittedEventOverride = notifyCommittedEvent };
+            using var client = factory.CreateClient();
+            ConfigureLiveFakePosture(factory);
+            var backlogKey = $"backlog-control-wake-{blockedBy}";
+            await EnsureDatabaseAndApproveOneBacklogItemAsync(factory, backlogKey);
+
+            var startsPaused = string.Equals(blockedBy, "pause", StringComparison.Ordinal);
+            await SetControlAsync(factory, startsPaused, !startsPaused, $"synthetic {blockedBy} gate");
+            Assert.Equal(0, Volatile.Read(ref wakeCalls));
+            // The test assembly disables parallel execution. Clear a coalesced
+            // wake left by an earlier test so the next signal belongs to this event.
+            await DrainPendingWatchdogWakesAsync();
+
+            var eventId = $"evt-control-wake-{blockedBy}-{Guid.NewGuid():N}";
+            using (var response = await PostSignedEventAsync(client, CompletionPayload(), eventId))
+                Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+            Assert.Equal(1, Volatile.Read(ref wakeCalls));
+
+            // Commit the event before the watchdog starts. Its startup pass and
+            // the event wake must both respect the persisted blocked state.
+            using (var scope = factory.Services.CreateScope())
+            {
+                var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+                var intake = await db.AutopilotEvents.SingleAsync(item => item.ExternalEventId == eventId);
+                Assert.Equal(AutopilotEventStatuses.Queued, intake.Status);
+            }
+            Assert.Empty(factory.Provider.Launches);
+
+            using var stop = new CancellationTokenSource();
+            var watchdog = CreateWatchdog(factory);
+            await watchdog.StartAsync(stop.Token);
+            try
+            {
+                var skipped = await factory.WatchdogLogger.WaitForBlockedWakeAsync(startsPaused, TimeSpan.FromSeconds(8));
+                Assert.Contains(startsPaused ? "controller paused" : "kill switch engaged", skipped, StringComparison.Ordinal);
+                using (var scope = factory.Services.CreateScope())
+                {
+                    var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+                    Assert.Equal(AutopilotEventStatuses.Queued,
+                        (await db.AutopilotEvents.SingleAsync(item => item.ExternalEventId == eventId)).Status);
+                }
+                Assert.Empty(factory.Provider.Launches);
+
+                // Clear one gate but leave the other active. This is still
+                // blocked and must not enqueue another wake.
+                if (startsPaused)
+                    await SetControlAsync(factory, paused: false, killSwitch: true, "remain blocked by kill switch");
+                else
+                    await SetControlAsync(factory, paused: true, killSwitch: false, "remain blocked by pause");
+                Assert.Equal(1, Volatile.Read(ref wakeCalls));
+                using (var scope = factory.Services.CreateScope())
+                {
+                    var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+                    Assert.Equal(AutopilotEventStatuses.Queued,
+                        (await db.AutopilotEvents.SingleAsync(item => item.ExternalEventId == eventId)).Status);
+                }
+                Assert.Empty(factory.Provider.Launches);
+
+                // The final blocked->eligible commit must publish a fresh wake.
+                if (startsPaused)
+                    await SetControlAsync(factory, paused: null, killSwitch: false, "resume after kill switch");
+                else
+                    await SetControlAsync(factory, paused: false, killSwitch: null, "resume after pause");
+                Assert.Equal(2, Volatile.Read(ref wakeCalls));
+
+                var launched = await factory.Provider.LaunchReceived.Task.WaitAsync(TimeSpan.FromSeconds(8));
+                Assert.Equal("Approved replacement task", launched.Title);
+                await WaitForCompletionAndLaunchAsync(factory, eventId, TimeSpan.FromSeconds(8));
+                using var finalScope = factory.Services.CreateScope();
+                var finalDb = finalScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+                Assert.Equal(AutopilotEventStatuses.Processed,
+                    (await finalDb.AutopilotEvents.SingleAsync(item => item.ExternalEventId == eventId)).Status);
+                Assert.Equal(AutopilotWaveLaunchStatuses.Launched,
+                    (await finalDb.AutopilotWaveLaunchTasks.SingleAsync(item => item.BacklogItemKey == backlogKey)).Status);
+                Assert.Single(factory.Provider.Launches);
+            }
+            finally
+            {
+                await watchdog.StopAsync(CancellationToken.None);
+            }
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("AUTOPILOT_WEBHOOK_SECRET", previousSecret);
+        }
+    }
+
+    [Fact]
+    public async Task Control_resume_does_not_notify_when_control_persistence_fails()
+    {
+        var wakeCalls = 0;
+        var failure = new ControlTransitionSaveFailureInterceptor();
+        using var factory = new DispatchTestFactory
+        {
+            NotifyCommittedEventOverride = () => Interlocked.Increment(ref wakeCalls),
+            SaveChangesInterceptorOverride = failure,
+        };
+        using (var setup = factory.Services.CreateScope())
+            await setup.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreatedAsync();
+
+        await SetControlAsync(factory, paused: true, killSwitch: false, "synthetic persisted pause");
+        Assert.Equal(0, Volatile.Read(ref wakeCalls));
+        failure.Arm();
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            SetControlAsync(factory, paused: false, killSwitch: null, "synthetic resume save failure"));
+        Assert.Equal("Synthetic control transition persistence failure.", exception.Message);
+        Assert.Equal(0, Volatile.Read(ref wakeCalls));
+
+        using var verify = factory.Services.CreateScope();
+        var db = verify.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var control = await db.AutopilotControlStates.SingleAsync(item => item.ControlKey == AutopilotControlState.SingletonKey);
+        Assert.True(control.Paused);
+        Assert.False(control.KillSwitchEngaged);
     }
 
     [Fact]
@@ -654,11 +787,29 @@ public sealed class AutopilotEventDispatchIntegrationTests
         throw new TimeoutException("The event was not processed and its approved replacement was not durably launched before the test deadline.");
     }
 
+    private static async Task<AutopilotControlSnapshot> SetControlAsync(
+        DispatchTestFactory factory,
+        bool? paused,
+        bool? killSwitch,
+        string reason)
+    {
+        using var scope = factory.Services.CreateScope();
+        var orchestrator = scope.ServiceProvider.GetRequiredService<IAutopilotOrchestrator>();
+        return await orchestrator.SetControlAsync(paused, killSwitch, null, reason);
+    }
+
+    private static async Task DrainPendingWatchdogWakesAsync()
+    {
+        while (await AutopilotEventDispatchSignal.WaitForEventOrTimeoutAsync(TimeSpan.Zero, CancellationToken.None))
+        {
+        }
+    }
+
     private static AutopilotWatchdogService CreateWatchdog(DispatchTestFactory factory) =>
         new(
             factory.Services.GetRequiredService<IServiceScopeFactory>(),
             factory.Services.GetRequiredService<IOptions<AutopilotOptions>>(),
-            NullLogger<AutopilotWatchdogService>.Instance);
+            factory.WatchdogLogger);
 
     private static void ConfigureLiveFakePosture(DispatchTestFactory factory)
     {
@@ -984,8 +1135,10 @@ public sealed class AutopilotEventDispatchIntegrationTests
     {
         private readonly string databasePath = Path.Combine(Path.GetTempPath(), $"taslim-event-dispatch-{Guid.NewGuid():N}.db");
         public FakeWaveLaunchProvider Provider { get; } = new();
+        public WatchdogWakeLogger WatchdogLogger { get; } = new();
         public Func<TaslimDbContext, IAutopilotLockService>? LockServiceOverride { get; init; }
         public Action? NotifyCommittedEventOverride { get; init; }
+        public SaveChangesInterceptor? SaveChangesInterceptorOverride { get; init; }
 
         private string ConnectionString => new SqliteConnectionStringBuilder
         {
@@ -998,13 +1151,27 @@ public sealed class AutopilotEventDispatchIntegrationTests
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
             builder.UseEnvironment("Testing");
+            builder.ConfigureAppConfiguration((_, configuration) => configuration.AddInMemoryCollection(
+                new Dictionary<string, string?> { ["Autopilot:WatchdogEnabled"] = "false" }));
             builder.ConfigureServices(services =>
             {
                 services.RemoveAll<DbContextOptions<TaslimDbContext>>();
-                services.AddDbContext<TaslimDbContext>(options => options.UseSqlite(ConnectionString));
+                services.AddDbContext<TaslimDbContext>(options =>
+                {
+                    options.UseSqlite(ConnectionString);
+                    if (SaveChangesInterceptorOverride is not null)
+                        options.AddInterceptors(SaveChangesInterceptorOverride);
+                });
             });
             builder.ConfigureTestServices(services =>
             {
+                foreach (var hostedWatchdog in services.Where(descriptor =>
+                             descriptor.ServiceType == typeof(IHostedService)
+                             && descriptor.ImplementationType == typeof(AutopilotWatchdogService)).ToArray())
+                {
+                    services.Remove(hostedWatchdog);
+                }
+
                 services.RemoveAll<IWaveLaunchProvider>();
                 services.AddSingleton(Provider);
                 services.AddScoped<IWaveLaunchProvider>(provider => provider.GetRequiredService<FakeWaveLaunchProvider>());
@@ -1118,6 +1285,69 @@ public sealed class AutopilotEventDispatchIntegrationTests
 
         public Task<bool> ReleaseAsync(AutopilotLockHandle handle, CancellationToken cancellationToken = default) =>
             Task.FromResult(true);
+    }
+
+    private sealed class ControlTransitionSaveFailureInterceptor : SaveChangesInterceptor
+    {
+        private int armed;
+
+        public void Arm() => Volatile.Write(ref armed, 1);
+
+        public override ValueTask<InterceptionResult<int>> SavingChangesAsync(
+            DbContextEventData eventData,
+            InterceptionResult<int> result,
+            CancellationToken cancellationToken = default)
+        {
+            if (Volatile.Read(ref armed) != 0
+                && eventData.Context?.ChangeTracker.Entries<AutopilotControlState>()
+                    .Any(entry => entry.State == EntityState.Modified) == true)
+            {
+                return ValueTask.FromException<InterceptionResult<int>>(
+                    new InvalidOperationException("Synthetic control transition persistence failure."));
+            }
+
+            return ValueTask.FromResult(result);
+        }
+    }
+
+    private sealed class WatchdogWakeLogger : ILogger<AutopilotWatchdogService>
+    {
+        private readonly TaskCompletionSource<string> pausedWakeConsumed = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<string> killSwitchWakeConsumed = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly ConcurrentQueue<string> messages = new();
+
+        public async Task<string> WaitForBlockedWakeAsync(bool paused, TimeSpan timeout)
+        {
+            try
+            {
+                return await (paused ? pausedWakeConsumed.Task : killSwitchWakeConsumed.Task).WaitAsync(timeout);
+            }
+            catch (TimeoutException exception)
+            {
+                throw new TimeoutException(
+                    $"The sole test watchdog did not consume the expected blocked wake. Logs=[{string.Join(" | ", messages)}]",
+                    exception);
+            }
+        }
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            var message = formatter(state, exception);
+            messages.Enqueue(exception is null ? message : $"{message}: {exception.GetType().Name}: {exception.Message}");
+            if (string.Equals(message, "Autopilot watchdog skipped: controller paused.", StringComparison.Ordinal))
+                pausedWakeConsumed.TrySetResult(message);
+            else if (string.Equals(message, "Autopilot watchdog skipped: kill switch engaged.", StringComparison.Ordinal))
+                killSwitchWakeConsumed.TrySetResult(message);
+        }
     }
 
     private sealed class FakeWaveLaunchProvider : IWaveLaunchProvider
