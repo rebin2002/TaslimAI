@@ -4,8 +4,9 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { useRouter } from "next/navigation";
 import { api, type AuthResponse, type LoginInput, type OnboardingInput, type ProfileInput, type RegisterInput, type User } from "@/lib/api";
 import { useLocale } from "@/components/LocaleProvider";
-import { locales, type Locale } from "@/lib/i18n";
-import { accountLocaleStorageKey, anonymousLocaleStorageKey, readStoredLocale, writeStoredLocale } from "@/lib/localePersistence";
+import { accountLocaleStorageKey, anonymousLocaleStorageKey, readStoredLocale } from "@/lib/localePersistence";
+import { accountLanguagePackStorageKey, anonymousLanguagePackStorageKey, readStoredLanguagePack, writeStoredLanguagePack } from "@/lib/languagePackPersistence";
+import { defaultLanguagePackRegistry } from "@/lib/languagePackRegistry";
 
 type AuthContextValue = {
   user: User | null;
@@ -24,9 +25,9 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 export function AuthProvider({ children }: Readonly<{ children: React.ReactNode }>) {
   const [session, setSession] = useState<AuthResponse | null>(null);
   const [loading, setLoading] = useState(true);
-  const { getLocaleSource, locale, setLocale } = useLocale();
+  const { getLocaleSource, languagePackId, setLanguagePack } = useLocale();
   const router = useRouter();
-  const sessionLocaleInitialized = useRef<string | null>(null);
+  const sessionLanguagePackInitialized = useRef<string | null>(null);
   const authRequestGeneration = useRef(0);
 
   const refresh = useCallback(async () => {
@@ -38,7 +39,7 @@ export function AuthProvider({ children }: Readonly<{ children: React.ReactNode 
     } catch {
       if (request !== authRequestGeneration.current) return;
       setSession(null);
-      sessionLocaleInitialized.current = null;
+      sessionLanguagePackInitialized.current = null;
     } finally {
       if (request === authRequestGeneration.current) setLoading(false);
     }
@@ -50,33 +51,31 @@ export function AuthProvider({ children }: Readonly<{ children: React.ReactNode 
   useEffect(() => {
     const user = session?.user;
     if (!user) {
-      sessionLocaleInitialized.current = null;
+      sessionLanguagePackInitialized.current = null;
       return;
     }
-    if (sessionLocaleInitialized.current !== user.id) {
-      sessionLocaleInitialized.current = user.id;
-      let savedLocale: Locale | null = null;
-      try {
-        savedLocale = readStoredLocale(window.localStorage, accountLocaleStorageKey(user.id));
-      } catch {
-        // Access to browser storage can be blocked by privacy settings.
-      }
+    if (sessionLanguagePackInitialized.current !== user.id) {
+      sessionLanguagePackInitialized.current = user.id;
+      let savedLanguagePack = readStoredLanguagePack(window.localStorage, accountLanguagePackStorageKey(user.id));
+      if (!savedLanguagePack) savedLanguagePack = readStoredLocale(window.localStorage, accountLocaleStorageKey(user.id));
+      const preferredLanguagePack = defaultLanguagePackRegistry.has(user.preferredLanguage) ? user.preferredLanguage : "en";
       const localeSource = getLocaleSource();
       if (localeSource !== "user" && localeSource !== "anonymous-storage") {
-        setLocale(savedLocale ?? user.preferredLanguage, { persist: false, source: "account" });
+        setLanguagePack(savedLanguagePack ?? preferredLanguagePack, { persist: false, source: "account" });
       }
     }
-  }, [getLocaleSource, session?.user, setLocale]);
+  }, [getLocaleSource, session?.user, setLanguagePack]);
   useEffect(() => {
     const userId = session?.user.id;
-    if (!userId || sessionLocaleInitialized.current !== userId) return;
+    if (!userId || sessionLanguagePackInitialized.current !== userId) return;
     try {
-      writeStoredLocale(window.localStorage, accountLocaleStorageKey(userId), locale);
+      writeStoredLanguagePack(window.localStorage, accountLanguagePackStorageKey(userId), languagePackId);
+      window.localStorage.removeItem(anonymousLanguagePackStorageKey);
       window.localStorage.removeItem(anonymousLocaleStorageKey);
     } catch {
-      // The in-memory locale remains active when browser storage is unavailable.
+      // Storage can be unavailable; the selected pack remains active in memory.
     }
-  }, [locale, session?.user.id]);
+  }, [languagePackId, session?.user.id]);
 
   const signIn = useCallback(async (input: LoginInput, redirectTo?: string) => {
     const request = ++authRequestGeneration.current;
@@ -100,26 +99,35 @@ export function AuthProvider({ children }: Readonly<{ children: React.ReactNode 
     await api.logout();
     if (request !== authRequestGeneration.current) return;
     setSession(null);
-    sessionLocaleInitialized.current = null;
-    setLocale("en", { persist: false, source: "default" });
-    try { window.localStorage.removeItem(anonymousLocaleStorageKey); } catch { /* Storage can be unavailable. */ }
+    sessionLanguagePackInitialized.current = null;
+    setLanguagePack("en", { persist: false, source: "default" });
+    try {
+      window.localStorage.removeItem(anonymousLanguagePackStorageKey);
+      window.localStorage.removeItem(anonymousLocaleStorageKey);
+    } catch {
+      // Storage can be unavailable; signing out and resetting in-memory state still succeeds.
+    }
     router.push("/");
-  }, [router, setLocale]);
+  }, [router, setLanguagePack]);
 
   const updateProfile = useCallback(async (input: ProfileInput) => {
     const next = await api.updateProfile(input);
     setSession(next);
     // The profile endpoint persists the interface language. Apply the same
-    // choice immediately so Account does not require a reload to switch the
-    // document language and direction.
-    const nextLocale = input.preferredLanguage as Locale;
-    if (locales.includes(nextLocale)) setLocale(nextLocale, { persist: false, source: "account" });
-  }, [setLocale]);
+    // choice immediately so Account does not require a reload to switch copy,
+    // document language, or direction.
+    if (defaultLanguagePackRegistry.has(input.preferredLanguage)) {
+      setLanguagePack(input.preferredLanguage, { persist: false, source: "account" });
+    }
+  }, [setLanguagePack]);
 
   const completeOnboarding = useCallback(async (input: OnboardingInput) => {
     const next = await api.completeOnboarding(input);
     setSession(next);
-  }, []);
+    if (defaultLanguagePackRegistry.has(input.preferredLanguage)) {
+      setLanguagePack(input.preferredLanguage, { persist: false, source: "account" });
+    }
+  }, [setLanguagePack]);
 
   const value = useMemo(() => ({ user: session?.user ?? null, workspace: session?.personalWorkspace ?? null, loading, signIn, register, signOut, updateProfile, completeOnboarding, refresh }), [completeOnboarding, loading, refresh, register, session, signIn, signOut, updateProfile]);
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

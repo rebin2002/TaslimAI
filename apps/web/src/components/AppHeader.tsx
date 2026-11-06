@@ -2,7 +2,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { ChevronDown, Search } from "lucide-react";
-import { useLocale, localeNames, locales } from "@/components/LocaleProvider";
+import { useLocale } from "@/components/LocaleProvider";
 import { BrandMark } from "@/components/BrandMark";
 import { useAuth } from "@/components/AuthProvider";
 import { NotificationBell } from "@/components/ActivityBell";
@@ -10,7 +10,7 @@ import { desktopNavigation, matchesNavigationPath } from "@/lib/navigation";
 
 export function AppHeader({ unreadCount }: Readonly<{ unreadCount: number }>) {
   const pathname = usePathname();
-  const { locale, setLocale, t } = useLocale();
+  const { languagePackId, languagePackIds, languagePackNames, setLanguagePack, t } = useLocale();
   const { user } = useAuth();
   return (
     <header className="topbar app-header">
@@ -35,8 +35,8 @@ export function AppHeader({ unreadCount }: Readonly<{ unreadCount: number }>) {
           <NotificationBell unreadCount={unreadCount} />
           <label className="language-select">
             <span className="sr-only">{t("navigation.language")}</span>
-            <select value={locale} onChange={(event) => setLocale(event.target.value as typeof locale)} aria-label={t("navigation.language")} dir="ltr">
-              {locales.map((item) => <option key={item} value={item}>{localeNames[item]}</option>)}
+            <select value={languagePackId} onChange={(event) => setLanguagePack(event.target.value)} aria-label={t("navigation.language")} dir="ltr">
+              {languagePackIds.map((item) => <option key={item} value={item}>{languagePackNames[item]}</option>)}
             </select>
             <ChevronDown size={14} aria-hidden="true" />
           </label>

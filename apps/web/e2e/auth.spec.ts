@@ -90,7 +90,7 @@ test.describe("authentication and onboarding", () => {
     await expect(interfaceLanguage).toHaveValue("en");
 
     await interfaceLanguage.selectOption("ar");
-    await page.getByRole("button", { name: /save changes/i }).click();
+    await page.locator(".account-profile-card button.primary-button").click();
 
     await expect(page.locator("html")).toHaveAttribute("lang", "ar");
     await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
