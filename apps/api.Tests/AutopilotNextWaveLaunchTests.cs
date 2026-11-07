@@ -827,6 +827,7 @@ public sealed class AutopilotNextWaveLaunchTests
         }.ConnectionString;
         var workerDirectory = Path.Combine(Path.GetTempPath(), $"taslim-fence-process-{Guid.NewGuid():N}");
         Exception? primaryFailure = null;
+        Task<PostgresFenceWorkerResult[]>? intakeDuringProviderTask = null;
         try
         {
             Directory.CreateDirectory(workerDirectory);
@@ -906,36 +907,55 @@ public sealed class AutopilotNextWaveLaunchTests
             await liveHost.AddBacklogAsync("bl-process-boundary-successor", "One verified replacement", priority: 3);
 
             PostgresFenceIntakeWorkerInput? completionInput = null;
+            var intakeAttemptStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             liveHost.Provider.BeforeReturnAsync = async (request, externalTaskId, cancellationToken) =>
             {
                 if (completionInput is not null) return;
                 completionInput = CreatePostgresFenceCompletionInput(request, externalTaskId, expectedTaskCount: 2);
-                var blocked = Assert.Single(await RunPostgresFenceProcessesAsync(
+                intakeDuringProviderTask = RunPostgresFenceProcessesAsync(
                     scopedConnectionString,
                     AutopilotCompletionLaunchFence.ResourceKey,
                     "intake-during-provider-call",
                     1,
                     workerDirectory,
                     workerMode: "intake",
-                    intakeInputs: [completionInput!]));
-                Assert.Equal(AutopilotIntakeOutcomes.FenceUnavailable, blocked.IntakeOutcome);
+                    intakeInputs: [completionInput!],
+                    onIntakeWorkerAttemptStarted: () => intakeAttemptStarted.TrySetResult(true));
+                await intakeAttemptStarted.Task.WaitAsync(TimeSpan.FromSeconds(45), cancellationToken);
                 using var verifyDuringCreate = liveHost.CreateContext();
-                Assert.Empty(await verifyDuringCreate.AutopilotEvents.ToListAsync(cancellationToken));
+                Assert.False(await verifyDuringCreate.AutopilotEvents.AnyAsync(item =>
+                    item.ExternalEventId == completionInput!.ExternalEventId, cancellationToken));
+                var launchingTask = await verifyDuringCreate.AutopilotWaveLaunchTasks.SingleAsync(
+                    item => item.WaveKey == request.WaveKey && item.TaskKey == request.TaskKey,
+                    cancellationToken);
+                Assert.Equal(AutopilotWaveLaunchStatuses.Launching, launchingTask.Status);
+                Assert.Null(launchingTask.ExternalTaskId);
             };
 
             await liveHost.GreenRunAsync("wave-postgres-intake-boundary");
             Assert.Equal(2, liveHost.Provider.LaunchCalls);
             Assert.NotNull(completionInput);
 
-            var acceptedBySeparateProcess = Assert.Single(await RunPostgresFenceProcessesAsync(
-                scopedConnectionString,
-                AutopilotCompletionLaunchFence.ResourceKey,
-                "intake-after-provider-outcome",
-                1,
-                workerDirectory,
-                workerMode: "intake",
-                intakeInputs: [completionInput!]));
-            Assert.Equal(AutopilotIntakeOutcomes.Accepted, acceptedBySeparateProcess.IntakeOutcome);
+            var intakeProcess = intakeDuringProviderTask
+                ?? throw new InvalidOperationException("The provider callback did not start the intake process.");
+            intakeDuringProviderTask = null;
+            var intakeDuringProvider = Assert.Single(await intakeProcess);
+            Assert.True(intakeDuringProvider.IntakeOutcome is AutopilotIntakeOutcomes.Accepted
+                or AutopilotIntakeOutcomes.FenceUnavailable,
+                $"Unexpected intake outcome during the provider fence: {intakeDuringProvider.IntakeOutcome ?? "<null>"}.");
+            var acceptedBySeparateProcess = intakeDuringProvider;
+            if (intakeDuringProvider.IntakeOutcome == AutopilotIntakeOutcomes.FenceUnavailable)
+            {
+                acceptedBySeparateProcess = Assert.Single(await RunPostgresFenceProcessesAsync(
+                    scopedConnectionString,
+                    AutopilotCompletionLaunchFence.ResourceKey,
+                    "intake-after-provider-outcome",
+                    1,
+                    workerDirectory,
+                    workerMode: "intake",
+                    intakeInputs: [completionInput!]));
+                Assert.Equal(AutopilotIntakeOutcomes.Accepted, acceptedBySeparateProcess.IntakeOutcome);
+            }
 
             var conflictPayload = completionInput! with { PayloadJson = completionInput.PayloadJson + " " };
             conflictPayload = conflictPayload with
@@ -957,6 +977,7 @@ public sealed class AutopilotNextWaveLaunchTests
             {
                 var savedEvent = await verify.AutopilotEvents.SingleAsync(item =>
                     item.ExternalEventId == completionInput!.ExternalEventId);
+                Assert.Equal(savedEvent.Id, acceptedBySeparateProcess.IntakeEventId);
                 Assert.Equal(AutopilotEventStatuses.Processed, savedEvent.Status);
                 Assert.True(savedEvent.SignatureVerified);
                 Assert.True(savedEvent.ReplayProtected);
@@ -996,6 +1017,20 @@ public sealed class AutopilotNextWaveLaunchTests
         catch (Exception exception)
         {
             primaryFailure = exception;
+        }
+
+        if (intakeDuringProviderTask is not null)
+        {
+            try
+            {
+                await intakeDuringProviderTask;
+            }
+            catch (Exception childFailure)
+            {
+                primaryFailure = primaryFailure is null
+                    ? childFailure
+                    : new AggregateException("The PostgreSQL fence regression and in-flight intake worker both failed.", primaryFailure, childFailure);
+            }
         }
 
         var cleanupFailures = await CleanupPostgresFenceTestAsync(adminConnectionString, schemaName, workerDirectory);
@@ -3725,6 +3760,8 @@ public sealed class AutopilotNextWaveLaunchTests
                     new EfAutopilotAuditLog(db),
                     intakeOptions,
                     TimeProvider.System);
+                var intakeStartedPath = RequiredFenceWorkerEnvironment("TASLIM_AUTOPILOT_FENCE_INTAKE_STARTED_PATH");
+                await File.WriteAllTextAsync(intakeStartedPath, workerPid.ToString());
                 var intakeResult = await intake.SubmitAsync(input.ToRequest());
                 var intakeWorkerResult = new PostgresFenceWorkerResult(
                     workerPid,
@@ -3820,7 +3857,8 @@ public sealed class AutopilotNextWaveLaunchTests
         int processCount,
         string workerDirectory,
         string workerMode = "lock",
-        IReadOnlyList<PostgresFenceIntakeWorkerInput>? intakeInputs = null)
+        IReadOnlyList<PostgresFenceIntakeWorkerInput>? intakeInputs = null,
+        Action? onIntakeWorkerAttemptStarted = null)
     {
         if (string.Equals(workerMode, "intake", StringComparison.Ordinal) && intakeInputs?.Count != processCount)
             throw new ArgumentException("An intake request must be supplied for every PostgreSQL intake worker.", nameof(intakeInputs));
@@ -3844,6 +3882,7 @@ public sealed class AutopilotNextWaveLaunchTests
             {
                 var readyPath = Path.Combine(roundDirectory, $"worker-{index}.ready");
                 var resultPath = Path.Combine(roundDirectory, $"worker-{index}.json");
+                var intakeStartedPath = Path.Combine(roundDirectory, $"worker-{index}.intake-started");
                 var heldBy = $"pg-fence-{phase}-{index}";
                 var startInfo = new ProcessStartInfo("dotnet")
                 {
@@ -3888,6 +3927,8 @@ public sealed class AutopilotNextWaveLaunchTests
                 startInfo.Environment["TASLIM_AUTOPILOT_FENCE_READY_PATH"] = readyPath;
                 startInfo.Environment["TASLIM_AUTOPILOT_FENCE_START_GATE"] = startGatePath;
                 startInfo.Environment["TASLIM_AUTOPILOT_FENCE_RESULT_PATH"] = resultPath;
+                if (intakeInputs is not null)
+                    startInfo.Environment["TASLIM_AUTOPILOT_FENCE_INTAKE_STARTED_PATH"] = intakeStartedPath;
 
                 var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
                 try
@@ -3931,6 +3972,12 @@ public sealed class AutopilotNextWaveLaunchTests
                 workers[index] = worker with { WorkerTestHostProcessId = testHostPid };
             }
             await File.WriteAllTextAsync(startGatePath, "go");
+            if (intakeInputs is not null)
+            {
+                for (var index = 0; index < processCount; index++)
+                    await WaitForFenceFileAsync(Path.Combine(roundDirectory, $"worker-{index}.intake-started"), TimeSpan.FromSeconds(45));
+                onIntakeWorkerAttemptStarted?.Invoke();
+            }
 
             using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60)))
             {
