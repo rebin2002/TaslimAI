@@ -671,6 +671,82 @@ public sealed class AutopilotEventDispatchIntegrationTests
         }
     }
 
+    [Fact]
+    public async Task Direct_intake_service_enforces_shared_fence_and_receipt_event_id_binding()
+    {
+        var previousSecret = Environment.GetEnvironmentVariable("AUTOPILOT_WEBHOOK_SECRET");
+        Environment.SetEnvironmentVariable("AUTOPILOT_WEBHOOK_SECRET", SigningSecret);
+        try
+        {
+            using var factory = new DispatchTestFactory();
+            using var client = factory.CreateClient();
+            using (var setup = factory.Services.CreateScope())
+                await setup.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreatedAsync();
+
+            var eventId = $"evt-direct-intake-fence-{Guid.NewGuid():N}";
+            var payload = BridgeV4TerminalReceiptCompletionPayload(eventId, "ABCDEFGHIJKLMNOPQRSTUV");
+            var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString();
+            var request = new AutopilotIntakeRequest(
+                $"sha256={ComputeSignature(timestamp, payload)}",
+                timestamp,
+                payload,
+                ManusBridgeWaveLaunchProvider.Key,
+                eventId,
+                AutopilotEventTypes.WaveTaskCompleted);
+
+            AutopilotLockHandle heldFence;
+            using (var holder = factory.Services.CreateScope())
+            {
+                heldFence = await holder.ServiceProvider.GetRequiredService<IAutopilotLockService>()
+                    .AcquireAsync(AutopilotCompletionLaunchFence.ResourceKey, "synthetic-provider-launch");
+                Assert.True(heldFence.IsAcquired);
+            }
+
+            using (var directCaller = factory.Services.CreateScope())
+            {
+                var intake = directCaller.ServiceProvider.GetRequiredService<IAutopilotEventIntake>();
+                var blocked = await intake.SubmitAsync(request);
+                Assert.Equal(AutopilotIntakeOutcomes.FenceUnavailable, blocked.Outcome);
+            }
+            using (var verify = factory.Services.CreateScope())
+                Assert.Empty(await verify.ServiceProvider.GetRequiredService<TaslimDbContext>().AutopilotEvents.ToListAsync());
+
+            using (var releaser = factory.Services.CreateScope())
+                Assert.True(await releaser.ServiceProvider.GetRequiredService<IAutopilotLockService>().ReleaseAsync(heldFence));
+
+            var mismatchedRequest = request with { ExternalEventId = $"{eventId}-different" };
+            using (var directCaller = factory.Services.CreateScope())
+            {
+                var intake = directCaller.ServiceProvider.GetRequiredService<IAutopilotEventIntake>();
+                var mismatch = await intake.SubmitAsync(mismatchedRequest);
+                Assert.Equal(AutopilotIntakeOutcomes.RejectedInvalid, mismatch.Outcome);
+                Assert.Equal("receipt_event_id_mismatch", mismatch.Reason);
+            }
+            using (var verify = factory.Services.CreateScope())
+                Assert.Empty(await verify.ServiceProvider.GetRequiredService<TaslimDbContext>().AutopilotEvents.ToListAsync());
+
+            using (var directCaller = factory.Services.CreateScope())
+            {
+                var intake = directCaller.ServiceProvider.GetRequiredService<IAutopilotEventIntake>();
+                var accepted = await intake.SubmitAsync(request);
+                Assert.Equal(AutopilotIntakeOutcomes.Accepted, accepted.Outcome);
+            }
+            using (var verify = factory.Services.CreateScope())
+            {
+                var db = verify.ServiceProvider.GetRequiredService<TaslimDbContext>();
+                var saved = await db.AutopilotEvents.SingleAsync(item => item.ExternalEventId == eventId);
+                Assert.Equal(AutopilotEventStatuses.Queued, saved.Status);
+                Assert.True(saved.SignatureVerified);
+                Assert.True(saved.ReplayProtected);
+                Assert.Equal(1, await db.AutopilotEvents.CountAsync());
+            }
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("AUTOPILOT_WEBHOOK_SECRET", previousSecret);
+        }
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

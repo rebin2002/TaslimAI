@@ -24,6 +24,7 @@ public static class AutopilotIntakeOutcomes
     public const string RejectedInvalid = "rejected_invalid";
     public const string PayloadConflict = "payload_conflict";
     public const string ShaConflict = "sha_conflict";
+    public const string FenceUnavailable = "fence_unavailable";
 }
 
 /// <summary>
@@ -36,6 +37,15 @@ public interface IAutopilotEventIntake
     Task<AutopilotIntakeResult> SubmitAsync(AutopilotIntakeRequest request, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Persists an event inside a caller-owned completion/launch fence transaction.
+    /// The service renews and verifies the exact token before any durable intake work.
+    /// </summary>
+    Task<AutopilotIntakeResult> SubmitWithFenceAsync(
+        AutopilotIntakeRequest request,
+        AutopilotLockHandle fence,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Submits a controller-internal, in-process completion signal derived from
     /// bounded polling of a launched task. This path is deliberately separate
     /// from the HTTP intake: it is never reachable from an HTTP request, it
@@ -44,6 +54,12 @@ public interface IAutopilotEventIntake
     /// only ever escalate to a human and can never fabricate a green gate.
     /// </summary>
     Task<AutopilotIntakeResult> SubmitInternalAsync(AutopilotInternalSignalRequest request, CancellationToken cancellationToken = default);
+
+    /// <summary>Persists an internal polling signal under a caller-owned shared fence.</summary>
+    Task<AutopilotIntakeResult> SubmitInternalWithFenceAsync(
+        AutopilotInternalSignalRequest request,
+        AutopilotLockHandle fence,
+        CancellationToken cancellationToken = default);
 }
 
 /// <summary>Controller-internal sources permitted to derive a completion signal.</summary>
@@ -70,9 +86,25 @@ public sealed class AutopilotEventIntake(
     IAutopilotEventAuthenticator authenticator,
     IAutopilotAuditLog audit,
     AutopilotOptions options,
-    TimeProvider timeProvider) : IAutopilotEventIntake
+    TimeProvider timeProvider,
+    IAutopilotLockService? lockService = null,
+    ILogger<AutopilotEventIntake>? logger = null) : IAutopilotEventIntake
 {
-    public async Task<AutopilotIntakeResult> SubmitAsync(AutopilotIntakeRequest request, CancellationToken cancellationToken = default)
+    private readonly IAutopilotLockService completionLaunchLocks =
+        lockService ?? new EfAutopilotLockService(db, options, timeProvider);
+
+    public Task<AutopilotIntakeResult> SubmitAsync(AutopilotIntakeRequest request, CancellationToken cancellationToken = default) =>
+        SubmitWithOwnedFenceAsync(
+            fence => SubmitWithFenceAsync(request, fence, cancellationToken),
+            cancellationToken);
+
+    public Task<AutopilotIntakeResult> SubmitWithFenceAsync(
+        AutopilotIntakeRequest request,
+        AutopilotLockHandle fence,
+        CancellationToken cancellationToken = default) =>
+        ExecuteWithinFenceAsync(fence, () => SubmitCoreAsync(request, cancellationToken), cancellationToken);
+
+    private async Task<AutopilotIntakeResult> SubmitCoreAsync(AutopilotIntakeRequest request, CancellationToken cancellationToken)
     {
         var now = timeProvider.GetUtcNow().UtcDateTime;
         var source = (request.SourceSystem ?? string.Empty).Trim();
@@ -112,6 +144,9 @@ public sealed class AutopilotEventIntake(
 
         if (!AutopilotInputValidation.TryNormalizeOutcome(signal.Outcome, out var outcome))
             return await RejectAsync(request, AutopilotEventStatuses.RejectedInvalid, "outcome_invalid", cancellationToken);
+
+        if (!HasValidManusBridgeReceiptEventIdBinding(request.PayloadJson, source, externalId, eventType))
+            return await RejectAsync(request, AutopilotEventStatuses.RejectedInvalid, "receipt_event_id_mismatch", cancellationToken);
 
         var payloadHash = authenticator.ComputePayloadHash(request.PayloadJson);
         var idempotencyKey = BuildIdempotencyKey(source, externalId);
@@ -259,7 +294,20 @@ public sealed class AutopilotEventIntake(
         return new AutopilotIntakeResult(AutopilotIntakeOutcomes.Accepted, intakeEvent.Id, null);
     }
 
-    public async Task<AutopilotIntakeResult> SubmitInternalAsync(AutopilotInternalSignalRequest request, CancellationToken cancellationToken = default)
+    public Task<AutopilotIntakeResult> SubmitInternalAsync(
+        AutopilotInternalSignalRequest request,
+        CancellationToken cancellationToken = default) =>
+        SubmitWithOwnedFenceAsync(
+            fence => SubmitInternalWithFenceAsync(request, fence, cancellationToken),
+            cancellationToken);
+
+    public Task<AutopilotIntakeResult> SubmitInternalWithFenceAsync(
+        AutopilotInternalSignalRequest request,
+        AutopilotLockHandle fence,
+        CancellationToken cancellationToken = default) =>
+        ExecuteWithinFenceAsync(fence, () => SubmitInternalCoreAsync(request, cancellationToken), cancellationToken);
+
+    private async Task<AutopilotIntakeResult> SubmitInternalCoreAsync(AutopilotInternalSignalRequest request, CancellationToken cancellationToken)
     {
         var now = timeProvider.GetUtcNow().UtcDateTime;
         var source = (request.SourceSystem ?? string.Empty).Trim();
@@ -370,6 +418,180 @@ public sealed class AutopilotEventIntake(
             dryRun: options.DryRun), cancellationToken);
 
         return new AutopilotIntakeResult(AutopilotIntakeOutcomes.Accepted, intakeEvent.Id, null);
+    }
+
+    private async Task<AutopilotIntakeResult> SubmitWithOwnedFenceAsync(
+        Func<AutopilotLockHandle, Task<AutopilotIntakeResult>> submit,
+        CancellationToken cancellationToken)
+    {
+        if (db.Database.CurrentTransaction is not null)
+        {
+            logger?.LogWarning("Autopilot intake direct entrypoint refused an ambient transaction; use the explicit under-fence method.");
+            return new AutopilotIntakeResult(AutopilotIntakeOutcomes.FenceUnavailable, null, "ambient_transaction_requires_explicit_fence");
+        }
+
+        AutopilotLockHandle fence;
+        try
+        {
+            fence = await completionLaunchLocks.AcquireAsync(
+                AutopilotCompletionLaunchFence.ResourceKey,
+                "autopilot-event-intake-service",
+                cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            logger?.LogError(exception, "Autopilot intake could not acquire the shared completion/launch fence.");
+            return new AutopilotIntakeResult(AutopilotIntakeOutcomes.FenceUnavailable, null, "completion_launch_fence_acquire_failed");
+        }
+
+        if (!IsValidFence(fence))
+            return new AutopilotIntakeResult(AutopilotIntakeOutcomes.FenceUnavailable, null, "completion_launch_fence_contended");
+
+        AutopilotIntakeResult result;
+        try
+        {
+            result = await submit(fence);
+        }
+        catch
+        {
+            _ = await TryReleaseFenceAsync(fence);
+            throw;
+        }
+
+        if (!await TryReleaseFenceAsync(fence))
+            return new AutopilotIntakeResult(AutopilotIntakeOutcomes.FenceUnavailable, null, "completion_launch_fence_release_uncertain");
+
+        return result;
+    }
+
+    private async Task<AutopilotIntakeResult> ExecuteWithinFenceAsync(
+        AutopilotLockHandle fence,
+        Func<Task<AutopilotIntakeResult>> operation,
+        CancellationToken cancellationToken)
+    {
+        if (!IsValidFence(fence)
+            || completionLaunchLocks is not IAutopilotLockLeaseRenewalService renewalService)
+            return new AutopilotIntakeResult(AutopilotIntakeOutcomes.FenceUnavailable, null, "completion_launch_fence_unverified");
+
+        Microsoft.EntityFrameworkCore.Storage.IDbContextTransaction? ownedTransaction = null;
+        if (db.Database.CurrentTransaction is null)
+            ownedTransaction = await db.Database.BeginTransactionAsync(cancellationToken);
+        await using var transactionLifetime = ownedTransaction;
+
+        var renewed = await renewalService.RenewAsync(fence, cancellationToken);
+        if (!SameLiveFence(fence, renewed))
+            return new AutopilotIntakeResult(AutopilotIntakeOutcomes.FenceUnavailable, null, "completion_launch_fence_lost_before_persistence");
+
+        var result = await operation();
+        if (ownedTransaction is not null)
+            await ownedTransaction.CommitAsync(cancellationToken);
+        return result;
+    }
+
+    private async Task<bool> TryReleaseFenceAsync(AutopilotLockHandle fence)
+    {
+        try
+        {
+            return await completionLaunchLocks.ReleaseAsync(fence, CancellationToken.None);
+        }
+        catch (Exception exception)
+        {
+            logger?.LogError(exception,
+                "Autopilot intake could not release the shared completion/launch fence. FencingToken={FencingToken}",
+                fence.FencingToken);
+            return false;
+        }
+    }
+
+    private static bool IsValidFence(AutopilotLockHandle fence) =>
+        fence.IsAcquired
+        && fence.FencingToken > 0
+        && !string.IsNullOrWhiteSpace(fence.OwnerToken)
+        && string.Equals(fence.ResourceKey, AutopilotCompletionLaunchFence.ResourceKey, StringComparison.Ordinal);
+
+    private static bool SameLiveFence(AutopilotLockHandle expected, AutopilotLockHandle renewed) =>
+        renewed.IsAcquired
+        && renewed.FencingToken == expected.FencingToken
+        && string.Equals(renewed.OwnerToken, expected.OwnerToken, StringComparison.Ordinal)
+        && string.Equals(renewed.ResourceKey, expected.ResourceKey, StringComparison.Ordinal);
+
+    internal static bool HasValidManusBridgeReceiptEventIdBinding(
+        string payload,
+        string source,
+        string externalEventId,
+        string eventType)
+    {
+        if (!string.Equals(source.Trim(), ManusBridgeWaveLaunchProvider.Key, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(eventType.Trim(), AutopilotEventTypes.WaveTaskCompleted, StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        try
+        {
+            using var payloadDocument = JsonDocument.Parse(payload);
+            var root = payloadDocument.RootElement;
+            if (root.ValueKind != JsonValueKind.Object
+                || !TryGetSingleStringProperty(root, "outcome", out var outcome))
+                return false;
+
+            var isSucceeded = string.Equals(outcome.Trim(), AutopilotTaskOutcomes.Succeeded, StringComparison.OrdinalIgnoreCase);
+            var evidenceProperties = root.EnumerateObject().Where(property => property.NameEquals("evidence")).ToArray();
+            if (evidenceProperties.Length != 1 || evidenceProperties[0].Value.ValueKind != JsonValueKind.String)
+                return !isSucceeded && evidenceProperties.Length == 0;
+
+            var evidenceJson = evidenceProperties[0].Value.GetString();
+            if (string.IsNullOrWhiteSpace(evidenceJson)) return !isSucceeded;
+
+            JsonDocument evidenceDocument;
+            try
+            {
+                evidenceDocument = JsonDocument.Parse(evidenceJson);
+            }
+            catch (JsonException)
+            {
+                return !isSucceeded;
+            }
+
+            using (evidenceDocument)
+            {
+                var evidence = evidenceDocument.RootElement;
+                if (evidence.ValueKind != JsonValueKind.Object)
+                    return !isSucceeded;
+
+                var hasReceiptKind = TryGetSingleStringProperty(evidence, "kind", out var kind)
+                    && string.Equals(kind, AutopilotGlobalTaskDetailTerminalReceipt.RequiredKind, StringComparison.Ordinal);
+                if (isSucceeded && !hasReceiptKind) return false;
+
+                var hasEventId = evidence.EnumerateObject().Any(property => property.NameEquals("event_id"));
+                if (!hasReceiptKind && !hasEventId) return true;
+
+                return TryGetSingleStringProperty(evidence, "event_id", out var receiptEventId)
+                    && externalEventId.Trim().Length > 0
+                    && string.Equals(receiptEventId, externalEventId.Trim(), StringComparison.Ordinal);
+            }
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    private static bool TryGetSingleStringProperty(JsonElement element, string name, out string value)
+    {
+        value = string.Empty;
+        var count = 0;
+        foreach (var property in element.EnumerateObject())
+        {
+            if (!property.NameEquals(name)) continue;
+            count++;
+            if (property.Value.ValueKind != JsonValueKind.String) return false;
+            value = property.Value.GetString() ?? string.Empty;
+        }
+
+        return count == 1;
     }
 
     public static string BuildIdempotencyKey(string sourceSystem, string externalEventId) =>

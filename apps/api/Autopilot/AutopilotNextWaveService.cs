@@ -1265,13 +1265,14 @@ public sealed class AutopilotNextWaveService(
                             && transactionFence.FencingToken == pollFence.FencingToken
                             && string.Equals(transactionFence.OwnerToken, pollFence.OwnerToken, StringComparison.Ordinal))
                         {
-                            submission = await intake.SubmitInternalAsync(
+                            submission = await intake.SubmitInternalWithFenceAsync(
                                 new AutopilotInternalSignalRequest(
                                     AutopilotInternalSignalSources.Polling,
                                     PollEventId(task.ExternalTaskId, state.Status),
                                     AutopilotEventTypes.WaveTaskCompleted,
                                     signal,
                                     "polling_fallback"),
+                                transactionFence,
                                 cancellationToken);
                             await pollTransaction.CommitAsync(cancellationToken);
                         }
