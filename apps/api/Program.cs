@@ -259,6 +259,43 @@ builder.Services.AddScoped<IWaveLaunchProvider>(services =>
     string.IsNullOrWhiteSpace(services.GetRequiredService<AutopilotOptions>().BridgeBaseUrl)
         ? new NullWaveLaunchProvider()
         : services.GetRequiredService<ManusBridgeWaveLaunchProvider>());
+// Optional authenticated-user-wide Manus inventory. Disabled by default and
+// deliberately separate from the Autopilot master launch switch. A configured
+// identity must match the Bridge's actual user.me identity on every response;
+// a missing bearer credential or incomplete inventory fails closed before any
+// external Manus task can be launched.
+if (builder.Configuration.GetValue<bool>("Autopilot:GlobalInventory:Enabled", false))
+{
+    var bridgeTasksUrl = builder.Configuration["Autopilot:GlobalInventory:BridgeTasksUrl"];
+    var expectedManusUserId = builder.Configuration["Autopilot:GlobalInventory:ExpectedManusUserId"];
+    if (!Uri.TryCreate(bridgeTasksUrl, UriKind.Absolute, out var bridgeTasksUri)
+        || !string.Equals(bridgeTasksUri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
+        || !string.Equals(bridgeTasksUri.AbsolutePath, "/v1/tasks", StringComparison.Ordinal)
+        || !string.IsNullOrEmpty(bridgeTasksUri.Query)
+        || !string.IsNullOrEmpty(bridgeTasksUri.Fragment)
+        || !string.IsNullOrEmpty(bridgeTasksUri.UserInfo)
+        || string.IsNullOrWhiteSpace(expectedManusUserId)
+        || expectedManusUserId.Length > 256
+        || expectedManusUserId.Any(char.IsWhiteSpace)
+        || expectedManusUserId.Any(char.IsControl))
+        throw new InvalidOperationException("Autopilot global inventory requires a validated HTTPS BridgeTasksUrl and verified ExpectedManusUserId.");
+
+    builder.Services.AddScoped<IAutopilotGlobalTaskInventoryPageSource>(_ =>
+        new ManusBridgeUserWideTaskInventoryPageSource(
+            () => Environment.GetEnvironmentVariable("TASLIM_BRIDGE_TOKEN"),
+            bridgeTasksUri,
+            expectedManusUserId));
+    builder.Services.AddScoped(services =>
+        new AutopilotGlobalTaskInventoryReader(
+            services.GetRequiredService<IAutopilotGlobalTaskInventoryPageSource>(),
+            AutopilotGlobalTaskInventoryScopeIds.ManusBridgeAuthenticatedUserWide));
+    builder.Services.AddScoped(services =>
+        new AutopilotGlobalTaskSlotAllocator(
+            services.GetRequiredService<TaslimDbContext>(),
+            AutopilotGlobalTaskInventoryScopeIds.ManusBridgeAuthenticatedUserWide,
+            services.GetRequiredService<TimeProvider>(),
+            Math.Clamp(services.GetRequiredService<AutopilotOptions>().MaxConcurrency, 1, AutopilotGlobalTaskSlotAllocator.HardMaximum)));
+}
 builder.Services.AddScoped<IAutopilotNextWaveService, AutopilotNextWaveService>();
 if (builder.Configuration.GetValue("Autopilot:WatchdogEnabled", !builder.Environment.IsEnvironment("Testing")))
 {
