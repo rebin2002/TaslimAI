@@ -132,6 +132,83 @@ public sealed class AutopilotExternalEventAcknowledgementTests : IClassFixture<A
     }
 }
 
+public sealed class AutopilotCandidateV2OfflineParityTests
+{
+    private const string TestOnlySecret = "provider-free-external-ack-contract-secret";
+    private const string Timestamp = "1794067200";
+    private const string Source = "manus-bridge";
+    private const string EventType = "wave.task.completed";
+    private const string ExternalEventId = "evt-v2-contract-001";
+    private const string ExpectedBodySha256 = "abc18a1912a315c286b20dae4e7d0c4b395df20c20e8737d40d619a01a0fde87";
+    private const string ExpectedHmac = "0f45f43333c9a6c97b0ca8720758ceb6c8daeb675097207c84c7d69efdb51c47";
+
+    // This is an offline helper-parity candidate only. It is not an accepted HTTP
+    // signing contract and does not invoke or change the current v1 receiver.
+    [Fact]
+    public void Candidate_v2_fixture_pins_exact_raw_bytes_and_hmac_and_metadata_or_body_mutations_change_it()
+    {
+        const string rawBodyText = """{"waveKey":"wave-v2-contract","taskId":"task-v2-contract","outcome":"succeeded","evidence":"{\"kind\":\"taslim.manus.task_detail_terminal_receipt.v1\",\"task_id\":\"ABCDEFGHIJKLMNOPQRSTUV\",\"agent_status\":\"stopped\",\"stop_reason\":\"finish\",\"has_running_background_jobs\":false,\"event_id\":\"evt-v2-contract-001\"}"}""";
+        var rawBody = Encoding.UTF8.GetBytes(rawBodyText);
+        Assert.Equal(42, Encoding.UTF8.GetByteCount(TestOnlySecret));
+        Assert.Equal(323, rawBody.Length);
+        var bodySha256 = Convert.ToHexString(SHA256.HashData(rawBody)).ToLowerInvariant();
+        Assert.Equal(ExpectedBodySha256, bodySha256);
+
+        var canonical = CandidateSigningInput(Timestamp, Source, EventType, ExternalEventId, rawBody);
+        const string expectedCanonical =
+            "taslim-autopilot-v2\n" +
+            "1794067200\n" +
+            "12:manus-bridge\n" +
+            "19:wave.task.completed\n" +
+            "19:evt-v2-contract-001\n" +
+            "abc18a1912a315c286b20dae4e7d0c4b395df20c20e8737d40d619a01a0fde87\n";
+        Assert.Equal(158, canonical.Length);
+        Assert.Equal(expectedCanonical, Encoding.UTF8.GetString(canonical));
+
+        var key = Encoding.UTF8.GetBytes(TestOnlySecret);
+        var baselineHmac = Convert.ToHexString(HMACSHA256.HashData(key, canonical)).ToLowerInvariant();
+        Assert.Equal(ExpectedHmac, baselineHmac);
+
+        var mutations = new (string Name, string Timestamp, string Source, string EventType, string ExternalEventId, byte[] Body)[]
+        {
+            ("source", Timestamp, "other-bridge", EventType, ExternalEventId, rawBody),
+            ("type", Timestamp, Source, "wave.task.failed", ExternalEventId, rawBody),
+            ("event id", Timestamp, Source, EventType, "evt-other", rawBody),
+            ("timestamp", "1794067201", Source, EventType, ExternalEventId, rawBody),
+            ("body", Timestamp, Source, EventType, ExternalEventId, Encoding.UTF8.GetBytes(rawBodyText + " "))
+        };
+
+        foreach (var mutation in mutations)
+        {
+            var mutatedInput = CandidateSigningInput(
+                mutation.Timestamp,
+                mutation.Source,
+                mutation.EventType,
+                mutation.ExternalEventId,
+                mutation.Body);
+            var mutatedHmac = Convert.ToHexString(HMACSHA256.HashData(key, mutatedInput)).ToLowerInvariant();
+            Assert.NotEqual(baselineHmac, mutatedHmac);
+        }
+    }
+
+    private static byte[] CandidateSigningInput(
+        string timestamp,
+        string source,
+        string eventType,
+        string externalEventId,
+        byte[] rawBody)
+    {
+        var digest = Convert.ToHexString(SHA256.HashData(rawBody)).ToLowerInvariant();
+        var canonical =
+            $"taslim-autopilot-v2\n{timestamp}\n" +
+            $"{Encoding.UTF8.GetByteCount(source)}:{source}\n" +
+            $"{Encoding.UTF8.GetByteCount(eventType)}:{eventType}\n" +
+            $"{Encoding.UTF8.GetByteCount(externalEventId)}:{externalEventId}\n" +
+            $"{digest}\n";
+        return Encoding.UTF8.GetBytes(canonical);
+    }
+}
+
 // Each request/context owns its SQLite connection. Sharing one opened connection
 // lets request-scope cleanup race EF's per-connection function registration.
 public sealed class AutopilotAcknowledgementFactory : WebApplicationFactory<Program>
