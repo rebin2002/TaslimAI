@@ -909,7 +909,7 @@ public sealed class AutopilotNextWaveLaunchTests
             liveHost.Provider.BeforeReturnAsync = async (request, externalTaskId, cancellationToken) =>
             {
                 if (completionInput is not null) return;
-                completionInput = CreatePostgresFenceCompletionInput(request, externalTaskId);
+                completionInput = CreatePostgresFenceCompletionInput(request, externalTaskId, expectedTaskCount: 2);
                 var blocked = Assert.Single(await RunPostgresFenceProcessesAsync(
                     scopedConnectionString,
                     AutopilotCompletionLaunchFence.ResourceKey,
@@ -3757,8 +3757,9 @@ public sealed class AutopilotNextWaveLaunchTests
     }
 
     private static PostgresFenceIntakeWorkerInput CreatePostgresFenceCompletionInput(
-        WaveLaunchProviderRequest launchRequest,
-        string externalTaskId)
+        WaveLaunchProviderRequest request,
+        string externalTaskId,
+        int expectedTaskCount)
     {
         var externalEventId = $"evt-pg-fence-{Guid.NewGuid():N}";
         var receipt = JsonSerializer.Serialize(new
@@ -3772,8 +3773,8 @@ public sealed class AutopilotNextWaveLaunchTests
         });
         var payload = JsonSerializer.Serialize(new
         {
-            waveKey = launchRequest.WaveKey,
-            taskId = launchRequest.TaskKey,
+            waveKey = request.WaveKey,
+            taskId = request.TaskKey,
             outcome = AutopilotTaskOutcomes.Succeeded,
             branch = Branch,
             baseSha = BaseSha,
@@ -3781,7 +3782,7 @@ public sealed class AutopilotNextWaveLaunchTests
             attempt = 1,
             evidence = receipt,
             checks = CompleteChecks(),
-            expectedTaskCount = 1,
+            expectedTaskCount,
             waveComplete = false,
         });
         var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
