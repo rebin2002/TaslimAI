@@ -210,6 +210,11 @@ public sealed class RunwayMovieVideoProvider(
     {
         if (request.Operation is not (MovieStudioOperations.QuickMovie or MovieStudioOperations.SceneClip))
             throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieGenerationFailed, false);
+        // The Quick Movie image path historically skipped the Scene Clip model gate.
+        // Until model-specific payload, pricing and reference support are admitted,
+        // reject other configured models before DNS or a potentially billable POST.
+        if (!string.Equals(settings.Model?.Trim(), "gen4.5", StringComparison.OrdinalIgnoreCase))
+            throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);
         if (!string.IsNullOrWhiteSpace(request.ContinuationProviderJobId))
             throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);
         if (!string.IsNullOrWhiteSpace(request.ReferencePackageJson)
