@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
@@ -25,6 +26,10 @@ public sealed class MovieMissingInsertDecisionService(
     private const int MaxReviewCommentLength = 4_000;
     private const int MaxGroundingJsonLength = 4_000;
     private const int MaxAnchorJsonLength = 8_000;
+    private const int MaxMaterializeUniqueRetryCount = 1;
+    // PostgreSQL truncates EF's generated identifier at 63 bytes; the trailing
+    // '~' is the actual index name emitted by the provider in the CI database.
+    private const string DecisionProposalUniqueConstraint = "IX_MovieMissingInsertDecisions_MovieProjectId_TimelineRevision~";
 
     public async Task<IReadOnlyList<MovieMissingInsertDecisionDto>?> ListAsync(Guid userId, Guid movieProjectId, CancellationToken cancellationToken)
     {
@@ -49,39 +54,71 @@ public sealed class MovieMissingInsertDecisionService(
         if (plan.TimelineRevisionId is not Guid revisionId || plan.TimelineRevisionNumber is not int revisionNumber)
             return [];
 
-        var existing = await db.MovieMissingInsertDecisions
+        var eligibleProposalIds = plan.Proposals
+            .Where(proposal => plan.Gaps.Any(item => item.Id == proposal.GapId) && proposal.Grounding.AnchorShotId is Guid)
+            .Select(proposal => proposal.Id)
+            .ToHashSet();
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                var existing = await LoadRevisionDecisionsAsync(movieProjectId, revisionId, cancellationToken);
+                foreach (var proposal in plan.Proposals)
+                {
+                    if (existing.ContainsKey(proposal.Id)) continue;
+                    var gap = plan.Gaps.SingleOrDefault(item => item.Id == proposal.GapId);
+                    if (gap is null || proposal.Grounding.AnchorShotId is not Guid anchorShotId) continue;
+                    var decision = new MovieMissingInsertDecision
+                    {
+                        Id = Guid.NewGuid(), MovieProjectId = movieProjectId, ProposalId = proposal.Id, GapId = proposal.GapId,
+                        TimelineRevisionId = revisionId, TimelineRevisionNumber = revisionNumber,
+                        TrackId = gap.TrackId ?? Guid.Empty, BeforeTimelineItemId = gap.BeforeTimelineItemId, AfterTimelineItemId = gap.AfterTimelineItemId,
+                        TimelineInMilliseconds = gap.TimelineInMilliseconds, TimelineOutMilliseconds = gap.TimelineOutMilliseconds,
+                        BeforeShotId = gap.BeforeShotId, AfterShotId = gap.AfterShotId, SceneId = gap.SceneId,
+                        StorySceneId = proposal.Grounding.StorySceneId, AnchorShotId = anchorShotId,
+                        ApprovedStoryRevisionId = proposal.Grounding.ApprovedStoryRevisionId, LockedGuideRevisionId = proposal.Grounding.LockedGuideRevisionId,
+                        ProductionKitHash = proposal.Grounding.ProductionKitHash,
+                        ProductionKitSchemaVersion = plan.Grounding.ProductionKits.FirstOrDefault(item => item.ShotId == anchorShotId)?.SchemaVersion,
+                        AnchorTakeId = proposal.AnchorTakeId, AnchorSelectId = proposal.AnchorSelectId,
+                        ContractVersion = plan.ContractVersion, InsertType = proposal.InsertType, DurationMilliseconds = proposal.DurationMilliseconds,
+                        Description = LimitRequired(proposal.Description, 2_000, "Proposal description"),
+                        Purpose = LimitRequired(proposal.Purpose, 2_000, "Proposal purpose"),
+                        ProposalGroundingJson = BoundedJson(new { proposal.Grounding, proposal.AnchorTakeId, proposal.AnchorSelectId }, MaxGroundingJsonLength),
+                        ContinuityAnchorJson = BoundedJson(proposal.ContinuityAnchorJson, MaxAnchorJsonLength),
+                        ScreenDirectionAnchorJson = BoundedJson(proposal.ScreenDirectionAnchorJson, MaxAnchorJsonLength),
+                        Status = MovieMissingInsertDecisionStatuses.PendingReview, CreatedByUserId = userId, CreatedAt = DateTime.UtcNow,
+                    };
+                    db.MovieMissingInsertDecisions.Add(decision);
+                    existing.Add(proposal.Id, decision);
+                }
+                await db.SaveChangesAsync(cancellationToken);
+                return existing.Values.OrderBy(item => item.TimelineInMilliseconds).ThenBy(item => item.Id).Select(ToDto).ToArray();
+            }
+            catch (DbUpdateException exception) when (IsDecisionProposalUniqueViolation(exception) && attempt < MaxMaterializeUniqueRetryCount)
+            {
+                // PostgreSQL waits for the competing transaction before reporting the
+                // unique violation. Clear failed EF state, then replay the committed
+                // canonical rows instead of generating new IDs or returning a transient
+                // 500. If the competing transaction covered only part of the plan, the
+                // single bounded retry fills the remaining rows.
+                db.ChangeTracker.Clear();
+                var persisted = await LoadRevisionDecisionsAsync(movieProjectId, revisionId, cancellationToken);
+                if (eligibleProposalIds.All(persisted.ContainsKey))
+                    return persisted.Values.OrderBy(item => item.TimelineInMilliseconds).ThenBy(item => item.Id).Select(ToDto).ToArray();
+            }
+        }
+    }
+
+    private async Task<Dictionary<Guid, MovieMissingInsertDecision>> LoadRevisionDecisionsAsync(Guid movieProjectId, Guid revisionId, CancellationToken cancellationToken) =>
+        await db.MovieMissingInsertDecisions
             .Where(item => item.MovieProjectId == movieProjectId && item.TimelineRevisionId == revisionId)
             .ToDictionaryAsync(item => item.ProposalId, cancellationToken);
-        foreach (var proposal in plan.Proposals)
-        {
-            if (existing.ContainsKey(proposal.Id)) continue;
-            var gap = plan.Gaps.SingleOrDefault(item => item.Id == proposal.GapId);
-            if (gap is null || proposal.Grounding.AnchorShotId is not Guid anchorShotId) continue;
-            var decision = new MovieMissingInsertDecision
-            {
-                Id = Guid.NewGuid(), MovieProjectId = movieProjectId, ProposalId = proposal.Id, GapId = proposal.GapId,
-                TimelineRevisionId = revisionId, TimelineRevisionNumber = revisionNumber,
-                TrackId = gap.TrackId ?? Guid.Empty, BeforeTimelineItemId = gap.BeforeTimelineItemId, AfterTimelineItemId = gap.AfterTimelineItemId,
-                TimelineInMilliseconds = gap.TimelineInMilliseconds, TimelineOutMilliseconds = gap.TimelineOutMilliseconds,
-                BeforeShotId = gap.BeforeShotId, AfterShotId = gap.AfterShotId, SceneId = gap.SceneId,
-                StorySceneId = proposal.Grounding.StorySceneId, AnchorShotId = anchorShotId,
-                ApprovedStoryRevisionId = proposal.Grounding.ApprovedStoryRevisionId, LockedGuideRevisionId = proposal.Grounding.LockedGuideRevisionId,
-                ProductionKitHash = proposal.Grounding.ProductionKitHash,
-                ProductionKitSchemaVersion = plan.Grounding.ProductionKits.FirstOrDefault(item => item.ShotId == anchorShotId)?.SchemaVersion,
-                AnchorTakeId = proposal.AnchorTakeId, AnchorSelectId = proposal.AnchorSelectId,
-                ContractVersion = plan.ContractVersion, InsertType = proposal.InsertType, DurationMilliseconds = proposal.DurationMilliseconds,
-                Description = LimitRequired(proposal.Description, 2_000, "Proposal description"),
-                Purpose = LimitRequired(proposal.Purpose, 2_000, "Proposal purpose"),
-                ProposalGroundingJson = BoundedJson(new { proposal.Grounding, proposal.AnchorTakeId, proposal.AnchorSelectId }, MaxGroundingJsonLength),
-                ContinuityAnchorJson = BoundedJson(proposal.ContinuityAnchorJson, MaxAnchorJsonLength),
-                ScreenDirectionAnchorJson = BoundedJson(proposal.ScreenDirectionAnchorJson, MaxAnchorJsonLength),
-                Status = MovieMissingInsertDecisionStatuses.PendingReview, CreatedByUserId = userId, CreatedAt = DateTime.UtcNow,
-            };
-            db.MovieMissingInsertDecisions.Add(decision);
-            existing.Add(proposal.Id, decision);
-        }
-        await db.SaveChangesAsync(cancellationToken);
-        return existing.Values.OrderBy(item => item.TimelineInMilliseconds).ThenBy(item => item.Id).Select(ToDto).ToArray();
+
+    private static bool IsDecisionProposalUniqueViolation(DbUpdateException exception)
+    {
+        var postgres = exception.InnerException as PostgresException ?? exception.GetBaseException() as PostgresException;
+        return postgres?.SqlState == PostgresErrorCodes.UniqueViolation
+            && string.Equals(postgres.ConstraintName, DecisionProposalUniqueConstraint, StringComparison.Ordinal);
     }
 
     public async Task<MovieMissingInsertDecisionDto?> ReviewAsync(Guid userId, Guid decisionId, MovieMissingInsertReviewRequest request, CancellationToken cancellationToken)
@@ -209,7 +246,7 @@ public sealed class MovieMissingInsertDecisionService(
             ChangeSummary = "Applied an approved provider-neutral missing-insert decision.",
             CanonicalTimelineJson = current.CanonicalTimelineJson,
             Tracks = requests,
-        }, cancellationToken);
+        }, cancellationToken, requireCurrentRevision: true);
         if (appliedRevision is null) return null;
         decision.Status = MovieMissingInsertDecisionStatuses.Applied;
         decision.AppliedByUserId = userId;

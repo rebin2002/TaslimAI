@@ -161,6 +161,41 @@ public sealed class MovieMissingInsertDecisionTests
     }
 
     [Fact]
+    public async Task Overlapping_materialize_requests_replay_one_canonical_decision_set()
+    {
+        var postgresConnectionString = Environment.GetEnvironmentVariable("ConnectionStrings__Postgres");
+        if (string.IsNullOrWhiteSpace(postgresConnectionString))
+        {
+            // The full CI API job supplies PostgreSQL; SQLite cannot reproduce the
+            // unique-index wait/violation needed by this regression.
+            return;
+        }
+
+        var fixture = new MaterializeFixture(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid());
+        var plan = BuildMaterializePlan(fixture);
+        var planner = new BarrierPlanner(plan);
+        await using (var seedDb = CreateApplyDb(postgresConnectionString!))
+            await SeedMaterializeFixtureAsync(seedDb, fixture);
+
+        await using var firstDb = CreateApplyDb(postgresConnectionString!);
+        await using var secondDb = CreateApplyDb(postgresConnectionString!);
+        var firstService = new MovieMissingInsertDecisionService(firstDb, new MovieCollaborationAccess(firstDb, new WorkspaceAccessService(firstDb)), planner, null!, null!);
+        var secondService = new MovieMissingInsertDecisionService(secondDb, new MovieCollaborationAccess(secondDb, new WorkspaceAccessService(secondDb)), planner, null!, null!);
+
+        var results = await Task.WhenAll(
+            Task.Run(() => firstService.MaterializeAsync(fixture.UserId, fixture.MovieId, new MovieMissingInsertMaterializeRequest { TimelineRevisionId = fixture.RevisionId }, CancellationToken.None)),
+            Task.Run(() => secondService.MaterializeAsync(fixture.UserId, fixture.MovieId, new MovieMissingInsertMaterializeRequest { TimelineRevisionId = fixture.RevisionId }, CancellationToken.None)));
+
+        Assert.Equal(2, planner.CallCount);
+        Assert.All(results, result => Assert.Single(result!));
+        Assert.Equal(results[0]![0].Id, results[1]![0].Id);
+        await using var verifyDb = CreateApplyDb(postgresConnectionString!);
+        var persisted = await verifyDb.MovieMissingInsertDecisions.Where(item => item.MovieProjectId == fixture.MovieId && item.TimelineRevisionId == fixture.RevisionId).ToListAsync();
+        Assert.Single(persisted);
+        Assert.Equal(results[0]![0].Id, persisted[0].Id);
+    }
+
+    [Fact]
     public void Materialize_request_cannot_carry_client_proposal_or_generation_fields()
     {
         var request = JsonSerializer.Deserialize<MovieMissingInsertMaterializeRequest>(
@@ -176,6 +211,39 @@ public sealed class MovieMissingInsertDecisionTests
 
     private static TaslimDbContext CreateApplyDb(string connectionString) =>
         new(new DbContextOptionsBuilder<TaslimDbContext>().UseNpgsql(connectionString).Options);
+
+    private static MovieMissingInsertPlanDto BuildMaterializePlan(MaterializeFixture fixture)
+    {
+        var gapId = Guid.NewGuid();
+        var proposalId = Guid.NewGuid();
+        return new MovieMissingInsertPlanDto(
+            MovieMissingInsertPlanner.ContractVersion, fixture.MovieId, fixture.RevisionId, 3, MovieTimelineRevisionStatuses.Draft,
+            RequiresApproval: true, CanonicalTimelineChanged: false, GenerationQueued: false,
+            new MovieMissingInsertGroundingDto(null, null, null, null, [new MovieMissingInsertProductionKitReferenceDto(fixture.ShotId, "kit-hash", 1)], true),
+            [new MovieMissingInsertGapDto(gapId, MovieMissingInsertGapKinds.Timeline, fixture.TrackId, 1_000, 2_000, 1_000, null, null, null, null, fixture.SceneId, "test gap")],
+            [],
+            [new MovieMissingInsertProposalDto(
+                proposalId, gapId, MovieMissingInsertApprovalStatuses.PendingApproval, true, false, MovieMissingInsertProposalTypes.Detail,
+                fixture.SceneId, null, fixture.ShotId, 1_000, "deterministic test proposal", "cover the test gap", null, null, null, null, null, null, null,
+                new MovieMissingInsertProposalGroundingDto(null, null, null, fixture.ShotId, "kit-hash", ["test"]),
+                AnchorTakeId: fixture.TakeId, ContinuityAnchorJson: "{}", ScreenDirectionAnchorJson: "{}")],
+            [], DateTime.UtcNow);
+    }
+
+    private static async Task SeedMaterializeFixtureAsync(TaslimDbContext db, MaterializeFixture fixture)
+    {
+        db.Database.EnsureCreated();
+        var now = DateTime.UtcNow;
+        db.Users.Add(new ApplicationUser { Id = fixture.UserId, UserName = $"materialize-{fixture.UserId:N}", NormalizedUserName = $"MATERIALIZE-{fixture.UserId:N}".ToUpperInvariant(), DisplayName = "Materialize Owner", CreatedAt = now, UpdatedAt = now });
+        db.Workspaces.Add(new Workspace { Id = fixture.WorkspaceId, Name = "Materialize Workspace", Slug = $"materialize-{fixture.UserId:N}", Type = WorkspaceType.Personal, CreatedAt = now });
+        db.WorkspaceMembers.Add(new WorkspaceMember { Id = Guid.NewGuid(), WorkspaceId = fixture.WorkspaceId, UserId = fixture.UserId, Role = WorkspaceRole.Owner, JoinedAt = now });
+        db.MovieProjects.Add(new MovieProject { Id = fixture.MovieId, WorkspaceId = fixture.WorkspaceId, CreatedByUserId = fixture.UserId, Title = "Materialize Movie", Description = "Concurrent decision fixture", DurationSeconds = 30, CreatedAt = now, UpdatedAt = now, Guide = new MovieContinuityGuide { Id = Guid.NewGuid(), UpdatedAt = now } });
+        db.MovieTeamMembers.Add(new MovieTeamMember { Id = Guid.NewGuid(), MovieProjectId = fixture.MovieId, UserId = fixture.UserId, Role = MovieTeamRoles.Producer, IsProjectOwner = true, CreatedAt = now });
+        db.MovieScenes.Add(new MovieScene { Id = fixture.SceneId, MovieProjectId = fixture.MovieId, Sequence = 1, Title = "Materialize Scene", Summary = "Concurrent decision scene", CreatedAt = now, UpdatedAt = now });
+        db.MovieShots.Add(new MovieShot { Id = fixture.ShotId, MovieSceneId = fixture.SceneId, Sequence = 1, Description = "Materialize anchor shot", CreatedAt = now, UpdatedAt = now });
+        db.MovieTakes.Add(new MovieTake { Id = fixture.TakeId, MovieShotId = fixture.ShotId, VersionNumber = 1, Label = "Materialize anchor take", Status = MovieTakeStatuses.Selected, SelectedAt = now, CreatedAt = now, UpdatedAt = now });
+        await db.SaveChangesAsync();
+    }
 
     private static async Task<ApplyFixture> SeedApplyFixtureAsync(TaslimDbContext db)
     {
@@ -238,6 +306,20 @@ public sealed class MovieMissingInsertDecisionTests
     }
 
     private sealed record ApplyFixture(Guid UserId, Guid MovieId, Guid SceneId, Guid ShotId, Guid DecisionId);
+    private sealed record MaterializeFixture(Guid UserId, Guid WorkspaceId, Guid MovieId, Guid SceneId, Guid ShotId, Guid TakeId, Guid RevisionId, Guid TrackId);
+
+    private sealed class BarrierPlanner(MovieMissingInsertPlanDto plan) : IMovieMissingInsertPlannerService
+    {
+        private readonly TaskCompletionSource<bool> bothCalls = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int calls;
+        public int CallCount => Volatile.Read(ref calls);
+        public async Task<MovieMissingInsertPlanDto?> GetAsync(Guid userId, Guid movieProjectId, Guid? timelineRevisionId, CancellationToken cancellationToken = default)
+        {
+            if (Interlocked.Increment(ref calls) == 2) bothCalls.TrySetResult(true);
+            await bothCalls.Task.WaitAsync(TimeSpan.FromSeconds(5), cancellationToken);
+            return plan;
+        }
+    }
 
     private sealed class StaticReferencePackageService(Guid movieProjectId, Guid sceneId, Guid shotId, string packageHash) : IMovieProductionReferencePackageService
     {
@@ -256,7 +338,7 @@ public sealed class MovieMissingInsertDecisionTests
         public TaskCompletionSource<bool> SecondCallStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource<bool> ReleaseFirstCall { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        public async Task<MovieTimelineRevisionDto?> CreateRevisionAsync(Guid userId, Guid movieProjectId, MovieTimelineRevisionRequest request, CancellationToken cancellationToken)
+        public async Task<MovieTimelineRevisionDto?> CreateRevisionAsync(Guid userId, Guid movieProjectId, MovieTimelineRevisionRequest request, CancellationToken cancellationToken, bool requireCurrentRevision = false)
         {
             var call = Interlocked.Increment(ref calls);
             if (call == 1)

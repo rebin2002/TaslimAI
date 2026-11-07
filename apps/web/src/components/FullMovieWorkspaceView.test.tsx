@@ -228,6 +228,9 @@ describe("Full Movie workspace foundation", () => {
     expect(selectsSource).toContain("api.reviewMovieMissingInsertDecision");
     expect(selectsSource).toContain("api.applyMovieMissingInsertDecision");
     expect(selectsSource).toContain("server-grounded");
+    expect(selectsSource).toContain("decision.timelineRevisionId === revisionId");
+    expect(selectsSource).toContain("decision.timelineRevisionNumber === plan.timelineRevisionNumber");
+    expect(selectsSource).toContain("The canonical timeline changed while the server proposal was being prepared");
     expect(selectsSource).not.toContain("api.createMovieTimelineRevision");
     expect(selectsSource).not.toContain("buildSalvageTimelineRevision");
     expect(selectsSource).not.toContain("Accept recommendation");

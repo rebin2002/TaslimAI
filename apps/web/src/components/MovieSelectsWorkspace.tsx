@@ -58,13 +58,23 @@ export function MovieSelectsWorkspace({ project }: { project: MovieProject }) {
   }, [project.id, subclips]);
 
   const loadServerControl = useCallback(async (revisionId?: string | null) => {
+    if (!revisionId) {
+      setServerPlan(null);
+      setServerDecisions([]);
+      return;
+    }
     try {
       const [plan, persistedDecisions] = await Promise.all([
         api.getMovieMissingInsertPlan(project.id, revisionId),
         api.getMovieMissingInsertDecisions(project.id),
       ]);
+      if (plan.timelineRevisionId !== revisionId || plan.timelineRevisionNumber == null) {
+        setServerPlan(null);
+        setServerDecisions([]);
+        return;
+      }
       setServerPlan(plan);
-      setServerDecisions(persistedDecisions);
+      setServerDecisions(persistedDecisions.filter((decision) => decision.timelineRevisionId === revisionId && decision.timelineRevisionNumber === plan.timelineRevisionNumber));
     } catch {
       setServerPlan(null);
       setServerDecisions([]);
@@ -89,7 +99,9 @@ export function MovieSelectsWorkspace({ project }: { project: MovieProject }) {
   const selectedRange = selectedRecommendation ? rangeFor(selectedRecommendation.subclip, rangeOverrides) : null;
   const selectedApprovedSelect = selectedRecommendation ? approvedSelectFor(selectedRecommendation.subclip, selectsByTake) : null;
   const selectedPendingSelect = selectedRecommendation ? pendingSelectFor(selectedRecommendation.subclip, selectsByTake) : null;
-  const selectedServerDecision = selectedRecommendation ? serverDecisionFor(selectedRecommendation.subclip, selectedApprovedSelect, serverDecisions) : null;
+  const currentRevisionId = timeline?.currentRevision?.id ?? null;
+  const currentRevisionNumber = timeline?.currentRevision?.revisionNumber ?? null;
+  const selectedServerDecision = selectedRecommendation ? serverDecisionFor(selectedRecommendation.subclip, selectedApprovedSelect, currentRevisionId, currentRevisionNumber, serverDecisions) : null;
   const timelineItems = timeline?.currentRevision?.tracks.flatMap((track) => track.items) ?? [];
   const proposalCanWrite = Boolean(
     selectedRecommendation && selectedRecommendation.subclip.selected && ["Approved", "Selected"].includes(selectedRecommendation.subclip.status)
@@ -144,10 +156,14 @@ export function MovieSelectsWorkspace({ project }: { project: MovieProject }) {
       const plan = await api.getMovieMissingInsertPlan(project.id, timeline?.currentRevision?.id);
       if (!plan.timelineRevisionId) throw new Error("The server planner needs a current canonical timeline revision before it can propose an insert.");
       const materialized = await api.materializeMovieMissingInsertDecisions(project.id, { timelineRevisionId: plan.timelineRevisionId });
-      const decision = materialized.find((item) => item.anchorTakeId === recommendation.subclip.takeId && item.status !== "Applied");
+      const currentRevisionNumber = timeline?.currentRevision?.revisionNumber;
+      if (plan.timelineRevisionId !== timeline?.currentRevision?.id || currentRevisionNumber == null || plan.timelineRevisionNumber !== currentRevisionNumber)
+        throw new Error("The canonical timeline changed while the server proposal was being prepared. Refresh Selects and review the current revision.");
+      const currentDecisions = materialized.filter((item) => item.timelineRevisionId === plan.timelineRevisionId && item.timelineRevisionNumber === plan.timelineRevisionNumber);
+      const decision = currentDecisions.find((item) => item.anchorTakeId === recommendation.subclip.takeId && item.status !== "Applied");
       if (!decision) throw new Error("The server planner found no grounded gap for this take. No client-authored insert was created.");
       setServerPlan(plan);
-      setServerDecisions(materialized);
+      setServerDecisions(currentDecisions);
       setProposalId(recommendation.id);
       setMessage("Server-grounded proposal loaded. Review the bounded range and the durable decision before applying it.");
     } catch (cause) {
@@ -204,6 +220,7 @@ export function MovieSelectsWorkspace({ project }: { project: MovieProject }) {
       setMessage("Server-approved minimal insert applied to a new draft timeline revision. No footage was copied or regenerated.");
       setProposalId(null);
     } catch (cause) {
+      await reload().catch(() => undefined);
       setError(cause instanceof Error ? cause.message : "The server insert could not be applied. The revision may be stale.");
     } finally {
       setBusy(false);
@@ -225,7 +242,7 @@ export function MovieSelectsWorkspace({ project }: { project: MovieProject }) {
 
 function approvedSelectFor(subclip: MovieSubclip, selectsByTake: Record<string, MovieTakeSelectRecord[]>) { return (selectsByTake[subclip.takeId] ?? []).find((record) => record.status === "Approved") ?? null; }
 function pendingSelectFor(subclip: MovieSubclip, selectsByTake: Record<string, MovieTakeSelectRecord[]>) { return (selectsByTake[subclip.takeId] ?? []).find((record) => record.status !== "Approved" && record.status !== "Rejected") ?? null; }
-function serverDecisionFor(subclip: MovieSubclip, approvedSelect: MovieTakeSelectRecord | null, decisions: MovieMissingInsertDecision[]) { return decisions.find((decision) => decision.anchorTakeId === subclip.takeId && decision.status !== "Applied" && (!decision.anchorSelectId || decision.anchorSelectId === approvedSelect?.id)) ?? decisions.find((decision) => decision.anchorTakeId === subclip.takeId && decision.status !== "Applied") ?? null; }
+function serverDecisionFor(subclip: MovieSubclip, approvedSelect: MovieTakeSelectRecord | null, revisionId: string | null, revisionNumber: number | null, decisions: MovieMissingInsertDecision[]) { return decisions.find((decision) => decision.timelineRevisionId === revisionId && decision.timelineRevisionNumber === revisionNumber && decision.anchorTakeId === subclip.takeId && decision.status !== "Applied" && (!decision.anchorSelectId || decision.anchorSelectId === approvedSelect?.id)) ?? decisions.find((decision) => decision.timelineRevisionId === revisionId && decision.timelineRevisionNumber === revisionNumber && decision.anchorTakeId === subclip.takeId && decision.status !== "Applied") ?? null; }
 function SalvageRecommendationCard({ recommendation, range, selects, onRangeChange, onDecision, onPropose, proposing, busy }: { recommendation: SalvageRecommendation; range: RangeOverride; selects: MovieTakeSelectRecord[]; onRangeChange: (key: keyof RangeOverride, value: number) => void; onDecision: (decision: SalvageDecision) => void; onPropose: () => void; proposing: boolean; busy: boolean }) {
   const { subclip } = recommendation;
   const decisionTone = recommendation.decision === "accepted" ? "is-accepted" : recommendation.decision === "rejected" ? "is-rejected" : "";
