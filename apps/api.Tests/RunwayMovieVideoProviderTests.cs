@@ -59,6 +59,37 @@ public sealed class RunwayMovieVideoProviderTests
         Assert.Empty(handler.Requests);
     }
 
+    [Theory]
+    [InlineData("seedance2_5")]
+    [InlineData("kling_4")]
+    [InlineData("unverified-model")]
+    public async Task Quick_movie_image_request_rejects_unadmitted_model_before_dns_or_provider_http(string modelKey)
+    {
+        // Quick Movie uses an image-to-video endpoint with a fixed Gen-4.5
+        // contract. A newly configured model must not bypass Scene Clip's
+        // provider-model admission simply because an image was provided.
+        var handler = new RecordingHandler(_ => throw new InvalidOperationException("No provider request allowed."));
+        var urlPolicy = new CountingProviderUrlPolicy();
+        var options = EnabledOptions();
+        options.Model = modelKey;
+        var provider = CreateProvider(handler, options, urlPolicy);
+        var request = Request(sourceImageUri: "https://assets.example.test/frame.png") with
+        {
+            Operation = MovieStudioOperations.QuickMovie,
+            SourceResolution = null,
+            TargetResolution = null,
+            QualityTier = null,
+            ProcessingPath = null,
+        };
+
+        var error = await Assert.ThrowsAsync<MovieVideoProviderException>(() =>
+            provider.SubmitAsync(request, CancellationToken.None));
+
+        Assert.Equal(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, error.Code);
+        Assert.Equal(0, urlPolicy.Calls);
+        Assert.Empty(handler.Requests);
+    }
+
     [Fact]
     public async Task Unpriced_quick_movie_preserves_supported_short_video_submission()
     {
