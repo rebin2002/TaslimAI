@@ -952,7 +952,7 @@ public sealed class AutopilotNextWaveLaunchTests
                 intakeInputs: [conflictPayload]));
             Assert.Equal(AutopilotIntakeOutcomes.PayloadConflict, conflictingProcess.IntakeOutcome);
 
-            await liveHost.RunCycleAsync();
+            var completionCycle = await liveHost.RunCycleAsync();
             using (var verify = liveHost.CreateContext())
             {
                 var savedEvent = await verify.AutopilotEvents.SingleAsync(item =>
@@ -961,7 +961,17 @@ public sealed class AutopilotNextWaveLaunchTests
                 Assert.True(savedEvent.SignatureVerified);
                 Assert.True(savedEvent.ReplayProtected);
                 var launchTasks = await verify.AutopilotWaveLaunchTasks.ToListAsync();
-                Assert.Equal(3, launchTasks.Count);
+                var taskSummary = string.Join("; ", launchTasks
+                    .OrderBy(item => item.WaveKey, StringComparer.Ordinal)
+                    .ThenBy(item => item.TaskKey, StringComparer.Ordinal)
+                    .Select(item => $"{item.WaveKey}/{item.TaskKey}:{item.Status}:native={item.ExternalTaskId ?? "<null>"}:detail={item.LastStatusDetail ?? "<null>"}:batch={item.BatchId}"));
+                var batches = await verify.AutopilotWaveLaunchBatches.ToListAsync();
+                var batchSummary = string.Join("; ", batches
+                    .OrderBy(item => item.WaveKey, StringComparer.Ordinal)
+                    .Select(item => $"{item.WaveKey}:{item.Status}:detail={item.LastStatusDetail ?? "<null>"}:tasks={item.TaskCount}"));
+                var completionDiagnostic = $"cycle={completionCycle.Outcome}/{completionCycle.Reason ?? "<null>"}; processed={completionCycle.EventsProcessed}; "
+                    + $"event={savedEvent.WaveKey}/{savedEvent.TaskId}:{savedEvent.Status}:{savedEvent.Reason}; tasks=[{taskSummary}]; batches=[{batchSummary}]";
+                Assert.True(launchTasks.Count == 3, completionDiagnostic);
                 Assert.Single(launchTasks, item => item.Status == AutopilotWaveLaunchStatuses.Completed);
                 Assert.Equal(2, launchTasks.Count(item => item.Status == AutopilotWaveLaunchStatuses.Launched));
                 Assert.Equal(2, launchTasks.Count(item =>
