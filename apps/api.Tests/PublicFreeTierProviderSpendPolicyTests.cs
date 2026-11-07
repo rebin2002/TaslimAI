@@ -1091,6 +1091,8 @@ public sealed class PublicFreeTierRuntimeNegativeAcceptanceTests
         foreach (var module in Modules)
             observations.Add(await RunUnauthenticatedAsync(root, module));
 
+        observations.Add(await RunUnconfirmedChatAsync(factory));
+
         // Each newly registered workspace is provisioned on the canonical Free plan; the test
         // marks its address confirmed so the only relevant missing gate is spend admission.
         observations.AddRange(await RunChatAsync(factory));
@@ -1107,6 +1109,10 @@ public sealed class PublicFreeTierRuntimeNegativeAcceptanceTests
                 || item.StatusCodes.Any(status => status < 400))).ToArray();
         var anonymousFailures = observations.Where(item => item.Scenario == "unauthenticated"
             && (item.StatusCodes.Any(status => status is not (401 or 403)) || item.ProviderCallDelta != 0 || item.LedgerReserveDelta != 0)).ToArray();
+        var unconfirmedRegistrationFailures = observations.Where(item => item.Scenario == "unconfirmed_registration"
+            && (item.EmailConfirmed || item.StatusCodes.Length == 0 || item.StatusCodes.Any(status => status is not (401 or 403))
+                || item.ProviderCallDelta != 0 || item.DispatchAuthorizationDelta != 0
+                || item.CreditLedgerEntryDelta != 0 || item.ChargedAmountUsd != 0m)).ToArray();
 
         var chargedAmount = await SumCustomerChargesAsync(factory, null);
         var egressAttempts = factory.EgressAttempts.Count;
@@ -1119,6 +1125,7 @@ public sealed class PublicFreeTierRuntimeNegativeAcceptanceTests
             userBudgetFailures.Length,
             globalConcurrentFailures.Length,
             anonymousFailures.Length,
+            unconfirmedRegistrationFailures.Length,
             chargedAmount,
             egressAttempts);
         await File.WriteAllTextAsync(Path.Combine(root, "negative-acceptance-report.json"), JsonSerializer.Serialize(report, JsonOptions));
@@ -1129,13 +1136,15 @@ public sealed class PublicFreeTierRuntimeNegativeAcceptanceTests
             userBudgetFailures,
             globalConcurrentFailures,
             anonymousFailures,
+            unconfirmedRegistrationFailures,
             report.RuntimeProviderCostGuard,
             report.ChargedAmountUsd,
             report.BlockedOutboundHttpAttempts,
         }, JsonOptions);
         Assert.Equal(0m, chargedAmount);
         Assert.Equal(0, egressAttempts);
-        Assert.True(userBudgetFailures.Length == 0 && globalConcurrentFailures.Length == 0 && anonymousFailures.Length == 0,
+        Assert.True(userBudgetFailures.Length == 0 && globalConcurrentFailures.Length == 0 && anonymousFailures.Length == 0
+            && unconfirmedRegistrationFailures.Length == 0,
             "NEGATIVE ACCEPTANCE RED: real module dispatch did not fail closed. Full report: " + Path.Combine(root, "negative-acceptance-report.json") + " Details=" + failureSummary);
     }
 
@@ -1164,6 +1173,21 @@ public sealed class PublicFreeTierRuntimeNegativeAcceptanceTests
                 content = "Synthetic concurrent retry probe.", requestId = "chat-global-race-02",
             }, null), () => factory.Calls.Get("Chat")));
         return result;
+    }
+
+    private static async Task<DispatchObservation> RunUnconfirmedChatAsync(NegativeRuntimeApiFactory factory)
+    {
+        using var client = factory.CreateClient();
+        var auth = await RegisterAsync(client, "UnconfirmedChat");
+        Assert.False(await IsEmailConfirmedAsync(factory, auth.User.Id));
+        var conversation = await CreateConversationAsync(client, auth.PersonalWorkspace.Id);
+        factory.Ledger.SetDenialCode("PUBLIC_FREE_TIER_EMAIL_CONFIRMATION_REQUIRED");
+
+        return await ObserveAsync(factory, client, "Chat", "unconfirmed_registration", auth.PersonalWorkspace.Id,
+            () => SendOneAsync(client, HttpMethod.Post, $"/api/conversations/{conversation.Id}/messages", new
+            {
+                content = "Unconfirmed registration must not reach a provider.", requestId = $"unconfirmed-{Guid.NewGuid():N}",
+            }), () => factory.Calls.Get("Chat"));
     }
 
     private static async Task<IReadOnlyList<DispatchObservation>> RunImageAsync(NegativeRuntimeApiFactory factory)
@@ -1509,7 +1533,7 @@ public sealed class PublicFreeTierRuntimeNegativeAcceptanceTests
             $"- Synthetic policy controls: user cap `{report.PolicyControls.UserCapCode}`; global cap `{report.PolicyControls.GlobalCapCode}` (both denied by the pure policy).",
             $"- Provider-free execution: {report.EgressNote}",
             $"- Runtime customer charge total: ${report.ChargedAmountUsd:0.000000} USD; blocked outbound HTTP attempts: {report.BlockedOutboundHttpAttempts}.",
-            $"- Failing user-cap module cases: {report.UserBudgetFailureCount}; failing global/concurrent cases: {report.GlobalConcurrentFailureCount}; failing unauth cases: {report.UnauthenticatedFailureCount}.",
+            $"- Failing user-cap module cases: {report.UserBudgetFailureCount}; failing global/concurrent cases: {report.GlobalConcurrentFailureCount}; failing unauth cases: {report.UnauthenticatedFailureCount}; failing unconfirmed-registration cases: {report.UnconfirmedRegistrationFailureCount}.",
             "",
             "| Module | Scenario | HTTP status(es) | Error code(s) | Fake provider delta | ledger reserve delta | customer credit-entry delta | active Free plan | email confirmed |",
             "|---|---|---:|---|---:|---:|---:|---|---|",
@@ -1517,7 +1541,7 @@ public sealed class PublicFreeTierRuntimeNegativeAcceptanceTests
         foreach (var item in report.Observations)
             lines.Add($"| {item.Module} | {item.Scenario} | {string.Join(",", item.StatusCodes)} | {string.Join(",", item.ErrorCodes)} | {item.ProviderCallDelta} | {item.LedgerReserveDelta} | {item.CreditLedgerEntryDelta} | {item.IsActiveFreePlan} | {item.EmailConfirmed} |");
         lines.Add("");
-        lines.Add("An authenticated exhausted-budget case is a positive safety result only if the synthetic ledger was called, every request was rejected before provider invocation, and the customer credit ledger was unchanged. Unauthenticated requests should receive 401/403 before either ledger or provider. This report is provider-free and does not enable or alter production code/configuration.");
+        lines.Add("An authenticated exhausted-budget case is a positive safety result only if the synthetic ledger was called, every request was rejected before provider invocation, and the customer credit ledger was unchanged. Unauthenticated and unconfirmed registrations should receive 401/403 before provider invocation. This report is provider-free and does not enable or alter production code/configuration.");
         return string.Join(Environment.NewLine, lines);
     }
 
@@ -1529,7 +1553,7 @@ public sealed class PublicFreeTierRuntimeNegativeAcceptanceTests
     private sealed record NegativeAcceptanceReport(string Head, string RuntimeProviderCostGuard, string EgressNote,
         PolicyControlObservation PolicyControls, IReadOnlyList<DispatchObservation> Observations,
         int UserBudgetFailureCount, int GlobalConcurrentFailureCount, int UnauthenticatedFailureCount,
-        decimal ChargedAmountUsd, int BlockedOutboundHttpAttempts);
+        int UnconfirmedRegistrationFailureCount, decimal ChargedAmountUsd, int BlockedOutboundHttpAttempts);
 
     private sealed class ResponsePair : IDisposable
     {
@@ -1627,8 +1651,10 @@ internal sealed class ExhaustedLedgerProbe : IPublicFreeTierSpendLedger
     {
         Interlocked.Increment(ref reserveCalls);
         var code = Volatile.Read(ref denialCode);
-        return Task.FromResult(new PublicFreeTierReservationResult(false, null, false,
-            PublicFreeTierAdmissionDecision.Deny(429, code, "Synthetic exhausted-budget sentinel: deny before provider I/O."), PublicFreeTierReservationState.None));
+        var decision = request.EmailIsConfirmed
+            ? PublicFreeTierAdmissionDecision.Deny(429, code, "Synthetic exhausted-budget sentinel: deny before provider I/O.")
+            : PublicFreeTierAdmissionDecision.Deny(403, "PUBLIC_FREE_TIER_EMAIL_CONFIRMATION_REQUIRED", "Confirm your email before using free AI.");
+        return Task.FromResult(new PublicFreeTierReservationResult(false, null, false, decision, PublicFreeTierReservationState.None));
     }
 
     public Task<PublicFreeTierDispatchAuthorizationResult> TryAuthorizeProviderDispatchAsync(Guid reservationId, string dispatchIdempotencyKey, CancellationToken cancellationToken = default)
