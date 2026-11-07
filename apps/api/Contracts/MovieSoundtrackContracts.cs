@@ -16,11 +16,11 @@ public sealed class MovieSoundtrackCueRequest
     public string Mood { get; set; } = "neutral";
     [Range(0, 100)]
     public int Intensity { get; set; }
-    [Range(typeof(decimal), "0", "3600")]
+    [Range(typeof(decimal), "0", "7200")]
     public decimal ActStartSeconds { get; set; }
-    [Range(typeof(decimal), "0", "3600")]
+    [Range(typeof(decimal), "0", "7200")]
     public decimal SceneStartSeconds { get; set; }
-    [Range(typeof(decimal), "0", "3600")]
+    [Range(typeof(decimal), "0", "7200")]
     public decimal TimelineStartSeconds { get; set; }
     [Range(typeof(decimal), "0.001", "3600")]
     public decimal DurationSeconds { get; set; } = 30;
@@ -37,11 +37,11 @@ public sealed class MovieSoundtrackCueUpdateRequest
     public string? Mood { get; set; }
     [Range(0, 100)]
     public int? Intensity { get; set; }
-    [Range(typeof(decimal), "0", "3600")]
+    [Range(typeof(decimal), "0", "7200")]
     public decimal? ActStartSeconds { get; set; }
-    [Range(typeof(decimal), "0", "3600")]
+    [Range(typeof(decimal), "0", "7200")]
     public decimal? SceneStartSeconds { get; set; }
-    [Range(typeof(decimal), "0", "3600")]
+    [Range(typeof(decimal), "0", "7200")]
     public decimal? TimelineStartSeconds { get; set; }
     [Range(typeof(decimal), "0.001", "3600")]
     public decimal? DurationSeconds { get; set; }

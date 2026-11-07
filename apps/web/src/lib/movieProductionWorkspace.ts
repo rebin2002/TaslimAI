@@ -1,6 +1,7 @@
 import type {
   MovieFinalMaster,
   MovieProductionReviewInput,
+  MovieProductionPriceIntent,
   MovieProductionVersion,
   MovieProject,
   MovieTake,
@@ -207,7 +208,7 @@ export type MovieProductionWorkspaceAdapter = {
   createKeyframe: (shotId: string, sourceVersionId: string, compositionJson: string) => Promise<unknown>;
   reviewVersion: (versionId: string, input: MovieProductionReviewInput) => Promise<unknown>;
   createMotionPreview: (shotId: string, sourceVersionId: string) => Promise<unknown>;
-  queueRender: (shotId: string, sourceVersionId: string, retry: boolean, intent?: MovieRenderIntent) => Promise<unknown>;
+  queueRender: (shotId: string, sourceVersionId: string, retry: boolean, intent: MovieRenderIntent, priceIntent: MovieProductionPriceIntent, idempotencyKey: string) => Promise<unknown>;
   createTake: (versionId: string) => Promise<unknown>;
   approveTake: (takeId: string) => Promise<unknown>;
   selectTake: (takeId: string) => Promise<unknown>;

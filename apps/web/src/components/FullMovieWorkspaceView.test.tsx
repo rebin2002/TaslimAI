@@ -97,7 +97,7 @@ describe("Full Movie workspace foundation", () => {
 
   it("keeps scene decisions behind explicit Director review boundaries", () => {
     expect(workspaceSource).toContain("Review it, approve or reject it, then execute explicitly");
-    expect(workspaceSource).toContain("Generate / regenerate");
+    expect(workspaceSource).toContain("Preview price &amp; generate");
     expect(workspaceSource).toContain("No local-only scene record is created");
   });
 

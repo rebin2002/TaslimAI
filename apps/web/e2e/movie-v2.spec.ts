@@ -51,8 +51,99 @@ test.describe("Movie Studio V2 browser smoke", () => {
     await page.goto("/create/movie");
     await expect(page.getByRole("tab", { name: /quick movie/i }).first()).toBeVisible();
     await expect(page.getByText("One brief, one output")).toBeVisible();
+    // Saving a Quick brief does not create a provider job, even if the
+    // adapter cannot perform quick_movie generation.
     await expect(page.getByText(/Quick Movie stays intentionally small/i)).toBeVisible();
+    await page.getByLabel("Describe your movie").fill("A brief-only provider-free smoke test.");
+    await expect(page.locator(".movie-submit-row button[type=submit]")).toBeEnabled();
     await expect(page).not.toHaveURL(/\/create\/movie\/[0-9a-f-]+\/overview$/i);
+  });
+
+  test("saves a Quick Movie brief without queueing a provider generation job", async ({ authenticatedPage: page }) => {
+    await page.goto("/create/movie");
+    await page.getByLabel("Movie title").fill("Provider-free Quick Movie brief");
+    await page.getByLabel("Describe your movie").fill("A safe metadata-only movie project with no generated footage.");
+
+    const createResponse = page.waitForResponse(
+      (response) => response.url().endsWith("/api/movie-studio/projects") &&
+        response.request().method() === "POST",
+    );
+    await page.getByRole("button", { name: /save quick movie brief/i }).click();
+    const response = await createResponse;
+    expect(response.status()).toBe(202);
+    const payload = await response.json();
+    expect(payload.project.mode).toBe("Quick");
+    expect(payload.job).toBeNull();
+    await expect(page.getByText("Brief saved", { exact: true })).toBeVisible();
+    await expect(page.locator("video")).toHaveCount(0);
+    await expect(page).not.toHaveURL(/\/create\/movie\/[0-9a-f-]+\/overview$/i);
+  });
+
+  test("keeps Quick and Full draft durations separate when switching tabs", async ({ authenticatedPage: page }) => {
+    await page.goto("/create/movie");
+    const quickTab = page.getByRole("tab", { name: /quick movie/i }).first();
+    const fullTab = page.getByRole("tab", { name: /full movie/i }).first();
+    const durationField = page.locator(".movie-brief-card input[type=number]").first();
+
+    await expect(durationField).toHaveAttribute("max", "3600");
+    await durationField.fill("90");
+    await fullTab.click();
+    await expect(durationField).toHaveValue("30");
+    await expect(durationField).toHaveAttribute("max", "7200");
+    await durationField.fill("7200");
+
+    // Switching back cannot quietly turn a feature-length film into a
+    // 3,600-second Quick clip or leave the Quick form invalid.
+    await quickTab.click();
+    await expect(durationField).toHaveAttribute("max", "3600");
+    await expect(durationField).toHaveValue("90");
+    await fullTab.click();
+    await expect(durationField).toHaveValue("7200");
+
+    // Keyboard tab navigation must preserve the same independent drafts.
+    await fullTab.press("ArrowLeft");
+    await expect(durationField).toHaveValue("90");
+    await quickTab.press("ArrowRight");
+    await expect(durationField).toHaveValue("7200");
+    // No generation or project creation is invoked by this regression.
+  });
+
+  test("persists a two-hour full movie timeline without queueing paid work", async ({ authenticatedPage: page }) => {
+    test.setTimeout(120_000);
+    await page.goto("/create/movie");
+    const quickDurationField = page.locator(".movie-brief-card input[type=number]").first();
+    await expect(quickDurationField).toHaveAttribute("max", "3600");
+    await page.getByRole("tab", { name: /full movie/i }).first().click();
+
+    // The project duration is a timeline goal; it is not an instruction to
+    // generate a single 7,200-second paid provider clip.
+    const durationField = page.locator(".movie-brief-card input[type=number]").first();
+    await expect(durationField).toHaveAttribute("max", "7200");
+    await durationField.fill("7200");
+    await page.getByLabel("Movie title").fill("E2E Two Hour Movie Timeline");
+    await page.getByLabel("Describe your movie").fill("A two-hour production plan that will be assembled from separately admitted shots.");
+    await page.getByRole("button", { name: /create full project/i }).click();
+
+    await expect(page).toHaveURL(/\/create\/movie\/[0-9a-f-]+\/overview$/i);
+    const projectId = page.url().match(/\/create\/movie\/([0-9a-f-]+)\/overview$/i)?.[1];
+    expect(projectId).toBeTruthy();
+
+    const response = await page.request.get(`/api/movie-studio/projects/${projectId}`);
+    expect(response.ok()).toBe(true);
+    const project = (await response.json()) as {
+      id: string;
+      mode: string;
+      durationSeconds: number;
+      clips: unknown[];
+    };
+    expect(project.id).toBe(projectId);
+    expect(project.mode).toBe("Full");
+    expect(project.durationSeconds).toBe(7200);
+    expect(project.clips).toEqual([]);
+
+    await page.reload();
+    await expect(page.getByRole("heading", { name: "E2E Two Hour Movie Timeline", level: 1 })).toBeVisible();
+    await expect(page.getByText("No generated footage yet")).toBeVisible();
   });
 
   test("creates an empty Story Director proposal for the same MovieProject after the guide is locked", async ({ authenticatedPage: page }) => {

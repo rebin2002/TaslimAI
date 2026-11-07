@@ -76,7 +76,9 @@ public sealed record MovieProductionGenerationRequest(
     bool ConfirmationAccepted = false,
     string? IdempotencyKey = null,
     bool AllowReferenceReadinessOverride = false,
-    string? ReferenceReadinessOverrideReason = null);
+    string? ReferenceReadinessOverrideReason = null,
+    decimal? ExpectedMaximumAmountUsd = null,
+    string? ExpectedQuoteFingerprint = null);
 
 /// <summary>
 /// This result is internal to the movie service boundary. It carries the canonical
@@ -129,7 +131,18 @@ public sealed class MovieProductionGenerationOrchestrator(
         if (shot is null || !await collaboration.HasPermissionAsync(userId, shot.Scene.MovieProjectId, MoviePermissions.Generate, cancellationToken))
             return null;
 
-        var existing = await FindExistingAsync(userId, request, normalizedKey, cancellationToken);
+        // Validate the user-supplied label before any speculative clip, job or usage
+        // reservation is created. The label used to be validated only when the
+        // production version was constructed, after the generation job was queued.
+        var normalizedLabel = CleanBounded(request.Label, 160);
+        // Match the API's existing 160-character title contract before a
+        // continuity snapshot, speculative clip, job, or cost reservation exists.
+        // A rejected title must not leave paid-generation state behind.
+        if (!string.IsNullOrWhiteSpace(request.Title) && request.Title.Trim().Length > 160)
+            throw new MovieProductionValidationException(
+                "PRODUCTION_TITLE_TOO_LARGE", "The production title must be 160 characters or fewer.");
+
+        var existing = await FindExistingAsync(userId, shot, request, normalizedKey, cancellationToken);
         if (existing is not null)
             return existing;
 
@@ -140,6 +153,54 @@ public sealed class MovieProductionGenerationOrchestrator(
         if (workflowError is not null)
             throw new MovieProductionValidationException("PRODUCTION_RENDER_INVALID", workflowError);
 
+        // Admission must use the selected adapter's declared single-clip capability,
+        // not the total movie duration. Fail before cost preflight, continuity
+        // persistence, clip/job creation or any usage reservation.
+        var plan = BuildPlan(shot, request);
+        var durationSeconds = ResolveSingleClipDuration(
+            shot.DurationSeconds, shot.Scene.DurationSeconds, shot.Scene.MovieProject.DurationSeconds);
+        ValidateProductionClipAdmission(provider, durationSeconds, plan.SourceResolution,
+            plan.TargetResolution, plan.QualityTier, plan.ProcessingPath,
+            shot.Scene.MovieProject.AspectRatio);
+        var providerModelKey = MovieStudioHelpers.Clean(provider.SceneClipPricingModelKey);
+        if (string.IsNullOrWhiteSpace(providerModelKey))
+            throw new MovieProductionValidationException(
+                "MOVIE_PROVIDER_MODEL_UNVERIFIED",
+                "The selected video adapter has not declared an exact model key for pricing this production clip.");
+        // Share the conservative prompt floor with the read-only preflight.
+        // Queue admission still validates an optional custom render title.
+        var renderDescription = string.IsNullOrWhiteSpace(request.Title)
+            ? shot.Scene.MovieProject.Title : request.Title.Trim();
+        var promptPayload = BuildProductionPromptPayloads(shot, renderDescription, provider);
+        var minimumCreativePromptLength = promptPayload.MinimumCharacters;
+        if (provider.SceneClipPromptMaxCharacters is { } promptCapacity
+            && minimumCreativePromptLength > promptCapacity)
+            throw new MovieProductionValidationException(
+                "MOVIE_CLIP_PROMPT_UNSUPPORTED",
+                "The shot description exceeds this provider's prompt limit. Shorten it before rendering.");
+
+        // Approved production sends the character-continuity snapshot as well
+        // as the scene/shot direction. Preview without writing the snapshot so
+        // an oversized character card cannot reach pricing or usage admission.
+        var continuityPreview = await continuity.BuildSnapshotForTargetAsync(
+            shot.Scene.MovieProjectId, shot.Scene.Id, shot.Id,
+            persist: false, cancellationToken);
+        if (provider.SceneClipPromptMaxCharacters is { } continuityPromptCapacity
+            && minimumCreativePromptLength + continuityPreview.SnapshotJson.Trim().Length > continuityPromptCapacity)
+            throw new MovieProductionValidationException(
+                "MOVIE_CLIP_PROMPT_UNSUPPORTED",
+                "The character-continuity context exceeds this provider's prompt limit. Shorten it before rendering.");
+
+        if (!request.ConfirmationAccepted)
+            throw new MovieProductionValidationException(
+                "GENERATION_CONFIRMATION_REQUIRED",
+                "Review the current maximum USD quote and explicitly confirm before queueing this production render.");
+        if (!request.ExpectedMaximumAmountUsd.HasValue || request.ExpectedMaximumAmountUsd.Value < 0
+            || string.IsNullOrWhiteSpace(request.ExpectedQuoteFingerprint))
+            throw new MovieProductionValidationException(
+                "MOVIE_PRODUCTION_QUOTE_REQUIRED",
+                "Run the read-only production preflight and provide its current maximum USD quote before queueing.");
+
         var preflightResult = await productionPreflight.EvaluateAsync(
             userId,
             request.MovieShotId,
@@ -147,7 +208,9 @@ public sealed class MovieProductionGenerationOrchestrator(
                 request.ApprovedSourceVersionId,
                 request.TargetResolution,
                 request.QualityTier,
-                request.ConfirmationAccepted),
+                request.ConfirmationAccepted,
+                request.ExpectedMaximumAmountUsd,
+                request.ExpectedQuoteFingerprint),
             cancellationToken);
         if (preflightResult is null)
             return null;
@@ -155,17 +218,12 @@ public sealed class MovieProductionGenerationOrchestrator(
             throw new MovieProductionValidationException(
                 preflightResult.RejectionCode ?? "PRODUCTION_PREFLIGHT_REQUIRED",
                 preflightResult.RejectionMessage ?? preflightResult.Summary);
+        if (!MovieProductionQuoteFingerprint.Matches(
+                preflightResult.PriceIntent, request.ExpectedMaximumAmountUsd, request.ExpectedQuoteFingerprint))
+            throw new MovieProductionValidationException(
+                "MOVIE_PRODUCTION_QUOTE_STALE",
+                "The selected adapter or maximum USD price changed after preview. Refresh the quote before queueing.");
 
-        await referenceReadiness.EnsureCanGenerateAsync(
-            userId,
-            shot.Id,
-            request.AllowReferenceReadinessOverride,
-            request.ReferenceReadinessOverrideReason,
-            MovieReferenceReadinessOverrideSources.ProductionRender,
-            cancellationToken);
-
-        var plan = BuildPlan(shot, request);
-        var durationSeconds = Math.Clamp(shot.DurationSeconds ?? shot.Scene.DurationSeconds ?? Math.Min(shot.Scene.MovieProject.DurationSeconds, 60), 1, 3600);
         var estimate = await costEstimator.EstimateAsync(
             new MovieGenerationCostRequest(
                 durationSeconds,
@@ -174,7 +232,25 @@ public sealed class MovieProductionGenerationOrchestrator(
                 plan.QualityTier,
                 plan.ProcessingPath),
             selectedProviderKey: provider.Key,
+            selectedModelKey: providerModelKey,
             cancellationToken: cancellationToken);
+        var currentPriceIntent = MovieProductionQuoteFingerprint.Create(
+            shot.Id,
+            source!.Id,
+            shot.Scene.MovieProject.AspectRatio,
+            durationSeconds,
+            provider.Key,
+            providerModelKey,
+            plan,
+            estimate);
+        if (currentPriceIntent is null || !MovieProductionQuoteFingerprint.Matches(
+                currentPriceIntent, request.ExpectedMaximumAmountUsd, request.ExpectedQuoteFingerprint))
+            throw new MovieProductionValidationException(
+                currentPriceIntent is null ? "MOVIE_PRODUCTION_PRICE_UNAVAILABLE" : "MOVIE_PRODUCTION_QUOTE_STALE",
+                currentPriceIntent is null
+                    ? "No exact model-specific USD price route is available for this production render."
+                    : "The selected adapter or maximum USD price changed after preview. Refresh the quote before queueing.");
+        var priceIntent = currentPriceIntent;
         var preflight = await costGuardrails.EvaluateAsync(
             userId,
             shot.Scene.MovieProject.WorkspaceId,
@@ -187,12 +263,34 @@ public sealed class MovieProductionGenerationOrchestrator(
                 preflight.RejectionCode ?? "GENERATION_CONFIRMATION_REQUIRED",
                 preflight.RejectionMessage ?? "Confirm the generation cost before queueing this production request.");
 
-        var snapshot = await continuity.BuildSnapshotForTargetAsync(
-            shot.Scene.MovieProjectId,
-            shot.Scene.Id,
+        await referenceReadiness.EnsureCanGenerateAsync(
+            userId,
             shot.Id,
-            persist: true,
+            request.AllowReferenceReadinessOverride,
+            request.ReferenceReadinessOverrideReason,
+            MovieReferenceReadinessOverrideSources.ProductionRender,
             cancellationToken);
+
+        var maximumContinuityPromptCharacters = provider.SceneClipPromptMaxCharacters is { } currentPromptLimit
+            ? (int)Math.Max(0L, (long)currentPromptLimit - minimumCreativePromptLength)
+            : (int?)null;
+        MovieCharacterContinuitySnapshotDto snapshot;
+        try
+        {
+            snapshot = await continuity.BuildSnapshotForTargetAsync(
+                shot.Scene.MovieProjectId,
+                shot.Scene.Id,
+                shot.Id,
+                persist: true,
+                cancellationToken: cancellationToken,
+                maximumPromptCharacters: maximumContinuityPromptCharacters);
+        }
+        catch (MovieContinuityPromptLimitException)
+        {
+            throw new MovieProductionValidationException(
+                "MOVIE_CLIP_PROMPT_UNSUPPORTED",
+                "The character-continuity context exceeds this provider's prompt limit. Shorten it before rendering.");
+        }
         var now = DateTime.UtcNow;
         var clip = new MovieClip
         {
@@ -224,16 +322,9 @@ public sealed class MovieProductionGenerationOrchestrator(
             shot.Scene.MovieProject.Style,
             shot.Scene.MovieProject.Language,
             shot.Scene.MovieProject.AdditionalInstructions,
-            shot.Scene.MovieProject.Guide is null ? null : JsonSerializer.Serialize(new
-            {
-                shot.Scene.MovieProject.Guide.VisualLanguage,
-                shot.Scene.MovieProject.Guide.CameraLanguage,
-                shot.Scene.MovieProject.Guide.ColorAndLighting,
-                shot.Scene.MovieProject.Guide.SoundAndNarration,
-                shot.Scene.MovieProject.Guide.ContinuityRules,
-            }),
-            JsonSerializer.Serialize(new { shot.Scene.Title, shot.Scene.Summary, shot.Scene.DurationSeconds }),
-            JsonSerializer.Serialize(new { shot.Description, shot.Purpose, shot.Subjects, shot.CameraAndFraming, shot.CameraMotion, shot.DurationSeconds }),
+            promptPayload.GuideJson,
+            promptPayload.SceneJson,
+            promptPayload.ShotJson,
             null,
             null,
             null,
@@ -246,7 +337,11 @@ public sealed class MovieProductionGenerationOrchestrator(
             plan.TargetResolution,
             plan.ProcessingPath,
             plan.QualityTier,
-            snapshot.SnapshotHash);
+            snapshot.SnapshotHash,
+            SelectedProviderKey: provider.Key,
+            CharacterContinuityJson: snapshot.SnapshotJson,
+            SelectedProviderModelKey: providerModelKey,
+            SelectedProviderQuoteFingerprint: priceIntent.QuoteFingerprint);
 
         GenerationJob job;
         try
@@ -276,11 +371,11 @@ public sealed class MovieProductionGenerationOrchestrator(
         // can therefore both create provisional clips and then receive the same
         // canonical job. Do not attach the losing request's clip/version to that
         // job; replay the winner after its relationship rows become visible.
-        if (normalizedKey is not null && !JobTargetsClip(job, clip.Id))
+        if (!JobTargetsClip(job, clip.Id))
         {
             db.MovieClips.Remove(clip);
             await db.SaveChangesAsync(CancellationToken.None);
-            return await FindExistingAfterConcurrentCreateAsync(userId, request, normalizedKey, cancellationToken);
+            return await FindExistingAfterConcurrentCreateAsync(userId, shot, request, normalizedKey, cancellationToken);
         }
 
         clip.GenerationJobId = job.Id;
@@ -295,7 +390,7 @@ public sealed class MovieProductionGenerationOrchestrator(
             VersionNumber = shot.ProductionVersions.Count == 0 ? 1 : shot.ProductionVersions.Max(item => item.VersionNumber) + 1,
             Stage = MovieProductionStages.ProductionRender,
             Status = MovieProductionVersionStatuses.PendingApproval,
-            Label = CleanBounded(request.Label, 160),
+            Label = normalizedLabel,
             CompositionJson = source.CompositionJson,
             StageProvenanceJson = JsonSerializer.Serialize(new
             {
@@ -352,6 +447,7 @@ public sealed class MovieProductionGenerationOrchestrator(
 
     private async Task<MovieProductionOrchestrationResult?> FindExistingAsync(
         Guid userId,
+        MovieShot shot,
         MovieProductionGenerationRequest request,
         string? idempotencyKey,
         CancellationToken cancellationToken)
@@ -363,16 +459,31 @@ public sealed class MovieProductionGenerationOrchestrator(
         if (existingJob is null) return null;
         MovieGenerationInput? input = null;
         try { input = JsonSerializer.Deserialize<MovieGenerationInput>(existingJob.InputJson); } catch (JsonException) { }
-        var requestedTarget = string.IsNullOrWhiteSpace(request.TargetResolution) ? MovieResolutionTiers.P1080 : request.TargetResolution.Trim();
-        var requestedQuality = string.IsNullOrWhiteSpace(request.QualityTier) ? DirectorQualityLevels.Standard : request.QualityTier.Trim();
-        var requestedTitle = string.IsNullOrWhiteSpace(request.Title) ? null : request.Title.Trim();
-        if (input is null
-            || input.MovieShotId != request.MovieShotId
-            || input.SourceProductionVersionId != request.ApprovedSourceVersionId
-            || !string.Equals(input.TargetResolution, requestedTarget, StringComparison.OrdinalIgnoreCase)
-            || !string.Equals(input.QualityTier, requestedQuality, StringComparison.OrdinalIgnoreCase)
-            || (requestedTitle is not null && !string.Equals(input.Description, requestedTitle, StringComparison.Ordinal)))
+        var expectedQuoteFingerprint = request.ExpectedQuoteFingerprint?.Trim();
+        var currentProviderModelKey = MovieStudioHelpers.Clean(provider.SceneClipPricingModelKey);
+        // An idempotent replay must not silently adopt a paid job from a
+        // different adapter after routing or deployment configuration changes.
+        // Historical jobs without a bound provider retain their legacy behavior.
+        if (input is null || !MatchesProductionReplay(input, shot, request)
+            || !string.Equals(input.SelectedProviderQuoteFingerprint, expectedQuoteFingerprint, StringComparison.Ordinal)
+            || existingJob.EstimatedProviderCostUsd != request.ExpectedMaximumAmountUsd
+            || (!string.IsNullOrWhiteSpace(input.SelectedProviderKey)
+                && !string.Equals(input.SelectedProviderKey, provider.Key, StringComparison.OrdinalIgnoreCase))
+            || (!string.IsNullOrWhiteSpace(input.SelectedProviderModelKey)
+                && !string.Equals(input.SelectedProviderModelKey, currentProviderModelKey, StringComparison.OrdinalIgnoreCase)))
             throw new MovieProductionValidationException("IDEMPOTENCY_KEY_REUSED", "This idempotency key was already used for a different production request.");
+        // For newly admitted production jobs, character continuity forms part
+        // of the canonical creative request. The same replay key must not adopt
+        // a previously priced render after the character bible changes. Older
+        // serialized jobs lacking this optional field preserve replay behavior.
+        if (input.CharacterContinuityJson is not null)
+        {
+            var currentContinuity = await continuity.BuildSnapshotForTargetAsync(
+                shot.Scene.MovieProjectId, shot.Scene.Id, shot.Id, persist: false, cancellationToken);
+            if (!string.Equals(input.CharacterContinuityJson, currentContinuity.SnapshotJson, StringComparison.Ordinal))
+                throw new MovieProductionValidationException("IDEMPOTENCY_KEY_REUSED",
+                    "This idempotency key was already used for a different production request.");
+        }
         var version = await db.MovieProductionVersions
             .Include(item => item.AssetReferences)
             .Include(item => item.GenerationJob).ThenInclude(item => item!.ProviderAttempts)
@@ -381,6 +492,8 @@ public sealed class MovieProductionGenerationOrchestrator(
         var clip = await db.MovieClips.FirstOrDefaultAsync(item => item.MovieShotId == request.MovieShotId && item.GenerationJobId == existingJob.Id, cancellationToken);
         if (version is null || clip is null)
             throw new MovieProductionValidationException("IDEMPOTENCY_INCOMPLETE", "The previous production request is still being finalized; retry with the same idempotency key.");
+        if (!string.Equals(version.Label, CleanBounded(request.Label, 160), StringComparison.Ordinal))
+            throw new MovieProductionValidationException("IDEMPOTENCY_KEY_REUSED", "This idempotency key was already used for a different production request.");
         var target = input.TargetResolution ?? MovieResolutionTiers.P1080;
         var source = input.SourceResolution ?? target;
         return new(version, existingJob, clip, MovieProductionOrchestrationStateMachine.From(existingJob.Status), source, target, input.ProcessingPath ?? MovieResolutionPathKinds.Native, MovieGenerationCostEstimate.Unevaluated("idempotent_replay"));
@@ -388,6 +501,7 @@ public sealed class MovieProductionGenerationOrchestrator(
 
     private async Task<MovieProductionOrchestrationResult?> FindExistingAfterConcurrentCreateAsync(
         Guid userId,
+        MovieShot shot,
         MovieProductionGenerationRequest request,
         string idempotencyKey,
         CancellationToken cancellationToken)
@@ -397,7 +511,7 @@ public sealed class MovieProductionGenerationOrchestrator(
         {
             try
             {
-                return await FindExistingAsync(userId, request, idempotencyKey, cancellationToken);
+                return await FindExistingAsync(userId, shot, request, idempotencyKey, cancellationToken);
             }
             catch (MovieProductionValidationException exception)
                 when (exception.Code == "IDEMPOTENCY_INCOMPLETE" && attempt + 1 < maxAttempts)
@@ -409,7 +523,67 @@ public sealed class MovieProductionGenerationOrchestrator(
             }
         }
 
-        return await FindExistingAsync(userId, request, idempotencyKey, cancellationToken);
+        return await FindExistingAsync(userId, shot, request, idempotencyKey, cancellationToken);
+    }
+
+    // A production render's idempotency key binds its actual priced and creative
+    // intent, not just the source version and output tier. A changed shot, scene,
+    // guide, or movie must not silently adopt the previous billable job.
+    private static bool MatchesProductionReplay(
+        MovieGenerationInput input,
+        MovieShot shot,
+        MovieProductionGenerationRequest request)
+    {
+        var movie = shot.Scene.MovieProject;
+        var plan = BuildPlan(shot, request);
+        // A replay key binds the original priced clip duration. If a later
+        // edit makes the selected shot invalid as a single provider clip,
+        // treat this as changed replay intent, never as a successful replay.
+        int duration;
+        try
+        {
+            duration = ResolveSingleClipDuration(
+                shot.DurationSeconds, shot.Scene.DurationSeconds, movie.DurationSeconds);
+        }
+        catch (MovieProductionValidationException error)
+            when (error.Code == "MOVIE_CLIP_DURATION_UNSUPPORTED")
+        {
+            return false;
+        }
+        var title = string.IsNullOrWhiteSpace(request.Title) ? movie.Title : request.Title.Trim();
+        var guide = movie.Guide is null ? null : JsonSerializer.Serialize(new
+        {
+            movie.Guide.VisualLanguage,
+            movie.Guide.CameraLanguage,
+            movie.Guide.ColorAndLighting,
+            movie.Guide.SoundAndNarration,
+            movie.Guide.ContinuityRules,
+        });
+        var scene = JsonSerializer.Serialize(new { shot.Scene.Title, shot.Scene.Summary, shot.Scene.DurationSeconds });
+        var shotSnapshot = JsonSerializer.Serialize(new
+        {
+            shot.Description, shot.Purpose, shot.Subjects,
+            shot.CameraAndFraming, shot.CameraMotion, shot.DurationSeconds,
+        });
+
+        return string.Equals(input.Operation, MovieStudioOperations.SceneClip, StringComparison.OrdinalIgnoreCase)
+            && input.MovieProjectId == movie.Id
+            && input.MovieSceneId == shot.Scene.Id
+            && input.MovieShotId == shot.Id
+            && input.SourceProductionVersionId == request.ApprovedSourceVersionId
+            && input.DurationSeconds == duration
+            && string.Equals(input.Description, title, StringComparison.Ordinal)
+            && string.Equals(input.AspectRatio, movie.AspectRatio, StringComparison.Ordinal)
+            && string.Equals(input.Style, movie.Style, StringComparison.Ordinal)
+            && string.Equals(input.Language, movie.Language, StringComparison.Ordinal)
+            && string.Equals(input.AdditionalInstructions, movie.AdditionalInstructions, StringComparison.Ordinal)
+            && string.Equals(input.ContinuityGuideJson, guide, StringComparison.Ordinal)
+            && string.Equals(input.SceneJson, scene, StringComparison.Ordinal)
+            && string.Equals(input.ShotJson, shotSnapshot, StringComparison.Ordinal)
+            && string.Equals(input.SourceResolution, plan.SourceResolution, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(input.TargetResolution, plan.TargetResolution, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(input.ProcessingPath, plan.ProcessingPath, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(input.QualityTier, plan.QualityTier, StringComparison.OrdinalIgnoreCase);
     }
 
     internal static bool JobTargetsClip(GenerationJob job, Guid clipId)
@@ -425,11 +599,107 @@ public sealed class MovieProductionGenerationOrchestrator(
         }
     }
 
-    private static ProductionPlan BuildPlan(MovieShot shot, MovieProductionGenerationRequest request)
+    // Movie/scene duration is timeline planning metadata, never permission to
+    // truncate one billable render to an arbitrary shorter clip. Preserve the
+    // selected shot's actual duration and reject invalid single-clip lengths
+    // before cost estimation or job persistence. The adapter's stricter range
+    // is checked separately by ValidateProductionClipAdmission.
+    internal static int ResolveSingleClipDuration(int? shotSeconds, int? sceneSeconds, int movieSeconds)
     {
-        var plan = MovieProductionAdaptivePlanBuilder.Build(shot, request.TargetResolution, request.QualityTier);
-        return new(plan.SourceResolution, plan.TargetResolution, plan.ProcessingPath, plan.QualityTier);
+        var durationSeconds = shotSeconds ?? sceneSeconds ?? Math.Min(movieSeconds, 60);
+        if (durationSeconds is < 1 or > 3600)
+            throw new MovieProductionValidationException(
+                "MOVIE_CLIP_DURATION_UNSUPPORTED",
+                "The selected shot or scene duration cannot be sent as one production clip. Use shorter shots or a validated segmentation workflow.");
+        return durationSeconds;
     }
+
+    // Shared provider-neutral admission predicate for approved production renders.
+    // The read-only preflight can inspect the same decision without throwing or
+    // creating a clip/job; queue admission throws the exact same rejection.
+    // Unknown adapters, unverified durations and unpriced profiles fail closed.
+    internal static MovieProductionValidationException? EvaluateProductionClipAdmission(
+        IMovieVideoProvider videoProvider,
+        int durationSeconds,
+        string sourceResolution,
+        string targetResolution,
+        string qualityTier,
+        string processingPath,
+        string aspectRatio)
+    {
+        if (!videoProvider.IsAvailable
+            || !videoProvider.SupportedOperations.Contains(MovieStudioOperations.SceneClip, StringComparer.OrdinalIgnoreCase))
+            return new MovieProductionValidationException(
+                "MOVIE_PROVIDER_UNAVAILABLE",
+                "The selected video provider is unavailable for production clips.");
+
+        if (videoProvider.SceneClipDurationRange is not { } durationRange
+            || !durationRange.Supports(durationSeconds))
+            return new MovieProductionValidationException(
+                "MOVIE_CLIP_DURATION_UNSUPPORTED",
+                "The selected video provider cannot generate a single clip of this duration. Use shorter shots or a validated segmentation workflow.");
+
+        if (!videoProvider.SupportsSceneClipCostIntent(
+                sourceResolution, targetResolution, qualityTier, processingPath, aspectRatio))
+            return new MovieProductionValidationException(
+                "MOVIE_CLIP_EXECUTION_INTENT_UNSUPPORTED",
+                "The selected video provider cannot deliver the requested resolution, quality and processing profile.");
+
+        return null;
+    }
+
+    internal static void ValidateProductionClipAdmission(
+        IMovieVideoProvider videoProvider,
+        int durationSeconds,
+        string sourceResolution,
+        string targetResolution,
+        string qualityTier,
+        string processingPath,
+        string aspectRatio)
+    {
+        var rejection = EvaluateProductionClipAdmission(videoProvider, durationSeconds,
+            sourceResolution, targetResolution, qualityTier, processingPath, aspectRatio);
+        if (rejection is not null)
+            throw rejection;
+    }
+
+    // Excludes character continuity, which both preflight and queue check
+    // separately. The JSON properties and order match the video job payload.
+    internal static (long MinimumCharacters, string? GuideJson, string SceneJson, string ShotJson)
+        BuildProductionPromptPayloads(
+            MovieShot shot, string renderDescription, IMovieVideoProvider videoProvider)
+    {
+        var movie = shot.Scene.MovieProject;
+        var guide = movie.Guide;
+        var guidePayload = guide is null ? null : JsonSerializer.Serialize(new
+        {
+            guide.VisualLanguage,
+            guide.CameraLanguage,
+            guide.ColorAndLighting,
+            guide.SoundAndNarration,
+            guide.ContinuityRules,
+        });
+        var scenePayload = JsonSerializer.Serialize(new
+        {
+            shot.Scene.Title, shot.Scene.Summary, shot.Scene.DurationSeconds,
+        });
+        var shotPayload = JsonSerializer.Serialize(new
+        {
+            shot.Description, shot.Purpose, shot.Subjects,
+            shot.CameraAndFraming, shot.CameraMotion, shot.DurationSeconds,
+        });
+        var minimumCharacters = (long)renderDescription.Trim().Length
+            + (movie.Style?.Trim().Length ?? 0)
+            + (movie.AdditionalInstructions?.Trim().Length ?? 0)
+            + (guidePayload?.Length ?? 0)
+            + scenePayload.Length
+            + shotPayload.Length
+            + Math.Max(0, videoProvider.SceneClipPromptFormattingOverheadCharacters);
+        return (minimumCharacters, guidePayload, scenePayload, shotPayload);
+    }
+
+    private static MovieProductionAdaptivePlan BuildPlan(MovieShot shot, MovieProductionGenerationRequest request) =>
+        MovieProductionAdaptivePlanBuilder.Build(shot, request.TargetResolution, request.QualityTier);
 
     private async Task ReconcileFastTerminalAsync(MovieClip clip, Guid jobId, CancellationToken cancellationToken)
     {
@@ -448,16 +718,20 @@ public sealed class MovieProductionGenerationOrchestrator(
         }
     }
 
-    private static string? NormalizeIdempotencyKey(string? value)
+    internal static string NormalizeIdempotencyKey(string? value)
     {
         var key = value?.Trim();
-        if (string.IsNullOrWhiteSpace(key)) return null;
-        if (key.Length > 128) throw new MovieProductionValidationException("IDEMPOTENCY_KEY_INVALID", "The idempotency key is too long.");
+        if (string.IsNullOrWhiteSpace(key))
+            throw new MovieProductionValidationException(
+                "IDEMPOTENCY_KEY_REQUIRED",
+                "A unique Idempotency-Key header is required for approved production renders.");
+        // GenerationJobService accepts at most 80 characters. Reject before
+        // continuity snapshots or speculative clip/version persistence.
+        if (key.Length > 80) throw new MovieProductionValidationException("IDEMPOTENCY_KEY_INVALID", "The idempotency key is too long.");
         return key;
     }
 
     private static string? CleanBounded(string? value, int max) =>
         string.IsNullOrWhiteSpace(value) ? null : value.Trim().Length <= max ? value.Trim() : throw new MovieProductionValidationException("PRODUCTION_LABEL_TOO_LARGE", "The production label is too long.");
 
-    private sealed record ProductionPlan(string SourceResolution, string TargetResolution, string ProcessingPath, string QualityTier);
 }

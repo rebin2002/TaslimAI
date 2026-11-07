@@ -101,7 +101,8 @@ public sealed class MovieReferenceReadinessException(string code, string message
 
 /// <summary>
 /// Append-only evidence that a user deliberately bypassed a safe, overridable
-/// readiness blocker. It stores bounded provider-neutral facts only.
+/// readiness blocker. It stores bounded provider-neutral facts only and records
+/// the confirmed admission attempt, not whether a downstream job was queued.
 /// </summary>
 public sealed class MovieReferenceReadinessOverrideAudit
 {
@@ -123,7 +124,7 @@ public interface IMovieReferenceReadinessService
     Task<MovieReferenceReadinessDto?> GetAsync(Guid userId, Guid shotId, CancellationToken cancellationToken = default);
     Task<MovieReferenceReadinessDto?> EvaluateAsync(Guid userId, Guid shotId, CancellationToken cancellationToken = default);
     Task<MovieReferenceReadinessOverrideDto?> RecordOverrideAsync(Guid userId, Guid shotId, MovieReferenceReadinessOverrideRequest request, string source, CancellationToken cancellationToken = default);
-    Task EnsureCanGenerateAsync(Guid userId, Guid shotId, bool allowOverride, string? overrideReason, string source, CancellationToken cancellationToken = default);
+    Task EnsureCanGenerateAsync(Guid userId, Guid shotId, bool allowOverride, string? overrideReason, string source, CancellationToken cancellationToken = default, bool persistOverride = true);
 }
 
 public sealed class MovieReferenceReadinessService(
@@ -167,7 +168,8 @@ public sealed class MovieReferenceReadinessService(
         bool allowOverride,
         string? overrideReason,
         string source,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        bool persistOverride = true)
     {
         var evaluation = await EvaluateAsync(userId, shotId, cancellationToken);
         if (evaluation is null)
@@ -176,7 +178,8 @@ public sealed class MovieReferenceReadinessService(
         if (!allowOverride)
             throw new MovieReferenceReadinessException("MOVIE_REFERENCE_READINESS_BLOCKED", BuildBlockedMessage(evaluation));
         EnsureOverrideIsSafe(evaluation, overrideReason);
-        await SaveOverrideAsync(userId, evaluation, overrideReason!, source, cancellationToken);
+        if (persistOverride)
+            await SaveOverrideAsync(userId, evaluation, overrideReason!, source, cancellationToken);
     }
 
     private async Task<MovieReferenceReadinessDto> EvaluateCoreAsync(

@@ -160,6 +160,7 @@ public sealed class MovieFinalAssemblyCancellationCleanupTests : IClassFixture<M
     public async Task Cancellation_after_source_materialization_deletes_temporary_inputs_before_job_settlement()
     {
         using var client = factory.CreateClient();
+        const string idempotencyKey = "assembly-cancellation-cleanup-1";
         factory.Scenarios[FakeProviderKind.Movie] = FakeProviderScenario.ImmediateSuccess;
         var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(client, title: "Assembly cancellation cleanup");
         var (takeId, sourceAssetId) = await CreateFinalizedTakeAsync(client, fixture.Project.Project.Id, fixture.Shot.Id);
@@ -175,7 +176,7 @@ public sealed class MovieFinalAssemblyCancellationCleanupTests : IClassFixture<M
                     resolutionProfile = MovieFinalAssemblyProfiles.Hd1080p,
                     timeline = new[] { new { takeId, inPointSeconds = 0m } },
                 },
-                idempotencyKey: "assembly-cancellation-cleanup-1");
+                idempotencyKey: idempotencyKey);
 
             await factory.MaterializationGate.Reached.Task.WaitAsync(TimeSpan.FromSeconds(15));
             using var cancel = await MovieOperationalFixtures.SendWithCsrfAsync(
@@ -191,6 +192,58 @@ public sealed class MovieFinalAssemblyCancellationCleanupTests : IClassFixture<M
             Assert.Equal(GenerationJobStatus.Cancelled.ToString(), terminal.Status);
             Assert.Equal(0, factory.AssemblyExecutor.InvocationCount);
 
+            // Simulate a lost final-assembly sidecar write after the canonical
+            // generation job has already reached Cancelled. A read must repair it,
+            // and replaying the original request must not create another job.
+            using (var staleScope = factory.Services.CreateScope())
+            {
+                var staleDb = staleScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+                var updated = await staleDb.MovieAssemblies
+                    .Where(item => item.Id == assembly.Id && item.GenerationJobId == assembly.GenerationJobId)
+                    .ExecuteUpdateAsync(setters => setters
+                        .SetProperty(item => item.Status, MovieAssemblyStatuses.Assembling)
+                        .SetProperty(item => item.AssetId, (Guid?)null)
+                        .SetProperty(item => item.LastErrorCode, (string?)null)
+                        .SetProperty(item => item.CompletedAt, (DateTime?)null));
+                Assert.Equal(1, updated);
+            }
+
+            var recovered = await client.GetFromJsonAsync<MovieFinalAssemblyDto>(
+                $"/api/movie-studio/final-assemblies/{assembly.Id}");
+            Assert.NotNull(recovered);
+            Assert.Equal(MovieAssemblyStatuses.Cancelled, recovered!.Status);
+            Assert.Equal(assembly.GenerationJobId, recovered.GenerationJobId);
+            Assert.Null(recovered.OutputAssetId);
+
+            var replay = await MovieOperationalFixtures.PostAsync<MovieFinalAssemblyDto>(
+                client,
+                $"/api/movie-studio/projects/{fixture.Project.Project.Id}/final-assembly",
+                new
+                {
+                    resolutionProfile = MovieFinalAssemblyProfiles.Hd1080p,
+                    timeline = new[] { new { takeId, inPointSeconds = 0m } },
+                },
+                idempotencyKey: idempotencyKey);
+            Assert.Equal(assembly.Id, replay.Id);
+            Assert.Equal(assembly.GenerationJobId, replay.GenerationJobId);
+            Assert.Equal(MovieAssemblyStatuses.Cancelled, replay.Status);
+            Assert.Null(replay.OutputAssetId);
+
+            using (var verifyScope = factory.Services.CreateScope())
+            {
+                var verifyDb = verifyScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+                var persisted = await verifyDb.MovieAssemblies.AsNoTracking()
+                    .SingleAsync(item => item.Id == assembly.Id);
+                Assert.Equal(MovieAssemblyStatuses.Cancelled, persisted.Status);
+                Assert.Null(persisted.AssetId);
+                Assert.Equal(1, await verifyDb.GenerationJobs.AsNoTracking()
+                    .CountAsync(item => item.IdempotencyKey == idempotencyKey));
+                Assert.Equal(1, await verifyDb.MovieAssemblies.AsNoTracking()
+                    .CountAsync(item => item.IdempotencyKey == idempotencyKey));
+                Assert.False(await verifyDb.Assets.AsNoTracking()
+                    .AnyAsync(item => item.SourceGenerationJobId == assembly.GenerationJobId));
+            }
+
             var inputRoot = Path.Combine(Path.GetTempPath(), "taslim-final-assembly-inputs");
             var leftovers = Directory.Exists(inputRoot)
                 ? Directory.EnumerateFiles(inputRoot, $"{sourceAssetId:N}.*", SearchOption.AllDirectories).ToArray()
@@ -205,8 +258,8 @@ public sealed class MovieFinalAssemblyCancellationCleanupTests : IClassFixture<M
 
     private async Task<(Guid TakeId, Guid AssetId)> CreateFinalizedTakeAsync(HttpClient client, Guid projectId, Guid shotId)
     {
-        var generated = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
-            client,
+        var generated = await MovieOperationalFixtures.PostWithConfirmedMovieQuoteAsync<MovieStudioGenerationResponse>(
+            factory, client,
             $"/api/movie-studio/shots/{shotId}/generate",
             new { title = "Cancellation cleanup source take" },
             idempotencyKey: "assembly-cancellation-source-1");

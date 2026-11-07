@@ -755,7 +755,13 @@ public sealed record MovieVideoGenerationRequest(
     bool UpscalingRequested = false,
     string? FirstFrameImageUri = null,
     string? LastFrameImageUri = null,
-    IReadOnlyList<MovieVideoReferenceImage>? ReferenceImages = null);
+    IReadOnlyList<MovieVideoReferenceImage>? ReferenceImages = null,
+    // Preserve the priced request intent at the provider-neutral boundary.
+    // Adapters must still validate supported resolutions and quality levels.
+    string? TargetResolution = null,
+    string? QualityTier = null,
+    // A separate character snapshot avoids replacing the movie's visual guide.
+    string? CharacterContinuityJson = null);
 public sealed record MovieVideoReferenceImage(string Uri, string? Role = null);
 
 public sealed record MovieVideoSubmission(string ProviderJobId);
@@ -787,11 +793,48 @@ public sealed record MovieVideoProviderOutput(
     string? SafeMetadataJson,
     string? ProviderModelKey = null);
 
+/// <summary>Conservative single-job duration capability advertised by a video adapter.</summary>
+public sealed record MovieClipDurationRange(int MinimumSeconds, int MaximumSeconds)
+{
+    public bool Supports(int seconds) => MinimumSeconds > 0 && MaximumSeconds >= MinimumSeconds
+        && seconds >= MinimumSeconds && seconds <= MaximumSeconds;
+}
+
 public interface IMovieVideoProvider
 {
     string Key { get; }
+    // Exact adapter model used for priced SceneClip requests. Unknown providers
+    // remain unpriceable by default; callers must not fan out across model rows.
+    string? SceneClipPricingModelKey => null;
     bool IsAvailable { get; }
     IReadOnlyCollection<string> SupportedOperations { get; }
+    // Unknown adapters fail closed at legacy scene/shot admission. Implementations
+    // must declare only durations their own submission contract can accept.
+    MovieClipDurationRange? SceneClipDurationRange => null;
+    // A description longer than the entire provider prompt limit can never
+    // be submitted faithfully. Null means no safe early length assertion.
+    // Providers still validate the assembled prompt before outbound submission.
+    int? SceneClipPromptMaxCharacters => null;
+    // Account for adapter-inserted section labels and newlines before queueing
+    // potentially billable work. Unknown adapters default to zero overhead.
+    int SceneClipPromptFormattingOverheadCharacters => 0;
+    // Some adapters include the full world-continuity snapshot in the paid
+    // prompt. Opt in only when the adapter actually sends that field so
+    // admission and worker checks use the same conservative prompt budget.
+    bool SceneClipWorldContextInPrompt => false;
+    // A provider may opt in only after mapping these distinct frame/reference
+    // fields to its verified submission payload. Unknown adapters fail closed.
+    bool SupportsSceneClipFrameReferences => false;
+    // Declared only when an adapter can honor the same priced output profile.
+    // Unknown providers fail closed before usage reservation or paid submission.
+    bool SupportsSceneClipCostIntent(string sourceResolution, string targetResolution,
+        string qualityTier, string processingPath, string aspectRatio) => false;
+    // SourceImageUri can select a distinct image-to-video execution mode.
+    // It is not covered by the base scene-clip quote unless explicitly priced.
+    bool SupportsSceneClipSourceImageCostIntent => false;
+    // Reference packages are a distinct Movie input mode. Unknown adapters must
+    // not queue them as if the base generation quote covered them.
+    bool SupportsReferencePackageCostIntent => false;
     Task<MovieVideoSubmission> SubmitAsync(MovieVideoGenerationRequest request, CancellationToken cancellationToken);
     Task<MovieVideoProviderStatus> GetStatusAsync(string providerJobId, CancellationToken cancellationToken);
     Task<MovieVideoProviderOutput> RetrieveAsync(string providerJobId, MovieVideoProviderStatus status, CancellationToken cancellationToken);
@@ -864,7 +907,17 @@ public sealed record MovieGenerationInput(
     int? TakeCount = null,
     string? FirstFrameImageUri = null,
     string? LastFrameImageUri = null,
-    IReadOnlyList<MovieVideoReferenceImage>? ReferenceImages = null);
+    IReadOnlyList<MovieVideoReferenceImage>? ReferenceImages = null,
+    // Bind new priced jobs to the adapter selected at admission. Older serialized
+    // jobs without this optional field retain their historical execution path.
+    string? SelectedProviderKey = null,
+    // Production renders persist the exact character context they send to video.
+    string? CharacterContinuityJson = null,
+    // New priced scene jobs pin the adapter model selected during admission.
+    // Older serialized jobs retain their historical execution path.
+    string? SelectedProviderModelKey = null,
+    // Approved production jobs pin the opaque quote fingerprint displayed at confirmation.
+    string? SelectedProviderQuoteFingerprint = null);
 
 public sealed record MovieProviderReadinessDto(bool Ready, IReadOnlyList<string> SupportedOperations);
 
@@ -902,6 +955,19 @@ public sealed record MovieStudioProjectDto(Guid Id, Guid WorkspaceId, Guid? Proj
 public sealed record MovieStudioProjectResponse(MovieStudioProjectDto Project, GenerationJobDto? Job);
 public sealed record MovieStudioProviderResponse(MovieProviderReadinessDto Provider);
 public sealed record MovieStudioGenerationResponse(MovieStudioProjectDto Project, GenerationJobDto Job, Guid ClipId);
+public sealed record MovieSceneGenerationPreviewDto(
+    int DurationSeconds,
+    string SourceResolution,
+    string TargetResolution,
+    string QualityTier,
+    string ProcessingPath,
+    bool ExecutionProfileVerified,
+    bool CanConfirmCost,
+    GenerationCostPreviewDto? CostGuardrails,
+    string? RejectionCode,
+    string? RejectionMessage,
+    string? ProviderKey = null,
+    string? ProviderModelKey = null);
 public sealed record MovieGuideRevisionResponse(MovieGuideRevisionDto Revision, MovieDirectorContextDto? AuthoritativeContext);
 public sealed record MovieGuideHistoryResponse(Guid MovieGuideId, int CurrentRevisionNumber, int? LockedRevisionNumber, IReadOnlyList<MovieGuideRevisionDto> Revisions);
 
@@ -1005,11 +1071,21 @@ public sealed record MovieStudioGenerationRequest(
     // Movie generation is a paid operation. The server evaluates the same cost
     // guardrail as the production orchestrator and refuses to queue when the
     // estimate is unavailable or an expensive estimate was not confirmed.
-    bool ConfirmationAccepted = false);
+    bool ConfirmationAccepted = false,
+    // Nullable for request compatibility; fresh scene/shot queue admission requires
+    // all quote fields after canonical idempotent replays have been resolved.
+    // Server-side provider selection and price estimation remain authoritative.
+    string? ExpectedProviderKey = null,
+    string? ExpectedProviderModelKey = null,
+    decimal? ExpectedProviderCostUsd = null);
 
 
 public static class MovieStudioValidation
 {
+    // A full-film project/timeline limit, not a per-provider generation clip limit.
+    public const int MaxProjectDurationSeconds = 120 * 60;
+    public const int MaxQuickDurationSeconds = 60 * 60;
+
     public static readonly IReadOnlySet<string> SupportedAspectRatios = new HashSet<string>(StringComparer.Ordinal)
     {
         "16:9", "9:16", "1:1", "4:5", "4:3",
@@ -1019,7 +1095,9 @@ public static class MovieStudioValidation
     {
         if (string.IsNullOrWhiteSpace(request.Title) || request.Title.Trim().Length > 160) return "Add a movie title.";
         if (string.IsNullOrWhiteSpace(request.Description) || request.Description.Trim().Length > 8000) return "Describe the movie in 1–8,000 characters.";
-        if (request.DurationSeconds is < 1 or > 3600) return "Movie duration must be between 1 second and 60 minutes.";
+        if (request.DurationSeconds is < 1 or > MaxProjectDurationSeconds) return "Movie duration must be between 1 second and 120 minutes.";
+        if (request.Mode == MovieProjectModes.Quick && request.DurationSeconds > MaxQuickDurationSeconds)
+            return "Quick Movie duration must be between 1 second and 60 minutes.";
         if (!SupportedAspectRatios.Contains(request.AspectRatio)) return "Choose a supported aspect ratio.";
         if (!LanguageCodes.Supported.Contains(request.Language)) return "Choose English, Arabic, or Kurdish.";
         if (request.Mode is not (MovieProjectModes.Quick or MovieProjectModes.Full)) return "Choose Quick Movie or Full Movie Project.";

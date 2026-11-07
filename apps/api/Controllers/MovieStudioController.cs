@@ -12,7 +12,7 @@ namespace Taslim.Api.Controllers;
 [ApiController]
 [Authorize]
 [Route("api/movie-studio")]
-public sealed class MovieStudioController(IMovieStudioService movies, IMovieProductionComplexityService complexity, IMovieDurationBudgetService durationBudgets, IMovieGuideService guides, IMovieStoryService stories, IMovieStoryCastService storyCast, IMovieCharacterContinuityService continuity, IMovieWorldContinuityService worldContinuity, IMovieProductionContinuityService productionContinuity, IMovieProductionReferencePackageService productionReferences, IMovieProductionPreflightService productionPreflight, IMovieTimelineService timeline, IMovieTimelineTransitionService transitionEdits, IMovieTakeSelectService takeSelects, IMovieShotExecutionService shotExecution, MovieAuthorizationService authorization, MovieShotImportanceService shotImportance, IMovieCinematographyPlanningService cinematographyPlanning, IMovieCharacterProductionSheetService productionSheets, IMovieLocationGeographySheetService geographySheets, IMoviePropBibleService propBible, IMovieReferenceReadinessService referenceReadiness, IMovieMissingInsertPlannerService insertPlanner) : ControllerBase
+public sealed class MovieStudioController(IMovieStudioService movies, IMovieProductionComplexityService complexity, IMovieDurationBudgetService durationBudgets, IMovieGuideService guides, IMovieStoryService stories, IMovieStoryCastService storyCast, IMovieCharacterContinuityService continuity, IMovieWorldContinuityService worldContinuity, IMovieProductionContinuityService productionContinuity, IMovieProductionReferencePackageService productionReferences, IMovieProductionPreflightService productionPreflight, IMovieTimelineService timeline, IMovieTimelineTransitionService transitionEdits, IMovieTakeSelectService takeSelects, IMovieShotExecutionService shotExecution, MovieAuthorizationService authorization, MovieShotImportanceService shotImportance, IMovieCinematographyPlanningService cinematographyPlanning, IMovieCharacterProductionSheetService productionSheets, IMovieLocationGeographySheetService geographySheets, IMoviePropBibleService propBible, IMovieReferenceReadinessService referenceReadiness, IMovieMissingInsertPlannerService insertPlanner, IMovieVideoProvider videoProvider) : ControllerBase
 {
     [HttpGet("cinematography/presets")]
     public IActionResult CinematographyPresets() => Ok(CinematographyPresetCatalog.All);
@@ -45,12 +45,74 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
         return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result);
     }
 
+
+    [HttpPatch("projects/{id:guid}/duration")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> UpdateProjectDuration(Guid id, MovieStudioProjectDurationRequest request, CancellationToken cancellationToken)
+    {
+        if (!ModelState.IsValid) return ApiResults.Validation(this);
+        try
+        {
+            var result = await movies.UpdateProjectDurationAsync(GetUserId(), id, request.DurationSeconds, cancellationToken);
+            return result is null
+                ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.")
+                : Ok(result);
+        }
+        catch (MovieStudioValidationException exception)
+        {
+            return ApiResults.Error(this, 400, "MOVIE_REQUEST_INVALID", exception.Message);
+        }
+    }
+
     [HttpGet("projects/{id:guid}/duration-budget")]
     public async Task<IActionResult> GetDurationBudget(Guid id, CancellationToken cancellationToken)
     {
         var result = await durationBudgets.GetAsync(GetUserId(), id, cancellationToken);
         return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result);
     }
+    // This endpoint is read-only and exposes only a duration split plan.
+    // It does not approve reference packages, quote generation costs, create
+    // a clip/job, or claim that long-form assembly is production-ready.
+    [HttpGet("projects/{id:guid}/clip-segmentation-preview")]
+    public async Task<IActionResult> GetClipSegmentationPreview(Guid id, CancellationToken cancellationToken)
+    {
+        var movie = await movies.GetAsync(GetUserId(), id, cancellationToken);
+        if (movie is null)
+            return ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.");
+
+        var adapterDeclaresSceneClip = videoProvider.IsAvailable
+            && videoProvider.SupportedOperations.Contains(
+                MovieStudioOperations.SceneClip, StringComparer.OrdinalIgnoreCase);
+        IReadOnlyList<MoviePlannedClipSegment> segments = [];
+        var canSplit = adapterDeclaresSceneClip
+            && MovieClipSegmentationPlanner.TryPlan(
+                movie.DurationSeconds, videoProvider.SceneClipDurationRange, out segments);
+
+        // Scene-aware slots require a complete, explicitly timed scene plan.
+        // Never infer missing scene durations or let a slot cross scenes.
+        IReadOnlyList<MoviePlannedSceneClipSegment> sceneSegments = [];
+        var canSplitByScene = canSplit
+            && movie.Scenes.Count > 0
+            && movie.Scenes.All(scene => scene.DurationSeconds is > 0)
+            && MovieSceneClipSegmentationPlanner.TryPlan(
+                movie.DurationSeconds,
+                movie.Scenes.Select(scene => new MoviePlannedSceneDuration(
+                    scene.Id, scene.Sequence, scene.DurationSeconds!.Value)).ToArray(),
+                videoProvider.SceneClipDurationRange,
+                out sceneSegments);
+        return Ok(new MovieClipSegmentationPreviewDto(
+            id,
+            movie.DurationSeconds,
+            videoProvider.Key,
+            adapterDeclaresSceneClip,
+            canSplit,
+            videoProvider.SceneClipDurationRange?.MinimumSeconds,
+            videoProvider.SceneClipDurationRange?.MaximumSeconds,
+            segments,
+            canSplitByScene,
+            sceneSegments));
+    }
+
     [HttpGet("projects/{id:guid}/timeline")]
     public async Task<IActionResult> GetTimeline(Guid id, CancellationToken cancellationToken)
     {
@@ -847,14 +909,32 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
         [FromQuery] Guid? sourceVersionId,
         [FromQuery] string? targetResolution,
         [FromQuery] string? qualityTier,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        [FromQuery] bool confirmationAccepted = false,
+        [FromQuery] Guid? sourceProductionVersionId = null,
+        [FromQuery] decimal? expectedMaximumAmountUsd = null,
+        [FromQuery] string? expectedQuoteFingerprint = null)
     {
         try
         {
+            // Support both existing source query names without silently choosing
+            // between conflicting production versions. This GET is read-only;
+            // confirmation here never authorizes a paid queue submission.
+            if (sourceVersionId.HasValue && sourceProductionVersionId.HasValue
+                && sourceVersionId.Value != sourceProductionVersionId.Value)
+                return ApiResults.Error(this, 400, "MOVIE_PREFLIGHT_SOURCE_CONFLICT",
+                    "Choose one production source version for preflight.");
+            var selectedSourceId = sourceVersionId ?? sourceProductionVersionId;
             var result = await productionPreflight.EvaluateAsync(
                 GetUserId(),
                 shotId,
-                new MovieProductionPreflightRequest(sourceVersionId, targetResolution, qualityTier),
+                new MovieProductionPreflightRequest(
+                    selectedSourceId,
+                    targetResolution,
+                    qualityTier,
+                    confirmationAccepted,
+                    expectedMaximumAmountUsd,
+                    expectedQuoteFingerprint),
                 cancellationToken);
             return result is null ? ApiResults.Error(this, 404, "MOVIE_SHOT_NOT_FOUND", "Movie shot not found.") : Ok(result);
         }
@@ -1038,6 +1118,30 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
         catch (GenerationJobValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
     }
 
+    [HttpPost("projects/{id:guid}/scenes/{sceneId:guid}/generation-preview")]
+    [ValidateAntiForgeryToken]
+    [EnableRateLimiting(RateLimiting.ExpensiveAi)]
+    public async Task<IActionResult> PreviewSceneGeneration(Guid id, Guid sceneId, MovieStudioGenerationRequest request, CancellationToken cancellationToken)
+    {
+        if (!ModelState.IsValid) return ApiResults.Validation(this);
+        var result = await movies.PreviewSceneGenerationAsync(GetUserId(), id, sceneId, request, cancellationToken);
+        return result is null
+            ? ApiResults.Error(this, 404, "MOVIE_SCENE_NOT_FOUND", "Movie scene not found.")
+            : Ok(result);
+    }
+
+    [HttpPost("shots/{shotId:guid}/generation-preview")]
+    [ValidateAntiForgeryToken]
+    [EnableRateLimiting(RateLimiting.ExpensiveAi)]
+    public async Task<IActionResult> PreviewShotGeneration(Guid shotId, MovieStudioGenerationRequest request, CancellationToken cancellationToken)
+    {
+        if (!ModelState.IsValid) return ApiResults.Validation(this);
+        var result = await movies.PreviewShotGenerationAsync(GetUserId(), shotId, request, cancellationToken);
+        return result is null
+            ? ApiResults.Error(this, 404, "MOVIE_SHOT_NOT_FOUND", "Movie shot not found.")
+            : Ok(result);
+    }
+
     [HttpPost("projects/{id:guid}/scenes/{sceneId:guid}/generate")]
     [ValidateAntiForgeryToken]
     [EnableRateLimiting(RateLimiting.ExpensiveAi)]
@@ -1048,6 +1152,7 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
             var result = await movies.GenerateSceneAsync(GetUserId(), id, sceneId, request, cancellationToken, Request.Headers["Idempotency-Key"].FirstOrDefault());
             return result is null ? ApiResults.Error(this, 404, "MOVIE_SCENE_NOT_FOUND", "Movie scene not found.") : Accepted(result);
         }
+        catch (GenerationJobValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
         catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_SCENE_NOT_READY", exception.Message); }
         catch (MovieReferenceReadinessException exception) { return ApiResults.Error(this, 409, exception.Code, exception.Message); }
         catch (MovieStudioCostGuardException exception) { return ApiResults.Error(this, 402, exception.Code, exception.Message); }
@@ -1063,6 +1168,7 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
             var result = await movies.GenerateShotAsync(GetUserId(), shotId, request, cancellationToken, Request.Headers["Idempotency-Key"].FirstOrDefault());
             return result is null ? ApiResults.Error(this, 404, "MOVIE_SHOT_NOT_FOUND", "Movie shot not found.") : Accepted(result);
         }
+        catch (GenerationJobValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
         catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_SHOT_NOT_READY", exception.Message); }
         catch (MovieReferenceReadinessException exception) { return ApiResults.Error(this, 409, exception.Code, exception.Message); }
         catch (MovieStudioCostGuardException exception) { return ApiResults.Error(this, 402, exception.Code, exception.Message); }
