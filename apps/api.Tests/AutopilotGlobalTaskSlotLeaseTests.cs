@@ -1352,10 +1352,19 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
             Assert.Equal(1, safeRetry.ActiveSlotsObserved);
         }
 
+        await using (var db = CreateContext())
+        {
+            var accepted = await CreateAllocator(db).RecordAcceptedAsync(ids[0], key, "external-task-after-safe-retry");
+            Assert.Equal(AutopilotGlobalTaskSlotOutcomes.AlreadyActive, accepted.Outcome);
+            Assert.True(accepted.SlotHeld);
+            Assert.False(accepted.MayCallProvider);
+        }
+
         await using var verify = CreateContext();
         var recovered = await verify.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == ids[0]);
-        Assert.Equal(AutopilotWaveLaunchStatuses.Launching, recovered.Status);
+        Assert.Equal(AutopilotWaveLaunchStatuses.Launched, recovered.Status);
         Assert.Equal(2, recovered.LaunchAttempt);
+        Assert.Equal("external-task-after-safe-retry", recovered.ExternalTaskId);
     }
 
     [Fact]
@@ -1391,6 +1400,131 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Accepted_provider_id_without_durable_reservation_cannot_launch_or_free_a_global_slot()
+    {
+        var ids = await SeedLaunchTasksAsync(total: 21, initiallyActive: 20, tasksPerWave: 21);
+        string key;
+        const string attemptedExternalTaskId = "external-task-without-reservation";
+        const string legacyDetail = "legacy_unmarked_launching_row";
+        await using (var db = CreateContext())
+        {
+            var task = await db.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == ids[0]);
+            task.Status = AutopilotWaveLaunchStatuses.Launching;
+            task.ExternalTaskId = null;
+            task.LaunchedAt = null;
+            task.CompletedAt = null;
+            task.ReasonCode = null;
+            task.LastStatusDetail = legacyDetail;
+            task.UpdatedAt = DateTime.UtcNow;
+            task.ConcurrencyToken = Guid.NewGuid();
+            key = AutopilotGlobalTaskSlotIdentity.CreateIdempotencyKey(task.WaveKey, task.TaskKey);
+            await db.SaveChangesAsync();
+        }
+
+        var fakeProviderCalls = 0;
+        await using (var db = CreateContext())
+        {
+            var accepted = await CreateAllocator(db).RecordAcceptedAsync(ids[0], key, attemptedExternalTaskId);
+            if (accepted.MayCallProvider) fakeProviderCalls++;
+            Assert.Equal(AutopilotGlobalTaskSlotOutcomes.AmbiguousLaunch, accepted.Outcome);
+            Assert.True(accepted.SlotHeld);
+            Assert.False(accepted.MayCallProvider);
+            Assert.Equal("global_slot_reservation_provenance_missing", accepted.ReasonCode);
+        }
+
+        await using (var verifyUnmarked = CreateContext())
+        {
+            var stillUnmarked = await verifyUnmarked.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == ids[0]);
+            Assert.Equal(AutopilotWaveLaunchStatuses.Launching, stillUnmarked.Status);
+            Assert.Null(stillUnmarked.ExternalTaskId);
+            Assert.Null(stillUnmarked.ReasonCode);
+            Assert.Equal(legacyDetail, stillUnmarked.LastStatusDetail);
+        }
+
+        await using (var db = CreateContext())
+        {
+            var allocator = CreateAllocator(db);
+            var ambiguous = await allocator.RecordAmbiguousAsync(ids[0], key, "legacy_timeout");
+            Assert.Equal(AutopilotGlobalTaskSlotOutcomes.AmbiguousLaunch, ambiguous.Outcome);
+            Assert.True(ambiguous.SlotHeld);
+            Assert.False(ambiguous.MayCallProvider);
+
+            var acceptedAfterAmbiguous = await allocator.RecordAcceptedAsync(ids[0], key, attemptedExternalTaskId);
+            if (acceptedAfterAmbiguous.MayCallProvider) fakeProviderCalls++;
+            Assert.Equal(AutopilotGlobalTaskSlotOutcomes.AmbiguousLaunch, acceptedAfterAmbiguous.Outcome);
+            Assert.True(acceptedAfterAmbiguous.SlotHeld);
+            Assert.False(acceptedAfterAmbiguous.MayCallProvider);
+            Assert.Equal("global_slot_reservation_provenance_missing", acceptedAfterAmbiguous.ReasonCode);
+        }
+
+        var twentyFirst = await ClaimAsync(ids[20], CompleteInventory());
+        if (twentyFirst.MayCallProvider) fakeProviderCalls++;
+        Assert.Equal(AutopilotGlobalTaskSlotOutcomes.CapacityReached, twentyFirst.Outcome);
+        Assert.Equal(20, twentyFirst.ActiveSlotsObserved);
+        Assert.False(twentyFirst.MayCallProvider);
+        Assert.Equal(0, fakeProviderCalls);
+
+        await using var verify = CreateContext();
+        var unmarked = await verify.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == ids[0]);
+        Assert.Equal(AutopilotWaveLaunchStatuses.Launching, unmarked.Status);
+        Assert.Null(unmarked.ExternalTaskId);
+        Assert.Null(unmarked.LaunchedAt);
+        Assert.Null(unmarked.CompletedAt);
+        Assert.Equal("global_slot_reserved", unmarked.ReasonCode);
+        Assert.NotNull(unmarked.LastStatusDetail);
+        Assert.StartsWith("slot_retained_until_authoritative_reconciliation:", unmarked.LastStatusDetail!, StringComparison.Ordinal);
+        Assert.Equal(1, unmarked.LaunchAttempt);
+        Assert.Equal(20, await verify.AutopilotWaveLaunchTasks.CountAsync(item =>
+            item.Status == AutopilotWaveLaunchStatuses.Launching || item.Status == AutopilotWaveLaunchStatuses.Launched));
+        var deniedTask = await verify.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == ids[20]);
+        Assert.Equal(AutopilotWaveLaunchStatuses.Planned, deniedTask.Status);
+        Assert.Equal(0, deniedTask.LaunchAttempt);
+        Assert.Null(deniedTask.ExternalTaskId);
+    }
+
+    [Theory]
+    [InlineData("global_slot_claimed:forged")]
+    [InlineData("global_slot_claimed:0/20")]
+    [InlineData("global_slot_claimed:21/20")]
+    [InlineData("global_slot_claimed:1/19")]
+    [InlineData("global_slot_claimed:1/20/extra")]
+    public async Task Malformed_or_forged_admission_detail_cannot_authorize_provider_acceptance(string detail)
+    {
+        var ids = await SeedLaunchTasksAsync(total: 1, initiallyActive: 0);
+        string key;
+        await using (var db = CreateContext())
+        {
+            var task = await db.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == ids[0]);
+            task.Status = AutopilotWaveLaunchStatuses.Launching;
+            task.LaunchAttempt = 1;
+            task.ReasonCode = "global_slot_reserved";
+            task.LastStatusDetail = detail;
+            key = AutopilotGlobalTaskSlotIdentity.CreateIdempotencyKey(task.WaveKey, task.TaskKey);
+            await db.SaveChangesAsync();
+        }
+
+        const string attemptedExternalTaskId = "external-task-forged-marker";
+        await using (var db = CreateContext())
+        {
+            var result = await CreateAllocator(db).RecordAcceptedAsync(ids[0], key, attemptedExternalTaskId);
+            Assert.Equal(AutopilotGlobalTaskSlotOutcomes.AmbiguousLaunch, result.Outcome);
+            Assert.True(result.SlotHeld);
+            Assert.False(result.MayCallProvider);
+            Assert.Equal("global_slot_reservation_provenance_missing", result.ReasonCode);
+        }
+
+        await using var verify = CreateContext();
+        var unchanged = await verify.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == ids[0]);
+        Assert.Equal(AutopilotWaveLaunchStatuses.Launching, unchanged.Status);
+        Assert.Equal(1, unchanged.LaunchAttempt);
+        Assert.Equal("global_slot_reserved", unchanged.ReasonCode);
+        Assert.Equal(detail, unchanged.LastStatusDetail);
+        Assert.Null(unchanged.ExternalTaskId);
+        Assert.Null(unchanged.LaunchedAt);
+        Assert.Null(unchanged.CompletedAt);
+    }
+
+    [Fact]
     public async Task Existing_provider_task_is_reused_by_the_same_idempotency_key_after_restart()
     {
         var ids = await SeedLaunchTasksAsync(total: 1, initiallyActive: 0);
@@ -1409,8 +1543,22 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
         }
         await using (var db = CreateContext())
         {
-            var accepted = await CreateAllocator(db).RecordAcceptedAsync(ids[0], key, "external-task-recovered");
+            var allocator = CreateAllocator(db);
+            var accepted = await allocator.RecordAcceptedAsync(ids[0], key, "external-task-recovered");
             Assert.Equal(AutopilotGlobalTaskSlotOutcomes.AlreadyActive, accepted.Outcome);
+            Assert.True(accepted.SlotHeld);
+            Assert.False(accepted.MayCallProvider);
+
+            var duplicate = await allocator.RecordAcceptedAsync(ids[0], key, "external-task-recovered");
+            Assert.Equal(AutopilotGlobalTaskSlotOutcomes.AlreadyActive, duplicate.Outcome);
+            Assert.True(duplicate.SlotHeld);
+            Assert.False(duplicate.MayCallProvider);
+
+            var conflict = await allocator.RecordAcceptedAsync(ids[0], key, "different-external-task");
+            Assert.Equal(AutopilotGlobalTaskSlotOutcomes.IdempotencyConflict, conflict.Outcome);
+            Assert.True(conflict.SlotHeld);
+            Assert.False(conflict.MayCallProvider);
+            Assert.Equal("external-task-recovered", conflict.ExternalTaskId);
         }
 
         var inventory = new AutopilotGlobalTaskInventorySnapshot(

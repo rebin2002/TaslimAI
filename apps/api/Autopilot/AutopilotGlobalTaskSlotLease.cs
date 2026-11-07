@@ -973,6 +973,9 @@ public sealed class AutopilotGlobalTaskSlotAllocator
                     }
                     if (task.Status != AutopilotWaveLaunchStatuses.Launching)
                         return new(AutopilotGlobalTaskSlotOutcomes.InvalidTransition, false, false, 0, task.ExternalTaskId, "launch_claim_not_held");
+                    if (!HasDurableProviderAdmissionEvidence(task))
+                        return new(AutopilotGlobalTaskSlotOutcomes.AmbiguousLaunch, true, false, 0,
+                            task.ExternalTaskId, "global_slot_reservation_provenance_missing");
 
                     task.ExternalTaskId = externalTaskId.Trim();
                     task.Status = AutopilotWaveLaunchStatuses.Launched;
@@ -1375,6 +1378,36 @@ public sealed class AutopilotGlobalTaskSlotAllocator
         task.Status == AutopilotWaveLaunchStatuses.Launched
         || (task.Status == AutopilotWaveLaunchStatuses.Launching
             && (task.ReasonCode == SlotReservedReason || task.ReasonCode == UnverifiedProviderRejectionReason));
+
+    // Occupancy markers also represent stale or ambiguous held rows. Only the
+    // details written by a reservation path that authorizes a provider call are
+    // sufficient provenance for persisting a provider acceptance.
+    private bool HasDurableProviderAdmissionEvidence(AutopilotWaveLaunchTask task)
+    {
+        if (task.Status != AutopilotWaveLaunchStatuses.Launching
+            || !string.Equals(task.ReasonCode, SlotReservedReason, StringComparison.Ordinal))
+            return false;
+
+        var detail = task.LastStatusDetail;
+        if (detail is null) return false;
+        if (string.Equals(detail, "slot_retained; provider_retry_requires_idempotency", StringComparison.Ordinal))
+            return true;
+
+        const string prefix = "global_slot_claimed:";
+        if (!detail.StartsWith(prefix, StringComparison.Ordinal)) return false;
+        var counts = detail.AsSpan(prefix.Length);
+        var separator = counts.IndexOf('/');
+        if (separator <= 0 || separator == counts.Length - 1 || counts[(separator + 1)..].IndexOf('/') >= 0)
+            return false;
+
+        if (!int.TryParse(counts[..separator], System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture, out var admittedCount)
+            || !int.TryParse(counts[(separator + 1)..], System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture, out var recordedCapacity))
+            return false;
+
+        return recordedCapacity == capacity && admittedCount >= 1 && admittedCount <= recordedCapacity;
+    }
 
     private DateTime UtcNow() => clock.GetUtcNow().UtcDateTime;
 
