@@ -381,6 +381,47 @@ public sealed class MusicGenerationSongContractTests : IClassFixture<MusicSongCa
     }
 
     [Theory]
+    [InlineData("ku", "sorani_erbil", "[TEST ONLY] هەولێر — سۆرانی")]
+    [InlineData("ar", "iraqi_baghdadi", "[TEST ONLY] بغداد — عراقي")]
+    public async Task Combined_lyrics_and_audio_reference_request_fails_before_cost_preflight_job_creation_or_provider_call(
+        string lyricsLanguage,
+        string lyricsDialect,
+        string lyricLine)
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, $"music-combined-reference-{Guid.NewGuid():N}@example.com");
+        var response = await SendWithCsrf(client, new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            description = "Synthetic lyrics plus private audio reference contract test only",
+            purpose = "Keep unsupported combined modes from charging or silently falling back",
+            genre = "folk",
+            mood = "calm",
+            durationSeconds = 60,
+            creationMode = "song_with_vocals",
+            vocalPreference = "vocal",
+            language = "en",
+            lyricsLanguage,
+            lyricsDialect,
+            lyricsRightsConfirmed = true,
+            lyrics = new[] { new { section = "verse", lines = new[] { lyricLine } } },
+            referenceRightsConfirmed = true,
+            referenceAssets = new[] { new { mediaType = "audio", assetId = Guid.NewGuid() } },
+        });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(GenerationJobErrorCodes.MusicProviderUnavailable, body.GetProperty("error").GetProperty("code").GetString());
+        Assert.Equal(0, factory.Services.GetRequiredService<CountingUsageCostControl>().PreflightCalls);
+        Assert.Equal(0, factory.Services.GetRequiredService<NoCallMusicProvider>().Calls);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.False(await db.GenerationJobs.AsNoTracking().AnyAsync(item => item.CreatedByUserId == auth.User.Id));
+        Assert.False(await db.UsageTransactions.AsNoTracking().AnyAsync(item => item.UserId == auth.User.Id));
+    }
+
+    [Theory]
     [InlineData("audio")]
     [InlineData("video")]
     public async Task Unsupported_reference_assets_fail_before_cost_preflight_job_creation_or_provider_call(string mediaType)
