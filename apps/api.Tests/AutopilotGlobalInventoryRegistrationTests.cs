@@ -1,16 +1,17 @@
-using Microsoft.AspNetCore.Hosting;
-using Microsoft.AspNetCore.Mvc.Testing;
-using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Taslim.Api.Autopilot;
 using Xunit;
 
 namespace Taslim.Api.Tests;
 
-/// <summary>
-/// Keeps Bridge inventory admission behind explicit deployment configuration.
-/// No test enables external Manus launches or reads production secrets.
-/// </summary>
+// Environment-based configuration is read at WebApplication.CreateBuilder time,
+// before WebApplicationFactory's ConfigureAppConfiguration override can be applied.
+// Isolate this group from all other xUnit collections to avoid leaking process
+// settings into unrelated test hosts.
+[CollectionDefinition("AutopilotGlobalInventoryEnvironment", DisableParallelization = true)]
+public sealed class AutopilotGlobalInventoryEnvironmentCollection { }
+
+[Collection("AutopilotGlobalInventoryEnvironment")]
 public sealed class AutopilotGlobalInventoryRegistrationTests
 {
     [Fact]
@@ -27,25 +28,34 @@ public sealed class AutopilotGlobalInventoryRegistrationTests
     [Fact]
     public void Explicit_userwide_inventory_configuration_registers_complete_admission_stack()
     {
-        using var baseFactory = new TaslimApiFactory();
-        using var factory = baseFactory.WithWebHostBuilder(builder =>
-            builder.ConfigureAppConfiguration((_, configuration) =>
-                configuration.AddInMemoryCollection(new Dictionary<string, string?>
-                {
-                    ["Autopilot:GlobalInventory:Enabled"] = "true",
-                    ["Autopilot:GlobalInventory:BridgeTasksUrl"] = "https://bridge.example.test/v1/tasks",
-                    ["Autopilot:GlobalInventory:ExpectedManusUserId"] = "verified-test-user",
-                    ["Autopilot:MaxConcurrency"] = "99",
-                })));
+        var settings = new Dictionary<string, string?>
+        {
+            ["Autopilot__GlobalInventory__Enabled"] = "true",
+            ["Autopilot__GlobalInventory__BridgeTasksUrl"] = "https://bridge.example.test/v1/tasks",
+            ["Autopilot__GlobalInventory__ExpectedManusUserId"] = "verified-test-user",
+            ["Autopilot__MaxConcurrency"] = "99",
+        };
+        var original = settings.Keys.ToDictionary(key => key, Environment.GetEnvironmentVariable);
+        try
+        {
+            foreach (var setting in settings)
+                Environment.SetEnvironmentVariable(setting.Key, setting.Value);
 
-        using var scope = factory.Services.CreateScope();
-        Assert.IsType<ManusBridgeUserWideTaskInventoryPageSource>(
-            scope.ServiceProvider.GetRequiredService<IAutopilotGlobalTaskInventoryPageSource>());
-        Assert.NotNull(scope.ServiceProvider.GetRequiredService<AutopilotGlobalTaskInventoryReader>());
-        Assert.NotNull(scope.ServiceProvider.GetRequiredService<AutopilotGlobalTaskSlotAllocator>());
-        // Configuration alone never enables the controller or external launches.
-        var options = scope.ServiceProvider.GetRequiredService<AutopilotOptions>();
-        Assert.False(options.Enabled);
-        Assert.False(options.AllowNextWaveLaunch);
+            using var factory = new TaslimApiFactory();
+            using var scope = factory.Services.CreateScope();
+            Assert.IsType<ManusBridgeUserWideTaskInventoryPageSource>(
+                scope.ServiceProvider.GetRequiredService<IAutopilotGlobalTaskInventoryPageSource>());
+            Assert.NotNull(scope.ServiceProvider.GetRequiredService<AutopilotGlobalTaskInventoryReader>());
+            Assert.NotNull(scope.ServiceProvider.GetRequiredService<AutopilotGlobalTaskSlotAllocator>());
+            // Registration alone must not enable actual Manus launches.
+            var options = scope.ServiceProvider.GetRequiredService<AutopilotOptions>();
+            Assert.False(options.Enabled);
+            Assert.False(options.AllowNextWaveLaunch);
+        }
+        finally
+        {
+            foreach (var setting in original)
+                Environment.SetEnvironmentVariable(setting.Key, setting.Value);
+        }
     }
 }
