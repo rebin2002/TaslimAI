@@ -172,7 +172,7 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
 
             var taskIds = await SeedLaunchTasksAsync(total: 3, initiallyActive: 0, tasksPerWave: 1, contextOptions: pgOptions);
             var inventoryScope = AutopilotGlobalTaskInventoryScopeIds.ManusBridgeAuthenticatedUserWide;
-            var inventoryPayload = BuildBridgeInventoryPayload(taskCount: 20);
+            var inventoryPayload = BuildBridgeInventoryPayload(taskCount: 19);
             var inventoryRequestCount = 0;
             string? inventoryRequestUri = null;
             string? inventoryAuthorization = null;
