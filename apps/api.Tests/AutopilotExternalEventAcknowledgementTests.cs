@@ -149,6 +149,98 @@ public sealed class AutopilotExternalEventAcknowledgementTests : IClassFixture<A
         finally { Environment.SetEnvironmentVariable(SecretVariable, previous); }
     }
 
+    // Characterization only: source/type acceptance below records the current v1
+    // metadata-authentication gap, not an approved signing contract.
+    [Theory]
+    [InlineData("source", "alternate-source", 202, "alternate-source", "wave.task.completed", "evt-v1-header-mutation")]
+    [InlineData("type", "wave.completed", 202, "manus-bridge", "wave.completed", "evt-v1-header-mutation")]
+    [InlineData("event-id", "evt-v1-header-mutated", 400, null, null, null)]
+    public async Task Current_v1_metadata_header_mutations_are_characterized_without_provider_calls(
+        string mutation,
+        string mutatedValue,
+        int expectedStatusCode,
+        string? expectedPersistedSource,
+        string? expectedPersistedEventType,
+        string? expectedPersistedExternalEventId)
+    {
+        var previous = Environment.GetEnvironmentVariable(SecretVariable);
+        Environment.SetEnvironmentVariable(SecretVariable, Secret);
+        try
+        {
+            using var isolatedFactory = new AutopilotAcknowledgementFactory();
+            using var client = isolatedFactory.CreateClient();
+            using (var setupScope = isolatedFactory.Services.CreateScope())
+                setupScope.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+
+            using (var beforeScope = isolatedFactory.Services.CreateScope())
+            {
+                var beforeDb = beforeScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+                Assert.Empty(await beforeDb.AutopilotEvents.AsNoTracking().ToListAsync());
+                Assert.Empty(await beforeDb.AutopilotWaveLaunchTasks.AsNoTracking().ToListAsync());
+            }
+
+            const string signedExternalEventId = "evt-v1-header-mutation";
+            var payload = Payload(signedExternalEventId);
+            using var request = Request(signedExternalEventId, payload);
+            var headerName = mutation switch
+            {
+                "source" => "X-Autopilot-Source",
+                "type" => "X-Autopilot-Event-Type",
+                "event-id" => "X-Autopilot-Event-Id",
+                _ => throw new ArgumentOutOfRangeException(nameof(mutation), mutation, "Unknown test header mutation.")
+            };
+            Assert.True(request.Headers.Remove(headerName));
+            request.Headers.Add(headerName, mutatedValue);
+
+            Assert.Equal(
+                mutation == "source" ? mutatedValue : ManusBridgeWaveLaunchProvider.Key,
+                request.Headers.GetValues("X-Autopilot-Source").Single());
+            Assert.Equal(
+                mutation == "type" ? mutatedValue : AutopilotEventTypes.WaveTaskCompleted,
+                request.Headers.GetValues("X-Autopilot-Event-Type").Single());
+            Assert.Equal(
+                mutation == "event-id" ? mutatedValue : signedExternalEventId,
+                request.Headers.GetValues("X-Autopilot-Event-Id").Single());
+
+            using var response = await client.SendAsync(request);
+            Assert.Equal((HttpStatusCode)expectedStatusCode, response.StatusCode);
+            using var responseBody = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            if (expectedStatusCode == (int)HttpStatusCode.Accepted)
+            {
+                Assert.Equal("accepted", responseBody.RootElement.GetProperty("status").GetString());
+                Assert.Equal(expectedPersistedExternalEventId,
+                    responseBody.RootElement.GetProperty("externalEventId").GetString());
+            }
+            else
+            {
+                Assert.Equal("AUTOPILOT_EVENT_REJECTED",
+                    responseBody.RootElement.GetProperty("error").GetProperty("code").GetString());
+            }
+
+            Assert.Equal(0, isolatedFactory.ProviderProbe.LaunchCalls);
+            using var afterScope = isolatedFactory.Services.CreateScope();
+            var afterDb = afterScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var events = await afterDb.AutopilotEvents.AsNoTracking().ToListAsync();
+            if (expectedPersistedSource is null)
+            {
+                Assert.Empty(events);
+            }
+            else
+            {
+                var stored = Assert.Single(events);
+                Assert.Equal(expectedPersistedSource, stored.SourceSystem);
+                Assert.Equal(expectedPersistedEventType, stored.EventType);
+                Assert.Equal(expectedPersistedExternalEventId, stored.ExternalEventId);
+                Assert.Equal(payload, stored.SignalJson);
+                Assert.True(stored.SignatureVerified);
+                Assert.True(stored.ReplayProtected);
+                Assert.Equal(AutopilotEventStatuses.Queued, stored.Status);
+            }
+            Assert.Empty(await afterDb.AutopilotWaveLaunchTasks.AsNoTracking().ToListAsync());
+        }
+        finally { Environment.SetEnvironmentVariable(SecretVariable, previous); }
+    }
+
     private static string Payload(string? receiptId) => JsonSerializer.Serialize(new
     {
         waveKey = "wave-ack-contract",
@@ -264,6 +356,7 @@ public sealed class AutopilotCandidateV2OfflineParityTests
 public sealed class AutopilotAcknowledgementFactory : WebApplicationFactory<Program>
 {
     private readonly string databasePath = Path.Combine(Path.GetTempPath(), $"taslim-ack-{Guid.NewGuid():N}.sqlite");
+    public AcknowledgementProviderProbe ProviderProbe { get; } = new();
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
@@ -274,6 +367,8 @@ public sealed class AutopilotAcknowledgementFactory : WebApplicationFactory<Prog
         {
             services.RemoveAll<DbContextOptions<TaslimDbContext>>();
             services.AddDbContext<TaslimDbContext>(options => options.UseSqlite($"Data Source={databasePath};Default Timeout=30"));
+            services.RemoveAll<IWaveLaunchProvider>();
+            services.AddSingleton<IWaveLaunchProvider>(ProviderProbe);
         });
     }
 
@@ -286,4 +381,25 @@ public sealed class AutopilotAcknowledgementFactory : WebApplicationFactory<Prog
                 if (File.Exists(databasePath + suffix)) File.Delete(databasePath + suffix);
         }
     }
+}
+
+public sealed class AcknowledgementProviderProbe : IWaveLaunchProvider
+{
+    private int launchCalls;
+
+    public string ProviderKey => "acknowledgement-test-probe";
+    public bool IsConfigured => true;
+    public int LaunchCalls => Volatile.Read(ref launchCalls);
+
+    public Task<WaveLaunchProviderResult> LaunchTaskAsync(
+        WaveLaunchProviderRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        Interlocked.Increment(ref launchCalls);
+        return Task.FromResult(WaveLaunchProviderResult.Unavailable("unexpected_acknowledgement_test_provider_call"));
+    }
+
+    public Task<WaveLaunchTaskState?> GetTaskStateAsync(
+        string externalTaskId,
+        CancellationToken cancellationToken = default) => Task.FromResult<WaveLaunchTaskState?>(null);
 }
