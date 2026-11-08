@@ -188,6 +188,73 @@ public sealed class BillingGrantExpiryContractTests
     }
 
     [Fact]
+    public async Task Sqlite_refund_replay_with_same_key_is_workspace_scoped_and_never_double_credits()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connection).Options;
+        await using var db = new TaslimDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+
+        var firstWorkspace = NewWorkspace();
+        var secondWorkspace = NewWorkspace();
+        var firstUser = NewUser();
+        var secondUser = NewUser();
+        var firstUsage = NewCompletedUsage(firstWorkspace.Id, firstUser.Id, "refund-workspace:first-usage");
+        var secondUsage = NewCompletedUsage(secondWorkspace.Id, secondUser.Id, "refund-workspace:second-usage");
+        db.Workspaces.AddRange(firstWorkspace, secondWorkspace);
+        db.Users.AddRange(firstUser, secondUser);
+        db.UsageTransactions.AddRange(firstUsage, secondUsage);
+        await db.SaveChangesAsync();
+
+        var ledger = NewChargingEnabledLedger(db);
+        const string grantKey = "refund-workspace:grant";
+        const string debitKey = "refund-workspace:debit";
+        const string refundKey = "refund-workspace:once";
+        const string reason = "Synthetic workspace-scoped refund replay";
+        await ledger.GrantAsync(
+            firstWorkspace.Id, CreditEntitlementType.Purchased, 100,
+            grantKey, reason, expiresAt: DateTime.UtcNow.AddDays(30));
+        await ledger.GrantAsync(
+            secondWorkspace.Id, CreditEntitlementType.Purchased, 100,
+            grantKey, reason, expiresAt: DateTime.UtcNow.AddDays(30));
+        var firstDebit = await ledger.RecordUsageDebitAsync(firstWorkspace.Id, firstUsage.Id, 25, debitKey, reason);
+        var secondDebit = await ledger.RecordUsageDebitAsync(secondWorkspace.Id, secondUsage.Id, 25, debitKey, reason);
+        Assert.NotNull(firstDebit);
+        Assert.NotNull(secondDebit);
+
+        var firstRefund = await ledger.RefundAsync(firstWorkspace.Id, firstDebit.Entry.Id, refundKey, reason);
+        var secondRefund = await ledger.RefundAsync(secondWorkspace.Id, secondDebit.Entry.Id, refundKey, reason);
+
+        Assert.True(firstRefund.Created);
+        Assert.True(secondRefund.Created);
+        Assert.NotEqual(firstRefund.Entry.Id, secondRefund.Entry.Id);
+        Assert.Equal(CreditLedgerEntryType.Refund, firstRefund.Entry.Type);
+        Assert.Equal(CreditLedgerEntryType.Refund, secondRefund.Entry.Type);
+        Assert.Equal(25, firstRefund.Entry.Amount);
+        Assert.Equal(25, secondRefund.Entry.Amount);
+        Assert.Equal(firstDebit.Entry.Id, firstRefund.Entry.ReversesEntryId);
+        Assert.Equal(secondDebit.Entry.Id, secondRefund.Entry.ReversesEntryId);
+
+        var firstReplay = await ledger.RefundAsync(firstWorkspace.Id, firstDebit.Entry.Id, refundKey, reason);
+        var secondReplay = await ledger.RefundAsync(secondWorkspace.Id, secondDebit.Entry.Id, refundKey, reason);
+        Assert.False(firstReplay.Created);
+        Assert.False(secondReplay.Created);
+        Assert.Equal(firstRefund.Entry.Id, firstReplay.Entry.Id);
+        Assert.Equal(secondRefund.Entry.Id, secondReplay.Entry.Id);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            ledger.RefundAsync(firstWorkspace.Id, firstDebit.Entry.Id, "refund-workspace:second-key", reason));
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            ledger.RefundAsync(secondWorkspace.Id, secondDebit.Entry.Id, "refund-workspace:second-key", reason));
+        Assert.Equal(6, await db.CreditLedgerEntries.CountAsync());
+        Assert.Equal(100L, await db.CreditLedgerEntries.Where(item => item.WorkspaceId == firstWorkspace.Id).SumAsync(item => item.Amount));
+        Assert.Equal(100L, await db.CreditLedgerEntries.Where(item => item.WorkspaceId == secondWorkspace.Id).SumAsync(item => item.Amount));
+        Assert.Equal(1, await db.CreditLedgerEntries.CountAsync(item => item.WorkspaceId == firstWorkspace.Id && item.Type == CreditLedgerEntryType.Refund));
+        Assert.Equal(1, await db.CreditLedgerEntries.CountAsync(item => item.WorkspaceId == secondWorkspace.Id && item.Type == CreditLedgerEntryType.Refund));
+    }
+
+    [Fact]
     public async Task Sqlite_debit_replay_is_durable_across_context_restarts_and_rejects_rebinding()
     {
         var databasePath = Path.Combine(Path.GetTempPath(), $"issue330-debit-replay-{Guid.NewGuid():N}.db");
