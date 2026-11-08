@@ -351,6 +351,122 @@ public sealed class AutopilotCandidateV2OfflineParityTests
     }
 }
 
+public sealed class AutopilotAcceptedV2GoldenVectorFixtureTests
+{
+    // Copied as machine-readable data from the owner-supplied JSON vector
+    // (SHA-256 a6197a2665c7310f7b58511005961710327791279a13a1efcf90c6bc1898a020).
+    // This pure fixture test does not call or imply acceptance by the v2 HTTP receiver.
+    private const string OwnerGoldenVectorJson = """
+      {
+        "status": "PROPOSED_UNAPPROVED_TEST_VECTOR",
+        "values": {
+          "version": "v2",
+          "method": "POST",
+          "path": "/api/autopilot/events",
+          "timestamp": "1760000000",
+          "source": "manus-bridge",
+          "event_id": "evt:v2-001",
+          "event_type": "wave.task.completed"
+        },
+        "headers": {
+          "Content-Type": "application/json",
+          "X-Autopilot-Signature-Version": "v2",
+          "X-Autopilot-Timestamp": "1760000000",
+          "X-Autopilot-Source": "manus-bridge",
+          "X-Autopilot-Event-Id": "evt:v2-001",
+          "X-Autopilot-Event-Type": "wave.task.completed",
+          "X-Autopilot-Signature": "v2=ffb9595c31c404602bcbe2bac7e9729c7947a896eaa7ac4125ae95abd6551e65"
+        },
+        "raw_body": {
+          "utf8": "{\"waveKey\":\"wave-demo-01\",\"taskId\":\"task-demo-01\",\"outcome\":\"succeeded\",\"evidence\":\"{\\\"kind\\\":\\\"taslim.manus.task_detail_terminal_receipt.v1\\\",\\\"task_id\\\":\\\"AbCdEf0123456789GhIjKl\\\",\\\"agent_status\\\":\\\"stopped\\\",\\\"stop_reason\\\":\\\"finish\\\",\\\"has_running_background_jobs\\\":false,\\\"event_id\\\":\\\"evt:v2-001\\\"}\",\"checks\":{},\"requiresHumanDecision\":false,\"waveComplete\":false}",
+          "byte_length": 369,
+          "base64": "eyJ3YXZlS2V5Ijoid2F2ZS1kZW1vLTAxIiwidGFza0lkIjoidGFzay1kZW1vLTAxIiwib3V0Y29tZSI6InN1Y2NlZWRlZCIsImV2aWRlbmNlIjoie1wia2luZFwiOlwidGFzbGltLm1hbnVzLnRhc2tfZGV0YWlsX3Rlcm1pbmFsX3JlY2VpcHQudjFcIixcInRhc2tfaWRcIjpcIkFiQ2RFZjAxMjM0NTY3ODlHaElqS2xcIixcImFnZW50X3N0YXR1c1wiOlwic3RvcHBlZFwiLFwic3RvcF9yZWFzb25cIjpcImZpbmlzaFwiLFwiaGFzX3J1bm5pbmdfYmFja2dyb3VuZF9qb2JzXCI6ZmFsc2UsXCJldmVudF9pZFwiOlwiZXZ0OnYyLTAwMVwifSIsImNoZWNrcyI6e30sInJlcXVpcmVzSHVtYW5EZWNpc2lvbiI6ZmFsc2UsIndhdmVDb21wbGV0ZSI6ZmFsc2V9",
+          "sha256": "cd06b69531d1430f892560238db7bddf2dcc9b65b0a14d6c8cc0b70298a31279"
+        },
+        "canonical": {
+          "encoding": "ASCII (identical bytes to UTF-8)",
+          "line_ending": "LF only",
+          "trailing_lf": true,
+          "byte_length": 166,
+          "text": "AUTOPILOT-EVENT-V2\nPOST\n/api/autopilot/events\n1760000000\nmanus-bridge\nevt:v2-001\nwave.task.completed\ncd06b69531d1430f892560238db7bddf2dcc9b65b0a14d6c8cc0b70298a31279\n",
+          "base64": "QVVUT1BJTE9ULUVWRU5ULVYyClBPU1QKL2FwaS9hdXRvcGlsb3QvZXZlbnRzCjE3NjAwMDAwMDAKbWFudXMtYnJpZGdlCmV2dDp2Mi0wMDEKd2F2ZS50YXNrLmNvbXBsZXRlZApjZDA2YjY5NTMxZDE0MzBmODkyNTYwMjM4ZGI3YmRkZjJkY2M5YjY1YjBhMTRkNmM4Y2MwYjcwMjk4YTMxMjc5Cg=="
+        },
+        "test_only_key": {
+          "encoding": "ASCII/UTF-8 exact bytes",
+          "text": "bridge-v2-golden-secret-not-for-use",
+          "base64": "YnJpZGdlLXYyLWdvbGRlbi1zZWNyZXQtbm90LWZvci11c2U=",
+          "not_for_production": true
+        },
+        "hmac_sha256_hex_lowercase": "ffb9595c31c404602bcbe2bac7e9729c7947a896eaa7ac4125ae95abd6551e65",
+        "signature_header_value": "v2=ffb9595c31c404602bcbe2bac7e9729c7947a896eaa7ac4125ae95abd6551e65"
+      }
+    """;
+
+    [Fact]
+    public void Owner_supplied_v2_vector_pins_exact_body_canonical_bytes_hmac_and_metadata_mutation()
+    {
+        using var document = JsonDocument.Parse(OwnerGoldenVectorJson);
+        var root = document.RootElement;
+        var values = root.GetProperty("values");
+        var headers = root.GetProperty("headers");
+        var rawBodyVector = root.GetProperty("raw_body");
+        var canonicalVector = root.GetProperty("canonical");
+        var keyVector = root.GetProperty("test_only_key");
+
+        Assert.Equal("PROPOSED_UNAPPROVED_TEST_VECTOR", ReadString(root, "status"));
+        Assert.True(keyVector.GetProperty("not_for_production").GetBoolean());
+        Assert.Equal("v2", ReadString(values, "version"));
+        Assert.Equal("application/json", ReadString(headers, "Content-Type"));
+        Assert.Equal(ReadString(values, "timestamp"), ReadString(headers, "X-Autopilot-Timestamp"));
+        Assert.Equal(ReadString(values, "source"), ReadString(headers, "X-Autopilot-Source"));
+        Assert.Equal(ReadString(values, "event_id"), ReadString(headers, "X-Autopilot-Event-Id"));
+        Assert.Equal(ReadString(values, "event_type"), ReadString(headers, "X-Autopilot-Event-Type"));
+        Assert.Equal("v2", ReadString(headers, "X-Autopilot-Signature-Version"));
+
+        var rawBody = Convert.FromBase64String(ReadString(rawBodyVector, "base64"));
+        Assert.Equal(369, rawBodyVector.GetProperty("byte_length").GetInt32());
+        Assert.Equal(369, rawBody.Length);
+        Assert.Equal(ReadString(rawBodyVector, "utf8"), Encoding.UTF8.GetString(rawBody));
+        var bodyDigest = Convert.ToHexString(SHA256.HashData(rawBody)).ToLowerInvariant();
+        Assert.Equal(ReadString(rawBodyVector, "sha256"), bodyDigest);
+        Assert.Equal("cd06b69531d1430f892560238db7bddf2dcc9b65b0a14d6c8cc0b70298a31279", bodyDigest);
+
+        var canonicalText = ReadString(canonicalVector, "text");
+        var canonicalBytes = Convert.FromBase64String(ReadString(canonicalVector, "base64"));
+        Assert.Equal("ASCII (identical bytes to UTF-8)", ReadString(canonicalVector, "encoding"));
+        Assert.Equal("LF only", ReadString(canonicalVector, "line_ending"));
+        Assert.True(canonicalVector.GetProperty("trailing_lf").GetBoolean());
+        Assert.Equal(166, canonicalVector.GetProperty("byte_length").GetInt32());
+        Assert.Equal(166, canonicalBytes.Length);
+        Assert.Equal(canonicalText, Encoding.ASCII.GetString(canonicalBytes));
+        Assert.EndsWith("\n", canonicalText);
+        Assert.DoesNotContain((byte)'\r', canonicalBytes);
+        Assert.Equal(canonicalBytes, Encoding.ASCII.GetBytes(canonicalText));
+
+        var key = Convert.FromBase64String(ReadString(keyVector, "base64"));
+        Assert.Equal(ReadString(keyVector, "text"), Encoding.ASCII.GetString(key));
+        var expectedHmac = ReadString(root, "hmac_sha256_hex_lowercase");
+        var actualHmac = Convert.ToHexString(HMACSHA256.HashData(key, canonicalBytes)).ToLowerInvariant();
+        Assert.Equal("ffb9595c31c404602bcbe2bac7e9729c7947a896eaa7ac4125ae95abd6551e65", expectedHmac);
+        Assert.Equal(expectedHmac, actualHmac);
+        Assert.Equal($"v2={expectedHmac}", ReadString(root, "signature_header_value"));
+        Assert.Equal(ReadString(root, "signature_header_value"), ReadString(headers, "X-Autopilot-Signature"));
+
+        // Mutating only the signed source metadata while retaining the body and
+        // original signature must invalidate this pure fixture verification.
+        var sourceMarker = $"\n{ReadString(values, "source")}\n";
+        var sourceMarkerIndex = canonicalText.IndexOf(sourceMarker, StringComparison.Ordinal);
+        Assert.True(sourceMarkerIndex >= 0);
+        Assert.Equal(sourceMarkerIndex, canonicalText.LastIndexOf(sourceMarker, StringComparison.Ordinal));
+        var mutatedCanonical = canonicalText.Replace(sourceMarker, "\nalternate-source\n", StringComparison.Ordinal);
+        var mutatedHmac = Convert.ToHexString(HMACSHA256.HashData(key, Encoding.ASCII.GetBytes(mutatedCanonical))).ToLowerInvariant();
+        Assert.NotEqual(expectedHmac, mutatedHmac);
+    }
+
+    private static string ReadString(JsonElement element, string propertyName) =>
+        element.GetProperty(propertyName).GetString() ?? throw new InvalidOperationException($"Missing string property '{propertyName}'.");
+}
+
 // Each request/context owns its SQLite connection. Sharing one opened connection
 // lets request-scope cleanup race EF's per-connection function registration.
 public sealed class AutopilotAcknowledgementFactory : WebApplicationFactory<Program>
