@@ -74,6 +74,56 @@ public sealed class AutopilotExternalEventAcknowledgementTests : IClassFixture<A
         finally { Environment.SetEnvironmentVariable(SecretVariable, previous); }
     }
 
+    [Fact]
+    public async Task Candidate_v2_hmac_is_not_accepted_by_the_current_v1_http_receiver()
+    {
+        var previous = Environment.GetEnvironmentVariable(SecretVariable);
+        Environment.SetEnvironmentVariable(SecretVariable, Secret);
+        try
+        {
+            using var isolatedFactory = new AutopilotAcknowledgementFactory();
+            using var client = isolatedFactory.CreateClient();
+            using (var setupScope = isolatedFactory.Services.CreateScope())
+                setupScope.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+
+            // Keep the v2 canonical fields/body but use a fresh timestamp so the v1
+            // endpoint rejects the candidate signature, not just a stale fixture.
+            var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture);
+            var rawBody = Encoding.UTF8.GetBytes(AutopilotCandidateV2OfflineParityTests.RawBodyText);
+            var signature = Convert.ToHexString(HMACSHA256.HashData(
+                Encoding.UTF8.GetBytes(Secret),
+                AutopilotCandidateV2OfflineParityTests.CandidateSigningInput(
+                    timestamp,
+                    AutopilotCandidateV2OfflineParityTests.Source,
+                    AutopilotCandidateV2OfflineParityTests.EventType,
+                    AutopilotCandidateV2OfflineParityTests.ExternalEventId,
+                    rawBody))).ToLowerInvariant();
+
+            using var request = new HttpRequestMessage(HttpMethod.Post, "/api/autopilot/events")
+            {
+                Content = new ByteArrayContent(rawBody)
+            };
+            request.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
+            request.Headers.Add("X-Autopilot-Source", AutopilotCandidateV2OfflineParityTests.Source);
+            request.Headers.Add("X-Autopilot-Event-Id", AutopilotCandidateV2OfflineParityTests.ExternalEventId);
+            request.Headers.Add("X-Autopilot-Event-Type", AutopilotCandidateV2OfflineParityTests.EventType);
+            request.Headers.Add("X-Autopilot-Timestamp", timestamp);
+            request.Headers.Add("X-Autopilot-Signature", $"sha256={signature}");
+
+            using var response = await client.SendAsync(request);
+            Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+            using var responseBody = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            Assert.Equal("AUTOPILOT_EVENT_UNAUTHENTICATED",
+                responseBody.RootElement.GetProperty("error").GetProperty("code").GetString());
+
+            using var scope = isolatedFactory.Services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            Assert.Empty(await db.AutopilotEvents.AsNoTracking().ToListAsync());
+            Assert.Empty(await db.AutopilotWaveLaunchTasks.AsNoTracking().ToListAsync());
+        }
+        finally { Environment.SetEnvironmentVariable(SecretVariable, previous); }
+    }
+
     [Theory]
     [InlineData(null)]
     [InlineData("different-receipt-event")]
@@ -136,9 +186,10 @@ public sealed class AutopilotCandidateV2OfflineParityTests
 {
     private const string TestOnlySecret = "provider-free-external-ack-contract-secret";
     private const string Timestamp = "1794067200";
-    private const string Source = "manus-bridge";
-    private const string EventType = "wave.task.completed";
-    private const string ExternalEventId = "evt-v2-contract-001";
+    internal const string Source = "manus-bridge";
+    internal const string EventType = "wave.task.completed";
+    internal const string ExternalEventId = "evt-v2-contract-001";
+    internal const string RawBodyText = """{"waveKey":"wave-v2-contract","taskId":"task-v2-contract","outcome":"succeeded","evidence":"{\"kind\":\"taslim.manus.task_detail_terminal_receipt.v1\",\"task_id\":\"ABCDEFGHIJKLMNOPQRSTUV\",\"agent_status\":\"stopped\",\"stop_reason\":\"finish\",\"has_running_background_jobs\":false,\"event_id\":\"evt-v2-contract-001\"}"}""";
     private const string ExpectedBodySha256 = "abc18a1912a315c286b20dae4e7d0c4b395df20c20e8737d40d619a01a0fde87";
     private const string ExpectedHmac = "0f45f43333c9a6c97b0ca8720758ceb6c8daeb675097207c84c7d69efdb51c47";
 
@@ -147,8 +198,7 @@ public sealed class AutopilotCandidateV2OfflineParityTests
     [Fact]
     public void Candidate_v2_fixture_pins_exact_raw_bytes_and_hmac_and_metadata_or_body_mutations_change_it()
     {
-        const string rawBodyText = """{"waveKey":"wave-v2-contract","taskId":"task-v2-contract","outcome":"succeeded","evidence":"{\"kind\":\"taslim.manus.task_detail_terminal_receipt.v1\",\"task_id\":\"ABCDEFGHIJKLMNOPQRSTUV\",\"agent_status\":\"stopped\",\"stop_reason\":\"finish\",\"has_running_background_jobs\":false,\"event_id\":\"evt-v2-contract-001\"}"}""";
-        var rawBody = Encoding.UTF8.GetBytes(rawBodyText);
+        var rawBody = Encoding.UTF8.GetBytes(RawBodyText);
         Assert.Equal(42, Encoding.UTF8.GetByteCount(TestOnlySecret));
         Assert.Equal(323, rawBody.Length);
         var bodySha256 = Convert.ToHexString(SHA256.HashData(rawBody)).ToLowerInvariant();
@@ -175,7 +225,7 @@ public sealed class AutopilotCandidateV2OfflineParityTests
             ("type", Timestamp, Source, "wave.task.failed", ExternalEventId, rawBody),
             ("event id", Timestamp, Source, EventType, "evt-other", rawBody),
             ("timestamp", "1794067201", Source, EventType, ExternalEventId, rawBody),
-            ("body", Timestamp, Source, EventType, ExternalEventId, Encoding.UTF8.GetBytes(rawBodyText + " "))
+            ("body", Timestamp, Source, EventType, ExternalEventId, Encoding.UTF8.GetBytes(RawBodyText + " "))
         };
 
         foreach (var mutation in mutations)
@@ -191,7 +241,7 @@ public sealed class AutopilotCandidateV2OfflineParityTests
         }
     }
 
-    private static byte[] CandidateSigningInput(
+    internal static byte[] CandidateSigningInput(
         string timestamp,
         string source,
         string eventType,
