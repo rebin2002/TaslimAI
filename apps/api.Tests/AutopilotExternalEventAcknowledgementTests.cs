@@ -75,7 +75,7 @@ public sealed class AutopilotExternalEventAcknowledgementTests : IClassFixture<A
     }
 
     [Fact]
-    public async Task Candidate_v2_hmac_is_not_accepted_by_the_current_v1_http_receiver()
+    public async Task Legacy_experimental_not_accepted_v2_hmac_is_not_accepted_by_the_current_v1_http_receiver()
     {
         var previous = Environment.GetEnvironmentVariable(SecretVariable);
         Environment.SetEnvironmentVariable(SecretVariable, Secret);
@@ -89,14 +89,14 @@ public sealed class AutopilotExternalEventAcknowledgementTests : IClassFixture<A
             // Keep the v2 canonical fields/body but use a fresh timestamp so the v1
             // endpoint rejects the candidate signature, not just a stale fixture.
             var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture);
-            var rawBody = Encoding.UTF8.GetBytes(AutopilotCandidateV2OfflineParityTests.RawBodyText);
+            var rawBody = Encoding.UTF8.GetBytes(AutopilotLegacyExperimentalNotAcceptedV2OfflineParityTests.LegacyExperimentalNotAcceptedRawBodyText);
             var signature = Convert.ToHexString(HMACSHA256.HashData(
                 Encoding.UTF8.GetBytes(Secret),
-                AutopilotCandidateV2OfflineParityTests.CandidateSigningInput(
+                AutopilotLegacyExperimentalNotAcceptedV2OfflineParityTests.LegacyExperimentalNotAcceptedSigningInput(
                     timestamp,
-                    AutopilotCandidateV2OfflineParityTests.Source,
-                    AutopilotCandidateV2OfflineParityTests.EventType,
-                    AutopilotCandidateV2OfflineParityTests.ExternalEventId,
+                    AutopilotLegacyExperimentalNotAcceptedV2OfflineParityTests.LegacyExperimentalNotAcceptedSource,
+                    AutopilotLegacyExperimentalNotAcceptedV2OfflineParityTests.LegacyExperimentalNotAcceptedEventType,
+                    AutopilotLegacyExperimentalNotAcceptedV2OfflineParityTests.LegacyExperimentalNotAcceptedExternalEventId,
                     rawBody))).ToLowerInvariant();
 
             using var request = new HttpRequestMessage(HttpMethod.Post, "/api/autopilot/events")
@@ -104,9 +104,9 @@ public sealed class AutopilotExternalEventAcknowledgementTests : IClassFixture<A
                 Content = new ByteArrayContent(rawBody)
             };
             request.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
-            request.Headers.Add("X-Autopilot-Source", AutopilotCandidateV2OfflineParityTests.Source);
-            request.Headers.Add("X-Autopilot-Event-Id", AutopilotCandidateV2OfflineParityTests.ExternalEventId);
-            request.Headers.Add("X-Autopilot-Event-Type", AutopilotCandidateV2OfflineParityTests.EventType);
+            request.Headers.Add("X-Autopilot-Source", AutopilotLegacyExperimentalNotAcceptedV2OfflineParityTests.LegacyExperimentalNotAcceptedSource);
+            request.Headers.Add("X-Autopilot-Event-Id", AutopilotLegacyExperimentalNotAcceptedV2OfflineParityTests.LegacyExperimentalNotAcceptedExternalEventId);
+            request.Headers.Add("X-Autopilot-Event-Type", AutopilotLegacyExperimentalNotAcceptedV2OfflineParityTests.LegacyExperimentalNotAcceptedEventType);
             request.Headers.Add("X-Autopilot-Timestamp", timestamp);
             request.Headers.Add("X-Autopilot-Signature", $"sha256={signature}");
 
@@ -274,29 +274,37 @@ public sealed class AutopilotExternalEventAcknowledgementTests : IClassFixture<A
     }
 }
 
-public sealed class AutopilotCandidateV2OfflineParityTests
+// LEGACY_EXPERIMENTAL_NOT_ACCEPTED: retained only to characterize the historical
+// 323-byte / 158-byte helper. It is not the proposed integration contract.
+public sealed class AutopilotLegacyExperimentalNotAcceptedV2OfflineParityTests
 {
-    private const string TestOnlySecret = "provider-free-external-ack-contract-secret";
-    private const string Timestamp = "1794067200";
-    internal const string Source = "manus-bridge";
-    internal const string EventType = "wave.task.completed";
-    internal const string ExternalEventId = "evt-v2-contract-001";
-    internal const string RawBodyText = """{"waveKey":"wave-v2-contract","taskId":"task-v2-contract","outcome":"succeeded","evidence":"{\"kind\":\"taslim.manus.task_detail_terminal_receipt.v1\",\"task_id\":\"ABCDEFGHIJKLMNOPQRSTUV\",\"agent_status\":\"stopped\",\"stop_reason\":\"finish\",\"has_running_background_jobs\":false,\"event_id\":\"evt-v2-contract-001\"}"}""";
-    private const string ExpectedBodySha256 = "abc18a1912a315c286b20dae4e7d0c4b395df20c20e8737d40d619a01a0fde87";
-    private const string ExpectedHmac = "0f45f43333c9a6c97b0ca8720758ceb6c8daeb675097207c84c7d69efdb51c47";
+    private const string LegacyExperimentalNotAcceptedTestOnlySecret = "provider-free-external-ack-contract-secret";
+    private const string LegacyExperimentalNotAcceptedTimestamp = "1794067200";
+    internal const string LegacyExperimentalNotAcceptedSource = "manus-bridge";
+    internal const string LegacyExperimentalNotAcceptedEventType = "wave.task.completed";
+    internal const string LegacyExperimentalNotAcceptedExternalEventId = "evt-v2-contract-001";
+    internal const string LegacyExperimentalNotAcceptedRawBodyText = """{"waveKey":"wave-v2-contract","taskId":"task-v2-contract","outcome":"succeeded","evidence":"{\"kind\":\"taslim.manus.task_detail_terminal_receipt.v1\",\"task_id\":\"ABCDEFGHIJKLMNOPQRSTUV\",\"agent_status\":\"stopped\",\"stop_reason\":\"finish\",\"has_running_background_jobs\":false,\"event_id\":\"evt-v2-contract-001\"}"}""";
+    private const string LegacyExperimentalNotAcceptedExpectedBodySha256 = "abc18a1912a315c286b20dae4e7d0c4b395df20c20e8737d40d619a01a0fde87";
+    private const string LegacyExperimentalNotAcceptedExpectedHmac = "0f45f43333c9a6c97b0ca8720758ceb6c8daeb675097207c84c7d69efdb51c47";
 
-    // This is an offline helper-parity candidate only. It is not an accepted HTTP
-    // signing contract and does not invoke or change the current v1 receiver.
+    // LEGACY_EXPERIMENTAL_NOT_ACCEPTED: this test pins only the retired helper
+    // shape. Passing it is not v2 integration acceptance and says nothing about
+    // Node/C# interoperability or the current HTTP receiver.
     [Fact]
-    public void Candidate_v2_fixture_pins_exact_raw_bytes_and_hmac_and_metadata_or_body_mutations_change_it()
+    public void Legacy_experimental_not_accepted_fixture_pins_323_byte_body_158_byte_input_and_legacy_hmac()
     {
-        var rawBody = Encoding.UTF8.GetBytes(RawBodyText);
-        Assert.Equal(42, Encoding.UTF8.GetByteCount(TestOnlySecret));
+        var rawBody = Encoding.UTF8.GetBytes(LegacyExperimentalNotAcceptedRawBodyText);
+        Assert.Equal(42, Encoding.UTF8.GetByteCount(LegacyExperimentalNotAcceptedTestOnlySecret));
         Assert.Equal(323, rawBody.Length);
         var bodySha256 = Convert.ToHexString(SHA256.HashData(rawBody)).ToLowerInvariant();
-        Assert.Equal(ExpectedBodySha256, bodySha256);
+        Assert.Equal(LegacyExperimentalNotAcceptedExpectedBodySha256, bodySha256);
 
-        var canonical = CandidateSigningInput(Timestamp, Source, EventType, ExternalEventId, rawBody);
+        var canonical = LegacyExperimentalNotAcceptedSigningInput(
+            LegacyExperimentalNotAcceptedTimestamp,
+            LegacyExperimentalNotAcceptedSource,
+            LegacyExperimentalNotAcceptedEventType,
+            LegacyExperimentalNotAcceptedExternalEventId,
+            rawBody);
         const string expectedCanonical =
             "taslim-autopilot-v2\n" +
             "1794067200\n" +
@@ -307,22 +315,22 @@ public sealed class AutopilotCandidateV2OfflineParityTests
         Assert.Equal(158, canonical.Length);
         Assert.Equal(expectedCanonical, Encoding.UTF8.GetString(canonical));
 
-        var key = Encoding.UTF8.GetBytes(TestOnlySecret);
+        var key = Encoding.UTF8.GetBytes(LegacyExperimentalNotAcceptedTestOnlySecret);
         var baselineHmac = Convert.ToHexString(HMACSHA256.HashData(key, canonical)).ToLowerInvariant();
-        Assert.Equal(ExpectedHmac, baselineHmac);
+        Assert.Equal(LegacyExperimentalNotAcceptedExpectedHmac, baselineHmac);
 
         var mutations = new (string Name, string Timestamp, string Source, string EventType, string ExternalEventId, byte[] Body)[]
         {
-            ("source", Timestamp, "other-bridge", EventType, ExternalEventId, rawBody),
-            ("type", Timestamp, Source, "wave.task.failed", ExternalEventId, rawBody),
-            ("event id", Timestamp, Source, EventType, "evt-other", rawBody),
-            ("timestamp", "1794067201", Source, EventType, ExternalEventId, rawBody),
-            ("body", Timestamp, Source, EventType, ExternalEventId, Encoding.UTF8.GetBytes(RawBodyText + " "))
+            ("source", LegacyExperimentalNotAcceptedTimestamp, "other-bridge", LegacyExperimentalNotAcceptedEventType, LegacyExperimentalNotAcceptedExternalEventId, rawBody),
+            ("type", LegacyExperimentalNotAcceptedTimestamp, LegacyExperimentalNotAcceptedSource, "wave.task.failed", LegacyExperimentalNotAcceptedExternalEventId, rawBody),
+            ("event id", LegacyExperimentalNotAcceptedTimestamp, LegacyExperimentalNotAcceptedSource, LegacyExperimentalNotAcceptedEventType, "evt-other", rawBody),
+            ("timestamp", "1794067201", LegacyExperimentalNotAcceptedSource, LegacyExperimentalNotAcceptedEventType, LegacyExperimentalNotAcceptedExternalEventId, rawBody),
+            ("body", LegacyExperimentalNotAcceptedTimestamp, LegacyExperimentalNotAcceptedSource, LegacyExperimentalNotAcceptedEventType, LegacyExperimentalNotAcceptedExternalEventId, Encoding.UTF8.GetBytes(LegacyExperimentalNotAcceptedRawBodyText + " "))
         };
 
         foreach (var mutation in mutations)
         {
-            var mutatedInput = CandidateSigningInput(
+            var mutatedInput = LegacyExperimentalNotAcceptedSigningInput(
                 mutation.Timestamp,
                 mutation.Source,
                 mutation.EventType,
@@ -333,7 +341,7 @@ public sealed class AutopilotCandidateV2OfflineParityTests
         }
     }
 
-    internal static byte[] CandidateSigningInput(
+    internal static byte[] LegacyExperimentalNotAcceptedSigningInput(
         string timestamp,
         string source,
         string eventType,
@@ -351,11 +359,13 @@ public sealed class AutopilotCandidateV2OfflineParityTests
     }
 }
 
-public sealed class AutopilotAcceptedV2GoldenVectorFixtureTests
+// This is the sole proposed integration-acceptance vector in this file: the
+// owner-supplied 369-byte / 166-byte method-and-path-bound form. Owners accepted
+// it as offline test material; runtime support and activation remain deferred.
+public sealed class AutopilotSoleProposedV2IntegrationAcceptanceVectorFixtureTests
 {
-    // Copied as machine-readable data from the owner-supplied JSON vector
-    // (SHA-256 a6197a2665c7310f7b58511005961710327791279a13a1efcf90c6bc1898a020).
-    // This pure fixture test does not call or imply acceptance by the v2 HTTP receiver.
+    // The JSON is retained exactly as supplied; its original status field is not
+    // a runtime decision. The 369/166 form is the sole proposed integration vector.
     private const string OwnerGoldenVectorJson = """
       {
         "status": "PROPOSED_UNAPPROVED_TEST_VECTOR",
@@ -403,7 +413,7 @@ public sealed class AutopilotAcceptedV2GoldenVectorFixtureTests
     """;
 
     [Fact]
-    public void Owner_supplied_v2_vector_pins_exact_body_canonical_bytes_and_hmac()
+    public void Sole_proposed_integration_acceptance_vector_pins_exact_body_canonical_bytes_and_hmac()
     {
         using var document = JsonDocument.Parse(OwnerGoldenVectorJson);
         var root = document.RootElement;
@@ -453,9 +463,45 @@ public sealed class AutopilotAcceptedV2GoldenVectorFixtureTests
         Assert.Equal(ReadString(root, "signature_header_value"), ReadString(headers, "X-Autopilot-Signature"));
     }
 
+    [Fact]
+    public void Legacy_experimental_not_accepted_helper_and_hmac_cannot_reproduce_the_proposed_vector()
+    {
+        using var document = JsonDocument.Parse(OwnerGoldenVectorJson);
+        var root = document.RootElement;
+        var values = root.GetProperty("values");
+        var rawBody = Convert.FromBase64String(ReadString(root.GetProperty("raw_body"), "base64"));
+        var acceptedCanonical = Convert.FromBase64String(ReadString(root.GetProperty("canonical"), "base64"));
+        var key = Convert.FromBase64String(ReadString(root.GetProperty("test_only_key"), "base64"));
+
+        // Reuse the proposed vector's exact metadata, body, and synthetic key so
+        // this isolates the legacy canonicalization difference, not key choice.
+        var legacyCanonical = AutopilotLegacyExperimentalNotAcceptedV2OfflineParityTests.LegacyExperimentalNotAcceptedSigningInput(
+            ReadString(values, "timestamp"),
+            ReadString(values, "source"),
+            ReadString(values, "event_type"),
+            ReadString(values, "event_id"),
+            rawBody);
+        const string expectedLegacyCanonicalBase64 =
+            "dGFzbGltLWF1dG9waWxvdC12MgoxNzYwMDAwMDAwCjEyOm1hbnVzLWJyaWRnZQoxOTp3YXZlLnRhc2suY29tcGxldGVkCjEwOmV2dDp2Mi0wMDEKY2QwNmI2OTUzMWQxNDMwZjg5MjU2MDIzOGRiN2JkZGYyZGNjOWI2NWIwYTE0ZDZjOGNjMGI3MDI5OGEzMTI3OQo=";
+        const string expectedLegacyHmac = "d853cd6e8a867d8a2e3beff54606dc6f444eb661ad8665342f445eb29f7fe4cd";
+
+        Assert.Equal(166, acceptedCanonical.Length);
+        Assert.Equal(149, legacyCanonical.Length);
+        Assert.Equal(expectedLegacyCanonicalBase64, Convert.ToBase64String(legacyCanonical));
+        Assert.NotEqual(Convert.ToBase64String(acceptedCanonical), Convert.ToBase64String(legacyCanonical));
+
+        var acceptedHmac = HMACSHA256.HashData(key, acceptedCanonical);
+        var legacyHmac = HMACSHA256.HashData(key, legacyCanonical);
+        Assert.Equal("ffb9595c31c404602bcbe2bac7e9729c7947a896eaa7ac4125ae95abd6551e65",
+            Convert.ToHexString(acceptedHmac).ToLowerInvariant());
+        Assert.Equal(expectedLegacyHmac, Convert.ToHexString(legacyHmac).ToLowerInvariant());
+        Assert.NotEqual(Convert.ToHexString(acceptedHmac), Convert.ToHexString(legacyHmac));
+        Assert.False(CryptographicOperations.FixedTimeEquals(acceptedHmac, legacyHmac));
+    }
+
     // Expected canonical Base64 and HMAC values were independently recomputed
-    // from the owner-supplied fixture with its synthetic key.
-    public static object[][] AcceptedVectorMutationCases =>
+    // from the sole proposed owner-supplied fixture with its synthetic key.
+    public static object[][] SoleProposedIntegrationAcceptanceVectorMutationCases =>
         new object[][]
         {
             new object[]
@@ -496,8 +542,8 @@ public sealed class AutopilotAcceptedV2GoldenVectorFixtureTests
         };
 
     [Theory]
-    [MemberData(nameof(AcceptedVectorMutationCases))]
-    public void Each_accepted_v2_mutation_changes_pinned_canonical_bytes_and_rejects_original_hmac(
+    [MemberData(nameof(SoleProposedIntegrationAcceptanceVectorMutationCases))]
+    public void Each_sole_proposed_integration_vector_mutation_changes_pinned_canonical_bytes_and_rejects_original_hmac(
         string field,
         string mutatedValue,
         string expectedCanonicalBase64,
