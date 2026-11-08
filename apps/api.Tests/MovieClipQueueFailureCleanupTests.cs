@@ -1,4 +1,5 @@
 using System.Net;
+using System.Text.Json;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -6,6 +7,7 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 using Taslim.Api.Domain;
 using Taslim.Api.Generation;
 using Taslim.Api.Movies;
+using Taslim.Api.Tests.ProviderTesting;
 using Taslim.Api.Persistence;
 using Xunit;
 
@@ -177,4 +179,233 @@ public sealed class MovieClipQueueFailureCleanupTests : IClassFixture<MovieQueue
         Assert.Single(await db.UsageTransactions.AsNoTracking()
             .Where(item => item.RequestId == $"generation:{job.Id:N}").ToListAsync());
     }
+}
+
+public sealed class MovieClipCleanupDeleteFailureVisibilityTests
+    : IClassFixture<MovieClipCollisionApiFactory>
+{
+    private readonly MovieClipCollisionApiFactory factory;
+
+    public MovieClipCleanupDeleteFailureVisibilityTests(MovieClipCollisionApiFactory factory)
+    {
+        this.factory = factory;
+        using var scope = factory.Services.CreateScope();
+        scope.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+    }
+
+    [Fact]
+    public async Task Persistent_conflict_cleanup_delete_failure_is_quarantined_then_reconciled_on_authorized_reads()
+    {
+        using var client = factory.CreateClient();
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Movie persistent cleanup deletion failure");
+        var key = $"movie-persistent-cleanup-delete-failure-{Guid.NewGuid():N}";
+        var path = $"/api/movie-studio/shots/{fixture.Shot.Id}/generate";
+        factory.Gate.Register(key);
+        var canonicalRequest = await MovieOperationalFixtures.BuildConfirmedMovieGenerationRequestAsync(
+            factory, path, new { title = "Cleanup DELETE canonical winner" });
+        var conflictingRequest = await MovieOperationalFixtures.BuildConfirmedMovieGenerationRequestAsync(
+            factory, path, new { title = "Cleanup DELETE conflicting loser" });
+
+        int clipsBefore;
+        int snapshotsBefore;
+        int jobsBefore;
+        int usageBefore;
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            clipsBefore = await db.MovieClips.CountAsync(item => item.MovieProjectId == fixture.Project.Project.Id);
+            snapshotsBefore = await db.MovieCharacterContinuitySnapshots.CountAsync(item => item.MovieProjectId == fixture.Project.Project.Id);
+            jobsBefore = await db.GenerationJobs.CountAsync();
+            usageBefore = await db.UsageTransactions.CountAsync();
+        }
+
+        var projectBefore = await MovieOperationalFixtures.GetAsync<MovieStudioProjectDto>(
+            client, $"/api/movie-studio/projects/{fixture.Project.Project.Id}");
+        var workspaceBefore = await MovieOperationalFixtures.GetAsync<MovieWorkspaceResponse>(
+            client, $"/api/movie-studio/projects/{fixture.Project.Project.Id}/workspace?module=scenes");
+        var projectVisibleBefore = VisibleProjectClipIds(projectBefore).Count;
+        var workspaceVisibleBefore = VisibleWorkspaceClipIds(workspaceBefore).Count;
+
+        using (var triggerScope = factory.Services.CreateScope())
+        {
+            var db = triggerScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            await db.Database.ExecuteSqlRawAsync(
+                "CREATE TRIGGER \"FailMovieClipCleanup\" BEFORE DELETE ON \"MovieClips\" "
+                + "WHEN OLD.\"GenerationJobId\" IS NULL "
+                + "BEGIN SELECT RAISE(ABORT, 'injected persistent speculative clip cleanup failure'); END;");
+        }
+
+        HttpResponseMessage? canonicalResponse = null;
+        HttpResponseMessage? conflictingResponse = null;
+        var canonicalBody = string.Empty;
+        var conflictingBody = string.Empty;
+        var retryBody = string.Empty;
+        int clipsAfter;
+        int snapshotsAfter;
+        int jobsAfter;
+        int usageAfter;
+        int jobsForKey;
+        int unlinkedClipsAfter;
+        int cleanupPendingClipsAfter;
+        Guid canonicalJobId;
+        Guid canonicalClipId;
+        Guid retryJobId;
+        Guid retryClipId;
+        Guid? cleanupPendingClipId = null;
+        Guid? cleanupPendingSnapshotId = null;
+        Guid? canonicalSnapshotId = null;
+        bool pendingSnapshotRetained = false;
+        HttpStatusCode? retryStatus = null;
+        List<Guid> projectVisibleAfter;
+        List<Guid> workspaceVisibleAfter;
+        try
+        {
+            var canonicalTask = MovieOperationalFixtures.SendWithCsrfAsync(
+                client, HttpMethod.Post, path, canonicalRequest, idempotencyKey: key);
+            await factory.Gate.WaitForFirstArrivalAsync(key).WaitAsync(TimeSpan.FromSeconds(40));
+            var conflictingTask = MovieOperationalFixtures.SendWithCsrfAsync(
+                client, HttpMethod.Post, path, conflictingRequest, idempotencyKey: key);
+            await Task.WhenAll(canonicalTask, conflictingTask).WaitAsync(TimeSpan.FromSeconds(90));
+            canonicalResponse = await canonicalTask;
+            conflictingResponse = await conflictingTask;
+            canonicalBody = await canonicalResponse.Content.ReadAsStringAsync();
+            conflictingBody = await conflictingResponse.Content.ReadAsStringAsync();
+
+            using var canonicalJson = JsonDocument.Parse(canonicalBody);
+            canonicalJobId = canonicalJson.RootElement.GetProperty("job").GetProperty("id").GetGuid();
+            canonicalClipId = canonicalJson.RootElement.GetProperty("clipId").GetGuid();
+
+            using (var retry = await MovieOperationalFixtures.SendWithCsrfAsync(
+                client, HttpMethod.Post, path, canonicalRequest, idempotencyKey: key))
+            {
+                retryStatus = retry.StatusCode;
+                retryBody = await retry.Content.ReadAsStringAsync();
+            }
+            using var retryJson = JsonDocument.Parse(retryBody);
+            retryJobId = retryJson.RootElement.GetProperty("job").GetProperty("id").GetGuid();
+            retryClipId = retryJson.RootElement.GetProperty("clipId").GetGuid();
+
+            var projectAfter = await MovieOperationalFixtures.GetAsync<MovieStudioProjectDto>(
+                client, $"/api/movie-studio/projects/{fixture.Project.Project.Id}");
+            var workspaceAfter = await MovieOperationalFixtures.GetAsync<MovieWorkspaceResponse>(
+                client, $"/api/movie-studio/projects/{fixture.Project.Project.Id}/workspace?module=scenes");
+            projectVisibleAfter = VisibleProjectClipIds(projectAfter);
+            workspaceVisibleAfter = VisibleWorkspaceClipIds(workspaceAfter);
+
+            using var verificationScope = factory.Services.CreateScope();
+            var verificationDb = verificationScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            clipsAfter = await verificationDb.MovieClips.CountAsync(item => item.MovieProjectId == fixture.Project.Project.Id);
+            snapshotsAfter = await verificationDb.MovieCharacterContinuitySnapshots.CountAsync(item => item.MovieProjectId == fixture.Project.Project.Id);
+            jobsAfter = await verificationDb.GenerationJobs.CountAsync();
+            usageAfter = await verificationDb.UsageTransactions.CountAsync();
+            jobsForKey = await verificationDb.GenerationJobs.CountAsync(item => item.IdempotencyKey == key);
+            unlinkedClipsAfter = await verificationDb.MovieClips.CountAsync(
+                item => item.MovieProjectId == fixture.Project.Project.Id && item.GenerationJobId == null);
+            var cleanupPendingClip = await verificationDb.MovieClips.AsNoTracking()
+                .Where(item => item.MovieProjectId == fixture.Project.Project.Id
+                    && item.GenerationJobId == null && item.Status == "CleanupPending")
+                .Select(item => new { item.Id, item.ContinuitySnapshotId })
+                .SingleOrDefaultAsync();
+            cleanupPendingClipsAfter = await verificationDb.MovieClips.CountAsync(
+                item => item.MovieProjectId == fixture.Project.Project.Id
+                    && item.GenerationJobId == null && item.Status == "CleanupPending");
+            cleanupPendingClipId = cleanupPendingClip?.Id;
+            cleanupPendingSnapshotId = cleanupPendingClip?.ContinuitySnapshotId;
+            canonicalSnapshotId = await verificationDb.MovieClips.AsNoTracking()
+                .Where(item => item.Id == canonicalClipId)
+                .Select(item => item.ContinuitySnapshotId)
+                .SingleAsync();
+            pendingSnapshotRetained = cleanupPendingSnapshotId is Guid pendingSnapshotId
+                && await verificationDb.MovieCharacterContinuitySnapshots.AsNoTracking()
+                    .AnyAsync(item => item.Id == pendingSnapshotId);
+        }
+        finally
+        {
+            canonicalResponse?.Dispose();
+            conflictingResponse?.Dispose();
+            using var cleanupScope = factory.Services.CreateScope();
+            var cleanupDb = cleanupScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            await cleanupDb.Database.ExecuteSqlRawAsync("DROP TRIGGER IF EXISTS \"FailMovieClipCleanup\";");
+        }
+
+        var recoveredProject = await MovieOperationalFixtures.GetAsync<MovieStudioProjectDto>(
+            client, $"/api/movie-studio/projects/{fixture.Project.Project.Id}");
+        var recoveredWorkspace = await MovieOperationalFixtures.GetAsync<MovieWorkspaceResponse>(
+            client, $"/api/movie-studio/projects/{fixture.Project.Project.Id}/workspace?module=scenes");
+        int clipsAfterRecovery;
+        int snapshotsAfterRecovery;
+        int unlinkedClipsAfterRecovery;
+        int cleanupPendingClipsAfterRecovery;
+        using (var recoveryScope = factory.Services.CreateScope())
+        {
+            var recoveryDb = recoveryScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            clipsAfterRecovery = await recoveryDb.MovieClips.CountAsync(item => item.MovieProjectId == fixture.Project.Project.Id);
+            snapshotsAfterRecovery = await recoveryDb.MovieCharacterContinuitySnapshots.CountAsync(item => item.MovieProjectId == fixture.Project.Project.Id);
+            unlinkedClipsAfterRecovery = await recoveryDb.MovieClips.CountAsync(
+                item => item.MovieProjectId == fixture.Project.Project.Id && item.GenerationJobId == null);
+            cleanupPendingClipsAfterRecovery = await recoveryDb.MovieClips.CountAsync(
+                item => item.MovieProjectId == fixture.Project.Project.Id && item.Status == "CleanupPending");
+        }
+
+        var retryRemainsCanonical = canonicalResponse?.StatusCode == HttpStatusCode.Accepted
+            && retryStatus == HttpStatusCode.Accepted
+            && retryJobId == canonicalJobId && retryClipId == canonicalClipId;
+        var originalConflictPreserved = conflictingResponse?.StatusCode == HttpStatusCode.BadRequest
+            && conflictingBody.Contains("IDEMPOTENCY_KEY_REUSED", StringComparison.Ordinal);
+        var orphanClipIsHidden = cleanupPendingClipId.HasValue
+            && projectVisibleAfter.Count == projectVisibleBefore + 1
+            && workspaceVisibleAfter.Count == workspaceVisibleBefore + 1
+            && projectVisibleAfter.Contains(canonicalClipId)
+            && workspaceVisibleAfter.Contains(canonicalClipId)
+            && !projectVisibleAfter.Contains(cleanupPendingClipId.Value)
+            && !workspaceVisibleAfter.Contains(cleanupPendingClipId.Value);
+        var pendingResidueIsQuarantined = clipsAfter == clipsBefore + 2
+            && snapshotsAfter == snapshotsBefore + 2
+            && unlinkedClipsAfter == 1
+            && cleanupPendingClipsAfter == 1
+            && cleanupPendingSnapshotId.HasValue
+            && pendingSnapshotRetained
+            && canonicalSnapshotId.HasValue
+            && canonicalSnapshotId != cleanupPendingSnapshotId;
+        var cleanupReconcilesAfterDeleteRecovers = clipsAfterRecovery == clipsBefore + 1
+            && snapshotsAfterRecovery == snapshotsBefore + 1
+            && unlinkedClipsAfterRecovery == 0
+            && cleanupPendingClipsAfterRecovery == 0
+            && VisibleProjectClipIds(recoveredProject).Count == projectVisibleBefore + 1
+            && VisibleWorkspaceClipIds(recoveredWorkspace).Count == workspaceVisibleBefore + 1
+            && VisibleProjectClipIds(recoveredProject).Contains(canonicalClipId)
+            && VisibleWorkspaceClipIds(recoveredWorkspace).Contains(canonicalClipId);
+        var canonicalAccountingUnchanged = jobsForKey == 1
+            && jobsAfter == jobsBefore + 1
+            && usageAfter == usageBefore + 1
+            && factory.Calls.Calls(FakeProviderKind.Movie) == 0;
+
+        var details = $"canonicalStatus={(int?)canonicalResponse?.StatusCode}, retryStatus={(int?)retryStatus}, "
+            + $"conflictStatus={(int?)conflictingResponse?.StatusCode}, conflictingBody={conflictingBody}, "
+            + $"retryJob={retryJobId}/{canonicalJobId}, retryClip={retryClipId}/{canonicalClipId}, "
+            + $"publicProjectClipDelta={projectVisibleAfter.Count - projectVisibleBefore}, "
+            + $"publicWorkspaceClipDelta={workspaceVisibleAfter.Count - workspaceVisibleBefore}, "
+            + $"persistedClipDelta={clipsAfter - clipsBefore}, unlinkedClips={unlinkedClipsAfter}, cleanupPending={cleanupPendingClipsAfter}, "
+            + $"snapshotDelta={snapshotsAfter - snapshotsBefore}, pendingSnapshotRetained={pendingSnapshotRetained}, "
+            + $"recoveredClipDelta={clipsAfterRecovery - clipsBefore}, recoveredSnapshotDelta={snapshotsAfterRecovery - snapshotsBefore}, "
+            + $"recoveredUnlinked={unlinkedClipsAfterRecovery}, recoveredPending={cleanupPendingClipsAfterRecovery}, jobsForKey={jobsForKey}, "
+            + $"usageDelta={usageAfter - usageBefore}, providerCalls={factory.Calls.Calls(FakeProviderKind.Movie)}";
+
+        Assert.True(retryRemainsCanonical && originalConflictPreserved && orphanClipIsHidden
+            && pendingResidueIsQuarantined && cleanupReconcilesAfterDeleteRecovers
+            && canonicalAccountingUnchanged, details);
+    }
+
+    private static List<Guid> VisibleProjectClipIds(MovieStudioProjectDto project) => project.Clips
+        .Concat(project.Scenes.SelectMany(scene => scene.Clips.Concat(scene.Shots.SelectMany(shot => shot.Clips))))
+        .Select(item => item.Id)
+        .Distinct()
+        .ToList();
+
+    private static List<Guid> VisibleWorkspaceClipIds(MovieWorkspaceResponse workspace) => workspace.Project.Clips
+        .Concat(workspace.Project.Scenes.SelectMany(scene => scene.Clips))
+        .Select(item => item.Id)
+        .Distinct()
+        .ToList();
 }

@@ -68,6 +68,9 @@ public interface IMovieStudioService
 
 public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessService access, MovieCollaborationAccess collaboration, IGenerationJobService jobs, IMovieVideoProvider provider, IMovieCharacterContinuityService continuity, MovieWorldContinuityProjector worldContinuity, IMovieGenerationCostEstimator movieCostEstimator, IGenerationCostGuardrailService costGuardrails, IMovieProductionGenerationOrchestrator productionOrchestrator, IMovieReferenceReadinessService referenceReadiness, ILogger<MovieStudioService> logger) : IMovieStudioService
 {
+    // Persisted only while best-effort deletion is pending; all MovieStudio read DTOs exclude it.
+    private const string SpeculativeCleanupPendingStatus = "CleanupPending";
+
     public async Task<MovieStudioProjectResponse?> CreateAsync(Guid userId, MovieStudioCreateRequest request, CancellationToken cancellationToken, string? idempotencyKey = null)
     {
         var validation = MovieStudioValidation.Validate(request);
@@ -156,7 +159,10 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
     public async Task<MovieStudioProjectDto?> GetAsync(Guid userId, Guid id, CancellationToken cancellationToken)
     {
         var movie = await Query().FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
-        return movie is null || !await collaboration.HasPermissionAsync(userId, id, MoviePermissions.View, cancellationToken) ? null : ToDto(movie);
+        if (movie is null || !await collaboration.HasPermissionAsync(userId, id, MoviePermissions.View, cancellationToken)) return null;
+        await ReconcilePendingSpeculativeClipCleanupAsync(id, cancellationToken);
+        movie = await Query().FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
+        return movie is null ? null : ToDto(movie);
     }
 
     public async Task<MovieStudioProjectShellDto?> GetShellAsync(Guid userId, Guid id, CancellationToken cancellationToken)
@@ -236,6 +242,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
             .FirstOrDefaultAsync(cancellationToken);
 
         if (baseProject is null || !await collaboration.HasPermissionAsync(userId, id, MoviePermissions.View, cancellationToken)) return null;
+        await ReconcilePendingSpeculativeClipCleanupAsync(id, cancellationToken);
 
         // Scene and clip summaries are the stable shell contract. They intentionally
         // omit screenplay, asset metadata, production JSON, and character/world detail.
@@ -250,7 +257,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
             })
             .ToListAsync(cancellationToken);
         var clips = await db.MovieClips.AsNoTracking()
-            .Where(item => item.MovieProjectId == id)
+            .Where(item => item.MovieProjectId == id && item.Status != SpeculativeCleanupPendingStatus)
             .OrderByDescending(item => item.CreatedAt)
             .Select(item => new MovieWorkspaceClipDto(item.Id, item.MovieSceneId, item.MovieShotId, item.AssetId, item.Status, item.DurationSeconds))
             .ToListAsync(cancellationToken);
@@ -1839,21 +1846,21 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                 // The winning job's original clip may have been removed while
                 // this request was being queued. Do not strand our speculative
                 // clip without a valid canonical generation target.
-                await DiscardSpeculativeClipAsync(clip, CancellationToken.None);
+                await TryDiscardSpeculativeClipAsync(clip, CancellationToken.None);
                 throw new MovieStudioValidationException("The idempotent generation target is no longer available.");
             }
             if (!MovieStudioIdempotency.IsCompatibleClipLink(canonicalClip.GenerationJobId, canonicalJob.Id))
             {
                 // The job-creation collision path must respect the same clip/job
                 // identity boundary as the earlier job-first replay path.
-                await DiscardSpeculativeClipAsync(clip, CancellationToken.None);
+                await TryDiscardSpeculativeClipAsync(clip, CancellationToken.None);
                 throw new GenerationJobValidationException(
                     "IDEMPOTENCY_KEY_REUSED",
                     "The idempotent generation clip is linked to a different job.");
             }
             if (canonicalClip.GenerationJobId is null)
                 canonicalClip.GenerationJobId = canonicalJob.Id;
-            await DiscardSpeculativeClipAsync(clip, cancellationToken);
+            await TryDiscardSpeculativeClipAsync(clip, CancellationToken.None);
             return new MovieStudioGenerationResponse(
                 await GetAsync(userId, movie.Id, cancellationToken) ?? throw new InvalidOperationException("Movie project disappeared."),
                 GenerationJobContractMapper.ToMovieDto(canonicalJob),
@@ -1875,7 +1882,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         {
             if (!await LegacyContinuityMatchesAsync(job, movie, scene, shot, cancellationToken))
             {
-                await DiscardSpeculativeClipAsync(clip, CancellationToken.None);
+                await TryDiscardSpeculativeClipAsync(clip, CancellationToken.None);
                 throw new GenerationJobValidationException("IDEMPOTENCY_KEY_REUSED",
                     "This idempotency key was already used for a different generation request.");
             }
@@ -1887,14 +1894,14 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                 // The winning job's original clip may have been removed while
                 // this request was being queued. Do not strand our speculative
                 // clip without a valid canonical generation target.
-                await DiscardSpeculativeClipAsync(clip, CancellationToken.None);
+                await TryDiscardSpeculativeClipAsync(clip, CancellationToken.None);
                 throw new MovieStudioValidationException("The idempotent generation target is no longer available.");
             }
             if (!MovieStudioIdempotency.IsCompatibleClipLink(canonicalClip.GenerationJobId, job.Id))
             {
                 // A successful idempotent job response must not silently pair
                 // another generation job's clip with this job's usage reservation.
-                await DiscardSpeculativeClipAsync(clip, CancellationToken.None);
+                await TryDiscardSpeculativeClipAsync(clip, CancellationToken.None);
                 throw new GenerationJobValidationException(
                     "IDEMPOTENCY_KEY_REUSED",
                     "The idempotent generation clip is linked to a different job.");
@@ -1904,7 +1911,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                 canonicalClip.GenerationJobId = job.Id;
                 canonicalClip.UpdatedAt = DateTime.UtcNow;
             }
-            await DiscardSpeculativeClipAsync(clip, cancellationToken);
+            await TryDiscardSpeculativeClipAsync(clip, CancellationToken.None);
             return new MovieStudioGenerationResponse(
                 await GetAsync(userId, movie.Id, cancellationToken) ?? throw new InvalidOperationException("Movie project disappeared."),
                 GenerationJobContractMapper.ToMovieDto(job),
@@ -1918,6 +1925,18 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         return new MovieStudioGenerationResponse(await GetAsync(userId, movie.Id, cancellationToken) ?? throw new InvalidOperationException("Movie project disappeared."), GenerationJobContractMapper.ToMovieDto(job), clip.Id);
     }
 
+    private async Task ReconcilePendingSpeculativeClipCleanupAsync(Guid movieProjectId, CancellationToken cancellationToken)
+    {
+        var pendingClips = await db.MovieClips
+            .Where(item => item.MovieProjectId == movieProjectId
+                && item.GenerationJobId == null
+                && item.Status == SpeculativeCleanupPendingStatus)
+            .OrderBy(item => item.CreatedAt)
+            .ToListAsync(cancellationToken);
+        foreach (var clip in pendingClips)
+            await TryDiscardSpeculativeClipAsync(clip, CancellationToken.None);
+    }
+
     private async Task TryDiscardSpeculativeClipAsync(MovieClip clip, CancellationToken cancellationToken)
     {
         try
@@ -1928,8 +1947,16 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         {
             try
             {
+                var clipEntry = db.Entry(clip);
+                if (clipEntry.State == EntityState.Deleted) clipEntry.State = EntityState.Detached;
+                if (clip.ContinuitySnapshotId is { } snapshotId)
+                {
+                    var snapshotEntry = db.ChangeTracker.Entries<MovieCharacterContinuitySnapshot>()
+                        .FirstOrDefault(item => item.Entity.Id == snapshotId && item.State == EntityState.Deleted);
+                    if (snapshotEntry is not null) snapshotEntry.State = EntityState.Detached;
+                }
                 logger.LogError(
-                    "Failed to discard a speculative Movie clip while preserving the original request error. Cleanup exception type: {CleanupExceptionType}.",
+                    "Failed to remove a quarantined speculative Movie clip while preserving the canonical response. Cleanup exception type: {CleanupExceptionType}.",
                     cleanupException.GetType().Name);
             }
             catch
@@ -1941,6 +1968,15 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
 
     private async Task DiscardSpeculativeClipAsync(MovieClip clip, CancellationToken cancellationToken)
     {
+        if (clip.GenerationJobId is not null)
+            throw new InvalidOperationException("A linked Movie clip cannot be discarded as speculative.");
+        if (!string.Equals(clip.Status, SpeculativeCleanupPendingStatus, StringComparison.Ordinal))
+        {
+            clip.Status = SpeculativeCleanupPendingStatus;
+            clip.UpdatedAt = DateTime.UtcNow;
+            await db.SaveChangesAsync(cancellationToken);
+        }
+
         await using var transaction = await db.Database.BeginTransactionAsync(
             System.Data.IsolationLevel.Serializable, cancellationToken);
         if (clip.ContinuitySnapshotId is { } snapshotId)
@@ -1992,11 +2028,11 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
 
     private IQueryable<MovieProject> Query() => db.MovieProjects.AsNoTracking().AsSplitQuery()
         .Include(item => item.Guide)
-        .Include(item => item.Scenes).ThenInclude(scene => scene.Shots).ThenInclude(shot => shot.Clips)
+        .Include(item => item.Scenes).ThenInclude(scene => scene.Shots).ThenInclude(shot => shot.Clips.Where(clip => clip.Status != SpeculativeCleanupPendingStatus))
         .Include(item => item.Scenes).ThenInclude(scene => scene.Shots).ThenInclude(shot => shot.ProductionComplexityAssessments)
         .Include(item => item.Scenes).ThenInclude(scene => scene.Shots).ThenInclude(shot => shot.ProductionVersions).ThenInclude(version => version.AssetReferences)
-        .Include(item => item.Scenes).ThenInclude(scene => scene.Clips)
-        .Include(item => item.Clips)
+        .Include(item => item.Scenes).ThenInclude(scene => scene.Clips.Where(clip => clip.Status != SpeculativeCleanupPendingStatus))
+        .Include(item => item.Clips.Where(clip => clip.Status != SpeculativeCleanupPendingStatus))
         .Include(item => item.Characters).ThenInclude(character => character.States).ThenInclude(state => state.ContinuityLocks)
         .Include(item => item.Characters).ThenInclude(character => character.ReferenceAssets)
         .Include(item => item.Characters).ThenInclude(character => character.Relationships).ThenInclude(relationship => relationship.RelatedCharacter)
@@ -2019,14 +2055,14 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         .Include(item => item.ProductionSheet).ThenInclude(sheet => sheet!.Versions).ThenInclude(version => version.Looks);
 
     private IQueryable<MovieScene> PlanningQuery() => db.MovieScenes.AsNoTracking()
-        .Include(item => item.Shots).ThenInclude(shot => shot.Clips)
+        .Include(item => item.Shots).ThenInclude(shot => shot.Clips.Where(clip => clip.Status != SpeculativeCleanupPendingStatus))
         .Include(item => item.Shots).ThenInclude(shot => shot.ProductionComplexityAssessments)
         .Include(item => item.Shots).ThenInclude(shot => shot.ProductionVersions).ThenInclude(version => version.AssetReferences);
 
     private IQueryable<MovieShot> PlanningShotQuery() => db.MovieShots
         .Include(item => item.Scene).ThenInclude(scene => scene.MovieProject)
         .Include(item => item.Scene).ThenInclude(scene => scene.MovieProject).ThenInclude(project => project.Guide)
-        .Include(item => item.Clips)
+        .Include(item => item.Clips.Where(clip => clip.Status != SpeculativeCleanupPendingStatus))
         .Include(item => item.ProductionComplexityAssessments)
         .Include(item => item.ProductionVersions).ThenInclude(version => version.AssetReferences);
 
