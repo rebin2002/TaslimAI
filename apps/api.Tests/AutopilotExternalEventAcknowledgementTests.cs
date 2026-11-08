@@ -464,6 +464,72 @@ public sealed class AutopilotSoleProposedV2IntegrationAcceptanceVectorFixtureTes
     }
 
     [Fact]
+    public async Task Sole_proposed_integration_v2_vector_is_rejected_by_current_v1_http_receiver_without_side_effects()
+    {
+        using var vectorDocument = JsonDocument.Parse(OwnerGoldenVectorJson);
+        var root = vectorDocument.RootElement;
+        var values = root.GetProperty("values");
+        var headers = root.GetProperty("headers");
+        var rawBody = Convert.FromBase64String(ReadString(root.GetProperty("raw_body"), "base64"));
+        var testKey = Convert.FromBase64String(ReadString(root.GetProperty("test_only_key"), "base64"));
+        var previous = Environment.GetEnvironmentVariable("AUTOPILOT_WEBHOOK_SECRET");
+        Environment.SetEnvironmentVariable("AUTOPILOT_WEBHOOK_SECRET", Encoding.UTF8.GetString(testKey));
+        try
+        {
+            using var isolatedFactory = new AutopilotAcknowledgementFactory();
+            using var client = isolatedFactory.CreateClient();
+            using (var setupScope = isolatedFactory.Services.CreateScope())
+                setupScope.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+
+            using (var beforeScope = isolatedFactory.Services.CreateScope())
+            {
+                var beforeDb = beforeScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+                Assert.Empty(await beforeDb.AutopilotEvents.AsNoTracking().ToListAsync());
+                Assert.Empty(await beforeDb.AutopilotWaveLaunchTasks.AsNoTracking().ToListAsync());
+            }
+
+            using var request = new HttpRequestMessage(
+                new HttpMethod(ReadString(values, "method")),
+                ReadString(values, "path"))
+            {
+                Content = new ByteArrayContent(rawBody)
+            };
+            request.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(
+                ReadString(headers, "Content-Type"));
+            request.Headers.Add("X-Autopilot-Signature-Version", ReadString(headers, "X-Autopilot-Signature-Version"));
+            request.Headers.Add("X-Autopilot-Timestamp", ReadString(headers, "X-Autopilot-Timestamp"));
+            request.Headers.Add("X-Autopilot-Source", ReadString(headers, "X-Autopilot-Source"));
+            request.Headers.Add("X-Autopilot-Event-Id", ReadString(headers, "X-Autopilot-Event-Id"));
+            request.Headers.Add("X-Autopilot-Event-Type", ReadString(headers, "X-Autopilot-Event-Type"));
+            request.Headers.Add("X-Autopilot-Signature", ReadString(headers, "X-Autopilot-Signature"));
+
+            using var response = await client.SendAsync(request);
+            var responseText = await response.Content.ReadAsStringAsync();
+            Assert.False(response.IsSuccessStatusCode,
+                $"The current v1 receiver must not ACK the proposed v2 vector. Status={(int)response.StatusCode}; body={responseText}");
+            using var responseDocument = JsonDocument.Parse(responseText);
+            var responseRoot = responseDocument.RootElement;
+            Assert.False(responseRoot.TryGetProperty("externalEventId", out _));
+            Assert.False(responseRoot.TryGetProperty("eventId", out _));
+            if (responseRoot.TryGetProperty("status", out var ackStatus))
+            {
+                Assert.NotEqual("accepted", ackStatus.GetString());
+                Assert.NotEqual("duplicate", ackStatus.GetString());
+            }
+
+            Assert.Equal(0, isolatedFactory.ProviderProbe.ProviderCalls);
+            using var afterScope = isolatedFactory.Services.CreateScope();
+            var afterDb = afterScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            Assert.Empty(await afterDb.AutopilotEvents.AsNoTracking().ToListAsync());
+            Assert.Empty(await afterDb.AutopilotWaveLaunchTasks.AsNoTracking().ToListAsync());
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("AUTOPILOT_WEBHOOK_SECRET", previous);
+        }
+    }
+
+    [Fact]
     public void Legacy_experimental_not_accepted_helper_and_hmac_cannot_reproduce_the_proposed_vector()
     {
         using var document = JsonDocument.Parse(OwnerGoldenVectorJson);
